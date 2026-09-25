@@ -9,6 +9,8 @@ from facet_preparation import (
     batch_operation_id,
     document_facets,
 )
+from vector_work import delete as delete_vector
+from vector_work import publish as publish_vectors
 
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service
@@ -197,6 +199,14 @@ class MemoryGraph(Plugin):
     @job("memory.embedding.recover")
     async def recover_embedding_batch(self, task, ctx):
         return await recover_embedding(ctx, task)
+
+    @job("memory.vector.publish")
+    async def publish_vector_batch(self, task, ctx):
+        return await publish_vectors(ctx, task, self.profile)
+
+    @job("memory.vector.delete")
+    async def delete_vector_ref(self, task, ctx):
+        return await delete_vector(ctx, task)
 
     @service(
         "memory.profile.describe",

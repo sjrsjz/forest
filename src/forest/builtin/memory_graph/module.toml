@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.16.0"
+version = "1.17.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -34,6 +34,8 @@ requests = [
   "service.call:embedding.profile.bind",
   "service.call:embedding.request.materialize",
   "service.call:embedding.encode",
+  "service.call:vector.index.upsert",
+  "service.call:vector.index.delete",
   "domain.query:memory.read-exact-sources",
   "domain.query:memory.read-facet-source",
   "domain.query:memory.read-embedding-candidates",
@@ -48,6 +50,7 @@ requests = [
   "uow.execute:memory.handoff-embedding-effect",
   "uow.execute:memory.abandon-embedding-effect",
   "uow.execute:memory.observe-embedding-effect",
+  "uow.execute:memory.publish-vector-batch",
   "uow.execute:memory.settle-embedding-budget",
   "uow.execute:memory.mark-source-unavailable"
 ]
@@ -67,6 +70,18 @@ startup_dependency = false
 [[components.requires]]
 name = "embedding.encode"
 contract = ">=2.0,<3.0"
+required = false
+startup_dependency = false
+
+[[components.requires]]
+name = "vector.index.upsert"
+contract = ">=1.0,<2.0"
+required = false
+startup_dependency = false
+
+[[components.requires]]
+name = "vector.index.delete"
+contract = ">=1.0,<2.0"
 required = false
 startup_dependency = false
 
@@ -169,9 +184,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.14.0"
+schema_version = "3.15.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "d0493e4b1761122fc4de65d0b8f487105b23959eae2fe84068ab4e24e5edcf95"
+baseline_sha256 = "efbfed3f51b24d3a5e27736e7fd295ca26e5ccd87c667ca9ccffa1fbd5f88b8a"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -284,6 +299,13 @@ contract = "1.0"
 function = "memory_observe_embedding_attempt"
 input_schema = "schemas/observe-embedding-attempt-envelope.json"
 output_schema = "schemas/observe-embedding-effect-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.publish-vector-batch-record"
+contract = "1.0"
+function = "memory_publish_vector_batch"
+input_schema = "schemas/publish-vector-envelope.json"
+output_schema = "schemas/publish-vector-output.json"
 
 [[components.unit_of_work_participants]]
 name = "memory.reserve-embedding-budget-record"
@@ -410,6 +432,17 @@ steps = [
 ]
 
 [[components.unit_of_work_plans]]
+name = "memory.publish-vector-batch"
+contract = "1.0"
+input_schema = "schemas/publish-vector-input.json"
+output_schema = "schemas/publish-vector-output.json"
+timeout_s = 20
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.publish-vector-batch-record", input_path = "/memory" }
+]
+
+[[components.unit_of_work_plans]]
 name = "memory.reserve-embedding-budget"
 contract = "1.0"
 input_schema = "schemas/budget-reserve-input.json"
@@ -499,6 +532,36 @@ claim_timeout_s = 5
 handler_timeout_s = 60
 settle_timeout_s = 5
 lease_seconds = 90
+
+[[components.owned_work_handlers]]
+name = "memory.vector.publish"
+contract = "1.0"
+handler = "memory.vector.publish"
+claim_function = "memory_claim_vector_publish"
+settle_function = "memory_settle_vector_publish"
+input_schema = "schemas/vector-publish-work-input.json"
+output_schema = "schemas/vector-publish-work-output.json"
+max_concurrency = 2
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 180
+settle_timeout_s = 5
+lease_seconds = 240
+
+[[components.owned_work_handlers]]
+name = "memory.vector.delete"
+contract = "1.0"
+handler = "memory.vector.delete"
+claim_function = "memory_claim_vector_deletion"
+settle_function = "memory_settle_vector_deletion"
+input_schema = "schemas/vector-delete-work-input.json"
+output_schema = "schemas/vector-delete-work-output.json"
+max_concurrency = 2
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 45
+settle_timeout_s = 5
+lease_seconds = 75
 
 [[components.unit_of_work_plans]]
 name = "memory.mark-source-unavailable"

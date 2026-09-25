@@ -858,10 +858,49 @@ CREATE TABLE vector_index_deletions (
     source_unit_id text NOT NULL CHECK (octet_length(source_unit_id) BETWEEN 1 AND 256),
     deletion_epoch bigint NOT NULL CHECK (deletion_epoch >= 0),
     state text NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING','DELETED')),
+    claim_token text CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
+    claim_payload jsonb,
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     deleted_at timestamptz,
     PRIMARY KEY (bot_id,index_ref_id),
-    CHECK ((state='DELETED') = (deleted_at IS NOT NULL))
+    UNIQUE (bot_id,claim_token),
+    CHECK ((state='DELETED') = (deleted_at IS NOT NULL)),
+    CHECK ((claim_token IS NULL) =
+        (claim_payload IS NULL AND lease_deadline IS NULL))
+);
+CREATE TABLE vector_publish_batches (
+    bot_id text NOT NULL,
+    attempt_id text NOT NULL,
+    state text NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING','CLAIMED','SETTLED')),
+    claim_token text CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
+    claim_payload jsonb,
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,attempt_id),
+    UNIQUE (bot_id,claim_token),
+    FOREIGN KEY (bot_id,attempt_id) REFERENCES embedding_batch_attempts(bot_id,attempt_id),
+    CHECK ((state='CLAIMED') =
+        (claim_token IS NOT NULL AND claim_payload IS NOT NULL AND lease_deadline IS NOT NULL))
+);
+CREATE TABLE vector_publish_operations (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    result_payload jsonb NOT NULL,
+    PRIMARY KEY (bot_id,operation_id)
+);
+CREATE TABLE vector_work_settlements (
+    bot_id text NOT NULL,
+    claim_token text NOT NULL,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    PRIMARY KEY (bot_id,claim_token)
 );
 CREATE INDEX source_units_author_idx ON source_units(
     bot_id,author_subject_ref,eligibility_state,occurred_at DESC,source_unit_id DESC
@@ -900,7 +939,10 @@ CREATE INDEX embedding_recovery_work_poll_idx ON embedding_recovery_work(
     bot_id,state,next_attempt_at,claim_id
 );
 CREATE INDEX vector_index_deletions_work_idx ON vector_index_deletions(
-    bot_id,state,created_at,index_ref_id
+    bot_id,state,next_attempt_at,index_ref_id
+);
+CREATE INDEX vector_publish_batches_poll_idx ON vector_publish_batches(
+    bot_id,state,next_attempt_at,attempt_id
 );
 CREATE INDEX embedding_claims_created_idx ON embedding_claims(
     bot_id,purpose,created_at,claim_id
@@ -918,6 +960,469 @@ CREATE INDEX embedding_budget_reservations_state_idx ON embedding_budget_reserva
 CREATE FUNCTION reject_immutable_row() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION 'memory.graph immutable fact cannot change' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION memory_claim_vector_publish(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work_row __forest_module_schema__.vector_publish_batches%ROWTYPE;
+    attempt_row __forest_module_schema__.embedding_batch_attempts%ROWTYPE;
+    claim_row __forest_module_schema__.embedding_claims%ROWTYPE;
+    facets_value jsonb;
+    task_payload jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_CLAIM_INVALID',
+                'message','Vector publish claim is invalid','status',422));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.vector_publish_batches
+    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    IF FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',work_row.claim_payload);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_domain_bind_work
+        WHERE bot_id=requested_bot AND state='READY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    INSERT INTO __forest_module_schema__.vector_publish_batches(bot_id,attempt_id)
+    SELECT DISTINCT a.bot_id,a.attempt_id
+    FROM __forest_module_schema__.embedding_batch_attempts a
+    JOIN __forest_module_schema__.embedding_claim_items ci
+      ON ci.bot_id=a.bot_id AND ci.claim_id=a.claim_id
+    JOIN __forest_module_schema__.embedding_facets f
+      ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+    WHERE a.bot_id=requested_bot AND a.state='SUCCEEDED'
+      AND f.state='EMBEDDED' AND f.purpose='DOCUMENT'
+    ORDER BY a.bot_id,a.attempt_id LIMIT 32
+    ON CONFLICT (bot_id,attempt_id) DO NOTHING;
+    SELECT w.* INTO work_row FROM __forest_module_schema__.vector_publish_batches w
+    WHERE w.bot_id=requested_bot AND w.next_attempt_at<=clock_timestamp()
+      AND (w.state='PENDING'
+           OR (w.state='CLAIMED' AND w.lease_deadline<=clock_timestamp()))
+    ORDER BY w.next_attempt_at,w.attempt_id LIMIT 1 FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    SELECT * INTO attempt_row FROM __forest_module_schema__.embedding_batch_attempts
+    WHERE bot_id=requested_bot AND attempt_id=work_row.attempt_id;
+    SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
+    WHERE bot_id=requested_bot AND claim_id=attempt_row.claim_id;
+    IF attempt_row.state<>'SUCCEEDED' OR claim_row.purpose<>'DOCUMENT' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_ATTEMPT_INVALID',
+                'message','Vector publish attempt is not settled','status',409));
+    END IF;
+    SELECT jsonb_agg(jsonb_build_object(
+        'facet_id',f.facet_id,'item_index',ci.item_index,
+        'source_unit_id',f.source_unit_id,'source_revision',f.source_revision,
+        'modality',f.modality,'state',f.state,'vector_digest',f.vector_digest
+    ) ORDER BY ci.item_index) INTO facets_value
+    FROM __forest_module_schema__.embedding_claim_items ci
+    JOIN __forest_module_schema__.embedding_facets f
+      ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+    WHERE ci.bot_id=requested_bot AND ci.claim_id=attempt_row.claim_id;
+    IF jsonb_array_length(facets_value)<>claim_row.item_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_MEMBERS_INVALID',
+                'message','Vector publish batch membership changed','status',409));
+    END IF;
+    task_payload := jsonb_build_object(
+        'protocol','forest.owned-work-claim/1',
+        'work_id',work_row.attempt_id,'claim_token',requested_token,
+        'attempt',work_row.attempt_count+1,
+        'operation_id','memory-vector-publish:'||encode(sha256(convert_to(
+            requested_bot||'/'||requested_token,'UTF8')),'hex'),
+        'causal_root_kind','memory.embedding.batch',
+        'causal_root_id',attempt_row.claim_id,
+        'payload',jsonb_build_object(
+            'attempt_id',work_row.attempt_id,'claim_token',requested_token,
+            'space_id',claim_row.space_id,
+            'result',jsonb_build_object(
+                'payload_id',attempt_row.result_payload_id,
+                'digest',attempt_row.result_payload_digest,
+                'owner_component_id','embedding.multimodal',
+                'owner_kind','embedding.result',
+                'owner_id',attempt_row.attempt_id),
+            'facets',facets_value));
+    UPDATE __forest_module_schema__.vector_publish_batches
+    SET state='CLAIMED',claim_token=requested_token,claim_payload=task_payload,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND attempt_id=work_row.attempt_id;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',task_payload);
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_CLAIM_INVALID',
+            'message','Vector publish claim is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_publish_vector_batch(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    results_value jsonb := body->'results';
+    epoch_value jsonb := envelope#>'{prior,payload_epoch}';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    epoch_number bigint := (epoch_value->>'deletion_epoch')::bigint;
+    work_row __forest_module_schema__.vector_publish_batches%ROWTYPE;
+    attempt_row __forest_module_schema__.embedding_batch_attempts%ROWTYPE;
+    claim_row __forest_module_schema__.embedding_claims%ROWTYPE;
+    prior_row __forest_module_schema__.vector_publish_operations%ROWTYPE;
+    facet_row record;
+    item_result jsonb;
+    source_eligible boolean;
+    ready_count integer := 0;
+    deletion_count integer := 0;
+    seen_count integer := 0;
+    result_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-vector-publish/1'
+       OR epoch_value->>'protocol' IS DISTINCT FROM 'forest.payload-epoch/1'
+       OR requested_bot IS NULL OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR epoch_number IS NULL OR epoch_number<0
+       OR jsonb_typeof(results_value) IS DISTINCT FROM 'array'
+       OR body->>'attempt_id' IS NULL OR body->>'claim_token' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_INVALID',
+                'message','Vector publication evidence is invalid','status',422));
+    END IF;
+    SELECT * INTO prior_row FROM __forest_module_schema__.vector_publish_operations
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF FOUND THEN
+        IF prior_row.input_digest=requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+                'value',prior_row.result_payload);
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_CONFLICT',
+                'message','Vector publication operation was reused','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.vector_publish_batches
+    WHERE bot_id=requested_bot AND attempt_id=body->>'attempt_id' FOR UPDATE;
+    SELECT * INTO attempt_row FROM __forest_module_schema__.embedding_batch_attempts
+    WHERE bot_id=requested_bot AND attempt_id=body->>'attempt_id';
+    IF work_row IS NULL OR work_row.state<>'CLAIMED'
+       OR work_row.claim_token IS DISTINCT FROM body->>'claim_token'
+       OR attempt_row IS NULL OR attempt_row.state<>'SUCCEEDED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_CLAIM_LOST',
+                'message','Vector publication claim is no longer current','status',409));
+    END IF;
+    SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
+    WHERE bot_id=requested_bot AND claim_id=attempt_row.claim_id;
+    IF claim_row.purpose<>'DOCUMENT' OR claim_row.space_id IS DISTINCT FROM
+        body->>'space_id' OR jsonb_array_length(results_value)<>claim_row.item_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_MEMBERS_INVALID',
+                'message','Vector publication membership differs','status',409));
+    END IF;
+    FOR facet_row IN
+        SELECT ci.item_index,f.facet_id,f.state AS facet_state,f.source_unit_id,
+               f.source_revision,f.space_id,f.accepted_deletion_epoch,
+               f.index_ref_id,u.source_revision AS unit_revision,
+               u.eligibility_state AS unit_state,
+               u.accepted_deletion_epoch AS unit_epoch,
+               s.status AS source_state,o.occurrence_id
+        FROM __forest_module_schema__.embedding_claim_items ci
+        JOIN __forest_module_schema__.embedding_facets f
+          ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+        JOIN __forest_module_schema__.memory_sources s
+          ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+        LEFT JOIN LATERAL (
+            SELECT occurrence.occurrence_id
+            FROM __forest_module_schema__.source_occurrences occurrence
+            WHERE occurrence.bot_id=f.bot_id
+              AND occurrence.source_unit_id=f.source_unit_id
+              AND occurrence.eligibility_state='ELIGIBLE'
+            ORDER BY occurrence.occurrence_id LIMIT 1 FOR SHARE
+        ) o ON true
+        WHERE ci.bot_id=requested_bot AND ci.claim_id=attempt_row.claim_id
+        ORDER BY ci.item_index FOR UPDATE OF f FOR SHARE OF u,s
+    LOOP
+        seen_count := seen_count+1;
+        item_result := results_value->facet_row.item_index;
+        IF item_result->>'facet_id' IS DISTINCT FROM facet_row.facet_id
+           OR item_result->>'status' NOT IN ('PUBLISHED','TOMBSTONED','SKIPPED')
+           OR facet_row.space_id IS DISTINCT FROM claim_row.space_id
+           OR facet_row.facet_state NOT IN ('EMBEDDED','READY','SUPPRESSED')
+           OR facet_row.accepted_deletion_epoch>epoch_number
+           OR facet_row.unit_epoch>epoch_number THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_MEMBERS_INVALID',
+                    'message','Vector publication facet differs','status',409));
+        END IF;
+        source_eligible := facet_row.facet_state<>'SUPPRESSED'
+            AND facet_row.unit_state='ELIGIBLE'
+            AND facet_row.unit_revision=facet_row.source_revision
+            AND facet_row.source_state='ACTIVE'
+            AND facet_row.occurrence_id IS NOT NULL;
+        IF source_eligible THEN
+            IF item_result->>'status'<>'PUBLISHED' THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_VECTOR_REF_NOT_PUBLISHED',
+                        'message','Eligible vector ref was not published','status',409));
+            END IF;
+            IF facet_row.facet_state='EMBEDDED' THEN
+                UPDATE __forest_module_schema__.embedding_facets
+                SET state='READY',index_ref_id=facet_row.facet_id,
+                    published_at=clock_timestamp(),updated_at=clock_timestamp()
+                WHERE bot_id=requested_bot AND facet_id=facet_row.facet_id;
+            ELSIF facet_row.index_ref_id IS DISTINCT FROM facet_row.facet_id THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_VECTOR_REF_CONFLICT',
+                        'message','Published vector ref differs','status',409));
+            END IF;
+            ready_count := ready_count+1;
+        ELSE
+            INSERT INTO __forest_module_schema__.vector_index_deletions(
+                bot_id,index_ref_id,space_id,source_unit_id,deletion_epoch)
+            VALUES(requested_bot,facet_row.facet_id,facet_row.space_id,
+                facet_row.source_unit_id,epoch_number)
+            ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
+            IF facet_row.facet_state IN ('EMBEDDED','READY') THEN
+                UPDATE __forest_module_schema__.embedding_facets
+                SET state='SUPPRESSED',index_ref_id=NULL,vector_digest=NULL,
+                    result_payload_id=NULL,result_payload_digest=NULL,
+                    published_at=NULL,updated_at=clock_timestamp()
+                WHERE bot_id=requested_bot AND facet_id=facet_row.facet_id;
+            END IF;
+            deletion_count := deletion_count+1;
+        END IF;
+    END LOOP;
+    IF seen_count<>claim_row.item_count THEN
+        RAISE EXCEPTION 'Vector publication membership changed under lock'
+            USING ERRCODE='55000';
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.memory-vector-published/1',
+        'attempt_id',attempt_row.attempt_id,'ready_count',ready_count,
+        'deletion_count',deletion_count);
+    INSERT INTO __forest_module_schema__.vector_publish_operations(
+        bot_id,operation_id,input_digest,result_payload)
+    VALUES(requested_bot,requested_operation,requested_digest,result_value);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',result_value);
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_INVALID',
+            'message','Vector publication evidence is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_vector_publish(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    prior_row __forest_module_schema__.vector_work_settlements%ROWTYPE;
+    work_row __forest_module_schema__.vector_publish_batches%ROWTYPE;
+    result_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR input->>'work_id' IS NULL
+       OR input->>'attempt' !~ '^[1-9][0-9]*$'
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_SETTLEMENT_INVALID',
+                'message','Vector work settlement is invalid','status',422));
+    END IF;
+    SELECT * INTO prior_row FROM __forest_module_schema__.vector_work_settlements
+    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    IF FOUND THEN
+        IF prior_row.input_payload=input THEN RETURN prior_row.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_SETTLEMENT_CONFLICT',
+                'message','Vector work was settled differently','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.vector_publish_batches
+    WHERE bot_id=requested_bot AND claim_token=requested_token FOR UPDATE;
+    IF work_row IS NULL OR work_row.state<>'CLAIMED'
+       OR work_row.attempt_id IS DISTINCT FROM input->>'work_id'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_CLAIM_LOST',
+                'message','Vector publish claim is no longer current','status',409));
+    END IF;
+    IF input#>>'{outcome,status}'='SUCCEEDED' THEN
+        IF input#>>'{outcome,result,attempt_id}' IS DISTINCT FROM work_row.attempt_id
+           OR EXISTS (
+               SELECT 1 FROM __forest_module_schema__.embedding_claim_items ci
+               JOIN __forest_module_schema__.embedding_batch_attempts a
+                 ON a.bot_id=ci.bot_id AND a.claim_id=ci.claim_id
+               JOIN __forest_module_schema__.embedding_facets f
+                 ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+               WHERE a.bot_id=requested_bot AND a.attempt_id=work_row.attempt_id
+                 AND f.state NOT IN ('READY','SUPPRESSED')
+           ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_NOT_COMPLETE',
+                    'message','Vector publish result was not committed','status',409));
+        END IF;
+        UPDATE __forest_module_schema__.vector_publish_batches
+        SET state='SETTLED',claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND attempt_id=work_row.attempt_id;
+    ELSE
+        UPDATE __forest_module_schema__.vector_publish_batches
+        SET state='PENDING',claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+            next_attempt_at=clock_timestamp()+
+                (LEAST(power(2,LEAST(attempt_count,8)),300)*interval '1 second'),
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND attempt_id=work_row.attempt_id;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work_row.attempt_id));
+    INSERT INTO __forest_module_schema__.vector_work_settlements(
+        bot_id,claim_token,input_payload,result_payload)
+    VALUES(requested_bot,requested_token,input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_VECTOR_SETTLEMENT_INVALID',
+            'message','Vector work settlement is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_claim_vector_deletion(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work_row __forest_module_schema__.vector_index_deletions%ROWTYPE;
+    task_payload jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_DELETE_CLAIM_INVALID',
+                'message','Vector deletion claim is invalid','status',422));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.vector_index_deletions
+    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    IF FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',work_row.claim_payload);
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.vector_index_deletions
+    WHERE bot_id=requested_bot AND state='PENDING'
+      AND next_attempt_at<=clock_timestamp()
+      AND (claim_token IS NULL OR lease_deadline<=clock_timestamp())
+    ORDER BY next_attempt_at,index_ref_id LIMIT 1 FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    task_payload := jsonb_build_object(
+        'protocol','forest.owned-work-claim/1',
+        'work_id',work_row.index_ref_id,'claim_token',requested_token,
+        'attempt',work_row.attempt_count+1,
+        'operation_id','memory-vector-delete:'||encode(sha256(convert_to(
+            requested_bot||'/'||requested_token,'UTF8')),'hex'),
+        'causal_root_kind','memory.vector.deletion',
+        'causal_root_id',work_row.index_ref_id,
+        'payload',jsonb_build_object(
+            'index_ref_id',work_row.index_ref_id,'space_id',work_row.space_id));
+    UPDATE __forest_module_schema__.vector_index_deletions
+    SET claim_token=requested_token,claim_payload=task_payload,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1
+    WHERE bot_id=requested_bot AND index_ref_id=work_row.index_ref_id;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',task_payload);
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_VECTOR_DELETE_CLAIM_INVALID',
+            'message','Vector deletion claim is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_vector_deletion(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    prior_row __forest_module_schema__.vector_work_settlements%ROWTYPE;
+    work_row __forest_module_schema__.vector_index_deletions%ROWTYPE;
+    result_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR input->>'work_id' IS NULL
+       OR input->>'attempt' !~ '^[1-9][0-9]*$'
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_SETTLEMENT_INVALID',
+                'message','Vector work settlement is invalid','status',422));
+    END IF;
+    SELECT * INTO prior_row FROM __forest_module_schema__.vector_work_settlements
+    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    IF FOUND THEN
+        IF prior_row.input_payload=input THEN RETURN prior_row.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_SETTLEMENT_CONFLICT',
+                'message','Vector work was settled differently','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.vector_index_deletions
+    WHERE bot_id=requested_bot AND claim_token=requested_token FOR UPDATE;
+    IF work_row IS NULL OR work_row.state<>'PENDING'
+       OR work_row.index_ref_id IS DISTINCT FROM input->>'work_id'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_VECTOR_DELETE_CLAIM_LOST',
+                'message','Vector deletion claim is no longer current','status',409));
+    END IF;
+    IF input#>>'{outcome,status}'='SUCCEEDED' THEN
+        IF input#>>'{outcome,result,index_ref_id}' IS DISTINCT FROM work_row.index_ref_id
+           OR input#>>'{outcome,result,deleted}' IS DISTINCT FROM 'true' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_VECTOR_DELETE_RESULT_INVALID',
+                    'message','Vector deletion result differs','status',409));
+        END IF;
+        UPDATE __forest_module_schema__.vector_index_deletions
+        SET state='DELETED',claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+            deleted_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND index_ref_id=work_row.index_ref_id;
+    ELSE
+        UPDATE __forest_module_schema__.vector_index_deletions
+        SET claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+            next_attempt_at=clock_timestamp()+
+                (LEAST(power(2,LEAST(attempt_count,8)),300)*interval '1 second')
+        WHERE bot_id=requested_bot AND index_ref_id=work_row.index_ref_id;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work_row.index_ref_id));
+    INSERT INTO __forest_module_schema__.vector_work_settlements(
+        bot_id,claim_token,input_payload,result_payload)
+    VALUES(requested_bot,requested_token,input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_VECTOR_SETTLEMENT_INVALID',
+            'message','Vector work settlement is invalid','status',422));
 END;
 $$;
 
@@ -1097,11 +1602,48 @@ BEGIN
            OLD.deletion_epoch,OLD.created_at) THEN
         RAISE EXCEPTION 'Vector index deletion identity is immutable' USING ERRCODE='55000';
     END IF;
-    IF OLD.state='PENDING' AND NEW.state='DELETED' AND NEW.deleted_at IS NOT NULL THEN
+    IF OLD.state='PENDING' AND NEW.state='PENDING'
+       AND NEW.deleted_at IS NULL AND NEW.next_attempt_at>=OLD.next_attempt_at THEN
+        IF OLD.claim_token IS NULL AND NEW.claim_token IS NOT NULL
+           AND NEW.attempt_count=OLD.attempt_count+1 THEN RETURN NEW; END IF;
+        IF OLD.claim_token IS NOT NULL AND NEW.claim_token IS NULL
+           AND NEW.attempt_count=OLD.attempt_count THEN RETURN NEW; END IF;
+        IF OLD.claim_token IS NOT NULL AND NEW.claim_token IS NOT NULL
+           AND OLD.claim_token IS DISTINCT FROM NEW.claim_token
+           AND OLD.lease_deadline<=clock_timestamp()
+           AND NEW.attempt_count=OLD.attempt_count+1 THEN RETURN NEW; END IF;
+    END IF;
+    IF OLD.state='PENDING' AND NEW.state='DELETED'
+       AND NEW.deleted_at IS NOT NULL AND NEW.claim_token IS NULL
+       AND NEW.lease_deadline IS NULL THEN
         RETURN NEW;
     END IF;
     IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
     RAISE EXCEPTION 'Invalid vector index deletion transition' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION guard_vector_publish_batch() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.bot_id,NEW.attempt_id,NEW.created_at) IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.attempt_id,OLD.created_at) THEN
+        RAISE EXCEPTION 'Vector publish work identity is immutable' USING ERRCODE='55000';
+    END IF;
+    IF NEW.updated_at<OLD.updated_at OR NEW.next_attempt_at<OLD.next_attempt_at THEN
+        RAISE EXCEPTION 'Vector publish work moved backward' USING ERRCODE='55000';
+    END IF;
+    IF OLD.state='PENDING' AND NEW.state='CLAIMED'
+       AND NEW.attempt_count=OLD.attempt_count+1 THEN RETURN NEW; END IF;
+    IF OLD.state='CLAIMED' AND NEW.state='CLAIMED'
+       AND OLD.lease_deadline<=clock_timestamp()
+       AND NEW.claim_token IS DISTINCT FROM OLD.claim_token
+       AND NEW.attempt_count=OLD.attempt_count+1 THEN RETURN NEW; END IF;
+    IF OLD.state='CLAIMED' AND NEW.state IN ('PENDING','SETTLED')
+       AND NEW.claim_token IS NULL AND NEW.attempt_count=OLD.attempt_count THEN
+        RETURN NEW;
+    END IF;
+    IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'Invalid vector publish work transition' USING ERRCODE='55000';
 END;
 $$;
 
@@ -1166,6 +1708,8 @@ CREATE TRIGGER embedding_attempt_guard BEFORE UPDATE OR DELETE ON embedding_batc
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_attempt();
 CREATE TRIGGER vector_index_deletion_guard BEFORE UPDATE OR DELETE ON vector_index_deletions
     FOR EACH ROW EXECUTE FUNCTION guard_vector_index_deletion();
+CREATE TRIGGER vector_publish_batch_guard BEFORE UPDATE OR DELETE ON vector_publish_batches
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_publish_batch();
 CREATE TRIGGER embedding_claim_guard BEFORE UPDATE OR DELETE ON embedding_claims
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_claim();
 CREATE TRIGGER embedding_claim_items_immutable BEFORE UPDATE OR DELETE ON embedding_claim_items

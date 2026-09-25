@@ -117,21 +117,21 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 会以明确来源和群主干进入同一 source unit；Media 异步抓取通过稳定 ref 收敛。Memory 包现提供只读主干、来源、关系查询端口；来源查询按群主干、作者、模态、单元类型和发生时间筛选，使用快照加稳定游标分页；关系查询返回节点两端和有界证据，逐条标明来源群、主干及作者。WebUI 与群聊 Shell 都经包声明访问这些端口，Host 不再拥有 Memory 浏览逻辑。真实 PostgreSQL 测试已覆盖包安装、来源筛选及关系证据来源。
 
-Memory 包已注册 `memory.embedding.dispatch` 和 `memory.embedding.recover` 两类 owned-work：Provider 成功绑定并完成 domain.bind 后才自动领取最多 32 个图文 facet；Memory 持有预算、Kernel Effect 与 facet 的 prepare/handoff/observe 事务，Provider 包只物化请求并执行 HTTP。原 claim 在 Bot 级事务锁下合流，避免并发重复领取；失败和明确未发送有冷却时间，预算耗尽延至下一 UTC 日。过期 PREPARED attempt 只放弃并释放预算，DISPATCHED attempt 只观察 UNKNOWN，恢复任务绝不重发网络请求。PostgreSQL 域状态测试和宿主启动/重启测试已通过；真实宿主图已用假 HTTP 客户端验证一条归档群消息的文本与图片 facet 全部进入 `EMBEDDED`，但尚未发布到独立向量索引。
+Memory 包已注册 `memory.embedding.dispatch` 和 `memory.embedding.recover` 两类 owned-work：Provider 成功绑定并完成 domain.bind 后才自动领取最多 32 个图文 facet；Memory 持有预算、Kernel Effect 与 facet 的 prepare/handoff/observe 事务，Provider 包只物化请求并执行 HTTP。原 claim 在 Bot 级事务锁下合流，避免并发重复领取；失败和明确未发送有冷却时间，预算耗尽延至下一 UTC 日。过期 PREPARED attempt 只放弃并释放预算，DISPATCHED attempt 只观察 UNKNOWN，恢复任务绝不重发网络请求。PostgreSQL 域状态测试和宿主启动/重启测试已通过；真实宿主图已用假 HTTP 客户端验证一条归档群消息的文本与图片 facet 经 `EMBEDDED` 发布为 `READY`，并写入独立向量索引。
 
-旧宿主 Memory 执行栈已移除，图区域扩散算法位于 `builtin/memory_graph/python/graph_region.py`。嵌入派发已通过 Kernel Effect、Memory 和 Embedding 包的联合测试；崩溃后恢复与真实供应商响应尚未端到端验收。独立向量索引包已有 PostgreSQL 持久 ref 围栏：同 ref 写删串行、删除建立不可逆 tombstone，删除后的 upsert 被拒绝；后台周期清扫会重放 tombstone 删除，以收敛 Milvus 超时后的迟到写入。隔离 PostgreSQL 加真实 Milvus 的往返测试，以及宿主启动、热替换、重启测试已通过。Memory 的 ref 发布和删除 outbox Worker、图扩散与有界随机采样的生产接入、跨主干联想写入、语义召回、遗忘及真实召回试验仍未完成。在接入并验收之前，管理 UI 不能宣称这些能力可用。
+旧宿主 Memory 执行栈已移除，图区域扩散算法位于 `builtin/memory_graph/python/graph_region.py`。嵌入派发已通过 Kernel Effect、Memory 和 Embedding 包的联合测试；崩溃后恢复与真实供应商响应尚未端到端验收。独立向量索引包已有 PostgreSQL 持久 ref 围栏：同 ref 写删串行、删除建立不可逆 tombstone，删除后的 upsert 被拒绝；后台周期清扫会重放 tombstone 删除，以收敛 Milvus 超时后的迟到写入。Memory 已用包内 owned-work 按 Embedding batch 读取结果、验证每个 facet 的向量摘要并发布稳定 ref；PostgreSQL 复核来源后才把 facet 置为 `READY`，失效候选写删除 outbox，另一包内任务执行删除。隔离 PostgreSQL 加真实 Milvus 的索引测试，以及假 Embedding HTTP、假 Milvus 的宿主图文发布、outbox 删除、热替换和重启测试已通过。公开遗忘/抑制事务、图扩散与有界随机采样的生产接入、跨主干联想写入、语义召回及真实召回试验仍未完成。在接入并验收之前，管理 UI 不能宣称这些能力可用。
 
 Memory 的 handoff 事务现由 `memory.embedding.dispatch` owned-work Worker 调用；prepare/handoff/observe 已通过假 HTTP 客户端的真实跨包事务验证，故障注入仍待验收。
 
 过期 PREPARED attempt 由 `memory.embedding.recover` 放弃并释放预算；已 handoff 的 attempt 只转 UNKNOWN，不重发 HTTP。恢复路径已有隔离测试，真实进程崩溃与重启故障注入仍待验收。
 
-Memory owned-work Worker 已接入结果观察；成功回执依 claim 顺序验证向量和实际 token 用量，再由单一 UnitOfWork 同时结算 Effect、预算与 facet。独立向量索引发布和语义召回仍未完成；跨包真实请求及崩溃恢复的端到端测试仍待完成。
+Memory owned-work Worker 已接入结果观察；成功回执依 claim 顺序验证向量和实际 token 用量，再由单一 UnitOfWork 同时结算 Effect、预算与 facet。独立向量索引发布已接入并用假 Milvus 验证；语义召回、真实供应商请求及崩溃恢复的端到端测试仍待完成。
 
 ## 8. 下一切换顺序
 
-1. 在 `builtin/memory_graph` 内建立文档/查询 facet 准备、生命周期绑定的多模态 Embedding Effect、每日成本配额和包所有的持久任务；只把索引 ref 发布到向量库。
-2. 接入图区域扩散、跨主干联想和语义召回；恢复及重放需与删除 epoch、Generation 围栏收敛。
-3. 补齐遗忘 UnitOfWork、证据浏览的进一步分页以及图文真实召回试验。
+1. 完成 `builtin/memory_graph` 的公开遗忘 UnitOfWork：同步撤销 Payload、来源资格、facet 和关联证据，并为全部可能已发布的 ref 写删除 outbox；补齐发布崩溃重放验证。
+2. 建立查询 facet 的多模态 Embedding 与向量种子召回，再接入图区域扩散、跨主干联想；恢复及重放需与删除 epoch、Generation 围栏收敛。
+3. 补齐证据浏览的进一步分页以及图文真实召回试验。
 4. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
 5. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。
 

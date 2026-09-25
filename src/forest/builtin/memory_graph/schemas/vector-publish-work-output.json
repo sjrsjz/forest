@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["attempt_id", "ready_count", "deletion_count"],
+  "properties": {
+    "attempt_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "ready_count": {"type": "integer", "minimum": 0, "maximum": 32},
+    "deletion_count": {"type": "integer", "minimum": 0, "maximum": 32}
+  }
+}

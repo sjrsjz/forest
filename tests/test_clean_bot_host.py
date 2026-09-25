@@ -88,6 +88,8 @@ class FakeMediaClient(FakeModelClient):
 
 class FakeMilvusClient:
     collections = {}
+    fail_next_delete = False
+    delete_failures = 0
 
     class Schema:
         def __init__(self):
@@ -160,6 +162,10 @@ class FakeMilvusClient:
         return [candidates[:limit]]
 
     async def delete(self, *, collection_name, ids, **_values):
+        if type(self).fail_next_delete:
+            type(self).fail_next_delete = False
+            type(self).delete_failures += 1
+            raise OSError("transient vector deletion failure")
         rows = self.collections[collection_name]["rows"]
         for ref_id in ids:
             rows.pop(ref_id, None)
@@ -845,7 +851,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                             facets = await (
                                 await conn.execute(
                                     sql.SQL(
-                                        "SELECT modality,state,result_payload_id "
+                                        "SELECT facet_id,modality,state,result_payload_id,index_ref_id "
                                         "FROM {}.embedding_facets WHERE bot_id=%s "
                                         "AND source_unit_id=%s"
                                     ).format(sql.Identifier(memory_namespace)),
@@ -853,7 +859,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                                 )
                             ).fetchall()
                         if len(facets) == 3 and all(
-                            facet["state"] == "EMBEDDED" for facet in facets
+                            facet["state"] == "READY" for facet in facets
                         ):
                             break
                         await asyncio.sleep(0.1)
@@ -895,18 +901,108 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                             (settings.bot_id,),
                         )
                     ).fetchall()
+                    vector_work = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT state,attempt_count,claim_payload,next_attempt_at "
+                                "FROM {}.vector_publish_batches WHERE bot_id=%s"
+                            ).format(sql.Identifier(memory_namespace)),
+                            (settings.bot_id,),
+                        )
+                    ).fetchall()
+                    vector_settlements = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT input_payload FROM {}.vector_work_settlements "
+                                "WHERE bot_id=%s"
+                            ).format(sql.Identifier(memory_namespace)),
+                            (settings.bot_id,),
+                        )
+                    ).fetchall()
                 raise AssertionError({
                     "facets": facets,
                     "facet_work": facet_work,
                     "claims": claims,
                     "attempts": attempt_rows,
                     "settlements": settlements,
+                    "vector_work": vector_work,
+                    "vector_settlements": vector_settlements,
                     "owned_failure": memory_instance._owned_work.failure,
                 }) from exc
             assert sorted(facet["modality"] for facet in facets) == [
                 "IMAGE", "TEXT", "TEXT"
             ]
             assert all(facet["result_payload_id"] for facet in facets)
+            assert all(facet["index_ref_id"] == facet["facet_id"] for facet in facets)
+            index_collection = host.registry.get("vector.index")._effect_drivers[
+                "vector.index.upsert"
+            ].collection_name
+            assert set(FakeMilvusClient.collections[index_collection]["rows"]) >= {
+                facet["facet_id"] for facet in facets
+            }
+
+            # Exercise the deletion outbox after a committed Memory suppression.
+            # The public forget transaction is a separate, unfinished boundary.
+            deletion_epoch = await host._kernel.payload.epoch()
+            previous_delete_failures = FakeMilvusClient.delete_failures
+            FakeMilvusClient.fail_next_delete = True
+            async with host.store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {}.source_units SET eligibility_state='SUPPRESSED',"
+                        "eligibility_revision=eligibility_revision+1,updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND source_unit_id=%s"
+                    ).format(sql.Identifier(memory_namespace)),
+                    (settings.bot_id, "onebot-unit:" + event_hash),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {}.source_occurrences SET eligibility_state='SUPPRESSED',"
+                        "input_batch_ref=NULL,context_revision=NULL "
+                        "WHERE bot_id=%s AND source_unit_id=%s"
+                    ).format(sql.Identifier(memory_namespace)),
+                    (settings.bot_id, "onebot-unit:" + event_hash),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.vector_index_deletions("
+                        "bot_id,index_ref_id,space_id,source_unit_id,deletion_epoch) "
+                        "SELECT bot_id,facet_id,space_id,source_unit_id,%s "
+                        "FROM {}.embedding_facets WHERE bot_id=%s AND source_unit_id=%s"
+                    ).format(sql.Identifier(memory_namespace), sql.Identifier(memory_namespace)),
+                    (deletion_epoch, settings.bot_id, "onebot-unit:" + event_hash),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {}.embedding_facets SET state='SUPPRESSED',"
+                        "index_ref_id=NULL,vector_digest=NULL,result_payload_id=NULL,"
+                        "result_payload_digest=NULL,published_at=NULL,"
+                        "updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND source_unit_id=%s"
+                    ).format(sql.Identifier(memory_namespace)),
+                    (settings.bot_id, "onebot-unit:" + event_hash),
+                )
+            async with asyncio.timeout(15):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        deleted = await (
+                            await conn.execute(
+                                sql.SQL(
+                                    "SELECT state FROM {}.vector_index_deletions "
+                                    "WHERE bot_id=%s AND source_unit_id=%s"
+                                ).format(sql.Identifier(memory_namespace)),
+                                (settings.bot_id, "onebot-unit:" + event_hash),
+                            )
+                        ).fetchall()
+                    if len(deleted) == len(facets) and all(
+                        row["state"] == "DELETED" for row in deleted
+                    ):
+                        break
+                    await asyncio.sleep(0.1)
+            assert not set(FakeMilvusClient.collections[index_collection]["rows"]) & {
+                facet["facet_id"] for facet in facets
+            }
+            assert FakeMilvusClient.delete_failures == previous_delete_failures + 1
 
             previous = host.registry.graph_identity
             replacement_graph = await host.replace_runtime_graph()

@@ -520,6 +520,8 @@ class CleanBotHost:
                 "embedding.profile.bind": "1.0",
                 "embedding.request.materialize": "1.0",
                 "embedding.encode": "2.0",
+                "vector.index.upsert": "1.0",
+                "vector.index.delete": "1.0",
             },
             additional_grants=(
                 CapabilityGrant("embedding.invoke", "bot", self.store.bot_id, delegable=True),
