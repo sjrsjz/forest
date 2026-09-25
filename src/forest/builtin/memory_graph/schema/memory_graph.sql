@@ -534,59 +534,6 @@ CREATE TABLE embedding_facets (
     UNIQUE (bot_id,index_ref_id)
 );
 
-CREATE TABLE embedding_attempts (
-    bot_id text NOT NULL,
-    attempt_id text NOT NULL CHECK (octet_length(attempt_id) BETWEEN 1 AND 256),
-    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
-    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
-    facet_id text NOT NULL,
-    attempt_no integer NOT NULL CHECK (attempt_no > 0),
-    executor_component_id text NOT NULL
-        CHECK (octet_length(executor_component_id) BETWEEN 1 AND 128),
-    executor_generation_id text NOT NULL
-        CHECK (octet_length(executor_generation_id) BETWEEN 1 AND 256),
-    route_revision text NOT NULL CHECK (octet_length(route_revision) BETWEEN 1 AND 256),
-    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
-    deadline_at timestamptz NOT NULL,
-    state text NOT NULL DEFAULT 'PREPARED' CHECK (
-        state IN ('PREPARED','DISPATCHED','SUCCEEDED','NOT_SENT','UNKNOWN','RETRYABLE_FAILURE','FAILED')
-    ),
-    handoff_operation_id text,
-    settlement_operation_id text CHECK (
-        settlement_operation_id IS NULL
-        OR octet_length(settlement_operation_id) BETWEEN 1 AND 256
-    ),
-    result_payload_id text,
-    result_payload_digest text CHECK (
-        result_payload_digest IS NULL OR result_payload_digest ~ '^sha256:[a-f0-9]{64}$'
-    ),
-    vector_digest text CHECK (vector_digest IS NULL OR vector_digest ~ '^sha256:[a-f0-9]{64}$'),
-    error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
-    prepared_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    dispatched_at timestamptz,
-    settled_at timestamptz,
-    PRIMARY KEY (bot_id,attempt_id),
-    UNIQUE (bot_id,operation_id),
-    UNIQUE (bot_id,facet_id,attempt_no),
-    UNIQUE (bot_id,attempt_id,facet_id),
-    FOREIGN KEY (bot_id,facet_id) REFERENCES embedding_facets(bot_id,facet_id),
-    CHECK (state<>'PREPARED' OR handoff_operation_id IS NULL),
-    CHECK (state<>'PREPARED' OR dispatched_at IS NULL),
-    CHECK (
-        state NOT IN ('DISPATCHED','SUCCEEDED','UNKNOWN','RETRYABLE_FAILURE','FAILED')
-        OR handoff_operation_id IS NOT NULL
-    ),
-    CHECK (
-        state NOT IN ('DISPATCHED','SUCCEEDED','UNKNOWN','RETRYABLE_FAILURE','FAILED')
-        OR dispatched_at IS NOT NULL
-    ),
-    CHECK ((state IN ('PREPARED','DISPATCHED')) = (settlement_operation_id IS NULL)),
-    CHECK ((state IN ('PREPARED','DISPATCHED')) = (settled_at IS NULL)),
-    CHECK ((state='SUCCEEDED') = (result_payload_id IS NOT NULL)),
-    CHECK ((state='SUCCEEDED') = (result_payload_digest IS NOT NULL)),
-    CHECK ((state='SUCCEEDED') = (vector_digest IS NOT NULL))
-);
-
 CREATE TABLE embedding_claims (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     claim_id text NOT NULL CHECK (octet_length(claim_id) BETWEEN 1 AND 256),
@@ -615,6 +562,71 @@ CREATE TABLE embedding_claim_items (
     FOREIGN KEY (bot_id,claim_id) REFERENCES embedding_claims(bot_id,claim_id),
     FOREIGN KEY (bot_id,facet_id) REFERENCES embedding_facets(bot_id,facet_id)
 );
+
+CREATE TABLE embedding_batch_attempts (
+    bot_id text NOT NULL,
+    attempt_id text NOT NULL CHECK (octet_length(attempt_id) BETWEEN 1 AND 256),
+    claim_id text NOT NULL,
+    request_id text NOT NULL CHECK (octet_length(request_id) BETWEEN 1 AND 256),
+    effect_operation_id text NOT NULL CHECK (octet_length(effect_operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    executor_component_id text NOT NULL
+        CHECK (octet_length(executor_component_id) BETWEEN 1 AND 128),
+    executor_generation_id text NOT NULL
+        CHECK (octet_length(executor_generation_id) BETWEEN 1 AND 256),
+    profile_ref text NOT NULL CHECK (profile_ref ~ '^profile:[a-f0-9]{64}$'),
+    route_revision text NOT NULL CHECK (octet_length(route_revision) BETWEEN 1 AND 256),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
+    request_body_payload_id text NOT NULL
+        CHECK (octet_length(request_body_payload_id) BETWEEN 1 AND 256),
+    request_body_digest text NOT NULL CHECK (request_body_digest ~ '^sha256:[a-f0-9]{64}$'),
+    request_manifest_payload_id text NOT NULL
+        CHECK (octet_length(request_manifest_payload_id) BETWEEN 1 AND 256),
+    request_manifest_digest text NOT NULL CHECK (
+        request_manifest_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    reservation_id text NOT NULL CHECK (octet_length(reservation_id) BETWEEN 1 AND 256),
+    deadline_at timestamptz NOT NULL,
+    state text NOT NULL DEFAULT 'PREPARED' CHECK (
+        state IN ('PREPARED','DISPATCHED','SUCCEEDED','NOT_SENT','UNKNOWN','FAILED')
+    ),
+    handoff_operation_id text CHECK (
+        handoff_operation_id IS NULL OR octet_length(handoff_operation_id) BETWEEN 1 AND 256
+    ),
+    settlement_operation_id text CHECK (
+        settlement_operation_id IS NULL
+        OR octet_length(settlement_operation_id) BETWEEN 1 AND 256
+    ),
+    result_payload_id text CHECK (
+        result_payload_id IS NULL OR octet_length(result_payload_id) BETWEEN 1 AND 256
+    ),
+    result_payload_digest text CHECK (
+        result_payload_digest IS NULL OR result_payload_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
+    prepared_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    dispatched_at timestamptz,
+    settled_at timestamptz,
+    PRIMARY KEY (bot_id,attempt_id),
+    UNIQUE (bot_id,claim_id),
+    UNIQUE (bot_id,effect_operation_id),
+    UNIQUE (bot_id,request_id),
+    FOREIGN KEY (bot_id,claim_id) REFERENCES embedding_claims(bot_id,claim_id),
+    CHECK (state<>'PREPARED' OR handoff_operation_id IS NULL),
+    CHECK (state<>'PREPARED' OR dispatched_at IS NULL),
+    CHECK (
+        state NOT IN ('DISPATCHED','SUCCEEDED','UNKNOWN','FAILED')
+        OR (handoff_operation_id IS NOT NULL AND dispatched_at IS NOT NULL)
+    ),
+    CHECK ((state IN ('PREPARED','DISPATCHED')) = (settlement_operation_id IS NULL)),
+    CHECK ((state IN ('PREPARED','DISPATCHED')) = (settled_at IS NULL)),
+    CHECK ((state='SUCCEEDED') = (result_payload_id IS NOT NULL)),
+    CHECK ((state='SUCCEEDED') = (result_payload_digest IS NOT NULL))
+);
+
+ALTER TABLE embedding_facets ADD CONSTRAINT embedding_facet_current_attempt_fk
+    FOREIGN KEY (bot_id,current_attempt_id)
+    REFERENCES embedding_batch_attempts(bot_id,attempt_id);
 
 CREATE TABLE embedding_budget_days (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
@@ -656,6 +668,7 @@ CREATE TABLE embedding_budget_reservations (
     PRIMARY KEY (bot_id,reservation_id),
     UNIQUE (bot_id,operation_id),
     UNIQUE (bot_id,batch_ref),
+    UNIQUE (bot_id,reservation_id,batch_ref),
     UNIQUE (bot_id,settlement_operation_id),
     FOREIGN KEY (bot_id,budget_day) REFERENCES embedding_budget_days(bot_id,budget_day),
     CHECK ((state='RESERVED') = (settled_at IS NULL)),
@@ -663,6 +676,10 @@ CREATE TABLE embedding_budget_reservations (
     CHECK ((state='RESERVED') = (settlement_input_digest IS NULL)),
     CHECK ((state='CHARGED') = (charged_tokens IS NOT NULL))
 );
+
+ALTER TABLE embedding_batch_attempts ADD CONSTRAINT embedding_batch_reservation_fk
+    FOREIGN KEY (bot_id,reservation_id,claim_id)
+    REFERENCES embedding_budget_reservations(bot_id,reservation_id,batch_ref);
 
 CREATE TABLE retrieval_bundles (
     bot_id text NOT NULL,
@@ -849,7 +866,7 @@ CREATE INDEX embedding_facets_query_idx ON embedding_facets(
 CREATE INDEX embedding_facets_snapshot_idx ON embedding_facets(
     bot_id,space_id,purpose,state,published_at,facet_id
 );
-CREATE INDEX embedding_attempts_recovery_idx ON embedding_attempts(
+CREATE INDEX embedding_batch_attempts_recovery_idx ON embedding_batch_attempts(
     bot_id,state,deadline_at,attempt_id
 );
 CREATE INDEX vector_index_deletions_work_idx ON vector_index_deletions(
@@ -1010,18 +1027,24 @@ $$;
 
 CREATE FUNCTION guard_embedding_attempt() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF ROW(NEW.bot_id,NEW.attempt_id,NEW.operation_id,NEW.input_digest,NEW.facet_id,
-           NEW.attempt_no,NEW.executor_component_id,NEW.executor_generation_id,
-           NEW.route_revision,NEW.accepted_deletion_epoch,NEW.deadline_at,NEW.prepared_at)
+    IF ROW(NEW.bot_id,NEW.attempt_id,NEW.claim_id,NEW.request_id,
+           NEW.effect_operation_id,NEW.input_digest,NEW.executor_component_id,
+           NEW.executor_generation_id,NEW.profile_ref,NEW.route_revision,
+           NEW.accepted_deletion_epoch,NEW.request_body_payload_id,
+           NEW.request_body_digest,NEW.request_manifest_payload_id,
+           NEW.request_manifest_digest,NEW.reservation_id,NEW.deadline_at,NEW.prepared_at)
        IS DISTINCT FROM
-       ROW(OLD.bot_id,OLD.attempt_id,OLD.operation_id,OLD.input_digest,OLD.facet_id,
-           OLD.attempt_no,OLD.executor_component_id,OLD.executor_generation_id,
-           OLD.route_revision,OLD.accepted_deletion_epoch,OLD.deadline_at,OLD.prepared_at) THEN
+       ROW(OLD.bot_id,OLD.attempt_id,OLD.claim_id,OLD.request_id,
+           OLD.effect_operation_id,OLD.input_digest,OLD.executor_component_id,
+           OLD.executor_generation_id,OLD.profile_ref,OLD.route_revision,
+           OLD.accepted_deletion_epoch,OLD.request_body_payload_id,
+           OLD.request_body_digest,OLD.request_manifest_payload_id,
+           OLD.request_manifest_digest,OLD.reservation_id,OLD.deadline_at,OLD.prepared_at) THEN
         RAISE EXCEPTION 'Embedding attempt identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.state='PREPARED' AND NEW.state IN ('DISPATCHED','NOT_SENT') THEN RETURN NEW; END IF;
     IF OLD.state='DISPATCHED' AND NEW.state IN (
-        'SUCCEEDED','NOT_SENT','UNKNOWN','RETRYABLE_FAILURE','FAILED'
+        'SUCCEEDED','NOT_SENT','UNKNOWN','FAILED'
     ) THEN RETURN NEW; END IF;
     IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
     RAISE EXCEPTION 'Invalid embedding attempt transition' USING ERRCODE='55000';
@@ -1102,7 +1125,7 @@ CREATE TRIGGER memory_query_guard BEFORE UPDATE OR DELETE ON memory_queries
     FOR EACH ROW EXECUTE FUNCTION guard_memory_query();
 CREATE TRIGGER embedding_facet_guard BEFORE UPDATE OR DELETE ON embedding_facets
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_facet();
-CREATE TRIGGER embedding_attempt_guard BEFORE UPDATE OR DELETE ON embedding_attempts
+CREATE TRIGGER embedding_attempt_guard BEFORE UPDATE OR DELETE ON embedding_batch_attempts
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_attempt();
 CREATE TRIGGER vector_index_deletion_guard BEFORE UPDATE OR DELETE ON vector_index_deletions
     FOR EACH ROW EXECUTE FUNCTION guard_vector_index_deletion();

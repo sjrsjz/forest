@@ -923,6 +923,71 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
         } == {
             facet["facet_id"] for claim in claimed for facet in claim["payload"]["facets"]
         }
+        claim_id = reclaimed["value"]["claim_token"]
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.embedding_budget_days(bot_id,budget_day) "
+                    "VALUES(%s,current_date)"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id,),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.embedding_budget_reservations("
+                    "bot_id,reservation_id,operation_id,input_digest,batch_ref,"
+                    "policy_revision,budget_day,request_limit,token_limit,"
+                    "reserved_tokens,deadline_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,current_date,1000,100000,100,"
+                    "clock_timestamp()+interval '1 hour')"
+                ).format(sql.Identifier(namespace)),
+                (
+                    store.bot_id, "budget/embedding/claim", "reserve/embedding/claim",
+                    "sha256:" + "b" * 64, claim_id, "daily-cost-cap/1",
+                ),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.embedding_batch_attempts("
+                    "bot_id,attempt_id,claim_id,request_id,effect_operation_id,"
+                    "input_digest,executor_component_id,executor_generation_id,"
+                    "profile_ref,route_revision,accepted_deletion_epoch,"
+                    "request_body_payload_id,request_body_digest,"
+                    "request_manifest_payload_id,request_manifest_digest,"
+                    "reservation_id,deadline_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,"
+                    "clock_timestamp()+interval '1 hour')"
+                ).format(sql.Identifier(namespace)),
+                (
+                    store.bot_id, "attempt/embedding/claim", claim_id,
+                    "request/embedding/claim", "effect/embedding/claim",
+                    "sha256:" + "a" * 64, "embedding.multimodal", "generation/embedding",
+                    "profile:" + "c" * 64, "graph/1", "payload/body",
+                    "sha256:" + "d" * 64, "payload/manifest", "sha256:" + "e" * 64,
+                    "budget/embedding/claim",
+                ),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.embedding_facets SET state='PREPARED',"
+                    "current_attempt_id=%s,attempt_count=attempt_count+1 "
+                    "WHERE bot_id=%s AND facet_id=ANY(%s)"
+                ).format(sql.Identifier(namespace)),
+                (
+                    "attempt/embedding/claim", store.bot_id,
+                    [item["facet_id"] for item in reclaimed["value"]["payload"]["facets"]],
+                ),
+            )
+            attempt_members = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT count(*) AS n FROM {}.embedding_facets "
+                        "WHERE bot_id=%s AND current_attempt_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "attempt/embedding/claim"),
+                )
+            ).fetchone()
+        assert attempt_members["n"] == 2
 
         identity = instance.generation_identity
         endpoint = instance.runtime_service_handlers()[
