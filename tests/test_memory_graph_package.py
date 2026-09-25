@@ -317,7 +317,9 @@ async def test_memory_embedding_identity_is_immutable_across_configuration_plans
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize("resolution", ["HANDOFF", "ABANDON"])
+@pytest.mark.parametrize(
+    "resolution", ["HANDOFF", "ABANDON", "RESPONDED", "NOT_SENT", "UNKNOWN"]
+)
 async def test_memory_package_qualifies_exact_conversation_batch(
     clean_authority, tmp_path, resolution
 ):
@@ -1033,6 +1035,15 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 "charged_tokens": None,
                 "error_code": "MEMORY_EMBEDDING_HANDOFF_NOT_SENT",
             }
+            abandon_input = {
+                "protocol": "forest.memory-embedding-abandon/1",
+                "claim_id": claim_id,
+                "attempt_id": "attempt/embedding/claim",
+                "effect_operation_id": "effect/embedding/claim",
+                "abandonment_operation_id": "effect/abandon/embedding/claim",
+                "reservation_id": "budget/embedding/claim",
+                "reason_code": "MEMORY_EMBEDDING_HANDOFF_NOT_SENT",
+            }
             async with store.pool.connection() as conn, conn.transaction():
                 released = await (
                     await conn.execute(
@@ -1069,6 +1080,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                             Jsonb({
                                 "bot_id": store.bot_id,
                                 "operation_id": "memory/abandon/embedding/claim",
+                                "participant_input_digest": digest_json(abandon_input),
                             }),
                             Jsonb({
                                 "protocol": "forest.uow-step/1",
@@ -1076,15 +1088,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                                     "component_id": "memory.graph",
                                     "generation_id": generation_id,
                                 },
-                                "input": {
-                                    "protocol": "forest.memory-embedding-abandon/1",
-                                    "claim_id": claim_id,
-                                    "attempt_id": "attempt/embedding/claim",
-                                    "effect_operation_id": "effect/embedding/claim",
-                                    "abandonment_operation_id": "effect/abandon/embedding/claim",
-                                    "reservation_id": "budget/embedding/claim",
-                                    "reason_code": "MEMORY_EMBEDDING_HANDOFF_NOT_SENT",
-                                },
+                                "input": abandon_input,
                                 "prior": {
                                     "effect": {
                                         "attempt_id": "attempt/embedding/claim",
@@ -1182,6 +1186,154 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 )
             ).fetchone()
         assert dispatched_facets["n"] == 2
+
+        if resolution != "HANDOFF":
+            observed_state = {
+                "RESPONDED": "SUCCEEDED",
+                "NOT_SENT": "NOT_APPLIED",
+                "UNKNOWN": "UNKNOWN",
+            }[resolution]
+            budget_state = {
+                "RESPONDED": "CHARGED",
+                "NOT_SENT": "RELEASED",
+                "UNKNOWN": "UNKNOWN",
+            }[resolution]
+            charged_tokens = 12 if resolution == "RESPONDED" else None
+            result_ref = ({
+                "payload_id": "payload/embedding-result",
+                "digest": "sha256:" + "c" * 64,
+                "owner_component_id": "embedding.multimodal",
+                "owner_kind": "embedding.result",
+                "owner_id": "attempt/embedding/claim",
+            } if resolution == "RESPONDED" else None)
+            vectors = [
+                {
+                    "facet_id": facet["facet_id"],
+                    "index": index,
+                    "vector_digest": "sha256:" + str(index + 1) * 64,
+                }
+                for index, facet in enumerate(reclaimed["value"]["payload"]["facets"])
+            ] if result_ref is not None else []
+            budget_input = {
+                "protocol": "forest.memory-embedding-budget-settle/1",
+                "reservation_id": "budget/embedding/claim",
+                "state": budget_state,
+                "charged_tokens": charged_tokens,
+                "error_code": None if result_ref is not None else "EMBEDDING_RESULT_UNKNOWN",
+            }
+            memory_input = {
+                "protocol": "forest.memory-embedding-observe/1",
+                "claim_id": claim_id,
+                "attempt_id": "attempt/embedding/claim",
+                "effect_operation_id": "effect/embedding/claim",
+                "observation_operation_id": "effect/observation/embedding/claim",
+                "reservation_id": "budget/embedding/claim",
+                "observed_state": observed_state,
+                "evidence_digest": "sha256:" + "e" * 64,
+                "result": result_ref,
+                "vectors": vectors,
+                "charged_tokens": charged_tokens,
+                "error_code": budget_input["error_code"],
+            }
+            async with store.pool.connection() as conn, conn.transaction():
+                released = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT {}.memory_settle_embedding_budget(%s::jsonb,%s::jsonb) "
+                            "AS result"
+                        ).format(sql.Identifier(namespace)),
+                        (
+                            Jsonb({
+                                "bot_id": store.bot_id,
+                                "operation_id": "budget/observe/embedding/claim",
+                                "participant_input_digest": digest_json(budget_input),
+                            }),
+                            Jsonb({
+                                "protocol": "forest.uow-step/1",
+                                "caller": {
+                                    "component_id": "memory.graph",
+                                    "generation_id": generation_id,
+                                },
+                                "input": budget_input,
+                                "prior": {},
+                            }),
+                        ),
+                    )
+                ).fetchone()
+                assert released["result"]["ok"] is True
+                observed = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT {}.memory_observe_embedding_attempt(%s::jsonb,%s::jsonb) "
+                            "AS result"
+                        ).format(sql.Identifier(namespace)),
+                        (
+                            Jsonb({
+                                "bot_id": store.bot_id,
+                                "operation_id": "memory/observe/embedding/claim",
+                                "participant_input_digest": digest_json(memory_input),
+                            }),
+                            Jsonb({
+                                "protocol": "forest.uow-step/1",
+                                "caller": {
+                                    "component_id": "memory.graph",
+                                    "generation_id": generation_id,
+                                },
+                                "input": memory_input,
+                                "prior": {
+                                    "effect": {
+                                        "protocol": "forest.effect-command-observation/1",
+                                        "observation": {
+                                            "attempt_id": "attempt/embedding/claim",
+                                            "observation_operation_id":
+                                                "effect/observation/embedding/claim",
+                                            "observed_status": observed_state,
+                                            "resulting_state": observed_state,
+                                            "evidence_kind": "executor",
+                                            "accepted": True,
+                                        },
+                                        "evidence_payload": {
+                                            "owner_component_id": "kernel.effect",
+                                            "owner_kind": "effect.evidence",
+                                            "owner_id": "effect/observation/embedding/claim",
+                                            "digest": "sha256:" + "e" * 64,
+                                        },
+                                        "evidence_parents": [result_ref] if result_ref else [],
+                                    },
+                                    "budget": released["result"]["value"],
+                                },
+                            }),
+                        ),
+                    )
+                ).fetchone()
+                facet_states = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT state,vector_digest,result_payload_id "
+                            "FROM {}.embedding_facets WHERE bot_id=%s "
+                            "AND current_attempt_id=%s"
+                        ).format(sql.Identifier(namespace)),
+                        (store.bot_id, "attempt/embedding/claim"),
+                    )
+                ).fetchall()
+            assert observed["result"]["ok"] is True
+            assert observed["result"]["value"]["state"] == {
+                "RESPONDED": "SUCCEEDED", "NOT_SENT": "NOT_SENT", "UNKNOWN": "UNKNOWN"
+            }[resolution]
+            if resolution == "NOT_SENT":
+                retry_claim = await claim_batch(
+                    "embedding/claim/after-not-sent", lease_seconds=360
+                )
+                assert retry_claim["ok"] is True
+                assert len(retry_claim["value"]["payload"]["facets"]) == 2
+            else:
+                assert len(facet_states) == 2
+                assert all(row["state"] == (
+                    "EMBEDDED" if result_ref else "UNKNOWN"
+                ) for row in facet_states)
+                assert all((row["result_payload_id"] == "payload/embedding-result")
+                           == (result_ref is not None) for row in facet_states)
+            return
 
         identity = instance.generation_identity
         endpoint = instance.runtime_service_handlers()[

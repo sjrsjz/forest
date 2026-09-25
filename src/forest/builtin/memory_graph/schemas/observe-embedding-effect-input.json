@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["effect", "budget", "memory"],
+  "properties": {
+    "effect": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "effect_operation_id", "attempt_id", "observation_operation_id", "status", "evidence_kind", "evidence"],
+      "properties": {
+        "protocol": {"const": "forest.effect-command-result/1"},
+        "effect_operation_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "observation_operation_id": {"$ref": "#/$defs/id"},
+        "status": {"enum": ["SUCCEEDED", "NOT_APPLIED", "UNKNOWN"]},
+        "evidence_kind": {"const": "executor"},
+        "evidence": {
+          "type": "object", "additionalProperties": false,
+          "required": ["value", "parents"],
+          "properties": {
+            "value": {"type": "object"},
+            "parents": {"type": "array", "maxItems": 1, "items": {"$ref": "#/$defs/payload"}}
+          }
+        }
+      }
+    },
+    "budget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "reservation_id", "state", "charged_tokens", "error_code"],
+      "properties": {
+        "protocol": {"const": "forest.memory-embedding-budget-settle/1"},
+        "reservation_id": {"$ref": "#/$defs/id"},
+        "state": {"enum": ["CHARGED", "RELEASED", "UNKNOWN"]},
+        "charged_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "error_code": {"type": ["string", "null"], "minLength": 1, "maxLength": 128}
+      }
+    },
+    "memory": {"$ref": "#/$defs/memory"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"$ref": "#/$defs/id"},
+        "owner_kind": {"$ref": "#/$defs/id"},
+        "owner_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "vector": {
+      "type": "object", "additionalProperties": false,
+      "required": ["facet_id", "index", "vector_digest"],
+      "properties": {
+        "facet_id": {"$ref": "#/$defs/id"},
+        "index": {"type": "integer", "minimum": 0, "maximum": 31},
+        "vector_digest": {"$ref": "#/$defs/digest"}
+      }
+    },
+    "memory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "claim_id", "attempt_id", "effect_operation_id", "observation_operation_id", "reservation_id", "observed_state", "evidence_digest", "result", "vectors", "charged_tokens", "error_code"],
+      "properties": {
+        "protocol": {"const": "forest.memory-embedding-observe/1"},
+        "claim_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "effect_operation_id": {"$ref": "#/$defs/id"},
+        "observation_operation_id": {"$ref": "#/$defs/id"},
+        "reservation_id": {"$ref": "#/$defs/id"},
+        "observed_state": {"enum": ["SUCCEEDED", "NOT_APPLIED", "UNKNOWN"]},
+        "evidence_digest": {"$ref": "#/$defs/digest"},
+        "result": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/payload"}]},
+        "vectors": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/vector"}},
+        "charged_tokens": {"type": ["integer", "null"], "minimum": 0},
+        "error_code": {"type": ["string", "null"], "minLength": 1, "maxLength": 128}
+      }
+    }
+  }
+}

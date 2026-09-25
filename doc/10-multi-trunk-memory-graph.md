@@ -209,6 +209,8 @@ Memory 的每日嵌入账本以 UTC 日期和 Bot ID 为键。每个稳定 batch
 
 提交前恢复使用独立的 `memory.abandon-embedding-effect` 事务计划。Kernel Effect 首先核实该 attempt 仍为 `PREPARED` 并登记放弃，预算随后原子释放，Memory 最后确认 attempt/claim/reservation 一致，把 attempt 记为 `NOT_SENT`、facet 退回 `PENDING`、claim 记为过期；任一步失败全部回滚。普通 claim 扫描不会擅自过期已有 attempt 的 claim。`DISPATCHING` 或更晚的 Effect 不可通过这条路径重发，必须进入结果观察或 UNKNOWN 对账。
 
+结果观察由 `memory.observe-embedding-effect` 在单一 UnitOfWork 内依次冻结 Kernel Effect 回执、结算每日预算、更新 Memory 批次和 facet。成功回执只把结果 Payload 引用与每个 facet 的向量摘要写回 PostgreSQL，向量本体仍留在受管结果 Payload 中，待后续发布到独立向量索引；已被抑制的 facet 不再转为可发布态。明确 `NOT_APPLIED` 才释放预算并允许重新 claim；`UNKNOWN` 保留占额和不可重发的状态。观察输入必须对应 Effect 已接受的观察事实、`effect.evidence` 摘要和结果 Payload 父边，且批次成员与顺序逐项匹配。
+
 ## 6. 跨主干联想、证据与合流
 
 联想可以连接群甲、群乙的源单元，或连接分别由两群支撑的实体/断言。它仅提供扩展线索；联想不把来源转成当前群，不把两个断言合成一个确定事实，也不授予原本没有的跨群读取能力。

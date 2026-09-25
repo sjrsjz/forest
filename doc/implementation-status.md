@@ -125,6 +125,8 @@ Memory 现在还声明 `memory.handoff-embedding-effect`：同一 UnitOfWork 先
 
 Memory 新增 `memory.abandon-embedding-effect`：只有 Kernel Effect 确认 attempt 仍处于 `PREPARED`、从未 handoff，才在同一事务内放弃 Effect、释放预算、标记 Memory attempt 为 `NOT_SENT` 并将本批 facet 退回 `PENDING`。带 attempt 的过期 claim 不会被普通领取循环直接标为 `EXPIRED`；恢复计划负责释放它。已 handoff 或状态不确定的批次不能走此路径。PostgreSQL 参与者测试已验证退回与预算状态，真实 Kernel Effect 联合事务及崩溃恢复 Worker 仍未接线。
 
+Memory 还声明了 `memory.observe-embedding-effect`：Kernel Effect 将小型回执冻结为 `effect.evidence` 并验证结果 Payload 父引用，预算结算与 Memory 批次状态在同一事务内提交。`SUCCEEDED` 按 claim 顺序核对每个 facet 的向量摘要，将仍可用的 facet 标为 `EMBEDDED`；`NOT_APPLIED` 退回 `PENDING` 并释放预算；`UNKNOWN` 保持不可重发状态与预算占额。Memory participant 的 PostgreSQL 测试覆盖三种状态及明确未发送后的重新领取；测试尚以合成 Effect 前序结果调用 SQL，真实跨包事务和 Worker 尚待接入。向量索引发布及语义召回未完成。
+
 ## 8. 下一切换顺序
 
 1. 在 `builtin/memory_graph` 内建立文档/查询 facet 准备、生命周期绑定的多模态 Embedding Effect、每日成本配额和包所有的持久任务；只把索引 ref 发布到向量库。

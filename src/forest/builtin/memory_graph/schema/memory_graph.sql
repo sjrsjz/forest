@@ -592,6 +592,10 @@ CREATE TABLE embedding_batch_attempts (
         settlement_operation_id IS NULL
         OR octet_length(settlement_operation_id) BETWEEN 1 AND 256
     ),
+    settlement_input_digest text CHECK (
+        settlement_input_digest IS NULL
+        OR settlement_input_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
     result_payload_id text CHECK (
         result_payload_id IS NULL OR octet_length(result_payload_id) BETWEEN 1 AND 256
     ),
@@ -613,6 +617,7 @@ CREATE TABLE embedding_batch_attempts (
         OR (handoff_operation_id IS NOT NULL AND dispatched_at IS NOT NULL)
     ),
     CHECK ((state IN ('PREPARED','DISPATCHED')) = (settlement_operation_id IS NULL)),
+    CHECK ((state IN ('PREPARED','DISPATCHED')) = (settlement_input_digest IS NULL)),
     CHECK ((state IN ('PREPARED','DISPATCHED')) = (settled_at IS NULL)),
     CHECK ((state='SUCCEEDED') = (result_payload_id IS NOT NULL)),
     CHECK ((state='SUCCEEDED') = (result_payload_digest IS NOT NULL))
@@ -1933,6 +1938,7 @@ DECLARE
     budget_value jsonb := envelope#>'{prior,budget}';
     requested_bot text := context->>'bot_id';
     requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
     requested_claim text := body->>'claim_id';
     requested_attempt text := body->>'attempt_id';
     requested_effect text := body->>'effect_operation_id';
@@ -1944,6 +1950,7 @@ BEGIN
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
        OR body->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-abandon/1'
        OR requested_bot IS NULL OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
        OR requested_claim IS NULL OR requested_attempt IS NULL
        OR requested_effect IS NULL
        OR effect_value->>'attempt_id' IS DISTINCT FROM requested_attempt
@@ -1968,7 +1975,8 @@ BEGIN
                 'message','Embedding attempt identity differs','status',409));
     END IF;
     IF attempt_row.state='NOT_SENT'
-       AND attempt_row.settlement_operation_id=requested_operation THEN
+       AND attempt_row.settlement_operation_id=requested_operation
+       AND attempt_row.settlement_input_digest=requested_digest THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object('protocol','forest.memory-embedding-abandoned/1',
                 'claim_id',requested_claim,'attempt_id',requested_attempt,
@@ -1984,6 +1992,7 @@ BEGIN
     END IF;
     UPDATE __forest_module_schema__.embedding_batch_attempts
     SET state='NOT_SENT',settlement_operation_id=requested_operation,
+        settlement_input_digest=requested_digest,
         error_code=body->>'reason_code',settled_at=clock_timestamp()
     WHERE bot_id=requested_bot AND attempt_id=requested_attempt;
     UPDATE __forest_module_schema__.embedding_facets f
@@ -2004,6 +2013,182 @@ BEGIN
         'value',jsonb_build_object('protocol','forest.memory-embedding-abandoned/1',
             'claim_id',requested_claim,'attempt_id',requested_attempt,
             'state','NOT_SENT'));
+END;
+$$;
+
+CREATE FUNCTION memory_observe_embedding_attempt(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    effect_value jsonb := envelope#>'{prior,effect}';
+    effect_observation jsonb := effect_value->'observation';
+    effect_evidence jsonb := effect_value->'evidence_payload';
+    effect_parents jsonb := effect_value->'evidence_parents';
+    budget_value jsonb := envelope#>'{prior,budget}';
+    result_value jsonb := body->'result';
+    vectors_value jsonb := body->'vectors';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_claim text := body->>'claim_id';
+    requested_attempt text := body->>'attempt_id';
+    requested_effect text := body->>'effect_operation_id';
+    observed_state text := body->>'observed_state';
+    budget_state text;
+    attempt_state text;
+    claim_row __forest_module_schema__.embedding_claims%ROWTYPE;
+    attempt_row __forest_module_schema__.embedding_batch_attempts%ROWTYPE;
+    facet_row record;
+    vector_value jsonb;
+    seen_count integer := 0;
+BEGIN
+    IF jsonb_typeof(effect_parents) IS DISTINCT FROM 'array'
+       OR jsonb_typeof(vectors_value) IS DISTINCT FROM 'array' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_OBSERVATION_INVALID',
+                'message','Embedding observation evidence is invalid','status',422));
+    END IF;
+    budget_state := CASE observed_state WHEN 'SUCCEEDED' THEN 'CHARGED'
+        WHEN 'NOT_APPLIED' THEN 'RELEASED' WHEN 'UNKNOWN' THEN 'UNKNOWN' END;
+    attempt_state := CASE observed_state WHEN 'SUCCEEDED' THEN 'SUCCEEDED'
+        WHEN 'NOT_APPLIED' THEN 'NOT_SENT' WHEN 'UNKNOWN' THEN 'UNKNOWN' END;
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-observe/1'
+       OR requested_bot IS NULL OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_claim IS NULL OR requested_attempt IS NULL
+       OR requested_effect IS NULL OR budget_state IS NULL
+       OR effect_value->>'protocol' IS DISTINCT FROM 'forest.effect-command-observation/1'
+       OR effect_observation->>'attempt_id' IS DISTINCT FROM requested_attempt
+       OR effect_observation->>'observation_operation_id' IS DISTINCT FROM
+          body->>'observation_operation_id'
+       OR effect_observation->>'observed_status' IS DISTINCT FROM observed_state
+       OR effect_observation->>'resulting_state' IS DISTINCT FROM observed_state
+       OR effect_observation->>'evidence_kind' IS DISTINCT FROM 'executor'
+       OR effect_observation->>'accepted' IS DISTINCT FROM 'true'
+       OR effect_evidence->>'owner_component_id' IS DISTINCT FROM 'kernel.effect'
+       OR effect_evidence->>'owner_kind' IS DISTINCT FROM 'effect.evidence'
+       OR effect_evidence->>'owner_id' IS DISTINCT FROM body->>'observation_operation_id'
+       OR effect_evidence->>'digest' IS DISTINCT FROM body->>'evidence_digest'
+       OR budget_value->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-budget/1'
+       OR budget_value->>'reservation_id' IS DISTINCT FROM body->>'reservation_id'
+       OR budget_value->>'state' IS DISTINCT FROM budget_state
+       OR budget_value->>'charged_tokens' IS DISTINCT FROM body->>'charged_tokens'
+       OR (observed_state='SUCCEEDED' AND (
+           result_value IS NULL OR result_value='null'::jsonb
+           OR result_value->>'owner_component_id' IS DISTINCT FROM 'embedding.multimodal'
+           OR result_value->>'owner_kind' IS DISTINCT FROM 'embedding.result'
+           OR result_value->>'owner_id' IS DISTINCT FROM requested_attempt
+           OR jsonb_array_length(effect_parents)<>1
+           OR effect_parents->0 IS DISTINCT FROM result_value
+       ))
+       OR (observed_state<>'SUCCEEDED' AND (
+           result_value IS DISTINCT FROM 'null'::jsonb
+           OR jsonb_array_length(effect_parents)<>0
+           OR jsonb_array_length(vectors_value)<>0
+           OR body->>'charged_tokens' IS NOT NULL
+       )) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_OBSERVATION_INVALID',
+                'message','Embedding observation evidence is invalid','status',422));
+    END IF;
+    SELECT * INTO attempt_row FROM __forest_module_schema__.embedding_batch_attempts
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt FOR UPDATE;
+    IF attempt_row IS NULL OR attempt_row.claim_id IS DISTINCT FROM requested_claim
+       OR attempt_row.effect_operation_id IS DISTINCT FROM requested_effect
+       OR attempt_row.reservation_id IS DISTINCT FROM body->>'reservation_id' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_CONFLICT',
+                'message','Embedding attempt identity differs','status',409));
+    END IF;
+    IF attempt_row.state=attempt_state
+       AND attempt_row.settlement_operation_id=requested_operation
+       AND attempt_row.settlement_input_digest=requested_digest THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.memory-embedding-observed/1',
+                'claim_id',requested_claim,'attempt_id',requested_attempt,
+                'state',attempt_state));
+    END IF;
+    SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
+    WHERE bot_id=requested_bot AND claim_id=requested_claim FOR UPDATE;
+    IF attempt_row.state<>'DISPATCHED' OR claim_row IS NULL
+       OR claim_row.state<>'CLAIMED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_OBSERVATION_STALE',
+                'message','Embedding observation boundary is closed','status',409));
+    END IF;
+    IF observed_state='SUCCEEDED' AND
+       (jsonb_array_length(vectors_value)<>claim_row.item_count
+        OR body->>'charged_tokens' !~ '^[0-9]+$') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_VECTOR_SET_INVALID',
+                'message','Embedding vector set differs from the claim','status',422));
+    END IF;
+    FOR facet_row IN
+        SELECT ci.item_index,ci.facet_id,f.state,f.current_attempt_id
+        FROM __forest_module_schema__.embedding_claim_items ci
+        JOIN __forest_module_schema__.embedding_facets f
+          ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+        WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
+        ORDER BY ci.item_index FOR UPDATE OF f
+    LOOP
+        seen_count := seen_count+1;
+        IF facet_row.state NOT IN ('DISPATCHED','SUPPRESSED')
+           OR (facet_row.state='DISPATCHED' AND
+               facet_row.current_attempt_id IS DISTINCT FROM requested_attempt) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EMBEDDING_FACET_CHANGED',
+                    'message','Embedding facet changed before observation','status',409));
+        END IF;
+        IF observed_state='SUCCEEDED' THEN
+            vector_value := vectors_value->facet_row.item_index;
+            IF vector_value->>'facet_id' IS DISTINCT FROM facet_row.facet_id
+               OR vector_value->>'index' IS DISTINCT FROM facet_row.item_index::text
+               OR vector_value->>'vector_digest' !~ '^sha256:[a-f0-9]{64}$' THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_EMBEDDING_VECTOR_SET_INVALID',
+                        'message','Embedding vector set differs from the claim','status',422));
+            END IF;
+            IF facet_row.state='DISPATCHED' THEN
+                UPDATE __forest_module_schema__.embedding_facets
+                SET state='EMBEDDED',vector_digest=vector_value->>'vector_digest',
+                    result_payload_id=result_value->>'payload_id',
+                    result_payload_digest=result_value->>'digest',
+                    updated_at=clock_timestamp()
+                WHERE bot_id=requested_bot AND facet_id=facet_row.facet_id;
+            END IF;
+        ELSIF facet_row.state='DISPATCHED' THEN
+            UPDATE __forest_module_schema__.embedding_facets
+            SET state=CASE observed_state WHEN 'NOT_APPLIED' THEN 'PENDING'
+                    ELSE 'UNKNOWN' END,
+                current_attempt_id=CASE observed_state WHEN 'NOT_APPLIED' THEN NULL
+                    ELSE current_attempt_id END,
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND facet_id=facet_row.facet_id;
+        END IF;
+    END LOOP;
+    IF seen_count<>claim_row.item_count THEN
+        RAISE EXCEPTION 'Embedding claim membership changed under lock' USING ERRCODE='55000';
+    END IF;
+    UPDATE __forest_module_schema__.embedding_batch_attempts
+    SET state=attempt_state,settlement_operation_id=requested_operation,
+        settlement_input_digest=requested_digest,
+        result_payload_id=CASE WHEN observed_state='SUCCEEDED' THEN
+            result_value->>'payload_id' ELSE NULL END,
+        result_payload_digest=CASE WHEN observed_state='SUCCEEDED' THEN
+            result_value->>'digest' ELSE NULL END,
+        error_code=body->>'error_code',settled_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt;
+    UPDATE __forest_module_schema__.embedding_claims
+    SET state=CASE observed_state WHEN 'NOT_APPLIED' THEN 'EXPIRED' ELSE 'SETTLED' END,
+        settled_at=CASE observed_state WHEN 'NOT_APPLIED' THEN NULL
+            ELSE clock_timestamp() END
+    WHERE bot_id=requested_bot AND claim_id=requested_claim;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-embedding-observed/1',
+            'claim_id',requested_claim,'attempt_id',requested_attempt,
+            'state',attempt_state));
 END;
 $$;
 
