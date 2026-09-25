@@ -167,6 +167,105 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
 
         namespace = package.descriptor.storage.spec.namespace
         async with store.pool.connection() as conn, conn.transaction():
+            archived_pending = await participant.invoke_in(
+                conn,
+                "memory.qualify-archive",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "conversation.scheduler",
+                        "generation_id": generation_id,
+                    },
+                    "input": {},
+                    "prior": {
+                        "prepare": {
+                            "status": "WRITE",
+                            "commit": {
+                                "conversation_id": "onebot:group:933179609",
+                                "compaction_id": "compaction/memory/pending",
+                                "archived_unit_count": 1,
+                                "units": [{
+                                    "event_id": "event/pending",
+                                    "input_batch_id": "batch/memory/pending",
+                                    "context_revision": 1,
+                                }],
+                            },
+                        },
+                        "commit": {
+                            "status": "BATCH",
+                            "operation_id": "conversation/silent-archive/pending",
+                            "conversation_id": "onebot:group:933179609",
+                            "classified_through_seq": 1,
+                            "selected_input_end_seq": 1,
+                            "mailbox_revision": 1,
+                            "input_batch_id": "batch/memory/pending",
+                            "boundary": "IDLE",
+                            "kind": "SILENT_DRAIN",
+                            "start_seq": 1,
+                            "end_seq": 1,
+                            "trigger_cut_seq": None,
+                            "session_ref": None,
+                            "run_ref": None,
+                            "context_revision": 1,
+                            "context_view_revision": 1,
+                            "event_ids": ["event/pending"],
+                            "trigger_ids": [],
+                            "triggers": [],
+                            "memory_archive": {
+                                "compaction_ref": "compaction/memory/pending",
+                                "event_refs": ["event/pending"],
+                            },
+                        },
+                        "payload_epoch": deletion_epoch,
+                    },
+                },
+                operation_id="memory/archive/pending",
+                causal_root_kind="conversation.silent-drain",
+                causal_root_id="onebot:group:933179609",
+                parent_call_id="call/memory/archive/pending",
+                timeout_seconds=10,
+            )
+            assert archived_pending["memory_archive"]["event_refs"] == ["event/pending"]
+            await participant.invoke_in(
+                conn,
+                "memory.mark-source-unavailable-record",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "memory.graph",
+                        "generation_id": generation_id,
+                    },
+                    "input": {
+                        "conversation_ref": "onebot:group:933179609",
+                        "event_ref": "event/pending",
+                        "error_code": "SOURCE_NOT_AVAILABLE",
+                    },
+                    "prior": {},
+                },
+                operation_id="memory/unavailable/pending",
+                causal_root_kind="memory.capture",
+                causal_root_id="event/pending",
+                parent_call_id="call/memory/unavailable/pending",
+                timeout_seconds=10,
+            )
+        async with store.pool.connection() as conn:
+            pending_states = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT i.state AS input_state,a.state AS archive_state "
+                        "FROM {}.pending_input_events i JOIN {}.pending_archive_events a "
+                        "USING (bot_id,conversation_ref,event_ref) "
+                        "WHERE i.bot_id=%s AND i.event_ref=%s"
+                    ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                    (store.bot_id, "event/pending"),
+                )
+            ).fetchone()
+        assert pending_states == {
+            "input_state": "UNAVAILABLE",
+            "archive_state": "UNAVAILABLE",
+        }
+
+        async with store.pool.connection() as conn, conn.transaction():
             deletion_epoch = await payload_participant.invoke_in(
                 conn,
                 "payload.capture-deletion-epoch",
@@ -303,6 +402,93 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                 )
             assert captured["qualified_count"] == 1
             assert captured["pending_count"] == 0
+
+        async with store.pool.connection() as conn:
+            active_unit = await (
+                await conn.execute(
+                    sql.SQL("SELECT eligibility_state FROM {}.source_units "
+                            "WHERE bot_id=%s AND source_unit_id=%s").format(
+                        sql.Identifier(namespace)
+                    ),
+                    (store.bot_id, "unit/event/captured"),
+                )
+            ).fetchone()
+        assert active_unit["eligibility_state"] == "REGISTERED"
+
+        archived_selection = {
+            "status": "BATCH",
+            "operation_id": "conversation/silent-archive/test",
+            "conversation_id": "onebot:group:933179609",
+            "classified_through_seq": 1,
+            "selected_input_end_seq": 1,
+            "mailbox_revision": 1,
+            "input_batch_id": "batch/memory/captured",
+            "boundary": "IDLE",
+            "kind": "SILENT_DRAIN",
+            "start_seq": 1,
+            "end_seq": 1,
+            "trigger_cut_seq": None,
+            "session_ref": None,
+            "run_ref": None,
+            "context_revision": 2,
+            "context_view_revision": 2,
+            "event_ids": ["event/captured"],
+            "trigger_ids": [],
+            "triggers": [],
+            "memory_archive": {
+                "compaction_ref": "compaction/memory/test",
+                "event_refs": ["event/captured"],
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            epoch = await payload_participant.invoke_in(
+                conn,
+                "payload.capture-deletion-epoch",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "conversation.scheduler",
+                        "generation_id": generation_id,
+                    },
+                    "input": {"protocol": "forest.payload-epoch-capture/1"},
+                    "prior": {},
+                },
+            )
+            archive = await participant.invoke_in(
+                conn,
+                "memory.qualify-archive",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "conversation.scheduler",
+                        "generation_id": generation_id,
+                    },
+                    "input": {},
+                    "prior": {
+                        "prepare": {
+                            "status": "WRITE",
+                            "commit": {
+                                "conversation_id": "onebot:group:933179609",
+                                "compaction_id": "compaction/memory/test",
+                                "archived_unit_count": 1,
+                                "units": [{
+                                    "event_id": "event/captured",
+                                    "input_batch_id": "batch/memory/captured",
+                                    "context_revision": 2,
+                                }],
+                            },
+                        },
+                        "commit": archived_selection,
+                        "payload_epoch": epoch,
+                    },
+                },
+                operation_id="memory/archive/test",
+                causal_root_kind="conversation.silent-drain",
+                causal_root_id="onebot:group:933179609",
+                parent_call_id="call/memory/archive",
+                timeout_seconds=10,
+            )
+        assert archive == archived_selection
 
         identity = instance.generation_identity
         endpoint = instance.runtime_service_handlers()[
@@ -497,7 +683,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                 ).fetchone()
             )["n"]
         assert occurrence == {
-            "eligibility_state": "ADMITTED",
+            "eligibility_state": "ELIGIBLE",
             "input_batch_ref": "batch/memory/captured",
             "context_revision": 2,
         }

@@ -241,6 +241,8 @@ class ConversationScheduler(Plugin):
                     "protocol": "forest.payload-json-from-prior/1",
                     "prior_step_id": "prepare",
                 },
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                "memory": {},
             },
             operation_id=ctx.operations.stable("commit-silent-input:v1"),
         )

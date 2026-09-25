@@ -109,6 +109,8 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 消息来源捕获已由 `memory.capture-source` manifest UnitOfWork 封闭：Kernel Payload 删除 epoch、Conversation 已接纳的 event/ingress sequence、群来源身份、作者引用、多模态 part 与 occurrence 在同一事务校验和提交；来源、unit 与 occurrence 都有独立并发围栏和幂等账本。Media Worker 可经 `memory.source.capture` 使用同一 participant，抓取失败则经 `memory.source.unavailable` 留下持久不可用事实，避免 Agent 选择先于异步抓图完成时永久等待。输入资格 participant 会在捕获先到时原子提升 occurrence/unit，在选择先到时登记 `PENDING_CAPTURE` 并由后续捕获收敛；两种顺序均不需要宿主 Repository 回调。该路径已用真实 PostgreSQL 安装包 baseline 并验证捕获、资格转换、精确召回与 Registry 资源回收。
 
+资格边界已进一步拆分：`memory.qualify-input-batch` 现在只将 occurrence 标为 `ADMITTED`，不会让仍在活动 Context 的 source unit 进入长期召回。静默裁剪的 `conversation.commit-silent-input` 在同一 UnitOfWork 提交 Context 归档、捕获 Payload 删除 epoch，再调用 `memory.qualify-archive`；只有已提交的 compaction 成员才能把 occurrence/unit 提升为 `ELIGIBLE`。归档先于异步来源到达时留下 `pending_archive_events`，捕获与确定不可用会按同一事件围栏解析它。主动 Agent 运行期的 Context 裁剪和归档接入仍待完成。
+
 精确召回不再调用宿主 `builtin_memory_tool.py`：工具声明由 Memory manifest 发布并静态绑定本包 service，隔离 Worker 经只读 Domain Query 获取最多八个归档稳定 source unit，只有 ACTIVE 来源、`ELIGIBLE` unit 和完整 part 集可见。Worker 按精确 PayloadRef 读取文本、保留图片引用，结果明确携带 source/trunk/group/author provenance，并以原始 part 为父边写入 Memory 所有的 `tool.result`。真实 PostgreSQL 测试已覆盖群主干来源、缺失 ID、Payload 读取/写入、Generation 路由与资源回收。
 
 OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 会以明确来源和群主干进入同一 source unit；Media 异步抓取通过稳定 ref 收敛。Memory 包现提供只读主干、来源、关系查询端口；来源查询按群主干、作者、模态、单元类型和发生时间筛选，使用快照加稳定游标分页；关系查询返回节点两端和有界证据，逐条标明来源群、主干及作者。WebUI 与群聊 Shell 都经包声明访问这些端口，Host 不再拥有 Memory 浏览逻辑。真实 PostgreSQL 测试已覆盖包安装、来源筛选及关系证据来源。

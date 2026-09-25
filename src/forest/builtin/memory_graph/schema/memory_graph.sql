@@ -1080,6 +1080,7 @@ DECLARE
     ingress_seq_value bigint; deletion_epoch_value bigint; identity_digest_value text;
     source_input_digest text; manifest_digest_value text; modality_value text; source_order_value bigint;
     source_row record; identity_row record; unit_row record; occurrence_row record; operation_row record; pending_row record;
+    archive_pending_row record;
     part jsonb; duplicate_value boolean := false; eligibility_value text := 'REGISTERED';
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
@@ -1100,6 +1101,19 @@ BEGIN
             'code','MEMORY_CAPTURE_AUTHORITY_MISSING','message','Payload deletion epoch is unavailable','status',503));
     END IF;
     deletion_epoch_value := (epoch_value->>'deletion_epoch')::bigint;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/eligibility/' || requested_bot || '/' ||
+        (occurrence_value->>'conversation_ref') || '/' || (occurrence_value->>'event_ref'),0
+    ));
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.unavailable_source_events
+        WHERE bot_id=requested_bot AND conversation_ref=occurrence_value->>'conversation_ref'
+          AND event_ref=occurrence_value->>'event_ref'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_SOURCE_UNAVAILABLE',
+                'message','Unavailable source cannot later be captured','status',409));
+    END IF;
     IF conversation_step IS NOT NULL THEN
         conversation_value := prior->conversation_step;
         IF conversation_value->>'conversation_id' IS DISTINCT FROM occurrence_value->>'conversation_ref'
@@ -1150,7 +1164,7 @@ BEGIN
     IF source_row IS NULL THEN
         source_row := identity_row;
     END IF;
-    IF FOUND THEN
+    IF source_row IS NOT NULL THEN
         IF source_row.source_id IS DISTINCT FROM source_id_value
            OR source_row.source_kind IS DISTINCT FROM source_value->>'source_kind'
            OR source_row.platform IS DISTINCT FROM source_value->>'platform'
@@ -1249,18 +1263,53 @@ BEGIN
         UPDATE __forest_module_schema__.source_occurrences SET eligibility_state='ADMITTED',
             input_batch_ref=pending_row.input_batch_ref,context_revision=pending_row.context_revision,
             qualified_at=clock_timestamp() WHERE bot_id=requested_bot AND occurrence_id=occurrence_id_value;
-        UPDATE __forest_module_schema__.source_units SET eligibility_state='ELIGIBLE',
-            eligibility_revision=eligibility_revision+1,eligible_at=clock_timestamp(),updated_at=clock_timestamp()
-        WHERE bot_id=requested_bot AND source_unit_id=unit_id_value AND eligibility_state='REGISTERED';
         UPDATE __forest_module_schema__.pending_input_events SET state='RESOLVED',
             source_unit_id=unit_id_value,occurrence_id=occurrence_id_value,resolved_at=clock_timestamp()
         WHERE bot_id=requested_bot AND conversation_ref=occurrence_value->>'conversation_ref'
           AND event_ref=occurrence_value->>'event_ref';
-        eligibility_value := 'ELIGIBLE';
-    ELSE
-        SELECT eligibility_state INTO eligibility_value FROM __forest_module_schema__.source_units
-        WHERE bot_id=requested_bot AND source_unit_id=unit_id_value;
     END IF;
+    SELECT * INTO archive_pending_row FROM __forest_module_schema__.pending_archive_events
+    WHERE bot_id=requested_bot AND conversation_ref=occurrence_value->>'conversation_ref'
+      AND event_ref=occurrence_value->>'event_ref' FOR UPDATE;
+    IF archive_pending_row IS NOT NULL AND archive_pending_row.state='PENDING_CAPTURE' THEN
+        SELECT * INTO occurrence_row FROM __forest_module_schema__.source_occurrences
+        WHERE bot_id=requested_bot AND occurrence_id=occurrence_id_value FOR UPDATE;
+        IF occurrence_row.eligibility_state='SUPPRESSED' OR
+           (occurrence_row.input_batch_ref IS NOT NULL AND
+            occurrence_row.input_batch_ref IS DISTINCT FROM archive_pending_row.input_batch_ref) OR
+           (occurrence_row.context_revision IS NOT NULL AND
+            occurrence_row.context_revision IS DISTINCT FROM archive_pending_row.context_revision) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_ARCHIVE_CONFLICT',
+                    'message','Archived occurrence differs from captured source','status',409));
+        END IF;
+        UPDATE __forest_module_schema__.source_occurrences
+        SET eligibility_state='ELIGIBLE',input_batch_ref=archive_pending_row.input_batch_ref,
+            context_revision=archive_pending_row.context_revision,qualified_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND occurrence_id=occurrence_id_value
+          AND eligibility_state IN ('REGISTERED','ADMITTED');
+        UPDATE __forest_module_schema__.source_units
+        SET eligibility_state='ELIGIBLE',eligibility_revision=eligibility_revision+1,
+            eligible_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND source_unit_id=unit_id_value
+          AND eligibility_state='REGISTERED';
+        SELECT * INTO unit_row FROM __forest_module_schema__.source_units
+        WHERE bot_id=requested_bot AND source_unit_id=unit_id_value;
+        INSERT INTO __forest_module_schema__.archive_qualification_operations(
+            bot_id,operation_id,input_digest,compaction_ref,conversation_ref,event_ref,
+            source_unit_id,occurrence_id,resulting_eligibility_revision)
+        VALUES(requested_bot,archive_pending_row.operation_id,
+            archive_pending_row.input_digest,archive_pending_row.compaction_ref,
+            archive_pending_row.conversation_ref,archive_pending_row.event_ref,
+            unit_id_value,occurrence_id_value,unit_row.eligibility_revision);
+        UPDATE __forest_module_schema__.pending_archive_events
+        SET state='RESOLVED',source_unit_id=unit_id_value,
+            occurrence_id=occurrence_id_value,resolved_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND conversation_ref=occurrence_value->>'conversation_ref'
+          AND event_ref=occurrence_value->>'event_ref';
+    END IF;
+    SELECT eligibility_state INTO eligibility_value FROM __forest_module_schema__.source_units
+    WHERE bot_id=requested_bot AND source_unit_id=unit_id_value;
     INSERT INTO __forest_module_schema__.capture_operations(
         bot_id,operation_id,input_digest,source_unit_id,occurrence_id,duplicate_source)
     VALUES(requested_bot,requested_operation,requested_digest,unit_id_value,occurrence_id_value,duplicate_value);
@@ -1287,6 +1336,19 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
             'code','MEMORY_UNAVAILABLE_INPUT_INVALID','message','Memory unavailable envelope is invalid','status',422));
     END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/eligibility/' || requested_bot || '/' ||
+        (body->>'conversation_ref') || '/' || (body->>'event_ref'),0
+    ));
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.source_occurrences
+        WHERE bot_id=requested_bot AND conversation_ref=body->>'conversation_ref'
+          AND event_ref=body->>'event_ref'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_SOURCE_ALREADY_CAPTURED',
+                'message','Captured source cannot become unavailable','status',409));
+    END IF;
     INSERT INTO __forest_module_schema__.unavailable_source_events(
         bot_id,conversation_ref,event_ref,operation_id,input_digest,error_code)
     VALUES(requested_bot,body->>'conversation_ref',body->>'event_ref',requested_operation,
@@ -1305,6 +1367,10 @@ BEGIN
             error_code=body->>'error_code',resolved_at=clock_timestamp()
         WHERE bot_id=requested_bot AND conversation_ref=body->>'conversation_ref' AND event_ref=body->>'event_ref';
     END IF;
+    UPDATE __forest_module_schema__.pending_archive_events
+    SET state='UNAVAILABLE',error_code=body->>'error_code',resolved_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND conversation_ref=body->>'conversation_ref'
+      AND event_ref=body->>'event_ref' AND state='PENDING_CAPTURE';
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
         'protocol','forest.memory-source-unavailable/1','conversation_ref',body->>'conversation_ref',
         'event_ref',body->>'event_ref','error_code',body->>'error_code'));
@@ -1420,6 +1486,15 @@ BEGIN
             )
         );
     END IF;
+    -- Reserve the whole InputBatch in a stable order before touching rows.
+    FOR event_ref_value IN
+        SELECT value FROM jsonb_array_elements_text(event_refs) ORDER BY value
+    LOOP
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            'forest.memory.graph/eligibility/' || requested_bot || '/' ||
+            requested_conversation || '/' || event_ref_value,0
+        ));
+    END LOOP;
     FOR event_ref_value IN
         SELECT value FROM jsonb_array_elements_text(event_refs) ORDER BY value
     LOOP
@@ -1432,11 +1507,6 @@ BEGIN
                 )
             );
         END IF;
-        PERFORM pg_advisory_xact_lock(hashtextextended(
-            'forest.memory.graph/eligibility/' || requested_bot || '/' ||
-            requested_conversation || '/' || event_ref_value,
-            0
-        ));
         SELECT * INTO occurrence_row
         FROM __forest_module_schema__.source_occurrences
         WHERE bot_id=requested_bot AND conversation_ref=requested_conversation
@@ -1542,13 +1612,6 @@ BEGIN
                 context_revision=requested_context_revision,qualified_at=clock_timestamp()
             WHERE bot_id=requested_bot AND occurrence_id=occurrence_row.occurrence_id;
         END IF;
-        IF unit_row.eligibility_state='REGISTERED' THEN
-            UPDATE __forest_module_schema__.source_units
-            SET eligibility_state='ELIGIBLE',eligibility_revision=eligibility_revision+1,
-                eligible_at=clock_timestamp(),updated_at=clock_timestamp()
-            WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id
-            RETURNING * INTO unit_row;
-        END IF;
         IF replay_row IS NULL THEN
             INSERT INTO __forest_module_schema__.eligibility_operations(
                 bot_id,operation_id,input_digest,source_unit_id,occurrence_id,
@@ -1571,6 +1634,196 @@ BEGIN
             'deletion_epoch',requested_deletion_epoch
         )
     );
+END;
+$$;
+
+CREATE FUNCTION memory_qualify_archive(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    prior jsonb := envelope->'prior';
+    prepared jsonb := prior->'prepare';
+    committed jsonb := prior->'commit';
+    epoch_value jsonb := prior->'payload_epoch';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    archive_value jsonb;
+    units jsonb;
+    unit_value jsonb;
+    expected_events jsonb;
+    event_ref_value text;
+    conversation_ref_value text;
+    compaction_ref_value text;
+    batch_ref_value text;
+    context_revision_value bigint;
+    deletion_epoch_value bigint;
+    item_operation text;
+    item_digest text;
+    occurrence_row record;
+    unit_row record;
+    pending_row record;
+    unavailable_row record;
+    replay_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR requested_operation IS NULL OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR prepared IS NULL OR committed IS NULL
+       OR epoch_value->>'protocol' IS DISTINCT FROM 'forest.payload-epoch/1'
+       OR epoch_value->>'deletion_epoch' !~ '^[0-9]+$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ARCHIVE_INPUT_INVALID',
+                'message','Memory archive authority is incomplete','status',422));
+    END IF;
+    IF prepared->>'status'='SKIP' THEN
+        IF committed ? 'memory_archive' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_ARCHIVE_CONFLICT',
+                    'message','Skipped compaction claimed Memory archive','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',committed);
+    END IF;
+    archive_value := committed->'memory_archive';
+    units := prepared#>'{commit,units}';
+    conversation_ref_value := prepared#>>'{commit,conversation_id}';
+    compaction_ref_value := prepared#>>'{commit,compaction_id}';
+    deletion_epoch_value := (epoch_value->>'deletion_epoch')::bigint;
+    IF prepared->>'status' IS DISTINCT FROM 'WRITE'
+       OR jsonb_typeof(units) IS DISTINCT FROM 'array'
+       OR jsonb_typeof(archive_value) IS DISTINCT FROM 'object'
+       OR archive_value->>'compaction_ref' IS DISTINCT FROM compaction_ref_value
+       OR committed->>'conversation_id' IS DISTINCT FROM conversation_ref_value
+       OR jsonb_array_length(units) IS DISTINCT FROM
+          (prepared#>>'{commit,archived_unit_count}')::bigint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ARCHIVE_CONFLICT',
+                'message','Conversation archive membership differs','status',409));
+    END IF;
+    SELECT COALESCE(jsonb_agg(item->>'event_id' ORDER BY ordinality)
+        FILTER (WHERE item->>'event_id' IS NOT NULL),'[]'::jsonb)
+    INTO expected_events
+    FROM jsonb_array_elements(units) WITH ORDINALITY AS u(item,ordinality);
+    IF archive_value->'event_refs' IS DISTINCT FROM expected_events THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ARCHIVE_CONFLICT',
+            'message','Conversation archive event set differs','status',409));
+    END IF;
+    -- Capture, InputBatch selection and archive may overlap. Acquire every
+    -- event fence in the same order before locking any occurrence or unit row.
+    FOR event_ref_value IN
+        SELECT value FROM jsonb_array_elements_text(expected_events) ORDER BY value
+    LOOP
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            'forest.memory.graph/eligibility/' || requested_bot || '/' ||
+            conversation_ref_value || '/' || event_ref_value,0
+        ));
+    END LOOP;
+    FOR unit_value IN SELECT value FROM jsonb_array_elements(units) LOOP
+        event_ref_value := unit_value->>'event_id';
+        IF event_ref_value IS NULL THEN CONTINUE; END IF;
+        batch_ref_value := unit_value->>'input_batch_id';
+        IF batch_ref_value IS NULL OR unit_value->>'context_revision' !~ '^[1-9][0-9]*$'
+           OR octet_length(event_ref_value) NOT BETWEEN 1 AND 256 THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_ARCHIVE_INPUT_INVALID',
+                    'message','Archived event has no stable InputBatch','status',422));
+        END IF;
+        context_revision_value := (unit_value->>'context_revision')::bigint;
+        item_operation := 'archive:' || encode(sha256(convert_to(jsonb_build_array(
+            requested_bot,compaction_ref_value,event_ref_value
+        )::text,'UTF8')),'hex');
+        item_digest := 'sha256:' || encode(sha256(convert_to(jsonb_build_array(
+            requested_digest,compaction_ref_value,conversation_ref_value,event_ref_value,
+            batch_ref_value,context_revision_value,deletion_epoch_value
+        )::text,'UTF8')),'hex');
+        SELECT * INTO replay_row FROM __forest_module_schema__.archive_qualification_operations
+        WHERE bot_id=requested_bot AND compaction_ref=compaction_ref_value
+          AND event_ref=event_ref_value;
+        IF replay_row IS NOT NULL THEN
+            IF replay_row.operation_id IS DISTINCT FROM item_operation
+               OR replay_row.input_digest IS DISTINCT FROM item_digest THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_ARCHIVE_CONFLICT',
+                        'message','Archive replay differs','status',409));
+            END IF;
+            CONTINUE;
+        END IF;
+        SELECT * INTO occurrence_row FROM __forest_module_schema__.source_occurrences
+        WHERE bot_id=requested_bot AND conversation_ref=conversation_ref_value
+          AND event_ref=event_ref_value FOR UPDATE;
+        IF occurrence_row IS NULL THEN
+            SELECT * INTO pending_row FROM __forest_module_schema__.pending_input_events
+            WHERE bot_id=requested_bot AND conversation_ref=conversation_ref_value
+              AND event_ref=event_ref_value FOR UPDATE;
+            IF pending_row IS NOT NULL AND (
+                pending_row.input_batch_ref IS DISTINCT FROM batch_ref_value OR
+                pending_row.context_revision IS DISTINCT FROM context_revision_value
+            ) THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_ARCHIVE_CONFLICT',
+                        'message','Pending input and archive disagree','status',409));
+            END IF;
+            SELECT * INTO unavailable_row FROM __forest_module_schema__.unavailable_source_events
+            WHERE bot_id=requested_bot AND conversation_ref=conversation_ref_value
+              AND event_ref=event_ref_value;
+            INSERT INTO __forest_module_schema__.pending_archive_events(
+                bot_id,conversation_ref,event_ref,operation_id,input_digest,
+                compaction_ref,input_batch_ref,context_revision,accepted_deletion_epoch,
+                state,error_code,resolved_at)
+            VALUES(requested_bot,conversation_ref_value,event_ref_value,
+                item_operation,item_digest,compaction_ref_value,batch_ref_value,
+                context_revision_value,deletion_epoch_value,
+                CASE WHEN unavailable_row IS NULL THEN 'PENDING_CAPTURE' ELSE 'UNAVAILABLE' END,
+                unavailable_row.error_code,
+                CASE WHEN unavailable_row IS NULL THEN NULL ELSE clock_timestamp() END)
+            ON CONFLICT (bot_id,conversation_ref,event_ref) DO NOTHING;
+            SELECT * INTO pending_row FROM __forest_module_schema__.pending_archive_events
+            WHERE bot_id=requested_bot AND conversation_ref=conversation_ref_value
+              AND event_ref=event_ref_value;
+            IF pending_row.input_digest IS DISTINCT FROM item_digest
+               OR pending_row.compaction_ref IS DISTINCT FROM compaction_ref_value THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_ARCHIVE_CONFLICT',
+                        'message','Pending archive identity differs','status',409));
+            END IF;
+            CONTINUE;
+        END IF;
+        IF occurrence_row.eligibility_state='SUPPRESSED'
+           OR (occurrence_row.input_batch_ref IS NOT NULL AND
+               occurrence_row.input_batch_ref IS DISTINCT FROM batch_ref_value)
+           OR (occurrence_row.context_revision IS NOT NULL AND
+               occurrence_row.context_revision IS DISTINCT FROM context_revision_value) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_ARCHIVE_CONFLICT',
+                    'message','Archived occurrence differs from Memory capture','status',409));
+        END IF;
+        UPDATE __forest_module_schema__.source_occurrences
+        SET eligibility_state='ELIGIBLE',input_batch_ref=batch_ref_value,
+            context_revision=context_revision_value,qualified_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND occurrence_id=occurrence_row.occurrence_id
+          AND eligibility_state IN ('REGISTERED','ADMITTED');
+        UPDATE __forest_module_schema__.source_units
+        SET eligibility_state='ELIGIBLE',eligibility_revision=eligibility_revision+1,
+            eligible_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND source_unit_id=occurrence_row.source_unit_id
+          AND eligibility_state='REGISTERED';
+        SELECT * INTO unit_row FROM __forest_module_schema__.source_units
+        WHERE bot_id=requested_bot AND source_unit_id=occurrence_row.source_unit_id;
+        IF unit_row IS NULL OR unit_row.eligibility_state<>'ELIGIBLE' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_ARCHIVE_CONFLICT',
+                    'message','Archived source unit is unavailable','status',409));
+        END IF;
+        INSERT INTO __forest_module_schema__.archive_qualification_operations(
+            bot_id,operation_id,input_digest,compaction_ref,conversation_ref,event_ref,
+            source_unit_id,occurrence_id,resulting_eligibility_revision)
+        VALUES(requested_bot,item_operation,item_digest,compaction_ref_value,
+            conversation_ref_value,event_ref_value,occurrence_row.source_unit_id,
+            occurrence_row.occurrence_id,unit_row.eligibility_revision);
+    END LOOP;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',committed);
 END;
 $$;
 

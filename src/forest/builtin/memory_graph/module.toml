@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.4.2"
+version = "1.5.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -130,9 +130,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.2.0"
+schema_version = "3.3.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "5e8c79a7b499d4aa91dafc8c6ea057c5ea41cf25259d44fb9a093913d916bee7"
+baseline_sha256 = "e781e7a2e696ec150859459c2d6a2c0b05a40dfc84893e8b292c25fc198584b0"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -216,6 +216,13 @@ contract = "1.0"
 function = "memory_qualify_input_batch"
 input_schema = "schemas/qualify-input-batch-envelope.json"
 output_schema = "schemas/qualify-input-batch-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.qualify-archive"
+contract = "1.0"
+function = "memory_qualify_archive"
+input_schema = "schemas/qualify-archive-envelope.json"
+output_schema = "schemas/archive-selection-output.json"
 
 [[components.unit_of_work_plans]]
 name = "memory.capture-source"

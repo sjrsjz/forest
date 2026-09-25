@@ -1,10 +1,17 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["selection", "context_view", "payload"],
+  "required": ["selection", "context_view", "payload", "payload_epoch", "memory"],
   "properties": {
     "selection": {"$ref": "#/$defs/selection"},
     "context_view": {"$ref": "#/$defs/context_view"},
+    "payload_epoch": {
+      "type": "object",
+      "properties": {"protocol": {"const": "forest.payload-epoch-capture/1"}},
+      "required": ["protocol"],
+      "additionalProperties": false
+    },
+    "memory": {"type": "object", "maxProperties": 0},
     "payload": {
       "type": "object",
       "required": ["protocol", "prior_step_id"],

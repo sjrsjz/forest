@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "base": {
+      "type": "object",
+      "required": [
+        "status", "operation_id", "conversation_id", "classified_through_seq",
+        "selected_input_end_seq", "mailbox_revision"
+      ],
+      "properties": {
+        "status": {"enum": ["BATCH", "WAIT_INPUT", "CONTINUE", "IDLE"]},
+        "operation_id": {"type": "string"},
+        "conversation_id": {"type": "string"},
+        "classified_through_seq": {"type": "integer", "minimum": 0},
+        "selected_input_end_seq": {"type": "integer", "minimum": 0},
+        "mailbox_revision": {"type": "integer", "minimum": 0},
+        "memory_archive": {
+          "type": "object",
+          "required": ["compaction_ref", "event_refs"],
+          "properties": {
+            "compaction_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+            "event_refs": {"type": "array", "items": {"type": "string"}}
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  },
+  "oneOf": [
+    {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "properties": {"status": {"enum": ["WAIT_INPUT", "CONTINUE", "IDLE"]}}
+        }
+      ]
+    },
+    {
+      "allOf": [
+        {"$ref": "#/$defs/base"},
+        {
+          "required": [
+            "input_batch_id", "boundary", "kind", "start_seq", "end_seq",
+            "trigger_cut_seq", "session_ref", "run_ref", "context_revision",
+            "context_view_revision", "event_ids", "trigger_ids", "triggers"
+          ],
+          "properties": {
+            "status": {"const": "BATCH"},
+            "input_batch_id": {"type": "string"},
+            "boundary": {"enum": ["IDLE", "MODEL_SAFE_POINT", "SESSION_END"]},
+            "kind": {"enum": ["TRIGGER_INPUT", "SILENT_DRAIN", "RECOVERY_CLAIM"]},
+            "start_seq": {"type": ["integer", "null"], "minimum": 1},
+            "end_seq": {"type": ["integer", "null"], "minimum": 1},
+            "trigger_cut_seq": {"type": ["integer", "null"], "minimum": 1},
+            "session_ref": {"type": ["string", "null"]},
+            "run_ref": {"type": ["string", "null"]},
+            "context_revision": {"type": "integer", "minimum": 1},
+            "context_view_revision": {"type": "integer", "minimum": 0},
+            "event_ids": {"type": "array", "items": {"type": "string"}},
+            "trigger_ids": {"type": "array", "items": {"type": "string"}},
+            "triggers": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["trigger_id", "principal_ref", "ingress_seq"],
+                "properties": {
+                  "trigger_id": {"type": "string"},
+                  "principal_ref": {"type": "string"},
+                  "ingress_seq": {"type": "integer", "minimum": 1}
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "unevaluatedProperties": false
+}

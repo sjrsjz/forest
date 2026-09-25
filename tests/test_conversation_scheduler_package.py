@@ -58,6 +58,43 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             },
         },
     )
+    memory = await bootstrap_builtin_package(
+        Path(str(files("forest").joinpath("builtin/memory_graph"))),
+        PackageCatalog(tmp_path / "memory-packages"),
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={
+            "protocol": "forest.memory.graph/2",
+            "embedding": {
+                "model_kind": "TEXT_IMAGE",
+                "deployment_id": "embedding.multimodal/test",
+                "model_revision": "test/1",
+                "model": "Qwen/Qwen3-VL-Embedding-8B",
+                "dimensions": 4096,
+                "normalization": "L2",
+            },
+            "fusion_policy_revision": "independent-facets/1",
+            "retrieval": {
+                "policy_revision": "qiyu-graph-region/1",
+                "seed_limit": 4,
+                "candidate_limit_per_facet": 64,
+                "min_similarity": 0.35,
+                "min_graph_relevance": 0.05,
+                "max_graph_nodes": 32,
+                "max_association_edges_per_node": 32,
+                "max_retrieval_chars": 24000,
+                "sequence_weight": 0.55,
+                "association_weight": 0.9,
+            },
+            "embedding_budget": {
+                "policy_revision": "daily-cost-cap/1",
+                "daily_request_limit": 1000,
+                "daily_token_limit": 10000000,
+                "reservation_tokens": 32768,
+            },
+        },
+    )
     lease = await kernel.runtime.claim_host("conversation-host", "conversation-incarnation")
     host = SimpleNamespace(
         scope_kind="bot",
@@ -66,7 +103,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
-    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+    registry = RuntimeModuleRegistry(
+        host, (*kernel.descriptors, memory.descriptor, package.descriptor)
+    )
     await registry.start()
     try:
         instance = registry.get("conversation.scheduler")
