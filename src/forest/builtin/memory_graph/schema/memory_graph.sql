@@ -18,6 +18,25 @@ CREATE TABLE memory_domains (
     UNIQUE (bot_id,space_id)
 );
 
+CREATE TABLE memory_domain_bind_work (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    state text NOT NULL CHECK (state IN ('PENDING','CLAIMED','READY')),
+    claim_token text UNIQUE,
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    last_error_code text,
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK ((state='CLAIMED') = (claim_token IS NOT NULL AND lease_deadline IS NOT NULL))
+);
+
+CREATE TABLE memory_domain_bind_settlements (
+    claim_token text PRIMARY KEY,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE TABLE memory_sources (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     source_id text NOT NULL CHECK (octet_length(source_id) BETWEEN 1 AND 256),
@@ -1061,6 +1080,191 @@ CREATE TRIGGER retrieval_projections_immutable BEFORE UPDATE OR DELETE ON retrie
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER retrieval_matches_immutable BEFORE UPDATE OR DELETE ON retrieval_matches
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+
+CREATE FUNCTION memory_claim_domain_bind(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work_row __forest_module_schema__.memory_domain_bind_work%ROWTYPE;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_DOMAIN_CLAIM_INVALID',
+                'message','Memory domain claim is invalid','status',422));
+    END IF;
+    INSERT INTO __forest_module_schema__.memory_domain_bind_work(bot_id,state)
+    VALUES(requested_bot,CASE WHEN EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_domains WHERE bot_id=requested_bot
+    ) THEN 'READY' ELSE 'PENDING' END)
+    ON CONFLICT (bot_id) DO NOTHING;
+    UPDATE __forest_module_schema__.memory_domain_bind_work
+    SET state='PENDING',claim_token=NULL,lease_deadline=NULL,
+        next_attempt_at=clock_timestamp(),updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND state='CLAIMED' AND lease_deadline<=clock_timestamp();
+    UPDATE __forest_module_schema__.memory_domain_bind_work
+    SET state='READY',updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND state='PENDING' AND EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_domains WHERE bot_id=requested_bot
+    );
+    SELECT * INTO work_row FROM __forest_module_schema__.memory_domain_bind_work
+    WHERE bot_id=requested_bot AND state='PENDING'
+      AND next_attempt_at<=clock_timestamp() FOR UPDATE SKIP LOCKED;
+    IF work_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    UPDATE __forest_module_schema__.memory_domain_bind_work
+    SET state='CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot RETURNING * INTO work_row;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-claim/1',
+            'work_id','memory.domain',
+            'claim_token',work_row.claim_token,
+            'attempt',work_row.attempt_count,
+            'operation_id','memory-domain-bind:'||work_row.attempt_count,
+            'causal_root_kind','memory.domain',
+            'causal_root_id',requested_bot,
+            'payload',jsonb_build_object(
+                'protocol','forest.memory-domain-ensure/1',
+                'request_id','domain:'||encode(sha256(convert_to(requested_bot,'UTF8')),'hex')
+            )
+        ));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_domain_bind(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    old_input jsonb;
+    old_result jsonb;
+    result_value jsonb;
+    work_row __forest_module_schema__.memory_domain_bind_work%ROWTYPE;
+    succeeded boolean := input#>>'{outcome,status}'='SUCCEEDED'
+        AND input#>>'{outcome,result,bound}'='true';
+BEGIN
+    SELECT input_payload,result_payload INTO old_input,old_result
+    FROM __forest_module_schema__.memory_domain_bind_settlements
+    WHERE claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF old_input=input THEN RETURN old_result; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_DOMAIN_SETTLEMENT_CONFLICT',
+                'message','Memory domain claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.memory_domain_bind_work
+    WHERE bot_id=requested_bot FOR UPDATE;
+    IF work_row IS NULL OR work_row.state<>'CLAIMED'
+       OR input->>'work_id' IS DISTINCT FROM 'memory.domain'
+       OR work_row.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_DOMAIN_CLAIM_LOST',
+                'message','Memory domain claim is no longer current','status',409));
+    END IF;
+    IF succeeded AND EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_domains WHERE bot_id=requested_bot
+    ) THEN
+        UPDATE __forest_module_schema__.memory_domain_bind_work
+        SET state='READY',claim_token=NULL,lease_deadline=NULL,last_error_code=NULL,
+            updated_at=clock_timestamp() WHERE bot_id=requested_bot;
+    ELSE
+        UPDATE __forest_module_schema__.memory_domain_bind_work
+        SET state='PENDING',claim_token=NULL,lease_deadline=NULL,
+            next_attempt_at=clock_timestamp()+
+                (LEAST(power(2,LEAST(attempt_count,8)),300)*interval '1 second'),
+            last_error_code=COALESCE(input#>>'{outcome,error,code}',
+                'MEMORY_DOMAIN_BIND_RETRY'),updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id','memory.domain'));
+    INSERT INTO __forest_module_schema__.memory_domain_bind_settlements(
+        claim_token,input_payload,result_payload)
+    VALUES(input->>'claim_token',input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_DOMAIN_SETTLEMENT_INVALID',
+            'message','Memory domain settlement is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_bind_domain(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    domain_row __forest_module_schema__.memory_domains%ROWTYPE;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-domain-bind/1'
+       OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR body->>'space_id' !~ '^sha256:[a-f0-9]{64}$'
+       OR body->>'embedding_model_kind' IS DISTINCT FROM 'TEXT_IMAGE'
+       OR body->>'model_revision_digest' !~ '^sha256:[a-f0-9]{64}$'
+       OR body->>'dimensions' !~ '^[1-9][0-9]*$'
+       OR (body->>'dimensions')::integer NOT BETWEEN 1 AND 4096
+       OR body->>'normalization' IS DISTINCT FROM 'L2'
+       OR body->>'fusion_policy_revision' IS DISTINCT FROM 'independent-facets/1' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_DOMAIN_INPUT_INVALID',
+                'message','Memory embedding domain input is invalid','status',422));
+    END IF;
+    INSERT INTO __forest_module_schema__.memory_domains(
+        bot_id,initialization_operation_id,input_digest,space_id,embedding_model_kind,
+        model_revision_digest,dimensions,normalization,fusion_policy_revision)
+    VALUES(requested_bot,requested_operation,requested_digest,body->>'space_id',
+        body->>'embedding_model_kind',body->>'model_revision_digest',
+        (body->>'dimensions')::integer,body->>'normalization',
+        body->>'fusion_policy_revision')
+    ON CONFLICT (bot_id) DO NOTHING;
+    SELECT * INTO domain_row FROM __forest_module_schema__.memory_domains
+    WHERE bot_id=requested_bot FOR SHARE;
+    IF domain_row IS NULL
+       OR domain_row.space_id IS DISTINCT FROM body->>'space_id'
+       OR domain_row.embedding_model_kind IS DISTINCT FROM body->>'embedding_model_kind'
+       OR domain_row.model_revision_digest IS DISTINCT FROM body->>'model_revision_digest'
+       OR domain_row.dimensions IS DISTINCT FROM (body->>'dimensions')::integer
+       OR domain_row.normalization IS DISTINCT FROM body->>'normalization'
+       OR domain_row.fusion_policy_revision IS DISTINCT FROM body->>'fusion_policy_revision'
+       OR (domain_row.initialization_operation_id=requested_operation
+           AND domain_row.input_digest IS DISTINCT FROM requested_digest) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_DOMAIN_IDENTITY_CONFLICT',
+                'message','Bot Memory embedding domain is already bound differently','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-domain/1',
+            'space_id',domain_row.space_id,
+            'embedding_model_kind',domain_row.embedding_model_kind,
+            'model_revision_digest',domain_row.model_revision_digest,
+            'dimensions',domain_row.dimensions,
+            'normalization',domain_row.normalization,
+            'fusion_policy_revision',domain_row.fusion_policy_revision));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
+    OR not_null_violation OR check_violation THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_DOMAIN_INPUT_INVALID',
+            'message','Memory embedding domain input is invalid','status',422));
+END;
+$$;
 
 CREATE FUNCTION memory_capture_source(context jsonb, envelope jsonb)
 RETURNS jsonb

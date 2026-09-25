@@ -171,6 +171,56 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
         generation_id = instance.generation_identity.generation_id
         participant = instance.unit_of_work_participant()
         payload_participant = registry.get("kernel.payload").unit_of_work_participant()
+        domain_input = {
+            "protocol": "forest.memory-domain-bind/1",
+            "space_id": "sha256:" + "a" * 64,
+            "embedding_model_kind": "TEXT_IMAGE",
+            "model_revision_digest": "sha256:" + "b" * 64,
+            "dimensions": 4096,
+            "normalization": "L2",
+            "fusion_policy_revision": "independent-facets/1",
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            bound = await participant.invoke_in(
+                conn,
+                "memory.bind-domain-record",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "memory.graph",
+                        "generation_id": generation_id,
+                    },
+                    "input": domain_input,
+                    "prior": {},
+                },
+                operation_id="memory/domain/test",
+                causal_root_kind="memory.domain",
+                causal_root_id="bot-bundle",
+                parent_call_id="call/memory/domain",
+                timeout_seconds=10,
+            )
+            assert bound["space_id"] == domain_input["space_id"]
+        async with store.pool.connection() as conn, conn.transaction():
+            with pytest.raises(ForestError) as conflict:
+                await participant.invoke_in(
+                    conn,
+                    "memory.bind-domain-record",
+                    {
+                        "protocol": "forest.uow-step/1",
+                        "caller": {
+                            "component_id": "memory.graph",
+                            "generation_id": generation_id,
+                        },
+                        "input": {**domain_input, "space_id": "sha256:" + "c" * 64},
+                        "prior": {},
+                    },
+                    operation_id="memory/domain/conflict",
+                    causal_root_kind="memory.domain",
+                    causal_root_id="bot-bundle",
+                    parent_call_id="call/memory/domain-conflict",
+                    timeout_seconds=10,
+                )
+            assert conflict.value.code == "MEMORY_DOMAIN_IDENTITY_CONFLICT"
         text_payload = await kernel.payload.put_bytes(
             owner_component_id="adapter.onebot",
             owner_kind="context.input",

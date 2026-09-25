@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.5.4"
+version = "1.6.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -31,13 +31,28 @@ stop_timeout_s = 15
 requests = [
   "payload.read",
   "payload.write",
+  "service.call:embedding.profile.bind",
   "domain.query:memory.read-exact-sources",
   "domain.query:memory.list-trunks",
   "domain.query:memory.query-sources",
   "domain.query:memory.query-relations",
   "uow.execute:memory.capture-source",
+  "uow.execute:memory.bind-domain",
   "uow.execute:memory.mark-source-unavailable"
 ]
+
+[[components.requires]]
+name = "embedding.profile.bind"
+contract = ">=1.0,<2.0"
+required = false
+startup_dependency = false
+
+[[components.provides]]
+name = "memory.domain.ensure"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/domain-ensure-input.json"
+output_schema = "schemas/domain-record-output.json"
 
 [[components.provides]]
 name = "memory.source.capture"
@@ -131,9 +146,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.3.0"
+schema_version = "3.4.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "e781e7a2e696ec150859459c2d6a2c0b05a40dfc84893e8b292c25fc198584b0"
+baseline_sha256 = "fd4309774f3f9b60e2bcf9bef6846f821c9a0f630d52226d29a56a5c7cf03ed8"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -186,6 +201,13 @@ max_limit = 20
 timeout_s = 10
 
 [[components.unit_of_work_participants]]
+name = "memory.bind-domain-record"
+contract = "1.0"
+function = "memory_bind_domain"
+input_schema = "schemas/domain-bind-envelope.json"
+output_schema = "schemas/domain-record-output.json"
+
+[[components.unit_of_work_participants]]
 name = "memory.capture-source-record"
 contract = "1.0"
 function = "memory_capture_source"
@@ -226,6 +248,16 @@ input_schema = "schemas/qualify-archive-envelope.json"
 output_schema = "schemas/archive-selection-output.json"
 
 [[components.unit_of_work_plans]]
+name = "memory.bind-domain"
+contract = "1.0"
+input_schema = "schemas/domain-bind-input.json"
+output_schema = "schemas/domain-record-output.json"
+timeout_s = 10
+steps = [
+  { id = "memory", component_id = "memory.graph", participant = "memory.bind-domain-record" }
+]
+
+[[components.unit_of_work_plans]]
 name = "memory.capture-source"
 contract = "1.0"
 input_schema = "schemas/capture-plan.json"
@@ -235,6 +267,21 @@ steps = [
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
   { id = "memory", component_id = "memory.graph", participant = "memory.capture-source-record", input_path = "/memory" }
 ]
+
+[[components.owned_work_handlers]]
+name = "memory.domain.bind"
+contract = "1.0"
+handler = "memory.domain.bind"
+claim_function = "memory_claim_domain_bind"
+settle_function = "memory_settle_domain_bind"
+input_schema = "schemas/domain-ensure-input.json"
+output_schema = "schemas/domain-bind-work-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 30
+settle_timeout_s = 5
+lease_seconds = 45
 
 [[components.unit_of_work_plans]]
 name = "memory.mark-source-unavailable"

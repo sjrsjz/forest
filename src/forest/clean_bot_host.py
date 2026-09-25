@@ -514,6 +514,7 @@ class CleanBotHost:
                     "reservation_tokens": 32768,
                 },
             },
+            resolved_contracts={"embedding.profile.bind": "1.0"},
         )
         media_driver_options = {}
         if self._media_client_factory is not None:

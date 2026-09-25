@@ -2,7 +2,7 @@ import hashlib
 import json
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, service
+from forest.sdk import Plugin, job, service
 
 
 def _plain(value):
@@ -45,6 +45,56 @@ class MemoryGraph(Plugin):
             )
         self.profile = value
         self.profile_digest = _digest(value)
+
+    @service(
+        "memory.domain.ensure",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/domain-ensure-input.json",
+        output_schema="schemas/domain-record-output.json",
+    )
+    async def ensure_domain(self, payload, ctx):
+        request_id = payload["request_id"]
+        bound = await ctx.services.call(
+            "embedding.profile.bind",
+            {"protocol": "forest.embedding-bind-request/1", "request_id": request_id},
+            operation_id=ctx.operations.stable("embedding-profile:" + request_id),
+            timeout=10,
+        )
+        expected = {
+            key: self.profile["embedding"][key]
+            for key in ("deployment_id", "model_revision", "model", "dimensions")
+        }
+        if (
+            bound.get("protocol") != "forest.embedding-profile/1"
+            or bound.get("request_id") != request_id
+            or bound.get("component_id") != "embedding.multimodal"
+            or _plain(bound.get("profile")) != expected
+        ):
+            raise ForestError(
+                "MEMORY_EMBEDDING_PROFILE_MISMATCH",
+                "Memory model identity differs from the bound Embedding provider",
+                409,
+            )
+        return await ctx.uow.call(
+            "memory.bind-domain",
+            {
+                "protocol": "forest.memory-domain-bind/1",
+                "space_id": bound["space_id"],
+                "embedding_model_kind": self.profile["embedding"]["model_kind"],
+                "model_revision_digest": _digest(expected),
+                "dimensions": expected["dimensions"],
+                "normalization": self.profile["embedding"]["normalization"],
+                "fusion_policy_revision": self.profile["fusion_policy_revision"],
+            },
+            operation_id=ctx.operations.stable("memory-domain:" + bound["space_id"]),
+            timeout=10,
+        )
+
+    @job("memory.domain.bind")
+    async def bind_domain_work(self, task, ctx):
+        await self.ensure_domain(task["payload"], ctx)
+        return {"bound": True}
 
     @service(
         "memory.profile.describe",

@@ -18,6 +18,7 @@ from forest.embeddings import EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
 from forest.packages import PackageCatalog
+from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import ModuleLifecycleState
 
 
@@ -494,6 +495,55 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
         await host.start()
         try:
             assert set(host.registry.states.values()) == {ModuleLifecycleState.ACTIVE}
+            memory_schema = next(
+                descriptor.storage.spec.namespace
+                for descriptor in host.registry.descriptors
+                if descriptor.component_id == "memory.graph"
+            )
+            async with asyncio.timeout(20):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        saved_domain = await (
+                            await conn.execute(
+                                sql.SQL(
+                                    "SELECT d.space_id,d.dimensions,w.state FROM {}.memory_domains d "
+                                    "JOIN {}.memory_domain_bind_work w USING(bot_id)"
+                                ).format(
+                                    sql.Identifier(memory_schema),
+                                    sql.Identifier(memory_schema),
+                                )
+                            )
+                        ).fetchone()
+                    if saved_domain is not None and saved_domain["state"] == "READY":
+                        break
+                    await asyncio.sleep(0.1)
+            memory_instance = host.registry.get("memory.graph")
+            memory_identity = memory_instance.generation_identity
+            domain = await memory_instance.runtime_service_handlers()[
+                ("memory.domain.ensure", 1)
+            ].invoke_routed(
+                FrozenServiceRoute(
+                    service_id="memory.domain.ensure",
+                    version=1,
+                    caller_component_id="memory.graph",
+                    provider_component_id="memory.graph",
+                    provider_generation_id=memory_identity.generation_id,
+                    graph_id=memory_identity.graph_id,
+                    graph_revision=memory_identity.graph_revision,
+                    admission_lane="DATA",
+                    owned_work=False,
+                ),
+                RuntimeServiceInvocation(
+                    "memory-domain-host-test", 20, "memory.domain", "bot-production-test"
+                ),
+                (),
+                {
+                    "protocol": "forest.memory-domain-ensure/1",
+                    "request_id": "memory-domain-host-test",
+                },
+            )
+            assert domain["space_id"] == saved_domain["space_id"]
+            assert domain["dimensions"] == saved_domain["dimensions"] == 4096
             package_ids = {
                 descriptor.component_id: descriptor.artifact.package_id
                 for descriptor in host.registry.descriptors
