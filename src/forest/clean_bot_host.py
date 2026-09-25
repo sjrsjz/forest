@@ -516,6 +516,9 @@ class CleanBotHost:
                 },
             },
             resolved_contracts={"embedding.profile.bind": "1.0"},
+            additional_grants=(
+                CapabilityGrant("embedding.invoke", "bot", self.store.bot_id),
+            ),
         )
         media_driver_options = {}
         if self._media_client_factory is not None:
@@ -592,6 +595,9 @@ class CleanBotHost:
                 "conversation.context.snapshot": "2.0",
             },
             startup_components=("provider.chat-completions",),
+            additional_grants=(
+                CapabilityGrant("provider.invoke", "bot", self.store.bot_id),
+            ),
         )
         routing = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/routing_graph"))),

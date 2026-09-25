@@ -495,6 +495,29 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
         await host.start()
         try:
             assert set(host.registry.states.values()) == {ModuleLifecycleState.ACTIVE}
+            async with host.store.pool.connection() as conn:
+                grants = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT s.grantee_id,e.capability,e.resource_kind,e.resource_id "
+                            "FROM {}.grant_sets s JOIN {}.grant_entries e "
+                            "USING(bot_id,grant_set_id) WHERE s.bot_id=%s "
+                            "AND s.grantee_id IN ('agent.runtime','memory.graph')"
+                        ).format(
+                            sql.Identifier(host._kernel.authorization.namespace),
+                            sql.Identifier(host._kernel.authorization.namespace),
+                        ),
+                        (settings.bot_id,),
+                    )
+                ).fetchall()
+            assert {
+                (row["grantee_id"], row["capability"], row["resource_kind"],
+                 row["resource_id"])
+                for row in grants
+            } >= {
+                ("agent.runtime", "provider.invoke", "bot", settings.bot_id),
+                ("memory.graph", "embedding.invoke", "bot", settings.bot_id),
+            }
             memory_schema = next(
                 descriptor.storage.spec.namespace
                 for descriptor in host.registry.descriptors

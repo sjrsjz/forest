@@ -103,6 +103,8 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 数据库租约驱动的 `conversation.agent-run.pending` 已进入生产组合根：同一群聊只允许一个 actor claim，跨群可由多个槽并行；Worker 通过 `agent.execute/2` 驱动 Run，在模型安全边界合流，随后用事务计划原子提交 Agent 完成态、Conversation 回复单元与 Delivery Intent，再在 Session 边界选择后继输入并联动 Memory 资格确认。Agent 的 `FAILED/CANCELLED` 终态由独立事务计划核对精确 trigger 集、收敛 trigger 状态并释放 Session；`WAIT_APPROVAL` 依靠持久 defer deadline 轮询准确 approval，不需要宿主监听器。
 
+生产组合根显式给 `agent.runtime` 的 grant set 授予 Bot 级 `provider.invoke`，给 `memory.graph` 授予 Bot 级 `embedding.invoke`；两者的 Kernel Effect 授权票据仍须逐次绑定准确输入摘要、目标 Generation 与期限，服务调用能力本身不代替外部副作用授权。整图启动/重启测试核验 grant 落库。
+
 ## 7. Memory 生产包已经拥有的部分
 
 `builtin/memory_graph` 已经是可由 `PackageCatalog` 构建的独立包，声明自己的隔离 Worker、私有 storage baseline、Generation 配置、管理 UI、来源捕获与输入资格 UnitOfWork participant，以及 `memory_recall_exact` Agent 工具。嵌入配置将 `TEXT_IMAGE` 模型种类、部署标识、模型修订、维数与归一化方式绑定到 Bot 模块生命周期；端点轮换仍应由后续受限 Effect 配置承担，不能在已创建 Bot 上改换模型种类。
