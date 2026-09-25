@@ -65,7 +65,7 @@
 |---|---|---|---|
 | Agent | `builtin/agent_runtime` | 隔离 Worker、私有 SQL、manifest UoW 与 owned-work 已接入生产图 | 删除未引用的旧宿主实现；继续补齐可观测管理面 |
 | Conversation | `builtin/conversation_scheduler` | 入站、分类、静默归档、Agent 调度与安全边界合流已接入生产图 | 扩充管理查询与长时间压力验证 |
-| Memory | `builtin/memory_graph` | 多模态来源、归档资格、精确召回、持久 facet 准备与域绑定已运行；预算事务已装载但尚无派发 Worker 调用 | facet 派发与向量 ref、图扩散、跨主干联想、遗忘和完整管理面 |
+| Memory | `builtin/memory_graph` | 多模态来源、归档资格、精确召回、持久 facet 准备与域绑定已运行；排他批次 claim SQL 与预算事务已验证但尚无派发 Worker 调用 | facet 派发与向量 ref、图扩散、跨主干联想、遗忘和完整管理面 |
 
 OneBot Adapter 现在按消息形态调用 manifest 声明的四条入站 UnitOfWork 计划。Conversation、Memory/Media、Shell 与分类 participant 在同一事务计划内提交；Host 不再提供 `kernel.uow.onebot.ingress` 业务服务。
 
@@ -115,7 +115,7 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 会以明确来源和群主干进入同一 source unit；Media 异步抓取通过稳定 ref 收敛。Memory 包现提供只读主干、来源、关系查询端口；来源查询按群主干、作者、模态、单元类型和发生时间筛选，使用快照加稳定游标分页；关系查询返回节点两端和有界证据，逐条标明来源群、主干及作者。WebUI 与群聊 Shell 都经包声明访问这些端口，Host 不再拥有 Memory 浏览逻辑。真实 PostgreSQL 测试已覆盖包安装、来源筛选及关系证据来源。
 
-Memory 包在首次合格归档后登记持久 facet 准备任务：Worker 按原始 part 生成确定性文本跨度和独立图片 facet，并经包内事务写入 `PENDING`；另有只读候选查询返回这些 facet 的精确 payload、主干、会话和作者，尚不执行排他 claim。`embedding.multimodal` 包的 Worker 可从精确来源引用物化 Jina 或 Qwen VL 的图文 DOCUMENT/QUERY 请求，固定请求体与 manifest 分开保存；Effect Driver 通过精确引用读取和校验，避免图片超出 Worker 控制帧。Memory 包的每日预算预留/结算事务已经通过 PostgreSQL 并发验证，同 batch 只记一次，不确定结果保留占额。**尚无把候选 claim、预算、Effect 派发、结果结算和 Milvus ref 发布连成一条链的 owned-work handler；普通群聊消息目前不会自动获得语义向量索引。**
+Memory 包在首次合格归档后登记持久 facet 准备任务：Worker 按原始 part 生成确定性文本跨度和独立图片 facet，并经包内事务写入 `PENDING`；只读候选查询返回这些 facet 的精确 payload、主干、会话和作者。排他批次 claim SQL 已按 facet 行锁、有效来源和空间选择最多 32 个 facet，保留来源删除 epoch 高水位与租约，同 token 幂等重放；PostgreSQL 测试覆盖并发不重复领取与租约到期重领，但还没有在 owned-work manifest 中接入派发 Worker。`embedding.multimodal` 包的 Worker 可从精确来源引用物化 Jina 或 Qwen VL 的图文 DOCUMENT/QUERY 请求，固定请求体与 manifest 分开保存；Effect Driver 通过精确引用读取和校验，避免图片超出 Worker 控制帧，成功结果向量也写入独立受管 payload，服务回执仅传引用。Memory 包的每日预算预留/结算事务已经通过 PostgreSQL 并发验证，同 batch 只记一次，不确定结果保留占额。**尚无把候选 claim、预算、Effect 派发、结果结算和 Milvus ref 发布连成一条链的 owned-work handler；普通群聊消息目前不会自动获得语义向量索引。**
 
 旧 `clean_memory_module.py`、`clean_memory_runtime.py`、宿主嵌入 Worker、Memory Repository、旧 baseline 和只验证该未接入生产图路径的测试已移除；图区域扩散算法及其检验移入 `builtin/memory_graph/python/graph_region.py`。这次删除的是不可达的旧执行栈，不表示新包已有语义召回。仍未完成图片/文本 facet 的真实 Effect 派发、独立向量索引 ref、图扩散与有界随机采样在生产调用链的接入、跨主干联想写入、语义召回、遗忘和真实召回试验。上述能力在接入前不能由管理 UI 宣称可用。
 

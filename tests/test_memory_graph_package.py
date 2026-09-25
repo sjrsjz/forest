@@ -876,6 +876,54 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
             text_payload.content_digest, image_payload.content_digest,
         }
 
+        async def claim_batch(token):
+            async with store.pool.connection() as conn, conn.transaction():
+                row = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT {}.memory_claim_embedding_batch(%s::jsonb,%s::jsonb) "
+                            "AS result"
+                        ).format(sql.Identifier(namespace)),
+                        (
+                            Jsonb({"bot_id": store.bot_id}),
+                            Jsonb({
+                                "protocol": "forest.owned-work-claim-request/1",
+                                "claim_token": token,
+                                "lease_seconds": 3,
+                            }),
+                        ),
+                    )
+                ).fetchone()
+            return row["result"]
+
+        first_claim, second_claim = await asyncio.gather(
+            claim_batch("embedding/claim/one"), claim_batch("embedding/claim/two")
+        )
+        assert first_claim["ok"] and second_claim["ok"]
+        claimed = [
+            claim["value"] for claim in (first_claim, second_claim)
+            if claim["value"] is not None
+        ]
+        assert sum(len(claim["payload"]["facets"]) for claim in claimed) == 2
+        assert len({
+            facet["facet_id"] for claim in claimed for facet in claim["payload"]["facets"]
+        }) == 2
+        assert await claim_batch("embedding/claim/one") == first_claim
+        assert (await claim_batch("embedding/claim/three"))["value"] is None
+        assert all(
+            claim["payload"]["space_id"] == domain_input["space_id"]
+            and claim["payload"]["source_epoch_high_watermark"] >= 0
+            for claim in claimed
+        )
+        await asyncio.sleep(3.1)
+        reclaimed = await claim_batch("embedding/claim/after-expiry")
+        assert reclaimed["ok"] is True
+        assert {
+            facet["facet_id"] for facet in reclaimed["value"]["payload"]["facets"]
+        } == {
+            facet["facet_id"] for claim in claimed for facet in claim["payload"]["facets"]
+        }
+
         identity = instance.generation_identity
         endpoint = instance.runtime_service_handlers()[
             ("agent.tool.memory-exact-recall", 1)

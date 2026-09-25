@@ -590,21 +590,19 @@ CREATE TABLE embedding_attempts (
 CREATE TABLE embedding_claims (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     claim_id text NOT NULL CHECK (octet_length(claim_id) BETWEEN 1 AND 256),
-    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
-    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     purpose text NOT NULL CHECK (purpose IN ('DOCUMENT','QUERY')),
-    executor_component_id text NOT NULL
-        CHECK (octet_length(executor_component_id) BETWEEN 1 AND 128),
-    executor_generation_id text NOT NULL
-        CHECK (octet_length(executor_generation_id) BETWEEN 1 AND 256),
-    route_revision text NOT NULL CHECK (octet_length(route_revision) BETWEEN 1 AND 256),
-    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
-    deadline_at timestamptz NOT NULL,
+    space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
+    source_epoch_high_watermark bigint NOT NULL CHECK (source_epoch_high_watermark >= 0),
+    lease_seconds integer NOT NULL CHECK (lease_seconds BETWEEN 3 AND 86400),
+    lease_deadline timestamptz NOT NULL,
     item_limit integer NOT NULL CHECK (item_limit BETWEEN 1 AND 32),
     item_count integer NOT NULL CHECK (item_count BETWEEN 0 AND item_limit),
+    claim_payload jsonb NOT NULL,
+    state text NOT NULL DEFAULT 'CLAIMED' CHECK (state IN ('CLAIMED','EXPIRED','SETTLED')),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    settled_at timestamptz,
     PRIMARY KEY (bot_id,claim_id),
-    UNIQUE (bot_id,operation_id)
+    CHECK ((state='SETTLED') = (settled_at IS NOT NULL))
 );
 
 CREATE TABLE embedding_claim_items (
@@ -612,12 +610,10 @@ CREATE TABLE embedding_claim_items (
     claim_id text NOT NULL,
     item_index integer NOT NULL CHECK (item_index BETWEEN 0 AND 31),
     facet_id text NOT NULL,
-    attempt_id text NOT NULL,
     PRIMARY KEY (bot_id,claim_id,item_index),
-    UNIQUE (bot_id,attempt_id),
+    UNIQUE (bot_id,claim_id,facet_id),
     FOREIGN KEY (bot_id,claim_id) REFERENCES embedding_claims(bot_id,claim_id),
-    FOREIGN KEY (bot_id,attempt_id,facet_id)
-        REFERENCES embedding_attempts(bot_id,attempt_id,facet_id)
+    FOREIGN KEY (bot_id,facet_id) REFERENCES embedding_facets(bot_id,facet_id)
 );
 
 CREATE TABLE embedding_budget_days (
@@ -862,6 +858,12 @@ CREATE INDEX vector_index_deletions_work_idx ON vector_index_deletions(
 CREATE INDEX embedding_claims_created_idx ON embedding_claims(
     bot_id,purpose,created_at,claim_id
 );
+CREATE INDEX embedding_claims_active_idx ON embedding_claims(
+    bot_id,state,lease_deadline,claim_id
+);
+CREATE INDEX embedding_claim_items_facet_idx ON embedding_claim_items(
+    bot_id,facet_id,claim_id
+);
 CREATE INDEX embedding_budget_reservations_state_idx ON embedding_budget_reservations(
     bot_id,state,budget_day,reservation_id
 );
@@ -1062,6 +1064,28 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION guard_embedding_claim() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF ROW(NEW.bot_id,NEW.claim_id,NEW.purpose,NEW.space_id,
+           NEW.source_epoch_high_watermark,NEW.lease_seconds,NEW.lease_deadline,
+           NEW.item_limit,NEW.item_count,NEW.claim_payload,NEW.created_at)
+       IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.claim_id,OLD.purpose,OLD.space_id,
+           OLD.source_epoch_high_watermark,OLD.lease_seconds,OLD.lease_deadline,
+           OLD.item_limit,OLD.item_count,OLD.claim_payload,OLD.created_at) THEN
+        RAISE EXCEPTION 'Embedding claim identity is immutable' USING ERRCODE='55000';
+    END IF;
+    IF OLD.state='CLAIMED' AND NEW.state='EXPIRED' AND NEW.settled_at IS NULL THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.state='CLAIMED' AND NEW.state='SETTLED' AND NEW.settled_at IS NOT NULL THEN
+        RETURN NEW;
+    END IF;
+    IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'Invalid embedding claim transition' USING ERRCODE='55000';
+END;
+$$;
+
 CREATE TRIGGER memory_domain_immutable BEFORE UPDATE OR DELETE ON memory_domains
     FOR EACH ROW EXECUTE FUNCTION guard_memory_domain();
 CREATE TRIGGER memory_source_guard BEFORE UPDATE OR DELETE ON memory_sources
@@ -1082,8 +1106,8 @@ CREATE TRIGGER embedding_attempt_guard BEFORE UPDATE OR DELETE ON embedding_atte
     FOR EACH ROW EXECUTE FUNCTION guard_embedding_attempt();
 CREATE TRIGGER vector_index_deletion_guard BEFORE UPDATE OR DELETE ON vector_index_deletions
     FOR EACH ROW EXECUTE FUNCTION guard_vector_index_deletion();
-CREATE TRIGGER embedding_claims_immutable BEFORE UPDATE OR DELETE ON embedding_claims
-    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER embedding_claim_guard BEFORE UPDATE OR DELETE ON embedding_claims
+    FOR EACH ROW EXECUTE FUNCTION guard_embedding_claim();
 CREATE TRIGGER embedding_claim_items_immutable BEFORE UPDATE OR DELETE ON embedding_claim_items
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER embedding_budget_reservation_guard
@@ -2629,6 +2653,137 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','MEMORY_FACET_SOURCE_INPUT_INVALID',
             'message','Facet source page request is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_claim_embedding_batch(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    prior_claim __forest_module_schema__.embedding_claims%ROWTYPE;
+    domain_space text;
+    deletion_epoch_value bigint;
+    selected_facets jsonb;
+    claim_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_CLAIM_INVALID',
+                'message','Embedding batch claim is invalid','status',422));
+    END IF;
+    PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended(
+        requested_bot||'/'||requested_token,0));
+    SELECT * INTO prior_claim FROM __forest_module_schema__.embedding_claims
+    WHERE bot_id=requested_bot AND claim_id=requested_token;
+    IF FOUND THEN
+        IF prior_claim.lease_seconds IS DISTINCT FROM requested_lease THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EMBEDDING_CLAIM_CONFLICT',
+                    'message','Embedding claim token was reused differently','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',prior_claim.claim_payload);
+    END IF;
+    SELECT space_id INTO domain_space FROM __forest_module_schema__.memory_domains
+    WHERE bot_id=requested_bot;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    UPDATE __forest_module_schema__.embedding_claims
+    SET state='EXPIRED'
+    WHERE bot_id=requested_bot AND state='CLAIMED'
+      AND lease_deadline<=clock_timestamp();
+    WITH candidates AS MATERIALIZED (
+        SELECT f.*,u.trunk_id,u.author_subject_ref,p.width,p.height,
+               p.payload_owner_component_id,p.payload_owner_kind,p.payload_owner_id,
+               o.conversation_ref
+        FROM __forest_module_schema__.embedding_facets f
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+         AND u.source_revision=f.source_revision AND u.eligibility_state='ELIGIBLE'
+        JOIN __forest_module_schema__.memory_sources s
+          ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+        JOIN __forest_module_schema__.source_parts p
+          ON p.bot_id=f.bot_id AND p.source_unit_id=f.source_unit_id
+         AND p.part_id=f.part_id AND p.payload_id=f.input_payload_id
+         AND p.payload_digest=f.input_payload_digest
+        JOIN LATERAL (
+            SELECT occurrence.conversation_ref
+            FROM __forest_module_schema__.source_occurrences occurrence
+            WHERE occurrence.bot_id=f.bot_id
+              AND occurrence.source_unit_id=f.source_unit_id
+              AND occurrence.eligibility_state='ELIGIBLE'
+            ORDER BY occurrence.observed_at,occurrence.occurrence_id LIMIT 1
+        ) o ON true
+        WHERE f.bot_id=requested_bot AND f.purpose='DOCUMENT'
+          AND f.state='PENDING' AND f.space_id=domain_space
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.embedding_claim_items ci
+              JOIN __forest_module_schema__.embedding_claims c
+                ON c.bot_id=ci.bot_id AND c.claim_id=ci.claim_id
+              WHERE ci.bot_id=f.bot_id AND ci.facet_id=f.facet_id
+                AND c.state='CLAIMED' AND c.lease_deadline>clock_timestamp()
+          )
+        ORDER BY f.created_at,f.facet_id LIMIT 32
+        FOR UPDATE OF f SKIP LOCKED
+    ), ranked AS (
+        SELECT candidates.*,
+               sum(CASE WHEN modality='IMAGE' THEN input_byte_length ELSE 0 END)
+                   OVER (ORDER BY created_at,facet_id) AS image_bytes
+        FROM candidates
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'facet_id',facet_id,'source_unit_id',source_unit_id,
+        'source_revision',source_revision,'part_id',part_id,
+        'trunk_id',trunk_id,'conversation_ref',conversation_ref,
+        'author_ref',author_subject_ref,'modality',modality,
+        'selector_start_char',selector_start_char,
+        'selector_end_char',selector_end_char,
+        'input_payload',jsonb_build_object(
+            'payload_id',input_payload_id,'digest',input_payload_digest,
+            'owner_component_id',payload_owner_component_id,
+            'owner_kind',payload_owner_kind,'owner_id',payload_owner_id),
+        'facet_content_digest',facet_content_digest,
+        'input_byte_length',input_byte_length,'media_type',input_media_type,
+        'width',width,'height',height
+    ) ORDER BY created_at,facet_id),'[]'::jsonb),
+        max(accepted_deletion_epoch)
+    INTO selected_facets,deletion_epoch_value
+    FROM ranked WHERE image_bytes<=8388608;
+    IF jsonb_array_length(selected_facets)=0 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    claim_value := jsonb_build_object(
+        'protocol','forest.owned-work-claim/1',
+        'work_id',requested_token,'claim_token',requested_token,'attempt',1,
+        'operation_id','memory-embedding-work:'||encode(sha256(convert_to(
+            requested_bot||'/'||requested_token,'UTF8')),'hex'),
+        'causal_root_kind','memory.embedding.batch','causal_root_id',requested_token,
+        'payload',jsonb_build_object(
+            'claim_id',requested_token,'space_id',domain_space,
+            'source_epoch_high_watermark',deletion_epoch_value,
+            'facets',selected_facets));
+    INSERT INTO __forest_module_schema__.embedding_claims(
+        bot_id,claim_id,purpose,space_id,source_epoch_high_watermark,
+        lease_seconds,lease_deadline,item_limit,item_count,claim_payload)
+    VALUES(requested_bot,requested_token,'DOCUMENT',domain_space,deletion_epoch_value,
+        requested_lease,clock_timestamp()+(requested_lease*interval '1 second'),
+        32,jsonb_array_length(selected_facets),claim_value);
+    INSERT INTO __forest_module_schema__.embedding_claim_items(
+        bot_id,claim_id,item_index,facet_id)
+    SELECT requested_bot,requested_token,ordinality-1,facet->>'facet_id'
+    FROM jsonb_array_elements(selected_facets) WITH ORDINALITY AS item(facet,ordinality);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',claim_value);
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_EMBEDDING_CLAIM_INVALID',
+            'message','Embedding batch claim is invalid','status',422));
 END;
 $$;
 
