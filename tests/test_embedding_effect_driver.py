@@ -18,12 +18,12 @@ from forest.models import MediaSnapshot
 from forest.packages import digest_json
 
 
-def _reference(payload_id, content):
+def _reference(payload_id, content, owner_kind):
     return {
         "payload_id": payload_id,
         "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
-        "owner_component_id": "memory.graph",
-        "owner_kind": "embedding.request",
+        "owner_component_id": "embedding.multimodal",
+        "owner_kind": owner_kind,
         "owner_id": "request-1",
     }
 
@@ -100,9 +100,11 @@ async def test_large_image_dispatch_uses_exact_payload_references():
         )],
         request_id="request-1", transport_attempt_id="attempt-1",
     )
-    body_ref = _reference("payload-body", prepared.body)
+    body_ref = _reference("payload-body", prepared.body, "embedding.request.body")
     manifest_bytes = prepared.manifest_json.encode("utf-8")
-    manifest_ref = _reference("payload-manifest", manifest_bytes)
+    manifest_ref = _reference(
+        "payload-manifest", manifest_bytes, "embedding.request.manifest"
+    )
     configuration = {"profile": {
         "deployment_id": profile.deployment_id,
         "model_revision": profile.model_revision,

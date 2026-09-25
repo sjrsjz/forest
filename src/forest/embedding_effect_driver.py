@@ -124,10 +124,10 @@ class MultimodalEmbeddingEffectDriver:
             or not isinstance(manifest_ref, dict)
             or set(body_ref) != fields
             or set(manifest_ref) != fields
-            or body_ref["owner_component_id"] != "memory.graph"
-            or manifest_ref["owner_component_id"] != "memory.graph"
-            or body_ref["owner_kind"] != "embedding.request"
-            or manifest_ref["owner_kind"] != "embedding.request"
+            or body_ref["owner_component_id"] != "embedding.multimodal"
+            or manifest_ref["owner_component_id"] != "embedding.multimodal"
+            or body_ref["owner_kind"] != "embedding.request.body"
+            or manifest_ref["owner_kind"] != "embedding.request.manifest"
             or body_ref["owner_id"] != raw["request_id"]
             or manifest_ref["owner_id"] != raw["request_id"]
             or body_ref["digest"] != raw["payload_digest"]

@@ -544,6 +544,102 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             )
             assert domain["space_id"] == saved_domain["space_id"]
             assert domain["dimensions"] == saved_domain["dimensions"] == 4096
+            embedding_instance = host.registry.get("embedding.multimodal")
+            embedding_identity = embedding_instance.generation_identity
+            embedding_profile = await embedding_instance.runtime_service_handlers()[
+                ("embedding.profile.bind", 1)
+            ].invoke_routed(
+                FrozenServiceRoute(
+                    service_id="embedding.profile.bind",
+                    version=1,
+                    caller_component_id="memory.graph",
+                    provider_component_id="embedding.multimodal",
+                    provider_generation_id=embedding_identity.generation_id,
+                    graph_id=embedding_identity.graph_id,
+                    graph_revision=embedding_identity.graph_revision,
+                    admission_lane="DATA",
+                    owned_work=False,
+                ),
+                RuntimeServiceInvocation(
+                    "embedding-bind-host-test", 20,
+                    "memory.embedding", "bot-production-test",
+                ),
+                (),
+                {
+                    "protocol": "forest.embedding-bind-request/1",
+                    "request_id": "embedding-materialize-host-test",
+                },
+            )
+            source_bytes = "跨群记忆".encode("utf-8")
+            source_payload = await host._kernel.payload.put_bytes(
+                owner_component_id="memory.graph",
+                owner_kind="embedding.source.test",
+                owner_id="source/materialize/test",
+                media_type="text/plain",
+                content=source_bytes,
+                expected_deletion_epoch=await host._kernel.payload.epoch(),
+            )
+            source_ref = {
+                "payload_id": source_payload.payload_id,
+                "digest": source_payload.content_digest,
+                "owner_component_id": "memory.graph",
+                "owner_kind": "embedding.source.test",
+                "owner_id": "source/materialize/test",
+            }
+            materialized = await embedding_instance.runtime_service_handlers()[
+                ("embedding.request.materialize", 1)
+            ].invoke_routed(
+                FrozenServiceRoute(
+                    service_id="embedding.request.materialize",
+                    version=1,
+                    caller_component_id="memory.graph",
+                    provider_component_id="embedding.multimodal",
+                    provider_generation_id=embedding_identity.generation_id,
+                    graph_id=embedding_identity.graph_id,
+                    graph_revision=embedding_identity.graph_revision,
+                    admission_lane="DATA",
+                    owned_work=False,
+                ),
+                RuntimeServiceInvocation(
+                    "embedding-materialize-host-test", 30,
+                    "memory.embedding", "bot-production-test",
+                ),
+                (),
+                {
+                    "protocol": "forest.embedding-materialize/1",
+                    "request_id": "embedding-materialize-host-test",
+                    "transport_attempt_id": "embedding-materialize-attempt-test",
+                    "component_id": "embedding.multimodal",
+                    "generation_id": embedding_identity.generation_id,
+                    "profile_ref": embedding_profile["profile_ref"],
+                    "space_id": embedding_profile["space_id"],
+                    "purpose": "DOCUMENT",
+                    "facets": [{
+                        "facet_id": "embedding-facet-host-test",
+                        "source_unit_id": "source/materialize/test",
+                        "source_revision": 1,
+                        "part_id": "part/text",
+                        "trunk_id": "trunk/group/test",
+                        "conversation_ref": "onebot:group:933179609",
+                        "author_ref": "onebot:user:42",
+                        "modality": "TEXT",
+                        "selector_start_char": 0,
+                        "selector_end_char": len("跨群记忆"),
+                        "input_payload": source_ref,
+                        "facet_content_digest": source_payload.content_digest,
+                        "input_byte_length": len(source_bytes),
+                        "media_type": "text/plain",
+                        "width": None,
+                        "height": None,
+                    }],
+                },
+            )
+            assert materialized["prepared"]["body"]["owner_component_id"] == (
+                "embedding.multimodal"
+            )
+            assert json.loads(await host._kernel.payload.read_bytes(
+                materialized["prepared"]["body"]["payload_id"]
+            ))["input"] == [{"text": "跨群记忆"}]
             package_ids = {
                 descriptor.component_id: descriptor.artifact.package_id
                 for descriptor in host.registry.descriptors

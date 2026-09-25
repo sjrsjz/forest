@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.embedding.multimodal"
-version = "2.1.0"
+version = "2.2.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "embedding_provider:MultimodalEmbeddingProvider"
@@ -19,6 +19,9 @@ max_queue_items = 128
 max_state_inflight = 1
 max_owned_tasks = 4
 max_owned_resources = 4
+
+[components.capabilities]
+requests = ["payload.read", "payload.write"]
 
 [components.lifecycle]
 prepare_timeout_s = 10
@@ -40,6 +43,13 @@ contract = "1.0"
 semantics = "read"
 input_schema = "schemas/bind-input.json"
 output_schema = "schemas/bind-output.json"
+
+[[components.provides]]
+name = "embedding.request.materialize"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/materialize-input.json"
+output_schema = "schemas/materialize-output.json"
 
 [[components.effect_services]]
 name = "embedding.encode"

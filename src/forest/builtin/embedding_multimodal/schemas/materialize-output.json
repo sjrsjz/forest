@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "request_id", "transport_attempt_id", "component_id", "generation_id", "profile_ref", "space_id", "prepared"],
+  "properties": {
+    "protocol": {"const": "forest.embedding-materialized/1"},
+    "request_id": {"$ref": "#/$defs/id"},
+    "transport_attempt_id": {"$ref": "#/$defs/id"},
+    "component_id": {"const": "embedding.multimodal"},
+    "generation_id": {"$ref": "#/$defs/id"},
+    "profile_ref": {"type": "string", "pattern": "^profile:[a-f0-9]{64}$"},
+    "space_id": {"$ref": "#/$defs/digest"},
+    "prepared": {
+      "type": "object", "additionalProperties": false,
+      "required": ["request_id", "transport_attempt_id", "body", "manifest", "payload_digest", "space_id"],
+      "properties": {
+        "request_id": {"$ref": "#/$defs/id"},
+        "transport_attempt_id": {"$ref": "#/$defs/id"},
+        "body": {"$ref": "#/$defs/payload"},
+        "manifest": {"$ref": "#/$defs/payload"},
+        "payload_digest": {"$ref": "#/$defs/digest"},
+        "space_id": {"$ref": "#/$defs/digest"}
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"const": "embedding.multimodal"},
+        "owner_kind": {"enum": ["embedding.request.body", "embedding.request.manifest"]},
+        "owner_id": {"$ref": "#/$defs/id"}
+      }
+    }
+  }
+}

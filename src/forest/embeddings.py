@@ -1,9 +1,10 @@
 """Native multimodal embedding transport with immutable, attributed facets.
 
-The host supplies authorized MediaSnapshots and a final dispatch permit. This
-module performs no media fetches, model discovery, retries, database writes or
-secret persistence. A mixed batch returns one vector per input, never a fused
-multimodal vector. Protocol reference: https://api.jina.ai/openapi.json
+The Embedding package prepares a frozen request from exact archived payloads;
+the host verifies that request and enforces the final dispatch permit. This
+transport performs no media fetches, model discovery, retries, database writes
+or secret persistence. A mixed batch returns one vector per input, never a
+fused multimodal vector. Protocol reference: https://api.jina.ai/openapi.json
 """
 
 from __future__ import annotations
