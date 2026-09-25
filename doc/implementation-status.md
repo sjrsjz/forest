@@ -121,6 +121,8 @@ Memory 包在首次合格归档后登记持久 facet 准备任务：Worker 按�
 
 旧 `clean_memory_module.py`、`clean_memory_runtime.py`、宿主嵌入 Worker、Memory Repository、旧 baseline 和只验证该未接入生产图路径的测试已移除；图区域扩散算法及其检验移入 `builtin/memory_graph/python/graph_region.py`。这次删除的是不可达的旧执行栈，不表示新包已有语义召回。仍未完成图片/文本 facet 的真实 Effect 派发、独立向量索引 ref、图扩散与有界随机采样在生产调用链的接入、跨主干联想写入、语义召回、遗忘和真实召回试验。上述能力在接入前不能由管理 UI 宣称可用。
 
+Memory 现在还声明 `memory.handoff-embedding-effect`：同一 UnitOfWork 先锁住 Kernel Payload 删除时钟，再由 Kernel Effect 进入 `DISPATCHING`，最后由 Memory 复核 claim 租约、来源资格、批次身份和删除 epoch，并将 attempt 与全部 facet 推进为 `DISPATCHED`。Memory 参与者的 PostgreSQL 测试已覆盖删除 epoch 改变时拒绝 handoff、正常批次状态推进；完整 Kernel Effect/Memory 联合执行及失败回滚仍待集成验证。该计划尚未接入 owned-work Worker，也尚未实现结果收敛与向量索引发布。
+
 ## 8. 下一切换顺序
 
 1. 在 `builtin/memory_graph` 内建立文档/查询 facet 准备、生命周期绑定的多模态 Embedding Effect、每日成本配额和包所有的持久任务；只把索引 ref 发布到向量库。

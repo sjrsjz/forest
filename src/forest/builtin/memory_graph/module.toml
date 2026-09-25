@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.12.0"
+version = "1.13.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -43,6 +43,7 @@ requests = [
   "uow.execute:memory.prepare-document-facets",
   "uow.execute:memory.reserve-embedding-budget",
   "uow.execute:memory.prepare-embedding-effect",
+  "uow.execute:memory.handoff-embedding-effect",
   "uow.execute:memory.settle-embedding-budget",
   "uow.execute:memory.mark-source-unavailable"
 ]
@@ -152,9 +153,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.10.0"
+schema_version = "3.11.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "454b8f5140dabbb78db6141e67967ed9e7966a06b4ebe5aa3ffe5256a62cee58"
+baseline_sha256 = "7cf96dbea5e9c34b73f19b539b4859ac85ba8b4627d8ec512ae4aef74b9c9fb4"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -248,6 +249,13 @@ input_schema = "schemas/prepare-embedding-attempt-envelope.json"
 output_schema = "schemas/prepare-embedding-effect-output.json"
 
 [[components.unit_of_work_participants]]
+name = "memory.mark-embedding-handoff-record"
+contract = "1.0"
+function = "memory_mark_embedding_handoff"
+input_schema = "schemas/handoff-embedding-attempt-envelope.json"
+output_schema = "schemas/handoff-embedding-effect-output.json"
+
+[[components.unit_of_work_participants]]
 name = "memory.reserve-embedding-budget-record"
 contract = "1.0"
 function = "memory_reserve_embedding_budget"
@@ -333,6 +341,18 @@ steps = [
   { id = "authorization", component_id = "kernel.authorization", participant = "authorization.issue", input_path = "/authorization" },
   { id = "effect", component_id = "kernel.effect", participant = "effect.prepare-command", input_path = "/effect" },
   { id = "memory", component_id = "memory.graph", participant = "memory.prepare-embedding-attempt-record", input_path = "/memory" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.handoff-embedding-effect"
+contract = "1.0"
+input_schema = "schemas/handoff-embedding-effect-input.json"
+output_schema = "schemas/handoff-embedding-effect-output.json"
+timeout_s = 15
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "effect", component_id = "kernel.effect", participant = "effect.handoff", input_path = "/effect" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.mark-embedding-handoff-record", input_path = "/memory" }
 ]
 
 [[components.unit_of_work_plans]]

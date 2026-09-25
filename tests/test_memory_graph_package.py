@@ -1021,6 +1021,71 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
         assert attempt_members["n"] == 2
         assert prepared_attempt["result"]["value"]["facet_count"] == 2
 
+        async def handoff(epoch):
+            async with store.pool.connection() as conn, conn.transaction():
+                row = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT {}.memory_mark_embedding_handoff(%s::jsonb,%s::jsonb) "
+                            "AS result"
+                        ).format(sql.Identifier(namespace)),
+                        (
+                            Jsonb({"bot_id": store.bot_id}),
+                            Jsonb({
+                                "protocol": "forest.uow-step/1",
+                                "caller": {
+                                    "component_id": "memory.graph",
+                                    "generation_id": generation_id,
+                                },
+                                "input": {
+                                    "protocol": "forest.memory-embedding-handoff/1",
+                                    "claim_id": claim_id,
+                                    "attempt_id": "attempt/embedding/claim",
+                                    "effect_operation_id": "effect/embedding/claim",
+                                    "handoff_operation_id": "handoff/embedding/claim",
+                                },
+                                "prior": {
+                                    "payload_epoch": {
+                                        "protocol": "forest.payload-epoch/1",
+                                        "deletion_epoch": epoch,
+                                    },
+                                    "effect": {
+                                        "effect_operation_id": "effect/embedding/claim",
+                                        "attempt_id": "attempt/embedding/claim",
+                                        "handoff_operation_id": "handoff/embedding/claim",
+                                        "state": "DISPATCHING",
+                                        "wire_payload_id": "payload/effect-wire",
+                                        "wire_payload_digest": "sha256:" + "d" * 64,
+                                        "executor_component_id": "embedding.multimodal",
+                                        "executor_generation_id": "generation/embedding",
+                                        "fence_id": "graph/1",
+                                        "fence_epoch": 1,
+                                    },
+                                },
+                            }),
+                        ),
+                    )
+                ).fetchone()
+                return row["result"]
+
+        stale_handoff = await handoff(1)
+        assert stale_handoff["ok"] is False
+        assert stale_handoff["error"]["code"] == "MEMORY_EMBEDDING_HANDOFF_STALE"
+        dispatched_handoff = await handoff(0)
+        assert dispatched_handoff["ok"] is True
+        assert dispatched_handoff["value"]["facet_count"] == 2
+        async with store.pool.connection() as conn:
+            dispatched_facets = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT count(*) AS n FROM {}.embedding_facets "
+                        "WHERE bot_id=%s AND current_attempt_id=%s AND state='DISPATCHED'"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "attempt/embedding/claim"),
+                )
+            ).fetchone()
+        assert dispatched_facets["n"] == 2
+
         identity = instance.generation_identity
         endpoint = instance.runtime_service_handlers()[
             ("agent.tool.memory-exact-recall", 1)

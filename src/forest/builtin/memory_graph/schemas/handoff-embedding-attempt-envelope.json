@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "memory.graph"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "claim_id", "attempt_id", "effect_operation_id", "handoff_operation_id"],
+      "properties": {
+        "protocol": {"const": "forest.memory-embedding-handoff/1"},
+        "claim_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "effect_operation_id": {"$ref": "#/$defs/id"},
+        "handoff_operation_id": {"$ref": "#/$defs/id"}
+      }
+    },
+    "prior": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_epoch", "effect"],
+      "properties": {
+        "payload_epoch": {"type": "object"},
+        "effect": {"type": "object"}
+      }
+    }
+  },
+  "$defs": {"id": {"type": "string", "minLength": 1, "maxLength": 256}}
+}

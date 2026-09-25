@@ -205,6 +205,8 @@ Memory 的每日嵌入账本以 UTC 日期和 Bot ID 为键。每个稳定 batch
 
 专用图驱动失效或索引落后时，退回事实库的授权词法/稳定来源区间检索，返回 graph_completeness、source_watermark 和缺口信息。不得因派生图不可用而停止原始消息接纳和确定性裁剪。
 
+`memory.handoff-embedding-effect` 已声明为独立事务计划：先持有 Kernel Payload 删除时钟的共享锁，Kernel Effect 校验冻结 permit 并写入 `DISPATCHING`，Memory 再复核 claim 租约、空间、来源、facet、Effect wire 和 Generation 身份。删除 epoch 与 prepare 时冻结值不一致、来源资格变化或租约失效时，事务整体回滚，Effect 不会单独进入已派发态。prepare 与 handoff 使用同一来源资格函数，并锁定一个仍合格的归档 occurrence；实际网络发送只允许在 handoff 提交后进行。当前完成的是协议和 Memory 参与者，尚待真实联合事务与 Worker 验收。
+
 ## 6. 跨主干联想、证据与合流
 
 联想可以连接群甲、群乙的源单元，或连接分别由两群支撑的实体/断言。它仅提供扩展线索；联想不把来源转成当前群，不把两个断言合成一个确定事实，也不授予原本没有的跨群读取能力。
