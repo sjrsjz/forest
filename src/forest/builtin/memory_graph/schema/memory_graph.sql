@@ -2632,6 +2632,85 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
 END;
 $$;
 
+CREATE FUNCTION memory_read_embedding_candidates(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_limit integer := (input->>'limit')::integer;
+    domain_space text;
+    candidates jsonb;
+    candidate_count integer;
+BEGIN
+    IF requested_bot IS NULL OR requested_limit IS NULL
+       OR requested_limit NOT BETWEEN 1 AND 32 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_CANDIDATES_INVALID',
+                'message','Embedding candidate limit is invalid','status',422));
+    END IF;
+    SELECT space_id INTO domain_space FROM __forest_module_schema__.memory_domains
+    WHERE bot_id=requested_bot;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('status','UNBOUND','space_id',NULL,
+                'facets','[]'::jsonb,'has_more',false));
+    END IF;
+    WITH selected AS (
+        SELECT f.*,u.trunk_id,u.author_subject_ref,p.width,p.height,
+               p.payload_owner_component_id,p.payload_owner_kind,p.payload_owner_id,
+               o.conversation_ref
+        FROM __forest_module_schema__.embedding_facets f
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+         AND u.source_revision=f.source_revision AND u.eligibility_state='ELIGIBLE'
+        JOIN __forest_module_schema__.memory_sources s
+          ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+        JOIN __forest_module_schema__.source_parts p
+          ON p.bot_id=f.bot_id AND p.source_unit_id=f.source_unit_id
+         AND p.part_id=f.part_id AND p.payload_id=f.input_payload_id
+         AND p.payload_digest=f.input_payload_digest
+        JOIN LATERAL (
+            SELECT occurrence.conversation_ref
+            FROM __forest_module_schema__.source_occurrences occurrence
+            WHERE occurrence.bot_id=f.bot_id
+              AND occurrence.source_unit_id=f.source_unit_id
+              AND occurrence.eligibility_state='ELIGIBLE'
+            ORDER BY occurrence.observed_at,occurrence.occurrence_id LIMIT 1
+        ) o ON true
+        WHERE f.bot_id=requested_bot AND f.purpose='DOCUMENT'
+          AND f.state='PENDING' AND f.space_id=domain_space
+        ORDER BY f.created_at,f.facet_id LIMIT requested_limit+1
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'facet_id',facet_id,'source_unit_id',source_unit_id,
+        'source_revision',source_revision,'part_id',part_id,
+        'trunk_id',trunk_id,'conversation_ref',conversation_ref,
+        'author_ref',author_subject_ref,'modality',modality,
+        'selector_start_char',selector_start_char,
+        'selector_end_char',selector_end_char,
+        'input_payload',jsonb_build_object(
+            'payload_id',input_payload_id,'digest',input_payload_digest,
+            'owner_component_id',payload_owner_component_id,
+            'owner_kind',payload_owner_kind,'owner_id',payload_owner_id),
+        'facet_content_digest',facet_content_digest,
+        'input_byte_length',input_byte_length,'media_type',input_media_type,
+        'width',width,'height',height
+    ) ORDER BY created_at,facet_id)
+        FILTER (WHERE ordinal <= requested_limit),'[]'::jsonb),count(*)
+    INTO candidates,candidate_count
+    FROM (
+        SELECT selected.*,row_number() OVER (ORDER BY created_at,facet_id) AS ordinal
+        FROM selected
+    ) page;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('status','READY','space_id',domain_space,
+            'facets',candidates,'has_more',candidate_count>requested_limit));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_EMBEDDING_CANDIDATES_INVALID',
+            'message','Embedding candidate limit is invalid','status',422));
+END;
+$$;
+
 CREATE FUNCTION memory_read_exact_sources(context jsonb, input jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

@@ -187,6 +187,8 @@ Memory 包的持久域绑定任务在运行时通过冻结的 `embedding.profile
 
 归档事务首次把源单元提升为 `ELIGIBLE` 时，仅幂等登记 `facet_preparation_work`。Memory 自有的持久 Worker 在域绑定完成后按源单元租约读取有界的 part 分页，使用固定 `unicode-codepoints-2048-128/1` 规则把非空文本切成 2048 字符、重叠 128 字符的片段，并为每张图片保留一个独立 facet。facet ID 包含来源、修订、part、原始内容摘要、空间和跨度；每批最多 64 个，经包内 UnitOfWork 再次核验归档资格、原始 payload 引用和空间后写入 `PENDING`。崩溃重试复用相同批次操作 ID，不会把重复消息写成多份 facet。这一步尚不发起嵌入或向量索引请求；后续派发仍必须先通过预算预留和删除屏障。
 
+`memory.read-embedding-candidates` 只读地返回最早的最多 32 个待嵌入文档 facet，并从当前仍有效的来源、原始 part 和已归档 occurrence 中构造精确 payload、文本跨度或图片尺寸、主干、会话及作者。它返回的是候选快照，**不是 claim，也不授权网络派发**。真正的 owned-work claim 必须在写事务中排他选取并复核资格、空间及删除屏障；claim 阶段不能伪造尚未绑定的 Provider Generation。Worker 绑定实际 Provider、物化请求后，再以同一 batch 身份预留预算、准备 Effect 和原子 handoff。崩溃恢复只能根据持久 Effect/Memory 事实决定重试或 UNKNOWN；已 handoff 的 at-most-once 请求不能因为租约过期而再次发送。
+
 嵌入派发的 Worker 帧只携带固定请求体和 manifest 的精确 payload 引用、请求摘要与空间身份。图片的 base64 请求体写入受删除时钟管理的 payload 存储，不得内联到最多 256 KiB 的组件调用帧。Memory 只选择带来源身份的 facet；`embedding.multimodal` 包通过 `embedding.request.materialize` 按绑定的模型协议物化请求，并分别以 `embedding.request.body`、`embedding.request.manifest` 所有权保存两个 payload。其驱动先核对 effect 交接和 Generation，再在同一删除时钟快照内逐项验证 payload 的 ID、摘要及 Embedding 包所有权，重建并校验冻结请求；网络发送前再次核对 effect fence。这个传输契约不替代 Memory 侧的预算预留、来源资格和删除屏障。
 
 Memory 的每日嵌入账本以 UTC 日期和 Bot ID 为键。每个稳定 batch 在派发前先通过包内事务预留一次请求和配置的 token 估计额；同一 batch 只能持有一个 reservation，日账本行锁让并发 Worker 合流。明确未发送时释放占额，收到带 usage 的结果时以实际 token 数结算，不确定是否已发送时把请求数和估计额移入 UNKNOWN 占额且不得自动重发。估计 token 不能证明服务端的精确计费；若实耗超过预留，账本记实耗并停止后续超额预留。过期 reservation 必须先以 effect 证据对账，不能仅凭时间将它释放。

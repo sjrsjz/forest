@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.8.0"
+version = "1.9.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -34,6 +34,7 @@ requests = [
   "service.call:embedding.profile.bind",
   "domain.query:memory.read-exact-sources",
   "domain.query:memory.read-facet-source",
+  "domain.query:memory.read-embedding-candidates",
   "domain.query:memory.list-trunks",
   "domain.query:memory.query-sources",
   "domain.query:memory.query-relations",
@@ -150,9 +151,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.6.0"
+schema_version = "3.7.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "8e3f72f17f2ce2161df062e1aa72191ac8bcbacae40ffc3c85f4fe7e26459c96"
+baseline_sha256 = "98c780db403eb8a7113f703dbeb1484753304a59c09615a11f265fa8a65198e6"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -163,6 +164,13 @@ contract = "1.0"
 function = "memory_read_facet_source"
 input_schema = "schemas/read-facet-source-input.json"
 output_schema = "schemas/read-facet-source-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-embedding-candidates"
+contract = "1.0"
+function = "memory_read_embedding_candidates"
+input_schema = "schemas/read-embedding-candidates-input.json"
+output_schema = "schemas/read-embedding-candidates-output.json"
 
 [[components.domain_queries]]
 name = "memory.read-exact-sources"

@@ -853,6 +853,28 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                     ("IMAGE", "DOCUMENT", "PENDING"),
                 ]
         assert {row["space_id"] for row in saved_facets} == {domain_input["space_id"]}
+        async with store.pool.connection() as conn:
+            candidate_row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT {}.memory_read_embedding_candidates(%s::jsonb,%s::jsonb) "
+                        "AS result"
+                    ).format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({"limit": 1})),
+                )
+            ).fetchone()
+        candidates = candidate_row["result"]
+        assert candidates["ok"] is True
+        assert candidates["value"]["space_id"] == domain_input["space_id"]
+        assert candidates["value"]["has_more"] is True
+        assert len(candidates["value"]["facets"]) == 1
+        candidate = candidates["value"]["facets"][0]
+        assert candidate["trunk_id"] == "trunk/group/933179609"
+        assert candidate["conversation_ref"] == "onebot:group:933179609"
+        assert candidate["author_ref"] == "qq:42"
+        assert candidate["input_payload"]["digest"] in {
+            text_payload.content_digest, image_payload.content_digest,
+        }
 
         identity = instance.generation_identity
         endpoint = instance.runtime_service_handlers()[
