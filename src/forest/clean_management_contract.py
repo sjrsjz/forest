@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Callable
 
 from forest.errors import ForestError
@@ -128,103 +127,6 @@ class CleanModuleConfigurationContract:
             "validation_digest": value.validation_digest,
             "value": value.value,
         }
-
-
-class CleanMemoryManagementContract(CleanModuleConfigurationContract):
-    """Memory-owned bounded source and relation queries plus configuration."""
-
-    _source_fields = {
-        "limit",
-        "trunk_id",
-        "author_subject_ref",
-        "modality",
-        "unit_kind",
-        "occurred_from",
-        "occurred_to",
-        "snapshot_accepted_at",
-        "after_occurred_at",
-        "after_source_unit_id",
-    }
-    _relation_fields = {
-        "endpoint_kind",
-        "endpoint_id",
-        "active",
-        "eligible_only",
-        "limit",
-        "after_relation_id",
-        "after_contribution_id",
-        "snapshot_created_at",
-    }
-
-    def __init__(self, configuration, *, runtime, schema: dict, validator) -> None:
-        super().__init__(configuration, schema=schema, validator=validator)
-        self.runtime = runtime
-
-    def describe(self) -> dict:
-        value = super().describe()
-        value["queries"] = [
-            {"query_id": "memory.trunks.list", "max_items": 4096},
-            {"query_id": "memory.sources.query", "default_limit": 100, "max_limit": 500},
-            {"query_id": "memory.relations.query", "default_limit": 100, "max_limit": 500},
-        ]
-        return value
-
-    async def query(self, query_id: str, payload: dict) -> object:
-        if not isinstance(payload, dict):
-            raise ForestError("MODULE_MANAGEMENT_INPUT_INVALID", "Query input must be an object", 422)
-        if query_id == "memory.trunks.list":
-            if payload:
-                raise ForestError(
-                    "MODULE_MANAGEMENT_INPUT_INVALID", "Trunk query takes no fields", 422
-                )
-            return await self.runtime.list_trunks()
-        if query_id == "memory.sources.query":
-            values = self._fields(payload, self._source_fields)
-            for field in (
-                "occurred_from",
-                "occurred_to",
-                "snapshot_accepted_at",
-                "after_occurred_at",
-            ):
-                if values.get(field) is not None:
-                    values[field] = self._datetime(values[field], field)
-            return await self.runtime.query_sources(**values)
-        if query_id == "memory.relations.query":
-            values = self._fields(payload, self._relation_fields)
-            if values.get("snapshot_created_at") is not None:
-                values["snapshot_created_at"] = self._datetime(
-                    values["snapshot_created_at"], "snapshot_created_at"
-                )
-            return await self.runtime.query_relations(**values)
-        raise ForestError(
-            "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Memory query does not exist", 404
-        )
-
-    @staticmethod
-    def _fields(payload: dict, allowed: set[str]) -> dict:
-        if set(payload) - allowed:
-            raise ForestError(
-                "MODULE_MANAGEMENT_INPUT_INVALID", "Query contains unknown fields", 422
-            )
-        return {key: value for key, value in payload.items() if value is not None and value != ""}
-
-    @staticmethod
-    def _datetime(value: object, field: str) -> datetime:
-        if not isinstance(value, str) or len(value) > 64:
-            raise ForestError(
-                "MODULE_MANAGEMENT_INPUT_INVALID", f"{field} is not an ISO timestamp", 422
-            )
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            raise ForestError(
-                "MODULE_MANAGEMENT_INPUT_INVALID", f"{field} is not an ISO timestamp", 422
-            ) from None
-        if parsed.tzinfo is None:
-            raise ForestError(
-                "MODULE_MANAGEMENT_INPUT_INVALID", f"{field} requires a timezone", 422
-            )
-        return parsed
 
 
 class CleanAuditManagementContract(CleanModuleConfigurationContract):

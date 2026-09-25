@@ -359,6 +359,8 @@ Provider adapter 必须把来源信息渲染到实际发送给模型的上下文
 
 Memory 的管理面是 `memory.graph` Generation 发布的模块贡献，不是 WebUI 壳层中的固定页面。它必须面向一个 Bot 连续运行数月后的数十万至数百万来源设计；查询在服务端完成，浏览器只持有当前页、当前有界图邻域和显式打开的正文。
 
+当前实现只交付了首批只读浏览端口：`memory.trunks.list`、`memory.sources.query`、`memory.relations.query`。来源按单个群主干、作者、模态、类型和时间筛选，并用时间加单元 ID 的快照游标分页；关系按一个端点查询一跳、每页最多 20 条、每条最多展开 16 条带群/主干/作者来源的证据。WebUI 与群聊 Shell 调用同一包端口。下文的组合筛选、完整图邻域、删除 epoch/权限冻结、真实召回试验和管理 action 是待实现契约，不应将当前只读浏览表述为已满足本节全部要求。
+
 来源查询至少支持以下可组合条件：`group_source_id[]`、来源类型、稳定作者主体、平台/Binding、事件时间范围、source order 范围、内容模态、索引覆盖状态、删除/抑制状态、关系类型、人工审核状态、是否跨主干及有界全文/向量查询。查询先冻结 `graph_snapshot_ref + policy_revision + deletion_epoch`，再产生绑定完整 filter digest 的键集游标；默认排序使用稳定的 `(occurred_at, source_unit_id)` 或 `(source_order_seq, source_unit_id)`。禁止用 offset 分页遍历增长中的大表，也禁止换筛选条件后复用游标。
 
 列表项只返回身份、来源、作者、时间、模态、状态、受限预览和可见关系计数。完整正文、有序图片、embedding 诊断和原始证据按单项 query 延迟读取，并分别授权、限长和审计。统计必须从同一授权快照计算；不可见来源不能通过总数、分桶、游标或截断标记泄露。

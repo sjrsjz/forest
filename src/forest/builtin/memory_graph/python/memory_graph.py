@@ -65,6 +65,57 @@ class MemoryGraph(Plugin):
         }
 
     @service(
+        "shell.memory.inspect",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/shell-input.json",
+        output_schema="schemas/shell-output.json",
+    )
+    async def inspect_shell(self, payload, ctx):
+        command = payload["command_id"]
+        arguments = _plain(payload["arguments"])
+        if command == "memory.trunks":
+            result = await ctx.queries.call("memory.list-trunks", {})
+            lines = [f"Memory 主干（{len(result['items'])}）"]
+            lines.extend(
+                f"{row['trunk_id']} | 群 {row['external_group_id']} | "
+                f"来源 {row['registered_sources']} / 可召回 {row['eligible_sources']}"
+                for row in result["items"][:10]
+            )
+            if len(result["items"]) > 10:
+                lines.append("还有更多主干，请在 WebUI 查询。")
+        elif command == "memory.sources":
+            result = await ctx.queries.call("memory.query-sources", arguments)
+            lines = [f"Memory 来源（本页 {len(result['items'])}）"]
+            lines.extend(
+                f"{row['source_unit_id']} | 群 {row['external_group_id']} | "
+                f"{row['author_subject_ref']} | {row['modality']} | {row['unit_kind']}"
+                for row in result["items"]
+            )
+            if result["has_more"]:
+                lines.append("还有后续结果，请在 WebUI 使用稳定游标查询。")
+        elif command == "memory.relations":
+            result = await ctx.queries.call("memory.query-relations", arguments)
+            lines = [f"Memory 关系（本页 {len(result['items'])}）"]
+            for row in result["items"]:
+                groups = sorted({
+                    item["external_group_id"] for item in row["evidence"]
+                    if item["external_group_id"] is not None
+                })
+                origin = ",".join(groups) if groups else "无可见群来源"
+                lines.append(
+                    f"{row['relation_id']} {row['relation_kind']} | "
+                    f"{row['left_kind']}:{row['left_id']} -> "
+                    f"{row['right_kind']}:{row['right_id']} | 来源群 {origin}"
+                )
+            if result["has_more"]:
+                lines.append("还有后续结果，请在 WebUI 使用稳定游标查询。")
+        else:
+            raise ForestError("SHELL_ROUTE_UNSUPPORTED", "Shell route is unsupported", 409)
+        rendered = "\n".join(lines)
+        return {"text": rendered[:3500]}
+
+    @service(
         "memory.source.capture",
         semantics="idempotent",
         contract="1.0",

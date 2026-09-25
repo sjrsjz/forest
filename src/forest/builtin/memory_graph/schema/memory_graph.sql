@@ -1673,3 +1673,191 @@ BEGIN
     );
 END;
 $$;
+
+CREATE FUNCTION memory_list_trunks(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE result jsonb;
+BEGIN
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'trunk_id',q.trunk_id,'source_id',q.source_id,
+        'platform',q.platform,'realm_id',q.realm_id,
+        'external_group_id',q.external_group_id,
+        'registered_sources',q.registered_sources,
+        'eligible_sources',q.eligible_sources
+    ) ORDER BY q.trunk_id),'[]'::jsonb) INTO result
+    FROM (
+        SELECT t.trunk_id,t.source_id,s.platform,s.realm_id,s.external_group_id,
+            count(u.source_unit_id) AS registered_sources,
+            count(u.source_unit_id) FILTER (
+                WHERE u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE'
+            ) AS eligible_sources
+        FROM __forest_module_schema__.memory_trunks t
+        JOIN __forest_module_schema__.memory_sources s
+            ON s.bot_id=t.bot_id AND s.source_id=t.source_id
+        LEFT JOIN __forest_module_schema__.source_units u
+            ON u.bot_id=t.bot_id AND u.trunk_id=t.trunk_id
+        WHERE t.bot_id=context->>'bot_id'
+        GROUP BY t.trunk_id,t.source_id,s.platform,s.realm_id,s.external_group_id
+        ORDER BY t.trunk_id LIMIT 4096
+    ) q;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('items',result));
+END;
+$$;
+
+CREATE FUNCTION memory_query_sources(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    page_limit integer := COALESCE((input->>'limit')::integer,50);
+    snapshot_time timestamptz := COALESCE((input->>'snapshot_accepted_at')::timestamptz,clock_timestamp());
+    filter_digest text := 'sha256:' || encode(sha256(convert_to((
+        input - 'limit' - 'snapshot_accepted_at' - 'after_occurred_at'
+              - 'after_source_unit_id' - 'cursor_filter_digest'
+    )::text,'UTF8')),'hex');
+    from_time timestamptz := (input->>'occurred_from')::timestamptz;
+    to_time timestamptz := (input->>'occurred_to')::timestamptz;
+    after_time timestamptz := (input->>'after_occurred_at')::timestamptz;
+    items jsonb;
+    more boolean;
+    cursor_value jsonb;
+BEGIN
+    IF page_limit NOT BETWEEN 1 AND 100 OR
+       ((after_time IS NOT NULL) <> (input ? 'after_source_unit_id')) OR
+       (after_time IS NOT NULL AND (NOT input ? 'snapshot_accepted_at' OR
+          input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Source page limit or cursor is invalid','status',422));
+    END IF;
+    WITH page AS (
+        SELECT u.source_unit_id,u.source_id,u.trunk_id,s.source_kind,
+            s.platform,s.realm_id,s.external_group_id,u.author_subject_ref,
+            u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count
+        FROM __forest_module_schema__.source_units u
+        JOIN __forest_module_schema__.memory_sources s
+            ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+        WHERE u.bot_id=context->>'bot_id' AND u.eligibility_state='ELIGIBLE'
+          AND s.status='ACTIVE'
+          AND u.accepted_at<=snapshot_time AND u.eligible_at<=snapshot_time
+          AND (input->>'trunk_id' IS NULL OR u.trunk_id=input->>'trunk_id')
+          AND (input->>'author_subject_ref' IS NULL OR u.author_subject_ref=input->>'author_subject_ref')
+          AND (input->>'modality' IS NULL OR u.modality=input->>'modality')
+          AND (input->>'unit_kind' IS NULL OR u.unit_kind=input->>'unit_kind')
+          AND (from_time IS NULL OR u.occurred_at>=from_time)
+          AND (to_time IS NULL OR u.occurred_at<to_time)
+          AND (after_time IS NULL OR (u.occurred_at,u.source_unit_id)<(after_time,input->>'after_source_unit_id'))
+        ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT page_limit+1
+    ), visible AS (
+        SELECT * FROM page ORDER BY occurred_at DESC,source_unit_id DESC LIMIT page_limit
+    )
+    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.occurred_at DESC,v.source_unit_id DESC)
+                     FROM visible v),'[]'::jsonb),
+           (SELECT count(*)>page_limit FROM page),
+           (SELECT jsonb_build_object('occurred_at',v.occurred_at,
+                       'source_unit_id',v.source_unit_id)
+            FROM visible v ORDER BY v.occurred_at,v.source_unit_id LIMIT 1)
+    INTO items,more,cursor_value;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('snapshot_accepted_at',snapshot_time,
+            'filter_digest',filter_digest,
+            'items',items,'has_more',more,
+            'next_cursor',CASE WHEN more THEN cursor_value ELSE NULL END));
+END;
+$$;
+
+CREATE FUNCTION memory_query_relations(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    page_limit integer := COALESCE((input->>'limit')::integer,10);
+    snapshot_time timestamptz := COALESCE((input->>'snapshot_created_at')::timestamptz,clock_timestamp());
+    filter_digest text := 'sha256:' || encode(sha256(convert_to((
+        input - 'limit' - 'snapshot_created_at' - 'after_relation_id'
+              - 'after_contribution_id' - 'cursor_filter_digest'
+    )::text,'UTF8')),'hex');
+    items jsonb;
+    more boolean;
+    cursor_value jsonb;
+BEGIN
+    IF page_limit NOT BETWEEN 1 AND 20 OR
+       ((input ? 'after_relation_id') <> (input ? 'after_contribution_id')) OR
+       (input ? 'after_relation_id' AND (NOT input ? 'snapshot_created_at' OR
+          input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Relation page limit or cursor is invalid','status',422));
+    END IF;
+    WITH page AS (
+        SELECT c.contribution_id,c.relation_id,c.relation_kind,
+            c.left_kind,c.left_id,c.right_kind,c.right_id,c.weight_micros
+        FROM __forest_module_schema__.relation_contributions c
+        WHERE c.bot_id=context->>'bot_id' AND c.active AND c.created_at<=snapshot_time
+          AND ((c.left_kind=input->>'endpoint_kind' AND c.left_id=input->>'endpoint_id')
+            OR (c.right_kind=input->>'endpoint_kind' AND c.right_id=input->>'endpoint_id'))
+          AND (input->>'endpoint_kind'<>'SOURCE_UNIT' OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_units ue
+            JOIN __forest_module_schema__.memory_sources se
+              ON se.bot_id=ue.bot_id AND se.source_id=ue.source_id
+            WHERE ue.bot_id=c.bot_id AND ue.source_unit_id=input->>'endpoint_id'
+              AND ue.eligibility_state='ELIGIBLE' AND se.status='ACTIVE'
+          ))
+          AND (c.left_kind<>'SOURCE_UNIT' OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_units ul
+            JOIN __forest_module_schema__.memory_sources sl
+              ON sl.bot_id=ul.bot_id AND sl.source_id=ul.source_id
+            WHERE ul.bot_id=c.bot_id AND ul.source_unit_id=c.left_id
+              AND ul.eligibility_state='ELIGIBLE' AND sl.status='ACTIVE'
+          ))
+          AND (c.right_kind<>'SOURCE_UNIT' OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_units ur
+            JOIN __forest_module_schema__.memory_sources sr
+              ON sr.bot_id=ur.bot_id AND sr.source_id=ur.source_id
+            WHERE ur.bot_id=c.bot_id AND ur.source_unit_id=c.right_id
+              AND ur.eligibility_state='ELIGIBLE' AND sr.status='ACTIVE'
+          ))
+          AND (NOT input ? 'after_relation_id' OR
+            (c.relation_id,c.contribution_id)>(input->>'after_relation_id',input->>'after_contribution_id'))
+          AND NOT EXISTS (
+            SELECT 1 FROM __forest_module_schema__.relation_evidence e0
+            JOIN __forest_module_schema__.source_units u0
+              ON u0.bot_id=e0.bot_id AND u0.source_unit_id=e0.source_unit_id
+            JOIN __forest_module_schema__.memory_sources s0
+              ON s0.bot_id=u0.bot_id AND s0.source_id=u0.source_id
+            WHERE e0.bot_id=c.bot_id AND e0.contribution_id=c.contribution_id
+              AND (u0.eligibility_state<>'ELIGIBLE' OR s0.status<>'ACTIVE')
+          )
+        ORDER BY c.relation_id,c.contribution_id LIMIT page_limit+1
+    ), visible AS (
+        SELECT * FROM page ORDER BY relation_id,contribution_id LIMIT page_limit
+    )
+    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v)||jsonb_build_object(
+        'evidence_count',(
+            SELECT count(*) FROM __forest_module_schema__.relation_evidence e
+            WHERE e.bot_id=context->>'bot_id' AND e.contribution_id=v.contribution_id
+        ),
+        'evidence',COALESCE((
+            SELECT jsonb_agg(to_jsonb(evidence)-'evidence_index' ORDER BY evidence.evidence_index)
+            FROM (
+                SELECT e.evidence_index,e.source_unit_id,e.source_revision,e.part_id,
+                    u.trunk_id,s.external_group_id,u.author_subject_ref
+                FROM __forest_module_schema__.relation_evidence e
+                JOIN __forest_module_schema__.source_units u
+                  ON u.bot_id=e.bot_id AND u.source_unit_id=e.source_unit_id
+                JOIN __forest_module_schema__.memory_sources s
+                  ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+                WHERE e.bot_id=context->>'bot_id' AND e.contribution_id=v.contribution_id
+                ORDER BY e.evidence_index LIMIT 16
+            ) evidence
+        ),'[]'::jsonb)) ORDER BY v.relation_id,v.contribution_id)
+        FROM visible v),'[]'::jsonb),
+        (SELECT count(*)>page_limit FROM page),
+        (SELECT jsonb_build_object('relation_id',v.relation_id,
+            'contribution_id',v.contribution_id)
+         FROM visible v ORDER BY v.relation_id DESC,v.contribution_id DESC LIMIT 1)
+    INTO items,more,cursor_value;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('snapshot_created_at',snapshot_time,
+            'filter_digest',filter_digest,
+            'items',items,'has_more',more,
+            'next_cursor',CASE WHEN more THEN cursor_value ELSE NULL END));
+END;
+$$;

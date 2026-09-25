@@ -1,4 +1,4 @@
-from forest.memory_graph_retrieval import (
+from forest.builtin.memory_graph.python.graph_region import (
     RetrievalGraphEdge,
     strongest_path_activations,
 )

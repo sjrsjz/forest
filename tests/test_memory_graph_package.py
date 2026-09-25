@@ -9,6 +9,7 @@ from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.errors import ForestError
 from forest.packages import PackageCatalog
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
@@ -378,6 +379,101 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                 ],
             }
         ]
+
+        queries = {
+            declaration["name"]: declaration
+            for declaration in instance.component["domain_queries"]
+        }
+        trunks = await instance.invoke_management_query(
+            queries["memory.list-trunks"], {}, timeout_seconds=10
+        )
+        assert trunks["items"] == [
+            {
+                "trunk_id": "trunk/group/933179609",
+                "source_id": "source/group/933179609",
+                "platform": "onebot-v11",
+                "realm_id": "qq",
+                "external_group_id": "933179609",
+                "registered_sources": 1,
+                "eligible_sources": 1,
+            }
+        ]
+        sources = await instance.invoke_management_query(
+            queries["memory.query-sources"],
+            {"author_subject_ref": "qq:42", "trunk_id": "trunk/group/933179609"},
+            timeout_seconds=10,
+        )
+        assert [item["source_unit_id"] for item in sources["items"]] == [
+            "unit/event/captured"
+        ]
+        assert sources["items"][0]["external_group_id"] == "933179609"
+        assert sources["items"][0]["author_subject_ref"] == "qq:42"
+        assert sources["has_more"] is False
+        cursor = {
+            "snapshot_accepted_at": sources["snapshot_accepted_at"],
+            "after_occurred_at": sources["items"][0]["occurred_at"],
+            "after_source_unit_id": sources["items"][0]["source_unit_id"],
+            "cursor_filter_digest": sources["filter_digest"],
+        }
+        assert (await instance.invoke_management_query(
+            queries["memory.query-sources"],
+            {"author_subject_ref": "qq:42", "trunk_id": "trunk/group/933179609", **cursor},
+            timeout_seconds=10,
+        ))["items"] == []
+        with pytest.raises(ForestError) as changed_filter:
+            await instance.invoke_management_query(
+                queries["memory.query-sources"],
+                {"author_subject_ref": "qq:other", "trunk_id": "trunk/group/933179609", **cursor},
+                timeout_seconds=10,
+            )
+        assert changed_filter.value.code == "MEMORY_QUERY_INVALID"
+        assert (await instance.invoke_management_query(
+            queries["memory.query-sources"],
+            {"author_subject_ref": "qq:other"}, timeout_seconds=10
+        ))["items"] == []
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.relation_contributions "
+                    "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
+                    "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
+                    "weight_micros,admitted_deletion_epoch) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                ).format(sql.Identifier(namespace)),
+                (
+                    store.bot_id, "contribution/test", "relation/test",
+                    "sha256:" + "a" * 64, "relation/topic/test", "ASSOCIATES_WITH",
+                    "SOURCE_UNIT", "unit/event/captured", "ENTITY", "topic/test",
+                    "MANUAL", 900000, 0,
+                ),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.relation_evidence "
+                    "(bot_id,contribution_id,evidence_index,source_unit_id,"
+                    "source_revision,part_id) VALUES (%s,%s,%s,%s,%s,%s)"
+                ).format(sql.Identifier(namespace)),
+                (
+                    store.bot_id, "contribution/test", 0, "unit/event/captured",
+                    1, "part/event/captured/text",
+                ),
+            )
+        relations = await instance.invoke_management_query(
+            queries["memory.query-relations"],
+            {"endpoint_kind": "SOURCE_UNIT", "endpoint_id": "unit/event/captured"},
+            timeout_seconds=10,
+        )
+        assert len(relations["items"]) == 1
+        assert relations["items"][0]["right_id"] == "topic/test"
+        assert relations["items"][0]["evidence_count"] == 1
+        assert relations["items"][0]["evidence"] == [{
+            "source_unit_id": "unit/event/captured",
+            "source_revision": 1,
+            "part_id": "part/event/captured/text",
+            "trunk_id": "trunk/group/933179609",
+            "external_group_id": "933179609",
+            "author_subject_ref": "qq:42",
+        }]
 
         async with store.pool.connection() as conn:
             occurrence = await (

@@ -111,13 +111,16 @@ Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱
 
 精确召回不再调用宿主 `builtin_memory_tool.py`：工具声明由 Memory manifest 发布并静态绑定本包 service，隔离 Worker 经只读 Domain Query 获取最多八个归档稳定 source unit，只有 ACTIVE 来源、`ELIGIBLE` unit 和完整 part 集可见。Worker 按精确 PayloadRef 读取文本、保留图片引用，结果明确携带 source/trunk/group/author provenance，并以原始 part 为父边写入 Memory 所有的 `tool.result`。真实 PostgreSQL 测试已覆盖群主干来源、缺失 ID、Payload 读取/写入、Generation 路由与资源回收。
 
-OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 会以明确来源和群主干进入同一 source unit；Media 异步抓取通过稳定 ref 收敛。尚未完成的是图片/文本 facet 嵌入、独立向量索引 ref、QiYu 图区域扩散、超大关联点随机有界采样、跨主干联想、语义召回、遗忘，以及带筛选、关系遍历和真实召回试验的管理契约。
+OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 会以明确来源和群主干进入同一 source unit；Media 异步抓取通过稳定 ref 收敛。Memory 包现提供只读主干、来源、关系查询端口；来源查询按群主干、作者、模态、单元类型和发生时间筛选，使用快照加稳定游标分页；关系查询返回节点两端和有界证据，逐条标明来源群、主干及作者。WebUI 与群聊 Shell 都经包声明访问这些端口，Host 不再拥有 Memory 浏览逻辑。真实 PostgreSQL 测试已覆盖包安装、来源筛选及关系证据来源。
+
+旧 `clean_memory_module.py`、`clean_memory_runtime.py`、宿主嵌入 Worker、Memory Repository、旧 baseline 和只验证该未接入生产图路径的测试已移除；图区域扩散算法及其检验移入 `builtin/memory_graph/python/graph_region.py`。这次删除的是不可达的旧执行栈，不表示新包已有语义召回。仍未完成图片/文本 facet 嵌入、独立向量索引 ref、图扩散与有界随机采样在生产调用链的接入、跨主干联想写入、语义召回、遗忘和真实召回试验。上述能力在接入前不能由管理 UI 宣称可用。
 
 ## 8. 下一切换顺序
 
-1. 将旧 `clean_memory_runtime.py` 中尚未迁入包的嵌入与图算法逐项迁到 `builtin/memory_graph`，然后连同 `clean_memory_module.py` 和旧专用测试一起删除；Agent、Conversation 与旧入站 UoW 已删除。
-2. 补齐 `memory_graph` 的嵌入、向量索引 ref、图扩散、跨主干联想、遗忘和管理端口。
-3. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
-4. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。
+1. 在 `builtin/memory_graph` 内建立文档/查询 facet 准备、生命周期绑定的多模态 Embedding Effect、每日成本配额和包所有的持久任务；只把索引 ref 发布到向量库。
+2. 接入图区域扩散、跨主干联想和语义召回；恢复及重放需与删除 epoch、Generation 围栏收敛。
+3. 补齐遗忘 UnitOfWork、证据浏览的进一步分页以及图文真实召回试验。
+4. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
+5. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。
 
 生产图已经是微内核包系统；目标重型 Bot 框架仍需完成 Memory 主链和长期运行验证。
