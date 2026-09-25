@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.7.0"
+version = "1.8.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -40,6 +40,8 @@ requests = [
   "uow.execute:memory.capture-source",
   "uow.execute:memory.bind-domain",
   "uow.execute:memory.prepare-document-facets",
+  "uow.execute:memory.reserve-embedding-budget",
+  "uow.execute:memory.settle-embedding-budget",
   "uow.execute:memory.mark-source-unavailable"
 ]
 
@@ -148,9 +150,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.5.0"
+schema_version = "3.6.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "f1df6692ada75123c46ac6b84da9c15d579735f6beb27199932bfa6ec43906a6"
+baseline_sha256 = "8e3f72f17f2ce2161df062e1aa72191ac8bcbacae40ffc3c85f4fe7e26459c96"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -230,6 +232,20 @@ owner_kind_path = "/input/facets/*/input_payload/owner_kind"
 owner_id_path = "/input/facets/*/input_payload/owner_id"
 
 [[components.unit_of_work_participants]]
+name = "memory.reserve-embedding-budget-record"
+contract = "1.0"
+function = "memory_reserve_embedding_budget"
+input_schema = "schemas/budget-reserve-envelope.json"
+output_schema = "schemas/budget-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.settle-embedding-budget-record"
+contract = "1.0"
+function = "memory_settle_embedding_budget"
+input_schema = "schemas/budget-settle-envelope.json"
+output_schema = "schemas/budget-output.json"
+
+[[components.unit_of_work_participants]]
 name = "memory.capture-source-record"
 contract = "1.0"
 function = "memory_capture_source"
@@ -287,6 +303,26 @@ output_schema = "schemas/prepare-document-facets-output.json"
 timeout_s = 15
 steps = [
   { id = "memory", component_id = "memory.graph", participant = "memory.prepare-document-facets-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.reserve-embedding-budget"
+contract = "1.0"
+input_schema = "schemas/budget-reserve-input.json"
+output_schema = "schemas/budget-output.json"
+timeout_s = 10
+steps = [
+  { id = "memory", component_id = "memory.graph", participant = "memory.reserve-embedding-budget-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.settle-embedding-budget"
+contract = "1.0"
+input_schema = "schemas/budget-settle-input.json"
+output_schema = "schemas/budget-output.json"
+timeout_s = 10
+steps = [
+  { id = "memory", component_id = "memory.graph", participant = "memory.settle-embedding-budget-record" }
 ]
 
 [[components.unit_of_work_plans]]

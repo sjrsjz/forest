@@ -650,16 +650,21 @@ CREATE TABLE embedding_budget_reservations (
         state IN ('RESERVED','RELEASED','CHARGED','UNKNOWN')
     ),
     settlement_operation_id text,
+    settlement_input_digest text CHECK (
+        settlement_input_digest IS NULL OR settlement_input_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
     charged_tokens bigint CHECK (charged_tokens IS NULL OR charged_tokens >= 0),
     error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     settled_at timestamptz,
     PRIMARY KEY (bot_id,reservation_id),
     UNIQUE (bot_id,operation_id),
+    UNIQUE (bot_id,batch_ref),
     UNIQUE (bot_id,settlement_operation_id),
     FOREIGN KEY (bot_id,budget_day) REFERENCES embedding_budget_days(bot_id,budget_day),
     CHECK ((state='RESERVED') = (settled_at IS NULL)),
     CHECK ((state='RESERVED') = (settlement_operation_id IS NULL)),
+    CHECK ((state='RESERVED') = (settlement_input_digest IS NULL)),
     CHECK ((state='CHARGED') = (charged_tokens IS NOT NULL))
 );
 
@@ -1599,6 +1604,191 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','MEMORY_FACET_INPUT_INVALID',
             'message','Document facet input is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_reserve_embedding_budget(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    reservation_value text := body->>'reservation_id';
+    request_limit_value integer;
+    token_limit_value bigint;
+    reserved_tokens_value bigint;
+    budget_day_value date;
+    existing __forest_module_schema__.embedding_budget_reservations%ROWTYPE;
+    day_row __forest_module_schema__.embedding_budget_days%ROWTYPE;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-budget-reserve/1'
+       OR requested_bot IS NULL OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR reservation_value IS NULL OR octet_length(reservation_value) NOT BETWEEN 1 AND 256
+       OR octet_length(body->>'batch_ref') NOT BETWEEN 1 AND 256
+       OR body->>'policy_revision' IS DISTINCT FROM 'daily-cost-cap/1'
+       OR body->>'request_limit' !~ '^[1-9][0-9]*$'
+       OR body->>'token_limit' !~ '^[1-9][0-9]*$'
+       OR body->>'reserved_tokens' !~ '^[1-9][0-9]*$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_INPUT_INVALID',
+                'message','Embedding budget reservation is invalid','status',422));
+    END IF;
+    request_limit_value := (body->>'request_limit')::integer;
+    token_limit_value := (body->>'token_limit')::bigint;
+    reserved_tokens_value := (body->>'reserved_tokens')::bigint;
+    IF request_limit_value NOT BETWEEN 1 AND 1000000
+       OR token_limit_value NOT BETWEEN 1 AND 1000000000000
+       OR reserved_tokens_value NOT BETWEEN 1 AND LEAST(token_limit_value,1000000000) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_INPUT_INVALID',
+                'message','Embedding budget limits are invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/budget-operation/'||requested_bot||'/'||requested_operation,0));
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/budget-batch/'||requested_bot||'/'||(body->>'batch_ref'),0));
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/budget-reservation/'||requested_bot||'/'||reservation_value,0));
+    SELECT * INTO existing FROM __forest_module_schema__.embedding_budget_reservations
+    WHERE bot_id=requested_bot AND
+      (reservation_id=reservation_value OR operation_id=requested_operation
+       OR batch_ref=(body->>'batch_ref')) FOR UPDATE;
+    IF FOUND THEN
+        IF existing.reservation_id IS DISTINCT FROM reservation_value
+           OR existing.operation_id IS DISTINCT FROM requested_operation
+           OR existing.batch_ref IS DISTINCT FROM body->>'batch_ref'
+           OR existing.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_CONFLICT',
+                    'message','Embedding budget reservation identity differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.memory-embedding-budget/1',
+                'reservation_id',existing.reservation_id,'state',existing.state,
+                'budget_day',existing.budget_day,'reserved_tokens',existing.reserved_tokens,
+                'charged_tokens',existing.charged_tokens));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_domains WHERE bot_id=requested_bot
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_DOMAIN_UNBOUND',
+                'message','Embedding domain is not bound','status',409));
+    END IF;
+    budget_day_value := (clock_timestamp() AT TIME ZONE 'UTC')::date;
+    INSERT INTO __forest_module_schema__.embedding_budget_days(bot_id,budget_day)
+    VALUES(requested_bot,budget_day_value) ON CONFLICT DO NOTHING;
+    SELECT * INTO day_row FROM __forest_module_schema__.embedding_budget_days
+    WHERE bot_id=requested_bot AND budget_day=budget_day_value FOR UPDATE;
+    IF day_row.reserved_requests::bigint+day_row.settled_requests+
+       day_row.unknown_requests+1 > request_limit_value
+       OR day_row.reserved_tokens+day_row.charged_tokens+
+          day_row.unknown_tokens+reserved_tokens_value > token_limit_value THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_EXHAUSTED',
+                'message','Daily embedding budget is exhausted','status',429));
+    END IF;
+    INSERT INTO __forest_module_schema__.embedding_budget_reservations(
+        bot_id,reservation_id,operation_id,input_digest,batch_ref,policy_revision,
+        budget_day,request_limit,token_limit,reserved_tokens,deadline_at)
+    VALUES(requested_bot,reservation_value,requested_operation,requested_digest,
+        body->>'batch_ref',body->>'policy_revision',budget_day_value,
+        request_limit_value,token_limit_value,reserved_tokens_value,
+        clock_timestamp()+interval '10 minutes');
+    UPDATE __forest_module_schema__.embedding_budget_days
+    SET reserved_requests=reserved_requests+1,
+        reserved_tokens=reserved_tokens+reserved_tokens_value,
+        revision=revision+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND budget_day=budget_day_value;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-embedding-budget/1',
+            'reservation_id',reservation_value,'state','RESERVED',
+            'budget_day',budget_day_value,'reserved_tokens',reserved_tokens_value,
+            'charged_tokens',NULL));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
+    OR not_null_violation OR check_violation THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_INPUT_INVALID',
+            'message','Embedding budget reservation is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_embedding_budget(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    state_value text := body->>'state';
+    charged_value bigint;
+    reservation_row __forest_module_schema__.embedding_budget_reservations%ROWTYPE;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-budget-settle/1'
+       OR requested_bot IS NULL OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR octet_length(body->>'reservation_id') NOT BETWEEN 1 AND 256
+       OR state_value NOT IN ('RELEASED','CHARGED','UNKNOWN')
+       OR (state_value='CHARGED' AND body->>'charged_tokens' !~ '^[0-9]+$')
+       OR (state_value<>'CHARGED' AND body->'charged_tokens'<>'null'::jsonb)
+       OR (body->>'error_code' IS NOT NULL AND
+           octet_length(body->>'error_code') NOT BETWEEN 1 AND 128) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_SETTLEMENT_INVALID',
+                'message','Embedding budget settlement is invalid','status',422));
+    END IF;
+    charged_value := (body->>'charged_tokens')::bigint;
+    SELECT * INTO reservation_row FROM __forest_module_schema__.embedding_budget_reservations
+    WHERE bot_id=requested_bot AND reservation_id=body->>'reservation_id' FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_MISSING',
+                'message','Embedding budget reservation is missing','status',404));
+    END IF;
+    IF reservation_row.state<>'RESERVED' THEN
+        IF reservation_row.settlement_operation_id IS DISTINCT FROM requested_operation
+           OR reservation_row.settlement_input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_CONFLICT',
+                    'message','Embedding budget was settled differently','status',409));
+        END IF;
+    ELSE
+        PERFORM 1 FROM __forest_module_schema__.embedding_budget_days
+        WHERE bot_id=requested_bot AND budget_day=reservation_row.budget_day FOR UPDATE;
+        UPDATE __forest_module_schema__.embedding_budget_reservations
+        SET state=state_value,settlement_operation_id=requested_operation,
+            settlement_input_digest=requested_digest,charged_tokens=charged_value,
+            error_code=body->>'error_code',settled_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND reservation_id=reservation_row.reservation_id
+        RETURNING * INTO reservation_row;
+        UPDATE __forest_module_schema__.embedding_budget_days
+        SET reserved_requests=reserved_requests-1,
+            reserved_tokens=reserved_tokens-reservation_row.reserved_tokens,
+            settled_requests=settled_requests+CASE WHEN state_value='CHARGED' THEN 1 ELSE 0 END,
+            charged_tokens=charged_tokens+CASE WHEN state_value='CHARGED' THEN charged_value ELSE 0 END,
+            unknown_requests=unknown_requests+CASE WHEN state_value='UNKNOWN' THEN 1 ELSE 0 END,
+            unknown_tokens=unknown_tokens+CASE WHEN state_value='UNKNOWN'
+                THEN reservation_row.reserved_tokens ELSE 0 END,
+            revision=revision+1,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND budget_day=reservation_row.budget_day;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-embedding-budget/1',
+            'reservation_id',reservation_row.reservation_id,'state',reservation_row.state,
+            'budget_day',reservation_row.budget_day,
+            'reserved_tokens',reservation_row.reserved_tokens,
+            'charged_tokens',reservation_row.charged_tokens));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
+    OR not_null_violation OR check_violation THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_SETTLEMENT_INVALID',
+            'message','Embedding budget settlement is invalid','status',422));
 END;
 $$;
 

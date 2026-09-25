@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from psycopg import sql
+from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin.memory_graph.python.facet_preparation import document_facets
@@ -17,6 +18,148 @@ from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.module_configuration import ModuleConfigurationRepository
+
+
+@pytest.mark.postgres
+async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "budget-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = package.descriptor.storage.spec.namespace
+
+    async def invoke(function, operation, body):
+        context = {
+            "bot_id": store.bot_id,
+            "operation_id": operation,
+            "participant_input_digest": digest_json(body),
+        }
+        envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": {"component_id": "memory.graph", "generation_id": "generation/1"},
+            "input": body,
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result").format(
+                        sql.Identifier(namespace), sql.Identifier(function)
+                    ),
+                    (Jsonb(context), Jsonb(envelope)),
+                )
+            ).fetchone()
+        return row["result"]
+
+    bound = await invoke("memory_bind_domain", "domain/budget", {
+        "protocol": "forest.memory-domain-bind/1",
+        "space_id": "sha256:" + "a" * 64,
+        "embedding_model_kind": "TEXT_IMAGE",
+        "model_revision_digest": "sha256:" + "b" * 64,
+        "dimensions": 4096,
+        "normalization": "L2",
+        "fusion_policy_revision": "independent-facets/1",
+    })
+    assert bound["ok"] is True
+
+    def reserve_body(name, *, request_limit=1):
+        return {
+            "protocol": "forest.memory-embedding-budget-reserve/1",
+            "reservation_id": f"budget/{name}",
+            "batch_ref": f"batch/{name}",
+            "policy_revision": "daily-cost-cap/1",
+            "request_limit": request_limit,
+            "token_limit": 1000,
+            "reserved_tokens": 100,
+        }
+
+    first, second = await asyncio.gather(
+        invoke("memory_reserve_embedding_budget", "reserve/one", reserve_body("one")),
+        invoke("memory_reserve_embedding_budget", "reserve/two", reserve_body("two")),
+    )
+    assert sorted(item["ok"] for item in (first, second)) == [False, True]
+    winner = first if first["ok"] else second
+    loser = second if first["ok"] else first
+    assert loser["error"]["code"] == "MEMORY_EMBEDDING_BUDGET_EXHAUSTED"
+    name = "one" if first["ok"] else "two"
+    operation = f"reserve/{name}"
+    assert await invoke(
+        "memory_reserve_embedding_budget", operation, reserve_body(name)
+    ) == winner
+    same_batch = reserve_body("different-id")
+    same_batch["batch_ref"] = f"batch/{name}"
+    conflict = await invoke(
+        "memory_reserve_embedding_budget", "reserve/different-id", same_batch
+    )
+    assert conflict["error"]["code"] == "MEMORY_EMBEDDING_BUDGET_CONFLICT"
+
+    unknown = {
+        "protocol": "forest.memory-embedding-budget-settle/1",
+        "reservation_id": f"budget/{name}",
+        "state": "UNKNOWN", "charged_tokens": None,
+        "error_code": "EMBEDDING_TRANSPORT_UNKNOWN",
+    }
+    settled = await invoke("memory_settle_embedding_budget", "settle/unknown", unknown)
+    assert settled["value"]["state"] == "UNKNOWN"
+    assert await invoke(
+        "memory_settle_embedding_budget", "settle/unknown", unknown
+    ) == settled
+    conflicting = await invoke(
+        "memory_settle_embedding_budget", "settle/different", unknown
+    )
+    assert conflicting["error"]["code"] == "MEMORY_EMBEDDING_BUDGET_CONFLICT"
+    exhausted = await invoke(
+        "memory_reserve_embedding_budget", "reserve/after-unknown",
+        reserve_body("after-unknown"),
+    )
+    assert exhausted["error"]["code"] == "MEMORY_EMBEDDING_BUDGET_EXHAUSTED"
+
+    charged = await invoke(
+        "memory_reserve_embedding_budget", "reserve/charged",
+        reserve_body("charged", request_limit=2),
+    )
+    assert charged["value"]["state"] == "RESERVED"
+    result = await invoke("memory_settle_embedding_budget", "settle/charged", {
+        "protocol": "forest.memory-embedding-budget-settle/1",
+        "reservation_id": "budget/charged",
+        "state": "CHARGED", "charged_tokens": 150, "error_code": None,
+    })
+    assert result["value"]["charged_tokens"] == 150
+    released = await invoke(
+        "memory_reserve_embedding_budget", "reserve/released",
+        reserve_body("released", request_limit=3),
+    )
+    assert released["value"]["state"] == "RESERVED"
+    for name in ("released", "after-release"):
+        if name == "after-release":
+            admitted = await invoke(
+                "memory_reserve_embedding_budget", f"reserve/{name}",
+                reserve_body(name, request_limit=3),
+            )
+            assert admitted["value"]["state"] == "RESERVED"
+        settled_release = await invoke("memory_settle_embedding_budget", f"settle/{name}", {
+            "protocol": "forest.memory-embedding-budget-settle/1",
+            "reservation_id": f"budget/{name}",
+            "state": "RELEASED", "charged_tokens": None, "error_code": None,
+        })
+        assert settled_release["value"]["state"] == "RELEASED"
+    async with store.pool.connection() as conn:
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT reserved_requests,reserved_tokens,settled_requests,"
+                        "charged_tokens,unknown_requests,unknown_tokens "
+                        "FROM {}.embedding_budget_days WHERE bot_id=%s").format(
+                    sql.Identifier(namespace)
+                ),
+                (store.bot_id,),
+            )
+        ).fetchone()
+    assert tuple(row.values()) == (0, 0, 1, 150, 1, 100)
 
 
 def _configuration():

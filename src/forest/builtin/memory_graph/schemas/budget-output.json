@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "reservation_id", "state", "budget_day", "reserved_tokens", "charged_tokens"],
+  "properties": {
+    "protocol": {"const": "forest.memory-embedding-budget/1"},
+    "reservation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "state": {"enum": ["RESERVED", "RELEASED", "CHARGED", "UNKNOWN"]},
+    "budget_day": {"type": "string", "format": "date"},
+    "reserved_tokens": {"type": "integer", "minimum": 1},
+    "charged_tokens": {"type": ["integer", "null"], "minimum": 0}
+  }
+}
