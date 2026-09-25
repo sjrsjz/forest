@@ -1,5 +1,6 @@
 import hashlib
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -94,6 +95,8 @@ async def test_embedding_worker_handoffs_before_http_and_observes_claim_order():
         if name == "memory.prepare-embedding-effect":
             assert payload["effect"]["command"]["parents"] == [body_ref, manifest_ref]
             assert payload["budget"]["reserved_tokens"] == 100
+            deadline = datetime.fromisoformat(payload["authorization"]["expires_at"])
+            assert 0 < (deadline - datetime.now(UTC)).total_seconds() <= 30
             return {
                 "state": "PREPARED",
                 "attempt_id": attempt_id,

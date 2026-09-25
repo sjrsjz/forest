@@ -521,7 +521,7 @@ class CleanBotHost:
                 "embedding.encode": "2.0",
             },
             additional_grants=(
-                CapabilityGrant("embedding.invoke", "bot", self.store.bot_id),
+                CapabilityGrant("embedding.invoke", "bot", self.store.bot_id, delegable=True),
             ),
         )
         media_driver_options = {}
@@ -600,7 +600,7 @@ class CleanBotHost:
             },
             startup_components=("provider.chat-completions",),
             additional_grants=(
-                CapabilityGrant("provider.invoke", "bot", self.store.bot_id),
+                CapabilityGrant("provider.invoke", "bot", self.store.bot_id, delegable=True),
             ),
         )
         routing = await bootstrap_builtin_package(

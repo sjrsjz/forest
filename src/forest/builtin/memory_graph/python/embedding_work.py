@@ -249,7 +249,7 @@ async def dispatch(ctx, task, profile):
     prepared = _plain(materialized["prepared"])
     ticket_id = ctx.operations.stable("embedding-ticket:" + claim_id)
     permit_id = ctx.operations.stable("embedding-permit:" + claim_id)
-    deadline = (datetime.now(UTC) + timedelta(seconds=180)).isoformat()
+    deadline = (datetime.now(UTC) + timedelta(seconds=25)).isoformat()
     plan_digest = _digest({
         "profile_ref": bound["profile_ref"],
         "space_id": claim["space_id"],

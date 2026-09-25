@@ -499,7 +499,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 grants = await (
                     await conn.execute(
                         sql.SQL(
-                            "SELECT s.grantee_id,e.capability,e.resource_kind,e.resource_id "
+                            "SELECT s.grantee_id,e.capability,e.resource_kind,e.resource_id,"
+                            "e.delegable "
                             "FROM {}.grant_sets s JOIN {}.grant_entries e "
                             "USING(bot_id,grant_set_id) WHERE s.bot_id=%s "
                             "AND s.grantee_id IN ('agent.runtime','memory.graph')"
@@ -518,6 +519,11 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 ("agent.runtime", "provider.invoke", "bot", settings.bot_id),
                 ("memory.graph", "embedding.invoke", "bot", settings.bot_id),
             }
+            assert all(
+                row["delegable"]
+                for row in grants
+                if row["capability"] in {"provider.invoke", "embedding.invoke"}
+            )
             memory_schema = next(
                 descriptor.storage.spec.namespace
                 for descriptor in host.registry.descriptors
@@ -750,6 +756,157 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 ("IMAGE", 1),
                 ("TEXT", 2),
             ]
+
+            async with host.store.pool.connection() as conn:
+                occurrence = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT event_ref,input_batch_ref,context_revision "
+                            "FROM {}.source_occurrences "
+                            "WHERE bot_id=%s AND source_unit_id=%s"
+                        ).format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id, "onebot-unit:" + event_hash),
+                    )
+                ).fetchone()
+            assert occurrence is not None
+            event_ref = occurrence["event_ref"]
+            batch_ref = occurrence["input_batch_ref"] or "batch/host-embedding"
+            context_revision = occurrence["context_revision"] or 1
+            compaction_ref = "compaction/host-embedding"
+            archived_selection = {
+                "status": "BATCH",
+                "operation_id": "conversation/silent-archive/host-embedding",
+                "conversation_id": "onebot:group:933179609",
+                "classified_through_seq": 1,
+                "selected_input_end_seq": 1,
+                "mailbox_revision": 1,
+                "input_batch_id": batch_ref,
+                "boundary": "IDLE",
+                "kind": "SILENT_DRAIN",
+                "start_seq": 1,
+                "end_seq": 1,
+                "trigger_cut_seq": None,
+                "session_ref": None,
+                "run_ref": None,
+                "context_revision": context_revision,
+                "context_view_revision": context_revision,
+                "event_ids": [event_ref],
+                "trigger_ids": [],
+                "triggers": [],
+                "memory_archive": {
+                    "compaction_ref": compaction_ref,
+                    "event_refs": [event_ref],
+                },
+            }
+            participant = memory_instance.unit_of_work_participant()
+            async with host.store.pool.connection() as conn, conn.transaction():
+                archive = await participant.invoke_in(
+                    conn,
+                    "memory.qualify-archive",
+                    {
+                        "protocol": "forest.uow-step/1",
+                        "caller": {
+                            "component_id": "conversation.scheduler",
+                            "generation_id": memory_identity.generation_id,
+                        },
+                        "input": {},
+                        "prior": {
+                            "prepare": {
+                                "status": "WRITE",
+                                "commit": {
+                                    "conversation_id": "onebot:group:933179609",
+                                    "compaction_id": compaction_ref,
+                                    "archived_unit_count": 1,
+                                    "units": [{
+                                        "event_id": event_ref,
+                                        "input_batch_id": batch_ref,
+                                        "context_revision": context_revision,
+                                    }],
+                                },
+                            },
+                            "commit": archived_selection,
+                            "payload_epoch": {
+                                "protocol": "forest.payload-epoch/1",
+                                "deletion_epoch": await host._kernel.payload.epoch(),
+                            },
+                        },
+                    },
+                    operation_id="memory/archive/host-embedding",
+                    causal_root_kind="conversation.silent-drain",
+                    causal_root_id="onebot:group:933179609",
+                    parent_call_id="call/memory/archive/host-embedding",
+                    timeout_seconds=10,
+                )
+            assert archive == archived_selection
+            try:
+                async with asyncio.timeout(40):
+                    while True:
+                        async with host.store.pool.connection() as conn:
+                            facets = await (
+                                await conn.execute(
+                                    sql.SQL(
+                                        "SELECT modality,state,result_payload_id "
+                                        "FROM {}.embedding_facets WHERE bot_id=%s "
+                                        "AND source_unit_id=%s"
+                                    ).format(sql.Identifier(memory_namespace)),
+                                    (settings.bot_id, "onebot-unit:" + event_hash),
+                                )
+                            ).fetchall()
+                        if len(facets) == 3 and all(
+                            facet["state"] == "EMBEDDED" for facet in facets
+                        ):
+                            break
+                        await asyncio.sleep(0.1)
+            except TimeoutError as exc:
+                async with host.store.pool.connection() as conn:
+                    attempt_rows = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT state,error_code,claim_id FROM {}.embedding_batch_attempts "
+                                "WHERE bot_id=%s"
+                            ).format(sql.Identifier(memory_namespace)),
+                            (settings.bot_id,),
+                        )
+                    ).fetchall()
+                    facet_work = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT state,last_error_code FROM {}.facet_preparation_work "
+                                "WHERE bot_id=%s"
+                            ).format(sql.Identifier(memory_namespace)),
+                            (settings.bot_id,),
+                        )
+                    ).fetchall()
+                    claims = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT state,item_count FROM {}.embedding_claims "
+                                "WHERE bot_id=%s"
+                            ).format(sql.Identifier(memory_namespace)),
+                            (settings.bot_id,),
+                        )
+                    ).fetchall()
+                    settlements = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT input_payload FROM {}.embedding_work_settlements "
+                                "WHERE bot_id=%s"
+                            ).format(sql.Identifier(memory_namespace)),
+                            (settings.bot_id,),
+                        )
+                    ).fetchall()
+                raise AssertionError({
+                    "facets": facets,
+                    "facet_work": facet_work,
+                    "claims": claims,
+                    "attempts": attempt_rows,
+                    "settlements": settlements,
+                    "owned_failure": memory_instance._owned_work.failure,
+                }) from exc
+            assert sorted(facet["modality"] for facet in facets) == [
+                "IMAGE", "TEXT", "TEXT"
+            ]
+            assert all(facet["result_payload_id"] for facet in facets)
 
             previous = host.registry.graph_identity
             replacement_graph = await host.replace_runtime_graph()

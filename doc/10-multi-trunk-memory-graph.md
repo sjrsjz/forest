@@ -205,7 +205,7 @@ Memory 的每日嵌入账本以 UTC 日期和 Bot ID 为键。每个稳定 batch
 
 专用图驱动失效或索引落后时，退回事实库的授权词法/稳定来源区间检索，返回 graph_completeness、source_watermark 和缺口信息。不得因派生图不可用而停止原始消息接纳和确定性裁剪。
 
-该链路已有 Memory-owned 派发与恢复任务；Provider 物化请求和 HTTP 仍属 Embedding 包，Memory 只保存结果引用及向量摘要。真实跨包 Effect、重启恢复和向量索引发布仍待验收。
+该链路已有 Memory-owned 派发与恢复任务；Provider 物化请求和 HTTP 仍属 Embedding 包，Memory 只保存结果引用及向量摘要。假 HTTP 客户端驱动的真实跨包 Effect 已验证文本与图片 facet 进入 `EMBEDDED`；重启恢复、真实供应商和向量索引发布仍待验收。
 
 提交前恢复使用独立的 `memory.abandon-embedding-effect` 事务计划。Kernel Effect 首先核实该 attempt 仍为 `PREPARED` 并登记放弃，预算随后原子释放，Memory 最后确认 attempt/claim/reservation 一致，把 attempt 记为 `NOT_SENT`、facet 退回 `PENDING`、claim 记为过期；任一步失败全部回滚。普通 claim 扫描不会擅自过期已有 attempt 的 claim。`DISPATCHING` 或更晚的 Effect 不可通过这条路径重发，必须进入结果观察或 UNKNOWN 对账。
 
