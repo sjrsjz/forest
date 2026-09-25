@@ -317,7 +317,10 @@ async def test_memory_embedding_identity_is_immutable_across_configuration_plans
 
 
 @pytest.mark.postgres
-async def test_memory_package_qualifies_exact_conversation_batch(clean_authority, tmp_path):
+@pytest.mark.parametrize("resolution", ["HANDOFF", "ABANDON"])
+async def test_memory_package_qualifies_exact_conversation_batch(
+    clean_authority, tmp_path, resolution
+):
     store, installer = clean_authority
     kernel = await bootstrap_clean_kernel(store, installer)
     package = await bootstrap_builtin_package(
@@ -927,8 +930,9 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
         async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(
                 sql.SQL(
-                    "INSERT INTO {}.embedding_budget_days(bot_id,budget_day) "
-                    "VALUES(%s,current_date)"
+                    "INSERT INTO {}.embedding_budget_days("
+                    "bot_id,budget_day,reserved_requests,reserved_tokens) "
+                    "VALUES(%s,current_date,1,100)"
                 ).format(sql.Identifier(namespace)),
                 (store.bot_id,),
             )
@@ -1020,6 +1024,99 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
             ).fetchone()
         assert attempt_members["n"] == 2
         assert prepared_attempt["result"]["value"]["facet_count"] == 2
+
+        if resolution == "ABANDON":
+            budget_input = {
+                "protocol": "forest.memory-embedding-budget-settle/1",
+                "reservation_id": "budget/embedding/claim",
+                "state": "RELEASED",
+                "charged_tokens": None,
+                "error_code": "MEMORY_EMBEDDING_HANDOFF_NOT_SENT",
+            }
+            async with store.pool.connection() as conn, conn.transaction():
+                released = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT {}.memory_settle_embedding_budget(%s::jsonb,%s::jsonb) "
+                            "AS result"
+                        ).format(sql.Identifier(namespace)),
+                        (
+                            Jsonb({
+                                "bot_id": store.bot_id,
+                                "operation_id": "budget/release/embedding/claim",
+                                "participant_input_digest": digest_json(budget_input),
+                            }),
+                            Jsonb({
+                                "protocol": "forest.uow-step/1",
+                                "caller": {
+                                    "component_id": "memory.graph",
+                                    "generation_id": generation_id,
+                                },
+                                "input": budget_input,
+                                "prior": {},
+                            }),
+                        ),
+                    )
+                ).fetchone()
+                assert released["result"]["ok"] is True
+                abandoned = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT {}.memory_abandon_embedding_attempt(%s::jsonb,%s::jsonb) "
+                            "AS result"
+                        ).format(sql.Identifier(namespace)),
+                        (
+                            Jsonb({
+                                "bot_id": store.bot_id,
+                                "operation_id": "memory/abandon/embedding/claim",
+                            }),
+                            Jsonb({
+                                "protocol": "forest.uow-step/1",
+                                "caller": {
+                                    "component_id": "memory.graph",
+                                    "generation_id": generation_id,
+                                },
+                                "input": {
+                                    "protocol": "forest.memory-embedding-abandon/1",
+                                    "claim_id": claim_id,
+                                    "attempt_id": "attempt/embedding/claim",
+                                    "effect_operation_id": "effect/embedding/claim",
+                                    "abandonment_operation_id": "effect/abandon/embedding/claim",
+                                    "reservation_id": "budget/embedding/claim",
+                                    "reason_code": "MEMORY_EMBEDDING_HANDOFF_NOT_SENT",
+                                },
+                                "prior": {
+                                    "effect": {
+                                        "attempt_id": "attempt/embedding/claim",
+                                        "abandonment_operation_id": "effect/abandon/embedding/claim",
+                                        "reason_code": "MEMORY_EMBEDDING_HANDOFF_NOT_SENT",
+                                        "cancel_effect": False,
+                                    },
+                                    "budget": released["result"]["value"],
+                                },
+                            }),
+                        ),
+                    )
+                ).fetchone()
+                states = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT state,current_attempt_id FROM {}.embedding_facets "
+                            "WHERE bot_id=%s AND facet_id IN "
+                            "(SELECT facet_id FROM {}.embedding_claim_items "
+                            "WHERE bot_id=%s AND claim_id=%s)"
+                        ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                        (store.bot_id, store.bot_id, claim_id),
+                    )
+                ).fetchall()
+            assert abandoned["result"]["value"]["state"] == "NOT_SENT"
+            assert len(states) == 2
+            assert all(row["state"] == "PENDING" and row["current_attempt_id"] is None
+                       for row in states)
+            retry_claim = await claim_batch("embedding/claim/after-abandon", lease_seconds=360)
+            assert retry_claim["ok"] is True
+            assert len(retry_claim["value"]["payload"]["facets"]) == 2
+            return
 
         async def handoff(epoch):
             async with store.pool.connection() as conn, conn.transaction():

@@ -123,6 +123,8 @@ Memory 包在首次合格归档后登记持久 facet 准备任务：Worker 按�
 
 Memory 现在还声明 `memory.handoff-embedding-effect`：同一 UnitOfWork 先锁住 Kernel Payload 删除时钟，再由 Kernel Effect 进入 `DISPATCHING`，最后由 Memory 复核 claim 租约、来源资格、批次身份和删除 epoch，并将 attempt 与全部 facet 推进为 `DISPATCHED`。Memory 参与者的 PostgreSQL 测试已覆盖删除 epoch 改变时拒绝 handoff、正常批次状态推进；完整 Kernel Effect/Memory 联合执行及失败回滚仍待集成验证。该计划尚未接入 owned-work Worker，也尚未实现结果收敛与向量索引发布。
 
+Memory 新增 `memory.abandon-embedding-effect`：只有 Kernel Effect 确认 attempt 仍处于 `PREPARED`、从未 handoff，才在同一事务内放弃 Effect、释放预算、标记 Memory attempt 为 `NOT_SENT` 并将本批 facet 退回 `PENDING`。带 attempt 的过期 claim 不会被普通领取循环直接标为 `EXPIRED`；恢复计划负责释放它。已 handoff 或状态不确定的批次不能走此路径。PostgreSQL 参与者测试已验证退回与预算状态，真实 Kernel Effect 联合事务及崩溃恢复 Worker 仍未接线。
+
 ## 8. 下一切换顺序
 
 1. 在 `builtin/memory_graph` 内建立文档/查询 facet 准备、生命周期绑定的多模态 Embedding Effect、每日成本配额和包所有的持久任务；只把索引 ref 发布到向量库。

@@ -1925,6 +1925,88 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
 END;
 $$;
 
+CREATE FUNCTION memory_abandon_embedding_attempt(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    effect_value jsonb := envelope#>'{prior,effect}';
+    budget_value jsonb := envelope#>'{prior,budget}';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_claim text := body->>'claim_id';
+    requested_attempt text := body->>'attempt_id';
+    requested_effect text := body->>'effect_operation_id';
+    claim_row __forest_module_schema__.embedding_claims%ROWTYPE;
+    attempt_row __forest_module_schema__.embedding_batch_attempts%ROWTYPE;
+    updated_count integer;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-abandon/1'
+       OR requested_bot IS NULL OR requested_operation IS NULL
+       OR requested_claim IS NULL OR requested_attempt IS NULL
+       OR requested_effect IS NULL
+       OR effect_value->>'attempt_id' IS DISTINCT FROM requested_attempt
+       OR effect_value->>'abandonment_operation_id' IS DISTINCT FROM
+          body->>'abandonment_operation_id'
+       OR effect_value->>'reason_code' IS DISTINCT FROM body->>'reason_code'
+       OR effect_value->>'cancel_effect' IS DISTINCT FROM 'false'
+       OR budget_value->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-budget/1'
+       OR budget_value->>'reservation_id' IS DISTINCT FROM body->>'reservation_id'
+       OR budget_value->>'state' IS DISTINCT FROM 'RELEASED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_ABANDON_INVALID',
+                'message','Embedding abandonment envelope is invalid','status',422));
+    END IF;
+    SELECT * INTO attempt_row FROM __forest_module_schema__.embedding_batch_attempts
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt FOR UPDATE;
+    IF attempt_row IS NULL OR attempt_row.claim_id IS DISTINCT FROM requested_claim
+       OR attempt_row.effect_operation_id IS DISTINCT FROM requested_effect
+       OR attempt_row.reservation_id IS DISTINCT FROM body->>'reservation_id' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_CONFLICT',
+                'message','Embedding attempt identity differs','status',409));
+    END IF;
+    IF attempt_row.state='NOT_SENT'
+       AND attempt_row.settlement_operation_id=requested_operation THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.memory-embedding-abandoned/1',
+                'claim_id',requested_claim,'attempt_id',requested_attempt,
+                'state','NOT_SENT'));
+    END IF;
+    SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
+    WHERE bot_id=requested_bot AND claim_id=requested_claim FOR UPDATE;
+    IF attempt_row.state<>'PREPARED' OR claim_row IS NULL
+       OR claim_row.state NOT IN ('CLAIMED','EXPIRED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_NOT_ABANDONABLE',
+                'message','Only a prepared embedding attempt can be abandoned','status',409));
+    END IF;
+    UPDATE __forest_module_schema__.embedding_batch_attempts
+    SET state='NOT_SENT',settlement_operation_id=requested_operation,
+        error_code=body->>'reason_code',settled_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt;
+    UPDATE __forest_module_schema__.embedding_facets f
+    SET state='PENDING',current_attempt_id=NULL,updated_at=clock_timestamp()
+    FROM __forest_module_schema__.embedding_claim_items ci
+    WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
+      AND f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+      AND f.state='PREPARED' AND f.current_attempt_id=requested_attempt;
+    GET DIAGNOSTICS updated_count = ROW_COUNT;
+    IF updated_count<>claim_row.item_count THEN
+        RAISE EXCEPTION 'Embedding claim membership changed under lock' USING ERRCODE='55000';
+    END IF;
+    IF claim_row.state='CLAIMED' THEN
+        UPDATE __forest_module_schema__.embedding_claims
+        SET state='EXPIRED' WHERE bot_id=requested_bot AND claim_id=requested_claim;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-embedding-abandoned/1',
+            'claim_id',requested_claim,'attempt_id',requested_attempt,
+            'state','NOT_SENT'));
+END;
+$$;
+
 CREATE FUNCTION memory_reserve_embedding_budget(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -2988,10 +3070,14 @@ BEGIN
     IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
     END IF;
-    UPDATE __forest_module_schema__.embedding_claims
+    UPDATE __forest_module_schema__.embedding_claims c
     SET state='EXPIRED'
-    WHERE bot_id=requested_bot AND state='CLAIMED'
-      AND lease_deadline<=clock_timestamp();
+    WHERE c.bot_id=requested_bot AND c.state='CLAIMED'
+      AND c.lease_deadline<=clock_timestamp()
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts a
+          WHERE a.bot_id=c.bot_id AND a.claim_id=c.claim_id
+      );
     WITH candidates AS MATERIALIZED (
         SELECT f.*,u.trunk_id,u.author_subject_ref,p.width,p.height,
                p.payload_owner_component_id,p.payload_owner_kind,p.payload_owner_id,

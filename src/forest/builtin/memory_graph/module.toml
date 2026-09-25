@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.13.0"
+version = "1.14.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -44,6 +44,7 @@ requests = [
   "uow.execute:memory.reserve-embedding-budget",
   "uow.execute:memory.prepare-embedding-effect",
   "uow.execute:memory.handoff-embedding-effect",
+  "uow.execute:memory.abandon-embedding-effect",
   "uow.execute:memory.settle-embedding-budget",
   "uow.execute:memory.mark-source-unavailable"
 ]
@@ -153,9 +154,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.11.0"
+schema_version = "3.12.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "7cf96dbea5e9c34b73f19b539b4859ac85ba8b4627d8ec512ae4aef74b9c9fb4"
+baseline_sha256 = "72ebc908487447848fa5f4cef6fa5dc808d8b53830b9903e323d22999ea37b1a"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -256,6 +257,13 @@ input_schema = "schemas/handoff-embedding-attempt-envelope.json"
 output_schema = "schemas/handoff-embedding-effect-output.json"
 
 [[components.unit_of_work_participants]]
+name = "memory.abandon-embedding-attempt-record"
+contract = "1.0"
+function = "memory_abandon_embedding_attempt"
+input_schema = "schemas/abandon-embedding-attempt-envelope.json"
+output_schema = "schemas/abandon-embedding-effect-output.json"
+
+[[components.unit_of_work_participants]]
 name = "memory.reserve-embedding-budget-record"
 contract = "1.0"
 function = "memory_reserve_embedding_budget"
@@ -353,6 +361,18 @@ steps = [
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
   { id = "effect", component_id = "kernel.effect", participant = "effect.handoff", input_path = "/effect" },
   { id = "memory", component_id = "memory.graph", participant = "memory.mark-embedding-handoff-record", input_path = "/memory" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.abandon-embedding-effect"
+contract = "1.0"
+input_schema = "schemas/abandon-embedding-effect-input.json"
+output_schema = "schemas/abandon-embedding-effect-output.json"
+timeout_s = 15
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.abandon", input_path = "/effect" },
+  { id = "budget", component_id = "memory.graph", participant = "memory.settle-embedding-budget-record", input_path = "/budget" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.abandon-embedding-attempt-record", input_path = "/memory" }
 ]
 
 [[components.unit_of_work_plans]]
