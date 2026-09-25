@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "claim_id", "attempt_id", "effect_operation_id", "state", "facet_count", "authorization_ticket_id", "wire_payload", "permit"],
+  "properties": {
+    "protocol": {"const": "forest.memory-embedding-effect-prepared/1"},
+    "claim_id": {"$ref": "#/$defs/id"},
+    "attempt_id": {"$ref": "#/$defs/id"},
+    "effect_operation_id": {"$ref": "#/$defs/id"},
+    "state": {"enum": ["PREPARED", "DISPATCHED", "SUCCEEDED", "NOT_SENT", "UNKNOWN", "FAILED"]},
+    "facet_count": {"type": "integer", "minimum": 1, "maximum": 32},
+    "authorization_ticket_id": {"$ref": "#/$defs/id"},
+    "wire_payload": {"$ref": "#/$defs/payload"},
+    "permit": {"$ref": "#/$defs/permit"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "permit": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "effect_operation_id", "attempt_id", "attempt_no", "wire_payload_id", "wire_payload_digest", "executor_component_id", "executor_generation_id", "fence_kind", "fence_id", "fence_epoch", "deadline_at"],
+      "properties": {
+        "protocol": {"const": "forest.effect-permit/1"},
+        "effect_operation_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "attempt_no": {"type": "integer", "minimum": 1},
+        "wire_payload_id": {"$ref": "#/$defs/id"},
+        "wire_payload_digest": {"$ref": "#/$defs/digest"},
+        "executor_component_id": {"const": "embedding.multimodal"},
+        "executor_generation_id": {"$ref": "#/$defs/id"},
+        "fence_kind": {"const": "runtime.graph"},
+        "fence_id": {"$ref": "#/$defs/id"},
+        "fence_epoch": {"type": "integer", "minimum": 1},
+        "deadline_at": {"type": "string", "minLength": 1, "maxLength": 64}
+      }
+    },
+    "payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"const": "kernel.effect"},
+        "owner_kind": {"const": "effect.wire"},
+        "owner_id": {"$ref": "#/$defs/id"}
+      }
+    }
+  }
+}

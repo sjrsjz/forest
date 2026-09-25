@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.11.0"
+version = "1.12.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -42,6 +42,7 @@ requests = [
   "uow.execute:memory.bind-domain",
   "uow.execute:memory.prepare-document-facets",
   "uow.execute:memory.reserve-embedding-budget",
+  "uow.execute:memory.prepare-embedding-effect",
   "uow.execute:memory.settle-embedding-budget",
   "uow.execute:memory.mark-source-unavailable"
 ]
@@ -151,9 +152,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.9.0"
+schema_version = "3.10.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "993f204cd8dc435c0ad71109a4aff97d188f079490aa00c04cf61b12870e9883"
+baseline_sha256 = "454b8f5140dabbb78db6141e67967ed9e7966a06b4ebe5aa3ffe5256a62cee58"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -240,6 +241,13 @@ owner_kind_path = "/input/facets/*/input_payload/owner_kind"
 owner_id_path = "/input/facets/*/input_payload/owner_id"
 
 [[components.unit_of_work_participants]]
+name = "memory.prepare-embedding-attempt-record"
+contract = "1.0"
+function = "memory_prepare_embedding_attempt"
+input_schema = "schemas/prepare-embedding-attempt-envelope.json"
+output_schema = "schemas/prepare-embedding-effect-output.json"
+
+[[components.unit_of_work_participants]]
 name = "memory.reserve-embedding-budget-record"
 contract = "1.0"
 function = "memory_reserve_embedding_budget"
@@ -311,6 +319,20 @@ output_schema = "schemas/prepare-document-facets-output.json"
 timeout_s = 15
 steps = [
   { id = "memory", component_id = "memory.graph", participant = "memory.prepare-document-facets-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.prepare-embedding-effect"
+contract = "1.0"
+input_schema = "schemas/prepare-embedding-effect-input.json"
+output_schema = "schemas/prepare-embedding-effect-output.json"
+timeout_s = 15
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "budget", component_id = "memory.graph", participant = "memory.reserve-embedding-budget-record", input_path = "/budget" },
+  { id = "authorization", component_id = "kernel.authorization", participant = "authorization.issue", input_path = "/authorization" },
+  { id = "effect", component_id = "kernel.effect", participant = "effect.prepare-command", input_path = "/effect" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.prepare-embedding-attempt-record", input_path = "/memory" }
 ]
 
 [[components.unit_of_work_plans]]

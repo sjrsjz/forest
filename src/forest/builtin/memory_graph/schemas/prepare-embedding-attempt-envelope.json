@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "memory.graph"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "claim_id", "attempt_id", "effect_operation_id", "reservation_id", "space_id"],
+      "properties": {
+        "protocol": {"const": "forest.memory-embedding-attempt-prepare/1"},
+        "claim_id": {"$ref": "#/$defs/id"},
+        "attempt_id": {"$ref": "#/$defs/id"},
+        "effect_operation_id": {"$ref": "#/$defs/id"},
+        "reservation_id": {"$ref": "#/$defs/id"},
+        "space_id": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+      }
+    },
+    "prior": {
+      "type": "object",
+      "required": ["payload_epoch", "budget", "authorization", "effect"],
+      "properties": {
+        "payload_epoch": {"type": "object"},
+        "budget": {"type": "object"},
+        "authorization": {"type": "object"},
+        "effect": {"type": "object"}
+      }
+    }
+  },
+  "$defs": {"id": {"type": "string", "minLength": 1, "maxLength": 256}}
+}

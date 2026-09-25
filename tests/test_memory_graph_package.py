@@ -876,7 +876,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
             text_payload.content_digest, image_payload.content_digest,
         }
 
-        async def claim_batch(token):
+        async def claim_batch(token, lease_seconds=3):
             async with store.pool.connection() as conn, conn.transaction():
                 row = await (
                     await conn.execute(
@@ -889,7 +889,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                             Jsonb({
                                 "protocol": "forest.owned-work-claim-request/1",
                                 "claim_token": token,
-                                "lease_seconds": 3,
+                                "lease_seconds": lease_seconds,
                             }),
                         ),
                     )
@@ -916,7 +916,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
             for claim in claimed
         )
         await asyncio.sleep(3.1)
-        reclaimed = await claim_batch("embedding/claim/after-expiry")
+        reclaimed = await claim_batch("embedding/claim/after-expiry", lease_seconds=360)
         assert reclaimed["ok"] is True
         assert {
             facet["facet_id"] for facet in reclaimed["value"]["payload"]["facets"]
@@ -946,38 +946,69 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                     "sha256:" + "b" * 64, claim_id, "daily-cost-cap/1",
                 ),
             )
-            await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}.embedding_batch_attempts("
-                    "bot_id,attempt_id,claim_id,request_id,effect_operation_id,"
-                    "input_digest,executor_component_id,executor_generation_id,"
-                    "profile_ref,route_revision,accepted_deletion_epoch,"
-                    "request_body_payload_id,request_body_digest,"
-                    "request_manifest_payload_id,request_manifest_digest,"
-                    "reservation_id,deadline_at) "
-                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,%s,%s,%s,%s,%s,"
-                    "clock_timestamp()+interval '1 hour')"
-                ).format(sql.Identifier(namespace)),
-                (
-                    store.bot_id, "attempt/embedding/claim", claim_id,
-                    "request/embedding/claim", "effect/embedding/claim",
-                    "sha256:" + "a" * 64, "embedding.multimodal", "generation/embedding",
-                    "profile:" + "c" * 64, "graph/1", "payload/body",
-                    "sha256:" + "d" * 64, "payload/manifest", "sha256:" + "e" * 64,
-                    "budget/embedding/claim",
-                ),
-            )
-            await conn.execute(
-                sql.SQL(
-                    "UPDATE {}.embedding_facets SET state='PREPARED',"
-                    "current_attempt_id=%s,attempt_count=attempt_count+1 "
-                    "WHERE bot_id=%s AND facet_id=ANY(%s)"
-                ).format(sql.Identifier(namespace)),
-                (
-                    "attempt/embedding/claim", store.bot_id,
-                    [item["facet_id"] for item in reclaimed["value"]["payload"]["facets"]],
-                ),
-            )
+            prepared_attempt = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT {}.memory_prepare_embedding_attempt(%s::jsonb,%s::jsonb) "
+                        "AS result"
+                    ).format(sql.Identifier(namespace)),
+                    (
+                        Jsonb({"bot_id": store.bot_id}),
+                        Jsonb({
+                            "protocol": "forest.uow-step/1",
+                            "caller": {
+                                "component_id": "memory.graph",
+                                "generation_id": generation_id,
+                            },
+                            "input": {
+                                "protocol": "forest.memory-embedding-attempt-prepare/1",
+                                "claim_id": claim_id,
+                                "attempt_id": "attempt/embedding/claim",
+                                "effect_operation_id": "effect/embedding/claim",
+                                "reservation_id": "budget/embedding/claim",
+                                "space_id": domain_input["space_id"],
+                            },
+                            "prior": {
+                                "payload_epoch": {
+                                    "protocol": "forest.payload-epoch/1",
+                                    "deletion_epoch": 0,
+                                },
+                                "budget": {
+                                    "protocol": "forest.memory-embedding-budget/1",
+                                    "reservation_id": "budget/embedding/claim",
+                                    "state": "RESERVED",
+                                },
+                                "authorization": {},
+                                "effect": {
+                                    "protocol": "forest.effect-command-permit/1",
+                                    "authorization_ticket_id": "ticket/embedding/claim",
+                                    "wire_payload": {
+                                        "payload_id": "payload/effect-wire",
+                                        "digest": "sha256:" + "d" * 64,
+                                        "owner_component_id": "kernel.effect",
+                                        "owner_kind": "effect.wire",
+                                        "owner_id": "attempt/embedding/claim",
+                                    },
+                                    "permit": {
+                                        "protocol": "forest.effect-permit/1",
+                                        "effect_operation_id": "effect/embedding/claim",
+                                        "attempt_id": "attempt/embedding/claim",
+                                        "attempt_no": 1,
+                                        "executor_component_id": "embedding.multimodal",
+                                        "executor_generation_id": "generation/embedding",
+                                        "fence_kind": "runtime.graph",
+                                        "fence_id": "graph/1",
+                                        "fence_epoch": 1,
+                                        "wire_payload_id": "payload/effect-wire",
+                                        "wire_payload_digest": "sha256:" + "d" * 64,
+                                        "deadline_at": "2099-01-01T00:00:00+00:00",
+                                    },
+                                },
+                            },
+                        }),
+                    ),
+                )
+            ).fetchone()
             attempt_members = await (
                 await conn.execute(
                     sql.SQL(
@@ -988,6 +1019,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(clean_authority
                 )
             ).fetchone()
         assert attempt_members["n"] == 2
+        assert prepared_attempt["result"]["value"]["facet_count"] == 2
 
         identity = instance.generation_identity
         endpoint = instance.runtime_service_handlers()[

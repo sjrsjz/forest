@@ -567,23 +567,18 @@ CREATE TABLE embedding_batch_attempts (
     bot_id text NOT NULL,
     attempt_id text NOT NULL CHECK (octet_length(attempt_id) BETWEEN 1 AND 256),
     claim_id text NOT NULL,
-    request_id text NOT NULL CHECK (octet_length(request_id) BETWEEN 1 AND 256),
     effect_operation_id text NOT NULL CHECK (octet_length(effect_operation_id) BETWEEN 1 AND 256),
-    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     executor_component_id text NOT NULL
         CHECK (octet_length(executor_component_id) BETWEEN 1 AND 128),
     executor_generation_id text NOT NULL
         CHECK (octet_length(executor_generation_id) BETWEEN 1 AND 256),
-    profile_ref text NOT NULL CHECK (profile_ref ~ '^profile:[a-f0-9]{64}$'),
-    route_revision text NOT NULL CHECK (octet_length(route_revision) BETWEEN 1 AND 256),
+    fence_graph_id text NOT NULL CHECK (octet_length(fence_graph_id) BETWEEN 1 AND 256),
+    fence_graph_revision bigint NOT NULL CHECK (fence_graph_revision > 0),
     accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
-    request_body_payload_id text NOT NULL
-        CHECK (octet_length(request_body_payload_id) BETWEEN 1 AND 256),
-    request_body_digest text NOT NULL CHECK (request_body_digest ~ '^sha256:[a-f0-9]{64}$'),
-    request_manifest_payload_id text NOT NULL
-        CHECK (octet_length(request_manifest_payload_id) BETWEEN 1 AND 256),
-    request_manifest_digest text NOT NULL CHECK (
-        request_manifest_digest ~ '^sha256:[a-f0-9]{64}$'
+    effect_wire_payload_id text NOT NULL
+        CHECK (octet_length(effect_wire_payload_id) BETWEEN 1 AND 256),
+    effect_wire_payload_digest text NOT NULL CHECK (
+        effect_wire_payload_digest ~ '^sha256:[a-f0-9]{64}$'
     ),
     reservation_id text NOT NULL CHECK (octet_length(reservation_id) BETWEEN 1 AND 256),
     deadline_at timestamptz NOT NULL,
@@ -610,7 +605,6 @@ CREATE TABLE embedding_batch_attempts (
     PRIMARY KEY (bot_id,attempt_id),
     UNIQUE (bot_id,claim_id),
     UNIQUE (bot_id,effect_operation_id),
-    UNIQUE (bot_id,request_id),
     FOREIGN KEY (bot_id,claim_id) REFERENCES embedding_claims(bot_id,claim_id),
     CHECK (state<>'PREPARED' OR handoff_operation_id IS NULL),
     CHECK (state<>'PREPARED' OR dispatched_at IS NULL),
@@ -1027,19 +1021,17 @@ $$;
 
 CREATE FUNCTION guard_embedding_attempt() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF ROW(NEW.bot_id,NEW.attempt_id,NEW.claim_id,NEW.request_id,
-           NEW.effect_operation_id,NEW.input_digest,NEW.executor_component_id,
-           NEW.executor_generation_id,NEW.profile_ref,NEW.route_revision,
-           NEW.accepted_deletion_epoch,NEW.request_body_payload_id,
-           NEW.request_body_digest,NEW.request_manifest_payload_id,
-           NEW.request_manifest_digest,NEW.reservation_id,NEW.deadline_at,NEW.prepared_at)
+    IF ROW(NEW.bot_id,NEW.attempt_id,NEW.claim_id,
+           NEW.effect_operation_id,NEW.executor_component_id,
+           NEW.executor_generation_id,NEW.fence_graph_id,NEW.fence_graph_revision,
+           NEW.accepted_deletion_epoch,NEW.effect_wire_payload_id,
+           NEW.effect_wire_payload_digest,NEW.reservation_id,NEW.deadline_at,NEW.prepared_at)
        IS DISTINCT FROM
-       ROW(OLD.bot_id,OLD.attempt_id,OLD.claim_id,OLD.request_id,
-           OLD.effect_operation_id,OLD.input_digest,OLD.executor_component_id,
-           OLD.executor_generation_id,OLD.profile_ref,OLD.route_revision,
-           OLD.accepted_deletion_epoch,OLD.request_body_payload_id,
-           OLD.request_body_digest,OLD.request_manifest_payload_id,
-           OLD.request_manifest_digest,OLD.reservation_id,OLD.deadline_at,OLD.prepared_at) THEN
+       ROW(OLD.bot_id,OLD.attempt_id,OLD.claim_id,
+           OLD.effect_operation_id,OLD.executor_component_id,
+           OLD.executor_generation_id,OLD.fence_graph_id,OLD.fence_graph_revision,
+           OLD.accepted_deletion_epoch,OLD.effect_wire_payload_id,
+           OLD.effect_wire_payload_digest,OLD.reservation_id,OLD.deadline_at,OLD.prepared_at) THEN
         RAISE EXCEPTION 'Embedding attempt identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.state='PREPARED' AND NEW.state IN ('DISPATCHED','NOT_SENT') THEN RETURN NEW; END IF;
@@ -1651,6 +1643,170 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','MEMORY_FACET_INPUT_INVALID',
             'message','Document facet input is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_prepare_embedding_attempt(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    prior jsonb := envelope->'prior';
+    epoch_value jsonb := prior->'payload_epoch';
+    budget_value jsonb := prior->'budget';
+    effect_value jsonb := prior->'effect';
+    permit_value jsonb := effect_value->'permit';
+    wire_value jsonb := effect_value->'wire_payload';
+    requested_bot text := context->>'bot_id';
+    requested_claim text := body->>'claim_id';
+    requested_attempt text := body->>'attempt_id';
+    requested_effect text := body->>'effect_operation_id';
+    epoch_number bigint;
+    claim_row __forest_module_schema__.embedding_claims%ROWTYPE;
+    existing __forest_module_schema__.embedding_batch_attempts%ROWTYPE;
+    domain_space text;
+    qualified_count integer;
+    updated_count integer;
+    output_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-attempt-prepare/1'
+       OR requested_bot IS NULL OR requested_claim IS NULL
+       OR requested_attempt IS NULL OR requested_effect IS NULL
+       OR epoch_value->>'protocol' IS DISTINCT FROM 'forest.payload-epoch/1'
+       OR epoch_value->>'deletion_epoch' !~ '^[0-9]+$'
+       OR budget_value->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-budget/1'
+       OR budget_value->>'reservation_id' IS DISTINCT FROM body->>'reservation_id'
+       OR budget_value->>'state' IS NULL
+       OR budget_value->>'state' NOT IN ('RESERVED','CHARGED','UNKNOWN')
+       OR effect_value->>'protocol' IS DISTINCT FROM 'forest.effect-command-permit/1'
+       OR NULLIF(effect_value->>'authorization_ticket_id','') IS NULL
+       OR permit_value->>'protocol' IS DISTINCT FROM 'forest.effect-permit/1'
+       OR permit_value->>'effect_operation_id' IS DISTINCT FROM requested_effect
+       OR permit_value->>'attempt_id' IS DISTINCT FROM requested_attempt
+       OR permit_value->>'attempt_no' IS DISTINCT FROM '1'
+       OR permit_value->>'executor_component_id' IS DISTINCT FROM 'embedding.multimodal'
+       OR permit_value->>'fence_kind' IS DISTINCT FROM 'runtime.graph'
+       OR permit_value->>'wire_payload_id' IS DISTINCT FROM wire_value->>'payload_id'
+       OR permit_value->>'wire_payload_digest' IS DISTINCT FROM wire_value->>'digest'
+       OR wire_value->>'owner_component_id' IS DISTINCT FROM 'kernel.effect'
+       OR wire_value->>'owner_kind' IS DISTINCT FROM 'effect.wire'
+       OR wire_value->>'owner_id' IS DISTINCT FROM requested_attempt THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_INVALID',
+                'message','Embedding attempt preparation is invalid','status',422));
+    END IF;
+    epoch_number := (epoch_value->>'deletion_epoch')::bigint;
+    output_value := jsonb_build_object(
+        'protocol','forest.memory-embedding-effect-prepared/1',
+        'claim_id',requested_claim,'attempt_id',requested_attempt,
+        'effect_operation_id',requested_effect,'state','PREPARED',
+        'facet_count',NULL,'authorization_ticket_id',
+            effect_value->>'authorization_ticket_id',
+        'wire_payload',wire_value,'permit',permit_value);
+    SELECT * INTO existing FROM __forest_module_schema__.embedding_batch_attempts
+    WHERE bot_id=requested_bot AND
+      (attempt_id=requested_attempt OR claim_id=requested_claim
+       OR effect_operation_id=requested_effect) FOR UPDATE;
+    IF FOUND THEN
+        IF existing.attempt_id IS DISTINCT FROM requested_attempt
+           OR existing.claim_id IS DISTINCT FROM requested_claim
+           OR existing.effect_operation_id IS DISTINCT FROM requested_effect
+           OR existing.reservation_id IS DISTINCT FROM body->>'reservation_id'
+           OR existing.executor_generation_id IS DISTINCT FROM
+              permit_value->>'executor_generation_id'
+           OR existing.fence_graph_id IS DISTINCT FROM permit_value->>'fence_id'
+           OR existing.fence_graph_revision IS DISTINCT FROM
+              (permit_value->>'fence_epoch')::bigint
+           OR existing.accepted_deletion_epoch IS DISTINCT FROM epoch_number
+           OR existing.effect_wire_payload_id IS DISTINCT FROM wire_value->>'payload_id'
+           OR existing.effect_wire_payload_digest IS DISTINCT FROM wire_value->>'digest' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_CONFLICT',
+                    'message','Embedding attempt identity differs','status',409));
+        END IF;
+        SELECT item_count INTO qualified_count FROM __forest_module_schema__.embedding_claims
+        WHERE bot_id=requested_bot AND claim_id=requested_claim;
+        output_value := jsonb_set(output_value,'{state}',to_jsonb(existing.state));
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_set(output_value,'{facet_count}',to_jsonb(qualified_count)));
+    END IF;
+    IF budget_value->>'state' IS DISTINCT FROM 'RESERVED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_NOT_RESERVED',
+                'message','Embedding budget is not reserved','status',409));
+    END IF;
+    SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
+    WHERE bot_id=requested_bot AND claim_id=requested_claim FOR UPDATE;
+    SELECT space_id INTO domain_space FROM __forest_module_schema__.memory_domains
+    WHERE bot_id=requested_bot;
+    IF claim_row IS NULL OR claim_row.state<>'CLAIMED'
+       OR claim_row.lease_deadline<=clock_timestamp()
+       OR claim_row.space_id IS DISTINCT FROM domain_space
+       OR claim_row.space_id IS DISTINCT FROM body->>'space_id'
+       OR claim_row.source_epoch_high_watermark>epoch_number
+       OR claim_row.item_count<1 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_CLAIM_LOST',
+                'message','Embedding batch claim is no longer eligible','status',409));
+    END IF;
+    WITH locked AS MATERIALIZED (
+        SELECT f.facet_id
+        FROM __forest_module_schema__.embedding_claim_items ci
+        JOIN __forest_module_schema__.embedding_facets f
+          ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+         AND u.source_revision=f.source_revision AND u.eligibility_state='ELIGIBLE'
+        JOIN __forest_module_schema__.memory_sources s
+          ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+        JOIN __forest_module_schema__.source_parts p
+          ON p.bot_id=f.bot_id AND p.source_unit_id=f.source_unit_id
+         AND p.part_id=f.part_id AND p.payload_id=f.input_payload_id
+         AND p.payload_digest=f.input_payload_digest
+        WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
+          AND f.state='PENDING' AND f.space_id=claim_row.space_id
+          AND f.accepted_deletion_epoch<=epoch_number
+          AND EXISTS (
+              SELECT 1 FROM __forest_module_schema__.source_occurrences o
+              WHERE o.bot_id=f.bot_id AND o.source_unit_id=f.source_unit_id
+                AND o.eligibility_state='ELIGIBLE'
+          )
+        ORDER BY ci.item_index
+        FOR UPDATE OF f FOR SHARE OF u,s
+    )
+    SELECT count(*) INTO qualified_count FROM locked;
+    IF qualified_count<>claim_row.item_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_SOURCE_CHANGED',
+                'message','Embedding batch source changed before handoff','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.embedding_batch_attempts(
+        bot_id,attempt_id,claim_id,effect_operation_id,executor_component_id,
+        executor_generation_id,fence_graph_id,fence_graph_revision,
+        accepted_deletion_epoch,effect_wire_payload_id,effect_wire_payload_digest,
+        reservation_id,deadline_at)
+    VALUES(requested_bot,requested_attempt,requested_claim,requested_effect,
+        'embedding.multimodal',permit_value->>'executor_generation_id',
+        permit_value->>'fence_id',(permit_value->>'fence_epoch')::bigint,
+        epoch_number,wire_value->>'payload_id',wire_value->>'digest',
+        body->>'reservation_id',(permit_value->>'deadline_at')::timestamptz);
+    UPDATE __forest_module_schema__.embedding_facets f
+    SET state='PREPARED',current_attempt_id=requested_attempt,
+        attempt_count=attempt_count+1,updated_at=clock_timestamp()
+    FROM __forest_module_schema__.embedding_claim_items ci
+    WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
+      AND f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id;
+    GET DIAGNOSTICS updated_count = ROW_COUNT;
+    IF updated_count<>claim_row.item_count THEN
+        RAISE EXCEPTION 'Embedding claim membership changed under lock' USING ERRCODE='55000';
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_set(output_value,'{facet_count}',to_jsonb(qualified_count)));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_INVALID',
+            'message','Embedding attempt preparation is invalid','status',422));
 END;
 $$;
 
