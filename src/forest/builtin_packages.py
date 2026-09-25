@@ -113,6 +113,7 @@ async def bootstrap_builtin_package(
         component_id=component_id,
         namespace=storage.spec.namespace,
         payloads=kernel.payload,
+        immutable_paths=tuple(snapshot.component.get("config_immutable_paths", ())),
     )
     configuration_schema = snapshot.schema(snapshot.component["config_schema"])
     configuration_validator = (
@@ -127,6 +128,7 @@ async def bootstrap_builtin_package(
         value=initial_configuration,
         validation_digest=digest_json(configuration_schema),
     )
+    await configuration.assert_immutable(initial_configuration)
     requested = tuple(snapshot.component.get("capabilities", {}).get("requests", ()))
     policy_revision = await kernel.authorization.revision()
     grants = await kernel.authorization.create_grant_set(

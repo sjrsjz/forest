@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from psycopg import sql
@@ -22,6 +23,24 @@ class EffectiveModuleConfiguration:
     value: object | None = None
 
 
+_MISSING = object()
+
+
+def _pointer_value(value: object, path: str) -> object:
+    for token in path[1:].split("/"):
+        key = token.replace("~1", "/").replace("~0", "~")
+        if isinstance(value, Mapping):
+            value = value.get(key, _MISSING)
+        elif isinstance(value, list) and key.isascii() and key.isdecimal():
+            index = int(key)
+            value = value[index] if index < len(value) else _MISSING
+        else:
+            return _MISSING
+        if value is _MISSING:
+            return _MISSING
+    return value
+
+
 class ModuleConfigurationRepository:
     """Shared protocol code operating only on one module's private schema."""
 
@@ -32,6 +51,7 @@ class ModuleConfigurationRepository:
         component_id: str,
         namespace: str,
         payloads: KernelPayloadRepository,
+        immutable_paths: tuple[str, ...] = (),
     ) -> None:
         if not component_id or not namespace:
             raise ValueError("module configuration identity is required")
@@ -39,6 +59,7 @@ class ModuleConfigurationRepository:
         self.component_id = component_id
         self.namespace = namespace
         self.payloads = payloads
+        self.immutable_paths = immutable_paths
 
     def _table(self, name: str):
         return sql.Identifier(self.namespace, name)
@@ -180,6 +201,7 @@ class ModuleConfigurationRepository:
                     "Configuration head changed or still awaits Generation activation",
                     409,
                 )
+            await self._assert_immutable_in(conn, value)
             payload = await self._put_value_in(
                 conn,
                 operation_id=operation_id,
@@ -270,7 +292,14 @@ class ModuleConfigurationRepository:
                     "Configuration plan is stale or already consumed",
                     409,
                 )
-            await self._verify_payload_in(conn, plan, f"plan:{plan_id}")
+            reference = await self._verify_payload_in(conn, plan, f"plan:{plan_id}")
+            if self.immutable_paths:
+                body = await self.payloads.read_bytes_in(
+                    conn,
+                    plan["config_payload_id"],
+                    expected_deletion_epoch=reference.accepted_deletion_epoch,
+                )
+                await self._assert_immutable_in(conn, self._decode_value(body))
             revision = expected_desired_revision + 1
             row = await (
                 await conn.execute(
@@ -398,6 +427,33 @@ class ModuleConfigurationRepository:
     async def effective(self, *, include_value: bool = False) -> EffectiveModuleConfiguration:
         return await self._head_configuration("effective_revision", include_value=include_value)
 
+    async def assert_immutable(self, value: object) -> None:
+        """Check package-declared Bot-lifetime fields against the effective configuration."""
+
+        if not self.immutable_paths:
+            return
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._assert_immutable_in(conn, value)
+
+    async def _assert_immutable_in(self, conn, value: object) -> None:
+        if not self.immutable_paths:
+            return
+        baseline = (await self.effective_in(conn, include_value=True)).value
+        for path in self.immutable_paths:
+            original = _pointer_value(baseline, path)
+            candidate = _pointer_value(value, path)
+            if (
+                original is _MISSING
+                or candidate is _MISSING
+                or digest_json(original) != digest_json(candidate)
+            ):
+                raise ForestError(
+                    "MODULE_CONFIGURATION_IMMUTABLE",
+                    "Bot-lifetime module configuration cannot change",
+                    409,
+                    details={"path": path},
+                )
+
     async def effective_in(
         self, conn, *, include_value: bool = False
     ) -> EffectiveModuleConfiguration:
@@ -453,12 +509,7 @@ class ModuleConfigurationRepository:
             saved.payload_id,
             expected_deletion_epoch=reference.accepted_deletion_epoch,
         )
-        try:
-            value = json.loads(body)
-        except (UnicodeError, json.JSONDecodeError) as exc:  # database invariant
-            raise ForestError(
-                "MODULE_CONFIGURATION_CORRUPT", "Configuration payload is not JSON", 500
-            ) from exc
+        value = self._decode_value(body)
         return EffectiveModuleConfiguration(
             saved.revision,
             saved.payload_id,
@@ -466,6 +517,15 @@ class ModuleConfigurationRepository:
             saved.validation_digest,
             value,
         )
+
+    @staticmethod
+    def _decode_value(body: bytes) -> object:
+        try:
+            return json.loads(body)
+        except (UnicodeError, json.JSONDecodeError) as exc:  # database invariant
+            raise ForestError(
+                "MODULE_CONFIGURATION_CORRUPT", "Configuration payload is not JSON", 500
+            ) from exc
 
     async def _authorize_management_in(
         self,
@@ -590,8 +650,8 @@ class ModuleConfigurationRepository:
             expected_deletion_epoch=epoch,
         )
 
-    async def _verify_payload_in(self, conn, row, owner_id: str) -> None:
-        await self.payloads.verify_in(
+    async def _verify_payload_in(self, conn, row, owner_id: str):
+        return await self.payloads.verify_in(
             conn,
             payload_id=row["config_payload_id"],
             digest=row["config_payload_digest"],

@@ -2518,6 +2518,13 @@ def package_runtime_descriptor(
             500,
         )
     component = snapshot.component
+    immutable_paths = tuple(component.get("config_immutable_paths", ()))
+    if immutable_paths and tuple(getattr(module_configuration, "immutable_paths", ())) != immutable_paths:
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_BINDING_INVALID",
+            "Package immutable configuration paths must be enforced by its repository",
+            500,
+        )
     compiled_schemas = snapshot.schemas(_component_schema_references(component))
     if (
         component.get("storage", {}).get("execution_profile") == "official"

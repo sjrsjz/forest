@@ -181,6 +181,8 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 每个 Bot 的 collection 身份由 `(bot_id, space_id, dimensions, metric)` 一次冻结。模型种类、模型修订、维度或空间改变必须创建新 Bot/新隔离索引；兼容 endpoint 和凭据可以经 `vector.index` 配置新 Generation 替换。Milvus 是可重建派生库：丢失后从当前合格 facet 与稳定 ref 重放，不得反向把 Milvus 当作消息或关系权威。
 
+`memory.graph` 在包清单中声明 `/embedding` 为 Bot 生命周期内不可变配置。通用模块配置仓库在规划和应用配置时按当前有效修订核验这个路径，启动时也拒绝与已有 Memory 有效配置冲突的模型身份；检索参数和嵌入预算可以通过新 Generation 调整。模型 endpoint 与凭据属于 `embedding.multimodal` 的连接配置，不放进 Memory 的模型身份字段。
+
 一次召回先把当前 InputBatch 的文本/图片 parts 发布为 QUERY `ref_id`，Milvus ANN 只返回 DOCUMENT `ref_id` 与相似度。`memory.graph` 随后在冻结可见性时间点回 PostgreSQL 批量验证 `READY`、space、来源修订、`ELIGIBLE`、删除 epoch 和当前 InputBatch 切口；未通过者被丢弃。各查询 facet 的候选用 RRF 只确定直接种子顺序，向量相似度不再与图激活值混成一个分数。直接种子的激活值统一为 `1.0`，再沿同主干前后邻接边和 `ASSOCIATES_WITH` 边执行最大乘积扩散；最终 EvidenceBundle 始终从 PostgreSQL 事实库物化，并逐项附原始群聊、主干、作者和命中路径。
 
 重建先读取冻结有效源集、构造候选节点和边、验证主干约束与来源清单，再检查 scope head、删除屏障和代际 fence，最后一次发布 graph head。若源集继续增长，按持久 desired/processed 水位追赶；覆盖不足必须在快照元数据里显式标记，不得把“已处理最大位置”冒充无缺口完成。

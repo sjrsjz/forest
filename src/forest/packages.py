@@ -114,6 +114,12 @@ MANIFEST_SCHEMA = {
                         for key in ("id", "scope", "reload_mode", "config_schema")
                     },
                     "state_schema": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                    "config_immutable_paths": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "uniqueItems": True,
+                        "items": {"type": "string"},
+                    },
                     "state_value_schema": {"type": "string"},
                     "state_migrations": {
                         "type": "array",
@@ -1155,6 +1161,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
         _fail("INVALID_COMPONENT", "A valid Bot-scoped component is required")
     if component.get("reload_mode") != "drain":
         _fail("UNSUPPORTED_STATE_SCHEMA", "Only drain reload is supported")
+    if any(
+        not _valid_json_pointer(path)
+        for path in component.get("config_immutable_paths", ())
+    ):
+        _fail("INVALID_MANIFEST", "Immutable configuration paths must be JSON pointers")
     if "state_value_schema" in component:
         _schema(files, component["state_value_schema"])
     migration_sources = set()

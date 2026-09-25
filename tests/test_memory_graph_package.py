@@ -10,9 +10,10 @@ from test_schema_bundles import clean_authority as clean_authority
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
+from forest.storage.module_configuration import ModuleConfigurationRepository
 
 
 def _configuration():
@@ -71,6 +72,72 @@ def _envelope(
         },
         "_operation": operation,
     }
+
+
+@pytest.mark.postgres
+async def test_memory_embedding_identity_is_immutable_across_configuration_plans(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    source = Path(__file__).parents[1] / "src/forest/builtin/memory_graph"
+    catalog = PackageCatalog(tmp_path / "memory-packages")
+    package = await bootstrap_builtin_package(
+        source, catalog, store, installer, kernel=kernel,
+        initial_configuration=_configuration(),
+    )
+    schema_digest = digest_json(package.snapshot.schema("schemas/config.json"))
+    changed_model = _configuration()
+    changed_model["embedding"]["model_revision"] = "different-model/1"
+    with pytest.raises(ForestError) as caught:
+        await package.configuration.plan(
+            operation_id="change-memory-model",
+            expected_desired_revision=1,
+            value=changed_model,
+            validation_digest=schema_digest,
+        )
+    assert caught.value.code == "MODULE_CONFIGURATION_IMMUTABLE"
+
+    # An older writer's outstanding plan cannot bypass the new package policy.
+    old_writer = ModuleConfigurationRepository(
+        store,
+        component_id="memory.graph",
+        namespace=package.configuration.namespace,
+        payloads=kernel.payload,
+    )
+    old_plan = await old_writer.plan(
+        operation_id="old-writer-model-plan",
+        expected_desired_revision=1,
+        value=changed_model,
+        validation_digest=schema_digest,
+    )
+    with pytest.raises(ForestError) as caught:
+        await package.configuration.apply(
+            operation_id="apply-old-model-plan",
+            plan_id=old_plan["plan_id"],
+            expected_desired_revision=1,
+        )
+    assert caught.value.code == "MODULE_CONFIGURATION_IMMUTABLE"
+
+    changed_budget = _configuration()
+    changed_budget["embedding_budget"]["daily_request_limit"] = 250
+    plan = await package.configuration.plan(
+        operation_id="change-memory-budget",
+        expected_desired_revision=1,
+        value=changed_budget,
+        validation_digest=schema_digest,
+    )
+    await package.configuration.apply(
+        operation_id="apply-memory-budget",
+        plan_id=plan["plan_id"],
+        expected_desired_revision=1,
+    )
+    with pytest.raises(ForestError) as caught:
+        await bootstrap_builtin_package(
+            source, catalog, store, installer, kernel=kernel,
+            initial_configuration=changed_model,
+        )
+    assert caught.value.code == "MODULE_CONFIGURATION_IMMUTABLE"
 
 
 @pytest.mark.postgres
