@@ -428,6 +428,7 @@ class CleanBotHost:
                     "embedding.multimodal.http": (
                         multimodal_embedding_effect_driver_factory(
                             effects=self._kernel.effect,
+                            payloads=self._kernel.payload,
                             runtime=self._kernel.runtime,
                             credential_resolver=resolve_embedding_secret,
                             **embedding_driver_options,

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import inspect
 import json
+from types import SimpleNamespace
 
 from forest.embeddings import EmbeddingClient, EmbeddingProfile, PreparedEmbeddingRequest
 from forest.errors import ForestError
@@ -33,6 +32,7 @@ class MultimodalEmbeddingEffectDriver:
         declaration,
         *,
         effects,
+        payloads,
         runtime,
         credential_resolver,
         client_factory=EmbeddingClient,
@@ -47,6 +47,7 @@ class MultimodalEmbeddingEffectDriver:
         self.configuration_revision = configuration_revision
         self.identity = identity
         self.effects = effects
+        self.payloads = payloads
         self.runtime = runtime
         self.credential_resolver = credential_resolver
         self.client_factory = client_factory
@@ -111,18 +112,43 @@ class MultimodalEmbeddingEffectDriver:
                 "Embedding request belongs to another Provider Generation",
                 409,
             )
+        await self._verify_effect(payload)
         raw = payload["prepared"]
+        fields = {
+            "payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"
+        }
+        body_ref, manifest_ref = raw["body"], raw["manifest"]
+        if (
+            payload["protocol"] != "forest.embedding-dispatch/2"
+            or not isinstance(body_ref, dict)
+            or not isinstance(manifest_ref, dict)
+            or set(body_ref) != fields
+            or set(manifest_ref) != fields
+            or body_ref["owner_component_id"] != "memory.graph"
+            or manifest_ref["owner_component_id"] != "memory.graph"
+            or body_ref["owner_kind"] != "embedding.request"
+            or manifest_ref["owner_kind"] != "embedding.request"
+            or body_ref["owner_id"] != raw["request_id"]
+            or manifest_ref["owner_id"] != raw["request_id"]
+            or body_ref["digest"] != raw["payload_digest"]
+        ):
+            raise ForestError(
+                "EMBEDDING_REQUEST_INVALID", "Prepared payload references are invalid", 422
+            )
+        body, manifest = await self.payloads.read_verified_batch(
+            (SimpleNamespace(**body_ref), SimpleNamespace(**manifest_ref))
+        )
         try:
             prepared = PreparedEmbeddingRequest(
                 request_id=raw["request_id"],
                 transport_attempt_id=raw["transport_attempt_id"],
-                body=base64.b64decode(raw["body_base64"], validate=True),
-                manifest_json=raw["manifest_json"],
+                body=body,
+                manifest_json=manifest.decode("utf-8"),
                 payload_digest=raw["payload_digest"],
                 space_id=raw["space_id"],
             )
             prepared.verify()
-        except (KeyError, TypeError, ValueError, binascii.Error) as exc:
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
             raise ForestError(
                 "EMBEDDING_REQUEST_INVALID", "Prepared embedding request is invalid", 422
             ) from exc
@@ -157,7 +183,7 @@ class MultimodalEmbeddingEffectDriver:
 
 
 def multimodal_embedding_effect_driver_factory(
-    *, effects, runtime, credential_resolver, client_factory=EmbeddingClient
+    *, effects, payloads, runtime, credential_resolver, client_factory=EmbeddingClient
 ):
     def create(configuration, configuration_revision, identity, declaration):
         return MultimodalEmbeddingEffectDriver(
@@ -166,6 +192,7 @@ def multimodal_embedding_effect_driver_factory(
             identity,
             declaration,
             effects=effects,
+            payloads=payloads,
             runtime=runtime,
             credential_resolver=credential_resolver,
             client_factory=client_factory,

@@ -187,6 +187,8 @@ Memory 包的持久域绑定任务在运行时通过冻结的 `embedding.profile
 
 归档事务首次把源单元提升为 `ELIGIBLE` 时，仅幂等登记 `facet_preparation_work`。Memory 自有的持久 Worker 在域绑定完成后按源单元租约读取有界的 part 分页，使用固定 `unicode-codepoints-2048-128/1` 规则把非空文本切成 2048 字符、重叠 128 字符的片段，并为每张图片保留一个独立 facet。facet ID 包含来源、修订、part、原始内容摘要、空间和跨度；每批最多 64 个，经包内 UnitOfWork 再次核验归档资格、原始 payload 引用和空间后写入 `PENDING`。崩溃重试复用相同批次操作 ID，不会把重复消息写成多份 facet。这一步尚不发起嵌入或向量索引请求；后续派发仍必须先通过预算预留和删除屏障。
 
+嵌入派发的 Worker 帧只携带固定请求体和 manifest 的精确 payload 引用、请求摘要与空间身份。图片的 base64 请求体写入受删除时钟管理的 payload 存储，不得内联到最多 256 KiB 的组件调用帧。`embedding.multimodal` 驱动先核对 effect 交接和 Generation，再在同一删除时钟快照内逐项验证 payload 的 ID、摘要及 Memory 所有权，重建并校验冻结请求；网络发送前再次核对 effect fence。这个传输契约不替代 Memory 侧的预算预留、来源资格和删除屏障。
+
 一次召回先把当前 InputBatch 的文本/图片 parts 发布为 QUERY `ref_id`，Milvus ANN 只返回 DOCUMENT `ref_id` 与相似度。`memory.graph` 随后在冻结可见性时间点回 PostgreSQL 批量验证 `READY`、space、来源修订、`ELIGIBLE`、删除 epoch 和当前 InputBatch 切口；未通过者被丢弃。各查询 facet 的候选用 RRF 只确定直接种子顺序，向量相似度不再与图激活值混成一个分数。直接种子的激活值统一为 `1.0`，再沿同主干前后邻接边和 `ASSOCIATES_WITH` 边执行最大乘积扩散；最终 EvidenceBundle 始终从 PostgreSQL 事实库物化，并逐项附原始群聊、主干、作者和命中路径。
 
 重建先读取冻结有效源集、构造候选节点和边、验证主干约束与来源清单，再检查 scope head、删除屏障和代际 fence，最后一次发布 graph head。若源集继续增长，按持久 desired/processed 水位追赶；覆盖不足必须在快照元数据里显式标记，不得把“已处理最大位置”冒充无缺口完成。
