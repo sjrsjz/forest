@@ -58,6 +58,7 @@ async def test_embedding_worker_handoffs_before_http_and_observes_claim_order():
                 "profile": profile_snapshot,
             }
         if name == "embedding.request.materialize":
+            assert payload["purpose"] == "DOCUMENT"
             return {
                 "protocol": "forest.embedding-materialized/1",
                 "request_id": request_id,
@@ -135,7 +136,8 @@ async def test_embedding_worker_handoffs_before_http_and_observes_claim_order():
         payloads=SimpleNamespace(read_json=read_json),
     )
     result = await dispatch(
-        ctx, {"payload": {"claim_id": "claim/one", "space_id": space, "facets": facets}},
+        ctx, {"payload": {"claim_id": "claim/one", "space_id": space,
+                          "purpose": "DOCUMENT", "facets": facets}},
         profile,
     )
     assert result == {"claim_id": "claim/one", "state": "SUCCEEDED"}

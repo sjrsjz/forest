@@ -130,6 +130,7 @@ CREATE TABLE source_units (
     ),
     eligibility_revision bigint NOT NULL DEFAULT 0 CHECK (eligibility_revision >= 0),
     eligible_at timestamptz,
+    eligible_xid xid8,
     occurred_at timestamptz NOT NULL,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -366,6 +367,7 @@ CREATE TABLE relation_contributions (
     weight_micros bigint NOT NULL CHECK (weight_micros BETWEEN 0 AND 1000000000000),
     admitted_deletion_epoch bigint NOT NULL CHECK (admitted_deletion_epoch >= 0),
     active boolean NOT NULL DEFAULT true,
+    created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,contribution_id),
     UNIQUE (bot_id,operation_id),
@@ -380,6 +382,7 @@ CREATE TABLE relation_evidence (
     source_unit_id text NOT NULL,
     source_revision bigint NOT NULL CHECK (source_revision > 0),
     part_id text NOT NULL CHECK (octet_length(part_id) BETWEEN 1 AND 256),
+    created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     PRIMARY KEY (bot_id,contribution_id,evidence_index),
     UNIQUE (bot_id,contribution_id,source_unit_id,source_revision,part_id),
     FOREIGN KEY (bot_id,contribution_id)
@@ -422,6 +425,7 @@ CREATE TABLE memory_queries (
     fusion_policy_revision text NOT NULL
         CHECK (octet_length(fusion_policy_revision) BETWEEN 1 AND 256),
     accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
+    graph_snapshot pg_snapshot NOT NULL DEFAULT pg_current_snapshot(),
     state text NOT NULL DEFAULT 'OPEN' CHECK (state IN ('OPEN','FROZEN')),
     bundle_id text CHECK (bundle_id IS NULL OR octet_length(bundle_id) BETWEEN 1 AND 256),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -540,6 +544,7 @@ CREATE TABLE embedding_facets (
         result_payload_digest IS NULL OR result_payload_digest ~ '^sha256:[a-f0-9]{64}$'
     ),
     published_at timestamptz,
+    published_xid xid8,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,facet_id),
@@ -557,6 +562,7 @@ CREATE TABLE embedding_facets (
     CHECK ((state IN ('EMBEDDED','READY')) = (result_payload_id IS NOT NULL)),
     CHECK ((state IN ('EMBEDDED','READY')) = (result_payload_digest IS NOT NULL)),
     CHECK ((state='READY') = (published_at IS NOT NULL)),
+    CHECK ((state='READY') = (published_xid IS NOT NULL)),
     UNIQUE (bot_id,index_ref_id)
 );
 
@@ -1284,10 +1290,12 @@ BEGIN
     JOIN __forest_module_schema__.embedding_facets f
       ON f.bot_id=requested_bot AND f.index_ref_id=hit->>'ref_id'
      AND f.purpose='DOCUMENT' AND f.state='READY'
-     AND f.space_id=page_check#>>'{value,space_id}' AND f.published_at<=query_row.created_at
+     AND f.space_id=page_check#>>'{value,space_id}'
+     AND pg_visible_in_snapshot(f.published_xid,query_row.graph_snapshot)
     JOIN __forest_module_schema__.source_units u
-      ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+     ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
      AND u.source_revision=f.source_revision AND u.eligibility_state='ELIGIBLE'
+     AND pg_visible_in_snapshot(u.eligible_xid,query_row.graph_snapshot)
     JOIN __forest_module_schema__.memory_sources s
       ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
     WHERE EXISTS (
@@ -1821,6 +1829,33 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION stamp_source_unit_graph_xid() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='INSERT' THEN
+        NEW.eligible_xid := CASE WHEN NEW.eligibility_state='ELIGIBLE'
+            THEN pg_current_xact_id() ELSE NULL END;
+    ELSIF OLD.eligibility_state='REGISTERED' AND NEW.eligibility_state='ELIGIBLE' THEN
+        NEW.eligible_xid := pg_current_xact_id();
+    ELSIF NEW.eligible_xid IS DISTINCT FROM OLD.eligible_xid THEN
+        RAISE EXCEPTION 'Memory eligibility transaction is immutable' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION stamp_facet_publication_xid() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NEW.state<>'READY' THEN
+        NEW.published_xid := NULL;
+    ELSIF TG_OP='INSERT' OR OLD.state<>'READY' THEN
+        NEW.published_xid := pg_current_xact_id();
+    ELSIF NEW.published_xid IS DISTINCT FROM OLD.published_xid THEN
+        RAISE EXCEPTION 'Memory publication transaction is immutable' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION guard_source_unit() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF ROW(NEW.bot_id,NEW.source_unit_id,NEW.capture_operation_id,NEW.input_digest,
@@ -1872,12 +1907,12 @@ BEGIN
     IF ROW(NEW.bot_id,NEW.contribution_id,NEW.operation_id,NEW.input_digest,
            NEW.relation_id,NEW.relation_kind,NEW.left_kind,NEW.left_id,
            NEW.right_kind,NEW.right_id,NEW.relation_key,NEW.origin_kind,
-           NEW.weight_micros,NEW.admitted_deletion_epoch,NEW.created_at)
+           NEW.weight_micros,NEW.admitted_deletion_epoch,NEW.created_at,NEW.created_xid)
        IS DISTINCT FROM
        ROW(OLD.bot_id,OLD.contribution_id,OLD.operation_id,OLD.input_digest,
            OLD.relation_id,OLD.relation_kind,OLD.left_kind,OLD.left_id,
            OLD.right_kind,OLD.right_id,OLD.relation_key,OLD.origin_kind,
-           OLD.weight_micros,OLD.admitted_deletion_epoch,OLD.created_at) THEN
+           OLD.weight_micros,OLD.admitted_deletion_epoch,OLD.created_at,OLD.created_xid) THEN
         RAISE EXCEPTION 'Memory relation contribution identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.active AND NOT NEW.active THEN RETURN NEW; END IF;
@@ -1891,16 +1926,17 @@ BEGIN
     IF ROW(NEW.bot_id,NEW.query_id,NEW.operation_id,NEW.input_digest,
            NEW.current_source_id,NEW.input_batch_ref,NEW.context_revision,
            NEW.query_mode,NEW.fusion_policy_revision,NEW.accepted_deletion_epoch,
-           NEW.created_at)
+           NEW.created_at,NEW.graph_snapshot::text)
        IS DISTINCT FROM
        ROW(OLD.bot_id,OLD.query_id,OLD.operation_id,OLD.input_digest,
            OLD.current_source_id,OLD.input_batch_ref,OLD.context_revision,
            OLD.query_mode,OLD.fusion_policy_revision,OLD.accepted_deletion_epoch,
-           OLD.created_at) THEN
+           OLD.created_at,OLD.graph_snapshot::text) THEN
         RAISE EXCEPTION 'Memory query identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.state='OPEN' AND NEW.state='FROZEN' THEN RETURN NEW; END IF;
-    IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    IF ROW(NEW.state,NEW.bundle_id,NEW.frozen_at)
+       IS NOT DISTINCT FROM ROW(OLD.state,OLD.bundle_id,OLD.frozen_at) THEN RETURN NEW; END IF;
     RAISE EXCEPTION 'Invalid Memory query transition' USING ERRCODE='55000';
 END;
 $$;
@@ -2066,6 +2102,10 @@ CREATE TRIGGER memory_source_guard BEFORE UPDATE OR DELETE ON memory_sources
     FOR EACH ROW EXECUTE FUNCTION guard_memory_source();
 CREATE TRIGGER source_unit_guard BEFORE UPDATE OR DELETE ON source_units
     FOR EACH ROW EXECUTE FUNCTION guard_source_unit();
+CREATE TRIGGER source_unit_graph_xid BEFORE INSERT OR UPDATE ON source_units
+    FOR EACH ROW EXECUTE FUNCTION stamp_source_unit_graph_xid();
+CREATE TRIGGER facet_publication_xid BEFORE INSERT OR UPDATE ON embedding_facets
+    FOR EACH ROW EXECUTE FUNCTION stamp_facet_publication_xid();
 CREATE TRIGGER unavailable_source_events_immutable BEFORE UPDATE OR DELETE ON unavailable_source_events
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER source_occurrence_guard BEFORE UPDATE OR DELETE ON source_occurrences

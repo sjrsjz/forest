@@ -162,6 +162,54 @@ async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
     assert tuple(row.values()) == (0, 0, 1, 150, 1, 100)
 
 
+@pytest.mark.postgres
+async def test_graph_snapshot_excludes_facts_committed_after_registration(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "snapshot-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    async with store.pool.connection() as writer, store.pool.connection() as reader:
+        async with writer.transaction():
+            await writer.execute(
+                sql.SQL(
+                    "INSERT INTO {}.relation_contributions "
+                    "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
+                    "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
+                    "weight_micros,admitted_deletion_epoch) VALUES "
+                    "(%s,'late-contribution','late-operation',%s,'late-relation',"
+                    "'ASSOCIATES_WITH','ENTITY','left','ENTITY','right','RULE',500000,0)"
+                ).format(namespace),
+                (store.bot_id, "sha256:" + "a" * 64),
+            )
+            boundary = await (
+                await reader.execute(
+                    "SELECT pg_current_snapshot()::text AS snapshot, clock_timestamp() AS observed_at"
+                )
+            ).fetchone()
+        result = await (
+            await reader.execute(
+                sql.SQL(
+                    "SELECT pg_visible_in_snapshot(created_xid,%s::pg_snapshot) AS old_visible,"
+                    "pg_visible_in_snapshot(created_xid,pg_current_snapshot()) AS new_visible,"
+                    "created_at <= %s AS timestamp_precedes_boundary "
+                    "FROM {}.relation_contributions WHERE bot_id=%s AND contribution_id=%s"
+                ).format(namespace),
+                (boundary["snapshot"], boundary["observed_at"], store.bot_id, "late-contribution"),
+            )
+        ).fetchone()
+        assert result == {
+            "old_visible": False,
+            "new_visible": True,
+            "timestamp_precedes_boundary": True,
+        }
+
+
 def _configuration():
     return {
         "protocol": "forest.memory.graph/2",
@@ -920,6 +968,9 @@ async def test_memory_package_qualifies_exact_conversation_batch(
             and claim["payload"]["source_epoch_high_watermark"] >= 0
             for claim in claimed
         )
+        # Keep background dispatch out of this manual lease-expiry arbitration.
+        instance.freeze_owned_admission()
+        await instance.drain_owned_work()
         await asyncio.sleep(3.1)
         reclaimed = await claim_batch("embedding/claim/after-expiry", lease_seconds=360)
         assert reclaimed["ok"] is True

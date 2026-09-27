@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.22.0"
+version = "1.23.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -213,9 +213,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.20.0"
+schema_version = "3.21.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "065f597fd7f74354e5ed442114497616bdbeb56ac323987f0e6f450129a7461c"
+baseline_sha256 = "c3427b9e360b94afc12996578a32e9c9eafa9914c54969bd8d3d537423e7363c"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"

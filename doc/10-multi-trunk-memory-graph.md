@@ -244,7 +244,9 @@ LLM 生成联想时，输入源集、提示词/模型配置及端点版本形成
 
 `memory.query.prepare/1` 仅接受已注册 query_id，按固定成员集生成 facet。每个 part 最多 64 个 facet，一次查询最多 256 个 facet；单张图片最多 8 MiB，一次查询图片累计最多 32 MiB。超限明确拒绝，不能静默丢掉 part 或改做图片描述。facet 身份包含 query_id 和确定性文档 facet 身份，避免同一来源的 QUERY 与 DOCUMENT 或不同查询互相覆盖。每个固定 query_part_index 对应一份持久准备回执，纯空白文本也以零 facet 回执闭合。所有回执提交后，独立完成事务捕获当前删除 epoch、重验完整成员集并登记准备完成事实；只有该事实存在，QUERY 才能被嵌入任务领取。崩溃/热重载后重放相同 part 操作，不能把部分准备冒充完整查询；准备服务本身不调用 Embedding。
 
-种子入口 `memory.query.seeds/1` 为只读阶段：准备完成且全部 QUERY facet 为 READY 后才搜索，每次索引调用最多 256 个候选，再以每批 32 个引用回 PostgreSQL 重验。文档必须为相同 space 的 READY DOCUMENT facet，原源修订一致，来源 ACTIVE，源单元和至少一个 occurrence 已归档；只接受 query 创建时点之前已发布的 facet。排除 query 自身源单元，以及当前会话切口之后或尚未接纳的观察，防止通过其他观察的归档资格读到队列尾部。每个查询 facet 对同一源单元只贡献其首个合格命中的 `1/(60+rank)`，合计 RRF 仅排序种子；种子激活均为 1.0，群聊、主干和作者由事实库返回。该阶段不物化正文、不生成最终 EvidenceBundle，不替代后续的固定图快照、最终删除/授权重验与结果冻结。
+种子入口 `memory.query.seeds/1` 为只读阶段：准备完成且全部 QUERY facet 为 READY 后才搜索，每次索引调用最多 256 个候选，再以每批 32 个引用回 PostgreSQL 重验。文档必须为相同 space 的 READY DOCUMENT facet，原源修订一致，来源 ACTIVE，源单元和至少一个 occurrence 已归档；只接受在 query 登记的事务快照中可见的归档与发布事实。排除 query 自身源单元，以及当前会话切口之后或尚未接纳的观察，防止通过其他观察的归档资格读到队列尾部。每个查询 facet 对同一源单元只贡献其首个合格命中的 `1/(60+rank)`，合计 RRF 仅排序种子；种子激活均为 1.0，群聊、主干和作者由事实库返回。该阶段不物化正文、不生成最终 EvidenceBundle，不替代后续图邻接读取、最终删除/授权重验与结果冻结。
+
+查询的正向事实范围使用登记时的 `pg_snapshot` 固定，不能用 `created_at` 或 `published_at` 判断事务是否已经提交。源单元首次归档和 facet 首次发布记录其顶层 `xid8`；关系贡献及证据登记时也记录顶层事务 ID。种子候选和后续图邻接只允许使用 `pg_visible_in_snapshot` 判定可见的归档、发布及关系事实。这样，较早开始但较晚提交的事务不会混入先前查询，也不需要在 Bot 全局建立写锁来分配图版本。删除、来源退役和关系撤销仍按当前状态过滤；固定正向事实范围不会恢复已撤销内容。`xid8` 是显式保存的领域元数据，不能依赖可能被 vacuum 冻结的行 `xmin`。快照和事务 ID 仅由包内 SQL 产生，Worker 不提供这些值。`graph_snapshot_ref` 是指向该不可变查询记录的稳定引用，不是全局图版本计数，也不向模型暴露 PostgreSQL 快照内容。这里固定的是领域事实可见范围，ANN 候选集合及最终 EvidenceBundle 仍须由后续结果事务冻结。[PostgreSQL 事务快照定义](https://www.postgresql.org/docs/16/functions-info.html#FUNCTIONS-PG-SNAPSHOT)
 
 ```text
 MemoryQuery
@@ -302,7 +304,7 @@ query_parts允许文本、图片和有序混合输入，支持文搜图、图搜
     "realm_id": "qq-global",
     "external_group_id": "10001"
   },
-  "graph_snapshot_ref": "graph-generation-4:revision-18",
+  "graph_snapshot_ref": "memory-query:query-18",
   "evidence": [
     {
       "evidence_id": "ev-9",
