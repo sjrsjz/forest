@@ -297,6 +297,42 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         )).fetchone())["result"]
         assert expired["value"]["state"] == "FAILED"
         assert expired["value"]["error_code"] == "MEMORY_RECALL_DEADLINE"
+        async def cancel_work(query):
+            body = {"protocol":"forest.uow-step/1","caller":{
+                "component_id":"memory.graph","generation_id":"generation/test"},
+                "input":{"protocol":"forest.memory-recall-cancel/1",
+                         "query_id":query,"reason_code":"SUPERSEDED"},"prior":{}}
+            return (await (await execute(
+                "SELECT {}.memory_cancel_recall(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id":store.bot_id}),Jsonb(body)),
+            )).fetchone())["result"]
+        assert (await cancel_work("query/status"))["value"]["status"] == "TERMINAL"
+        await register_query("query/cancel-pending")
+        pending_request = {**request,"input":{**request["input"],
+            "query_id":"query/cancel-pending"}}
+        assert (await request_work(pending_request))["ok"]
+        cancelled = await cancel_work("query/cancel-pending")
+        assert cancelled["value"]["status"] == "CANCELLED"
+        assert await cancel_work("query/cancel-pending") == cancelled
+        await register_query("query/cancel-claimed")
+        claimed_request = {**request,"input":{**request["input"],
+            "query_id":"query/cancel-claimed"}}
+        assert (await request_work(claimed_request))["ok"]
+        in_flight = await claim("recall-claim/cancelled")
+        assert in_flight["value"]["work_id"] == "query/cancel-claimed"
+        waiting_cancel = await cancel_work("query/cancel-claimed")
+        assert waiting_cancel["value"]["status"] == "CANCELLING"
+        cancelling = (await (await execute(
+            "SELECT {}.memory_read_recall_work(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id":store.bot_id}),Jsonb({"query_id":"query/cancel-claimed"})),
+        )).fetchone())["result"]
+        assert cancelling["value"]["state"] == "CANCELLING"
+        cancel_settlement = {**settlement,"work_id":"query/cancel-claimed",
+            "claim_token":"recall-claim/cancelled","attempt":1,
+            "outcome":{"status":"SUCCEEDED","result":{"query_id":"query/cancel-claimed"}}}
+        assert (await settle(cancel_settlement))["ok"]
+        assert (await cancel_work("query/cancel-claimed"))["value"]["status"] == "CANCELLED"
+        assert (await claim("recall-claim/no-cancelled"))["value"] is None
         first = await neighbours("query/one")
         assert first == await neighbours("query/one")
         assert first["association_sampled"]

@@ -1385,6 +1385,21 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                                       "status/automatic-replay", stage="work-status")) == state
             assert (await query_stage(automatic_query["query_id"],
                                       "progress/automatic", stage="progress"))["phase"] == "READY"
+            cancelled_ready = await memory_instance.runtime_service_handlers()[
+                ("memory.query.cancel", 1)
+            ].invoke_routed(
+                FrozenServiceRoute(
+                    service_id="memory.query.cancel", version=1,
+                    caller_component_id="memory.graph", provider_component_id="memory.graph",
+                    provider_generation_id=memory_identity.generation_id,
+                    graph_id=memory_identity.graph_id,
+                    graph_revision=memory_identity.graph_revision,
+                    admission_lane="DATA", owned_work=False,
+                ),
+                RuntimeServiceInvocation("cancel/finished-recall", 30, "memory.query", settings.bot_id),
+                (), {"query_id": automatic_query["query_id"], "reason_code": "SUPERSEDED"},
+            )
+            assert cancelled_ready["status"] == "TERMINAL"
 
             # The public UoW revokes Payload, Memory eligibility, graph evidence,
             # and vector refs together before the asynchronous Milvus deletion.

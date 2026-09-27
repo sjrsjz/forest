@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from context_projection import ContextSnapshotReader
 from model_execution import ModelExecution
@@ -201,7 +202,10 @@ class AgentExecution:
                 },
             },
             operation_id=self.ctx.operations.stable(
-                f"acquire-model-input:{request['run_ref']}:{step_seq}"
+                # CONTINUE/WAIT_INPUT are observations, not a permanent result
+                # for this model step. A committed BATCH advances Run revision
+                # atomically, so recovery can safely issue a fresh observation.
+                f"acquire-model-input:{request['run_ref']}:{step_seq}:{uuid4().hex}"
             ),
             timeout=25,
         )

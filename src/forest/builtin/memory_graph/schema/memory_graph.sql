@@ -490,7 +490,9 @@ CREATE TABLE query_recall_work (
     query_id text NOT NULL,
     deadline_at timestamptz NOT NULL,
     state text NOT NULL DEFAULT 'PENDING'
-        CHECK (state IN ('PENDING','CLAIMED','BLOCKED_UNKNOWN','READY','FAILED')),
+        CHECK (state IN ('PENDING','CLAIMED','BLOCKED_UNKNOWN','READY','FAILED','CANCELLED')),
+    cancel_requested boolean NOT NULL DEFAULT false,
+    cancel_reason text CHECK (cancel_reason IS NULL OR cancel_reason='SUPERSEDED'),
     claim_token text UNIQUE,
     claim_payload jsonb,
     lease_deadline timestamptz,
@@ -505,7 +507,9 @@ CREATE TABLE query_recall_work (
     CHECK ((state='CLAIMED') = (claim_token IS NOT NULL)),
     CHECK ((state='CLAIMED') = (claim_payload IS NOT NULL)),
     CHECK ((state='CLAIMED') = (lease_deadline IS NOT NULL)),
-    CHECK ((state='FAILED') = (last_error_code IS NOT NULL))
+    CHECK ((state='FAILED') = (last_error_code IS NOT NULL)),
+    CHECK (cancel_requested = (cancel_reason IS NOT NULL)),
+    CHECK (state<>'CANCELLED' OR cancel_requested)
 );
 
 CREATE INDEX query_recall_work_due_idx ON query_recall_work(bot_id,next_attempt_at,query_id)
@@ -2180,7 +2184,9 @@ BEGIN
     END IF;
     state_value := work_row.state;
     error_value := work_row.last_error_code;
-    IF state_value NOT IN ('READY','FAILED') AND work_row.deadline_at<=clock_timestamp() THEN
+    IF state_value='CLAIMED' AND work_row.cancel_requested THEN
+        state_value := 'CANCELLING';
+    ELSIF state_value NOT IN ('READY','FAILED','CANCELLED') AND work_row.deadline_at<=clock_timestamp() THEN
         state_value := 'FAILED'; error_value := 'MEMORY_RECALL_DEADLINE';
     END IF;
     IF state_value='READY' THEN
@@ -2196,6 +2202,54 @@ BEGIN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
         'protocol','forest.memory-recall-work/1','query_id',work_row.query_id,'state',state_value,
         'deadline_at',work_row.deadline_at,'error_code',error_value,'evidence_ref',reference_value));
+END;
+$$;
+
+CREATE FUNCTION memory_cancel_recall(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    result_status text;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-recall-cancel/1'
+       OR body->>'reason_code' IS DISTINCT FROM 'SUPERSEDED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_CANCEL_INVALID',
+                'message','Recall cancellation is invalid','status',422));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
+    WHERE bot_id=context->>'bot_id' AND query_id=body->>'query_id' FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_NOT_REQUESTED',
+                'message','Query has no requested recall work','status',404));
+    END IF;
+    IF work_row.cancel_requested THEN
+        IF work_row.cancel_reason IS DISTINCT FROM body->>'reason_code' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_RECALL_CANCEL_CONFLICT',
+                    'message','Recall was cancelled for another reason','status',409));
+        END IF;
+        result_status := CASE WHEN work_row.state='CANCELLED' THEN 'CANCELLED' ELSE 'CANCELLING' END;
+    ELSIF work_row.state IN ('READY','FAILED') OR work_row.deadline_at<=clock_timestamp() THEN
+        result_status := 'TERMINAL';
+    ELSIF work_row.state='CLAIMED' THEN
+        UPDATE __forest_module_schema__.query_recall_work
+        SET cancel_requested=true,cancel_reason='SUPERSEDED',updated_at=clock_timestamp()
+        WHERE bot_id=work_row.bot_id AND query_id=work_row.query_id;
+        result_status := 'CANCELLING';
+    ELSE
+        UPDATE __forest_module_schema__.query_recall_work
+        SET state='CANCELLED',cancel_requested=true,cancel_reason='SUPERSEDED',
+            updated_at=clock_timestamp()
+        WHERE bot_id=work_row.bot_id AND query_id=work_row.query_id;
+        result_status := 'CANCELLED';
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'protocol','forest.memory-recall-cancelled/1','query_id',work_row.query_id,'status',result_status));
 END;
 $$;
 
@@ -2284,6 +2338,13 @@ BEGIN
     IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
     END IF;
+    IF work_row.cancel_requested THEN
+        UPDATE __forest_module_schema__.query_recall_work
+        SET state='CANCELLED',claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND query_id=work_row.query_id;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
     IF work_row.deadline_at<=clock_timestamp() THEN
         UPDATE __forest_module_schema__.query_recall_work
         SET state='FAILED',last_error_code='MEMORY_RECALL_DEADLINE',claim_token=NULL,
@@ -2354,10 +2415,14 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_RECALL_SETTLEMENT_INVALID',
                 'message','Recall result refers to another query','status',422));
     END IF;
-    progress := __forest_module_schema__.memory_read_query_progress(context,
-        jsonb_build_object('query_id',work_row.query_id));
-    phase_value := progress#>>'{value,phase}';
-    IF work_row.deadline_at<=clock_timestamp() THEN
+    IF NOT work_row.cancel_requested AND work_row.deadline_at>clock_timestamp() THEN
+        progress := __forest_module_schema__.memory_read_query_progress(context,
+            jsonb_build_object('query_id',work_row.query_id));
+        phase_value := progress#>>'{value,phase}';
+    END IF;
+    IF work_row.cancel_requested THEN
+        next_state := 'CANCELLED';
+    ELSIF work_row.deadline_at<=clock_timestamp() THEN
         next_state := 'FAILED'; next_error := 'MEMORY_RECALL_DEADLINE';
     ELSIF progress->>'ok' IS DISTINCT FROM 'true' THEN
         next_state := 'FAILED'; next_error := progress#>>'{error,code}';

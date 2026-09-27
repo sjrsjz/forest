@@ -39,6 +39,10 @@ WAIT_EMBEDDING 不在 Worker 内循环 sleep。UNKNOWN 不进入普通重试队�
 
 BLOCKED_UNKNOWN 是独立状态，只周期观察既有事实与截止时间，不执行准备、ANN、冻结或物化。召回编排步骤的回执丢失与嵌入 Effect 的 UNKNOWN 不同：前者允许从已有幂等阶段事实恢复，后者始终不重发。每次 Worker 只调用一个幂等阶段，且受 claim 的剩余绝对时间和有界 handler 时间约束。超时不会撤销已经提交的事实；settle 必须重新读取后决定结果。
 
+`memory.query.cancel/1` 用 query_id 和固定原因 SUPERSEDED 请求停止旧工作。与领取/结算按同一工作行串行：未领取的工作直接进入 CANCELLED；已领取的只登记取消意图并对调用者显示 CANCELLING，当前阶段已发生的外部请求仍按其原 Effect 结算，Worker 在下一次读取时停止推进，当前 claim 结算或租约恢复后落为 CANCELLED。若 READY/FAILED 已先提交，取消返回 TERMINAL，不删除历史结果。已发布的受管证据仍受来源遗忘与读取权限约束。Agent 不得以“取消查询”伪装为撤销已派发的嵌入。
+
+同一模型步骤如果已接纳输入版本 v，之后 Memory 等待期间新 trigger 到达，安全边界选择必须使用新的选择 operation identity，不能重放 v 的旧 `BATCH` 或 `CONTINUE` 回执。若新选择成功，Agent 先持久推进 input revision，再请求取消旧查询并登记新查询；取消回执丢失时，以同一旧 query_id 重试即可。`CONTINUE` 是一次观察，不是永远没有新消息的证明；下一次有资格的安全边界可以进行新的选择。若选择事务提交了 BATCH 而调用回执丢失，Agent 从已提交的 Run input revision 恢复，不重复追加同一批次。
+
 Agent 等待时释放本次执行租约，保留同一个逻辑 Session/Run 和同群排他性。新 trigger 继续入队，在下一次合法模型边界接纳；不会创建并发响应。查询的输入 cut 已固定，新输入只能使尚未准备模型请求的步骤进入明确的新输入版本，不能偷偷改写旧 query。
 
 召回完成后、冻结模型请求前，再通过原安全边界契约检查排队 trigger。若选出新批次，先提交该模型步骤的新输入版本及对应新 query identity，再由 Memory 处理该查询；旧 query 的证据不能冒充新版本的召回结果。已经 handoff 的旧嵌入按原 Effect 结算，不能为了新版本重发同一 attempt。持续触发可能使该步骤多次更新输入，因此截止时间属于整个步骤，不因新输入或重新 claim 延长。模型请求冻结后到达的 trigger 留给下一次模型调用，不能修改正在发出的请求。

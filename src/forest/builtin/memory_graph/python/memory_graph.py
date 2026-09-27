@@ -168,6 +168,20 @@ class MemoryGraph(Plugin):
         )
 
     @service(
+        "memory.query.cancel",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/recall-cancel-input.json",
+        output_schema="schemas/recall-cancel-output.json",
+    )
+    async def cancel_recall(self, payload, ctx):
+        body = {"protocol": "forest.memory-recall-cancel/1", **_plain(payload)}
+        return await ctx.uow.call(
+            "memory.cancel-recall", {"memory": body},
+            operation_id="recall-cancel:" + _digest(body)[7:], timeout=20,
+        )
+
+    @service(
         "memory.query.work-status",
         semantics="read",
         contract="1.0",

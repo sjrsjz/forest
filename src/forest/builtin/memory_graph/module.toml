@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.30.0"
+version = "1.31.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -61,6 +61,7 @@ requests = [
   "uow.execute:memory.prepare-document-facets",
   "uow.execute:memory.begin-query",
   "uow.execute:memory.request-recall",
+  "uow.execute:memory.cancel-recall",
   "uow.execute:memory.prepare-query-part-facets",
   "uow.execute:memory.complete-query-facets",
   "uow.execute:memory.begin-query-matching",
@@ -227,9 +228,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.28.0"
+schema_version = "3.29.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "75d972fbe2aedefceec525c747ae115b0ed0975d61c5ef5d476ac08ad34df156"
+baseline_sha256 = "02a7770c634455031155832ef8d5a315a33c342a0c569d5eb4736657e6eb9ef2"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -874,6 +875,30 @@ contract = "1.0"
 semantics = "read"
 input_schema = "schemas/query-prepare-input.json"
 output_schema = "schemas/recall-work-output.json"
+
+[[components.provides]]
+name = "memory.query.cancel"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/recall-cancel-input.json"
+output_schema = "schemas/recall-cancel-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.cancel-recall-record"
+contract = "1.0"
+function = "memory_cancel_recall"
+input_schema = "schemas/recall-cancel-envelope.json"
+output_schema = "schemas/recall-cancel-output.json"
+
+[[components.unit_of_work_plans]]
+name = "memory.cancel-recall"
+contract = "1.0"
+input_schema = "schemas/recall-cancel-plan-input.json"
+output_schema = "schemas/recall-cancel-output.json"
+timeout_s = 20
+steps = [
+  { id = "memory", component_id = "memory.graph", participant = "memory.cancel-recall-record", input_path = "/memory" }
+]
 
 [[components.unit_of_work_participants]]
 name = "memory.request-recall-record"

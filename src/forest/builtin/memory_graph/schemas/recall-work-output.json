@@ -23,9 +23,11 @@
       "enum": [
         "PENDING",
         "CLAIMED",
+        "CANCELLING",
         "BLOCKED_UNKNOWN",
         "READY",
-        "FAILED"
+        "FAILED",
+        "CANCELLED"
       ]
     },
     "deadline_at": {

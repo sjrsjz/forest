@@ -16,6 +16,9 @@ async def advance(plugin, task, ctx):
     # their committed facts; this worker never dispatches an Embedding Effect.
     async with asyncio.timeout(min(remaining, 150)):
         request = {"query_id": payload["query_id"]}
+        work = await ctx.queries.call("memory.read-recall-work", request, timeout=10)
+        if work["state"] in {"CANCELLING", "CANCELLED"}:
+            return {"query_id": payload["query_id"]}
         progress = await plugin.query_progress(request, ctx)
         phase = progress["phase"]
         action = {
