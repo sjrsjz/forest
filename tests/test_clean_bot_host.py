@@ -1149,6 +1149,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert (await query_stage(query["query_id"], "seeds/original"))["seeds"] == []
             empty_record = await query_stage(query["query_id"], "freeze/original", stage="freeze")
             assert empty_record["result_count"] == empty_record["seed_count"] == 0
+            empty_evidence = await query_stage(query["query_id"], "materialize/original", stage="materialize")
+            assert empty_evidence["evidence_count"] == 0
             await clients[-1].handler(json.dumps({
                 "self_id": int(settings.onebot_self_id), "post_type": "message",
                 "message_type": "group", "sub_type": "normal", "time": 1_720_000_001,
@@ -1302,6 +1304,26 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             final_parts = await frozen_parts(first_parts["last_part_index"])
             assert len(final_parts["parts"]) == 1 and not final_parts["has_more"]
             assert final_parts["parts"][0]["part_kind"] == "TEXT"
+            materialized = await asyncio.gather(
+                query_stage(recall_query["query_id"], "materialize/recall-one", stage="materialize"),
+                query_stage(recall_query["query_id"], "materialize/recall-two", stage="materialize"),
+            )
+            assert materialized[0] == materialized[1]
+            assert materialized[0]["evidence_count"] == 1
+            assert materialized[0]["missing_count"] == 0
+            document = json.loads(await host._kernel.payload.read_bytes(materialized[0]["evidence_ref"]["payload_id"]))
+            assert document["protocol"] == "forest.memory-evidence/1"
+            assert document["current_source"]["external_group_id"] == "933179609"
+            unit_evidence = document["evidence"][0]
+            assert unit_evidence["author_subject_ref"] == "qq:20001"
+            assert unit_evidence["external_group_id"] == "933179609"
+            assert [part["kind"] for part in unit_evidence["parts"]] == ["text", "image", "text"]
+            assert unit_evidence["parts"][0]["text"] == "before"
+            assert unit_evidence["parts"][2]["text"] == "after"
+            assert unit_evidence["parts"][1]["media_ref"]["payload_id"] == first_parts["parts"][1]["payload"]["payload_id"]
+            assert not document["content_truncated"]
+            assert await query_stage(recall_query["query_id"], "materialize/replay", stage="materialize") == materialized[0]
+            assert FakeMilvusClient.search_calls == search_count
 
             # The public UoW revokes Payload, Memory eligibility, graph evidence,
             # and vector refs together before the asynchronous Milvus deletion.
@@ -1369,6 +1391,13 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             ) == frozen[0]
             assert (await frozen_parts())["node"] is None
             assert (await frozen_parts())["parts"] == []
+            with pytest.raises(ForestError) as unavailable:
+                await query_stage(recall_query["query_id"], "materialize/after-forget", stage="materialize")
+            assert unavailable.value.code == "MEMORY_EVIDENCE_UNAVAILABLE"
+            for ref in (materialized[0]["evidence_ref"], empty_evidence["evidence_ref"]):
+                with pytest.raises(ForestError) as revoked:
+                    await host._kernel.payload.read_bytes(ref["payload_id"])
+                assert revoked.value.code == "PAYLOAD_REVOKED"
             index_rows.pop("stale-ref/no-fact")
             with pytest.raises(ForestError) as caught:
                 await memory_instance.invoke_management_query(

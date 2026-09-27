@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.27.0"
+version = "1.28.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -46,6 +46,8 @@ requests = [
   "domain.query:memory.read-matched-seeds",
   "domain.query:memory.read-retrieval-record",
   "domain.query:memory.read-retrieval-parts",
+  "domain.query:memory.read-retrieval-dependencies",
+  "domain.query:memory.read-retrieval-materialization",
   "domain.query:memory.qualify-vector-candidates",
   "domain.query:memory.read-embedding-candidates",
   "domain.query:memory.list-trunks",
@@ -61,6 +63,7 @@ requests = [
   "uow.execute:memory.begin-query-matching",
   "uow.execute:memory.record-query-matches",
   "uow.execute:memory.freeze-retrieval",
+  "uow.execute:memory.publish-retrieval-evidence",
   "uow.execute:memory.reserve-embedding-budget",
   "uow.execute:memory.prepare-embedding-effect",
   "uow.execute:memory.handoff-embedding-effect",
@@ -221,9 +224,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.25.0"
+schema_version = "3.26.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "e3bdf75abd6d1bf9f5c075b86ff635fa3835adb848b7418cb9c9a03d20b21b9c"
+baseline_sha256 = "60eb6c72407d76f9032726ce6ff3cf498ffa4019aa63367670837541ae056bf5"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -825,3 +828,48 @@ contract = "1.0"
 function = "memory_read_retrieval_parts"
 input_schema = "schemas/read-retrieval-parts-input.json"
 output_schema = "schemas/read-retrieval-parts-output.json"
+
+[[components.provides]]
+name = "memory.query.materialize"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/evidence-receipt-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-retrieval-dependencies"
+contract = "1.0"
+function = "memory_read_retrieval_dependencies"
+input_schema = "schemas/read-retrieval-dependencies-input.json"
+output_schema = "schemas/read-retrieval-dependencies-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-retrieval-materialization"
+contract = "1.0"
+function = "memory_read_retrieval_materialization"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/read-retrieval-materialization-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.publish-retrieval-evidence-record"
+contract = "1.0"
+function = "memory_publish_retrieval_evidence"
+input_schema = "schemas/publish-evidence-envelope.json"
+output_schema = "schemas/read-retrieval-materialization-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/evidence_ref"
+owner_component_path = "/input/evidence_ref/owner_component_id"
+owner_kind_path = "/input/evidence_ref/owner_kind"
+owner_id_path = "/input/evidence_ref/owner_id"
+
+[[components.unit_of_work_plans]]
+name = "memory.publish-retrieval-evidence"
+contract = "1.0"
+input_schema = "schemas/publish-evidence-plan-input.json"
+output_schema = "schemas/read-retrieval-materialization-output.json"
+timeout_s = 30
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.publish-retrieval-evidence-record", input_path = "/memory" }
+]

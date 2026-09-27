@@ -278,7 +278,7 @@ MemoryQuery
 2. 路径分数是沿途边权乘积；同一节点只保留最大乘积路径。低于 `min_graph_relevance` 的候选不再入队，按激活值从高到低确定性出队，最多物化 `max_graph_nodes` 个节点。
 3. 同主干相邻边使用 `sequence_weight`，联想边使用 `association_weight`。两种权重及 `min_graph_relevance` 均须在 `(0,1]`，因此路径分数不会沿边增大，最大激活优先出队可只读取每个节点一次。联想贡献自己的业务权重保留为证据元数据，但不能偷偷改变本版本的扩散权重。
 4. 每次展开一个节点时，时序边不占用联想边配额；若合格 `ASSOCIATES_WITH` 边超过 `max_association_edges_per_node`，先按 `(query_id, source_unit_id, relation_id, contribution_id, target_id)` 派生的伪随机顺序选取至多该数量，再进行扩散。相同查询可审计重放，不同查询会得到不同子样本，数据库不得先取全量高出度邻接再在进程内裁剪。
-5. 检索包冻结直接种子、图激活、前驱边、实际进入区域的关系和删除 epoch。模型投影只接受完整源单元前缀；投影确认写独立不可变 `retrieval_projections` 回执，不能原地修改不可变检索项。
+5. 检索包冻结直接种子、图激活、前驱边、实际进入区域的关系和删除 epoch。Memory 规范证据发布写独立不可变 `retrieval_materializations` 回执，不修改检索项；模型能力投影及确认由 Agent 的请求 manifest 持有，不在 Memory 中建立第二份模型投影状态。
 
 默认值为：`seed_limit=4`、`candidate_limit_per_facet=64`、`min_similarity=0.35`、`min_graph_relevance=0.05`、`max_graph_nodes=32`、`max_association_edges_per_node=32`、`sequence_weight=0.55`、`association_weight=0.90`。这些值由 `memory.graph` 的模块配置冻结，可随新 Generation 发布，但一个已冻结检索包不受后来配置变更影响。
 
@@ -312,7 +312,21 @@ query_parts允许文本、图片和有序混合输入，支持文搜图、图搜
 
 该端口只返回 Managed PayloadRef，后续 Worker 仍必须通过 Kernel Payload 读取原文/图片并建立派生载荷父引用；它不授权网络调用，也不声称返回引用时 Payload 内容一定仍有效。删除与实际物化之间的竞争由 Payload 的当前 epoch 与父链检查阻断。
 
-### 7.3 EvidenceBundle 结构
+### 7.3 规范证据物化与发布
+
+`memory.query.materialize/1` 是包内幂等写入服务，要求查询已有冻结区域；不调用 ANN、Embedding 或 LLM。Worker 从固定项目顺序读取原始 parts，正文按 UTF-8 解码，图片保留完整 Managed PayloadRef、媒体类型和尺寸，图文原序不变。原作者身份 Payload 中的事件时身份与主键同时保存；身份快照必须为最多 64 KiB 的 UTF-8 JSON 对象，超限或格式不符明确拒绝，不构造假身份。`forest.memory-evidence/1` 规范载荷记录 Bot/query/bundle、当前群来源、图快照引用，以及每项原群/主干/作者/时间/顺序、命中 parts、种子/激活值和父路径。
+
+正文预算使用匹配准备时固定的 `max_retrieval_chars`，按 Unicode 字符截取，不产生记忆摘要或 API 调用。每源单元最多物化 64 个原序 parts；正文截取及 part 上限均标出 `content_truncated`，保留原始 part_count。图预算的 `truncated`、联想采样的 `association_sampled` 与失效项目的 `missing_count` 分别记录。已失效项目不能用新图邻居顶替；物化中途失效则明确拒绝，不拼接半份来源。
+
+Payload lineage 同时包含查询输入、每项实际 parts、父路径上的全部来源锚点和关系的全部必要证据来源锚点。私有依赖端口每页最多 32 个锚点；每条贡献最多 64 项证据，由 evidence_index CHECK 与创建事务封闭共同约束。64 节点路径最多 4160 个依赖锚点。依赖按 64 个一组写受管载荷，查询输入也按页建立父链，再合成为源单元载荷和最终规范证据；每次写入遵守 Kernel 的 256 父引用上限。最终回执只返回准确 PayloadRef，正文与图片引用不内联入组件帧。120 秒物化 deadline 内未能完成不发布记录。
+
+`retrieval_materializations` 只保存首份成功发布的规范证据引用、项目选择、删除 epoch 与内容截断/缺失计数，不保存模型能力投影。manifest UnitOfWork 先取得删除屏障并验证证据引用，再在 Memory 中按来源、源单元、贡献的稳定顺序取得共享行锁，复核选择及全部冻结路径，最后一次性插入不可变记录。选择必须按项目原序覆盖全部当前合格项目，不能把有效节点伪装成 missing。并发候选收敛到首份成功记录，不覆盖正文。正文候选失败或发布失败不产生成功记录；未接纳 Payload 工件由载荷清理策略处理。
+
+父引用分组只约束每次写入的引用数量，不解除 Kernel 的 4096 项继承来源清单和 32 MiB 载荷上限。超过这些资源上限时明确拒绝发布，不能剥离必要来源来绕过围栏；上层按资源错误处理，不把未发布候选当成可用证据。
+
+重放先重验来源与路径，再读取受管证据验证当前 Payload 状态；失效证据返回 `MEMORY_EVIDENCE_UNAVAILABLE` 或 Kernel Payload 撤销错误，不重新挑选正文。源遗忘通过锚点父链撤销已物化证据，包括空结果对查询输入的依赖。关系单独撤销/来源退役仍须通过 Memory 发布和读取复核阻断。Agent 尚须在模型请求发布/派发边界消费该规范证据并重验引用；模型不支持图片时的能力投影不属于 Memory 或 Provider。
+
+### 7.4 EvidenceBundle 结构
 
 每项证据保留 sources 数组；同一断言有两个群来源时保留两项，不能只取排名最高来源覆盖其余。多源人工内容或显式非裁剪派生工件采用逐 claim 的 source_refs。模型输入不依赖裁剪摘要；默认从稳定源单元/chunk 物化原文。
 
@@ -378,7 +392,7 @@ source_ref、source_unit_id 和 node_ref 是稳定引用；display_name 和群�
 
 示例的parts为源单元的图文证据内容；claims、parts与sources分别描述推断/原始内容/出处，不能把图片相似度转写为模型已经看见的事实。每个part在完整schema中关联其source_refs及media lineage；来自不同群的多个图像段不能平铺成一个无作者的图片数组。图文媒体获取、索引和模态覆盖状态分别报告。
 
-### 7.4 必须进入真实 Provider 输入
+### 7.5 必须进入真实 Provider 输入
 
 Provider adapter 必须把来源信息渲染到实际发送给模型的上下文，不能只留在工具返回元数据、日志或内部 DTO 中。渲染器使用固定版本和来源索引，向模型明确以下约束，再逐项插入数据：
 

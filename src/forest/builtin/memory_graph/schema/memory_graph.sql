@@ -380,7 +380,7 @@ CREATE TABLE relation_contributions (
 CREATE TABLE relation_evidence (
     bot_id text NOT NULL,
     contribution_id text NOT NULL,
-    evidence_index integer NOT NULL CHECK (evidence_index >= 0),
+    evidence_index integer NOT NULL CHECK (evidence_index BETWEEN 0 AND 63),
     source_unit_id text NOT NULL,
     source_revision bigint NOT NULL CHECK (source_revision > 0),
     part_id text NOT NULL CHECK (octet_length(part_id) BETWEEN 1 AND 256),
@@ -837,11 +837,14 @@ CREATE TABLE retrieval_items (
 ALTER TABLE memory_queries ADD CONSTRAINT frozen_query_bundle_fk
     FOREIGN KEY (bot_id,query_id,bundle_id) REFERENCES retrieval_bundles(bot_id,query_id,bundle_id);
 
-CREATE TABLE retrieval_projections (
+CREATE TABLE retrieval_materializations (
     bot_id text NOT NULL,
     bundle_id text NOT NULL,
-    projection_digest text NOT NULL CHECK (projection_digest ~ '^sha256:[a-f0-9]{64}$'),
-    projected_count integer NOT NULL CHECK (projected_count BETWEEN 0 AND 256),
+    evidence_ref jsonb NOT NULL CHECK (jsonb_typeof(evidence_ref)='object'),
+    item_indexes integer[] NOT NULL CHECK (cardinality(item_indexes)<=64),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch>=0),
+    content_truncated boolean NOT NULL,
+    missing_count integer NOT NULL CHECK (missing_count BETWEEN 0 AND 64),
     projected_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,bundle_id),
     FOREIGN KEY (bot_id,bundle_id) REFERENCES retrieval_bundles(bot_id,bundle_id)
@@ -1948,6 +1951,209 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_read_retrieval_dependencies(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    check_value jsonb;
+    refs jsonb;
+    next_unit text;
+    more_value boolean;
+BEGIN
+    check_value := __forest_module_schema__.memory_read_retrieval_parts(context,
+        input||jsonb_build_object('after_part_index',-1,'limit',1));
+    IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+    IF check_value#>'{value,node}'='null'::jsonb THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('available',false,'refs','[]'::jsonb,
+                'next_source_unit_id',NULL,'has_more',false));
+    END IF;
+    WITH RECURSIVE path AS (
+        SELECT i.source_unit_id,i.path_parent_source_unit_id,0 AS depth FROM __forest_module_schema__.retrieval_items i
+        WHERE i.bot_id=context->>'bot_id' AND i.bundle_id=check_value#>>'{value,bundle_id}'
+          AND i.item_index=(input->>'item_index')::integer
+        UNION ALL
+        SELECT i.source_unit_id,i.path_parent_source_unit_id,p.depth+1
+        FROM path p JOIN __forest_module_schema__.retrieval_items i
+          ON i.bot_id=context->>'bot_id' AND i.bundle_id=check_value#>>'{value,bundle_id}'
+         AND i.source_unit_id=p.path_parent_source_unit_id WHERE p.depth<63
+    ), dependencies AS (
+        SELECT source_unit_id FROM path
+        UNION
+        SELECT e.source_unit_id FROM path p
+        JOIN __forest_module_schema__.retrieval_relations r
+          ON r.bot_id=context->>'bot_id' AND r.bundle_id=check_value#>>'{value,bundle_id}'
+         AND r.target_unit_id=p.source_unit_id
+        JOIN __forest_module_schema__.relation_evidence e
+          ON e.bot_id=r.bot_id AND e.contribution_id=r.contribution_id
+    ), page AS (
+        SELECT u.* FROM dependencies d JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=context->>'bot_id' AND u.source_unit_id=d.source_unit_id
+        WHERE input->>'after_source_unit_id' IS NULL
+           OR u.source_unit_id>input->>'after_source_unit_id'
+        ORDER BY u.source_unit_id LIMIT 33
+    ), numbered AS (
+        SELECT *,row_number() OVER (ORDER BY source_unit_id) AS n FROM page
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('source_unit_id',source_unit_id,'payload',
+        jsonb_build_object('payload_id',author_payload_id,'digest',author_payload_digest,
+            'owner_component_id',author_owner_component_id,'owner_kind',author_owner_kind,
+            'owner_id',author_owner_id)) ORDER BY source_unit_id) FILTER (WHERE n<=32),'[]'::jsonb),
+        max(source_unit_id) FILTER (WHERE n<=32),count(*)>32
+    INTO refs,next_unit,more_value FROM numbered;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('available',true,'refs',refs,
+            'next_source_unit_id',next_unit,'has_more',more_value));
+END;
+$$;
+
+CREATE FUNCTION memory_read_retrieval_materialization(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    bundle_row __forest_module_schema__.retrieval_bundles%ROWTYPE;
+    projection_row __forest_module_schema__.retrieval_materializations%ROWTYPE;
+    check_value jsonb;
+    index_value integer;
+    current_source jsonb;
+    max_chars integer;
+BEGIN
+    SELECT * INTO bundle_row FROM __forest_module_schema__.retrieval_bundles
+    WHERE bot_id=context->>'bot_id' AND query_id=input->>'query_id';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RETRIEVAL_NOT_FROZEN',
+                'message','Query has no frozen retrieval result','status',409));
+    END IF;
+    check_value := __forest_module_schema__.memory_read_matched_seeds(context,input);
+    IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+    max_chars := (check_value#>>'{value,policy,max_retrieval_chars}')::integer;
+    SELECT jsonb_build_object('source_id',s.source_id,'source_kind',s.source_kind,
+        'platform',s.platform,'realm_id',s.realm_id,'external_group_id',s.external_group_id,
+        'trunk_id',s.trunk_id) INTO current_source
+    FROM __forest_module_schema__.memory_queries q
+    JOIN __forest_module_schema__.memory_sources s ON s.bot_id=q.bot_id AND s.source_id=q.current_source_id
+    WHERE q.bot_id=bundle_row.bot_id AND q.query_id=bundle_row.query_id;
+    SELECT * INTO projection_row FROM __forest_module_schema__.retrieval_materializations
+    WHERE bot_id=bundle_row.bot_id AND bundle_id=bundle_row.bundle_id;
+    IF FOUND THEN
+        FOREACH index_value IN ARRAY projection_row.item_indexes LOOP
+            check_value := __forest_module_schema__.memory_read_retrieval_parts(context,
+                jsonb_build_object('query_id',bundle_row.query_id,'item_index',index_value,
+                    'after_part_index',-1,'limit',1));
+            IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+            IF check_value#>'{value,node}'='null'::jsonb THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_EVIDENCE_UNAVAILABLE',
+                        'message','Frozen evidence has a revoked source or path','status',409));
+            END IF;
+        END LOOP;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'bundle_id',bundle_row.bundle_id,'result_count',bundle_row.result_count,
+        'current_source',current_source,'max_retrieval_chars',max_chars,
+        'truncated',bundle_row.truncated,'association_sampled',bundle_row.association_sampled,
+        'read_count',bundle_row.read_count,'evidence_ref',projection_row.evidence_ref,
+        'item_indexes',COALESCE(to_jsonb(projection_row.item_indexes),'[]'::jsonb),
+        'content_truncated',projection_row.content_truncated,'missing_count',projection_row.missing_count));
+END;
+$$;
+
+CREATE FUNCTION memory_publish_retrieval_evidence(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    epoch_value jsonb := envelope->'prior'->(envelope#>>'{input,deletion_epoch_step_id}');
+    bundle_row __forest_module_schema__.retrieval_bundles%ROWTYPE;
+    check_value jsonb;
+    index_value integer;
+    selected integer[];
+    dependency_units text[];
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR epoch_value->>'protocol' IS DISTINCT FROM 'forest.payload-epoch/1' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EVIDENCE_AUTHORITY_MISSING',
+                'message','Evidence publication requires the deletion barrier','status',422));
+    END IF;
+    SELECT * INTO bundle_row FROM __forest_module_schema__.retrieval_bundles
+    WHERE bot_id=context->>'bot_id' AND query_id=body->>'query_id' FOR UPDATE;
+    check_value := __forest_module_schema__.memory_read_retrieval_materialization(context,body);
+    IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+    IF check_value#>'{value,evidence_ref}'<>'null'::jsonb THEN RETURN check_value; END IF;
+    SELECT COALESCE(array_agg(value::integer ORDER BY ordinality),ARRAY[]::integer[]) INTO selected
+    FROM jsonb_array_elements_text(body->'item_indexes') WITH ORDINALITY;
+    IF selected IS DISTINCT FROM (SELECT COALESCE(array_agg(DISTINCT v ORDER BY v),ARRAY[]::integer[]) FROM unnest(selected) v)
+       OR cardinality(selected)+(body->>'missing_count')::integer<>bundle_row.result_count
+       OR EXISTS (SELECT 1 FROM unnest(selected) v WHERE v<0 OR v>=bundle_row.result_count)
+       OR body#>>'{evidence_ref,owner_component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body#>>'{evidence_ref,owner_kind}' IS DISTINCT FROM 'retrieval.evidence'
+       OR left(body#>>'{evidence_ref,owner_id}',length(bundle_row.bundle_id)+1)
+            IS DISTINCT FROM bundle_row.bundle_id||'/' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EVIDENCE_INVALID',
+                'message','Evidence selection or ownership is invalid','status',422));
+    END IF;
+    -- Hold semantic dependencies until publication commits. Negative writers
+    -- use the same order: Payload clock, source, unit, contribution.
+    WITH RECURSIVE path AS (
+        SELECT i.source_unit_id,i.path_parent_source_unit_id,0 AS depth
+        FROM __forest_module_schema__.retrieval_items i
+        WHERE i.bot_id=context->>'bot_id' AND i.bundle_id=bundle_row.bundle_id
+          AND i.item_index=ANY(selected)
+        UNION
+        SELECT i.source_unit_id,i.path_parent_source_unit_id,p.depth+1 FROM path p
+        JOIN __forest_module_schema__.retrieval_items i
+          ON i.bot_id=context->>'bot_id' AND i.bundle_id=bundle_row.bundle_id
+         AND i.source_unit_id=p.path_parent_source_unit_id WHERE p.depth<63
+    ), dependencies AS (
+        SELECT source_unit_id FROM path
+        UNION
+        SELECT e.source_unit_id FROM path p JOIN __forest_module_schema__.retrieval_relations r
+          ON r.bot_id=context->>'bot_id' AND r.bundle_id=bundle_row.bundle_id AND r.target_unit_id=p.source_unit_id
+        JOIN __forest_module_schema__.relation_evidence e ON e.bot_id=r.bot_id AND e.contribution_id=r.contribution_id
+        UNION
+        SELECT source_unit_id FROM __forest_module_schema__.memory_query_parts
+        WHERE bot_id=context->>'bot_id' AND query_id=bundle_row.query_id
+    ) SELECT COALESCE(array_agg(source_unit_id ORDER BY source_unit_id),ARRAY[]::text[])
+    INTO dependency_units FROM dependencies;
+    PERFORM 1 FROM __forest_module_schema__.memory_sources s
+    WHERE s.bot_id=context->>'bot_id' AND s.source_id IN (
+        SELECT source_id FROM __forest_module_schema__.source_units
+        WHERE bot_id=s.bot_id AND source_unit_id=ANY(dependency_units))
+    ORDER BY s.source_id FOR SHARE;
+    PERFORM 1 FROM __forest_module_schema__.source_units u
+    WHERE u.bot_id=context->>'bot_id' AND u.source_unit_id=ANY(dependency_units)
+    ORDER BY u.source_unit_id FOR SHARE;
+    PERFORM 1 FROM __forest_module_schema__.relation_contributions c
+    WHERE c.bot_id=context->>'bot_id' AND c.contribution_id IN (
+        SELECT contribution_id FROM __forest_module_schema__.retrieval_relations
+        WHERE bot_id=c.bot_id AND bundle_id=bundle_row.bundle_id)
+    ORDER BY c.contribution_id FOR SHARE;
+    FOR index_value IN 0..bundle_row.result_count-1 LOOP
+        check_value := __forest_module_schema__.memory_read_retrieval_parts(context,
+            jsonb_build_object('query_id',bundle_row.query_id,'item_index',index_value,
+                'after_part_index',-1,'limit',1));
+        IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+        IF check_value#>'{value,node}'='null'::jsonb AND index_value=ANY(selected) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EVIDENCE_UNAVAILABLE',
+                    'message','Evidence source changed before publication','status',409));
+        END IF;
+        IF check_value#>'{value,node}'<>'null'::jsonb AND NOT index_value=ANY(selected) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EVIDENCE_INVALID',
+                    'message','Evidence cannot omit an eligible frozen item','status',422));
+        END IF;
+    END LOOP;
+    INSERT INTO __forest_module_schema__.retrieval_materializations(
+        bot_id,bundle_id,evidence_ref,item_indexes,accepted_deletion_epoch,content_truncated,missing_count)
+    VALUES(context->>'bot_id',bundle_row.bundle_id,body->'evidence_ref',selected,
+        (epoch_value->>'deletion_epoch')::bigint,(body->>'content_truncated')::boolean,
+        (body->>'missing_count')::integer);
+    RETURN __forest_module_schema__.memory_read_retrieval_materialization(context,body);
+END;
+$$;
+
 CREATE FUNCTION memory_query_occurrence_matches(
     requested_bot text, requested_query text, requested_unit text,
     requested_revision bigint, requested_part text, requested_occurrence text
@@ -2798,7 +3004,7 @@ CREATE TRIGGER query_seed_matches_immutable BEFORE UPDATE OR DELETE ON query_see
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER retrieval_items_immutable BEFORE UPDATE OR DELETE ON retrieval_items
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
-CREATE TRIGGER retrieval_projections_immutable BEFORE UPDATE OR DELETE ON retrieval_projections
+CREATE TRIGGER retrieval_materializations_immutable BEFORE UPDATE OR DELETE ON retrieval_materializations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER retrieval_relations_immutable BEFORE UPDATE OR DELETE ON retrieval_relations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();

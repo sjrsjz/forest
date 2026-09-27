@@ -3,6 +3,7 @@ import json
 
 from embedding_work import dispatch as dispatch_embedding
 from embedding_work import recover as recover_embedding
+from evidence_materialization import materialize as materialize_evidence
 from facet_preparation import (
     FACET_BATCH_SIZE,
     MAX_DOCUMENT_FACETS,
@@ -256,6 +257,19 @@ class MemoryGraph(Plugin):
             {"payload_epoch": {"protocol": "forest.payload-epoch-capture/1"}, "memory": body},
             operation_id=ctx.operations.stable("retrieval-freeze:" + _digest(body)[7:]), timeout=30,
         )
+
+    @service(
+        "memory.query.materialize",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/query-prepare-input.json",
+        output_schema="schemas/evidence-receipt-output.json",
+    )
+    async def materialize_query(self, payload, ctx):
+        try:
+            return await materialize_evidence(ctx, payload["query_id"], _digest)
+        except TimeoutError as exc:
+            raise ForestError("MEMORY_EVIDENCE_DEADLINE", "Evidence preparation exceeded its deadline", 504) from exc
 
     @service(
         "memory.query.region",

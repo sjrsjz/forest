@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from jsonschema import Draft202012Validator
 from psycopg import sql
-from psycopg.errors import ForeignKeyViolation, ObjectNotInPrerequisiteState
+from psycopg.errors import CheckViolation, ForeignKeyViolation, ObjectNotInPrerequisiteState
 from psycopg.types.json import Jsonb
 from test_memory_graph_package import _configuration
 from test_schema_bundles import clean_authority as clean_authority
@@ -102,6 +102,12 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
                     "source_unit_id,source_revision,part_id) VALUES (%s,%s,0,'seed',%s,%s)",
                     (store.bot_id, name, revision, "missing" if missing_part else "text"),
                 )
+                if name.startswith("edge/"):
+                    await execute(
+                        "INSERT INTO {}.relation_evidence (bot_id,contribution_id,evidence_index,"
+                        "source_unit_id,source_revision,part_id) VALUES (%s,%s,1,'after',1,'text')",
+                        (store.bot_id, name),
+                    )
 
         for index in range(40):
             await contribution(f"edge/{index}", f"n{index:02}", reverse=bool(index % 2))
@@ -276,8 +282,50 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         assert cross_source["node"]["external_group_id"] == "group/b"
         assert not cross_source["node"]["is_current_source"]
         assert cross_source["node"]["matched_part_ids"] == []
+        dependencies = (await (await execute(
+            "SELECT {}.memory_read_retrieval_dependencies(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                "query_id": "query/one", "item_index": associated_index, "after_source_unit_id": None,
+            })),
+        )).fetchone())["result"]
+        assert dependencies["ok"] and dependencies["value"]["available"]
+        Draft202012Validator(package.snapshot.schema("schemas/read-retrieval-dependencies-output.json")).validate(dependencies["value"])
+        dependency_ids = {ref["source_unit_id"] for ref in dependencies["value"]["refs"]}
+        assert {"seed", "after", body["nodes"][associated_index]["source_unit_id"]} <= dependency_ids
+        with pytest.raises(CheckViolation):
+            await execute(
+                "INSERT INTO {}.relation_evidence (bot_id,contribution_id,evidence_index,"
+                "source_unit_id,source_revision,part_id) VALUES (%s,'edge/0',64,'seed',1,'text')",
+                (store.bot_id,),
+            )
         sequence_index = next(i for i, item in enumerate(body["nodes"]) if item["source_unit_id"] in {"before", "after"})
         assert (await read_parts(sequence_index))["node"] is not None
+        # Private SQL checks the selection; the public manifest independently
+        # verifies the candidate's exact Kernel Payload reference.
+        async def publish(indices, missing):
+            envelope = {"protocol": "forest.uow-step/1", "caller": {"component_id": "memory.graph"},
+                        "input": {"protocol": "forest.memory-evidence-publish/1", "query_id": "query/one",
+                                  "item_indexes": indices, "missing_count": missing, "content_truncated": False,
+                                  "deletion_epoch_step_id": "epoch", "evidence_ref": {
+                                      "payload_id": "evidence/test", "digest": digest,
+                                      "owner_component_id": "memory.graph", "owner_kind": "retrieval.evidence",
+                                      "owner_id": frozen["value"]["bundle_id"] + "/test"}},
+                        "prior": {"epoch": {"protocol": "forest.payload-epoch/1", "deletion_epoch": 0}}}
+            async with conn.transaction():
+                return (await (await execute(
+                    "SELECT {}.memory_publish_retrieval_evidence(%s::jsonb,%s::jsonb) AS result",
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb(envelope)),
+                )).fetchone())["result"]
+
+        rejected = await publish([63], 31)
+        assert not rejected["ok"] and rejected["error"]["code"] == "MEMORY_EVIDENCE_INVALID"
+        omitted = await publish([0], 31)
+        assert not omitted["ok"] and omitted["error"]["code"] == "MEMORY_EVIDENCE_INVALID"
+        assert (await (await execute("SELECT count(*) AS n FROM {}.retrieval_materializations", ())).fetchone())["n"] == 0
+        published = await publish(list(range(32)), 0)
+        assert published["ok"], published
+        Draft202012Validator(package.snapshot.schema("schemas/read-retrieval-materialization-output.json")).validate(published["value"])
+        assert published["value"]["item_indexes"] == list(range(32))
         with pytest.raises(ObjectNotInPrerequisiteState):
             await execute("UPDATE {}.retrieval_items SET activation=0.2", ())
 
@@ -286,7 +334,7 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         with pytest.raises(ForeignKeyViolation):
             await execute(
                 "INSERT INTO {}.relation_evidence (bot_id,contribution_id,evidence_index,"
-                "source_unit_id,source_revision,part_id) VALUES (%s,'edge/0',1,'after',1,'text')",
+                "source_unit_id,source_revision,part_id) VALUES (%s,'edge/0',2,'before',1,'text')",
                 (store.bot_id,),
             )
         old = selected(await neighbours("query/one", limit=128))
@@ -307,6 +355,11 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         )
         assert selected(await neighbours("query/new", limit=128)) == set()
         assert (await read_parts(associated_index))["node"] is None
+        unavailable = (await (await execute(
+            "SELECT {}.memory_read_retrieval_materialization(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": store.bot_id}), Jsonb({"query_id": "query/one"})),
+        )).fetchone())["result"]
+        assert not unavailable["ok"] and unavailable["error"]["code"] == "MEMORY_EVIDENCE_UNAVAILABLE"
         await execute(
             "UPDATE {}.source_units SET eligibility_state='SUPPRESSED',"
             "eligibility_revision=eligibility_revision+1 WHERE bot_id=%s AND source_unit_id='seed'",
