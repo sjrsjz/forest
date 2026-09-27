@@ -924,6 +924,12 @@ CREATE INDEX source_units_modality_idx ON source_units(
 CREATE INDEX source_units_kind_idx ON source_units(
     bot_id,unit_kind,eligibility_state,occurred_at DESC,source_unit_id DESC
 );
+CREATE INDEX eligibility_operations_batch_idx ON eligibility_operations(
+    bot_id,input_batch_ref,context_revision,occurrence_id
+);
+CREATE INDEX pending_input_events_batch_idx ON pending_input_events(
+    bot_id,input_batch_ref,context_revision,state,conversation_ref
+);
 CREATE INDEX relation_left_idx ON relation_contributions(
     bot_id,left_kind,left_id,active,relation_id,contribution_id
 );
@@ -973,6 +979,205 @@ CREATE INDEX embedding_budget_reservations_state_idx ON embedding_budget_reserva
 CREATE FUNCTION reject_immutable_row() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION 'memory.graph immutable fact cannot change' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION memory_begin_query(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_query text := body->>'query_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    epoch_value jsonb := envelope->'prior'->(body->>'deletion_epoch_step_id');
+    domain_row __forest_module_schema__.memory_domains%ROWTYPE;
+    query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    selected_parts jsonb;
+    selected_source text;
+    source_count integer;
+    text_count integer;
+    image_count integer;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-query-begin/1'
+       OR epoch_value->>'protocol' IS DISTINCT FROM 'forest.payload-epoch/1'
+       OR epoch_value->>'deletion_epoch' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INPUT_INVALID',
+                'message','Query preparation requires a current Payload epoch','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/query/'||requested_bot||'/'||requested_query,0));
+    SELECT * INTO domain_row FROM __forest_module_schema__.memory_domains
+    WHERE bot_id=requested_bot FOR SHARE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_DOMAIN_UNBOUND',
+                'message','Query requires a bound embedding domain','status',409));
+    END IF;
+    SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=requested_bot AND query_id=requested_query;
+    IF FOUND THEN
+        IF query_row.operation_id IS DISTINCT FROM requested_operation
+           OR query_row.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_QUERY_IDENTITY_CONFLICT',
+                    'message','Query identity was bound to a different input','status',409));
+        END IF;
+    ELSE
+        IF EXISTS (
+            SELECT 1 FROM __forest_module_schema__.pending_input_events
+            WHERE bot_id=requested_bot AND conversation_ref=body->>'conversation_ref'
+              AND input_batch_ref=body->>'input_batch_ref'
+              AND context_revision=(body->>'context_revision')::bigint
+              AND state='PENDING_CAPTURE'
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_QUERY_CAPTURE_PENDING',
+                    'message','Query input still has unresolved source capture','status',409));
+        END IF;
+        PERFORM o.occurrence_id
+        FROM __forest_module_schema__.eligibility_operations e
+        JOIN __forest_module_schema__.source_occurrences o USING(bot_id,occurrence_id,source_unit_id)
+        JOIN __forest_module_schema__.source_units u USING(bot_id,source_unit_id)
+        JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
+        WHERE o.bot_id=requested_bot AND o.conversation_ref=body->>'conversation_ref'
+          AND e.input_batch_ref=body->>'input_batch_ref'
+          AND e.context_revision=(body->>'context_revision')::bigint
+        ORDER BY u.source_unit_id,o.occurrence_id FOR SHARE OF o,u,s;
+        IF EXISTS (
+            SELECT 1 FROM __forest_module_schema__.eligibility_operations e
+            JOIN __forest_module_schema__.source_occurrences o USING(bot_id,occurrence_id,source_unit_id)
+            JOIN __forest_module_schema__.source_units u USING(bot_id,source_unit_id)
+            JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
+            WHERE e.bot_id=requested_bot AND o.conversation_ref=body->>'conversation_ref'
+              AND e.input_batch_ref=body->>'input_batch_ref'
+              AND e.context_revision=(body->>'context_revision')::bigint
+              AND (o.eligibility_state NOT IN ('ADMITTED','ELIGIBLE')
+                   OR u.eligibility_state NOT IN ('REGISTERED','ELIGIBLE') OR s.status<>'ACTIVE'
+                   OR o.input_batch_ref IS DISTINCT FROM e.input_batch_ref
+                   OR o.context_revision IS DISTINCT FROM e.context_revision)
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_QUERY_INPUT_UNAVAILABLE',
+                    'message','Admitted query membership was revoked','status',409));
+        END IF;
+        WITH members AS (
+            SELECT DISTINCT ON (u.source_unit_id)
+                u.source_id,u.source_unit_id,u.source_revision,u.accepted_deletion_epoch,
+                o.occurrence_id,o.ingress_seq
+            FROM __forest_module_schema__.eligibility_operations e
+            JOIN __forest_module_schema__.source_occurrences o
+              USING(bot_id,occurrence_id,source_unit_id)
+            JOIN __forest_module_schema__.source_units u USING(bot_id,source_unit_id)
+            JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
+            WHERE o.bot_id=requested_bot AND o.conversation_ref=body->>'conversation_ref'
+              AND e.input_batch_ref=body->>'input_batch_ref'
+              AND e.context_revision=(body->>'context_revision')::bigint
+              AND o.eligibility_state IN ('ADMITTED','ELIGIBLE')
+              AND u.eligibility_state IN ('REGISTERED','ELIGIBLE') AND s.status='ACTIVE'
+              AND u.accepted_deletion_epoch<=(epoch_value->>'deletion_epoch')::bigint
+            ORDER BY u.source_unit_id,o.ingress_seq,o.occurrence_id
+        ), parts AS (
+            SELECT m.*,p.part_id,p.part_index,p.part_kind
+            FROM members m JOIN __forest_module_schema__.source_parts p
+              ON p.bot_id=requested_bot AND p.source_unit_id=m.source_unit_id
+            ORDER BY m.ingress_seq,m.occurrence_id,p.part_index LIMIT 257
+        )
+        SELECT jsonb_agg(to_jsonb(parts) ORDER BY ingress_seq,occurrence_id,part_index),
+               min(source_id),count(DISTINCT source_id),
+               count(*) FILTER (WHERE part_kind='TEXT'),
+               count(*) FILTER (WHERE part_kind='IMAGE')
+        INTO selected_parts,selected_source,source_count,text_count,image_count FROM parts;
+        IF selected_parts IS NULL OR source_count<>1 THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_QUERY_INPUT_UNAVAILABLE',
+                    'message','Query does not identify one admitted conversation source','status',409));
+        END IF;
+        IF jsonb_array_length(selected_parts)>256 THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_QUERY_PART_LIMIT',
+                    'message','Query input exceeds 256 source parts','status',422));
+        END IF;
+        INSERT INTO __forest_module_schema__.memory_queries(
+            bot_id,query_id,operation_id,input_digest,current_source_id,input_batch_ref,
+            context_revision,query_mode,fusion_policy_revision,accepted_deletion_epoch)
+        VALUES(requested_bot,requested_query,requested_operation,requested_digest,
+            selected_source,body->>'input_batch_ref',(body->>'context_revision')::bigint,
+            CASE WHEN text_count=0 THEN 'IMAGE' WHEN image_count=0 THEN 'TEXT' ELSE 'MIXED' END,
+            domain_row.fusion_policy_revision,(epoch_value->>'deletion_epoch')::bigint)
+        RETURNING * INTO query_row;
+        INSERT INTO __forest_module_schema__.memory_query_parts(
+            bot_id,query_id,query_part_index,source_unit_id,source_revision,
+            occurrence_id,part_id,modality)
+        SELECT requested_bot,requested_query,(ordinality-1)::integer,
+               value->>'source_unit_id',(value->>'source_revision')::bigint,
+               value->>'occurrence_id',value->>'part_id',value->>'part_kind'
+        FROM jsonb_array_elements(selected_parts) WITH ORDINALITY;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-query/1',
+            'query_id',query_row.query_id,'space_id',domain_row.space_id,
+            'input_batch_ref',query_row.input_batch_ref,'context_revision',query_row.context_revision,
+            'query_mode',query_row.query_mode,'part_count',(
+                SELECT count(*) FROM __forest_module_schema__.memory_query_parts
+                WHERE bot_id=requested_bot AND query_id=requested_query)));
+END;
+$$;
+
+CREATE FUNCTION memory_read_query_parts(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_query text := input->>'query_id';
+    query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    page_value jsonb;
+    last_index integer;
+    has_more boolean;
+BEGIN
+    SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=requested_bot AND query_id=requested_query AND state='OPEN';
+    IF NOT FOUND OR EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_query_parts qp
+        JOIN __forest_module_schema__.source_units u USING(bot_id,source_unit_id)
+        JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
+        JOIN __forest_module_schema__.source_occurrences o
+          ON o.bot_id=qp.bot_id AND o.occurrence_id=qp.occurrence_id
+        WHERE qp.bot_id=requested_bot AND qp.query_id=requested_query
+          AND (u.source_revision<>qp.source_revision
+               OR u.eligibility_state NOT IN ('REGISTERED','ELIGIBLE') OR s.status<>'ACTIVE'
+               OR o.eligibility_state NOT IN ('ADMITTED','ELIGIBLE')
+               OR o.input_batch_ref IS DISTINCT FROM query_row.input_batch_ref
+               OR o.context_revision IS DISTINCT FROM query_row.context_revision)
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INPUT_UNAVAILABLE',
+                'message','Frozen query source membership is unavailable','status',409));
+    END IF;
+    SELECT COALESCE(jsonb_agg(item ORDER BY query_part_index),'[]'::jsonb),max(query_part_index)
+    INTO page_value,last_index FROM (
+        SELECT qp.query_part_index,jsonb_build_object(
+            'query_part_index',qp.query_part_index,'source_unit_id',qp.source_unit_id,
+            'source_revision',qp.source_revision,'occurrence_id',qp.occurrence_id,
+            'part_id',p.part_id,'part_index',p.part_index,'part_kind',p.part_kind,
+            'media_type',p.media_type,'byte_length',p.byte_length,
+            'payload',jsonb_build_object('payload_id',p.payload_id,'digest',p.payload_digest,
+                'owner_component_id',p.payload_owner_component_id,
+                'owner_kind',p.payload_owner_kind,'owner_id',p.payload_owner_id)) AS item
+        FROM __forest_module_schema__.memory_query_parts qp
+        JOIN __forest_module_schema__.source_parts p USING(bot_id,source_unit_id,part_id)
+        WHERE qp.bot_id=requested_bot AND qp.query_id=requested_query
+          AND qp.query_part_index>(input->>'after_part_index')::integer
+        ORDER BY qp.query_part_index LIMIT (input->>'limit')::integer
+    ) page;
+    SELECT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_query_parts
+        WHERE bot_id=requested_bot AND query_id=requested_query AND query_part_index>last_index
+    ) INTO has_more;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('parts',page_value,'next_part_index',last_index,'has_more',has_more));
 END;
 $$;
 

@@ -107,6 +107,28 @@ class MemoryGraph(Plugin):
         await self.ensure_domain(task["payload"], ctx)
         return {"bound": True}
 
+    @service(
+        "memory.query.begin",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/query-begin-input.json",
+        output_schema="schemas/query-begin-output.json",
+    )
+    async def begin_query(self, payload, ctx):
+        return await ctx.uow.call(
+            "memory.begin-query",
+            {
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                "memory": {
+                    **_plain(payload),
+                    "protocol": "forest.memory-query-begin/1",
+                    "deletion_epoch_step_id": "payload_epoch",
+                },
+            },
+            operation_id=ctx.operations.stable("query-begin:" + _digest(payload["query_id"])[7:]),
+            timeout=20,
+        )
+
     @job("memory.facets.prepare")
     async def prepare_document_facets(self, task, ctx):
         request = task["payload"]

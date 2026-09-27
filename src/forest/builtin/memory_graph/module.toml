@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.19.0"
+version = "1.20.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -38,6 +38,7 @@ requests = [
   "service.call:vector.index.delete",
   "domain.query:memory.read-exact-sources",
   "domain.query:memory.read-facet-source",
+  "domain.query:memory.read-query-parts",
   "domain.query:memory.read-embedding-candidates",
   "domain.query:memory.list-trunks",
   "domain.query:memory.query-sources",
@@ -46,6 +47,7 @@ requests = [
   "uow.execute:memory.forget-source",
   "uow.execute:memory.bind-domain",
   "uow.execute:memory.prepare-document-facets",
+  "uow.execute:memory.begin-query",
   "uow.execute:memory.reserve-embedding-budget",
   "uow.execute:memory.prepare-embedding-effect",
   "uow.execute:memory.handoff-embedding-effect",
@@ -85,6 +87,13 @@ name = "vector.index.delete"
 contract = ">=1.0,<2.0"
 required = false
 startup_dependency = false
+
+[[components.provides]]
+name = "memory.query.begin"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/query-begin-input.json"
+output_schema = "schemas/query-begin-output.json"
 
 [[components.provides]]
 name = "memory.domain.ensure"
@@ -192,12 +201,19 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.17.0"
+schema_version = "3.18.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "279fd7ad9e6d35d44a01b933a3a6c62182bf3b83b2c5941f61332313dc7e34c6"
+baseline_sha256 = "9c54fc19d522e83246c929b318caa9d33d77ce3288a910a5758b702ecc8f98a3"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
+
+[[components.domain_queries]]
+name = "memory.read-query-parts"
+contract = "1.0"
+function = "memory_read_query_parts"
+input_schema = "schemas/read-query-parts-input.json"
+output_schema = "schemas/read-query-parts-output.json"
 
 [[components.domain_queries]]
 name = "memory.read-facet-source"
@@ -259,6 +275,13 @@ port = "memory.query-relations"
 default_limit = 10
 max_limit = 20
 timeout_s = 10
+
+[[components.unit_of_work_participants]]
+name = "memory.begin-query-record"
+contract = "1.0"
+function = "memory_begin_query"
+input_schema = "schemas/query-begin-envelope.json"
+output_schema = "schemas/query-begin-output.json"
 
 [[components.unit_of_work_participants]]
 name = "memory.bind-domain-record"
@@ -584,6 +607,17 @@ claim_timeout_s = 5
 handler_timeout_s = 45
 settle_timeout_s = 5
 lease_seconds = 75
+
+[[components.unit_of_work_plans]]
+name = "memory.begin-query"
+contract = "1.0"
+input_schema = "schemas/query-begin-plan-input.json"
+output_schema = "schemas/query-begin-output.json"
+timeout_s = 20
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.begin-query-record", input_path = "/memory" }
+]
 
 [[components.unit_of_work_plans]]
 name = "memory.mark-source-unavailable"

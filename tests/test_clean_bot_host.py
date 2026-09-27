@@ -833,33 +833,75 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     parent_call_id="call/memory/query-admission/host-embedding",
                     timeout_seconds=10,
                 )
-                # Query registration/preparation is the next public boundary.
-                # This fixture exercises the real shared Effect/Embedding/index
-                # pipeline while its source is still outside the archive.
-                await conn.execute(
-                    sql.SQL(
-                        "INSERT INTO {}.memory_queries(bot_id,query_id,operation_id,"
-                        "input_digest,current_source_id,input_batch_ref,context_revision,"
-                        "query_mode,fusion_policy_revision,accepted_deletion_epoch) "
-                        "SELECT bot_id,'query/host-embedding','query/host-embedding',%s,"
-                        "source_id,%s,%s,'MIXED','independent-facets/1',accepted_deletion_epoch "
-                        "FROM {}.source_units WHERE bot_id=%s AND source_unit_id=%s"
-                    ).format(sql.Identifier(memory_namespace), sql.Identifier(memory_namespace)),
-                    ("sha256:" + "2" * 64, batch_ref, context_revision,
-                     settings.bot_id, "onebot-unit:" + event_hash),
+            query_route = FrozenServiceRoute(
+                service_id="memory.query.begin", version=1,
+                caller_component_id="memory.graph", provider_component_id="memory.graph",
+                provider_generation_id=memory_identity.generation_id,
+                graph_id=memory_identity.graph_id,
+                graph_revision=memory_identity.graph_revision,
+                admission_lane="DATA", owned_work=False,
+            )
+            query_input = {
+                "query_id": "query/host-embedding",
+                "conversation_ref": "onebot:group:933179609",
+                "input_batch_ref": batch_ref, "context_revision": context_revision,
+            }
+            query = await memory_instance.runtime_service_handlers()[
+                ("memory.query.begin", 1)
+            ].invoke_routed(
+                query_route,
+                RuntimeServiceInvocation(
+                    "query-begin-host-embedding", 30, "memory.query", settings.bot_id,
+                ),
+                (),
+                query_input,
+            )
+            assert query["query_id"] == "query/host-embedding"
+            assert query["part_count"] == 3 and query["query_mode"] == "MIXED"
+            assert await memory_instance.runtime_service_handlers()[
+                ("memory.query.begin", 1)
+            ].invoke_routed(
+                query_route,
+                RuntimeServiceInvocation(
+                    "query-begin-host-embedding", 30, "memory.query", settings.bot_id,
+                ),
+                (), query_input,
+            ) == query
+            with pytest.raises(ForestError) as caught:
+                await memory_instance.runtime_service_handlers()[
+                    ("memory.query.begin", 1)
+                ].invoke_routed(
+                    query_route,
+                    RuntimeServiceInvocation(
+                        "query-begin-wrong-context", 30, "memory.query", settings.bot_id,
+                    ),
+                    (),
+                    {**query_input, "query_id": "query/wrong-context",
+                     "context_revision": context_revision + 1},
                 )
-                await conn.execute(
-                    sql.SQL(
-                        "INSERT INTO {}.memory_query_parts(bot_id,query_id,query_part_index,"
-                        "source_unit_id,source_revision,occurrence_id,part_id,modality) "
-                        "SELECT p.bot_id,'query/host-embedding',p.part_index,p.source_unit_id,"
-                        "u.source_revision,o.occurrence_id,p.part_id,p.part_kind "
-                        "FROM {}.source_parts p JOIN {}.source_units u USING(bot_id,source_unit_id) "
-                        "JOIN {}.source_occurrences o USING(bot_id,source_unit_id) "
-                        "WHERE p.bot_id=%s AND p.source_unit_id=%s AND o.input_batch_ref=%s"
-                    ).format(*(sql.Identifier(memory_namespace) for _ in range(4))),
-                    (settings.bot_id, "onebot-unit:" + event_hash, batch_ref),
-                )
+            assert caught.value.code == "MEMORY_QUERY_INPUT_UNAVAILABLE"
+            query_parts_port = next(
+                port for port in memory_instance.component["domain_queries"]
+                if port["name"] == "memory.read-query-parts"
+            )
+            first_page = await memory_instance.invoke_management_query(
+                query_parts_port,
+                {"query_id": query["query_id"], "after_part_index": -1, "limit": 2},
+                timeout_seconds=10,
+            )
+            assert first_page["has_more"] is True
+            assert [part["part_kind"] for part in first_page["parts"]] == ["TEXT", "IMAGE"]
+            second_page = await memory_instance.invoke_management_query(
+                query_parts_port,
+                {"query_id": query["query_id"],
+                 "after_part_index": first_page["next_part_index"], "limit": 2},
+                timeout_seconds=10,
+            )
+            assert second_page["has_more"] is False
+            assert [part["part_kind"] for part in second_page["parts"]] == ["TEXT"]
+            async with host.store.pool.connection() as conn, conn.transaction():
+                # Facet preparation is still the next public boundary; registration
+                # above uses the actual isolated Memory service and manifest UoW.
                 await conn.execute(
                     sql.SQL(
                         "INSERT INTO {}.embedding_facets(bot_id,facet_id,purpose,query_id,"
@@ -1094,6 +1136,13 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert forget["suppressed_source_units"] == 1
             assert forget["vector_deletions"] == len(facets) + len(query_facets)
             assert forget["retracted_relations"] == 1
+            with pytest.raises(ForestError) as caught:
+                await memory_instance.invoke_management_query(
+                    query_parts_port,
+                    {"query_id": query["query_id"], "after_part_index": -1, "limit": 2},
+                    timeout_seconds=10,
+                )
+            assert caught.value.code == "MEMORY_QUERY_INPUT_UNAVAILABLE"
             for result_payload_id in {facet["result_payload_id"] for facet in facets + query_facets}:
                 with pytest.raises(ForestError) as caught:
                     await host._kernel.payload.read_bytes(result_payload_id)

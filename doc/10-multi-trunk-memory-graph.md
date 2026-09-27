@@ -240,6 +240,8 @@ LLM 生成联想时，输入源集、提示词/模型配置及端点版本形成
 
 ### 7.1 查询入口
 
+包内入口 `memory.query.begin/1` 接受 query_id、conversation_ref、已接纳的 input_batch_ref 与 context_revision。它通过 manifest UnitOfWork 捕获当前 Payload 删除 epoch，由 Memory participant 在同一事务锁定合格 occurrence/source unit 并登记不可变 query/part 集合；存在尚未完成的来源捕获时拒绝准备，不能悄悄用半份图片输入建立查询。注册的 part 数量上限为 256，超出时明确拒绝，不能以截断冒充完整切口。`memory.read-query-parts` 每页最多 32 个 part，翻页前重验整份固定成员集的来源状态和修订；源失效时拒绝整份查询。正文由包 Worker 按准确 PayloadRef 读取，Host 不参与查询选择。注册本身不产生 facet、不触发 Provider，也不改变 source unit 的归档资格；facet 准备和召回是后续独立步骤。
+
 ```text
 MemoryQuery
   trusted_bot_id, principal_ref, reply_route
@@ -459,4 +461,4 @@ MemoryStoreProfile 整库迁移导出来源注册表、来源时钟、单元、�
 
 这些是后续实现与并发故障测试的验收要求。实现应使用相同已接纳源集合的不同归档排列验证主干结构一致，再单独验证接纳仲裁、权限/删除屏障、Provider 实际请求体和预算上限；不能仅检查数据库元数据就声称来源标记已经到达模型。
 
-当前实现边界：Memory 包内的嵌入及向量发布已支持 DOCUMENT/QUERY 两种用途。QUERY 只允许使用 query 冻结记录里的 InputBatch、context revision、occurrence、part 和源修订；同批不可混合不同查询或用途。活跃 source unit 可以保持 REGISTERED，查询发布不会把它提升为归档 DOCUMENT。两类 facet 都受现有 Effect、预算、来源失效和向量删除围栏约束。集成测试目前通过直接数据库 fixture 注册 query，尚未实现公开查询注册/准备及语义种子选择，不能将该测试视作完整语义召回已完成。
+当前实现边界：Memory 包内的嵌入及向量发布已支持 DOCUMENT/QUERY 两种用途。QUERY 只允许使用 query 冻结记录里的 InputBatch、context revision、occurrence、part 和源修订；同批不可混合不同查询或用途。活跃 source unit 可以保持 REGISTERED，查询发布不会把它提升为归档 DOCUMENT。两类 facet 都受现有 Effect、预算、来源失效和向量删除围栏约束。集成测试目前通过 `memory.query.begin` 包服务注册 query，facet 仍由直接数据库 fixture 准备；尚未实现公开查询 facet 准备及语义种子选择，不能将该测试视作完整语义召回已完成。

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "parts",
+    "next_part_index",
+    "has_more"
+  ],
+  "properties": {
+    "parts": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/part"
+      }
+    },
+    "next_part_index": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 255
+    },
+    "has_more": {
+      "type": "boolean"
+    }
+  },
+  "$defs": {
+    "part": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "part_id",
+        "part_index",
+        "part_kind",
+        "media_type",
+        "byte_length",
+        "payload",
+        "query_part_index",
+        "source_unit_id",
+        "source_revision",
+        "occurrence_id"
+      ],
+      "properties": {
+        "part_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "part_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4095
+        },
+        "part_kind": {
+          "enum": [
+            "TEXT",
+            "IMAGE"
+          ]
+        },
+        "media_type": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "byte_length": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "payload": {
+          "$ref": "#/$defs/payload"
+        },
+        "query_part_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "source_unit_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "source_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "occurrence_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload_id",
+        "digest",
+        "owner_component_id",
+        "owner_kind",
+        "owner_id"
+      ],
+      "properties": {
+        "payload_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "owner_component_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "owner_kind": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "owner_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    }
+  }
+}

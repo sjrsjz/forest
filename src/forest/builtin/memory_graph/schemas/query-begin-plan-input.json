@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payload_epoch",
+    "memory"
+  ],
+  "properties": {
+    "payload_epoch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "forest.payload-epoch-capture/1"
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "query_id",
+        "conversation_ref",
+        "input_batch_ref",
+        "context_revision",
+        "protocol",
+        "deletion_epoch_step_id"
+      ],
+      "properties": {
+        "query_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "conversation_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "input_batch_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "context_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "protocol": {
+          "const": "forest.memory-query-begin/1"
+        },
+        "deletion_epoch_step_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "query_id",
+    "conversation_ref",
+    "input_batch_ref",
+    "context_revision"
+  ],
+  "properties": {
+    "query_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "conversation_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "input_batch_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "context_revision": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}
