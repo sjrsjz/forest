@@ -16,6 +16,7 @@ from facet_preparation import (
 )
 from graph_region import expand as expand_graph
 from query_matching import prepare as prepare_matching
+from recall_work import advance as advance_recall
 from vector_work import delete as delete_vector
 from vector_work import publish as publish_vectors
 
@@ -151,6 +152,39 @@ class MemoryGraph(Plugin):
             # Database publication is not a permanent Payload read permit.
             await ctx.payloads.read_bytes(progress["evidence_ref"])
         return progress
+
+    @service(
+        "memory.query.request",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/recall-request-input.json",
+        output_schema="schemas/recall-request-output.json",
+    )
+    async def request_recall(self, payload, ctx):
+        body = {"protocol": "forest.memory-recall-request/1", **_plain(payload)}
+        return await ctx.uow.call(
+            "memory.request-recall", {"memory": body},
+            operation_id="recall-request:" + _digest(body)[7:], timeout=20,
+        )
+
+    @service(
+        "memory.query.work-status",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/query-prepare-input.json",
+        output_schema="schemas/recall-work-output.json",
+    )
+    async def recall_status(self, payload, ctx):
+        state = await ctx.queries.call(
+            "memory.read-recall-work", {"query_id": payload["query_id"]}, timeout=30
+        )
+        if state["state"] == "READY":
+            await ctx.payloads.read_bytes(state["evidence_ref"])
+        return state
+
+    @job("memory.query.advance")
+    async def advance_recall(self, task, ctx):
+        return await advance_recall(self, task, ctx)
 
     @service(
         "memory.query.prepare",

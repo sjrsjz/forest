@@ -485,6 +485,41 @@ CREATE TABLE query_facet_preparations (
     FOREIGN KEY (bot_id,query_id) REFERENCES memory_queries(bot_id,query_id)
 );
 
+CREATE TABLE query_recall_work (
+    bot_id text NOT NULL,
+    query_id text NOT NULL,
+    deadline_at timestamptz NOT NULL,
+    state text NOT NULL DEFAULT 'PENDING'
+        CHECK (state IN ('PENDING','CLAIMED','BLOCKED_UNKNOWN','READY','FAILED')),
+    claim_token text UNIQUE,
+    claim_payload jsonb,
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count>=0),
+    failure_count integer NOT NULL DEFAULT 0 CHECK (failure_count BETWEEN 0 AND 3),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    last_error_code text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,query_id),
+    FOREIGN KEY (bot_id,query_id) REFERENCES memory_queries(bot_id,query_id),
+    CHECK ((state='CLAIMED') = (claim_token IS NOT NULL)),
+    CHECK ((state='CLAIMED') = (claim_payload IS NOT NULL)),
+    CHECK ((state='CLAIMED') = (lease_deadline IS NOT NULL)),
+    CHECK ((state='FAILED') = (last_error_code IS NOT NULL))
+);
+
+CREATE INDEX query_recall_work_due_idx ON query_recall_work(bot_id,next_attempt_at,query_id)
+    WHERE state IN ('PENDING','CLAIMED','BLOCKED_UNKNOWN');
+
+CREATE TABLE query_recall_settlements (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    claim_token text NOT NULL,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,claim_token)
+);
+
 CREATE TABLE facet_preparation_work (
     bot_id text NOT NULL,
     source_unit_id text NOT NULL,
@@ -1032,6 +1067,9 @@ BEGIN
     RAISE EXCEPTION 'memory.graph immutable fact cannot change' USING ERRCODE='55000';
 END;
 $$;
+
+CREATE TRIGGER recall_settlements_immutable BEFORE UPDATE OR DELETE ON query_recall_settlements
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 
 CREATE FUNCTION memory_begin_query(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
@@ -2121,6 +2159,239 @@ BEGIN
         'protocol','forest.memory-query-progress/1','query_id',requested_query,'phase',phase_value,
         'facet_count',facet_total,'ready_count',ready_total,'unknown_count',unknown_total,
         'failed_count',failed_total,'matched_count',matched_total,'evidence_ref',reference_value));
+END;
+$$;
+
+CREATE FUNCTION memory_read_recall_work(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    check_value jsonb;
+    state_value text;
+    error_value text;
+    reference_value jsonb := 'null'::jsonb;
+BEGIN
+    SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
+    WHERE bot_id=context->>'bot_id' AND query_id=input->>'query_id';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_NOT_REQUESTED',
+                'message','Query has no requested recall work','status',404));
+    END IF;
+    state_value := work_row.state;
+    error_value := work_row.last_error_code;
+    IF state_value NOT IN ('READY','FAILED') AND work_row.deadline_at<=clock_timestamp() THEN
+        state_value := 'FAILED'; error_value := 'MEMORY_RECALL_DEADLINE';
+    END IF;
+    IF state_value='READY' THEN
+        check_value := __forest_module_schema__.memory_read_query_progress(context,input);
+        IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+        IF check_value#>>'{value,phase}' IS DISTINCT FROM 'READY' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EVIDENCE_UNAVAILABLE',
+                    'message','Published recall evidence is unavailable','status',409));
+        END IF;
+        reference_value := check_value#>'{value,evidence_ref}';
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'protocol','forest.memory-recall-work/1','query_id',work_row.query_id,'state',state_value,
+        'deadline_at',work_row.deadline_at,'error_code',error_value,'evidence_ref',reference_value));
+END;
+$$;
+
+CREATE FUNCTION memory_request_recall(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_query text := body->>'query_id';
+    requested_deadline timestamptz := (body->>'deadline_at')::timestamptz;
+    work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    check_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-recall-request/1'
+       OR requested_query IS NULL OR requested_deadline IS NULL OR NOT isfinite(requested_deadline) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_REQUEST_INVALID',
+                'message','Recall request is invalid','status',422));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
+    WHERE bot_id=requested_bot AND query_id=requested_query;
+    IF NOT FOUND THEN
+        IF requested_deadline<=clock_timestamp() OR requested_deadline>clock_timestamp()+interval '10 minutes' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_RECALL_DEADLINE_INVALID',
+                    'message','New recall deadline must be within ten minutes','status',422));
+        END IF;
+        check_value := __forest_module_schema__.memory_read_query_parts(context,
+            jsonb_build_object('query_id',requested_query,'after_part_index',-1,'limit',1));
+        IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+        INSERT INTO __forest_module_schema__.query_recall_work(bot_id,query_id,deadline_at)
+        VALUES(requested_bot,requested_query,requested_deadline) ON CONFLICT (bot_id,query_id) DO NOTHING;
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
+    WHERE bot_id=requested_bot AND query_id=requested_query FOR UPDATE;
+    IF work_row.deadline_at IS DISTINCT FROM requested_deadline THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_REQUEST_CONFLICT',
+                'message','Recall deadline is already fixed','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'protocol','forest.memory-recall-requested/1','query_id',work_row.query_id,'deadline_at',work_row.deadline_at));
+EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_RECALL_REQUEST_INVALID',
+            'message','Recall deadline is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_claim_recall(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    task_payload jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_CLAIM_INVALID',
+                'message','Recall claim is invalid','status',422));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
+    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    IF FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',work_row.claim_payload);
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.query_recall_settlements
+        WHERE bot_id=requested_bot AND claim_token=requested_token
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_CLAIM_TOKEN_REUSED',
+                'message','Recall claim token has already been settled','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
+    WHERE bot_id=requested_bot AND state IN ('PENDING','CLAIMED','BLOCKED_UNKNOWN')
+      AND (state<>'CLAIMED' OR lease_deadline<=clock_timestamp())
+      AND (next_attempt_at<=clock_timestamp() OR deadline_at<=clock_timestamp())
+    ORDER BY next_attempt_at,query_id LIMIT 1 FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    IF work_row.deadline_at<=clock_timestamp() THEN
+        UPDATE __forest_module_schema__.query_recall_work
+        SET state='FAILED',last_error_code='MEMORY_RECALL_DEADLINE',claim_token=NULL,
+            claim_payload=NULL,lease_deadline=NULL,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND query_id=work_row.query_id;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    task_payload := jsonb_build_object('protocol','forest.owned-work-claim/1',
+        'work_id',work_row.query_id,'claim_token',requested_token,'attempt',work_row.attempt_count+1,
+        'operation_id','memory-recall:'||encode(sha256(convert_to(requested_bot||'/'||requested_token,'UTF8')),'hex'),
+        'causal_root_kind','memory.query','causal_root_id',work_row.query_id,
+        'payload',jsonb_build_object('query_id',work_row.query_id,'deadline_at',work_row.deadline_at));
+    UPDATE __forest_module_schema__.query_recall_work
+    SET state='CLAIMED',claim_token=requested_token,claim_payload=task_payload,
+        lease_deadline=clock_timestamp()+requested_lease*interval '1 second',
+        attempt_count=attempt_count+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND query_id=work_row.query_id;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',task_payload);
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_RECALL_CLAIM_INVALID',
+            'message','Recall claim is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_recall(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    prior_row __forest_module_schema__.query_recall_settlements%ROWTYPE;
+    progress jsonb;
+    phase_value text;
+    next_state text := 'PENDING';
+    next_error text;
+    next_delay integer := 1;
+    failures integer := 0;
+    result_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_token IS NULL OR input->>'attempt' !~ '^[1-9][0-9]*$'
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_SETTLEMENT_INVALID',
+                'message','Recall settlement is invalid','status',422));
+    END IF;
+    SELECT * INTO prior_row FROM __forest_module_schema__.query_recall_settlements
+    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    IF FOUND THEN
+        IF prior_row.input_payload=input THEN RETURN prior_row.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_SETTLEMENT_CONFLICT',
+                'message','Recall claim already has another settlement','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
+    WHERE bot_id=requested_bot AND claim_token=requested_token FOR UPDATE;
+    IF NOT FOUND OR work_row.state<>'CLAIMED' OR work_row.query_id IS DISTINCT FROM input->>'work_id'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer
+       OR work_row.lease_deadline<=clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_CLAIM_LOST',
+                'message','Recall claim is no longer current','status',409));
+    END IF;
+    IF input#>>'{outcome,status}'='SUCCEEDED'
+       AND input#>>'{outcome,result,query_id}' IS DISTINCT FROM work_row.query_id THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_SETTLEMENT_INVALID',
+                'message','Recall result refers to another query','status',422));
+    END IF;
+    progress := __forest_module_schema__.memory_read_query_progress(context,
+        jsonb_build_object('query_id',work_row.query_id));
+    phase_value := progress#>>'{value,phase}';
+    IF work_row.deadline_at<=clock_timestamp() THEN
+        next_state := 'FAILED'; next_error := 'MEMORY_RECALL_DEADLINE';
+    ELSIF progress->>'ok' IS DISTINCT FROM 'true' THEN
+        next_state := 'FAILED'; next_error := progress#>>'{error,code}';
+    ELSIF phase_value='FAILED' THEN
+        next_state := 'FAILED'; next_error := 'MEMORY_RECALL_EMBEDDING_FAILED';
+    ELSIF phase_value='BLOCKED_UNKNOWN' THEN
+        next_state := 'BLOCKED_UNKNOWN'; next_delay := 10;
+    ELSIF phase_value='READY' AND input#>>'{outcome,status}'='SUCCEEDED' THEN
+        next_state := 'READY';
+    ELSIF input#>>'{outcome,status}'='FAILED' THEN
+        failures := LEAST(work_row.failure_count+1,3);
+        IF failures>=3 OR (input#>>'{outcome,error,retryable}' IS DISTINCT FROM 'true'
+            AND input#>>'{outcome,error,unknown}' IS DISTINCT FROM 'true'
+            AND input#>>'{outcome,error,code}' NOT IN ('MEMORY_QUERY_VECTORS_PENDING','MEMORY_QUERY_MATCHES_PENDING')) THEN
+            next_state := 'FAILED';
+            next_error := COALESCE(input#>>'{outcome,error,code}','MEMORY_RECALL_WORK_FAILED');
+        ELSE
+            next_delay := power(2,failures)::integer;
+        END IF;
+    END IF;
+    UPDATE __forest_module_schema__.query_recall_work
+    SET state=next_state,last_error_code=next_error,failure_count=failures,
+        claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+        next_attempt_at=clock_timestamp()+next_delay*interval '1 second',updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND query_id=work_row.query_id;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1','work_id',work_row.query_id));
+    INSERT INTO __forest_module_schema__.query_recall_settlements(bot_id,claim_token,input_payload,result_payload)
+    VALUES(requested_bot,requested_token,input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_RECALL_SETTLEMENT_INVALID',
+            'message','Recall settlement is invalid','status',422));
 END;
 $$;
 

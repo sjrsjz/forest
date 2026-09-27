@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.29.0"
+version = "1.30.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -42,6 +42,7 @@ requests = [
   "domain.query:memory.read-facet-source",
   "domain.query:memory.read-query-parts",
   "domain.query:memory.read-query-progress",
+  "domain.query:memory.read-recall-work",
   "domain.query:memory.read-query-vectors",
   "domain.query:memory.read-match-preparation",
   "domain.query:memory.read-matched-seeds",
@@ -59,6 +60,7 @@ requests = [
   "uow.execute:memory.bind-domain",
   "uow.execute:memory.prepare-document-facets",
   "uow.execute:memory.begin-query",
+  "uow.execute:memory.request-recall",
   "uow.execute:memory.prepare-query-part-facets",
   "uow.execute:memory.complete-query-facets",
   "uow.execute:memory.begin-query-matching",
@@ -225,9 +227,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.27.0"
+schema_version = "3.28.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "552a504240a90bc6b24be19e49951c3a8a2de11afb14f168431c716a8a96d894"
+baseline_sha256 = "75d972fbe2aedefceec525c747ae115b0ed0975d61c5ef5d476ac08ad34df156"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -558,6 +560,21 @@ settle_timeout_s = 5
 lease_seconds = 360
 
 [[components.owned_work_handlers]]
+name = "memory.query.advance"
+contract = "1.0"
+handler = "memory.query.advance"
+claim_function = "memory_claim_recall"
+settle_function = "memory_settle_recall"
+input_schema = "schemas/recall-work-input.json"
+output_schema = "schemas/recall-work-result.json"
+max_concurrency = 2
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 180
+settle_timeout_s = 5
+lease_seconds = 210
+
+[[components.owned_work_handlers]]
 name = "memory.domain.bind"
 contract = "1.0"
 handler = "memory.domain.bind"
@@ -843,6 +860,44 @@ contract = "1.0"
 semantics = "read"
 input_schema = "schemas/query-prepare-input.json"
 output_schema = "schemas/query-progress-output.json"
+
+[[components.provides]]
+name = "memory.query.request"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/recall-request-input.json"
+output_schema = "schemas/recall-request-output.json"
+
+[[components.provides]]
+name = "memory.query.work-status"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/recall-work-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.request-recall-record"
+contract = "1.0"
+function = "memory_request_recall"
+input_schema = "schemas/recall-request-envelope.json"
+output_schema = "schemas/recall-request-output.json"
+
+[[components.unit_of_work_plans]]
+name = "memory.request-recall"
+contract = "1.0"
+input_schema = "schemas/recall-request-plan-input.json"
+output_schema = "schemas/recall-request-output.json"
+timeout_s = 20
+steps = [
+  { id = "memory", component_id = "memory.graph", participant = "memory.request-recall-record", input_path = "/memory" }
+]
+
+[[components.domain_queries]]
+name = "memory.read-recall-work"
+contract = "1.0"
+function = "memory_read_recall_work"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/recall-work-output.json"
 
 [[components.domain_queries]]
 name = "memory.read-query-progress"

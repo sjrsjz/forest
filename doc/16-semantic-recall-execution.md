@@ -33,6 +33,12 @@ Agent 必须先持久提交模型步骤输入和 query identity，再请求 Memo
 
 WAIT_EMBEDDING 不在 Worker 内循环 sleep。UNKNOWN 不进入普通重试队列。网络或模块暂时不可用只允许有界退避；总截止时间到达写明失败，不能让群永久保持无响应。取消召回工作不等价于取消已经 handoff 的嵌入：必须观察原 Effect，并保持费用结算和来源撤销规则。
 
+公开 `memory.query.request/1` 只接受已经登记的 query_id 和绝对 deadline_at，以 query_id 唯一登记 Memory owned-work。截止时间不得超过登记时的十分钟；重放必须给出相同时间，不能延长。`memory.query.work-status/1` 只读返回 PENDING、CLAIMED、BLOCKED_UNKNOWN、READY 或 FAILED，以及原截止时间、错误码和已验证证据引用。未登记工作返回明确错误。其 READY 仍必须重验规范证据和 Payload。
+
+工作表只保存调度事实，不保存业务阶段。每次 claim 在同一 Bot 内用 SKIP LOCKED 领取到期工作，独占 token、attempt 和 lease；同 token 重放返回原 claim。settle 锁住准确 claim，再从查询事实归约终态或下一次唤醒；重复 settle 要求原输入完全相同。过期 claim 不能提交结算，截止失败不能因重放恢复为运行态。普通连续暂时错误最多三次；成功观察重置该错误计数，嵌入等待不消耗重试次数。
+
+BLOCKED_UNKNOWN 是独立状态，只周期观察既有事实与截止时间，不执行准备、ANN、冻结或物化。召回编排步骤的回执丢失与嵌入 Effect 的 UNKNOWN 不同：前者允许从已有幂等阶段事实恢复，后者始终不重发。每次 Worker 只调用一个幂等阶段，且受 claim 的剩余绝对时间和有界 handler 时间约束。超时不会撤销已经提交的事实；settle 必须重新读取后决定结果。
+
 Agent 等待时释放本次执行租约，保留同一个逻辑 Session/Run 和同群排他性。新 trigger 继续入队，在下一次合法模型边界接纳；不会创建并发响应。查询的输入 cut 已固定，新输入只能使尚未准备模型请求的步骤进入明确的新输入版本，不能偷偷改写旧 query。
 
 召回完成后、冻结模型请求前，再通过原安全边界契约检查排队 trigger。若选出新批次，先提交该模型步骤的新输入版本及对应新 query identity，再由 Memory 处理该查询；旧 query 的证据不能冒充新版本的召回结果。已经 handoff 的旧嵌入按原 Effect 结算，不能为了新版本重发同一 attempt。持续触发可能使该步骤多次更新输入，因此截止时间属于整个步骤，不因新输入或重新 claim 延长。模型请求冻结后到达的 trigger 留给下一次模型调用，不能修改正在发出的请求。

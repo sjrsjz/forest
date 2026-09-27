@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "memory"
+  ],
+  "properties": {
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "query_id",
+        "deadline_at"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "forest.memory-recall-request/1"
+        },
+        "query_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "deadline_at": {
+          "type": "string",
+          "format": "date-time",
+          "minLength": 20,
+          "maxLength": 64
+        }
+      }
+    }
+  }
+}

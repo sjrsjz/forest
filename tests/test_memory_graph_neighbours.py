@@ -1,4 +1,5 @@
 import hashlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -204,13 +205,98 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         )
         assert (await progress("query/status"))["phase"] == "WAIT_EMBEDDING"
         for state, phase in (("PREPARED","WAIT_EMBEDDING"), ("DISPATCHED","WAIT_EMBEDDING"),
-                             ("UNKNOWN","BLOCKED_UNKNOWN"), ("SUPPRESSED","FAILED")):
+                             ("UNKNOWN","BLOCKED_UNKNOWN")):
             await execute(
                 "UPDATE {}.embedding_facets SET state=%s WHERE bot_id=%s AND facet_id='query/status-facet'",
                 (state,store.bot_id),
             )
             result = await progress("query/status")
             assert result["phase"] == phase and result["ready_count"] == 0
+        deadline = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        request = {"protocol":"forest.uow-step/1", "caller":{
+            "component_id":"memory.graph","generation_id":"generation/test"},
+            "input":{"protocol":"forest.memory-recall-request/1",
+                     "query_id":"query/status","deadline_at":deadline},"prior":{}}
+        async def request_work(body):
+            return (await (await execute(
+                "SELECT {}.memory_request_recall(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id":store.bot_id}),Jsonb(body)),
+            )).fetchone())["result"]
+        requested = await request_work(request)
+        assert requested["ok"] and await request_work(request) == requested
+        changed = {**request,"input":{**request["input"],"deadline_at":(
+            datetime.now(timezone.utc)+timedelta(minutes=6)).isoformat()}}
+        assert (await request_work(changed))["error"]["code"] == "MEMORY_RECALL_REQUEST_CONFLICT"
+        async def claim(token):
+            return (await (await execute(
+                "SELECT {}.memory_claim_recall(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id":store.bot_id}),Jsonb({"protocol":"forest.owned-work-claim-request/1",
+                    "claim_token":token,"lease_seconds":210})),
+            )).fetchone())["result"]
+        claimed = await claim("recall-claim/one")
+        assert claimed["ok"] and claimed["value"]["payload"]["query_id"] == "query/status"
+        assert await claim("recall-claim/one") == claimed
+        assert (await claim("recall-claim/two"))["value"] is None
+        settlement = {"protocol":"forest.owned-work-settle-request/1",
+            "work_id":"query/status","claim_token":"recall-claim/one","attempt":1,
+            "outcome":{"status":"SUCCEEDED","result":{"query_id":"query/status"}}}
+        async def settle(body):
+            return (await (await execute(
+                "SELECT {}.memory_settle_recall(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id":store.bot_id}),Jsonb(body)),
+            )).fetchone())["result"]
+        settled = await settle(settlement)
+        assert settled["ok"] and await settle(settlement) == settled
+        assert (await claim("recall-claim/one"))["error"]["code"] == "MEMORY_RECALL_CLAIM_TOKEN_REUSED"
+        assert (await settle({**settlement,"outcome":{"status":"FAILED", "error":{
+            "code":"TEST","status":500,"retryable":True,"unknown":False}}}))["error"]["code"] == "MEMORY_RECALL_SETTLEMENT_CONFLICT"
+        blocked = (await (await execute(
+            "SELECT {}.memory_read_recall_work(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id":store.bot_id}),Jsonb({"query_id":"query/status"})),
+        )).fetchone())["result"]
+        assert blocked["value"]["state"] == "BLOCKED_UNKNOWN"
+        await execute(
+            "UPDATE {}.query_recall_work SET next_attempt_at=clock_timestamp()-interval '1 second' "
+            "WHERE bot_id=%s AND query_id='query/status'",(store.bot_id,),
+        )
+        second = await claim("recall-claim/two")
+        assert second["value"]["attempt"] == 2
+        await execute(
+            "UPDATE {}.query_recall_work SET lease_deadline=clock_timestamp()-interval '1 second' "
+            "WHERE bot_id=%s AND query_id='query/status'",(store.bot_id,),
+        )
+        third = await claim("recall-claim/three")
+        assert third["value"]["attempt"] == 3
+        stale = {**settlement,"claim_token":"recall-claim/two","attempt":2}
+        assert (await settle(stale))["error"]["code"] == "MEMORY_RECALL_CLAIM_LOST"
+        await execute(
+            "UPDATE {}.embedding_facets SET state='SUPPRESSED' "
+            "WHERE bot_id=%s AND facet_id='query/status-facet'",(store.bot_id,),
+        )
+        assert (await progress("query/status"))["phase"] == "FAILED"
+        final = {**settlement,"claim_token":"recall-claim/three","attempt":3}
+        assert (await settle(final))["ok"]
+        finished = (await (await execute(
+            "SELECT {}.memory_read_recall_work(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id":store.bot_id}),Jsonb({"query_id":"query/status"})),
+        )).fetchone())["result"]
+        assert finished["value"]["state"] == "FAILED"
+        assert finished["value"]["error_code"] == "MEMORY_RECALL_EMBEDDING_FAILED"
+        expired_request = {**request,"input":{**request["input"],
+            "query_id":"query/two","deadline_at":(
+                datetime.now(timezone.utc)-timedelta(seconds=1)).isoformat()}}
+        assert (await request_work(expired_request))["error"]["code"] == "MEMORY_RECALL_DEADLINE_INVALID"
+        await execute(
+            "INSERT INTO {}.query_recall_work(bot_id,query_id,deadline_at) "
+            "VALUES (%s,'query/two',clock_timestamp()-interval '1 second')",(store.bot_id,),
+        )
+        assert (await claim("recall-claim/expired"))["value"] is None
+        expired = (await (await execute(
+            "SELECT {}.memory_read_recall_work(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id":store.bot_id}),Jsonb({"query_id":"query/two"})),
+        )).fetchone())["result"]
+        assert expired["value"]["state"] == "FAILED"
+        assert expired["value"]["error_code"] == "MEMORY_RECALL_DEADLINE"
         first = await neighbours("query/one")
         assert first == await neighbours("query/one")
         assert first["association_sampled"]

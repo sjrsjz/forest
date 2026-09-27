@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "query_id",
+    "state",
+    "deadline_at",
+    "error_code",
+    "evidence_ref"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.memory-recall-work/1"
+    },
+    "query_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "state": {
+      "enum": [
+        "PENDING",
+        "CLAIMED",
+        "BLOCKED_UNKNOWN",
+        "READY",
+        "FAILED"
+      ]
+    },
+    "deadline_at": {
+      "type": "string",
+      "format": "date-time",
+      "minLength": 20,
+      "maxLength": 64
+    },
+    "error_code": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "evidence_ref": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "payload_id",
+            "digest",
+            "owner_component_id",
+            "owner_kind",
+            "owner_id"
+          ],
+          "properties": {
+            "payload_id": {
+              "$ref": "#/$defs/id"
+            },
+            "digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "owner_component_id": {
+              "$ref": "#/$defs/id"
+            },
+            "owner_kind": {
+              "$ref": "#/$defs/id"
+            },
+            "owner_id": {
+              "$ref": "#/$defs/id"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "READY"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "evidence_ref": {
+            "type": "object"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "evidence_ref": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "FAILED"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error_code": {
+            "type": "string"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "error_code": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ]
+}

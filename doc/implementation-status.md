@@ -169,6 +169,10 @@ Agent 目前仍未消费该规范证据。下一步需要把语义召回纳入�
 
 [16 持久语义召回](16-semantic-recall-execution.md) 规定后续 Memory owned-work、Agent 步骤输入版本、等待后接纳新 trigger 和总截止时间。15 号文档已删除 Provider 拥有内容投影的旧目标语义。但当前代码的 `ChatCompletionsMaterializeDriver` 仍在宿主执行 `prepare_model_request`，Agent 的 `model.input` 仍未继承完整输入父链；必须把模型能力投影移入 Agent 包、保留 Provider 纯传输序列化边界，再验收真正的 Agent 语义证据接入。这些缺口尚未解决，阶段查询通过不能代替端到端实现。
 
+Memory 包现有 `memory.query.request/1`、`memory.query.work-status/1` 与 `memory.query.advance` owned-work，按已登记 query_id 和不可延长的绝对截止时间工作。任务表只保存 claim、lease、attempt、退避及终态；实际阶段仍来自 `memory.query.progress/1`。Worker 每次只执行一个现有幂等阶段，WAIT_EMBEDDING 交还租约，BLOCKED_UNKNOWN 不触发付费请求；过期 claim 的结算被拒绝，失败最多三次。READY 状态读取再次检查 Memory 路径和受管证据载荷。群 Agent 尚未通过这些公开端口消费证据；查询输入改版时取消旧工作、Agent 持久等待和 Provider 投影移交仍需实现，不能据此宣称群内语义召回已上线。
+
+固定包内容后，Linux 隔离 PostgreSQL 与宿主 Worker 的两项集成验证通过，用时约 163 秒。数据库验证覆盖请求合流与截止冲突、UNKNOWN 停驻、重复结算、token 重用拒绝、lease 过期后的旧 claim 拒绝、故障/截止终态；宿主验证覆盖新查询由 owned-work 自动完成准备、嵌入等待、固定 ANN、冻结和证据发布，READY 读取、遗忘后读取拒绝、热替换与重启。未发真实 QQ 消息，测试容器受 1 CPU/768 MiB 限额约束。中途一次测试因运行时改写了同版本包内容而被包仓库正确拒绝，最终在包内容固定后重新完整通过。
+
 ## 8. 下一切换顺序
 
 1. 补齐遗忘管理的固定目标计划、较大范围选择器与持续 Payload scrub；补齐发布崩溃重放验证。

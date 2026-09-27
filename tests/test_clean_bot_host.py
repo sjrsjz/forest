@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -1337,6 +1338,54 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert ready_progress["evidence_ref"] == materialized[0]["evidence_ref"]
             assert FakeMilvusClient.search_calls == search_count
 
+            # The owned Memory worker advances a fresh query from capture through
+            # embedding, fixed ANN, region freeze and evidence publication.
+            automatic_query = await memory_instance.runtime_service_handlers()[
+                ("memory.query.begin", 1)
+            ].invoke_routed(
+                query_route,
+                RuntimeServiceInvocation("query-begin-automatic", 30, "memory.query", settings.bot_id),
+                (), {"query_id": "query/automatic-host",
+                     "conversation_ref": "onebot:group:933179609",
+                     "input_batch_ref": recall_batch, "context_revision": recall_revision},
+            )
+            automatic_deadline = (datetime.now(timezone.utc) + timedelta(minutes=3)).isoformat()
+            async def request_automatic(operation, deadline):
+                service_id = "memory.query.request"
+                return await memory_instance.runtime_service_handlers()[(service_id, 1)].invoke_routed(
+                    FrozenServiceRoute(
+                        service_id=service_id, version=1,
+                        caller_component_id="memory.graph", provider_component_id="memory.graph",
+                        provider_generation_id=memory_identity.generation_id,
+                        graph_id=memory_identity.graph_id,
+                        graph_revision=memory_identity.graph_revision,
+                        admission_lane="DATA", owned_work=False,
+                    ),
+                    RuntimeServiceInvocation(operation, 30, "memory.query", settings.bot_id),
+                    (), {"query_id": automatic_query["query_id"], "deadline_at": deadline},
+                )
+            requested = await request_automatic("request/automatic-a", automatic_deadline)
+            assert await request_automatic("request/automatic-b", automatic_deadline) == requested
+            with pytest.raises(ForestError) as conflicting_deadline:
+                await request_automatic("request/automatic-conflict", (
+                    datetime.now(timezone.utc) + timedelta(minutes=4)).isoformat())
+            assert conflicting_deadline.value.code == "MEMORY_RECALL_REQUEST_CONFLICT"
+            async with asyncio.timeout(100):
+                status_poll = 0
+                while True:
+                    status_poll += 1
+                    state = await query_stage(automatic_query["query_id"],
+                                              f"status/automatic-{status_poll}", stage="work-status")
+                    if state["state"] == "READY":
+                        break
+                    assert state["state"] != "FAILED", state
+                    await asyncio.sleep(0.2)
+            assert state["evidence_ref"] is not None
+            assert (await query_stage(automatic_query["query_id"],
+                                      "status/automatic-replay", stage="work-status")) == state
+            assert (await query_stage(automatic_query["query_id"],
+                                      "progress/automatic", stage="progress"))["phase"] == "READY"
+
             # The public UoW revokes Payload, Memory eligibility, graph evidence,
             # and vector refs together before the asynchronous Milvus deletion.
             previous_epoch = await host._kernel.payload.epoch()
@@ -1395,6 +1444,10 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert forget["vector_deletions"] == len(facets) + len(query_facets)
             assert forget["retracted_relations"] == 1
             assert (await query_stage(recall_query["query_id"], "seeds/recall-after-forget"))["seeds"] == []
+            with pytest.raises(ForestError) as revoked_work:
+                await query_stage(automatic_query["query_id"],
+                                  "status/automatic-revoked", stage="work-status")
+            assert revoked_work.value.code == "MEMORY_EVIDENCE_UNAVAILABLE"
             with pytest.raises(ForestError) as revoked_progress:
                 await query_stage(recall_query["query_id"], "progress/revoked", stage="progress")
             assert revoked_progress.value.code == "MEMORY_EVIDENCE_UNAVAILABLE"
