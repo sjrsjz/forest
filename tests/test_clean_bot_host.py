@@ -1147,6 +1147,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             original_matches = await query_stage(query["query_id"], "match/original", stage="match")
             assert original_matches["match_count"] == 0
             assert (await query_stage(query["query_id"], "seeds/original"))["seeds"] == []
+            empty_record = await query_stage(query["query_id"], "freeze/original", stage="freeze")
+            assert empty_record["result_count"] == empty_record["seed_count"] == 0
             await clients[-1].handler(json.dumps({
                 "self_id": int(settings.onebot_self_id), "post_type": "message",
                 "message_type": "group", "sub_type": "normal", "time": 1_720_000_001,
@@ -1263,6 +1265,22 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert seed_node["activation"] == 1.0
             assert FakeMilvusClient.search_calls == search_count
 
+            frozen = await asyncio.gather(
+                query_stage(recall_query["query_id"], "freeze/recall-one", stage="freeze"),
+                query_stage(recall_query["query_id"], "freeze/recall-two", stage="freeze"),
+            )
+            assert frozen[0] == frozen[1]
+            assert frozen[0]["result_count"] == len(region["nodes"])
+            assert frozen[0]["seed_count"] == sum(node["is_seed"] for node in region["nodes"])
+            assert FakeMilvusClient.search_calls == search_count
+            async with host.store.pool.connection() as conn:
+                record = await (await conn.execute(
+                    sql.SQL("SELECT state,bundle_id FROM {}.memory_queries WHERE bot_id=%s AND query_id=%s").format(sql.Identifier(memory_namespace)),
+                    (settings.bot_id, recall_query["query_id"]),
+                )).fetchone()
+                assert record["state"] == "FROZEN"
+                assert record["bundle_id"] == frozen[0]["bundle_id"]
+
             # The public UoW revokes Payload, Memory eligibility, graph evidence,
             # and vector refs together before the asynchronous Milvus deletion.
             previous_epoch = await host._kernel.payload.epoch()
@@ -1324,6 +1342,9 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert (await query_stage(
                 recall_query["query_id"], "region/recall-after-forget", stage="region"
             ))["nodes"] == []
+            assert await query_stage(
+                recall_query["query_id"], "freeze/recall-after-forget", stage="freeze"
+            ) == frozen[0]
             index_rows.pop("stale-ref/no-fact")
             with pytest.raises(ForestError) as caught:
                 await memory_instance.invoke_management_query(

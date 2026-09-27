@@ -228,6 +228,36 @@ class MemoryGraph(Plugin):
         return await prepare_matching(ctx, payload["query_id"], self.profile["retrieval"])
 
     @service(
+        "memory.query.freeze",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/query-prepare-input.json",
+        output_schema="schemas/retrieval-record-output.json",
+    )
+    async def freeze_query(self, payload, ctx):
+        query_id = payload["query_id"]
+        recorded = await ctx.queries.call("memory.read-retrieval-record", {"query_id": query_id}, timeout=10)
+        if recorded is not None:
+            return recorded
+        region = await self.query_region(payload, ctx)
+        fields = (
+            "source_unit_id", "source_revision", "rank_score", "activation", "is_seed",
+            "path_parent_source_unit_id", "path_edge_id",
+        )
+        body = {
+            "protocol": "forest.memory-retrieval-freeze/1", "query_id": query_id,
+            "nodes": [{key: node[key] for key in fields} for node in region["nodes"]],
+            "read_count": region["read_count"], "truncated": region["truncated"],
+            "association_sampled": region["association_sampled"],
+            "deletion_epoch_step_id": "payload_epoch",
+        }
+        return await ctx.uow.call(
+            "memory.freeze-retrieval",
+            {"payload_epoch": {"protocol": "forest.payload-epoch-capture/1"}, "memory": body},
+            operation_id=ctx.operations.stable("retrieval-freeze:" + _digest(body)[7:]), timeout=30,
+        )
+
+    @service(
         "memory.query.region",
         semantics="read",
         contract="1.0",

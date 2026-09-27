@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "null"
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "query_id",
+        "bundle_id",
+        "result_count",
+        "seed_count",
+        "read_count",
+        "deletion_epoch",
+        "truncated",
+        "association_sampled"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "forest.memory-retrieval-record/1"
+        },
+        "query_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "bundle_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "result_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "seed_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "read_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "deletion_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "association_sampled": {
+          "type": "boolean"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "caller",
+    "input",
+    "prior"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.uow-step/1"
+    },
+    "caller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component_id",
+        "generation_id"
+      ],
+      "properties": {
+        "component_id": {
+          "const": "memory.graph"
+        },
+        "generation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "query_id",
+        "nodes",
+        "read_count",
+        "truncated",
+        "association_sampled",
+        "deletion_epoch_step_id"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "forest.memory-retrieval-freeze/1"
+        },
+        "query_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "nodes": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_unit_id",
+              "source_revision",
+              "rank_score",
+              "activation",
+              "is_seed",
+              "path_parent_source_unit_id",
+              "path_edge_id"
+            ],
+            "properties": {
+              "source_unit_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "source_revision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "rank_score": {
+                "type": "number",
+                "minimum": 0
+              },
+              "activation": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "maximum": 1
+              },
+              "is_seed": {
+                "type": "boolean"
+              },
+              "path_parent_source_unit_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "path_edge_id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "minLength": 1,
+                "maxLength": 256
+              }
+            }
+          }
+        },
+        "read_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "association_sampled": {
+          "type": "boolean"
+        },
+        "deletion_epoch_step_id": {
+          "const": "payload_epoch"
+        }
+      }
+    },
+    "prior": {
+      "type": "object"
+    }
+  }
+}

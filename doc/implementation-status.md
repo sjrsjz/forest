@@ -53,7 +53,7 @@
 | OneBot adapter | `adapter_onebot` | Binding、入站投影与发送语义在 Worker；WebSocket 在 Generation Driver |
 | Agent | `agent_runtime` | CorePrompt、模型/工具循环、审批与 reload 恢复均在隔离 Worker 和包私有 SQL 内 |
 | Conversation | `conversation_scheduler` | 同群串行、跨群并发、安全边界合流、静默归档和上下文裁剪 |
-| Memory | `memory_graph` | 多主干来源、图文嵌入、精确召回、种子及按需图区域读取；最终证据冻结和 Agent 语义接入待补齐 |
+| Memory | `memory_graph` | 多主干来源、图文嵌入、精确召回、固定匹配、按需图区域读取及检索区域冻结；原文物化和 Agent 语义接入待补齐 |
 
 内核的 Runtime、Payload、Authorization、Effect 与 Audit Authority 仍是可信微内核组件。它们不是可卸载业务插件，也不应迁入 `builtin`。
 
@@ -65,7 +65,7 @@
 |---|---|---|---|
 | Agent | `builtin/agent_runtime` | 隔离 Worker、私有 SQL、manifest UoW 与 owned-work 已接入生产图 | 删除未引用的旧宿主实现；继续补齐可观测管理面 |
 | Conversation | `builtin/conversation_scheduler` | 入站、分类、静默归档、Agent 调度与安全边界合流已接入生产图 | 扩充管理查询与长时间压力验证 |
-| Memory | `builtin/memory_graph` | 多模态来源、归档资格、精确召回、DOCUMENT/QUERY 嵌入发布、种子与按需图区域读取、单来源遗忘事务已运行 | 最终证据冻结及 Agent 语义召回接入、联想学习写入、遗忘计划/物理清理和完整管理面 |
+| Memory | `builtin/memory_graph` | 多模态来源、归档资格、精确召回、DOCUMENT/QUERY 嵌入发布、固定匹配、按需图扩散、检索区域冻结、单来源遗忘事务已运行 | 完整证据物化及 Agent 语义召回接入、联想学习写入、遗忘计划/物理清理和完整管理面 |
 
 OneBot Adapter 现在按消息形态调用 manifest 声明的四条入站 UnitOfWork 计划。Conversation、Memory/Media、Shell 与分类 participant 在同一事务计划内提交；Host 不再提供 `kernel.uow.onebot.ingress` 业务服务。
 
@@ -119,7 +119,7 @@ OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 
 
 Memory 包已注册 `memory.embedding.dispatch` 和 `memory.embedding.recover` 两类 owned-work：Provider 成功绑定并完成 domain.bind 后才自动领取最多 32 个图文 facet；Memory 持有预算、Kernel Effect 与 facet 的 prepare/handoff/observe 事务，Provider 包只物化请求并执行 HTTP。原 claim 在 Bot 级事务锁下合流，避免并发重复领取；失败和明确未发送有冷却时间，预算耗尽延至下一 UTC 日。过期 PREPARED attempt 只放弃并释放预算，DISPATCHED attempt 只观察 UNKNOWN，恢复任务绝不重发网络请求。PostgreSQL 域状态测试和宿主启动/重启测试已通过；真实宿主图已用假 HTTP 客户端验证一条归档群消息的文本与图片 facet 经 `EMBEDDED` 发布为 `READY`，并写入独立向量索引。
 
-旧宿主 Memory 执行栈已移除，图区域扩散算法位于 `builtin/memory_graph/python/graph_region.py`。嵌入派发已通过 Kernel Effect、Memory 和 Embedding 包的联合测试；崩溃后恢复与真实供应商响应尚未端到端验收。独立向量索引包已有 PostgreSQL 持久 ref 围栏：同 ref 写删串行、删除建立不可逆 tombstone，删除后的 upsert 被拒绝；后台周期清扫会重放 tombstone 删除，以收敛 Milvus 超时后的迟到写入。Memory 已用包内 owned-work 按 Embedding batch 读取结果、验证每个 facet 的向量摘要并发布稳定 ref；PostgreSQL 复核来源后才把 facet 置为 `READY`，失效候选写删除 outbox，另一包内任务执行删除。隔离 PostgreSQL 加真实 Milvus 的索引测试，以及假 Embedding HTTP、假 Milvus 的宿主图文发布、outbox 删除、热替换和重启测试已通过。单来源遗忘事务已接入包公开服务；管理面的固定目标计划与物理载荷清理、最终证据冻结、跨主干联想写入、语义召回及真实召回试验仍未完成。在接入并验收之前，管理 UI 不能宣称这些能力可用。
+旧宿主 Memory 执行栈已移除，图区域扩散算法位于 `builtin/memory_graph/python/graph_region.py`。嵌入派发已通过 Kernel Effect、Memory 和 Embedding 包的联合测试；崩溃后恢复与真实供应商响应尚未端到端验收。独立向量索引包已有 PostgreSQL 持久 ref 围栏：同 ref 写删串行、删除建立不可逆 tombstone，删除后的 upsert 被拒绝；后台周期清扫会重放 tombstone 删除，以收敛 Milvus 超时后的迟到写入。Memory 已用包内 owned-work 按 Embedding batch 读取结果、验证每个 facet 的向量摘要并发布稳定 ref；PostgreSQL 复核来源后才把 facet 置为 `READY`，失效候选写删除 outbox，另一包内任务执行删除。隔离 PostgreSQL 加真实 Milvus 的索引测试，以及假 Embedding HTTP、假 Milvus 的宿主图文发布、outbox 删除、热替换和重启测试已通过。单来源遗忘事务已接入包公开服务；管理面的固定目标计划与物理载荷清理、完整证据物化、跨主干联想写入、语义召回及真实召回试验仍未完成。在接入并验收之前，管理 UI 不能宣称这些能力可用。
 
 `memory.source.forget/1` 是单来源的事务原语，尚未作为 WebUI 高影响操作开放。Memory prepare participant 锁定来源单元并输出其作者载荷锚点；`kernel.payload` 的通用 `payload.forget-anchor-from-prior` 仅接受具有唯一完整根来源的不可变锚点，按当前删除屏障撤销该来源及所有已知派生 Payload。Memory apply participant 只消费版本化回执和选中 Payload ID 集合，在自己的 namespace 内同步失效受影响 source unit/occurrence/facet、停用关系端点与证据贡献，并为全部 facet ref 写不可逆删除 outbox。任一步拒绝整体回滚；重放返回原回执，同 operation 并发只推进一次 epoch。跨群派生载荷如果命中来源闭包也会失效，不按当前查询群覆盖来源。更大范围选择器、固定影响集合预览和 Kernel Payload 的持续物理 scrub 仍待完成。
 
@@ -145,14 +145,18 @@ Embedding 与向量发布主链同时支持 `DOCUMENT`/`QUERY`，用途来自持
 
 `memory.query.region/1` 已把种子读取接入包内按需最大乘积扩散，旧的全图加载 helper 已删除。种子、邻接及关系证据复用相同的 SQL 来源可见性规则；数据库分别寻找两条时序邻接，并对合格联想贡献先做查询派生限量采样，再向 Worker 返回。节点读取预算在展开前执行，失效节点也消耗预算；最大 64 次节点读取、每点 128 条联想边及扩散阶段 20 秒上限与包消息帧约束一致。配置及模块自带 UI 均收敛为 `(0,1]` 扩散权重，不再接受会放大路径分数的权重。
 
-真实 PostgreSQL 邻接测试覆盖高出度限量采样、相同查询稳定子样本、不同查询不同子样本、双向跨主干关系、来源群/作者、队列尾部、迟到归档/关系、证据集合创建事务封闭、part/修订外键、抑制与退役。4 项算法回归覆盖最强路径、环、读取预算、失效节点及权重为 1 时保留直接种子。假 Embedding HTTP/假 Milvus 加真实 PostgreSQL 的宿主验证覆盖区域公共服务、遗忘后区域为空、热替换与重启。区域只返回引用和元数据；最终 EvidenceBundle 冻结、原文物化、联想学习写入及 Agent 模型输入接入仍未完成。
+真实 PostgreSQL 邻接测试覆盖高出度限量采样、相同查询稳定子样本、不同查询不同子样本、双向跨主干关系、来源群/作者、队列尾部、迟到归档/关系、证据集合创建事务封闭、part/修订外键、抑制与退役。4 项算法回归覆盖最强路径、环、读取预算、失效节点及权重为 1 时保留直接种子。假 Embedding HTTP/假 Milvus 加真实 PostgreSQL 的宿主验证覆盖区域公共服务、遗忘后区域为空、热替换与重启。区域只返回引用和元数据；完整 EvidenceBundle 原文物化、联想学习写入及 Agent 模型输入接入仍未完成。
 
-匹配回执的宿主验证覆盖 ANN 第二个 facet 故障后的部分准备拒绝、保留已提交回执并补齐、两个调用合流到同一完整集合、完整重放与种子/区域读取不再增加 ANN 调用。图文匹配保留 IMAGE/TEXT 查询模态，来源遗忘后种子及区域立即为空，热替换和重启通过。单来源遗忘 prepare 已改为只读不可变 anchor，实际源锁在 Payload 删除屏障之后由 apply 获取，修正匹配外键锁与遗忘提前源锁的反向等待风险。15 项 PostgreSQL/算法/宿主验证通过；最终证据冻结、原文物化和 Agent 接入仍未完成。
+匹配回执的宿主验证覆盖 ANN 第二个 facet 故障后的部分准备拒绝、保留已提交回执并补齐、两个调用合流到同一完整集合、完整重放与种子/区域读取不再增加 ANN 调用。图文匹配保留 IMAGE/TEXT 查询模态，来源遗忘后种子及区域立即为空，热替换和重启通过。单来源遗忘 prepare 已改为只读不可变 anchor，实际源锁在 Payload 删除屏障之后由 apply 获取，修正匹配外键锁与遗忘提前源锁的反向等待风险。15 项 PostgreSQL/算法/宿主验证通过；完整证据物化、原文物化和 Agent 接入仍未完成。
+
+`memory.query.freeze/1` 已由包内 Worker、私有查询和 manifest UnitOfWork 实现。提交事务按固定匹配策略重验种子集合、源修订及父路径，把检索项目与实际路径边一次性写入不可变记录并推进查询为 FROZEN；失败发生在任何记录写入之前。同一查询的并发冻结收敛到同一回执，空结果可以冻结，读取和重放不再调用 ANN。删除后原回执保留历史元数据，只读召回立即过滤已失效来源；回执不携带原文或读取权限。
+
+此次真实 PostgreSQL、算法及宿主验证共 15 项通过，覆盖并发冻结、空区域、固定回执、遗忘过滤、热替换及重启。邻接验证另外覆盖 32 节点/31 条父路径的冻结，以及伪造种子排名、非种子激活值、边、未结算父节点和源修订的拒绝与零部分写入。嵌入预算验证首次在 Windows 临时包目录 rename 处遭遇访问错误；使用独立短临时路径复验通过，未修改生产代码增加重试。完整证据正文/媒体物化、模型输入及 Agent 语义接入仍未完成。
 
 ## 8. 下一切换顺序
 
 1. 补齐遗忘管理的固定目标计划、较大范围选择器与持续 Payload scrub；补齐发布崩溃重放验证。
-2. 在只读区域阶段上接入最终证据冻结与跨主干联想学习；恢复及重放需与删除 epoch、Generation 围栏收敛。
+2. 在已冻结检索区域上补齐原文及多模态证据物化、Agent 语义召回接入和跨主干联想学习；恢复及重放需与删除 epoch、Generation 围栏收敛。
 3. 补齐证据浏览的进一步分页以及图文真实召回试验。
 4. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
 5. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。

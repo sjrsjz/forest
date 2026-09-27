@@ -797,56 +797,45 @@ CREATE TABLE retrieval_bundles (
     bot_id text NOT NULL,
     bundle_id text NOT NULL CHECK (octet_length(bundle_id) BETWEEN 1 AND 256),
     query_id text NOT NULL,
-    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    operation_id text NOT NULL,
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
-    index_snapshot_at timestamptz NOT NULL,
-    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
-    result_limit integer NOT NULL CHECK (result_limit BETWEEN 1 AND 256),
-    seed_limit integer NOT NULL CHECK (seed_limit BETWEEN 1 AND 256),
-    candidate_limit_per_facet integer NOT NULL CHECK (
-        candidate_limit_per_facet BETWEEN 1 AND 256
-    ),
-    min_similarity real NOT NULL CHECK (min_similarity BETWEEN -1 AND 1),
-    min_graph_relevance real NOT NULL CHECK (
-        min_graph_relevance > 0 AND min_graph_relevance <= 1
-    ),
-    sequence_weight real NOT NULL CHECK (sequence_weight > 0 AND sequence_weight <= 1),
-    association_weight real NOT NULL CHECK (
-        association_weight > 0 AND association_weight <= 1
-    ),
-    max_association_edges_per_node integer NOT NULL CHECK (
-        max_association_edges_per_node BETWEEN 1 AND 4096
-    ),
-    sampling_seed text NOT NULL CHECK (octet_length(sampling_seed) BETWEEN 1 AND 256),
-    seed_count integer NOT NULL CHECK (seed_count BETWEEN 0 AND seed_limit),
-    result_count integer NOT NULL CHECK (result_count BETWEEN 0 AND 256),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch>=0),
+    read_count integer NOT NULL CHECK (read_count BETWEEN 0 AND 64),
+    truncated boolean NOT NULL,
+    association_sampled boolean NOT NULL,
+    seed_count integer NOT NULL CHECK (seed_count BETWEEN 0 AND 64),
+    result_count integer NOT NULL CHECK (result_count BETWEEN seed_count AND 64),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,bundle_id),
     UNIQUE (bot_id,query_id),
-    UNIQUE (bot_id,operation_id),
-    FOREIGN KEY (bot_id,query_id) REFERENCES memory_queries(bot_id,query_id)
+    FOREIGN KEY (bot_id,query_id) REFERENCES query_match_preparations(bot_id,query_id),
+    UNIQUE (bot_id,query_id,bundle_id)
 );
 
 CREATE TABLE retrieval_items (
     bot_id text NOT NULL,
     bundle_id text NOT NULL,
-    item_index integer NOT NULL CHECK (item_index BETWEEN 0 AND 255),
+    item_index integer NOT NULL CHECK (item_index BETWEEN 0 AND 63),
     source_unit_id text NOT NULL,
-    source_revision bigint NOT NULL CHECK (source_revision > 0),
-    rank_micros bigint NOT NULL CHECK (rank_micros >= 0),
-    activation_micros bigint NOT NULL CHECK (
-        activation_micros > 0 AND activation_micros <= 1000000
-    ),
+    source_revision bigint NOT NULL,
+    rank_score double precision NOT NULL CHECK (rank_score>=0 AND rank_score<=256),
+    activation double precision NOT NULL CHECK (activation>0 AND activation<=1),
     is_seed boolean NOT NULL,
     path_parent_source_unit_id text,
     path_edge_id text,
     PRIMARY KEY (bot_id,bundle_id,item_index),
     UNIQUE (bot_id,bundle_id,source_unit_id),
     FOREIGN KEY (bot_id,bundle_id) REFERENCES retrieval_bundles(bot_id,bundle_id),
-    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    FOREIGN KEY (bot_id,source_unit_id,source_revision)
+        REFERENCES source_units(bot_id,source_unit_id,source_revision),
+    FOREIGN KEY (bot_id,bundle_id,path_parent_source_unit_id)
+        REFERENCES retrieval_items(bot_id,bundle_id,source_unit_id),
     CHECK ((path_parent_source_unit_id IS NULL) = (path_edge_id IS NULL)),
-    CHECK (is_seed OR path_parent_source_unit_id IS NOT NULL)
+    CHECK (is_seed = (path_parent_source_unit_id IS NULL))
 );
+
+ALTER TABLE memory_queries ADD CONSTRAINT frozen_query_bundle_fk
+    FOREIGN KEY (bot_id,query_id,bundle_id) REFERENCES retrieval_bundles(bot_id,query_id,bundle_id);
 
 CREATE TABLE retrieval_projections (
     bot_id text NOT NULL,
@@ -861,18 +850,20 @@ CREATE TABLE retrieval_projections (
 CREATE TABLE retrieval_relations (
     bot_id text NOT NULL,
     bundle_id text NOT NULL,
-    relation_index integer NOT NULL CHECK (relation_index BETWEEN 0 AND 65535),
-    edge_id text NOT NULL CHECK (octet_length(edge_id) BETWEEN 1 AND 256),
+    relation_index integer NOT NULL CHECK (relation_index BETWEEN 0 AND 63),
+    edge_id text NOT NULL,
     relation_kind text NOT NULL CHECK (relation_kind IN ('SEQUENCE','ASSOCIATED')),
     source_unit_id text NOT NULL,
     target_unit_id text NOT NULL,
-    weight_micros bigint NOT NULL CHECK (weight_micros BETWEEN 1 AND 1000000),
+    weight double precision NOT NULL CHECK (weight>0 AND weight<=1),
     contribution_id text,
     PRIMARY KEY (bot_id,bundle_id,relation_index),
     UNIQUE (bot_id,bundle_id,edge_id,source_unit_id,target_unit_id),
-    FOREIGN KEY (bot_id,bundle_id) REFERENCES retrieval_bundles(bot_id,bundle_id),
-    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
-    FOREIGN KEY (bot_id,target_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    FOREIGN KEY (bot_id,bundle_id,source_unit_id)
+        REFERENCES retrieval_items(bot_id,bundle_id,source_unit_id),
+    FOREIGN KEY (bot_id,bundle_id,target_unit_id)
+        REFERENCES retrieval_items(bot_id,bundle_id,source_unit_id),
+    FOREIGN KEY (bot_id,contribution_id) REFERENCES relation_contributions(bot_id,contribution_id),
     CHECK (source_unit_id<>target_unit_id),
     CHECK ((relation_kind='ASSOCIATED') = (contribution_id IS NOT NULL))
 );
@@ -886,7 +877,7 @@ CREATE TABLE association_journal (
     bundle_id text NOT NULL,
     trigger_source_unit_id text NOT NULL,
     seed_source_unit_id text NOT NULL,
-    seed_rank_micros bigint NOT NULL CHECK (seed_rank_micros >= 0),
+    seed_rank_score double precision NOT NULL CHECK (seed_rank_score >= 0 AND seed_rank_score <= 256),
     state text NOT NULL DEFAULT 'PENDING_ARCHIVE' CHECK (
         state IN ('PENDING_ARCHIVE','PROMOTED','SUPPRESSED')
     ),
@@ -903,24 +894,6 @@ CREATE TABLE association_journal (
     CHECK (trigger_source_unit_id<>seed_source_unit_id),
     CHECK ((state='PROMOTED') = (contribution_id IS NOT NULL)),
     CHECK ((state='PROMOTED') = (promoted_at IS NOT NULL))
-);
-
-CREATE TABLE retrieval_matches (
-    bot_id text NOT NULL,
-    bundle_id text NOT NULL,
-    item_index integer NOT NULL,
-    match_index integer NOT NULL CHECK (match_index BETWEEN 0 AND 4095),
-    query_facet_id text NOT NULL,
-    document_facet_id text NOT NULL,
-    query_modality text NOT NULL CHECK (query_modality IN ('TEXT','IMAGE')),
-    document_modality text NOT NULL CHECK (document_modality IN ('TEXT','IMAGE')),
-    candidate_rank integer NOT NULL CHECK (candidate_rank BETWEEN 1 AND 256),
-    score real NOT NULL CHECK (score = score),
-    PRIMARY KEY (bot_id,bundle_id,item_index,match_index),
-    FOREIGN KEY (bot_id,bundle_id,item_index)
-        REFERENCES retrieval_items(bot_id,bundle_id,item_index),
-    FOREIGN KEY (bot_id,query_facet_id) REFERENCES embedding_facets(bot_id,facet_id),
-    FOREIGN KEY (bot_id,document_facet_id) REFERENCES embedding_facets(bot_id,facet_id)
 );
 
 CREATE INDEX sources_external_group_idx ON memory_sources(
@@ -1213,7 +1186,7 @@ DECLARE
     has_more boolean;
 BEGIN
     SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
-    WHERE bot_id=requested_bot AND query_id=requested_query AND state='OPEN';
+    WHERE bot_id=requested_bot AND query_id=requested_query AND state IN ('OPEN','FROZEN');
     IF NOT FOUND OR EXISTS (
         SELECT 1 FROM __forest_module_schema__.memory_query_parts qp
         JOIN __forest_module_schema__.source_units u USING(bot_id,source_unit_id)
@@ -1695,6 +1668,160 @@ BEGIN
         'value',jsonb_build_object('policy',preparation.policy,'result',jsonb_build_object(
             'protocol','forest.memory-query-seeds/1','query_id',query_row.query_id,
             'space_id',preparation.space_id,'index_snapshot_at',query_row.created_at,'seeds',seeds)));
+END;
+$$;
+
+CREATE FUNCTION memory_read_retrieval_record(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+        (SELECT jsonb_build_object('protocol','forest.memory-retrieval-record/1',
+            'query_id',b.query_id,'bundle_id',b.bundle_id,'result_count',b.result_count,
+            'seed_count',b.seed_count,'read_count',b.read_count,
+            'deletion_epoch',b.accepted_deletion_epoch,'truncated',b.truncated,
+            'association_sampled',b.association_sampled)
+         FROM __forest_module_schema__.retrieval_bundles b
+         WHERE b.bot_id=context->>'bot_id' AND b.query_id=input->>'query_id'));
+$$;
+
+CREATE FUNCTION memory_freeze_retrieval(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    epoch_value jsonb := envelope->'prior'->(envelope#>>'{input,deletion_epoch_step_id}');
+    query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    seed_view jsonb;
+    policy jsonb;
+    seed_set jsonb;
+    cache jsonb := '{}'::jsonb;
+    nodes jsonb := body->'nodes';
+    edges jsonb := '[]'::jsonb;
+    item jsonb;
+    seed jsonb;
+    parent jsonb;
+    page jsonb;
+    edge jsonb;
+    weight_value double precision;
+    index_value integer := 0;
+    seed_count integer := 0;
+    bundle_value text;
+    seen text[] := ARRAY[]::text[];
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR epoch_value->>'protocol' IS DISTINCT FROM 'forest.payload-epoch/1' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RETRIEVAL_AUTHORITY_MISSING',
+                'message','Retrieval freeze requires the deletion barrier','status',422));
+    END IF;
+    SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=context->>'bot_id' AND query_id=body->>'query_id' FOR UPDATE;
+    IF query_row.state='FROZEN' THEN
+        RETURN __forest_module_schema__.memory_read_retrieval_record(context,body);
+    END IF;
+    seed_view := __forest_module_schema__.memory_read_matched_seeds(context,body);
+    IF seed_view->>'ok' IS DISTINCT FROM 'true' THEN RETURN seed_view; END IF;
+    policy := seed_view#>'{value,policy}';
+    SELECT COALESCE(jsonb_agg(value ORDER BY ordinality),'[]'::jsonb) INTO seed_set
+    FROM jsonb_array_elements(seed_view#>'{value,result,seeds}') WITH ORDINALITY
+    WHERE ordinality<=(policy->>'max_graph_nodes')::integer;
+    IF jsonb_array_length(nodes)>(policy->>'max_graph_nodes')::integer
+       OR (body->>'read_count')::integer NOT BETWEEN jsonb_array_length(nodes)
+            AND (policy->>'max_graph_nodes')::integer
+       OR jsonb_array_length(nodes)<>(SELECT count(DISTINCT value->>'source_unit_id')
+            FROM jsonb_array_elements(nodes)) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RETRIEVAL_INVALID',
+                'message','Retrieval region violates its node bounds','status',422));
+    END IF;
+    FOR item IN SELECT value FROM jsonb_array_elements(nodes) LOOP
+        page := __forest_module_schema__.memory_read_graph_neighbours(context,
+            jsonb_build_object('query_id',body->>'query_id',
+                'source_unit_id',item->>'source_unit_id',
+                'association_limit',(policy->>'max_association_edges_per_node')::integer));
+        IF page->>'ok' IS DISTINCT FROM 'true' THEN RETURN page; END IF;
+        IF page#>'{value,node}'='null'::jsonb
+           OR page#>>'{value,node,source_revision}' IS DISTINCT FROM item->>'source_revision' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_RETRIEVAL_STALE',
+                    'message','Retrieval source is no longer eligible','status',409));
+        END IF;
+        cache := cache||jsonb_build_object(item->>'source_unit_id',page->'value');
+        SELECT value INTO seed FROM jsonb_array_elements(seed_set)
+        WHERE value->>'source_unit_id'=item->>'source_unit_id';
+        IF (item->>'is_seed')::boolean THEN
+            IF seed IS NULL OR item->>'path_parent_source_unit_id' IS NOT NULL
+               OR item->>'path_edge_id' IS NOT NULL
+               OR (item->>'activation')::double precision<>1.0
+               OR (item->>'rank_score')::double precision<>(seed->>'rank_score')::double precision THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_RETRIEVAL_STALE',
+                        'message','Retrieval seed does not match fixed receipts','status',409));
+            END IF;
+            seed_count := seed_count+1;
+        ELSE
+            SELECT value INTO parent FROM jsonb_array_elements(nodes)
+            WHERE value->>'source_unit_id'=item->>'path_parent_source_unit_id';
+            SELECT value INTO edge FROM jsonb_array_elements(
+                cache#>ARRAY[item->>'path_parent_source_unit_id','edges'])
+            WHERE value->>'target_id'=item->>'source_unit_id'
+              AND value->>'edge_id'=item->>'path_edge_id';
+            IF seed IS NOT NULL OR parent IS NULL OR edge IS NULL
+               OR NOT (item->>'path_parent_source_unit_id'=ANY(seen)) THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_RETRIEVAL_STALE',
+                        'message','Retrieval path is not an eligible rooted path','status',409));
+            END IF;
+            weight_value := (policy->>CASE edge->>'relation'
+                WHEN 'SEQUENCE' THEN 'sequence_weight' ELSE 'association_weight' END)::double precision;
+            IF (item->>'rank_score')::double precision<>0.0
+               OR (item->>'activation')::double precision < (policy->>'min_graph_relevance')::double precision
+               OR (item->>'activation')::double precision <>
+                  (parent->>'activation')::double precision*weight_value THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_RETRIEVAL_INVALID',
+                        'message','Retrieval activation does not match its path','status',422));
+            END IF;
+            edges := edges||jsonb_build_array(jsonb_build_object(
+                'source',parent->>'source_unit_id','target',item->>'source_unit_id',
+                'edge_id',edge->>'edge_id','relation',edge->>'relation',
+                'contribution_id',edge->>'contribution_id','weight',weight_value));
+        END IF;
+        seen := array_append(seen,item->>'source_unit_id');
+    END LOOP;
+    IF seed_count<>jsonb_array_length(seed_set) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RETRIEVAL_STALE',
+                'message','Retrieval is missing a qualified seed','status',409));
+    END IF;
+    bundle_value := 'retrieval:'||encode(sha256(convert_to(
+        jsonb_build_array(context->>'bot_id',query_row.query_id)::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.retrieval_bundles(
+        bot_id,bundle_id,query_id,operation_id,input_digest,accepted_deletion_epoch,
+        read_count,truncated,association_sampled,seed_count,result_count)
+    VALUES(context->>'bot_id',bundle_value,query_row.query_id,context->>'operation_id',
+        context->>'participant_input_digest',(epoch_value->>'deletion_epoch')::bigint,
+        (body->>'read_count')::integer,(body->>'truncated')::boolean,
+        (body->>'association_sampled')::boolean,seed_count,jsonb_array_length(nodes));
+    FOR item IN SELECT value FROM jsonb_array_elements(nodes) LOOP
+        INSERT INTO __forest_module_schema__.retrieval_items(
+            bot_id,bundle_id,item_index,source_unit_id,source_revision,rank_score,
+            activation,is_seed,path_parent_source_unit_id,path_edge_id)
+        VALUES(context->>'bot_id',bundle_value,index_value,item->>'source_unit_id',
+            (item->>'source_revision')::bigint,(item->>'rank_score')::double precision,
+            (item->>'activation')::double precision,(item->>'is_seed')::boolean,
+            item->>'path_parent_source_unit_id',item->>'path_edge_id');
+        index_value := index_value+1;
+    END LOOP;
+    INSERT INTO __forest_module_schema__.retrieval_relations(
+        bot_id,bundle_id,relation_index,source_unit_id,target_unit_id,
+        edge_id,relation_kind,contribution_id,weight)
+    SELECT context->>'bot_id',bundle_value,(ordinality-1)::integer,
+        value->>'source',value->>'target',value->>'edge_id',value->>'relation',
+        value->>'contribution_id',(value->>'weight')::double precision
+    FROM jsonb_array_elements(edges) WITH ORDINALITY;
+    UPDATE __forest_module_schema__.memory_queries SET state='FROZEN',bundle_id=bundle_value,
+        frozen_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND query_id=query_row.query_id;
+    RETURN __forest_module_schema__.memory_read_retrieval_record(context,body);
 END;
 $$;
 
@@ -2550,7 +2677,7 @@ CREATE TRIGGER retrieval_items_immutable BEFORE UPDATE OR DELETE ON retrieval_it
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER retrieval_projections_immutable BEFORE UPDATE OR DELETE ON retrieval_projections
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
-CREATE TRIGGER retrieval_matches_immutable BEFORE UPDATE OR DELETE ON retrieval_matches
+CREATE TRIGGER retrieval_relations_immutable BEFORE UPDATE OR DELETE ON retrieval_relations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 
 CREATE FUNCTION memory_claim_domain_bind(context jsonb, input jsonb)

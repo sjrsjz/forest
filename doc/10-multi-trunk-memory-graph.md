@@ -300,7 +300,15 @@ query_parts允许文本、图片和有序混合输入，支持文搜图、图搜
 
 跨Binding已去重的源事件检查全部occurrences：若存在当前Conversation中尚未纳入本次InputBatch的观察，该原始源及依赖它的claim仍受本次切口限制，不能因为另一个Binding已消费同源事件就绕过。query的来源manifest和输入边界digest包含相关观察依赖；后来的观察关联不能回写已发出的模型输入，下一物化/提交按当时守卫重新复核。
 
-### 7.2 EvidenceBundle 结构
+### 7.2 检索区域冻结
+
+`memory.query.freeze/1` 是独立的幂等写入阶段，输入只有已完成匹配的 query_id。Worker 按匹配准备时固定的策略扩散，再通过包 manifest 声明的 `memory.freeze-retrieval` UnitOfWork 提交区域。事务先取得 Kernel Payload 删除屏障，再锁定查询；重新检查完整输入成员、当前合法种子、每个源修订及每条父路径的邻接资格。非种子必须引用在结果中较早出现的父节点，激活值严格等于父激活值乘固定策略权重，不能接受自报分数或环。任何复核失败均在写入前返回错误。
+
+`retrieval_bundles` 保存查询、删除 epoch、读取计数、截断/采样标志与种子/结果数量；策略只引用 `query_match_preparations` 中的不可变记录，不复制字段。`retrieval_items` 保存源修订、浮点排名与激活值、种子标志和父路径；`retrieval_relations` 保存实际采用的边、贡献引用及策略权重。父节点和关系两端通过复合外键约束为同一 bundle 内的项目。三张表不可变，同一查询只能冻结一个结果，并发提交返回首次成功记录；查询从 OPEN 转为 FROZEN。
+
+冻结服务返回 `forest.memory-retrieval-record/1` 元数据回执，不返回正文。冻结后重放仍返回原回执，即使部分来源已经遗忘；它只证明曾提交该检索结果，不授予读取内容的权限。只读种子及区域诊断仍按当前失效状态过滤。后续原文物化必须读取冻结项目并重验来源、证据与 Payload，不能重新扩散替换已冻结结果，也不能凭旧 epoch 恢复已撤销内容。此阶段尚未生成完整 EvidenceBundle、规范正文 Payload 或模型输入投影。
+
+### 7.3 EvidenceBundle 结构
 
 每项证据保留 sources 数组；同一断言有两个群来源时保留两项，不能只取排名最高来源覆盖其余。多源人工内容或显式非裁剪派生工件采用逐 claim 的 source_refs。模型输入不依赖裁剪摘要；默认从稳定源单元/chunk 物化原文。
 
@@ -366,7 +374,7 @@ source_ref、source_unit_id 和 node_ref 是稳定引用；display_name 和群�
 
 示例的parts为源单元的图文证据内容；claims、parts与sources分别描述推断/原始内容/出处，不能把图片相似度转写为模型已经看见的事实。每个part在完整schema中关联其source_refs及media lineage；来自不同群的多个图像段不能平铺成一个无作者的图片数组。图文媒体获取、索引和模态覆盖状态分别报告。
 
-### 7.3 必须进入真实 Provider 输入
+### 7.4 必须进入真实 Provider 输入
 
 Provider adapter 必须把来源信息渲染到实际发送给模型的上下文，不能只留在工具返回元数据、日志或内部 DTO 中。渲染器使用固定版本和来源索引，向模型明确以下约束，再逐项插入数据：
 

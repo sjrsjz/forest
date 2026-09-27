@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.25.0"
+version = "1.26.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -44,6 +44,7 @@ requests = [
   "domain.query:memory.read-query-vectors",
   "domain.query:memory.read-match-preparation",
   "domain.query:memory.read-matched-seeds",
+  "domain.query:memory.read-retrieval-record",
   "domain.query:memory.qualify-vector-candidates",
   "domain.query:memory.read-embedding-candidates",
   "domain.query:memory.list-trunks",
@@ -58,6 +59,7 @@ requests = [
   "uow.execute:memory.complete-query-facets",
   "uow.execute:memory.begin-query-matching",
   "uow.execute:memory.record-query-matches",
+  "uow.execute:memory.freeze-retrieval",
   "uow.execute:memory.reserve-embedding-budget",
   "uow.execute:memory.prepare-embedding-effect",
   "uow.execute:memory.handoff-embedding-effect",
@@ -218,9 +220,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.23.0"
+schema_version = "3.24.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "a64735f120471477fff7b91d42fd0f9d1b581f816028b6437471a864d61e7fce"
+baseline_sha256 = "22bfd6d60d249dd916ba1b8112d02569a58733a23780bcf3848034ce42f5f2a8"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -783,3 +785,35 @@ contract = "1.0"
 semantics = "idempotent"
 input_schema = "schemas/query-prepare-input.json"
 output_schema = "schemas/query-matched-output.json"
+
+[[components.provides]]
+name = "memory.query.freeze"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/retrieval-record-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-retrieval-record"
+contract = "1.0"
+function = "memory_read_retrieval_record"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/read-retrieval-record-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.freeze-retrieval-record"
+contract = "1.0"
+function = "memory_freeze_retrieval"
+input_schema = "schemas/freeze-retrieval-envelope.json"
+output_schema = "schemas/retrieval-record-output.json"
+
+[[components.unit_of_work_plans]]
+name = "memory.freeze-retrieval"
+contract = "1.0"
+input_schema = "schemas/freeze-retrieval-plan-input.json"
+output_schema = "schemas/retrieval-record-output.json"
+timeout_s = 30
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.freeze-retrieval-record", input_path = "/memory" }
+]

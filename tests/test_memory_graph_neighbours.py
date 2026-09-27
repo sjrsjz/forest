@@ -1,14 +1,16 @@
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
 from psycopg import sql
-from psycopg.errors import ForeignKeyViolation
+from psycopg.errors import ForeignKeyViolation, ObjectNotInPrerequisiteState
 from psycopg.types.json import Jsonb
 from test_memory_graph_package import _configuration
 from test_schema_bundles import clean_authority as clean_authority
 
+from forest.builtin.memory_graph.python.graph_region import expand
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.packages import PackageCatalog
@@ -139,6 +141,27 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
             validator.validate(result)
             return result
 
+        await execute(
+            "INSERT INTO {}.memory_domains (bot_id,initialization_operation_id,input_digest,"
+            "space_id,embedding_model_kind,model_revision_digest,dimensions,normalization,"
+            "fusion_policy_revision) VALUES (%s,'bind/test',%s,'space/test','TEXT_IMAGE',%s,4,'L2','independent-facets/1')",
+            (store.bot_id, digest, digest),
+        )
+
+        async def ready_facet(name, source, query=None):
+            await execute(
+                "INSERT INTO {}.embedding_facets (bot_id,facet_id,purpose,query_id,source_unit_id,"
+                "source_revision,part_id,modality,selector_start_char,selector_end_char,"
+                "input_payload_id,input_payload_digest,facet_content_digest,input_media_type,"
+                "input_byte_length,space_id,accepted_deletion_epoch,state,index_ref_id,vector_digest,"
+                "result_payload_id,result_payload_digest,published_at) VALUES "
+                "(%s,%s,%s,%s,%s,1,'text','TEXT',0,1,%s,%s,%s,'text/plain',1,'space/test',0,"
+                "'READY',%s,%s,%s,%s,clock_timestamp())",
+                (store.bot_id, name, "QUERY" if query else "DOCUMENT", query, source,
+                 "input/" + name, digest, digest, name, digest, "result/" + name, digest),
+            )
+
+        await ready_facet("document/seed", "seed")
         await register_query("query/one")
         await register_query("query/two")
         first = await neighbours("query/one")
@@ -161,6 +184,75 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         assert other["node"]["author_subject_ref"] == "qq:author/b"
         assert "seed" in {edge["target_id"] for edge in other["edges"]}
         assert (await neighbours("query/one", "tail"))["node"] is None
+
+        # Fixed matching precedes the pure expansion and final write authority.
+        policy = _configuration()["retrieval"]
+        await ready_facet("query/facet", "query-input", "query/one")
+        await execute(
+            "INSERT INTO {}.query_match_preparations (bot_id,query_id,operation_id,input_digest,"
+            "space_id,policy,facet_count,accepted_deletion_epoch) VALUES "
+            "(%s,'query/one','match/test',%s,'space/test',%s,1,0)",
+            (store.bot_id, digest, Jsonb(policy)),
+        )
+        await execute(
+            "INSERT INTO {}.query_match_receipts (bot_id,query_id,query_facet_id,operation_id,"
+            "input_digest,accepted_deletion_epoch,match_count) VALUES "
+            "(%s,'query/one','query/facet','receipt/test',%s,0,1)",
+            (store.bot_id, digest),
+        )
+        await execute(
+            "INSERT INTO {}.query_seed_matches (bot_id,query_id,query_facet_id,source_unit_id,"
+            "source_revision,document_facet_id,candidate_rank,score) VALUES "
+            "(%s,'query/one','query/facet','seed',1,'document/seed',1,0.9)",
+            (store.bot_id,),
+        )
+
+        async def read_neighbours(_port, body, **_kwargs):
+            return await neighbours(body["query_id"], body["source_unit_id"], body["association_limit"])
+
+        region = await expand(
+            SimpleNamespace(queries=SimpleNamespace(call=read_neighbours)), "query/one",
+            [{"source_unit_id": "seed", "rank_score": 1.0 / 61}], policy,
+        )
+        assert len(region["nodes"]) == 32 and region["truncated"]
+        fields = ("source_unit_id", "source_revision", "rank_score", "activation", "is_seed",
+                  "path_parent_source_unit_id", "path_edge_id")
+        body = {**region, "nodes": [{key: item[key] for key in fields} for item in region["nodes"]],
+                "protocol": "forest.memory-retrieval-freeze/1", "query_id": "query/one",
+                "deletion_epoch_step_id": "epoch"}
+
+        async def freeze(nodes):
+            envelope = {"protocol": "forest.uow-step/1", "caller": {"component_id": "memory.graph"},
+                        "input": {**body, "nodes": nodes},
+                        "prior": {"epoch": {"protocol": "forest.payload-epoch/1", "deletion_epoch": 0}}}
+            async with conn.transaction():
+                row = await (await execute(
+                    "SELECT {}.memory_freeze_retrieval(%s::jsonb,%s::jsonb) AS result",
+                    (Jsonb({"bot_id": store.bot_id, "operation_id": "freeze/test",
+                            "participant_input_digest": digest}), Jsonb(envelope)),
+                )).fetchone()
+            return row["result"]
+
+        for index, mutation, code in (
+            (0, {"rank_score": 0.1}, "MEMORY_RETRIEVAL_STALE"),
+            (1, {"activation": 0.123}, "MEMORY_RETRIEVAL_INVALID"),
+            (1, {"path_edge_id": "fake/edge"}, "MEMORY_RETRIEVAL_STALE"),
+            (1, {"path_parent_source_unit_id": body["nodes"][-1]["source_unit_id"]}, "MEMORY_RETRIEVAL_STALE"),
+            (1, {"source_revision": 2}, "MEMORY_RETRIEVAL_STALE"),
+        ):
+            changed = [dict(item) for item in body["nodes"]]
+            changed[index].update(mutation)
+            rejected = await freeze(changed)
+            assert not rejected["ok"] and rejected["error"]["code"] == code
+            assert (await (await execute("SELECT count(*) AS n FROM {}.retrieval_bundles", ())).fetchone())["n"] == 0
+        frozen = await freeze(body["nodes"])
+        assert frozen["ok"], frozen
+        assert frozen["value"]["result_count"] == 32
+        assert frozen["value"]["seed_count"] == 1
+        assert await freeze([]) == frozen  # Historic metadata is immutable, not a new region.
+        assert (await (await execute("SELECT count(*) AS n FROM {}.retrieval_relations", ())).fetchone())["n"] == 31
+        with pytest.raises(ObjectNotInPrerequisiteState):
+            await execute("UPDATE {}.retrieval_items SET activation=0.2", ())
 
         await unit("late-unit", "b", 41, 41)
         await contribution("late/relation", "n00")
