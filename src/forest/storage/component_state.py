@@ -63,7 +63,6 @@ class ComponentStateQueries:
             body = await self.payloads.read_bytes_in(
                 conn,
                 reference.payload_id,
-                expected_deletion_epoch=reference.accepted_deletion_epoch,
             )
             return {"value": json.loads(body), "revision": row["revision"]}
 

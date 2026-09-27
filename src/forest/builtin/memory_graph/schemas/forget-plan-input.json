@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["prepare", "payload", "memory"],
+  "properties": {
+    "prepare": {
+      "type": "object", "additionalProperties": false,
+      "required": ["operation_id", "source_unit_id"],
+      "properties": {
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "payload": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "prior_step_id", "operation_id"],
+      "properties": {
+        "protocol": {"const": "forest.payload-forget-anchor/1"},
+        "prior_step_id": {"const": "prepare"},
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "memory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["operation_id", "source_unit_id", "prepare_step_id", "forget_step_id"],
+      "properties": {
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "prepare_step_id": {"const": "prepare"},
+        "forget_step_id": {"const": "payload"}
+      }
+    }
+  }
+}

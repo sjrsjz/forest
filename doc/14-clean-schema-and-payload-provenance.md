@@ -151,6 +151,10 @@ PayloadRef {
 
 相同幂等 operation 重放返回原永久回执和“正文已撤销”状态，不重新调用 Worker、模型或平台。不同输入复用 operation ID 必须拒绝。UNKNOWN 外部效果保持 UNKNOWN，遗忘不能把它改写成确定未发送。
 
+单来源遗忘的包间事务原语为 `Memory prepare -> Payload revoke -> Memory apply`。Memory prepare 锁定精确来源单元，输出通用 `forest.payload-forget-plan/1` 和作者载荷锚点。Kernel Payload 不解释群、Memory 单元或图；它要求锚点的不可变来源清单只有一个完整根来源，撤销该根的载荷派生闭包，并返回版本化回执及精确 Payload ID 选择集。Memory apply 确认锚点仍属于请求的来源单元，再在自己的 namespace 中失效所有引用命中载荷的单元、occurrence、facet、关系端点与关系证据，为全部潜在索引 ref 登记删除 outbox。任何 participant 拒绝都会回滚整次撤销。多根锚点拒绝而不是猜测；更大范围选择器由显式管理计划固定，不能通过该原语隐式扩大。
+
+遗忘不撤销已领取工作的结算身份。已领取 facet 准备任务保持 claim，返回或过期恢复时根据 suppression 收敛为失效；新领取与派生发布从权威来源状态拒绝。历史载荷的 `accepted_deletion_epoch` 是审计值，读取应在当前删除屏障下检查 ACTIVE 状态；不能拿创建时 epoch 拒掉未受影响的配置、组件状态或服务回执。需要冻结模型/副作用快照的调用仍显式传入自己的期望 epoch。此事务原语不替代管理面的影响集合计划、审批与物理 scrub 进度。
+
 ## 6. 多模块事务与通信
 
 模块之间只交换版本化 DTO、`PayloadRef`、`SourceManifestRef` 和明确因果引用。需要原子提交时，由内核的 UnitOfWork 创建一次 operation，并按已注册 participant contract 调用模块 Repository；所有 participant 使用同一 Bot 数据库事务，但每个 participant 只能写自己的 schema。典型流程包括：

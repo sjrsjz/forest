@@ -3784,6 +3784,29 @@ async def test_kernel_payload_admission_and_forget_converge_in_both_lock_orders(
         ).fetchone()
     assert state["state"] == "REVOKED"
 
+    concurrent_source = PayloadSource(
+        "conversation.scheduler", "group.message", "message/concurrent-forget", 1
+    )
+    concurrent_ref = await repository.put_bytes(
+        owner_component_id="conversation.scheduler",
+        owner_kind="context.input",
+        owner_id="race/concurrent-forget",
+        media_type="text/plain",
+        content=b"concurrent",
+        sources=(concurrent_source,),
+        expected_deletion_epoch=2,
+    )
+    concurrent_receipts = await asyncio.gather(*(
+        repository.forget(
+            operation_id="forget/race-concurrent",
+            payload_ids=(concurrent_ref.payload_id,),
+        )
+        for _ in range(2)
+    ))
+    assert concurrent_receipts[0] == concurrent_receipts[1]
+    assert concurrent_receipts[0]["deletion_epoch"] == 3
+    assert await repository.epoch() == 3
+
 
 @pytest.mark.postgres
 async def test_kernel_audit_requires_payload_authority_identity(clean_authority):

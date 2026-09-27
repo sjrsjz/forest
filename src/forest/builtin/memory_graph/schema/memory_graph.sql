@@ -335,6 +335,19 @@ CREATE TABLE source_suppressions (
     FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id)
 );
 
+CREATE TABLE source_forget_operations (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    source_unit_id text NOT NULL,
+    selection_digest text NOT NULL CHECK (selection_digest ~ '^sha256:[a-f0-9]{64}$'),
+    deletion_epoch bigint NOT NULL CHECK (deletion_epoch > 0),
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id),
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id)
+);
+
 CREATE TABLE relation_contributions (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     contribution_id text NOT NULL CHECK (octet_length(contribution_id) BETWEEN 1 AND 256),
@@ -1729,6 +1742,8 @@ CREATE TRIGGER capture_operations_immutable BEFORE UPDATE OR DELETE ON capture_o
 CREATE TRIGGER eligibility_operations_immutable BEFORE UPDATE OR DELETE ON eligibility_operations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER source_suppressions_immutable BEFORE UPDATE OR DELETE ON source_suppressions
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER source_forget_operations_immutable BEFORE UPDATE OR DELETE ON source_forget_operations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER relation_evidence_immutable BEFORE UPDATE OR DELETE ON relation_evidence
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
@@ -3229,6 +3244,189 @@ BEGIN
 EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow OR not_null_violation OR check_violation THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
         'code','MEMORY_CAPTURE_INPUT_INVALID','message','Memory capture payload is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_prepare_source_forget(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    unit_row record;
+    suppression_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'operation_id' IS NULL
+       OR octet_length(body->>'operation_id') NOT BETWEEN 1 AND 256
+       OR body->>'source_unit_id' IS NULL
+       OR octet_length(body->>'source_unit_id') NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_INPUT_INVALID',
+                'message','Memory forget request is invalid','status',422));
+    END IF;
+    SELECT * INTO unit_row FROM __forest_module_schema__.source_units
+    WHERE bot_id=requested_bot AND source_unit_id=body->>'source_unit_id' FOR UPDATE;
+    IF unit_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_SOURCE_NOT_FOUND',
+                'message','Memory source unit does not exist','status',404));
+    END IF;
+    SELECT * INTO suppression_row FROM __forest_module_schema__.source_suppressions
+    WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id;
+    IF unit_row.eligibility_state='SUPPRESSED' AND
+       (suppression_row IS NULL OR suppression_row.operation_id IS DISTINCT FROM
+        body->>'operation_id') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_SOURCE_SUPPRESSED',
+                'message','Memory source unit was already forgotten','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.payload-forget-plan/1',
+            'anchor_payload_id',unit_row.author_payload_id));
+END;
+$$;
+
+CREATE FUNCTION memory_apply_source_forget(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    prior jsonb := envelope->'prior';
+    prepared jsonb := prior->(body->>'prepare_step_id');
+    forgotten jsonb := prior->(body->>'forget_step_id');
+    requested_bot text := context->>'bot_id';
+    requested_digest text := context->>'participant_input_digest';
+    operation_row record;
+    unit_row record;
+    selected_ids text[];
+    affected_ids text[] := ARRAY[]::text[];
+    deletion_epoch_value bigint;
+    suppressed_count integer := 0;
+    deleted_refs integer := 0;
+    inserted_refs integer;
+    retracted_count integer := 0;
+    result_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'operation_id' IS NULL
+       OR octet_length(body->>'operation_id') NOT BETWEEN 1 AND 256
+       OR body->>'source_unit_id' IS NULL
+       OR octet_length(body->>'source_unit_id') NOT BETWEEN 1 AND 256
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR prepared->>'protocol' IS DISTINCT FROM 'forest.payload-forget-plan/1'
+       OR forgotten->>'protocol' IS DISTINCT FROM 'forest.payload-forgotten/1'
+       OR forgotten->>'operation_id' IS DISTINCT FROM body->>'operation_id'
+       OR forgotten->>'selection_digest' !~ '^sha256:[a-f0-9]{64}$'
+       OR forgotten->>'deletion_epoch' !~ '^[1-9][0-9]*$'
+       OR jsonb_typeof(forgotten->'selected_payload_ids') IS DISTINCT FROM 'array'
+       OR jsonb_array_length(forgotten->'selected_payload_ids') > 100000 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_AUTHORITY_INVALID',
+                'message','Payload forget receipt is invalid','status',422));
+    END IF;
+    SELECT array_agg(value ORDER BY value) INTO selected_ids
+    FROM jsonb_array_elements_text(forgotten->'selected_payload_ids');
+    IF selected_ids IS NULL OR prepared->>'anchor_payload_id' <> ALL(selected_ids) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_ANCHOR_MISSING',
+                'message','Payload forget selection omitted the Memory anchor','status',409));
+    END IF;
+    deletion_epoch_value := (forgotten->>'deletion_epoch')::bigint;
+    IF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.source_units
+        WHERE bot_id=requested_bot AND source_unit_id=body->>'source_unit_id'
+          AND author_payload_id=prepared->>'anchor_payload_id'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_ANCHOR_MISSING',
+                'message','Payload forget anchor differs from the Memory source','status',409));
+    END IF;
+    SELECT * INTO operation_row FROM __forest_module_schema__.source_forget_operations
+    WHERE bot_id=requested_bot AND operation_id=body->>'operation_id';
+    IF operation_row IS NOT NULL THEN
+        IF operation_row.input_digest IS DISTINCT FROM requested_digest
+           OR operation_row.source_unit_id IS DISTINCT FROM body->>'source_unit_id'
+           OR operation_row.selection_digest IS DISTINCT FROM forgotten->>'selection_digest'
+           OR operation_row.deletion_epoch IS DISTINCT FROM deletion_epoch_value THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FORGET_OPERATION_CONFLICT',
+                    'message','Memory forget operation differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',operation_row.result_payload);
+    END IF;
+    FOR unit_row IN
+        SELECT u.* FROM __forest_module_schema__.source_units u
+        WHERE u.bot_id=requested_bot AND (
+            u.author_payload_id=ANY(selected_ids) OR EXISTS (
+                SELECT 1 FROM __forest_module_schema__.source_parts p
+                WHERE p.bot_id=u.bot_id AND p.source_unit_id=u.source_unit_id
+                  AND p.payload_id=ANY(selected_ids)))
+        ORDER BY u.source_unit_id FOR UPDATE
+    LOOP
+        IF unit_row.eligibility_state='SUPPRESSED' THEN
+            CONTINUE;
+        END IF;
+        affected_ids := array_append(affected_ids,unit_row.source_unit_id);
+        INSERT INTO __forest_module_schema__.source_suppressions(
+            bot_id,operation_id,input_digest,source_unit_id,deletion_epoch,reason_code)
+        VALUES(requested_bot,body->>'operation_id',requested_digest,
+            unit_row.source_unit_id,deletion_epoch_value,'PUBLIC_FORGET');
+        UPDATE __forest_module_schema__.source_units
+        SET eligibility_state='SUPPRESSED',eligibility_revision=eligibility_revision+1,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id;
+        UPDATE __forest_module_schema__.source_occurrences
+        SET eligibility_state='SUPPRESSED',input_batch_ref=NULL,context_revision=NULL
+        WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id
+          AND eligibility_state<>'SUPPRESSED';
+        INSERT INTO __forest_module_schema__.vector_index_deletions(
+            bot_id,index_ref_id,space_id,source_unit_id,deletion_epoch)
+        SELECT bot_id,facet_id,space_id,source_unit_id,deletion_epoch_value
+        FROM __forest_module_schema__.embedding_facets
+        WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id
+        ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
+        GET DIAGNOSTICS inserted_refs = ROW_COUNT;
+        deleted_refs := deleted_refs + inserted_refs;
+        UPDATE __forest_module_schema__.embedding_facets
+        SET state='SUPPRESSED',index_ref_id=NULL,vector_digest=NULL,
+            result_payload_id=NULL,result_payload_digest=NULL,published_at=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id
+          AND state<>'SUPPRESSED';
+        UPDATE __forest_module_schema__.facet_preparation_work
+        SET state='SUPPRESSED',claim_token=NULL,lease_deadline=NULL,
+            prepared_facet_count=NULL,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id
+          AND state NOT IN ('SUPPRESSED','CLAIMED');
+        suppressed_count := suppressed_count+1;
+    END LOOP;
+    IF (body->>'source_unit_id') <> ALL(affected_ids) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_ANCHOR_MISSING',
+                'message','Memory source unit was not selected by Payload','status',409));
+    END IF;
+    UPDATE __forest_module_schema__.relation_contributions c SET active=false
+    WHERE c.bot_id=requested_bot AND c.active AND (
+        (c.left_kind='SOURCE_UNIT' AND c.left_id=ANY(affected_ids)) OR
+        (c.right_kind='SOURCE_UNIT' AND c.right_id=ANY(affected_ids)) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.relation_evidence e
+            WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
+              AND e.source_unit_id=ANY(affected_ids)));
+    GET DIAGNOSTICS retracted_count = ROW_COUNT;
+    result_value := jsonb_build_object('protocol','forest.memory-source-forgotten/1',
+        'source_unit_id',body->>'source_unit_id','deletion_epoch',deletion_epoch_value,
+        'suppressed_source_units',suppressed_count,'vector_deletions',deleted_refs,
+        'retracted_relations',retracted_count);
+    INSERT INTO __forest_module_schema__.source_forget_operations(
+        bot_id,operation_id,input_digest,source_unit_id,selection_digest,
+        deletion_epoch,result_payload)
+    VALUES(requested_bot,body->>'operation_id',requested_digest,
+        body->>'source_unit_id',forgotten->>'selection_digest',
+        deletion_epoch_value,result_value);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',result_value);
 END;
 $$;
 

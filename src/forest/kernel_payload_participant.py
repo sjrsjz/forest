@@ -1,11 +1,11 @@
-"""Generation-derived Payload writes for package UnitOfWork plans."""
+"""Generic Payload writes and revocation for package UnitOfWork plans."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
 from forest.errors import ForestError
-from forest.storage.payload_authority import PayloadSource
+from forest.storage.payload_authority import PayloadSource, SourceTarget
 
 
 def _object(value: object, fields: set[str], code: str) -> dict:
@@ -15,7 +15,7 @@ def _object(value: object, fields: set[str], code: str) -> dict:
 
 
 class KernelPayloadUnitOfWorkParticipant:
-    """Persist one caller-owned JSON payload prepared by an earlier UoW step."""
+    """Apply Payload-only protocols prepared by earlier UnitOfWork steps."""
 
     component_id = "kernel.payload"
 
@@ -60,6 +60,82 @@ class KernelPayloadUnitOfWorkParticipant:
             return {
                 "protocol": "forest.payload-epoch/1",
                 "deletion_epoch": epoch,
+            }
+        if name == "payload.forget-anchor-from-prior":
+            envelope = _object(
+                payload, {"protocol", "caller", "input", "prior"},
+                "PAYLOAD_UOW_INPUT_INVALID",
+            )
+            caller = _object(
+                envelope["caller"], {"component_id", "generation_id"},
+                "PAYLOAD_UOW_INPUT_INVALID",
+            )
+            request = _object(
+                envelope["input"], {"protocol", "prior_step_id", "operation_id"},
+                "PAYLOAD_UOW_INPUT_INVALID",
+            )
+            prior = envelope["prior"]
+            if (
+                envelope["protocol"] != "forest.uow-step/1"
+                or any(not isinstance(value, str) or not value for value in caller.values())
+                or request["protocol"] != "forest.payload-forget-anchor/1"
+                or not isinstance(prior, dict)
+                or not isinstance(request["prior_step_id"], str)
+                or request["prior_step_id"] not in prior
+                or not isinstance(request["operation_id"], str)
+                or not 1 <= len(request["operation_id"].encode("utf-8")) <= 256
+            ):
+                raise ForestError(
+                    "PAYLOAD_UOW_INPUT_INVALID", "Payload forget plan is invalid", 422
+                )
+            plan = _object(
+                prior[request["prior_step_id"]],
+                {"protocol", "anchor_payload_id"},
+                "PAYLOAD_UOW_INPUT_INVALID",
+            )
+            anchor_id = plan["anchor_payload_id"]
+            if (
+                plan["protocol"] != "forest.payload-forget-plan/1"
+                or not isinstance(anchor_id, str)
+                or not 1 <= len(anchor_id.encode("utf-8")) <= 256
+            ):
+                raise ForestError(
+                    "PAYLOAD_UOW_INPUT_INVALID", "Payload forget anchor is invalid", 422
+                )
+            sources = await self.service._sources_in(conn, anchor_id)
+            if len(sources) != 1 or sources[0].part_id != "*":
+                raise ForestError(
+                    "PAYLOAD_FORGET_SOURCE_AMBIGUOUS",
+                    "Anchor Payload must identify exactly one root source",
+                    409,
+                )
+            source = sources[0]
+            target = SourceTarget(
+                source_component_id=source.source_component_id,
+                source_kind=source.source_kind,
+                source_id=source.source_id,
+                source_revision=source.source_revision,
+            )
+            receipt = await self.service.forget_in(
+                conn,
+                operation_id=request["operation_id"],
+                source_targets=(target,),
+            )
+            selected_ids = await self.service.forget_selected_payload_ids_in(
+                conn, request["operation_id"]
+            )
+            if len(selected_ids) != receipt["selected_count"]:
+                raise ForestError(
+                    "PAYLOAD_FORGET_SELECTION_INVALID",
+                    "Payload forget selection differs from its committed receipt",
+                    503,
+                )
+            return {
+                "protocol": "forest.payload-forgotten/1",
+                "operation_id": receipt["operation_id"],
+                "deletion_epoch": receipt["deletion_epoch"],
+                "selection_digest": receipt["selection_digest"],
+                "selected_payload_ids": selected_ids,
             }
         if name != "payload.put-json-from-prior":
             raise ForestError(

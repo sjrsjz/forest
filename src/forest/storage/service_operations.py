@@ -131,7 +131,6 @@ class KernelServiceOperationLedger:
         body = await self.payloads.read_bytes_in(
             conn,
             reference.payload_id,
-            expected_deletion_epoch=reference.accepted_deletion_epoch,
         )
         try:
             envelope = json.loads(body)

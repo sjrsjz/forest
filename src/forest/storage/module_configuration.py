@@ -292,12 +292,11 @@ class ModuleConfigurationRepository:
                     "Configuration plan is stale or already consumed",
                     409,
                 )
-            reference = await self._verify_payload_in(conn, plan, f"plan:{plan_id}")
+            await self._verify_payload_in(conn, plan, f"plan:{plan_id}")
             if self.immutable_paths:
                 body = await self.payloads.read_bytes_in(
                     conn,
                     plan["config_payload_id"],
-                    expected_deletion_epoch=reference.accepted_deletion_epoch,
                 )
                 await self._assert_immutable_in(conn, self._decode_value(body))
             revision = expected_desired_revision + 1
@@ -496,7 +495,7 @@ class ModuleConfigurationRepository:
         saved = await self._revision_in(conn, revision, verify=True)
         if not include_value:
             return saved
-        reference = await self.payloads.verify_in(
+        await self.payloads.verify_in(
             conn,
             payload_id=saved.payload_id,
             digest=saved.payload_digest,
@@ -507,7 +506,6 @@ class ModuleConfigurationRepository:
         body = await self.payloads.read_bytes_in(
             conn,
             saved.payload_id,
-            expected_deletion_epoch=reference.accepted_deletion_epoch,
         )
         value = self._decode_value(body)
         return EffectiveModuleConfiguration(

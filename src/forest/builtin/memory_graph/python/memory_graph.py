@@ -348,6 +348,37 @@ class MemoryGraph(Plugin):
         )
 
     @service(
+        "memory.source.forget",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/forget-service-input.json",
+        output_schema="schemas/forget-output.json",
+    )
+    async def forget_source(self, payload, ctx):
+        request = _plain(payload)
+        operation_id = request["operation_id"]
+        source_unit_id = request["source_unit_id"]
+        return await ctx.uow.call(
+            "memory.forget-source",
+            {
+                "prepare": request,
+                "payload": {
+                    "protocol": "forest.payload-forget-anchor/1",
+                    "prior_step_id": "prepare",
+                    "operation_id": operation_id,
+                },
+                "memory": {
+                    "operation_id": operation_id,
+                    "source_unit_id": source_unit_id,
+                    "prepare_step_id": "prepare",
+                    "forget_step_id": "payload",
+                },
+            },
+            operation_id=operation_id,
+            timeout=30,
+        )
+
+    @service(
         "agent.tool.memory-exact-recall",
         semantics="idempotent",
         contract="1.0",

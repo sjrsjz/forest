@@ -941,47 +941,79 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 facet["facet_id"] for facet in facets
             }
 
-            # Exercise the deletion outbox after a committed Memory suppression.
-            # The public forget transaction is a separate, unfinished boundary.
-            deletion_epoch = await host._kernel.payload.epoch()
-            previous_delete_failures = FakeMilvusClient.delete_failures
-            FakeMilvusClient.fail_next_delete = True
+            # The public UoW revokes Payload, Memory eligibility, graph evidence,
+            # and vector refs together before the asynchronous Milvus deletion.
+            previous_epoch = await host._kernel.payload.epoch()
             async with host.store.pool.connection() as conn, conn.transaction():
                 await conn.execute(
                     sql.SQL(
-                        "UPDATE {}.source_units SET eligibility_state='SUPPRESSED',"
-                        "eligibility_revision=eligibility_revision+1,updated_at=clock_timestamp() "
-                        "WHERE bot_id=%s AND source_unit_id=%s"
+                        "INSERT INTO {}.relation_contributions("
+                        "bot_id,contribution_id,operation_id,input_digest,relation_id,"
+                        "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
+                        "weight_micros,admitted_deletion_epoch) "
+                        "VALUES(%s,'forget/evidence','forget/evidence',%s,'forget/relation',"
+                        "'ASSOCIATES_WITH','ENTITY','entity/a','ENTITY','entity/b','RULE',"
+                        "500000,%s)"
                     ).format(sql.Identifier(memory_namespace)),
-                    (settings.bot_id, "onebot-unit:" + event_hash),
+                    (settings.bot_id, "sha256:" + "1" * 64, previous_epoch),
                 )
                 await conn.execute(
                     sql.SQL(
-                        "UPDATE {}.source_occurrences SET eligibility_state='SUPPRESSED',"
-                        "input_batch_ref=NULL,context_revision=NULL "
-                        "WHERE bot_id=%s AND source_unit_id=%s"
+                        "INSERT INTO {}.relation_evidence("
+                        "bot_id,contribution_id,evidence_index,source_unit_id,"
+                        "source_revision,part_id) "
+                        "VALUES(%s,'forget/evidence',0,%s,1,'part:text:0')"
                     ).format(sql.Identifier(memory_namespace)),
                     (settings.bot_id, "onebot-unit:" + event_hash),
                 )
-                await conn.execute(
-                    sql.SQL(
-                        "INSERT INTO {}.vector_index_deletions("
-                        "bot_id,index_ref_id,space_id,source_unit_id,deletion_epoch) "
-                        "SELECT bot_id,facet_id,space_id,source_unit_id,%s "
-                        "FROM {}.embedding_facets WHERE bot_id=%s AND source_unit_id=%s"
-                    ).format(sql.Identifier(memory_namespace), sql.Identifier(memory_namespace)),
-                    (deletion_epoch, settings.bot_id, "onebot-unit:" + event_hash),
-                )
-                await conn.execute(
-                    sql.SQL(
-                        "UPDATE {}.embedding_facets SET state='SUPPRESSED',"
-                        "index_ref_id=NULL,vector_digest=NULL,result_payload_id=NULL,"
-                        "result_payload_digest=NULL,published_at=NULL,"
-                        "updated_at=clock_timestamp() "
-                        "WHERE bot_id=%s AND source_unit_id=%s"
-                    ).format(sql.Identifier(memory_namespace)),
-                    (settings.bot_id, "onebot-unit:" + event_hash),
-                )
+            previous_delete_failures = FakeMilvusClient.delete_failures
+            FakeMilvusClient.fail_next_delete = True
+            forget_input = {
+                "operation_id": "memory-forget-host-embedding",
+                "source_unit_id": "onebot-unit:" + event_hash,
+            }
+            forget_route = FrozenServiceRoute(
+                service_id="memory.source.forget",
+                version=1,
+                caller_component_id="memory.graph",
+                provider_component_id="memory.graph",
+                provider_generation_id=memory_identity.generation_id,
+                graph_id=memory_identity.graph_id,
+                graph_revision=memory_identity.graph_revision,
+                admission_lane="DATA",
+                owned_work=False,
+            )
+            forget = await memory_instance.runtime_service_handlers()[
+                ("memory.source.forget", 1)
+            ].invoke_routed(
+                forget_route,
+                RuntimeServiceInvocation(
+                    "memory-forget-host-embedding", 30,
+                    "memory.forget", "bot-production-test",
+                ),
+                (),
+                forget_input,
+            )
+            assert forget["deletion_epoch"] == previous_epoch + 1
+            assert forget["suppressed_source_units"] == 1
+            assert forget["vector_deletions"] == len(facets)
+            assert forget["retracted_relations"] == 1
+            for result_payload_id in {facet["result_payload_id"] for facet in facets}:
+                with pytest.raises(ForestError) as caught:
+                    await host._kernel.payload.read_bytes(result_payload_id)
+                assert caught.value.code == "PAYLOAD_REVOKED"
+            assert await host._kernel.payload.epoch() == previous_epoch + 1
+            assert await memory_instance.runtime_service_handlers()[
+                ("memory.source.forget", 1)
+            ].invoke_routed(
+                forget_route,
+                RuntimeServiceInvocation(
+                    "memory-forget-host-embedding-replay", 30,
+                    "memory.forget", "bot-production-test",
+                ),
+                (),
+                forget_input,
+            ) == forget
             async with asyncio.timeout(15):
                 while True:
                     async with host.store.pool.connection() as conn:

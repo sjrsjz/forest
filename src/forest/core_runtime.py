@@ -318,7 +318,7 @@ class PreparedEffectAuthorityModule(PreparedAuthorityModule):
 
 
 class PreparedPayloadAuthorityModule(PreparedAuthorityModule):
-    """Publish only the generic caller-owned Payload write participant ABI."""
+    """Publish generic Payload write, deletion-fence and revocation participants."""
 
     def unit_of_work_participant(self):
         return KernelPayloadUnitOfWorkParticipant(self, self.service)

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.17.0"
+version = "1.18.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -43,6 +43,7 @@ requests = [
   "domain.query:memory.query-sources",
   "domain.query:memory.query-relations",
   "uow.execute:memory.capture-source",
+  "uow.execute:memory.forget-source",
   "uow.execute:memory.bind-domain",
   "uow.execute:memory.prepare-document-facets",
   "uow.execute:memory.reserve-embedding-budget",
@@ -105,6 +106,13 @@ contract = "1.0"
 semantics = "idempotent"
 input_schema = "schemas/unavailable-input.json"
 output_schema = "schemas/unavailable-output.json"
+
+[[components.provides]]
+name = "memory.source.forget"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/forget-service-input.json"
+output_schema = "schemas/forget-output.json"
 
 [[components.provides]]
 name = "memory.profile.describe"
@@ -184,9 +192,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.15.0"
+schema_version = "3.16.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "efbfed3f51b24d3a5e27736e7fd295ca26e5ccd87c667ca9ccffa1fbd5f88b8a"
+baseline_sha256 = "4626e6ee7e49414b4d0207f8090ae94c84da30f884aff453f6b0a90f77b43967"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -346,6 +354,20 @@ contract = "1.0"
 function = "memory_mark_source_unavailable"
 input_schema = "schemas/unavailable-envelope.json"
 output_schema = "schemas/unavailable-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.prepare-source-forget"
+contract = "1.0"
+function = "memory_prepare_source_forget"
+input_schema = "schemas/forget-prepare-envelope.json"
+output_schema = "schemas/forget-prepare-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.apply-source-forget"
+contract = "1.0"
+function = "memory_apply_source_forget"
+input_schema = "schemas/forget-apply-envelope.json"
+output_schema = "schemas/forget-output.json"
 
 [[components.unit_of_work_participants]]
 name = "memory.qualify-input-batch"
@@ -571,4 +593,16 @@ output_schema = "schemas/unavailable-output.json"
 timeout_s = 10
 steps = [
   { id = "memory", component_id = "memory.graph", participant = "memory.mark-source-unavailable-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.forget-source"
+contract = "1.0"
+input_schema = "schemas/forget-plan-input.json"
+output_schema = "schemas/forget-output.json"
+timeout_s = 30
+steps = [
+  { id = "prepare", component_id = "memory.graph", participant = "memory.prepare-source-forget", input_path = "/prepare" },
+  { id = "payload", component_id = "kernel.payload", participant = "payload.forget-anchor-from-prior", input_path = "/payload" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.apply-source-forget", input_path = "/memory" }
 ]
