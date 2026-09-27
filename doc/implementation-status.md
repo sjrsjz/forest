@@ -131,16 +131,20 @@ Memory 的 handoff 事务现由 `memory.embedding.dispatch` owned-work Worker �
 
 Memory owned-work Worker 已接入结果观察；成功回执依 claim 顺序验证向量和实际 token 用量，再由单一 UnitOfWork 同时结算 Effect、预算与 facet。独立向量索引发布已接入并用假 Milvus 验证；语义召回、真实供应商请求及崩溃恢复的端到端测试仍待完成。
 
-Embedding 与向量发布主链现在同时支持 `DOCUMENT`/`QUERY`，用途来自持久 claim，不能由 Provider 猜测。领取时优先处理 QUERY，每批最多 32 个 facet，且同批只能属于一种用途及同一个 query；QUERY 资格要求 part 精确匹配 `memory_query_parts` 中的源修订和 occurrence，后者必须属于 query 的 InputBatch/context revision 且已 `ADMITTED` 或 `ELIGIBLE`。这允许未归档消息生成查询向量，却不提升 source unit 的长期召回资格。准备、handoff 与发布均重验用途对应的资格，发布失效仍走删除 outbox。宿主图集成测试已通过公开查询注册服务，验证未归档图文 QUERY 发布、之后的 DOCUMENT 发布、同时遗忘两类引用，以及热替换和重启；测试中的 QUERY facet 仍由直接数据库 fixture 准备，公开 facet 准备、ANN 种子重验和图扩散尚未接通，因此这不是可用语义召回的验收结论。
+Embedding 与向量发布主链同时支持 `DOCUMENT`/`QUERY`，用途来自持久 claim。每批最多 32 个 facet，同批只能属于一种用途及同一个 query；QUERY 必须匹配固定 InputBatch/context revision 和 source revision，且已完成全部 part 准备。QUERY 发布不提升源单元的长期归档资格。宿主测试通过公开注册/准备服务完成图文查询，不再直接写入 QUERY facet；DOC/QUERY 发布、同时遗忘、删除重试、热替换和重启已验证。
 
-`memory.query.begin/1` 现由隔离 Worker 调用 manifest `memory.begin-query` 事务计划，Kernel Payload 先捕获删除 epoch，Memory 依据持久接纳记录登记不可变查询成员集。尚有来源捕获未完成时拒绝准备；已接纳成员被撤销时拒绝整份查询，不静默缩小切口；超过 256 个 part 明确拒绝。只读 `memory.read-query-parts` 每页最多 32 项，翻页前检查整份成员集的源修订、归档/接纳资格和来源状态，返回准确 PayloadRef。接纳记录和待捕获记录均有 InputBatch/revision 索引，查询不用扫描整个 Bot 历史。宿主集成覆盖包服务路由、注册重放、错误上下文拒绝、图文分页及遗忘后的查询失效；注册本身不调用 Embedding，也不提升长期资格。独立的 QUERY facet 准备仍待实现。
+`memory.query.begin/1` 由隔离 Worker 调用 manifest `memory.begin-query` 事务计划，Kernel Payload 先捕获删除 epoch，Memory 依据持久接纳记录登记不可变查询成员集。尚有来源捕获未完成或已接纳成员被撤销时拒绝整份查询；超过 256 个 part 明确拒绝。只读 `memory.read-query-parts` 每页最多 32 项，翻页前检查整份成员集的源修订、接纳资格和来源状态，返回准确 PayloadRef。接纳和待捕获记录均有 InputBatch/revision 索引。`memory.query.prepare/1` 已通过固定 part 回执和不可变完成事实闭合查询准备；部分准备不触发嵌入，空白文本以零 facet 回执闭合。
 
-查询准备的最终宿主验证还覆盖两个不同调用并发准备同一个 query：part 操作和完成事实只提交一份，两个结果相同；缺少 part 回执时完成事务明确拒绝。纯分块回归、8 项 Memory 包测试和最终宿主图集成通过。完整语义召回仍需接入 ANN 候选重验、种子排序和生产图扩散，不能以查询向量 READY 代替召回验收。
+查询准备的宿主验证覆盖两个不同调用并发准备同一个 query：part 操作和完成事实只提交一份，两个结果相同；缺少 part 回执时完成事务明确拒绝。纯分块回归、8 项 Memory 包测试和宿主图集成通过。完整语义召回仍需接入生产图扩散与最终证据冻结，不能以查询向量 READY 代替召回验收。
+
+`memory.query.seeds/1` 已接入只读种子阶段：读取完整 READY 查询向量，调用独立索引，再将候选每批 32 项回 Memory 事实库重验。只接受 query 创建时点之前已发布的合法 DOCUMENT facet，排除查询自身和当前会话切口之后的观察；来源群、主干、作者由 PostgreSQL 返回，不采用索引附带的身份元数据。按每个查询 facet 对每个源单元的首个合格命中进行 RRF 排序，激活统一为 1.0。每 facet 候选配置上限已收敛到索引支持的 256，source occurrence 资格查询有源单元索引。这个阶段不物化正文、不冻结最终 EvidenceBundle，生产图扩散和 Agent 语义召回接入仍待完成。
+
+种子宿主集成使用假 Embedding HTTP、假 Milvus 和真实 PostgreSQL：后续图文查询召回已归档消息，返回其原群及作者，不存在的索引引用被过滤，来源遗忘后种子立即消失，热替换与重启通过。查询注册操作 ID 由 query_id 决定，不依赖外层调用；不同调用可合流到同一注册事实。8 项 Memory 包测试及最终宿主测试通过；真实供应商、真实多主干图扩散和最终 Provider 证据投影仍待验收。
 
 ## 8. 下一切换顺序
 
 1. 补齐遗忘管理的固定目标计划、较大范围选择器与持续 Payload scrub；补齐发布崩溃重放验证。
-2. 建立查询 facet 的多模态 Embedding 与向量种子召回，再接入图区域扩散、跨主干联想；恢复及重放需与删除 epoch、Generation 围栏收敛。
+2. 在已实现种子阶段上接入有界图区域扩散、最终证据冻结与跨主干联想；恢复及重放需与删除 epoch、Generation 围栏收敛。
 3. 补齐证据浏览的进一步分页以及图文真实召回试验。
 4. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
 5. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。

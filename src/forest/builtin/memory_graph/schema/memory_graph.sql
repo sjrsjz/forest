@@ -939,6 +939,9 @@ CREATE INDEX source_units_kind_idx ON source_units(
 CREATE INDEX eligibility_operations_batch_idx ON eligibility_operations(
     bot_id,input_batch_ref,context_revision,occurrence_id
 );
+CREATE INDEX source_occurrences_unit_idx ON source_occurrences(
+    bot_id,source_unit_id,conversation_ref,ingress_seq
+) INCLUDE (eligibility_state,input_batch_ref,context_revision);
 CREATE INDEX pending_input_events_batch_idx ON pending_input_events(
     bot_id,input_batch_ref,context_revision,state,conversation_ref
 );
@@ -1192,6 +1195,116 @@ BEGIN
         'value',jsonb_build_object('parts',page_value,'next_part_index',last_index,'has_more',has_more,
             'space_id',(SELECT space_id FROM __forest_module_schema__.memory_domains
                 WHERE bot_id=requested_bot)));
+END;
+$$;
+
+CREATE FUNCTION memory_read_query_vectors(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_query text := input->>'query_id';
+    page_check jsonb;
+    facets_value jsonb;
+    last_id text;
+    has_more boolean;
+    prepared_row __forest_module_schema__.query_facet_preparations%ROWTYPE;
+BEGIN
+    page_check := __forest_module_schema__.memory_read_query_parts(context,
+        jsonb_build_object('query_id',requested_query,'after_part_index',-1,'limit',1));
+    IF page_check->>'ok' IS DISTINCT FROM 'true' THEN RETURN page_check; END IF;
+    SELECT * INTO prepared_row FROM __forest_module_schema__.query_facet_preparations
+    WHERE bot_id=requested_bot AND query_id=requested_query;
+    IF NOT FOUND OR prepared_row.facet_count<>(
+        SELECT count(*) FROM __forest_module_schema__.embedding_facets
+        WHERE bot_id=requested_bot AND query_id=requested_query AND purpose='QUERY' AND state='READY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_VECTORS_PENDING',
+                'message','Query vectors are not all published','status',409));
+    END IF;
+    SELECT COALESCE(jsonb_agg(item ORDER BY facet_id),'[]'::jsonb),max(facet_id)
+    INTO facets_value,last_id FROM (
+        SELECT facet_id,jsonb_build_object('ref_id',index_ref_id,'modality',modality) AS item
+        FROM __forest_module_schema__.embedding_facets
+        WHERE bot_id=requested_bot AND query_id=requested_query AND purpose='QUERY' AND state='READY'
+          AND (input->>'after_facet_id' IS NULL OR facet_id>input->>'after_facet_id')
+        ORDER BY facet_id LIMIT (input->>'limit')::integer
+    ) page;
+    SELECT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.embedding_facets
+        WHERE bot_id=requested_bot AND query_id=requested_query AND purpose='QUERY' AND facet_id>last_id
+    ) INTO has_more;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('space_id',page_check#>>'{value,space_id}',
+            'index_snapshot_at',(SELECT created_at FROM __forest_module_schema__.memory_queries
+                WHERE bot_id=requested_bot AND query_id=requested_query),
+            'facets',facets_value,'next_facet_id',last_id,'has_more',has_more));
+END;
+$$;
+
+CREATE FUNCTION memory_qualify_vector_candidates(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_query text := input->>'query_id';
+    query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    page_check jsonb;
+    candidates_value jsonb;
+    conversation_value text;
+    cut_value bigint;
+BEGIN
+    page_check := __forest_module_schema__.memory_read_query_vectors(context,
+        jsonb_build_object('query_id',requested_query,'after_facet_id',NULL,'limit',1));
+    IF page_check->>'ok' IS DISTINCT FROM 'true' THEN RETURN page_check; END IF;
+    SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=requested_bot AND query_id=requested_query;
+    IF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.embedding_facets
+        WHERE bot_id=requested_bot AND query_id=requested_query AND purpose='QUERY'
+          AND index_ref_id=input->>'query_facet_id' AND state='READY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_FACET_MISMATCH',
+                'message','Candidate qualification refers to another query facet','status',409));
+    END IF;
+    SELECT min(o.conversation_ref),max(o.ingress_seq) INTO conversation_value,cut_value
+    FROM __forest_module_schema__.memory_query_parts qp
+    JOIN __forest_module_schema__.source_occurrences o
+      ON o.bot_id=qp.bot_id AND o.occurrence_id=qp.occurrence_id
+    WHERE qp.bot_id=requested_bot AND qp.query_id=requested_query;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'ref_id',f.index_ref_id,'candidate_rank',(hit->>'candidate_rank')::integer,
+        'score',(hit->>'score')::double precision,'source_unit_id',u.source_unit_id,
+        'source_revision',u.source_revision,'source_id',s.source_id,'trunk_id',s.trunk_id,
+        'source_kind',s.source_kind,'platform',s.platform,'realm_id',s.realm_id,
+        'external_group_id',s.external_group_id,'author_subject_ref',u.author_subject_ref
+    ) ORDER BY (hit->>'candidate_rank')::integer),'[]'::jsonb)
+    INTO candidates_value
+    FROM jsonb_array_elements(input->'candidates') hit
+    JOIN __forest_module_schema__.embedding_facets f
+      ON f.bot_id=requested_bot AND f.index_ref_id=hit->>'ref_id'
+     AND f.purpose='DOCUMENT' AND f.state='READY'
+     AND f.space_id=page_check#>>'{value,space_id}' AND f.published_at<=query_row.created_at
+    JOIN __forest_module_schema__.source_units u
+      ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+     AND u.source_revision=f.source_revision AND u.eligibility_state='ELIGIBLE'
+    JOIN __forest_module_schema__.memory_sources s
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+    WHERE EXISTS (
+        SELECT 1 FROM __forest_module_schema__.source_occurrences o
+        WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id AND o.eligibility_state='ELIGIBLE'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_query_parts qp
+        WHERE qp.bot_id=u.bot_id AND qp.query_id=requested_query AND qp.source_unit_id=u.source_unit_id
+    ) AND NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.source_occurrences o
+        WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
+          AND o.conversation_ref=conversation_value
+          AND (cut_value IS NULL OR o.ingress_seq IS NULL OR o.ingress_seq>cut_value
+               OR o.eligibility_state='REGISTERED')
+    );
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('candidates',candidates_value));
 END;
 $$;
 

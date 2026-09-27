@@ -179,7 +179,7 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 发布顺序是“先写派生索引，后发布权威引用”。进程在两步之间崩溃时，Worker 以同一 `ref_id` 重放 Milvus upsert；重复成功不会产生第二条记忆。抑制或删除先在 PostgreSQL 提交不可见事实并写 `vector_index_deletions`，查询立即回表过滤；后台再按 outbox 删除 Milvus 条目。即使删除暂时失败，旧向量也只能成为被 PostgreSQL 拒绝的无效候选，不能复活正文。
 
-删除 outbox 必须覆盖曾经可能发出 upsert 的 facet，包括仍为 `EMBEDDED`、尚未提交 `READY` 的 facet。`vector.index` 包按 `(bot_id, ref_id)` 串行处理写入与删除，保留不可逆 tombstone；删除先到时也要建立 tombstone，后到的同 ref upsert 必须拒绝。Milvus 在客户端超时后仍可能迟到提交，所以事务锁本身不足以证明物理删除：索引包还要周期性重放 tombstone 删除，Memory 的召回始终回查 PostgreSQL 的来源资格、facet 状态和修订。Memory 发布 Worker 按已结算的 Embedding batch 读取一次结果 Payload，逐项验证 facet 和向量摘要，再调用索引包；随后在带删除 epoch 的短事务中复核来源，只有有效 facet 可以提交 `READY`，其余进入删除 outbox。Memory 的删除 Worker 重放 outbox，索引包的 ref 围栏和周期清扫负责迟到写入。公开遗忘/抑制事务仍待接入，必须在抑制来源与相关 facet 的同一事务里为全部可能已发布的 ref 写 outbox。
+删除 outbox 必须覆盖曾经可能发出 upsert 的 facet，包括仍为 `EMBEDDED`、尚未提交 `READY` 的 facet。`vector.index` 包按 `(bot_id, ref_id)` 串行处理写入与删除，保留不可逆 tombstone；删除先到时也要建立 tombstone，后到的同 ref upsert 必须拒绝。Milvus 在客户端超时后仍可能迟到提交，所以事务锁本身不足以证明物理删除：索引包还要周期性重放 tombstone 删除，Memory 的召回始终回查 PostgreSQL 的来源资格、facet 状态和修订。Memory 发布 Worker 按已结算的 Embedding batch 读取一次结果 Payload，逐项验证 facet 和向量摘要，再调用索引包；随后在带删除 epoch 的短事务中复核来源，只有有效 facet 可以提交 `READY`，其余进入删除 outbox。Memory 的删除 Worker 重放 outbox，索引包的 ref 围栏和周期清扫负责迟到写入。`memory.source.forget/1` 已在抑制来源与相关 facet 的同一事务里为全部可能已发布的 ref 写 outbox，并撤销 Kernel Payload 来源闭包；管理面的固定目标预览与物理 scrub 仍待实现。
 
 每个 Bot 的 collection 身份由 `(bot_id, space_id, dimensions, metric)` 一次冻结。模型种类、模型修订、维度或空间改变必须创建新 Bot/新隔离索引；兼容 endpoint 和凭据可以经 `vector.index` 配置新 Generation 替换。Milvus 是可重建派生库：丢失后从当前合格 facet 与稳定 ref 重放，不得反向把 Milvus 当作消息或关系权威。
 
@@ -207,7 +207,7 @@ Memory 的每日嵌入账本以 UTC 日期和 Bot ID 为键。每个稳定 batch
 
 专用图驱动失效或索引落后时，退回事实库的授权词法/稳定来源区间检索，返回 graph_completeness、source_watermark 和缺口信息。不得因派生图不可用而停止原始消息接纳和确定性裁剪。
 
-该链路已有 Memory-owned 派发与恢复任务；Provider 物化请求和 HTTP 仍属 Embedding 包，Memory 只保存结果引用及向量摘要。假 HTTP 客户端驱动的真实跨包 Effect 已验证文本与图片 facet 进入 `EMBEDDED`；重启恢复、真实供应商和向量索引发布仍待验收。
+该链路已有 Memory-owned 派发与恢复任务；Provider 物化请求和 HTTP 仍属 Embedding 包，Memory 只保存结果引用及向量摘要。假 HTTP 客户端驱动的真实跨包 Effect 已验证图文 DOCUMENT/QUERY facet 经 `EMBEDDED` 发布为 `READY`，以及来源遗忘、向量删除重试、热替换与重启；真实供应商及进程崩溃故障注入仍待验收。
 
 提交前恢复使用独立的 `memory.abandon-embedding-effect` 事务计划。Kernel Effect 首先核实该 attempt 仍为 `PREPARED` 并登记放弃，预算随后原子释放，Memory 最后确认 attempt/claim/reservation 一致，把 attempt 记为 `NOT_SENT`、facet 退回 `PENDING`、claim 记为过期；任一步失败全部回滚。普通 claim 扫描不会擅自过期已有 attempt 的 claim。`DISPATCHING` 或更晚的 Effect 不可通过这条路径重发，必须进入结果观察或 UNKNOWN 对账。
 
@@ -243,6 +243,8 @@ LLM 生成联想时，输入源集、提示词/模型配置及端点版本形成
 包内入口 `memory.query.begin/1` 接受 query_id、conversation_ref、已接纳的 input_batch_ref 与 context_revision。它通过 manifest UnitOfWork 捕获当前 Payload 删除 epoch，由 Memory participant 在同一事务锁定合格 occurrence/source unit 并登记不可变 query/part 集合；存在尚未完成的来源捕获时拒绝准备，不能悄悄用半份图片输入建立查询。注册的 part 数量上限为 256，超出时明确拒绝，不能以截断冒充完整切口。`memory.read-query-parts` 每页最多 32 个 part，翻页前重验整份固定成员集的来源状态和修订；源失效时拒绝整份查询。正文由包 Worker 按准确 PayloadRef 读取，Host 不参与查询选择。注册本身不产生 facet、不触发 Provider，也不改变 source unit 的归档资格；facet 准备和召回是后续独立步骤。
 
 `memory.query.prepare/1` 仅接受已注册 query_id，按固定成员集生成 facet。每个 part 最多 64 个 facet，一次查询最多 256 个 facet；单张图片最多 8 MiB，一次查询图片累计最多 32 MiB。超限明确拒绝，不能静默丢掉 part 或改做图片描述。facet 身份包含 query_id 和确定性文档 facet 身份，避免同一来源的 QUERY 与 DOCUMENT 或不同查询互相覆盖。每个固定 query_part_index 对应一份持久准备回执，纯空白文本也以零 facet 回执闭合。所有回执提交后，独立完成事务捕获当前删除 epoch、重验完整成员集并登记准备完成事实；只有该事实存在，QUERY 才能被嵌入任务领取。崩溃/热重载后重放相同 part 操作，不能把部分准备冒充完整查询；准备服务本身不调用 Embedding。
+
+种子入口 `memory.query.seeds/1` 为只读阶段：准备完成且全部 QUERY facet 为 READY 后才搜索，每次索引调用最多 256 个候选，再以每批 32 个引用回 PostgreSQL 重验。文档必须为相同 space 的 READY DOCUMENT facet，原源修订一致，来源 ACTIVE，源单元和至少一个 occurrence 已归档；只接受 query 创建时点之前已发布的 facet。排除 query 自身源单元，以及当前会话切口之后或尚未接纳的观察，防止通过其他观察的归档资格读到队列尾部。每个查询 facet 对同一源单元只贡献其首个合格命中的 `1/(60+rank)`，合计 RRF 仅排序种子；种子激活均为 1.0，群聊、主干和作者由事实库返回。该阶段不物化正文、不生成最终 EvidenceBundle，不替代后续的固定图快照、最终删除/授权重验与结果冻结。
 
 ```text
 MemoryQuery
@@ -463,4 +465,4 @@ MemoryStoreProfile 整库迁移导出来源注册表、来源时钟、单元、�
 
 这些是后续实现与并发故障测试的验收要求。实现应使用相同已接纳源集合的不同归档排列验证主干结构一致，再单独验证接纳仲裁、权限/删除屏障、Provider 实际请求体和预算上限；不能仅检查数据库元数据就声称来源标记已经到达模型。
 
-当前实现边界：Memory 包内的嵌入及向量发布已支持 DOCUMENT/QUERY 两种用途。QUERY 只允许使用 query 冻结记录里的 InputBatch、context revision、occurrence、part 和源修订；同批不可混合不同查询或用途。活跃 source unit 可以保持 REGISTERED，查询发布不会把它提升为归档 DOCUMENT。两类 facet 都受现有 Effect、预算、来源失效和向量删除围栏约束。集成测试目前通过 `memory.query.begin` 包服务注册 query，facet 仍由直接数据库 fixture 准备；尚未实现公开查询 facet 准备及语义种子选择，不能将该测试视作完整语义召回已完成。
+当前实现边界：公开 `memory.query.begin`、`memory.query.prepare` 已在隔离包内完成查询注册和 facet 准备，DOCUMENT/QUERY 嵌入发布、资格失效和向量删除围栏均已接通。只读 `memory.query.seeds` 已进行图文候选回表重验、来源归因及 RRF 种子排序。生产图扩散、最终证据冻结、跨主干联想写入和 Agent 语义召回尚未接通；不能把种子阶段当作完整召回验收。

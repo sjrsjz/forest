@@ -867,6 +867,15 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 ),
                 (), query_input,
             ) == query
+            assert await memory_instance.runtime_service_handlers()[
+                ("memory.query.begin", 1)
+            ].invoke_routed(
+                query_route,
+                RuntimeServiceInvocation(
+                    "query-begin-host-new-caller", 30, "memory.query", settings.bot_id,
+                ),
+                (), query_input,
+            ) == query
             with pytest.raises(ForestError) as caught:
                 await memory_instance.runtime_service_handlers()[
                     ("memory.query.begin", 1)
@@ -1111,6 +1120,100 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 facet["facet_id"] for facet in facets
             }
 
+            async def seeds_for(query_id, operation):
+                return await memory_instance.runtime_service_handlers()[
+                    ("memory.query.seeds", 1)
+                ].invoke_routed(
+                    FrozenServiceRoute(
+                        service_id="memory.query.seeds", version=1,
+                        caller_component_id="memory.graph", provider_component_id="memory.graph",
+                        provider_generation_id=memory_identity.generation_id,
+                        graph_id=memory_identity.graph_id,
+                        graph_revision=memory_identity.graph_revision,
+                        admission_lane="DATA", owned_work=False,
+                    ),
+                    RuntimeServiceInvocation(operation, 30, "memory.query", settings.bot_id),
+                    (), {"query_id": query_id},
+                )
+
+            # This query predates document publication and cannot recall itself.
+            assert (await seeds_for(query["query_id"], "seeds/original"))["seeds"] == []
+            await clients[-1].handler(json.dumps({
+                "self_id": int(settings.onebot_self_id), "post_type": "message",
+                "message_type": "group", "sub_type": "normal", "time": 1_720_000_001,
+                "message_id": 4243, "user_id": 20002, "group_id": 933179609,
+                "sender": {"user_id": 20002, "nickname": "Recall sender", "card": "", "role": "member"},
+                "message": [
+                    {"type": "text", "data": {"text": "before"}},
+                    {"type": "image", "data": {"file": "recall-file", "url": "https://media.example/recall"}},
+                    {"type": "text", "data": {"text": "after"}},
+                ],
+            }).encode())
+            recall_hash = hashlib.sha256(b"binding/main\x004243").hexdigest()
+            recall_unit = "onebot-unit:" + recall_hash
+            async with asyncio.timeout(20):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        recall_occurrence = await (await conn.execute(
+                            sql.SQL("SELECT * FROM {}.source_occurrences WHERE bot_id=%s AND source_unit_id=%s").format(sql.Identifier(memory_namespace)),
+                            (settings.bot_id, recall_unit),
+                        )).fetchone()
+                    if recall_occurrence is not None:
+                        break
+                    await asyncio.sleep(0.1)
+            recall_batch = recall_occurrence["input_batch_ref"] or "batch/recall-host"
+            recall_revision = recall_occurrence["context_revision"] or 1
+            async with host.store.pool.connection() as conn, conn.transaction():
+                await participant.invoke_in(
+                    conn, "memory.qualify-input-batch",
+                    {
+                        "protocol": "forest.uow-step/1",
+                        "caller": {"component_id": "agent.runtime", "generation_id": host.registry.get("agent.runtime").generation_identity.generation_id},
+                        "input": {"selection_step_id": "selection", "deletion_epoch_step_id": "payload_epoch"},
+                        "prior": {
+                            "selection": {**archived_selection, "input_batch_id": recall_batch,
+                                "context_revision": recall_revision,
+                                "event_ids": [recall_occurrence["event_ref"]]},
+                            "payload_epoch": {"protocol": "forest.payload-epoch/1", "deletion_epoch": await host._kernel.payload.epoch()},
+                        },
+                    },
+                    operation_id="recall-admission-host", causal_root_kind="memory.query",
+                    causal_root_id="query/recall-host", parent_call_id="call/recall-admission-host",
+                    timeout_seconds=10,
+                )
+            recall_query = await memory_instance.runtime_service_handlers()[
+                ("memory.query.begin", 1)
+            ].invoke_routed(
+                query_route,
+                RuntimeServiceInvocation("query-begin-recall-host", 30, "memory.query", settings.bot_id),
+                (), {"query_id": "query/recall-host", "conversation_ref": "onebot:group:933179609",
+                     "input_batch_ref": recall_batch, "context_revision": recall_revision},
+            )
+            await memory_instance.runtime_service_handlers()[("memory.query.prepare", 1)].invoke_routed(
+                prepare_route,
+                RuntimeServiceInvocation("query-prepare-recall-host", 30, "memory.query", settings.bot_id),
+                (), {"query_id": recall_query["query_id"]},
+            )
+            async with asyncio.timeout(40):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        ready = await (await conn.execute(
+                            sql.SQL("SELECT count(*) AS n FROM {}.embedding_facets WHERE bot_id=%s AND query_id=%s AND state='READY'").format(sql.Identifier(memory_namespace)),
+                            (settings.bot_id, recall_query["query_id"]),
+                        )).fetchone()
+                    if ready["n"] == 3:
+                        break
+                    await asyncio.sleep(0.1)
+            index_rows = FakeMilvusClient.collections[index_collection]["rows"]
+            index_rows["stale-ref/no-fact"] = dict(index_rows[facets[0]["facet_id"]])
+            seeds = await seeds_for(recall_query["query_id"], "seeds/recall-before-forget")
+            assert len(seeds["seeds"]) == 1
+            assert seeds["seeds"][0]["source_unit_id"] == "onebot-unit:" + event_hash
+            assert seeds["seeds"][0]["external_group_id"] == "933179609"
+            assert seeds["seeds"][0]["author_subject_ref"] == "qq:20001"
+            assert seeds["seeds"][0]["query_modalities"] == ["IMAGE", "TEXT"]
+            assert seeds["seeds"][0]["activation"] == 1.0
+
             # The public UoW revokes Payload, Memory eligibility, graph evidence,
             # and vector refs together before the asynchronous Milvus deletion.
             previous_epoch = await host._kernel.payload.epoch()
@@ -1168,6 +1271,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert forget["suppressed_source_units"] == 1
             assert forget["vector_deletions"] == len(facets) + len(query_facets)
             assert forget["retracted_relations"] == 1
+            assert (await seeds_for(recall_query["query_id"], "seeds/recall-after-forget"))["seeds"] == []
+            index_rows.pop("stale-ref/no-fact")
             with pytest.raises(ForestError) as caught:
                 await memory_instance.invoke_management_query(
                     query_parts_port,

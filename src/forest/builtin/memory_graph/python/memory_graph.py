@@ -13,6 +13,7 @@ from facet_preparation import (
     query_part_facets,
     query_part_operation_id,
 )
+from seed_retrieval import retrieve as retrieve_seeds
 from vector_work import delete as delete_vector
 from vector_work import publish as publish_vectors
 
@@ -129,7 +130,7 @@ class MemoryGraph(Plugin):
                     "deletion_epoch_step_id": "payload_epoch",
                 },
             },
-            operation_id=ctx.operations.stable("query-begin:" + _digest(payload["query_id"])[7:]),
+            operation_id="query-begin:" + _digest(payload["query_id"])[7:],
             timeout=20,
         )
 
@@ -201,6 +202,16 @@ class MemoryGraph(Plugin):
             },
             operation_id="query-facets-complete:" + _digest(query_id)[7:], timeout=20,
         )
+
+    @service(
+        "memory.query.seeds",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/query-prepare-input.json",
+        output_schema="schemas/query-seeds-output.json",
+    )
+    async def query_seeds(self, payload, ctx):
+        return await retrieve_seeds(ctx, payload["query_id"], self.profile["retrieval"])
 
     @job("memory.facets.prepare")
     async def prepare_document_facets(self, task, ctx):
