@@ -976,6 +976,25 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_query_occurrence_matches(
+    requested_bot text, requested_query text, requested_unit text,
+    requested_revision bigint, requested_part text, requested_occurrence text
+) RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_query_parts p
+        JOIN __forest_module_schema__.memory_queries q
+          ON q.bot_id=p.bot_id AND q.query_id=p.query_id AND q.state='OPEN'
+        JOIN __forest_module_schema__.source_occurrences o
+          ON o.bot_id=p.bot_id AND o.occurrence_id=p.occurrence_id
+         AND o.source_unit_id=p.source_unit_id
+         AND o.input_batch_ref=q.input_batch_ref AND o.context_revision=q.context_revision
+         AND o.eligibility_state IN ('ADMITTED','ELIGIBLE')
+        WHERE p.bot_id=requested_bot AND p.query_id=requested_query
+          AND p.source_unit_id=requested_unit AND p.source_revision=requested_revision
+          AND p.part_id=requested_part AND p.occurrence_id=requested_occurrence
+    );
+$$;
+
 CREATE FUNCTION memory_claim_vector_publish(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -1016,7 +1035,7 @@ BEGIN
     JOIN __forest_module_schema__.embedding_facets f
       ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
     WHERE a.bot_id=requested_bot AND a.state='SUCCEEDED'
-      AND f.state='EMBEDDED' AND f.purpose='DOCUMENT'
+      AND f.state='EMBEDDED'
     ORDER BY a.bot_id,a.attempt_id LIMIT 32
     ON CONFLICT (bot_id,attempt_id) DO NOTHING;
     SELECT w.* INTO work_row FROM __forest_module_schema__.vector_publish_batches w
@@ -1031,7 +1050,7 @@ BEGIN
     WHERE bot_id=requested_bot AND attempt_id=work_row.attempt_id;
     SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
     WHERE bot_id=requested_bot AND claim_id=attempt_row.claim_id;
-    IF attempt_row.state<>'SUCCEEDED' OR claim_row.purpose<>'DOCUMENT' THEN
+    IF attempt_row.state<>'SUCCEEDED' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_ATTEMPT_INVALID',
                 'message','Vector publish attempt is not settled','status',409));
@@ -1060,7 +1079,7 @@ BEGIN
         'causal_root_id',attempt_row.claim_id,
         'payload',jsonb_build_object(
             'attempt_id',work_row.attempt_id,'claim_token',requested_token,
-            'space_id',claim_row.space_id,
+            'space_id',claim_row.space_id,'purpose',claim_row.purpose,
             'result',jsonb_build_object(
                 'payload_id',attempt_row.result_payload_id,
                 'digest',attempt_row.result_payload_digest,
@@ -1141,14 +1160,14 @@ BEGIN
     END IF;
     SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
     WHERE bot_id=requested_bot AND claim_id=attempt_row.claim_id;
-    IF claim_row.purpose<>'DOCUMENT' OR claim_row.space_id IS DISTINCT FROM
+    IF claim_row.space_id IS DISTINCT FROM
         body->>'space_id' OR jsonb_array_length(results_value)<>claim_row.item_count THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_MEMBERS_INVALID',
                 'message','Vector publication membership differs','status',409));
     END IF;
     FOR facet_row IN
-        SELECT ci.item_index,f.facet_id,f.state AS facet_state,f.source_unit_id,
+        SELECT ci.item_index,f.facet_id,f.state AS facet_state,f.source_unit_id,f.purpose,
                f.source_revision,f.space_id,f.accepted_deletion_epoch,
                f.index_ref_id,u.source_revision AS unit_revision,
                u.eligibility_state AS unit_state,
@@ -1166,7 +1185,11 @@ BEGIN
             FROM __forest_module_schema__.source_occurrences occurrence
             WHERE occurrence.bot_id=f.bot_id
               AND occurrence.source_unit_id=f.source_unit_id
-              AND occurrence.eligibility_state='ELIGIBLE'
+              AND ((f.purpose='DOCUMENT' AND occurrence.eligibility_state='ELIGIBLE')
+                   OR (f.purpose='QUERY' AND
+                       __forest_module_schema__.memory_query_occurrence_matches(
+                           f.bot_id,f.query_id,f.source_unit_id,f.source_revision,
+                           f.part_id,occurrence.occurrence_id)))
             ORDER BY occurrence.occurrence_id LIMIT 1 FOR SHARE
         ) o ON true
         WHERE ci.bot_id=requested_bot AND ci.claim_id=attempt_row.claim_id
@@ -1177,6 +1200,7 @@ BEGIN
         IF item_result->>'facet_id' IS DISTINCT FROM facet_row.facet_id
            OR item_result->>'status' NOT IN ('PUBLISHED','TOMBSTONED','SKIPPED')
            OR facet_row.space_id IS DISTINCT FROM claim_row.space_id
+           OR facet_row.purpose IS DISTINCT FROM claim_row.purpose
            OR facet_row.facet_state NOT IN ('EMBEDDED','READY','SUPPRESSED')
            OR facet_row.accepted_deletion_epoch>epoch_number
            OR facet_row.unit_epoch>epoch_number THEN
@@ -1185,7 +1209,8 @@ BEGIN
                     'message','Vector publication facet differs','status',409));
         END IF;
         source_eligible := facet_row.facet_state<>'SUPPRESSED'
-            AND facet_row.unit_state='ELIGIBLE'
+            AND (facet_row.unit_state='ELIGIBLE'
+                 OR (facet_row.purpose='QUERY' AND facet_row.unit_state='REGISTERED'))
             AND facet_row.unit_revision=facet_row.source_revision
             AND facet_row.source_state='ACTIVE'
             AND facet_row.occurrence_id IS NOT NULL;
@@ -2263,7 +2288,9 @@ BEGIN
           ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
         JOIN __forest_module_schema__.source_units u
           ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
-         AND u.source_revision=f.source_revision AND u.eligibility_state='ELIGIBLE'
+         AND u.source_revision=f.source_revision
+         AND (u.eligibility_state='ELIGIBLE'
+              OR (f.purpose='QUERY' AND u.eligibility_state='REGISTERED'))
         JOIN __forest_module_schema__.memory_sources s
           ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
         JOIN __forest_module_schema__.source_parts p
@@ -2274,7 +2301,11 @@ BEGIN
             SELECT o.occurrence_id
             FROM __forest_module_schema__.source_occurrences o
             WHERE o.bot_id=f.bot_id AND o.source_unit_id=f.source_unit_id
-              AND o.eligibility_state='ELIGIBLE'
+              AND ((f.purpose='DOCUMENT' AND o.eligibility_state='ELIGIBLE')
+                   OR (f.purpose='QUERY' AND
+                       __forest_module_schema__.memory_query_occurrence_matches(
+                           f.bot_id,f.query_id,f.source_unit_id,f.source_revision,
+                           f.part_id,o.occurrence_id)))
             ORDER BY o.occurrence_id LIMIT 1 FOR SHARE
         ) occurrence ON true
         WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
@@ -4013,6 +4044,7 @@ DECLARE
     domain_space text;
     deletion_epoch_value bigint;
     selected_facets jsonb;
+    selected_purpose text;
     claim_value jsonb;
 BEGIN
     IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
@@ -4058,7 +4090,9 @@ BEGIN
         FROM __forest_module_schema__.embedding_facets f
         JOIN __forest_module_schema__.source_units u
           ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
-         AND u.source_revision=f.source_revision AND u.eligibility_state='ELIGIBLE'
+         AND u.source_revision=f.source_revision
+         AND (u.eligibility_state='ELIGIBLE'
+              OR (f.purpose='QUERY' AND u.eligibility_state='REGISTERED'))
         JOIN __forest_module_schema__.memory_sources s
           ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
         JOIN __forest_module_schema__.source_parts p
@@ -4070,10 +4104,14 @@ BEGIN
             FROM __forest_module_schema__.source_occurrences occurrence
             WHERE occurrence.bot_id=f.bot_id
               AND occurrence.source_unit_id=f.source_unit_id
-              AND occurrence.eligibility_state='ELIGIBLE'
+              AND ((f.purpose='DOCUMENT' AND occurrence.eligibility_state='ELIGIBLE')
+                   OR (f.purpose='QUERY' AND
+                       __forest_module_schema__.memory_query_occurrence_matches(
+                           f.bot_id,f.query_id,f.source_unit_id,f.source_revision,
+                           f.part_id,occurrence.occurrence_id)))
             ORDER BY occurrence.observed_at,occurrence.occurrence_id LIMIT 1
         ) o ON true
-        WHERE f.bot_id=requested_bot AND f.purpose='DOCUMENT'
+        WHERE f.bot_id=requested_bot
           AND f.state='PENDING' AND f.space_id=domain_space
           AND f.next_attempt_at<=clock_timestamp()
           AND NOT EXISTS (
@@ -4083,13 +4121,18 @@ BEGIN
               WHERE ci.bot_id=f.bot_id AND ci.facet_id=f.facet_id
                 AND c.state='CLAIMED' AND c.lease_deadline>clock_timestamp()
           )
-        ORDER BY f.created_at,f.facet_id LIMIT 32
+        ORDER BY CASE f.purpose WHEN 'QUERY' THEN 0 ELSE 1 END,
+                 f.created_at,f.facet_id LIMIT 32
         FOR UPDATE OF f SKIP LOCKED
+    ), focus AS (
+        SELECT purpose,query_id FROM candidates
+        ORDER BY CASE purpose WHEN 'QUERY' THEN 0 ELSE 1 END,created_at,facet_id LIMIT 1
     ), ranked AS (
         SELECT candidates.*,
                sum(CASE WHEN modality='IMAGE' THEN input_byte_length ELSE 0 END)
-                   OVER (ORDER BY created_at,facet_id) AS image_bytes
-        FROM candidates
+                   OVER (ORDER BY candidates.created_at,candidates.facet_id) AS image_bytes
+        FROM candidates JOIN focus ON candidates.purpose=focus.purpose
+          AND candidates.query_id IS NOT DISTINCT FROM focus.query_id
     )
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
         'facet_id',facet_id,'source_unit_id',source_unit_id,
@@ -4106,8 +4149,8 @@ BEGIN
         'input_byte_length',input_byte_length,'media_type',input_media_type,
         'width',width,'height',height
     ) ORDER BY created_at,facet_id),'[]'::jsonb),
-        max(accepted_deletion_epoch)
-    INTO selected_facets,deletion_epoch_value
+        max(accepted_deletion_epoch),min(purpose)
+    INTO selected_facets,deletion_epoch_value,selected_purpose
     FROM ranked WHERE image_bytes<=8388608;
     IF jsonb_array_length(selected_facets)=0 THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
@@ -4119,13 +4162,13 @@ BEGIN
             requested_bot||'/'||requested_token,'UTF8')),'hex'),
         'causal_root_kind','memory.embedding.batch','causal_root_id',requested_token,
         'payload',jsonb_build_object(
-            'claim_id',requested_token,'space_id',domain_space,
+            'claim_id',requested_token,'space_id',domain_space,'purpose',selected_purpose,
             'source_epoch_high_watermark',deletion_epoch_value,
             'facets',selected_facets));
     INSERT INTO __forest_module_schema__.embedding_claims(
         bot_id,claim_id,purpose,space_id,source_epoch_high_watermark,
         lease_seconds,lease_deadline,item_limit,item_count,claim_payload)
-    VALUES(requested_bot,requested_token,'DOCUMENT',domain_space,deletion_epoch_value,
+    VALUES(requested_bot,requested_token,selected_purpose,domain_space,deletion_epoch_value,
         requested_lease,clock_timestamp()+(requested_lease*interval '1 second'),
         32,jsonb_array_length(selected_facets),claim_value);
     INSERT INTO __forest_module_schema__.embedding_claim_items(

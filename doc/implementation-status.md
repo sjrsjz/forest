@@ -131,6 +131,8 @@ Memory 的 handoff 事务现由 `memory.embedding.dispatch` owned-work Worker �
 
 Memory owned-work Worker 已接入结果观察；成功回执依 claim 顺序验证向量和实际 token 用量，再由单一 UnitOfWork 同时结算 Effect、预算与 facet。独立向量索引发布已接入并用假 Milvus 验证；语义召回、真实供应商请求及崩溃恢复的端到端测试仍待完成。
 
+Embedding 与向量发布主链现在同时支持 `DOCUMENT`/`QUERY`，用途来自持久 claim，不能由 Provider 猜测。领取时优先处理 QUERY，每批最多 32 个 facet，且同批只能属于一种用途及同一个 query；QUERY 资格要求 part 精确匹配 `memory_query_parts` 中的源修订和 occurrence，后者必须属于 query 的 InputBatch/context revision 且已 `ADMITTED` 或 `ELIGIBLE`。这允许未归档消息生成查询向量，却不提升 source unit 的长期召回资格。准备、handoff 与发布均重验用途对应的资格，发布失效仍走删除 outbox。宿主图集成测试已用直接数据库 fixture 注册查询，验证未归档图文 QUERY 发布、之后的 DOCUMENT 发布、同时遗忘两类引用，以及热替换和重启；公开查询注册/准备服务、ANN 种子重验和图扩散尚未接通，因此这不是可用语义召回的验收结论。
+
 ## 8. 下一切换顺序
 
 1. 补齐遗忘管理的固定目标计划、较大范围选择器与持续 Payload scrub；补齐发布崩溃重放验证。

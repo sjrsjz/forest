@@ -1,9 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object", "additionalProperties": false,
-  "required": ["claim_id", "space_id", "source_epoch_high_watermark", "facets"],
+  "required": ["claim_id", "space_id", "purpose", "source_epoch_high_watermark", "facets"],
   "properties": {
     "claim_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "purpose": {"enum": ["DOCUMENT", "QUERY"]},
     "space_id": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "source_epoch_high_watermark": {"type": "integer", "minimum": 0},
     "facets": {

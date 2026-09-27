@@ -1,9 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object", "additionalProperties": false,
-  "required": ["attempt_id", "claim_token", "space_id", "result", "facets"],
+  "required": ["attempt_id", "claim_token", "space_id", "purpose", "result", "facets"],
   "properties": {
     "attempt_id": {"$ref": "#/$defs/id"},
+    "purpose": {"enum": ["DOCUMENT", "QUERY"]},
     "claim_token": {"$ref": "#/$defs/id"},
     "space_id": {"$ref": "#/$defs/id"},
     "result": {

@@ -228,7 +228,7 @@ async def dispatch(ctx, task, profile):
             "generation_id": bound["generation_id"],
             "profile_ref": bound["profile_ref"],
             "space_id": claim["space_id"],
-            "purpose": "DOCUMENT",
+            "purpose": claim["purpose"],
             "facets": claim["facets"],
         },
         operation_id=ctx.operations.stable("embedding-materialize:" + claim_id),

@@ -64,7 +64,7 @@ async def publish(ctx, task, profile):
                     {
                         "ref_id": facet["facet_id"],
                         "space_id": work["space_id"],
-                        "purpose": "DOCUMENT",
+                        "purpose": work["purpose"],
                         "source_unit_id": facet["source_unit_id"],
                         "source_revision": facet["source_revision"],
                         "modality": facet["modality"],

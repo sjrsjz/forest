@@ -806,6 +806,102 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             }
             participant = memory_instance.unit_of_work_participant()
             async with host.store.pool.connection() as conn, conn.transaction():
+                await participant.invoke_in(
+                    conn,
+                    "memory.qualify-input-batch",
+                    {
+                        "protocol": "forest.uow-step/1",
+                        "caller": {
+                            "component_id": "agent.runtime",
+                            "generation_id": host.registry.get("agent.runtime").generation_identity.generation_id,
+                        },
+                        "input": {
+                            "selection_step_id": "selection",
+                            "deletion_epoch_step_id": "payload_epoch",
+                        },
+                        "prior": {
+                            "selection": archived_selection,
+                            "payload_epoch": {
+                                "protocol": "forest.payload-epoch/1",
+                                "deletion_epoch": await host._kernel.payload.epoch(),
+                            },
+                        },
+                    },
+                    operation_id="memory/query-admission/host-embedding",
+                    causal_root_kind="memory.query",
+                    causal_root_id="query/host-embedding",
+                    parent_call_id="call/memory/query-admission/host-embedding",
+                    timeout_seconds=10,
+                )
+                # Query registration/preparation is the next public boundary.
+                # This fixture exercises the real shared Effect/Embedding/index
+                # pipeline while its source is still outside the archive.
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.memory_queries(bot_id,query_id,operation_id,"
+                        "input_digest,current_source_id,input_batch_ref,context_revision,"
+                        "query_mode,fusion_policy_revision,accepted_deletion_epoch) "
+                        "SELECT bot_id,'query/host-embedding','query/host-embedding',%s,"
+                        "source_id,%s,%s,'MIXED','independent-facets/1',accepted_deletion_epoch "
+                        "FROM {}.source_units WHERE bot_id=%s AND source_unit_id=%s"
+                    ).format(sql.Identifier(memory_namespace), sql.Identifier(memory_namespace)),
+                    ("sha256:" + "2" * 64, batch_ref, context_revision,
+                     settings.bot_id, "onebot-unit:" + event_hash),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.memory_query_parts(bot_id,query_id,query_part_index,"
+                        "source_unit_id,source_revision,occurrence_id,part_id,modality) "
+                        "SELECT p.bot_id,'query/host-embedding',p.part_index,p.source_unit_id,"
+                        "u.source_revision,o.occurrence_id,p.part_id,p.part_kind "
+                        "FROM {}.source_parts p JOIN {}.source_units u USING(bot_id,source_unit_id) "
+                        "JOIN {}.source_occurrences o USING(bot_id,source_unit_id) "
+                        "WHERE p.bot_id=%s AND p.source_unit_id=%s AND o.input_batch_ref=%s"
+                    ).format(*(sql.Identifier(memory_namespace) for _ in range(4))),
+                    (settings.bot_id, "onebot-unit:" + event_hash, batch_ref),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.embedding_facets(bot_id,facet_id,purpose,query_id,"
+                        "source_unit_id,source_revision,part_id,modality,selector_start_char,"
+                        "selector_end_char,input_payload_id,input_payload_digest,facet_content_digest,"
+                        "input_media_type,input_byte_length,space_id,accepted_deletion_epoch) "
+                        "SELECT p.bot_id,'query-facet/host/'||p.part_index,'QUERY','query/host-embedding',"
+                        "p.source_unit_id,u.source_revision,p.part_id,p.part_kind,"
+                        "CASE p.part_kind WHEN 'TEXT' THEN 0 END,"
+                        "CASE p.part_kind WHEN 'TEXT' THEN p.byte_length END,"
+                        "p.payload_id,p.payload_digest,p.payload_digest,p.media_type,p.byte_length,"
+                        "d.space_id,u.accepted_deletion_epoch FROM {}.source_parts p "
+                        "JOIN {}.source_units u USING(bot_id,source_unit_id) "
+                        "JOIN {}.memory_domains d USING(bot_id) "
+                        "WHERE p.bot_id=%s AND p.source_unit_id=%s"
+                    ).format(*(sql.Identifier(memory_namespace) for _ in range(4))),
+                    (settings.bot_id, "onebot-unit:" + event_hash),
+                )
+            async with asyncio.timeout(40):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        query_facets = await (
+                            await conn.execute(
+                                sql.SQL(
+                                    "SELECT facet_id,state,result_payload_id FROM {}.embedding_facets "
+                                    "WHERE bot_id=%s AND query_id='query/host-embedding'"
+                                ).format(sql.Identifier(memory_namespace)),
+                                (settings.bot_id,),
+                            )
+                        ).fetchall()
+                    if len(query_facets) == 3 and all(row["state"] == "READY" for row in query_facets):
+                        break
+                    await asyncio.sleep(0.1)
+            async with host.store.pool.connection() as conn:
+                unit_state = await (
+                    await conn.execute(
+                        sql.SQL("SELECT eligibility_state FROM {}.source_units WHERE bot_id=%s AND source_unit_id=%s").format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id, "onebot-unit:" + event_hash),
+                    )
+                ).fetchone()
+            assert unit_state["eligibility_state"] == "REGISTERED"
+            async with host.store.pool.connection() as conn, conn.transaction():
                 archive = await participant.invoke_in(
                     conn,
                     "memory.qualify-archive",
@@ -853,7 +949,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                                     sql.SQL(
                                         "SELECT facet_id,modality,state,result_payload_id,index_ref_id "
                                         "FROM {}.embedding_facets WHERE bot_id=%s "
-                                        "AND source_unit_id=%s"
+                                        "AND source_unit_id=%s AND purpose='DOCUMENT'"
                                     ).format(sql.Identifier(memory_namespace)),
                                     (settings.bot_id, "onebot-unit:" + event_hash),
                                 )
@@ -996,9 +1092,9 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             )
             assert forget["deletion_epoch"] == previous_epoch + 1
             assert forget["suppressed_source_units"] == 1
-            assert forget["vector_deletions"] == len(facets)
+            assert forget["vector_deletions"] == len(facets) + len(query_facets)
             assert forget["retracted_relations"] == 1
-            for result_payload_id in {facet["result_payload_id"] for facet in facets}:
+            for result_payload_id in {facet["result_payload_id"] for facet in facets + query_facets}:
                 with pytest.raises(ForestError) as caught:
                     await host._kernel.payload.read_bytes(result_payload_id)
                 assert caught.value.code == "PAYLOAD_REVOKED"
@@ -1026,13 +1122,13 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                                 (settings.bot_id, "onebot-unit:" + event_hash),
                             )
                         ).fetchall()
-                    if len(deleted) == len(facets) and all(
+                    if len(deleted) == len(facets) + len(query_facets) and all(
                         row["state"] == "DELETED" for row in deleted
                     ):
                         break
                     await asyncio.sleep(0.1)
             assert not set(FakeMilvusClient.collections[index_collection]["rows"]) & {
-                facet["facet_id"] for facet in facets
+                facet["facet_id"] for facet in facets + query_facets
             }
             assert FakeMilvusClient.delete_failures == previous_delete_failures + 1
 
