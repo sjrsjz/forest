@@ -1280,6 +1280,28 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 )).fetchone()
                 assert record["state"] == "FROZEN"
                 assert record["bundle_id"] == frozen[0]["bundle_id"]
+            retrieval_parts_port = next(
+                port for port in memory_instance.component["domain_queries"]
+                if port["name"] == "memory.read-retrieval-parts"
+            )
+
+            async def frozen_parts(after=-1):
+                return await memory_instance.invoke_management_query(
+                    retrieval_parts_port,
+                    {"query_id": recall_query["query_id"], "item_index": 0,
+                     "after_part_index": after, "limit": 2},
+                    timeout_seconds=10,
+                )
+
+            first_parts = await frozen_parts()
+            assert first_parts["node"]["source_unit_id"] == seed_node["source_unit_id"]
+            assert first_parts["node"]["author_subject_ref"] == "qq:20001"
+            assert first_parts["node"]["external_group_id"] == "933179609"
+            assert {part["part_kind"] for part in first_parts["parts"]} == {"TEXT", "IMAGE"}
+            assert first_parts["has_more"]
+            final_parts = await frozen_parts(first_parts["last_part_index"])
+            assert len(final_parts["parts"]) == 1 and not final_parts["has_more"]
+            assert final_parts["parts"][0]["part_kind"] == "TEXT"
 
             # The public UoW revokes Payload, Memory eligibility, graph evidence,
             # and vector refs together before the asynchronous Milvus deletion.
@@ -1345,6 +1367,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert await query_stage(
                 recall_query["query_id"], "freeze/recall-after-forget", stage="freeze"
             ) == frozen[0]
+            assert (await frozen_parts())["node"] is None
+            assert (await frozen_parts())["parts"] == []
             index_rows.pop("stale-ref/no-fact")
             with pytest.raises(ForestError) as caught:
                 await memory_instance.invoke_management_query(

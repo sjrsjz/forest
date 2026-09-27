@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.26.0"
+version = "1.27.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -45,6 +45,7 @@ requests = [
   "domain.query:memory.read-match-preparation",
   "domain.query:memory.read-matched-seeds",
   "domain.query:memory.read-retrieval-record",
+  "domain.query:memory.read-retrieval-parts",
   "domain.query:memory.qualify-vector-candidates",
   "domain.query:memory.read-embedding-candidates",
   "domain.query:memory.list-trunks",
@@ -220,9 +221,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.24.0"
+schema_version = "3.25.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "22bfd6d60d249dd916ba1b8112d02569a58733a23780bcf3848034ce42f5f2a8"
+baseline_sha256 = "e3bdf75abd6d1bf9f5c075b86ff635fa3835adb848b7418cb9c9a03d20b21b9c"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -817,3 +818,10 @@ steps = [
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
   { id = "memory", component_id = "memory.graph", participant = "memory.freeze-retrieval-record", input_path = "/memory" }
 ]
+
+[[components.domain_queries]]
+name = "memory.read-retrieval-parts"
+contract = "1.0"
+function = "memory_read_retrieval_parts"
+input_schema = "schemas/read-retrieval-parts-input.json"
+output_schema = "schemas/read-retrieval-parts-output.json"

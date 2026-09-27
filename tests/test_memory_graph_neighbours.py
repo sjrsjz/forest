@@ -186,7 +186,7 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         assert (await neighbours("query/one", "tail"))["node"] is None
 
         # Fixed matching precedes the pure expansion and final write authority.
-        policy = _configuration()["retrieval"]
+        policy = {**_configuration()["retrieval"], "sequence_weight": 1.0}
         await ready_facet("query/facet", "query-input", "query/one")
         await execute(
             "INSERT INTO {}.query_match_preparations (bot_id,query_id,operation_id,input_digest,"
@@ -251,6 +251,33 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         assert frozen["value"]["seed_count"] == 1
         assert await freeze([]) == frozen  # Historic metadata is immutable, not a new region.
         assert (await (await execute("SELECT count(*) AS n FROM {}.retrieval_relations", ())).fetchone())["n"] == 31
+        parts_validator = Draft202012Validator(package.snapshot.schema("schemas/read-retrieval-parts-output.json"))
+
+        async def read_parts(index, after=-1):
+            result = (await (await execute(
+                "SELECT {}.memory_read_retrieval_parts(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                    "query_id": "query/one", "item_index": index, "after_part_index": after, "limit": 1,
+                })),
+            )).fetchone())["result"]
+            assert result["ok"], result
+            parts_validator.validate(result["value"])
+            return result["value"]
+
+        seed_parts = await read_parts(0)
+        assert seed_parts["node"]["matched_part_ids"] == ["text"]
+        assert seed_parts["node"]["is_current_source"]
+        assert seed_parts["parts"][0]["payload"]["payload_id"] == "text/seed"
+        assert not seed_parts["has_more"]
+        assert (await read_parts(0, after=0))["parts"] == []
+        assert (await read_parts(63))["node"] is None
+        associated_index = next(i for i, item in enumerate(body["nodes"]) if item["source_unit_id"].startswith("n"))
+        cross_source = await read_parts(associated_index)
+        assert cross_source["node"]["external_group_id"] == "group/b"
+        assert not cross_source["node"]["is_current_source"]
+        assert cross_source["node"]["matched_part_ids"] == []
+        sequence_index = next(i for i, item in enumerate(body["nodes"]) if item["source_unit_id"] in {"before", "after"})
+        assert (await read_parts(sequence_index))["node"] is not None
         with pytest.raises(ObjectNotInPrerequisiteState):
             await execute("UPDATE {}.retrieval_items SET activation=0.2", ())
 
@@ -279,3 +306,12 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
             (store.bot_id,),
         )
         assert selected(await neighbours("query/new", limit=128)) == set()
+        assert (await read_parts(associated_index))["node"] is None
+        await execute(
+            "UPDATE {}.source_units SET eligibility_state='SUPPRESSED',"
+            "eligibility_revision=eligibility_revision+1 WHERE bot_id=%s AND source_unit_id='seed'",
+            (store.bot_id,),
+        )
+        hidden = await read_parts(sequence_index)
+        assert hidden["node"] is None and hidden["parts"] == []
+        assert not hidden["has_more"]

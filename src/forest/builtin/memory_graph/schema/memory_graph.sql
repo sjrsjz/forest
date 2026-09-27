@@ -1825,6 +1825,129 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_read_retrieval_parts(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_query text := input->>'query_id';
+    requested_index integer := (input->>'item_index')::integer;
+    requested_after integer := (input->>'after_part_index')::integer;
+    requested_limit integer := (input->>'limit')::integer;
+    bundle_row __forest_module_schema__.retrieval_bundles%ROWTYPE;
+    item_row __forest_module_schema__.retrieval_items%ROWTYPE;
+    cursor_row __forest_module_schema__.retrieval_items%ROWTYPE;
+    seed_view jsonb;
+    policy jsonb;
+    page jsonb;
+    node_value jsonb;
+    parts_value jsonb;
+    matched_parts jsonb;
+    child_unit text;
+    child_edge text;
+    path_length integer := 0;
+    valid_path boolean := true;
+    last_index integer;
+    more_value boolean := false;
+BEGIN
+    IF requested_index IS NULL OR requested_index NOT BETWEEN 0 AND 63
+       OR requested_after IS NULL OR requested_after NOT BETWEEN -1 AND 4095
+       OR requested_limit IS NULL OR requested_limit NOT BETWEEN 1 AND 32 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RETRIEVAL_REQUEST_INVALID',
+                'message','Retrieval parts request exceeds its bounds','status',422));
+    END IF;
+    SELECT * INTO bundle_row FROM __forest_module_schema__.retrieval_bundles
+    WHERE bot_id=requested_bot AND query_id=requested_query;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RETRIEVAL_NOT_FROZEN',
+                'message','Query has no frozen retrieval result','status',409));
+    END IF;
+    seed_view := __forest_module_schema__.memory_read_matched_seeds(context,input);
+    IF seed_view->>'ok' IS DISTINCT FROM 'true' THEN RETURN seed_view; END IF;
+    policy := seed_view#>'{value,policy}';
+    SELECT * INTO item_row FROM __forest_module_schema__.retrieval_items
+    WHERE bot_id=requested_bot AND bundle_id=bundle_row.bundle_id AND item_index=requested_index;
+    IF NOT FOUND THEN valid_path := false; END IF;
+    cursor_row := item_row;
+    WHILE valid_path LOOP
+        path_length := path_length+1;
+        IF path_length>64 OR cursor_row.source_unit_id IS NULL THEN
+            valid_path := false; EXIT;
+        END IF;
+        page := __forest_module_schema__.memory_read_graph_neighbours(context,
+            jsonb_build_object('query_id',requested_query,'source_unit_id',cursor_row.source_unit_id,
+                'association_limit',(policy->>'max_association_edges_per_node')::integer));
+        IF page->>'ok' IS DISTINCT FROM 'true' THEN RETURN page; END IF;
+        IF page#>'{value,node}'='null'::jsonb
+           OR page#>>'{value,node,source_revision}' IS DISTINCT FROM cursor_row.source_revision::text
+           OR (child_unit IS NOT NULL AND NOT EXISTS (
+               SELECT 1 FROM jsonb_array_elements(page#>'{value,edges}') e
+               WHERE e->>'target_id'=child_unit AND e->>'edge_id'=child_edge)) THEN
+            valid_path := false; EXIT;
+        END IF;
+        IF path_length=1 THEN node_value := page#>'{value,node}'; END IF;
+        IF cursor_row.is_seed THEN
+            valid_path := EXISTS (
+                SELECT 1 FROM jsonb_array_elements(seed_view#>'{value,result,seeds}') s
+                WHERE s->>'source_unit_id'=cursor_row.source_unit_id);
+            EXIT;
+        END IF;
+        child_unit := cursor_row.source_unit_id;
+        child_edge := cursor_row.path_edge_id;
+        SELECT * INTO cursor_row FROM __forest_module_schema__.retrieval_items
+        WHERE bot_id=requested_bot AND bundle_id=bundle_row.bundle_id
+          AND source_unit_id=cursor_row.path_parent_source_unit_id;
+    END LOOP;
+    IF valid_path THEN
+        SELECT node_value||jsonb_build_object(
+            'occurred_at',u.occurred_at,'source_order_seq',u.source_order_seq,'unit_kind',u.unit_kind,
+            'part_count',u.part_count,'is_current_source',u.source_id=q.current_source_id,
+            'author_payload',jsonb_build_object('payload_id',u.author_payload_id,
+                'digest',u.author_payload_digest,'owner_component_id',u.author_owner_component_id,
+                'owner_kind',u.author_owner_kind,'owner_id',u.author_owner_id),
+            'activation',item_row.activation,'rank_score',item_row.rank_score,'is_seed',item_row.is_seed,
+            'path_parent_source_unit_id',item_row.path_parent_source_unit_id,
+            'path_edge_id',item_row.path_edge_id)
+        INTO node_value FROM __forest_module_schema__.source_units u
+        JOIN __forest_module_schema__.memory_queries q ON q.bot_id=u.bot_id AND q.query_id=requested_query
+        WHERE u.bot_id=requested_bot AND u.source_unit_id=item_row.source_unit_id;
+        SELECT COALESCE(jsonb_agg(part_id ORDER BY part_id),'[]'::jsonb) INTO matched_parts
+        FROM (
+            SELECT DISTINCT f.part_id FROM __forest_module_schema__.query_seed_matches m
+            JOIN __forest_module_schema__.embedding_facets f
+              ON f.bot_id=m.bot_id AND f.facet_id=m.document_facet_id AND f.state='READY'
+            JOIN __forest_module_schema__.embedding_facets qf
+              ON qf.bot_id=m.bot_id AND qf.facet_id=m.query_facet_id AND qf.state='READY'
+            WHERE m.bot_id=requested_bot AND m.query_id=requested_query
+              AND m.source_unit_id=item_row.source_unit_id
+        ) matches;
+        node_value := node_value||jsonb_build_object('matched_part_ids',matched_parts);
+        SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'part_id',p.part_id,'part_index',p.part_index,'part_kind',p.part_kind,'media_type',p.media_type,
+            'width',p.width,'height',p.height,'payload',jsonb_build_object(
+                'payload_id',p.payload_id,'digest',p.payload_digest,
+                'owner_component_id',p.payload_owner_component_id,'owner_kind',p.payload_owner_kind,
+                'owner_id',p.payload_owner_id)) ORDER BY p.part_index),'[]'::jsonb),max(p.part_index)
+        INTO parts_value,last_index FROM (
+            SELECT * FROM __forest_module_schema__.source_parts
+            WHERE bot_id=requested_bot AND source_unit_id=item_row.source_unit_id
+              AND part_index>requested_after ORDER BY part_index LIMIT requested_limit
+        ) p;
+        more_value := EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_parts
+            WHERE bot_id=requested_bot AND source_unit_id=item_row.source_unit_id
+              AND part_index>COALESCE(last_index,requested_after));
+    ELSE
+        node_value := NULL; parts_value := '[]'::jsonb;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('query_id',requested_query,'bundle_id',bundle_row.bundle_id,
+            'item_index',requested_index,'result_count',bundle_row.result_count,'node',node_value,
+            'parts',parts_value,'last_part_index',last_index,'has_more',more_value));
+END;
+$$;
+
 CREATE FUNCTION memory_query_occurrence_matches(
     requested_bot text, requested_query text, requested_unit text,
     requested_revision bigint, requested_part text, requested_occurrence text
