@@ -39,7 +39,7 @@
 
 | 组件 | builtin 包 | 当前边界 |
 |---|---|---|
-| Provider | `provider_chat_completions` | Worker 拥有 profile；同代 materialize/dispatch driver 通过 PayloadRef 生成模型投影、读取媒体并执行 HTTP；响应正文和 usage 由 Provider Generation 保存，dispatch/Effect/Agent observation 只传精确引用；Secret 不进入 Worker |
+| Provider | `provider_chat_completions` | Worker 拥有 profile；同代 HTTP driver 验证 Agent 冻结的投影和 wire PayloadRef 后执行传输；响应正文和 usage 由 Provider Generation 保存，dispatch/Effect/Agent observation 只传精确引用；Secret 不进入 Worker |
 | 多模态 Embedding | `embedding_multimodal` | Worker 拥有 Bot 生命周期冻结的 VL profile 和图文请求物化；同代 Effect Driver 校验固定请求与 payload 引用后执行网络派发 |
 | 向量索引 | `vector_index_milvus` | Milvus 只保存派生向量；Bot 库保存 ref 与权威来源 |
 | Media | `media_capture` | Worker/owned work 管理抓取状态；Effect Driver 管理外部下载 |
@@ -87,7 +87,7 @@ OneBot Adapter 现在按消息形态调用 manifest 声明的四条入站 UnitOf
 - terminal ModelTurn 先停在 `SAFE_BOUNDARY`；确认没有新触发批次后，Worker 以最新 terminal turn 的准确 `assistant.candidate` 为父边生成独立 `final.reply`，`agent.finalize-candidate/1` 同时核对来源与正式候选并原子推进到 `FINAL_READY`；内部解析候选不会直接交给 Delivery；
 - 最终完成、同 Session 后继 Run 和 Session 关闭的私有 participant。
 
-包内已加入 `model_execution.py`，模型 attempt 的 profile bind、`model.input` 写入、Provider materialize、授权与 Effect prepare、原子 handoff、Provider dispatch、Effect/Agent 原子 observe 及 Provider 结果读取均只经过 `ctx.services`、`ctx.uow`、`ctx.payloads` 与冻结的 `ctx.identity`。它没有 Repository、数据库连接或宿主 Agent adapter；Provider 异常或回执 fence 不一致在 handoff 后统一收敛为 `UNKNOWN`，不会盲目重发。
+包内已加入 `model_execution.py`，模型 attempt 的 profile bind、Agent-owned `model.input`/`model.projection`/`model.wire` 写入、授权与 Effect prepare、原子 handoff、Provider dispatch、Effect/Agent 原子 observe 及 Provider 结果读取均只经过 `ctx.services`、`ctx.uow`、`ctx.payloads` 与冻结的 `ctx.identity`。它没有 Repository、数据库连接或宿主 Agent adapter；Provider 异常或回执 fence 不一致在 handoff 后统一收敛为 `UNKNOWN`，不会盲目重发。
 
 Worker 已公开 `agent.execute/2`：输入只含 Conversation/Session/Run 引用、恢复标记、绝对期限和 actor fence；首批选择、Run lease、每次模型调用前的输入合流、Context Payload 树读取、Provider Effect、严格 ModelTurn 解析、唯一一次协议修复、非审批 ToolCall 的 Effect 执行以及 `final.reply` 生成均在隔离包内完成。恢复查询现在返回完整 Payload digest/owner fence，Worker 不再按裸 Payload ID 读取宿主存储。
 
@@ -167,13 +167,13 @@ Agent 目前仍未消费该规范证据。下一步需要把语义召回纳入�
 
 两项 Linux 真实 PostgreSQL 验证分别通过：宿主集成涵盖公开阶段端口、部分 ANN 回执、空证据、规范证据引用、遗忘、热替换和重启；图数据库验证涵盖零 facet/部分准备、合法嵌入等待/UNKNOWN/抑制转换及严格输出 schema。4 项图算法及 5 项证据物化快速回归通过。新增阶段 fixture 最初使用非法 PENDING → UNKNOWN 转换，被现有约束拒绝；修正为合法路径后单项复验通过。此次未发送真实 QQ 消息。
 
-[16 持久语义召回](16-semantic-recall-execution.md) 规定后续 Memory owned-work、Agent 步骤输入版本、等待后接纳新 trigger 和总截止时间。15 号文档已删除 Provider 拥有内容投影的旧目标语义。但当前代码的 `ChatCompletionsMaterializeDriver` 仍在宿主执行 `prepare_model_request`，Agent 的 `model.input` 仍未继承完整输入父链；必须把模型能力投影移入 Agent 包、保留 Provider 纯传输序列化边界，再验收真正的 Agent 语义证据接入。这些缺口尚未解决，阶段查询通过不能代替端到端实现。
+[16 持久语义召回](16-semantic-recall-execution.md) 规定 Memory owned-work、Agent 步骤输入版本、等待后接纳新 trigger 和总截止时间。模型能力投影已移入可热替换的 Agent 包；Provider 的请求 materialize 服务和宿主投影函数已删除。Agent 冻结 `model.input`、`model.projection` 与 `model.wire`，Provider 仅核对引用并传输。Context 根、Preset 或协议修复反馈及媒体引用进入 `model.input` 父链。规范 Memory 证据尚未接入 Agent 的等待和投影，因此阶段查询通过不能代替端到端语义召回验收。
 
 Memory 包现有 `memory.query.request/1`、`memory.query.work-status/1` 与 `memory.query.advance` owned-work，按已登记 query_id 和不可延长的绝对截止时间工作。任务表只保存 claim、lease、attempt、退避及终态；实际阶段仍来自 `memory.query.progress/1`。Worker 每次只执行一个现有幂等阶段，WAIT_EMBEDDING 交还租约，BLOCKED_UNKNOWN 不触发付费请求；过期 claim 的结算被拒绝，失败最多三次。READY 状态读取再次检查 Memory 路径和受管证据载荷。群 Agent 尚未通过这些公开端口消费证据；查询输入改版时调用取消、Agent 持久等待和 Provider 投影移交仍需实现，不能据此宣称群内语义召回已上线。
 
 `memory.query.cancel/1` 已在 Memory 包中加入 SUPERSEDED 取消。待领取工作立刻进入 CANCELLED；已领取工作先显示 CANCELLING，Worker 起步前可跳过，已开始的幂等阶段由原 claim 结算，再落为 CANCELLED。取消与领取/结算锁同一工作行，READY/FAILED 先提交时返回 TERMINAL 而不删除历史；外部嵌入 Effect 不被假定可撤销。真实 PostgreSQL 覆盖 PENDING/CLAIMED/TERMINAL、重复取消和结算竞争，宿主服务路由验证了已完成查询的终态取消。Agent 尚未调用取消端口，不能认为新触发已自动节省旧查询成本。
 
-Agent 包的模型安全边界选择现在为每次观察使用新的 operation identity，不再把一个 `CONTINUE` 或 `WAIT_INPUT` 回执当作同一步骤永久有效；已提交 BATCH 的真实去重仍靠同事务推进的 Run input revision 和 InputBatch 唯一约束。Agent 包状态、同群最后触发切口与完整宿主热替换/重启共四项 Linux 验证通过，其中状态、切口与宿主测试使用真实 PostgreSQL。当前 Agent 仍未绑定 Memory 查询、等待 `WAIT_MEMORY` 或将规范证据送入模型。代码审查确认旧 `forest.models._memory_bundle` 接受另一种证据结构，宿主 `ChatCompletionsMaterializeDriver` 仍做内容投影；后续必须按 `forest.memory-evidence/1` 重写 Agent-own 的投影协议并删除旧宿主业务投影，不能加兼容格式转换后宣称已对齐。
+Agent 包的模型安全边界选择现在为每次观察使用新的 operation identity，不再把一个 `CONTINUE` 或 `WAIT_INPUT` 回执当作同一步骤永久有效；已提交 BATCH 的真实去重仍靠同事务推进的 Run input revision 和 InputBatch 唯一约束。Agent 包状态、同群最后触发切口、宿主热替换/重启及投影所有权的真实 PostgreSQL 测试通过。旧宿主 `forest.models` 已拆成 Worker 可分发的纯协议值与宿主传输代码，旧 Provider materialize 驱动及服务声明已移除。当前 Agent 仍未绑定 Memory 查询、等待 `WAIT_MEMORY`、解析 `forest.memory-evidence/1` 或实际获取上下文图片；包内原 `_memory_bundle` 仍认另一种证据结构，必须原生改写并完成端到端验证。
 
 固定包内容后，Linux 隔离 PostgreSQL 与宿主 Worker 的两项集成验证通过，用时约 163 秒。数据库验证覆盖请求合流与截止冲突、UNKNOWN 停驻、重复结算、token 重用拒绝、lease 过期后的旧 claim 拒绝、故障/截止终态；宿主验证覆盖新查询由 owned-work 自动完成准备、嵌入等待、固定 ANN、冻结和证据发布，READY 读取、遗忘后读取拒绝、热替换与重启。未发真实 QQ 消息，测试容器受 1 CPU/768 MiB 限额约束。中途一次测试因运行时改写了同版本包内容而被包仓库正确拒绝，最终在包内容固定后重新完整通过。
 

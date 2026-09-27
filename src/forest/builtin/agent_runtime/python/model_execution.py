@@ -6,7 +6,11 @@ import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
+from agent_protocol import ProtocolRepairView
+from model_projection import prepare_model_request
+
 from forest.errors import ForestError
+from forest.model_contract import MediaSnapshot, ModelCapabilities
 
 
 def _digest(value) -> str:
@@ -121,6 +125,7 @@ class ModelExecution:
         effect_operation_id: str,
         snapshot: dict,
         preset_context: list[str],
+        source_refs: list[dict],
         tools: list[dict],
         media: list[dict],
         evidence: dict | None,
@@ -147,6 +152,37 @@ class ModelExecution:
                 409,
             )
         capabilities = profile["capabilities"]
+        target = ModelCapabilities(**capabilities)
+        if _digest(target.as_dict()) != profile["capability_digest"]:
+            raise ForestError(
+                "PROVIDER_PROFILE_FENCE_MISMATCH",
+                "Provider capabilities differ from their bound digest",
+                409,
+            )
+        images = {}
+        media_parents = []
+        seen_media = set()
+        for asset in media:
+            identity = (asset["source_unit_id"], asset["part_id"])
+            if identity in seen_media:
+                raise ForestError(
+                    "AGENT_MEDIA_INPUT_INVALID", "Media identity repeats in one model view", 422
+                )
+            seen_media.add(identity)
+            reference = asset["payload"]
+            content = await self.ctx.payloads.read_bytes(reference)
+            if len(content) != asset["byte_length"]:
+                raise ForestError(
+                    "AGENT_MEDIA_INPUT_INVALID", "Managed image length changed", 409
+                )
+            image = MediaSnapshot(
+                bot_id, asset["media_ref"], asset["media_revision"],
+                asset["source_unit_id"], asset["part_id"], asset["media_type"],
+                content, reference["digest"], asset["width"], asset["height"],
+            )
+            images[identity] = image
+            images[asset["media_ref"]] = image
+            media_parents.append(reference)
         model_input = {
             "protocol": "forest.agent-model-input/1",
             "request_id": request_id,
@@ -159,40 +195,52 @@ class ModelExecution:
             "output_tokens": output_tokens,
             "stream": stream,
         }
+        context_parent = snapshot.get("context_snapshot_ref")
+        if not source_refs:
+            raise ForestError(
+                "AGENT_MODEL_LINEAGE_MISSING",
+                "Model input must inherit its Preset or repair feedback",
+                409,
+            )
         model_input_ref = await self.ctx.payloads.put_json(
             model_input,
             owner_kind="model.input",
             owner_id=attempt_id,
-            parents=(),
+            parents=(
+                *((context_parent,) if context_parent is not None else ()),
+                *source_refs,
+                *media_parents,
+            ),
         )
-        materialized = await self.ctx.services.call(
-            "provider.request.materialize",
-            {
-                "protocol": "forest.provider-materialize/1",
-                "component_id": profile["component_id"],
-                "generation_id": profile["generation_id"],
-                "profile_ref": profile["profile_ref"],
-                "capability_digest": profile["capability_digest"],
-                "request_id": request_id,
-                "transport_attempt_id": attempt_id,
-                "input": model_input_ref,
-                "media": media,
-            },
-            operation_id=self.ctx.operations.stable(f"provider-materialize:{attempt_id}"),
-            timeout=120,
+        repair_view = ProtocolRepairView.from_record(repair) if repair is not None else None
+        prepared = prepare_model_request(
+            snapshot, target, request_id=request_id, transport_attempt_id=attempt_id,
+            preset_context=preset_context, tools=tools, media=images,
+            output_tokens=output_tokens, stream=stream, evidence=evidence,
+            repair_view=repair_view,
         )
-        if any(
-            materialized.get(name) != profile[name]
-            for name in ("component_id", "generation_id", "profile_ref", "capability_digest")
-        ) or (
-            materialized.get("request_id") != request_id
-            or materialized.get("transport_attempt_id") != attempt_id
-        ):
-            raise ForestError(
-                "PROVIDER_REQUEST_FENCE_MISMATCH",
-                "Materialized request belongs to another Provider binding",
-                409,
-            )
+        projection = await self.ctx.payloads.put_bytes(
+            prepared.manifest_json.encode("utf-8"), owner_kind="model.projection",
+            owner_id=request_id, media_type="application/json",
+            parents=(model_input_ref,),
+        )
+        wire = await self.ctx.payloads.put_bytes(
+            prepared.body, owner_kind="model.wire", owner_id=attempt_id,
+            media_type="application/json", parents=(projection,),
+        )
+        manifest = prepared.manifest
+        materialized = {
+            **{name: profile[name] for name in (
+                "component_id", "generation_id", "profile_ref", "capability_digest"
+            )},
+            "projection": projection,
+            "wire": wire,
+            "projected_content_digest": manifest["projected_content_digest"],
+            "source_manifest_digest": _digest(manifest["source_manifest"]),
+            "max_output_tokens": prepared.max_output_tokens,
+            "stream": prepared.stream,
+            "serializer_revision": prepared.serializer_revision,
+        }
         await self.ctx.uow.call(
             "agent.prepare-model-request",
             {

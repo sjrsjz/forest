@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from forest.errors import ForestError
-from forest.models import MediaSnapshot
+from forest.model_contract import MediaSnapshot
 
 JINA_MODEL = "jina-clip-v2"
 SILICONFLOW_VL_MODEL = "Qwen/Qwen3-VL-Embedding-8B"

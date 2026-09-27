@@ -673,6 +673,7 @@ class ContextSnapshotReader:
             "bot_id": self.bot_id,
             "run_id": run["run_id"],
             "logical_step_id": logical_step_id,
+            "context_snapshot_ref": base["source_manifest"],
             "input_revision": progress["input_revision"],
             "context_revision": progress["context_revision"],
             "context_view_revision": progress["context_view_revision"],

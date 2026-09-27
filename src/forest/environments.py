@@ -39,6 +39,7 @@ SDK_API = "1.0"
 SDK_FILES = (
     "__init__.py", "command_contract.py", "errors.py", "sdk.py", "drivers/__init__.py",
     "drivers/protocol.py", "drivers/python_worker.py", "drivers/worker.py",
+    "model_contract.py",
 )
 MAX_ENVIRONMENT_BYTES = 256 * 1024 * 1024
 MAX_ENVIRONMENT_FILES = 8192

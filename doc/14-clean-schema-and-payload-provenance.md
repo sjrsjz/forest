@@ -41,7 +41,7 @@
 
 Web 登录、部署账号与 issuer 密钥属于 deployment authority；OneBot 群管理员和平台身份解析属于 Adapter/Shell；Agent 工具定义、参数验证和工具审批的业务上下文属于 Agent。它们可把稳定主体引用、策略结果或批准依据交给授权端口，但不能把这些业务表搬进 `kernel.authorization`，也不能让通用票据携带密码、平台令牌或任意策略正文。授权模块不跨 schema 建外键或 join，涉及正文的限制条件必须使用经 `kernel.payload` 端口复核的载荷引用。
 
-`kernel.effect` 只负责不可撤回外部副作用的通用派发边界。Delivery 仍拥有 SendIntent、群聊顺序、Binding 和平台回执语义；Agent 仍拥有 ToolCall、工具 schema 与 Run 续调；模型 Provider 仍拥有请求投影、用量和 fallback。它们以稳定 `effect_operation_id`、精确目标、语义输入摘要和受管 payload 引用请求 Effect Gateway，不得把自己的业务状态机搬入内核效果表。效果记录不得出现 `tool_id`、`intent_id`、`binding_id`、群号、Provider 名称或 OneBot action 等业务字段。
+`kernel.effect` 只负责不可撤回外部副作用的通用派发边界。Delivery 仍拥有 SendIntent、群聊顺序、Binding 和平台回执语义；Agent 拥有 ToolCall、工具 schema、Run 续调、请求投影与 fallback 决策；模型 Provider 拥有传输和用量回执。它们以稳定 `effect_operation_id`、精确目标、语义输入摘要和受管 payload 引用请求 Effect Gateway，不得把自己的业务状态机搬入内核效果表。效果记录不得出现 `tool_id`、`intent_id`、`binding_id`、群号、Provider 名称或 OneBot action 等业务字段。
 
 `adapter.onebot` 的包 namespace 只物理拥有规范平台事件和 participant 幂等事实；Binding 配置使用每个包都具备的标准 `module_configuration` 账本，不在 Adapter 私表复制一套配置计划系统。配置 plan 固定期望 revision、完整 schema 校验后的配置 Payload、操作者和期限，apply 只引用该 plan；并发 apply 只能有一个推进 desired revision。凭据始终是宿主 Secret Resolver 的 opaque ref，明文不进入 Worker、配置 Payload、Adapter 表或日志。
 

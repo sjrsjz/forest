@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
 import pytest
 
 from forest.agent_context_projection import ConversationContextProjector
-from forest.models import ModelCapabilities, prepare_model_request
+from forest.model_contract import ModelCapabilities
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
+from model_projection import prepare_model_request
 
 
 class Payloads:

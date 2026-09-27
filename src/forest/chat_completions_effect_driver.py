@@ -7,15 +7,9 @@ import inspect
 import json
 from collections.abc import Mapping
 
-from forest.builtin.agent_runtime.python.agent_protocol import ProtocolRepairView
 from forest.errors import ForestError
-from forest.models import (
-    ChatCompletionsClient,
-    MediaSnapshot,
-    ModelCapabilities,
-    PreparedModelRequest,
-    prepare_model_request,
-)
+from forest.model_contract import ModelCapabilities, PreparedModelRequest
+from forest.model_transport import ChatCompletionsClient
 from forest.packages import digest_json
 
 
@@ -82,7 +76,10 @@ class ChatCompletionsEffectDriver:
         if (
             not isinstance(value, dict)
             or set(value) != fields
-            or value["owner_component_id"] != "provider.chat-completions"
+            or value["owner_component_id"] != (
+                "agent.runtime" if owner_kind in {"model.projection", "model.wire"}
+                else "provider.chat-completions"
+            )
             or value["owner_kind"] != owner_kind
             or value["owner_id"] != owner_id
         ):
@@ -321,286 +318,10 @@ class ChatCompletionsEffectDriver:
             await client.aclose()
 
 
-class ChatCompletionsMaterializeDriver:
-    """Materialize Provider-owned projection and wire payloads from exact refs."""
-
-    def __init__(
-        self,
-        configuration: dict,
-        _configuration_revision: int,
-        identity,
-        declaration: Mapping[str, object],
-        *,
-        payloads,
-        runtime,
-    ) -> None:
-        if (
-            declaration.get("kind") != "chat-completions.materialize"
-            or declaration.get("name") != "provider.request.materialize"
-        ):
-            raise ForestError(
-                "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
-                "Chat Completions materializer received another effect kind",
-                500,
-            )
-        self.identity = identity
-        self.payloads = payloads
-        self.runtime = runtime
-        self.capabilities = ModelCapabilities(**configuration["capabilities"])
-        self.capability_digest = digest_json(self.capabilities.as_dict())
-        self.profile_ref = "profile:" + digest_json(configuration)[7:]
-        self.accepting = False
-
-    async def start(self) -> None:
-        self.accepting = True
-
-    def _fence(self, payload: dict, scope) -> None:
-        if (
-            not self.accepting
-            or scope.component_id != self.identity.component_id
-            or scope.generation_id != self.identity.generation_id
-            or payload["component_id"] != self.identity.component_id
-            or payload["generation_id"] != self.identity.generation_id
-            or payload["profile_ref"] != self.profile_ref
-            or payload["capability_digest"] != self.capability_digest
-        ):
-            raise ForestError(
-                "PROVIDER_REQUEST_FENCE_MISMATCH",
-                "Model projection belongs to another Provider Generation",
-                409,
-            )
-
-    @staticmethod
-    def _input_envelope(value: object, payload: dict) -> dict:
-        fields = {
-            "protocol",
-            "request_id",
-            "transport_attempt_id",
-            "snapshot",
-            "preset_context",
-            "tools",
-            "evidence",
-            "repair",
-            "output_tokens",
-            "stream",
-        }
-        if (
-            not isinstance(value, dict)
-            or set(value) != fields
-            or value.get("protocol") != "forest.agent-model-input/1"
-            or value.get("request_id") != payload["request_id"]
-            or value.get("transport_attempt_id") != payload["transport_attempt_id"]
-            or not isinstance(value.get("snapshot"), dict)
-            or not isinstance(value.get("preset_context"), list)
-            or not isinstance(value.get("tools"), list)
-            or value.get("evidence") is not None
-            and not isinstance(value["evidence"], dict)
-            or value.get("repair") is not None
-            and not isinstance(value["repair"], dict)
-            or type(value.get("output_tokens")) is not int
-            or type(value.get("stream")) is not bool
-        ):
-            raise ForestError(
-                "PROVIDER_MODEL_INPUT_INVALID",
-                "Agent model input payload is invalid",
-                422,
-            )
-        return value
-
-    @staticmethod
-    def _payload_ref(value: object) -> dict:
-        fields = {
-            "payload_id",
-            "digest",
-            "owner_component_id",
-            "owner_kind",
-            "owner_id",
-        }
-        if not isinstance(value, dict) or set(value) != fields:
-            raise ForestError(
-                "PROVIDER_MODEL_INPUT_INVALID", "Payload reference is invalid", 422
-            )
-        return value
-
-    async def invoke(self, payload, *, scope, invocation):
-        self._fence(payload, scope)
-        await self.runtime.verify_generation_member(
-            component_id=self.identity.component_id,
-            generation_id=self.identity.generation_id,
-        )
-        input_ref = self._payload_ref(payload["input"])
-        if (
-            input_ref["owner_component_id"] != "agent.runtime"
-            or input_ref["owner_kind"] != "model.input"
-            or input_ref["owner_id"] != payload["transport_attempt_id"]
-        ):
-            raise ForestError(
-                "PROVIDER_MODEL_INPUT_INVALID",
-                "Model input ownership differs from its request",
-                422,
-            )
-
-        async with self.payloads.store.pool.connection() as conn, conn.transaction():
-            epoch = await self.payloads.epoch_in(conn)
-            await self.payloads.verify_in(
-                conn,
-                payload_id=input_ref["payload_id"],
-                digest=input_ref["digest"],
-                owner_component_id=input_ref["owner_component_id"],
-                owner_kind=input_ref["owner_kind"],
-                owner_id=input_ref["owner_id"],
-            )
-            input_body = await self.payloads.read_bytes_in(
-                conn,
-                input_ref["payload_id"],
-                expected_deletion_epoch=epoch,
-            )
-            try:
-                envelope = self._input_envelope(json.loads(input_body), payload)
-            except (UnicodeError, json.JSONDecodeError) as exc:
-                raise ForestError(
-                    "PROVIDER_MODEL_INPUT_INVALID",
-                    "Agent model input is not finite JSON",
-                    422,
-                ) from exc
-
-            media = {}
-            media_parent_ids = []
-            seen = set()
-            for asset in payload["media"]:
-                identity = (asset["source_unit_id"], asset["part_id"])
-                if identity in seen:
-                    raise ForestError(
-                        "PROVIDER_MEDIA_INPUT_INVALID",
-                        "Media identity repeats in one model projection",
-                        422,
-                    )
-                seen.add(identity)
-                reference = self._payload_ref(asset["payload"])
-                await self.payloads.verify_in(
-                    conn,
-                    payload_id=reference["payload_id"],
-                    digest=reference["digest"],
-                    owner_component_id=reference["owner_component_id"],
-                    owner_kind=reference["owner_kind"],
-                    owner_id=reference["owner_id"],
-                )
-                content = await self.payloads.read_bytes_in(
-                    conn,
-                    reference["payload_id"],
-                    expected_deletion_epoch=epoch,
-                )
-                if len(content) != asset["byte_length"]:
-                    raise ForestError(
-                        "PROVIDER_MEDIA_INPUT_INVALID",
-                        "Media byte length differs from its captured metadata",
-                        409,
-                    )
-                image = MediaSnapshot(
-                    envelope["snapshot"]["bot_id"],
-                    asset["media_ref"],
-                    asset["media_revision"],
-                    asset["source_unit_id"],
-                    asset["part_id"],
-                    asset["media_type"],
-                    content,
-                    reference["digest"],
-                    asset["width"],
-                    asset["height"],
-                )
-                media[identity] = image
-                media[asset["media_ref"]] = image
-                media_parent_ids.append(reference["payload_id"])
-
-            repair = (
-                ProtocolRepairView.from_record(envelope["repair"])
-                if envelope["repair"] is not None
-                else None
-            )
-            prepared = prepare_model_request(
-                envelope["snapshot"],
-                self.capabilities,
-                request_id=payload["request_id"],
-                transport_attempt_id=payload["transport_attempt_id"],
-                preset_context=envelope["preset_context"],
-                tools=envelope["tools"],
-                media=media,
-                output_tokens=envelope["output_tokens"],
-                stream=envelope["stream"],
-                evidence=envelope["evidence"],
-                repair_view=repair,
-            )
-            projection = await self.payloads.put_bytes_in(
-                conn,
-                owner_component_id=self.identity.component_id,
-                owner_kind="model.projection",
-                owner_id=prepared.request_id,
-                media_type="application/json",
-                content=prepared.manifest_json.encode("utf-8"),
-                parents=(input_ref["payload_id"], *media_parent_ids),
-                expected_deletion_epoch=epoch,
-            )
-            wire = await self.payloads.put_bytes_in(
-                conn,
-                owner_component_id=self.identity.component_id,
-                owner_kind="model.wire",
-                owner_id=prepared.transport_attempt_id,
-                media_type="application/json",
-                content=prepared.body,
-                parents=(input_ref["payload_id"], *media_parent_ids),
-                expected_deletion_epoch=epoch,
-            )
-
-        manifest = prepared.manifest
-
-        def ref(saved, kind, owner_id):
-            return {
-                "payload_id": saved.payload_id,
-                "digest": saved.content_digest,
-                "owner_component_id": self.identity.component_id,
-                "owner_kind": kind,
-                "owner_id": owner_id,
-            }
-        return {
-            "protocol": "forest.provider-materialized/1",
-            "component_id": self.identity.component_id,
-            "generation_id": self.identity.generation_id,
-            "profile_ref": self.profile_ref,
-            "capability_digest": self.capability_digest,
-            "request_id": prepared.request_id,
-            "transport_attempt_id": prepared.transport_attempt_id,
-            "projection": ref(projection, "model.projection", prepared.request_id),
-            "wire": ref(wire, "model.wire", prepared.transport_attempt_id),
-            "projected_content_digest": manifest["projected_content_digest"],
-            "source_manifest_digest": digest_json(manifest["source_manifest"]),
-            "max_output_tokens": prepared.max_output_tokens,
-            "stream": prepared.stream,
-            "serializer_revision": prepared.serializer_revision,
-        }
-
-    async def quiesce(self) -> None:
-        self.accepting = False
-
-    async def resume(self) -> None:
-        self.accepting = True
-
-    async def close(self) -> None:
-        self.accepting = False
-
-
 def chat_completions_effect_driver_factory(
     *, effects, payloads, runtime, credential_resolver, client_factory=ChatCompletionsClient
 ):
     def create(configuration, configuration_revision, identity, declaration):
-        if declaration.get("kind") == "chat-completions.materialize":
-            return ChatCompletionsMaterializeDriver(
-                configuration,
-                configuration_revision,
-                identity,
-                declaration,
-                payloads=payloads,
-                runtime=runtime,
-            )
         return ChatCompletionsEffectDriver(
             configuration,
             configuration_revision,

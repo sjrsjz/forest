@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from forest.errors import ForestError
-from forest.models import ModelResult
+from forest.model_contract import ModelResult
 from forest.packages import digest_json
 from forest.provider_protocol import ProviderPayloadRef
 from forest.storage.agent_runtime_authority import AgentPayloadRef

@@ -23,7 +23,7 @@ from forest.embeddings import (
     prepare_embedding_request,
 )
 from forest.errors import ForestError
-from forest.models import MediaSnapshot
+from forest.model_contract import MediaSnapshot
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII="

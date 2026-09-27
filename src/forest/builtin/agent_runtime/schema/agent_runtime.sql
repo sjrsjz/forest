@@ -1275,8 +1275,7 @@ BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
        OR context->>'participant_input_digest' !~ '^sha256:[a-f0-9]{64}$'
-       OR projection_value->>'owner_component_id'
-            IS DISTINCT FROM request_value->>'provider_component_id'
+       OR projection_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
        OR projection_value->>'owner_kind' IS DISTINCT FROM 'model.projection'
        OR projection_value->>'owner_id' IS DISTINCT FROM requested_request THEN
         RETURN jsonb_build_object(

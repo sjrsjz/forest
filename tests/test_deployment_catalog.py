@@ -19,7 +19,7 @@ from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
-from forest.models import ModelCapabilities
+from forest.model_contract import ModelCapabilities
 from forest.official_bot_provisioning import (
     OfficialBotCatalogSettingsResolver,
     OfficialBotProvisioner,

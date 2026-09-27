@@ -5,20 +5,21 @@ import base64
 import copy
 import hashlib
 import json
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-from forest.builtin.agent_runtime.python.agent_protocol import ProtocolRepairView
 from forest.errors import ForestError
-from forest.models import (
-    ChatCompletionsClient,
-    MediaSnapshot,
-    ModelCapabilities,
-    prepare_model_request,
-)
+from forest.model_contract import MediaSnapshot, ModelCapabilities
+from forest.model_transport import ChatCompletionsClient
 from forest.provider_builtin import validate_provider_configuration
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
+from agent_protocol import ProtocolRepairView
+from model_projection import prepare_model_request
 
 
 def unit(identifier="u1", text="hello", *, user="alice", group="group-a", parts=None, role="user"):

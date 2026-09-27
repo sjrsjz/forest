@@ -16,7 +16,7 @@ from forest.embeddings import (
     prepare_embedding_request,
 )
 from forest.errors import ForestError
-from forest.models import MediaSnapshot
+from forest.model_contract import MediaSnapshot
 from forest.packages import digest_json
 
 

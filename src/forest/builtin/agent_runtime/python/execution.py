@@ -556,8 +556,17 @@ class AgentExecution:
                     repair, repair_of = await self.turns.repair_view(recovery)
                     snapshot = self._repair_snapshot(run, step_seq)
                     snapshot["bot_id"] = self.ctx.identity["bot_id"]
+                    failure = recovery["protocol_failure"]
+                    source_refs = [{
+                        "payload_id": failure["feedback_payload_id"],
+                        "digest": failure["feedback_payload_digest"],
+                        "owner_component_id": "agent.runtime",
+                        "owner_kind": "protocol.repair.feedback",
+                        "owner_id": failure["failure_id"],
+                    }]
                 else:
                     snapshot = await self._model_snapshot(request, run, step_seq)
+                    source_refs = [self._preset_ref()]
                 invoked = await self.model.invoke(
                     owner=owner,
                     request_id=request_id,
@@ -565,6 +574,7 @@ class AgentExecution:
                     effect_operation_id=stable("model-effect", attempt_id),
                     snapshot=snapshot,
                     preset_context=[] if is_repair else preset_context,
+                    source_refs=source_refs,
                     tools=declarations,
                     media=[],
                     evidence=None,

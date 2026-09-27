@@ -8,7 +8,7 @@ from importlib.resources import files
 from jsonschema import Draft202012Validator
 
 from forest.errors import ForestError
-from forest.models import ModelCapabilities
+from forest.model_contract import ModelCapabilities
 
 PROVIDER_CONFIGURATION_SCHEMA = json.loads(
     files("forest")

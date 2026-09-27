@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from forest.models import ModelCapabilities, PreparedModelRequest
+from forest.model_contract import ModelCapabilities, PreparedModelRequest
 
 
 @dataclass(frozen=True)
@@ -68,10 +68,10 @@ class BoundProviderRequest:
             or not isinstance(self.prepared, PreparedModelRequest)
             or not isinstance(self.projection, ProviderPayloadRef)
             or not isinstance(self.wire, ProviderPayloadRef)
-            or self.projection.owner_component_id != self.component_id
+            or self.projection.owner_component_id != "agent.runtime"
             or self.projection.owner_kind != "model.projection"
             or self.projection.owner_id != self.prepared.request_id
-            or self.wire.owner_component_id != self.component_id
+            or self.wire.owner_component_id != "agent.runtime"
             or self.wire.owner_kind != "model.wire"
             or self.wire.owner_id != self.prepared.transport_attempt_id
             or self.wire.digest != self.prepared.payload_digest

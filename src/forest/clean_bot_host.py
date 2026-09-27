@@ -23,7 +23,7 @@ from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
 from forest.media_capture_effect_driver import media_image_fetch_effect_driver_factory
-from forest.models import ModelCapabilities
+from forest.model_contract import ModelCapabilities
 from forest.onebot_transport_effect_driver import onebot_transport_effect_driver_factory
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog
@@ -386,7 +386,6 @@ class CleanBotHost:
             },
             effect_driver_registry=PackageEffectDriverRegistry(
                 {
-                    "chat-completions.materialize": provider_effect_factory,
                     "chat-completions.http": provider_effect_factory,
                 }
             ),
@@ -598,7 +597,6 @@ class CleanBotHost:
             },
             resolved_contracts={
                 "provider.profile.bind": "1.0",
-                "provider.request.materialize": "1.0",
                 "provider.model.dispatch": "2.0",
                 "conversation.context.snapshot": "2.0",
             },

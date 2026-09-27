@@ -22,7 +22,7 @@
       "properties": {
         "payload_id": {"$ref": "#/$defs/id"},
         "digest": {"$ref": "#/$defs/digest"},
-        "owner_component_id": {"const": "provider.chat-completions"},
+        "owner_component_id": {"const": "agent.runtime"},
         "owner_kind": {"enum": ["model.projection", "model.wire"]},
         "owner_id": {"$ref": "#/$defs/id"}
       }

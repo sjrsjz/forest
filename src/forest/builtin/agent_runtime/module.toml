@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.4.0"
+version = "4.5.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -31,7 +31,6 @@ requests = [
   "payload.read",
   "payload.write",
   "service.call:provider.profile.bind",
-  "service.call:provider.request.materialize",
   "service.call:provider.model.dispatch",
   "service.call:conversation.context.snapshot",
   "domain.query:agent.run-snapshot",
@@ -63,12 +62,6 @@ requests = [
 
 [[components.requires]]
 name = "provider.profile.bind"
-contract = ">=1.0,<2.0"
-required = true
-startup_dependency = true
-
-[[components.requires]]
-name = "provider.request.materialize"
 contract = ">=1.0,<2.0"
 required = true
 startup_dependency = true
@@ -119,9 +112,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.2.0"
+schema_version = "2.3.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "cd209b179709b66e0b239a2e663c3d3d351759d4117c28229dfb674d935a1323"
+baseline_sha256 = "e7c68f573c1d547228183965f0bdc9f181935257b7cef38a34610f03613c64dd"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -296,7 +289,7 @@ output_schema = "schemas/model-request-output.json"
 
 [[components.unit_of_work_participants.payload_refs]]
 path = "/input/request/projection"
-owner_component_path = "/input/request/provider_component_id"
+owner_component_path = "/input/request/projection/owner_component_id"
 owner_kind = "model.projection"
 owner_id_path = "/input/request/projection/owner_id"
 

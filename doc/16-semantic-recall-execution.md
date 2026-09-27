@@ -51,7 +51,7 @@ Agent 等待时释放本次执行租约，保留同一个逻辑 Session/Run 和�
 
 Memory 发布 `forest.memory-evidence/1`，保留文本、图片引用、历史作者身份、群/主干、时间和实际路径。Agent 读取规范证据，按绑定的模型能力产生请求投影；纯文本模型移除图片内容，图文模型读取原图片引用。去图不会改变 Memory 的 QUERY 嵌入模型或查询语义。
 
-Agent model.input 和投影载荷必须继承 Context、Preset、规范 Memory 证据及原媒体的受管父链。Provider 只持有已投影请求的序列化/传输责任，不能裁剪上下文、估算拒绝预算或自行选取证据。规范证据、模型投影与 wire 是不同层的不可变产物，必须分别标明所有者与用途。
+Agent model.input、model.projection 与 model.wire 必须继承 Context、Preset、规范 Memory 证据及原媒体的受管父链。Provider 只校验并传输 Agent 已冻结的请求，不能裁剪上下文、估算拒绝预算或自行选取证据。规范证据、模型投影与 wire 是不同层的不可变产物，必须分别标明所有者与用途。
 
 ## 5. 验收证据
 

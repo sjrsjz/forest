@@ -36,7 +36,7 @@
       "properties": {
         "payload_id": {"$ref": "#/$defs/id"},
         "digest": {"$ref": "#/$defs/digest"},
-        "owner_component_id": {"$ref": "#/$defs/id"},
+        "owner_component_id": {"const": "agent.runtime"},
         "owner_kind": {"const": "model.projection"},
         "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
       },

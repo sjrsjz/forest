@@ -364,7 +364,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             )
         projection = await _payload(
             kernel,
-            owner_component_id="provider.chat",
+            owner_component_id="agent.runtime",
             owner_kind="model.projection",
             owner_id="model-request/package/1",
             value=b'{"messages":[{"role":"user","content":"A"}]}',
@@ -680,7 +680,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         )
         repair_projection = await _payload(
             kernel,
-            owner_component_id="provider.chat",
+            owner_component_id="agent.runtime",
             owner_kind="model.projection",
             owner_id="model-request/package/repair",
             value=b'{"messages":[{"role":"user","content":"repair"}]}',
