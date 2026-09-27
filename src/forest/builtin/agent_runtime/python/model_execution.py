@@ -127,8 +127,8 @@ class ModelExecution:
         preset_context: list[str],
         source_refs: list[dict],
         tools: list[dict],
-        media: list[dict],
-        evidence: dict | None,
+        evidence_ref: dict | None,
+        memory_query_id: str | None,
         repair: dict | None,
         output_tokens: int,
         stream: bool,
@@ -162,19 +162,52 @@ class ModelExecution:
         images = {}
         media_parents = []
         seen_media = set()
-        for asset in media:
+        context_media = []
+        if "image" in target.input_modalities:
+            for unit in snapshot.get("units", ()):
+                for part in unit.get("parts", ()):
+                    if (part.get("type") == "image"
+                            and isinstance(part.get("media_ref"), str)
+                            and type(part.get("media_revision")) is int):
+                        context_media.append({
+                            "source_unit_id": unit["unit_id"],
+                            "part_id": part["part_id"],
+                            "media_ref": part["media_ref"],
+                            "media_revision": part["media_revision"],
+                        })
+        # Prefer the newest visible images; older context still carries an
+        # explicit unavailable marker in the model projection.
+        requested_media = context_media[-32:]
+        requested_identities = {
+            (item["source_unit_id"], item["part_id"], item["media_ref"], item["media_revision"])
+            for item in requested_media
+        }
+        assets = []
+        if requested_media:
+            resolved = await self.ctx.services.call(
+                "media.context.resolve", {"items": requested_media},
+                operation_id=self.ctx.operations.stable(f"media-resolve:{request_id}"),
+                timeout=30,
+            )
+            assets = resolved["assets"]
+        context_image_budget = 12 * 1024 * 1024
+        for asset in assets:
             identity = (asset["source_unit_id"], asset["part_id"])
-            if identity in seen_media:
+            binding = (*identity, asset["media_ref"], asset["media_revision"])
+            if identity in seen_media or binding not in requested_identities:
                 raise ForestError(
-                    "AGENT_MEDIA_INPUT_INVALID", "Media identity repeats in one model view", 422
+                    "AGENT_MEDIA_INPUT_INVALID", "Resolved image differs from its context source", 422
                 )
             seen_media.add(identity)
+            if asset["byte_length"] > context_image_budget:
+                continue
             reference = asset["payload"]
             content = await self.ctx.payloads.read_bytes(reference)
             if len(content) != asset["byte_length"]:
                 raise ForestError(
                     "AGENT_MEDIA_INPUT_INVALID", "Managed image length changed", 409
                 )
+            context_image_budget -= len(content)
             image = MediaSnapshot(
                 bot_id, asset["media_ref"], asset["media_revision"],
                 asset["source_unit_id"], asset["part_id"], asset["media_type"],
@@ -183,6 +216,45 @@ class ModelExecution:
             images[identity] = image
             images[asset["media_ref"]] = image
             media_parents.append(reference)
+        if (evidence_ref is None) != (memory_query_id is None):
+            raise ForestError(
+                "AGENT_MEMORY_FENCE_MISMATCH", "Memory evidence and query identity differ", 409
+            )
+        evidence = None
+        if evidence_ref is not None:
+            if (evidence_ref.get("owner_component_id") != "memory.graph"
+                    or evidence_ref.get("owner_kind") != "retrieval.evidence"):
+                raise ForestError(
+                    "AGENT_MEMORY_FENCE_MISMATCH", "Memory evidence owner is invalid", 409
+                )
+            evidence = await self.ctx.payloads.read_json(evidence_ref)
+            if (not isinstance(evidence, dict)
+                    or evidence.get("query_id") != memory_query_id
+                    or evidence.get("bot_id") != bot_id):
+                raise ForestError(
+                    "AGENT_MEMORY_FENCE_MISMATCH", "Memory evidence belongs to another query", 409
+                )
+            if "image" in target.input_modalities:
+                memory_image_budget = 12 * 1024 * 1024
+                for unit in evidence.get("evidence", ()):
+                    for part in unit.get("parts", ()):
+                        if part.get("kind") != "image":
+                            continue
+                        reference = part["media_ref"]
+                        if memory_image_budget <= 0:
+                            continue
+                        content = await self.ctx.payloads.read_bytes(reference)
+                        if len(content) > memory_image_budget:
+                            continue
+                        memory_image_budget -= len(content)
+                        image = MediaSnapshot(
+                            bot_id, reference["payload_id"], unit["source_revision"],
+                            unit["source_unit_id"], part["part_id"],
+                            part["media_type"], content, reference["digest"],
+                            part["width"], part["height"],
+                        )
+                        images[(unit["source_unit_id"], part["part_id"])] = image
+                        images[reference["payload_id"]] = image
         model_input = {
             "protocol": "forest.agent-model-input/1",
             "request_id": request_id,
@@ -209,6 +281,7 @@ class ModelExecution:
             parents=(
                 *((context_parent,) if context_parent is not None else ()),
                 *source_refs,
+                *((evidence_ref,) if evidence_ref is not None else ()),
                 *media_parents,
             ),
         )

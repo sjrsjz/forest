@@ -144,97 +144,172 @@ def _canonical_units(snapshot: dict) -> list[dict]:
 
 
 def _memory_source(value: Any) -> dict:
-    """Keep native source identity; a SYSTEM target is not its source group."""
-    source = _attribution(value)
-    for name in ("source_id", "source_kind", "realm_id", "platform", "channel_kind", "channel_id"):
-        source[name] = _identifier(value.get(name), "memory " + name)
-    schema = value.get("identity_schema")
-    if type(schema) is not int or schema != 1:
-        raise _error("MODEL_SOURCE_INVALID", "Memory source requires an explicit identity schema")
-    source["identity_schema"] = schema
-    target = value.get("target_group_source_id")
-    if target is not None:
-        source["target_group_source_id"] = _identifier(target, "memory target source")
-    kind = source["source_kind"]
-    if (kind not in {"GROUP", "DIRECT", "SYSTEM"}
-            or (kind == "GROUP" and (source["channel_kind"] != "group"
-                or source.get("group_source_id") != source["source_id"]))
-            or (kind == "DIRECT" and source["channel_kind"] != "private")
-            or (kind == "SYSTEM" and source["channel_kind"] != "system")):
-        raise _error("MODEL_SOURCE_INVALID", "Memory source kind contradicts its channel identity")
+    """Preserve the original trunk and external group identity of one source."""
+    if not isinstance(value, dict):
+        raise _error("MODEL_SOURCE_INVALID", "Memory source must be a typed object")
+    source_id = _identifier(value.get("source_id"), "memory source ID")
+    kind = value.get("source_kind")
+    if kind not in {"GROUP", "DIRECT", "DOCUMENT", "SYSTEM", "UNKNOWN"}:
+        raise _error("MODEL_SOURCE_INVALID", "Memory source kind is invalid")
+    source = {name: value.get(name) for name in (
+        "source_id", "source_kind", "platform", "realm_id", "external_group_id", "trunk_id",
+    )}
+    for name in ("platform", "realm_id", "external_group_id", "trunk_id"):
+        if source[name] is not None:
+            _identifier(source[name], "memory " + name)
+    if kind == "GROUP":
+        if not source["external_group_id"] or not source["trunk_id"]:
+            raise _error("MODEL_SOURCE_INVALID", "Group memory needs its group and trunk")
+        source.update(channel_kind="group", channel_id=source["external_group_id"],
+                      group_source_id=source_id)
+    else:
+        source.update(channel_kind={"DIRECT": "private", "DOCUMENT": "document",
+                                    "SYSTEM": "system", "UNKNOWN": "unknown"}[kind],
+                      channel_id=source_id)
     return source
 
 
 def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict, list[dict]]:
+    """Validate the native Memory publication, never a reconstructed legacy bundle."""
     value = _decode(_encode(value), limit=MAX_REQUEST_BYTES)
-    if not isinstance(value, dict):
-        raise _error("MODEL_INPUT_INVALID", "Memory evidence must be a frozen bundle")
-    reference = {name: _identifier(value.get(name), "memory " + name) for name in (
-        "bundle_id", "payload_id", "digest", "query_id", "conversation_id", "space_id",
-    )}
-    if not re.fullmatch(r"sha256:[0-9a-f]{64}", reference["digest"]):
-        raise _error("MODEL_INPUT_INVALID", "Memory evidence requires its immutable payload digest")
-    for name in ("input_cut", "config_revision", "deletion_epoch"):
-        minimum = 1 if name == "config_revision" else 0
-        if type(value.get(name)) is not int or not minimum <= value[name] < 2**63:
-            raise _error("MODEL_INPUT_INVALID", "Memory evidence revisions/cut must be bounded integers")
-        reference[name] = value[name]
+    required = {"protocol", "bot_id", "query_id", "bundle_id", "graph_snapshot_ref",
+                "current_source", "evidence", "content_truncated", "missing_count",
+                "truncated", "association_sampled", "read_count", "max_retrieval_chars"}
+    if not isinstance(value, dict) or set(value) != required or value["protocol"] != "forest.memory-evidence/1":
+        raise _error("MODEL_INPUT_INVALID", "Memory evidence is not its native publication")
+    if value["bot_id"] != snapshot["bot_id"]:
+        raise _error("MODEL_SOURCE_INVALID", "Memory evidence belongs to another Bot")
+    query_id = _identifier(value["query_id"], "memory query ID")
+    _identifier(value["bundle_id"], "memory bundle ID")
+    if value["graph_snapshot_ref"] != "memory-query:" + query_id:
+        raise _error("MODEL_SOURCE_INVALID", "Memory graph reference differs from its query")
+    current = _memory_source(value["current_source"])
     conversation = snapshot.get("conversation")
-    if (not isinstance(conversation, dict)
-            or conversation.get("conversation_id") != reference["conversation_id"]
-            or snapshot["selected_input_end_seq"] != reference["input_cut"]):
-        raise _error("MODEL_SOURCE_INVALID", "Memory evidence belongs to another conversation or input cut")
-    current_source = _attribution(conversation)
-    if not current_source.get("group_source_id"):
-        raise _error("MODEL_SOURCE_INVALID", "Memory projection requires the current source identity")
-    status, rows = value.get("status"), value.get("evidence")
-    if (status not in {"READY", "DEGRADED"} or not isinstance(rows, list) or len(rows) > 32
-            or not isinstance(value.get("completeness"), dict)):
-        raise _error("MODEL_INPUT_INVALID", "Memory evidence requires bounded entries and completeness")
-    # Completeness stays data in the manifest. Only fixed status text is used as
-    # an instruction; arbitrary provider/diagnostic text is never promoted.
-    _encode(value["completeness"], limit=8192)
-    reference.update(status=status, completeness=value["completeness"],
-                     renderer_revision=MEMORY_EVIDENCE_REVISION)
-    if value.get("reason_code") is not None:
-        reason = value["reason_code"]
-        if not isinstance(reason, str) or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", reason):
-            raise _error("MODEL_INPUT_INVALID", "Memory reason must be a bounded code")
-        reference["reason_code"] = reason
+    if not isinstance(conversation, dict):
+        raise _error("MODEL_SOURCE_INVALID", "Memory evidence needs the current conversation")
+    if conversation.get("channel_kind") == "group":
+        if (current["source_kind"] != "GROUP"
+                or current["platform"] != conversation.get("platform")
+                or current["external_group_id"] != conversation.get("channel_id")):
+            raise _error("MODEL_SOURCE_INVALID", "Memory evidence targets another group")
+    elif (current["source_kind"] != "DIRECT"
+          or current["platform"] != conversation.get("platform")):
+        raise _error("MODEL_SOURCE_INVALID", "Memory evidence targets another conversation")
+    rows = value["evidence"]
+    if not isinstance(rows, list) or len(rows) > 64:
+        raise _error("MODEL_INPUT_INVALID", "Memory evidence count is invalid")
+    for name in ("content_truncated", "truncated", "association_sampled"):
+        if type(value[name]) is not bool:
+            raise _error("MODEL_INPUT_INVALID", "Memory completeness flags are invalid")
+    for name, maximum in (("missing_count", 64), ("read_count", 64),
+                          ("max_retrieval_chars", 1_000_000)):
+        if type(value[name]) is not int or not 0 <= value[name] <= maximum:
+            raise _error("MODEL_INPUT_INVALID", "Memory completeness count is invalid")
+    reference = {name: value[name] for name in (
+        "bundle_id", "query_id", "graph_snapshot_ref", "current_source",
+        "content_truncated", "missing_count", "truncated", "association_sampled",
+        "read_count", "max_retrieval_chars",
+    )}
+    reference.update(status="READY", renderer_revision=MEMORY_EVIDENCE_REVISION)
+    fields = {"source_unit_id", "source_revision", "source_id", "trunk_id", "source_kind",
+              "platform", "realm_id", "external_group_id", "author_subject_ref",
+              "activation", "rank_score", "is_seed", "path_parent_source_unit_id",
+              "path_edge_id", "occurred_at", "source_order_seq", "unit_kind", "part_count",
+              "is_current_source", "matched_part_ids", "author_identity", "parts",
+              "content_truncated"}
     normalized, seen = [], {unit["unit_id"] for unit in units}
     for row in rows:
-        if not isinstance(row, dict) or set(row) != {
-            "unit_id",
-            "source_unit_id",
-            "source_revision",
-            "source",
-            "author",
-            "parts",
-        }:
-            raise _error("MODEL_INPUT_INVALID", "Memory evidence entries must be typed objects")
-        original = _identifier(row.get("source_unit_id"), "memory source unit")
-        identifier = _identifier(row.get("unit_id"), "memory projection unit", maximum=265)
-        revision = row.get("source_revision")
-        if (identifier != "evidence:" + original or identifier in seen
-                or type(revision) is not int or not 1 <= revision < 2**63):
-            raise _error("MODEL_SOURCE_INVALID", "Memory evidence needs unique original source references")
+        if not isinstance(row, dict) or set(row) != fields:
+            raise _error("MODEL_INPUT_INVALID", "Memory evidence item shape is invalid")
+        original = _identifier(row["source_unit_id"], "memory source unit")
+        identifier = "evidence:" + original
+        if identifier in seen or len(identifier) > 265:
+            raise _error("MODEL_SOURCE_INVALID", "Memory source unit repeats")
         seen.add(identifier)
-        source = _memory_source(row.get("source"))
-        author = _attribution(row.get("author"), author=True)
-        _identifier(author.get("principal_ref"), "memory author principal")
-        _identifier(author.get("identity_origin"), "memory author origin")
-        parts = row.get("parts")
-        if not isinstance(parts, list) or len(parts) > 256:
-            raise _error("MODEL_INPUT_INVALID", "Memory evidence requires bounded ordered parts")
-        if source["source_kind"] == "GROUP":
-            relation = ("SAME_GROUP" if source["source_id"] == current_source["group_source_id"]
-                        else "CROSS_GROUP") if current_source.get("channel_kind") == "group" else "GROUP_SOURCE"
-        else:
-            relation = source["source_kind"] + "_SOURCE"
+        revision = row["source_revision"]
+        if type(revision) is not int or revision < 1:
+            raise _error("MODEL_SOURCE_INVALID", "Memory source revision is invalid")
+        source = _memory_source(row)
+        identity = row["author_identity"]
+        if not isinstance(identity, dict):
+            raise _error("MODEL_SOURCE_INVALID", "Memory author identity is invalid")
+        author = _attribution({**identity, "principal_ref": _identifier(
+            row["author_subject_ref"], "memory author subject"),
+            "identity_origin": "memory_verified"}, author=True)
+        if (type(row["is_seed"]) is not bool or type(row["is_current_source"]) is not bool
+                or type(row["content_truncated"]) is not bool
+                or not isinstance(row["activation"], (int, float))
+                or not 0 < row["activation"] <= 1
+                or not isinstance(row["rank_score"], (int, float))
+                or row["rank_score"] < 0
+                or type(row["part_count"]) is not int or row["part_count"] < 1
+                or not isinstance(row["occurred_at"], str)
+                or not row["occurred_at"]
+                or not isinstance(row["unit_kind"], str)
+                or not row["unit_kind"]):
+            raise _error("MODEL_INPUT_INVALID", "Memory retrieval metadata is invalid")
+        for name in ("path_parent_source_unit_id", "path_edge_id"):
+            if row[name] is not None:
+                _identifier(row[name], "memory " + name)
+        if row["source_order_seq"] is not None and (type(row["source_order_seq"]) is not int
+                                                     or row["source_order_seq"] < 1):
+            raise _error("MODEL_INPUT_INVALID", "Memory source order is invalid")
+        matched = row["matched_part_ids"]
+        if not isinstance(matched, list) or len(matched) > 256 or any(
+                not isinstance(item, str) or not item for item in matched):
+            raise _error("MODEL_INPUT_INVALID", "Memory matched parts are invalid")
+        parts = row["parts"]
+        if not isinstance(parts, list) or len(parts) > 64 or len(parts) > row["part_count"]:
+            raise _error("MODEL_INPUT_INVALID", "Memory parts are not bounded")
+        projected_parts = []
+        part_ids = set()
+        previous_index = -1
+        for part in parts:
+            if not isinstance(part, dict):
+                raise _error("MODEL_INPUT_INVALID", "Memory part is not typed")
+            part_id = _identifier(part.get("part_id"), "memory part ID")
+            index = part.get("part_index")
+            if (part_id in part_ids or type(index) is not int or index <= previous_index
+                    or index >= row["part_count"]):
+                raise _error("MODEL_INPUT_INVALID", "Memory part order or identity is invalid")
+            part_ids.add(part_id)
+            previous_index = index
+            if part.get("kind") == "text" and set(part) == {
+                    "part_id", "part_index", "kind", "text", "truncated"}:
+                if not isinstance(part["text"], str) or type(part["truncated"]) is not bool:
+                    raise _error("MODEL_INPUT_INVALID", "Memory text part is invalid")
+                projected_parts.append({"part_id": part_id, "type": "text", "text": part["text"]})
+            elif part.get("kind") == "image" and set(part) == {
+                    "part_id", "part_index", "kind", "media_ref", "media_type", "width", "height"}:
+                image_ref = part["media_ref"]
+                if (not isinstance(image_ref, dict) or set(image_ref) != {
+                        "payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"}
+                        or any(not isinstance(item, str) or not item for item in image_ref.values())
+                        or not re.fullmatch(r"sha256:[a-f0-9]{64}", image_ref["digest"])
+                        or part["media_type"] not in {
+                            "image/png", "image/jpeg", "image/webp", "image/gif"}
+                        or type(part["width"]) is not int or not 0 < part["width"] <= 100000
+                        or type(part["height"]) is not int or not 0 < part["height"] <= 100000):
+                    raise _error("MODEL_INPUT_INVALID", "Memory image reference is invalid")
+                projected_parts.append({"part_id": part_id, "type": "image",
+                                        "media_ref": image_ref["payload_id"],
+                                        "media_revision": revision, "media_payload": image_ref})
+            else:
+                raise _error("MODEL_INPUT_INVALID", "Memory part kind is invalid")
+        if row["is_current_source"] != (source["source_id"] == current["source_id"]):
+            raise _error("MODEL_SOURCE_INVALID", "Memory current-source flag is inconsistent")
+        relation = ("SAME_GROUP" if source["source_id"] == current["source_id"]
+                    else "CROSS_GROUP") if source["source_kind"] == "GROUP" else source["source_kind"] + "_SOURCE"
+        retrieval = {name: row[name] for name in (
+            "activation", "rank_score", "is_seed", "path_parent_source_unit_id",
+            "path_edge_id", "occurred_at", "source_order_seq", "unit_kind",
+            "matched_part_ids", "content_truncated",
+        )}
         normalized.append({"unit_id": identifier, "source_unit_id": original,
                            "source_revision": revision, "source": source, "author": author,
-                           "parts": parts, "current_conversation": current_source,
-                           "relationship_to_current_conversation": relation})
+                           "parts": projected_parts, "current_conversation": current,
+                           "relationship_to_current_conversation": relation,
+                           "retrieval": retrieval})
     return reference, normalized
 
 

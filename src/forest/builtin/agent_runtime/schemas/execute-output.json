@@ -10,7 +10,7 @@
     "protocol": {"const": "forest.agent-execution/2"},
     "status": {
       "enum": [
-        "IDLE", "WAIT_INPUT", "WAIT_TOOL", "WAIT_APPROVAL", "BLOCKED_UNKNOWN",
+        "IDLE", "WAIT_INPUT", "WAIT_MEMORY", "WAIT_TOOL", "WAIT_APPROVAL", "BLOCKED_UNKNOWN",
         "RELOAD_WAIT", "FINAL_READY", "COMPLETED", "FAILED", "CANCELLED"
       ]
     },

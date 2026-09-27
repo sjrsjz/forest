@@ -161,26 +161,28 @@ Embedding 与向量发布主链同时支持 `DOCUMENT`/`QUERY`，用途来自持
 
 18 项 Linux 整包/数据库/算法/宿主验证通过；新增作者身份 64 KiB 上限后，6 项宿主及物化约束复验通过。覆盖并发合流、空证据的查询 lineage、TEXT/IMAGE/TEXT 原序、历史作者/群来源、无需再次 ANN、遗忘撤销规范载荷、热替换/重启、关系必要证据来源、非法项目与有效项目遗漏的零部分写入、Unicode 截取、父引用分组和无效作者/文本拒绝。Windows 原生验证的部分包目录 rename 仍出现访问错误，原因未确认；没有加入生产重试或兼容分支。验证未发送真实 QQ 消息，测试容器采用 1 CPU/768 MiB 上限。
 
-Agent 目前仍未消费该规范证据。下一步需要把语义召回纳入持久执行阶段，并在请求发布/派发边界复核 Memory 证据及载荷；纯文本模型去图投影继续归 Agent。跨主干联想学习、完整遗忘管理/物理清理和管理召回试验也仍待完成。
+此时 Agent 尚未消费该规范证据；后续已接入公开召回端口和原生证据投影，见本节末的最新记录。跨主干联想学习、完整遗忘管理/物理清理和管理召回试验仍待完成。
 
 `memory.query.progress/1` 已加入 Memory 包公开只读契约，私有 SQL 在一个语句快照内从已有准备、facet、匹配、冻结及证据发布事实推导阶段，不新增重复的阶段表。完整准备为零 facets 与尚未完整准备分别返回 NEED_MATCHING 与 NEED_PREPARATION；部分匹配仍为 NEED_MATCHING，UNKNOWN 明确阻断，失败/抑制不冒充空结果。FROZEN 查询不会回退准备，READY 在私有路径复核之后还经 Worker 读取准确 PayloadRef，删除后的证据不会重报可用。该端口不登记工作、不触发付费请求，也不承诺后台召回已经运行。
 
 两项 Linux 真实 PostgreSQL 验证分别通过：宿主集成涵盖公开阶段端口、部分 ANN 回执、空证据、规范证据引用、遗忘、热替换和重启；图数据库验证涵盖零 facet/部分准备、合法嵌入等待/UNKNOWN/抑制转换及严格输出 schema。4 项图算法及 5 项证据物化快速回归通过。新增阶段 fixture 最初使用非法 PENDING → UNKNOWN 转换，被现有约束拒绝；修正为合法路径后单项复验通过。此次未发送真实 QQ 消息。
 
-[16 持久语义召回](16-semantic-recall-execution.md) 规定 Memory owned-work、Agent 步骤输入版本、等待后接纳新 trigger 和总截止时间。模型能力投影已移入可热替换的 Agent 包；Provider 的请求 materialize 服务和宿主投影函数已删除。Agent 冻结 `model.input`、`model.projection` 与 `model.wire`，Provider 仅核对引用并传输。Context 根、Preset 或协议修复反馈及媒体引用进入 `model.input` 父链。规范 Memory 证据尚未接入 Agent 的等待和投影，因此阶段查询通过不能代替端到端语义召回验收。
+[16 持久语义召回](16-semantic-recall-execution.md) 规定 Memory owned-work、Agent 步骤输入版本、等待后接纳新 trigger 和总截止时间。模型能力投影位于可热替换的 Agent 包；Provider 的请求 materialize 服务和宿主投影函数已删除。Agent 冻结 `model.input`、`model.projection` 与 `model.wire`，Provider 仅核对引用并传输。Context 根、Preset 或协议修复反馈、规范 Memory 证据和已解析图片进入 `model.input` 父链。Agent 现已接入 Memory 公开 begin/request/work-status/cancel 端口；完整端到端群聊验收仍待执行。
 
-Memory 包现有 `memory.query.request/1`、`memory.query.work-status/1` 与 `memory.query.advance` owned-work，按已登记 query_id 和不可延长的绝对截止时间工作。任务表只保存 claim、lease、attempt、退避及终态；实际阶段仍来自 `memory.query.progress/1`。Worker 每次只执行一个现有幂等阶段，WAIT_EMBEDDING 交还租约，BLOCKED_UNKNOWN 不触发付费请求；过期 claim 的结算被拒绝，失败最多三次。READY 状态读取再次检查 Memory 路径和受管证据载荷。群 Agent 尚未通过这些公开端口消费证据；查询输入改版时调用取消、Agent 持久等待和 Provider 投影移交仍需实现，不能据此宣称群内语义召回已上线。
+Memory 包现有 `memory.query.request/1`、`memory.query.work-status/1` 与 `memory.query.advance` owned-work，按已登记 query_id 和不可延长的绝对截止时间工作。任务表只保存 claim、lease、attempt、退避及终态；实际阶段仍来自 `memory.query.progress/1`。Worker 每次只执行一个现有幂等阶段，WAIT_EMBEDDING 交还租约，BLOCKED_UNKNOWN 不触发付费请求；过期 claim 的结算被拒绝，失败最多三次。READY 状态读取再次检查 Memory 路径和受管证据载荷。Agent 现按持久 Run 输入推导 query_id，等待未完成的来源捕获与召回；语义召回尚缺少真实群聊与模型请求体的端到端验收，不能据此宣称已上线。
 
-`memory.query.cancel/1` 已在 Memory 包中加入 SUPERSEDED 取消。待领取工作立刻进入 CANCELLED；已领取工作先显示 CANCELLING，Worker 起步前可跳过，已开始的幂等阶段由原 claim 结算，再落为 CANCELLED。取消与领取/结算锁同一工作行，READY/FAILED 先提交时返回 TERMINAL 而不删除历史；外部嵌入 Effect 不被假定可撤销。真实 PostgreSQL 覆盖 PENDING/CLAIMED/TERMINAL、重复取消和结算竞争，宿主服务路由验证了已完成查询的终态取消。Agent 尚未调用取消端口，不能认为新触发已自动节省旧查询成本。
+`memory.query.cancel/1` 已在 Memory 包中加入 SUPERSEDED 取消。待领取工作立刻进入 CANCELLED；已领取工作先显示 CANCELLING，Worker 起步前可跳过，已开始的幂等阶段由原 claim 结算，再落为 CANCELLED。取消与领取/结算锁同一工作行，READY/FAILED 先提交时返回 TERMINAL 而不删除历史；外部嵌入 Effect 不被假定可撤销。真实 PostgreSQL 覆盖 PENDING/CLAIMED/TERMINAL、重复取消和结算竞争。Agent 现于同一步骤收到更新的 InputBatch 后取消旧 query；已登记但尚未请求工作的 query 无须取消。
 
-Agent 包的模型安全边界选择现在为每次观察使用新的 operation identity，不再把一个 `CONTINUE` 或 `WAIT_INPUT` 回执当作同一步骤永久有效；已提交 BATCH 的真实去重仍靠同事务推进的 Run input revision 和 InputBatch 唯一约束。Agent 包状态、同群最后触发切口、宿主热替换/重启及投影所有权的真实 PostgreSQL 测试通过。旧宿主 `forest.models` 已拆成 Worker 可分发的纯协议值与宿主传输代码，旧 Provider materialize 驱动及服务声明已移除。当前 Agent 仍未绑定 Memory 查询、等待 `WAIT_MEMORY`、解析 `forest.memory-evidence/1` 或实际获取上下文图片；包内原 `_memory_bundle` 仍认另一种证据结构，必须原生改写并完成端到端验证。
+Agent 包的模型安全边界选择每次观察使用新的 operation identity，不再把一个 `CONTINUE` 或 `WAIT_INPUT` 回执当作同一步骤永久有效；已提交 BATCH 的真实去重靠同事务推进的 Run input revision 和 InputBatch 唯一约束。Agent 包状态、同群最后触发切口、宿主热替换/重启及投影所有权的真实 PostgreSQL 测试通过。旧宿主 `forest.models` 已拆成 Worker 可分发的纯协议值与宿主传输代码，旧 Provider materialize 驱动及服务声明已移除。Agent 现可返回 `WAIT_MEMORY`，原生解析 `forest.memory-evidence/1` 并保留群、主干、作者与路径归因；图文模型通过 `media.context.resolve` 取当前上下文图片，文本模型省略图片字节。仍需以真实图片及群聊请求验证完整运行链。
 
 固定包内容后，Linux 隔离 PostgreSQL 与宿主 Worker 的两项集成验证通过，用时约 163 秒。数据库验证覆盖请求合流与截止冲突、UNKNOWN 停驻、重复结算、token 重用拒绝、lease 过期后的旧 claim 拒绝、故障/截止终态；宿主验证覆盖新查询由 owned-work 自动完成准备、嵌入等待、固定 ANN、冻结和证据发布，READY 读取、遗忘后读取拒绝、热替换与重启。未发真实 QQ 消息，测试容器受 1 CPU/768 MiB 限额约束。中途一次测试因运行时改写了同版本包内容而被包仓库正确拒绝，最终在包内容固定后重新完整通过。
+
+本轮 Agent 接入后，局部规范证据/图片投影与输入版本测试 41 项通过；较大范围本地套件 430 项通过、87 项跳过。隔离 PostgreSQL 的完整宿主启动/热重载/重启与 Agent 包持久状态复验 2 项通过。Agent 通过持久 Run 输入推导查询 ID 和共同截止时间，在 Memory 捕获或召回等待时返回 `WAIT_MEMORY`；召回完成后再次检查群聊排队输入，旧版本查询在被新输入取代时取消。当前上下文图片经 `media.context.resolve` 读取，历史证据图文按模型能力投影；文本模型不读取图片字节。实际群聊消息→Memory 证据→Provider 请求体的端到端验收尚未完成，本轮未发真实 QQ 消息。
 
 ## 8. 下一切换顺序
 
 1. 补齐遗忘管理的固定目标计划、较大范围选择器与持续 Payload scrub；补齐发布崩溃重放验证。
-2. 在已物化规范证据上补齐 Agent 语义召回接入和跨主干联想学习；恢复及重放需与删除 epoch、Generation 围栏收敛。
+2. 验证 Agent 语义召回的真实群聊/模型请求链，补齐跨主干联想学习；恢复及重放需与删除 epoch、Generation 围栏收敛。
 3. 补齐证据浏览的进一步分页以及图文真实召回试验。
 4. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
 5. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。

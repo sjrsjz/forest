@@ -480,6 +480,8 @@ class ConversationScheduler(Plugin):
                 continue
             if status == "WAIT_INPUT":
                 return self._defer(status, "classification_prefix_pending", 0.25)
+            if status == "WAIT_MEMORY":
+                return self._defer(status, "memory_recall_pending", 0.5)
             if status == "WAIT_APPROVAL":
                 return self._defer(status, "approval_pending", 1.0)
             if status == "RELOAD_WAIT":

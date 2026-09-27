@@ -206,76 +206,80 @@ def test_pure_image_trigger_survives_missing_media_and_text_only_projection():
         assert json.loads(result.body)["messages"][1]["content"]
 
 
-def test_memory_evidence_accepts_only_the_current_exact_projection_contract():
+def native_evidence(*, parts=None):
+    current = {"source_id": "onebot-source:current-a", "source_kind": "GROUP",
+               "platform": "onebot-v11", "realm_id": "onebot-v11",
+               "external_group_id": "group-a", "trunk_id": "trunk-a"}
+    row = {"source_unit_id": "source-unit-a", "source_revision": 1,
+           "source_id": "onebot-source:historical-b", "source_kind": "GROUP",
+           "platform": "onebot-v11", "realm_id": "onebot-v11",
+           "external_group_id": "group-b", "trunk_id": "trunk-b",
+           "author_subject_ref": "qq:42", "author_identity": {"display_name_at_event": "Alice"},
+           "activation": 0.5, "rank_score": 0.75, "is_seed": False,
+           "path_parent_source_unit_id": "seed-unit-a", "path_edge_id": "edge-a",
+           "occurred_at": "2026-09-28T10:00:00+00:00", "source_order_seq": 1,
+           "unit_kind": "SOURCE", "part_count": 1, "is_current_source": False,
+           "matched_part_ids": ["text"], "content_truncated": False,
+           "parts": parts if parts is not None else [
+               {"part_id": "text", "part_index": 0, "kind": "text",
+                "text": "recalled", "truncated": False}],
+           }
+    return {"protocol": "forest.memory-evidence/1", "bot_id": "bot-a",
+            "query_id": "query-a", "bundle_id": "bundle-a",
+            "graph_snapshot_ref": "memory-query:query-a", "current_source": current,
+            "evidence": [row], "content_truncated": False, "missing_count": 0,
+            "truncated": False, "association_sampled": True,
+            "read_count": 1, "max_retrieval_chars": 1024}
+
+
+def test_native_memory_evidence_retains_cross_group_source_and_path():
     value = snapshot()
     value["conversation"] = {
-        "conversation_id": "conversation-group-a",
+        "conversation_id": "onebot:group:group-a",
         "group_source_id": "onebot:group:group-a",
-        "platform": "onebot-v11",
-        "channel_kind": "group",
-        "channel_id": "group-a",
+        "platform": "onebot-v11", "channel_kind": "group", "channel_id": "group-a",
     }
-    evidence = {
-        "bundle_id": "bundle-a",
-        "payload_id": "payload-a",
-        "digest": "sha256:" + "a" * 64,
-        "query_id": "query-a",
-        "conversation_id": "conversation-group-a",
-        "space_id": "space-a",
-        "input_cut": 8,
-        "config_revision": 1,
-        "deletion_epoch": 0,
-        "status": "READY",
-        "completeness": {"candidate_count": 1},
-        "evidence": [
-            {
-                "unit_id": "evidence:source-unit-a",
-                "source_unit_id": "source-unit-a",
-                "source_revision": 1,
-                "source": {
-                    "source_id": "onebot:group:group-b",
-                    "source_kind": "GROUP",
-                    "realm_id": "onebot-v11",
-                    "platform": "onebot-v11",
-                    "channel_kind": "group",
-                    "channel_id": "group-b",
-                    "group_source_id": "onebot:group:group-b",
-                    "identity_schema": 1,
-                },
-                "author": {
-                    "principal_ref": "qq:42",
-                    "identity_origin": "memory_verified",
-                },
-                "parts": [{"part_id": "text", "type": "text", "text": "recalled"}],
-            }
-        ],
-    }
+    evidence = native_evidence()
     request = prepare_model_request(
-        value,
-        capabilities(),
-        request_id="request-evidence",
-        transport_attempt_id="attempt-evidence",
-        evidence=evidence,
+        value, capabilities(), request_id="request-evidence",
+        transport_attempt_id="attempt-evidence", evidence=evidence,
     )
     source = request.manifest["source_manifest"][0]
     assert source["source"]["channel_id"] == "group-b"
-
-    evidence["evidence"][0]["retrieval"] = {
-        "kind": "graph_association",
-        "association_id": "association-a",
-        "edge_id": "edge-a",
-        "seed_source_unit_id": "seed-a",
-        "graph_revision": 1,
-    }
+    assert source["relationship_to_current_conversation"] == "CROSS_GROUP"
+    assert source["author"]["principal_ref"] == "qq:42"
+    assert source["retrieval"]["path_edge_id"] == "edge-a"
+    assert request.manifest["memory_evidence"]["association_sampled"] is True
+    evidence["evidence"][0]["unexpected"] = "injected"
     with pytest.raises(ForestError) as caught:
-        prepare_model_request(
-            value,
-            capabilities(),
-            request_id="request-extra-evidence-field",
-            transport_attempt_id="attempt-extra-evidence-field",
-            evidence=evidence,
-        )
+        prepare_model_request(value, capabilities(), request_id="request-invalid",
+                              transport_attempt_id="attempt-invalid", evidence=evidence)
     assert caught.value.code == "MODEL_INPUT_INVALID"
+
+
+def test_native_memory_image_obeys_bound_model_modality():
+    value = snapshot()
+    value["conversation"] = {
+        "conversation_id": "onebot:group:group-a",
+        "group_source_id": "onebot:group:group-a",
+        "platform": "onebot-v11", "channel_kind": "group", "channel_id": "group-a",
+    }
+    picture = image(source="source-unit-a", part="image", ref="image-a")
+    reference = {"payload_id": "image-a", "digest": picture.blob_digest,
+                 "owner_component_id": "media.capture", "owner_kind": "media.image",
+                 "owner_id": "source-unit-a/image"}
+    evidence = native_evidence(parts=[
+        {"part_id": "image", "part_index": 0, "kind": "image",
+         "media_ref": reference, "media_type": "image/png", "width": 1, "height": 1}])
+    evidence["evidence"][0]["matched_part_ids"] = ["image"]
+    text_only = prepared(value, evidence=evidence)
+    assert "image_url" not in text_only.body.decode()
+    assert "image-a" not in text_only.body.decode()
+    assert text_only.manifest["omitted_part_refs"][0]["reason"] == "MODEL_IMAGE_UNSUPPORTED"
+    visual = prepared(value, capabilities(input_modalities=("text", "image")),
+                      evidence=evidence, media={("source-unit-a", "image"): picture})
+    assert "data:image/png;base64," in visual.body.decode()
+    assert visual.manifest["source_manifest"][0]["source"]["channel_id"] == "group-b"
 
 
 def test_nested_attribution_drops_media_fields_and_rejects_untyped_ids():
@@ -374,35 +378,18 @@ def test_provider_projection_never_discards_context_based_on_capability_metadata
     )
 
 
-def test_empty_memory_status_is_projected_without_provider_budget_authority():
+def test_empty_native_memory_evidence_reports_no_match_without_trimming_context():
     value = snapshot(unit("required", "current trigger " * 80), required=["required"])
     value["conversation"] = {
-        "conversation_id": "conversation-group-a",
+        "conversation_id": "onebot:group:group-a",
         "group_source_id": "onebot:group:group-a",
-        "platform": "onebot-v11",
-        "channel_kind": "group",
-        "channel_id": "group-a",
+        "platform": "onebot-v11", "channel_kind": "group", "channel_id": "group-a",
     }
-    evidence = {
-        "bundle_id": "bundle-empty",
-        "payload_id": "payload-empty",
-        "digest": "sha256:" + "a" * 64,
-        "query_id": "query-empty",
-        "conversation_id": "conversation-group-a",
-        "space_id": "space-a",
-        "input_cut": 8,
-        "config_revision": 1,
-        "deletion_epoch": 0,
-        "status": "READY",
-        "completeness": {"candidate_count": 0},
-        "evidence": [],
-    }
-    result = prepared(
-        value,
-        capabilities(max_output_tokens=128),
-        output_tokens=128,
-        evidence=evidence,
-    )
+    evidence = native_evidence()
+    evidence["evidence"] = []
+    evidence["read_count"] = 0
+    result = prepared(value, capabilities(max_output_tokens=128),
+                      output_tokens=128, evidence=evidence)
     assert result.manifest["memory_evidence"]["projected_unit_ids"] == []
     assert result.manifest["memory_evidence"]["status_projected"] is True
     assert "current trigger" in result.body.decode()

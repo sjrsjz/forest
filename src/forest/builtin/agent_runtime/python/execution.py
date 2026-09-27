@@ -267,6 +267,97 @@ class AgentExecution:
         )
 
     @staticmethod
+    def _memory_query_id(run: dict, step_seq: int) -> str:
+        return stable(
+            "memory-query", run["run_id"], step_seq,
+            run["progress"]["input_revision"],
+        )
+
+    async def _cancel_superseded_recall(self, run: dict, step_seq: int) -> None:
+        if run["progress"]["input_revision"] < 1:
+            return
+        query_id = self._memory_query_id(run, step_seq)
+        try:
+            await self.ctx.services.call(
+                "memory.query.cancel",
+                {"query_id": query_id, "reason_code": "SUPERSEDED"},
+                operation_id=self.ctx.operations.stable(f"memory-cancel:{query_id}"),
+                timeout=25,
+            )
+        except ForestError as exc:
+            # A query may have been admitted while its owned work was not yet requested.
+            if exc.code != "MEMORY_RECALL_NOT_REQUESTED":
+                raise
+
+    async def _recall(self, run: dict, step_seq: int) -> tuple[str, str, dict | None]:
+        revision = run["progress"]["input_revision"]
+        inputs = [item for item in run["inputs"] if item["input_revision"] == revision]
+        if len(inputs) != 1:
+            raise ForestError(
+                "AGENT_MEMORY_INPUT_MISSING", "Current Agent input batch is not durable", 409
+            )
+        batch = inputs[0]
+        query_id = self._memory_query_id(run, step_seq)
+        try:
+            begun = await self.ctx.services.call(
+                "memory.query.begin",
+                {
+                    "query_id": query_id,
+                    "conversation_ref": run["conversation_ref"],
+                    "input_batch_ref": batch["input_batch_ref"],
+                    "context_revision": batch["context_revision"],
+                },
+                operation_id=self.ctx.operations.stable(f"memory-begin:{query_id}"),
+                timeout=30,
+            )
+        except ForestError as exc:
+            if exc.code == "MEMORY_QUERY_CAPTURE_PENDING":
+                return "PENDING", query_id, None
+            raise
+        if (begun["query_id"] != query_id
+                or begun["input_batch_ref"] != batch["input_batch_ref"]
+                or begun["context_revision"] != batch["context_revision"]):
+            raise ForestError(
+                "AGENT_MEMORY_FENCE_MISMATCH", "Memory query differs from Agent input", 409
+            )
+        # The Run start gives every model step a non-extending recall window.
+        # Memory accepts new work only within ten minutes of its first request.
+        recall_deadline = min(
+            _deadline(run["absolute_deadline"]),
+            _deadline(run["created_at"]) + timedelta(minutes=9),
+        )
+        requested = await self.ctx.services.call(
+            "memory.query.request",
+            {"query_id": query_id, "deadline_at": recall_deadline.isoformat()},
+            operation_id=self.ctx.operations.stable(f"memory-request:{query_id}"),
+            timeout=30,
+        )
+        if requested["query_id"] != query_id or _deadline(requested["deadline_at"]) != recall_deadline:
+            raise ForestError(
+                "AGENT_MEMORY_FENCE_MISMATCH", "Memory work deadline differs from Agent input", 409
+            )
+        status = await self.ctx.services.call(
+            "memory.query.work-status",
+            {"query_id": query_id},
+            operation_id=self.ctx.operations.stable(f"memory-status:{query_id}:{uuid4().hex}"),
+            timeout=30,
+        )
+        if status["query_id"] != query_id or _deadline(status["deadline_at"]) != recall_deadline:
+            raise ForestError(
+                "AGENT_MEMORY_FENCE_MISMATCH", "Memory work belongs to another query", 409
+            )
+        if status["state"] == "READY":
+            return "READY", query_id, status["evidence_ref"]
+        if status["state"] in {"PENDING", "CLAIMED"}:
+            return "PENDING", query_id, None
+        if status["state"] == "BLOCKED_UNKNOWN":
+            return "BLOCKED_UNKNOWN", query_id, None
+        raise ForestError(
+            status["error_code"] or "AGENT_MEMORY_RECALL_FAILED",
+            "Memory recall failed before the model call", 409,
+        )
+
+    @staticmethod
     def _repair_snapshot(run: dict, step_seq: int) -> dict:
         return {
             "bot_id": None,
@@ -514,6 +605,10 @@ class AgentExecution:
                     )
                     if selected["status"] == "WAIT_INPUT":
                         return self._result(request, "WAIT_INPUT", run)
+                    if selected["status"] == "BATCH":
+                        await self._cancel_superseded_recall(
+                            run, recovery["next_step_seq"]
+                        )
                     run = await self._run(run["run_id"])
                     recovery = await self._recovery(run["run_id"])
                 step_seq = recovery["next_step_seq"]
@@ -552,6 +647,8 @@ class AgentExecution:
                 )
                 repair = None
                 repair_of = None
+                memory_query_id = None
+                evidence_ref = None
                 if is_repair:
                     repair, repair_of = await self.turns.repair_view(recovery)
                     snapshot = self._repair_snapshot(run, step_seq)
@@ -565,6 +662,23 @@ class AgentExecution:
                         "owner_id": failure["failure_id"],
                     }]
                 else:
+                    memory_state, memory_query_id, evidence_ref = await self._recall(
+                        run, step_seq
+                    )
+                    if memory_state == "BLOCKED_UNKNOWN":
+                        return self._result(
+                            request, "BLOCKED_UNKNOWN", run,
+                            error_code="AGENT_MEMORY_RESULT_UNKNOWN",
+                        )
+                    if memory_state == "PENDING":
+                        return self._result(request, "WAIT_MEMORY", run)
+                    if stored_request is None:
+                        selected = await self._acquire_input(request, owner, step_seq)
+                        if selected["status"] == "WAIT_INPUT":
+                            return self._result(request, "WAIT_INPUT", run)
+                        if selected["status"] == "BATCH":
+                            await self._cancel_superseded_recall(run, step_seq)
+                            continue
                     snapshot = await self._model_snapshot(request, run, step_seq)
                     source_refs = [self._preset_ref()]
                 invoked = await self.model.invoke(
@@ -576,8 +690,8 @@ class AgentExecution:
                     preset_context=[] if is_repair else preset_context,
                     source_refs=source_refs,
                     tools=declarations,
-                    media=[],
-                    evidence=None,
+                    evidence_ref=evidence_ref,
+                    memory_query_id=memory_query_id,
                     repair=repair,
                     output_tokens=self.config["output_tokens"],
                     stream=self.config["stream"],

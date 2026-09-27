@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.5.0"
+version = "4.6.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -33,6 +33,11 @@ requests = [
   "service.call:provider.profile.bind",
   "service.call:provider.model.dispatch",
   "service.call:conversation.context.snapshot",
+  "service.call:media.context.resolve",
+  "service.call:memory.query.begin",
+  "service.call:memory.query.request",
+  "service.call:memory.query.work-status",
+  "service.call:memory.query.cancel",
   "domain.query:agent.run-snapshot",
   "domain.query:agent.run-recovery",
   "domain.query:agent.execution-history",
@@ -75,6 +80,36 @@ startup_dependency = true
 [[components.requires]]
 name = "conversation.context.snapshot"
 contract = ">=2.0,<3.0"
+required = true
+startup_dependency = false
+
+[[components.requires]]
+name = "media.context.resolve"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
+
+[[components.requires]]
+name = "memory.query.begin"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
+
+[[components.requires]]
+name = "memory.query.request"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
+
+[[components.requires]]
+name = "memory.query.work-status"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
+
+[[components.requires]]
+name = "memory.query.cancel"
+contract = ">=1.0,<2.0"
 required = true
 startup_dependency = false
 
