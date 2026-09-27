@@ -1144,13 +1144,18 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 )
 
             # This query predates document publication and cannot recall itself.
+            progress = await query_stage(query["query_id"], "progress/original", stage="progress")
+            assert progress["phase"] == "NEED_MATCHING"
+            assert progress["ready_count"] == progress["facet_count"] == 3
             original_matches = await query_stage(query["query_id"], "match/original", stage="match")
             assert original_matches["match_count"] == 0
             assert (await query_stage(query["query_id"], "seeds/original"))["seeds"] == []
             empty_record = await query_stage(query["query_id"], "freeze/original", stage="freeze")
             assert empty_record["result_count"] == empty_record["seed_count"] == 0
+            assert (await query_stage(query["query_id"], "progress/frozen", stage="progress"))["phase"] == "NEED_MATERIALIZATION"
             empty_evidence = await query_stage(query["query_id"], "materialize/original", stage="materialize")
             assert empty_evidence["evidence_count"] == 0
+            assert (await query_stage(query["query_id"], "progress/empty-ready", stage="progress"))["evidence_ref"] == empty_evidence["evidence_ref"]
             await clients[-1].handler(json.dumps({
                 "self_id": int(settings.onebot_self_id), "post_type": "message",
                 "message_type": "group", "sub_type": "normal", "time": 1_720_000_001,
@@ -1202,6 +1207,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 (), {"query_id": "query/recall-host", "conversation_ref": "onebot:group:933179609",
                      "input_batch_ref": recall_batch, "context_revision": recall_revision},
             )
+            assert (await query_stage(recall_query["query_id"], "progress/unprepared", stage="progress"))["phase"] == "NEED_PREPARATION"
             await memory_instance.runtime_service_handlers()[("memory.query.prepare", 1)].invoke_routed(
                 prepare_route,
                 RuntimeServiceInvocation("query-prepare-recall-host", 30, "memory.query", settings.bot_id),
@@ -1234,10 +1240,13 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     )
                 ).fetchone()
             assert partial_matching["n"] == 1
+            progress = await query_stage(recall_query["query_id"], "progress/partial-matches", stage="progress")
+            assert progress["phase"] == "NEED_MATCHING" and progress["matched_count"] == 1
             matching = await asyncio.gather(
                 query_stage(recall_query["query_id"], "match/recall-one", stage="match"),
                 query_stage(recall_query["query_id"], "match/recall-two", stage="match"),
             )
+            assert (await query_stage(recall_query["query_id"], "progress/matched", stage="progress"))["phase"] == "NEED_FREEZING"
             assert matching[0] == matching[1] == {
                 "protocol": "forest.memory-query-matched/1", "query_id": recall_query["query_id"],
                 "facet_count": 3, "match_count": 3,
@@ -1323,6 +1332,9 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert unit_evidence["parts"][1]["media_ref"]["payload_id"] == first_parts["parts"][1]["payload"]["payload_id"]
             assert not document["content_truncated"]
             assert await query_stage(recall_query["query_id"], "materialize/replay", stage="materialize") == materialized[0]
+            ready_progress = await query_stage(recall_query["query_id"], "progress/ready", stage="progress")
+            assert ready_progress["phase"] == "READY"
+            assert ready_progress["evidence_ref"] == materialized[0]["evidence_ref"]
             assert FakeMilvusClient.search_calls == search_count
 
             # The public UoW revokes Payload, Memory eligibility, graph evidence,
@@ -1383,6 +1395,9 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert forget["vector_deletions"] == len(facets) + len(query_facets)
             assert forget["retracted_relations"] == 1
             assert (await query_stage(recall_query["query_id"], "seeds/recall-after-forget"))["seeds"] == []
+            with pytest.raises(ForestError) as revoked_progress:
+                await query_stage(recall_query["query_id"], "progress/revoked", stage="progress")
+            assert revoked_progress.value.code == "MEMORY_EVIDENCE_UNAVAILABLE"
             assert (await query_stage(
                 recall_query["query_id"], "region/recall-after-forget", stage="region"
             ))["nodes"] == []

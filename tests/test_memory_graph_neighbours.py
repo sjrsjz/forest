@@ -170,6 +170,47 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         await ready_facet("document/seed", "seed")
         await register_query("query/one")
         await register_query("query/two")
+        async def progress(query):
+            result = (await (await execute(
+                "SELECT {}.memory_read_query_progress(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": store.bot_id}), Jsonb({"query_id": query})),
+            )).fetchone())["result"]
+            assert result["ok"], result
+            value = result["value"]
+            Draft202012Validator(package.snapshot.schema("schemas/query-progress-output.json")).validate(value)
+            return value
+
+        assert (await progress("query/two"))["phase"] == "NEED_PREPARATION"
+        await execute(
+            "INSERT INTO {}.query_facet_preparations (bot_id,query_id,facet_count,accepted_deletion_epoch) "
+            "VALUES (%s,'query/two',0,0)", (store.bot_id,),
+        )
+        assert (await progress("query/two"))["phase"] == "NEED_MATCHING"
+        await register_query("query/status")
+        await execute(
+            "INSERT INTO {}.embedding_facets (bot_id,facet_id,purpose,query_id,source_unit_id,"
+            "source_revision,part_id,modality,selector_start_char,selector_end_char,"
+            "input_payload_id,input_payload_digest,facet_content_digest,input_media_type,"
+            "input_byte_length,space_id,accepted_deletion_epoch) VALUES "
+            "(%s,'query/status-facet','QUERY','query/status','query-input',1,'text','TEXT',0,1,"
+            "'input/status',%s,%s,'text/plain',1,'space/test',0)",
+            (store.bot_id,digest,digest),
+        )
+        # A partial preparation is not a complete preparation receipt.
+        assert (await progress("query/status"))["phase"] == "NEED_PREPARATION"
+        await execute(
+            "INSERT INTO {}.query_facet_preparations (bot_id,query_id,facet_count,accepted_deletion_epoch) "
+            "VALUES (%s,'query/status',1,0)", (store.bot_id,),
+        )
+        assert (await progress("query/status"))["phase"] == "WAIT_EMBEDDING"
+        for state, phase in (("PREPARED","WAIT_EMBEDDING"), ("DISPATCHED","WAIT_EMBEDDING"),
+                             ("UNKNOWN","BLOCKED_UNKNOWN"), ("SUPPRESSED","FAILED")):
+            await execute(
+                "UPDATE {}.embedding_facets SET state=%s WHERE bot_id=%s AND facet_id='query/status-facet'",
+                (state,store.bot_id),
+            )
+            result = await progress("query/status")
+            assert result["phase"] == phase and result["ready_count"] == 0
         first = await neighbours("query/one")
         assert first == await neighbours("query/one")
         assert first["association_sampled"]

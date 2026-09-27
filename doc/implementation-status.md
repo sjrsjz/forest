@@ -163,6 +163,12 @@ Embedding 与向量发布主链同时支持 `DOCUMENT`/`QUERY`，用途来自持
 
 Agent 目前仍未消费该规范证据。下一步需要把语义召回纳入持久执行阶段，并在请求发布/派发边界复核 Memory 证据及载荷；纯文本模型去图投影继续归 Agent。跨主干联想学习、完整遗忘管理/物理清理和管理召回试验也仍待完成。
 
+`memory.query.progress/1` 已加入 Memory 包公开只读契约，私有 SQL 在一个语句快照内从已有准备、facet、匹配、冻结及证据发布事实推导阶段，不新增重复的阶段表。完整准备为零 facets 与尚未完整准备分别返回 NEED_MATCHING 与 NEED_PREPARATION；部分匹配仍为 NEED_MATCHING，UNKNOWN 明确阻断，失败/抑制不冒充空结果。FROZEN 查询不会回退准备，READY 在私有路径复核之后还经 Worker 读取准确 PayloadRef，删除后的证据不会重报可用。该端口不登记工作、不触发付费请求，也不承诺后台召回已经运行。
+
+两项 Linux 真实 PostgreSQL 验证分别通过：宿主集成涵盖公开阶段端口、部分 ANN 回执、空证据、规范证据引用、遗忘、热替换和重启；图数据库验证涵盖零 facet/部分准备、合法嵌入等待/UNKNOWN/抑制转换及严格输出 schema。4 项图算法及 5 项证据物化快速回归通过。新增阶段 fixture 最初使用非法 PENDING → UNKNOWN 转换，被现有约束拒绝；修正为合法路径后单项复验通过。此次未发送真实 QQ 消息。
+
+[16 持久语义召回](16-semantic-recall-execution.md) 规定后续 Memory owned-work、Agent 步骤输入版本、等待后接纳新 trigger 和总截止时间。15 号文档已删除 Provider 拥有内容投影的旧目标语义。但当前代码的 `ChatCompletionsMaterializeDriver` 仍在宿主执行 `prepare_model_request`，Agent 的 `model.input` 仍未继承完整输入父链；必须把模型能力投影移入 Agent 包、保留 Provider 纯传输序列化边界，再验收真正的 Agent 语义证据接入。这些缺口尚未解决，阶段查询通过不能代替端到端实现。
+
 ## 8. 下一切换顺序
 
 1. 补齐遗忘管理的固定目标计划、较大范围选择器与持续 Payload scrub；补齐发布崩溃重放验证。

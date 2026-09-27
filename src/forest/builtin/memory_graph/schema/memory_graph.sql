@@ -2057,6 +2057,73 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_read_query_progress(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_query text := input->>'query_id';
+    query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    prepared_row __forest_module_schema__.query_facet_preparations%ROWTYPE;
+    check_value jsonb;
+    phase_value text;
+    facet_total integer := 0;
+    ready_total integer := 0;
+    unknown_total integer := 0;
+    failed_total integer := 0;
+    matched_total integer := 0;
+    reference_value jsonb := 'null'::jsonb;
+BEGIN
+    check_value := __forest_module_schema__.memory_read_query_parts(context,
+        jsonb_build_object('query_id',requested_query,'after_part_index',-1,'limit',1));
+    IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+    SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=requested_bot AND query_id=requested_query;
+    SELECT count(*),count(*) FILTER (WHERE state='READY'),
+        count(*) FILTER (WHERE state='UNKNOWN'),
+        count(*) FILTER (WHERE state IN ('FAILED','SUPPRESSED'))
+    INTO facet_total,ready_total,unknown_total,failed_total
+    FROM __forest_module_schema__.embedding_facets
+    WHERE bot_id=requested_bot AND query_id=requested_query AND purpose='QUERY';
+    SELECT count(*) INTO matched_total FROM __forest_module_schema__.query_match_receipts
+    WHERE bot_id=requested_bot AND query_id=requested_query;
+
+    IF query_row.state='FROZEN' THEN
+        check_value := __forest_module_schema__.memory_read_retrieval_materialization(context,input);
+        IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+        reference_value := check_value#>'{value,evidence_ref}';
+        phase_value := CASE WHEN reference_value='null'::jsonb
+            THEN 'NEED_MATERIALIZATION' ELSE 'READY' END;
+    ELSE
+        SELECT * INTO prepared_row FROM __forest_module_schema__.query_facet_preparations
+        WHERE bot_id=requested_bot AND query_id=requested_query;
+        IF NOT FOUND THEN
+            phase_value := 'NEED_PREPARATION';
+        ELSIF prepared_row.facet_count<>facet_total THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_QUERY_FACET_MISMATCH',
+                    'message','Complete preparation differs from its query facets','status',409));
+        ELSIF failed_total>0 THEN
+            phase_value := 'FAILED';
+        ELSIF unknown_total>0 THEN
+            phase_value := 'BLOCKED_UNKNOWN';
+        ELSIF ready_total<facet_total THEN
+            phase_value := 'WAIT_EMBEDDING';
+        ELSIF EXISTS (
+            SELECT 1 FROM __forest_module_schema__.query_match_preparations
+            WHERE bot_id=requested_bot AND query_id=requested_query AND facet_count=matched_total
+        ) THEN
+            phase_value := 'NEED_FREEZING';
+        ELSE
+            phase_value := 'NEED_MATCHING';
+        END IF;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
+        'protocol','forest.memory-query-progress/1','query_id',requested_query,'phase',phase_value,
+        'facet_count',facet_total,'ready_count',ready_total,'unknown_count',unknown_total,
+        'failed_count',failed_total,'matched_count',matched_total,'evidence_ref',reference_value));
+END;
+$$;
+
 CREATE FUNCTION memory_publish_retrieval_evidence(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE

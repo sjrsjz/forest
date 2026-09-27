@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.28.0"
+version = "1.29.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -41,6 +41,7 @@ requests = [
   "domain.query:memory.read-graph-neighbours",
   "domain.query:memory.read-facet-source",
   "domain.query:memory.read-query-parts",
+  "domain.query:memory.read-query-progress",
   "domain.query:memory.read-query-vectors",
   "domain.query:memory.read-match-preparation",
   "domain.query:memory.read-matched-seeds",
@@ -224,9 +225,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.26.0"
+schema_version = "3.27.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "60eb6c72407d76f9032726ce6ff3cf498ffa4019aa63367670837541ae056bf5"
+baseline_sha256 = "552a504240a90bc6b24be19e49951c3a8a2de11afb14f168431c716a8a96d894"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -835,6 +836,20 @@ contract = "1.0"
 semantics = "idempotent"
 input_schema = "schemas/query-prepare-input.json"
 output_schema = "schemas/evidence-receipt-output.json"
+
+[[components.provides]]
+name = "memory.query.progress"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/query-progress-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-query-progress"
+contract = "1.0"
+function = "memory_read_query_progress"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/query-progress-output.json"
 
 [[components.domain_queries]]
 name = "memory.read-retrieval-dependencies"

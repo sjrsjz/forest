@@ -137,6 +137,22 @@ class MemoryGraph(Plugin):
         )
 
     @service(
+        "memory.query.progress",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/query-prepare-input.json",
+        output_schema="schemas/query-progress-output.json",
+    )
+    async def query_progress(self, payload, ctx):
+        progress = await ctx.queries.call(
+            "memory.read-query-progress", {"query_id": payload["query_id"]}, timeout=30
+        )
+        if progress["phase"] == "READY":
+            # Database publication is not a permanent Payload read permit.
+            await ctx.payloads.read_bytes(progress["evidence_ref"])
+        return progress
+
+    @service(
         "memory.query.prepare",
         semantics="idempotent",
         contract="1.0",
