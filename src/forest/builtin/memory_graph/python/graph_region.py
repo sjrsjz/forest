@@ -1,136 +1,66 @@
-"""Deterministic bounded expansion for archive-backed memory graphs."""
+"""Lazy maximum-product expansion over Memory's bounded neighbour port."""
 
-from __future__ import annotations
-
-import hashlib
+import asyncio
 import heapq
-from dataclasses import dataclass
 
 
-@dataclass(frozen=True, slots=True)
-class RetrievalGraphEdge:
-    edge_id: str
-    source_id: str
-    target_id: str
-    relation: str
-    weight: float
+async def expand(ctx, query_id, seeds, policy):
+    """Read each visited node once; database sampling precedes Worker expansion.
 
-    def __post_init__(self) -> None:
-        if not self.edge_id or not self.source_id or not self.target_id:
-            raise ValueError("graph edge identities cannot be empty")
-        if self.source_id == self.target_id:
-            raise ValueError("graph edge endpoints must differ")
-        if self.relation not in {"SEQUENCE", "ASSOCIATED"}:
-            raise ValueError("unsupported retrieval graph relation")
-        if isinstance(self.weight, bool) or not 0.0 < self.weight <= 1.0:
-            raise ValueError("graph edge weight must be in (0, 1]")
-
-
-@dataclass(frozen=True, slots=True)
-class RetrievalGraphActivation:
-    node_id: str
-    relevance: float
-    parent_id: str | None
-    edge_id: str | None
-
-
-def _sample_rank(*, sampling_seed: str, source_id: str, edge: RetrievalGraphEdge) -> bytes:
-    return hashlib.sha256(
-        "\0".join((sampling_seed, source_id, edge.edge_id, edge.target_id)).encode("utf-8")
-    ).digest()
-
-
-def strongest_path_activations(
-    *,
-    ordered_nodes: tuple[str, ...],
-    edges: tuple[RetrievalGraphEdge, ...],
-    seeds: tuple[str, ...],
-    sampling_seed: str,
-    min_relevance: float = 0.05,
-    max_nodes: int = 32,
-    max_association_edges_per_node: int = 32,
-) -> tuple[RetrievalGraphActivation, ...]:
-    """Return maximum-product activations with bounded association fan-out.
-
-    Every qualified seed starts at 1.0. Sequence edges are never sampled.
-    When an expanded node has more associative neighbours than its configured
-    cap, a query-seeded hash ranking selects the subset. The subset therefore
-    varies across frozen queries while replaying one query exactly.
+    Scores cannot grow along a path because configured weights are in (0, 1].
+    Therefore the maximum-score frontier settles each reachable node once.
+    The read budget bounds work even when current revocations remove nodes.
+    This read-only region still requires final evidence validation and freezing.
     """
-
-    if isinstance(min_relevance, bool) or not 0.0 < min_relevance <= 1.0:
-        raise ValueError("min_relevance must be in (0, 1]")
-    if type(max_nodes) is not int or max_nodes <= 0:
-        raise ValueError("max_nodes must be positive")
-    if (
-        type(max_association_edges_per_node) is not int
-        or max_association_edges_per_node <= 0
-    ):
-        raise ValueError("max_association_edges_per_node must be positive")
-    if not sampling_seed:
-        raise ValueError("sampling_seed cannot be empty")
-
-    positions = {node_id: index for index, node_id in enumerate(ordered_nodes)}
-    adjacency: dict[str, list[RetrievalGraphEdge]] = {}
-    for edge in edges:
-        if edge.source_id in positions and edge.target_id in positions:
-            adjacency.setdefault(edge.source_id, []).append(edge)
-
-    bounded_adjacency: dict[str, tuple[RetrievalGraphEdge, ...]] = {}
-    for source_id, outgoing in adjacency.items():
-        sequence = sorted(
-            (edge for edge in outgoing if edge.relation == "SEQUENCE"),
-            key=lambda edge: (positions[edge.target_id], edge.edge_id),
-        )
-        associations = [edge for edge in outgoing if edge.relation == "ASSOCIATED"]
-        if len(associations) > max_association_edges_per_node:
-            associations.sort(
-                key=lambda edge: (
-                    _sample_rank(
-                        sampling_seed=sampling_seed,
-                        source_id=source_id,
-                        edge=edge,
-                    ),
-                    edge.edge_id,
-                )
-            )
-            associations = associations[:max_association_edges_per_node]
-        else:
-            associations.sort(key=lambda edge: (positions[edge.target_id], edge.edge_id))
-        bounded_adjacency[source_id] = tuple((*sequence, *associations))
-
-    relevance = {
-        node_id: 1.0 for node_id in dict.fromkeys(seeds) if node_id in positions
-    }
-    predecessor: dict[str, tuple[str, str]] = {}
-    queue = [(-score, positions[node_id], node_id) for node_id, score in relevance.items()]
+    budget = policy["max_graph_nodes"]
+    selected = seeds[:budget]
+    seed_scores = {seed["source_unit_id"]: seed["rank_score"] for seed in selected}
+    seed_order = {seed["source_unit_id"]: rank for rank, seed in enumerate(selected)}
+    best = {node_id: 1.0 for node_id in seed_scores}
+    parents = {}
+    queue = [(-1.0, seed_order[node_id], node_id) for node_id in seed_scores]
     heapq.heapify(queue)
-    while queue:
-        negative_score, _, source_id = heapq.heappop(queue)
-        source_score = -negative_score
-        if source_score < relevance.get(source_id, 0.0):
-            continue
-        for edge in bounded_adjacency.get(source_id, ()):
-            propagated = source_score * edge.weight
-            current = relevance.get(edge.target_id, 0.0)
-            if propagated < min_relevance or propagated <= current:
+    visited = set()
+    nodes = []
+    association_sampled = False
+    async with asyncio.timeout(20):
+        while queue and len(visited) < budget:
+            negative_score, _, node_id = heapq.heappop(queue)
+            score = -negative_score
+            if node_id in visited or score < best[node_id]:
                 continue
-            relevance[edge.target_id] = propagated
-            predecessor[edge.target_id] = (source_id, edge.edge_id)
-            heapq.heappush(
-                queue,
-                (-propagated, positions[edge.target_id], edge.target_id),
+            visited.add(node_id)
+            page = await ctx.queries.call(
+                "memory.read-graph-neighbours",
+                {"query_id": query_id, "source_unit_id": node_id,
+                 "association_limit": policy["max_association_edges_per_node"]},
+                timeout=10,
             )
-
-    ranked = sorted(
-        relevance.items(), key=lambda item: (-item[1], positions[item[0]], item[0])
-    )[:max_nodes]
-    return tuple(
-        RetrievalGraphActivation(
-            node_id=node_id,
-            relevance=score,
-            parent_id=predecessor.get(node_id, (None, None))[0],
-            edge_id=predecessor.get(node_id, (None, None))[1],
-        )
-        for node_id, score in ranked
-    )
+            if page["node"] is None:
+                continue
+            parent_id, edge_id = parents.get(node_id, (None, None))
+            nodes.append({
+                **page["node"], "activation": score,
+                "rank_score": seed_scores.get(node_id, 0.0), "is_seed": node_id in seed_scores,
+                "path_parent_source_unit_id": parent_id, "path_edge_id": edge_id,
+            })
+            association_sampled |= page["association_sampled"]
+            for edge in page["edges"]:
+                target_id = edge["target_id"]
+                weight = policy[
+                    "sequence_weight" if edge["relation"] == "SEQUENCE" else "association_weight"
+                ]
+                propagated = score * weight
+                if (target_id in visited or propagated < policy["min_graph_relevance"]
+                        or propagated <= best.get(target_id, 0.0)):
+                    continue
+                best[target_id] = propagated
+                parents[target_id] = (node_id, edge["edge_id"])
+                heapq.heappush(queue, (-propagated, len(seed_order), target_id))
+    return {
+        "nodes": nodes, "read_count": len(visited),
+        "truncated": len(seeds) > budget or any(
+            node_id not in visited and -score == best[node_id] for score, _, node_id in queue
+        ),
+        "association_sampled": association_sampled,
+    }

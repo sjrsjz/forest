@@ -13,6 +13,7 @@ from facet_preparation import (
     query_part_facets,
     query_part_operation_id,
 )
+from graph_region import expand as expand_graph
 from seed_retrieval import retrieve as retrieve_seeds
 from vector_work import delete as delete_vector
 from vector_work import publish as publish_vectors
@@ -212,6 +213,29 @@ class MemoryGraph(Plugin):
     )
     async def query_seeds(self, payload, ctx):
         return await retrieve_seeds(ctx, payload["query_id"], self.profile["retrieval"])
+
+    @service(
+        "memory.query.region",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/query-prepare-input.json",
+        output_schema="schemas/query-region-output.json",
+    )
+    async def query_region(self, payload, ctx):
+        query_id = payload["query_id"]
+        policy = self.profile["retrieval"]
+        seeds = await retrieve_seeds(ctx, query_id, policy)
+        try:
+            region = await expand_graph(ctx, query_id, seeds["seeds"], policy)
+        except TimeoutError as exc:
+            raise ForestError(
+                "MEMORY_GRAPH_DEADLINE", "Graph expansion exceeded its deadline", 504
+            ) from exc
+        return {
+            "protocol": "forest.memory-query-region/1", "query_id": query_id,
+            "space_id": seeds["space_id"], "policy_revision": policy["policy_revision"],
+            **region,
+        }
 
     @job("memory.facets.prepare")
     async def prepare_document_facets(self, task, ctx):

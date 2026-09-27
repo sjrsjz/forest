@@ -135,6 +135,7 @@ CREATE TABLE source_units (
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,source_unit_id),
+    UNIQUE (bot_id,source_unit_id,source_revision),
     UNIQUE (bot_id,capture_operation_id),
     UNIQUE (bot_id,source_id,source_order_seq),
     FOREIGN KEY (bot_id,source_id) REFERENCES memory_sources(bot_id,source_id),
@@ -370,6 +371,7 @@ CREATE TABLE relation_contributions (
     created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,contribution_id),
+    UNIQUE (bot_id,contribution_id,created_xid),
     UNIQUE (bot_id,operation_id),
     UNIQUE (bot_id,relation_id,contribution_id),
     CHECK (ROW(left_kind,left_id) IS DISTINCT FROM ROW(right_kind,right_id))
@@ -385,9 +387,12 @@ CREATE TABLE relation_evidence (
     created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     PRIMARY KEY (bot_id,contribution_id,evidence_index),
     UNIQUE (bot_id,contribution_id,source_unit_id,source_revision,part_id),
-    FOREIGN KEY (bot_id,contribution_id)
-        REFERENCES relation_contributions(bot_id,contribution_id),
-    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id)
+    FOREIGN KEY (bot_id,contribution_id,created_xid)
+        REFERENCES relation_contributions(bot_id,contribution_id,created_xid),
+    FOREIGN KEY (bot_id,source_unit_id,source_revision)
+        REFERENCES source_units(bot_id,source_unit_id,source_revision),
+    FOREIGN KEY (bot_id,source_unit_id,part_id)
+        REFERENCES source_parts(bot_id,source_unit_id,part_id)
 );
 
 CREATE TABLE relation_retractions (
@@ -1248,6 +1253,34 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_graph_unit_visible(
+    requested_bot text, requested_unit text, graph_snapshot pg_snapshot,
+    excluded_query text, current_conversation text, cut_seq bigint
+) RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.source_units u
+        JOIN __forest_module_schema__.memory_sources s USING (bot_id,source_id)
+        WHERE u.bot_id=requested_bot AND u.source_unit_id=requested_unit
+          AND u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE'
+          AND pg_visible_in_snapshot(u.eligible_xid,graph_snapshot)
+          AND EXISTS (
+              SELECT 1 FROM __forest_module_schema__.source_occurrences o
+              WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
+                AND o.eligibility_state='ELIGIBLE'
+          ) AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.memory_query_parts qp
+              WHERE qp.bot_id=u.bot_id AND qp.query_id=excluded_query
+                AND qp.source_unit_id=u.source_unit_id
+          ) AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.source_occurrences o
+              WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
+                AND o.conversation_ref=current_conversation
+                AND (cut_seq IS NULL OR o.ingress_seq IS NULL OR o.ingress_seq>cut_seq
+                     OR o.eligibility_state='REGISTERED')
+          )
+    );
+$$;
+
 CREATE FUNCTION memory_qualify_vector_candidates(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
@@ -1294,25 +1327,131 @@ BEGIN
      AND pg_visible_in_snapshot(f.published_xid,query_row.graph_snapshot)
     JOIN __forest_module_schema__.source_units u
      ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
-     AND u.source_revision=f.source_revision AND u.eligibility_state='ELIGIBLE'
-     AND pg_visible_in_snapshot(u.eligible_xid,query_row.graph_snapshot)
+     AND u.source_revision=f.source_revision
     JOIN __forest_module_schema__.memory_sources s
-      ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
-    WHERE EXISTS (
-        SELECT 1 FROM __forest_module_schema__.source_occurrences o
-        WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id AND o.eligibility_state='ELIGIBLE'
-    ) AND NOT EXISTS (
-        SELECT 1 FROM __forest_module_schema__.memory_query_parts qp
-        WHERE qp.bot_id=u.bot_id AND qp.query_id=requested_query AND qp.source_unit_id=u.source_unit_id
-    ) AND NOT EXISTS (
-        SELECT 1 FROM __forest_module_schema__.source_occurrences o
-        WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
-          AND o.conversation_ref=conversation_value
-          AND (cut_value IS NULL OR o.ingress_seq IS NULL OR o.ingress_seq>cut_value
-               OR o.eligibility_state='REGISTERED')
-    );
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+    WHERE __forest_module_schema__.memory_graph_unit_visible(
+        requested_bot,u.source_unit_id,query_row.graph_snapshot,
+        requested_query,conversation_value,cut_value);
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('candidates',candidates_value));
+END;
+$$;
+
+CREATE FUNCTION memory_read_graph_neighbours(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_query text := input->>'query_id';
+    requested_unit text := input->>'source_unit_id';
+    association_limit integer := (input->>'association_limit')::integer;
+    query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    unit_row __forest_module_schema__.source_units%ROWTYPE;
+    check_value jsonb;
+    conversation_value text;
+    cut_value bigint;
+    node_value jsonb;
+    sequence_edges jsonb;
+    association_edges jsonb;
+    association_sampled boolean;
+BEGIN
+    IF association_limit IS NULL OR association_limit NOT BETWEEN 1 AND 128
+       OR requested_unit IS NULL OR octet_length(requested_unit) NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REQUEST_INVALID',
+                'message','Graph neighbour request exceeds its bounds','status',422));
+    END IF;
+    check_value := __forest_module_schema__.memory_read_query_parts(context,
+        jsonb_build_object('query_id',requested_query,'after_part_index',-1,'limit',1));
+    IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+    SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=requested_bot AND query_id=requested_query;
+    SELECT min(o.conversation_ref),max(o.ingress_seq) INTO conversation_value,cut_value
+    FROM __forest_module_schema__.memory_query_parts qp
+    JOIN __forest_module_schema__.source_occurrences o
+      ON o.bot_id=qp.bot_id AND o.occurrence_id=qp.occurrence_id
+    WHERE qp.bot_id=requested_bot AND qp.query_id=requested_query;
+    IF NOT __forest_module_schema__.memory_graph_unit_visible(
+        requested_bot,requested_unit,query_row.graph_snapshot,
+        requested_query,conversation_value,cut_value) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('node',NULL,'edges','[]'::jsonb,'association_sampled',false));
+    END IF;
+    SELECT * INTO unit_row FROM __forest_module_schema__.source_units
+    WHERE bot_id=requested_bot AND source_unit_id=requested_unit;
+    SELECT jsonb_build_object(
+        'source_unit_id',unit_row.source_unit_id,'source_revision',unit_row.source_revision,
+        'source_id',s.source_id,'trunk_id',s.trunk_id,'source_kind',s.source_kind,
+        'platform',s.platform,'realm_id',s.realm_id,'external_group_id',s.external_group_id,
+        'author_subject_ref',unit_row.author_subject_ref)
+    INTO node_value FROM __forest_module_schema__.memory_sources s
+    WHERE s.bot_id=requested_bot AND s.source_id=unit_row.source_id;
+    -- Two indexed directional seeks. Hidden units are skipped without exposing
+    -- their count; this is adjacency in the authorised archived view.
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'target_id',source_unit_id,'relation','SEQUENCE',
+        'edge_id','sequence:'||encode(sha256(convert_to(jsonb_build_array(
+            unit_row.source_id,requested_unit,source_unit_id)::text,'UTF8')),'hex'),
+        'relation_id',NULL,'contribution_id',NULL) ORDER BY source_order_seq),'[]'::jsonb)
+    INTO sequence_edges FROM (
+        (SELECT u.source_unit_id,u.source_order_seq
+         FROM __forest_module_schema__.source_units u
+         WHERE u.bot_id=requested_bot AND u.source_id=unit_row.source_id
+           AND u.source_order_seq<unit_row.source_order_seq
+           AND __forest_module_schema__.memory_graph_unit_visible(
+               requested_bot,u.source_unit_id,query_row.graph_snapshot,
+               requested_query,conversation_value,cut_value)
+         ORDER BY u.source_order_seq DESC LIMIT 1)
+        UNION ALL
+        (SELECT u.source_unit_id,u.source_order_seq
+         FROM __forest_module_schema__.source_units u
+         WHERE u.bot_id=requested_bot AND u.source_id=unit_row.source_id
+           AND u.source_order_seq>unit_row.source_order_seq
+           AND __forest_module_schema__.memory_graph_unit_visible(
+               requested_bot,u.source_unit_id,query_row.graph_snapshot,
+               requested_query,conversation_value,cut_value)
+         ORDER BY u.source_order_seq LIMIT 1)
+    ) neighbours;
+    WITH outgoing AS (
+        SELECT c.*,c.right_id AS target_id FROM __forest_module_schema__.relation_contributions c
+        WHERE c.bot_id=requested_bot AND c.left_kind='SOURCE_UNIT' AND c.left_id=requested_unit
+          AND c.right_kind='SOURCE_UNIT' AND c.relation_kind='ASSOCIATES_WITH' AND c.active
+        UNION ALL
+        SELECT c.*,c.left_id AS target_id FROM __forest_module_schema__.relation_contributions c
+        WHERE c.bot_id=requested_bot AND c.right_kind='SOURCE_UNIT' AND c.right_id=requested_unit
+          AND c.left_kind='SOURCE_UNIT' AND c.relation_kind='ASSOCIATES_WITH' AND c.active
+    ), sampled AS MATERIALIZED (
+        SELECT c.*,encode(sha256(convert_to(jsonb_build_array(
+            requested_query,requested_unit,c.relation_id,c.contribution_id,c.target_id
+        )::text,'UTF8')),'hex') AS sample_rank
+        FROM outgoing c
+        WHERE pg_visible_in_snapshot(c.created_xid,query_row.graph_snapshot)
+          AND __forest_module_schema__.memory_graph_unit_visible(
+              requested_bot,c.target_id,query_row.graph_snapshot,
+              requested_query,conversation_value,cut_value)
+          AND EXISTS (
+              SELECT 1 FROM __forest_module_schema__.relation_evidence e
+              WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
+          ) AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.relation_evidence e
+              WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
+                AND NOT __forest_module_schema__.memory_graph_unit_visible(
+                    requested_bot,e.source_unit_id,query_row.graph_snapshot,
+                    requested_query,conversation_value,cut_value)
+          )
+        ORDER BY sample_rank,c.contribution_id,c.target_id LIMIT association_limit+1
+    ), ranked AS (
+        SELECT *,row_number() OVER (ORDER BY sample_rank,contribution_id,target_id) AS rank
+        FROM sampled
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'target_id',target_id,'relation','ASSOCIATED','edge_id',contribution_id,
+        'relation_id',relation_id,'contribution_id',contribution_id) ORDER BY rank)
+        FILTER (WHERE rank<=association_limit),'[]'::jsonb),count(*)>association_limit
+    INTO association_edges,association_sampled FROM ranked;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('node',node_value,'edges',sequence_edges||association_edges,
+            'association_sampled',association_sampled));
 END;
 $$;
 

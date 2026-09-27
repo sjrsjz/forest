@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.23.0"
+version = "1.24.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -38,6 +38,7 @@ requests = [
   "service.call:vector.index.delete",
   "service.call:vector.index.search",
   "domain.query:memory.read-exact-sources",
+  "domain.query:memory.read-graph-neighbours",
   "domain.query:memory.read-facet-source",
   "domain.query:memory.read-query-parts",
   "domain.query:memory.read-query-vectors",
@@ -213,9 +214,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.21.0"
+schema_version = "3.22.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "c3427b9e360b94afc12996578a32e9c9eafa9914c54969bd8d3d537423e7363c"
+baseline_sha256 = "69b1c674438e5537e11bb8c76ba7e9be9dc7d21a936bfd2d59b476833f42252e"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -707,3 +708,17 @@ contract = "1.0"
 function = "memory_qualify_vector_candidates"
 input_schema = "schemas/qualify-vector-candidates-input.json"
 output_schema = "schemas/qualify-vector-candidates-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-graph-neighbours"
+contract = "1.0"
+function = "memory_read_graph_neighbours"
+input_schema = "schemas/read-graph-neighbours-input.json"
+output_schema = "schemas/read-graph-neighbours-output.json"
+
+[[components.provides]]
+name = "memory.query.region"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/query-region-output.json"
