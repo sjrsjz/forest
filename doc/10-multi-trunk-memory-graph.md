@@ -242,6 +242,8 @@ LLM 生成联想时，输入源集、提示词/模型配置及端点版本形成
 
 包内入口 `memory.query.begin/1` 接受 query_id、conversation_ref、已接纳的 input_batch_ref 与 context_revision。它通过 manifest UnitOfWork 捕获当前 Payload 删除 epoch，由 Memory participant 在同一事务锁定合格 occurrence/source unit 并登记不可变 query/part 集合；存在尚未完成的来源捕获时拒绝准备，不能悄悄用半份图片输入建立查询。注册的 part 数量上限为 256，超出时明确拒绝，不能以截断冒充完整切口。`memory.read-query-parts` 每页最多 32 个 part，翻页前重验整份固定成员集的来源状态和修订；源失效时拒绝整份查询。正文由包 Worker 按准确 PayloadRef 读取，Host 不参与查询选择。注册本身不产生 facet、不触发 Provider，也不改变 source unit 的归档资格；facet 准备和召回是后续独立步骤。
 
+`memory.query.prepare/1` 仅接受已注册 query_id，按固定成员集生成 facet。每个 part 最多 64 个 facet，一次查询最多 256 个 facet；单张图片最多 8 MiB，一次查询图片累计最多 32 MiB。超限明确拒绝，不能静默丢掉 part 或改做图片描述。facet 身份包含 query_id 和确定性文档 facet 身份，避免同一来源的 QUERY 与 DOCUMENT 或不同查询互相覆盖。每个固定 query_part_index 对应一份持久准备回执，纯空白文本也以零 facet 回执闭合。所有回执提交后，独立完成事务捕获当前删除 epoch、重验完整成员集并登记准备完成事实；只有该事实存在，QUERY 才能被嵌入任务领取。崩溃/热重载后重放相同 part 操作，不能把部分准备冒充完整查询；准备服务本身不调用 Embedding。
+
 ```text
 MemoryQuery
   trusted_bot_id, principal_ref, reply_route

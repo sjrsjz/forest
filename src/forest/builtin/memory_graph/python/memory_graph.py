@@ -6,8 +6,12 @@ from embedding_work import recover as recover_embedding
 from facet_preparation import (
     FACET_BATCH_SIZE,
     MAX_DOCUMENT_FACETS,
+    MAX_QUERY_FACETS,
+    MAX_QUERY_IMAGE_BYTES,
     batch_operation_id,
     document_facets,
+    query_part_facets,
+    query_part_operation_id,
 )
 from vector_work import delete as delete_vector
 from vector_work import publish as publish_vectors
@@ -127,6 +131,75 @@ class MemoryGraph(Plugin):
             },
             operation_id=ctx.operations.stable("query-begin:" + _digest(payload["query_id"])[7:]),
             timeout=20,
+        )
+
+    @service(
+        "memory.query.prepare",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/query-prepare-input.json",
+        output_schema="schemas/query-prepare-output.json",
+    )
+    async def prepare_query(self, payload, ctx):
+        query_id = payload["query_id"]
+        prepared_parts = []
+        facet_count = 0
+        image_bytes = 0
+        after_index = -1
+        for _ in range(8):
+            page = await ctx.queries.call(
+                "memory.read-query-parts",
+                {"query_id": query_id, "after_part_index": after_index, "limit": 32},
+                timeout=10,
+            )
+            space_id = page["space_id"]
+            for part in page["parts"]:
+                text_parts = {}
+                if part["part_kind"] == "TEXT":
+                    raw = await ctx.payloads.read_bytes(part["payload"])
+                    try:
+                        text_parts[part["part_id"]] = raw.decode("utf-8")
+                    except UnicodeDecodeError as exc:
+                        raise ForestError("MEMORY_TEXT_INVALID", "Query text is not UTF-8", 422) from exc
+                try:
+                    facets = query_part_facets(query_id, space_id, part, text_parts)
+                except ValueError as exc:
+                    raise ForestError("MEMORY_QUERY_FACET_LIMIT", str(exc), 422) from exc
+                facet_count += len(facets)
+                if part["part_kind"] == "IMAGE":
+                    image_bytes += part["byte_length"]
+                if facet_count > MAX_QUERY_FACETS or image_bytes > MAX_QUERY_IMAGE_BYTES:
+                    raise ForestError(
+                        "MEMORY_QUERY_FACET_LIMIT", "Query exceeds its facet or image budget", 422
+                    )
+                prepared_parts.append({
+                    "protocol": "forest.memory-query-part-facets/1",
+                    "query_id": query_id, "source_unit_id": part["source_unit_id"],
+                    "source_revision": part["source_revision"], "space_id": space_id,
+                    "batch_index": part["query_part_index"], "part_id": part["part_id"],
+                    "facets": facets,
+                })
+            if not page["has_more"]:
+                break
+            after_index = page["next_part_index"]
+        else:
+            raise ForestError("MEMORY_QUERY_PART_LIMIT", "Query exceeds 256 source parts", 422)
+        for part in prepared_parts:
+            await ctx.uow.call(
+                "memory.prepare-query-part-facets", part,
+                operation_id=query_part_operation_id(query_id, space_id, part["batch_index"]),
+                timeout=20,
+            )
+        return await ctx.uow.call(
+            "memory.complete-query-facets",
+            {
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                "memory": {
+                    "protocol": "forest.memory-query-complete/1", "query_id": query_id,
+                    "facet_count": facet_count, "deletion_epoch_step_id": "payload_epoch",
+                },
+            },
+            operation_id="query-facets-complete:" + _digest(query_id)[7:], timeout=20,
         )
 
     @job("memory.facets.prepare")

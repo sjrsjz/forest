@@ -135,6 +135,8 @@ Embedding 与向量发布主链现在同时支持 `DOCUMENT`/`QUERY`，用途来
 
 `memory.query.begin/1` 现由隔离 Worker 调用 manifest `memory.begin-query` 事务计划，Kernel Payload 先捕获删除 epoch，Memory 依据持久接纳记录登记不可变查询成员集。尚有来源捕获未完成时拒绝准备；已接纳成员被撤销时拒绝整份查询，不静默缩小切口；超过 256 个 part 明确拒绝。只读 `memory.read-query-parts` 每页最多 32 项，翻页前检查整份成员集的源修订、归档/接纳资格和来源状态，返回准确 PayloadRef。接纳记录和待捕获记录均有 InputBatch/revision 索引，查询不用扫描整个 Bot 历史。宿主集成覆盖包服务路由、注册重放、错误上下文拒绝、图文分页及遗忘后的查询失效；注册本身不调用 Embedding，也不提升长期资格。独立的 QUERY facet 准备仍待实现。
 
+查询准备的最终宿主验证还覆盖两个不同调用并发准备同一个 query：part 操作和完成事实只提交一份，两个结果相同；缺少 part 回执时完成事务明确拒绝。纯分块回归、8 项 Memory 包测试和最终宿主图集成通过。完整语义召回仍需接入 ANN 候选重验、种子排序和生产图扩散，不能以查询向量 READY 代替召回验收。
+
 ## 8. 下一切换顺序
 
 1. 补齐遗忘管理的固定目标计划、较大范围选择器与持续 Payload scrub；补齐发布崩溃重放验证。

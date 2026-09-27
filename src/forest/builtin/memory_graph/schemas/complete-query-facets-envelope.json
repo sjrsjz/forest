@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "caller",
+    "input",
+    "prior"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.uow-step/1"
+    },
+    "caller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component_id",
+        "generation_id"
+      ],
+      "properties": {
+        "component_id": {
+          "const": "memory.graph"
+        },
+        "generation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "query_id",
+        "facet_count",
+        "deletion_epoch_step_id"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "forest.memory-query-complete/1"
+        },
+        "query_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "facet_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "deletion_epoch_step_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "prior": {
+      "type": "object"
+    }
+  }
+}

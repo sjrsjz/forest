@@ -1,4 +1,4 @@
-"""Deterministic document facets over archived source parts."""
+"""Deterministic facets over immutable source parts."""
 
 import hashlib
 import json
@@ -7,6 +7,9 @@ TEXT_WINDOW_CHARS = 2048
 TEXT_OVERLAP_CHARS = 128
 MAX_DOCUMENT_FACETS = 4096
 FACET_BATCH_SIZE = 64
+MAX_QUERY_FACETS = 256
+MAX_QUERY_IMAGE_BYTES = 33554432
+MAX_QUERY_SINGLE_IMAGE_BYTES = 8388608
 CHUNKER_VERSION = "unicode-codepoints-2048-128/1"
 
 
@@ -25,7 +28,10 @@ def _facet_id(source_unit_id, source_revision, space_id, part, start, end):
     ])[7:]
 
 
-def document_facets(source_unit_id, source_revision, space_id, parts, text_parts):
+def document_facets(
+    source_unit_id, source_revision, space_id, parts, text_parts,
+    *, max_facets=MAX_DOCUMENT_FACETS,
+):
     """Build stable text spans and one image facet per image part."""
 
     facets = []
@@ -34,7 +40,7 @@ def document_facets(source_unit_id, source_revision, space_id, parts, text_parts
         if part["part_kind"] == "IMAGE":
             byte_length = part["byte_length"]
             if type(byte_length) is not int or not 0 < byte_length <= 33554432:
-                raise ValueError("Archived image length is invalid")
+                raise ValueError("Source image length is invalid")
             facets.append({
                 "facet_id": _facet_id(
                     source_unit_id, source_revision, space_id, part, None, None
@@ -69,13 +75,15 @@ def document_facets(source_unit_id, source_revision, space_id, parts, text_parts
                         "input_byte_length": len(chunk_bytes),
                         "input_payload": reference,
                     })
+                    if len(facets) > max_facets:
+                        raise ValueError("Source exceeds the facet limit")
                 if end == len(content):
                     break
                 start = end - TEXT_OVERLAP_CHARS
         else:
-            raise ValueError("Archived part modality is unsupported")
-        if len(facets) > MAX_DOCUMENT_FACETS:
-            raise ValueError("Archived source exceeds the document facet limit")
+            raise ValueError("Source part modality is unsupported")
+        if len(facets) > max_facets:
+            raise ValueError("Source exceeds the facet limit")
     return facets
 
 
@@ -83,3 +91,20 @@ def batch_operation_id(source_unit_id, source_revision, space_id, batch_index):
     return "facet-batch:" + _digest([
         CHUNKER_VERSION, source_unit_id, source_revision, space_id, batch_index,
     ])[7:]
+
+
+def query_part_facets(query_id, space_id, part, text_parts):
+    facets = document_facets(
+        part["source_unit_id"], part["source_revision"], space_id, [part], text_parts,
+        max_facets=FACET_BATCH_SIZE,
+    )
+    if part["part_kind"] == "IMAGE" and part["byte_length"] > MAX_QUERY_SINGLE_IMAGE_BYTES:
+        raise ValueError("Query image exceeds the embedding batch limit")
+    return [
+        {**facet, "facet_id": "query-facet:" + _digest([query_id, facet["facet_id"]])[7:]}
+        for facet in facets
+    ]
+
+
+def query_part_operation_id(query_id, space_id, part_index):
+    return "query-facet-part:" + _digest([CHUNKER_VERSION, query_id, space_id, part_index])[7:]

@@ -458,10 +458,22 @@ CREATE TABLE facet_preparation_operations (
     target_kind text NOT NULL CHECK (target_kind IN ('SOURCE_UNIT','QUERY')),
     target_id text NOT NULL CHECK (octet_length(target_id) BETWEEN 1 AND 256),
     batch_index integer NOT NULL CHECK (batch_index BETWEEN 0 AND 65535),
-    facet_count integer NOT NULL CHECK (facet_count BETWEEN 1 AND 64),
+    facet_count integer NOT NULL CHECK (
+        facet_count BETWEEN 0 AND 64 AND (target_kind='QUERY' OR facet_count>0)
+    ),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,operation_id),
     UNIQUE (bot_id,target_kind,target_id,batch_index)
+);
+
+CREATE TABLE query_facet_preparations (
+    bot_id text NOT NULL,
+    query_id text NOT NULL,
+    facet_count integer NOT NULL CHECK (facet_count BETWEEN 0 AND 256),
+    accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch>=0),
+    completed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,query_id),
+    FOREIGN KEY (bot_id,query_id) REFERENCES memory_queries(bot_id,query_id)
 );
 
 CREATE TABLE facet_preparation_work (
@@ -1177,7 +1189,9 @@ BEGIN
         WHERE bot_id=requested_bot AND query_id=requested_query AND query_part_index>last_index
     ) INTO has_more;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
-        'value',jsonb_build_object('parts',page_value,'next_part_index',last_index,'has_more',has_more));
+        'value',jsonb_build_object('parts',page_value,'next_part_index',last_index,'has_more',has_more,
+            'space_id',(SELECT space_id FROM __forest_module_schema__.memory_domains
+                WHERE bot_id=requested_bot)));
 END;
 $$;
 
@@ -1189,6 +1203,8 @@ CREATE FUNCTION memory_query_occurrence_matches(
         SELECT 1 FROM __forest_module_schema__.memory_query_parts p
         JOIN __forest_module_schema__.memory_queries q
           ON q.bot_id=p.bot_id AND q.query_id=p.query_id AND q.state='OPEN'
+        JOIN __forest_module_schema__.query_facet_preparations prepared
+          ON prepared.bot_id=q.bot_id AND prepared.query_id=q.query_id
         JOIN __forest_module_schema__.source_occurrences o
           ON o.bot_id=p.bot_id AND o.occurrence_id=p.occurrence_id
          AND o.source_unit_id=p.source_unit_id
@@ -1984,6 +2000,9 @@ CREATE TRIGGER memory_query_parts_immutable BEFORE UPDATE OR DELETE ON memory_qu
 CREATE TRIGGER facet_preparation_operations_immutable
     BEFORE UPDATE OR DELETE ON facet_preparation_operations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER query_facet_preparations_immutable
+    BEFORE UPDATE OR DELETE ON query_facet_preparations
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER retrieval_bundles_immutable BEFORE UPDATE OR DELETE ON retrieval_bundles
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER retrieval_items_immutable BEFORE UPDATE OR DELETE ON retrieval_items
@@ -2326,7 +2345,7 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
 END;
 $$;
 
-CREATE FUNCTION memory_prepare_document_facets(context jsonb, envelope jsonb)
+CREATE FUNCTION memory_prepare_facets(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
     body jsonb := envelope->'input';
@@ -2335,6 +2354,11 @@ DECLARE
     requested_operation text := context->>'operation_id';
     requested_digest text := context->>'participant_input_digest';
     source_id_value text := body->>'source_unit_id';
+    purpose_value text := CASE body->>'protocol'
+        WHEN 'forest.memory-document-facets/1' THEN 'DOCUMENT'
+        WHEN 'forest.memory-query-part-facets/1' THEN 'QUERY' END;
+    target_kind_value text := CASE purpose_value WHEN 'QUERY' THEN 'QUERY' ELSE 'SOURCE_UNIT' END;
+    target_id_value text := CASE purpose_value WHEN 'QUERY' THEN body->>'query_id' ELSE source_id_value END;
     batch_index_value integer;
     source_row __forest_module_schema__.source_units%ROWTYPE;
     part_row __forest_module_schema__.source_parts%ROWTYPE;
@@ -2351,17 +2375,18 @@ DECLARE
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
-       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-document-facets/1'
+       OR purpose_value IS NULL
        OR requested_operation IS NULL OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
        OR source_id_value IS NULL OR octet_length(source_id_value) NOT BETWEEN 1 AND 256
        OR body->>'source_revision' IS NULL
        OR body->>'source_revision' !~ '^[1-9][0-9]*$'
        OR body->>'batch_index' IS NULL OR body->>'batch_index' !~ '^[0-9]+$'
        OR jsonb_typeof(facets) IS DISTINCT FROM 'array'
-       OR jsonb_array_length(facets) NOT BETWEEN 1 AND 64 THEN
+       OR jsonb_array_length(facets) NOT BETWEEN 0 AND 64
+       OR (purpose_value='DOCUMENT' AND jsonb_array_length(facets)=0) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_FACET_INPUT_INVALID',
-                'message','Document facet input is invalid','status',422));
+                'message','Facet input is invalid','status',422));
     END IF;
     batch_index_value := (body->>'batch_index')::integer;
     facet_count := jsonb_array_length(facets);
@@ -2373,17 +2398,17 @@ BEGIN
                 'message','Document facet batch has duplicate or invalid identities','status',422));
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
-        'forest.memory.graph/facet-batch/'||requested_bot||'/'||source_id_value||'/'||batch_index_value,0));
+        'forest.memory.graph/facet-batch/'||requested_bot||'/'||target_kind_value||'/'||target_id_value||'/'||batch_index_value,0));
     SELECT * INTO operation_row FROM __forest_module_schema__.facet_preparation_operations
-    WHERE bot_id=requested_bot AND target_kind='SOURCE_UNIT'
-      AND target_id=source_id_value AND batch_index=batch_index_value;
+    WHERE bot_id=requested_bot AND target_kind=target_kind_value
+      AND target_id=target_id_value AND batch_index=batch_index_value;
     IF operation_row IS NOT NULL THEN
         IF operation_row.operation_id IS DISTINCT FROM requested_operation
            OR operation_row.input_digest IS DISTINCT FROM requested_digest
            OR operation_row.facet_count IS DISTINCT FROM facet_count THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','MEMORY_FACET_BATCH_CONFLICT',
-                    'message','Document facet batch was prepared differently','status',409));
+                    'message','Facet batch was prepared differently','status',409));
         END IF;
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object('protocol','forest.memory-facets-prepared/1',
@@ -2397,11 +2422,29 @@ BEGIN
       ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
     WHERE u.bot_id=requested_bot AND u.source_unit_id=source_id_value FOR SHARE OF u;
     IF domain_row IS NULL OR domain_row.space_id IS DISTINCT FROM body->>'space_id'
-       OR source_row IS NULL OR source_row.eligibility_state<>'ELIGIBLE'
+       OR source_row IS NULL
+       OR (purpose_value='DOCUMENT' AND source_row.eligibility_state<>'ELIGIBLE')
+       OR (purpose_value='QUERY' AND source_row.eligibility_state NOT IN ('REGISTERED','ELIGIBLE'))
        OR source_row.source_revision IS DISTINCT FROM (body->>'source_revision')::bigint THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_FACET_SOURCE_INELIGIBLE',
-                'message','Document source or embedding space is unavailable','status',409));
+                'message','Facet source or embedding space is unavailable','status',409));
+    END IF;
+    IF purpose_value='QUERY' AND NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_query_parts qp
+        JOIN __forest_module_schema__.memory_queries q USING(bot_id,query_id)
+        JOIN __forest_module_schema__.source_occurrences o
+          ON o.bot_id=qp.bot_id AND o.occurrence_id=qp.occurrence_id
+         AND o.source_unit_id=qp.source_unit_id
+        WHERE qp.bot_id=requested_bot AND qp.query_id=target_id_value
+          AND qp.query_part_index=batch_index_value AND qp.source_unit_id=source_id_value
+          AND qp.source_revision=source_row.source_revision AND qp.part_id=body->>'part_id'
+          AND q.state='OPEN' AND o.input_batch_ref=q.input_batch_ref
+          AND o.context_revision=q.context_revision AND o.eligibility_state IN ('ADMITTED','ELIGIBLE')
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_PART_MISMATCH',
+                'message','Query part differs from its immutable membership','status',409));
     END IF;
     FOR facet IN SELECT value FROM jsonb_array_elements(facets) LOOP
         reference := facet->'input_payload';
@@ -2413,6 +2456,7 @@ BEGIN
         WHERE bot_id=requested_bot AND source_unit_id=source_id_value
           AND part_id=facet->>'part_id' FOR SHARE;
         IF part_row IS NULL OR octet_length(facet->>'facet_id') NOT BETWEEN 1 AND 256
+           OR (purpose_value='QUERY' AND part_row.part_id IS DISTINCT FROM body->>'part_id')
            OR modality_value IS DISTINCT FROM part_row.part_kind
            OR reference->>'payload_id' IS DISTINCT FROM part_row.payload_id
            OR reference->>'digest' IS DISTINCT FROM part_row.payload_digest
@@ -2429,14 +2473,14 @@ BEGIN
                 OR byte_count IS DISTINCT FROM part_row.byte_length)) THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','MEMORY_FACET_PART_MISMATCH',
-                    'message','Facet does not match the archived source part','status',409));
+                    'message','Facet does not match the source part','status',409));
         END IF;
         INSERT INTO __forest_module_schema__.embedding_facets(
-            bot_id,facet_id,purpose,source_unit_id,source_revision,part_id,modality,
+            bot_id,facet_id,purpose,query_id,source_unit_id,source_revision,part_id,modality,
             selector_start_char,selector_end_char,input_payload_id,input_payload_digest,
             facet_content_digest,input_media_type,input_byte_length,space_id,
             accepted_deletion_epoch)
-        VALUES(requested_bot,facet->>'facet_id','DOCUMENT',source_id_value,
+        VALUES(requested_bot,facet->>'facet_id',purpose_value,body->>'query_id',source_id_value,
             source_row.source_revision,part_row.part_id,modality_value,
             start_value,end_value,part_row.payload_id,part_row.payload_digest,
             facet->>'facet_content_digest',part_row.media_type,byte_count,
@@ -2444,7 +2488,8 @@ BEGIN
         ON CONFLICT (bot_id,facet_id) DO NOTHING;
         SELECT * INTO existing_row FROM __forest_module_schema__.embedding_facets
         WHERE bot_id=requested_bot AND facet_id=facet->>'facet_id';
-        IF existing_row.purpose IS DISTINCT FROM 'DOCUMENT'
+        IF existing_row.purpose IS DISTINCT FROM purpose_value
+           OR existing_row.query_id IS DISTINCT FROM body->>'query_id'
            OR existing_row.source_unit_id IS DISTINCT FROM source_id_value
            OR existing_row.source_revision IS DISTINCT FROM source_row.source_revision
            OR existing_row.part_id IS DISTINCT FROM part_row.part_id
@@ -2466,8 +2511,8 @@ BEGIN
     END LOOP;
     INSERT INTO __forest_module_schema__.facet_preparation_operations(
         bot_id,operation_id,input_digest,target_kind,target_id,batch_index,facet_count)
-    VALUES(requested_bot,requested_operation,requested_digest,'SOURCE_UNIT',
-        source_id_value,batch_index_value,facet_count);
+    VALUES(requested_bot,requested_operation,requested_digest,target_kind_value,
+        target_id_value,batch_index_value,facet_count);
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('protocol','forest.memory-facets-prepared/1',
             'source_unit_id',source_id_value,'batch_index',batch_index_value,
@@ -2476,7 +2521,66 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
     OR not_null_violation OR check_violation THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','MEMORY_FACET_INPUT_INVALID',
-            'message','Document facet input is invalid','status',422));
+            'message','Facet input is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_complete_query_facets(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_query text := body->>'query_id';
+    epoch_value jsonb := envelope->'prior'->(body->>'deletion_epoch_step_id');
+    part_count integer;
+    receipt_count integer;
+    facet_count_value integer;
+    page_check jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-query-complete/1'
+       OR epoch_value->>'protocol' IS DISTINCT FROM 'forest.payload-epoch/1'
+       OR epoch_value->>'deletion_epoch' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INPUT_INVALID',
+                'message','Query completion requires a current Payload epoch','status',422));
+    END IF;
+    PERFORM query_id FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=requested_bot AND query_id=requested_query FOR UPDATE;
+    PERFORM u.source_unit_id FROM __forest_module_schema__.memory_query_parts qp
+    JOIN __forest_module_schema__.source_units u USING(bot_id,source_unit_id)
+    JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
+    JOIN __forest_module_schema__.source_occurrences o
+      ON o.bot_id=qp.bot_id AND o.occurrence_id=qp.occurrence_id
+    WHERE qp.bot_id=requested_bot AND qp.query_id=requested_query
+    ORDER BY u.source_unit_id,o.occurrence_id FOR SHARE OF u,s,o;
+    page_check := __forest_module_schema__.memory_read_query_parts(context,
+        jsonb_build_object('query_id',requested_query,'after_part_index',-1,'limit',1));
+    IF page_check->>'ok' IS DISTINCT FROM 'true' THEN RETURN page_check; END IF;
+    SELECT count(qp.query_part_index),count(op.operation_id),COALESCE(sum(op.facet_count),0)
+    INTO part_count,receipt_count,facet_count_value
+    FROM __forest_module_schema__.memory_query_parts qp
+    LEFT JOIN __forest_module_schema__.facet_preparation_operations op
+      ON op.bot_id=qp.bot_id AND op.target_kind='QUERY' AND op.target_id=qp.query_id
+     AND op.batch_index=qp.query_part_index
+    WHERE qp.bot_id=requested_bot AND qp.query_id=requested_query;
+    IF part_count=0 OR part_count<>receipt_count OR facet_count_value>256
+       OR facet_count_value IS DISTINCT FROM (body->>'facet_count')::integer
+       OR facet_count_value<>(SELECT count(*) FROM __forest_module_schema__.embedding_facets
+            WHERE bot_id=requested_bot AND query_id=requested_query AND purpose='QUERY') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_PREPARATION_INCOMPLETE',
+                'message','Query part preparation receipts are incomplete','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.query_facet_preparations(
+        bot_id,query_id,facet_count,accepted_deletion_epoch)
+    VALUES(requested_bot,requested_query,facet_count_value,(epoch_value->>'deletion_epoch')::bigint)
+    ON CONFLICT (bot_id,query_id) DO NOTHING;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-query-facets/1',
+            'query_id',requested_query,'facet_count',facet_count_value,'part_count',part_count,
+            'status','PREPARED'));
 END;
 $$;
 

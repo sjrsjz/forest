@@ -5,7 +5,8 @@
   "required": [
     "parts",
     "next_part_index",
-    "has_more"
+    "has_more",
+    "space_id"
   ],
   "properties": {
     "parts": {
@@ -25,6 +26,10 @@
     },
     "has_more": {
       "type": "boolean"
+    },
+    "space_id": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
     }
   },
   "$defs": {

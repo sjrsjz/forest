@@ -899,27 +899,59 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             )
             assert second_page["has_more"] is False
             assert [part["part_kind"] for part in second_page["parts"]] == ["TEXT"]
-            async with host.store.pool.connection() as conn, conn.transaction():
-                # Facet preparation is still the next public boundary; registration
-                # above uses the actual isolated Memory service and manifest UoW.
-                await conn.execute(
-                    sql.SQL(
-                        "INSERT INTO {}.embedding_facets(bot_id,facet_id,purpose,query_id,"
-                        "source_unit_id,source_revision,part_id,modality,selector_start_char,"
-                        "selector_end_char,input_payload_id,input_payload_digest,facet_content_digest,"
-                        "input_media_type,input_byte_length,space_id,accepted_deletion_epoch) "
-                        "SELECT p.bot_id,'query-facet/host/'||p.part_index,'QUERY','query/host-embedding',"
-                        "p.source_unit_id,u.source_revision,p.part_id,p.part_kind,"
-                        "CASE p.part_kind WHEN 'TEXT' THEN 0 END,"
-                        "CASE p.part_kind WHEN 'TEXT' THEN p.byte_length END,"
-                        "p.payload_id,p.payload_digest,p.payload_digest,p.media_type,p.byte_length,"
-                        "d.space_id,u.accepted_deletion_epoch FROM {}.source_parts p "
-                        "JOIN {}.source_units u USING(bot_id,source_unit_id) "
-                        "JOIN {}.memory_domains d USING(bot_id) "
-                        "WHERE p.bot_id=%s AND p.source_unit_id=%s"
-                    ).format(*(sql.Identifier(memory_namespace) for _ in range(4))),
-                    (settings.bot_id, "onebot-unit:" + event_hash),
+            with pytest.raises(ForestError) as caught:
+                async with host.store.pool.connection() as conn, conn.transaction():
+                    await participant.invoke_in(
+                        conn, "memory.complete-query-facets-record",
+                        {
+                            "protocol": "forest.uow-step/1",
+                            "caller": {
+                                "component_id": "memory.graph",
+                                "generation_id": memory_identity.generation_id,
+                            },
+                            "input": {
+                                "protocol": "forest.memory-query-complete/1",
+                                "query_id": query["query_id"], "facet_count": 0,
+                                "deletion_epoch_step_id": "payload_epoch",
+                            },
+                            "prior": {"payload_epoch": {
+                                "protocol": "forest.payload-epoch/1",
+                                "deletion_epoch": await host._kernel.payload.epoch(),
+                            }},
+                        },
+                        operation_id="query-complete-before-parts",
+                        causal_root_kind="memory.query", causal_root_id=query["query_id"],
+                        parent_call_id="call/query-complete-before-parts", timeout_seconds=10,
+                    )
+            assert caught.value.code == "MEMORY_QUERY_PREPARATION_INCOMPLETE"
+            prepare_route = FrozenServiceRoute(
+                service_id="memory.query.prepare", version=1,
+                caller_component_id="memory.graph", provider_component_id="memory.graph",
+                provider_generation_id=memory_identity.generation_id,
+                graph_id=memory_identity.graph_id,
+                graph_revision=memory_identity.graph_revision,
+                admission_lane="DATA", owned_work=False,
+            )
+
+            async def prepare_query(operation):
+                return await memory_instance.runtime_service_handlers()[
+                    ("memory.query.prepare", 1)
+                ].invoke_routed(
+                    prepare_route,
+                    RuntimeServiceInvocation(operation, 30, "memory.query", settings.bot_id),
+                    (), {"query_id": query["query_id"]},
                 )
+
+            prepared_query, concurrent_query = await asyncio.gather(
+                prepare_query("query-prepare-host-embedding/a"),
+                prepare_query("query-prepare-host-embedding/b"),
+            )
+            assert concurrent_query == prepared_query
+            assert prepared_query == {
+                "protocol": "forest.memory-query-facets/1",
+                "query_id": query["query_id"], "part_count": 3,
+                "facet_count": 3, "status": "PREPARED",
+            }
             async with asyncio.timeout(40):
                 while True:
                     async with host.store.pool.connection() as conn:

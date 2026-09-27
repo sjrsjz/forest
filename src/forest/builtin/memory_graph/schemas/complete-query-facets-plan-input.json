@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "payload_epoch",
+    "memory"
+  ],
+  "properties": {
+    "payload_epoch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "forest.payload-epoch-capture/1"
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "query_id",
+        "facet_count",
+        "deletion_epoch_step_id"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "forest.memory-query-complete/1"
+        },
+        "query_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "facet_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256
+        },
+        "deletion_epoch_step_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    }
+  }
+}
