@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "query_id",
+    "facet_count",
+    "match_count"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.memory-query-matched/1"
+    },
+    "query_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "facet_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 256
+    },
+    "match_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65536
+    }
+  }
+}

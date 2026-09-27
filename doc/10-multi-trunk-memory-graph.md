@@ -244,9 +244,11 @@ LLM 生成联想时，输入源集、提示词/模型配置及端点版本形成
 
 `memory.query.prepare/1` 仅接受已注册 query_id，按固定成员集生成 facet。每个 part 最多 64 个 facet，一次查询最多 256 个 facet；单张图片最多 8 MiB，一次查询图片累计最多 32 MiB。超限明确拒绝，不能静默丢掉 part 或改做图片描述。facet 身份包含 query_id 和确定性文档 facet 身份，避免同一来源的 QUERY 与 DOCUMENT 或不同查询互相覆盖。每个固定 query_part_index 对应一份持久准备回执，纯空白文本也以零 facet 回执闭合。所有回执提交后，独立完成事务捕获当前删除 epoch、重验完整成员集并登记准备完成事实；只有该事实存在，QUERY 才能被嵌入任务领取。崩溃/热重载后重放相同 part 操作，不能把部分准备冒充完整查询；准备服务本身不调用 Embedding。
 
-种子入口 `memory.query.seeds/1` 为只读阶段：准备完成且全部 QUERY facet 为 READY 后才搜索，每次索引调用最多 256 个候选，再以每批 32 个引用回 PostgreSQL 重验。文档必须为相同 space 的 READY DOCUMENT facet，原源修订一致，来源 ACTIVE，源单元和至少一个 occurrence 已归档；只接受在 query 登记的事务快照中可见的归档与发布事实。排除 query 自身源单元，以及当前会话切口之后或尚未接纳的观察，防止通过其他观察的归档资格读到队列尾部。每个查询 facet 对同一源单元只贡献其首个合格命中的 `1/(60+rank)`，合计 RRF 仅排序种子；种子激活均为 1.0，群聊、主干和作者由事实库返回。该阶段不物化正文、不生成最终 EvidenceBundle，不替代后续图邻接读取、最终删除/授权重验与结果冻结。
+`memory.query.match/1` 是独立的幂等准备阶段。全部 QUERY facet 为 READY 后，它先通过 manifest UnitOfWork 固定该查询的完整检索策略和 facet 数量；再逐 facet 调用独立向量索引，每次最多 256 个候选，由 Memory participant 按固定策略和来源可见性重验，在一次事务中写入不可变 facet 回执和合法匹配行。每个 facet 对同一源单元只保存最小候选 rank 的命中，包括其准确 document facet、源修订和分数；零命中也提交回执。并发准备同一 facet 以首个已提交回执为准，后来到达的 ANN 响应不覆盖它。每次重试先读取完成的 facet 引用，仅补尚缺回执；部分匹配不可成为完整种子输入，空白查询的零 facet 准备直接闭合。检索策略在匹配准备时固定，后续 Generation 的配置变更不改变已准备查询。
 
-查询的正向事实范围使用登记时的 `pg_snapshot` 固定，不能用 `created_at` 或 `published_at` 判断事务是否已经提交。源单元首次归档和 facet 首次发布记录其顶层 `xid8`；关系贡献及证据登记时也记录顶层事务 ID。种子候选和后续图邻接只允许使用 `pg_visible_in_snapshot` 判定可见的归档、发布及关系事实。这样，较早开始但较晚提交的事务不会混入先前查询，也不需要在 Bot 全局建立写锁来分配图版本。删除、来源退役和关系撤销仍按当前状态过滤；固定正向事实范围不会恢复已撤销内容。`xid8` 是显式保存的领域元数据，不能依赖可能被 vacuum 冻结的行 `xmin`。快照和事务 ID 仅由包内 SQL 产生，Worker 不提供这些值。`graph_snapshot_ref` 是指向该不可变查询记录的稳定引用，不是全局图版本计数，也不向模型暴露 PostgreSQL 快照内容。这里固定的是领域事实可见范围，ANN 候选集合及最终 EvidenceBundle 仍须由后续结果事务冻结。[PostgreSQL 事务快照定义](https://www.postgresql.org/docs/16/functions-info.html#FUNCTIONS-PG-SNAPSHOT)
+`memory.query.seeds/1` 是只读阶段，只从完整持久匹配集合计算 `sum(1/(60+rank))` 并按固定 `seed_limit` 排序，不调用 ANN，也不登记回执。原索引引用必须解析为相同 space 的合法 READY DOCUMENT facet；匹配登记时按 query 的事务快照检查发布与归档资格，排除自身源单元和当前会话切口之后或尚未接纳的观察。读取匹配种子时仍检查当前来源/删除状态，失效源立即消失。种子激活统一为 1.0，匹配模态从准确 QUERY facet 推导，群、主干和作者由事实库返回。该阶段不物化正文、不生成最终 EvidenceBundle，不替代最终删除/授权重验与结果冻结。
+
+查询的正向事实范围使用登记时的 `pg_snapshot` 固定，不能用 `created_at` 或 `published_at` 判断事务是否已经提交。源单元首次归档和 facet 首次发布记录其顶层 `xid8`；关系贡献及证据登记时也记录顶层事务 ID。种子候选和后续图邻接只允许使用 `pg_visible_in_snapshot` 判定可见的归档、发布及关系事实。这样，较早开始但较晚提交的事务不会混入先前查询，也不需要在 Bot 全局建立写锁来分配图版本。删除、来源退役和关系撤销仍按当前状态过滤；固定正向事实范围不会恢复已撤销内容。`xid8` 是显式保存的领域元数据，不能依赖可能被 vacuum 冻结的行 `xmin`。快照和事务 ID 仅由包内 SQL 产生，Worker 不提供这些值。`graph_snapshot_ref` 是指向该不可变查询记录的稳定引用，不是全局图版本计数，也不向模型暴露 PostgreSQL 快照内容。这里固定的是领域事实可见范围；合法 ANN 匹配已经由独立 facet 回执固定，最终 EvidenceBundle 仍须由后续结果事务冻结。[PostgreSQL 事务快照定义](https://www.postgresql.org/docs/16/functions-info.html#FUNCTIONS-PG-SNAPSHOT)
 
 ```text
 MemoryQuery
@@ -264,7 +266,7 @@ MemoryQuery
 
 先确定可信 Bot 和当前来源，再检索全局授权候选、按预算扩展图、从事实库物化、过滤不可见/已删除/输入切口之外的来源，最后组装来源明确的证据。扩展在读取每个节点时就执行节点总量、最低激活值和单节点联想扇出限制，整个召回还受调用期限约束；不能遍历完整图后才裁结果。
 
-包内只读入口 `memory.query.region/1` 已连接向量种子与按需区域扩散。每次经 `memory.read-graph-neighbours` 读取一个节点，数据库按主干位置分别寻找前后最近的可见归档单元；联想边按查询派生的顺序在数据库限量采样后才返回 Worker。关系两端和全部必要证据采用与种子相同的归档可见性、当前删除状态及输入切口规则，任何一个必要证据失效就排除该贡献。时序邻接是当前获权归档视图中的相邻关系，不能描述为原始消息紧接发生。
+包内只读入口 `memory.query.region/1` 从完整匹配回执取得种子及该查询的固定策略，再按需扩散，不会重新请求 ANN。每次经 `memory.read-graph-neighbours` 读取一个节点，数据库按主干位置分别寻找前后最近的可见归档单元；联想边按查询派生的顺序在数据库限量采样后才返回 Worker。关系两端和全部必要证据采用与种子相同的归档可见性、当前删除状态及输入切口规则，任何一个必要证据失效就排除该贡献。时序邻接是当前获权归档视图中的相邻关系，不能描述为原始消息紧接发生。
 
 关系贡献及其必要证据必须在同一顶层事务中创建：`relation_evidence` 通过包含 `created_xid` 的复合外键引用贡献，不能在后续事务追加证据、改变已经发布贡献的必要来源集合。源修订和具体 part 也由复合外键保证存在及匹配。读取只检查当前资格与快照可见性，不再为不存在的 part 或错误修订补偿；联想写入事务须原子提交贡献及完整证据集合。
 
@@ -281,6 +283,8 @@ MemoryQuery
 默认值为：`seed_limit=4`、`candidate_limit_per_facet=64`、`min_similarity=0.35`、`min_graph_relevance=0.05`、`max_graph_nodes=32`、`max_association_edges_per_node=32`、`sequence_weight=0.55`、`association_weight=0.90`。这些值由 `memory.graph` 的模块配置冻结，可随新 Generation 发布，但一个已冻结检索包不受后来配置变更影响。
 
 成功回复后的联想学习只使用该轮**实际投影给模型的直接种子**。图扩散带出的节点、因字符预算未投影的节点和失败/取消 Run 均不得产生学习边。FinalReply UnitOfWork 先写不可变 `association_journal`；若触发消息仍在活动 Context，日志保持 `PENDING_ARCHIVE`，待该触发源也通过裁剪归档成为 `ELIGIBLE` 后，才创建一次稳定的无向 `ASSOCIATES_WITH` 贡献。重复召回不累加边权，删除任一端点会抑制尚未提升的日志。
+
+单来源遗忘的 prepare participant 只读取不可变作者 anchor，不提前锁定源单元；Kernel Payload 删除屏障先取得，Memory apply 随后按稳定顺序锁定并抑制来源。匹配事务同样先捕获 Payload 屏障，再锁查询准备和插入匹配事实，避免外键检查与“先锁源、后取删除屏障”的遗忘事务形成反向等待。提交时的资格复核由实际写入 participant 完成，prepare 不承担状态更新。
 
 模型从 EvidenceBundle 得到稳定 `source_unit_id` 后，可调用 Memory 模块贡献的 `memory_recall_exact` 工具读取一至八个准确归档单元。精确召回不调用 ANN，也不接受 `REGISTERED/ADMITTED` 活跃消息；结果仍逐项携带来源群、主干、作者和图文 parts，并受当前删除 epoch 与工具授权链约束。
 

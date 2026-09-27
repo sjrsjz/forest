@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.24.0"
+version = "1.25.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -42,6 +42,8 @@ requests = [
   "domain.query:memory.read-facet-source",
   "domain.query:memory.read-query-parts",
   "domain.query:memory.read-query-vectors",
+  "domain.query:memory.read-match-preparation",
+  "domain.query:memory.read-matched-seeds",
   "domain.query:memory.qualify-vector-candidates",
   "domain.query:memory.read-embedding-candidates",
   "domain.query:memory.list-trunks",
@@ -54,6 +56,8 @@ requests = [
   "uow.execute:memory.begin-query",
   "uow.execute:memory.prepare-query-part-facets",
   "uow.execute:memory.complete-query-facets",
+  "uow.execute:memory.begin-query-matching",
+  "uow.execute:memory.record-query-matches",
   "uow.execute:memory.reserve-embedding-budget",
   "uow.execute:memory.prepare-embedding-effect",
   "uow.execute:memory.handoff-embedding-effect",
@@ -214,9 +218,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.22.0"
+schema_version = "3.23.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "69b1c674438e5537e11bb8c76ba7e9be9dc7d21a936bfd2d59b476833f42252e"
+baseline_sha256 = "a64735f120471477fff7b91d42fd0f9d1b581f816028b6437471a864d61e7fce"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -722,3 +726,60 @@ contract = "1.0"
 semantics = "read"
 input_schema = "schemas/query-prepare-input.json"
 output_schema = "schemas/query-region-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.begin-query-matching-record"
+contract = "1.0"
+function = "memory_begin_query_matching"
+input_schema = "schemas/begin-query-matching-envelope.json"
+output_schema = "schemas/match-preparation-output.json"
+
+[[components.unit_of_work_plans]]
+name = "memory.begin-query-matching"
+contract = "1.0"
+input_schema = "schemas/begin-query-matching-plan-input.json"
+output_schema = "schemas/match-preparation-output.json"
+timeout_s = 20
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.begin-query-matching-record", input_path = "/memory" }
+]
+
+[[components.unit_of_work_participants]]
+name = "memory.record-query-matches-record"
+contract = "1.0"
+function = "memory_record_query_matches"
+input_schema = "schemas/record-query-matches-envelope.json"
+output_schema = "schemas/match-preparation-output.json"
+
+[[components.unit_of_work_plans]]
+name = "memory.record-query-matches"
+contract = "1.0"
+input_schema = "schemas/record-query-matches-plan-input.json"
+output_schema = "schemas/match-preparation-output.json"
+timeout_s = 20
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.record-query-matches-record", input_path = "/memory" }
+]
+
+[[components.domain_queries]]
+name = "memory.read-match-preparation"
+contract = "1.0"
+function = "memory_read_match_preparation"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/match-preparation-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-matched-seeds"
+contract = "1.0"
+function = "memory_read_matched_seeds"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/matched-seeds-output.json"
+
+[[components.provides]]
+name = "memory.query.match"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/query-matched-output.json"

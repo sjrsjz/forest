@@ -14,7 +14,7 @@ from facet_preparation import (
     query_part_operation_id,
 )
 from graph_region import expand as expand_graph
-from seed_retrieval import retrieve as retrieve_seeds
+from query_matching import prepare as prepare_matching
 from vector_work import delete as delete_vector
 from vector_work import publish as publish_vectors
 
@@ -212,7 +212,20 @@ class MemoryGraph(Plugin):
         output_schema="schemas/query-seeds-output.json",
     )
     async def query_seeds(self, payload, ctx):
-        return await retrieve_seeds(ctx, payload["query_id"], self.profile["retrieval"])
+        prepared = await ctx.queries.call(
+            "memory.read-matched-seeds", {"query_id": payload["query_id"]}, timeout=10
+        )
+        return prepared["result"]
+
+    @service(
+        "memory.query.match",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/query-prepare-input.json",
+        output_schema="schemas/query-matched-output.json",
+    )
+    async def match_query(self, payload, ctx):
+        return await prepare_matching(ctx, payload["query_id"], self.profile["retrieval"])
 
     @service(
         "memory.query.region",
@@ -223,8 +236,9 @@ class MemoryGraph(Plugin):
     )
     async def query_region(self, payload, ctx):
         query_id = payload["query_id"]
-        policy = self.profile["retrieval"]
-        seeds = await retrieve_seeds(ctx, query_id, policy)
+        prepared = await ctx.queries.call("memory.read-matched-seeds", {"query_id": query_id}, timeout=10)
+        policy = prepared["policy"]
+        seeds = prepared["result"]
         try:
             region = await expand_graph(ctx, query_id, seeds["seeds"], policy)
         except TimeoutError as exc:

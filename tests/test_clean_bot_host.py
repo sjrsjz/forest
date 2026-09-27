@@ -87,6 +87,8 @@ class FakeMediaClient(FakeModelClient):
 
 
 class FakeMilvusClient:
+    search_calls = 0
+    fail_search_at = None
     collections = {}
     fail_next_delete = False
     delete_failures = 0
@@ -144,6 +146,10 @@ class FakeMilvusClient:
         ]
 
     async def search(self, *, collection_name, data, limit, output_fields, **_values):
+        type(self).search_calls += 1
+        if type(self).search_calls == type(self).fail_search_at:
+            type(self).fail_search_at = None
+            raise RuntimeError("Injected ANN search failure")
         query = data[0]
         rows = self.collections[collection_name]["rows"]
         candidates = []
@@ -1138,6 +1144,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 )
 
             # This query predates document publication and cannot recall itself.
+            original_matches = await query_stage(query["query_id"], "match/original", stage="match")
+            assert original_matches["match_count"] == 0
             assert (await query_stage(query["query_id"], "seeds/original"))["seeds"] == []
             await clients[-1].handler(json.dumps({
                 "self_id": int(settings.onebot_self_id), "post_type": "message",
@@ -1207,6 +1215,34 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     await asyncio.sleep(0.1)
             index_rows = FakeMilvusClient.collections[index_collection]["rows"]
             index_rows["stale-ref/no-fact"] = dict(index_rows[facets[0]["facet_id"]])
+            FakeMilvusClient.fail_search_at = FakeMilvusClient.search_calls + 2
+            with pytest.raises(ForestError):
+                await query_stage(recall_query["query_id"], "match/recall-interrupted", stage="match")
+            with pytest.raises(ForestError) as incomplete_matches:
+                await query_stage(recall_query["query_id"], "seeds/recall-incomplete")
+            assert incomplete_matches.value.code == "MEMORY_QUERY_MATCHES_PENDING"
+            async with host.store.pool.connection() as conn:
+                partial_matching = await (
+                    await conn.execute(
+                        sql.SQL("SELECT count(*) AS n FROM {}.query_match_receipts "
+                                "WHERE bot_id=%s AND query_id=%s").format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id, recall_query["query_id"]),
+                    )
+                ).fetchone()
+            assert partial_matching["n"] == 1
+            matching = await asyncio.gather(
+                query_stage(recall_query["query_id"], "match/recall-one", stage="match"),
+                query_stage(recall_query["query_id"], "match/recall-two", stage="match"),
+            )
+            assert matching[0] == matching[1] == {
+                "protocol": "forest.memory-query-matched/1", "query_id": recall_query["query_id"],
+                "facet_count": 3, "match_count": 3,
+            }
+            search_count = FakeMilvusClient.search_calls
+            assert await query_stage(
+                recall_query["query_id"], "match/recall-replay", stage="match"
+            ) == matching[0]
+            assert FakeMilvusClient.search_calls == search_count
             seeds = await query_stage(recall_query["query_id"], "seeds/recall-before-forget")
             assert len(seeds["seeds"]) == 1
             assert seeds["seeds"][0]["source_unit_id"] == "onebot-unit:" + event_hash
@@ -1225,6 +1261,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert seed_node["external_group_id"] == "933179609"
             assert seed_node["author_subject_ref"] == "qq:20001"
             assert seed_node["activation"] == 1.0
+            assert FakeMilvusClient.search_calls == search_count
 
             # The public UoW revokes Payload, Memory eligibility, graph evidence,
             # and vector refs together before the asynchronous Milvus deletion.
