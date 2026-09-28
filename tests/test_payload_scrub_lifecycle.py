@@ -2,6 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -12,6 +13,7 @@ from forest.core_runtime import PreparedPayloadAuthorityModule
 async def test_payload_scrubber_drains_backlog_and_stops_at_generation_quiesce():
     class Payloads:
         def __init__(self):
+            self.store = SimpleNamespace()
             self.calls = 0
             self.drained = asyncio.Event()
 
@@ -24,6 +26,7 @@ async def test_payload_scrubber_drains_backlog_and_stops_at_generation_quiesce()
 
     payloads = Payloads()
     module = PreparedPayloadAuthorityModule("kernel.payload", payloads, None, None, (), None)
+    module.management_assets.reap_expired = AsyncMock(return_value={"reaped": 0})
     await module.bind_generation(SimpleNamespace(
         component_id="kernel.payload", generation_id="generation/test",
     ))
@@ -42,12 +45,15 @@ async def test_payload_scrubber_drains_backlog_and_stops_at_generation_quiesce()
 @pytest.mark.asyncio
 async def test_payload_scrubber_failure_surfaces_during_quiesce():
     class BrokenPayloads:
+        store = SimpleNamespace()
+
         async def scrub(self, *, limit):
             raise RuntimeError("database unavailable")
 
     module = PreparedPayloadAuthorityModule(
         "kernel.payload", BrokenPayloads(), None, None, (), None,
     )
+    module.management_assets.reap_expired = AsyncMock(return_value={"reaped": 0})
     await module.bind_generation(SimpleNamespace(
         component_id="kernel.payload", generation_id="generation/broken",
     ))

@@ -260,7 +260,7 @@ async def test_effect_payload_materializer_seals_kernel_effect_ownership():
 
 @pytest.mark.asyncio
 async def test_domain_authority_verifies_every_payload_in_declared_array():
-    payloads = SimpleNamespace(verify_in=AsyncMock())
+    payloads = SimpleNamespace(store=SimpleNamespace(), verify_in=AsyncMock())
     authority = PostgresPackageDomainAuthority(
         SimpleNamespace(),
         SimpleNamespace(),
@@ -300,6 +300,7 @@ async def test_domain_authority_verifies_every_payload_in_declared_array():
                 for index, reference in zip((3, 4), references, strict=True)
             ]
         },
+        scope=SimpleNamespace(generation_id="generation/delivery"),
     )
     assert [call.kwargs["payload_id"] for call in payloads.verify_in.await_args_list] == [
         "payload/3",
@@ -309,7 +310,7 @@ async def test_domain_authority_verifies_every_payload_in_declared_array():
 
 @pytest.mark.asyncio
 async def test_domain_authority_resolves_payload_owner_from_the_port_input():
-    payloads = SimpleNamespace(verify_in=AsyncMock())
+    payloads = SimpleNamespace(store=SimpleNamespace(), verify_in=AsyncMock())
     authority = PostgresPackageDomainAuthority(
         SimpleNamespace(),
         SimpleNamespace(),
@@ -348,6 +349,7 @@ async def test_domain_authority_resolves_payload_owner_from_the_port_input():
                 "content": reference,
             }
         },
+        scope=SimpleNamespace(generation_id="generation/conversation"),
     )
     payloads.verify_in.assert_awaited_once_with(
         conn,
