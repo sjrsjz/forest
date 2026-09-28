@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
@@ -319,6 +320,57 @@ class PreparedEffectAuthorityModule(PreparedAuthorityModule):
 
 class PreparedPayloadAuthorityModule(PreparedAuthorityModule):
     """Publish generic Payload write, deletion-fence and revocation participants."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._scrub_task: asyncio.Task | None = None
+
+    def activate_generation(self) -> None:
+        if self._scrub_task is not None:
+            raise ForestError(
+                "PAYLOAD_GENERATION_ALREADY_ACTIVATED",
+                "Payload scrubber already belongs to this Generation",
+                409,
+            )
+        super().activate_generation()
+        self._scrub_task = asyncio.create_task(
+            self._scrub_revoked(),
+            name=f"kernel-payload-scrub:{self.generation_identity.generation_id}",
+        )
+
+    async def _scrub_revoked(self) -> None:
+        while True:
+            result = await self.service.scrub(limit=100)
+            await asyncio.sleep(0.1 if result["scrubbed"] else 10.0)
+
+    def owned_tasks(self) -> tuple[asyncio.Task, ...]:
+        return (self._scrub_task,) if self._scrub_task is not None else ()
+
+    async def _stop_scrubber(self) -> None:
+        if self._scrub_task is not None:
+            task = self._scrub_task
+            was_done = task.done()
+            task.cancel()
+            outcome, = await asyncio.gather(task, return_exceptions=True)
+            self._scrub_task = None
+            if isinstance(outcome, BaseException) and not isinstance(
+                outcome, asyncio.CancelledError
+            ):
+                raise outcome
+            if was_done and not isinstance(outcome, asyncio.CancelledError):
+                raise ForestError(
+                    "PAYLOAD_SCRUBBER_STOPPED",
+                    "Payload scrubber stopped before its Generation quiesced",
+                    503,
+                )
+
+    async def quiesce(self) -> None:
+        await super().quiesce()
+        await self._stop_scrubber()
+
+    async def close(self) -> None:
+        await self._stop_scrubber()
+        await super().close()
 
     def unit_of_work_participant(self):
         return KernelPayloadUnitOfWorkParticipant(self, self.service)

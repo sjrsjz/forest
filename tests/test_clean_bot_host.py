@@ -1577,6 +1577,23 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 with pytest.raises(ForestError) as revoked:
                     await host._kernel.payload.read_bytes(ref["payload_id"])
                 assert revoked.value.code == "PAYLOAD_REVOKED"
+            async with asyncio.timeout(20):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        scrubbed = await (await conn.execute(
+                            sql.SQL(
+                                "SELECT h.state, b.payload_id IS NULL AS body_removed "
+                                "FROM {}.payload_headers h LEFT JOIN {}.payload_bodies b "
+                                "USING (bot_id,payload_id) WHERE h.bot_id=%s AND h.payload_id=%s"
+                            ).format(
+                                sql.Identifier(host._kernel.payload.namespace),
+                                sql.Identifier(host._kernel.payload.namespace),
+                            ),
+                            (settings.bot_id, materialized[0]["evidence_ref"]["payload_id"]),
+                        )).fetchone()
+                    if scrubbed == {"state": "SCRUBBED", "body_removed": True}:
+                        break
+                    await asyncio.sleep(0.1)
             index_rows.pop("stale-ref/no-fact")
             with pytest.raises(ForestError) as caught:
                 await memory_instance.invoke_management_query(
