@@ -1,6 +1,6 @@
 # Forest 设计文档
 
-状态：目标设计与激进重构进行中。更新日期：2026-09-18。[00 架构总契约](00-architecture-contract.md)是当前实现的唯一入口和最高权威；01–16 只展开目标领域契约，禁止夹带“已落地”式完成度叙述。[实现状态与验证记录](implementation-status.md)是代码完成度、测试证据和暂时缺口的唯一权威。旧 P0–P5 纵向切片已经从工作树删除，避免旧 Store、组合根、固定后台和开发期迁移设计继续充当实现输入；历史只通过 Git 追查。项目根 [README](../README.md) 只提供当前架构入口和开发检查；当前干净单 Bot 的实际部署方式见[生产启动运行手册](operations-clean-production-launch.md)。
+状态：目标设计与激进重构进行中。更新日期：2026-09-29。[00 架构总契约](00-architecture-contract.md)是当前实现的唯一入口和最高权威；01–17 只展开目标领域契约，禁止夹带“已落地”式完成度叙述。[实现状态与验证记录](implementation-status.md)是代码完成度、测试证据和暂时缺口的唯一权威。旧 P0–P5 纵向切片已经从工作树删除，避免旧 Store、组合根、固定后台和开发期迁移设计继续充当实现输入；历史只通过 Git 追查。项目根 [README](../README.md) 只提供当前架构入口和开发检查；当前干净单 Bot 的实际部署方式见[生产启动运行手册](operations-clean-production-launch.md)。
 
 Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人框架。采用稳定微内核与原生 Python 插件，运行实例按代际管理；一个 Bot 拥有一个全局记忆域，不按群建立记忆库，群聊之间可以异步并行。Wasm 为可选扩展，不是开发或运行前提。
 
@@ -11,7 +11,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 | 优先级 | 文档 | 约束范围 |
 |---|---|---|
 | 0 | [00 架构总契约](00-architecture-contract.md) | 当前对象模型、微内核边界、权威执行链、模块控制台、激进重构规则和实现门禁；直接否决冲突设计 |
-| 1 | [13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净数据库基线](14-clean-schema-and-payload-provenance.md)、[15 单 Agent 生产执行](15-single-agent-production-execution.md)、[16 持久语义召回](16-semantic-recall-execution.md) | 00 的运行时、控制面、模块数据所有权、schema bundle 与生产 Agent 执行边界详细化 |
+| 1 | [13 微内核运行时与控制面重构](13-microkernel-control-plane-redesign.md)、[14 干净数据库基线](14-clean-schema-and-payload-provenance.md)、[15 单 Agent 生产执行](15-single-agent-production-execution.md)、[16 持久语义召回](16-semantic-recall-execution.md)、[17 组件 Worker Host](17-component-worker-host.md) | 00 的运行时、控制面、模块数据所有权、schema bundle 与生产 Agent 执行边界详细化 |
 | 2 | [01 架构设计](01-architecture.md) | 系统边界、模块职责、部署与总体验收不变量 |
 | 3 | [02 生命周期](02-kernel-lifecycle.md)、[03 通信与调度](03-communication-scheduling.md)、[05 存储与鉴权](05-storage-security-operations.md)、[06 并发合流](06-concurrent-convergence.md) | 通用协议、所有权、事务、授权与收敛规则 |
 | 4 | [08 群聊上下文](08-group-context-interaction.md)、[09 群聊 Shell](09-group-shell-command-system.md)、[10 多主干记忆图](10-multi-trunk-memory-graph.md)、[11 多模态记忆](11-multimodal-memory-and-model-projection.md)、[12 WebUI](12-webui-administration.md) | 交互、管理和数据域专项契约；不得扩大微内核职责 |
@@ -26,7 +26,7 @@ Forest 是面向多 Bot 实体、长期记忆和自主 Agent 的重型机器人�
 
 编写任何模块前，必须先从 00、13、14 确定 `owner / namespace / Repository contract / provides / requires / UnitOfWork participants / Generation fence / management contribution / deletion behavior`；涉及会话 Agent 执行时还必须读取 15。缺少任一项就先补设计，不能从旧实现反推边界。
 
-当前文档树只保留三类材料：00–16 的目标契约、`research-*` 的只读调研证据，以及 `implementation-status.md` 的完成度记录。旧 P0–P5 切片不再保留副本；其中仍有价值的算法必须先重新写入对应 01–16 文档，才能进入实现。撤销的产品子 Agent、开发期 payload 迁移、旧库升级、固定业务后台和组合根不得从 Git 历史恢复。
+当前文档树只保留三类材料：00–17 的目标契约、`research-*` 的只读调研证据，以及 `implementation-status.md` 的完成度记录。旧 P0–P5 切片不再保留副本；其中仍有价值的算法必须先重新写入对应 01–17 文档，才能进入实现。撤销的产品子 Agent、开发期 payload 迁移、旧库升级、固定业务后台和组合根不得从 Git 历史恢复。
 
 ## 需求对应
 
