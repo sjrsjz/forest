@@ -132,6 +132,8 @@ class FakeMilvusClient:
     search_calls = 0
     fail_search_at = None
     collections = {}
+    fail_after_upsert_once = False
+    upsert_ack_losses = 0
     fail_next_delete = False
     delete_failures = 0
 
@@ -182,6 +184,10 @@ class FakeMilvusClient:
         rows = self.collections[collection_name]["rows"]
         for row in data:
             rows[row["ref_id"]] = deepcopy(row)
+        if type(self).fail_after_upsert_once:
+            type(self).fail_after_upsert_once = False
+            type(self).upsert_ack_losses += 1
+            raise OSError("injected vector upsert acknowledgement loss")
         return {"upsert_count": len(data)}
 
     async def get(self, *, collection_name, ids, output_fields, **_values):
@@ -1042,6 +1048,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     )
                 ).fetchone()
             assert unit_state["eligibility_state"] == "REGISTERED"
+            prior_ack_losses = FakeMilvusClient.upsert_ack_losses
+            FakeMilvusClient.fail_after_upsert_once = True
             async with host.store.pool.connection() as conn, conn.transaction():
                 archive = await participant.invoke_in(
                     conn,
@@ -1171,6 +1179,16 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             ]
             assert all(facet["result_payload_id"] for facet in facets)
             assert all(facet["index_ref_id"] == facet["facet_id"] for facet in facets)
+            assert FakeMilvusClient.upsert_ack_losses == prior_ack_losses + 1
+            async with host.store.pool.connection() as conn:
+                replayed_publish = await (await conn.execute(
+                    sql.SQL(
+                        "SELECT max(attempt_count) AS attempts "
+                        "FROM {}.vector_publish_batches WHERE bot_id=%s"
+                    ).format(sql.Identifier(memory_namespace)),
+                    (settings.bot_id,),
+                )).fetchone()
+            assert replayed_publish["attempts"] >= 2
             index_collection = host.registry.get("vector.index")._effect_drivers[
                 "vector.index.upsert"
             ].collection_name
@@ -1966,6 +1984,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             await restarted.close()
         assert clients[-1].closed is True
     finally:
+        FakeMilvusClient.fail_after_upsert_once = False
         assert name.startswith("forest_host_") and len(name) == 44
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()
