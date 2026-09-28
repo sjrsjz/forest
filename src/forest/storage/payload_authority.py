@@ -675,28 +675,33 @@ class KernelPayloadRepository:
                 new_epoch,
             ),
         )
-        for target in targets:
+        if targets:
             await conn.execute(
                 sql.SQL(
                     "INSERT INTO {}(bot_id,operation_id,source_component_id,source_kind,"
-                    "source_id,source_revision,part_id) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+                    "source_id,source_revision,part_id) "
+                    "SELECT %s,%s,t.source_component_id,t.source_kind,t.source_id,"
+                    "t.source_revision,t.part_id FROM unnest(%s::text[],%s::text[],"
+                    "%s::text[],%s::bigint[],%s::text[]) AS t("
+                    "source_component_id,source_kind,source_id,source_revision,part_id)"
                 ).format(self._table("forget_source_targets")),
                 (
                     self.store.bot_id,
                     operation_id,
-                    target.source_component_id,
-                    target.source_kind,
-                    target.source_id,
-                    target.source_revision,
-                    target.part_id,
+                    [target.source_component_id for target in targets],
+                    [target.source_kind for target in targets],
+                    [target.source_id for target in targets],
+                    [target.source_revision for target in targets],
+                    [target.part_id for target in targets],
                 ),
             )
-        for payload_id in selected_ids:
+        if selected_ids:
             await conn.execute(
                 sql.SQL(
-                    "INSERT INTO {}(bot_id,operation_id,payload_id) VALUES (%s,%s,%s)"
+                    "INSERT INTO {}(bot_id,operation_id,payload_id) "
+                    "SELECT %s,%s,t.payload_id FROM unnest(%s::text[]) AS t(payload_id)"
                 ).format(self._table("forget_payload_targets")),
-                (self.store.bot_id, operation_id, payload_id),
+                (self.store.bot_id, operation_id, list(selected_ids)),
             )
         await conn.execute(
             sql.SQL("UPDATE {} SET deletion_epoch=%s WHERE bot_id=%s").format(
@@ -753,28 +758,31 @@ class KernelPayloadRepository:
             if existing_payloads != set(requested_payloads):
                 raise ForestError("PAYLOAD_NOT_FOUND", "Forget target does not exist", 404)
         selected = set(requested_payloads)
-        for target in targets:
+        if targets:
             rows = await (
                 await conn.execute(
                     sql.SQL(
-                        "SELECT DISTINCT h.payload_id FROM {} h JOIN {} i "
-                        "ON i.bot_id=h.bot_id AND i.manifest_id=h.source_manifest_id "
-                        "WHERE h.bot_id=%s AND h.state='ACTIVE' "
-                        "AND i.source_component_id=%s AND i.source_kind=%s "
-                        "AND i.source_id=%s AND i.source_revision=%s "
-                        "AND (%s='*' OR i.part_id='*' OR i.part_id=%s)"
+                        "SELECT DISTINCT h.payload_id FROM unnest(%s::text[],%s::text[],"
+                        "%s::text[],%s::bigint[],%s::text[]) AS t("
+                        "source_component_id,source_kind,source_id,source_revision,part_id) "
+                        "JOIN {} i ON i.bot_id=%s AND "
+                        "i.source_component_id=t.source_component_id AND "
+                        "i.source_kind=t.source_kind AND i.source_id=t.source_id AND "
+                        "i.source_revision=t.source_revision AND "
+                        "(t.part_id='*' OR i.part_id='*' OR i.part_id=t.part_id) "
+                        "JOIN {} h ON h.bot_id=i.bot_id AND "
+                        "h.source_manifest_id=i.manifest_id WHERE h.state='ACTIVE'"
                     ).format(
-                        self._table("payload_headers"),
                         self._table("source_manifest_items"),
+                        self._table("payload_headers"),
                     ),
                     (
+                        [target.source_component_id for target in targets],
+                        [target.source_kind for target in targets],
+                        [target.source_id for target in targets],
+                        [target.source_revision for target in targets],
+                        [target.part_id for target in targets],
                         self.store.bot_id,
-                        target.source_component_id,
-                        target.source_kind,
-                        target.source_id,
-                        target.source_revision,
-                        target.part_id,
-                        target.part_id,
                     ),
                 )
             ).fetchall()

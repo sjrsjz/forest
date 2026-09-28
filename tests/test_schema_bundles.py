@@ -3362,6 +3362,56 @@ async def test_kernel_payload_repository_closes_sources_and_forget_descendants(
 
 
 @pytest.mark.postgres
+async def test_kernel_payload_forget_selects_multiple_sources_as_one_closure(clean_authority):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.payload", "forest.kernel.payload",
+        "forest.kernel-payload.repository/1", "storage/official/kernel_payload.sql",
+    )
+    await installer.install(
+        storage.spec, storage.baseline, storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    repository = KernelPayloadRepository(store, namespace=storage.spec.namespace)
+    roots = []
+    targets = []
+    for index in range(3):
+        source = PayloadSource("conversation.scheduler", "group.message", f"message/{index}", 1)
+        roots.append(await repository.put_bytes(
+            owner_component_id="conversation.scheduler", owner_kind="context.input",
+            owner_id=f"input/{index}", media_type="text/plain",
+            content=f"source {index}".encode(), sources=(source,),
+            expected_deletion_epoch=0,
+        ))
+        if index < 2:
+            targets.append(SourceTarget(
+                source.source_component_id, source.source_kind,
+                source.source_id, source.source_revision,
+            ))
+    derived = await repository.put_bytes(
+        owner_component_id="memory.graph", owner_kind="retrieval.evidence",
+        owner_id="evidence/shared", media_type="application/json",
+        content=b'{"evidence":true}',
+        parents=(roots[0].payload_id, roots[1].payload_id),
+        expected_deletion_epoch=0,
+    )
+    async with store.pool.connection() as conn, conn.transaction():
+        preview = await repository.preview_forget_in(conn, source_targets=targets)
+        receipt = await repository.forget_in(
+            conn, operation_id="forget/two-sources", source_targets=targets,
+            expected_deletion_epoch=preview["deletion_epoch"],
+            expected_selection_digest=preview["selection_digest"],
+        )
+        selected = await repository.forget_selected_payload_ids_in(
+            conn, "forget/two-sources"
+        )
+    assert receipt["selected_count"] == 3
+    assert selected == sorted([roots[0].payload_id, roots[1].payload_id, derived.payload_id])
+    assert roots[2].payload_id not in selected
+
+
+@pytest.mark.postgres
 async def test_kernel_payload_admission_and_forget_converge_in_both_lock_orders(
     clean_authority,
 ):
