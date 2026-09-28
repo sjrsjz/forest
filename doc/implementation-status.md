@@ -276,3 +276,5 @@ Memory 包的 PostgreSQL 用例还覆盖了另一个崩溃边界：批次发布�
 一次本地合成规模探针在受限 PostgreSQL 容器中插入 5 万条无 facet 来源：普通第一页、无 facet 第一页和无匹配的完整覆盖筛选分别耗时约 0.168、0.154、0.105 秒。它只检查该数据分布和查询成本，不能代替数月真实消息、混合图文 facet 与并发写入的长期压力验收。
 
 长时在线观测脚本已按当前候选基线修正：检查 20 个模块、实际 `embedding_batch_attempts` 与预算预留的 deadline，并移除旧版 OneBot Binding/Client 表查询，因为当前模块不持久化连接状态。用现有在线 Bot 库做一次只读采样时，20 个 bundle 虽在，但缺少候选基线的 `embedding_batch_attempts`；探针明确返回 `BOT_SCHEMA_INCOMPATIBLE`，因此该在线库不能用作当前候选版本的长时验收。在线 Supervisor 和 Bot 未重启或写入，仍需在隔离的当前基线 Bot 库上跑完整探针与真实连接验收。
+
+当前工作树重新构建候选测试镜像后，在独立无持久卷 PostgreSQL 容器中执行完整 Bot 宿主的文本、图片、跨群并发及成功回复四个场景，结果 `4 passed`（288.03 秒）。同一候选镜像与独立 PostgreSQL 再接入现有真实 Milvus，向量 ref 的写后失联重试、查询、删除围栏场景 `1 passed`（4.68 秒）；该测试自行删除临时 collection，测试 PostgreSQL 容器已移除。宿主四场景仍使用假 Embedding、假 Milvus、假 OneBot；Milvus 场景是索引包单独验收，不能合并宣称真实 Embedding＋Milvus 的完整宿主图文召回已通过。
