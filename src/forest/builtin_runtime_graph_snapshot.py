@@ -30,8 +30,10 @@ def runtime_graph_snapshot_service(context):
                     "package_id": item["package_id"],
                     "package_version": item["package_version"],
                     "package_digest": item["package_digest"],
-                    "data_admission": item["data_admission"],
-                    "control_admission": item["control_admission"],
+                    "data_admission": item["data_admission"] and status["data_admission"],
+                    "control_admission": (
+                        item["control_admission"] and status["control_admission"]
+                    ),
                 }
                 for item in status["members"]
             ],
