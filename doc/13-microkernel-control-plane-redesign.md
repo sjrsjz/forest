@@ -258,6 +258,8 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 宿主先通过认证 API 读取并核对当前 Generation 的工件摘要，再让 iframe 导航到同一条带摘要的认证资源路由。该响应单独设置 `sandbox allow-scripts` 与只允许自包含脚本、样式和本地图片 Blob 的 CSP；控制台主文档保持禁止内联脚本的 CSP，并只允许加载同源 frame。iframe 元素也不含 `allow-same-origin`，因此模块脚本仍没有 Cookie、LocalStorage、父页面 DOM、网络和导航权限。不能把自包含 HTML 改装成由控制台创建的 Blob 文档：Blob 会继承控制台 CSP，使包内脚本失效。首版 UI 必须是单个自包含 HTML；后续多资源 bundle 仍须维持独立资源策略与无同源权限，不能给模块源站权限。切换作用域、模块或 Generation 时，宿主关闭旧 MessageChannel 并撤销尚未完成的 UI 挂载。
 
+部署控制台是唯一面向浏览器的管理入口。Bot 的管理网关只接受部署会话签发并绑定 Bot scope、组件 Generation、操作与输入摘要的 Web authority ticket；单 Bot 进程不再另起持有独立静态令牌的管理 HTTP 服务。单 Bot CLI 仍可用于运行诊断，但不声明第二套 Web 会话、CSP 或模块管理 API。
+
 通信使用一次性的 `MessageChannel`，双方先交换协议版本和 nonce。宿主只发送：
 
 - component/package/generation 标识；

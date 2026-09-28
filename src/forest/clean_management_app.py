@@ -4,13 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import hmac
-from importlib.resources import files
 from typing import Any
 
-from fastapi import FastAPI, Header, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict
 
 from forest.clean_management_contract import (
@@ -42,21 +37,14 @@ class ConfigurationApplyInput(BaseModel):
 
 class CleanManagementGateway:
     def __init__(
-        self, host, access_token: str, *, ticket_authority=None, scope_id: str | None = None
+        self, host, *, ticket_authority, scope_id: str | None = None
     ) -> None:
-        if not isinstance(access_token, str) or not 16 <= len(access_token) <= 4096:
-            raise ValueError("Management access token must contain at least 16 characters")
+        if ticket_authority is None:
+            raise ValueError("Management Web authority ticket is required")
         self.host = host
         self.ticket_authority = ticket_authority
         self.scope_id = scope_id or host.settings.bot_id
-        self._token_digest = hashlib.sha256(access_token.encode()).digest()
         self._apply_lock = asyncio.Lock()
-
-    def authorize(self, supplied: str | None) -> None:
-        if supplied is None or not hmac.compare_digest(
-            hashlib.sha256(supplied.encode()).digest(), self._token_digest
-        ):
-            raise ForestError("MANAGEMENT_AUTHENTICATION_REQUIRED", "Management token is invalid", 401)
 
     def contract(self, component_id: str) -> CleanModuleConfigurationContract:
         registry = self.registry()
@@ -129,10 +117,6 @@ class CleanManagementGateway:
         )
 
     def _asset_authority(self):
-        if self.ticket_authority is None:
-            raise ForestError(
-                "WEB_AUTHORITY_TICKET_REQUIRED", "Asset uploads require a Web session", 403
-            )
         return ManagementAssetAuthority(self.host._kernel.payload)
 
     async def _asset_write(
@@ -255,8 +239,6 @@ class CleanManagementGateway:
         required_role: str,
         plan_digest: str | None = None,
     ) -> None:
-        if self.ticket_authority is None:
-            return
         if ticket is None or operation_id is None:
             raise ForestError(
                 "WEB_AUTHORITY_TICKET_REQUIRED", "Web authority ticket is required", 403
@@ -322,12 +304,6 @@ class CleanManagementGateway:
         input_digest: str,
         plan_digest: str | None,
     ) -> dict:
-        if self.ticket_authority is None:
-            raise ForestError(
-                "WEB_AUTHORITY_TRANSACTION_REQUIRED",
-                "Web authority transaction guard is unavailable",
-                503,
-            )
         await self.ticket_authority.verify(
             ticket,
             target_scope_kind="bot",
@@ -478,9 +454,7 @@ class CleanManagementGateway:
             expected_desired_revision=body.expected_desired_revision,
             value=body.value,
             authorization=authorization,
-            authorization_guard=(
-                self._authorize_mutation_in if self.ticket_authority is not None else None
-            ),
+            authorization_guard=self._authorize_mutation_in,
         )
 
     async def apply_configuration(
@@ -511,11 +485,7 @@ class CleanManagementGateway:
                 plan_id=body.plan_id,
                 expected_desired_revision=body.expected_desired_revision,
                 authorization=authorization,
-                authorization_guard=(
-                    self._authorize_mutation_in
-                    if self.ticket_authority is not None
-                    else None
-                ),
+                authorization_guard=self._authorize_mutation_in,
             )
             effective = await contract.configuration.effective()
             replaced = effective.revision != saved["revision"]
@@ -592,9 +562,7 @@ class CleanManagementGateway:
                 operation_id=operation_id,
                 payload=body,
                 authorization=authorization,
-                authorization_guard=(
-                    self._authorize_mutation_in if self.ticket_authority is not None else None
-                ),
+                authorization_guard=self._authorize_mutation_in,
             )
             if not isinstance(result, CleanManagementActionResult):
                 raise ForestError(
@@ -613,120 +581,3 @@ class CleanManagementGateway:
                 "graph_id": graph.graph_id,
                 "graph_revision": graph.graph_revision,
             }
-
-
-def create_clean_management_app(host, *, access_token: str) -> FastAPI:
-    gateway = CleanManagementGateway(host, access_token)
-    app = FastAPI(title="Forest Runtime Console", docs_url=None, redoc_url=None)
-    static = files("forest").joinpath("clean_management_static")
-    app.mount("/static", StaticFiles(directory=str(static)), name="static")
-
-    @app.middleware("http")
-    async def security_headers(request: Request, call_next):
-        response = await call_next(request)
-        response.headers["x-content-type-options"] = "nosniff"
-        response.headers["x-frame-options"] = "DENY"
-        response.headers["referrer-policy"] = "no-referrer"
-        response.headers["content-security-policy"] = (
-            "default-src 'none'; script-src 'self'; style-src 'self'; "
-            "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
-            "frame-src blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-        )
-        if request.url.path.startswith("/management/"):
-            response.headers["cache-control"] = "no-store"
-        return response
-
-    @app.exception_handler(ForestError)
-    async def forest_error(_request: Request, exc: ForestError):
-        return JSONResponse(
-            {"code": exc.code, "message": exc.message, "details": exc.details},
-            status_code=exc.status,
-        )
-
-    def authenticated(token: str | None) -> None:
-        gateway.authorize(token)
-
-    @app.get("/", include_in_schema=False)
-    async def index():
-        return FileResponse(str(static.joinpath("index.html")))
-
-    @app.get("/management/v1/runtime")
-    async def runtime(x_forest_management_token: str | None = Header(default=None)):
-        authenticated(x_forest_management_token)
-        return await gateway.runtime()
-
-    @app.get("/management/v1/modules/{component_id}/configuration")
-    async def read_configuration(
-        component_id: str,
-        x_forest_management_token: str | None = Header(default=None),
-    ):
-        authenticated(x_forest_management_token)
-        return await gateway.contract(component_id).read()
-
-    @app.get(
-        "/management/v1/modules/{component_id}/management-ui/{artifact_sha256}"
-    )
-    async def read_management_ui(
-        component_id: str,
-        artifact_sha256: str,
-        x_forest_management_token: str | None = Header(default=None),
-    ):
-        authenticated(x_forest_management_token)
-        content = await gateway.read_management_ui(component_id, artifact_sha256)
-        return Response(content, media_type="text/html; charset=utf-8")
-
-    @app.post("/management/v1/modules/{component_id}/configuration/plans")
-    async def plan_configuration(
-        component_id: str,
-        body: ConfigurationPlanInput,
-        x_forest_management_token: str | None = Header(default=None),
-        idempotency_key: str | None = Header(default=None),
-    ):
-        authenticated(x_forest_management_token)
-        return await gateway.plan_configuration(
-            component_id,
-            body=body,
-            idempotency_key=idempotency_key,
-        )
-
-    @app.post("/management/v1/modules/{component_id}/configuration/apply")
-    async def apply_configuration(
-        component_id: str,
-        body: ConfigurationApplyInput,
-        x_forest_management_token: str | None = Header(default=None),
-        idempotency_key: str | None = Header(default=None),
-    ):
-        authenticated(x_forest_management_token)
-        return await gateway.apply_configuration(
-            component_id,
-            body=body,
-            idempotency_key=idempotency_key,
-        )
-
-    @app.post("/management/v1/modules/{component_id}/queries/{query_id}")
-    async def module_query(
-        component_id: str,
-        query_id: str,
-        body: dict,
-        x_forest_management_token: str | None = Header(default=None),
-    ):
-        authenticated(x_forest_management_token)
-        return await gateway.module_query(component_id, query_id, body)
-
-    @app.post("/management/v1/modules/{component_id}/actions/{action_id}")
-    async def module_action(
-        component_id: str,
-        action_id: str,
-        body: dict,
-        x_forest_management_token: str | None = Header(default=None),
-        idempotency_key: str | None = Header(default=None),
-    ):
-        authenticated(x_forest_management_token)
-        return await gateway.module_action(
-            component_id,
-            action_id,
-            body=body,
-            idempotency_key=idempotency_key,
-        )
-
-    return app

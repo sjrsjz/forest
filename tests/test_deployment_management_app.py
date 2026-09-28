@@ -198,7 +198,6 @@ async def test_bot_gateway_applies_exact_web_operation_policy_after_signature_ch
     )
     gateway = CleanManagementGateway(
         host,
-        "management-token-long-enough",
         ticket_authority=signer,
         scope_id="bot-scope-test",
     )
@@ -695,7 +694,7 @@ async def test_asset_routes_forward_bounded_binary_under_bot_web_tickets(monkeyp
     calls = []
 
     class AssetGateway:
-        def __init__(self, host, token, *, ticket_authority, scope_id):
+        def __init__(self, host, *, ticket_authority, scope_id):
             assert scope_id == "bot-scope-test"
 
         def authorization_target(self, component_id):

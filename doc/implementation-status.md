@@ -238,3 +238,5 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 试验元数据回收现位于 `memory_graph` 包的向量删除 owned-work 认领事务：先有界抑制到期 facet 并为任何曾尝试派发的 facet 登记删除屏障；没有待领删除任务时，每轮最多回收一份到期试验、检查八份候选。Bot 级持久游标跨轮轮转和回绕，使前八份因有效租约而阻塞时，第九份仍能被回收。事务锁定试验输入，要求召回工作终结、所有 facet 已抑制、相关向量删除均结算、嵌入 claim/attempt/发布/恢复工作没有在途状态、预算预留已结算且没有成功回复联想日志。过期但没有外部尝试的旧 claim 与召回工作由该事务收敛，再按外键顺序删除试验 part、查询、facet、证据区域和包内结算行；向量删除 tombstone 与费用预算保留。仅对应 Bot、试验查询、bundle 和 claim 的不可变事实触发器在该事务内放行，正常群查询不受影响。真实 PostgreSQL 冻结 bundle/证据、过期 claim、有效租约阻断、向量屏障、游标轮转及并发认领用例通过，Memory 包 19 项数据库回归通过；Kernel Payload 的物理清扫仍按其独立 TTL 路径运行。真实供应商图文召回和长时间运行验收尚未完成。
 
 部署管理网关现经真实本机 HTTP 与 Edge 浏览器验证登录、Bot 作用域选择、Memory 包 UI 的摘要读取与隔离 iframe 初始化、管理 query 的 MessageChannel 往返、卸载和登出。验收发现原 Blob iframe 继承控制台 CSP 后无法执行包内脚本，已改为带摘要的认证路由加载并独立施加 sandbox CSP；作用域路径改写曾把全局登出误送往 Bot 路由，现只改写 Runtime 与模块接口。切换工作区时，旧 UI 的异步挂载和 MessageChannel 会失效。该浏览器验收使用内存管理后端，证明 HTTP 会话和包 UI 接线，不证明真实 PostgreSQL 管理试验、供应商图文召回或长期运行。
+
+旧 `FOREST_MANAGEMENT_TOKEN` 单 Bot HTTP 入口已删除；该入口使用另一套令牌 API，无法与现行部署会话控制台及包 UI 协议正确配合。`CleanManagementGateway` 现必须持有部署 Web authority ticket signer，Bot scope 由部署控制台提供；单 Bot 启动函数只管理 Bot 生命周期和状态输出。真实 Edge 会话下的 5 项部署管理验收通过，单 Bot 主机本地 5 项测试通过、5 项需数据库环境而跳过；此清理不替代真实数据库管理试验。

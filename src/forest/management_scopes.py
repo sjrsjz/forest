@@ -290,10 +290,11 @@ class DeploymentManagementScopeProvider:
 class BotManagementScopeProvider:
     scope_kind = "bot"
 
-    def __init__(self, *, supervisor, ticket_authority=None) -> None:
+    def __init__(self, *, supervisor, ticket_authority) -> None:
+        if ticket_authority is None:
+            raise ValueError("Bot management requires a Web authority ticket signer")
         self.supervisor = supervisor
         self.ticket_authority = ticket_authority
-        self._internal_token = secrets.token_urlsafe(32)
         self._gateways: dict[str, tuple[object, CleanManagementGateway]] = {}
 
     async def list_scopes(self) -> tuple[dict, ...]:
@@ -308,7 +309,6 @@ class BotManagementScopeProvider:
                     host,
                     CleanManagementGateway(
                         host,
-                        self._internal_token,
                         ticket_authority=self.ticket_authority,
                         scope_id=scope_id,
                     ),

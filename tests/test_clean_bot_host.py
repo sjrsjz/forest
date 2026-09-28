@@ -1593,7 +1593,6 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             forget_input["plan"] = current_plan
             gateway = CleanManagementGateway(
                 host,
-                "test-management-token-long-enough",
                 ticket_authority=WebAuthorityTicketAuthority(
                     issuer_id="deployment/host-test",
                     active_key_id="master/host-test/1",
