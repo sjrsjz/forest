@@ -1567,7 +1567,34 @@ async def test_memory_package_qualifies_exact_conversation_batch(
         ]
         assert sources["items"][0]["external_group_id"] == "933179609"
         assert sources["items"][0]["author_subject_ref"] == "qq:42"
+        assert sources["items"][0]["eligibility_state"] == "ELIGIBLE"
+        assert sources["items"][0]["source_status"] == "ACTIVE"
         assert sources["has_more"] is False
+        selected = await instance.invoke_management_query(
+            queries["memory.query-sources"],
+            {
+                "group_source_ids": ["source/group/933179609"],
+                "source_id": "source/group/933179609",
+                "source_kind": "GROUP",
+                "platform": "onebot-v11",
+                "realm_id": "qq",
+                "external_group_id": "933179609",
+                "binding_ref": "binding/main",
+                "source_order_from": 1,
+                "source_order_to": 2,
+                "eligibility_state": "ELIGIBLE",
+                "source_status": "ACTIVE",
+            },
+            timeout_seconds=10,
+        )
+        assert [item["source_unit_id"] for item in selected["items"]] == [
+            "unit/event/captured"
+        ]
+        assert (await instance.invoke_management_query(
+            queries["memory.query-sources"],
+            {"group_source_ids": ["source/group/other"]},
+            timeout_seconds=10,
+        ))["items"] == []
         cursor = {
             "snapshot_accepted_at": sources["snapshot_accepted_at"],
             "after_occurred_at": sources["items"][0]["occurred_at"],
@@ -1586,6 +1613,18 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 timeout_seconds=10,
             )
         assert changed_filter.value.code == "MEMORY_QUERY_INVALID"
+        with pytest.raises(ForestError) as changed_state:
+            await instance.invoke_management_query(
+                queries["memory.query-sources"],
+                {
+                    "author_subject_ref": "qq:42",
+                    "trunk_id": "trunk/group/933179609",
+                    "eligibility_state": "SUPPRESSED",
+                    **cursor,
+                },
+                timeout_seconds=10,
+            )
+        assert changed_state.value.code == "MEMORY_QUERY_INVALID"
         assert (await instance.invoke_management_query(
             queries["memory.query-sources"],
             {"author_subject_ref": "qq:other"}, timeout_seconds=10

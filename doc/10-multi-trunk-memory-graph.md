@@ -427,7 +427,7 @@ Provider adapter 必须把来源信息渲染到实际发送给模型的上下文
 
 Memory 的管理面是 `memory.graph` Generation 发布的模块贡献，不是 WebUI 壳层中的固定页面。它必须面向一个 Bot 连续运行数月后的数十万至数百万来源设计；查询在服务端完成，浏览器只持有当前页、当前有界图邻域和显式打开的正文。
 
-当前实现已交付 `memory.trunks.list`、`memory.sources.query`、`memory.relations.query` 三个只读浏览端口，以及单来源遗忘的固定影响计划、P0 授权入队和状态跟踪。来源按单个群主干、作者、模态、类型和时间筛选，并用时间加单元 ID 的快照游标分页；关系按一个端点查询一跳、每页最多 20 条、每条最多展开 16 条带群/主干/作者来源的证据。WebUI 与群聊 Shell 调用同一包端口。组合筛选、完整图邻域、较大范围遗忘选择器、真实召回试验及其他管理 action 仍未完成，不能把当前能力表述为满足本节全部要求。
+当前实现已交付 `memory.trunks.list`、`memory.sources.query`、`memory.relations.query` 三个只读浏览端口，以及单来源遗忘的固定影响计划、P0 授权入队和状态跟踪。来源查询已可组合群来源 ID 列表、精确来源 ID、群主干、来源类型、平台、Realm、群号、Binding、作者、模态、单元类型、事件时间、单来源序号区间及当前资格/来源状态；默认只显示活动且可召回的来源。每页最多 100 条，以发生时间和单元 ID 键集翻页，游标绑定完整筛选摘要。关系按一个端点查询一跳、每页最多 20 条、每条最多展开 16 条带群/主干/作者来源的证据。WebUI 与群聊 Shell 调用同一包端口。索引覆盖与关系审核筛选、完整图邻域、较大范围遗忘选择器、真实召回试验及其他管理 action 仍未完成，不能把当前能力表述为满足本节全部要求。
 
 来源查询至少支持以下可组合条件：`group_source_id[]`、来源类型、稳定作者主体、平台/Binding、事件时间范围、source order 范围、内容模态、索引覆盖状态、删除/抑制状态、关系类型、人工审核状态、是否跨主干及有界全文/向量查询。查询先冻结 `graph_snapshot_ref + policy_revision + deletion_epoch`，再产生绑定完整 filter digest 的键集游标；默认排序使用稳定的 `(occurred_at, source_unit_id)` 或 `(source_order_seq, source_unit_id)`。禁止用 offset 分页遍历增长中的大表，也禁止换筛选条件后复用游标。
 

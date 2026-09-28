@@ -1068,6 +1068,9 @@ CREATE INDEX eligibility_operations_batch_idx ON eligibility_operations(
 CREATE INDEX source_occurrences_unit_idx ON source_occurrences(
     bot_id,source_unit_id,conversation_ref,ingress_seq
 ) INCLUDE (eligibility_state,input_batch_ref,context_revision);
+CREATE INDEX source_occurrences_binding_browse_idx ON source_occurrences(
+    bot_id,binding_ref,source_unit_id
+);
 CREATE INDEX pending_input_events_batch_idx ON pending_input_events(
     bot_id,input_batch_ref,context_revision,state,conversation_ref
 );
@@ -6950,11 +6953,26 @@ DECLARE
     from_time timestamptz := (input->>'occurred_from')::timestamptz;
     to_time timestamptz := (input->>'occurred_to')::timestamptz;
     after_time timestamptz := (input->>'after_occurred_at')::timestamptz;
+    selected_sources text[];
+    selected_state text := COALESCE(input->>'eligibility_state','ELIGIBLE');
+    selected_source_status text := COALESCE(input->>'source_status','ACTIVE');
     items jsonb;
     more boolean;
     cursor_value jsonb;
 BEGIN
+    IF input ? 'group_source_ids' THEN
+        SELECT COALESCE(array_agg(value ORDER BY value),ARRAY[]::text[])
+        INTO selected_sources FROM jsonb_array_elements_text(input->'group_source_ids');
+    END IF;
     IF page_limit NOT BETWEEN 1 AND 100 OR
+       selected_state NOT IN ('REGISTERED','ELIGIBLE','SUPPRESSED') OR
+       selected_source_status NOT IN ('ACTIVE','RETIRED') OR
+       (input ? 'group_source_ids' AND (cardinality(selected_sources)=0 OR
+          cardinality(selected_sources)>256)) OR
+       (input ? 'source_order_from' AND NOT (input ? 'source_id')) OR
+       (input ? 'source_order_to' AND NOT (input ? 'source_id')) OR
+       ((input->>'source_order_from')::bigint > (input->>'source_order_to')::bigint) OR
+       (from_time IS NOT NULL AND to_time IS NOT NULL AND from_time>=to_time) OR
        ((after_time IS NOT NULL) <> (input ? 'after_source_unit_id')) OR
        (after_time IS NOT NULL AND (NOT input ? 'snapshot_accepted_at' OR
           input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) THEN
@@ -6965,17 +6983,34 @@ BEGIN
     WITH page AS (
         SELECT u.source_unit_id,u.source_id,u.trunk_id,s.source_kind,
             s.platform,s.realm_id,s.external_group_id,u.author_subject_ref,
-            u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count
+            u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
+            u.eligibility_state,s.status AS source_status
         FROM __forest_module_schema__.source_units u
         JOIN __forest_module_schema__.memory_sources s
             ON s.bot_id=u.bot_id AND s.source_id=u.source_id
-        WHERE u.bot_id=context->>'bot_id' AND u.eligibility_state='ELIGIBLE'
-          AND s.status='ACTIVE'
-          AND u.accepted_at<=snapshot_time AND u.eligible_at<=snapshot_time
+        WHERE u.bot_id=context->>'bot_id' AND u.eligibility_state=selected_state
+          AND s.status=selected_source_status
+          AND u.accepted_at<=snapshot_time
+          AND (u.eligible_at IS NULL OR u.eligible_at<=snapshot_time)
           AND (input->>'trunk_id' IS NULL OR u.trunk_id=input->>'trunk_id')
+          AND (input->>'source_id' IS NULL OR u.source_id=input->>'source_id')
+          AND (selected_sources IS NULL OR
+               (s.source_kind='GROUP' AND u.source_id=ANY(selected_sources)))
+          AND (input->>'source_kind' IS NULL OR s.source_kind=input->>'source_kind')
+          AND (input->>'platform' IS NULL OR s.platform=input->>'platform')
+          AND (input->>'realm_id' IS NULL OR s.realm_id=input->>'realm_id')
+          AND (input->>'external_group_id' IS NULL OR s.external_group_id=input->>'external_group_id')
+          AND (input->>'binding_ref' IS NULL OR EXISTS (
+              SELECT 1 FROM __forest_module_schema__.source_occurrences o
+              WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
+                AND o.binding_ref=input->>'binding_ref'))
           AND (input->>'author_subject_ref' IS NULL OR u.author_subject_ref=input->>'author_subject_ref')
           AND (input->>'modality' IS NULL OR u.modality=input->>'modality')
           AND (input->>'unit_kind' IS NULL OR u.unit_kind=input->>'unit_kind')
+          AND (input->>'source_order_from' IS NULL OR
+               u.source_order_seq>=(input->>'source_order_from')::bigint)
+          AND (input->>'source_order_to' IS NULL OR
+               u.source_order_seq<(input->>'source_order_to')::bigint)
           AND (from_time IS NULL OR u.occurred_at>=from_time)
           AND (to_time IS NULL OR u.occurred_at<to_time)
           AND (after_time IS NULL OR (u.occurred_at,u.source_unit_id)<(after_time,input->>'after_source_unit_id'))
