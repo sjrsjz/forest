@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import os
+import socket
+import sys
+import threading
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -262,6 +269,183 @@ class _Registry:
                 "management_contract": self.module.management_contract.describe(),
             }
         ]
+
+
+def test_real_browser_loads_memory_package_through_authenticated_http():
+    """The package HTML must execute under the actual management response CSP."""
+    if os.environ.get("FOREST_BROWSER_SMOKE") != "1":
+        pytest.skip("Set FOREST_BROWSER_SMOKE=1 for the real browser smoke")
+    import uvicorn
+    from playwright.sync_api import expect, sync_playwright
+
+    memory_html = (
+        Path(__file__).resolve().parents[1]
+        / "src/forest/builtin/memory_graph/ui/index.html"
+    ).read_bytes()
+    digest = hashlib.sha256(memory_html).hexdigest()
+
+    class MemoryConfiguration(_Configuration):
+        component_id = "memory.graph"
+
+        async def desired(self, *, include_value=False):
+            result = await super().desired(include_value=include_value)
+            result.value = (
+                {
+                    "embedding": {
+                        "deployment_id": "browser-smoke",
+                        "model": "fixture-vl",
+                        "model_kind": "VL",
+                        "dimensions": 3,
+                    },
+                    "retrieval": {},
+                }
+                if include_value else None
+            )
+            return result
+
+    class MemoryContract(_Contract):
+        async def query(self, query_id, payload):
+            if query_id == "memory.trunks.list":
+                return {"items": []}
+            if query_id == "memory.sources.query":
+                return {
+                    "items": [],
+                    "has_more": False,
+                    "snapshot_accepted_at": "2026-09-28T00:00:00Z",
+                }
+            raise AssertionError(f"Unexpected Memory UI query: {query_id}")
+
+    contract = MemoryContract(MemoryConfiguration(), schema={"type": "object"})
+    def read_memory_ui(expected):
+        assert expected == digest
+        return {"sha256": digest}, memory_html
+
+    module = SimpleNamespace(
+        management_contract=contract, management_ui_artifact=read_memory_ui
+    )
+
+    class Registry:
+        graph_identity = SimpleNamespace(
+            graph_id="graph/browser-smoke", graph_revision=1,
+            generations={"memory.graph": "generation/browser-smoke"},
+        )
+
+        def get(self, component_id):
+            if component_id != "memory.graph":
+                raise KeyError(component_id)
+            return module
+
+        def describe(self):
+            return [{
+                "component_id": "memory.graph",
+                "state": "ACTIVE",
+                "generation_id": "generation/browser-smoke",
+                "artifact": {"package_id": "forest.memory-graph"},
+                "management_contract": contract.describe(),
+                "management_contributions": [{
+                    "contribution_id": "memory.graph.management",
+                    "label": "Memory",
+                    "surface": {
+                        "kind": "sandboxed-package",
+                        "artifact": f"/management/v1/modules/memory.graph/management-ui/{digest}",
+                        "sha256": digest,
+                    },
+                }],
+            }]
+
+    host = SimpleNamespace(
+        settings=SimpleNamespace(bot_id="bot/browser-smoke"),
+        registry=Registry(),
+        generation_authority=_GenerationAuthority(),
+        _kernel=SimpleNamespace(
+            configurations={"kernel.authorization": _PolicyConfiguration()},
+        ),
+    )
+
+    class Supervisor:
+        async def management_scopes(self):
+            return ({
+                "scope_id": "browser-smoke",
+                "scope_kind": "bot",
+                "bot_id": "bot/browser-smoke",
+                "label": "Browser smoke",
+                "available": True,
+                "desired_state": "ONLINE",
+                "observed_state": "ONLINE",
+            },)
+
+        @asynccontextmanager
+        async def management_host(self, scope_id):
+            assert scope_id == "browser-smoke"
+            yield host
+
+    listening = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listening.bind(("127.0.0.1", 0))
+    listening.listen(128)
+    port = listening.getsockname()[1]
+    origin = f"http://127.0.0.1:{port}"
+    identity = _IdentityAuthority()
+    app = create_deployment_management_app(
+        deployment_id="deployment/browser-smoke",
+        components=(),
+        identity_authority=identity,
+        allowed_origin=origin,
+        bot_supervisor=Supervisor(),
+    )
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, kwargs={"sockets": [listening]}, daemon=True)
+    thread.start()
+    previous_policy = asyncio.get_event_loop_policy()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert server.started
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        with sync_playwright() as playwright:
+            executable = os.environ.get("FOREST_BROWSER_EXECUTABLE")
+            if executable is None and sys.platform == "win32":
+                edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+                if edge.is_file():
+                    executable = str(edge)
+            browser = playwright.chromium.launch(
+                headless=True,
+                **({"executable_path": executable} if executable else {}),
+            )
+            try:
+                page = browser.new_page()
+                errors = []
+                page.on("pageerror", lambda error: errors.append(str(error)))
+                page.goto(origin + "/")
+                expect(page.locator("#login")).to_be_visible()
+                page.locator('#login-form [name="username"]').fill("admin")
+                page.locator('#login-form [name="password"]').fill("correct-password")
+                page.locator("#login-form button").click()
+                expect(page.locator("#console")).to_be_visible()
+                page.locator("#scope-select").select_option("bot:browser-smoke")
+                expect(page.locator("#module-nav button")).to_have_text("memory.graph")
+                page.locator("#module-nav button").click()
+                frame = page.frame_locator("iframe.package-ui-frame")
+                expect(frame.locator('[data-tab="trial"]')).to_be_visible()
+                expect(frame.locator("#revision")).to_contain_text("r1")
+                expect(frame.locator("#source-count")).not_to_be_empty()
+                assert not errors, errors
+                page.locator("#back").click()
+                expect(page.locator("iframe.package-ui-frame")).to_have_count(0)
+                with page.expect_response("**/management/v1/auth/logout") as logout:
+                    page.locator("#logout").click()
+                assert logout.value.status == 200
+                assert identity.revoked
+                expect(page.locator("#login")).to_be_visible()
+            finally:
+                browser.close()
+    finally:
+        asyncio.set_event_loop_policy(previous_policy)
+        server.should_exit = True
+        thread.join(timeout=10)
+        assert not thread.is_alive()
 
 
 async def test_first_setup_endpoint_requires_exact_origin_and_closes_after_pairing():

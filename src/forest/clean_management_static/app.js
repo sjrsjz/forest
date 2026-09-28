@@ -1,5 +1,6 @@
 let apiBase = '/management/v1';
 let scopes = [];
+let workspaceEpoch = 0;
 const $ = id => document.getElementById(id);
 
 function cookie(name) {
@@ -10,7 +11,8 @@ function cookie(name) {
 
 function scopedPath(path) {
   const prefix = '/management/v1';
-  return path.startsWith(`${prefix}/`) ? `${apiBase}${path.slice(prefix.length)}` : path;
+  return path === `${prefix}/runtime` || path.startsWith(`${prefix}/modules/`)
+    ? `${apiBase}${path.slice(prefix.length)}` : path;
 }
 
 function scopeBase(scope) {
@@ -64,21 +66,23 @@ async function sha256Hex(text) {
   return [...new Uint8Array(digest)].map(value => value.toString(16).padStart(2, '0')).join('');
 }
 
-async function mountSandboxedPackage(root, row, contribution) {
+async function mountSandboxedPackage(root, row, contribution, epoch) {
   const surface = contribution.surface;
   const html = await fetchText(surface.artifact);
+  if (epoch !== workspaceEpoch) return;
   if (await sha256Hex(html) !== surface.sha256) {
     throw new Error('模块管理 UI 摘要校验失败');
   }
+  if (epoch !== workspaceEpoch) return;
   const base = `/management/v1/modules/${encodeURIComponent(row.component_id)}/configuration`;
   const configuration = await api(base);
+  if (epoch !== workspaceEpoch) return;
   let draft = structuredClone(configuration.desired.value);
   let plan = null;
   let messages = [];
   const operationReplies = new Map();
   const nonce = crypto.randomUUID();
   const channel = new MessageChannel();
-  const blobUrl = URL.createObjectURL(new Blob([html], {type: 'text/html'}));
   const shell = document.createElement('div');
   shell.className = 'sandbox-shell';
   const controls = document.createElement('div');
@@ -285,14 +289,23 @@ async function mountSandboxedPackage(root, row, contribution) {
   frame.onload = () => frame.contentWindow.postMessage({
     protocol: 'forest.management-ui-connect/1', type: 'connect', nonce,
   }, '*', [channel.port2]);
-  frame.src = blobUrl;
+  frame.src = scopedPath(surface.artifact);
   activeSandboxCleanup = () => {
     channel.port1.close();
-    URL.revokeObjectURL(blobUrl);
+    frame.onload = null;
+    frame.src = 'about:blank';
   };
 }
 
+function unmountPackage() {
+  workspaceEpoch += 1;
+  if (activeSandboxCleanup) activeSandboxCleanup();
+  activeSandboxCleanup = null;
+  $('contribution-root').replaceChildren();
+}
+
 function showOverview() {
+  unmountPackage();
   $('overview').classList.remove('hidden');
   $('module-view').classList.add('hidden');
   document.querySelectorAll('#module-nav button').forEach(item => item.classList.remove('selected'));
@@ -323,10 +336,7 @@ function renderScopes(rows) {
 }
 
 async function openModule(row, button) {
-  if (activeSandboxCleanup) {
-    activeSandboxCleanup();
-    activeSandboxCleanup = null;
-  }
+  unmountPackage();
   document.querySelectorAll('#module-nav button').forEach(
     item => item.classList.toggle('selected', item === button),
   );
@@ -351,19 +361,21 @@ async function openModule(row, button) {
     tab.textContent = contribution.label;
     nav.append(tab);
     tab.onclick = async () => {
+      unmountPackage();
+      const epoch = workspaceEpoch;
       nav.querySelectorAll('button').forEach(
         item => item.classList.toggle('selected', item === tab),
       );
-      root.replaceChildren();
       try {
         if (contribution.surface.kind === 'sandboxed-package') {
-          await mountSandboxedPackage(root, row, contribution);
+          await mountSandboxedPackage(root, row, contribution, epoch);
           return;
         }
         const template = await fetch(contribution.surface.template).then(response => {
           if (!response.ok) throw new Error('管理模板读取失败');
           return response.text();
         });
+        if (epoch !== workspaceEpoch) return;
         root.innerHTML = template;
         const style = contribution.surface.style;
         if (style && !document.querySelector(`link[data-module-style="${CSS.escape(style)}"]`)) {
@@ -374,9 +386,10 @@ async function openModule(row, button) {
           document.head.append(link);
         }
         const module = await import(contribution.surface.module);
+        if (epoch !== workspaceEpoch) return;
         await module.mount({root, component: row, api, notice, refresh});
       } catch (error) {
-        notice(error.message);
+        if (epoch === workspaceEpoch) notice(error.message);
       }
     };
     if (index === 0) tab.click();
@@ -398,6 +411,7 @@ async function refresh() {
     throw error;
   }
   if (snapshot.scopes && renderScopes(snapshot.scopes)) return refresh();
+  unmountPackage();
   const runtime = snapshot.runtime;
   $('bot-id').textContent = runtime.bot_id;
   $('runtime-state').textContent = runtime.graph_state;

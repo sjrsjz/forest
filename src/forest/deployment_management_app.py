@@ -96,13 +96,13 @@ def create_deployment_management_app(
     async def security_headers(request: Request, call_next):
         response = await call_next(request)
         response.headers["x-content-type-options"] = "nosniff"
-        response.headers["x-frame-options"] = "DENY"
+        response.headers.setdefault("x-frame-options", "DENY")
         response.headers["referrer-policy"] = "no-referrer"
-        response.headers["content-security-policy"] = (
+        response.headers.setdefault("content-security-policy", (
             "default-src 'none'; script-src 'self'; style-src 'self'; "
             "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; "
-            "frame-src blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
-        )
+            "frame-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        ))
         if request.url.path.startswith("/management/"):
             response.headers["cache-control"] = "no-store"
         return response
@@ -262,7 +262,19 @@ def create_deployment_management_app(
         session = await authenticated(request)
         async with scopes.gateway(scope_kind, scope_id, session) as gateway:
             content = await gateway.read_management_ui(component_id, artifact_sha256)
-            return Response(content, media_type="text/html; charset=utf-8")
+            return Response(
+                content,
+                media_type="text/html; charset=utf-8",
+                headers={
+                    "x-frame-options": "SAMEORIGIN",
+                    "content-security-policy": (
+                        "sandbox allow-scripts; default-src 'none'; "
+                        "script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                        "img-src blob: data:; connect-src 'none'; font-src 'none'; "
+                        "frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
+                    ),
+                },
+            )
 
     @app.post(
         "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
