@@ -128,6 +128,7 @@ _MODULES = {
             "runtime.call.admit",
             "runtime.state.publish",
             "runtime.graph.reload",
+            "runtime.graph-replacement.request",
             "runtime.graph.snapshot",
             "kernel.uow.conversation.final-reply",
             "kernel.uow.conversation.select-input",
@@ -144,6 +145,7 @@ _MODULES = {
             "runtime.call.admit",
             "runtime.state.publish",
             "runtime.graph.reload",
+            "runtime.graph-replacement.request",
             "runtime.graph.snapshot",
         ),
     },
@@ -225,6 +227,46 @@ class PreparedAuthorityModule:
 
     async def close(self) -> None:
         self.generation_active = False
+
+
+def runtime_graph_replacement_request_service(context):
+    """Accept a fenced, idempotent graph rebuild intent from a capable module."""
+
+    runtime = context.participant("kernel.runtime").service
+
+    async def request(payload):
+        if (
+            type(payload) is not dict
+            or set(payload)
+            != {"protocol", "operation_id", "expected_graph_revision", "requested_by"}
+            or payload["protocol"] != "forest.runtime-graph-replacement-request/1"
+            or not isinstance(payload["operation_id"], str)
+            or not 1 <= len(payload["operation_id"].encode()) <= 256
+            or type(payload["expected_graph_revision"]) is not int
+            or payload["expected_graph_revision"] <= 0
+            or not isinstance(payload["requested_by"], str)
+            or not 1 <= len(payload["requested_by"].encode()) <= 256
+        ):
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID",
+                "Graph replacement request is invalid",
+                422,
+            )
+        saved = await runtime.request_graph_replacement(
+            context.host_lease,
+            operation_id=payload["operation_id"],
+            expected_graph_revision=payload["expected_graph_revision"],
+            requested_by=payload["requested_by"],
+        )
+        return {
+            "protocol": "forest.runtime-graph-replacement-receipt/1",
+            "operation_id": saved["operation_id"],
+            "activation_id": saved["activation_id"],
+            "state": saved["state"],
+            "expected_graph_revision": saved["expected_graph_revision"],
+        }
+
+    return request
 
 
 class PreparedAuditAuthorityModule(PreparedAuthorityModule):
@@ -583,6 +625,12 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                         1,
                         ("kernel.runtime",),
                         runtime_graph_snapshot_service,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "runtime.graph-replacement.request",
+                        1,
+                        ("kernel.runtime",),
+                        runtime_graph_replacement_request_service,
                     ),
                     RuntimeKernelServiceSpec(
                         RUNTIME_HEALTH_SNAPSHOT_JOB.service_id,

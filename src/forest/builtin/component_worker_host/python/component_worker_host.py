@@ -87,3 +87,41 @@ class ComponentWorkerHost(Plugin):
                 for item in graph["members"]
             )
         }
+
+    @service("shell.component-host.reload", semantics="idempotent")
+    async def reload(self, payload, ctx):
+        arguments = payload["arguments"]
+        component_id = arguments["component_id"]
+        graph = await self._graph(ctx)
+        if not any(item["component_id"] == component_id for item in graph["members"]):
+            raise ForestError(
+                "COMPONENT_HOST_MODULE_NOT_FOUND",
+                "Component is not in the active graph",
+                404,
+            )
+        receipt = await ctx.services.call(
+            "runtime.graph-replacement.request",
+            {
+                "protocol": "forest.runtime-graph-replacement-request/1",
+                "operation_id": ctx.operations.stable("module-reload-request"),
+                "expected_graph_revision": arguments["expected_graph_revision"],
+                "requested_by": payload["principal_ref"],
+            },
+            operation_id=ctx.operations.stable("submit-graph-replacement"),
+            timeout=10,
+        )
+        if receipt["expected_graph_revision"] != graph["graph_revision"]:
+            return {
+                "text": (
+                    f"此前 Graph r{receipt['expected_graph_revision']} 的组件重载请求"
+                    f"已记录（{receipt['state']}）；operation={receipt['operation_id']}"
+                )
+            }
+        affected = ", ".join(item["component_id"] for item in graph["members"])
+        return {
+            "text": (
+                f"组件 {component_id} 的重载请求已记录（{receipt['state']}）；"
+                f"当前实现会更换整张 Graph 的 {len(graph['members'])} 个 Generation："
+                f"{affected}；operation={receipt['operation_id']}"
+            )
+        }

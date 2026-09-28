@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.2.0"
+version = "1.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -27,7 +27,10 @@ drain_timeout_s = 60
 stop_timeout_s = 10
 
 [components.capabilities]
-requests = ["service.call:runtime.graph.snapshot"]
+requests = [
+  "service.call:runtime.graph.snapshot",
+  "service.call:runtime.graph-replacement.request"
+]
 
 [components.management_ui]
 entrypoint = "ui/index.html"
@@ -42,6 +45,12 @@ name = "runtime.graph.snapshot"
 contract = ">=1.0,<2.0"
 required = true
 startup_dependency = true
+
+[[components.requires]]
+name = "runtime.graph-replacement.request"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
 
 [[components.provides]]
 name = "component.host.modules"
@@ -66,6 +75,13 @@ semantics = "at-most-once"
 input_schema = "schemas/shell-input.json"
 output_schema = "schemas/shell-output.json"
 
+[[components.provides]]
+name = "shell.component-host.reload"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/shell-reload-input.json"
+output_schema = "schemas/shell-output.json"
+
 [[components.shell_commands]]
 command_id = "module.list"
 command_version = 1
@@ -78,6 +94,20 @@ service_class = "P1"
 required_capabilities = ["runtime.status.read"]
 output_policy = "SHORT"
 timeout_s = 10
+
+[[components.shell_commands]]
+command_id = "module.reload"
+command_version = 1
+service_id = "shell.component-host.reload"
+service_version = 1
+argument_schema = "schemas/shell-reload-arguments.json"
+management_operation_id = "module.reload"
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["runtime.graph.reload"]
+option_aliases = [["expect-graph", "expected_graph_revision"]]
+output_policy = "SHORT"
+timeout_s = 20
 
 [[components.management_queries]]
 id = "modules"

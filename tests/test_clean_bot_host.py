@@ -34,6 +34,7 @@ from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import ModuleLifecycleState
+from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.vector_index_authority import VectorIndexIdentityRepository
@@ -540,6 +541,112 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
         "close-candidate",
         "resume-previous",
     ]
+
+
+@pytest.mark.postgres
+async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(tmp_path):
+    dsn = os.environ.get("FOREST_TEST_DSN")
+    if not dsn:
+        pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
+    name = "forest_reload_" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    parsed = urlsplit(dsn)
+    uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
+    settings = CleanBotSettings(
+        bot_id="bot-worker-host-reload-test", dsn=uri,
+        model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
+        model="test-model", model_deployment_id="provider.chat-completions/test",
+        model_max_output_tokens=1024, model_input_modalities=("text",),
+        embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
+        embedding_api_key="test-embedding-key",
+        embedding_deployment_id="embedding.multimodal/qiyu-vl/test",
+        embedding_model_revision="test-revision/1",
+        embedding_model="Qwen/Qwen3-VL-Embedding-8B", embedding_dimensions=4096,
+        onebot_self_id="123456789", onebot_websocket_url="ws://127.0.0.1:3001/",
+        onebot_access_token="test-onebot-token",
+        allowed_group_ids=("933179609",), group_trigger_mode="MENTION",
+        private_enabled=True, shell_administrator_ids=("42",),
+        agent_system_prompt="Worker Host reload fixture.",
+    )
+
+    async def create_websocket(_url, _token, **_limits):
+        return FakeWebSocketClient(settings.onebot_self_id)
+
+    host = CleanBotHost(
+        settings,
+        model_client_factory=FakeModelClient,
+        embedding_client_factory=FakeEmbeddingClient,
+        media_client_factory=FakeMediaClient,
+        vector_index_client_factory=FakeMilvusClient,
+        websocket_client_factory=create_websocket,
+        package_catalog=PackageCatalog(tmp_path / "reload-packages"),
+    )
+    try:
+        await host.start()
+        try:
+            previous = host.registry.graph_identity
+            handle = next(
+                handle for key, handle in host.registry.contract_router._requests.items()
+                if key[0] == "shell.command" and key[1] == "shell.component-host.reload"
+            )
+
+            async def reload(component_id, revision, operation_id, *, route=handle):
+                return await route.invoke(
+                    ShellCommandExecutionRequest(
+                        command_id="module.reload",
+                        command_version=1,
+                        arguments={
+                            "component_id": component_id,
+                            "expected_graph_revision": revision,
+                        },
+                        request_id=operation_id,
+                        principal_ref="qq:42",
+                        conversation_ref="onebot:group:933179609",
+                    ),
+                    operation_id=operation_id,
+                    causal_root_kind="shell.request",
+                    causal_root_id=operation_id,
+                    timeout_seconds=20,
+                )
+
+            with pytest.raises(ForestError) as missing:
+                await reload("module.missing", previous.graph_revision, "reload/missing")
+            assert missing.value.code == "COMPONENT_HOST_MODULE_NOT_FOUND"
+            with pytest.raises(ForestError) as stale:
+                await reload("agent.runtime", previous.graph_revision + 1, "reload/stale")
+            assert stale.value.code == "RUNTIME_GRAPH_REVISION_CONFLICT"
+            result = await reload("agent.runtime", previous.graph_revision, "reload/valid")
+            assert "会更换整张 Graph" in result.text
+            assert "agent.runtime" in result.text
+            assert "memory.graph" in result.text
+            async with asyncio.timeout(180):
+                while host.registry.graph_identity.graph_id == previous.graph_id:
+                    await asyncio.sleep(0.1)
+                while (await host._kernel.runtime.status())["latest_replacement"]["state"] != "SUCCEEDED":
+                    await asyncio.sleep(0.1)
+            replacement = host.registry.graph_identity
+            assert replacement.graph_revision == previous.graph_revision + 1
+            assert set(replacement.generations) == set(previous.generations)
+            assert all(
+                replacement.generations[component_id] != previous.generations[component_id]
+                for component_id in previous.generations
+            )
+            current_handle = next(
+                route for key, route in host.registry.contract_router._requests.items()
+                if key[0] == "shell.command" and key[1] == "shell.component-host.reload"
+            )
+            replay = await reload(
+                "agent.runtime", previous.graph_revision, "reload/valid", route=current_handle
+            )
+            assert f"此前 Graph r{previous.graph_revision}" in replay.text
+            assert host.registry.graph_identity.graph_id == replacement.graph_id
+        finally:
+            await host.close()
+    finally:
+        assert name.startswith("forest_reload_") and len(name) == 46
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        await admin.close()
 
 
 @pytest.mark.postgres
