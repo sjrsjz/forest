@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import io
 import json
 import os
 import sys
@@ -14,6 +16,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from PIL import Image
 from psycopg import sql
 
 from forest.adapters.onebot import SendResult
@@ -27,6 +30,10 @@ from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import ModuleLifecycleState
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSubject
+from forest.storage.management_asset_authority import (
+    ManagementAssetAuthority,
+    management_asset_owner_id,
+)
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
@@ -1441,6 +1448,107 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert ready_progress["phase"] == "READY"
             assert ready_progress["evidence_ref"] == materialized[0]["evidence_ref"]
             assert FakeMilvusClient.search_calls == search_count
+
+            # A management trial consumes real bound text/image assets and the
+            # same owned recall chain, while retaining its separate input identity.
+            trial_id = "trial/host-mixed-recall"
+            trial_actor = "subject/host-admin"
+            trial_assets = ManagementAssetAuthority(host._kernel.payload)
+            trial_png = io.BytesIO()
+            Image.new("RGB", (2, 3), (12, 34, 56)).save(trial_png, format="PNG")
+            trial_inputs = (
+                ("part/text", "TEXT", "text/plain", b"before after"),
+                ("part/image", "IMAGE", "image/png", trial_png.getvalue()),
+            )
+            trial_parts = []
+            for part_id, modality, media_type, content in trial_inputs:
+                upload_id = "upload/host/" + part_id
+                content_digest = "sha256:" + hashlib.sha256(content).hexdigest()
+                async with host.store.pool.connection() as conn, conn.transaction():
+                    await trial_assets.begin_in(
+                        conn, upload_id=upload_id, component_id="memory.graph",
+                        asset_id="trial.input", actor_subject_ref=trial_actor,
+                        generation_id=memory_identity.generation_id,
+                        target_ref=trial_id, part_id=part_id,
+                        owner_kind="trial.input",
+                        owner_id=management_asset_owner_id("trial", trial_id, part_id),
+                        media_type=media_type, byte_length=len(content),
+                        content_digest=content_digest, chunk_count=1,
+                        allowed_media_types=("text/plain", "image/png"),
+                        max_bytes=8 * 1024 * 1024,
+                    )
+                    await trial_assets.put_chunk_in(
+                        conn, upload_id=upload_id, component_id="memory.graph",
+                        asset_id="trial.input", actor_subject_ref=trial_actor,
+                        generation_id=memory_identity.generation_id,
+                        chunk_index=0, content=content,
+                        content_digest=content_digest,
+                    )
+                    finalized = await trial_assets.finalize_in(
+                        conn, upload_id=upload_id, component_id="memory.graph",
+                        asset_id="trial.input", actor_subject_ref=trial_actor,
+                        generation_id=memory_identity.generation_id,
+                    )
+                trial_parts.append({
+                    "part_id": part_id, "modality": modality, "media_type": media_type,
+                    "byte_length": len(content), "width": finalized["width"],
+                    "height": finalized["height"], "payload": finalized["payload"],
+                })
+            trial_authorization = SimpleNamespace(
+                web_subject_ref=trial_actor,
+                target_generation_id=memory_identity.generation_id,
+            )
+            started_trial = await memory_instance.management_contract.action(
+                "memory.trial.start", operation_id="web:trial-host-mixed-recall",
+                payload={"query_id": trial_id, "parts": trial_parts},
+                authorization=trial_authorization,
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            assert started_trial.value["query_id"] == trial_id
+            async with asyncio.timeout(100):
+                while True:
+                    trial_state = await memory_instance.management_contract.query_authorized(
+                        "memory.trial.get", {"query_id": trial_id},
+                        authorization=trial_authorization,
+                    )
+                    if trial_state["state"] == "READY":
+                        break
+                    if trial_state["state"] == "FAILED":
+                        async with host.store.pool.connection() as conn:
+                            trial_facts = await (await conn.execute(sql.SQL(
+                                "SELECT (SELECT count(*) FROM {}.embedding_facets "
+                                "WHERE bot_id=%s AND query_id=%s) AS facets, "
+                                "(SELECT count(*) FROM {}.query_match_receipts "
+                                "WHERE bot_id=%s AND query_id=%s) AS matches, "
+                                "(SELECT state FROM {}.memory_queries "
+                                "WHERE bot_id=%s AND query_id=%s) AS query_state"
+                            ).format(*(sql.Identifier(memory_namespace) for _ in range(3))),
+                                (settings.bot_id, trial_id) * 3,
+                            )).fetchone()
+                        raise AssertionError((trial_state, trial_facts))
+                    await asyncio.sleep(0.2)
+            trial_page = await memory_instance.management_contract.query_authorized(
+                "memory.trial.result", {"query_id": trial_id, "limit": 4},
+                authorization=trial_authorization,
+            )
+            assert trial_page["total_count"] == 1
+            assert trial_page["items"][0]["source_unit_id"] == unit_evidence["source_unit_id"]
+            assert trial_page["items"][0]["external_group_id"] == "933179609"
+            assert trial_page["items"][0]["author_subject_ref"] == "qq:20001"
+            trial_image = await memory_instance.management_contract.query_authorized(
+                "memory.trial.image", {
+                    "query_id": trial_id,
+                    "source_unit_id": unit_evidence["source_unit_id"],
+                    "part_id": picture["part_id"], "offset": 0,
+                }, authorization=trial_authorization,
+            )
+            assert base64.b64decode(trial_image["data_base64"]) == picture_bytes
+            with pytest.raises(ForestError) as foreign_trial:
+                await memory_instance.management_contract.query_authorized(
+                    "memory.trial.result", {"query_id": trial_id},
+                    authorization=SimpleNamespace(web_subject_ref="subject/other-admin"),
+                )
+            assert foreign_trial.value.code == "MEMORY_TRIAL_NOT_FOUND"
 
             # The owned Memory worker advances a fresh query from capture through
             # embedding, fixed ANN, region freeze and evidence publication.

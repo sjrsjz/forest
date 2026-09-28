@@ -2493,7 +2493,8 @@ BEGIN
     IF valid_path THEN
         SELECT node_value||jsonb_build_object(
             'occurred_at',u.occurred_at,'source_order_seq',u.source_order_seq,'unit_kind',u.unit_kind,
-            'part_count',u.part_count,'is_current_source',u.source_id=q.current_source_id,
+            'part_count',u.part_count,'is_current_source',
+            COALESCE(u.source_id=q.current_source_id,false),
             'author_payload',jsonb_build_object('payload_id',u.author_payload_id,
                 'digest',u.author_payload_digest,'owner_component_id',u.author_owner_component_id,
                 'owner_kind',u.author_owner_kind,'owner_id',u.author_owner_id),

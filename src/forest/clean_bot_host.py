@@ -7,6 +7,7 @@ import json
 import os
 import signal
 from dataclasses import dataclass
+from datetime import timedelta
 from importlib.resources import files
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -41,6 +42,8 @@ from forest.vector_index_builtin import (
     vector_index_configuration_validator_factory,
 )
 from forest.vector_index_effect_driver import milvus_vector_index_effect_driver_factory
+
+_HOST_LEASE_TTL = timedelta(minutes=2)
 
 
 def _required(name: str) -> str:
@@ -835,11 +838,12 @@ class CleanBotHost:
             self.generation_authority = self._kernel.runtime
             self._replacement_lock = asyncio.Lock()
             registry = await self._assemble_registry()
-            self._lease = await self._kernel.runtime.claim_host(self._host_id, self._incarnation)
-            # Generation preparation can exceed the 30 second HostLease TTL on a
-            # cold install. Lease ownership starts at claim, so renewal must also
-            # start there; waiting until publication can fence the very owner that
-            # is still preparing the graph.
+            self._lease = await self._kernel.runtime.claim_host(
+                self._host_id, self._incarnation, ttl=_HOST_LEASE_TTL
+            )
+            # Cold package preparation and graph replacement may block the event
+            # loop longer than one renewal interval. Start renewal at claim and
+            # retain the same bounded grace period for every renewal.
             self._renewal_task = asyncio.create_task(
                 self._renew_lease(), name=f"bot-host-lease:{self.settings.bot_id}"
             )
@@ -1018,7 +1022,9 @@ class CleanBotHost:
     async def _renew_lease(self) -> None:
         while True:
             await asyncio.sleep(10)
-            self._lease = await self._kernel.runtime.claim_host(self._host_id, self._incarnation)
+            self._lease = await self._kernel.runtime.claim_host(
+                self._host_id, self._incarnation, ttl=_HOST_LEASE_TTL
+            )
 
     async def _supervise_owned_tasks(self) -> None:
         """Fail the Bot host when a task still owned by its active graph stops."""
