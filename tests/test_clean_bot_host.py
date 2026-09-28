@@ -7,6 +7,7 @@ import io
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,12 +17,14 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from httpx import ASGITransport, AsyncClient
 from PIL import Image
 from psycopg import sql
 
 from forest.adapters.onebot import SendResult
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.clean_management_app import CleanManagementGateway
+from forest.deployment_management_app import create_deployment_management_app
 from forest.embeddings import EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
@@ -29,11 +32,7 @@ from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import ModuleLifecycleState
-from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSubject
-from forest.storage.management_asset_authority import (
-    ManagementAssetAuthority,
-    management_asset_owner_id,
-)
+from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
@@ -1453,95 +1452,158 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             # same owned recall chain, while retaining its separate input identity.
             trial_id = "trial/host-mixed-recall"
             trial_actor = "subject/host-admin"
-            trial_assets = ManagementAssetAuthority(host._kernel.payload)
             trial_png = io.BytesIO()
             Image.new("RGB", (2, 3), (12, 34, 56)).save(trial_png, format="PNG")
             trial_inputs = (
                 ("part/text", "TEXT", "text/plain", b"before after"),
                 ("part/image", "IMAGE", "image/png", trial_png.getvalue()),
             )
-            trial_parts = []
-            for part_id, modality, media_type, content in trial_inputs:
-                upload_id = "upload/host/" + part_id
-                content_digest = "sha256:" + hashlib.sha256(content).hexdigest()
-                async with host.store.pool.connection() as conn, conn.transaction():
-                    await trial_assets.begin_in(
-                        conn, upload_id=upload_id, component_id="memory.graph",
-                        asset_id="trial.input", actor_subject_ref=trial_actor,
-                        generation_id=memory_identity.generation_id,
-                        target_ref=trial_id, part_id=part_id,
-                        owner_kind="trial.input",
-                        owner_id=management_asset_owner_id("trial", trial_id, part_id),
-                        media_type=media_type, byte_length=len(content),
-                        content_digest=content_digest, chunk_count=1,
-                        allowed_media_types=("text/plain", "image/png"),
-                        max_bytes=8 * 1024 * 1024,
+            class TrialIdentity:
+                active_key_id = "master/host-trial/1"
+                token = "s" * 43
+                csrf = "c" * 43
+                subject = WebSubject(
+                    trial_actor, "admin", "Administrator", "ADMIN", True, 1
+                )
+
+                @staticmethod
+                def key_resolver(key_id):
+                    return b"k" * 32 if key_id == "master/host-trial/1" else None
+
+                async def login(self, *, username, password, peer_id):
+                    assert (username, password, peer_id) == (
+                        "admin", "correct-password", "127.0.0.1"
                     )
-                    await trial_assets.put_chunk_in(
-                        conn, upload_id=upload_id, component_id="memory.graph",
-                        asset_id="trial.input", actor_subject_ref=trial_actor,
-                        generation_id=memory_identity.generation_id,
-                        chunk_index=0, content=content,
-                        content_digest=content_digest,
+                    return WebSession(
+                        self.token, self.csrf, "session/host-trial", self.subject,
+                        datetime.now(timezone.utc) + timedelta(hours=1),
                     )
-                    finalized = await trial_assets.finalize_in(
-                        conn, upload_id=upload_id, component_id="memory.graph",
-                        asset_id="trial.input", actor_subject_ref=trial_actor,
-                        generation_id=memory_identity.generation_id,
+
+                async def authenticate(self, token):
+                    if token != self.token:
+                        raise ForestError(
+                            "MANAGEMENT_AUTHENTICATION_REQUIRED",
+                            "Web session is invalid", 401,
+                        )
+                    return AuthenticatedWebSession(
+                        hashlib.sha256(token.encode()).hexdigest(),
+                        "session/host-trial", 1,
+                        hashlib.sha256(self.csrf.encode()).hexdigest(),
+                        self.subject,
+                        datetime.now(timezone.utc) + timedelta(hours=1),
                     )
-                trial_parts.append({
-                    "part_id": part_id, "modality": modality, "media_type": media_type,
-                    "byte_length": len(content), "width": finalized["width"],
-                    "height": finalized["height"], "payload": finalized["payload"],
-                })
-            trial_authorization = SimpleNamespace(
-                web_subject_ref=trial_actor,
-                target_generation_id=memory_identity.generation_id,
+
+                async def revalidate_session(self, session):
+                    if session.subject != self.subject:
+                        raise ForestError(
+                            "MANAGEMENT_AUTHENTICATION_REQUIRED",
+                            "Web session changed", 401,
+                        )
+
+            class TrialSupervisor:
+                @asynccontextmanager
+                async def management_host(self, scope_id):
+                    assert scope_id == settings.bot_id
+                    yield host
+
+                async def management_scopes(self):
+                    return ({"scope_kind": "bot", "scope_id": settings.bot_id},)
+
+            management_app = create_deployment_management_app(
+                deployment_id="deployment/host-trial",
+                components=(), identity_authority=TrialIdentity(),
+                allowed_origin="http://forest.test",
+                bot_supervisor=TrialSupervisor(),
             )
-            started_trial = await memory_instance.management_contract.action(
-                "memory.trial.start", operation_id="web:trial-host-mixed-recall",
-                payload={"query_id": trial_id, "parts": trial_parts},
-                authorization=trial_authorization,
-                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            trial_base = (
+                f"/management/v1/scopes/bot/{settings.bot_id}/modules/memory.graph"
             )
-            assert started_trial.value["query_id"] == trial_id
-            async with asyncio.timeout(100):
-                while True:
-                    trial_state = await memory_instance.management_contract.query_authorized(
-                        "memory.trial.get", {"query_id": trial_id},
-                        authorization=trial_authorization,
+            async with AsyncClient(
+                transport=ASGITransport(app=management_app),
+                base_url="http://forest.test",
+            ) as web:
+                login = await web.post(
+                    "/management/v1/auth/login",
+                    headers={"origin": "http://forest.test"},
+                    json={"username": "admin", "password": "correct-password"},
+                )
+                assert login.status_code == 200, login.text
+                headers = {
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": TrialIdentity.csrf,
+                }
+                trial_parts = []
+                for index, (part_id, modality, media_type, content) in enumerate(
+                    trial_inputs
+                ):
+                    upload_id = f"upload-host-trial-{index}"
+                    upload_base = f"{trial_base}/assets/trial.input/uploads"
+                    opened = await web.post(
+                        upload_base, headers=headers,
+                        json={
+                            "upload_id": upload_id, "target_ref": trial_id,
+                            "part_id": part_id, "media_type": media_type,
+                            "byte_length": len(content),
+                            "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+                            "chunk_count": 1,
+                        },
                     )
-                    if trial_state["state"] == "READY":
-                        break
-                    if trial_state["state"] == "FAILED":
-                        async with host.store.pool.connection() as conn:
-                            trial_facts = await (await conn.execute(sql.SQL(
-                                "SELECT (SELECT count(*) FROM {}.embedding_facets "
-                                "WHERE bot_id=%s AND query_id=%s) AS facets, "
-                                "(SELECT count(*) FROM {}.query_match_receipts "
-                                "WHERE bot_id=%s AND query_id=%s) AS matches, "
-                                "(SELECT state FROM {}.memory_queries "
-                                "WHERE bot_id=%s AND query_id=%s) AS query_state"
-                            ).format(*(sql.Identifier(memory_namespace) for _ in range(3))),
-                                (settings.bot_id, trial_id) * 3,
-                            )).fetchone()
-                        raise AssertionError((trial_state, trial_facts))
-                    await asyncio.sleep(0.2)
-            trial_page = await memory_instance.management_contract.query_authorized(
-                "memory.trial.result", {"query_id": trial_id, "limit": 4},
-                authorization=trial_authorization,
-            )
+                    assert opened.status_code == 200, opened.text
+                    chunk = await web.put(
+                        f"{upload_base}/{upload_id}/chunks/0",
+                        headers={**headers, "content-type": "application/octet-stream"},
+                        content=content,
+                    )
+                    assert chunk.status_code == 200, chunk.text
+                    finalized = await web.post(
+                        f"{upload_base}/{upload_id}/finalize", headers=headers,
+                    )
+                    assert finalized.status_code == 200, finalized.text
+                    saved = finalized.json()
+                    trial_parts.append({
+                        "part_id": part_id, "modality": modality,
+                        "media_type": media_type, "byte_length": len(content),
+                        "width": saved["width"], "height": saved["height"],
+                        "payload": saved["payload"],
+                    })
+                started_trial = await web.post(
+                    f"{trial_base}/actions/memory.trial.start",
+                    headers={**headers, "idempotency-key": "host-mixed-recall"},
+                    json={"query_id": trial_id, "parts": trial_parts},
+                )
+                assert started_trial.status_code == 200, started_trial.text
+                assert started_trial.json()["query_id"] == trial_id
+
+                async def trial_query(name, body):
+                    response = await web.post(
+                        f"{trial_base}/queries/{name}", headers=headers, json=body,
+                    )
+                    assert response.status_code == 200, response.text
+                    return response.json()
+
+                async with asyncio.timeout(100):
+                    while True:
+                        trial_state = await trial_query(
+                            "memory.trial.get", {"query_id": trial_id}
+                        )
+                        if trial_state["state"] == "READY":
+                            break
+                        assert trial_state["state"] != "FAILED", trial_state
+                        await asyncio.sleep(0.2)
+                trial_page = await trial_query(
+                    "memory.trial.result", {"query_id": trial_id, "limit": 4}
+                )
+                trial_image = await trial_query(
+                    "memory.trial.image", {
+                        "query_id": trial_id,
+                        "source_unit_id": unit_evidence["source_unit_id"],
+                        "part_id": picture["part_id"], "offset": 0,
+                    },
+                )
             assert trial_page["total_count"] == 1
             assert trial_page["items"][0]["source_unit_id"] == unit_evidence["source_unit_id"]
             assert trial_page["items"][0]["external_group_id"] == "933179609"
             assert trial_page["items"][0]["author_subject_ref"] == "qq:20001"
-            trial_image = await memory_instance.management_contract.query_authorized(
-                "memory.trial.image", {
-                    "query_id": trial_id,
-                    "source_unit_id": unit_evidence["source_unit_id"],
-                    "part_id": picture["part_id"], "offset": 0,
-                }, authorization=trial_authorization,
-            )
             assert base64.b64decode(trial_image["data_base64"]) == picture_bytes
             with pytest.raises(ForestError) as foreign_trial:
                 await memory_instance.management_contract.query_authorized(
