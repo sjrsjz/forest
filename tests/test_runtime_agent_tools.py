@@ -49,6 +49,29 @@ def _runtime():
     )
 
 
+def test_manifest_service_dependencies_define_startup_order_without_late_bound_cycle():
+    provider = RuntimeModuleDescriptor(
+        "module.provider",
+        (),
+        lambda *_: object(),
+        _ARTIFACT,
+        provided_services=(("demo.request", "1.0"),),
+    )
+    consumer = RuntimeModuleDescriptor(
+        "module.consumer",
+        (),
+        lambda *_: object(),
+        _ARTIFACT,
+        provided_services=(("demo.reply", "1.0"),),
+        startup_service_requires=(("demo.request", ">=1.0,<2.0"),),
+    )
+    registry = RuntimeModuleRegistry(_runtime(), (consumer, provider))
+    assert registry.order == ["module.provider", "module.consumer"]
+
+    with pytest.raises(ForestError, match="Startup service has no provider"):
+        RuntimeModuleRegistry(_runtime(), (consumer,))
+
+
 def _command(service_id: str) -> RuntimeShellCommandContribution:
     return RuntimeShellCommandContribution(
         "module.inspect",

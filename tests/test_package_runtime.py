@@ -9,8 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from forest.errors import ForestError
-from forest.module_validation import resolve_dependencies
 from forest.job_protocol import DurableJobExecutionRequest
+from forest.module_validation import resolve_dependencies
 from forest.package_runtime import (
     PackageGenerationAdapter,
     PackageGenerationState,
@@ -130,7 +130,6 @@ def test_package_publishes_agent_tool_from_its_own_service(tmp_path):
         module_configuration=Configuration(),
         grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
         resolved_contracts={},
-        startup_components=(),
         generation_verifier=lambda **_values: None,
         generation_member_verifier=lambda **_values: None,
         state_queries=SimpleNamespace(),
@@ -159,7 +158,6 @@ def test_installed_package_cannot_enable_official_domain_storage(tmp_path):
             module_configuration=Configuration(),
             grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
             resolved_contracts={},
-            startup_components=(),
             generation_verifier=lambda **_values: None,
             generation_member_verifier=lambda **_values: None,
             state_queries=None,
@@ -652,7 +650,6 @@ async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_p
             ),
         ),
         resolved_contracts={},
-        startup_components=(),
         generation_verifier=verify_generation,
         generation_member_verifier=verify_generation,
         state_queries=None,

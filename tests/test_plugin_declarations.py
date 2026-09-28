@@ -326,7 +326,6 @@ class Worker:
         module_configuration=object(),
         grants=SimpleNamespace(entries=()),
         resolved_contracts={},
-        startup_components=(),
         generation_verifier=object(),
         generation_member_verifier=object(),
         state_queries=None,

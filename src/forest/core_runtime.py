@@ -594,6 +594,9 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 if component_id == "kernel.runtime"
                 else ()
             ),
+            provided_services=tuple(
+                (service_id, "1.0") for service_id in definition["services"]
+            ),
             agent_tools=((RUNTIME_STATUS_TOOL,) if component_id == "kernel.runtime" else ()),
             shell_commands=(
                 RUNTIME_SHELL_COMMANDS

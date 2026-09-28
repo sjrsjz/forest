@@ -24,7 +24,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from forest.errors import ForestError
-from forest.packages import digest_json
+from forest.packages import contract_matches, contract_range, digest_json
 from forest.runtime_contracts import RuntimeContractRouter, RuntimeKernelServiceSpec
 from forest.runtime_generation import (
     BoundGenerationIdentity,
@@ -685,6 +685,8 @@ class RuntimeModuleDescriptor:
     event_subscriptions: tuple[RuntimeEventSubscriptionContribution, ...] = ()
     component_jobs: tuple[RuntimeComponentJobContribution, ...] = ()
     owned_work_lifecycle: OwnedWorkLifecycle = OwnedWorkLifecycle.NONE
+    provided_services: tuple[tuple[str, str], ...] = ()
+    startup_service_requires: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         identities = [item.contribution_id for item in self.management]
@@ -726,6 +728,10 @@ class RuntimeModuleDescriptor:
             raise ValueError("Runtime ComponentJob identities must be unique")
         if not isinstance(self.owned_work_lifecycle, OwnedWorkLifecycle):
             raise ValueError("Runtime owned-work lifecycle declaration is invalid")
+        if len(self.provided_services) != len(set(self.provided_services)):
+            raise ValueError("Runtime provided service identities must be unique")
+        if len(self.startup_service_requires) != len(set(self.startup_service_requires)):
+            raise ValueError("Runtime startup service requirements must be unique")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -828,6 +834,34 @@ class RuntimeModuleRegistry:
             component_id: tuple(sorted(required))
             for component_id, required in dynamic_requires.items()
         }
+        providers: dict[tuple[str, int], tuple[str, str]] = {}
+        for descriptor in self.descriptors:
+            for service_id, service_version in descriptor.provided_services:
+                major = contract_range(service_version)[0][0]
+                key = (service_id, major)
+                if key in providers:
+                    raise ForestError(
+                        "RUNTIME_SERVICE_PROVIDER_CONFLICT",
+                        "Runtime service has no unique provider endpoint",
+                        409,
+                        details={"service_id": service_id, "version": major},
+                    )
+                providers[key] = (descriptor.component_id, service_version)
+        self._service_startup_requires = {}
+        for descriptor in self.descriptors:
+            required_components = set()
+            for service_id, contract in descriptor.startup_service_requires:
+                lower_major = contract_range(contract)[0][0]
+                provider = providers.get((service_id, lower_major))
+                if provider is None or not contract_matches(contract, provider[1]):
+                    raise ForestError(
+                        "RUNTIME_SERVICE_DEPENDENCY_MISSING",
+                        "Startup service has no provider satisfying its contract",
+                        422,
+                        details={"component_id": descriptor.component_id, "service_id": service_id},
+                    )
+                required_components.add(provider[0])
+            self._service_startup_requires[descriptor.component_id] = tuple(sorted(required_components))
         self.contract_router = RuntimeContractRouter(self)
         self.scope_kind = getattr(runtime, "scope_kind", "bot")
         self.generation_authority = getattr(runtime, "generation_authority", None)
@@ -836,7 +870,11 @@ class RuntimeModuleRegistry:
     def _effective_requires(self, descriptor: RuntimeModuleDescriptor) -> tuple[str, ...]:
         return tuple(
             dict.fromkeys(
-                (*descriptor.requires, *self._dynamic_requires[descriptor.component_id])
+                (
+                    *descriptor.requires,
+                    *self._service_startup_requires[descriptor.component_id],
+                    *self._dynamic_requires[descriptor.component_id],
+                )
             )
         )
 
@@ -864,6 +902,10 @@ class RuntimeModuleRegistry:
             "wakes_on_work": descriptor.wakes_on_work,
             "work_notify_order": descriptor.work_notify_order,
             "kernel_services": [item.as_fact() for item in descriptor.kernel_services],
+            "provided_services": [list(item) for item in descriptor.provided_services],
+            "startup_service_requires": [
+                list(item) for item in descriptor.startup_service_requires
+            ],
             "agent_tools": [item.as_fact() for item in descriptor.agent_tools],
             "shell_commands": [item.as_fact() for item in descriptor.shell_commands],
             "job_types": [item.as_fact() for item in descriptor.job_types],

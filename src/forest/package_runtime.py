@@ -2524,7 +2524,6 @@ def package_runtime_descriptor(
     module_configuration: Any,
     grants: Any,
     resolved_contracts: Mapping[str, str],
-    startup_components: tuple[str, ...],
     generation_verifier: GenerationVerifier,
     generation_member_verifier: GenerationVerifier,
     state_queries: PackageStateQueries | None,
@@ -2829,7 +2828,9 @@ def package_runtime_descriptor(
         requires=tuple(
             dict.fromkeys(
                 (
-                    *startup_components,
+                    "kernel.runtime",
+                    "kernel.payload",
+                    "kernel.authorization",
                     *(
                         ("routing.graph",)
                         if (
@@ -2864,5 +2865,17 @@ def package_runtime_descriptor(
             OwnedWorkLifecycle.FREEZE_DRAIN
             if component.get("owned_work_handlers")
             else OwnedWorkLifecycle.NONE
+        ),
+        provided_services=tuple(
+            (item["name"], item["contract"])
+            for item in (
+                *component.get("provides", ()),
+                *component.get("effect_services", ()),
+            )
+        ),
+        startup_service_requires=tuple(
+            (item["name"], item["contract"])
+            for item in component.get("requires", ())
+            if item.get("startup_dependency") and item["name"] in resolved_contracts
         ),
     )

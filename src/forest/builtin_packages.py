@@ -128,7 +128,6 @@ async def bootstrap_builtin_package(
     kernel,
     initial_configuration: dict[str, Any],
     resolved_contracts: dict[str, str] | None = None,
-    startup_components: tuple[str, ...] = (),
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     configuration_validator_factory: Callable[[str], Callable] | None = None,
     additional_grants: tuple[CapabilityGrant, ...] = (),
@@ -226,16 +225,6 @@ async def bootstrap_builtin_package(
         module_configuration=configuration,
         grants=grants,
         resolved_contracts=_required_service_contracts(snapshot, resolved_contracts),
-        startup_components=tuple(
-            dict.fromkeys(
-                (
-                    "kernel.runtime",
-                    "kernel.payload",
-                    "kernel.authorization",
-                    *startup_components,
-                )
-            )
-        ),
         generation_verifier=kernel.runtime.verify_active_generation,
         generation_member_verifier=kernel.runtime.verify_generation_member,
         state_queries=KernelPackageStateQueries(

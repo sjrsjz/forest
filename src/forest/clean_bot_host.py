@@ -546,7 +546,6 @@ class CleanBotHost:
                 "max_attempts": 3,
                 "context_wait_seconds": 3,
             },
-            startup_components=("memory.graph",),
             effect_driver_registry=PackageEffectDriverRegistry(
                 {
                     "media.public-image": media_image_fetch_effect_driver_factory(
@@ -594,9 +593,6 @@ class CleanBotHost:
                 "output_tokens": self.settings.model_max_output_tokens,
                 "stream": True,
             },
-            startup_components=(
-                "provider.chat-completions", "media.capture", "memory.graph",
-            ),
             additional_grants=(
                 CapabilityGrant("provider.invoke", "bot", self.store.bot_id, delegable=True),
             ),
@@ -686,7 +682,6 @@ class CleanBotHost:
                     "policy_revision": "context-view-unit-window-v1",
                 },
             },
-            startup_components=("agent.runtime",),
         )
         delivery = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/delivery"))),
@@ -695,7 +690,6 @@ class CleanBotHost:
             self.schema_bundle_installer,
             kernel=self._kernel,
             initial_configuration={"protocol": "forest.delivery/1"},
-            startup_components=("adapter.onebot",),
             effect_driver_registry=PackageEffectDriverRegistry(
                 {
                     "kernel.payload-json": kernel_payload_json_effect_driver_factory(
@@ -763,10 +757,6 @@ class CleanBotHost:
                     }
                 ],
             },
-            startup_components=(
-                "codec.onebot",
-                "conversation.trigger-policy",
-            ),
             effect_driver_registry=PackageEffectDriverRegistry(
                 {
                     "onebot.websocket-v11": onebot_transport_effect_driver_factory(
