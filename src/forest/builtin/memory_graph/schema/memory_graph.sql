@@ -457,9 +457,11 @@ CREATE TABLE memory_queries (
     query_id text NOT NULL CHECK (octet_length(query_id) BETWEEN 1 AND 256),
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
-    current_source_id text NOT NULL,
-    input_batch_ref text NOT NULL CHECK (octet_length(input_batch_ref) BETWEEN 1 AND 256),
-    context_revision bigint NOT NULL CHECK (context_revision > 0),
+    input_kind text NOT NULL DEFAULT 'SOURCE_UNIT'
+        CHECK (input_kind IN ('SOURCE_UNIT','ADMIN_TRIAL')),
+    current_source_id text,
+    input_batch_ref text CHECK (octet_length(input_batch_ref) BETWEEN 1 AND 256),
+    context_revision bigint CHECK (context_revision > 0),
     query_mode text NOT NULL CHECK (query_mode IN ('TEXT','IMAGE','MIXED')),
     fusion_policy_revision text NOT NULL
         CHECK (octet_length(fusion_policy_revision) BETWEEN 1 AND 256),
@@ -470,9 +472,14 @@ CREATE TABLE memory_queries (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     frozen_at timestamptz,
     PRIMARY KEY (bot_id,query_id),
+    UNIQUE (bot_id,query_id,input_kind),
     UNIQUE (bot_id,operation_id),
     UNIQUE (bot_id,bundle_id),
     FOREIGN KEY (bot_id,current_source_id) REFERENCES memory_sources(bot_id,source_id),
+    CHECK ((input_kind='SOURCE_UNIT' AND current_source_id IS NOT NULL
+            AND input_batch_ref IS NOT NULL AND context_revision IS NOT NULL)
+        OR (input_kind='ADMIN_TRIAL' AND current_source_id IS NULL
+            AND input_batch_ref IS NULL AND context_revision IS NULL)),
     CHECK ((state='FROZEN') = (bundle_id IS NOT NULL)),
     CHECK ((state='FROZEN') = (frozen_at IS NOT NULL))
 );
@@ -481,6 +488,7 @@ CREATE TABLE memory_query_parts (
     bot_id text NOT NULL,
     query_id text NOT NULL,
     query_part_index integer NOT NULL CHECK (query_part_index BETWEEN 0 AND 255),
+    input_kind text NOT NULL DEFAULT 'SOURCE_UNIT' CHECK (input_kind='SOURCE_UNIT'),
     source_unit_id text NOT NULL,
     source_revision bigint NOT NULL CHECK (source_revision > 0),
     occurrence_id text NOT NULL,
@@ -488,11 +496,50 @@ CREATE TABLE memory_query_parts (
     modality text NOT NULL CHECK (modality IN ('TEXT','IMAGE')),
     PRIMARY KEY (bot_id,query_id,query_part_index),
     UNIQUE (bot_id,query_id,source_unit_id,part_id),
-    FOREIGN KEY (bot_id,query_id) REFERENCES memory_queries(bot_id,query_id),
+    FOREIGN KEY (bot_id,query_id,input_kind)
+        REFERENCES memory_queries(bot_id,query_id,input_kind),
     FOREIGN KEY (bot_id,source_unit_id,part_id)
         REFERENCES source_parts(bot_id,source_unit_id,part_id),
     FOREIGN KEY (bot_id,occurrence_id) REFERENCES source_occurrences(bot_id,occurrence_id)
 );
+
+CREATE TABLE memory_trial_inputs (
+    bot_id text NOT NULL,
+    query_id text NOT NULL CHECK (octet_length(query_id) BETWEEN 1 AND 256),
+    input_kind text NOT NULL DEFAULT 'ADMIN_TRIAL' CHECK (input_kind='ADMIN_TRIAL'),
+    input_revision bigint NOT NULL DEFAULT 1 CHECK (input_revision>0),
+    actor_subject_ref text NOT NULL CHECK (octet_length(actor_subject_ref) BETWEEN 1 AND 256),
+    generation_id text NOT NULL CHECK (octet_length(generation_id) BETWEEN 1 AND 256),
+    expires_at timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,query_id),
+    FOREIGN KEY (bot_id,query_id,input_kind)
+        REFERENCES memory_queries(bot_id,query_id,input_kind),
+    CHECK (expires_at>created_at AND expires_at<=created_at+interval '1 hour')
+);
+
+CREATE TABLE memory_trial_parts (
+    bot_id text NOT NULL,
+    query_id text NOT NULL,
+    query_part_index integer NOT NULL CHECK (query_part_index BETWEEN 0 AND 255),
+    part_id text NOT NULL CHECK (octet_length(part_id) BETWEEN 1 AND 256),
+    modality text NOT NULL CHECK (modality IN ('TEXT','IMAGE')),
+    media_type text NOT NULL CHECK (octet_length(media_type) BETWEEN 1 AND 128),
+    byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 8388608),
+    payload_id text NOT NULL CHECK (octet_length(payload_id) BETWEEN 1 AND 256),
+    payload_digest text NOT NULL CHECK (payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    payload_owner_component_id text NOT NULL
+        CHECK (octet_length(payload_owner_component_id) BETWEEN 1 AND 128),
+    payload_owner_kind text NOT NULL
+        CHECK (octet_length(payload_owner_kind) BETWEEN 1 AND 128),
+    payload_owner_id text NOT NULL
+        CHECK (octet_length(payload_owner_id) BETWEEN 1 AND 512),
+    PRIMARY KEY (bot_id,query_id,query_part_index),
+    UNIQUE (bot_id,query_id,part_id),
+    FOREIGN KEY (bot_id,query_id) REFERENCES memory_trial_inputs(bot_id,query_id)
+);
+
+CREATE INDEX memory_trial_inputs_expiry_idx ON memory_trial_inputs(bot_id,expires_at,query_id);
 
 CREATE TABLE facet_preparation_operations (
     bot_id text NOT NULL,
@@ -1281,13 +1328,55 @@ DECLARE
     requested_bot text := context->>'bot_id';
     requested_query text := input->>'query_id';
     query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    trial_row __forest_module_schema__.memory_trial_inputs%ROWTYPE;
     page_value jsonb;
     last_index integer;
     has_more boolean;
 BEGIN
     SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
     WHERE bot_id=requested_bot AND query_id=requested_query AND state IN ('OPEN','FROZEN');
-    IF NOT FOUND OR EXISTS (
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INPUT_UNAVAILABLE',
+                'message','Query input is unavailable','status',409));
+    END IF;
+    IF query_row.input_kind='ADMIN_TRIAL' THEN
+        SELECT * INTO trial_row FROM __forest_module_schema__.memory_trial_inputs
+        WHERE bot_id=requested_bot AND query_id=requested_query;
+        IF NOT FOUND OR trial_row.generation_id IS DISTINCT FROM context->>'generation_id'
+           OR trial_row.expires_at<=clock_timestamp() THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
+                    'message','Trial input has expired or its Generation was replaced','status',410));
+        END IF;
+        SELECT COALESCE(jsonb_agg(item ORDER BY query_part_index),'[]'::jsonb),
+               max(query_part_index)
+        INTO page_value,last_index FROM (
+            SELECT p.query_part_index,jsonb_build_object(
+                'query_part_index',p.query_part_index,'part_id',p.part_id,
+                'part_index',p.query_part_index,'part_kind',p.modality,
+                'media_type',p.media_type,'byte_length',p.byte_length,
+                'input_identity',jsonb_build_object('kind','ADMIN_TRIAL',
+                    'ref',trial_row.query_id,'revision',trial_row.input_revision),
+                'payload',jsonb_build_object('payload_id',p.payload_id,
+                    'digest',p.payload_digest,
+                    'owner_component_id',p.payload_owner_component_id,
+                    'owner_kind',p.payload_owner_kind,'owner_id',p.payload_owner_id)) AS item
+            FROM __forest_module_schema__.memory_trial_parts p
+            WHERE p.bot_id=requested_bot AND p.query_id=requested_query
+              AND p.query_part_index>(input->>'after_part_index')::integer
+            ORDER BY p.query_part_index LIMIT (input->>'limit')::integer
+        ) page;
+        SELECT EXISTS (SELECT 1 FROM __forest_module_schema__.memory_trial_parts p
+            WHERE p.bot_id=requested_bot AND p.query_id=requested_query
+              AND p.query_part_index>COALESCE(last_index,(input->>'after_part_index')::integer))
+        INTO has_more;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('parts',page_value,'next_part_index',last_index,
+                'has_more',has_more,'space_id',(SELECT space_id
+                    FROM __forest_module_schema__.memory_domains WHERE bot_id=requested_bot)));
+    END IF;
+    IF EXISTS (
         SELECT 1 FROM __forest_module_schema__.memory_query_parts qp
         JOIN __forest_module_schema__.source_units u USING(bot_id,source_unit_id)
         JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
@@ -3222,12 +3311,12 @@ $$;
 CREATE FUNCTION guard_memory_query() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF ROW(NEW.bot_id,NEW.query_id,NEW.operation_id,NEW.input_digest,
-           NEW.current_source_id,NEW.input_batch_ref,NEW.context_revision,
+           NEW.input_kind,NEW.current_source_id,NEW.input_batch_ref,NEW.context_revision,
            NEW.query_mode,NEW.fusion_policy_revision,NEW.accepted_deletion_epoch,
            NEW.created_at,NEW.graph_snapshot::text)
        IS DISTINCT FROM
        ROW(OLD.bot_id,OLD.query_id,OLD.operation_id,OLD.input_digest,
-           OLD.current_source_id,OLD.input_batch_ref,OLD.context_revision,
+           OLD.input_kind,OLD.current_source_id,OLD.input_batch_ref,OLD.context_revision,
            OLD.query_mode,OLD.fusion_policy_revision,OLD.accepted_deletion_epoch,
            OLD.created_at,OLD.graph_snapshot::text) THEN
         RAISE EXCEPTION 'Memory query identity is immutable' USING ERRCODE='55000';
@@ -3236,6 +3325,25 @@ BEGIN
     IF ROW(NEW.state,NEW.bundle_id,NEW.frozen_at)
        IS NOT DISTINCT FROM ROW(OLD.state,OLD.bundle_id,OLD.frozen_at) THEN RETURN NEW; END IF;
     RAISE EXCEPTION 'Invalid Memory query transition' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION guard_trial_input_retention() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE expiry timestamptz;
+BEGIN
+    IF TG_OP='UPDATE' THEN
+        RAISE EXCEPTION 'Trial input identity is immutable' USING ERRCODE='55000';
+    END IF;
+    IF TG_TABLE_NAME='memory_trial_inputs' THEN
+        expiry := OLD.expires_at;
+    ELSE
+        SELECT expires_at INTO expiry FROM __forest_module_schema__.memory_trial_inputs
+        WHERE bot_id=OLD.bot_id AND query_id=OLD.query_id;
+    END IF;
+    IF expiry IS NULL OR expiry>clock_timestamp() THEN
+        RAISE EXCEPTION 'Active trial input cannot be removed' USING ERRCODE='55000';
+    END IF;
+    RETURN OLD;
 END;
 $$;
 
@@ -3448,6 +3556,10 @@ CREATE TRIGGER relation_retractions_immutable BEFORE UPDATE OR DELETE ON relatio
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER memory_query_parts_immutable BEFORE UPDATE OR DELETE ON memory_query_parts
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER memory_trial_inputs_retention BEFORE UPDATE OR DELETE ON memory_trial_inputs
+    FOR EACH ROW EXECUTE FUNCTION guard_trial_input_retention();
+CREATE TRIGGER memory_trial_parts_retention BEFORE UPDATE OR DELETE ON memory_trial_parts
+    FOR EACH ROW EXECUTE FUNCTION guard_trial_input_retention();
 CREATE TRIGGER facet_preparation_operations_immutable
     BEFORE UPDATE OR DELETE ON facet_preparation_operations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();

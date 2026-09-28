@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
-from psycopg import sql
+from psycopg import errors, sql
 from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
@@ -586,6 +586,114 @@ async def test_query_facet_persistence_rejects_unbound_input_identity(
         )).fetchone())["result"]
     assert result["ok"] is False
     assert result["error"]["code"] == "MEMORY_FACET_INPUT_INVALID"
+
+
+@pytest.mark.postgres
+async def test_trial_parts_are_isolated_from_source_membership_and_generation(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "trial-input-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    digest = "sha256:" + "a" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_domains "
+            "(bot_id,initialization_operation_id,input_digest,space_id,"
+            "embedding_model_kind,model_revision_digest,dimensions,normalization,"
+            "fusion_policy_revision) VALUES (%s,'trial-domain',%s,%s,'TEXT_IMAGE',%s,"
+            "4096,'L2','fusion/1')"
+        ).format(namespace), (store.bot_id, digest, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_queries "
+            "(bot_id,query_id,operation_id,input_digest,input_kind,query_mode,"
+            "fusion_policy_revision,accepted_deletion_epoch) VALUES "
+            "(%s,'query/trial','trial-register',%s,'ADMIN_TRIAL','MIXED','fusion/1',0)"
+        ).format(namespace), (store.bot_id, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_trial_inputs "
+            "(bot_id,query_id,actor_subject_ref,generation_id,expires_at) "
+            "VALUES (%s,'query/trial','web:admin','generation/trial',"
+            "clock_timestamp()+interval '10 minutes')"
+        ).format(namespace), (store.bot_id,))
+        for index, modality, media_type in (
+            (0, "TEXT", "text/plain"), (1, "IMAGE", "image/png")
+        ):
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.memory_trial_parts "
+                "(bot_id,query_id,query_part_index,part_id,modality,media_type,"
+                "byte_length,payload_id,payload_digest,payload_owner_component_id,"
+                "payload_owner_kind,payload_owner_id) VALUES "
+                "(%s,'query/trial',%s,%s,%s,%s,4,%s,%s,'memory.graph',"
+                "'trial.input','query/trial')"
+            ).format(namespace), (
+                store.bot_id, index, f"part/{index}", modality, media_type,
+                f"payload/{index}", digest,
+            ))
+
+    async def browse(generation, after=-1):
+        async with store.pool.connection() as conn:
+            return (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_read_query_parts(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id, "generation_id": generation}),
+                Jsonb({"query_id": "query/trial", "after_part_index": after, "limit": 1}),
+            ))).fetchone())["result"]
+
+    first = await browse("generation/trial")
+    assert first["ok"] is True
+    Draft202012Validator(package.snapshot.schema(
+        "schemas/read-query-parts-output.json"
+    )).validate(first["value"])
+    assert first["value"]["has_more"] is True
+    assert first["value"]["parts"][0]["input_identity"] == {
+        "kind": "ADMIN_TRIAL", "ref": "query/trial", "revision": 1,
+    }
+    assert "source_unit_id" not in first["value"]["parts"][0]
+    second = await browse("generation/trial", first["value"]["next_part_index"])
+    assert [part["part_kind"] for part in second["value"]["parts"]] == ["IMAGE"]
+    assert second["value"]["has_more"] is False
+    stale = await browse("generation/replaced")
+    assert stale["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
+    async with store.pool.connection() as conn:
+        with pytest.raises(errors.ObjectNotInPrerequisiteState):
+            async with conn.transaction():
+                await conn.execute(sql.SQL(
+                    "DELETE FROM {}.memory_trial_parts WHERE bot_id=%s AND query_id='query/trial'"
+                ).format(namespace), (store.bot_id,))
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_queries "
+            "(bot_id,query_id,operation_id,input_digest,input_kind,query_mode,"
+            "fusion_policy_revision,accepted_deletion_epoch) VALUES "
+            "(%s,'query/expired','trial-expired',%s,'ADMIN_TRIAL','TEXT','fusion/1',0)"
+        ).format(namespace), (store.bot_id, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_trial_inputs "
+            "(bot_id,query_id,actor_subject_ref,generation_id,created_at,expires_at) "
+            "VALUES (%s,'query/expired','web:admin','generation/trial',"
+            "clock_timestamp()-interval '2 minutes',clock_timestamp()-interval '1 minute')"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_trial_parts "
+            "(bot_id,query_id,query_part_index,part_id,modality,media_type,byte_length,"
+            "payload_id,payload_digest,payload_owner_component_id,payload_owner_kind,"
+            "payload_owner_id) VALUES (%s,'query/expired',0,'part/expired','TEXT',"
+            "'text/plain',4,'payload/expired',%s,'memory.graph','trial.input',"
+            "'query/expired')"
+        ).format(namespace), (store.bot_id, digest))
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "DELETE FROM {}.memory_trial_parts WHERE bot_id=%s AND query_id='query/expired'"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "DELETE FROM {}.memory_trial_inputs WHERE bot_id=%s AND query_id='query/expired'"
+        ).format(namespace), (store.bot_id,))
 
 
 def _envelope(
