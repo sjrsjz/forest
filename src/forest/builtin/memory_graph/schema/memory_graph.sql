@@ -1155,6 +1155,10 @@ CREATE INDEX embedding_facets_source_idx ON embedding_facets(
 CREATE INDEX embedding_facets_query_idx ON embedding_facets(
     bot_id,query_id,purpose,state,facet_id
 );
+CREATE INDEX embedding_facets_trial_expiry_idx ON embedding_facets(
+    bot_id,state,trial_query_id,facet_id
+) WHERE input_kind='ADMIN_TRIAL'
+    AND state IN ('PENDING','DISPATCHED','EMBEDDED','READY','UNKNOWN','FAILED');
 CREATE INDEX embedding_facets_snapshot_idx ON embedding_facets(
     bot_id,space_id,purpose,state,published_at,facet_id
 );
@@ -3134,6 +3138,7 @@ DECLARE
     requested_token text := input->>'claim_token';
     requested_lease integer := (input->>'lease_seconds')::integer;
     work_row __forest_module_schema__.vector_index_deletions%ROWTYPE;
+    expired_facet record;
     task_payload jsonb;
 BEGIN
     IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
@@ -3150,6 +3155,38 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
             'value',work_row.claim_payload);
     END IF;
+    -- Expiry is a Memory fact. Retire a bounded set before selecting deletion
+    -- work so a silent Bot also removes stale trial vectors from the index.
+    FOR expired_facet IN
+        SELECT f.facet_id,f.space_id,f.accepted_deletion_epoch,f.state
+        FROM __forest_module_schema__.memory_trial_inputs t
+        JOIN __forest_module_schema__.embedding_facets f
+          ON f.bot_id=t.bot_id AND f.trial_query_id=t.query_id
+         AND f.input_kind='ADMIN_TRIAL'
+        WHERE t.bot_id=requested_bot AND t.expires_at<=clock_timestamp()
+          AND f.state IN ('PENDING','DISPATCHED','EMBEDDED','READY','UNKNOWN','FAILED')
+          AND (f.state NOT IN ('DISPATCHED','UNKNOWN') OR NOT EXISTS (
+                   SELECT 1 FROM __forest_module_schema__.vector_index_deletions d
+                   WHERE d.bot_id=f.bot_id AND d.index_ref_id=f.facet_id
+               ))
+        ORDER BY t.expires_at,f.facet_id LIMIT 32
+        FOR UPDATE OF f SKIP LOCKED
+    LOOP
+        IF expired_facet.state IN ('DISPATCHED','UNKNOWN','EMBEDDED','READY') THEN
+            INSERT INTO __forest_module_schema__.vector_index_deletions(
+                bot_id,index_ref_id,space_id,deletion_epoch)
+            VALUES(requested_bot,expired_facet.facet_id,expired_facet.space_id,
+                expired_facet.accepted_deletion_epoch)
+            ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
+        END IF;
+        IF expired_facet.state IN ('PENDING','EMBEDDED','READY','FAILED') THEN
+            UPDATE __forest_module_schema__.embedding_facets
+            SET state='SUPPRESSED',index_ref_id=NULL,vector_digest=NULL,
+                result_payload_id=NULL,result_payload_digest=NULL,
+                published_at=NULL,updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND facet_id=expired_facet.facet_id;
+        END IF;
+    END LOOP;
     SELECT * INTO work_row FROM __forest_module_schema__.vector_index_deletions
     WHERE bot_id=requested_bot AND state='PENDING'
       AND next_attempt_at<=clock_timestamp()

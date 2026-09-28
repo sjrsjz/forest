@@ -948,6 +948,125 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
         ).format(namespace), (store.bot_id,))
 
 
+@pytest.mark.postgres
+async def test_expired_trial_vectors_are_suppressed_and_deleted(clean_authority, tmp_path):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "expired-trial-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    digest = "sha256:" + "a" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_domains "
+            "(bot_id,initialization_operation_id,input_digest,space_id,"
+            "embedding_model_kind,model_revision_digest,dimensions,normalization,"
+            "fusion_policy_revision) VALUES "
+            "(%s,'expired-domain',%s,%s,'TEXT_IMAGE',%s,4096,'L2','fusion/1')"
+        ).format(namespace), (store.bot_id, digest, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_queries "
+            "(bot_id,query_id,operation_id,input_digest,input_kind,query_mode,"
+            "fusion_policy_revision,accepted_deletion_epoch) VALUES "
+            "(%s,'query/expired-vector','expired-register',%s,'ADMIN_TRIAL',"
+            "'TEXT','fusion/1',0)"
+        ).format(namespace), (store.bot_id, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_trial_inputs "
+            "(bot_id,query_id,actor_subject_ref,generation_id,created_at,expires_at) "
+            "VALUES (%s,'query/expired-vector','web:admin','generation/expired',"
+            "clock_timestamp()-interval '2 minutes',"
+            "clock_timestamp()-interval '1 minute')"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_trial_parts "
+            "(bot_id,query_id,query_part_index,part_id,modality,media_type,"
+            "byte_length,payload_id,payload_digest,payload_owner_component_id,"
+            "payload_owner_kind,payload_owner_id) VALUES "
+            "(%s,'query/expired-vector',0,'part/expired-vector','TEXT',"
+            "'text/plain',4,'payload/expired-vector',%s,'memory.graph',"
+            "'trial.input','query/expired-vector')"
+        ).format(namespace), (store.bot_id, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_facets "
+            "(bot_id,facet_id,purpose,query_id,input_kind,input_ref,input_revision,"
+            "trial_query_id,part_id,modality,selector_start_char,selector_end_char,"
+            "input_payload_id,input_payload_digest,facet_content_digest,"
+            "input_media_type,input_byte_length,space_id,accepted_deletion_epoch,"
+            "state,index_ref_id,vector_digest,result_payload_id,"
+            "result_payload_digest,published_at) VALUES "
+            "(%s,'facet/expired-vector','QUERY','query/expired-vector',"
+            "'ADMIN_TRIAL','query/expired-vector',1,'query/expired-vector',"
+            "'part/expired-vector','TEXT',0,4,'payload/expired-vector',%s,%s,"
+            "'text/plain',4,%s,0,'READY','facet/expired-vector',%s,"
+            "'embedding-result/expired',%s,clock_timestamp())"
+        ).format(namespace), (store.bot_id, digest, digest, digest, digest, digest))
+    async with store.pool.connection() as conn:
+        expired_read = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_read_query_parts(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id, "generation_id": "generation/expired"}),
+            Jsonb({"query_id": "query/expired-vector", "after_part_index": -1,
+                   "limit": 1}),
+        ))).fetchone())["result"]
+    assert expired_read["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
+    async def claim_deletion(token):
+        async with store.pool.connection() as conn, conn.transaction():
+            return (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_claim_vector_deletion(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id}),
+                Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                       "claim_token": token, "lease_seconds": 360}),
+            ))).fetchone())["result"]
+
+    claims = await asyncio.gather(
+        claim_deletion("delete/expired-vector/a"),
+        claim_deletion("delete/expired-vector/b"),
+    )
+    assert all(claim["ok"] for claim in claims)
+    assert sum(claim["value"] is not None for claim in claims) == 1
+    deletion_claim = next(claim for claim in claims if claim["value"] is not None)
+    deletion_token = deletion_claim["value"]["claim_token"]
+    assert deletion_claim["ok"] and deletion_claim["value"] is not None
+    assert deletion_claim["value"]["payload"] == {
+        "index_ref_id": "facet/expired-vector", "space_id": digest,
+    }
+    async with store.pool.connection() as conn:
+        row = (await (await conn.execute(sql.SQL(
+            "SELECT f.state,d.state AS deletion_state "
+            "FROM {}.embedding_facets f JOIN {}.vector_index_deletions d "
+            "ON d.bot_id=f.bot_id AND d.index_ref_id=f.facet_id "
+            "WHERE f.bot_id=%s AND f.facet_id='facet/expired-vector'"
+        ).format(namespace, namespace), (store.bot_id,))).fetchone())
+    assert row == {"state": "SUPPRESSED", "deletion_state": "PENDING"}
+    async with store.pool.connection() as conn:
+        settled = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_settle_vector_deletion(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"protocol": "forest.owned-work-settle-request/1",
+                   "work_id": "facet/expired-vector",
+                   "claim_token": deletion_token, "attempt": 1,
+                   "outcome": {"status": "SUCCEEDED",
+                               "result": {"index_ref_id": "facet/expired-vector",
+                                          "deleted": True}}}),
+        ))).fetchone())["result"]
+    assert settled["ok"], settled
+    async with store.pool.connection() as conn:
+        next_claim = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_claim_vector_deletion(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                   "claim_token": "delete/expired-vector/next", "lease_seconds": 360}),
+        ))).fetchone())["result"]
+    assert next_claim["ok"] and next_claim["value"] is None
+
+
 def _envelope(
     generation_id,
     selection,

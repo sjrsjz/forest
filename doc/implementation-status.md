@@ -209,6 +209,8 @@ Memory 管理关系新增 `memory.relations.neighbourhood` 只读端口：从指
 
 后续已把试验 facet 接入 Memory 的嵌入 claim、handoff 资格复核与向量发布：认领时要求 Bot/Generation、未过期的试验输入、固定 part 和 PayloadRef；handoff 前重新锁定并核验，旧 Generation 不可继续派发。发布事务仍按当前 Generation 与到期时间判定，失效向量写 ref-only 删除 outbox 并抑制 facet；向量发布 Worker 的任务契约不再暴露群来源字段。隔离 PostgreSQL 已验证图文试验认领、旧 Generation 拒绝、正常发布为 READY、旧 Generation 发布时墓碑删除，以及删除 outbox 的认领与结算；完整 Memory 包 15 项、静态检查和本地 441 项回归通过。管理启动/取消 action、受管资产入口、试验调度/结果查询与 TTL 清理尚未完成，因此管理试验仍不可用。
 
+Memory 的常驻向量删除 Worker 现在每次认领前有界扫描已过期试验：未派发的 PENDING/FAILED facet 直接抑制；已派发或结果不确定的 facet 先登记 ref-only 删除屏障，等待原任务收敛；EMBEDDED/READY 同事务登记删除并抑制。单次最多处理 32 个 facet，扫描索引只收录待处理状态，不包含已抑制的历史行；索引删除继续由原 owned-work 租约与结算完成。真实 PostgreSQL 验证了已发布试验在静默到期后无法读取、被抑制、两个并发认领合流为唯一删除任务、结算及二次轮询不重复领取。完整 Memory 包 16 项通过。此机制处理向量索引生命周期，尚未物理回收试验查询、part 和 Payload 记录；完整 TTL 清理仍待实现。
+
 Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。管理启动 action、受管临时资产接纳、试验 owned-work、结果查询和 TTL 清理仍未完成。
 
 ## 8. 下一切换顺序
