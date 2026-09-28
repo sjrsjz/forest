@@ -98,7 +98,7 @@ GROUP_MESSAGE 的 source_unit_id 根据 Bot 和平台去重身份稳定派生；
 
 源单元注册、当前轮查询资格与长期可检索资格是三个不同状态。完整来源物化后，`source_units` 先成为 `REGISTERED`；Conversation 把 occurrence 提交进准确 InputBatch 后，该 occurrence 成为 `ADMITTED`，只允许作为本轮 QUERY facet 的输入，源单元仍是 `REGISTERED`，不得生成 DOCUMENT facet、进入 Milvus 或充当图节点；只有 Scheduler 已提交的确定性裁剪结果明确把该事件写入 `memory_archive`，Memory 在同一 UnitOfWork 中复核 `compaction_ref/event_ref/InputBatch/context_revision` 后，occurrence 与源单元才成为 `ELIGIBLE`。因此活跃窗口、排队尾部和“已被 Agent 看见但尚未裁剪”的消息都不是长期 RAG 文档。即使来源后来归档，早先模型调用仍按自己冻结的切口和检索包读取，不能回写未来内容。
 
-InputBatch 提交不能同步等待远端图片下载。若选择事务尚未找到完整 source occurrence，Memory 写入由 `(conversation_ref,event_ref)` 唯一标识的 `pending_input_events`；裁剪先于完整来源到达时另写 `pending_archive_events`。媒体物化、输入接纳与归档资格对同一事件使用相同锁，来源提交后依次解析两类待定事实，使状态从 `REGISTERED` 收敛为 `ADMITTED`，再收敛为 `ELIGIBLE`。下载确定失败时两类待定事实一并成为 `UNAVAILABLE`。待定记录自身不可检索，也不能创建文本占位冒充图片；重放输入不同必须冲突，不能最后写入者覆盖。
+InputBatch 提交不能同步等待远端图片下载。若选择事务尚未找到完整 source occurrence，Memory 写入由 `(conversation_ref,event_ref)` 唯一标识的 `pending_input_events`；裁剪先于完整来源到达时另写 `pending_archive_events`。媒体物化、输入接纳与归档资格对同一事件使用相同锁，来源提交后依次解析两类待定事实，使状态从 `REGISTERED` 收敛为 `ADMITTED`，再收敛为 `ELIGIBLE`。解析待定输入时必须在同一捕获事务写入与即时输入接纳同身份、同摘要规则的 `eligibility_operations`；`memory.query.begin` 只从这份权威资格事实构造成员集，不能仅凭 occurrence 的 `ADMITTED` 状态推断成员。下载确定失败时两类待定事实一并成为 `UNAVAILABLE`。待定记录自身不可检索，也不能创建文本占位冒充图片；重放输入不同必须冲突，不能最后写入者覆盖。
 
 ```text
 MemorySourceUnit

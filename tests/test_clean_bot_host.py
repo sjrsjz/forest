@@ -9,6 +9,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,12 +21,13 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
 from psycopg import sql
+from pymilvus import AsyncMilvusClient
 
 from forest.adapters.onebot import SendResult
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.clean_management_app import CleanManagementGateway
 from forest.deployment_management_app import create_deployment_management_app
-from forest.embeddings import EmbeddingResult, EmbeddingVector
+from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
 from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
@@ -33,6 +35,7 @@ from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import ModuleLifecycleState
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
+from forest.storage.vector_index_authority import VectorIndexIdentityRepository
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
@@ -126,6 +129,18 @@ class FakeMediaClient(FakeModelClient):
         ):
             raise ForestError("MEDIA_TRANSPORT_FAILED", "retry fixture", 502)
         return CapturedImage(b"fake-png-bytes", "image/png", 2, 3)
+
+
+class ValidPngMediaClient(FakeMediaClient):
+    async def fetch(self, locator):
+        capture_delay = float(os.environ.get("FOREST_TEST_MEDIA_CAPTURE_DELAY_SECONDS", "0"))
+        if capture_delay:
+            await asyncio.sleep(capture_delay)
+        self.fetched.append(locator)
+        image = Image.new("RGB", (64, 64), (33, 91, 147))
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG")
+        return CapturedImage(buffer.getvalue(), "image/png", 64, 64)
 
 
 class FakeMilvusClient:
@@ -2020,6 +2035,36 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
         shell_administrator_ids=("42",),
         agent_system_prompt="The Agent-Memory request integration fixture.",
     )
+    qiyu_env_file = os.environ.get("FOREST_TEST_QIYU_ENV_FILE") if scenario == "visual" else None
+    real_transport = bool(qiyu_env_file)
+    valid_media = real_transport or bool(os.environ.get("FOREST_TEST_MEDIA_CAPTURE_DELAY_SECONDS"))
+    if qiyu_env_file:
+        wanted = {
+            "EMBEDDING_PROVIDER", "EMBEDDING_MODEL", "EMBEDDING_DIMENSION",
+            "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL",
+        }
+        qiyu_values = {}
+        for line in Path(qiyu_env_file).read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            key = key.strip()
+            if separator and key in wanted:
+                qiyu_values[key] = value.strip().strip('"\'')
+        assert qiyu_values.get("EMBEDDING_PROVIDER") == "siliconflow"
+        assert qiyu_values.get("EMBEDDING_MODEL") == "Qwen/Qwen3-VL-Embedding-8B"
+        assert qiyu_values.get("EMBEDDING_DIMENSION") == "4096"
+        assert qiyu_values.get("EMBEDDING_API_KEY")
+        assert qiyu_values.get("EMBEDDING_BASE_URL", "").startswith("https://")
+        milvus_uri = os.environ["FOREST_TEST_MILVUS_URI"]
+        settings = replace(
+            settings,
+            bot_id="bot-agent-recall-real-" + uuid4().hex[:12],
+            embedding_endpoint=qiyu_values["EMBEDDING_BASE_URL"].rstrip("/") + "/embeddings",
+            embedding_api_key=qiyu_values["EMBEDDING_API_KEY"],
+            embedding_deployment_id="embedding.multimodal/qiyu-vl/real-host-test",
+            embedding_model_revision="operator-declared/real-host-test-1",
+            vector_index_endpoint=milvus_uri,
+            embedding_timeout_seconds=120,
+        )
     clients = []
     RecordingModelClient.requests = []
     RecordingModelClient.first_gate = (
@@ -2040,9 +2085,9 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
     host = CleanBotHost(
         settings,
         model_client_factory=RecordingModelClient,
-        embedding_client_factory=FakeEmbeddingClient,
-        media_client_factory=FakeMediaClient,
-        vector_index_client_factory=FakeMilvusClient,
+        embedding_client_factory=None if real_transport else FakeEmbeddingClient,
+        media_client_factory=ValidPngMediaClient if valid_media else FakeMediaClient,
+        vector_index_client_factory=None if real_transport else FakeMilvusClient,
         websocket_client_factory=create_websocket,
         package_catalog=PackageCatalog(tmp_path / "recall-packages"),
     )
@@ -2052,7 +2097,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
             item.storage.spec.namespace for item in host.registry.descriptors
             if item.component_id == "memory.graph"
         )
-        async with asyncio.timeout(20):
+        async with asyncio.timeout(90 if real_transport else 20):
             while True:
                 async with host.store.pool.connection() as conn:
                     domain = await (await conn.execute(
@@ -2079,13 +2124,17 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
             ],
         }).encode())
         try:
-            async with asyncio.timeout(45):
+            async with asyncio.timeout(120 if real_transport else 45):
                 while not RecordingModelClient.requests:
                     await asyncio.sleep(0.1)
         except TimeoutError as exc:
             conversation_schema = next(
                 item.storage.spec.namespace for item in host.registry.descriptors
                 if item.component_id == "conversation.scheduler"
+            )
+            media_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "media.capture"
             )
             async with host.store.pool.connection() as conn:
                 failures = await (await conn.execute(
@@ -2108,10 +2157,23 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                     "SELECT input_payload->'outcome' AS outcome "
                     "FROM {}.vector_work_settlements ORDER BY claim_token DESC LIMIT 5"
                 ).format(sql.Identifier(memory_schema)))).fetchall()
+                pending_inputs = await (await conn.execute(sql.SQL(
+                    "SELECT state,error_code,input_batch_ref,context_revision "
+                    "FROM {}.pending_input_events"
+                ).format(sql.Identifier(memory_schema)))).fetchall()
+                source_occurrences = await (await conn.execute(sql.SQL(
+                    "SELECT eligibility_state,input_batch_ref,context_revision "
+                    "FROM {}.source_occurrences"
+                ).format(sql.Identifier(memory_schema)))).fetchall()
+                media_captures = await (await conn.execute(sql.SQL(
+                    "SELECT state,error_code FROM {}.media_captures"
+                ).format(sql.Identifier(media_schema)))).fetchall()
             raise AssertionError(
                 f"Provider not reached: agent={failures}, recall={recall}, "
                 f"facets={facets}, vector_batches={vector_batches}, "
                 f"vector_settlements={vector_settlements}, "
+                f"pending_inputs={pending_inputs}, occurrences={source_occurrences}, "
+                f"media_captures={media_captures}, "
                 f"memory_failure={host.registry.get('memory.graph')._owned_work.failure}"
             ) from exc
         prepared = RecordingModelClient.requests[0]
@@ -2121,6 +2183,35 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
         assert manifest["memory_evidence"]["current_source"]["external_group_id"] == "933179609"
         assert any(item["author"]["principal_ref"] == "qq:20001"
                    for item in manifest["source_manifest"])
+        if real_transport:
+            vector_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "vector.index"
+            )
+            async with host.store.pool.connection() as conn:
+                query_facets = await (await conn.execute(
+                    sql.SQL(
+                        "SELECT modality,state,index_ref_id FROM {}.embedding_facets "
+                        "WHERE bot_id=%s AND purpose='QUERY'"
+                    ).format(sql.Identifier(memory_schema)), (settings.bot_id,),
+                )).fetchall()
+                active_refs = await (await conn.execute(
+                    sql.SQL(
+                        "SELECT ref_id FROM {}.vector_index_refs "
+                        "WHERE bot_id=%s AND state='ACTIVE'"
+                    ).format(sql.Identifier(vector_schema)), (settings.bot_id,),
+                )).fetchall()
+                receipts = await (await conn.execute(
+                    sql.SQL("SELECT count(*) AS count FROM {}.query_match_receipts WHERE bot_id=%s")
+                    .format(sql.Identifier(memory_schema)), (settings.bot_id,),
+                )).fetchone()
+            assert {(row["modality"], row["state"]) for row in query_facets} >= {
+                ("TEXT", "READY"), ("IMAGE", "READY")
+            }
+            assert {row["index_ref_id"] for row in query_facets} <= {
+                row["ref_id"] for row in active_refs
+            }
+            assert receipts["count"] >= 2
         if scenario == "visual":
             assert b"image_url" in prepared.body
             assert manifest["media_transform_refs"]
@@ -2196,6 +2287,22 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
         RecordingModelClient.first_gate = None
         RecordingModelClient.reply_text = None
         await host.close()
+        if real_transport:
+            profile = EmbeddingProfile(
+                deployment_id=settings.embedding_deployment_id,
+                model_revision=settings.embedding_model_revision,
+                model=settings.embedding_model,
+                dimensions=settings.embedding_dimensions,
+            )
+            collection_name = VectorIndexIdentityRepository.collection_name(
+                settings.bot_id, profile.space_id
+            )
+            client = AsyncMilvusClient(uri=settings.vector_index_endpoint)
+            try:
+                if await client.has_collection(collection_name=collection_name):
+                    await client.drop_collection(collection_name=collection_name)
+            finally:
+                await client.close()
         assert name.startswith("forest_recall_") and len(name) == 46
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()

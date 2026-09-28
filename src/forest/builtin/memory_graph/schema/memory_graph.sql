@@ -6015,6 +6015,8 @@ DECLARE
     source_row record; identity_row record; unit_row record; occurrence_row record; operation_row record; pending_row record;
     archive_pending_row record;
     part jsonb; duplicate_value boolean := false; eligibility_value text := 'REGISTERED';
+    eligibility_operation_id text; eligibility_input_digest text;
+    current_eligibility_revision bigint;
     journal_row record;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
@@ -6197,6 +6199,24 @@ BEGIN
         UPDATE __forest_module_schema__.source_occurrences SET eligibility_state='ADMITTED',
             input_batch_ref=pending_row.input_batch_ref,context_revision=pending_row.context_revision,
             qualified_at=clock_timestamp() WHERE bot_id=requested_bot AND occurrence_id=occurrence_id_value;
+        eligibility_operation_id := 'eligibility:' || encode(sha256(convert_to(jsonb_build_array(
+            requested_bot,pending_row.operation_id,occurrence_id_value
+        )::text,'UTF8')),'hex');
+        eligibility_input_digest := 'sha256:' || encode(sha256(convert_to(jsonb_build_array(
+            unit_id_value,occurrence_id_value,pending_row.input_batch_ref,
+            pending_row.context_revision,pending_row.accepted_deletion_epoch
+        )::text,'UTF8')),'hex');
+        SELECT eligibility_revision INTO current_eligibility_revision
+        FROM __forest_module_schema__.source_units
+        WHERE bot_id=requested_bot AND source_unit_id=unit_id_value;
+        INSERT INTO __forest_module_schema__.eligibility_operations(
+            bot_id,operation_id,input_digest,source_unit_id,occurrence_id,
+            input_batch_ref,context_revision,resulting_eligibility_revision
+        ) VALUES (
+            requested_bot,eligibility_operation_id,eligibility_input_digest,
+            unit_id_value,occurrence_id_value,pending_row.input_batch_ref,
+            pending_row.context_revision,current_eligibility_revision
+        );
         UPDATE __forest_module_schema__.pending_input_events SET state='RESOLVED',
             source_unit_id=unit_id_value,occurrence_id=occurrence_id_value,resolved_at=clock_timestamp()
         WHERE bot_id=requested_bot AND conversation_ref=occurrence_value->>'conversation_ref'
