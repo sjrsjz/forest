@@ -1,0 +1,69 @@
+manifest_version = 1
+package_id = "forest.component-worker-host"
+version = "1.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "component_worker_host:ComponentWorkerHost"
+
+[[components]]
+id = "component.worker-host"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 16
+max_queue_items = 64
+max_state_inflight = 8
+max_owned_tasks = 2
+max_owned_resources = 2
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 60
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = ["service.call:runtime.graph.snapshot"]
+
+[[components.requires]]
+name = "runtime.graph.snapshot"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.provides]]
+name = "component.host.module"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/module-input.json"
+output_schema = "schemas/module-output.json"
+
+[[components.provides]]
+name = "shell.component-host.execute"
+contract = "1.0"
+semantics = "at-most-once"
+input_schema = "schemas/shell-input.json"
+output_schema = "schemas/shell-output.json"
+
+[[components.shell_commands]]
+command_id = "module.list"
+command_version = 1
+service_id = "shell.component-host.execute"
+service_version = 1
+argument_schema = "schemas/shell-list.json"
+management_operation_id = "module"
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["runtime.status.read"]
+output_policy = "SHORT"
+timeout_s = 10
+
+[[components.management_queries]]
+id = "module"
+port = "component.host.module"
+timeout_s = 10

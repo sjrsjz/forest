@@ -115,17 +115,6 @@ RUNTIME_SHELL_COMMANDS = (
         (("expect-maintenance", "expected_maintenance_epoch"),),
     ),
     RuntimeShellCommandContribution(
-        "module.list",
-        1,
-        "shell.core-runtime.execute",
-        1,
-        _empty_schema("module.list"),
-        "runtime.status",
-        "BOT",
-        "P1",
-        ("runtime.status.read",),
-    ),
-    RuntimeShellCommandContribution(
         "core.reload",
         1,
         "shell.core-runtime.execute",
@@ -168,16 +157,6 @@ def runtime_shell_service(context):
                 if replacement.get("error_code"):
                     text += f" error={replacement['error_code']}"
             return ShellCommandExecutionResult(text)
-        if request.command_id == "module.list":
-            status = await runtime.status()
-            return ShellCommandExecutionResult(
-                "Forest RuntimeGraph 模块：\n"
-                + "\n".join(
-                    f"{item['component_id']} {item['status']} "
-                    f"r{item['config_revision']} {item['generation_id']}"
-                    for item in status["members"]
-                )
-            )
         if request.command_id == "core.reload":
             if set(request.arguments) != {"expected_graph_revision"} or type(
                 request.arguments["expected_graph_revision"]

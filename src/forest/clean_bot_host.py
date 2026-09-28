@@ -393,6 +393,15 @@ class CleanBotHost:
                 }
             ),
         )
+        worker_host = await bootstrap_builtin_package(
+            Path(str(files("forest").joinpath("builtin/component_worker_host"))),
+            self.package_catalog,
+            self.store,
+            self.schema_bundle_installer,
+            kernel=self._kernel,
+            initial_configuration={"protocol": "forest.component-worker-host/1"},
+            resolved_contracts={"runtime.graph.snapshot": "1.0"},
+        )
         embedding_profile = {
             "deployment_id": self.settings.embedding_deployment_id,
             "model_revision": self.settings.embedding_model_revision,
@@ -814,6 +823,7 @@ class CleanBotHost:
             self._kernel.descriptors
             + (
                 provider.descriptor,
+                worker_host.descriptor,
                 embedding.descriptor,
                 vector_index.descriptor,
                 memory.descriptor,

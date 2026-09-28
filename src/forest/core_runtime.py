@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
+from forest.builtin_runtime_graph_snapshot import runtime_graph_snapshot_service
 from forest.builtin_runtime_job import (
     RUNTIME_HEALTH_SNAPSHOT_JOB,
     runtime_health_snapshot_service,
@@ -40,8 +41,8 @@ from forest.storage.authorization_authority import (
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import KernelAuditRepository
 from forest.storage.kernel_runtime import KernelRuntimeRepository
-from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.management_asset_authority import ManagementAssetAuthority
+from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.payload_authority import KernelPayloadRepository
 from forest.web_operation_policy import (
     WEB_OPERATION_POLICY_DEFAULT,
@@ -127,6 +128,7 @@ _MODULES = {
             "runtime.call.admit",
             "runtime.state.publish",
             "runtime.graph.reload",
+            "runtime.graph.snapshot",
             "kernel.uow.conversation.final-reply",
             "kernel.uow.conversation.select-input",
             "kernel.uow.conversation.session-handoff",
@@ -142,6 +144,7 @@ _MODULES = {
             "runtime.call.admit",
             "runtime.state.publish",
             "runtime.graph.reload",
+            "runtime.graph.snapshot",
         ),
     },
 }
@@ -574,6 +577,12 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                         1,
                         ("kernel.runtime",),
                         runtime_shell_service,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "runtime.graph.snapshot",
+                        1,
+                        ("kernel.runtime",),
+                        runtime_graph_snapshot_service,
                     ),
                     RuntimeKernelServiceSpec(
                         RUNTIME_HEALTH_SNAPSHOT_JOB.service_id,

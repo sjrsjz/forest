@@ -600,6 +600,19 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
         await host.start()
         try:
             assert set(host.registry.states.values()) == {ModuleLifecycleState.ACTIVE}
+            worker_host = host.registry.get("component.worker-host")
+            agent_member = await worker_host.management_contract.query(
+                "module", {"component_id": "agent.runtime"}
+            )
+            assert agent_member["member"]["component_id"] == "agent.runtime"
+            assert agent_member["member"]["generation_id"] == (
+                host.registry.graph_identity.generations["agent.runtime"]
+            )
+            assert next(
+                descriptor.component_id
+                for descriptor in host.registry.descriptors
+                if any(command.command_id == "module.list" for command in descriptor.shell_commands)
+            ) == "component.worker-host"
             async with host.store.pool.connection() as conn:
                 grants = await (
                     await conn.execute(
@@ -1982,6 +1995,16 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             replacement_graph = await host.replace_runtime_graph()
             assert replacement_graph.graph_identity.graph_id != previous.graph_id
             assert set(replacement_graph.states.values()) == {ModuleLifecycleState.ACTIVE}
+            current_worker_host = host.registry.get("component.worker-host")
+            current_module = await current_worker_host.management_contract.query(
+                "module", {"component_id": "agent.runtime"}
+            )
+            assert current_module["graph_revision"] == replacement_graph.graph_identity.graph_revision
+            assert current_worker_host.generation_identity != worker_host.generation_identity
+            with pytest.raises(ForestError):
+                await worker_host.management_contract.query(
+                    "module", {"component_id": "agent.runtime"}
+                )
             replaced_work = await host.registry.get("memory.graph").management_contract.query(
                 "memory.forget.status", {"request_id": request_id}
             )
