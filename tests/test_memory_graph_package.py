@@ -208,6 +208,25 @@ async def test_graph_snapshot_excludes_facts_committed_after_registration(
             "new_visible": True,
             "timestamp_precedes_boundary": True,
         }
+        context = Jsonb({"bot_id": store.bot_id})
+        async def browse(values):
+            row = await (
+                await reader.execute(
+                    sql.SQL("SELECT {}.memory_query_relations(%s,%s) AS result").format(namespace),
+                    (context, Jsonb({"endpoint_kind": "ENTITY", "endpoint_id": "left", **values})),
+                )
+            ).fetchone()
+            assert row["result"]["ok"] is True
+            return row["result"]["value"]
+
+        assert (await browse({"snapshot_xid": boundary["snapshot"]}))["items"] == []
+        current = await browse({"origin_kinds": ["RULE"], "cross_trunk": False})
+        assert len(current["items"]) == 1
+        assert current["items"][0]["direction"] == "UNDIRECTED"
+        assert current["items"][0]["origin_kind"] == "RULE"
+        assert current["items"][0]["cross_trunk"] is False
+        assert (await browse({"snapshot_xid": current["snapshot_xid"],
+                             "relation_kinds": ["CONTRADICTS"]}))["items"] == []
 
 
 def _configuration():
@@ -949,6 +968,8 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 ).fetchone()
             return row["result"]
 
+        # Freeze the background owner before arbitrating the same SQL queue by hand.
+        instance.freeze_owned_admission()
         first_claim, second_claim = await asyncio.gather(
             claim_batch("embedding/claim/one"), claim_batch("embedding/claim/two")
         )
@@ -968,8 +989,6 @@ async def test_memory_package_qualifies_exact_conversation_batch(
             and claim["payload"]["source_epoch_high_watermark"] >= 0
             for claim in claimed
         )
-        # Keep background dispatch out of this manual lease-expiry arbitration.
-        instance.freeze_owned_admission()
         await instance.drain_owned_work()
         await asyncio.sleep(3.1)
         reclaimed = await claim_batch("embedding/claim/after-expiry", lease_seconds=360)
@@ -1663,12 +1682,19 @@ async def test_memory_package_qualifies_exact_conversation_batch(
         )
         assert len(relations["items"]) == 1
         assert relations["items"][0]["right_id"] == "topic/test"
+        assert relations["items"][0]["direction"] == "UNDIRECTED"
+        assert relations["items"][0]["origin_kind"] == "MANUAL"
+        assert relations["items"][0]["cross_trunk"] is False
         assert relations["items"][0]["evidence_count"] == 1
         assert relations["items"][0]["evidence"] == [{
             "source_unit_id": "unit/event/captured",
             "source_revision": 1,
             "part_id": "part/event/captured/text",
             "trunk_id": "trunk/group/933179609",
+            "source_id": "source/group/933179609",
+            "source_kind": "GROUP",
+            "platform": "onebot-v11",
+            "realm_id": "qq",
             "external_group_id": "933179609",
             "author_subject_ref": "qq:42",
         }]

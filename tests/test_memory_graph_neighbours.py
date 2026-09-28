@@ -112,6 +112,36 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
 
         for index in range(40):
             await contribution(f"edge/{index}", f"n{index:02}", reverse=bool(index % 2))
+        async def browse_relations(values):
+            row = await (
+                await execute(
+                    "SELECT {}.memory_query_relations(%s::jsonb,%s::jsonb) AS result",
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                        "endpoint_kind": "SOURCE_UNIT", "endpoint_id": "seed", **values,
+                    })),
+                )
+            ).fetchone()
+            return row["result"]
+
+        first_edges = (await browse_relations({"cross_trunk": True, "limit": 5}))["value"]
+        assert len(first_edges["items"]) == 5 and first_edges["has_more"]
+        assert all(edge["cross_trunk"] and edge["direction"] == "UNDIRECTED"
+                   for edge in first_edges["items"])
+        cursor = {
+            "snapshot_xid": first_edges["snapshot_xid"],
+            "after_relation_id": first_edges["next_cursor"]["relation_id"],
+            "after_contribution_id": first_edges["next_cursor"]["contribution_id"],
+            "cursor_filter_digest": first_edges["filter_digest"],
+        }
+        second_edges = (await browse_relations({
+            "cross_trunk": True, "limit": 5, **cursor,
+        }))["value"]
+        assert len(second_edges["items"]) == 5
+        assert not ({edge["contribution_id"] for edge in first_edges["items"]}
+                    & {edge["contribution_id"] for edge in second_edges["items"]})
+        assert (await browse_relations({
+            "cross_trunk": False, "limit": 5, **cursor,
+        }))["error"]["code"] == "MEMORY_QUERY_INVALID"
         with pytest.raises(ForeignKeyViolation):
             await contribution("invalid/evidence", "n00", missing_part=True)
         with pytest.raises(ForeignKeyViolation):

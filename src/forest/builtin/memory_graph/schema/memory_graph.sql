@@ -7037,36 +7037,66 @@ CREATE FUNCTION memory_query_relations(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
     page_limit integer := COALESCE((input->>'limit')::integer,10);
-    snapshot_time timestamptz := COALESCE((input->>'snapshot_created_at')::timestamptz,clock_timestamp());
-    filter_digest text := 'sha256:' || encode(sha256(convert_to((
-        input - 'limit' - 'snapshot_created_at' - 'after_relation_id'
-              - 'after_contribution_id' - 'cursor_filter_digest'
-    )::text,'UTF8')),'hex');
+    snapshot_value pg_snapshot := COALESCE((input->>'snapshot_xid')::pg_snapshot,
+        pg_current_snapshot());
+    filter_digest text := 'sha256:' || encode(sha256(convert_to(
+        jsonb_build_array(input - 'limit' - 'snapshot_xid' - 'after_relation_id'
+            - 'after_contribution_id' - 'cursor_filter_digest',
+            snapshot_value::text)::text,'UTF8')),'hex');
     items jsonb;
     more boolean;
     cursor_value jsonb;
 BEGIN
     IF page_limit NOT BETWEEN 1 AND 20 OR
        ((input ? 'after_relation_id') <> (input ? 'after_contribution_id')) OR
-       (input ? 'after_relation_id' AND (NOT input ? 'snapshot_created_at' OR
+       (input ? 'after_relation_id' AND (NOT (input ? 'snapshot_xid') OR
           input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
                 'message','Relation page limit or cursor is invalid','status',422));
     END IF;
     WITH page AS (
-        SELECT c.contribution_id,c.relation_id,c.relation_kind,
-            c.left_kind,c.left_id,c.right_kind,c.right_id,c.weight_micros
+        SELECT c.contribution_id,c.relation_id,c.relation_kind,c.relation_key,
+            c.left_kind,c.left_id,c.right_kind,c.right_id,c.weight_micros,
+            c.origin_kind,c.created_at,trunks.cross_trunk,
+            CASE WHEN c.relation_kind='ASSOCIATES_WITH' THEN 'UNDIRECTED'
+                 WHEN c.left_kind=input->>'endpoint_kind' AND c.left_id=input->>'endpoint_id'
+                    THEN 'OUTBOUND' ELSE 'INBOUND' END AS direction
         FROM __forest_module_schema__.relation_contributions c
-        WHERE c.bot_id=context->>'bot_id' AND c.active AND c.created_at<=snapshot_time
+        CROSS JOIN LATERAL (
+            SELECT count(DISTINCT origins.trunk_id)>1 AS cross_trunk FROM (
+                SELECT u.trunk_id FROM __forest_module_schema__.source_units u
+                WHERE u.bot_id=c.bot_id AND (
+                    (c.left_kind='SOURCE_UNIT' AND u.source_unit_id=c.left_id) OR
+                    (c.right_kind='SOURCE_UNIT' AND u.source_unit_id=c.right_id))
+                UNION ALL
+                SELECT u.trunk_id FROM __forest_module_schema__.relation_evidence e
+                JOIN __forest_module_schema__.source_units u
+                  ON u.bot_id=e.bot_id AND u.source_unit_id=e.source_unit_id
+                WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
+            ) origins WHERE origins.trunk_id IS NOT NULL
+        ) trunks
+        WHERE c.bot_id=context->>'bot_id' AND c.active
+          AND pg_visible_in_snapshot(c.created_xid,snapshot_value)
           AND ((c.left_kind=input->>'endpoint_kind' AND c.left_id=input->>'endpoint_id')
             OR (c.right_kind=input->>'endpoint_kind' AND c.right_id=input->>'endpoint_id'))
+          AND (NOT (input ? 'relation_kinds') OR c.relation_kind IN (
+              SELECT value FROM jsonb_array_elements_text(input->'relation_kinds')))
+          AND (NOT (input ? 'origin_kinds') OR c.origin_kind IN (
+              SELECT value FROM jsonb_array_elements_text(input->'origin_kinds')))
+          AND (NOT (input ? 'cross_trunk') OR
+               trunks.cross_trunk=(input->>'cross_trunk')::boolean)
+          AND (input->>'direction' IS NULL OR
+              (CASE WHEN c.relation_kind='ASSOCIATES_WITH' THEN 'UNDIRECTED'
+                    WHEN c.left_kind=input->>'endpoint_kind' AND c.left_id=input->>'endpoint_id'
+                         THEN 'OUTBOUND' ELSE 'INBOUND' END)=input->>'direction')
           AND (input->>'endpoint_kind'<>'SOURCE_UNIT' OR EXISTS (
             SELECT 1 FROM __forest_module_schema__.source_units ue
             JOIN __forest_module_schema__.memory_sources se
               ON se.bot_id=ue.bot_id AND se.source_id=ue.source_id
             WHERE ue.bot_id=c.bot_id AND ue.source_unit_id=input->>'endpoint_id'
               AND ue.eligibility_state='ELIGIBLE' AND se.status='ACTIVE'
+              AND pg_visible_in_snapshot(ue.eligible_xid,snapshot_value)
           ))
           AND (c.left_kind<>'SOURCE_UNIT' OR EXISTS (
             SELECT 1 FROM __forest_module_schema__.source_units ul
@@ -7074,6 +7104,7 @@ BEGIN
               ON sl.bot_id=ul.bot_id AND sl.source_id=ul.source_id
             WHERE ul.bot_id=c.bot_id AND ul.source_unit_id=c.left_id
               AND ul.eligibility_state='ELIGIBLE' AND sl.status='ACTIVE'
+              AND pg_visible_in_snapshot(ul.eligible_xid,snapshot_value)
           ))
           AND (c.right_kind<>'SOURCE_UNIT' OR EXISTS (
             SELECT 1 FROM __forest_module_schema__.source_units ur
@@ -7081,6 +7112,7 @@ BEGIN
               ON sr.bot_id=ur.bot_id AND sr.source_id=ur.source_id
             WHERE ur.bot_id=c.bot_id AND ur.source_unit_id=c.right_id
               AND ur.eligibility_state='ELIGIBLE' AND sr.status='ACTIVE'
+              AND pg_visible_in_snapshot(ur.eligible_xid,snapshot_value)
           ))
           AND (NOT input ? 'after_relation_id' OR
             (c.relation_id,c.contribution_id)>(input->>'after_relation_id',input->>'after_contribution_id'))
@@ -7091,7 +7123,8 @@ BEGIN
             JOIN __forest_module_schema__.memory_sources s0
               ON s0.bot_id=u0.bot_id AND s0.source_id=u0.source_id
             WHERE e0.bot_id=c.bot_id AND e0.contribution_id=c.contribution_id
-              AND (u0.eligibility_state<>'ELIGIBLE' OR s0.status<>'ACTIVE')
+              AND (u0.eligibility_state<>'ELIGIBLE' OR s0.status<>'ACTIVE'
+                   OR NOT pg_visible_in_snapshot(u0.eligible_xid,snapshot_value))
           )
         ORDER BY c.relation_id,c.contribution_id LIMIT page_limit+1
     ), visible AS (
@@ -7106,7 +7139,8 @@ BEGIN
             SELECT jsonb_agg(to_jsonb(evidence)-'evidence_index' ORDER BY evidence.evidence_index)
             FROM (
                 SELECT e.evidence_index,e.source_unit_id,e.source_revision,e.part_id,
-                    u.trunk_id,s.external_group_id,u.author_subject_ref
+                    u.trunk_id,s.source_id,s.source_kind,s.platform,s.realm_id,
+                    s.external_group_id,u.author_subject_ref
                 FROM __forest_module_schema__.relation_evidence e
                 JOIN __forest_module_schema__.source_units u
                   ON u.bot_id=e.bot_id AND u.source_unit_id=e.source_unit_id
@@ -7123,9 +7157,13 @@ BEGIN
          FROM visible v ORDER BY v.relation_id DESC,v.contribution_id DESC LIMIT 1)
     INTO items,more,cursor_value;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
-        'value',jsonb_build_object('snapshot_created_at',snapshot_time,
+        'value',jsonb_build_object('snapshot_xid',snapshot_value::text,
             'filter_digest',filter_digest,
             'items',items,'has_more',more,
             'next_cursor',CASE WHEN more THEN cursor_value ELSE NULL END));
+EXCEPTION WHEN invalid_text_representation THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+            'message','Relation snapshot is invalid','status',422));
 END;
 $$;
