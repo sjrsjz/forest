@@ -20,6 +20,11 @@ from forest.clean_management_contract import (
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.kernel_audit import AuditEnvelope
+from forest.storage.management_asset_authority import (
+    CHUNK_BYTES,
+    ManagementAssetAuthority,
+    management_asset_owner_id,
+)
 from forest.web_operation_policy import authorize_web_operation
 
 
@@ -108,6 +113,136 @@ class CleanManagementGateway:
     def action_plan_digest(self, component_id: str, action_id: str, body: dict) -> str | None:
         resolver = getattr(self.contract(component_id), "authorization_plan_digest", None)
         return resolver(action_id, body) if callable(resolver) else None
+
+    def asset_declaration(self, component_id: str, asset_id: str) -> dict:
+        resolver = getattr(self.contract(component_id), "asset", None)
+        if not callable(resolver):
+            raise ForestError(
+                "MODULE_MANAGEMENT_ASSET_NOT_FOUND", "Module asset does not exist", 404
+            )
+        return resolver(asset_id)
+
+    def asset_operation_id(self, component_id: str, asset_id: str, stage: str, key: str) -> str:
+        return self.operation_id(
+            component_id, "asset." + asset_id + "." + stage,
+            hashlib.sha256(key.encode("utf-8")).hexdigest(),
+        )
+
+    def _asset_authority(self):
+        if self.ticket_authority is None:
+            raise ForestError(
+                "WEB_AUTHORITY_TICKET_REQUIRED", "Asset uploads require a Web session", 403
+            )
+        return ManagementAssetAuthority(self.host._kernel.payload)
+
+    async def _asset_write(
+        self, *, component_id: str, asset_id: str, stage: str, body: dict,
+        authorization, operation_id: str, mutate,
+    ):
+        action_key = "asset." + asset_id + "." + stage
+        input_digest = digest_json(body)
+        await self._authorize(
+            authorization, component_id=component_id, operation_id=operation_id,
+            action_key=action_key, input_digest=input_digest, required_role="ADMIN",
+        )
+        payloads = self.host._kernel.payload
+        async with payloads.store.pool.connection() as conn, conn.transaction():
+            await self._authorize_mutation_in(
+                conn, ticket=authorization, component_id=component_id,
+                operation_id=operation_id, action_key=action_key,
+                input_digest=input_digest, plan_digest=None,
+            )
+            return await mutate(conn)
+
+    async def asset_begin(
+        self, component_id: str, asset_id: str, body: dict, *,
+        authorization=None, operation_id=None,
+    ) -> dict:
+        declaration = self.asset_declaration(component_id, asset_id)
+        authority = self._asset_authority()
+        if not isinstance(body, dict) or set(body) != {
+            "upload_id", "target_ref", "part_id", "media_type", "byte_length",
+            "digest", "chunk_count",
+        }:
+            raise ForestError("MANAGEMENT_ASSET_INVALID", "Upload input is invalid", 422)
+        upload_id = body["upload_id"]
+        if not isinstance(upload_id, str) or not 1 <= len(upload_id) <= 128:
+            raise ForestError("MANAGEMENT_ASSET_INVALID", "Upload ID is invalid", 422)
+        operation_id = operation_id or self.asset_operation_id(
+            component_id, asset_id, "begin", upload_id
+        )
+        async def mutate(conn):
+            return await authority.begin_in(
+                conn, upload_id=upload_id, component_id=component_id,
+                asset_id=asset_id, actor_subject_ref=authorization.web_subject_ref,
+                generation_id=authorization.target_generation_id,
+                target_ref=body["target_ref"], part_id=body["part_id"],
+                owner_kind=declaration["owner_kind"],
+                owner_id=management_asset_owner_id(
+                    declaration["owner_prefix"], body["target_ref"], body["part_id"]
+                ),
+                media_type=body["media_type"], byte_length=body["byte_length"],
+                content_digest=body["digest"], chunk_count=body["chunk_count"],
+                allowed_media_types=tuple(declaration["media_types"]),
+                max_bytes=declaration["max_bytes"],
+            )
+        return await self._asset_write(
+            component_id=component_id, asset_id=asset_id, stage="begin",
+            body=body, authorization=authorization, operation_id=operation_id,
+            mutate=mutate,
+        )
+
+    async def asset_chunk(
+        self, component_id: str, asset_id: str, upload_id: str,
+        chunk_index: int, content: bytes, *, authorization=None, operation_id=None,
+    ) -> dict:
+        self.asset_declaration(component_id, asset_id)
+        authority = self._asset_authority()
+        if type(content) is not bytes or not 1 <= len(content) <= CHUNK_BYTES:
+            raise ForestError("MANAGEMENT_ASSET_CHUNK_INVALID", "Chunk exceeds 256 KiB", 413)
+        body = {
+            "upload_id": upload_id, "chunk_index": chunk_index,
+            "byte_length": len(content),
+            "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+        }
+        operation_id = operation_id or self.asset_operation_id(
+            component_id, asset_id, "chunk", f"{upload_id}:{chunk_index}"
+        )
+        async def mutate(conn):
+            return await authority.put_chunk_in(
+                conn, upload_id=upload_id, component_id=component_id,
+                asset_id=asset_id, actor_subject_ref=authorization.web_subject_ref,
+                generation_id=authorization.target_generation_id,
+                chunk_index=chunk_index, content=content,
+                content_digest=body["digest"],
+            )
+        return await self._asset_write(
+            component_id=component_id, asset_id=asset_id, stage="chunk",
+            body=body, authorization=authorization, operation_id=operation_id,
+            mutate=mutate,
+        )
+
+    async def asset_finalize(
+        self, component_id: str, asset_id: str, upload_id: str, *,
+        authorization=None, operation_id=None,
+    ) -> dict:
+        self.asset_declaration(component_id, asset_id)
+        authority = self._asset_authority()
+        body = {"upload_id": upload_id}
+        operation_id = operation_id or self.asset_operation_id(
+            component_id, asset_id, "finalize", upload_id
+        )
+        async def mutate(conn):
+            return await authority.finalize_in(
+                conn, upload_id=upload_id, component_id=component_id,
+                asset_id=asset_id, actor_subject_ref=authorization.web_subject_ref,
+                generation_id=authorization.target_generation_id,
+            )
+        return await self._asset_write(
+            component_id=component_id, asset_id=asset_id, stage="finalize",
+            body=body, authorization=authorization, operation_id=operation_id,
+            mutate=mutate,
+        )
 
     async def _authorize(
         self,
@@ -404,21 +539,23 @@ class CleanManagementGateway:
         authorization=None,
         operation_id=None,
     ):
-        await self._authorize(
-            authorization,
-            component_id=component_id,
-            operation_id=operation_id,
-            action_key=query_id,
-            input_digest=digest_json(body),
-            required_role="AUDITOR",
-        )
         contract = self.contract(component_id)
         query = getattr(contract, "query", None)
         if not callable(query):
             raise ForestError(
                 "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Module query does not exist", 404
             )
-        return await query(query_id, body)
+        await self._authorize(
+            authorization,
+            component_id=component_id,
+            operation_id=operation_id,
+            action_key=query_id,
+            input_digest=digest_json(body),
+            required_role=contract.query_required_role(query_id),
+        )
+        return await contract.query_authorized(
+            query_id, body, authorization=authorization
+        )
 
     async def module_action(
         self,

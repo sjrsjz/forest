@@ -390,6 +390,7 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
             "credential_expired": False,
         }
         assert (await client.get("/management/v1/runtime")).status_code == 401
+
         assert (
             await client.post(
                 "/management/v1/auth/login",
@@ -414,6 +415,14 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
             "origin": "http://forest.test",
             "x-forest-csrf": _IdentityAuthority.csrf_token,
         }
+        oversized_asset = await client.put(
+            "/management/v1/scopes/bot/bot-scope-test/modules/"
+            "test.component/assets/trial.input/uploads/upload-1/chunks/0",
+            headers={**headers, "content-type": "application/octet-stream"},
+            content=b"x" * (262144 + 1),
+        )
+        assert oversized_asset.status_code == 413
+        assert oversized_asset.json()["code"] == "MANAGEMENT_ASSET_CHUNK_INVALID"
         deployment = await client.get("/management/v1/runtime")
         assert [scope["scope_id"] for scope in deployment.json()["scopes"]] == [
             "deployment",
@@ -497,3 +506,78 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
             await client.post("/management/v1/auth/logout", headers=headers)
         ).status_code == 200
         assert (await client.get("/management/v1/runtime")).status_code == 401
+
+async def test_asset_routes_forward_bounded_binary_under_bot_web_tickets(monkeypatch):
+    calls = []
+
+    class AssetGateway:
+        def __init__(self, host, token, *, ticket_authority, scope_id):
+            assert scope_id == "bot-scope-test"
+
+        def authorization_target(self, component_id):
+            assert component_id == "memory.graph"
+            return "generation/asset-1", 1
+
+        def asset_operation_id(self, component_id, asset_id, stage, key):
+            return "asset:" + hashlib.sha256(
+                f"{component_id}:{asset_id}:{stage}:{key}".encode()
+            ).hexdigest()
+
+        async def asset_begin(self, component_id, asset_id, body, **kwargs):
+            calls.append(("begin", body, kwargs["authorization"]))
+            return {"state": "OPEN", "upload_id": body["upload_id"]}
+
+        async def asset_chunk(self, component_id, asset_id, upload_id, index, content, **kwargs):
+            calls.append(("chunk", bytes(content), kwargs["authorization"]))
+            return {"upload_id": upload_id, "chunk_index": index}
+
+        async def asset_finalize(self, component_id, asset_id, upload_id, **kwargs):
+            calls.append(("finalize", upload_id, kwargs["authorization"]))
+            return {"state": "FINALIZED", "upload_id": upload_id}
+
+    monkeypatch.setattr("forest.management_scopes.CleanManagementGateway", AssetGateway)
+
+    class Supervisor:
+        async def management_scopes(self):
+            return ()
+
+        @asynccontextmanager
+        async def management_host(self, scope_id):
+            assert scope_id == "bot-scope-test"
+            yield object()
+
+    app = create_deployment_management_app(
+        deployment_id="deployment/test", components=(),
+        identity_authority=_IdentityAuthority(), allowed_origin="http://forest.test",
+        bot_supervisor=Supervisor(),
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://forest.test"
+    ) as client:
+        login = await client.post(
+            "/management/v1/auth/login", headers={"origin": "http://forest.test"},
+            json={"username": "admin", "password": "correct-password"},
+        )
+        assert login.status_code == 200
+        headers = {"origin": "http://forest.test",
+                   "x-forest-csrf": _IdentityAuthority.csrf_token}
+        base = ("/management/v1/scopes/bot/bot-scope-test/modules/"
+                "memory.graph/assets/trial.input/uploads")
+        body = {"upload_id": "asset-1", "target_ref": "trial-1",
+                "part_id": "image-0", "media_type": "image/png",
+                "byte_length": 4, "digest": "sha256:" + "a" * 64,
+                "chunk_count": 1}
+        assert (await client.post(base, headers=headers, json=body)).json()["state"] == "OPEN"
+        binary = b"\x00\x01\x02\xff"
+        uploaded = await client.put(
+            base + "/asset-1/chunks/0",
+            headers={**headers, "content-type": "application/octet-stream"},
+            content=binary,
+        )
+        assert uploaded.status_code == 200
+        assert uploaded.json()["chunk_index"] == 0
+        assert (await client.post(base + "/asset-1/finalize", headers=headers)).json()["state"] == "FINALIZED"
+        assert [item[0] for item in calls] == ["begin", "chunk", "finalize"]
+        assert calls[1][1] == binary
+        assert all(item[2].web_subject_ref == "web-subject/test" for item in calls)
+        assert all(item[2].target_generation_id == "generation/asset-1" for item in calls)

@@ -41,6 +41,7 @@ from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import KernelAuditRepository
 from forest.storage.kernel_runtime import KernelRuntimeRepository
 from forest.storage.module_configuration import ModuleConfigurationRepository
+from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.payload_authority import KernelPayloadRepository
 from forest.web_operation_policy import (
     WEB_OPERATION_POLICY_DEFAULT,
@@ -323,6 +324,7 @@ class PreparedPayloadAuthorityModule(PreparedAuthorityModule):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        self.management_assets = ManagementAssetAuthority(self.service)
         self._scrub_task: asyncio.Task | None = None
 
     def activate_generation(self) -> None:
@@ -340,8 +342,9 @@ class PreparedPayloadAuthorityModule(PreparedAuthorityModule):
 
     async def _scrub_revoked(self) -> None:
         while True:
+            expired = await self.management_assets.reap_expired(limit=16)
             result = await self.service.scrub(limit=100)
-            await asyncio.sleep(0.1 if result["scrubbed"] else 10.0)
+            await asyncio.sleep(0.1 if result["scrubbed"] or expired["reaped"] else 10.0)
 
     def owned_tasks(self) -> tuple[asyncio.Task, ...]:
         return (self._scrub_task,) if self._scrub_task is not None else ()

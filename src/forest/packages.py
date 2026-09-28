@@ -352,6 +352,14 @@ MANIFEST_SCHEMA = {
                                                 "owner_id_path": {"type": "string"},
                                                 "media_type_path": {"type": "string"},
                                                 "byte_length_path": {"type": "string"},
+                                                "management_asset_id": {"type": "string"},
+                                                "target_ref_path": {"type": "string"},
+                                                "part_id_path": {"type": "string"},
+                                                "width_path": {"type": "string"},
+                                                "height_path": {"type": "string"},
+                                                "min_remaining_s": {
+                                                    "type": "integer", "minimum": 0, "maximum": 1800,
+                                                },
                                             },
                                             "allOf": [
                                                 {
@@ -615,6 +623,8 @@ MANIFEST_SCHEMA = {
                                     "maximum": 10000,
                                 },
                                 "max_limit": {"type": "integer", "minimum": 1, "maximum": 10000},
+                                "required_role": {"enum": ["ADMIN", "AUDITOR"]},
+                                "actor_field": {"type": "string"},
                                 "timeout_s": {
                                     "type": "number",
                                     "exclusiveMinimum": 0,
@@ -642,6 +652,26 @@ MANIFEST_SCHEMA = {
                                     "exclusiveMinimum": 0,
                                     "maximum": 120,
                                 },
+                            },
+                        },
+                    },
+                    "management_assets": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["id", "owner_kind", "owner_prefix", "media_types", "max_bytes"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "owner_kind": {"type": "string"},
+                                "owner_prefix": {"type": "string"},
+                                "media_types": {
+                                    "type": "array", "minItems": 1, "maxItems": 4,
+                                    "uniqueItems": True,
+                                    "items": {"enum": ["text/plain", "image/png", "image/jpeg", "image/webp"]},
+                                },
+                                "max_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608},
                             },
                         },
                     },
@@ -1198,6 +1228,18 @@ def _manifest(files: dict[str, bytes]) -> dict:
     domain_commands = component.get("domain_commands", [])
     management_queries = component.get("management_queries", [])
     management_actions = component.get("management_actions", [])
+    management_assets = component.get("management_assets", [])
+    asset_by_id = {}
+    for asset in management_assets:
+        asset_id = asset["id"]
+        if (
+            not IDENTIFIER.fullmatch(asset_id)
+            or not IDENTIFIER.fullmatch(asset["owner_kind"])
+            or not re.fullmatch(r"[a-z][a-z0-9._-]{0,31}", asset["owner_prefix"])
+            or asset_id in asset_by_id
+        ):
+            _fail("INVALID_MANAGEMENT_ASSETS", "Management asset declarations must have unique valid identities")
+        asset_by_id[asset_id] = asset
     unit_of_work_participants = component.get("unit_of_work_participants", [])
     unit_of_work_plans = component.get("unit_of_work_plans", [])
     job_types = component.get("job_types", [])
@@ -1294,15 +1336,18 @@ def _manifest(files: dict[str, bytes]) -> dict:
             )
             bound_paths.extend(
                 value for value in (
-                    reference.get("media_type_path"), reference.get("byte_length_path")
+                    reference.get("media_type_path"), reference.get("byte_length_path"),
+                    reference.get("target_ref_path"), reference.get("part_id_path"),
+                    reference.get("width_path"), reference.get("height_path"),
                 ) if value is not None
             )
             if (
                 not _valid_json_pointer(path, wildcards=True)
+                or path.split("/").count("*") != reference["owner_id_path"].split("/").count("*")
                 or any(
                     not _valid_json_pointer(owner_path, wildcards=True)
-                    or path.split("/").count("*")
-                    != owner_path.split("/").count("*")
+                    or owner_path.split("/").count("*")
+                    not in (0, path.split("/").count("*"))
                     for owner_path in bound_paths
                 )
                 or (owner_component is None) == (component_path is None)
@@ -1317,6 +1362,27 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     "INVALID_DOMAIN_AUTHORITY",
                     "Managed payload reference declarations must use exact JSON pointers and owners",
                 )
+            asset_id = reference.get("management_asset_id")
+            if asset_id is not None:
+                asset = asset_by_id.get(asset_id)
+                if (
+                    asset is None
+                    or service not in domain_commands
+                    or owner_component != component["id"]
+                    or owner_kind != asset["owner_kind"]
+                    or any(reference.get(name) is None for name in (
+                        "target_ref_path", "part_id_path", "media_type_path",
+                        "byte_length_path", "width_path", "height_path",
+                    ))
+                    or not any(
+                        action["port"] == service["name"] and action.get("actor_field")
+                        for action in management_actions
+                    )
+                ):
+                    _fail(
+                        "INVALID_MANAGEMENT_ASSETS",
+                        "Asset-backed payload refs require a matching management action and exact metadata paths",
+                    )
         if service in owned_work_handlers and (
             not SQL_FUNCTION.fullmatch(service.get("claim_function", ""))
             or not SQL_FUNCTION.fullmatch(service.get("settle_function", ""))
@@ -1397,6 +1463,26 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_MANAGEMENT_OPERATIONS",
                 "Management query default_limit cannot exceed max_limit",
             )
+        actor_field = declaration.get("actor_field")
+        if actor_field is not None:
+            port = next(
+                item for item in (*domain_queries, *services)
+                if item["name"] == declaration["port"]
+            )
+            input_schema = _schema(files, port["input_schema"])
+            properties = input_schema.get("properties", {})
+            if (
+                declaration.get("required_role") != "ADMIN"
+                or not IDENTIFIER.fullmatch(actor_field)
+                or actor_field not in input_schema.get("required", ())
+                or not isinstance(properties, dict)
+                or not isinstance(properties.get(actor_field), dict)
+                or properties[actor_field].get("type") != "string"
+            ):
+                _fail(
+                    "INVALID_MANAGEMENT_OPERATIONS",
+                    "Actor-bound management queries require ADMIN and a required string field",
+                )
     for declaration in management_actions:
         if declaration.get("port") not in command_ports:
             _fail(

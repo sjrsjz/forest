@@ -116,7 +116,8 @@ async function mountSandboxedPackage(root, row, contribution) {
     messages = messages.filter(value => now - value < 1000);
     if (
       !message || message.protocol !== 'forest.management-ui-channel/1'
-      || message.nonce !== nonce || encoded.length > 262144 || messages.length >= 20
+      || message.nonce !== nonce || encoded.length > 262144
+      || messages.length >= (message.type === 'asset-chunk' ? 64 : 20)
     ) return;
     messages.push(now);
     try {
@@ -173,7 +174,13 @@ async function mountSandboxedPackage(root, row, contribution) {
         const kind = message.type === 'query' ? 'queries' : 'actions';
         const options = {method: 'POST', body: JSON.stringify(message.value)};
         if (message.type === 'action') {
-          options.headers = {'idempotency-key': `package-ui:${nonce}:${requestId}`};
+          const stableKey = message.idempotency_key;
+          if (stableKey !== undefined && (
+            typeof stableKey !== 'string'
+            || !/^[a-zA-Z0-9._:-]{1,96}$/.test(stableKey)
+          )) throw new Error('模块动作幂等键无效');
+          options.headers = {'idempotency-key': stableKey
+            ? `package-ui:${stableKey}` : `package-ui:${nonce}:${requestId}`};
         }
         try {
           const value = await api(
@@ -195,6 +202,52 @@ async function mountSandboxedPackage(root, row, contribution) {
             operation_id: operationId,
             message: error instanceof Error ? error.message : String(error),
           });
+        }
+      } else if (['asset-begin', 'asset-chunk', 'asset-finalize'].includes(message.type)) {
+        const requestId = message.request_id;
+        const assetId = message.asset_id;
+        const uploadId = message.upload_id || message.value?.upload_id;
+        if (
+          typeof requestId !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(requestId)
+          || typeof assetId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(assetId)
+          || !row.management_contract?.assets?.some(asset => asset.asset_id === assetId)
+          || typeof uploadId !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(uploadId)
+        ) throw new Error('模块资产请求无效');
+        const prior = operationReplies.get(requestId);
+        if (prior) { send(prior.type, prior.payload); return; }
+        const assetBase = `/management/v1/modules/${encodeURIComponent(row.component_id)}`
+          + `/assets/${encodeURIComponent(assetId)}/uploads`;
+        let path, options;
+        if (message.type === 'asset-begin') {
+          if (!message.value || Array.isArray(message.value)
+              || typeof message.value !== 'object') throw new Error('上传声明无效');
+          path = assetBase;
+          options = {method: 'POST', body: JSON.stringify(message.value)};
+        } else if (message.type === 'asset-chunk') {
+          if (!Number.isInteger(message.chunk_index) || message.chunk_index < 0
+              || message.chunk_index >= 32 || !(message.content instanceof ArrayBuffer)
+              || message.content.byteLength < 1 || message.content.byteLength > 262144) {
+            throw new Error('上传分块无效');
+          }
+          path = `${assetBase}/${encodeURIComponent(uploadId)}/chunks/${message.chunk_index}`;
+          options = {method: 'PUT', body: message.content,
+            headers: {'content-type': 'application/octet-stream'}};
+        } else {
+          path = `${assetBase}/${encodeURIComponent(uploadId)}/finalize`;
+          options = {method: 'POST', body: '{}'};
+        }
+        try {
+          const value = await api(path, options);
+          const reply = {type: 'asset-result',
+            payload: {request_id: requestId, asset_id: assetId, value}};
+          if (operationReplies.size >= 64) {
+            operationReplies.delete(operationReplies.keys().next().value);
+          }
+          operationReplies.set(requestId, reply);
+          send(reply.type, reply.payload);
+        } catch (error) {
+          send('operation-error', {request_id: requestId, operation_id: assetId,
+            message: error instanceof Error ? error.message : String(error)});
         }
       }
     } catch (error) {

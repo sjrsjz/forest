@@ -153,6 +153,70 @@ CREATE TABLE payload_bodies (
         REFERENCES payload_headers(bot_id, payload_id)
 );
 
+CREATE TABLE management_asset_uploads (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    upload_id text NOT NULL CHECK (octet_length(upload_id) BETWEEN 1 AND 128),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    component_id text NOT NULL CHECK (octet_length(component_id) BETWEEN 1 AND 128),
+    asset_id text NOT NULL CHECK (octet_length(asset_id) BETWEEN 1 AND 128),
+    actor_subject_ref text NOT NULL CHECK (octet_length(actor_subject_ref) BETWEEN 1 AND 128),
+    generation_id text NOT NULL CHECK (octet_length(generation_id) BETWEEN 1 AND 256),
+    target_ref text NOT NULL CHECK (octet_length(target_ref) BETWEEN 1 AND 256),
+    part_id text NOT NULL CHECK (octet_length(part_id) BETWEEN 1 AND 256),
+    owner_kind text NOT NULL CHECK (octet_length(owner_kind) BETWEEN 1 AND 128),
+    owner_id text NOT NULL CHECK (octet_length(owner_id) BETWEEN 1 AND 512),
+    media_type text NOT NULL CHECK (media_type IN (
+        'text/plain','image/png','image/jpeg','image/webp')),
+    byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 8388608),
+    content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[a-f0-9]{64}$'),
+    chunk_count integer NOT NULL CHECK (chunk_count BETWEEN 1 AND 32),
+    opened_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    upload_expires_at timestamptz NOT NULL,
+    state text NOT NULL DEFAULT 'OPEN' CHECK (state IN ('OPEN','FINALIZED')),
+    payload_id text,
+    width integer CHECK (width IS NULL OR width BETWEEN 1 AND 100000),
+    height integer CHECK (height IS NULL OR height BETWEEN 1 AND 100000),
+    finalized_at timestamptz,
+    payload_expires_at timestamptz,
+    PRIMARY KEY (bot_id, upload_id),
+    UNIQUE (bot_id, component_id, owner_kind, owner_id),
+    FOREIGN KEY (bot_id, payload_id) REFERENCES payload_headers(bot_id, payload_id),
+    CHECK (chunk_count = (byte_length + 262143) / 262144),
+    CHECK (upload_expires_at > opened_at
+        AND upload_expires_at <= opened_at + interval '15 minutes'),
+    CHECK ((state='OPEN' AND payload_id IS NULL AND width IS NULL AND height IS NULL
+                AND finalized_at IS NULL AND payload_expires_at IS NULL)
+        OR (state='FINALIZED' AND payload_id IS NOT NULL AND finalized_at IS NOT NULL
+                AND payload_expires_at > finalized_at
+                AND payload_expires_at <= finalized_at + interval '30 minutes'
+                AND ((media_type='text/plain' AND width IS NULL AND height IS NULL)
+                  OR (media_type<>'text/plain' AND width IS NOT NULL
+                      AND height IS NOT NULL))))
+);
+
+CREATE TABLE management_asset_chunks (
+    bot_id text NOT NULL,
+    upload_id text NOT NULL,
+    chunk_index integer NOT NULL CHECK (chunk_index BETWEEN 0 AND 31),
+    byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 262144),
+    content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[a-f0-9]{64}$'),
+    content bytea NOT NULL,
+    PRIMARY KEY (bot_id, upload_id, chunk_index),
+    FOREIGN KEY (bot_id, upload_id)
+        REFERENCES management_asset_uploads(bot_id, upload_id),
+    CHECK (byte_length = octet_length(content)),
+    CHECK (content_digest = 'sha256:' || encode(sha256(content), 'hex'))
+);
+
+CREATE TABLE management_asset_admission_windows (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    actor_subject_ref text NOT NULL CHECK (octet_length(actor_subject_ref) BETWEEN 1 AND 128),
+    window_start timestamptz NOT NULL,
+    admission_count integer NOT NULL CHECK (admission_count BETWEEN 1 AND 8),
+    bytes_reserved integer NOT NULL CHECK (bytes_reserved BETWEEN 1 AND 33554432),
+    PRIMARY KEY (bot_id, actor_subject_ref, window_start)
+);
+
 CREATE INDEX manifest_source_idx ON source_manifest_items(
     bot_id, source_component_id, source_kind, source_id, source_revision, part_id, manifest_id
 );
@@ -160,6 +224,15 @@ CREATE INDEX payload_manifest_idx ON payload_headers(bot_id, source_manifest_id,
 CREATE INDEX payload_scrub_pending_idx ON payload_headers(bot_id, payload_id)
     WHERE state = 'REVOKED';
 CREATE INDEX payload_parent_idx ON payload_derivations(bot_id, parent_payload_id, payload_id);
+CREATE INDEX management_asset_expiry_idx ON management_asset_uploads(
+    bot_id, (COALESCE(payload_expires_at, upload_expires_at)), upload_id
+);
+CREATE INDEX management_asset_active_actor_idx ON management_asset_uploads(
+    bot_id, actor_subject_ref, upload_expires_at
+) WHERE state='OPEN';
+CREATE INDEX management_asset_window_expiry_idx ON management_asset_admission_windows(
+    bot_id, window_start
+);
 
 CREATE FUNCTION reject_immutable_fact() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
@@ -376,6 +449,69 @@ END;
 $$;
 CREATE TRIGGER payload_body_admission BEFORE INSERT OR UPDATE OR DELETE ON payload_bodies
     FOR EACH ROW EXECUTE FUNCTION payload_body_guard();
+
+CREATE FUNCTION management_asset_upload_guard() RETURNS trigger LANGUAGE plpgsql
+SET search_path FROM CURRENT AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        IF OLD.state='FINALIZED' AND EXISTS (
+            SELECT 1 FROM payload_headers h
+            WHERE h.bot_id=OLD.bot_id AND h.payload_id=OLD.payload_id
+              AND h.state='ACTIVE'
+        ) THEN
+            RAISE EXCEPTION 'Finalized management asset remains active' USING ERRCODE='55000';
+        END IF;
+        RETURN OLD;
+    END IF;
+    IF (to_jsonb(NEW)-ARRAY['state','payload_id','width','height',
+                            'finalized_at','payload_expires_at'])
+       IS DISTINCT FROM
+       (to_jsonb(OLD)-ARRAY['state','payload_id','width','height',
+                            'finalized_at','payload_expires_at'])
+       OR OLD.state<>'OPEN' OR NEW.state<>'FINALIZED'
+       OR NEW.payload_id IS NULL OR NEW.finalized_at IS NULL
+       OR NEW.finalized_at>=OLD.upload_expires_at THEN
+        RAISE EXCEPTION 'Management asset state transition is invalid' USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER management_asset_upload_state
+    BEFORE UPDATE OR DELETE ON management_asset_uploads
+    FOR EACH ROW EXECUTE FUNCTION management_asset_upload_guard();
+
+CREATE FUNCTION management_asset_chunk_guard() RETURNS trigger LANGUAGE plpgsql
+SET search_path FROM CURRENT AS $$
+DECLARE upload management_asset_uploads;
+BEGIN
+    IF TG_OP='UPDATE' THEN
+        RAISE EXCEPTION 'Management asset chunks are write once' USING ERRCODE='55000';
+    END IF;
+    IF TG_OP='DELETE' THEN
+        SELECT * INTO upload FROM management_asset_uploads
+        WHERE bot_id=OLD.bot_id AND upload_id=OLD.upload_id;
+        IF upload.state='FINALIZED' OR upload.upload_expires_at<=clock_timestamp() THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'Active management asset chunks cannot be removed'
+            USING ERRCODE='55000';
+    END IF;
+    SELECT * INTO upload FROM management_asset_uploads
+    WHERE bot_id=NEW.bot_id AND upload_id=NEW.upload_id;
+    IF upload.upload_id IS NULL OR upload.state<>'OPEN'
+       OR upload.upload_expires_at<=clock_timestamp()
+       OR NEW.chunk_index>=upload.chunk_count
+       OR NEW.byte_length<>LEAST(262144,
+            upload.byte_length-NEW.chunk_index*262144) THEN
+        RAISE EXCEPTION 'Management asset chunk admission is invalid'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER management_asset_chunk_state
+    BEFORE INSERT OR UPDATE OR DELETE ON management_asset_chunks
+    FOR EACH ROW EXECUTE FUNCTION management_asset_chunk_guard();
 
 INSERT INTO deletion_clock(bot_id)
 SELECT bot_id FROM forest_kernel.bot_identity;

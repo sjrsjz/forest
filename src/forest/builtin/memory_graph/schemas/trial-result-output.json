@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "query_id", "bundle_id", "graph_snapshot_ref", "total_count",
+    "missing_count", "content_truncated", "truncated", "association_sampled",
+    "items", "next_index", "has_more"],
+  "properties": {
+    "protocol": {"const": "forest.memory-trial-result-page/1"},
+    "query_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "bundle_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "graph_snapshot_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+    "total_count": {"type": "integer", "minimum": 0, "maximum": 64},
+    "missing_count": {"type": "integer", "minimum": 0, "maximum": 64},
+    "content_truncated": {"type": "boolean"},
+    "truncated": {"type": "boolean"},
+    "association_sampled": {"type": "boolean"},
+    "next_index": {"type": ["integer", "null"], "minimum": 0, "maximum": 63},
+    "has_more": {"type": "boolean"},
+    "items": {
+      "type": "array", "maxItems": 8,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["item_index", "source_unit_id", "source_id", "source_kind",
+          "platform", "external_group_id", "trunk_id", "author_subject_ref",
+          "occurred_at", "is_seed", "rank_score", "excerpt",
+          "excerpt_truncated", "images", "image_count"],
+        "properties": {
+          "item_index": {"type": "integer", "minimum": 0, "maximum": 63},
+          "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
+          "source_id": {"type": "string", "minLength": 1, "maxLength": 256},
+          "source_kind": {"enum": ["GROUP", "DIRECT", "DOCUMENT", "SYSTEM", "UNKNOWN"]},
+          "platform": {"type": ["string", "null"]},
+          "external_group_id": {"type": ["string", "null"]},
+          "trunk_id": {"type": ["string", "null"]},
+          "author_subject_ref": {"type": "string"},
+          "occurred_at": {"type": ["string", "null"]},
+          "is_seed": {"type": "boolean"},
+          "rank_score": {"type": "number"},
+          "excerpt": {"type": "string", "maxLength": 2048},
+          "excerpt_truncated": {"type": "boolean"},
+          "image_count": {"type": "integer", "minimum": 0, "maximum": 64},
+          "images": {
+            "type": "array", "maxItems": 8,
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["part_id", "media_type", "width", "height", "media_ref"],
+              "properties": {
+                "part_id": {"type": "string"},
+                "media_type": {"enum": ["image/png", "image/jpeg", "image/webp"]},
+                "width": {"type": "integer", "minimum": 1, "maximum": 100000},
+                "height": {"type": "integer", "minimum": 1, "maximum": 100000},
+                "media_ref": {
+                  "type": "object", "additionalProperties": false,
+                  "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+                  "properties": {
+                    "payload_id": {"type": "string"},
+                    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+                    "owner_component_id": {"type": "string"},
+                    "owner_kind": {"type": "string"},
+                    "owner_id": {"type": "string"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

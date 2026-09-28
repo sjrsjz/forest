@@ -48,6 +48,14 @@ class CleanModuleConfigurationContract:
             },
         }
 
+    def query_required_role(self, query_id: str) -> str:
+        return "AUDITOR"
+
+    async def query_authorized(
+        self, query_id: str, payload: dict, *, authorization=None
+    ) -> object:
+        return await self.query(query_id, payload)
+
     async def read(self) -> dict:
         desired = await self.configuration.desired(include_value=True)
         effective = await self.configuration.effective(include_value=True)

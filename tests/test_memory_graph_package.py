@@ -20,6 +20,7 @@ from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.module_configuration import ModuleConfigurationRepository
+from forest.storage.management_asset_authority import ManagementAssetAuthority
 
 
 def _trial_owner_id(query_id: str, part_id: str) -> str:
@@ -628,27 +629,40 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
                 "fusion_policy_revision) VALUES (%s,'trial-domain',%s,%s,'TEXT_IMAGE',%s,"
                 "4096,'L2','fusion/1') ON CONFLICT (bot_id) DO NOTHING"
             ).format(namespace), (store.bot_id, digest, digest, digest))
-        stored = await kernel.payload.put_bytes(
-            owner_component_id="memory.graph", owner_kind="trial.input",
-            owner_id=_trial_owner_id("query/authority", "text/0"),
-            media_type="text/plain", content=b"hello trial",
-            expected_deletion_epoch=await kernel.payload.epoch(),
+        generation_id = registry.graph_identity.generations["memory.graph"]
+        web_actor = SimpleNamespace(
+            web_subject_ref="admin-1", target_generation_id=generation_id,
         )
-        second = await kernel.payload.put_bytes(
-            owner_component_id="memory.graph", owner_kind="trial.input",
-            owner_id=_trial_owner_id("query/authority", "text/1"),
-            media_type="text/plain", content=b"second trial",
-            expected_deletion_epoch=await kernel.payload.epoch(),
-        )
-        assert second.payload_id != stored.payload_id
-        reference = {"payload_id": stored.payload_id, "digest": stored.content_digest,
-                     "owner_component_id": "memory.graph", "owner_kind": "trial.input",
-                     "owner_id": _trial_owner_id("query/authority", "text/0")}
-        second_reference = {
-            "payload_id": second.payload_id, "digest": second.content_digest,
-            "owner_component_id": "memory.graph", "owner_kind": "trial.input",
-            "owner_id": _trial_owner_id("query/authority", "text/1"),
-        }
+        assets = ManagementAssetAuthority(kernel.payload)
+
+        async def uploaded(part_id, upload_id, content):
+            part_digest = "sha256:" + hashlib.sha256(content).hexdigest()
+            async with store.pool.connection() as conn, conn.transaction():
+                await assets.begin_in(
+                    conn, upload_id=upload_id, component_id="memory.graph",
+                    asset_id="trial.input", actor_subject_ref="admin-1",
+                    generation_id=generation_id, target_ref="query/authority",
+                    part_id=part_id, owner_kind="trial.input",
+                    owner_id=_trial_owner_id("query/authority", part_id),
+                    media_type="text/plain", byte_length=len(content),
+                    content_digest=part_digest, chunk_count=1,
+                    allowed_media_types=("text/plain",), max_bytes=8388608,
+                )
+                await assets.put_chunk_in(
+                    conn, upload_id=upload_id, component_id="memory.graph",
+                    asset_id="trial.input", actor_subject_ref="admin-1",
+                    generation_id=generation_id, chunk_index=0,
+                    content=content, content_digest=part_digest,
+                )
+                return (await assets.finalize_in(
+                    conn, upload_id=upload_id, component_id="memory.graph",
+                    asset_id="trial.input", actor_subject_ref="admin-1",
+                    generation_id=generation_id,
+                ))["payload"]
+
+        reference = await uploaded("text/0", "upload-authority-0", b"hello trial")
+        second_reference = await uploaded("text/1", "upload-authority-1", b"second trial")
+        assert second_reference["payload_id"] != reference["payload_id"]
         body = {"query_id": "query/authority", "parts": [{
             "part_id": "text/0", "modality": "TEXT", "media_type": "text/plain",
             "byte_length": 11, "width": None, "height": None, "payload": reference,
@@ -663,6 +677,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
         with pytest.raises(ForestError) as rejected:
             await instance.management_contract.action(
                 "memory.trial.start", operation_id="web:trial-invalid", payload=invalid,
+                authorization=web_actor,
             )
         assert rejected.value.code == "PAYLOAD_IDENTITY_CONFLICT"
         wrong_length = {**body, "parts": [{**body["parts"][0], "byte_length": 10}]}
@@ -670,28 +685,48 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
             await instance.management_contract.action(
                 "memory.trial.start", operation_id="web:trial-wrong-length",
                 payload=wrong_length,
+                authorization=web_actor,
             )
         assert rejected.value.code == "DOMAIN_PAYLOAD_METADATA_CONFLICT"
+        with pytest.raises(ForestError) as rejected:
+            await instance.management_contract.action(
+                "memory.trial.start", operation_id="web:trial-no-asset-authority",
+                payload=body,
+            )
+        assert rejected.value.code == "MANAGEMENT_ASSET_AUTHORITY_REQUIRED"
+        with pytest.raises(ForestError) as rejected:
+            await instance.management_contract.action(
+                "memory.trial.start", operation_id="web:trial-other-actor",
+                payload=body,
+                authorization=SimpleNamespace(
+                    web_subject_ref="admin-2", target_generation_id=generation_id,
+                ),
+            )
+        assert rejected.value.code == "MANAGEMENT_ASSET_IDENTITY_CONFLICT"
         started = await instance.management_contract.action(
             "memory.trial.start", operation_id="web:trial-valid", payload=body,
+            authorization=web_actor,
         )
         assert started.value["query_id"] == "query/authority"
         assert await instance.management_contract.action(
             "memory.trial.start", operation_id="web:trial-valid", payload=body,
+            authorization=web_actor,
         ) == started
         async with store.pool.connection() as conn:
             actor = (await (await conn.execute(sql.SQL(
                 "SELECT actor_subject_ref FROM {}.memory_trial_inputs "
                 "WHERE bot_id=%s AND query_id='query/authority'"
             ).format(namespace), (store.bot_id,))).fetchone())["actor_subject_ref"]
-        assert actor == "management:shared-token"
-        viewed = await instance.management_contract.query(
+        assert actor == "admin-1"
+        viewed = await instance.management_contract.query_authorized(
             "memory.trial.get", {"query_id": "query/authority"},
+            authorization=web_actor,
         )
         assert viewed["query_id"] == "query/authority"
         cancelled = await instance.management_contract.action(
             "memory.trial.cancel", operation_id="web:trial-cancel",
             payload={"query_id": "query/authority"},
+            authorization=web_actor,
         )
         assert cancelled.value["query_id"] == "query/authority"
     finally:
@@ -735,6 +770,8 @@ async def test_management_trial_registers_mixed_input_and_separate_cancellation(
             "parts": [part(0, "TEXT", "text/plain"), part(1, "IMAGE", "image/png")]}
 
     async def invoke(function, context, payload):
+        if function == "memory_read_management_trial":
+            payload = {"requested_by": "web:admin", **payload}
         async with store.pool.connection() as conn:
             return (await (await conn.execute(sql.SQL(
                 "SELECT {}.{}(%s,%s) AS result"
@@ -756,6 +793,10 @@ async def test_management_trial_registers_mixed_input_and_separate_cancellation(
     assert conflict["error"]["code"] == "MEMORY_TRIAL_IDENTITY_CONFLICT"
     current = await invoke("memory_read_management_trial", {}, {"query_id": "query/management"})
     assert current["ok"] and current["value"]["query_mode"] == "MIXED"
+    other_actor = await invoke("memory_read_management_trial", {}, {
+        "query_id": "query/management", "requested_by": "web:other",
+    })
+    assert other_actor["error"]["code"] == "MEMORY_TRIAL_NOT_FOUND"
     assert current["value"]["state"] == "PENDING"
     Draft202012Validator(package.snapshot.schema(
         "schemas/trial-get-output.json"
@@ -790,6 +831,10 @@ async def test_management_trial_registers_mixed_input_and_separate_cancellation(
             "SELECT count(*) AS n FROM {}.source_units WHERE bot_id=%s"
         ).format(namespace), (store.bot_id,))).fetchone())["n"]
     assert source_count == 0
+    other_cancel = await invoke("memory_cancel_management_trial", {}, {
+        "query_id": "query/management", "requested_by": "web:other",
+    })
+    assert other_cancel["error"]["code"] == "MEMORY_TRIAL_NOT_FOUND"
     cancelled = await invoke("memory_cancel_management_trial", {}, {
         "query_id": "query/management", "requested_by": "web:admin",
     })

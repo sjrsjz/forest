@@ -1364,7 +1364,12 @@ BEGIN
     END IF;
     SELECT * INTO trial_row FROM __forest_module_schema__.memory_trial_inputs
     WHERE bot_id=query_row.bot_id AND query_id=query_row.query_id;
-    IF NOT FOUND OR trial_row.generation_id IS DISTINCT FROM context->>'generation_id'
+    IF NOT FOUND OR trial_row.actor_subject_ref IS DISTINCT FROM input->>'requested_by' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_NOT_FOUND',
+                'message','Management trial does not exist','status',404));
+    END IF;
+    IF trial_row.generation_id IS DISTINCT FROM context->>'generation_id'
        OR trial_row.expires_at<=clock_timestamp() THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
@@ -1387,6 +1392,7 @@ CREATE FUNCTION memory_cancel_management_trial(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
     query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    trial_row __forest_module_schema__.memory_trial_inputs%ROWTYPE;
     work_row __forest_module_schema__.query_recall_work%ROWTYPE;
     status_value text;
 BEGIN
@@ -1397,6 +1403,19 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_TRIAL_NOT_FOUND',
                 'message','Management trial does not exist','status',404));
+    END IF;
+    SELECT * INTO trial_row FROM __forest_module_schema__.memory_trial_inputs
+    WHERE bot_id=query_row.bot_id AND query_id=query_row.query_id FOR SHARE;
+    IF NOT FOUND OR trial_row.actor_subject_ref IS DISTINCT FROM input->>'requested_by' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_NOT_FOUND',
+                'message','Management trial does not exist','status',404));
+    END IF;
+    IF trial_row.generation_id IS DISTINCT FROM context->>'generation_id'
+       OR trial_row.expires_at<=clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
+                'message','Trial input is unavailable to this administrator','status',410));
     END IF;
     SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
     WHERE bot_id=query_row.bot_id AND query_id=query_row.query_id FOR UPDATE;

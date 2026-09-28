@@ -47,6 +47,9 @@ class PackageManagementContract(CleanModuleConfigurationContract):
             item["id"]: (item, command_ports[item["port"]])
             for item in component.get("management_actions", ())
         }
+        self._assets = {
+            item["id"]: item for item in component.get("management_assets", ())
+        }
 
     def describe(self) -> dict:
         value = super().describe()
@@ -54,8 +57,9 @@ class PackageManagementContract(CleanModuleConfigurationContract):
         value["queries"] = [
             {
                 "query_id": operation_id,
-                "input_schema": self.adapter.snapshot.schema(port["input_schema"]),
+                "input_schema": self._public_action_schema(declaration, port),
                 "output_schema": self.adapter.snapshot.schema(port["output_schema"]),
+                "required_role": declaration.get("required_role", "AUDITOR"),
                 **(
                     {"default_limit": declaration["default_limit"]}
                     if "default_limit" in declaration
@@ -78,9 +82,39 @@ class PackageManagementContract(CleanModuleConfigurationContract):
             }
             for operation_id, (declaration, port) in self._actions.items()
         ]
+        value["assets"] = [
+            {
+                "asset_id": item["id"], "media_types": item["media_types"],
+                "max_bytes": item["max_bytes"], "chunk_bytes": 262144,
+            }
+            for item in self._assets.values()
+        ]
         return value
 
+    def asset(self, asset_id: str) -> dict:
+        try:
+            return self._assets[asset_id]
+        except KeyError:
+            raise ForestError(
+                "MODULE_MANAGEMENT_ASSET_NOT_FOUND",
+                "Package management asset does not exist", 404,
+            ) from None
+
+    def query_required_role(self, query_id: str) -> str:
+        try:
+            declaration, _port = self._queries[query_id]
+        except KeyError:
+            raise ForestError(
+                "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Package query does not exist", 404
+            ) from None
+        return declaration.get("required_role", "AUDITOR")
+
     async def query(self, query_id: str, payload: dict) -> object:
+        return await self.query_authorized(query_id, payload)
+
+    async def query_authorized(
+        self, query_id: str, payload: dict, *, authorization=None
+    ) -> object:
         try:
             declaration, port = self._queries[query_id]
         except KeyError:
@@ -89,9 +123,23 @@ class PackageManagementContract(CleanModuleConfigurationContract):
                 "Package management query does not exist",
                 404,
             ) from None
+        actor_field = declaration.get("actor_field")
+        if actor_field is not None and actor_field in payload:
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID",
+                "Authenticated actor fields are supplied by the management gateway", 422,
+            )
+        query_payload = dict(payload)
+        if actor_field is not None:
+            actor = getattr(authorization, "web_subject_ref", None)
+            if actor is None:
+                raise ForestError(
+                    "WEB_AUTHORITY_TICKET_REQUIRED", "Actor-bound query requires Web authority", 403,
+                )
+            query_payload[actor_field] = actor
         return await self.adapter.invoke_management_query(
             port,
-            payload,
+            query_payload,
             timeout_seconds=float(declaration.get("timeout_s", 30)),
         )
 

@@ -1663,6 +1663,7 @@ class PackageGenerationAdapter:
             parent_call_id=parent_call_id,
             timeout_seconds=timeout_seconds,
             before_write=before_write,
+            management_authorization=authorization,
         )
         if not output_validator.is_valid(result):
             raise ForestError(

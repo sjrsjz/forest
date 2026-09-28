@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.46.0"
+version = "1.48.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -43,6 +43,7 @@ requests = [
   "domain.query:memory.read-query-parts",
   "domain.query:memory.read-query-progress",
   "domain.query:memory.read-recall-work",
+  "domain.query:memory.read-management-trial",
   "domain.query:memory.assert-public-query",
   "domain.query:memory.read-query-vectors",
   "domain.query:memory.read-match-preparation",
@@ -124,6 +125,13 @@ contract = "1.0"
 semantics = "idempotent"
 input_schema = "schemas/query-begin-input.json"
 output_schema = "schemas/query-begin-output.json"
+
+[[components.provides]]
+name = "memory.trial.result"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/trial-result-input.json"
+output_schema = "schemas/trial-result-output.json"
 
 [[components.provides]]
 name = "memory.domain.ensure"
@@ -238,9 +246,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.42.0"
+schema_version = "3.43.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "35bd05efb23d1d78142d56384aa5eee9a363083b65e51777928454f6a37ce59f"
+baseline_sha256 = "6f9592dd8f2e5c4fedfebfcad918314de11b3d2c41a6c692ff001b172da10058"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -343,6 +351,12 @@ owner_kind = "trial.input"
 owner_id_path = "/parts/*/payload/owner_id"
 media_type_path = "/parts/*/media_type"
 byte_length_path = "/parts/*/byte_length"
+management_asset_id = "trial.input"
+target_ref_path = "/query_id"
+part_id_path = "/parts/*/part_id"
+width_path = "/parts/*/width"
+height_path = "/parts/*/height"
+min_remaining_s = 660
 
 [[components.domain_commands]]
 name = "memory.cancel-management-trial"
@@ -388,7 +402,16 @@ timeout_s = 10
 [[components.management_queries]]
 id = "memory.trial.get"
 port = "memory.read-management-trial"
+required_role = "ADMIN"
+actor_field = "requested_by"
 timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.trial.result"
+port = "memory.trial.result"
+required_role = "ADMIN"
+actor_field = "requested_by"
+timeout_s = 30
 
 [[components.management_actions]]
 id = "memory.forget.enqueue"
@@ -411,6 +434,13 @@ port = "memory.cancel-management-trial"
 priority = "P1"
 actor_field = "requested_by"
 timeout_s = 15
+
+[[components.management_assets]]
+id = "trial.input"
+owner_kind = "trial.input"
+owner_prefix = "trial"
+media_types = ["text/plain", "image/png", "image/jpeg", "image/webp"]
+max_bytes = 8388608
 
 [[components.unit_of_work_participants]]
 name = "memory.begin-query-record"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import re
 import secrets
@@ -522,5 +523,56 @@ class _AuthorizedGateway:
             action_id,
             **values,
             authorization=ticket,
+            operation_id=operation_id,
+        )
+
+    async def asset_begin(self, component_id: str, asset_id: str, body: dict):
+        self._write()
+        operation_id = self.gateway.asset_operation_id(
+            component_id, asset_id, "begin", body.get("upload_id", "")
+        )
+        ticket, operation_id = await self._ticket(
+            component_id, "asset." + asset_id + ".begin", body,
+            operation_id=operation_id,
+        )
+        return await self.gateway.asset_begin(
+            component_id, asset_id, body, authorization=ticket,
+            operation_id=operation_id,
+        )
+
+    async def asset_chunk(
+        self, component_id: str, asset_id: str, upload_id: str,
+        chunk_index: int, content: bytes,
+    ):
+        self._write()
+        body = {
+            "upload_id": upload_id, "chunk_index": chunk_index,
+            "byte_length": len(content),
+            "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+        }
+        operation_id = self.gateway.asset_operation_id(
+            component_id, asset_id, "chunk", f"{upload_id}:{chunk_index}"
+        )
+        ticket, operation_id = await self._ticket(
+            component_id, "asset." + asset_id + ".chunk", body,
+            operation_id=operation_id,
+        )
+        return await self.gateway.asset_chunk(
+            component_id, asset_id, upload_id, chunk_index, content,
+            authorization=ticket, operation_id=operation_id,
+        )
+
+    async def asset_finalize(self, component_id: str, asset_id: str, upload_id: str):
+        self._write()
+        body = {"upload_id": upload_id}
+        operation_id = self.gateway.asset_operation_id(
+            component_id, asset_id, "finalize", upload_id
+        )
+        ticket, operation_id = await self._ticket(
+            component_id, "asset." + asset_id + ".finalize", body,
+            operation_id=operation_id,
+        )
+        return await self.gateway.asset_finalize(
+            component_id, asset_id, upload_id, authorization=ticket,
             operation_id=operation_id,
         )

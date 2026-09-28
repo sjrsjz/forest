@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["query_id", "requested_by"],
+  "properties": {
+    "query_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "requested_by": {"type": "string", "minLength": 1, "maxLength": 256},
+    "after_index": {"type": "integer", "minimum": -1, "maximum": 63},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 8}
+  }
+}

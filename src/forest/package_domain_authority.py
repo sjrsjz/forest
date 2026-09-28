@@ -14,6 +14,7 @@ from psycopg.types.json import Jsonb
 from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope
 from forest.packages import digest_json
+from forest.storage.management_asset_authority import ManagementAssetAuthority
 
 _FUNCTION = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 _ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
@@ -42,6 +43,7 @@ class PostgresPackageDomainAuthority:
         self.storage_package_digest = storage_package_digest
         self.storage_execution_profile = storage_execution_profile
         self.payloads = payloads
+        self.management_assets = ManagementAssetAuthority(payloads) if payloads is not None else None
 
     @staticmethod
     def _pointer(value: object, pointer: str, bindings: tuple[str, ...] = ()) -> object:
@@ -109,7 +111,10 @@ class PostgresPackageDomainAuthority:
         walk(value, 0, ())
         return tuple(results)
 
-    async def _verify_payload_refs(self, conn, declaration: dict, payload: dict) -> None:
+    async def _verify_payload_refs(
+        self, conn, declaration: dict, payload: dict, *, scope,
+        management_authorization=None,
+    ) -> None:
         references = declaration.get("payload_refs", ())
         if not references:
             return
@@ -175,6 +180,45 @@ class PostgresPackageDomainAuthority:
                         "Managed payload metadata differs from its authoritative bytes",
                         409,
                     )
+                asset_id = declaration_ref.get("management_asset_id")
+                if asset_id is not None:
+                    actor = getattr(management_authorization, "web_subject_ref", None)
+                    target_generation = getattr(
+                        management_authorization, "target_generation_id", None
+                    )
+                    if actor is None or target_generation != scope.generation_id:
+                        raise ForestError(
+                            "MANAGEMENT_ASSET_AUTHORITY_REQUIRED",
+                            "Asset-backed commands require current Web authority", 403,
+                        )
+                    asset = await self.management_assets.verify_asset_in(
+                        conn, payload_id=verified.payload_id,
+                        digest=verified.content_digest, component_id=self.component_id,
+                        asset_id=asset_id, actor_subject_ref=actor,
+                        generation_id=scope.generation_id,
+                        target_ref=self._pointer(
+                            payload, declaration_ref["target_ref_path"], bindings
+                        ),
+                        part_id=self._pointer(
+                            payload, declaration_ref["part_id_path"], bindings
+                        ),
+                        min_remaining_seconds=declaration_ref.get("min_remaining_s", 0),
+                    )
+                    if (
+                        asset["payload"] != reference
+                        or asset["media_type"] != verified.media_type
+                        or asset["byte_length"] != verified.byte_length
+                        or asset["width"] != self._pointer(
+                            payload, declaration_ref["width_path"], bindings
+                        )
+                        or asset["height"] != self._pointer(
+                            payload, declaration_ref["height_path"], bindings
+                        )
+                    ):
+                        raise ForestError(
+                            "MANAGEMENT_ASSET_METADATA_CONFLICT",
+                            "Asset metadata differs from its authoritative bytes", 409,
+                        )
 
     async def invoke_query(
         self,
@@ -221,6 +265,7 @@ class PostgresPackageDomainAuthority:
         parent_call_id: str,
         timeout_seconds: float,
         before_write=None,
+        management_authorization=None,
     ) -> Any:
         """Run one package Command behind the current CONTROL route and Web fence."""
 
@@ -232,6 +277,7 @@ class PostgresPackageDomainAuthority:
             parent_call_id=parent_call_id,
             timeout_seconds=timeout_seconds,
             before_write=before_write,
+            management_authorization=management_authorization,
         )
 
     async def invoke_preparation_command(
@@ -337,6 +383,7 @@ class PostgresPackageDomainAuthority:
         parent_call_id: str,
         timeout_seconds: float,
         before_write=None,
+        management_authorization=None,
     ) -> Any:
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -404,6 +451,7 @@ class PostgresPackageDomainAuthority:
                         parent_call_id=parent_call_id,
                         timeout_seconds=timeout_seconds,
                         generation_verified=True,
+                        management_authorization=management_authorization,
                     )
         except ForestError:
             raise
@@ -427,6 +475,7 @@ class PostgresPackageDomainAuthority:
         parent_call_id: str,
         timeout_seconds: float,
         generation_verified: bool = False,
+        management_authorization=None,
     ) -> Any:
         function = declaration.get("function")
         name = declaration.get("name")
@@ -458,7 +507,10 @@ class PostgresPackageDomainAuthority:
             )
         await self._verify_storage(conn)
         await self._verify_function(conn, function, query=kind == "query")
-        await self._verify_payload_refs(conn, declaration, payload)
+        await self._verify_payload_refs(
+            conn, declaration, payload, scope=scope,
+            management_authorization=management_authorization,
+        )
         context = {
             "protocol": "forest.domain-context/1",
             "port_kind": kind,

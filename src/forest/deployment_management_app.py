@@ -19,6 +19,7 @@ from forest.management_scopes import (
     DeploymentManagementScopeProvider,
     ManagementScopeRegistry,
 )
+from forest.storage.management_asset_authority import CHUNK_BYTES
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 _SESSION_COOKIE = "forest_management_session"
@@ -337,5 +338,50 @@ def create_deployment_management_app(
                 body=body,
                 idempotency_key=request.headers.get("idempotency-key"),
             )
+
+    @app.post(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/assets/{asset_id}/uploads"
+    )
+    async def scoped_asset_begin(
+        scope_kind: str, scope_id: str, component_id: str, asset_id: str,
+        body: dict, request: Request,
+    ):
+        session = await authenticated(request, csrf=True, admin=True)
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
+            return await gateway.asset_begin(component_id, asset_id, body)
+
+    @app.put(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/assets/{asset_id}/uploads/{upload_id}/chunks/{chunk_index}"
+    )
+    async def scoped_asset_chunk(
+        scope_kind: str, scope_id: str, component_id: str, asset_id: str,
+        upload_id: str, chunk_index: int, request: Request,
+    ):
+        session = await authenticated(request, csrf=True, admin=True)
+        if request.headers.get("content-type") != "application/octet-stream":
+            raise ForestError("MANAGEMENT_ASSET_CHUNK_INVALID", "Chunk must be binary", 415)
+        content = bytearray()
+        async for fragment in request.stream():
+            if len(content) + len(fragment) > CHUNK_BYTES:
+                raise ForestError("MANAGEMENT_ASSET_CHUNK_INVALID", "Chunk exceeds 256 KiB", 413)
+            content.extend(fragment)
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
+            return await gateway.asset_chunk(
+                component_id, asset_id, upload_id, chunk_index, bytes(content)
+            )
+
+    @app.post(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/assets/{asset_id}/uploads/{upload_id}/finalize"
+    )
+    async def scoped_asset_finalize(
+        scope_kind: str, scope_id: str, component_id: str, asset_id: str,
+        upload_id: str, request: Request,
+    ):
+        session = await authenticated(request, csrf=True, admin=True)
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
+            return await gateway.asset_finalize(component_id, asset_id, upload_id)
 
     return app
