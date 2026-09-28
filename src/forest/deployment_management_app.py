@@ -100,7 +100,7 @@ def create_deployment_management_app(
         response.headers["referrer-policy"] = "no-referrer"
         response.headers["content-security-policy"] = (
             "default-src 'none'; script-src 'self'; style-src 'self'; "
-            "img-src 'self' data:; connect-src 'self'; font-src 'self'; "
+            "img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; "
             "frame-src blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
         )
         if request.url.path.startswith("/management/"):

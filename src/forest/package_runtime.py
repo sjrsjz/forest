@@ -399,7 +399,8 @@ class PackageGenerationAdapter:
         services = [
             {"service_id": item["name"], "version": _major(item["contract"])}
             for item in (
-                *self.component.get("provides", ()),
+                *(item for item in self.component.get("provides", ())
+                  if item.get("visibility", "public") == "public"),
                 *self.component.get("effect_services", ()),
                 *self.component.get("job_types", ()),
             )
@@ -504,6 +505,7 @@ class PackageGenerationAdapter:
         handlers = {
             (item["name"], _major(item["contract"])): self._service_handler(item["name"])
             for item in self.component.get("provides", ())
+            if item.get("visibility", "public") == "public"
         }
         handlers.update(
             {

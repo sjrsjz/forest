@@ -1,10 +1,7 @@
 """Bounded, source-attributed management projection of trial evidence."""
 
 import base64
-import io
 import json
-
-from PIL import Image, ImageOps, UnidentifiedImageError
 
 from forest.errors import ForestError
 
@@ -101,7 +98,7 @@ async def read_page(ctx, payload):
 
 
 async def read_image(ctx, payload):
-    """Return one small preview only when it belongs to this actor's live trial."""
+    """Return one exact bounded image chunk from this actor's live evidence."""
 
     evidence, evidence_ref = await _authorized_evidence(ctx, payload)
     image_part = next((
@@ -123,54 +120,28 @@ async def read_image(ctx, payload):
     image_ref = image_part.get("media_ref")
     if not isinstance(image_ref, dict):
         raise ForestError("MEMORY_EVIDENCE_INVALID", "Evidence image ref is invalid", 409)
-    raw = await ctx.payloads.read_bytes(image_ref)
-    if len(raw) > 32 * 1024 * 1024:
-        raise ForestError("MEMORY_TRIAL_IMAGE_TOO_LARGE", "Image exceeds preview input bound", 413)
-    try:
-        with Image.open(io.BytesIO(raw)) as image:
-            width, height = image.size
-            if (
-                image.format != {"image/png": "PNG", "image/jpeg": "JPEG", "image/webp": "WEBP"}[media_type]
-                or width != image_part.get("width")
-                or height != image_part.get("height")
-                or width * height > 20_000_000
-            ):
-                raise ForestError("MEMORY_EVIDENCE_INVALID", "Evidence image metadata differs", 409)
-            image.load()
-            image = ImageOps.exif_transpose(image)
-            if image.mode in ("RGBA", "LA") or "transparency" in image.info:
-                rgba = image.convert("RGBA")
-                canvas = Image.new("RGB", rgba.size, "white")
-                canvas.paste(rgba, mask=rgba.getchannel("A"))
-                image = canvas
-            else:
-                image = image.convert("RGB")
-            preview = image.copy()
-            for side in (1024, 768, 512, 384, 256, 192):
-                preview.thumbnail((side, side), Image.Resampling.LANCZOS)
-                for quality in (76, 62):
-                    buffer = io.BytesIO()
-                    preview.save(buffer, format="JPEG", quality=quality, optimize=True)
-                    if buffer.tell() <= 96 * 1024:
-                        current = await ctx.queries.call(
-                            "memory.read-management-trial",
-                            {"query_id": payload["query_id"], "requested_by": payload["requested_by"]},
-                            timeout=10,
-                        )
-                        if current["state"] != "READY" or current["evidence_ref"] != evidence_ref:
-                            raise ForestError(
-                                "MEMORY_EVIDENCE_UNAVAILABLE", "Trial evidence changed", 409
-                            )
-                        return {
-                            "protocol": "forest.memory-trial-image/1",
-                            "query_id": payload["query_id"],
-                            "source_unit_id": payload["source_unit_id"],
-                            "part_id": payload["part_id"],
-                            "media_type": "image/jpeg",
-                            "width": preview.width,
-                            "height": preview.height,
-                            "data_base64": base64.b64encode(buffer.getvalue()).decode("ascii"),
-                        }
-    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
-        raise ForestError("MEMORY_EVIDENCE_INVALID", "Evidence image bytes are invalid", 409) from exc
-    raise ForestError("MEMORY_TRIAL_IMAGE_TOO_LARGE", "Image cannot fit preview bound", 413)
+    offset = payload.get("offset", 0)
+    chunk = await ctx.payloads.read_chunk(image_ref, offset=offset)
+    if chunk["byte_length"] > 32 * 1024 * 1024:
+        raise ForestError("MEMORY_TRIAL_IMAGE_TOO_LARGE", "Image exceeds display bound", 413)
+    if offset >= chunk["byte_length"]:
+        raise ForestError("PAYLOAD_RANGE_INVALID", "Image offset exceeds its bytes", 416)
+    current = await ctx.queries.call(
+        "memory.read-management-trial",
+        {"query_id": payload["query_id"], "requested_by": payload["requested_by"]},
+        timeout=10,
+    )
+    if current["state"] != "READY" or current["evidence_ref"] != evidence_ref:
+        raise ForestError("MEMORY_EVIDENCE_UNAVAILABLE", "Trial evidence changed", 409)
+    return {
+        "protocol": "forest.memory-trial-image-chunk/1",
+        "query_id": payload["query_id"],
+        "source_unit_id": payload["source_unit_id"],
+        "part_id": payload["part_id"],
+        "media_type": media_type,
+        "width": image_part["width"], "height": image_part["height"],
+        "digest": image_ref["digest"],
+        "offset": chunk["offset"], "byte_length": chunk["byte_length"],
+        "eof": chunk["eof"],
+        "data_base64": base64.b64encode(chunk["content"]).decode("ascii"),
+    }

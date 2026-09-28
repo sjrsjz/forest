@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src data:; font-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src blob:; font-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Memory Graph</title>
   <style>
     :root{color-scheme:dark;font:13px/1.4 system-ui,sans-serif;background:#0c1712;color:#dcebe3}
@@ -54,6 +54,8 @@
 <script>
 (()=>{'use strict';
   let port,nonce='',sequence=0,draft=null,sourcePage=null,relationPage=null,forgetPlan=null,forgetTimer=null,trialTimer=null,trialPage=null;
+  const trialImageUrls=new Set();
+  function clearTrialImages(){for(const url of trialImageUrls)URL.revokeObjectURL(url);trialImageUrls.clear();}
   const pending=new Map(),$=id=>document.getElementById(id);
   const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',type,nonce,...payload});
   const request=(type,operation_id,value,idempotency_key)=>new Promise((resolve,reject)=>{const request_id=`memory-ui:${++sequence}`;pending.set(request_id,{resolve,reject});send(type,{request_id,operation_id,value,...(idempotency_key?{idempotency_key}:{})});});
@@ -116,6 +118,34 @@
     const digest=await crypto.subtle.digest('SHA-256',content);
     return 'sha256:'+Array.from(new Uint8Array(digest),value=>value.toString(16).padStart(2,'0')).join('');
   }
+  async function loadTrialImage(query_id,item,image,card){
+    const chunks=[];let offset=0,total=null;
+    for(;;){
+      const part=await call('memory.trial.image',{
+        query_id,source_unit_id:item.source_unit_id,part_id:image.part_id,offset
+      });
+      if($('trial-query').value.trim()!==query_id||!card.isConnected)throw Error('试验页面已更换');
+      if(part.query_id!==query_id||part.source_unit_id!==item.source_unit_id
+        ||part.part_id!==image.part_id||part.media_type!==image.media_type
+        ||part.width!==image.width||part.height!==image.height
+        ||part.digest!==image.media_ref.digest||part.offset!==offset
+        ||part.byte_length>33554432||(total!==null&&part.byte_length!==total))
+        throw Error('图片分块身份发生变化');
+      total=part.byte_length;
+      const binary=atob(part.data_base64);
+      if(!binary.length||binary.length>98304||offset+binary.length>total)
+        throw Error('图片分块长度不合法');
+      chunks.push(Uint8Array.from(binary,char=>char.charCodeAt(0)));
+      offset+=binary.length;
+      if(part.eof!== (offset===total))throw Error('图片分块结束标记不合法');
+      if(part.eof)break;
+      await new Promise(resolve=>setTimeout(resolve,100));
+    }
+    const content=new Blob(chunks,{type:image.media_type});
+    if(await digestBytes(await content.arrayBuffer())!==image.media_ref.digest)
+      throw Error('图片摘要不匹配');
+    return URL.createObjectURL(content);
+  }
   async function uploadTrialPart(query_id,part_id,media_type,content){
     const identity=new TextEncoder().encode(query_id+'\0'+part_id);
     const upload_id='asset:'+(await digestBytes(identity)).slice(7);
@@ -143,14 +173,14 @@
     if(['PENDING','CLAIMED','BLOCKED_UNKNOWN','CANCELLING'].includes(result.state))
       trialTimer=setTimeout(()=>loadTrial(query_id).catch(error=>status(error.message)),3000);
     else if(result.state==='READY')await loadTrialResult(query_id,false);
-    else{$('trial-results').replaceChildren();$('trial-next').disabled=true;trialPage=null;}
+    else{clearTrialImages();$('trial-results').replaceChildren();$('trial-next').disabled=true;trialPage=null;}
   }
   async function loadTrialResult(query_id=$('trial-query').value.trim(),next=false){
     const input={query_id,limit:4,after_index:next&&trialPage?.next_index!=null?trialPage.next_index:-1};
     const page=await call('memory.trial.result',input);
     if($('trial-query').value.trim()!==query_id)return;
     trialPage=page;
-    const root=$('trial-results');root.replaceChildren();
+    const root=$('trial-results');clearTrialImages();root.replaceChildren();
     for(const item of page.items){
       const card=document.createElement('div');card.className='relation';
       const title=document.createElement('strong');
@@ -167,13 +197,11 @@
         button.onclick=async()=>{
           button.disabled=true;
           try{
-            const preview=await call('memory.trial.image',{
-              query_id,source_unit_id:item.source_unit_id,part_id:image.part_id
-            });
-            if($('trial-query').value.trim()!==query_id||!card.isConnected)return;
+            const url=await loadTrialImage(query_id,item,image,card);
+            if($('trial-query').value.trim()!==query_id||!card.isConnected){URL.revokeObjectURL(url);return;}
             const picture=document.createElement('img');picture.className='trial-preview';
             picture.alt=`来源 ${item.source_id} 的图片 ${image.part_id}`;
-            picture.src=`data:${preview.media_type};base64,${preview.data_base64}`;
+            picture.src=url;trialImageUrls.add(url);
             wrap.replaceChildren(picture);
           }catch(error){button.disabled=false;status(error.message);}
         };

@@ -22,5 +22,6 @@ def describe_package(package) -> dict:
         "services": [
             {"name": service["name"], "input_schema": package.schema(service["input_schema"])}
             for service in component["provides"]
+            if service.get("visibility", "public") == "public"
         ],
     }

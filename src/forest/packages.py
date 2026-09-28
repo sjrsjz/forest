@@ -254,7 +254,8 @@ MANIFEST_SCHEMA = {
                             | {
                                 "semantics": {
                                     "enum": ["at-most-once", "idempotent", "read"]
-                                }
+                                },
+                                "visibility": {"enum": ["public", "management"]},
                             },
                         },
                     },
@@ -1483,6 +1484,16 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     "INVALID_MANAGEMENT_OPERATIONS",
                     "Actor-bound management queries require ADMIN and a required string field",
                 )
+    management_query_ports = {item["port"] for item in management_queries}
+    for service in services:
+        if service.get("visibility", "public") == "management" and (
+            service["semantics"] != "read"
+            or service["name"] not in management_query_ports
+        ):
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Management-only services must be read-only management query ports",
+            )
     for declaration in management_actions:
         if declaration.get("port") not in command_ports:
             _fail(

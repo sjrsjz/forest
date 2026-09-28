@@ -6,6 +6,7 @@
     "query_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "requested_by": {"type": "string", "minLength": 1, "maxLength": 256},
     "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
-    "part_id": {"type": "string", "minLength": 1, "maxLength": 256}
+    "part_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "offset": {"type": "integer", "minimum": 0, "maximum": 33554432}
   }
 }

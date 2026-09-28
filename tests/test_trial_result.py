@@ -1,5 +1,6 @@
 import json
 import base64
+import hashlib
 import io
 from pathlib import Path
 from types import SimpleNamespace
@@ -101,11 +102,12 @@ async def test_trial_result_rejects_another_bot_evidence():
 
 
 @pytest.mark.asyncio
-async def test_trial_image_preview_is_bounded_and_comes_from_attributed_evidence():
+async def test_trial_image_chunks_are_bounded_and_come_from_attributed_evidence():
     image_bytes = io.BytesIO()
-    Image.new("RGB", (1800, 1200), "#336699").save(image_bytes, format="PNG")
+    Image.effect_noise((512, 512), 100).convert("RGB").save(image_bytes, format="PNG")
+    raw_image = image_bytes.getvalue()
     media_ref = {
-        "payload_id": "image/1", "digest": "sha256:" + "b" * 64,
+        "payload_id": "image/1", "digest": "sha256:" + hashlib.sha256(raw_image).hexdigest(),
         "owner_component_id": "memory.graph", "owner_kind": "source.part",
         "owner_id": "source/1/part/1",
     }
@@ -119,7 +121,7 @@ async def test_trial_image_preview_is_bounded_and_comes_from_attributed_evidence
         "bot_id": "bot/1", "query_id": "trial/1", "current_source": None,
         "evidence": [{"source_unit_id": "unit/1", "parts": [{
             "kind": "image", "part_id": "part/1", "media_type": "image/png",
-            "width": 1800, "height": 1200, "media_ref": media_ref,
+            "width": 512, "height": 512, "media_ref": media_ref,
         }]}],
     }
 
@@ -130,21 +132,38 @@ async def test_trial_image_preview_is_bounded_and_comes_from_attributed_evidence
 
     class Payloads:
         async def read_bytes(self, reference):
-            if reference == evidence_ref:
-                return json.dumps(evidence).encode()
+            assert reference == evidence_ref
+            return json.dumps(evidence).encode()
+
+        async def read_chunk(self, reference, *, offset):
             assert reference == media_ref
-            return image_bytes.getvalue()
+            content = raw_image[offset:offset + 96 * 1024]
+            return {"content": content, "offset": offset,
+                    "byte_length": len(raw_image),
+                    "eof": offset + len(content) == len(raw_image)}
 
     ctx = SimpleNamespace(identity={"bot_id": "bot/1"}, queries=Queries(), payloads=Payloads())
-    result = await read_image(ctx, {
+    request = {
         "query_id": "trial/1", "requested_by": "admin/1",
         "source_unit_id": "unit/1", "part_id": "part/1",
-    })
-    assert result["media_type"] == "image/jpeg"
-    assert result["width"] <= 1024 and result["height"] <= 1024
-    assert len(base64.b64decode(result["data_base64"])) <= 96 * 1024
-    with Image.open(io.BytesIO(base64.b64decode(result["data_base64"]))) as preview:
-        assert preview.size == (result["width"], result["height"])
+    }
+    chunks = []
+    offset = 0
+    while True:
+        result = await read_image(ctx, {**request, "offset": offset})
+        assert result["media_type"] == "image/png"
+        assert result["width"] == result["height"] == 512
+        assert result["digest"] == media_ref["digest"]
+        assert result["offset"] == offset
+        chunk = base64.b64decode(result["data_base64"])
+        assert 0 < len(chunk) <= 96 * 1024
+        chunks.append(chunk)
+        offset += len(chunk)
+        assert result["eof"] == (offset == len(raw_image))
+        if result["eof"]:
+            break
+    assert len(chunks) > 1
+    assert b"".join(chunks) == raw_image
     schema = json.loads((Path(__file__).parents[1]
         / "src/forest/builtin/memory_graph/schemas/trial-image-output.json"
     ).read_text(encoding="utf-8"))

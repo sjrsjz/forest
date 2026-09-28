@@ -346,7 +346,7 @@ ComponentJob 的兼容接管要求相同 `handler_id`、输入 schema digest 和
 
 ## 7. 可扩展管理视图
 
-模块除配置 UI 外可声明只读管理视图和类型化管理动作。视图查询必须经组件注册的 management query contract，包负责 DTO 的字段选择、分页和脱敏，网关核对角色及声明的输入/输出 schema 后通过隔离通道传给 iframe。动作必须映射到已注册的 Domain Command，并走计划、授权、幂等、审计和生命周期执行器。
+模块除配置 UI 外可声明只读管理视图和类型化管理动作。视图查询必须经组件注册的 management query contract，包负责 DTO 的字段选择、分页和脱敏，网关核对角色及声明的输入/输出 schema 后通过隔离通道传给 iframe。动作必须映射到已注册的 Domain Command，并走计划、授权、幂等、审计和生命周期执行器。包的只读服务若声明 `visibility=management`，必须绑定一个管理查询；Worker 仍装载该服务，但依赖求解、公共服务目录和 RuntimeGraph 均不为其他组件发布其路由。管理网关只向同一包 Generation 的服务端点发起自调用，并注入已验证的管理员主体；普通模块不能自行提供该主体来读取管理结果。
 
 可安装包通过 manifest 的 `management_queries` 将查询绑定到同包 Domain Query 或声明为 `read` 的服务，`management_actions` 则绑定到同包 Domain Command；宿主不得按 `component_id` 挂业务 handler。只读服务适合需要跨模块 UnitOfWork 取得一致快照的预览，不能把业务写入伪装成 Query。每项声明冻结公开 operation ID、端口、输入/输出 schema、分页上限或优先级；Action 可用 JSON Pointer 声明授权计划投影。管理网关从当前 Generation 的 management contract 枚举操作；Action 在一次 Bot 数据库事务内完成 CONTROL admission 栅栏、Web authority ticket/策略复核、审计及包 Command。跨模块业务动作由已授权 Command 原子登记模块自有持久工作，再由该包的 owned-work 在执行事务内重验计划和资源屏障。包替换后旧 contract、旧 UI 与旧端口同时失效，不得由宿主保留可继续写旧 schema 的管理兼容层。
 

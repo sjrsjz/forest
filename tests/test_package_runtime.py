@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from forest.errors import ForestError
+from forest.module_validation import resolve_dependencies
 from forest.job_protocol import DurableJobExecutionRequest
 from forest.package_runtime import (
     PackageGenerationAdapter,
@@ -49,6 +50,48 @@ class Configuration:
             payload_digest=digest_json(value),
             value=value if include_value else None,
         )
+
+
+def test_management_only_memory_services_have_no_runtime_routes(tmp_path):
+    snapshot = PackageCatalog(tmp_path / "catalog").build(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph"
+    )
+    adapter = PackageGenerationAdapter(
+        snapshot=snapshot,
+        bot_id="bot-package-runtime",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        service_routes={},
+        resolved_contracts={},
+        generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=None,
+        state_commands=None,
+        owned_work_authority=SimpleNamespace(),
+        service_operation_ledger=NoServiceLedger(),
+    )
+    public = {
+        (item["service_id"], item["version"])
+        for item in adapter.runtime_contract["services"]
+    }
+    routed = set(adapter.runtime_service_handlers())
+    assert ("memory.query.request", 1) in public & routed
+    for name in (
+        "memory.trial.result", "memory.trial.image", "memory.source.forget.preview"
+    ):
+        assert (name, 1) not in public
+        assert (name, 1) not in routed
+        assert name in adapter._provided_services
+
+    with pytest.raises(ForestError) as missing:
+        resolve_dependencies({
+            "memory.graph": snapshot,
+            "another.component": SimpleNamespace(component={
+                "provides": [],
+                "requires": [{"name": "memory.trial.image", "contract": ">=1.0,<2.0"}],
+            }),
+        })
+    assert missing.value.code == "DEPENDENCY_MISSING"
 
 
 def test_package_publishes_agent_tool_from_its_own_service(tmp_path):

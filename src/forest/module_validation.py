@@ -23,6 +23,8 @@ def resolve_dependencies(snapshots: dict[str, PackageSnapshot]) -> DependencyPla
     providers: dict[tuple[str, int], tuple[str, str]] = {}
     for component_id, snapshot in snapshots.items():
         for provided in snapshot.component["provides"]:
+            if provided.get("visibility", "public") != "public":
+                continue
             key = provided["name"], int(provided["contract"].split(".")[0])
             if key in providers:
                 raise ForestError(

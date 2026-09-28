@@ -792,59 +792,68 @@ class PayloadsHandle:
             )
         return result
 
-    async def read_bytes(self, reference: Mapping) -> bytes:
+    async def read_chunk(
+        self, reference: Mapping, *, offset: int, max_bytes: int = _CHUNK_BYTES
+    ) -> dict:
         scope = self._call_scope()
+        exact = self._reference(reference)
+        if (
+            type(offset) is not int or offset < 0
+            or type(max_bytes) is not int or not 1 <= max_bytes <= self._CHUNK_BYTES
+        ):
+            raise ForestError("PAYLOAD_RANGE_INVALID", "Payload read range is invalid", 422)
+        result = await self._rpc(
+            scope.call_id,
+            {
+                "action": "read-chunk", "reference": exact,
+                "offset": offset, "max_bytes": max_bytes,
+            },
+        )
+        if (
+            not isinstance(result, dict)
+            or set(result) != {"data_base64", "offset", "byte_length", "eof"}
+            or result["offset"] != offset
+            or type(result["byte_length"]) is not int
+            or result["byte_length"] < 0
+            or type(result["eof"]) is not bool
+        ):
+            raise ForestError(
+                "PAYLOAD_PROTOCOL_INVALID", "Host returned an invalid payload chunk", 502
+            )
+        try:
+            chunk = base64.b64decode(result["data_base64"], validate=True)
+        except (TypeError, ValueError) as exc:
+            raise ForestError(
+                "PAYLOAD_PROTOCOL_INVALID", "Host returned invalid payload bytes", 502
+            ) from exc
+        total = result["byte_length"]
+        if (
+            len(chunk) > max_bytes or offset + len(chunk) > total
+            or not chunk and offset < total
+            or result["eof"] != (offset + len(chunk) == total)
+        ):
+            raise ForestError(
+                "PAYLOAD_PROTOCOL_INVALID", "Host returned an invalid payload range", 502
+            )
+        return {"content": chunk, "offset": offset, "byte_length": total,
+                "eof": result["eof"]}
+
+    async def read_bytes(self, reference: Mapping) -> bytes:
         exact = self._reference(reference)
         chunks: list[bytes] = []
         offset = 0
         total: int | None = None
         while total is None or offset < total:
-            result = await self._rpc(
-                scope.call_id,
-                {
-                    "action": "read-chunk",
-                    "reference": exact,
-                    "offset": offset,
-                    "max_bytes": self._CHUNK_BYTES,
-                },
-            )
-            if (
-                not isinstance(result, dict)
-                or set(result) != {"data_base64", "offset", "byte_length", "eof"}
-                or result["offset"] != offset
-                or type(result["byte_length"]) is not int
-                or result["byte_length"] < 0
-                or type(result["eof"]) is not bool
-            ):
-                raise ForestError(
-                    "PAYLOAD_PROTOCOL_INVALID", "Host returned an invalid payload chunk", 502
-                )
+            result = await self.read_chunk(exact, offset=offset)
             if total is None:
                 total = result["byte_length"]
             elif total != result["byte_length"]:
                 raise ForestError(
                     "PAYLOAD_PROTOCOL_INVALID", "Payload length changed during one read", 409
                 )
-            try:
-                chunk = base64.b64decode(result["data_base64"], validate=True)
-            except (TypeError, ValueError) as exc:
-                raise ForestError(
-                    "PAYLOAD_PROTOCOL_INVALID", "Host returned invalid payload bytes", 502
-                ) from exc
-            if len(chunk) > self._CHUNK_BYTES or offset + len(chunk) > total:
-                raise ForestError(
-                    "PAYLOAD_PROTOCOL_INVALID", "Host returned an invalid payload range", 502
-                )
-            if not chunk and offset < total:
-                raise ForestError(
-                    "PAYLOAD_PROTOCOL_INVALID", "Payload read made no progress", 502
-                )
+            chunk = result["content"]
             chunks.append(chunk)
             offset += len(chunk)
-            if result["eof"] != (offset == total):
-                raise ForestError(
-                    "PAYLOAD_PROTOCOL_INVALID", "Payload EOF marker is inconsistent", 502
-                )
         content = b"".join(chunks)
         if "sha256:" + hashlib.sha256(content).hexdigest() != exact["digest"]:
             raise ForestError(

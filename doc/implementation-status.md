@@ -213,7 +213,7 @@ Memory 的常驻向量删除 Worker 现在每次认领前有界扫描已过期�
 
 管理试验复用正式查询的召回 owned-work 状态机时，状态读取现按 Bot、Generation 和有效期拒绝失效试验；任务认领及旧 claim token 重放会把到期或换代的试验收敛为 `FAILED/MEMORY_TRIAL_INPUT_UNAVAILABLE`，避免继续调度图扩散。SQL 定向验证覆盖有效试验状态、换代拒读、旧 claim 重放和待领取工作终止。
 
-Memory 包现已声明 `memory.trial.start`、`memory.trial.get`、`memory.trial.result`、`memory.trial.image` 和独立 `memory.trial.cancel` 管理端口。启动 action 在同一权威事务内冻结 Bot/管理员/Generation、图文 part、十分钟有效期及八分钟召回截止；Memory 的 Domain Command Authority 在提交前向 Kernel Payload 核验每个精确引用的身份、媒体类型和字节数。PostgreSQL 验证了图文登记幂等、伪造摘要和字节数拒绝、独立取消以及 Agent 公开端口拒绝试验 ID。试验证据物化使用单独协议，不伪造“当前群来源”；既有群来源证据协议保持原样。结果端口分页读取证据正文和图片引用并标明群、主干、来源与作者；图片端口按需读取单个归属 part 并返回最多 96 KiB 的 JPEG 预览，隔离 UI 可显示像素。真实图文全链验收尚未完成。
+Memory 包现已声明 `memory.trial.start`、`memory.trial.get`、`memory.trial.result`、`memory.trial.image` 和独立 `memory.trial.cancel` 管理端口。启动 action 在同一权威事务内冻结 Bot/管理员/Generation、图文 part、十分钟有效期及八分钟召回截止；Memory 的 Domain Command Authority 在提交前向 Kernel Payload 核验每个精确引用的身份、媒体类型和字节数。PostgreSQL 验证了图文登记幂等、伪造摘要和字节数拒绝、独立取消以及 Agent 公开端口拒绝试验 ID。试验证据物化使用单独协议，不伪造“当前群来源”；既有群来源证据协议保持原样。结果端口分页读取证据正文和图片引用并标明群、主干、来源与作者；图片端口按需读取单个归属 part 的 96 KiB 原图分块，隔离 UI 校验完整摘要后显示。真实图文全链验收尚未完成。
 
 取消 action 现同时给试验输入写入单向 `cancelled_at`，阻断后续 part 读取、facet 准备、嵌入领取与派发资格；向量发布不能确认取消后的 READY，向量删除 Worker 将取消与过期试验一起清扫，包括已准备但尚未派发的 `PREPARED` facet。PostgreSQL 覆盖了已领取召回工作的取消后结算、待嵌入和已准备 facet 不再领取并被抑制。已派发的外部请求仍按原 at-most-once 效果结算，不能许诺即时撤销网络调用。
 
@@ -221,7 +221,7 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 
 试验输入的多个 part 现使用由 `query_id` 与 `part_id` 派生的独立 Kernel Payload owner_id；Memory 的启动命令与表约束同时复核该身份，避免图文 part 争用同一唯一 owner。隔离 PostgreSQL 已验证两个真实 Payload 能在同一管理试验登记，错误摘要和字节数仍被拒绝。
 
-管理资产通道已新增于 `kernel.payload`：包清单声明可上传资产，部署管理路由对 256 KiB 原始块设硬上限，Bot Web ticket/策略/审计和分块写入在同一事务内完成。上传会话绑定 Bot、管理员、组件 Generation、目标 query/part、owner 与总体摘要；5 分钟未完成超时、30 分钟最终 Payload TTL，数据库约束块身份，限流窗口及每 Bot 保留量设上界，常驻 Kernel 清理撤销过期 Payload。完成时从真实图片字节解析尺寸；Memory 试验 action 对每个 part 复核同一管理员、Generation、query/part、元数据及剩余有效期。试验状态、结果和图片查询由 Web 网关注入管理员主体，Memory 对查询与取消复核主体/Generation；不同管理员不能凭试验 ID 读取或取消。隔离包 UI 已加入图文上传、启动、状态、证据分页、按需图片预览和取消入口；定向 PostgreSQL 已验证分块幂等、绑定拒绝和到期撤销，HTTP 与前端还需完整真实会话验收，试验查询/part 的物理 TTL 回收仍待完成。
+管理资产通道已新增于 `kernel.payload`：包清单声明可上传资产，部署管理路由对 256 KiB 原始块设硬上限，Bot Web ticket/策略/审计和分块写入在同一事务内完成。上传会话绑定 Bot、管理员、组件 Generation、目标 query/part、owner 与总体摘要；5 分钟未完成超时、30 分钟最终 Payload TTL，数据库约束块身份，限流窗口及每 Bot 保留量设上界，常驻 Kernel 清理撤销过期 Payload。完成时从真实图片字节解析尺寸；Memory 试验 action 对每个 part 复核同一管理员、Generation、query/part、元数据及剩余有效期。试验状态、结果和图片查询由 Web 网关注入管理员主体，Memory 对查询与取消复核主体/Generation；不同管理员不能凭试验 ID 读取或取消。结果、图片和遗忘预览服务现声明为管理专用，只能经包管理入口调用，不出现在公共依赖图和 RuntimeGraph。隔离包 UI 已加入图文上传、启动、状态、证据分页、按需原图分块显示和取消入口；定向 PostgreSQL 已验证分块幂等、绑定拒绝和到期撤销，HTTP 与前端还需完整真实会话验收，试验查询/part 的物理 TTL 回收仍待完成。
 
 ## 8. 下一切换顺序
 
