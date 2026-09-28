@@ -28,14 +28,14 @@
           "additionalProperties": false
         },
         "boundary": {"enum": ["IDLE", "MODEL_SAFE_POINT", "SESSION_END"]},
-        "selection_mode": {"enum": ["ANY", "SILENT_ONLY"]},
+        "selection_mode": {"enum": ["ANY", "SILENT_ONLY", "PREFILL_ONLY"]},
         "session_ref": {"type": ["string", "null"], "maxLength": 256},
         "run_ref": {"type": ["string", "null"], "maxLength": 256},
         "next_run_ref": {"type": ["string", "null"], "maxLength": 256}
       },
       "allOf": [
         {
-          "if": {"properties": {"boundary": {"const": "IDLE"}}},
+          "if": {"properties": {"boundary": {"const": "IDLE"}, "selection_mode": {"enum": ["ANY", "SILENT_ONLY"]}}},
           "then": {
             "properties": {
               "session_ref": {"type": "string", "minLength": 1},
@@ -45,7 +45,7 @@
           }
         },
         {
-          "if": {"properties": {"boundary": {"const": "MODEL_SAFE_POINT"}}},
+          "if": {"properties": {"boundary": {"const": "MODEL_SAFE_POINT"}, "selection_mode": {"enum": ["ANY", "SILENT_ONLY"]}}},
           "then": {
             "properties": {
               "session_ref": {"type": "string", "minLength": 1},
@@ -55,13 +55,32 @@
           }
         },
         {
-          "if": {"properties": {"boundary": {"const": "SESSION_END"}}},
+          "if": {"properties": {"boundary": {"const": "SESSION_END"}, "selection_mode": {"enum": ["ANY", "SILENT_ONLY"]}}},
           "then": {
             "properties": {
               "session_ref": {"type": "string", "minLength": 1},
               "run_ref": {"type": "string", "minLength": 1},
               "next_run_ref": {"type": "string", "minLength": 1}
             }
+          }
+        },
+        {
+          "if": {"properties": {"selection_mode": {"const": "PREFILL_ONLY"}}},
+          "then": {
+            "properties": {"next_run_ref": {"type": "null"}},
+            "allOf": [
+              {
+                "if": {"properties": {"boundary": {"const": "IDLE"}}},
+                "then": {"properties": {"session_ref": {"type": "null"}, "run_ref": {"type": "null"}}}
+              },
+              {
+                "if": {"properties": {"boundary": {"enum": ["MODEL_SAFE_POINT", "SESSION_END"]}}},
+                "then": {"properties": {
+                  "session_ref": {"type": "string", "minLength": 1},
+                  "run_ref": {"type": "string", "minLength": 1}
+                }}
+              }
+            ]
           }
         }
       ],

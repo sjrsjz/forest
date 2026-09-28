@@ -153,15 +153,48 @@ class AgentExecution:
         )
         return None if started["status"] == "IDLE" else started["run"]
 
+    async def _prefill(self, request: dict, boundary: str) -> bool:
+        for _ in range(8):
+            request_id = uuid4().hex
+            selected = await self.ctx.services.call(
+                "conversation.context.prefill",
+                {
+                    "protocol": "forest.conversation-context-prefill/1",
+                    "request_id": request_id,
+                    "actor": request["actor"],
+                    "boundary": boundary,
+                    "session_ref": None if boundary == "IDLE" else request["session_ref"],
+                    "run_ref": None if boundary == "IDLE" else request["run_ref"],
+                },
+                operation_id=self.ctx.operations.stable(f"prefill:{request_id}"),
+                timeout=35,
+            )
+            if selected["status"] == "CONTINUE":
+                return True
+            if selected["status"] != "BATCH" or selected["kind"] != "CONTEXT_PREFILL":
+                raise ForestError(
+                    "AGENT_PREFILL_RESULT_INVALID", "Conversation prefill was invalid", 409
+                )
+        return False
+
     async def _load_or_start(self, request: dict) -> dict | None:
         try:
             run = await self._run(request["run_ref"])
         except ForestError as exc:
             if exc.code != "AGENT_RUN_NOT_FOUND" or request["resume"]:
                 raise
-            run = await self._start(request)
+            if not await self._prefill(request, "IDLE"):
+                return {"_prefill_pending": True}
+            try:
+                run = await self._start(request)
+            except ForestError as start_error:
+                if start_error.code != "CONVERSATION_PREFILL_REQUIRED":
+                    raise
+                return {"_prefill_pending": True}
         if run is None:
             return None
+        if run.get("_prefill_pending"):
+            return run
         if (
             run["session_id"] != request["session_ref"]
             or run["conversation_ref"] != request["conversation_id"]
@@ -178,7 +211,7 @@ class AgentExecution:
             )
         return run
 
-    async def _acquire_input(self, request: dict, owner: dict, step_seq: int) -> dict:
+    async def _acquire_once(self, request: dict, owner: dict, step_seq: int) -> dict:
         return await self.ctx.uow.call(
             "agent.acquire-model-input",
             {
@@ -209,6 +242,17 @@ class AgentExecution:
             ),
             timeout=25,
         )
+
+    async def _acquire_input(self, request: dict, owner: dict, step_seq: int) -> dict:
+        for _ in range(2):
+            try:
+                return await self._acquire_once(request, owner, step_seq)
+            except ForestError as exc:
+                if exc.code != "CONVERSATION_PREFILL_REQUIRED":
+                    raise
+                if not await self._prefill(request, "MODEL_SAFE_POINT"):
+                    return {"status": "WAIT_INPUT"}
+        return {"status": "WAIT_INPUT"}
 
     @staticmethod
     def _reply(run: dict) -> dict | None:
@@ -411,6 +455,8 @@ class AgentExecution:
                 422,
             )
         run = await self._load_or_start(request)
+        if run is not None and run.get("_prefill_pending"):
+            return self._result(request, "WAIT_INPUT")
         if run is None:
             return self._result(request, "IDLE")
         if run["state"] in {"COMPLETED", "FAILED", "CANCELLED"}:

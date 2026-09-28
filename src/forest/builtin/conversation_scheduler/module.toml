@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.9.0"
+version = "4.10.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -33,6 +33,7 @@ requests = [
   "service.call:agent.execution.policy",
   "domain.query:conversation.context-page",
   "uow.execute:conversation.commit-silent-input",
+  "uow.execute:conversation.prefill-trigger-input",
   "uow.execute:conversation.compact-before-run",
   "uow.execute:conversation.commit-final-reply",
   "uow.execute:conversation.session-handoff",
@@ -58,11 +59,18 @@ semantics = "idempotent"
 input_schema = "schemas/context-snapshot-input.json"
 output_schema = "schemas/context-snapshot-output.json"
 
+[[components.provides]]
+name = "conversation.context.prefill"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/prefill-service-input.json"
+output_schema = "schemas/select-input-output.json"
+
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.5.0"
+schema_version = "4.6.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "2f1b03c63648126f6f51c348ff8b613a70b722b1b3bbb4ec3ca7803874aba412"
+baseline_sha256 = "074cb87193b616cc1d72dd1fc524b5d57449341fbfc2f11650622d2bd6bece62"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -174,6 +182,22 @@ steps = [
   { id = "payload", component_id = "kernel.payload", participant = "payload.put-json-from-prior", input_path = "/payload" },
   { id = "commit", component_id = "conversation.scheduler", participant = "conversation.commit-context-compaction" },
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.qualify-archive", input_path = "/memory" }
+]
+
+[[components.unit_of_work_plans]]
+name = "conversation.prefill-trigger-input"
+contract = "1.0"
+input_schema = "schemas/prefill-input-plan.json"
+output_schema = "schemas/select-input-output.json"
+timeout_s = 25
+steps = [
+  { id = "select", component_id = "conversation.scheduler", participant = "conversation.select-input", input_path = "/selection" },
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "qualify", component_id = "memory.graph", participant = "memory.qualify-input-batch", input_path = "/qualification" },
+  { id = "prepare", component_id = "conversation.scheduler", participant = "conversation.prepare-context-compaction" },
+  { id = "payload", component_id = "kernel.payload", participant = "payload.put-json-from-prior", input_path = "/payload" },
+  { id = "commit", component_id = "conversation.scheduler", participant = "conversation.commit-context-compaction" },
   { id = "memory", component_id = "memory.graph", participant = "memory.qualify-archive", input_path = "/memory" }
 ]
 

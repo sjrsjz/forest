@@ -48,7 +48,7 @@
             "status": {"const": "BATCH"},
             "input_batch_id": {"type": "string"},
             "boundary": {"enum": ["IDLE", "MODEL_SAFE_POINT", "SESSION_END"]},
-            "kind": {"enum": ["TRIGGER_INPUT", "SILENT_DRAIN", "RECOVERY_CLAIM"]},
+            "kind": {"enum": ["TRIGGER_INPUT", "CONTEXT_PREFILL", "SILENT_DRAIN", "RECOVERY_CLAIM"]},
             "start_seq": {"type": ["integer", "null"], "minimum": 1},
             "end_seq": {"type": ["integer", "null"], "minimum": 1},
             "trigger_cut_seq": {"type": ["integer", "null"], "minimum": 1},

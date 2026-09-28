@@ -203,7 +203,7 @@ CREATE TABLE input_batches (
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     boundary text NOT NULL CHECK (boundary IN ('IDLE','MODEL_SAFE_POINT','SESSION_END')),
-    kind text NOT NULL CHECK (kind IN ('TRIGGER_INPUT','SILENT_DRAIN','RECOVERY_CLAIM')),
+    kind text NOT NULL CHECK (kind IN ('TRIGGER_INPUT','CONTEXT_PREFILL','SILENT_DRAIN','RECOVERY_CLAIM')),
     start_seq bigint CHECK (start_seq IS NULL OR start_seq > 0),
     end_seq bigint CHECK (end_seq IS NULL OR end_seq > 0),
     trigger_cut_seq bigint CHECK (trigger_cut_seq IS NULL OR trigger_cut_seq > 0),
@@ -224,6 +224,10 @@ CREATE TABLE input_batches (
         (kind='TRIGGER_INPUT' AND start_seq IS NOT NULL AND end_seq IS NOT NULL
             AND start_seq <= end_seq AND trigger_cut_seq=end_seq
             AND selected_input_end_seq=end_seq AND session_ref IS NOT NULL)
+        OR (kind='CONTEXT_PREFILL' AND start_seq IS NOT NULL AND end_seq IS NOT NULL
+            AND start_seq <= end_seq AND end_seq-start_seq < 64
+            AND trigger_cut_seq IS NULL AND selected_input_end_seq=end_seq
+            AND session_ref IS NULL)
         OR (kind='SILENT_DRAIN' AND start_seq IS NOT NULL AND end_seq IS NOT NULL
             AND start_seq <= end_seq AND trigger_cut_seq IS NULL
             AND selected_input_end_seq=end_seq AND session_ref IS NULL)
@@ -1239,25 +1243,58 @@ BEGIN
             )
         );
     END IF;
-    PERFORM trigger_id
-    FROM __forest_module_schema__.conversation_triggers
-    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
-      AND status='PENDING' AND ingress_seq<=lane.classified_through_seq
-    ORDER BY ingress_seq,trigger_id
-    FOR UPDATE;
+    -- Classification and every trigger-state transition hold this lane row
+    -- first. The lane fence stabilizes the pending set without locking an
+    -- arbitrarily large trigger backlog during each 64-event prefill.
     SELECT count(*)::integer,max(ingress_seq)
     INTO pending_count,trigger_cut
     FROM __forest_module_schema__.conversation_triggers
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
       AND status='PENDING' AND ingress_seq<=lane.classified_through_seq;
     has_gap := lane.classified_through_seq < lane.next_ingress_seq - 1;
-    IF pending_count > 0 THEN
+    IF requested_mode='PREFILL_ONLY' THEN
+        IF pending_count > 0 AND trigger_cut-lane.context_applied_seq > 64 THEN
+            -- Retain the last trigger in the final Agent InputBatch. Earlier
+            -- triggers stay PENDING while their source events enter Context.
+            selection_kind := 'CONTEXT_PREFILL';
+            selection_start := lane.context_applied_seq+1;
+            selection_end := LEAST(lane.context_applied_seq+64,trigger_cut-1);
+            selection_trigger_cut := NULL;
+            selected_session := NULL;
+            selected_run := NULL;
+        ELSE
+            INSERT INTO __forest_module_schema__.selection_operations(
+                bot_id,operation_id,conversation_id,input_digest,boundary,result_status,
+                input_batch_id,observed_mailbox_revision,observed_classified_through_seq,
+                selected_input_end_seq,actor_owner_id,actor_epoch
+            ) VALUES (
+                requested_bot,requested_operation,requested_conversation,requested_digest,
+                requested_boundary,'CONTINUE',NULL,lane.mailbox_revision,
+                lane.classified_through_seq,lane.context_applied_seq,requested_owner,requested_epoch
+            );
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',true,
+                'value',__forest_module_schema__.conversation_selection_result(
+                    requested_bot,requested_operation
+                )
+            );
+        END IF;
+    ELSIF pending_count > 0 THEN
         IF requested_mode='SILENT_ONLY' THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object(
                     'code','CONVERSATION_TRIGGER_PENDING',
                     'message','Silent drain cannot claim a pending trigger','status',409
+                )
+            );
+        END IF;
+        IF trigger_cut-lane.context_applied_seq > 64 THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONVERSATION_PREFILL_REQUIRED',
+                    'message','Trigger prefix requires bounded Context prefill','status',409
                 )
             );
         END IF;
@@ -1436,7 +1473,7 @@ BEGIN
         WHERE bot_id=requested_bot AND conversation_id=requested_conversation
           AND context_revision=selection_context_revision;
     END IF;
-    IF pending_count > 0 THEN
+    IF pending_count > 0 AND selection_kind <> 'CONTEXT_PREFILL' THEN
         UPDATE __forest_module_schema__.conversation_triggers
         SET status='CLAIMED',claimed_session_ref=selected_session,
             claimed_run_ref=selected_run,input_batch_id=batch_id,

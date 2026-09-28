@@ -19,6 +19,8 @@
       "required": ["prepare", "payload"],
       "properties": {
         "select": {"type": "object", "required": ["status", "conversation_id"]},
+        "payload_epoch": {"type": "object", "required": ["protocol", "deletion_epoch"]},
+        "qualify": {"type": "object", "required": ["protocol", "qualified_count", "pending_count"]},
         "prepare": {"type": "object", "required": ["protocol", "status"]},
         "payload": {"type": "object", "required": ["protocol", "status"]}
       },

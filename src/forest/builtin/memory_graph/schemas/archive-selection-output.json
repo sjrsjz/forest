@@ -121,6 +121,7 @@
                 "kind": {
                   "enum": [
                     "TRIGGER_INPUT",
+                    "CONTEXT_PREFILL",
                     "SILENT_DRAIN",
                     "RECOVERY_CLAIM"
                   ]

@@ -16,8 +16,12 @@
     "input": {"type": "object"},
     "prior": {
       "type": "object",
-      "maxProperties": 1,
-      "properties": {"select": {"type": "object", "required": ["status", "conversation_id"]}},
+      "maxProperties": 3,
+      "properties": {
+        "select": {"type": "object", "required": ["status", "conversation_id"]},
+        "payload_epoch": {"type": "object", "required": ["protocol", "deletion_epoch"]},
+        "qualify": {"type": "object", "required": ["protocol", "qualified_count", "pending_count"]}
+      },
       "additionalProperties": false
     }
   },

@@ -6914,7 +6914,7 @@ DECLARE
     pending_count integer := 0;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
-       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR envelope#>>'{caller,component_id}' NOT IN ('agent.runtime','conversation.scheduler')
        OR body IS NULL OR prior IS NULL
        OR selection_step IS NULL OR epoch_step IS NULL
        OR requested_operation IS NULL

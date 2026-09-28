@@ -983,5 +983,175 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ).fetchone()
         assert [row["archived_unit_count"] for row in maintenance_archives] == [64, 4]
         assert active_count["n"] == maintained["context_view_unit_count"] == 1
+        # A trigger at the start of a long classified prefix must not make
+        # Conversation claim all sources or triggers in one transaction.
+        prefill_conversation = "conversation/onebot/system/prefill"
+        digest = "sha256:" + "0" * 64
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.conversation_lanes("
+                    "bot_id,conversation_id,conversation_key_digest,source_component_id,"
+                    "binding_ref,platform,channel_kind,channel_ref,next_ingress_seq,"
+                    "classified_through_seq,actor_owner_id,actor_epoch,actor_expires_at) "
+                    "VALUES(%s,%s,%s,'adapter.onebot','binding/test','onebot-v11',"
+                    "'SYSTEM','prefill',131,130,'prefill-owner',1,"
+                    "clock_timestamp()+interval '1 hour')"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, prefill_conversation, digest),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.inbox_messages("
+                    "bot_id,conversation_id,event_id,ingress_seq,admission_operation_id,"
+                    "input_digest,source_component_id,source_event_ref,event_kind,"
+                    "author_subject_ref,content_payload_id,content_payload_digest,"
+                    "content_owner_component_id,content_owner_kind,content_owner_id,"
+                    "author_payload_id,author_payload_digest,author_owner_component_id,"
+                    "author_owner_kind,author_owner_id,context_disposition,"
+                    "classification_state,trigger_decision,classification_operation_id,"
+                    "classification_input_digest,classifier_component_id,"
+                    "classifier_generation_id,received_at,classification_deadline,"
+                    "classified_at) "
+                    "SELECT %s,%s,'prefill-event/'||n,n,'prefill-admit/'||n,%s,"
+                    "'adapter.onebot','prefill-source/'||n,'message.group',"
+                    "'qq:'||n,'payload/content/'||n,%s,'adapter.onebot',"
+                    "'onebot.normalized-event','prefill-event/'||n,"
+                    "'payload/author/'||n,%s,'adapter.onebot',"
+                    "'onebot.author-snapshot','prefill-event/'||n,'MATERIALIZE',"
+                    "'FINAL',CASE WHEN n IN (30,130) THEN 'TRIGGER' "
+                    "ELSE 'NO_TRIGGER' END,'prefill-classify/'||n,%s,"
+                    "'conversation.scheduler','generation/test',clock_timestamp(),"
+                    "clock_timestamp()+interval '1 hour',clock_timestamp() "
+                    "FROM generate_series(1,130) AS n"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, prefill_conversation, digest, digest, digest, digest),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.conversation_triggers("
+                    "bot_id,conversation_id,trigger_id,event_id,ingress_seq,"
+                    "principal_ref,input_digest) "
+                    "SELECT %s,%s,'prefill-trigger/'||n,'prefill-event/'||n,n,"
+                    "'qq:'||n,%s FROM (VALUES (30),(130)) AS t(n)"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, prefill_conversation, digest),
+            )
+        prefill_actor = {
+            "conversation_id": prefill_conversation,
+            "owner_id": "prefill-owner",
+            "epoch": 1,
+        }
+        prefill_endpoint = instance.runtime_service_handlers()[
+            ("conversation.context.prefill", 1)
+        ]
+        prefill_route = FrozenServiceRoute(
+            service_id="conversation.context.prefill",
+            version=1,
+            caller_component_id="kernel.runtime",
+            provider_component_id="conversation.scheduler",
+            provider_generation_id=instance.generation_identity.generation_id,
+            graph_id=registry.graph_identity.graph_id,
+            graph_revision=registry.graph_identity.graph_revision,
+            admission_lane="DATA",
+            owned_work=False,
+        )
+        for index, expected_range in enumerate(((1, 64), (65, 128))):
+            envelope = {
+                "protocol": "forest.uow-step/1",
+                "caller": {
+                    "component_id": "conversation.scheduler",
+                    "generation_id": participant.generation_id,
+                },
+                "input": {
+                    "actor": prefill_actor,
+                    "boundary": "IDLE",
+                    "selection_mode": "PREFILL_ONLY",
+                    "session_ref": None,
+                    "run_ref": None,
+                    "next_run_ref": None,
+                },
+                "prior": {},
+            }
+            if index == 0:
+                prefilled = await prefill_endpoint.invoke_routed(
+                    prefill_route,
+                    RuntimeServiceInvocation(
+                        "conversation:prefill:first", 30,
+                        "test.conversation", prefill_conversation,
+                    ),
+                    ({
+                        "protocol": "forest.conversation-context-prefill/1",
+                        "request_id": "prefill-first",
+                        "actor": prefill_actor,
+                        "boundary": "IDLE",
+                        "session_ref": None,
+                        "run_ref": None,
+                    },),
+                    {},
+                )
+                replay = await prefill_endpoint.invoke_routed(
+                    prefill_route,
+                    RuntimeServiceInvocation(
+                        "conversation:prefill:first", 30,
+                        "test.conversation", prefill_conversation,
+                    ),
+                    ({
+                        "protocol": "forest.conversation-context-prefill/1",
+                        "request_id": "prefill-first",
+                        "actor": prefill_actor,
+                        "boundary": "IDLE",
+                        "session_ref": None,
+                        "run_ref": None,
+                    },),
+                    {},
+                )
+                assert replay == prefilled
+            else:
+                async with store.pool.connection() as conn, conn.transaction():
+                    prefilled = await participant.invoke_in(
+                        conn, "conversation.select-input", envelope,
+                        operation_id=f"uow-step:prefill/{index}",
+                        causal_root_kind="conversation.actor",
+                        causal_root_id=prefill_conversation,
+                        parent_call_id=f"call:prefill/{index}",
+                        timeout_seconds=10,
+                    )
+            assert prefilled["kind"] == "CONTEXT_PREFILL"
+            assert (prefilled["start_seq"], prefilled["end_seq"]) == expected_range
+            assert len(prefilled["event_ids"]) == 64
+            assert prefilled["trigger_ids"] == []
+        envelope["input"].update(
+            selection_mode="ANY", session_ref="prefill-session", run_ref="prefill-run"
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            final = await participant.invoke_in(
+                conn, "conversation.select-input", envelope,
+                operation_id="uow-step:prefill/final",
+                causal_root_kind="conversation.actor",
+                causal_root_id=prefill_conversation,
+                parent_call_id="call:prefill/final",
+                timeout_seconds=10,
+            )
+        assert final["kind"] == "TRIGGER_INPUT"
+        assert final["event_ids"] == ["prefill-event/129", "prefill-event/130"]
+        assert final["trigger_ids"] == ["prefill-trigger/30", "prefill-trigger/130"]
+        assert [item["principal_ref"] for item in final["triggers"]] == ["qq:30", "qq:130"]
+        drained = await prefill_endpoint.invoke_routed(
+            prefill_route,
+            RuntimeServiceInvocation(
+                "conversation:prefill:done", 30, "test.conversation", prefill_conversation
+            ),
+            ({
+                "protocol": "forest.conversation-context-prefill/1",
+                "request_id": "prefill-done",
+                "actor": prefill_actor,
+                "boundary": "MODEL_SAFE_POINT",
+                "session_ref": "prefill-session",
+                "run_ref": "prefill-run",
+            },),
+            {},
+        )
+        assert drained["status"] == "CONTINUE"
     finally:
         assert await registry.close() == []

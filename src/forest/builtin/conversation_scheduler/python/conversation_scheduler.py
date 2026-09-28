@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service
@@ -47,6 +48,57 @@ class ConversationScheduler(Plugin):
                 "owner_id",
             )
         }
+
+    @service(
+        "conversation.context.prefill",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/prefill-service-input.json",
+        output_schema="schemas/select-input-output.json",
+    )
+    async def prefill_trigger_context(self, payload, ctx):
+        request = payload
+        selection = {
+            "actor": request["actor"],
+            "boundary": request["boundary"],
+            "selection_mode": "PREFILL_ONLY",
+            "session_ref": request["session_ref"],
+            "run_ref": request["run_ref"],
+            "next_run_ref": None,
+        }
+        result = await ctx.uow.call(
+            "conversation.prefill-trigger-input",
+            {
+                "selection": selection,
+                "context_view": self._context_view,
+                "payload": {
+                    "protocol": "forest.payload-json-from-prior/1",
+                    "prior_step_id": "prepare",
+                },
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                "qualification": {
+                    "selection_step_id": "select",
+                    "deletion_epoch_step_id": "payload_epoch",
+                },
+                "memory": {},
+            },
+            operation_id=ctx.operations.stable("prefill:" + request["request_id"]),
+            timeout=30,
+        )
+        if result["status"] == "BATCH":
+            if result["kind"] != "CONTEXT_PREFILL" or len(result["event_ids"]) > 64:
+                raise ForestError(
+                    "CONVERSATION_PREFILL_RESULT_INVALID",
+                    "Context prefill returned an invalid batch",
+                    409,
+                )
+        elif result["status"] != "CONTINUE":
+            raise ForestError(
+                "CONVERSATION_PREFILL_RESULT_INVALID",
+                "Context prefill returned an invalid boundary",
+                409,
+            )
+        return result
 
     @staticmethod
     def _unit_parents(units):
@@ -368,7 +420,7 @@ class ConversationScheduler(Plugin):
             timeout=35,
         )
 
-    async def _handoff(self, task, execution, deadline, ctx):
+    async def _handoff_once(self, task, execution, deadline, ctx):
         completed = execution["run_ref"]
         successor = self._stable(
             "run-successor", task["conversation_id"], completed, task["actor"]["epoch"]
@@ -401,6 +453,31 @@ class ConversationScheduler(Plugin):
             operation_id=ctx.operations.stable(f"session-handoff:{completed}"),
             timeout=35,
         )
+
+    async def _handoff(self, task, execution, deadline, ctx):
+        for _ in range(2):
+            try:
+                return await self._handoff_once(task, execution, deadline, ctx)
+            except ForestError as exc:
+                if exc.code != "CONVERSATION_PREFILL_REQUIRED":
+                    raise
+                for _ in range(8):
+                    selected = await self.prefill_trigger_context(
+                        {
+                            "protocol": "forest.conversation-context-prefill/1",
+                            "request_id": uuid4().hex,
+                            "actor": task["actor"],
+                            "boundary": "SESSION_END",
+                            "session_ref": execution["session_ref"],
+                            "run_ref": execution["run_ref"],
+                        },
+                        ctx,
+                    )
+                    if selected["status"] == "CONTINUE":
+                        break
+                else:
+                    return {"action": "WAIT_INPUT"}
+        return {"action": "WAIT_INPUT"}
 
     async def _commit_terminal(self, task, execution, ctx):
         trigger_ids = execution["answered_trigger_ids"]

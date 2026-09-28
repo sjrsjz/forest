@@ -88,16 +88,17 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 InputBatch 的 `kind` 分为：
 
 - `TRIGGER_INPUT`：选择触发后增加新的来源前缀，并把对应触发领取给当前 Session/Run。
+- `CONTEXT_PREFILL`：触发切口距离已提交游标超过 64 条时，每次只提交至多 64 条连续消息和它们的 Memory 输入资格；不领取任何触发，不创建或推进 Agent Run，最后一个触发消息始终留在最终的 `TRIGGER_INPUT` 中。早期触发的作者、来源和待领取状态保持不变。
 - `SILENT_DRAIN`：无触发时追加普通来源前缀，并在越过 Context 高水位时于同一维护事务归档、裁剪；`run_id = null`，不产生回复型 Run。
 - `RECOVERY_CLAIM`：恢复尚未完成的触发，而其来源已经提交过；`start_seq = end_seq = null`，引用既有 Context 单元，不重复追加消息。
 
 输入选择端口必须显式带边界原因，不能用一个含糊的“拉取下一条”接口：
 
-- `IDLE`：没有活动 Session 时，若连续头内有 trigger，则截到最后一个 trigger 并返回 `TRIGGER_INPUT`；只有普通尾部时直接提交 `SILENT_DRAIN`，不创建 Session/Run。
-- `MODEL_SAFE_POINT`：仅在当前模型调用和工具因果组已经闭合、下一次模型调用尚未冻结时使用。有 trigger 就截到最后一个 trigger；无 trigger 时返回 `WAIT_INPUT` 或 `CONTINUE`，绝不吸收普通尾部。
+- `IDLE`：没有活动 Session 时，若连续头内有 trigger，则先分批预填超长前缀，再截到最后一个 trigger 并返回 `TRIGGER_INPUT`；只有普通尾部时直接提交 `SILENT_DRAIN`，不创建 Session/Run。
+- `MODEL_SAFE_POINT`：仅在当前模型调用和工具因果组已经闭合、下一次模型调用尚未冻结时使用。有 trigger 则先分批预填超长前缀，再截到最后一个 trigger；无 trigger 时返回 `WAIT_INPUT` 或 `CONTINUE`，绝不吸收普通尾部。
 - `SESSION_END`：Agent 已结束本次回答且没有可领取 trigger 时，把连续普通尾部提交为 `SILENT_DRAIN`；若已有 trigger，则返回新的 `TRIGGER_INPUT`，由同群串行状态机继续工作。
 
-旧实现中的字符串 `SAFE_POINT` 只是过渡名称，干净契约使用 `MODEL_SAFE_POINT`。Repository 必须拒绝未知边界、过期 actor epoch、与现有 operation 不同输入的幂等键重用。每次选择都先写不可变 `selection_operations` 回执，包括不产生批次的 `WAIT_INPUT/CONTINUE/IDLE`；同一 operation 永远重放第一次观察到的结果，状态变化后调用者必须使用新 operation。选择事务只锁本 Conversation lane，再按 `ingress_seq/trigger_id` 稳定顺序写入批次成员；不同 Conversation 不共享行锁，因此可以并行。
+旧实现中的字符串 `SAFE_POINT` 只是过渡名称，干净契约使用 `MODEL_SAFE_POINT`。Repository 必须拒绝未知边界、过期 actor epoch、与现有 operation 不同输入的幂等键重用。每次选择都先写不可变 `selection_operations` 回执，包括不产生批次的 `WAIT_INPUT/CONTINUE/IDLE`；同一 operation 永远重放第一次观察到的结果，状态变化后调用者必须使用新 operation。`PREFILL_ONLY` 只在有效 actor fence 下推进连续前缀，跨 Conversation 不共享行锁；普通 `ANY` 选择若遇到超过 64 条尚未提交的触发前缀，必须拒绝并要求预填。预填和 Memory 资格、归档处于同一 UOW，最后一个触发留给最终批次以维持召回输入。`SESSION_END` 在领取下一轮触发前也执行相同预填，当前回复的触发集合不受新消息影响。
 
 ### 2.3 触发状态独立于消费游标
 
@@ -587,5 +588,7 @@ Bot 已提交的最终回复通过 ModelTurn 入 Context；平台再次推送同
 | GI-32 | 历史、跨群Evidence与tool-result同时含图，Provider降级为文本 | 各层投影去图且工具配对/群来源完整，新attempt固定原切口和所见manifest，不改完整Context |
 | GI-33 | 下载/图像索引在请求冻结后完成 | 旧请求不补图；后续合法安全点可选新媒体revision，同群不另开Agent |
 | GI-34 | 文本模型运行和多次裁剪后切回视觉模型 | 文本请求省略不造成持久删图；仍在合法窗口或获权召回的原媒体可被视觉请求物化 |
+| GI-35 | 130 条已分类消息中，第 30 与 130 条分别由不同用户触发 | Context 以 64 条为上限预填，预填不领取触发；最终批次仍包含第 130 条，两个触发及其各自身份共同归属同一 Run |
+| GI-36 | 预填事务已提交而调用响应丢失，随后新消息又入队 | 相同 operation 重放原批次；新 operation 从已提交游标继续，最终切口只在下一次合法安全点冻结 |
 
 除上述场景外，性质检查应持续验证输入范围恰好覆盖连续前缀、触发状态不由消费游标推导、单群唯一 Session/有效提交者、所有输出可追溯到固定输入批次。可交换的 Bot 全局记忆操作另按[06 的性质验收](06-concurrent-convergence.md#10-性质验证与并发时序验收)执行，不能把消息顺序、授权仲裁或模型文本误当作可交换更新。
