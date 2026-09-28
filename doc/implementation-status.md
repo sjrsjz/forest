@@ -266,3 +266,5 @@ QiYu 配置中的 SiliconFlow `Qwen/Qwen3-VL-Embedding-8B` 已用于一次低频
 真实 Milvus 与隔离 PostgreSQL 的向量索引测试现覆盖外部写入成功而确认丢失：测试专用 collection 中第一笔 upsert 已写入 Milvus，随后故意抛出传输错误；PostgreSQL ref 权威记录仍为空。关闭该 Generation 的驱动并重新创建后，相同 ref/向量重放成功、ref 变为 ACTIVE，后续检索与删除仍通过。该验证覆盖向量索引包的写后失联/重启窗口；Memory 包 Worker 对整批发布的崩溃重放仍需单独验收。
 
 完整 Bot 宿主的隔离 PostgreSQL + 假 Milvus 用例又在文档 facet 首次向量发布时注入“一条 ref 已写入、确认丢失”：Memory 包自有 Worker 将该批工作重试至少一次，所有文档 facet 最终 READY，后续召回、遗忘、热替换和重启仍通过。这证明 Memory 整批发布在运行中可从部分外部成功收敛；实际进程在该窗口立即崩溃并重启的验收尚未完成。
+
+Memory 包的 PostgreSQL 用例还覆盖了另一个崩溃边界：批次发布事务已把全部 facet 置为 READY，但 Worker 尚未写任务结算就失去租约。租约到期后，新 claim 对同一批次重新计算并提交幂等发布回执；旧 claim 的结算被拒绝，新 claim 可结算为 SETTLED。此验证没有实际杀死进程，也不替代外部 Milvus 写入时进程崩溃后的整批重放验收。

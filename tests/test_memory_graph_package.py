@@ -1431,7 +1431,7 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
         ).format(namespace), (
             Jsonb({"bot_id": store.bot_id, "generation_id": "generation/trial"}),
             Jsonb({"protocol": "forest.owned-work-claim-request/1",
-                   "claim_token": "publish/trial", "lease_seconds": 360}),
+                   "claim_token": "publish/trial", "lease_seconds": 3}),
         ))).fetchone())["result"]
     assert publish_claim["ok"], publish_claim
     publish_work = publish_claim["value"]["payload"]
@@ -1505,6 +1505,61 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
             "WHERE bot_id=%s AND query_id='query/trial' AND state='READY'"
         ).format(namespace), (store.bot_id,))).fetchone())["n"]
     assert ready == 2
+    # Publication committed, then the worker disappeared before settling its
+    # claim. A new worker must replay the same batch after the lease expires.
+    await asyncio.sleep(3.1)
+    async with store.pool.connection() as conn:
+        reclaimed = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_claim_vector_publish(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id, "generation_id": "generation/trial"}),
+            Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                   "claim_token": "publish/trial/recovered", "lease_seconds": 3}),
+        ))).fetchone())["result"]
+    assert reclaimed["ok"] and reclaimed["value"]["attempt"] == 2, reclaimed
+    assert {facet["facet_id"] for facet in reclaimed["value"]["payload"]["facets"]} == {
+        facet["facet_id"] for facet in publish_work["facets"]
+    }
+    assert all(facet["state"] == "READY"
+               for facet in reclaimed["value"]["payload"]["facets"])
+    recovered_body = {**publish_body, "claim_token": "publish/trial/recovered"}
+    recovered_context = {
+        **publish_context,
+        "operation_id": "publish/trial-operation/recovered",
+        "participant_input_digest": digest_json(recovered_body),
+    }
+    recovered_envelope = {**publish_envelope, "input": recovered_body}
+    async with store.pool.connection() as conn:
+        recovered = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_publish_vector_batch(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb(recovered_context), Jsonb(recovered_envelope),
+        ))).fetchone())["result"]
+    assert recovered["ok"] and recovered["value"]["ready_count"] == 2, recovered
+    async with store.pool.connection() as conn:
+        stale_settlement = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_settle_vector_publish(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"protocol": "forest.owned-work-settle-request/1",
+                   "work_id": "attempt/trial", "claim_token": "publish/trial",
+                   "attempt": 1,
+                   "outcome": {"status": "SUCCEEDED", "result": {
+                       "attempt_id": "attempt/trial", "ready_count": 2,
+                       "deletion_count": 0}}}),
+        ))).fetchone())["result"]
+    assert stale_settlement["error"]["code"] == "MEMORY_VECTOR_PUBLISH_CLAIM_LOST"
+    async with store.pool.connection() as conn:
+        settled = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_settle_vector_publish(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"protocol": "forest.owned-work-settle-request/1",
+                   "work_id": "attempt/trial",
+                   "claim_token": "publish/trial/recovered", "attempt": 2,
+                   "outcome": {"status": "SUCCEEDED", "result": recovered["value"]}}),
+        ))).fetchone())["result"]
+    assert settled["ok"], settled
     stale = await browse("generation/replaced")
     assert stale["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
     async with store.pool.connection() as conn, conn.transaction():
