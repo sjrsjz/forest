@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.48.0"
+version = "1.49.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -132,6 +132,13 @@ contract = "1.0"
 semantics = "read"
 input_schema = "schemas/trial-result-input.json"
 output_schema = "schemas/trial-result-output.json"
+
+[[components.provides]]
+name = "memory.trial.image"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/trial-image-input.json"
+output_schema = "schemas/trial-image-output.json"
 
 [[components.provides]]
 name = "memory.domain.ensure"
@@ -409,6 +416,13 @@ timeout_s = 10
 [[components.management_queries]]
 id = "memory.trial.result"
 port = "memory.trial.result"
+required_role = "ADMIN"
+actor_field = "requested_by"
+timeout_s = 30
+
+[[components.management_queries]]
+id = "memory.trial.image"
+port = "memory.trial.image"
 required_role = "ADMIN"
 actor_field = "requested_by"
 timeout_s = 30

@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src data:; font-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Memory Graph</title>
   <style>
     :root{color-scheme:dark;font:13px/1.4 system-ui,sans-serif;background:#0c1712;color:#dcebe3}
     *{box-sizing:border-box}body{margin:0;padding:8px;height:610px}button,input,select,textarea{font:inherit;border:1px solid #345344;border-radius:6px;background:#102019;color:inherit;padding:6px 8px}button{cursor:pointer;background:#255743}button:disabled{opacity:.5}
-    .app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:8px}.bar,.filters,.pager{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.bar{justify-content:space-between}.muted{color:#8fa99b}nav{display:flex;gap:5px}nav button.active{background:#70cfa1;color:#092015}.panel{min-height:0;overflow:auto;border:1px solid #2c493b;border-radius:8px;padding:10px;background:#102019}.hidden{display:none}.filters{margin-bottom:8px}.filters input{min-width:9rem}.table{width:100%;border-collapse:collapse;table-layout:fixed}.table th,.table td{padding:7px;border-bottom:1px solid #294538;vertical-align:top;overflow-wrap:anywhere;text-align:left}.table th{color:#9ab8a7;font-weight:600}.table tr[data-unit]{cursor:pointer}.table tr[data-unit]:hover{background:#1b3529}.pager{margin-top:8px}.detail{white-space:pre-wrap;overflow-wrap:anywhere;color:#a9c3b4;margin:5px 0 12px}.relation{border:1px solid #2b4939;border-radius:7px;padding:8px;margin-bottom:8px}.relation strong{color:#8ddbb0}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.grid label{display:grid;gap:4px;color:#9db6a7}.grid input{width:100%;min-width:0}.wide{grid-column:span 2}.status{min-height:20px;color:#8ddbb0}.danger{background:#8a3b33}.review{border:1px solid #345344;border-radius:7px;padding:10px;margin:10px 0}.review strong{color:#ffc18f}.confirm{display:flex;align-items:center;gap:6px}.confirm input{min-width:0}.forget-id{width:min(100%,38rem)}.trial-input{width:min(100%,54rem);height:7rem;resize:vertical}.trial-id{width:min(100%,38rem)}@media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.table th:nth-child(4),.table td:nth-child(4){display:none}}
+    .app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:8px}.bar,.filters,.pager{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.bar{justify-content:space-between}.muted{color:#8fa99b}nav{display:flex;gap:5px}nav button.active{background:#70cfa1;color:#092015}.panel{min-height:0;overflow:auto;border:1px solid #2c493b;border-radius:8px;padding:10px;background:#102019}.hidden{display:none}.filters{margin-bottom:8px}.filters input{min-width:9rem}.table{width:100%;border-collapse:collapse;table-layout:fixed}.table th,.table td{padding:7px;border-bottom:1px solid #294538;vertical-align:top;overflow-wrap:anywhere;text-align:left}.table th{color:#9ab8a7;font-weight:600}.table tr[data-unit]{cursor:pointer}.table tr[data-unit]:hover{background:#1b3529}.pager{margin-top:8px}.detail{white-space:pre-wrap;overflow-wrap:anywhere;color:#a9c3b4;margin:5px 0 12px}.relation{border:1px solid #2b4939;border-radius:7px;padding:8px;margin-bottom:8px}.relation strong{color:#8ddbb0}.trial-preview{display:block;max-width:100%;max-height:320px;margin:8px 0;object-fit:contain}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.grid label{display:grid;gap:4px;color:#9db6a7}.grid input{width:100%;min-width:0}.wide{grid-column:span 2}.status{min-height:20px;color:#8ddbb0}.danger{background:#8a3b33}.review{border:1px solid #345344;border-radius:7px;padding:10px;margin:10px 0}.review strong{color:#ffc18f}.confirm{display:flex;align-items:center;gap:6px}.confirm input{min-width:0}.forget-id{width:min(100%,38rem)}.trial-input{width:min(100%,54rem);height:7rem;resize:vertical}.trial-id{width:min(100%,38rem)}@media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.table th:nth-child(4),.table td:nth-child(4){display:none}}
   </style>
 </head>
 <body>
@@ -158,9 +158,33 @@
       const meta=document.createElement('div');meta.className='muted';
       meta.textContent=`来源 ${item.source_id} / ${item.source_unit_id} · ${item.platform??'—'} · 作者 ${item.author_subject_ref} · ${stamp(item.occurred_at)} · 分数 ${item.rank_score}`;
       const body=document.createElement('div');body.className='detail';
-      body.textContent=(item.excerpt||'无文本片段')+(item.excerpt_truncated?'…':'')
-        +(item.images.length?'\n'+item.images.map(image=>`图片 ${image.part_id} · ${image.width}×${image.height} · ${image.media_type} · ${image.media_ref.payload_id}`).join('\n'):'');
-      card.append(title,meta,body);root.append(card);
+      body.textContent=(item.excerpt||'无文本片段')+(item.excerpt_truncated?'…':'');
+      card.append(title,meta,body);
+      for(const image of item.images){
+        const wrap=document.createElement('div');wrap.className='detail';
+        const button=document.createElement('button');
+        button.textContent=`查看图片 ${image.part_id} · ${image.width}×${image.height}`;
+        button.onclick=async()=>{
+          button.disabled=true;
+          try{
+            const preview=await call('memory.trial.image',{
+              query_id,source_unit_id:item.source_unit_id,part_id:image.part_id
+            });
+            if($('trial-query').value.trim()!==query_id||!card.isConnected)return;
+            const picture=document.createElement('img');picture.className='trial-preview';
+            picture.alt=`来源 ${item.source_id} 的图片 ${image.part_id}`;
+            picture.src=`data:${preview.media_type};base64,${preview.data_base64}`;
+            wrap.replaceChildren(picture);
+          }catch(error){button.disabled=false;status(error.message);}
+        };
+        wrap.append(button);card.append(wrap);
+      }
+      if(item.image_count>item.images.length){
+        const omitted=document.createElement('div');omitted.className='muted';
+        omitted.textContent=`另有 ${item.image_count-item.images.length} 张图片未在本页展开`;
+        card.append(omitted);
+      }
+      root.append(card);
     }
     if(!page.items.length)root.textContent='没有可见证据。';
     $('trial-count').textContent=`证据 ${page.total_count} 项 · 缺失 ${page.missing_count} 项 · 图快照 ${page.graph_snapshot_ref}`;

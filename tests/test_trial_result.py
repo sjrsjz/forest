@@ -1,11 +1,14 @@
 import json
+import base64
+import io
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
+from PIL import Image
 
-from forest.builtin.memory_graph.python.trial_result import read_page
+from forest.builtin.memory_graph.python.trial_result import read_image, read_page
 from forest.errors import ForestError
 
 
@@ -95,3 +98,60 @@ async def test_trial_result_rejects_another_bot_evidence():
     with pytest.raises(ForestError) as rejected:
         await read_page(ctx, {"query_id": "trial/1", "requested_by": "admin/1"})
     assert rejected.value.code == "MEMORY_EVIDENCE_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_trial_image_preview_is_bounded_and_comes_from_attributed_evidence():
+    image_bytes = io.BytesIO()
+    Image.new("RGB", (1800, 1200), "#336699").save(image_bytes, format="PNG")
+    media_ref = {
+        "payload_id": "image/1", "digest": "sha256:" + "b" * 64,
+        "owner_component_id": "memory.graph", "owner_kind": "source.part",
+        "owner_id": "source/1/part/1",
+    }
+    evidence_ref = {
+        "payload_id": "evidence/1", "digest": "sha256:" + "a" * 64,
+        "owner_component_id": "memory.graph", "owner_kind": "retrieval.evidence",
+        "owner_id": "bundle/1",
+    }
+    evidence = {
+        "protocol": "forest.memory-trial-evidence/1", "input_kind": "ADMIN_TRIAL",
+        "bot_id": "bot/1", "query_id": "trial/1", "current_source": None,
+        "evidence": [{"source_unit_id": "unit/1", "parts": [{
+            "kind": "image", "part_id": "part/1", "media_type": "image/png",
+            "width": 1800, "height": 1200, "media_ref": media_ref,
+        }]}],
+    }
+
+    class Queries:
+        async def call(self, name, payload, *, timeout):
+            assert payload == {"query_id": "trial/1", "requested_by": "admin/1"}
+            return {"state": "READY", "evidence_ref": evidence_ref}
+
+    class Payloads:
+        async def read_bytes(self, reference):
+            if reference == evidence_ref:
+                return json.dumps(evidence).encode()
+            assert reference == media_ref
+            return image_bytes.getvalue()
+
+    ctx = SimpleNamespace(identity={"bot_id": "bot/1"}, queries=Queries(), payloads=Payloads())
+    result = await read_image(ctx, {
+        "query_id": "trial/1", "requested_by": "admin/1",
+        "source_unit_id": "unit/1", "part_id": "part/1",
+    })
+    assert result["media_type"] == "image/jpeg"
+    assert result["width"] <= 1024 and result["height"] <= 1024
+    assert len(base64.b64decode(result["data_base64"])) <= 96 * 1024
+    with Image.open(io.BytesIO(base64.b64decode(result["data_base64"]))) as preview:
+        assert preview.size == (result["width"], result["height"])
+    schema = json.loads((Path(__file__).parents[1]
+        / "src/forest/builtin/memory_graph/schemas/trial-image-output.json"
+    ).read_text(encoding="utf-8"))
+    Draft202012Validator(schema).validate(result)
+    with pytest.raises(ForestError) as rejected:
+        await read_image(ctx, {
+            "query_id": "trial/1", "requested_by": "admin/1",
+            "source_unit_id": "unit/other", "part_id": "part/1",
+        })
+    assert rejected.value.code == "MEMORY_TRIAL_IMAGE_NOT_FOUND"
