@@ -2,6 +2,8 @@
 
 > 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。当前生产装配已切为微内核包图；Memory 完整主链和长期运行验收尚未完成，因此 Forest 仍不可发布。
 
+本页保留按实施先后写下的阶段记录；早期段落中的“尚未”只描述当时状态，当前结论以第 8 节的切换清单和末尾最新验收记录为准。
+
 ## 1. 判定标准
 
 只有同时满足以下条件的组件才记为“已包化”：
@@ -225,9 +227,9 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 
 ## 8. 下一切换顺序
 
-1. 将已有冻结选择与批次预览接到 P0 授权、持久分批执行、部分完成状态和分页管理 UI；完成管理召回试验，补齐发布崩溃重放验证。
+1. 将已有冻结选择与批次预览接到 P0 授权、持久分批执行、部分完成状态和分页管理 UI；补齐发布崩溃重放验证。
 2. 验证 Agent 语义召回的真实 QQ 群聊链、图片召回命中与跨群成功回复及联想提升；恢复及重放需与删除 epoch、Generation 围栏收敛。
-3. 补齐证据浏览的进一步分页以及图文真实召回试验。
+3. 补齐证据浏览的进一步分页和长期混合图文负载验收。
 4. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
 5. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。
 
@@ -284,3 +286,5 @@ Memory 包的 PostgreSQL 用例还覆盖了另一个崩溃边界：批次发布�
 完整跨群图文链已有隔离验收：假 OneBot 在群 `933179609` 注入一条文字＋有效 PNG，真实 SiliconFlow VL 嵌入和 Milvus 把 TEXT/IMAGE DOCUMENT facet 发布为 READY；另一群 `933179610` 用相同图片触发 Agent，模型请求的证据清单出现原群 `933179609`、原作者 `qq:20001` 和准确来源单元。数据库中的 `query_seed_matches` 还确认 IMAGE 查询 facet 命中该 IMAGE 文档 facet，而非仅由文字相似度带出来源。最初手工调用 Memory 归档事务的用例 `1 passed`（77.43 秒）。随后将同一用例改为通过模块配置计划和热替换把 Conversation 窗口设为 2/1，连续注入四条无触发的群 A 消息；生产 `conversation.silent-drain` 自行提交裁剪和 Memory 归档，首条图文来源达到 ELIGIBLE，两个 DOCUMENT facet 均达到 READY，群 B 的图片查询与来源归因继续通过（`1 passed`，135.14 秒）。测试没有再直接调用归档 participant；临时 PostgreSQL 和 Milvus collection 均已清理。OneBot 与模型回复仍为假客户端，尚未验收真实 QQ 发送或数月运行稳定性。
 
 旧的顶层审批等待、最终回复、会话交接、投递协调器及 Conversation/Memory 事务协调器现已删除；旧 `storage.conversation_scheduler` Repository、其独立 SQL 基线和专测旧基线的用例也已删除。生产 Conversation 仍由 `builtin/conversation_scheduler` 的包声明、私有 schema 和 UnitOfWork 运行，没有增加兼容层。随后 Agent 包状态用例改用当前包的租约 UnitOfWork 和公开 Run 查询端口，旧 `storage.agent_runtime_authority` Repository 也已删除。该用例为单独检验终态 UnitOfWork，经当前 Agent schema 的合法状态边设置 FINAL_READY 前置条件；真正的模型输出到回复提交仍由宿主成功回复用例验证。移除旧 Agent 文件后重建的 Python 3.11 镜像中，无数据库回归为 `452 passed, 85 skipped`，隔离 PostgreSQL 的 Agent 包用例 `1 passed`；临时数据库已移除。
+
+管理图文召回试验现也经过真实 VL 与向量索引验收：在上述隔离宿主自动归档来源之后，管理员资产权威绑定一段文本和一张 64×64 PNG，Memory 包的管理 action 启动独立试验；包自有 Worker 使用 QiYu 的 SiliconFlow `Qwen/Qwen3-VL-Embedding-8B` 和真实 Milvus 完成准备、匹配、冻结与证据物化，状态达到 READY。试验结果包含原群 `933179609`、作者 `qq:20001` 和图像证据，`query_seed_matches` 确认本次管理试验的 IMAGE 查询 facet 命中该来源的 IMAGE 文档 facet（隔离测试 `1 passed`，143.01 秒）。此项真实供应商用例直接调用管理资产与模块 action，先前的假供应商用例另行验证了部署管理 App 的 ASGI 上传、会话、CSRF 与 Web ticket；尚未将真实供应商和真实浏览器合成一项验收。临时 PostgreSQL 容器与 Milvus collection 已移除，OneBot 和聊天模型仍为假客户端。

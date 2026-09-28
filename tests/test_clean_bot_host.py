@@ -35,6 +35,7 @@ from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import ModuleLifecycleState
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
+from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.vector_index_authority import VectorIndexIdentityRepository
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
@@ -2314,7 +2315,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
 
 
 @pytest.mark.postgres
-async def test_real_vl_archived_image_is_recalled_from_another_group(tmp_path):
+async def test_real_vl_auto_archive_cross_group_recall_and_management_trial(tmp_path):
     dsn = os.environ.get("FOREST_TEST_DSN")
     qiyu_env_file = os.environ.get("FOREST_TEST_QIYU_ENV_FILE")
     milvus_uri = os.environ.get("FOREST_TEST_MILVUS_URI")
@@ -2387,6 +2388,7 @@ async def test_real_vl_archived_image_is_recalled_from_another_group(tmp_path):
             expected_desired_revision=1,
         )
         await host.replace_runtime_graph()
+        memory = host.registry.get("memory.graph")
         namespace = next(
             item.storage.spec.namespace for item in host.registry.descriptors
             if item.component_id == "memory.graph"
@@ -2485,6 +2487,109 @@ async def test_real_vl_archived_image_is_recalled_from_another_group(tmp_path):
             for row in matched_modalities
         }
         assert b"image_url" in prepared.body
+
+        trial_id = "trial/cross-vl-image"
+        trial_actor = "subject/cross-vl-admin"
+        generation_id = memory.generation_identity.generation_id
+        assets = ManagementAssetAuthority(host._kernel.payload)
+
+        async def upload_trial_part(part_id, modality, media_type, content, width, height):
+            content_digest = "sha256:" + hashlib.sha256(content).hexdigest()
+            owner_id = "trial:" + hashlib.sha256(
+                (trial_id + "\0" + part_id).encode()
+            ).hexdigest()
+            upload_id = "upload/cross-vl/" + part_id
+            async with host.store.pool.connection() as conn, conn.transaction():
+                await assets.begin_in(
+                    conn, upload_id=upload_id, component_id="memory.graph",
+                    asset_id="trial.input", actor_subject_ref=trial_actor,
+                    generation_id=generation_id, target_ref=trial_id,
+                    part_id=part_id, owner_kind="trial.input", owner_id=owner_id,
+                    media_type=media_type, byte_length=len(content),
+                    content_digest=content_digest, chunk_count=1,
+                    allowed_media_types=(media_type,), max_bytes=8388608,
+                )
+                await assets.put_chunk_in(
+                    conn, upload_id=upload_id, component_id="memory.graph",
+                    asset_id="trial.input", actor_subject_ref=trial_actor,
+                    generation_id=generation_id, chunk_index=0,
+                    content=content, content_digest=content_digest,
+                )
+                saved = await assets.finalize_in(
+                    conn, upload_id=upload_id, component_id="memory.graph",
+                    asset_id="trial.input", actor_subject_ref=trial_actor,
+                    generation_id=generation_id,
+                )
+            return {
+                "part_id": part_id, "modality": modality, "media_type": media_type,
+                "byte_length": len(content), "width": width, "height": height,
+                "payload": saved["payload"],
+            }
+
+        trial_png = io.BytesIO()
+        Image.new("RGB", (64, 64), (33, 91, 147)).save(trial_png, format="PNG")
+        trial_parts = [
+            await upload_trial_part(
+                "part/text", "TEXT", "text/plain",
+                b"Where is the blue glass orb?", None, None,
+            ),
+            await upload_trial_part(
+                "part/image", "IMAGE", "image/png",
+                trial_png.getvalue(), 64, 64,
+            ),
+        ]
+        trial_authorization = SimpleNamespace(
+            web_subject_ref=trial_actor, target_generation_id=generation_id,
+        )
+
+        async def accept_trial_ticket(_conn, *, ticket, **_kwargs):
+            assert ticket is trial_authorization
+
+        started = await memory.management_contract.action(
+            "memory.trial.start", operation_id="web:cross-vl-trial",
+            payload={"query_id": trial_id, "parts": trial_parts},
+            authorization=trial_authorization,
+            authorization_guard=accept_trial_ticket,
+        )
+        assert started.value["query_id"] == trial_id
+        async with asyncio.timeout(180):
+            while True:
+                trial_state = await memory.management_contract.query_authorized(
+                    "memory.trial.get", {"query_id": trial_id},
+                    authorization=trial_authorization,
+                )
+                if trial_state["state"] == "READY":
+                    break
+                assert trial_state["state"] != "FAILED", trial_state
+                await asyncio.sleep(0.2)
+        trial_page = await memory.management_contract.query_authorized(
+            "memory.trial.result", {"query_id": trial_id, "limit": 4},
+            authorization=trial_authorization,
+        )
+        assert any(
+            item["source_unit_id"] == document_unit
+            and item["external_group_id"] == "933179609"
+            and item["author_subject_ref"] == "qq:20001"
+            and item["image_count"] >= 1
+            for item in trial_page["items"]
+        )
+        async with host.store.pool.connection() as conn:
+            trial_matches = await (await conn.execute(
+                sql.SQL(
+                    "SELECT q.modality AS query_modality,d.modality AS document_modality "
+                    "FROM {m}.query_seed_matches x "
+                    "JOIN {m}.embedding_facets q ON q.bot_id=x.bot_id "
+                    "AND q.facet_id=x.query_facet_id "
+                    "JOIN {m}.embedding_facets d ON d.bot_id=x.bot_id "
+                    "AND d.facet_id=x.document_facet_id "
+                    "WHERE x.bot_id=%s AND x.query_id=%s AND x.source_unit_id=%s"
+                ).format(m=sql.Identifier(namespace)),
+                (settings.bot_id, trial_id, document_unit),
+            )).fetchall()
+        assert ("IMAGE", "IMAGE") in {
+            (row["query_modality"], row["document_modality"])
+            for row in trial_matches
+        }
     finally:
         RecordingModelClient.reply_text = None
         try:
