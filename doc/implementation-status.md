@@ -55,6 +55,8 @@
 | Conversation | `conversation_scheduler` | 同群串行、跨群并发、安全边界合流、静默归档和上下文裁剪 |
 | Memory | `memory_graph` | 多主干来源、图文嵌入、精确召回、固定匹配、按需图区域读取及检索区域冻结；规范图文证据物化已接入；Agent 语义接入待补齐 |
 
+向量索引的 `upsert/search` 契约现为 major 2：Milvus 只保存 `ref_id`、Bot/空间/用途路由字段和向量，ANN 只返回 ref 与分数；群来源、修订、作者和模态均由 Memory 按 ref 在 PostgreSQL 权威表复核。collection 名称按新布局分代，避免旧列布局在热重载或重建时被误用。此收敛移除了管理试验查询必须伪造来源才能写入索引的协议障碍；试验的嵌入 claim、Provider 输入、发布资格和 owned-work 尚未接通。
+
 内核的 Runtime、Payload、Authorization、Effect 与 Audit Authority 仍是可信微内核组件。它们不是可卸载业务插件，也不应迁入 `builtin`。
 
 ## 4. 已切换的生产 builtin

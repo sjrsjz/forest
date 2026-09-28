@@ -143,12 +143,14 @@ class MilvusVectorIndexEffectDriver:
                     )
                     fields = {item["name"]: item for item in description.get("fields", [])}
                     vector = fields.get("embedding", {})
-                    if int(vector.get("params", {}).get("dim", -1)) != self.configuration[
-                        "dimensions"
-                    ]:
+                    if (
+                        set(fields) != {"ref_id", "bot_id", "space_id", "purpose", "embedding"}
+                        or int(vector.get("params", {}).get("dim", -1))
+                        != self.configuration["dimensions"]
+                    ):
                         raise ForestError(
                             "VECTOR_INDEX_SPACE_IMMUTABLE",
-                            "Milvus collection dimension differs",
+                            "Milvus collection layout differs",
                             409,
                         )
                     return
@@ -159,9 +161,6 @@ class MilvusVectorIndexEffectDriver:
                 schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
                 schema.add_field("space_id", DataType.VARCHAR, max_length=256)
                 schema.add_field("purpose", DataType.VARCHAR, max_length=16)
-                schema.add_field("source_unit_id", DataType.VARCHAR, max_length=256)
-                schema.add_field("source_revision", DataType.INT64)
-                schema.add_field("modality", DataType.VARCHAR, max_length=16)
                 schema.add_field(
                     "embedding",
                     DataType.FLOAT_VECTOR,
@@ -222,7 +221,6 @@ class MilvusVectorIndexEffectDriver:
         values = tuple(float(item) for item in payload["vector"])
         if (
             not _valid_ref(payload["ref_id"])
-            or not _valid_ref(payload["source_unit_id"])
             or len(values) != self.configuration["dimensions"]
             or any(not math.isfinite(item) for item in values)
         ):
@@ -234,9 +232,6 @@ class MilvusVectorIndexEffectDriver:
             "bot_id": self.bot_id,
             "space_id": payload["space_id"],
             "purpose": payload["purpose"],
-            "source_unit_id": payload["source_unit_id"],
-            "source_revision": payload["source_revision"],
-            "modality": payload["modality"],
             "embedding": list(values),
         }
         input_digest = digest_json(row)
@@ -292,7 +287,7 @@ class MilvusVectorIndexEffectDriver:
                         '&& purpose == "DOCUMENT"'
                     ),
                     limit=payload["limit"],
-                    output_fields=["source_unit_id", "source_revision", "modality"],
+                    output_fields=[],
                     search_params={"metric_type": "COSINE", "params": {}},
                     consistency_level="Strong",
                 )
@@ -305,16 +300,12 @@ class MilvusVectorIndexEffectDriver:
         hits = raw[0] if isinstance(raw, list) and raw else []
         result = []
         for hit in hits:
-            entity = hit.get("entity", {}) if isinstance(hit, Mapping) else {}
             ref_id = hit.get("ref_id", hit.get("id")) if isinstance(hit, Mapping) else None
             score = hit.get("distance") if isinstance(hit, Mapping) else None
             if (
                 not isinstance(ref_id, str)
                 or type(score) not in {int, float}
                 or not math.isfinite(float(score))
-                or not isinstance(entity.get("source_unit_id"), str)
-                or type(entity.get("source_revision")) is not int
-                or entity.get("modality") not in {"TEXT", "IMAGE"}
             ):
                 raise ForestError(
                     "VECTOR_INDEX_RESPONSE_INVALID", "Milvus returned an invalid hit", 502
@@ -323,9 +314,6 @@ class MilvusVectorIndexEffectDriver:
                 {
                     "ref_id": ref_id,
                     "score": float(score),
-                    "source_unit_id": entity["source_unit_id"],
-                    "source_revision": entity["source_revision"],
-                    "modality": entity["modality"],
                 }
             )
         return {

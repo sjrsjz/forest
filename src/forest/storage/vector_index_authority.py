@@ -21,7 +21,7 @@ class VectorIndexIdentityRepository:
     @staticmethod
     def collection_name(bot_id: str, space_id: str) -> str:
         suffix = hashlib.sha256((bot_id + "\0" + space_id).encode()).hexdigest()[:32]
-        return "forest_memory_" + suffix
+        return "forest_memory_ref2_" + suffix
 
     async def initialize(
         self,

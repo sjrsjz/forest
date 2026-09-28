@@ -156,6 +156,7 @@ class FakeMilvusClient:
         vector = next(item for item in schema.fields if item["name"] == "embedding")
         self.collections[collection_name] = {
             "dimensions": vector["dim"],
+            "fields": deepcopy(schema.fields),
             "rows": {},
         }
 
@@ -163,7 +164,11 @@ class FakeMilvusClient:
         collection = self.collections[collection_name]
         return {
             "fields": [
-                {"name": "embedding", "params": {"dim": collection["dimensions"]}}
+                {"name": field["name"], **(
+                    {"params": {"dim": field["dim"]}}
+                    if field["name"] == "embedding" else {}
+                )}
+                for field in collection["fields"]
             ]
         }
 
@@ -1913,12 +1918,31 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
             )
             async with host.store.pool.connection() as conn:
                 failures = await (await conn.execute(
-                    sql.SQL("SELECT input_payload#>>'{outcome,error,code}' AS code "
+                    sql.SQL("SELECT input_payload->'outcome' AS outcome "
                             "FROM {}.conversation_agent_work_settlements "
                             "ORDER BY created_at DESC LIMIT 5")
                     .format(sql.Identifier(conversation_schema))
                 )).fetchall()
-            raise AssertionError(f"Provider not reached; Agent work errors: {failures}") from exc
+                recall = await (await conn.execute(sql.SQL(
+                    "SELECT state,last_error_code,failure_count FROM {}.query_recall_work"
+                ).format(sql.Identifier(memory_schema)))).fetchall()
+                facets = await (await conn.execute(sql.SQL(
+                    "SELECT purpose,state,count(*) AS n FROM {}.embedding_facets "
+                    "GROUP BY purpose,state ORDER BY purpose,state"
+                ).format(sql.Identifier(memory_schema)))).fetchall()
+                vector_batches = await (await conn.execute(sql.SQL(
+                    "SELECT state,attempt_count FROM {}.vector_publish_batches"
+                ).format(sql.Identifier(memory_schema)))).fetchall()
+                vector_settlements = await (await conn.execute(sql.SQL(
+                    "SELECT input_payload->'outcome' AS outcome "
+                    "FROM {}.vector_work_settlements ORDER BY claim_token DESC LIMIT 5"
+                ).format(sql.Identifier(memory_schema)))).fetchall()
+            raise AssertionError(
+                f"Provider not reached: agent={failures}, recall={recall}, "
+                f"facets={facets}, vector_batches={vector_batches}, "
+                f"vector_settlements={vector_settlements}, "
+                f"memory_failure={host.registry.get('memory.graph')._owned_work.failure}"
+            ) from exc
         prepared = RecordingModelClient.requests[0]
         prepared.verify()
         manifest = prepared.manifest

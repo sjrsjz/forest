@@ -106,14 +106,17 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
     try:
         for driver in drivers.values():
             await driver.start()
+        collection = await drivers["vector.index.upsert"].client.describe_collection(
+            collection_name=collection_name
+        )
+        assert {field["name"] for field in collection["fields"]} == {
+            "ref_id", "bot_id", "space_id", "purpose", "embedding",
+        }
         await drivers["vector.index.upsert"].invoke(
             {
                 "ref_id": "ref/document/near",
                 "space_id": space_id,
                 "purpose": "DOCUMENT",
-                "source_unit_id": "unit/near",
-                "source_revision": 1,
-                "modality": "TEXT",
                 "vector": [1.0, 0.0, 0.0, 0.0],
             },
             scope=scope,
@@ -124,9 +127,6 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                 "ref_id": "ref/document/far",
                 "space_id": space_id,
                 "purpose": "DOCUMENT",
-                "source_unit_id": "unit/far",
-                "source_revision": 1,
-                "modality": "IMAGE",
                 "vector": [0.0, 1.0, 0.0, 0.0],
             },
             scope=scope,
@@ -137,9 +137,6 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                 "ref_id": "ref/query",
                 "space_id": space_id,
                 "purpose": "QUERY",
-                "source_unit_id": "unit/query",
-                "source_revision": 1,
-                "modality": "TEXT",
                 "vector": [1.0, 0.0, 0.0, 0.0],
             },
             scope=scope,
@@ -156,7 +153,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             "ref/document/near",
             "ref/document/far",
         ]
-        assert hits[0]["source_unit_id"] == "unit/near"
+        assert set(hits[0]) == {"ref_id", "score"}
         assert all("embedding" not in hit for hit in hits)
 
         with pytest.raises(ForestError) as rebound:
@@ -165,9 +162,6 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                     "ref_id": "ref/document/near",
                     "space_id": space_id,
                     "purpose": "DOCUMENT",
-                    "source_unit_id": "unit/near",
-                    "source_revision": 1,
-                    "modality": "TEXT",
                     "vector": [0.0, 0.0, 1.0, 0.0],
                 },
                 scope=scope,
@@ -193,9 +187,6 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                     "ref_id": "ref/document/near",
                     "space_id": space_id,
                     "purpose": "DOCUMENT",
-                    "source_unit_id": "unit/near",
-                    "source_revision": 1,
-                    "modality": "TEXT",
                     "vector": [1.0, 0.0, 0.0, 0.0],
                 },
                 scope=scope,
@@ -213,9 +204,6 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                     "ref_id": "ref/never-published",
                     "space_id": space_id,
                     "purpose": "DOCUMENT",
-                    "source_unit_id": "unit/new",
-                    "source_revision": 1,
-                    "modality": "TEXT",
                     "vector": [0.0, 0.0, 1.0, 0.0],
                 },
                 scope=scope,

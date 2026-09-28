@@ -12,13 +12,10 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["ref_id", "score", "source_unit_id", "source_revision", "modality"],
+        "required": ["ref_id", "score"],
         "properties": {
           "ref_id": {"type": "string", "minLength": 1, "maxLength": 256},
-          "score": {"type": "number"},
-          "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
-          "source_revision": {"type": "integer", "minimum": 1},
-          "modality": {"enum": ["TEXT", "IMAGE"]}
+          "score": {"type": "number"}
         }
       }
     }

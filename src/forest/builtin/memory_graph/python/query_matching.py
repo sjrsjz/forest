@@ -40,6 +40,7 @@ async def prepare(ctx, query_id, policy):
                     {"query_ref_id": facet["ref_id"], "space_id": progress["space_id"],
                      "limit": policy["candidate_limit_per_facet"]},
                     operation_id=ctx.operations.stable("matching-search:" + _digest(facet["ref_id"])),
+                    contract_major=2,
                     timeout=15,
                 )
                 if (response["query_ref_id"] != facet["ref_id"]
