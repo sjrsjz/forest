@@ -265,9 +265,11 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 - 当前非敏感值、字段级继承来源及读权限；
 - desired/effective/observed 状态和最近操作的脱敏摘要。
 
-模块 UI 只能发送 `ready`、`resize`、`set-draft`、`validate`、`request-plan`、`discard-draft`，以及调用本 Generation 已声明 management operation 的 `query/action`。操作消息只能给出 operation ID、稳定 request ID 和 JSON 输入，不能提供 URL、HTTP 方法、组件 ID、权限名或任意控制调用；壳层把请求固定路由到当前 iframe 所属组件，并对 action 生成幂等键。所有消息有 schema、大小和频率限制，服务端仍按 manifest 的输入 schema、当前 Generation、权限和事务栅栏执行。密钥字段由宿主原生控件覆盖，模块 UI 只看 `secret_ref` 是否已设置。
+模块 UI 只能发送 `ready`、`resize`、`set-draft`、`validate`、`request-plan`、`discard-draft`，调用本 Generation 已声明 management operation 的 `query/action`，以及下述通用资产传输消息。操作消息只能给出 operation ID、稳定 request ID 和 JSON 输入，不能提供 URL、HTTP 方法、组件 ID、权限名或任意控制调用；壳层把请求固定路由到当前 iframe 所属组件，并对 action 生成幂等键。所有消息有 schema、大小和频率限制，服务端仍按 manifest 的输入 schema、当前 Generation、权限和事务栅栏执行。密钥字段由宿主原生控件覆盖，模块 UI 只看 `secret_ref` 是否已设置。
 
 未声明 UI、UI 协议不兼容、资源校验失败或脚本崩溃时，控制台使用通用 schema 表单。自定义 UI 是呈现插件，不是配置权威，也不能成为模块可运行的必要条件。
+
+需要图片等二进制输入的管理 operation 使用通用的 `asset.open`、`asset.chunk`、`asset.finish` 消息；它们属于管理通道的受限资源传输，不是模块自定义 HTTP API。宿主在 `open` 固定 scope、Bot、管理员、模块 Generation、允许的 operation、大小/块数上限和 TTL；每块按序号、长度与上传会话校验，`finish` 验证总长度、内容摘要与媒体类型后生成短期 Payload 引用。只有对应的管理 action 能消费该引用，且必须在签票和接纳时重新检查归属、过期和摘要。宿主对未完成上传和过期资产回收，模块卸载或 Generation 更替使未消费的引用失效；已接纳工作按模块 owned-work 协议处理。iframe 仍无直连网络、Cookie、跨模块资产访问或底层 Payload 写权限。
 
 ## 6. 路由、授权和 dispatch trace
 
