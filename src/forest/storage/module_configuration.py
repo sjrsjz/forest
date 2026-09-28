@@ -239,6 +239,28 @@ class ModuleConfigurationRepository:
         authorization=None,
         authorization_guard=None,
     ) -> EffectiveModuleConfiguration:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.apply_in(
+                conn,
+                operation_id=operation_id,
+                plan_id=plan_id,
+                expected_desired_revision=expected_desired_revision,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+            )
+
+    async def apply_in(
+        self,
+        conn,
+        *,
+        operation_id: str,
+        plan_id: str,
+        expected_desired_revision: int,
+        authorization=None,
+        authorization_guard=None,
+    ) -> EffectiveModuleConfiguration:
+        """Commit desired in the caller's transaction for composed UnitOfWork plans."""
+
         input_digest = digest_json(
             [
                 "forest.module-configuration.apply/1",
@@ -247,94 +269,93 @@ class ModuleConfigurationRepository:
                 expected_desired_revision,
             ]
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
-            await self._authorize_management_in(
-                conn,
-                authorization=authorization,
-                authorization_guard=authorization_guard,
-                operation_id=operation_id,
-                action_key="configuration.apply",
-                input_digest=digest_json(
-                    {
-                        "plan_id": plan_id,
-                        "expected_desired_revision": expected_desired_revision,
-                    }
+        await self._authorize_management_in(
+            conn,
+            authorization=authorization,
+            authorization_guard=authorization_guard,
+            operation_id=operation_id,
+            action_key="configuration.apply",
+            input_digest=digest_json(
+                {
+                    "plan_id": plan_id,
+                    "expected_desired_revision": expected_desired_revision,
+                }
+            ),
+            plan_digest=digest_json({"plan_id": plan_id}),
+        )
+        head = await self._head_in(conn, lock=True)
+        existing = await self._revision_by_operation_in(conn, operation_id)
+        if existing is not None:
+            self._guard_revision(
+                existing,
+                input_digest,
+                previous_revision=expected_desired_revision,
+                plan_id=plan_id,
+            )
+            return self._configuration(existing)
+        plan = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND plan_id=%s FOR UPDATE").format(
+                    self._table("module_configuration_plans")
                 ),
-                plan_digest=digest_json({"plan_id": plan_id}),
+                (self.store.bot_id, plan_id),
             )
-            head = await self._head_in(conn, lock=True)
-            existing = await self._revision_by_operation_in(conn, operation_id)
-            if existing is not None:
-                self._guard_revision(
-                    existing,
+        ).fetchone()
+        if (
+            plan is None
+            or plan["state"] != "PLANNED"
+            or plan["expected_desired_revision"] != expected_desired_revision
+            or head["desired_revision"] != expected_desired_revision
+            or head["effective_revision"] != expected_desired_revision
+        ):
+            raise ForestError(
+                "MODULE_CONFIGURATION_CONFLICT",
+                "Configuration plan is stale or already consumed",
+                409,
+            )
+        await self._verify_payload_in(conn, plan, f"plan:{plan_id}")
+        if self.immutable_paths:
+            body = await self.payloads.read_bytes_in(
+                conn,
+                plan["config_payload_id"],
+            )
+            await self._assert_immutable_in(conn, self._decode_value(body))
+        revision = expected_desired_revision + 1
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}(bot_id,revision,previous_revision,operation_id,"
+                    "input_digest,plan_id,config_payload_id,config_payload_digest,"
+                    "validation_digest) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *"
+                ).format(self._table("module_configuration_revisions")),
+                (
+                    self.store.bot_id,
+                    revision,
+                    expected_desired_revision,
+                    operation_id,
                     input_digest,
-                    previous_revision=expected_desired_revision,
-                    plan_id=plan_id,
-                )
-                return self._configuration(existing)
-            plan = await (
-                await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s AND plan_id=%s FOR UPDATE").format(
-                        self._table("module_configuration_plans")
-                    ),
-                    (self.store.bot_id, plan_id),
-                )
-            ).fetchone()
-            if (
-                plan is None
-                or plan["state"] != "PLANNED"
-                or plan["expected_desired_revision"] != expected_desired_revision
-                or head["desired_revision"] != expected_desired_revision
-                or head["effective_revision"] != expected_desired_revision
-            ):
-                raise ForestError(
-                    "MODULE_CONFIGURATION_CONFLICT",
-                    "Configuration plan is stale or already consumed",
-                    409,
-                )
-            await self._verify_payload_in(conn, plan, f"plan:{plan_id}")
-            if self.immutable_paths:
-                body = await self.payloads.read_bytes_in(
-                    conn,
+                    plan_id,
                     plan["config_payload_id"],
-                )
-                await self._assert_immutable_in(conn, self._decode_value(body))
-            revision = expected_desired_revision + 1
-            row = await (
-                await conn.execute(
-                    sql.SQL(
-                        "INSERT INTO {}(bot_id,revision,previous_revision,operation_id,"
-                        "input_digest,plan_id,config_payload_id,config_payload_digest,"
-                        "validation_digest) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *"
-                    ).format(self._table("module_configuration_revisions")),
-                    (
-                        self.store.bot_id,
-                        revision,
-                        expected_desired_revision,
-                        operation_id,
-                        input_digest,
-                        plan_id,
-                        plan["config_payload_id"],
-                        plan["config_payload_digest"],
-                        plan["validation_digest"],
-                    ),
-                )
-            ).fetchone()
-            await conn.execute(
-                sql.SQL(
-                    "UPDATE {} SET state='APPLIED',applied_revision=%s,"
-                    "applied_at=clock_timestamp() WHERE bot_id=%s AND plan_id=%s"
-                ).format(self._table("module_configuration_plans")),
-                (revision, self.store.bot_id, plan_id),
+                    plan["config_payload_digest"],
+                    plan["validation_digest"],
+                ),
             )
-            await conn.execute(
-                sql.SQL(
-                    "UPDATE {} SET desired_revision=%s,updated_at=clock_timestamp() "
-                    "WHERE bot_id=%s"
-                ).format(self._table("module_configuration_heads")),
-                (revision, self.store.bot_id),
-            )
-            return self._configuration(row)
+        ).fetchone()
+        await conn.execute(
+            sql.SQL(
+                "UPDATE {} SET state='APPLIED',applied_revision=%s,"
+                "applied_at=clock_timestamp() WHERE bot_id=%s AND plan_id=%s"
+            ).format(self._table("module_configuration_plans")),
+            (revision, self.store.bot_id, plan_id),
+        )
+        await conn.execute(
+            sql.SQL(
+                "UPDATE {} SET desired_revision=%s,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s"
+            ).format(self._table("module_configuration_heads")),
+            (revision, self.store.bot_id),
+        )
+        return self._configuration(row)
 
     async def activate_in(
         self,

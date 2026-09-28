@@ -1677,6 +1677,17 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
         ),
     )
     assert plans[0]["plan_id"] == plans[1]["plan_id"]
+    with pytest.raises(RuntimeError, match="abort sibling participant"):
+        async with store.pool.connection() as conn, conn.transaction():
+            staged = await configuration.apply_in(
+                conn,
+                operation_id="configuration.apply.2",
+                plan_id=plans[0]["plan_id"],
+                expected_desired_revision=1,
+            )
+            assert staged.revision == 2
+            raise RuntimeError("abort sibling participant")
+    assert (await configuration.desired()).revision == 1
     applied = await asyncio.gather(
         configuration.apply(
             operation_id="configuration.apply.2",
