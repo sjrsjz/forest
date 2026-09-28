@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "selection_id", "first_ordinal", "last_ordinal",
+    "deletion_epoch", "plan_digest", "suppressed_source_units",
+    "vector_deletions", "retracted_relations"],
+  "properties": {
+    "protocol": {"const": "forest.memory-forget-batch-applied/1"},
+    "selection_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "first_ordinal": {"type": "integer", "minimum": 1, "maximum": 1000000},
+    "last_ordinal": {"type": "integer", "minimum": 1, "maximum": 1000000},
+    "deletion_epoch": {"type": "integer", "minimum": 1},
+    "plan_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "suppressed_source_units": {"type": "integer", "minimum": 1},
+    "vector_deletions": {"type": "integer", "minimum": 0},
+    "retracted_relations": {"type": "integer", "minimum": 0}
+  }
+}

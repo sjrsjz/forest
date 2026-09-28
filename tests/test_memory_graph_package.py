@@ -589,6 +589,65 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
                 "WHERE bot_id=%s AND selection_id='selection/target' AND ordinal=1"
             ).format(namespace), (store.bot_id,))
 
+    operation_id = "batch/selection-apply"
+    input_digest = "sha256:" + "b" * 64
+    before_epoch = await kernel.payload.epoch()
+
+    async def execute_batch(plan):
+        async with store.pool.connection() as conn, conn.transaction():
+            request = {**batch_request, "operation_id": operation_id}
+            prepared = (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_prepare_forget_batch(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id}),
+                Jsonb({**step, "input": request, "prior": {}}),
+            ))).fetchone())["result"]
+            assert prepared["ok"] is True, prepared
+            forgotten = await participant.invoke_in(
+                conn, "payload.forget-anchors-from-prior", {
+                    **step, "input": {
+                        "protocol": "forest.payload-forget-anchors/1",
+                        "prior_step_id": "prepare", "operation_id": operation_id,
+                        "expected_deletion_epoch": plan["deletion_epoch"],
+                        "expected_selection_digest": plan["selection_digest"],
+                    }, "prior": {"prepare": prepared["value"]},
+                },
+            )
+            applied = (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_apply_forget_batch(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id,
+                       "participant_input_digest": input_digest}),
+                Jsonb({**step, "input": {**request,
+                    "prepare_step_id": "prepare", "forget_step_id": "payload",
+                    "plan": plan},
+                    "prior": {"prepare": prepared["value"], "payload": forgotten}}),
+            ))).fetchone())["result"]
+            if not applied["ok"]:
+                raise ForestError(**applied["error"])
+            return applied["value"]
+
+    stale_plan = {**planned["value"], "source_unit_count": 3}
+    with pytest.raises(ForestError) as changed:
+        await execute_batch(stale_plan)
+    assert changed.value.code == "MEMORY_FORGET_BATCH_PLAN_CHANGED"
+    assert await kernel.payload.epoch() == before_epoch
+    applied = await execute_batch(planned["value"])
+    assert applied["protocol"] == "forest.memory-forget-batch-applied/1"
+    assert applied["suppressed_source_units"] == 2
+    assert applied["deletion_epoch"] == before_epoch + 1
+    assert await execute_batch(planned["value"]) == applied
+    assert await kernel.payload.epoch() == before_epoch + 1
+    async with store.pool.connection() as conn:
+        rows = await (await conn.execute(sql.SQL(
+            "SELECT source_unit_id,eligibility_state FROM {}.source_units "
+            "WHERE bot_id=%s ORDER BY source_unit_id"
+        ).format(namespace), (store.bot_id,))).fetchall()
+    assert {row["source_unit_id"]: row["eligibility_state"] for row in rows} == {
+        "unit/late": "ELIGIBLE", "unit/one": "SUPPRESSED",
+        "unit/other": "ELIGIBLE", "unit/three": "SUPPRESSED",
+    }
+
 
 def _configuration():
     return {

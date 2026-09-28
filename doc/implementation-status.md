@@ -250,3 +250,5 @@ Memory 已新增私有的 `forget_selections` 和 `forget_selection_members`：�
 批次预览现已接通 `memory.preview-forget-batch` UnitOfWork：Memory 从冻结目录按序号取最多 64 个当前有效成员，Kernel Payload 在删除时钟锁下对去重作者锚点形成闭包，Memory 再计算跨来源影响并固定成员、闭包、删除纪元和影响摘要。管理查询注入管理员主体，Worker 只携带选择引用与批次范围。真实 PostgreSQL 验证了两个根来源、共享派生 Payload、后续新来源隔离，以及包运行时管理查询的完整入口。此预览不能执行撤销；P0 批次授权、持久进度、执行和批量 UI 仍待实现。
 
 单来源 Memory 遗忘的事务写入效果现收敛为包内私有的 `memory_apply_forget_effects`：它按稳定顺序锁定所有受 Payload 闭包影响的来源，并统一写来源抑制、向量删除屏障、facet/准备任务失效和关系贡献撤销。单来源操作继续校验原有精确计划、保存原有幂等回执；这个私有函数只是供后续批次执行复用的写入基础，不提供批次授权或批次执行入口。
+
+Memory 包内现有私有 `memory.forget-batch` 三步 UnitOfWork：从冻结成员目录取根锚点，Kernel Payload 按预览的删除纪元及闭包摘要撤销，Memory 在同一事务内重算完整批次影响计划、复核管理员所属选择及成员修订，再复用遗忘效果函数并写入独立的不可变批次回执。错误计划使整笔事务回滚，重放返回原回执；PostgreSQL 用例覆盖两个根、共享派生 Payload、后续新来源隔离、错误计划回滚及幂等重放。此计划目前只供包内部组合，尚无管理 P0 入队、跨批进度、部分完成状态或批量 UI，不能作为已交付的大范围遗忘操作。

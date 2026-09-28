@@ -351,6 +351,23 @@ CREATE TABLE source_forget_operations (
     FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id)
 );
 
+CREATE TABLE batch_forget_operations (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    selection_id text NOT NULL,
+    requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
+    first_ordinal integer NOT NULL CHECK (first_ordinal BETWEEN 1 AND 1000000),
+    last_ordinal integer NOT NULL CHECK (last_ordinal BETWEEN first_ordinal AND 1000000),
+    member_digest text NOT NULL CHECK (member_digest ~ '^sha256:[a-f0-9]{64}$'),
+    root_member_digest text NOT NULL CHECK (root_member_digest ~ '^sha256:[a-f0-9]{64}$'),
+    selection_digest text NOT NULL CHECK (selection_digest ~ '^sha256:[a-f0-9]{64}$'),
+    deletion_epoch bigint NOT NULL CHECK (deletion_epoch > 0),
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id)
+);
+
 CREATE TABLE management_forget_work (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     request_id text NOT NULL CHECK (octet_length(request_id) BETWEEN 1 AND 256),
@@ -399,6 +416,8 @@ CREATE TABLE forget_selections (
     PRIMARY KEY (bot_id,selection_id),
     UNIQUE (bot_id,operation_id)
 );
+ALTER TABLE batch_forget_operations ADD CONSTRAINT batch_forget_selection_fk
+    FOREIGN KEY (bot_id,selection_id) REFERENCES forget_selections(bot_id,selection_id);
 
 CREATE TABLE forget_selection_members (
     bot_id text NOT NULL,
@@ -4261,6 +4280,8 @@ CREATE TRIGGER eligibility_operations_immutable BEFORE UPDATE OR DELETE ON eligi
 CREATE TRIGGER source_suppressions_immutable BEFORE UPDATE OR DELETE ON source_suppressions
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER source_forget_operations_immutable BEFORE UPDATE OR DELETE ON source_forget_operations
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER batch_forget_operations_immutable BEFORE UPDATE OR DELETE ON batch_forget_operations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER forget_selections_immutable BEFORE UPDATE OR DELETE ON forget_selections
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
@@ -8265,6 +8286,8 @@ BEGIN
        octet_length(body->>'selection_id') NOT BETWEEN 1 AND 256 OR
        body->>'requested_by' IS NULL OR
        octet_length(body->>'requested_by') NOT BETWEEN 1 AND 256 OR
+       (body ? 'operation_id' AND
+        octet_length(body->>'operation_id') NOT BETWEEN 1 AND 256) OR
        after_value IS NULL OR after_value<0 OR
        batch_size IS NULL OR batch_size NOT BETWEEN 1 AND 64 THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
@@ -8293,9 +8316,13 @@ BEGIN
       ON u.bot_id=m.bot_id AND u.source_unit_id=m.source_unit_id
      AND u.source_revision=m.source_revision
      AND u.author_payload_id=m.anchor_payload_id
-     AND u.eligibility_state<>'SUPPRESSED'
+    LEFT JOIN __forest_module_schema__.source_suppressions s
+      ON s.bot_id=u.bot_id AND s.source_unit_id=u.source_unit_id
     WHERE m.bot_id=requested_bot AND m.selection_id=selection_row.selection_id
-      AND m.ordinal>after_value AND m.ordinal<=last_value;
+      AND m.ordinal>after_value AND m.ordinal<=last_value
+      AND (u.eligibility_state<>'SUPPRESSED' OR
+           (body ? 'operation_id' AND
+            s.operation_id=body->>'operation_id'));
     IF live_count<>expected_count OR anchor_ids IS NULL THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_CHANGED',
@@ -8304,6 +8331,32 @@ BEGIN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('protocol','forest.payload-forget-batch-plan/1',
             'anchor_payload_ids',to_jsonb(anchor_ids)));
+END;
+$$;
+
+CREATE FUNCTION memory_forget_batch_impact_plan(
+    requested_bot text, selection_id_value text, member_digest_value text,
+    first_ordinal_value integer, last_ordinal_value integer,
+    root_member_digest_value text, root_sample_value jsonb,
+    deletion_epoch_value bigint, selection_digest_value text,
+    selected_ids text[])
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    plan_value jsonb;
+BEGIN
+    plan_value := jsonb_build_object(
+        'protocol','forest.memory-forget-batch-impact-plan/1',
+        'selection_id',selection_id_value,'member_digest',member_digest_value,
+        'first_ordinal',first_ordinal_value,'last_ordinal',last_ordinal_value,
+        'batch_member_count',last_ordinal_value-first_ordinal_value+1,
+        'root_member_digest',root_member_digest_value,
+        'batch_source_unit_sample',root_sample_value,
+        'deletion_epoch',deletion_epoch_value,
+        'selection_digest',selection_digest_value,
+        'selected_payload_count',cardinality(selected_ids)) ||
+        __forest_module_schema__.memory_source_forget_impact(requested_bot,selected_ids);
+    RETURN plan_value || jsonb_build_object('plan_digest','sha256:' ||
+        encode(sha256(convert_to(plan_value::text,'UTF8')),'hex'));
 END;
 $$;
 
@@ -8325,7 +8378,6 @@ DECLARE
     selected_ids text[];
     root_digest text;
     root_sample jsonb;
-    impact jsonb;
     plan_value jsonb;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1' OR
@@ -8389,22 +8441,155 @@ BEGIN
                 'message','Forget batch members or Payload closure changed',
                 'status',409));
     END IF;
-    impact := __forest_module_schema__.memory_source_forget_impact(
-        requested_bot,selected_ids);
-    plan_value := jsonb_build_object(
-        'protocol','forest.memory-forget-batch-impact-plan/1',
-        'selection_id',selection_row.selection_id,
-        'member_digest',selection_row.member_digest,
-        'first_ordinal',after_value+1,'last_ordinal',last_value,
-        'batch_member_count',member_count,'root_member_digest',root_digest,
-        'batch_source_unit_sample',root_sample,
-        'deletion_epoch',(preview->>'deletion_epoch')::bigint,
-        'selection_digest',preview->>'selection_digest',
-        'selected_payload_count',(preview->>'selected_count')::integer)
-        || impact;
+    plan_value := __forest_module_schema__.memory_forget_batch_impact_plan(
+        requested_bot,selection_row.selection_id,selection_row.member_digest,
+        after_value+1,last_value,root_digest,root_sample,
+        (preview->>'deletion_epoch')::bigint,preview->>'selection_digest',
+        selected_ids);
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
-        'value',plan_value || jsonb_build_object('plan_digest','sha256:' ||
-            encode(sha256(convert_to(plan_value::text,'UTF8')),'hex')));
+        'value',plan_value);
+END;
+$$;
+
+CREATE FUNCTION memory_apply_forget_batch(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    prior jsonb := envelope->'prior';
+    prepared jsonb := prior->(body->>'prepare_step_id');
+    forgotten jsonb := prior->(body->>'forget_step_id');
+    requested_bot text := context->>'bot_id';
+    requested_digest text := context->>'participant_input_digest';
+    selection_row __forest_module_schema__.forget_selections%ROWTYPE;
+    operation_row __forest_module_schema__.batch_forget_operations%ROWTYPE;
+    after_value integer := (body->>'after_ordinal')::integer;
+    batch_size integer := (body->>'batch_size')::integer;
+    last_value integer;
+    live_count integer;
+    root_ids text[];
+    anchor_ids text[];
+    selected_ids text[];
+    root_digest text;
+    root_sample jsonb;
+    current_plan jsonb;
+    effects jsonb;
+    result_value jsonb;
+    deletion_epoch_value bigint;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1' OR
+       envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph' OR
+       requested_digest !~ '^sha256:[a-f0-9]{64}$' OR
+       body->>'operation_id' IS NULL OR
+       octet_length(body->>'operation_id') NOT BETWEEN 1 AND 256 OR
+       body->>'selection_id' IS NULL OR
+       octet_length(body->>'selection_id') NOT BETWEEN 1 AND 256 OR
+       body->>'requested_by' IS NULL OR
+       octet_length(body->>'requested_by') NOT BETWEEN 1 AND 256 OR
+       after_value IS NULL OR after_value<0 OR
+       batch_size IS NULL OR batch_size NOT BETWEEN 1 AND 64 OR
+       jsonb_typeof(body->'plan') IS DISTINCT FROM 'object' OR
+       prepared->>'protocol' IS DISTINCT FROM 'forest.payload-forget-batch-plan/1' OR
+       jsonb_typeof(prepared->'anchor_payload_ids') IS DISTINCT FROM 'array' OR
+       forgotten->>'protocol' IS DISTINCT FROM 'forest.payload-forgotten/1' OR
+       forgotten->>'operation_id' IS DISTINCT FROM body->>'operation_id' OR
+       forgotten->>'selection_digest' !~ '^sha256:[a-f0-9]{64}$' OR
+       forgotten->>'deletion_epoch' !~ '^[1-9][0-9]*$' OR
+       jsonb_typeof(forgotten->'selected_payload_ids') IS DISTINCT FROM 'array' OR
+       jsonb_array_length(forgotten->'selected_payload_ids') > 100000 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_AUTHORITY_INVALID',
+                'message','Batch forget receipt is invalid','status',422));
+    END IF;
+    SELECT * INTO selection_row FROM __forest_module_schema__.forget_selections
+    WHERE bot_id=requested_bot AND selection_id=body->>'selection_id'
+      AND requested_by=body->>'requested_by';
+    IF selection_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_NOT_FOUND',
+                'message','Forget selection does not exist','status',404));
+    END IF;
+    IF after_value>=selection_row.member_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_EXHAUSTED',
+                'message','Forget selection has no remaining batch','status',409));
+    END IF;
+    last_value := LEAST(after_value+batch_size,selection_row.member_count);
+    SELECT count(*),array_agg(m.source_unit_id ORDER BY m.ordinal),
+           array_agg(DISTINCT m.anchor_payload_id ORDER BY m.anchor_payload_id),
+           'sha256:' || encode(sha256(convert_to(jsonb_agg(
+               jsonb_build_array(m.source_unit_id,m.source_revision,
+                   m.anchor_payload_id) ORDER BY m.ordinal)::text,'UTF8')),'hex'),
+           to_jsonb((array_agg(m.source_unit_id ORDER BY m.ordinal))[1:20])
+    INTO live_count,root_ids,anchor_ids,root_digest,root_sample
+    FROM __forest_module_schema__.forget_selection_members m
+    JOIN __forest_module_schema__.source_units u
+      ON u.bot_id=m.bot_id AND u.source_unit_id=m.source_unit_id
+     AND u.source_revision=m.source_revision
+     AND u.author_payload_id=m.anchor_payload_id
+    LEFT JOIN __forest_module_schema__.source_suppressions s
+      ON s.bot_id=u.bot_id AND s.source_unit_id=u.source_unit_id
+    WHERE m.bot_id=requested_bot AND m.selection_id=selection_row.selection_id
+      AND m.ordinal>after_value AND m.ordinal<=last_value
+      AND (u.eligibility_state<>'SUPPRESSED' OR
+           s.operation_id=body->>'operation_id');
+    SELECT array_agg(value ORDER BY value) INTO selected_ids
+    FROM jsonb_array_elements_text(forgotten->'selected_payload_ids');
+    IF live_count<>last_value-after_value OR anchor_ids IS NULL OR
+       prepared->'anchor_payload_ids' IS DISTINCT FROM to_jsonb(anchor_ids) OR
+       selected_ids IS NULL OR NOT (anchor_ids <@ selected_ids) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_CHANGED',
+                'message','Frozen batch or Payload closure changed','status',409));
+    END IF;
+    deletion_epoch_value := (forgotten->>'deletion_epoch')::bigint;
+    SELECT * INTO operation_row FROM __forest_module_schema__.batch_forget_operations
+    WHERE bot_id=requested_bot AND operation_id=body->>'operation_id';
+    IF operation_row IS NOT NULL THEN
+        IF operation_row.input_digest IS DISTINCT FROM requested_digest OR
+           operation_row.selection_id IS DISTINCT FROM selection_row.selection_id OR
+           operation_row.requested_by IS DISTINCT FROM body->>'requested_by' OR
+           operation_row.first_ordinal IS DISTINCT FROM after_value+1 OR
+           operation_row.last_ordinal IS DISTINCT FROM last_value OR
+           operation_row.selection_digest IS DISTINCT FROM forgotten->>'selection_digest' OR
+           operation_row.deletion_epoch IS DISTINCT FROM deletion_epoch_value THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_OPERATION_CONFLICT',
+                    'message','Batch forget operation differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',operation_row.result_payload);
+    END IF;
+    current_plan := __forest_module_schema__.memory_forget_batch_impact_plan(
+        requested_bot,selection_row.selection_id,selection_row.member_digest,
+        after_value+1,last_value,root_digest,root_sample,
+        deletion_epoch_value-1,forgotten->>'selection_digest',selected_ids);
+    IF body->'plan' IS DISTINCT FROM current_plan THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_PLAN_CHANGED',
+                'message','Batch impact differs from the approved plan','status',409));
+    END IF;
+    effects := __forest_module_schema__.memory_apply_forget_effects(
+        requested_bot,body->>'operation_id',requested_digest,selected_ids,
+        deletion_epoch_value,root_ids);
+    IF effects IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_CHANGED',
+                'message','Frozen batch roots were not selected','status',409));
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.memory-forget-batch-applied/1',
+        'selection_id',selection_row.selection_id,'first_ordinal',after_value+1,
+        'last_ordinal',last_value,'deletion_epoch',deletion_epoch_value,
+        'plan_digest',current_plan->>'plan_digest') || effects;
+    INSERT INTO __forest_module_schema__.batch_forget_operations(
+        bot_id,operation_id,input_digest,selection_id,requested_by,
+        first_ordinal,last_ordinal,member_digest,root_member_digest,
+        selection_digest,deletion_epoch,result_payload)
+    VALUES(requested_bot,body->>'operation_id',requested_digest,
+        selection_row.selection_id,body->>'requested_by',after_value+1,last_value,
+        selection_row.member_digest,root_digest,forgotten->>'selection_digest',
+        deletion_epoch_value,result_value);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',result_value);
 END;
 $$;
 

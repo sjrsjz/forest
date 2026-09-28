@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.56.0"
+version = "1.57.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -62,6 +62,7 @@ requests = [
   "uow.execute:memory.forget-source",
   "uow.execute:memory.preview-source-forget",
   "uow.execute:memory.preview-forget-batch",
+  "uow.execute:memory.forget-batch",
   "uow.execute:memory.bind-domain",
   "uow.execute:memory.prepare-document-facets",
   "uow.execute:memory.begin-query",
@@ -265,9 +266,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.48.0"
+schema_version = "3.49.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "0053627cf62a5655109098b116120878e6eb302db0bcc36945687da4c497c5b3"
+baseline_sha256 = "bb9e6d49386658631e05c1b01fe1398b6ab972562220237a1f79f8d00f2cc8c7"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -636,6 +637,13 @@ input_schema = "schemas/forget-batch-preview-envelope.json"
 output_schema = "schemas/forget-batch-preview-output.json"
 
 [[components.unit_of_work_participants]]
+name = "memory.apply-forget-batch"
+contract = "1.0"
+function = "memory_apply_forget_batch"
+input_schema = "schemas/forget-batch-apply-envelope.json"
+output_schema = "schemas/forget-batch-apply-output.json"
+
+[[components.unit_of_work_participants]]
 name = "memory.apply-source-forget"
 contract = "1.0"
 function = "memory_apply_source_forget"
@@ -950,6 +958,18 @@ steps = [
   { id = "prepare", component_id = "memory.graph", participant = "memory.prepare-forget-batch", input_path = "/prepare" },
   { id = "payload", component_id = "kernel.payload", participant = "payload.preview-forget-anchors-from-prior", input_path = "/payload" },
   { id = "memory", component_id = "memory.graph", participant = "memory.preview-forget-batch-record", input_path = "/memory" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.forget-batch"
+contract = "1.0"
+input_schema = "schemas/forget-batch-plan-input.json"
+output_schema = "schemas/forget-batch-apply-output.json"
+timeout_s = 30
+steps = [
+  { id = "prepare", component_id = "memory.graph", participant = "memory.prepare-forget-batch", input_path = "/prepare" },
+  { id = "payload", component_id = "kernel.payload", participant = "payload.forget-anchors-from-prior", input_path = "/payload" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.apply-forget-batch", input_path = "/memory" }
 ]
 
 [[components.unit_of_work_participants]]

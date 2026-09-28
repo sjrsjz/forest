@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {"type": "object", "additionalProperties": false,
+      "required": ["component_id", "generation_id"], "properties": {
+        "component_id": {"const": "memory.graph"},
+        "generation_id": {"type": "string", "minLength": 1}}},
+    "input": {"type": "object", "additionalProperties": false,
+      "required": ["operation_id", "selection_id", "requested_by", "after_ordinal",
+        "batch_size", "prepare_step_id", "forget_step_id", "plan"],
+      "properties": {
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "selection_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "requested_by": {"type": "string", "minLength": 1, "maxLength": 256},
+        "after_ordinal": {"type": "integer", "minimum": 0, "maximum": 999999},
+        "batch_size": {"type": "integer", "minimum": 1, "maximum": 64},
+        "prepare_step_id": {"const": "prepare"},
+        "forget_step_id": {"const": "payload"},
+        "plan": {"type": "object", "required": ["protocol", "plan_digest"],
+          "properties": {
+            "protocol": {"const": "forest.memory-forget-batch-impact-plan/1"},
+            "plan_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}}}}},
+    "prior": {"type": "object", "required": ["prepare", "payload"]}
+  }
+}
