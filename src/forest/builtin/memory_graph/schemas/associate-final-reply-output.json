@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "journaled", "promoted", "skipped"],
+  "properties": {
+    "protocol": {"const": "forest.association-journal/1"},
+    "journaled": {"type": "integer", "minimum": 0, "maximum": 128},
+    "promoted": {"type": "integer", "minimum": 0, "maximum": 128},
+    "skipped": {"type": "integer", "minimum": 0, "maximum": 128}
+  }
+}

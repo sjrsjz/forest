@@ -282,7 +282,7 @@ MemoryQuery
 
 默认值为：`seed_limit=4`、`candidate_limit_per_facet=64`、`min_similarity=0.35`、`min_graph_relevance=0.05`、`max_graph_nodes=32`、`max_association_edges_per_node=32`、`sequence_weight=0.55`、`association_weight=0.90`。这些值由 `memory.graph` 的模块配置冻结，可随新 Generation 发布，但一个已冻结检索包不受后来配置变更影响。
 
-成功回复后的联想学习只使用该轮**实际投影给模型的直接种子**。图扩散带出的节点、因字符预算未投影的节点和失败/取消 Run 均不得产生学习边。FinalReply UnitOfWork 先写不可变 `association_journal`；若触发消息仍在活动 Context，日志保持 `PENDING_ARCHIVE`，待该触发源也通过裁剪归档成为 `ELIGIBLE` 后，才创建一次稳定的无向 `ASSOCIATES_WITH` 贡献。重复召回不累加边权，删除任一端点会抑制尚未提升的日志。
+成功回复后的联想学习只使用该轮**实际投影给模型的直接种子**。图扩散带出的节点、因字符预算未投影的节点和失败/取消 Run 均不得产生学习边。Agent 在模型请求事实中冻结种子及实际送出的 part，最终提交时按每次模型调用所属输入版本的最后一个触发记录给出有界提案（最多 128 对，超额显式标记 `truncated`）。Conversation 在同一 FinalReply UnitOfWork 中返回已回答的触发记录与原始事件映射；Memory 用该事件对应的查询 part、冻结检索包中的直接种子和送出 part 复核后写入 `association_journal`。若触发消息仍在活动 Context，日志保持 `PENDING_ARCHIVE`，待该触发源也通过裁剪归档成为 `ELIGIBLE` 后，才创建一次稳定的无向 `ASSOCIATES_WITH` 贡献，权重固定为 QiYu 默认的 0.9。重复召回不累加边权，删除任一端点会抑制尚未提升的日志，已提升贡献则在来源遗忘事务中撤销。
 
 单来源遗忘的 prepare participant 只读取不可变作者 anchor，不提前锁定源单元；Kernel Payload 删除屏障先取得，Memory apply 随后按稳定顺序锁定并抑制来源。匹配事务同样先捕获 Payload 屏障，再锁查询准备和插入匹配事实，避免外键检查与“先锁源、后取删除屏障”的遗忘事务形成反向等待。提交时的资格复核由实际写入 participant 完成，prepare 不承担状态更新。
 
@@ -503,4 +503,4 @@ MemoryStoreProfile 整库迁移导出来源注册表、来源时钟、单元、�
 
 这些是后续实现与并发故障测试的验收要求。实现应使用相同已接纳源集合的不同归档排列验证主干结构一致，再单独验证接纳仲裁、权限/删除屏障、Provider 实际请求体和预算上限；不能仅检查数据库元数据就声称来源标记已经到达模型。
 
-当前实现边界：隔离 Memory 包已完成查询登记、facet 嵌入、向量索引引用、图文种子回表、受预算约束的图扩散、区域冻结及原生多模态证据发布。Agent 包已调用公开召回端口，按输入版本等待、取消和投影证据；跨主干联想学习写入、完整遗忘管理与真实群聊端到端语义召回验收仍未完成。阶段测试和局部包测试不能代替完整验收。
+当前实现边界：隔离 Memory 包已完成查询登记、facet 嵌入、向量索引引用、图文种子回表、受预算约束的图扩散、区域冻结、原生多模态证据发布与成功回复后的联想日志/归档提升。Agent 包已调用公开召回端口，按输入版本等待、取消和投影证据。跨主干联想已通过隔离 PostgreSQL 的等待归档、一次提升与重复召回验证；真实群聊端到端跨群学习、完整遗忘管理和长期运行验收仍未完成。阶段测试和局部包测试不能代替完整验收。

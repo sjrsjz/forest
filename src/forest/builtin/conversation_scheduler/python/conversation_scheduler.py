@@ -308,6 +308,10 @@ class ConversationScheduler(Plugin):
                     "answered_trigger_ids": triggers,
                     "unit_id": self._stable("context-reply", run_ref),
                 },
+                "memory": {
+                    "conversation_ref": task["conversation_id"],
+                    "reply_ref": reply_ref,
+                },
                 "delivery": {
                     "protocol": "forest.delivery-intent/1",
                     "intent_id": intent_id,

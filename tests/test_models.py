@@ -19,6 +19,7 @@ from forest.provider_builtin import validate_provider_configuration
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 from agent_protocol import ProtocolRepairView
+from model_execution import _learning_candidates
 from model_projection import prepare_model_request
 
 
@@ -250,6 +251,18 @@ def test_native_memory_evidence_retains_cross_group_source_and_path():
     assert source["author"]["principal_ref"] == "qq:42"
     assert source["retrieval"]["path_edge_id"] == "edge-a"
     assert request.manifest["memory_evidence"]["association_sampled"] is True
+    assert _learning_candidates(request.manifest) == []
+    evidence["evidence"][0].update(is_seed=True, path_parent_source_unit_id=None,
+                                   path_edge_id=None)
+    direct = prepare_model_request(
+        value, capabilities(), request_id="request-direct",
+        transport_attempt_id="attempt-direct", evidence=evidence,
+    )
+    assert _learning_candidates(direct.manifest) == [{
+        "bundle_id": "bundle-a", "query_id": "query-a",
+        "source_unit_id": "source-unit-a", "source_revision": 1,
+        "rank_score": 0.75, "part_ids": ["text"],
+    }]
     evidence["evidence"][0]["unexpected"] = "injected"
     with pytest.raises(ForestError) as caught:
         prepare_model_request(value, capabilities(), request_id="request-invalid",
@@ -272,14 +285,18 @@ def test_native_memory_image_obeys_bound_model_modality():
         {"part_id": "image", "part_index": 0, "kind": "image",
          "media_ref": reference, "media_type": "image/png", "width": 1, "height": 1}])
     evidence["evidence"][0]["matched_part_ids"] = ["image"]
+    evidence["evidence"][0].update(is_seed=True, path_parent_source_unit_id=None,
+                                   path_edge_id=None)
     text_only = prepared(value, evidence=evidence)
     assert "image_url" not in text_only.body.decode()
     assert "image-a" not in text_only.body.decode()
     assert text_only.manifest["omitted_part_refs"][0]["reason"] == "MODEL_IMAGE_UNSUPPORTED"
+    assert _learning_candidates(text_only.manifest) == []
     visual = prepared(value, capabilities(input_modalities=("text", "image")),
                       evidence=evidence, media={("source-unit-a", "image"): picture})
     assert "data:image/png;base64," in visual.body.decode()
     assert visual.manifest["source_manifest"][0]["source"]["channel_id"] == "group-b"
+    assert _learning_candidates(visual.manifest)[0]["part_ids"] == ["image"]
 
 
 def test_nested_attribution_drops_media_fields_and_rejects_untyped_ids():

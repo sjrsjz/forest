@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.6.0"
+version = "4.7.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -60,9 +60,9 @@ output_schema = "schemas/context-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.3.0"
+schema_version = "4.4.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "e062414a70eb24c1b2ce368dd17f36f368708500ecc6bda4b958dd371d28d22d"
+baseline_sha256 = "08c2b494eddbeae0daf52bc6876cb9710a3ec1da2ec9f13b42b57a8f40d5a6d8"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -186,6 +186,7 @@ timeout_s = 30
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.commit-final-run-record", input_path = "/agent" },
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.append-final-reply", input_path = "/conversation" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.associate-final-reply", input_path = "/memory" },
   { id = "delivery", component_id = "delivery", participant = "delivery.create-chat-intent-uow", input_path = "/delivery", participant_generation_field = "delivery_generation_id" }
 ]
 

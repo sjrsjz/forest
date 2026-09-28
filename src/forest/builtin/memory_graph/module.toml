@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.31.0"
+version = "1.32.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -228,9 +228,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.29.0"
+schema_version = "3.30.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "02a7770c634455031155832ef8d5a315a33c342a0c569d5eb4736657e6eb9ef2"
+baseline_sha256 = "6e3bada27d6bb92e7225dd5cc143281e9ff6405d55bc01865ce986f6a857e47d"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -432,6 +432,13 @@ contract = "1.0"
 function = "memory_qualify_archive"
 input_schema = "schemas/qualify-archive-envelope.json"
 output_schema = "schemas/archive-selection-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.associate-final-reply"
+contract = "1.0"
+function = "memory_associate_final_reply"
+input_schema = "schemas/associate-final-reply-envelope.json"
+output_schema = "schemas/associate-final-reply-output.json"
 
 [[components.unit_of_work_plans]]
 name = "memory.bind-domain"

@@ -2249,6 +2249,7 @@ DECLARE
     requested_trigger_count integer;
     matched_trigger_count integer;
     trigger_ids_value jsonb;
+    answered_events_value jsonb;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
@@ -2306,8 +2307,11 @@ BEGIN
                 )
             );
         END IF;
-        SELECT COALESCE(jsonb_agg(t.trigger_id ORDER BY t.trigger_id),'[]'::jsonb)
-        INTO trigger_ids_value
+        SELECT COALESCE(jsonb_agg(t.trigger_id ORDER BY t.trigger_id),'[]'::jsonb),
+               COALESCE(jsonb_agg(jsonb_build_object(
+                   'trigger_ref',t.trigger_id,'event_ref',t.event_id
+               ) ORDER BY t.trigger_id),'[]'::jsonb)
+        INTO trigger_ids_value,answered_events_value
         FROM __forest_module_schema__.conversation_triggers t
         WHERE t.bot_id=requested_bot AND t.answered_reply_ref=requested_reply
           AND t.claimed_session_ref=requested_session AND t.claimed_run_ref=requested_run;
@@ -2316,6 +2320,7 @@ BEGIN
             'value',jsonb_build_object(
                 'operation_id',requested_operation,'context_revision',replay.context_revision,
                 'unit_id',requested_unit,'answered_trigger_ids',trigger_ids_value,
+                'answered_events',answered_events_value,
                 'reply_ref',requested_reply
             )
         );
@@ -2371,13 +2376,21 @@ BEGIN
         context_view_unit_count=context_view_unit_count+1,
         mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
-    SELECT COALESCE(jsonb_agg(value ORDER BY value),'[]'::jsonb)
-    INTO trigger_ids_value FROM jsonb_array_elements_text(trigger_values);
+    SELECT COALESCE(jsonb_agg(t.trigger_id ORDER BY t.trigger_id),'[]'::jsonb),
+           COALESCE(jsonb_agg(jsonb_build_object(
+               'trigger_ref',t.trigger_id,'event_ref',t.event_id
+           ) ORDER BY t.trigger_id),'[]'::jsonb)
+    INTO trigger_ids_value,answered_events_value
+    FROM __forest_module_schema__.conversation_triggers t
+    JOIN jsonb_array_elements_text(trigger_values) requested(trigger_id)
+      ON requested.trigger_id=t.trigger_id
+    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation;
     RETURN jsonb_build_object(
         'protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object(
             'operation_id',requested_operation,'context_revision',context_revision_value,
             'unit_id',requested_unit,'answered_trigger_ids',trigger_ids_value,
+            'answered_events',answered_events_value,
             'reply_ref',requested_reply
         )
     );

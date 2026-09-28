@@ -24,6 +24,34 @@ def _digest(value) -> str:
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _learning_candidates(manifest: dict) -> list[dict]:
+    """Freeze direct seeds whose content was actually sent to this model."""
+    evidence = manifest.get("memory_evidence")
+    if not isinstance(evidence, dict) or evidence.get("status") != "READY":
+        return []
+    included: dict[str, list[str]] = {}
+    for part in manifest["included_part_refs"]:
+        if part.get("context_data") == "memory_evidence":
+            included.setdefault(part["source_unit_id"], []).append(part["part_id"])
+    candidates = []
+    for source in manifest["source_manifest"]:
+        if (source.get("context_data") != "memory_evidence"
+                or source.get("bundle_id") != evidence["bundle_id"]
+                or not source.get("retrieval", {}).get("is_seed")):
+            continue
+        part_ids = list(dict.fromkeys(included.get(source["source_unit_id"], ())))[:8]
+        if part_ids:
+            candidates.append({
+                "bundle_id": evidence["bundle_id"],
+                "query_id": evidence["query_id"],
+                "source_unit_id": source["source_unit_id"],
+                "source_revision": source["source_revision"],
+                "rank_score": source["retrieval"]["rank_score"],
+                "part_ids": part_ids,
+            })
+    return candidates[:64]
+
+
 def _receipt(value, *, request_id: str, attempt_id: str, payload_digest: str) -> dict:
     fields = {
         "status",
@@ -333,6 +361,7 @@ class ModelExecution:
                     "projection": materialized["projection"],
                     "projected_content_digest": materialized["projected_content_digest"],
                     "source_manifest_digest": materialized["source_manifest_digest"],
+                    "learning_candidates": _learning_candidates(manifest),
                     "output_token_budget": materialized["max_output_tokens"],
                 },
             },

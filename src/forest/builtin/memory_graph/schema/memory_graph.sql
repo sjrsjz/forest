@@ -917,8 +917,14 @@ CREATE TABLE association_journal (
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     reply_ref text NOT NULL CHECK (octet_length(reply_ref) BETWEEN 1 AND 512),
     bundle_id text NOT NULL,
+    query_id text NOT NULL,
+    trigger_ref text NOT NULL,
     trigger_source_unit_id text NOT NULL,
+    trigger_source_revision bigint NOT NULL CHECK (trigger_source_revision>0),
+    trigger_part_id text NOT NULL,
     seed_source_unit_id text NOT NULL,
+    seed_source_revision bigint NOT NULL CHECK (seed_source_revision>0),
+    seed_part_id text NOT NULL,
     seed_rank_score double precision NOT NULL CHECK (seed_rank_score >= 0 AND seed_rank_score <= 256),
     state text NOT NULL DEFAULT 'PENDING_ARCHIVE' CHECK (
         state IN ('PENDING_ARCHIVE','PROMOTED','SUPPRESSED')
@@ -933,10 +939,22 @@ CREATE TABLE association_journal (
         REFERENCES source_units(bot_id,source_unit_id),
     FOREIGN KEY (bot_id,seed_source_unit_id)
         REFERENCES source_units(bot_id,source_unit_id),
+    FOREIGN KEY (bot_id,trigger_source_unit_id,trigger_source_revision)
+        REFERENCES source_units(bot_id,source_unit_id,source_revision),
+    FOREIGN KEY (bot_id,seed_source_unit_id,seed_source_revision)
+        REFERENCES source_units(bot_id,source_unit_id,source_revision),
+    FOREIGN KEY (bot_id,trigger_source_unit_id,trigger_part_id)
+        REFERENCES source_parts(bot_id,source_unit_id,part_id),
+    FOREIGN KEY (bot_id,seed_source_unit_id,seed_part_id)
+        REFERENCES source_parts(bot_id,source_unit_id,part_id),
     CHECK (trigger_source_unit_id<>seed_source_unit_id),
     CHECK ((state='PROMOTED') = (contribution_id IS NOT NULL)),
     CHECK ((state='PROMOTED') = (promoted_at IS NOT NULL))
 );
+
+CREATE INDEX association_journal_pending_trigger_idx ON association_journal(
+    bot_id,trigger_source_unit_id,journal_id
+) WHERE state='PENDING_ARCHIVE';
 
 CREATE INDEX sources_external_group_idx ON memory_sources(
     bot_id,platform,realm_id,external_group_id,identity_incarnation
@@ -4720,6 +4738,222 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
 END;
 $$;
 
+CREATE FUNCTION memory_promote_association(requested_bot text, requested_journal text)
+RETURNS boolean LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    journal_row __forest_module_schema__.association_journal%ROWTYPE;
+    trigger_row record;
+    seed_row record;
+    left_ref text;
+    right_ref text;
+    pair_digest text;
+    contribution_ref text;
+    new_contribution integer;
+BEGIN
+    SELECT * INTO journal_row FROM __forest_module_schema__.association_journal
+    WHERE bot_id=requested_bot AND journal_id=requested_journal FOR UPDATE;
+    IF journal_row IS NULL OR journal_row.state<>'PENDING_ARCHIVE' THEN RETURN false; END IF;
+    SELECT u.eligibility_state,s.status INTO trigger_row
+    FROM __forest_module_schema__.source_units u
+    JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
+    WHERE u.bot_id=requested_bot AND u.source_unit_id=journal_row.trigger_source_unit_id;
+    SELECT u.eligibility_state,s.status INTO seed_row
+    FROM __forest_module_schema__.source_units u
+    JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
+    WHERE u.bot_id=requested_bot AND u.source_unit_id=journal_row.seed_source_unit_id;
+    IF trigger_row IS NULL OR seed_row IS NULL
+       OR trigger_row.eligibility_state='SUPPRESSED' OR seed_row.eligibility_state='SUPPRESSED'
+       OR trigger_row.status<>'ACTIVE' OR seed_row.status<>'ACTIVE' THEN
+        UPDATE __forest_module_schema__.association_journal SET state='SUPPRESSED'
+        WHERE bot_id=requested_bot AND journal_id=requested_journal;
+        RETURN false;
+    END IF;
+    IF trigger_row.eligibility_state<>'ELIGIBLE'
+       OR seed_row.eligibility_state<>'ELIGIBLE' THEN RETURN false; END IF;
+    left_ref := LEAST(journal_row.trigger_source_unit_id,journal_row.seed_source_unit_id);
+    right_ref := GREATEST(journal_row.trigger_source_unit_id,journal_row.seed_source_unit_id);
+    pair_digest := encode(sha256(convert_to(
+        jsonb_build_array(requested_bot,left_ref,right_ref)::text,'UTF8')),'hex');
+    contribution_ref := 'association:' || pair_digest;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/association/' || requested_bot || '/' || pair_digest,0));
+    INSERT INTO __forest_module_schema__.relation_contributions(
+        bot_id,contribution_id,operation_id,input_digest,relation_id,relation_kind,
+        left_kind,left_id,right_kind,right_id,origin_kind,weight_micros,
+        admitted_deletion_epoch
+    )
+    SELECT requested_bot,contribution_ref,contribution_ref,
+        'sha256:' || pair_digest,'association:' || pair_digest,'ASSOCIATES_WITH',
+        'SOURCE_UNIT',left_ref,'SOURCE_UNIT',right_ref,'MODEL',900000,
+        GREATEST(trigger_unit.accepted_deletion_epoch,seed_unit.accepted_deletion_epoch)
+    FROM __forest_module_schema__.source_units trigger_unit
+    CROSS JOIN __forest_module_schema__.source_units seed_unit
+    WHERE trigger_unit.bot_id=requested_bot
+      AND trigger_unit.source_unit_id=journal_row.trigger_source_unit_id
+      AND seed_unit.bot_id=requested_bot
+      AND seed_unit.source_unit_id=journal_row.seed_source_unit_id
+    ON CONFLICT DO NOTHING;
+    GET DIAGNOSTICS new_contribution = ROW_COUNT;
+    IF new_contribution=1 THEN
+        INSERT INTO __forest_module_schema__.relation_evidence(
+            bot_id,contribution_id,evidence_index,source_unit_id,source_revision,part_id
+        ) VALUES
+            (requested_bot,contribution_ref,0,journal_row.trigger_source_unit_id,
+             journal_row.trigger_source_revision,journal_row.trigger_part_id),
+            (requested_bot,contribution_ref,1,journal_row.seed_source_unit_id,
+             journal_row.seed_source_revision,journal_row.seed_part_id);
+    ELSIF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.relation_contributions
+        WHERE bot_id=requested_bot AND contribution_id=contribution_ref AND active
+    ) OR (
+        SELECT count(*) FROM __forest_module_schema__.relation_evidence
+        WHERE bot_id=requested_bot AND contribution_id=contribution_ref
+    )<>2 THEN
+        UPDATE __forest_module_schema__.association_journal SET state='SUPPRESSED'
+        WHERE bot_id=requested_bot AND journal_id=requested_journal;
+        RETURN false;
+    END IF;
+    UPDATE __forest_module_schema__.association_journal
+    SET state='PROMOTED',contribution_id=contribution_ref,promoted_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND journal_id=requested_journal;
+    RETURN true;
+END;
+$$;
+
+CREATE FUNCTION memory_associate_final_reply(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    agent_value jsonb := envelope#>'{prior,agent}';
+    conversation_value jsonb := envelope#>'{prior,conversation}';
+    proposals jsonb := agent_value#>'{learning,proposals}';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    proposal jsonb;
+    seed jsonb;
+    event_ref_value text;
+    trigger_unit text;
+    trigger_revision bigint;
+    trigger_part text;
+    seed_unit text;
+    seed_revision bigint;
+    journal_ref text;
+    old_journal record;
+    journaled_count integer := 0;
+    promoted_count integer := 0;
+    skipped_count integer := 0;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR requested_operation IS NULL OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR agent_value->>'state' IS DISTINCT FROM 'COMPLETED'
+       OR agent_value->>'conversation_ref' IS DISTINCT FROM body->>'conversation_ref'
+       OR agent_value#>>'{learning,protocol}' IS DISTINCT FROM 'forest.agent-learning/1'
+       OR jsonb_typeof(proposals) IS DISTINCT FROM 'array'
+       OR jsonb_array_length(proposals)>128
+       OR conversation_value->>'reply_ref' IS DISTINCT FROM body->>'reply_ref'
+       OR jsonb_typeof(conversation_value->'answered_events') IS DISTINCT FROM 'array' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ASSOCIATION_INPUT_INVALID',
+                'message','Final reply learning authority is incomplete','status',422));
+    END IF;
+    FOR proposal IN SELECT value FROM jsonb_array_elements(proposals) LOOP
+        seed := proposal->'seed';
+        SELECT answered->>'event_ref' INTO event_ref_value
+        FROM jsonb_array_elements(conversation_value->'answered_events') answered
+        WHERE answered->>'trigger_ref'=proposal->>'trigger_ref' LIMIT 1;
+        IF event_ref_value IS NULL OR jsonb_typeof(seed->'part_ids')<>'array'
+           OR jsonb_array_length(seed->'part_ids')=0 THEN
+            skipped_count := skipped_count+1;
+            CONTINUE;
+        END IF;
+        SELECT o.source_unit_id,qp.source_revision,qp.part_id
+        INTO trigger_unit,trigger_revision,trigger_part
+        FROM __forest_module_schema__.source_occurrences o
+        JOIN __forest_module_schema__.memory_query_parts qp
+          ON qp.bot_id=o.bot_id AND qp.occurrence_id=o.occurrence_id
+        JOIN __forest_module_schema__.memory_queries q
+          ON q.bot_id=qp.bot_id AND q.query_id=qp.query_id
+        WHERE o.bot_id=requested_bot
+          AND o.conversation_ref=body->>'conversation_ref'
+          AND o.event_ref=event_ref_value
+          AND q.query_id=seed->>'query_id'
+          AND qp.source_unit_id=o.source_unit_id
+        ORDER BY qp.query_part_index LIMIT 1;
+        SELECT ri.source_unit_id,ri.source_revision INTO seed_unit,seed_revision
+        FROM __forest_module_schema__.retrieval_items ri
+        JOIN __forest_module_schema__.retrieval_bundles b
+          ON b.bot_id=ri.bot_id AND b.bundle_id=ri.bundle_id
+        JOIN __forest_module_schema__.source_parts p
+          ON p.bot_id=ri.bot_id AND p.source_unit_id=ri.source_unit_id
+         AND p.part_id=seed#>>'{part_ids,0}'
+        WHERE ri.bot_id=requested_bot AND ri.bundle_id=seed->>'bundle_id'
+          AND b.query_id=seed->>'query_id'
+          AND ri.source_unit_id=seed->>'source_unit_id'
+          AND ri.source_revision=(seed->>'source_revision')::bigint
+          AND ri.rank_score=(seed->>'rank_score')::double precision
+          AND ri.is_seed;
+        IF trigger_unit IS NULL OR seed_unit IS NULL OR trigger_unit=seed_unit THEN
+            skipped_count := skipped_count+1;
+            CONTINUE;
+        END IF;
+        PERFORM 1 FROM __forest_module_schema__.source_units
+        WHERE bot_id=requested_bot AND source_unit_id IN (trigger_unit,seed_unit)
+        ORDER BY source_unit_id FOR SHARE;
+        IF NOT EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_units u
+            JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
+            WHERE u.bot_id=requested_bot AND u.source_unit_id=trigger_unit
+              AND u.source_revision=trigger_revision
+              AND u.eligibility_state<>'SUPPRESSED' AND s.status='ACTIVE'
+        ) OR NOT EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_units u
+            JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
+            WHERE u.bot_id=requested_bot AND u.source_unit_id=seed_unit
+              AND u.source_revision=seed_revision
+              AND u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE'
+        ) THEN
+            skipped_count := skipped_count+1;
+            CONTINUE;
+        END IF;
+        journal_ref := 'association-journal:' || encode(sha256(convert_to(
+            jsonb_build_array(requested_bot,requested_operation,
+                seed->>'bundle_id',trigger_unit,seed_unit)::text,'UTF8')),'hex');
+        INSERT INTO __forest_module_schema__.association_journal(
+            bot_id,journal_id,operation_id,input_digest,reply_ref,bundle_id,
+            query_id,trigger_ref,trigger_source_unit_id,trigger_source_revision,
+            trigger_part_id,seed_source_unit_id,seed_source_revision,seed_part_id,
+            seed_rank_score
+        ) VALUES (
+            requested_bot,journal_ref,requested_operation,requested_digest,
+            body->>'reply_ref',seed->>'bundle_id',seed->>'query_id',
+            proposal->>'trigger_ref',trigger_unit,trigger_revision,trigger_part,
+            seed_unit,seed_revision,seed#>>'{part_ids,0}',
+            (seed->>'rank_score')::double precision
+        ) ON CONFLICT DO NOTHING;
+        SELECT * INTO old_journal FROM __forest_module_schema__.association_journal
+        WHERE bot_id=requested_bot AND journal_id=journal_ref;
+        IF old_journal IS NULL OR old_journal.input_digest IS DISTINCT FROM requested_digest
+           OR old_journal.reply_ref IS DISTINCT FROM body->>'reply_ref'
+           OR old_journal.trigger_ref IS DISTINCT FROM proposal->>'trigger_ref'
+           OR old_journal.trigger_part_id IS DISTINCT FROM trigger_part
+           OR old_journal.seed_part_id IS DISTINCT FROM seed#>>'{part_ids,0}' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_ASSOCIATION_REPLAY_CONFLICT',
+                    'message','Association journal identity differs','status',409));
+        END IF;
+        journaled_count := journaled_count+1;
+        IF __forest_module_schema__.memory_promote_association(requested_bot,journal_ref)
+        THEN promoted_count := promoted_count+1; END IF;
+    END LOOP;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.association-journal/1',
+            'journaled',journaled_count,'promoted',promoted_count,
+            'skipped',skipped_count));
+END;
+$$;
+
 CREATE FUNCTION memory_capture_source(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -4740,6 +4974,7 @@ DECLARE
     source_row record; identity_row record; unit_row record; occurrence_row record; operation_row record; pending_row record;
     archive_pending_row record;
     part jsonb; duplicate_value boolean := false; eligibility_value text := 'REGISTERED';
+    journal_row record;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR caller_component NOT IN ('adapter.onebot','memory.graph')
@@ -4971,6 +5206,14 @@ BEGIN
             occurrence_id=occurrence_id_value,resolved_at=clock_timestamp()
         WHERE bot_id=requested_bot AND conversation_ref=occurrence_value->>'conversation_ref'
           AND event_ref=occurrence_value->>'event_ref';
+        FOR journal_row IN
+            SELECT journal_id FROM __forest_module_schema__.association_journal
+            WHERE bot_id=requested_bot AND trigger_source_unit_id=unit_id_value
+              AND state='PENDING_ARCHIVE' ORDER BY journal_id
+        LOOP
+            PERFORM __forest_module_schema__.memory_promote_association(
+                requested_bot,journal_row.journal_id);
+        END LOOP;
     END IF;
     SELECT eligibility_state INTO eligibility_value FROM __forest_module_schema__.source_units
     WHERE bot_id=requested_bot AND source_unit_id=unit_id_value;
@@ -5147,6 +5390,11 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_FORGET_ANCHOR_MISSING',
                 'message','Memory source unit was not selected by Payload','status',409));
     END IF;
+    UPDATE __forest_module_schema__.association_journal
+    SET state='SUPPRESSED'
+    WHERE bot_id=requested_bot AND state='PENDING_ARCHIVE'
+      AND (trigger_source_unit_id=ANY(affected_ids)
+           OR seed_source_unit_id=ANY(affected_ids));
     UPDATE __forest_module_schema__.relation_contributions c SET active=false
     WHERE c.bot_id=requested_bot AND c.active AND (
         (c.left_kind='SOURCE_UNIT' AND c.left_id=ANY(affected_ids)) OR
@@ -5511,6 +5759,7 @@ DECLARE
     pending_row record;
     unavailable_row record;
     replay_row record;
+    journal_row record;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
@@ -5671,6 +5920,15 @@ BEGIN
         INSERT INTO __forest_module_schema__.facet_preparation_work(bot_id,source_unit_id)
         VALUES(requested_bot,occurrence_row.source_unit_id)
         ON CONFLICT (bot_id,source_unit_id) DO NOTHING;
+        FOR journal_row IN
+            SELECT journal_id FROM __forest_module_schema__.association_journal
+            WHERE bot_id=requested_bot
+              AND trigger_source_unit_id=occurrence_row.source_unit_id
+              AND state='PENDING_ARCHIVE' ORDER BY journal_id
+        LOOP
+            PERFORM __forest_module_schema__.memory_promote_association(
+                requested_bot,journal_row.journal_id);
+        END LOOP;
     END LOOP;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',committed);

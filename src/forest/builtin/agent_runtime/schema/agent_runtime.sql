@@ -247,6 +247,10 @@ CREATE TABLE model_requests (
     projected_content_digest text NOT NULL
         CHECK (projected_content_digest ~ '^sha256:[a-f0-9]{64}$'),
     source_manifest_digest text NOT NULL CHECK (source_manifest_digest ~ '^sha256:[a-f0-9]{64}$'),
+    learning_candidates jsonb NOT NULL CHECK (
+        jsonb_typeof(learning_candidates)='array'
+        AND jsonb_array_length(learning_candidates)<=64
+    ),
     output_token_budget integer NOT NULL CHECK (output_token_budget > 0),
     state text NOT NULL DEFAULT 'READY' CHECK (
         state IN ('READY','ATTEMPT_PREPARED','DISPATCHING','SUCCEEDED',
@@ -613,7 +617,8 @@ BEGIN
            NEW.instruction_channel,NEW.capability_digest,NEW.projection_payload_id,
            NEW.projection_payload_digest,NEW.projection_owner_component_id,
            NEW.projection_owner_kind,NEW.projection_owner_id,NEW.projected_content_digest,
-           NEW.source_manifest_digest,NEW.output_token_budget,NEW.created_at)
+           NEW.source_manifest_digest,NEW.learning_candidates,
+           NEW.output_token_budget,NEW.created_at)
        IS DISTINCT FROM
        ROW(OLD.bot_id,OLD.request_id,OLD.run_id,OLD.step_seq,OLD.request_kind,
            OLD.semantic_request_digest,OLD.input_revision,OLD.context_revision,
@@ -623,7 +628,8 @@ BEGIN
            OLD.instruction_channel,OLD.capability_digest,OLD.projection_payload_id,
            OLD.projection_payload_digest,OLD.projection_owner_component_id,
            OLD.projection_owner_kind,OLD.projection_owner_id,OLD.projected_content_digest,
-           OLD.source_manifest_digest,OLD.output_token_budget,OLD.created_at) THEN
+           OLD.source_manifest_digest,OLD.learning_candidates,
+           OLD.output_token_budget,OLD.created_at) THEN
         RAISE EXCEPTION 'Model request identity is immutable' USING ERRCODE='55000';
     END IF;
     IF ((OLD.state IN ('READY','NOT_APPLIED') AND NEW.state='ATTEMPT_PREPARED') AND
@@ -1277,7 +1283,11 @@ BEGIN
        OR context->>'participant_input_digest' !~ '^sha256:[a-f0-9]{64}$'
        OR projection_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
        OR projection_value->>'owner_kind' IS DISTINCT FROM 'model.projection'
-       OR projection_value->>'owner_id' IS DISTINCT FROM requested_request THEN
+       OR projection_value->>'owner_id' IS DISTINCT FROM requested_request
+       OR jsonb_typeof(request_value->'learning_candidates') IS DISTINCT FROM 'array'
+       OR jsonb_array_length(request_value->'learning_candidates')>64
+       OR (request_value->>'request_kind'='REPAIR'
+           AND jsonb_array_length(request_value->'learning_candidates')<>0) THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -1325,6 +1335,8 @@ BEGIN
                 IS DISTINCT FROM request_value->>'projected_content_digest'
            OR existing.source_manifest_digest
                 IS DISTINCT FROM request_value->>'source_manifest_digest'
+           OR existing.learning_candidates
+                IS DISTINCT FROM request_value->'learning_candidates'
            OR existing.output_token_budget
                 IS DISTINCT FROM (request_value->>'output_token_budget')::integer THEN
             RETURN jsonb_build_object(
@@ -1384,7 +1396,8 @@ BEGIN
         provider_generation_id,provider_profile_ref,model_ref,instruction_channel,
         capability_digest,projection_payload_id,projection_payload_digest,
         projection_owner_component_id,projection_owner_kind,projection_owner_id,
-        projected_content_digest,source_manifest_digest,output_token_budget
+        projected_content_digest,source_manifest_digest,learning_candidates,
+        output_token_budget
     ) VALUES (
         requested_bot,requested_request,requested_run,run_row.next_step_seq,
         request_value->>'request_kind',semantic_digest_value,run_row.input_revision,
@@ -1397,6 +1410,7 @@ BEGIN
         projection_value->>'owner_component_id',projection_value->>'owner_kind',
         projection_value->>'owner_id',request_value->>'projected_content_digest',
         request_value->>'source_manifest_digest',
+        request_value->'learning_candidates',
         (request_value->>'output_token_budget')::integer
     );
     IF run_row.state='REPAIR_READY' THEN
@@ -4343,6 +4357,48 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_final_learning(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    WITH pairs AS (
+        SELECT r.step_seq,r.request_id,r.input_revision,t.trigger_ref,
+            candidate.value AS seed,
+            candidate.value->>'source_unit_id' AS seed_source_unit_id
+        FROM __forest_module_schema__.model_requests r
+        JOIN LATERAL (
+            SELECT trigger_ref FROM __forest_module_schema__.run_input_triggers
+            WHERE bot_id=r.bot_id AND run_id=r.run_id
+              AND input_revision=r.input_revision
+            ORDER BY trigger_index DESC LIMIT 1
+        ) t ON true
+        CROSS JOIN LATERAL jsonb_array_elements(r.learning_candidates) candidate(value)
+        WHERE r.bot_id=context->>'bot_id' AND r.run_id=input->>'run_id'
+          AND r.state='SUCCEEDED' AND r.request_kind IN ('PRIMARY','CONTINUATION')
+          AND EXISTS (
+              SELECT 1 FROM __forest_module_schema__.model_turns turn_row
+              WHERE turn_row.bot_id=r.bot_id AND turn_row.request_id=r.request_id
+          )
+    ), distinct_pairs AS (
+        SELECT DISTINCT ON (trigger_ref,seed_source_unit_id) *
+        FROM pairs
+        ORDER BY trigger_ref,seed_source_unit_id,step_seq,request_id
+    ), ordered AS (
+        SELECT *,row_number() OVER (
+            ORDER BY step_seq,trigger_ref,seed_source_unit_id,request_id
+        ) AS position
+        FROM distinct_pairs
+        ORDER BY step_seq,trigger_ref,seed_source_unit_id,request_id
+        LIMIT 129
+    )
+    SELECT jsonb_build_object(
+        'protocol','forest.agent-learning/1',
+        'proposals',COALESCE(jsonb_agg(jsonb_build_object(
+            'request_id',request_id,'input_revision',input_revision,
+            'trigger_ref',trigger_ref,'seed',seed
+        ) ORDER BY position) FILTER (WHERE position<=128),'[]'::jsonb),
+        'truncated',count(*)>128
+    ) FROM ordered;
+$$;
+
 CREATE FUNCTION agent_commit_final_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -4419,9 +4475,11 @@ BEGIN
                 )
             );
         END IF;
-        RETURN __forest_module_schema__.agent_run_snapshot(
+        RETURN jsonb_set(__forest_module_schema__.agent_run_snapshot(
             context,jsonb_build_object('run_id',requested_run)
-        );
+        ),'{value,learning}',__forest_module_schema__.agent_final_learning(
+            context,jsonb_build_object('run_id',requested_run)
+        ));
     END IF;
     IF run_row.state IS DISTINCT FROM 'FINAL_READY' OR run_row.owner_id IS NOT NULL THEN
         RETURN jsonb_build_object(
@@ -4453,9 +4511,11 @@ BEGIN
     SET state='COMPLETED',checkpoint_seq=next_sequence,
         terminal_at=clock_timestamp(),updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND run_id=requested_run;
-    RETURN __forest_module_schema__.agent_run_snapshot(
+    RETURN jsonb_set(__forest_module_schema__.agent_run_snapshot(
         context,jsonb_build_object('run_id',requested_run)
-    );
+    ),'{value,learning}',__forest_module_schema__.agent_final_learning(
+        context,jsonb_build_object('run_id',requested_run)
+    ));
 END;
 $$;
 

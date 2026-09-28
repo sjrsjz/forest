@@ -390,6 +390,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "projection": projection.canonical(),
                     "projected_content_digest": digest_json({"content": "A"}),
                     "source_manifest_digest": digest_json({"source": "context"}),
+                    "learning_candidates": [],
                     "output_token_budget": 256,
                 },
             },
