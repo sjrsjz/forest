@@ -44,10 +44,21 @@
         "byte_length",
         "payload",
         "query_part_index",
-        "input_identity",
-        "source_unit_id",
-        "source_revision",
-        "occurrence_id"
+        "input_identity"
+      ],
+      "oneOf": [
+        {
+          "properties": {"input_identity": {"properties": {"kind": {"const": "SOURCE_UNIT"}}}},
+          "required": ["source_unit_id", "source_revision", "occurrence_id"]
+        },
+        {
+          "properties": {"input_identity": {"properties": {"kind": {"const": "ADMIN_TRIAL"}}}},
+          "not": {"anyOf": [
+            {"required": ["source_unit_id"]},
+            {"required": ["source_revision"]},
+            {"required": ["occurrence_id"]}
+          ]}
+        }
       ],
       "properties": {
         "part_id": {

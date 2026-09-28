@@ -188,8 +188,7 @@
       "additionalProperties": false,
       "required": [
         "protocol",
-        "source_unit_id",
-        "source_revision",
+        "input_identity",
         "space_id",
         "batch_index",
         "facets",
@@ -199,6 +198,15 @@
       "properties": {
         "protocol": {
           "const": "forest.memory-query-part-facets/1"
+        },
+        "input_identity": {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "ref", "revision"],
+          "properties": {
+            "kind": {"enum": ["SOURCE_UNIT", "ADMIN_TRIAL"]},
+            "ref": {"type": "string", "minLength": 1, "maxLength": 256},
+            "revision": {"type": "integer", "minimum": 1}
+          }
         },
         "source_unit_id": {
           "type": "string",
@@ -236,7 +244,17 @@
           "minLength": 1,
           "maxLength": 256
         }
-      }
+      },
+      "oneOf": [
+        {
+          "properties": {"input_identity": {"properties": {"kind": {"const": "SOURCE_UNIT"}}}},
+          "required": ["source_unit_id", "source_revision"]
+        },
+        {
+          "properties": {"input_identity": {"properties": {"kind": {"const": "ADMIN_TRIAL"}}}},
+          "not": {"anyOf": [{"required": ["source_unit_id"]}, {"required": ["source_revision"]}]}
+        }
+      ]
     }
   }
 }

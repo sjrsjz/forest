@@ -3837,6 +3837,11 @@ BEGIN
        OR source_id_value IS NULL OR octet_length(source_id_value) NOT BETWEEN 1 AND 256
        OR body->>'source_revision' IS NULL
        OR body->>'source_revision' !~ '^[1-9][0-9]*$'
+       OR (purpose_value='QUERY' AND (
+           body#>>'{input_identity,kind}' IS DISTINCT FROM 'SOURCE_UNIT'
+           OR body#>>'{input_identity,ref}' IS DISTINCT FROM source_id_value
+           OR body#>>'{input_identity,revision}' IS DISTINCT FROM body->>'source_revision'))
+       OR (purpose_value='DOCUMENT' AND body ? 'input_identity')
        OR body->>'batch_index' IS NULL OR body->>'batch_index' !~ '^[0-9]+$'
        OR jsonb_typeof(facets) IS DISTINCT FROM 'array'
        OR jsonb_array_length(facets) NOT BETWEEN 0 AND 64

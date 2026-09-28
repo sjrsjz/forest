@@ -506,6 +506,88 @@ def test_query_facets_keep_trial_input_identity_separate_from_source_identity():
         )
 
 
+def test_query_preparation_contract_discriminates_source_and_trial_identity():
+    schema_dir = Path(__file__).parents[1] / "src/forest/builtin/memory_graph/schemas"
+    schema = json.loads((schema_dir / "prepare-query-part-facets-input.json").read_text(
+        encoding="utf-8"
+    ))
+    validator = Draft202012Validator(schema)
+    request = {
+        "protocol": "forest.memory-query-part-facets/1",
+        "query_id": "query/1", "space_id": "sha256:" + "a" * 64,
+        "batch_index": 0, "part_id": "part/1", "facets": [],
+        "input_identity": {"kind": "SOURCE_UNIT", "ref": "unit/1", "revision": 1},
+        "source_unit_id": "unit/1", "source_revision": 1,
+    }
+    validator.validate(request)
+    trial = {
+        **request,
+        "input_identity": {"kind": "ADMIN_TRIAL", "ref": "trial/1", "revision": 1},
+    }
+    trial.pop("source_unit_id")
+    trial.pop("source_revision")
+    validator.validate(trial)
+    assert list(validator.iter_errors({**trial, "source_unit_id": "unit/1"}))
+    assert list(validator.iter_errors({**request, "input_identity": trial["input_identity"]}))
+    read_schema = json.loads((schema_dir / "read-query-parts-output.json").read_text(
+        encoding="utf-8"
+    ))
+    read_validator = Draft202012Validator(read_schema)
+    part = {
+        "part_id": "part/1", "part_index": 0, "part_kind": "TEXT",
+        "media_type": "text/plain", "byte_length": 4, "query_part_index": 0,
+        "payload": {
+            "payload_id": "payload/1", "digest": "sha256:" + "b" * 64,
+            "owner_component_id": "memory.graph", "owner_kind": "trial.input",
+            "owner_id": "trial/1",
+        },
+        "input_identity": trial["input_identity"],
+    }
+    page = {"parts": [part], "next_part_index": None, "has_more": False,
+            "space_id": request["space_id"]}
+    read_validator.validate(page)
+    assert list(read_validator.iter_errors({**page, "parts": [{
+        **part, "source_revision": 1,
+    }]}))
+
+
+@pytest.mark.postgres
+async def test_query_facet_persistence_rejects_unbound_input_identity(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "facet-identity-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    body = {
+        "protocol": "forest.memory-query-part-facets/1", "query_id": "query/1",
+        "source_unit_id": "unit/1", "source_revision": 1,
+        "input_identity": {"kind": "SOURCE_UNIT", "ref": "unit/other", "revision": 1},
+        "space_id": "sha256:" + "a" * 64,
+        "batch_index": 0, "part_id": "part/1", "facets": [],
+    }
+    envelope = {
+        "protocol": "forest.uow-step/1",
+        "caller": {"component_id": "memory.graph"},
+        "input": body,
+    }
+    context = {
+        "bot_id": store.bot_id, "operation_id": "operation/facet-identity",
+        "participant_input_digest": digest_json(body),
+    }
+    async with store.pool.connection() as conn:
+        result = (await (await conn.execute(
+            sql.SQL("SELECT {}.memory_prepare_facets(%s,%s) AS result").format(namespace),
+            (Jsonb(context), Jsonb(envelope)),
+        )).fetchone())["result"]
+    assert result["ok"] is False
+    assert result["error"]["code"] == "MEMORY_FACET_INPUT_INVALID"
+
+
 def _envelope(
     generation_id,
     selection,

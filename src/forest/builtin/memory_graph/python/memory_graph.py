@@ -241,8 +241,12 @@ class MemoryGraph(Plugin):
                     )
                 prepared_parts.append({
                     "protocol": "forest.memory-query-part-facets/1",
-                    "query_id": query_id, "source_unit_id": part["source_unit_id"],
-                    "source_revision": part["source_revision"], "space_id": space_id,
+                    "query_id": query_id, "input_identity": part["input_identity"],
+                    **({
+                        "source_unit_id": part["source_unit_id"],
+                        "source_revision": part["source_revision"],
+                    } if part["input_identity"]["kind"] == "SOURCE_UNIT" else {}),
+                    "space_id": space_id,
                     "batch_index": part["query_part_index"], "part_id": part["part_id"],
                     "facets": facets,
                 })
