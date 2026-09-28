@@ -3,9 +3,11 @@
 import base64
 import hashlib
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from forest.builtin.embedding_multimodal.python.embedding_provider import (
     MultimodalEmbeddingProvider,
@@ -139,3 +141,79 @@ async def test_materializer_freezes_text_and_image_with_source_provenance(
     with pytest.raises(ForestError, match="differ from their identity"):
         await provider.materialize(request, ctx)
     assert len(payloads.writes) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model,dimensions", [
+    ("jina-clip-v2", 512),
+    ("Qwen/Qwen3-VL-Embedding-8B", 4096),
+])
+async def test_materializer_preserves_trial_identity_without_source_unit(model, dimensions):
+    provider = MultimodalEmbeddingProvider()
+    await provider.prepare(None, {
+        "protocol": "forest.embedding.multimodal/1",
+        "endpoint": "https://example.invalid/embeddings",
+        "credential_ref": "credential-1", "timeout_seconds": 60,
+        "max_connections": 1,
+        "profile": {"deployment_id": "test-deployment", "model_revision": "test-revision",
+                    "model": model, "dimensions": dimensions},
+    })
+    text = "管理试验文本".encode("utf-8")
+    image = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lXcAAAAASUVORK5CYII="
+    )
+    text_ref = _reference("trial-text", text, owner_kind="trial.input")
+    image_ref = _reference("trial-image", image, owner_kind="trial.input")
+    payloads = _Payloads({
+        "trial-text": (text_ref, text), "trial-image": (image_ref, image),
+    })
+    request = {
+        "protocol": "forest.embedding-materialize/1",
+        "request_id": "request-1", "transport_attempt_id": "attempt-1",
+        "component_id": "embedding.multimodal", "generation_id": "generation-1",
+        "profile_ref": provider.profile_ref, "space_id": provider.space_id,
+        "purpose": "QUERY",
+        "facets": [
+            {"input_kind": "ADMIN_TRIAL", "input_ref": "trial-query-1",
+             "input_revision": 1, "query_id": "trial-query-1",
+             "facet_id": "trial-text-facet", "part_id": "trial-text-part",
+             "modality": "TEXT", "selector_start_char": 0,
+             "selector_end_char": len("管理试验文本"), "input_payload": text_ref,
+             "facet_content_digest": text_ref["digest"],
+             "input_byte_length": len(text), "media_type": "text/plain",
+             "width": None, "height": None},
+            {"input_kind": "ADMIN_TRIAL", "input_ref": "trial-query-1",
+             "input_revision": 1, "query_id": "trial-query-1",
+             "facet_id": "trial-image-facet", "part_id": "trial-image-part",
+             "modality": "IMAGE", "selector_start_char": None,
+             "selector_end_char": None, "input_payload": image_ref,
+             "facet_content_digest": image_ref["digest"],
+             "input_byte_length": len(image), "media_type": "image/png",
+             "width": 1, "height": 1},
+        ],
+    }
+    schema_path = (Path(__file__).parents[1] / "src/forest/builtin/embedding_multimodal"
+                   / "schemas/materialize-input.json")
+    Draft202012Validator(json.loads(schema_path.read_text(encoding="utf-8"))).validate(
+        request
+    )
+    ctx = SimpleNamespace(
+        identity={"bot_id": "bot-1", "generation_id": "generation-1"},
+        payloads=payloads,
+    )
+    result = await provider.materialize(request, ctx)
+    prepared = PreparedEmbeddingRequest(
+        request_id="request-1", transport_attempt_id="attempt-1",
+        body=payloads.items[result["prepared"]["body"]["payload_id"]][1],
+        manifest_json=payloads.items[result["prepared"]["manifest"]["payload_id"]][1]
+        .decode("utf-8"),
+        payload_digest=result["prepared"]["payload_digest"],
+        space_id=result["prepared"]["space_id"],
+    )
+    prepared.verify()
+    assert all("source_unit_id" not in facet["source"]
+               for facet in prepared.manifest["facets"])
+    assert prepared.manifest["facets"][1]["capture"]["query_id"] == "trial-query-1"
+    request["facets"][1]["query_id"] = "another-query"
+    with pytest.raises(ForestError, match="Trial query identity differs"):
+        await provider.materialize(request, ctx)

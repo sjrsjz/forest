@@ -627,14 +627,35 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
             await conn.execute(sql.SQL(
                 "INSERT INTO {}.memory_trial_parts "
                 "(bot_id,query_id,query_part_index,part_id,modality,media_type,"
-                "byte_length,payload_id,payload_digest,payload_owner_component_id,"
+                "byte_length,width,height,payload_id,payload_digest,payload_owner_component_id,"
                 "payload_owner_kind,payload_owner_id) VALUES "
-                "(%s,'query/trial',%s,%s,%s,%s,4,%s,%s,'memory.graph',"
+                "(%s,'query/trial',%s,%s,%s,%s,4,%s,%s,%s,%s,'memory.graph',"
                 "'trial.input','query/trial')"
             ).format(namespace), (
                 store.bot_id, index, f"part/{index}", modality, media_type,
+                1 if modality == "IMAGE" else None,
+                1 if modality == "IMAGE" else None,
                 f"payload/{index}", digest,
             ))
+
+    async with store.pool.connection() as conn:
+        dimensions = (await (await conn.execute(sql.SQL(
+            "SELECT modality,width,height FROM {}.memory_trial_parts "
+            "WHERE bot_id=%s AND query_id='query/trial' ORDER BY query_part_index"
+        ).format(namespace), (store.bot_id,))).fetchall())
+    assert [(row["modality"], row["width"], row["height"])
+            for row in dimensions] == [("TEXT", None, None), ("IMAGE", 1, 1)]
+    async with store.pool.connection() as conn:
+        with pytest.raises(errors.CheckViolation):
+            async with conn.transaction():
+                await conn.execute(sql.SQL(
+                    "INSERT INTO {}.memory_trial_parts "
+                    "(bot_id,query_id,query_part_index,part_id,modality,media_type,"
+                    "byte_length,payload_id,payload_digest,payload_owner_component_id,"
+                    "payload_owner_kind,payload_owner_id) VALUES "
+                    "(%s,'query/trial',2,'part/no-size','IMAGE','image/png',4,"
+                    "'payload/no-size',%s,'memory.graph','trial.input','query/trial')"
+                ).format(namespace), (store.bot_id, digest))
 
     async def browse(generation, after=-1):
         async with store.pool.connection() as conn:

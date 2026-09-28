@@ -526,6 +526,8 @@ CREATE TABLE memory_trial_parts (
     modality text NOT NULL CHECK (modality IN ('TEXT','IMAGE')),
     media_type text NOT NULL CHECK (octet_length(media_type) BETWEEN 1 AND 128),
     byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 8388608),
+    width integer CHECK (width IS NULL OR width BETWEEN 1 AND 100000),
+    height integer CHECK (height IS NULL OR height BETWEEN 1 AND 100000),
     payload_id text NOT NULL CHECK (octet_length(payload_id) BETWEEN 1 AND 256),
     payload_digest text NOT NULL CHECK (payload_digest ~ '^sha256:[a-f0-9]{64}$'),
     payload_owner_component_id text NOT NULL
@@ -536,7 +538,9 @@ CREATE TABLE memory_trial_parts (
         CHECK (octet_length(payload_owner_id) BETWEEN 1 AND 512),
     PRIMARY KEY (bot_id,query_id,query_part_index),
     UNIQUE (bot_id,query_id,part_id),
-    FOREIGN KEY (bot_id,query_id) REFERENCES memory_trial_inputs(bot_id,query_id)
+    FOREIGN KEY (bot_id,query_id) REFERENCES memory_trial_inputs(bot_id,query_id),
+    CHECK ((modality='TEXT' AND width IS NULL AND height IS NULL)
+        OR (modality='IMAGE' AND width IS NOT NULL AND height IS NOT NULL))
 );
 
 CREATE INDEX memory_trial_inputs_expiry_idx ON memory_trial_inputs(bot_id,expires_at,query_id);

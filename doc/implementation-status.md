@@ -205,6 +205,8 @@ Memory 管理关系新增 `memory.relations.neighbourhood` 只读端口：从指
 
 查询 part 的读取与 facet 准备契约按 `SOURCE_UNIT` / `ADMIN_TRIAL` 输入身份分支：试验 part 不允许携带群来源单元、修订或 occurrence 字段，正式来源 part 必须携带；Worker 将身份传到准备事务。`embedding_facets` 以身份判别式分别约束真实来源 part 和试验临时 part，试验准备事务校验 Bot、Generation、有效期、修订、有序 part 与 PayloadRef，查询准备完结按相应 part 表计数；PostgreSQL 已验证图文试验 facet 的登记和完结。准备后的试验 facet 仍未进入嵌入 claim、向量发布及召回工作流，因此管理试验尚不可用。
 
+试验临时图片 part 现在必须保存并约束真实宽高，文本 part 禁止伪造宽高；Embedding 物化服务支持独立的 `ADMIN_TRIAL` 查询身份和图片快照，冻结请求验证不再需要伪造群来源单元。图文物化在两种 VL 模型请求格式下通过回放验证，原有群来源物化回归通过。试验 facet 的 claim、预算/Generation 围栏、向量发布和管理启动 action 仍待接通，因此不能将物化能力表述为可用的管理召回试验。
+
 Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。管理启动 action、受管临时资产接纳、试验 owned-work、结果查询和 TTL 清理仍未完成。
 
 ## 8. 下一切换顺序

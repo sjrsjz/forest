@@ -51,6 +51,9 @@ SOURCE_FIELDS = frozenset(
         "thread_id",
         "unit_id",
         "source_unit_id",
+        "input_kind",
+        "input_ref",
+        "query_id",
         "event_id",
         "source_event_id",
         "principal_ref",
@@ -211,12 +214,54 @@ class EmbeddingProfile:
 
 
 @dataclass(frozen=True)
+class TrialMediaCapture:
+    """Managed trial pixels with their own query identity, never a source unit."""
+
+    bot_id: str
+    query_id: str
+    input_revision: int
+    media_ref: str
+    part_id: str
+    mime: str
+    content: bytes = field(repr=False)
+    blob_digest: str
+    width: int
+    height: int
+    transform_ref: str | None = None
+    input_kind: str = "ADMIN_TRIAL"
+
+    def __post_init__(self):
+        for name in ("bot_id", "query_id", "media_ref", "part_id"):
+            _identifier(getattr(self, name))
+        if (
+            self.input_kind != "ADMIN_TRIAL"
+            or type(self.input_revision) is not int or self.input_revision < 1
+            or self.mime not in {"image/png", "image/jpeg", "image/webp", "image/gif"}
+            or not isinstance(self.content, bytes)
+            or not 0 < len(self.content) <= MAX_IMAGE_BYTES
+            or type(self.width) is not int or not 0 < self.width <= 100000
+            or type(self.height) is not int or not 0 < self.height <= 100000
+            or self.transform_ref is not None
+        ):
+            raise _error("EMBEDDING_IMAGE_INVALID", "Trial image capture is invalid")
+        digest = _hash(self.content)
+        if self.blob_digest != digest:
+            raise _error("EMBEDDING_IMAGE_INVALID", "Trial image bytes differ from their digest")
+
+    def manifest(self):
+        return {name: getattr(self, name) for name in (
+            "input_kind", "bot_id", "query_id", "input_revision", "media_ref",
+            "part_id", "mime", "blob_digest", "width", "height", "transform_ref",
+        )}
+
+
+@dataclass(frozen=True)
 class EmbeddingInput:
     """Exactly one semantic facet; image bytes retain host capture provenance."""
 
     facet_id: str
     text: str | None = field(default=None, repr=False)
-    image: MediaSnapshot | None = field(default=None, repr=False)
+    image: MediaSnapshot | TrialMediaCapture | None = field(default=None, repr=False)
     source_json: str = field(default="{}", repr=False)
 
     def __post_init__(self):
@@ -237,13 +282,24 @@ class EmbeddingInput:
                 raise _error("EMBEDDING_INPUT_INVALID", "Text facet must be nonempty and bounded")
         else:
             if (
-                not isinstance(self.image, MediaSnapshot)
+                not isinstance(self.image, (MediaSnapshot, TrialMediaCapture))
                 or len(self.image.content) > MAX_IMAGE_BYTES
             ):
                 raise _error(
                     "EMBEDDING_IMAGE_INVALID", "Image facet requires a bounded managed capture"
                 )
-            for key in ("bot_id", "media_ref", "media_revision", "source_unit_id", "part_id"):
+            if isinstance(self.image, TrialMediaCapture) and (
+                source.get("input_kind") != "ADMIN_TRIAL"
+                or source.get("input_ref") != self.image.query_id
+                or source.get("input_revision") != self.image.input_revision
+            ):
+                raise _error(
+                    "EMBEDDING_SOURCE_INVALID", "Trial capture and attribution disagree"
+                )
+            keys = ("bot_id", "query_id", "input_revision", "media_ref", "part_id") \
+                if isinstance(self.image, TrialMediaCapture) else \
+                ("bot_id", "media_ref", "media_revision", "source_unit_id", "part_id")
+            for key in keys:
                 if key in source and source[key] != getattr(self.image, key):
                     raise _error(
                         "EMBEDDING_SOURCE_INVALID", "Image capture and attribution disagree"
@@ -349,7 +405,10 @@ class PreparedEmbeddingRequest:
                         if header != "data:" + facet["capture"]["mime"] + ";base64":
                             raise ValueError("media type")
                     content = base64.b64decode(encoded_image, validate=True)
-                    capture = MediaSnapshot(**facet["capture"], content=content)
+                    capture_type = (TrialMediaCapture
+                                    if facet["capture"].get("input_kind") == "ADMIN_TRIAL"
+                                    else MediaSnapshot)
+                    capture = capture_type(**facet["capture"], content=content)
                     inputs.append(
                         EmbeddingInput(facet["facet_id"], image=capture, source_json=source)
                     )

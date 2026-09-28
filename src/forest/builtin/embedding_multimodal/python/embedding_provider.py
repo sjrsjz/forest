@@ -57,6 +57,24 @@ def _profile_snapshot(profile):
 
 
 def _facet_source(facet, bot_id):
+    if facet.get("input_kind") == "ADMIN_TRIAL":
+        source = {
+            "bot_id": bot_id,
+            "input_kind": "ADMIN_TRIAL",
+            "input_ref": facet["input_ref"],
+            "input_revision": facet["input_revision"],
+            "query_id": facet["query_id"],
+            "part_id": facet["part_id"],
+            "payload_id": facet["input_payload"]["payload_id"],
+            "payload_digest": facet["input_payload"]["digest"],
+        }
+        if facet["input_ref"] != facet["query_id"]:
+            raise ForestError(
+                "EMBEDDING_FACET_INVALID", "Trial query identity differs", 422
+            )
+        if facet["modality"] == "IMAGE":
+            source["media_ref"] = facet["input_payload"]["payload_id"]
+        return source
     source = {
         "bot_id": bot_id,
         "source_unit_id": facet["source_unit_id"],
@@ -120,8 +138,6 @@ async def _embedding_input(facet, payloads, bot_id):
         capture = {
             "bot_id": bot_id,
             "media_ref": facet["input_payload"]["payload_id"],
-            "media_revision": facet["source_revision"],
-            "source_unit_id": facet["source_unit_id"],
             "part_id": facet["part_id"],
             "mime": facet["media_type"],
             "blob_digest": facet["input_payload"]["digest"],
@@ -129,6 +145,17 @@ async def _embedding_input(facet, payloads, bot_id):
             "height": facet["height"],
             "transform_ref": None,
         }
+        if facet.get("input_kind") == "ADMIN_TRIAL":
+            capture.update({
+                "input_kind": "ADMIN_TRIAL",
+                "query_id": facet["query_id"],
+                "input_revision": facet["input_revision"],
+            })
+        else:
+            capture.update({
+                "media_revision": facet["source_revision"],
+                "source_unit_id": facet["source_unit_id"],
+            })
         wire = {"image": base64.b64encode(content).decode("ascii")}
     if (
         len(selected) != facet["input_byte_length"]
