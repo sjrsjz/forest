@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.0.0"
+version = "1.1.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -28,6 +28,14 @@ stop_timeout_s = 10
 
 [components.capabilities]
 requests = ["service.call:runtime.graph.snapshot"]
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "components.workspace"
+label = "组件"
+group = "runtime"
+order = 2
 
 [[components.requires]]
 name = "runtime.graph.snapshot"

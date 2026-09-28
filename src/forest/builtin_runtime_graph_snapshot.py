@@ -27,6 +27,11 @@ def runtime_graph_snapshot_service(context):
                     "generation_id": item["generation_id"],
                     "status": item["status"],
                     "config_revision": item["config_revision"],
+                    "package_id": item["package_id"],
+                    "package_version": item["package_version"],
+                    "package_digest": item["package_digest"],
+                    "data_admission": item["data_admission"],
+                    "control_admission": item["control_admission"],
                 }
                 for item in status["members"]
             ],

@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root{color-scheme:dark;font:14px/1.45 system-ui,sans-serif;color:#dcebe2;background:#0d1712}
+    body{margin:0;padding:16px}main{display:grid;gap:12px;max-width:900px}
+    h1{font-size:16px;margin:0}p{margin:0;color:#a9c1b2}
+    .form{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
+    label{display:grid;gap:5px;flex:1 1 280px;color:#a9c1b2}
+    input,button{box-sizing:border-box;padding:9px 11px;border:1px solid #395247;border-radius:8px;background:#13231b;color:inherit}
+    input{width:100%}button{cursor:pointer;background:#255844}
+    dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
+    dl div{border:1px solid #284036;border-radius:8px;padding:8px 10px;min-width:0}
+    dt{color:#a9c1b2}dd{margin:3px 0 0;overflow-wrap:anywhere}
+    #status{min-height:1.4em} @media(max-width:640px){dl{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>当前 Graph 的组件</h1>
+    <p>按组件 ID 查询已发布代际和包工件。此视图只读取内核的冻结 Graph 事实。</p>
+    <div class="form">
+      <label>组件 ID<input id="component-id" value="component.worker-host"></label>
+      <button id="inspect" type="button">查询</button>
+    </div>
+    <p id="status" role="status"></p>
+    <dl id="details" hidden>
+      <div><dt>Bot / Graph</dt><dd id="graph"></dd></div>
+      <div><dt>组件状态</dt><dd id="state"></dd></div>
+      <div><dt>包</dt><dd id="package"></dd></div>
+      <div><dt>包摘要</dt><dd id="digest"></dd></div>
+      <div><dt>Generation</dt><dd id="generation"></dd></div>
+      <div><dt>接纳</dt><dd id="admission"></dd></div>
+    </dl>
+  </main>
+  <script>
+    (()=>{'use strict';
+      let port=null,nonce='',sequence=0,pending='';
+      const byId=id=>document.getElementById(id);
+      const send=(type,value={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...value});
+      const resize=()=>send('resize',{height:document.documentElement.scrollHeight});
+      const query=()=>{
+        const component_id=byId('component-id').value.trim();
+        if(!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(component_id)){
+          byId('status').textContent='组件 ID 无效';return;
+        }
+        pending=`component-ui:${++sequence}`;
+        byId('details').hidden=true;
+        byId('status').textContent='正在读取…';
+        send('query',{request_id:pending,operation_id:'module',value:{component_id}});
+      };
+      const render=value=>{
+        const member=value.member;
+        byId('graph').textContent=`${value.bot_id} / r${value.graph_revision}`;
+        byId('state').textContent=`${member.component_id} · ${member.status} · 配置 r${member.config_revision}`;
+        byId('package').textContent=`${member.package_id} ${member.package_version}`;
+        byId('digest').textContent=member.package_digest;
+        byId('generation').textContent=member.generation_id;
+        byId('admission').textContent=`DATA ${member.data_admission?'开放':'关闭'} · CONTROL ${member.control_admission?'开放':'关闭'}`;
+        byId('details').hidden=false;
+        byId('status').textContent='';
+        resize();
+      };
+      addEventListener('message',event=>{
+        const message=event.data||{};
+        if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect'||typeof message.nonce!=='string')return;
+        port=event.ports[0];nonce=message.nonce;
+        port.onmessage=event=>{
+          const response=event.data||{};
+          if(response.protocol!=='forest.management-ui-channel/1'||response.nonce!==nonce)return;
+          if(response.type==='initialize'){query();resize();return;}
+          if(response.request_id!==pending)return;
+          if(response.type==='query-result')render(response.value);
+          else if(response.type==='operation-error'){
+            byId('details').hidden=true;
+            byId('status').textContent=response.message||'查询失败';
+            resize();
+          }
+        };
+        port.start();send('ready');
+      },{once:true});
+      byId('inspect').addEventListener('click',()=>{if(port)query();});
+      byId('component-id').addEventListener('keydown',event=>{
+        if(event.key==='Enter'){event.preventDefault();if(port)query();}
+      });
+    })();
+  </script>
+</body>
+</html>

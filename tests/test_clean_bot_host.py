@@ -608,6 +608,12 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert agent_member["member"]["generation_id"] == (
                 host.registry.graph_identity.generations["agent.runtime"]
             )
+            assert agent_member["member"]["package_id"] == "forest.agent-runtime"
+            assert agent_member["member"]["package_digest"] == (
+                host.registry.get("agent.runtime").snapshot.digest
+            )
+            assert agent_member["member"]["data_admission"] is True
+            assert agent_member["member"]["control_admission"] is True
             assert next(
                 descriptor.component_id
                 for descriptor in host.registry.descriptors

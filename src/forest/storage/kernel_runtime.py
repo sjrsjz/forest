@@ -63,7 +63,9 @@ class KernelRuntimeRepository:
                 rows = await (
                     await conn.execute(
                         sql.SQL(
-                            "SELECT m.component_id,m.generation_id,g.status,g.config_revision "
+                            "SELECT m.component_id,m.generation_id,g.status,g.config_revision,"
+                            "m.package_id,m.package_version,m.package_digest,"
+                            "m.data_admission,m.control_admission "
                             "FROM {} m JOIN {} g ON g.bot_id=m.bot_id "
                             "AND g.generation_id=m.generation_id WHERE m.bot_id=%s "
                             "AND m.graph_id=%s ORDER BY m.component_id"
