@@ -240,3 +240,5 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 部署管理网关现经真实本机 HTTP 与 Edge 浏览器验证登录、Bot 作用域选择、Memory 包 UI 的摘要读取与隔离 iframe 初始化、管理 query 的 MessageChannel 往返、卸载和登出。验收发现原 Blob iframe 继承控制台 CSP 后无法执行包内脚本，已改为带摘要的认证路由加载并独立施加 sandbox CSP；作用域路径改写曾把全局登出误送往 Bot 路由，现只改写 Runtime 与模块接口。切换工作区时，旧 UI 的异步挂载和 MessageChannel 会失效。该浏览器验收使用内存管理后端，证明 HTTP 会话和包 UI 接线，不证明真实 PostgreSQL 管理试验、供应商图文召回或长期运行。
 
 旧 `FOREST_MANAGEMENT_TOKEN` 单 Bot HTTP 入口已删除；该入口使用另一套令牌 API，无法与现行部署会话控制台及包 UI 协议正确配合。`CleanManagementGateway` 现必须持有部署 Web authority ticket signer，Bot scope 由部署控制台提供；单 Bot 启动函数只管理 Bot 生命周期和状态输出。真实 Edge 会话下的 5 项部署管理验收通过，单 Bot 主机本地 5 项测试通过、5 项需数据库环境而跳过；此清理不替代真实数据库管理试验。
+
+Memory 单次遗忘的执行阶段已将来源锁定、抑制记录、资格/观察更新、向量删除屏障、facet 和准备任务收敛改为有界集合写入，保留 Payload 删除纪元、固定影响计划、幂等操作回执和关系撤销。私有 PostgreSQL 上 19 项 Memory 包回归通过；修改后真实宿主遗忘、向量删除故障、热替换及重启链路通过。此改动只是大范围遗忘的写入基础，尚未交付持久选择目录、分批计划或批量管理 UI。
