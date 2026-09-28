@@ -356,6 +356,42 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
     async with store.pool.connection() as conn, conn.transaction():
         await insert_unit(conn, "newest", 1, "2026-01-03T00:00:00Z")
         await insert_unit(conn, "oldest", 3, "2026-01-01T00:00:00Z")
+        for name in ("newest", "oldest"):
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.source_parts "
+                "(bot_id,source_unit_id,part_id,part_index,part_kind,media_type,"
+                "payload_id,payload_digest,payload_owner_component_id,"
+                "payload_owner_kind,payload_owner_id) VALUES "
+                "(%s,%s,%s,0,'TEXT','text/plain',%s,%s,'memory.graph','test',%s)"
+            ).format(namespace), (
+                store.bot_id, f"unit/{name}", f"part/{name}",
+                f"payload/{name}", digest, f"unit/{name}",
+            ))
+        for name, index, state in (
+            ("newest", 0, "READY"), ("newest", 1, "PENDING"),
+            ("oldest", 0, "READY"),
+        ):
+            facet_id = f"facet/{name}/{index}"
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.embedding_facets "
+                "(bot_id,facet_id,purpose,input_kind,input_ref,input_revision,"
+                "source_unit_id,source_revision,part_id,modality,selector_start_char,"
+                "selector_end_char,input_payload_id,input_payload_digest,"
+                "facet_content_digest,input_media_type,input_byte_length,space_id,"
+                "accepted_deletion_epoch,state,index_ref_id,vector_digest,"
+                "result_payload_id,result_payload_digest,published_at) VALUES "
+                "(%s,%s,'DOCUMENT','SOURCE_UNIT',%s,1,%s,1,%s,'TEXT',%s,%s,"
+                "%s,%s,%s,'text/plain',8,'space/cursor',0,%s,%s,%s,%s,%s,%s)"
+            ).format(namespace), (
+                store.bot_id, facet_id, f"unit/{name}", f"unit/{name}",
+                f"part/{name}", index, index + 1, f"payload/{name}",
+                digest, digest, state,
+                facet_id if state == "READY" else None,
+                digest if state == "READY" else None,
+                f"result/{facet_id}" if state == "READY" else None,
+                digest if state == "READY" else None,
+                "2026-01-01T00:00:00Z" if state == "READY" else None,
+            ))
 
     async with store.pool.connection() as writer, store.pool.connection() as reader:
         async with writer.transaction():
@@ -368,6 +404,9 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
             ).fetchone()
             first = first["result"]["value"]
             assert [item["source_unit_id"] for item in first["items"]] == ["unit/newest"]
+            assert (first["items"][0]["index_coverage"],
+                    first["items"][0]["ready_document_facet_count"],
+                    first["items"][0]["document_facet_count"]) == ("PARTIAL", 1, 2)
             assert first["has_more"] is True
         cursor = {
             "limit": 1,
@@ -387,6 +426,7 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
         assert [item["source_unit_id"] for item in second["result"]["value"]["items"]] == [
             "unit/oldest"
         ]
+        assert second["result"]["value"]["items"][0]["index_coverage"] == "COMPLETE"
         changed_boundary = await (
             await reader.execute(
                 sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
@@ -402,9 +442,42 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
                 (Jsonb({"bot_id": store.bot_id}), Jsonb({"limit": 3})),
             )
         ).fetchone()
+        Draft202012Validator(package.snapshot.schema(
+            "schemas/query-sources-output.json"
+        )).validate(fresh["result"]["value"])
         assert [item["source_unit_id"] for item in fresh["result"]["value"]["items"]] == [
             "unit/newest", "unit/late", "unit/oldest"
         ]
+        for coverage, expected in (
+            ("PARTIAL", "unit/newest"),
+            ("NO_FACETS", "unit/late"),
+            ("COMPLETE", "unit/oldest"),
+        ):
+            selected = await (await reader.execute(
+                sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+                (Jsonb({"bot_id": store.bot_id}),
+                 Jsonb({"index_coverage": coverage})),
+            )).fetchone()
+            assert [item["source_unit_id"] for item in selected["result"]["value"]["items"]] == [
+                expected
+            ]
+        frozen = await (await reader.execute(sql.SQL(
+            "SELECT {}.memory_freeze_forget_selection(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id, "operation_id": "freeze/complete"}),
+            Jsonb({"selection_id": "selection/complete",
+                   "requested_by": "admin/coverage",
+                   "filters": {"index_coverage": "COMPLETE"}}),
+        ))).fetchone()
+        assert frozen["result"]["value"]["member_count"] == 1
+        member = await (await reader.execute(sql.SQL(
+            "SELECT {}.memory_query_forget_selection(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"selection_id": "selection/complete",
+                   "requested_by": "admin/coverage"}),
+        ))).fetchone()
+        assert member["result"]["value"]["items"][0]["source_unit_id"] == "unit/oldest"
 
 
 @pytest.mark.postgres

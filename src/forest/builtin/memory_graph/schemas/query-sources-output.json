@@ -8,7 +8,7 @@
     "snapshot_xid": {"type": "string", "minLength": 3, "maxLength": 65536},
     "items": {"type": "array", "maxItems": 100, "items": {
       "type": "object", "additionalProperties": false,
-      "required": ["source_unit_id", "source_id", "trunk_id", "source_kind", "platform", "realm_id", "external_group_id", "author_subject_ref", "unit_kind", "modality", "occurred_at", "source_order_seq", "part_count", "eligibility_state", "source_status"],
+      "required": ["source_unit_id", "source_id", "trunk_id", "source_kind", "platform", "realm_id", "external_group_id", "author_subject_ref", "unit_kind", "modality", "occurred_at", "source_order_seq", "part_count", "eligibility_state", "source_status", "document_facet_count", "ready_document_facet_count", "index_coverage"],
       "properties": {
         "source_unit_id": {"type": "string"},
         "source_id": {"type": "string"},
@@ -24,7 +24,10 @@
         "source_order_seq": {"type": "integer"},
         "part_count": {"type": "integer"},
         "eligibility_state": {"enum": ["REGISTERED", "ELIGIBLE", "SUPPRESSED"]},
-        "source_status": {"enum": ["ACTIVE", "RETIRED"]}
+        "source_status": {"enum": ["ACTIVE", "RETIRED"]},
+        "document_facet_count": {"type": "integer", "minimum": 0},
+        "ready_document_facet_count": {"type": "integer", "minimum": 0},
+        "index_coverage": {"enum": ["NO_FACETS", "NOT_READY", "PARTIAL", "COMPLETE"]}
       }
     }},
     "has_more": {"type": "boolean"},

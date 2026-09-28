@@ -8006,15 +8006,30 @@ RETURNS TABLE (
     author_subject_ref text, unit_kind text, modality text,
     occurred_at timestamptz, source_order_seq bigint, part_count integer,
     eligibility_state text, source_status text, source_revision bigint,
-    author_payload_id text)
+    author_payload_id text, document_facet_count integer,
+    ready_document_facet_count integer, index_coverage text)
 LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     SELECT u.source_unit_id,u.source_id,u.trunk_id,s.source_kind,
         s.platform,s.realm_id,s.external_group_id,u.author_subject_ref,
         u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
-        u.eligibility_state,s.status,u.source_revision,u.author_payload_id
+        u.eligibility_state,s.status,u.source_revision,u.author_payload_id,
+        coverage.facet_count,coverage.ready_count,coverage.index_coverage
     FROM __forest_module_schema__.source_units u
     JOIN __forest_module_schema__.memory_sources s
       ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+    CROSS JOIN LATERAL (
+        SELECT count(*)::integer AS facet_count,
+               count(*) FILTER (WHERE f.state='READY')::integer AS ready_count,
+               CASE WHEN count(*)=0 THEN 'NO_FACETS'
+                    WHEN count(*) FILTER (WHERE f.state='READY')=count(*)
+                        THEN 'COMPLETE'
+                    WHEN count(*) FILTER (WHERE f.state='READY')=0
+                        THEN 'NOT_READY'
+                    ELSE 'PARTIAL' END AS index_coverage
+        FROM __forest_module_schema__.embedding_facets f
+        WHERE f.bot_id=u.bot_id AND f.source_unit_id=u.source_unit_id
+          AND f.source_revision=u.source_revision AND f.purpose='DOCUMENT'
+    ) coverage
     WHERE u.bot_id=requested_bot
       AND u.eligibility_state=COALESCE(filters->>'eligibility_state','ELIGIBLE')
       AND s.status=COALESCE(filters->>'source_status','ACTIVE')
@@ -8042,6 +8057,8 @@ LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
            u.author_subject_ref=filters->>'author_subject_ref')
       AND (filters->>'modality' IS NULL OR u.modality=filters->>'modality')
       AND (filters->>'unit_kind' IS NULL OR u.unit_kind=filters->>'unit_kind')
+      AND (filters->>'index_coverage' IS NULL OR
+           coverage.index_coverage=filters->>'index_coverage')
       AND (filters->>'source_order_from' IS NULL OR
            u.source_order_seq>=(filters->>'source_order_from')::bigint)
       AND (filters->>'source_order_to' IS NULL OR
@@ -8070,6 +8087,7 @@ DECLARE
     selected_sources text[];
     selected_state text := COALESCE(input->>'eligibility_state','ELIGIBLE');
     selected_source_status text := COALESCE(input->>'source_status','ACTIVE');
+    selected_index_coverage text := input->>'index_coverage';
     items jsonb;
     more boolean;
     cursor_value jsonb;
@@ -8081,6 +8099,8 @@ BEGIN
     IF page_limit NOT BETWEEN 1 AND 100 OR
        selected_state NOT IN ('REGISTERED','ELIGIBLE','SUPPRESSED') OR
        selected_source_status NOT IN ('ACTIVE','RETIRED') OR
+       (selected_index_coverage IS NOT NULL AND selected_index_coverage NOT IN
+           ('NO_FACETS','NOT_READY','PARTIAL','COMPLETE')) OR
        (input ? 'group_source_ids' AND (cardinality(selected_sources)=0 OR
           cardinality(selected_sources)>256)) OR
        (input ? 'source_order_from' AND NOT (input ? 'source_id')) OR
@@ -8099,7 +8119,8 @@ BEGIN
         SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
             u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
             u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
-            u.eligibility_state,u.source_status
+            u.eligibility_state,u.source_status,u.document_facet_count,
+            u.ready_document_facet_count,u.index_coverage
         FROM __forest_module_schema__.memory_filtered_source_units(
             context->>'bot_id',input,snapshot_time,snapshot_value) u
         WHERE after_time IS NULL OR

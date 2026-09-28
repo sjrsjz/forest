@@ -17,6 +17,7 @@
     "unit_kind": {"type": "string", "minLength": 1, "maxLength": 128},
     "eligibility_state": {"enum": ["REGISTERED", "ELIGIBLE", "SUPPRESSED"]},
     "source_status": {"enum": ["ACTIVE", "RETIRED"]},
+    "index_coverage": {"enum": ["NO_FACETS", "NOT_READY", "PARTIAL", "COMPLETE"]},
     "source_order_from": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
     "source_order_to": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
     "occurred_from": {"type": "string", "format": "date-time"},
