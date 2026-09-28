@@ -258,3 +258,5 @@ Memory 包内现有私有 `memory.forget-batch` 三步 UnitOfWork：从冻结成
 图文试验宿主验收现进一步走部署管理 App 的真实 ASGI HTTP 路由：登录会话经 CSRF 与 Web authority ticket，按管理资产声明分块上传文本和 PNG，管理 action 入队后由包自有 Worker 完成召回；状态、结果与归属图片均经 HTTP 管理 query 读取。此路径与真实 PostgreSQL、假 Embedding HTTP 和假 Milvus 的完整 Bot 宿主集成用例通过。当前证明 HTTP 协议及事务授权链路可用；真实浏览器对实际宿主、真实 Embedding/向量供应商请求和长期运行仍待验收。
 
 Memory 包自带管理 UI 现接入已存在的冻结选择和有界批次预览端口：管理员从来源页当前筛选生成不可变成员目录，按序号分页核对根来源及作者锚点，并按起点/大小查看 Payload、来源、向量、关系及联想日志影响。界面明确只作核对和预览；跨批 P0 授权、执行进度及批量确认仍未接入。
+
+QiYu 配置中的 SiliconFlow `Qwen/Qwen3-VL-Embedding-8B` 已用于一次低频真实供应商请求：Forest 的 `EmbeddingClient` 按自身冻结请求格式同时发送一段文本和一张 64×64 PNG 的 data URI，收到 HTTP 200、两条 4096 维向量以及供应商报告的 41 个总 token（含 4 个图片 token）。该结果证明当前端点对 Forest 图文请求格式兼容；它没有经过 Bot 宿主的完整索引与召回链，也不证明远端模型修订身份或长期稳定性。
