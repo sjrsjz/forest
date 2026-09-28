@@ -16,6 +16,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from forest.adapters.onebot import SendResult
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.embeddings import EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
@@ -77,9 +78,10 @@ class FakeEmbeddingClient(FakeModelClient):
         )
 
 
-class RecordingUnknownModelClient(FakeModelClient):
+class RecordingModelClient(FakeModelClient):
     requests = []
     first_gate = None
+    reply_text = None
 
     async def dispatch(self, prepared, *, permitcheck):
         await permitcheck(prepared)
@@ -87,6 +89,14 @@ class RecordingUnknownModelClient(FakeModelClient):
         type(self).requests.append(prepared)
         if first and type(self).first_gate is not None:
             await type(self).first_gate.wait()
+        if type(self).reply_text is not None:
+            return ModelResult(
+                "RESPONDED", prepared.request_id, prepared.transport_attempt_id,
+                prepared.payload_digest, text=type(self).reply_text,
+                usage_json='{"total_tokens":12}', finish_reason="stop",
+                provider_response_id="fake-provider-response",
+                provider_model="test-model",
+            )
         return ModelResult(
             "UNKNOWN", prepared.request_id, prepared.transport_attempt_id,
             prepared.payload_digest, error_code="TEST_MODEL_RESULT_UNKNOWN",
@@ -209,6 +219,11 @@ class FakeWebSocketClient:
         self.handler = None
         self.closed = False
         self.failure_code = None
+        self.sent = []
+
+    async def send(self, prepared, *, timeout=None):
+        self.sent.append(prepared)
+        return SendResult("SENT", message_id=str(80000 + len(self.sent)))
 
     async def get_login_info(self, *, timeout=None):
         return {"self_id": self.self_id, "nickname": "Forest"}
@@ -1643,7 +1658,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize("scenario", ("text", "visual", "cross-group"))
+@pytest.mark.parametrize("scenario", ("text", "visual", "cross-group", "success"))
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
@@ -1673,9 +1688,15 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
         agent_system_prompt="The Agent-Memory request integration fixture.",
     )
     clients = []
-    RecordingUnknownModelClient.requests = []
-    RecordingUnknownModelClient.first_gate = (
+    RecordingModelClient.requests = []
+    RecordingModelClient.first_gate = (
         asyncio.Event() if scenario == "cross-group" else None
+    )
+    RecordingModelClient.reply_text = (
+        '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
+        '<block block_type="Assistant"><content><text>Forest success fixture</text>'
+        '</content></block></blocks></payload></valid_agent_protocol_content_block>'
+        if scenario == "success" else None
     )
 
     async def create_websocket(_url, _token, **_limits):
@@ -1685,7 +1706,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
 
     host = CleanBotHost(
         settings,
-        model_client_factory=RecordingUnknownModelClient,
+        model_client_factory=RecordingModelClient,
         embedding_client_factory=FakeEmbeddingClient,
         media_client_factory=FakeMediaClient,
         vector_index_client_factory=FakeMilvusClient,
@@ -1726,7 +1747,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
         }).encode())
         try:
             async with asyncio.timeout(45):
-                while not RecordingUnknownModelClient.requests:
+                while not RecordingModelClient.requests:
                     await asyncio.sleep(0.1)
         except TimeoutError as exc:
             conversation_schema = next(
@@ -1741,7 +1762,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                     .format(sql.Identifier(conversation_schema))
                 )).fetchall()
             raise AssertionError(f"Provider not reached; Agent work errors: {failures}") from exc
-        prepared = RecordingUnknownModelClient.requests[0]
+        prepared = RecordingModelClient.requests[0]
         prepared.verify()
         manifest = prepared.manifest
         assert manifest["memory_evidence"]["status"] == "READY"
@@ -1779,20 +1800,49 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                 ],
             }).encode())
             async with asyncio.timeout(35):
-                while len(RecordingUnknownModelClient.requests) < 2:
+                while len(RecordingModelClient.requests) < 2:
                     await asyncio.sleep(0.1)
-            second = RecordingUnknownModelClient.requests[1]
+            second = RecordingModelClient.requests[1]
             second.verify()
-            assert len(RecordingUnknownModelClient.requests) == 2
+            assert len(RecordingModelClient.requests) == 2
             assert b"Queued for the same group" not in prepared.body
             assert second.manifest["memory_evidence"]["current_source"][
                 "external_group_id"
             ] == "933179610"
             assert second.manifest["memory_evidence"]["status"] == "READY"
+        if scenario == "success":
+            try:
+                async with asyncio.timeout(15):
+                    while not clients[-1].sent:
+                        await asyncio.sleep(0.1)
+            except TimeoutError as exc:
+                namespaces = {
+                    item.component_id: item.storage.spec.namespace
+                    for item in host.registry.descriptors
+                    if item.storage is not None
+                }
+                async with host.store.pool.connection() as conn:
+                    async def rows(component, query):
+                        result = await conn.execute(
+                            sql.SQL(query).format(sql.Identifier(namespaces[component]))
+                        )
+                        return await result.fetchall()
+
+                    diagnostics = {
+                        "runs": await rows("agent.runtime", "SELECT state, next_step_seq, current_model_request_id FROM {}.agent_runs"),
+                        "requests": await rows("agent.runtime", "SELECT state FROM {}.model_requests"),
+                        "attempts": await rows("agent.runtime", "SELECT state FROM {}.model_transport_attempts"),
+                        "intents": await rows("delivery", "SELECT state, error_code FROM {}.send_intents"),
+                        "settlements": await rows("conversation.scheduler", "SELECT input_payload->'outcome'->'error'->>'code' AS code FROM {}.conversation_agent_work_settlements ORDER BY created_at DESC LIMIT 5"),
+                    }
+                raise AssertionError(f"Successful model response did not deliver: {diagnostics}") from exc
+            assert len(clients[-1].sent) == 1
+            assert b"Forest success fixture" in clients[-1].sent[0].wire_body
     finally:
-        if RecordingUnknownModelClient.first_gate is not None:
-            RecordingUnknownModelClient.first_gate.set()
-        RecordingUnknownModelClient.first_gate = None
+        if RecordingModelClient.first_gate is not None:
+            RecordingModelClient.first_gate.set()
+        RecordingModelClient.first_gate = None
+        RecordingModelClient.reply_text = None
         await host.close()
         assert name.startswith("forest_recall_") and len(name) == 46
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))

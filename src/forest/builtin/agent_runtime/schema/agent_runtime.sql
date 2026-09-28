@@ -4356,7 +4356,7 @@ DECLARE
     requested_digest text := context->>'participant_input_digest';
     requested_run text := body->>'run_id';
     requested_session text := body->>'session_id';
-    checkpoint_id text;
+    requested_checkpoint text;
     run_row record;
     session_row record;
     existing record;
@@ -4377,7 +4377,7 @@ BEGIN
             )
         );
     END IF;
-    checkpoint_id := 'checkpoint-completed:' || encode(sha256(convert_to(
+    requested_checkpoint := 'checkpoint-completed:' || encode(sha256(convert_to(
         jsonb_build_array(requested_bot,requested_run)::text,'UTF8'
     )),'hex');
     PERFORM pg_advisory_xact_lock(hashtextextended(
@@ -4405,7 +4405,7 @@ BEGIN
     END IF;
     SELECT * INTO existing
     FROM __forest_module_schema__.run_checkpoints
-    WHERE bot_id=requested_bot AND checkpoint_id=checkpoint_id;
+    WHERE bot_id=requested_bot AND checkpoint_id=requested_checkpoint;
     IF existing IS NOT NULL THEN
         IF existing.run_id IS DISTINCT FROM requested_run
            OR existing.input_digest IS DISTINCT FROM requested_digest
@@ -4443,7 +4443,7 @@ BEGIN
         state_owner_component_id,state_owner_kind,state_owner_id,
         checkpoint_checksum,owner_epoch
     ) VALUES (
-        requested_bot,requested_run,next_sequence,checkpoint_id,requested_digest,
+        requested_bot,requested_run,next_sequence,requested_checkpoint,requested_digest,
         'COMPLETED',run_row.input_revision,run_row.next_step_seq,
         reply_value->>'payload_id',reply_value->>'digest',
         reply_value->>'owner_component_id',reply_value->>'owner_kind',

@@ -179,6 +179,8 @@ Agent 包的模型安全边界选择每次观察使用新的 operation identity�
 
 本轮修复后，本地全套测试 436 项通过、89 项跳过，隔离 PostgreSQL 宿主与调度回归 16 项通过。Agent 通过持久 Run 输入推导查询 ID 和共同截止时间，在 Memory 捕获或召回等待时返回 `WAIT_MEMORY`；召回完成后再次检查群聊排队输入，旧版本查询在被新输入取代时取消。当前上下文图片经 `media.context.resolve` 读取，历史证据图文按模型能力投影；文本模型不读取图片字节。新增隔离验收以伪 OneBot 群 @ 触发真实宿主、Scheduler、Agent、Memory 与 Provider 请求准备，核对群、主干、作者来源和纯文本 wire 不含图片；伪模型返回 UNKNOWN，因此没有真实 QQ 发送。此链路暴露并修复了 Agent 缺少 Memory/Media 服务绑定、同一 Run 不同 claim 复用 WAIT_MEMORY 服务回执，以及 Scheduler 包 `max_state_inflight=1` 阻塞 owned-work 读状态的问题。后续独立验收通过图文群消息到模型 wire，以及第一群模型调用挂起时同群 trigger 排队、第二群模型调用继续进入 Provider；图片召回命中、真实供应商响应及跨群成功回复仍待验证。
 
+成功回复链路的隔离验收进一步使用合规的模型 XML 回执，真实 Agent 包完成 `FINAL_READY` 后经 Scheduler 的三参与者 UnitOfWork 提交 Run 终态、Conversation 回复单元和 Delivery Intent，伪 OneBot 收到一条投递；未发送真实 QQ 消息。该验收发现 `agent.commit-final-run-record` 把局部变量与 `run_checkpoints.checkpoint_id` 列同名，导致 PostgreSQL 拒绝最终提交并让群持续静默；现已使用明确的请求变量修正，更新 Agent 包版本与官方 SQL baseline。修复后，隔离 PostgreSQL 的成功回复和完整宿主热替换/重启复验通过，本地全套 436 项通过、92 项跳过。联想日志尚未接入最终提交事务，不能将此次成功回复误报为联想学习完成。
+
 ## 8. 下一切换顺序
 
 1. 补齐遗忘管理的固定目标计划、较大范围选择器与持续 Payload scrub；补齐发布崩溃重放验证。
