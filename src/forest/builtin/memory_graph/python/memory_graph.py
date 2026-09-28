@@ -663,6 +663,39 @@ class MemoryGraph(Plugin):
         )
 
     @service(
+        "memory.forget.batch.preview",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/forget-batch-preview-input.json",
+        output_schema="schemas/forget-batch-preview-output.json",
+    )
+    async def preview_forget_batch(self, payload, ctx):
+        request = {
+            "selection_id": payload["selection_id"],
+            "requested_by": payload["requested_by"],
+            "after_ordinal": payload.get("after_ordinal", 0),
+            "batch_size": payload.get("batch_size", 32),
+        }
+        operation_id = ctx.operations.stable("memory-forget-batch-preview")
+        return await ctx.uow.call(
+            "memory.preview-forget-batch",
+            {
+                "prepare": request,
+                "payload": {
+                    "protocol": "forest.payload-forget-anchors-preview/1",
+                    "prior_step_id": "prepare",
+                },
+                "memory": {
+                    **request,
+                    "prepare_step_id": "prepare",
+                    "preview_step_id": "payload",
+                },
+            },
+            operation_id=operation_id,
+            timeout=30,
+        )
+
+    @service(
         "memory.source.forget",
         semantics="idempotent",
         contract="1.0",

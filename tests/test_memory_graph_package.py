@@ -16,11 +16,13 @@ from forest.builtin.memory_graph.python.facet_preparation import document_facets
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
+from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.module_configuration import ModuleConfigurationRepository
+from forest.storage.payload_authority import PayloadSource
 
 
 def _trial_owner_id(query_id: str, part_id: str) -> str:
@@ -427,6 +429,14 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         ).format(namespace), (store.bot_id, digest, digest))
 
     async def insert_unit(name, order, author):
+        root = await kernel.payload.put_bytes(
+            owner_component_id="conversation.scheduler", owner_kind="context.input",
+            owner_id=f"input/{name}", media_type="text/plain",
+            content=f"message {name}".encode(),
+            sources=(PayloadSource(
+                "conversation.scheduler", "group.message", f"message/{name}", 1,
+            ),), expected_deletion_epoch=0,
+        )
         async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(sql.SQL(
                 "INSERT INTO {}.source_units "
@@ -437,17 +447,25 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
                 "author_owner_id,accepted_deletion_epoch,eligibility_state,"
                 "eligible_at,eligible_xid,occurred_at) VALUES "
                 "(%s,%s,%s,%s,'source/selection',%s,1,'MESSAGE','TEXT',1,"
-                "%s,%s,%s,%s,'memory.graph','test',%s,0,'ELIGIBLE',"
+                "%s,%s,%s,%s,'conversation.scheduler','context.input',%s,0,'ELIGIBLE',"
                 "clock_timestamp(),pg_current_xact_id(),%s::timestamptz)"
             ).format(namespace), (
                 store.bot_id, f"unit/{name}", f"capture/{name}", digest,
-                order, digest, author, f"payload/{name}", digest,
-                f"unit/{name}", f"2026-01-{order:02d}T00:00:00Z",
+                order, digest, author, root.payload_id, root.content_digest,
+                f"input/{name}", f"2026-01-{order:02d}T00:00:00Z",
             ))
+        return root
 
-    await insert_unit("one", 1, "author/target")
+    first_root = await insert_unit("one", 1, "author/target")
     await insert_unit("other", 2, "author/other")
-    await insert_unit("three", 3, "author/target")
+    third_root = await insert_unit("three", 3, "author/target")
+    shared = await kernel.payload.put_bytes(
+        owner_component_id="memory.graph", owner_kind="retrieval.evidence",
+        owner_id="evidence/selection", media_type="application/json",
+        content=b'{"shared":true}',
+        parents=(first_root.payload_id, third_root.payload_id),
+        expected_deletion_epoch=0,
+    )
 
     async def invoke(function, context, body):
         async with store.pool.connection() as conn, conn.transaction():
@@ -482,6 +500,80 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         "unit/one"
     ]
     assert second["value"]["has_more"] is False
+    batch_request = {"selection_id": "selection/target", "requested_by": "admin/one",
+                     "after_ordinal": 0, "batch_size": 2}
+    step = {"protocol": "forest.uow-step/1", "caller": {
+        "component_id": "memory.graph", "generation_id": "memory/test",
+    }}
+    participant = KernelPayloadUnitOfWorkParticipant(
+        SimpleNamespace(generation_identity=SimpleNamespace(generation_id="payload/test")),
+        kernel.payload,
+    )
+    async with store.pool.connection() as conn, conn.transaction():
+        prepared = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_prepare_forget_batch(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({**step, "input": batch_request, "prior": {}}),
+        ))).fetchone())["result"]
+        assert prepared["ok"] is True, prepared
+        anchors = prepared["value"]
+        assert set(anchors["anchor_payload_ids"]) == {
+            first_root.payload_id, third_root.payload_id,
+        }
+        preview = await participant.invoke_in(
+            conn, "payload.preview-forget-anchors-from-prior", {
+                **step, "input": {
+                    "protocol": "forest.payload-forget-anchors-preview/1",
+                    "prior_step_id": "prepare",
+                }, "prior": {"prepare": anchors},
+            },
+        )
+        planned = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_preview_forget_batch(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({**step, "input": {**batch_request,
+                "prepare_step_id": "prepare", "preview_step_id": "payload"},
+                "prior": {"prepare": anchors, "payload": preview}}),
+        ))).fetchone())["result"]
+    assert planned["ok"] is True, planned
+    assert planned["value"]["batch_member_count"] == 2
+    assert planned["value"]["source_unit_count"] == 2
+    assert planned["value"]["selected_payload_count"] == 3
+    assert shared.payload_id in preview["selected_payload_ids"]
+    assert planned["value"]["batch_source_unit_sample"] == [
+        "unit/three", "unit/one",
+    ]
+    lease = await kernel.runtime.claim_host(
+        "forget-preview-host", "forget-preview-incarnation",
+        ttl=timedelta(minutes=5),
+    )
+    host = SimpleNamespace(
+        scope_kind="bot", bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer, generation_authority=kernel.runtime,
+    )
+    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+    await registry.start()
+    try:
+        actual = await registry.get("memory.graph").management_contract.query_authorized(
+            "memory.forget.batch.preview",
+            {"selection_id": "selection/target", "after_ordinal": 0,
+             "batch_size": 2},
+            authorization=SimpleNamespace(web_subject_ref="admin/one"),
+        )
+        assert actual["plan_digest"] == planned["value"]["plan_digest"]
+        with pytest.raises(ForestError) as forbidden:
+            await registry.get("memory.graph").management_contract.query_authorized(
+                "memory.forget.batch.preview",
+                {"selection_id": "selection/target", "after_ordinal": 0,
+                 "batch_size": 2},
+                authorization=SimpleNamespace(web_subject_ref="admin/two"),
+            )
+        assert forbidden.value.code == "MEMORY_FORGET_SELECTION_NOT_FOUND"
+    finally:
+        assert await registry.close() == []
     foreign = await invoke("memory_query_forget_selection", {"bot_id": store.bot_id}, {
         "selection_id": "selection/target", "requested_by": "admin/two",
     })

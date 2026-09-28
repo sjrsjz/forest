@@ -20,6 +20,7 @@ from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
+from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import (
@@ -3375,7 +3376,6 @@ async def test_kernel_payload_forget_selects_multiple_sources_as_one_closure(cle
     )
     repository = KernelPayloadRepository(store, namespace=storage.spec.namespace)
     roots = []
-    targets = []
     for index in range(3):
         source = PayloadSource("conversation.scheduler", "group.message", f"message/{index}", 1)
         roots.append(await repository.put_bytes(
@@ -3384,11 +3384,6 @@ async def test_kernel_payload_forget_selects_multiple_sources_as_one_closure(cle
             content=f"source {index}".encode(), sources=(source,),
             expected_deletion_epoch=0,
         ))
-        if index < 2:
-            targets.append(SourceTarget(
-                source.source_component_id, source.source_kind,
-                source.source_id, source.source_revision,
-            ))
     derived = await repository.put_bytes(
         owner_component_id="memory.graph", owner_kind="retrieval.evidence",
         owner_id="evidence/shared", media_type="application/json",
@@ -3396,18 +3391,55 @@ async def test_kernel_payload_forget_selects_multiple_sources_as_one_closure(cle
         parents=(roots[0].payload_id, roots[1].payload_id),
         expected_deletion_epoch=0,
     )
+    participant = KernelPayloadUnitOfWorkParticipant(
+        SimpleNamespace(generation_identity=SimpleNamespace(generation_id="payload/test")),
+        repository,
+    )
+    envelope = {
+        "protocol": "forest.uow-step/1",
+        "caller": {"component_id": "memory.graph", "generation_id": "memory/test"},
+        "prior": {"prepare": {
+            "protocol": "forest.payload-forget-batch-plan/1",
+            "anchor_payload_ids": [roots[0].payload_id, roots[1].payload_id],
+        }},
+    }
     async with store.pool.connection() as conn, conn.transaction():
-        preview = await repository.preview_forget_in(conn, source_targets=targets)
-        receipt = await repository.forget_in(
-            conn, operation_id="forget/two-sources", source_targets=targets,
-            expected_deletion_epoch=preview["deletion_epoch"],
-            expected_selection_digest=preview["selection_digest"],
+        with pytest.raises(ForestError) as ambiguous:
+            await participant.invoke_in(conn, "payload.preview-forget-anchors-from-prior", {
+                **envelope,
+                "prior": {"prepare": {
+                    "protocol": "forest.payload-forget-batch-plan/1",
+                    "anchor_payload_ids": [roots[0].payload_id, derived.payload_id],
+                }},
+                "input": {"protocol": "forest.payload-forget-anchors-preview/1",
+                          "prior_step_id": "prepare"},
+            })
+        assert ambiguous.value.code == "PAYLOAD_FORGET_SOURCE_AMBIGUOUS"
+        preview = await participant.invoke_in(
+            conn, "payload.preview-forget-anchors-from-prior", {
+                **envelope,
+                "input": {"protocol": "forest.payload-forget-anchors-preview/1",
+                          "prior_step_id": "prepare"},
+            },
+        )
+        receipt = await participant.invoke_in(
+            conn, "payload.forget-anchors-from-prior", {
+                **envelope,
+                "input": {
+                    "protocol": "forest.payload-forget-anchors/1",
+                    "prior_step_id": "prepare",
+                    "operation_id": "forget/two-sources",
+                    "expected_deletion_epoch": preview["deletion_epoch"],
+                    "expected_selection_digest": preview["selection_digest"],
+                },
+            },
         )
         selected = await repository.forget_selected_payload_ids_in(
             conn, "forget/two-sources"
         )
-    assert receipt["selected_count"] == 3
+    assert receipt["protocol"] == "forest.payload-forgotten/1"
     assert selected == sorted([roots[0].payload_id, roots[1].payload_id, derived.payload_id])
+    assert receipt["selected_payload_ids"] == selected
     assert roots[2].payload_id not in selected
 
 

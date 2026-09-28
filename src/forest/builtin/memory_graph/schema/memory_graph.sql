@@ -8229,6 +8229,168 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_prepare_forget_batch(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    selection_row __forest_module_schema__.forget_selections%ROWTYPE;
+    after_value integer := (body->>'after_ordinal')::integer;
+    batch_size integer := (body->>'batch_size')::integer;
+    last_value integer;
+    expected_count integer;
+    live_count integer;
+    anchor_ids text[];
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1' OR
+       envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph' OR
+       body->>'selection_id' IS NULL OR
+       octet_length(body->>'selection_id') NOT BETWEEN 1 AND 256 OR
+       body->>'requested_by' IS NULL OR
+       octet_length(body->>'requested_by') NOT BETWEEN 1 AND 256 OR
+       after_value IS NULL OR after_value<0 OR
+       batch_size IS NULL OR batch_size NOT BETWEEN 1 AND 64 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_INPUT_INVALID',
+                'message','Forget batch request is invalid','status',422));
+    END IF;
+    SELECT * INTO selection_row FROM __forest_module_schema__.forget_selections
+    WHERE bot_id=requested_bot AND selection_id=body->>'selection_id'
+      AND requested_by=body->>'requested_by';
+    IF selection_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_NOT_FOUND',
+                'message','Forget selection does not exist','status',404));
+    END IF;
+    IF after_value>=selection_row.member_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_EXHAUSTED',
+                'message','Forget selection has no remaining batch','status',409));
+    END IF;
+    last_value := LEAST(after_value+batch_size,selection_row.member_count);
+    expected_count := last_value-after_value;
+    SELECT count(*),array_agg(DISTINCT m.anchor_payload_id ORDER BY m.anchor_payload_id)
+    INTO live_count,anchor_ids
+    FROM __forest_module_schema__.forget_selection_members m
+    JOIN __forest_module_schema__.source_units u
+      ON u.bot_id=m.bot_id AND u.source_unit_id=m.source_unit_id
+     AND u.source_revision=m.source_revision
+     AND u.author_payload_id=m.anchor_payload_id
+     AND u.eligibility_state<>'SUPPRESSED'
+    WHERE m.bot_id=requested_bot AND m.selection_id=selection_row.selection_id
+      AND m.ordinal>after_value AND m.ordinal<=last_value;
+    IF live_count<>expected_count OR anchor_ids IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_CHANGED',
+                'message','A frozen forget member is no longer eligible','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.payload-forget-batch-plan/1',
+            'anchor_payload_ids',to_jsonb(anchor_ids)));
+END;
+$$;
+
+CREATE FUNCTION memory_preview_forget_batch(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    prior jsonb := envelope->'prior';
+    prepared jsonb := prior->(body->>'prepare_step_id');
+    preview jsonb := prior->(body->>'preview_step_id');
+    requested_bot text := context->>'bot_id';
+    selection_row __forest_module_schema__.forget_selections%ROWTYPE;
+    after_value integer := (body->>'after_ordinal')::integer;
+    batch_size integer := (body->>'batch_size')::integer;
+    last_value integer;
+    member_count integer;
+    live_count integer;
+    anchor_ids text[];
+    selected_ids text[];
+    root_digest text;
+    root_sample jsonb;
+    impact jsonb;
+    plan_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1' OR
+       envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph' OR
+       body->>'selection_id' IS NULL OR
+       octet_length(body->>'selection_id') NOT BETWEEN 1 AND 256 OR
+       body->>'requested_by' IS NULL OR
+       octet_length(body->>'requested_by') NOT BETWEEN 1 AND 256 OR
+       after_value IS NULL OR after_value<0 OR
+       batch_size IS NULL OR batch_size NOT BETWEEN 1 AND 64 OR
+       prepared->>'protocol' IS DISTINCT FROM 'forest.payload-forget-batch-plan/1' OR
+       jsonb_typeof(prepared->'anchor_payload_ids') IS DISTINCT FROM 'array' OR
+       preview->>'protocol' IS DISTINCT FROM 'forest.payload-forget-preview/1' OR
+       preview->>'selection_digest' !~ '^sha256:[a-f0-9]{64}$' OR
+       preview->>'deletion_epoch' !~ '^[0-9]+$' OR
+       preview->>'selected_count' !~ '^[0-9]+$' OR
+       jsonb_typeof(preview->'selected_payload_ids') IS DISTINCT FROM 'array' OR
+       jsonb_array_length(preview->'selected_payload_ids') > 100000 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_PREVIEW_INVALID',
+                'message','Forget batch preview is invalid','status',422));
+    END IF;
+    SELECT * INTO selection_row FROM __forest_module_schema__.forget_selections
+    WHERE bot_id=requested_bot AND selection_id=body->>'selection_id'
+      AND requested_by=body->>'requested_by';
+    IF selection_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_NOT_FOUND',
+                'message','Forget selection does not exist','status',404));
+    END IF;
+    IF after_value>=selection_row.member_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_EXHAUSTED',
+                'message','Forget selection has no remaining batch','status',409));
+    END IF;
+    last_value := LEAST(after_value+batch_size,selection_row.member_count);
+    member_count := last_value-after_value;
+    SELECT count(*),array_agg(DISTINCT m.anchor_payload_id ORDER BY m.anchor_payload_id),
+           'sha256:' || encode(sha256(convert_to(jsonb_agg(
+               jsonb_build_array(m.source_unit_id,m.source_revision,
+                   m.anchor_payload_id) ORDER BY m.ordinal)::text,'UTF8')),'hex'),
+           to_jsonb((array_agg(m.source_unit_id ORDER BY m.ordinal))[1:20])
+    INTO live_count,anchor_ids,root_digest,root_sample
+    FROM __forest_module_schema__.forget_selection_members m
+    JOIN __forest_module_schema__.source_units u
+      ON u.bot_id=m.bot_id AND u.source_unit_id=m.source_unit_id
+     AND u.source_revision=m.source_revision
+     AND u.author_payload_id=m.anchor_payload_id
+     AND u.eligibility_state<>'SUPPRESSED'
+    WHERE m.bot_id=requested_bot AND m.selection_id=selection_row.selection_id
+      AND m.ordinal>after_value AND m.ordinal<=last_value;
+    SELECT array_agg(value ORDER BY value) INTO selected_ids
+    FROM jsonb_array_elements_text(preview->'selected_payload_ids');
+    IF live_count<>member_count OR anchor_ids IS NULL OR
+       prepared->'anchor_payload_ids' IS DISTINCT FROM to_jsonb(anchor_ids) OR
+       selected_ids IS NULL OR
+       cardinality(selected_ids)<>(preview->>'selected_count')::integer OR
+       NOT (anchor_ids <@ selected_ids) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_CHANGED',
+                'message','Forget batch members or Payload closure changed',
+                'status',409));
+    END IF;
+    impact := __forest_module_schema__.memory_source_forget_impact(
+        requested_bot,selected_ids);
+    plan_value := jsonb_build_object(
+        'protocol','forest.memory-forget-batch-impact-plan/1',
+        'selection_id',selection_row.selection_id,
+        'member_digest',selection_row.member_digest,
+        'first_ordinal',after_value+1,'last_ordinal',last_value,
+        'batch_member_count',member_count,'root_member_digest',root_digest,
+        'batch_source_unit_sample',root_sample,
+        'deletion_epoch',(preview->>'deletion_epoch')::bigint,
+        'selection_digest',preview->>'selection_digest',
+        'selected_payload_count',(preview->>'selected_count')::integer)
+        || impact;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',plan_value || jsonb_build_object('plan_digest','sha256:' ||
+            encode(sha256(convert_to(plan_value::text,'UTF8')),'hex')));
+END;
+$$;
+
 CREATE FUNCTION memory_query_relations(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE

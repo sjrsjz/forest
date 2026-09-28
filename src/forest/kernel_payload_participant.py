@@ -64,8 +64,17 @@ class KernelPayloadUnitOfWorkParticipant:
         if name in {
             "payload.preview-forget-anchor-from-prior",
             "payload.forget-anchor-from-prior",
+            "payload.preview-forget-anchors-from-prior",
+            "payload.forget-anchors-from-prior",
         }:
-            preview = name == "payload.preview-forget-anchor-from-prior"
+            preview = name.startswith("payload.preview-forget-")
+            batch = name.endswith("anchors-from-prior")
+            expected_protocol = {
+                (False, False): "forest.payload-forget-anchor/1",
+                (False, True): "forest.payload-forget-anchor-preview/1",
+                (True, False): "forest.payload-forget-anchors/1",
+                (True, True): "forest.payload-forget-anchors-preview/1",
+            }[(batch, preview)]
             envelope = _object(
                 payload, {"protocol", "caller", "input", "prior"},
                 "PAYLOAD_UOW_INPUT_INVALID",
@@ -92,10 +101,7 @@ class KernelPayloadUnitOfWorkParticipant:
             if (
                 envelope["protocol"] != "forest.uow-step/1"
                 or any(not isinstance(value, str) or not value for value in caller.values())
-                or request["protocol"] != (
-                    "forest.payload-forget-anchor-preview/1"
-                    if preview else "forest.payload-forget-anchor/1"
-                )
+                or request["protocol"] != expected_protocol
                 or not isinstance(prior, dict)
                 or not isinstance(request["prior_step_id"], str)
                 or request["prior_step_id"] not in prior
@@ -109,43 +115,67 @@ class KernelPayloadUnitOfWorkParticipant:
                 raise ForestError(
                     "PAYLOAD_UOW_INPUT_INVALID", "Payload forget plan is invalid", 422
                 )
+            plan_fields = (
+                {"protocol", "anchor_payload_ids"} if batch else
+                {"protocol", "anchor_payload_id"}
+            )
             plan = _object(
-                prior[request["prior_step_id"]],
-                {"protocol", "anchor_payload_id"},
+                prior[request["prior_step_id"]], plan_fields,
                 "PAYLOAD_UOW_INPUT_INVALID",
             )
-            anchor_id = plan["anchor_payload_id"]
-            if (
-                plan["protocol"] != "forest.payload-forget-plan/1"
-                or not isinstance(anchor_id, str)
-                or not 1 <= len(anchor_id.encode("utf-8")) <= 256
-            ):
+            anchor_ids = (
+                plan["anchor_payload_ids"] if batch else [plan["anchor_payload_id"]]
+            )
+            expected_plan_protocol = (
+                "forest.payload-forget-batch-plan/1" if batch else
+                "forest.payload-forget-plan/1"
+            )
+            if (plan["protocol"] != expected_plan_protocol
+                or not isinstance(anchor_ids, list)
+                or not 1 <= len(anchor_ids) <= (64 if batch else 1)
+                or any(
+                    not isinstance(item, str) or
+                    not 1 <= len(item.encode("utf-8")) <= 256
+                    for item in anchor_ids
+                )
+                or len(set(anchor_ids)) != len(anchor_ids)):
                 raise ForestError(
                     "PAYLOAD_UOW_INPUT_INVALID", "Payload forget anchor is invalid", 422
                 )
-            sources = await self.service._sources_in(conn, anchor_id)
-            if len(sources) != 1 or sources[0].part_id != "*":
+            source_map = await self.service._sources_for_payloads_in(
+                conn, tuple(anchor_ids)
+            )
+            targets = []
+            for anchor_id in anchor_ids:
+                sources = source_map[anchor_id]
+                if len(sources) != 1 or sources[0].part_id != "*":
+                    raise ForestError(
+                        "PAYLOAD_FORGET_SOURCE_AMBIGUOUS",
+                        "Anchor Payload must identify exactly one root source",
+                        409,
+                    )
+                source = sources[0]
+                targets.append(SourceTarget(
+                    source_component_id=source.source_component_id,
+                    source_kind=source.source_kind,
+                    source_id=source.source_id,
+                    source_revision=source.source_revision,
+                ))
+            if len(set(targets)) != len(targets):
                 raise ForestError(
                     "PAYLOAD_FORGET_SOURCE_AMBIGUOUS",
-                    "Anchor Payload must identify exactly one root source",
+                    "Anchor Payloads must identify distinct root sources",
                     409,
                 )
-            source = sources[0]
-            target = SourceTarget(
-                source_component_id=source.source_component_id,
-                source_kind=source.source_kind,
-                source_id=source.source_id,
-                source_revision=source.source_revision,
-            )
             if preview:
                 result = await self.service.preview_forget_in(
-                    conn, source_targets=(target,)
+                    conn, source_targets=tuple(targets)
                 )
                 return {"protocol": "forest.payload-forget-preview/1", **result}
             receipt = await self.service.forget_in(
                 conn,
                 operation_id=request["operation_id"],
-                source_targets=(target,),
+                source_targets=tuple(targets),
                 expected_deletion_epoch=request.get("expected_deletion_epoch"),
                 expected_selection_digest=request.get("expected_selection_digest"),
             )

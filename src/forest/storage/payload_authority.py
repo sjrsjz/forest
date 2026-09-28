@@ -204,6 +204,33 @@ class KernelPayloadRepository:
             for row in rows
         )
 
+    async def _sources_for_payloads_in(
+        self, conn, payload_ids: tuple[str, ...]
+    ) -> dict[str, tuple[PayloadSource, ...]]:
+        """Read a bounded anchor set in one query for a forget UnitOfWork."""
+        rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT h.payload_id,i.* FROM {} h JOIN {} i "
+                    "ON i.bot_id=h.bot_id AND i.manifest_id=h.source_manifest_id "
+                    "WHERE h.bot_id=%s AND h.payload_id=ANY(%s) "
+                    "ORDER BY h.payload_id,i.item_index"
+                ).format(
+                    self._table("payload_headers"),
+                    self._table("source_manifest_items"),
+                ),
+                (self.store.bot_id, list(payload_ids)),
+            )
+        ).fetchall()
+        grouped: dict[str, list[PayloadSource]] = {key: [] for key in payload_ids}
+        for row in rows:
+            grouped[row["payload_id"]].append(
+                PayloadSource(
+                    **{field: row[field] for field in PayloadSource.__dataclass_fields__}
+                )
+            )
+        return {key: tuple(value) for key, value in grouped.items()}
+
     async def put_bytes_in(
         self,
         conn,

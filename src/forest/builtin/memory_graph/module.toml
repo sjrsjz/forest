@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.54.0"
+version = "1.55.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -61,6 +61,7 @@ requests = [
   "uow.execute:memory.capture-source",
   "uow.execute:memory.forget-source",
   "uow.execute:memory.preview-source-forget",
+  "uow.execute:memory.preview-forget-batch",
   "uow.execute:memory.bind-domain",
   "uow.execute:memory.prepare-document-facets",
   "uow.execute:memory.begin-query",
@@ -179,6 +180,14 @@ input_schema = "schemas/forget-preview-service-input.json"
 output_schema = "schemas/forget-preview-output.json"
 
 [[components.provides]]
+name = "memory.forget.batch.preview"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/forget-batch-preview-input.json"
+output_schema = "schemas/forget-batch-preview-output.json"
+
+[[components.provides]]
 name = "memory.profile.describe"
 contract = "2.0"
 semantics = "read"
@@ -256,9 +265,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.46.0"
+schema_version = "3.47.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "0f391b09b730a558bde66b1769889a4c63e6244e8c61e51569647725ba564fa4"
+baseline_sha256 = "0bbf4d86ba18c2b7fe4adc2cb7cb6b0e36e0197ffbe855ebbb86977005f29419"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -409,6 +418,13 @@ actor_field = "requested_by"
 default_limit = 50
 max_limit = 100
 timeout_s = 15
+
+[[components.management_queries]]
+id = "memory.forget.batch.preview"
+port = "memory.forget.batch.preview"
+required_role = "ADMIN"
+actor_field = "requested_by"
+timeout_s = 30
 
 [[components.management_queries]]
 id = "memory.relations.query"
@@ -604,6 +620,20 @@ contract = "1.0"
 function = "memory_preview_source_forget"
 input_schema = "schemas/forget-preview-envelope.json"
 output_schema = "schemas/forget-preview-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.prepare-forget-batch"
+contract = "1.0"
+function = "memory_prepare_forget_batch"
+input_schema = "schemas/forget-batch-prepare-envelope.json"
+output_schema = "schemas/forget-batch-prepare-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.preview-forget-batch-record"
+contract = "1.0"
+function = "memory_preview_forget_batch"
+input_schema = "schemas/forget-batch-preview-envelope.json"
+output_schema = "schemas/forget-batch-preview-output.json"
 
 [[components.unit_of_work_participants]]
 name = "memory.apply-source-forget"
@@ -908,6 +938,18 @@ steps = [
   { id = "prepare", component_id = "memory.graph", participant = "memory.prepare-source-forget", input_path = "/prepare" },
   { id = "payload", component_id = "kernel.payload", participant = "payload.preview-forget-anchor-from-prior", input_path = "/payload" },
   { id = "memory", component_id = "memory.graph", participant = "memory.preview-source-forget-record", input_path = "/memory" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.preview-forget-batch"
+contract = "1.0"
+input_schema = "schemas/forget-batch-preview-plan-input.json"
+output_schema = "schemas/forget-batch-preview-output.json"
+timeout_s = 30
+steps = [
+  { id = "prepare", component_id = "memory.graph", participant = "memory.prepare-forget-batch", input_path = "/prepare" },
+  { id = "payload", component_id = "kernel.payload", participant = "payload.preview-forget-anchors-from-prior", input_path = "/payload" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.preview-forget-batch-record", input_path = "/memory" }
 ]
 
 [[components.unit_of_work_participants]]

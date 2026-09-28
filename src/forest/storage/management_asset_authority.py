@@ -296,8 +296,8 @@ class ManagementAssetAuthority:
         finalized = await (await conn.execute(
             sql.SQL(
                 "UPDATE {} SET state='FINALIZED',payload_id=%s,width=%s,height=%s,"
-                "finalized_at=clock_timestamp(),"
-                "payload_expires_at=clock_timestamp()+interval '30 minutes' "
+                "finalized_at=statement_timestamp(),"
+                "payload_expires_at=statement_timestamp()+interval '30 minutes' "
                 "WHERE bot_id=%s AND upload_id=%s RETURNING *"
             ).format(self._table("management_asset_uploads")),
             (ref.payload_id, width, height, self.store.bot_id, upload_id),

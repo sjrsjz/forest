@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "selection_id", "member_digest", "first_ordinal",
+    "last_ordinal", "batch_member_count", "root_member_digest",
+    "batch_source_unit_sample", "deletion_epoch", "selection_digest",
+    "selected_payload_count", "memory_impact_digest", "source_unit_count",
+    "vector_deletion_count", "relation_retraction_count",
+    "association_journal_count", "source_unit_sample", "plan_digest"],
+  "properties": {
+    "protocol": {"const": "forest.memory-forget-batch-impact-plan/1"},
+    "selection_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "member_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "first_ordinal": {"type": "integer", "minimum": 1, "maximum": 1000000},
+    "last_ordinal": {"type": "integer", "minimum": 1, "maximum": 1000000},
+    "batch_member_count": {"type": "integer", "minimum": 1, "maximum": 64},
+    "root_member_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "batch_source_unit_sample": {"type": "array", "maxItems": 20,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+    "deletion_epoch": {"type": "integer", "minimum": 0},
+    "selection_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "selected_payload_count": {"type": "integer", "minimum": 1, "maximum": 100000},
+    "memory_impact_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "source_unit_count": {"type": "integer", "minimum": 1},
+    "vector_deletion_count": {"type": "integer", "minimum": 0},
+    "relation_retraction_count": {"type": "integer", "minimum": 0},
+    "association_journal_count": {"type": "integer", "minimum": 0},
+    "source_unit_sample": {"type": "array", "maxItems": 20,
+      "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+    "plan_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  }
+}
