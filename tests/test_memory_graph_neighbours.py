@@ -187,14 +187,15 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
 
         async def ready_facet(name, source, query=None):
             await execute(
-                "INSERT INTO {}.embedding_facets (bot_id,facet_id,purpose,query_id,source_unit_id,"
+                "INSERT INTO {}.embedding_facets (bot_id,facet_id,purpose,query_id,input_kind,"
+                "input_ref,input_revision,source_unit_id,"
                 "source_revision,part_id,modality,selector_start_char,selector_end_char,"
                 "input_payload_id,input_payload_digest,facet_content_digest,input_media_type,"
                 "input_byte_length,space_id,accepted_deletion_epoch,state,index_ref_id,vector_digest,"
                 "result_payload_id,result_payload_digest,published_at) VALUES "
-                "(%s,%s,%s,%s,%s,1,'text','TEXT',0,1,%s,%s,%s,'text/plain',1,'space/test',0,"
+                "(%s,%s,%s,%s,'SOURCE_UNIT',%s,1,%s,1,'text','TEXT',0,1,%s,%s,%s,'text/plain',1,'space/test',0,"
                 "'READY',%s,%s,%s,%s,clock_timestamp())",
-                (store.bot_id, name, "QUERY" if query else "DOCUMENT", query, source,
+                (store.bot_id, name, "QUERY" if query else "DOCUMENT", query, source, source,
                  "input/" + name, digest, digest, name, digest, "result/" + name, digest),
             )
 
@@ -219,11 +220,12 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         assert (await progress("query/two"))["phase"] == "NEED_MATCHING"
         await register_query("query/status")
         await execute(
-            "INSERT INTO {}.embedding_facets (bot_id,facet_id,purpose,query_id,source_unit_id,"
+            "INSERT INTO {}.embedding_facets (bot_id,facet_id,purpose,query_id,input_kind,"
+            "input_ref,input_revision,source_unit_id,"
             "source_revision,part_id,modality,selector_start_char,selector_end_char,"
             "input_payload_id,input_payload_digest,facet_content_digest,input_media_type,"
             "input_byte_length,space_id,accepted_deletion_epoch) VALUES "
-            "(%s,'query/status-facet','QUERY','query/status','query-input',1,'text','TEXT',0,1,"
+            "(%s,'query/status-facet','QUERY','query/status','SOURCE_UNIT','query-input',1,'query-input',1,'text','TEXT',0,1,"
             "'input/status',%s,%s,'text/plain',1,'space/test',0)",
             (store.bot_id,digest,digest),
         )

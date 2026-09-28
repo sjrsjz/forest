@@ -658,6 +658,71 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
     second = await browse("generation/trial", first["value"]["next_part_index"])
     assert [part["part_kind"] for part in second["value"]["parts"]] == ["IMAGE"]
     assert second["value"]["has_more"] is False
+    for index, part in enumerate((first["value"]["parts"][0], second["value"]["parts"][0])):
+        facet = {
+            "facet_id": f"trial-facet/{index}", "part_id": part["part_id"],
+            "modality": part["part_kind"],
+            "selector_start_char": 0 if index == 0 else None,
+            "selector_end_char": 4 if index == 0 else None,
+            "input_payload": part["payload"], "facet_content_digest": digest,
+            "input_byte_length": 4,
+        }
+        body = {
+            "protocol": "forest.memory-query-part-facets/1",
+            "query_id": "query/trial", "input_identity": part["input_identity"],
+            "space_id": digest, "batch_index": index,
+            "part_id": part["part_id"], "facets": [facet],
+        }
+        context = {
+            "bot_id": store.bot_id, "generation_id": "generation/trial",
+            "operation_id": f"trial-facets/{index}",
+            "participant_input_digest": digest_json(body),
+        }
+        envelope = {"protocol": "forest.uow-step/1",
+                    "caller": {"component_id": "memory.graph"}, "input": body}
+        async with store.pool.connection() as conn:
+            result = (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_prepare_facets(%s,%s) AS result"
+            ).format(namespace), (Jsonb(context), Jsonb(envelope)))).fetchone())["result"]
+        assert result["ok"], result
+        Draft202012Validator(package.snapshot.schema(
+            "schemas/prepare-query-part-facets-output.json"
+        )).validate(result["value"])
+        assert "source_unit_id" not in result["value"]
+    async with store.pool.connection() as conn:
+        stale_receipt = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_prepare_facets(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({**context, "generation_id": "generation/replaced"}),
+            Jsonb(envelope),
+        ))).fetchone())["result"]
+    assert stale_receipt["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
+    async with store.pool.connection() as conn:
+        rows = (await (await conn.execute(sql.SQL(
+            "SELECT input_kind,input_ref,input_revision,source_unit_id,trial_query_id "
+            "FROM {}.embedding_facets WHERE bot_id=%s AND query_id='query/trial' "
+            "ORDER BY facet_id"
+        ).format(namespace), (store.bot_id,))).fetchall())
+    assert len(rows) == 2
+    assert all(row["input_kind"] == "ADMIN_TRIAL" and row["input_ref"] == "query/trial"
+               and row["input_revision"] == 1 and row["source_unit_id"] is None
+               and row["trial_query_id"] == "query/trial" for row in rows)
+    complete = {
+        "protocol": "forest.uow-step/1", "caller": {"component_id": "memory.graph"},
+        "input": {"protocol": "forest.memory-query-complete/1",
+                  "query_id": "query/trial", "facet_count": 2,
+                  "deletion_epoch_step_id": "payload_epoch"},
+        "prior": {"payload_epoch": {"protocol": "forest.payload-epoch/1",
+                                    "deletion_epoch": 0}},
+    }
+    async with store.pool.connection() as conn:
+        result = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_complete_query_facets(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id, "generation_id": "generation/trial"}),
+            Jsonb(complete),
+        ))).fetchone())["result"]
+    assert result["ok"] and result["value"]["facet_count"] == 2, result
     stale = await browse("generation/replaced")
     assert stale["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
     async with store.pool.connection() as conn:

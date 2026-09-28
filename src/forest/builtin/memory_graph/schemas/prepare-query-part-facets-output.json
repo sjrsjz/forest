@@ -4,13 +4,24 @@
   "additionalProperties": false,
   "required": [
     "protocol",
-    "source_unit_id",
+    "query_id",
+    "input_identity",
     "batch_index",
     "facet_count"
   ],
   "properties": {
     "protocol": {
       "const": "forest.memory-facets-prepared/1"
+    },
+    "query_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "input_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "ref", "revision"],
+      "properties": {
+        "kind": {"enum": ["SOURCE_UNIT", "ADMIN_TRIAL"]},
+        "ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "revision": {"type": "integer", "minimum": 1}
+      }
     },
     "source_unit_id": {
       "type": "string",
@@ -27,5 +38,15 @@
       "minimum": 0,
       "maximum": 64
     }
-  }
+  },
+  "oneOf": [
+    {
+      "properties": {"input_identity": {"properties": {"kind": {"const": "SOURCE_UNIT"}}}},
+      "required": ["source_unit_id"]
+    },
+    {
+      "properties": {"input_identity": {"properties": {"kind": {"const": "ADMIN_TRIAL"}}}},
+      "not": {"required": ["source_unit_id"]}
+    }
+  ]
 }

@@ -4,7 +4,6 @@
   "additionalProperties": false,
   "required": [
     "protocol",
-    "source_unit_id",
     "batch_index",
     "facet_count"
   ],
@@ -17,6 +16,16 @@
       "minLength": 1,
       "maxLength": 256
     },
+    "query_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "input_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "ref", "revision"],
+      "properties": {
+        "kind": {"enum": ["SOURCE_UNIT", "ADMIN_TRIAL"]},
+        "ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "revision": {"type": "integer", "minimum": 1}
+      }
+    },
     "batch_index": {
       "type": "integer",
       "minimum": 0,
@@ -27,5 +36,13 @@
       "minimum": 0,
       "maximum": 64
     }
-  }
+  },
+  "oneOf": [
+    {"required": ["source_unit_id"], "properties": {
+      "input_identity": {"properties": {"kind": {"const": "SOURCE_UNIT"}}}
+    }},
+    {"required": ["query_id", "input_identity"],
+     "properties": {"input_identity": {"properties": {"kind": {"const": "ADMIN_TRIAL"}}}},
+     "not": {"required": ["source_unit_id"]}}
+  ]
 }

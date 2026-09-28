@@ -195,15 +195,15 @@ Memory 来源管理查询新增群来源集合、精确来源、平台/Realm/群
 
 Kernel Payload 的遗忘基础路径已将多来源根选择改为一次 `unnest` 集合连接，将来源目标与闭包 Payload 记录改为集合插入；删除屏障、完整闭包摘要、100000 Payload 上限及重放围栏不变。真实 PostgreSQL 的多来源共享派生载荷验证表明，同一派生 Payload 只进入闭包一次，未选来源仍保留；原有单来源、预览变更和双锁顺序并发测试均通过。这是大范围遗忘选择器需要的下层基础，不等于已交付 Memory 私有选择目录、分批计划或管理 UI。
 
-管理召回试验的目标契约已纠正为“启动 action + 状态/结果 query + 独立取消 action”。当前代码只接受已接纳的群来源构造 `memory_query_parts`，尚无独立的管理员临时查询输入、通用管理图片资产传输、试验 owned-work 或结果查询；不能把现有 Agent 召回包装为管理试验，也不能借群消息表的外键伪造来源。实现必须先抽出两种输入汇合的召回协议，再使试验共用现有嵌入、索引、图扩散和证据物化链路。
+管理召回试验的目标契约为“启动 action + 状态/结果 query + 独立取消 action”。试验已有独立查询身份和私有临时 part 表；通用管理图片资产传输、启动/取消 action、试验 owned-work 与结果查询尚无实现。不能把现有 Agent 召回包装为管理试验，也不能借群消息表的外键伪造来源。后续须使试验共用嵌入、索引、图扩散和证据物化链路。
 
-正式召回的 `memory.read-query-parts` 现显式返回 `SOURCE_UNIT` 输入身份，查询 facet 的稳定 ID 将输入种类并入摘要，且校验来源身份与已接纳 part 一致。相同的纯 facet 切分函数已能接受 `ADMIN_TRIAL` 身份而不要求伪造 `source_unit_id`；这只是输入算法边界，试验的临时资产、私有存储、管理 action、后续 SQL 阶段和结果 UI 尚未接通，不能表述为召回试验可用。
+正式召回的 `memory.read-query-parts` 显式返回 `SOURCE_UNIT` 输入身份，查询 facet 的稳定 ID 将输入种类并入摘要，且校验来源身份与已接纳 part 一致。相同的纯 facet 切分函数接受 `ADMIN_TRIAL`，后者还有独立私有存储与 SQL 准备分支；试验的受管资产、管理 action、后续执行与结果 UI 尚未接通，不能表述为召回试验可用。
 
 Memory 管理关系新增 `memory.relations.neighbourhood` 只读端口：从指定权威节点按固定 PostgreSQL 语句快照展开 1 至 3 跳，节点与边各至多 32 个，最多读取 64 页并有 8 秒截止；返回前驱、跳数、关系类型、方向、创建来源及逐项真实来源证据，遇预算给出明确截断原因。模块 UI 可设置预算并浏览节点与边。它复用一跳关系的当前资格和删除过滤，仍不代表可重建发布图投影、人工审核或图版本状态；管理召回试验和大范围遗忘选择器仍未完成。
 
-查询 part 的读取与 facet 准备契约现按 `SOURCE_UNIT` / `ADMIN_TRIAL` 输入身份分支：试验 part 不要求也不允许携带群来源单元、修订或 occurrence 字段，正式来源 part 则必须携带；Worker 将身份传到准备事务，Memory SQL 核对正式来源身份与已登记来源字段一致。当前 facet 准备写入仍只接纳 `SOURCE_UNIT`，因为试验临时资产验证、写入分支与 owned-work 尚未实现；管理试验未开放，也不借此绕过来源外键。
+查询 part 的读取与 facet 准备契约按 `SOURCE_UNIT` / `ADMIN_TRIAL` 输入身份分支：试验 part 不允许携带群来源单元、修订或 occurrence 字段，正式来源 part 必须携带；Worker 将身份传到准备事务。`embedding_facets` 以身份判别式分别约束真实来源 part 和试验临时 part，试验准备事务校验 Bot、Generation、有效期、修订、有序 part 与 PayloadRef，查询准备完结按相应 part 表计数；PostgreSQL 已验证图文试验 facet 的登记和完结。准备后的试验 facet 仍未进入嵌入 claim、向量发布及召回工作流，因此管理试验尚不可用。
 
-Memory 查询根现在有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 已有独立的表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取能返回无群来源字段的试验输入，并按 Bot、Generation 和到期时间拒绝旧输入。此阶段仅完成可安装的数据模型与私有读取，尚无管理启动 action、受管临时资产接纳、试验 owned-work、结果查询或 TTL 清理，不能声称试验可运行。
+Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。管理启动 action、受管临时资产接纳、试验 owned-work、结果查询和 TTL 清理仍未完成。
 
 ## 8. 下一切换顺序
 
