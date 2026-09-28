@@ -1625,6 +1625,12 @@ class PackageGenerationAdapter:
         authorization=None,
         authorization_guard=None,
     ) -> Any:
+        if authorization is None or not callable(authorization_guard):
+            raise ForestError(
+                "WEB_AUTHORITY_TICKET_REQUIRED",
+                "Management action requires a transactional Web authority guard",
+                403,
+            )
         if declaration not in self.component.get("domain_commands", ()):
             raise ForestError(
                 "MODULE_MANAGEMENT_BINDING_INVALID",
@@ -1646,8 +1652,6 @@ class PackageGenerationAdapter:
         scope, parent_call_id = self._management_scope(operation_id)
 
         async def before_write(conn) -> None:
-            if authorization_guard is None:
-                return
             await authorization_guard(
                 conn,
                 ticket=authorization,

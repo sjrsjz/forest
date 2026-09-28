@@ -241,4 +241,6 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 
 旧 `FOREST_MANAGEMENT_TOKEN` 单 Bot HTTP 入口已删除；该入口使用另一套令牌 API，无法与现行部署会话控制台及包 UI 协议正确配合。`CleanManagementGateway` 现必须持有部署 Web authority ticket signer，Bot scope 由部署控制台提供；单 Bot 启动函数只管理 Bot 生命周期和状态输出。真实 Edge 会话下的 5 项部署管理验收通过，单 Bot 主机本地 5 项测试通过、5 项需数据库环境而跳过；此清理不替代真实数据库管理试验。
 
+包管理动作的最后入口也已收紧：`PackageGenerationAdapter.invoke_management_action` 必须同时收到 Web authority ticket 与事务内授权 guard，缺失即拒绝；声明 `actor_field` 的动作只从非空 `web_subject_ref` 注入审计主体，不再使用 `management:shared-token`。隔离 PostgreSQL 下的 Memory 管理试验、Job Scheduler 动作和完整 Bot 宿主遗忘/重启链路已通过；这些测试使用显式测试票据和 guard，生产路径仍由部署网关签发、消费真实票据。大范围遗忘选择器和长期压力验收尚未完成。
+
 Memory 单次遗忘的执行阶段已将来源锁定、抑制记录、资格/观察更新、向量删除屏障、facet 和准备任务收敛改为有界集合写入，保留 Payload 删除纪元、固定影响计划、幂等操作回执和关系撤销。私有 PostgreSQL 上 19 项 Memory 包回归通过；修改后真实宿主遗忘、向量删除故障、热替换及重启链路通过。此改动只是大范围遗忘的写入基础，尚未交付持久选择目录、分批计划或批量管理 UI。

@@ -1571,6 +1571,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 operation_id="web:memory-forget-stale-queued",
                 payload={"source_unit_id": forget_input["source_unit_id"],
                          "plan": stale_plan},
+                authorization=SimpleNamespace(web_subject_ref="subject/host-admin"),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
             )
             async with asyncio.timeout(20):
                 while True:

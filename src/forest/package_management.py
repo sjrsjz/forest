@@ -190,9 +190,14 @@ class PackageManagementContract(CleanModuleConfigurationContract):
             )
         command_payload = dict(payload)
         if actor_field is not None:
-            command_payload[actor_field] = getattr(
-                authorization, "web_subject_ref", "management:shared-token"
-            )
+            actor = getattr(authorization, "web_subject_ref", None)
+            if not isinstance(actor, str) or not actor:
+                raise ForestError(
+                    "WEB_AUTHORITY_TICKET_REQUIRED",
+                    "Actor-bound action requires Web authority",
+                    403,
+                )
+            command_payload[actor_field] = actor
         result = await self.adapter.invoke_management_action(
             port,
             command_payload,

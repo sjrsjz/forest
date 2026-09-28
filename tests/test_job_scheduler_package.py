@@ -60,6 +60,8 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
                 "source_conversation_ref": None,
                 "input": {},
             },
+            authorization=SimpleNamespace(web_subject_ref="test-admin"),
+            authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
         )
         for _ in range(200):
             item = await runtime.management_contract.query(
@@ -79,7 +81,7 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
             if task.done() and not task.cancelled()
         ]
         assert item["error_code"] is None, item["error_code"]
-        assert item["requested_by"] == "management:shared-token"
+        assert item["requested_by"] == "test-admin"
         assert item["state"] == "SUCCEEDED", (
             item,
             runtime.failure,

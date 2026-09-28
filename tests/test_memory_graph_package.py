@@ -19,8 +19,8 @@ from forest.errors import ForestError
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
-from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.management_asset_authority import ManagementAssetAuthority
+from forest.storage.module_configuration import ModuleConfigurationRepository
 
 
 def _trial_owner_id(query_id: str, part_id: str) -> str:
@@ -633,6 +633,8 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
         web_actor = SimpleNamespace(
             web_subject_ref="admin-1", target_generation_id=generation_id,
         )
+        async def accept_fixture_ticket(_conn, *, ticket, **_kwargs):
+            assert ticket is not None
         assets = ManagementAssetAuthority(kernel.payload)
 
         async def uploaded(part_id, upload_id, content):
@@ -677,7 +679,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
         with pytest.raises(ForestError) as rejected:
             await instance.management_contract.action(
                 "memory.trial.start", operation_id="web:trial-invalid", payload=invalid,
-                authorization=web_actor,
+                authorization=web_actor, authorization_guard=accept_fixture_ticket,
             )
         assert rejected.value.code == "PAYLOAD_IDENTITY_CONFLICT"
         wrong_length = {**body, "parts": [{**body["parts"][0], "byte_length": 10}]}
@@ -685,7 +687,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
             await instance.management_contract.action(
                 "memory.trial.start", operation_id="web:trial-wrong-length",
                 payload=wrong_length,
-                authorization=web_actor,
+                authorization=web_actor, authorization_guard=accept_fixture_ticket,
             )
         assert rejected.value.code == "DOMAIN_PAYLOAD_METADATA_CONFLICT"
         with pytest.raises(ForestError) as rejected:
@@ -693,7 +695,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
                 "memory.trial.start", operation_id="web:trial-no-asset-authority",
                 payload=body,
             )
-        assert rejected.value.code == "MANAGEMENT_ASSET_AUTHORITY_REQUIRED"
+        assert rejected.value.code == "WEB_AUTHORITY_TICKET_REQUIRED"
         with pytest.raises(ForestError) as rejected:
             await instance.management_contract.action(
                 "memory.trial.start", operation_id="web:trial-other-actor",
@@ -701,16 +703,17 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
                 authorization=SimpleNamespace(
                     web_subject_ref="admin-2", target_generation_id=generation_id,
                 ),
+                authorization_guard=accept_fixture_ticket,
             )
         assert rejected.value.code == "MANAGEMENT_ASSET_IDENTITY_CONFLICT"
         started = await instance.management_contract.action(
             "memory.trial.start", operation_id="web:trial-valid", payload=body,
-            authorization=web_actor,
+            authorization=web_actor, authorization_guard=accept_fixture_ticket,
         )
         assert started.value["query_id"] == "query/authority"
         assert await instance.management_contract.action(
             "memory.trial.start", operation_id="web:trial-valid", payload=body,
-            authorization=web_actor,
+            authorization=web_actor, authorization_guard=accept_fixture_ticket,
         ) == started
         async with store.pool.connection() as conn:
             actor = (await (await conn.execute(sql.SQL(
@@ -726,7 +729,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
         cancelled = await instance.management_contract.action(
             "memory.trial.cancel", operation_id="web:trial-cancel",
             payload={"query_id": "query/authority"},
-            authorization=web_actor,
+            authorization=web_actor, authorization_guard=accept_fixture_ticket,
         )
         assert cancelled.value["query_id"] == "query/authority"
     finally:

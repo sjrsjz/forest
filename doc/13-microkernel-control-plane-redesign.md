@@ -352,7 +352,7 @@ ComponentJob 的兼容接管要求相同 `handler_id`、输入 schema digest 和
 
 可安装包通过 manifest 的 `management_queries` 将查询绑定到同包 Domain Query 或声明为 `read` 的服务，`management_actions` 则绑定到同包 Domain Command；宿主不得按 `component_id` 挂业务 handler。只读服务适合需要跨模块 UnitOfWork 取得一致快照的预览，不能把业务写入伪装成 Query。每项声明冻结公开 operation ID、端口、输入/输出 schema、分页上限或优先级；Action 可用 JSON Pointer 声明授权计划投影。管理网关从当前 Generation 的 management contract 枚举操作；Action 在一次 Bot 数据库事务内完成 CONTROL admission 栅栏、Web authority ticket/策略复核、审计及包 Command。跨模块业务动作由已授权 Command 原子登记模块自有持久工作，再由该包的 owned-work 在执行事务内重验计划和资源屏障。包替换后旧 contract、旧 UI 与旧端口同时失效，不得由宿主保留可继续写旧 schema 的管理兼容层。
 
-业务命令若需要记录操作者，manifest 用 `actor_field` 声明一个命令输入中的必填字符串字段。该字段从公开 Web 输入 schema 中移除，浏览器提交同名字段会被拒绝；management contract 在授权完成后从 ticket 注入 `web_subject_ref`，共享管理令牌路径注入固定主体 `management:shared-token`。授权票据仍绑定浏览器实际提交正文的摘要，注入后的完整命令才交给包 Domain Command。这样呈现代码不能伪造审计主体，包也不需要认识 HTTP 会话。
+业务命令若需要记录操作者，manifest 用 `actor_field` 声明一个命令输入中的必填字符串字段。该字段从公开 Web 输入 schema 中移除，浏览器提交同名字段会被拒绝；management contract 必须从部署 Web authority ticket 注入非空 `web_subject_ref`，不存在共享令牌的伪造主体。授权票据仍绑定浏览器实际提交正文的摘要，注入后的完整命令才交给包 Domain Command。包运行时对每个管理动作要求 ticket 和事务内授权 guard；缺失任一项即拒绝，guard 在 Command 写入同一事务中核验 ticket、Bot scope、Generation、操作与正文摘要。这样呈现代码不能伪造审计主体，包也不需要认识 HTTP 会话。
 
 Memory 模块至少提供可扩展的 source/graph/retrieval 视图；Agent 模块提供 session/run/model-turn/tool-call 视图；Adapter 提供连接和协议事件；Scheduler 提供作业与 lease。控制台壳仅呈现模块给出的视图目录和通用状态，不为这些类型写专用顶层页面。
 
