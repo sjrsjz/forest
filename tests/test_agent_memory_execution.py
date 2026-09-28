@@ -21,6 +21,7 @@ class MemoryServices:
         self.deadline = deadline
         self.capture_pending = False
         self.state = "PENDING"
+        self.registered = False
 
     async def call(self, name, body, **_kwargs):
         self.calls.append((name, body))
@@ -30,8 +31,11 @@ class MemoryServices:
             return {**body, "protocol": "forest.memory-query/1", "space_id": "space",
                     "query_mode": "TEXT", "part_count": 1}
         if name == "memory.query.request":
+            self.registered = True
             return {**body, "protocol": "forest.memory-recall-requested/1"}
         if name == "memory.query.work-status":
+            if not self.registered:
+                raise ForestError("MEMORY_RECALL_NOT_REQUESTED", "not requested", 404)
             return {"query_id": body["query_id"], "deadline_at": self.deadline,
                     "state": self.state, "evidence_ref": {"payload_id": "evidence"}
                     if self.state == "READY" else None,
@@ -70,7 +74,9 @@ async def test_recall_waits_for_capture_then_replays_one_frozen_query():
     services.capture_pending = True
     waiting = await agent._recall(durable, 3)
     assert waiting[0] == "PENDING"
-    assert [name for name, _ in services.calls] == ["memory.query.begin"]
+    assert [name for name, _ in services.calls] == [
+        "memory.query.work-status", "memory.query.begin"
+    ]
     services.capture_pending = False
     first = await agent._recall(durable, 3)
     assert first == ("PENDING", waiting[1], None)
@@ -78,8 +84,7 @@ async def test_recall_waits_for_capture_then_replays_one_frozen_query():
     ready = await agent._recall(durable, 3)
     assert ready == ("READY", waiting[1], {"payload_id": "evidence"})
     requested = [body for name, body in services.calls if name == "memory.query.request"]
-    assert len(requested) == 2
-    assert requested[0] == requested[1]
+    assert len(requested) == 1
     assert requested[0]["deadline_at"] == frozen_deadline
     assert all(body["input_batch_ref"] == "batch-new" for name, body in services.calls
                if name == "memory.query.begin")

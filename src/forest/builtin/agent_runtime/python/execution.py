@@ -298,50 +298,61 @@ class AgentExecution:
             )
         batch = inputs[0]
         query_id = self._memory_query_id(run, step_seq)
-        try:
-            begun = await self.ctx.services.call(
-                "memory.query.begin",
-                {
-                    "query_id": query_id,
-                    "conversation_ref": run["conversation_ref"],
-                    "input_batch_ref": batch["input_batch_ref"],
-                    "context_revision": batch["context_revision"],
-                },
-                operation_id=self.ctx.operations.stable(f"memory-begin:{query_id}"),
-                timeout=30,
-            )
-        except ForestError as exc:
-            if exc.code == "MEMORY_QUERY_CAPTURE_PENDING":
-                return "PENDING", query_id, None
-            raise
-        if (begun["query_id"] != query_id
-                or begun["input_batch_ref"] != batch["input_batch_ref"]
-                or begun["context_revision"] != batch["context_revision"]):
-            raise ForestError(
-                "AGENT_MEMORY_FENCE_MISMATCH", "Memory query differs from Agent input", 409
-            )
         # The Run start gives every model step a non-extending recall window.
         # Memory accepts new work only within ten minutes of its first request.
         recall_deadline = min(
             _deadline(run["absolute_deadline"]),
             _deadline(run["created_at"]) + timedelta(minutes=9),
         )
-        requested = await self.ctx.services.call(
-            "memory.query.request",
-            {"query_id": query_id, "deadline_at": recall_deadline.isoformat()},
-            operation_id=self.ctx.operations.stable(f"memory-request:{query_id}"),
-            timeout=30,
-        )
-        if requested["query_id"] != query_id or _deadline(requested["deadline_at"]) != recall_deadline:
-            raise ForestError(
-                "AGENT_MEMORY_FENCE_MISMATCH", "Memory work deadline differs from Agent input", 409
+        async def observe_work():
+            return await self.ctx.services.call(
+                "memory.query.work-status",
+                {"query_id": query_id},
+                operation_id=self.ctx.operations.stable(
+                    f"memory-status:{query_id}:{uuid4().hex}"
+                ),
+                timeout=30,
             )
-        status = await self.ctx.services.call(
-            "memory.query.work-status",
-            {"query_id": query_id},
-            operation_id=self.ctx.operations.stable(f"memory-status:{query_id}:{uuid4().hex}"),
-            timeout=30,
-        )
+
+        try:
+            status = await observe_work()
+        except ForestError as exc:
+            if exc.code != "MEMORY_RECALL_NOT_REQUESTED":
+                raise
+            try:
+                begun = await self.ctx.services.call(
+                    "memory.query.begin",
+                    {
+                        "query_id": query_id,
+                        "conversation_ref": run["conversation_ref"],
+                        "input_batch_ref": batch["input_batch_ref"],
+                        "context_revision": batch["context_revision"],
+                    },
+                    operation_id=self.ctx.operations.stable(f"memory-begin:{query_id}"),
+                    timeout=30,
+                )
+            except ForestError as begin_error:
+                if begin_error.code == "MEMORY_QUERY_CAPTURE_PENDING":
+                    return "PENDING", query_id, None
+                raise
+            if (begun["query_id"] != query_id
+                    or begun["input_batch_ref"] != batch["input_batch_ref"]
+                    or begun["context_revision"] != batch["context_revision"]):
+                raise ForestError(
+                    "AGENT_MEMORY_FENCE_MISMATCH", "Memory query differs from Agent input", 409
+                )
+            requested = await self.ctx.services.call(
+                "memory.query.request",
+                {"query_id": query_id, "deadline_at": recall_deadline.isoformat()},
+                operation_id=self.ctx.operations.stable(f"memory-request:{query_id}"),
+                timeout=30,
+            )
+            if (requested["query_id"] != query_id
+                    or _deadline(requested["deadline_at"]) != recall_deadline):
+                raise ForestError(
+                    "AGENT_MEMORY_FENCE_MISMATCH", "Memory work deadline differs from Agent input", 409
+                )
+            status = await observe_work()
         if status["query_id"] != query_id or _deadline(status["deadline_at"]) != recall_deadline:
             raise ForestError(
                 "AGENT_MEMORY_FENCE_MISMATCH", "Memory work belongs to another query", 409

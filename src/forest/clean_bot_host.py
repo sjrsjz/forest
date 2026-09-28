@@ -599,8 +599,15 @@ class CleanBotHost:
                 "provider.profile.bind": "1.0",
                 "provider.model.dispatch": "2.0",
                 "conversation.context.snapshot": "2.0",
+                "media.context.resolve": "1.0",
+                "memory.query.begin": "1.0",
+                "memory.query.request": "1.0",
+                "memory.query.work-status": "1.0",
+                "memory.query.cancel": "1.0",
             },
-            startup_components=("provider.chat-completions",),
+            startup_components=(
+                "provider.chat-completions", "media.capture", "memory.graph",
+            ),
             additional_grants=(
                 CapabilityGrant("provider.invoke", "bot", self.store.bot_id, delegable=True),
             ),

@@ -56,3 +56,5 @@ Agent model.input、model.projection 与 model.wire 必须继承 Context、Prese
 ## 5. 验收证据
 
 需要在真实 PostgreSQL 与实际隔离 Worker 路径验证：准备中断恢复、部分 ANN 回执恢复、零 facet/零结果、UNKNOWN 不重发、截止失败、并发登记合流、热重载后同 query 恢复、删除后 READY 失效，以及同群等待不并发、跨群不互相阻塞。Agent 验收还必须检查实际模型请求包含正确来源证据，纯文本请求没有图片内容，协议修复不启动新召回。阶段查询测试通过不能代替这些端到端验收。
+
+已有隔离 PostgreSQL 验收通过伪 OneBot 群 @ 入站、真实 Scheduler/Agent/Memory 隔离 Worker、伪嵌入和向量索引、伪模型调用串起一轮请求，检查证据进入 Provider 请求体并保留群、主干和作者来源，纯文本 wire 不含图片。伪模型返回 UNKNOWN，未向真实 QQ 发送消息。真实 QQ、跨群并发和图片请求的整链验收仍待执行。

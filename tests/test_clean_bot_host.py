@@ -4,8 +4,10 @@ import asyncio
 import hashlib
 import json
 import os
+import sys
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -18,9 +20,13 @@ from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.embeddings import EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
+from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
 from forest.packages import PackageCatalog
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import ModuleLifecycleState
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
+from model_projection import prepare_model_request
 
 
 class FakeModelClient:
@@ -68,6 +74,18 @@ class FakeEmbeddingClient(FakeModelClient):
             ),
             usage_json='{"total_tokens":1}',
             http_status=200,
+        )
+
+
+class RecordingUnknownModelClient(FakeModelClient):
+    requests = []
+
+    async def dispatch(self, prepared, *, permitcheck):
+        await permitcheck(prepared)
+        type(self).requests.append(prepared)
+        return ModelResult(
+            "UNKNOWN", prepared.request_id, prepared.transport_attempt_id,
+            prepared.payload_digest, error_code="TEST_MODEL_RESULT_UNKNOWN",
         )
 
 
@@ -1332,6 +1350,65 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert unit_evidence["parts"][2]["text"] == "after"
             assert unit_evidence["parts"][1]["media_ref"]["payload_id"] == first_parts["parts"][1]["payload"]["payload_id"]
             assert not document["content_truncated"]
+            current_group = "onebot:group:933179609"
+            model_view = {
+                "bot_id": settings.bot_id, "run_id": "run/host-recall-projection",
+                "logical_step_id": "step/host-recall-projection",
+                "input_revision": 1, "context_revision": recall_revision,
+                "context_view_revision": recall_revision, "selected_input_end_seq": 2,
+                "trigger_ids": ["trigger/host-recall-projection"],
+                "input_batch_ids": [recall_batch],
+                "conversation": {
+                    "conversation_id": current_group, "group_source_id": current_group,
+                    "platform": "onebot-v11", "channel_kind": "group",
+                    "channel_id": "933179609",
+                },
+                "units": [{
+                    "unit_id": "context/host-recall-question", "role": "user",
+                    "source": {
+                        "conversation_id": current_group, "group_source_id": current_group,
+                        "platform": "onebot-v11", "channel_kind": "group",
+                        "channel_id": "933179609",
+                    },
+                    "author": {"principal_ref": "qq:20002", "identity_origin": "adapter_verified"},
+                    "parts": [{"part_id": "question", "type": "text", "text": "What happened?"}],
+                }],
+            }
+            text_projection = prepare_model_request(
+                model_view, ModelCapabilities("host-text", "test-model", "host-test/1"),
+                request_id="model/host-text-evidence", transport_attempt_id="attempt/host-text-evidence",
+                evidence=document,
+            )
+            recalled_source = next(item for item in text_projection.manifest["source_manifest"]
+                                   if item.get("source_unit_id") == unit_evidence["source_unit_id"])
+            assert recalled_source["source"]["external_group_id"] == "933179609"
+            assert recalled_source["source"]["trunk_id"] == unit_evidence["trunk_id"]
+            assert recalled_source["author"]["principal_ref"] == "qq:20001"
+            assert recalled_source["retrieval"]["path_edge_id"] == unit_evidence["path_edge_id"]
+            assert b"image_url" not in text_projection.body
+            assert any(item["reason"] == "MODEL_IMAGE_UNSUPPORTED"
+                       for item in text_projection.manifest["omitted_part_refs"])
+            picture = unit_evidence["parts"][1]
+            picture_ref = picture["media_ref"]
+            picture_bytes = await host._kernel.payload.read_bytes(picture_ref["payload_id"])
+            image = MediaSnapshot(
+                settings.bot_id, picture_ref["payload_id"], unit_evidence["source_revision"],
+                unit_evidence["source_unit_id"], picture["part_id"],
+                picture["media_type"], picture_bytes, picture_ref["digest"],
+                picture["width"], picture["height"],
+            )
+            visual_projection = prepare_model_request(
+                model_view,
+                ModelCapabilities("host-visual", "test-visual-model", "host-test/1",
+                                  input_modalities=("text", "image")),
+                request_id="model/host-visual-evidence",
+                transport_attempt_id="attempt/host-visual-evidence",
+                evidence=document, media={picture_ref["payload_id"]: image},
+            )
+            assert b"image_url" in visual_projection.body
+            assert visual_projection.manifest["media_transform_refs"][0]["source_unit_id"] == (
+                unit_evidence["source_unit_id"]
+            )
             assert await query_stage(recall_query["query_id"], "materialize/replay", stage="materialize") == materialized[0]
             ready_progress = await query_stage(recall_query["query_id"], "progress/ready", stage="progress")
             assert ready_progress["phase"] == "READY"
@@ -1557,5 +1634,108 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
         assert clients[-1].closed is True
     finally:
         assert name.startswith("forest_host_") and len(name) == 44
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        await admin.close()
+
+
+@pytest.mark.postgres
+async def test_group_trigger_recall_reaches_provider_request(tmp_path):
+    dsn = os.environ.get("FOREST_TEST_DSN")
+    if not dsn:
+        pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
+    name = "forest_recall_" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    parsed = urlsplit(dsn)
+    uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
+    settings = CleanBotSettings(
+        bot_id="bot-agent-recall-test", dsn=uri,
+        model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
+        model="test-model", model_deployment_id="provider.chat-completions/test",
+        model_max_output_tokens=1024, model_input_modalities=("text",),
+        embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
+        embedding_api_key="test-embedding-key",
+        embedding_deployment_id="embedding.multimodal/qiyu-vl/test",
+        embedding_model_revision="test-revision/1",
+        embedding_model="Qwen/Qwen3-VL-Embedding-8B", embedding_dimensions=4096,
+        onebot_self_id="123456789", onebot_websocket_url="ws://127.0.0.1:3001/",
+        onebot_access_token="test-onebot-token", allowed_group_ids=("933179609",),
+        group_trigger_mode="MENTION", private_enabled=True,
+        shell_administrator_ids=("42",),
+        agent_system_prompt="The Agent-Memory request integration fixture.",
+    )
+    clients = []
+    RecordingUnknownModelClient.requests = []
+
+    async def create_websocket(_url, _token, **_limits):
+        client = FakeWebSocketClient(settings.onebot_self_id)
+        clients.append(client)
+        return client
+
+    host = CleanBotHost(
+        settings,
+        model_client_factory=RecordingUnknownModelClient,
+        embedding_client_factory=FakeEmbeddingClient,
+        media_client_factory=FakeMediaClient,
+        vector_index_client_factory=FakeMilvusClient,
+        websocket_client_factory=create_websocket,
+        package_catalog=PackageCatalog(tmp_path / "recall-packages"),
+    )
+    try:
+        await host.start()
+        memory_schema = next(
+            item.storage.spec.namespace for item in host.registry.descriptors
+            if item.component_id == "memory.graph"
+        )
+        async with asyncio.timeout(20):
+            while True:
+                async with host.store.pool.connection() as conn:
+                    domain = await (await conn.execute(
+                        sql.SQL("SELECT state FROM {}.memory_domain_bind_work WHERE bot_id=%s")
+                        .format(sql.Identifier(memory_schema)), (settings.bot_id,),
+                    )).fetchone()
+                if domain is not None and domain["state"] == "READY":
+                    break
+                await asyncio.sleep(0.1)
+        await clients[-1].handler(json.dumps({
+            "self_id": int(settings.onebot_self_id), "post_type": "message",
+            "message_type": "group", "sub_type": "normal",
+            "time": int(datetime.now(timezone.utc).timestamp()),
+            "message_id": 90001, "user_id": 20001, "group_id": 933179609,
+            "sender": {"user_id": 20001, "nickname": "Recall tester",
+                       "card": "", "role": "member"},
+            "message": [
+                {"type": "at", "data": {"qq": settings.onebot_self_id}},
+                {"type": "text", "data": {"text": "What is in memory?"}},
+            ],
+        }).encode())
+        try:
+            async with asyncio.timeout(45):
+                while not RecordingUnknownModelClient.requests:
+                    await asyncio.sleep(0.1)
+        except TimeoutError as exc:
+            conversation_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "conversation.scheduler"
+            )
+            async with host.store.pool.connection() as conn:
+                failures = await (await conn.execute(
+                    sql.SQL("SELECT input_payload#>>'{outcome,error,code}' AS code "
+                            "FROM {}.conversation_agent_work_settlements "
+                            "ORDER BY created_at DESC LIMIT 5")
+                    .format(sql.Identifier(conversation_schema))
+                )).fetchall()
+            raise AssertionError(f"Provider not reached; Agent work errors: {failures}") from exc
+        prepared = RecordingUnknownModelClient.requests[0]
+        prepared.verify()
+        manifest = prepared.manifest
+        assert manifest["memory_evidence"]["status"] == "READY"
+        assert manifest["memory_evidence"]["current_source"]["external_group_id"] == "933179609"
+        assert any(item["author"]["principal_ref"] == "qq:20001"
+                   for item in manifest["source_manifest"])
+        assert b"image_url" not in prepared.body
+    finally:
+        await host.close()
+        assert name.startswith("forest_recall_") and len(name) == 46
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()

@@ -453,7 +453,9 @@ class ConversationScheduler(Plugin):
                     "absolute_deadline": None if resume else new_run_deadline,
                     "actor": work["actor"],
                 },
-                operation_id=ctx.operations.stable(f"agent-execute:{run_ref}"),
+                operation_id=ctx.operations.stable(
+                    f"agent-execute:{run_ref}:{work['actor']['epoch']}"
+                ),
                 contract_major=2,
                 timeout=540,
             )
@@ -481,7 +483,7 @@ class ConversationScheduler(Plugin):
             if status == "WAIT_INPUT":
                 return self._defer(status, "classification_prefix_pending", 0.25)
             if status == "WAIT_MEMORY":
-                return self._defer(status, "memory_recall_pending", 0.5)
+                return self._defer(status, "memory_recall_pending", 2.0)
             if status == "WAIT_APPROVAL":
                 return self._defer(status, "approval_pending", 1.0)
             if status == "RELOAD_WAIT":
