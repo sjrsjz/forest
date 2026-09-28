@@ -25,7 +25,6 @@ from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 
 RUNTIME = module_schema_namespace("forest.kernel.runtime")
-ONEBOT = module_schema_namespace("forest.adapter.onebot")
 MEMORY = module_schema_namespace("forest.memory.graph")
 AGENT = module_schema_namespace("forest.agent.runtime")
 DELIVERY = module_schema_namespace("forest.delivery")
@@ -77,6 +76,21 @@ async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> d
             bundles = await (
                 await connection.execute("SELECT count(*) AS count FROM forest_kernel.schema_bundles")
             ).fetchone()
+            if bundles["count"] != 20:
+                raise RuntimeError(
+                    f"BOT_SCHEMA_BUNDLES_MISMATCH: expected 20, found {bundles['count']}"
+                )
+            memory_attempt_table = await (
+                await connection.execute(
+                    "SELECT to_regclass(%s) AS table_name",
+                    (f"{MEMORY}.embedding_batch_attempts",),
+                )
+            ).fetchone()
+            if memory_attempt_table["table_name"] is None:
+                raise RuntimeError(
+                    "BOT_SCHEMA_INCOMPATIBLE: embedding_batch_attempts is absent; "
+                    "run this observer against a Bot installed from the candidate baseline"
+                )
             graph = await (
                 await connection.execute(
                     sql.SQL("SELECT graph_id,graph_revision FROM {}.runtime_graph_head WHERE bot_id=%s").format(
@@ -106,27 +120,6 @@ async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> d
                     (bot_id, graph["graph_id"]),
                 )
             ).fetchone()
-            binding = await (
-                await connection.execute(
-                    sql.SQL(
-                        "SELECT state,desired_revision,effective_revision,receive_enabled,error_code,"
-                        "current_client_incarnation FROM {}.binding_heads "
-                        "WHERE bot_id=%s AND binding_id='binding/main'"
-                    ).format(sql.Identifier(ONEBOT)),
-                    (bot_id,),
-                )
-            ).fetchone()
-            client = None
-            if binding is not None and binding["current_client_incarnation"] is not None:
-                client = await (
-                    await connection.execute(
-                        sql.SQL(
-                            "SELECT state,error_code FROM {}.binding_clients "
-                            "WHERE bot_id=%s AND client_incarnation=%s"
-                        ).format(sql.Identifier(ONEBOT)),
-                        (bot_id, binding["current_client_incarnation"]),
-                    )
-                ).fetchone()
             memory = await (
                 await connection.execute(
                     sql.SQL(
@@ -135,10 +128,11 @@ async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> d
                         "(SELECT count(*) FROM {m}.source_units WHERE bot_id=%s) AS sources,"
                         "(SELECT count(*) FROM {m}.embedding_facets WHERE bot_id=%s) AS facets,"
                         "(SELECT count(*) FROM {m}.embedding_facets WHERE bot_id=%s AND state='READY') AS ready_facets,"
-                        "(SELECT count(*) FROM {m}.embedding_attempts WHERE bot_id=%s AND state IN ('PREPARED','DISPATCHED') "
-                        " AND COALESCE(dispatched_at,prepared_at)<clock_timestamp()-(%s * interval '1 second')) AS stale_attempts,"
+                        "(SELECT count(*) FROM {m}.embedding_batch_attempts WHERE bot_id=%s "
+                        " AND state IN ('PREPARED','DISPATCHED') "
+                        " AND deadline_at<clock_timestamp()-(%s * interval '1 second')) AS stale_attempts,"
                         "(SELECT count(*) FROM {m}.embedding_budget_reservations WHERE bot_id=%s AND state='RESERVED' "
-                        " AND created_at<clock_timestamp()-(%s * interval '1 second')) AS stale_reservations"
+                        " AND deadline_at<clock_timestamp()-(%s * interval '1 second')) AS stale_reservations"
                     ).format(m=sql.Identifier(MEMORY)),
                     (bot_id, bot_id, bot_id, bot_id, bot_id, stale_seconds, bot_id, stale_seconds),
                 )
@@ -171,16 +165,6 @@ async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> d
         "members": members["members"],
         "lifecycle_recorded": lifecycle["recorded"],
         "active_members": lifecycle["active"],
-        "binding": None
-        if binding is None
-        else {
-            "state": binding["state"],
-            "desired_revision": binding["desired_revision"],
-            "effective_revision": binding["effective_revision"],
-            "receive_enabled": binding["receive_enabled"],
-            "error_code": binding["error_code"],
-        },
-        "client": None if client is None else dict(client),
         "memory": dict(memory),
         "concurrency": dict(concurrency),
         "work": dict(work),
@@ -198,21 +182,10 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
         failures.append("DEPLOYMENT_INTENT_INVALID")
     if deployment["observed_state"] != "ONLINE" or deployment["error_code"] is not None:
         failures.append("DEPLOYMENT_OBSERVATION_INVALID")
-    if bot["schema_bundles"] != 19 or bot["members"] != 19:
+    if bot["schema_bundles"] != 20 or bot["members"] != 20:
         failures.append("RUNTIME_GRAPH_CARDINALITY_INVALID")
-    if bot["lifecycle_recorded"] != 19 or bot["active_members"] != 19:
+    if bot["lifecycle_recorded"] != 20 or bot["active_members"] != 20:
         failures.append("RUNTIME_LIFECYCLE_INVALID")
-    binding = bot["binding"] or {}
-    if (
-        binding.get("state") != "ONLINE"
-        or not binding.get("receive_enabled")
-        or binding.get("error_code") is not None
-        or binding.get("desired_revision") != binding.get("effective_revision")
-    ):
-        failures.append("ONEBOT_BINDING_INVALID")
-    client = bot["client"] or {}
-    if client.get("state") != "ACTIVE" or client.get("error_code") is not None:
-        failures.append("ONEBOT_CLIENT_INVALID")
     if bot["memory"]["stale_attempts"] or bot["memory"]["stale_reservations"]:
         failures.append("EMBEDDING_CONVERGENCE_STALE")
     if bot["concurrency"]["overlapping_sessions"]:
@@ -302,7 +275,11 @@ async def observe(arguments: argparse.Namespace) -> int:
 def main() -> None:
     arguments = parser().parse_args()
     _validate(arguments)
-    raise SystemExit(asyncio.run(observe(arguments)))
+    try:
+        result = asyncio.run(observe(arguments))
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from None
+    raise SystemExit(result)
 
 
 if __name__ == "__main__":
