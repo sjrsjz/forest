@@ -31,8 +31,14 @@ from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
 from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
+from forest.package_capabilities import PackageCallScope
+from forest.package_unit_of_work import PostgresPackageConfigurationApplyCoordinator
 from forest.packages import PackageCatalog, digest_json
-from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
+from forest.runtime_contracts import (
+    FrozenServiceRoute,
+    RuntimeServiceInvocation,
+    RuntimeUnitOfWorkParticipantHandle,
+)
 from forest.runtime_modules import ModuleLifecycleState
 from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
@@ -672,6 +678,90 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
             )
             assert f"Graph r{previous.graph_revision}" in replay.text
             assert host.registry.graph_identity.graph_id == replacement.graph_id
+            agent_configuration = host.registry.get("agent.runtime").module_configuration
+            current_configuration = await agent_configuration.desired(include_value=True)
+            configuration_plan = await agent_configuration.plan(
+                operation_id="web:configuration-plan/atomic-test",
+                expected_desired_revision=current_configuration.revision,
+                value=current_configuration.value,
+                validation_digest=current_configuration.validation_digest,
+            )
+            configuration_scope = PackageCallScope(
+                bot_id=settings.bot_id,
+                component_id="agent.runtime",
+                generation_id=replacement.generations["agent.runtime"],
+                instance_id="test/configuration",
+                worker_incarnation="test/configuration",
+                call_id="call:test/configuration",
+                call_operation_id="web:configuration-apply/atomic-test",
+                causal_root_kind="management.configuration",
+                causal_root_id="web:configuration-apply/atomic-test",
+            )
+            actor = SimpleNamespace(
+                target_graph_revision=replacement.graph_revision,
+                web_subject_ref="subject/host-admin",
+            )
+
+            async def reject_control(*_args, **_kwargs):
+                raise ForestError("TEST_CONTROL_REJECTED", "Control participant rejected", 409)
+
+            control = SimpleNamespace(
+                component_id="component.worker-host",
+                generation_id=replacement.generations["component.worker-host"],
+                invoke_in=reject_control,
+            )
+            rejected_coordinator = PostgresPackageConfigurationApplyCoordinator(
+                host._kernel.runtime.store,
+                host._kernel.runtime,
+                component_id="agent.runtime",
+                configuration=agent_configuration,
+                control_handle=SimpleNamespace(resolve=lambda: control),
+            )
+            apply_args = dict(
+                operation_id="web:configuration-apply/atomic-test",
+                plan_id=configuration_plan["plan_id"],
+                expected_desired_revision=current_configuration.revision,
+                authorization=actor,
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            with pytest.raises(ForestError) as rejected:
+                await rejected_coordinator.execute(configuration_scope, **apply_args)
+            assert rejected.value.code == "TEST_CONTROL_REJECTED"
+            assert (await agent_configuration.desired()).revision == current_configuration.revision
+            configuration_coordinator = PostgresPackageConfigurationApplyCoordinator(
+                host._kernel.runtime.store,
+                host._kernel.runtime,
+                component_id="agent.runtime",
+                configuration=agent_configuration,
+                control_handle=RuntimeUnitOfWorkParticipantHandle(
+                    host.registry.contract_router, "component.worker-host"
+                ),
+            )
+            committed = await configuration_coordinator.execute(configuration_scope, **apply_args)
+            assert committed["configuration"].revision == current_configuration.revision + 1
+            assert committed["rebuild"]["target_component_id"] == "agent.runtime"
+            request_id = committed["rebuild"]["request_id"]
+            replayed = await configuration_coordinator.execute(configuration_scope, **apply_args)
+            assert replayed["configuration"] == committed["configuration"]
+            assert replayed["rebuild"]["request_id"] == request_id
+            async with asyncio.timeout(180):
+                while True:
+                    try:
+                        rebuild = await host.registry.get(
+                            "component.worker-host"
+                        ).management_contract.query(
+                            "configuration-rebuild", {"request_id": request_id}
+                        )
+                    except ForestError as error:
+                        if error.status != 409:
+                            raise
+                        await asyncio.sleep(0.2)
+                        continue
+                    if rebuild["state"] in ("EFFECTIVE", "REBUILD_FAILED"):
+                        break
+                    await asyncio.sleep(0.2)
+            assert rebuild["state"] == "EFFECTIVE", rebuild
+            assert host.registry.graph_identity.graph_revision > replacement.graph_revision
         finally:
             await host.close()
     finally:

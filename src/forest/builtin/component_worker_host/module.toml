@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.4.0"
+version = "1.5.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -32,6 +32,7 @@ requests = [
   "service.call:runtime.graph-replacement.request",
   "service.call:runtime.graph-replacement.status",
   "domain.query:component.reload.read",
+  "domain.query:component.configuration-rebuild.read",
   "domain.command:component.reload.enqueue"
 ]
 
@@ -45,9 +46,9 @@ order = 2
 
 [components.storage]
 schema_id = "forest.component.worker-host"
-schema_version = "1.0.0"
+schema_version = "1.1.0"
 baseline = "schema/control.sql"
-baseline_sha256 = "42f1be2b664790d452da2949dd348aaeffaf8fbcc987713614fa4434da615459"
+baseline_sha256 = "b493f507bff369da64a2badddfe7f300c7d2b981a8783b6cbd03ac0edbf32f17"
 scope = "bot"
 repository_contract = "forest.component-worker-host.repository/1"
 execution_profile = "official"
@@ -93,6 +94,14 @@ semantics = "read"
 visibility = "management"
 input_schema = "schemas/reload-read.json"
 output_schema = "schemas/reload-status-output.json"
+
+[[components.provides]]
+name = "component.host.configuration-rebuild"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/configuration-rebuild-read.json"
+output_schema = "schemas/configuration-rebuild-output.json"
 
 [[components.provides]]
 name = "shell.component-host.execute"
@@ -159,6 +168,13 @@ function = "component_reload_read"
 input_schema = "schemas/reload-read.json"
 output_schema = "schemas/reload-output.json"
 
+[[components.domain_queries]]
+name = "component.configuration-rebuild.read"
+contract = "1.0"
+function = "component_configuration_rebuild_read"
+input_schema = "schemas/configuration-rebuild-read.json"
+output_schema = "schemas/configuration-rebuild-output.json"
+
 [[components.management_actions]]
 id = "module.reload"
 port = "component.reload.enqueue"
@@ -169,6 +185,11 @@ timeout_s = 15
 [[components.management_queries]]
 id = "reload"
 port = "component.host.reload"
+timeout_s = 10
+
+[[components.management_queries]]
+id = "configuration-rebuild"
+port = "component.host.configuration-rebuild"
 timeout_s = 10
 
 [[components.owned_work_handlers]]
@@ -185,3 +206,25 @@ claim_timeout_s = 5
 handler_timeout_s = 20
 settle_timeout_s = 5
 lease_seconds = 45
+
+[[components.owned_work_handlers]]
+name = "component.configuration-rebuild.pending"
+contract = "1.0"
+handler = "component.configuration-rebuild.submit"
+claim_function = "component_configuration_rebuild_claim"
+settle_function = "component_configuration_rebuild_settle"
+input_schema = "schemas/configuration-rebuild-work-input.json"
+output_schema = "schemas/configuration-rebuild-work-output.json"
+max_concurrency = 1
+poll_interval_ms = 500
+claim_timeout_s = 5
+handler_timeout_s = 20
+settle_timeout_s = 5
+lease_seconds = 45
+
+[[components.unit_of_work_participants]]
+name = "component.configuration-rebuild.record"
+contract = "1.0"
+function = "component_record_configuration_rebuild"
+input_schema = "schemas/configuration-rebuild-envelope.json"
+output_schema = "schemas/configuration-rebuild-output.json"

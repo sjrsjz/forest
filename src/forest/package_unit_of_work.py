@@ -21,6 +21,136 @@ def _step_operation(operation_id: str, plan_name: str, step_id: str) -> str:
     return "uow-step:" + digest
 
 
+class PostgresPackageConfigurationApplyCoordinator:
+    """Commit one package's desired configuration with Worker Host control intent."""
+
+    def __init__(self, store, runtime, *, component_id: str, configuration, control_handle) -> None:
+        self.store = store
+        self.runtime = runtime
+        self.component_id = component_id
+        self.configuration = configuration
+        self.control_handle = control_handle
+
+    async def execute(
+        self,
+        scope: PackageCallScope,
+        *,
+        operation_id: str,
+        plan_id: str,
+        expected_desired_revision: int,
+        authorization,
+        authorization_guard,
+    ) -> dict:
+        if (
+            scope.component_id != self.component_id
+            or scope.call_operation_id != operation_id
+            or authorization is None
+            or authorization_guard is None
+        ):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_APPLY_AUTHORITY_INVALID",
+                "Configuration apply requires the target package and Web authority",
+                403,
+            )
+        try:
+            async with asyncio.timeout(30):
+                return await self._execute_in_transaction(
+                    scope,
+                    operation_id=operation_id,
+                    plan_id=plan_id,
+                    expected_desired_revision=expected_desired_revision,
+                    authorization=authorization,
+                    authorization_guard=authorization_guard,
+                )
+        except ForestError:
+            raise
+        except TimeoutError as exc:
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_APPLY_TIMEOUT",
+                "Configuration apply exceeded its deadline",
+                504,
+            ) from exc
+        except psycopg.Error as exc:
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_APPLY_FAILED",
+                "Configuration apply transaction failed",
+                503,
+            ) from exc
+
+    async def _execute_in_transaction(
+        self,
+        scope: PackageCallScope,
+        *,
+        operation_id: str,
+        plan_id: str,
+        expected_desired_revision: int,
+        authorization,
+        authorization_guard,
+    ) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.runtime.verify_active_generation_in(
+                conn,
+                component_id=self.component_id,
+                generation_id=scope.generation_id,
+                admission_lane="CONTROL",
+            )
+            control = self.control_handle.resolve()
+            for component_id in sorted({self.component_id, control.component_id}):
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    ("forest.uow.participant:" + component_id,),
+                )
+            await self.runtime.verify_generation_member_in(
+                conn,
+                component_id=control.component_id,
+                generation_id=control.generation_id,
+            )
+            saved = await self.configuration.apply_in(
+                conn,
+                operation_id=operation_id,
+                plan_id=plan_id,
+                expected_desired_revision=expected_desired_revision,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+            )
+            configuration = {
+                "component_id": self.component_id,
+                "generation_id": scope.generation_id,
+                "plan_id": plan_id,
+                "revision": saved.revision,
+                "payload_digest": saved.payload_digest,
+            }
+            rebuild = await control.invoke_in(
+                conn,
+                "component.configuration-rebuild.record",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": self.component_id,
+                        "generation_id": scope.generation_id,
+                    },
+                    "input": {
+                        "target_component_id": self.component_id,
+                        "target_generation_id": scope.generation_id,
+                        "plan_id": plan_id,
+                        "desired_revision": saved.revision,
+                        "payload_digest": saved.payload_digest,
+                        "expected_graph_revision": authorization.target_graph_revision,
+                        "requested_by": authorization.web_subject_ref,
+                    },
+                    "prior": {"configuration": configuration},
+                },
+                operation_id=_step_operation(
+                    operation_id, "component.configuration.apply", "control"
+                ),
+                causal_root_kind=scope.causal_root_kind,
+                causal_root_id=scope.causal_root_id,
+                parent_call_id=scope.call_id,
+                timeout_seconds=20,
+            )
+            return {"configuration": saved, "rebuild": rebuild}
+
+
 class PostgresPackageUnitOfWorkCoordinator:
     """Execute an immutable participant sequence in one caller-owned transaction."""
 
@@ -140,9 +270,7 @@ class PostgresPackageUnitOfWorkCoordinator:
                 "PACKAGE_UOW_TIMEOUT", "UnitOfWork plan exceeded its deadline", 504
             ) from exc
         except psycopg.Error as exc:
-            raise ForestError(
-                "PACKAGE_UOW_FAILED", "UnitOfWork transaction failed", 503
-            ) from exc
+            raise ForestError("PACKAGE_UOW_FAILED", "UnitOfWork transaction failed", 503) from exc
 
     def _resolve(self, component_id: str):
         handle = self.participant_handles.get(component_id)

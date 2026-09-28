@@ -118,6 +118,10 @@ class ComponentWorkerHost(Plugin):
             "updated_at": saved["updated_at"],
         }
 
+    @service("component.host.configuration-rebuild", semantics="read")
+    async def configuration_rebuild_status(self, payload, ctx):
+        return await ctx.queries.call("component.configuration-rebuild.read", payload)
+
     @service("shell.component-host.reload", semantics="idempotent")
     async def reload(self, payload, ctx):
         arguments = payload["arguments"]
@@ -200,6 +204,82 @@ class ComponentWorkerHost(Plugin):
         except ForestError as error:
             return {
                 "disposition": "RETRY" if error.status >= 500 else "FAILED",
+                "receipt": None,
+                "error_code": error.code,
+            }
+
+    @job("component.configuration-rebuild.submit")
+    async def submit_configuration_rebuild(self, task, ctx):
+        work = task["payload"]
+        try:
+            graph = await self._graph(ctx)
+            member = next(
+                (
+                    item for item in graph["members"]
+                    if item["component_id"] == work["target_component_id"]
+                ),
+                None,
+            )
+            if member is None:
+                return {
+                    "disposition": "FAILED",
+                    "receipt": None,
+                    "error_code": "COMPONENT_HOST_MODULE_NOT_FOUND",
+                }
+            if member["config_revision"] == work["desired_revision"]:
+                return {"disposition": "EFFECTIVE", "receipt": None, "error_code": None}
+            if member["config_revision"] > work["desired_revision"]:
+                return {
+                    "disposition": "FAILED",
+                    "receipt": None,
+                    "error_code": "COMPONENT_CONFIGURATION_REBUILD_SUPERSEDED",
+                }
+            previous = work["kernel_receipt"]
+            if previous is not None and previous["expected_graph_revision"] == graph["graph_revision"]:
+                status = await ctx.services.call(
+                    "runtime.graph-replacement.status",
+                    {
+                        "protocol": "forest.runtime-graph-replacement-status-request/1",
+                        "operation_id": previous["operation_id"],
+                    },
+                    operation_id=ctx.operations.stable("read-configuration-rebuild"),
+                    timeout=10,
+                )
+                if status["state"] == "FAILED":
+                    return {
+                        "disposition": "FAILED",
+                        "receipt": None,
+                        "error_code": status["error_code"],
+                    }
+                if status["state"] != "SUCCEEDED":
+                    return {
+                        "disposition": "REQUESTED",
+                        "receipt": previous,
+                        "error_code": None,
+                    }
+                return {
+                    "disposition": "RETRY",
+                    "receipt": None,
+                    "error_code": "COMPONENT_CONFIGURATION_REBUILD_GRAPH_PENDING",
+                }
+            receipt = await ctx.services.call(
+                "runtime.graph-replacement.request",
+                {
+                    "protocol": "forest.runtime-graph-replacement-request/1",
+                    "operation_id": (
+                        "configuration-rebuild:" + work["request_id"]
+                        + ":graph:" + str(graph["graph_revision"])
+                    ),
+                    "expected_graph_revision": graph["graph_revision"],
+                    "requested_by": work["requested_by"],
+                },
+                operation_id=ctx.operations.stable("submit-configuration-rebuild"),
+                timeout=10,
+            )
+            return {"disposition": "REQUESTED", "receipt": receipt, "error_code": None}
+        except ForestError as error:
+            return {
+                "disposition": "RETRY" if error.status in (409, 429) or error.status >= 500 else "FAILED",
                 "receipt": None,
                 "error_code": error.code,
             }

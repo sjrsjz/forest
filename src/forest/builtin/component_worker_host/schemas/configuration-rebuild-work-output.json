@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"disposition":{"enum":["EFFECTIVE","REQUESTED","RETRY","FAILED"]},"receipt":{"type":["object","null"]},"error_code":{"type":["string","null"]}},"required":["disposition","receipt","error_code"],"additionalProperties":false}
