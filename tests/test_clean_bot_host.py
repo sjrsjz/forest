@@ -2365,7 +2365,28 @@ async def test_real_vl_archived_image_is_recalled_from_another_group(tmp_path):
     )
     try:
         await host.start()
-        memory = host.registry.get("memory.graph")
+        conversation = host.registry.get("conversation.scheduler")
+        configuration = conversation.module_configuration
+        compact_view = {
+            "protocol": "forest.conversation.scheduler/2",
+            "context_view": {
+                "high_watermark_units": 2,
+                "retain_units": 1,
+                "policy_revision": "context-view-unit-window-v1",
+            },
+        }
+        plan = await configuration.plan(
+            operation_id="cross-vl-compact-view-plan",
+            expected_desired_revision=1,
+            value=compact_view,
+            validation_digest=digest_json(conversation.snapshot.schema("schemas/config.json")),
+        )
+        await configuration.apply(
+            operation_id="cross-vl-compact-view-apply",
+            plan_id=plan["plan_id"],
+            expected_desired_revision=1,
+        )
+        await host.replace_runtime_graph()
         namespace = next(
             item.storage.spec.namespace for item in host.registry.descriptors
             if item.component_id == "memory.graph"
@@ -2381,16 +2402,15 @@ async def test_real_vl_archived_image_is_recalled_from_another_group(tmp_path):
                     break
                 await asyncio.sleep(0.1)
 
-        async def ingest(group_id, user_id, message_id, text_value, *, mention):
+        async def ingest(group_id, user_id, message_id, text_value, *, mention, image=True):
             message = []
             if mention:
                 message.append({"type": "at", "data": {"qq": settings.onebot_self_id}})
-            message.extend([
-                {"type": "text", "data": {"text": text_value}},
-                {"type": "image", "data": {
+            message.append({"type": "text", "data": {"text": text_value}})
+            if image:
+                message.append({"type": "image", "data": {
                     "file": "same-test-image", "url": "https://media.example/same-test-image",
-                }},
-            ])
+                }})
             await clients[-1].handler(json.dumps({
                 "self_id": int(settings.onebot_self_id), "post_type": "message",
                 "message_type": "group", "sub_type": "normal",
@@ -2402,80 +2422,34 @@ async def test_real_vl_archived_image_is_recalled_from_another_group(tmp_path):
             }).encode())
 
         await ingest(933179609, 20001, 97001, "The blue glass orb is here.", mention=False)
+        for index in range(2, 5):
+            await ingest(933179609, 20001, 97000 + index,
+                         f"Background conversation {index}.", mention=False, image=False)
         document_unit = "onebot-unit:" + hashlib.sha256(b"binding/main\x0097001").hexdigest()
-        async with asyncio.timeout(45):
-            while True:
-                async with host.store.pool.connection() as conn:
-                    occurrence = await (await conn.execute(
-                        sql.SQL("SELECT event_ref,input_batch_ref,context_revision "
-                                "FROM {}.source_occurrences WHERE bot_id=%s AND source_unit_id=%s")
-                        .format(sql.Identifier(namespace)),
-                        (settings.bot_id, document_unit),
-                    )).fetchone()
-                    parts = await (await conn.execute(
-                        sql.SQL("SELECT part_kind FROM {}.source_parts "
-                                "WHERE bot_id=%s AND source_unit_id=%s ORDER BY part_index")
-                        .format(sql.Identifier(namespace)),
-                        (settings.bot_id, document_unit),
-                    )).fetchall()
-                if occurrence is not None and [row["part_kind"] for row in parts] == ["TEXT", "IMAGE"]:
-                    break
-                await asyncio.sleep(0.1)
-
-        batch_ref = occurrence["input_batch_ref"] or "batch/cross-vl-document"
-        context_revision = occurrence["context_revision"] or 1
-        event_ref = occurrence["event_ref"]
-        compaction_ref = "compaction/cross-vl-document"
-        selection = {
-            "status": "BATCH", "operation_id": "conversation/silent-archive/cross-vl",
-            "conversation_id": "onebot:group:933179609", "classified_through_seq": 1,
-            "selected_input_end_seq": 1, "mailbox_revision": 1,
-            "input_batch_id": batch_ref, "boundary": "IDLE", "kind": "SILENT_DRAIN",
-            "start_seq": 1, "end_seq": 1, "trigger_cut_seq": None,
-            "session_ref": None, "run_ref": None,
-            "context_revision": context_revision, "context_view_revision": context_revision,
-            "event_ids": [event_ref], "trigger_ids": [], "triggers": [],
-            "memory_archive": {"compaction_ref": compaction_ref, "event_refs": [event_ref]},
-        }
-        async with host.store.pool.connection() as conn, conn.transaction():
-            await memory.unit_of_work_participant().invoke_in(
-                conn, "memory.qualify-archive", {
-                    "protocol": "forest.uow-step/1",
-                    "caller": {"component_id": "conversation.scheduler",
-                               "generation_id": memory.generation_identity.generation_id},
-                    "input": {}, "prior": {
-                        "prepare": {"status": "WRITE", "commit": {
-                            "conversation_id": "onebot:group:933179609",
-                            "compaction_id": compaction_ref, "archived_unit_count": 1,
-                            "units": [{"event_id": event_ref, "input_batch_id": batch_ref,
-                                       "context_revision": context_revision}],
-                        }},
-                        "commit": selection,
-                        "payload_epoch": {"protocol": "forest.payload-epoch/1",
-                                          "deletion_epoch": await host._kernel.payload.epoch()},
-                    },
-                }, operation_id="memory/archive/cross-vl-document",
-                causal_root_kind="conversation.silent-drain",
-                causal_root_id="onebot:group:933179609",
-                parent_call_id="call/memory/archive/cross-vl-document",
-                timeout_seconds=10,
-            )
         async with asyncio.timeout(180):
             while True:
                 async with host.store.pool.connection() as conn:
+                    source = await (await conn.execute(
+                        sql.SQL("SELECT eligibility_state FROM {}.source_units "
+                                "WHERE bot_id=%s AND source_unit_id=%s")
+                        .format(sql.Identifier(namespace)),
+                        (settings.bot_id, document_unit),
+                    )).fetchone()
                     document_facets = await (await conn.execute(
                         sql.SQL("SELECT modality,state,index_ref_id FROM {}.embedding_facets "
                                 "WHERE bot_id=%s AND purpose='DOCUMENT' AND source_unit_id=%s")
                         .format(sql.Identifier(namespace)),
                         (settings.bot_id, document_unit),
                     )).fetchall()
-                if len(document_facets) == 2 and all(row["state"] == "READY" for row in document_facets):
+                if (source is not None and source["eligibility_state"] == "ELIGIBLE"
+                        and len(document_facets) == 2
+                        and all(row["state"] == "READY" for row in document_facets)):
                     break
                 await asyncio.sleep(0.2)
         assert {row["modality"] for row in document_facets} == {"TEXT", "IMAGE"}
         assert all(row["index_ref_id"] for row in document_facets)
 
-        await ingest(933179610, 20002, 97002, "Where is the blue glass orb?", mention=True)
+        await ingest(933179610, 20002, 97102, "Where is the blue glass orb?", mention=True)
         async with asyncio.timeout(180):
             while not RecordingModelClient.requests:
                 await asyncio.sleep(0.2)
