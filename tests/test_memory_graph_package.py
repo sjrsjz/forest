@@ -229,6 +229,104 @@ async def test_graph_snapshot_excludes_facts_committed_after_registration(
                              "relation_kinds": ["CONTRADICTS"]}))["items"] == []
 
 
+@pytest.mark.postgres
+async def test_source_cursor_excludes_source_committed_after_first_page(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "source-cursor-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    digest = "sha256:" + "a" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.memory_sources "
+                "(bot_id,source_id,registration_operation_id,input_digest,source_kind,"
+                "identity_incarnation,identity_digest) "
+                "VALUES (%s,'source/cursor','register/cursor',%s,'DOCUMENT',1,%s)"
+            ).format(namespace),
+            (store.bot_id, digest, digest),
+        )
+
+    async def insert_unit(conn, name, order, occurred):
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.source_units "
+                "(bot_id,source_unit_id,capture_operation_id,input_digest,source_id,"
+                "source_order_seq,source_revision,unit_kind,modality,part_count,"
+                "content_manifest_digest,author_subject_ref,author_payload_id,"
+                "author_payload_digest,author_owner_component_id,author_owner_kind,"
+                "author_owner_id,accepted_deletion_epoch,eligibility_state,"
+                "eligible_at,eligible_xid,occurred_at) VALUES "
+                "(%s,%s,%s,%s,'source/cursor',%s,1,'MESSAGE','TEXT',1,"
+                "%s,'author/test',%s,%s,'memory.graph','test',%s,0,'ELIGIBLE',"
+                "clock_timestamp(),pg_current_xact_id(),%s::timestamptz)"
+            ).format(namespace),
+            (
+                store.bot_id, f"unit/{name}", f"capture/{name}", digest,
+                order, digest, f"payload/{name}", digest, f"unit/{name}", occurred,
+            ),
+        )
+
+    async with store.pool.connection() as conn, conn.transaction():
+        await insert_unit(conn, "newest", 1, "2026-01-03T00:00:00Z")
+        await insert_unit(conn, "oldest", 3, "2026-01-01T00:00:00Z")
+
+    async with store.pool.connection() as writer, store.pool.connection() as reader:
+        async with writer.transaction():
+            await insert_unit(writer, "late", 2, "2026-01-02T00:00:00Z")
+            first = await (
+                await reader.execute(
+                    sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({"limit": 1})),
+                )
+            ).fetchone()
+            first = first["result"]["value"]
+            assert [item["source_unit_id"] for item in first["items"]] == ["unit/newest"]
+            assert first["has_more"] is True
+        cursor = {
+            "limit": 1,
+            "snapshot_accepted_at": first["snapshot_accepted_at"],
+            "snapshot_xid": first["snapshot_xid"],
+            "after_occurred_at": first["next_cursor"]["occurred_at"],
+            "after_source_unit_id": first["next_cursor"]["source_unit_id"],
+            "cursor_filter_digest": first["filter_digest"],
+        }
+        second = await (
+            await reader.execute(
+                sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+                (Jsonb({"bot_id": store.bot_id}), Jsonb(cursor)),
+            )
+        ).fetchone()
+        assert second["result"]["ok"] is True
+        assert [item["source_unit_id"] for item in second["result"]["value"]["items"]] == [
+            "unit/oldest"
+        ]
+        changed_boundary = await (
+            await reader.execute(
+                sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+                (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                    **cursor, "snapshot_accepted_at": "2030-01-01T00:00:00Z"
+                })),
+            )
+        ).fetchone()
+        assert changed_boundary["result"]["error"]["code"] == "MEMORY_QUERY_INVALID"
+        fresh = await (
+            await reader.execute(
+                sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+                (Jsonb({"bot_id": store.bot_id}), Jsonb({"limit": 3})),
+            )
+        ).fetchone()
+        assert [item["source_unit_id"] for item in fresh["result"]["value"]["items"]] == [
+            "unit/newest", "unit/late", "unit/oldest"
+        ]
+
+
 def _configuration():
     return {
         "protocol": "forest.memory.graph/2",
@@ -1616,6 +1714,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
         ))["items"] == []
         cursor = {
             "snapshot_accepted_at": sources["snapshot_accepted_at"],
+            "snapshot_xid": sources["snapshot_xid"],
             "after_occurred_at": sources["items"][0]["occurred_at"],
             "after_source_unit_id": sources["items"][0]["source_unit_id"],
             "cursor_filter_digest": sources["filter_digest"],

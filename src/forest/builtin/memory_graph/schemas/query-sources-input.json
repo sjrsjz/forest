@@ -22,6 +22,7 @@
     "occurred_from": {"type": "string", "format": "date-time"},
     "occurred_to": {"type": "string", "format": "date-time"},
     "snapshot_accepted_at": {"type": "string", "format": "date-time"},
+    "snapshot_xid": {"type": "string", "minLength": 3, "maxLength": 65536},
     "after_occurred_at": {"type": "string", "format": "date-time"},
     "after_source_unit_id": {"$ref": "#/$defs/id"},
     "cursor_filter_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
@@ -29,8 +30,8 @@
   "dependentRequired": {
     "source_order_from": ["source_id"],
     "source_order_to": ["source_id"],
-    "after_occurred_at": ["after_source_unit_id", "snapshot_accepted_at", "cursor_filter_digest"],
-    "after_source_unit_id": ["after_occurred_at", "snapshot_accepted_at", "cursor_filter_digest"]
+    "after_occurred_at": ["after_source_unit_id", "snapshot_accepted_at", "snapshot_xid", "cursor_filter_digest"],
+    "after_source_unit_id": ["after_occurred_at", "snapshot_accepted_at", "snapshot_xid", "cursor_filter_digest"]
   },
   "$defs": {"id": {"type": "string", "minLength": 1, "maxLength": 256}}
 }

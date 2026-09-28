@@ -133,6 +133,7 @@ CREATE TABLE source_units (
     eligible_xid xid8,
     occurred_at timestamptz NOT NULL,
     accepted_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    accepted_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,source_unit_id),
     UNIQUE (bot_id,source_unit_id,source_revision),
@@ -3158,14 +3159,14 @@ BEGIN
            NEW.unit_kind,NEW.modality,NEW.part_count,NEW.content_manifest_digest,
            NEW.author_subject_ref,NEW.author_payload_id,NEW.author_payload_digest,
            NEW.author_owner_component_id,NEW.author_owner_kind,NEW.author_owner_id,
-           NEW.accepted_deletion_epoch,NEW.occurred_at,NEW.accepted_at)
+           NEW.accepted_deletion_epoch,NEW.occurred_at,NEW.accepted_at,NEW.accepted_xid)
        IS DISTINCT FROM
        ROW(OLD.bot_id,OLD.source_unit_id,OLD.capture_operation_id,OLD.input_digest,
            OLD.source_id,OLD.trunk_id,OLD.source_order_seq,OLD.source_revision,
            OLD.unit_kind,OLD.modality,OLD.part_count,OLD.content_manifest_digest,
            OLD.author_subject_ref,OLD.author_payload_id,OLD.author_payload_digest,
            OLD.author_owner_component_id,OLD.author_owner_kind,OLD.author_owner_id,
-           OLD.accepted_deletion_epoch,OLD.occurred_at,OLD.accepted_at) THEN
+           OLD.accepted_deletion_epoch,OLD.occurred_at,OLD.accepted_at,OLD.accepted_xid) THEN
         RAISE EXCEPTION 'Memory source unit identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.eligibility_state='REGISTERED' AND NEW.eligibility_state IN ('ELIGIBLE','SUPPRESSED')
@@ -6946,9 +6947,12 @@ RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
     page_limit integer := COALESCE((input->>'limit')::integer,50);
     snapshot_time timestamptz := COALESCE((input->>'snapshot_accepted_at')::timestamptz,clock_timestamp());
+    snapshot_value pg_snapshot := COALESCE((input->>'snapshot_xid')::pg_snapshot,
+        pg_current_snapshot());
     filter_digest text := 'sha256:' || encode(sha256(convert_to((
-        input - 'limit' - 'snapshot_accepted_at' - 'after_occurred_at'
-              - 'after_source_unit_id' - 'cursor_filter_digest'
+        jsonb_build_array(input - 'limit' - 'snapshot_accepted_at' - 'snapshot_xid'
+            - 'after_occurred_at' - 'after_source_unit_id' - 'cursor_filter_digest',
+            snapshot_value::text,snapshot_time::text)
     )::text,'UTF8')),'hex');
     from_time timestamptz := (input->>'occurred_from')::timestamptz;
     to_time timestamptz := (input->>'occurred_to')::timestamptz;
@@ -6974,7 +6978,8 @@ BEGIN
        ((input->>'source_order_from')::bigint > (input->>'source_order_to')::bigint) OR
        (from_time IS NOT NULL AND to_time IS NOT NULL AND from_time>=to_time) OR
        ((after_time IS NOT NULL) <> (input ? 'after_source_unit_id')) OR
-       (after_time IS NOT NULL AND (NOT input ? 'snapshot_accepted_at' OR
+       (after_time IS NOT NULL AND (NOT input ? 'snapshot_accepted_at'
+          OR NOT input ? 'snapshot_xid' OR
           input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
@@ -6991,7 +6996,11 @@ BEGIN
         WHERE u.bot_id=context->>'bot_id' AND u.eligibility_state=selected_state
           AND s.status=selected_source_status
           AND u.accepted_at<=snapshot_time
+          AND pg_visible_in_snapshot(u.accepted_xid,snapshot_value)
           AND (u.eligible_at IS NULL OR u.eligible_at<=snapshot_time)
+          AND (selected_state<>'ELIGIBLE' OR
+               (u.eligible_xid IS NOT NULL AND
+                pg_visible_in_snapshot(u.eligible_xid,snapshot_value)))
           AND (input->>'trunk_id' IS NULL OR u.trunk_id=input->>'trunk_id')
           AND (input->>'source_id' IS NULL OR u.source_id=input->>'source_id')
           AND (selected_sources IS NULL OR
@@ -7027,6 +7036,7 @@ BEGIN
     INTO items,more,cursor_value;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('snapshot_accepted_at',snapshot_time,
+            'snapshot_xid',snapshot_value::text,
             'filter_digest',filter_digest,
             'items',items,'has_more',more,
             'next_cursor',CASE WHEN more THEN cursor_value ELSE NULL END));

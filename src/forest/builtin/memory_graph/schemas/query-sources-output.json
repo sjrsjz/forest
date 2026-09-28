@@ -2,9 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["snapshot_accepted_at", "items", "has_more", "next_cursor", "filter_digest"],
+  "required": ["snapshot_accepted_at", "snapshot_xid", "items", "has_more", "next_cursor", "filter_digest"],
   "properties": {
     "snapshot_accepted_at": {"type": "string", "format": "date-time"},
+    "snapshot_xid": {"type": "string", "minLength": 3, "maxLength": 65536},
     "items": {"type": "array", "maxItems": 100, "items": {
       "type": "object", "additionalProperties": false,
       "required": ["source_unit_id", "source_id", "trunk_id", "source_kind", "platform", "realm_id", "external_group_id", "author_subject_ref", "unit_kind", "modality", "occurred_at", "source_order_seq", "part_count", "eligibility_state", "source_status"],
