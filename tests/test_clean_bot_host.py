@@ -143,6 +143,25 @@ class ValidPngMediaClient(FakeMediaClient):
         return CapturedImage(buffer.getvalue(), "image/png", 64, 64)
 
 
+def qiyu_embedding_config(path: str) -> dict[str, str]:
+    wanted = {
+        "EMBEDDING_PROVIDER", "EMBEDDING_MODEL", "EMBEDDING_DIMENSION",
+        "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL",
+    }
+    values = {}
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if separator and key in wanted:
+            values[key] = value.strip().strip('"\'')
+    assert values.get("EMBEDDING_PROVIDER") == "siliconflow"
+    assert values.get("EMBEDDING_MODEL") == "Qwen/Qwen3-VL-Embedding-8B"
+    assert values.get("EMBEDDING_DIMENSION") == "4096"
+    assert values.get("EMBEDDING_API_KEY")
+    assert values.get("EMBEDDING_BASE_URL", "").startswith("https://")
+    return values
+
+
 class FakeMilvusClient:
     search_calls = 0
     fail_search_at = None
@@ -2039,21 +2058,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
     real_transport = bool(qiyu_env_file)
     valid_media = real_transport or bool(os.environ.get("FOREST_TEST_MEDIA_CAPTURE_DELAY_SECONDS"))
     if qiyu_env_file:
-        wanted = {
-            "EMBEDDING_PROVIDER", "EMBEDDING_MODEL", "EMBEDDING_DIMENSION",
-            "EMBEDDING_API_KEY", "EMBEDDING_BASE_URL",
-        }
-        qiyu_values = {}
-        for line in Path(qiyu_env_file).read_text(encoding="utf-8").splitlines():
-            key, separator, value = line.partition("=")
-            key = key.strip()
-            if separator and key in wanted:
-                qiyu_values[key] = value.strip().strip('"\'')
-        assert qiyu_values.get("EMBEDDING_PROVIDER") == "siliconflow"
-        assert qiyu_values.get("EMBEDDING_MODEL") == "Qwen/Qwen3-VL-Embedding-8B"
-        assert qiyu_values.get("EMBEDDING_DIMENSION") == "4096"
-        assert qiyu_values.get("EMBEDDING_API_KEY")
-        assert qiyu_values.get("EMBEDDING_BASE_URL", "").startswith("https://")
+        qiyu_values = qiyu_embedding_config(qiyu_env_file)
         milvus_uri = os.environ["FOREST_TEST_MILVUS_URI"]
         settings = replace(
             settings,
@@ -2306,3 +2311,228 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
         assert name.startswith("forest_recall_") and len(name) == 46
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()
+
+
+@pytest.mark.postgres
+async def test_real_vl_archived_image_is_recalled_from_another_group(tmp_path):
+    dsn = os.environ.get("FOREST_TEST_DSN")
+    qiyu_env_file = os.environ.get("FOREST_TEST_QIYU_ENV_FILE")
+    milvus_uri = os.environ.get("FOREST_TEST_MILVUS_URI")
+    if not dsn or not qiyu_env_file or not milvus_uri:
+        pytest.skip("Private PostgreSQL, QiYu VL credentials and Milvus are required")
+    qiyu = qiyu_embedding_config(qiyu_env_file)
+    database = "forest_cross_vl_" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
+    parsed = urlsplit(dsn)
+    uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + database, "", ""))
+    settings = CleanBotSettings(
+        bot_id="bot-cross-vl-" + uuid4().hex[:16], dsn=uri,
+        model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
+        model="test-model", model_deployment_id="provider.chat-completions/test",
+        model_max_output_tokens=1024, model_input_modalities=("text", "image"),
+        embedding_endpoint=qiyu["EMBEDDING_BASE_URL"].rstrip("/") + "/embeddings",
+        embedding_api_key=qiyu["EMBEDDING_API_KEY"],
+        embedding_deployment_id="embedding.multimodal/qiyu-vl/cross-group-test",
+        embedding_model_revision="operator-declared/cross-group-test-1",
+        embedding_model=qiyu["EMBEDDING_MODEL"], embedding_dimensions=4096,
+        onebot_self_id="123456789", onebot_websocket_url="ws://127.0.0.1:3001/",
+        onebot_access_token="test-onebot-token",
+        allowed_group_ids=("933179609", "933179610"),
+        group_trigger_mode="MENTION", private_enabled=False,
+        shell_administrator_ids=(), agent_system_prompt="Cross-group VL recall fixture.",
+        embedding_timeout_seconds=120, vector_index_endpoint=milvus_uri,
+    )
+    clients = []
+    RecordingModelClient.requests = []
+    RecordingModelClient.first_gate = None
+    RecordingModelClient.reply_text = (
+        '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
+        '<block block_type="Assistant"><content><text>Cross-group recall complete</text>'
+        '</content></block></blocks></payload></valid_agent_protocol_content_block>'
+    )
+
+    async def create_websocket(_url, _token, **_limits):
+        client = FakeWebSocketClient(settings.onebot_self_id)
+        clients.append(client)
+        return client
+
+    host = CleanBotHost(
+        settings, model_client_factory=RecordingModelClient,
+        media_client_factory=ValidPngMediaClient,
+        websocket_client_factory=create_websocket,
+        package_catalog=PackageCatalog(tmp_path / "cross-vl-packages"),
+    )
+    try:
+        await host.start()
+        memory = host.registry.get("memory.graph")
+        namespace = next(
+            item.storage.spec.namespace for item in host.registry.descriptors
+            if item.component_id == "memory.graph"
+        )
+        async with asyncio.timeout(90):
+            while True:
+                async with host.store.pool.connection() as conn:
+                    domain = await (await conn.execute(
+                        sql.SQL("SELECT state FROM {}.memory_domain_bind_work WHERE bot_id=%s")
+                        .format(sql.Identifier(namespace)), (settings.bot_id,),
+                    )).fetchone()
+                if domain is not None and domain["state"] == "READY":
+                    break
+                await asyncio.sleep(0.1)
+
+        async def ingest(group_id, user_id, message_id, text_value, *, mention):
+            message = []
+            if mention:
+                message.append({"type": "at", "data": {"qq": settings.onebot_self_id}})
+            message.extend([
+                {"type": "text", "data": {"text": text_value}},
+                {"type": "image", "data": {
+                    "file": "same-test-image", "url": "https://media.example/same-test-image",
+                }},
+            ])
+            await clients[-1].handler(json.dumps({
+                "self_id": int(settings.onebot_self_id), "post_type": "message",
+                "message_type": "group", "sub_type": "normal",
+                "time": int(datetime.now(timezone.utc).timestamp()),
+                "message_id": message_id, "user_id": user_id, "group_id": group_id,
+                "sender": {"user_id": user_id, "nickname": "Test sender", "card": "",
+                           "role": "member"},
+                "message": message,
+            }).encode())
+
+        await ingest(933179609, 20001, 97001, "The blue glass orb is here.", mention=False)
+        document_unit = "onebot-unit:" + hashlib.sha256(b"binding/main\x0097001").hexdigest()
+        async with asyncio.timeout(45):
+            while True:
+                async with host.store.pool.connection() as conn:
+                    occurrence = await (await conn.execute(
+                        sql.SQL("SELECT event_ref,input_batch_ref,context_revision "
+                                "FROM {}.source_occurrences WHERE bot_id=%s AND source_unit_id=%s")
+                        .format(sql.Identifier(namespace)),
+                        (settings.bot_id, document_unit),
+                    )).fetchone()
+                    parts = await (await conn.execute(
+                        sql.SQL("SELECT part_kind FROM {}.source_parts "
+                                "WHERE bot_id=%s AND source_unit_id=%s ORDER BY part_index")
+                        .format(sql.Identifier(namespace)),
+                        (settings.bot_id, document_unit),
+                    )).fetchall()
+                if occurrence is not None and [row["part_kind"] for row in parts] == ["TEXT", "IMAGE"]:
+                    break
+                await asyncio.sleep(0.1)
+
+        batch_ref = occurrence["input_batch_ref"] or "batch/cross-vl-document"
+        context_revision = occurrence["context_revision"] or 1
+        event_ref = occurrence["event_ref"]
+        compaction_ref = "compaction/cross-vl-document"
+        selection = {
+            "status": "BATCH", "operation_id": "conversation/silent-archive/cross-vl",
+            "conversation_id": "onebot:group:933179609", "classified_through_seq": 1,
+            "selected_input_end_seq": 1, "mailbox_revision": 1,
+            "input_batch_id": batch_ref, "boundary": "IDLE", "kind": "SILENT_DRAIN",
+            "start_seq": 1, "end_seq": 1, "trigger_cut_seq": None,
+            "session_ref": None, "run_ref": None,
+            "context_revision": context_revision, "context_view_revision": context_revision,
+            "event_ids": [event_ref], "trigger_ids": [], "triggers": [],
+            "memory_archive": {"compaction_ref": compaction_ref, "event_refs": [event_ref]},
+        }
+        async with host.store.pool.connection() as conn, conn.transaction():
+            await memory.unit_of_work_participant().invoke_in(
+                conn, "memory.qualify-archive", {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {"component_id": "conversation.scheduler",
+                               "generation_id": memory.generation_identity.generation_id},
+                    "input": {}, "prior": {
+                        "prepare": {"status": "WRITE", "commit": {
+                            "conversation_id": "onebot:group:933179609",
+                            "compaction_id": compaction_ref, "archived_unit_count": 1,
+                            "units": [{"event_id": event_ref, "input_batch_id": batch_ref,
+                                       "context_revision": context_revision}],
+                        }},
+                        "commit": selection,
+                        "payload_epoch": {"protocol": "forest.payload-epoch/1",
+                                          "deletion_epoch": await host._kernel.payload.epoch()},
+                    },
+                }, operation_id="memory/archive/cross-vl-document",
+                causal_root_kind="conversation.silent-drain",
+                causal_root_id="onebot:group:933179609",
+                parent_call_id="call/memory/archive/cross-vl-document",
+                timeout_seconds=10,
+            )
+        async with asyncio.timeout(180):
+            while True:
+                async with host.store.pool.connection() as conn:
+                    document_facets = await (await conn.execute(
+                        sql.SQL("SELECT modality,state,index_ref_id FROM {}.embedding_facets "
+                                "WHERE bot_id=%s AND purpose='DOCUMENT' AND source_unit_id=%s")
+                        .format(sql.Identifier(namespace)),
+                        (settings.bot_id, document_unit),
+                    )).fetchall()
+                if len(document_facets) == 2 and all(row["state"] == "READY" for row in document_facets):
+                    break
+                await asyncio.sleep(0.2)
+        assert {row["modality"] for row in document_facets} == {"TEXT", "IMAGE"}
+        assert all(row["index_ref_id"] for row in document_facets)
+
+        await ingest(933179610, 20002, 97002, "Where is the blue glass orb?", mention=True)
+        async with asyncio.timeout(180):
+            while not RecordingModelClient.requests:
+                await asyncio.sleep(0.2)
+        prepared = RecordingModelClient.requests[0]
+        prepared.verify()
+        assert prepared.manifest["memory_evidence"]["status"] == "READY"
+        assert prepared.manifest["memory_evidence"]["current_source"]["external_group_id"] == "933179610"
+        historical = [
+            item for item in prepared.manifest["source_manifest"]
+            if item.get("context_data") == "memory_evidence"
+        ]
+        assert any(
+            item["source_unit_id"] == document_unit
+            and item["source"]["external_group_id"] == "933179609"
+            and item["author"]["principal_ref"] == "qq:20001"
+            for item in historical
+        )
+        async with host.store.pool.connection() as conn:
+            matched_modalities = await (await conn.execute(
+                sql.SQL(
+                    "SELECT q.modality AS query_modality,d.modality AS document_modality "
+                    "FROM {m}.query_seed_matches x "
+                    "JOIN {m}.embedding_facets q ON q.bot_id=x.bot_id "
+                    "AND q.facet_id=x.query_facet_id "
+                    "JOIN {m}.embedding_facets d ON d.bot_id=x.bot_id "
+                    "AND d.facet_id=x.document_facet_id "
+                    "WHERE x.bot_id=%s AND x.source_unit_id=%s"
+                ).format(m=sql.Identifier(namespace)),
+                (settings.bot_id, document_unit),
+            )).fetchall()
+        assert ("IMAGE", "IMAGE") in {
+            (row["query_modality"], row["document_modality"])
+            for row in matched_modalities
+        }
+        assert b"image_url" in prepared.body
+    finally:
+        RecordingModelClient.reply_text = None
+        try:
+            await host.close()
+        finally:
+            try:
+                profile = EmbeddingProfile(
+                    deployment_id=settings.embedding_deployment_id,
+                    model_revision=settings.embedding_model_revision,
+                    model=settings.embedding_model, dimensions=settings.embedding_dimensions,
+                )
+                collection_name = VectorIndexIdentityRepository.collection_name(
+                    settings.bot_id, profile.space_id
+                )
+                client = AsyncMilvusClient(uri=settings.vector_index_endpoint)
+                try:
+                    if await client.has_collection(collection_name=collection_name):
+                        await client.drop_collection(collection_name=collection_name)
+                finally:
+                    await client.close()
+            finally:
+                await admin.execute(
+                    sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database))
+                )
+                await admin.close()
