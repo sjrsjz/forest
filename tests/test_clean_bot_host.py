@@ -79,10 +79,14 @@ class FakeEmbeddingClient(FakeModelClient):
 
 class RecordingUnknownModelClient(FakeModelClient):
     requests = []
+    first_gate = None
 
     async def dispatch(self, prepared, *, permitcheck):
         await permitcheck(prepared)
+        first = not type(self).requests
         type(self).requests.append(prepared)
+        if first and type(self).first_gate is not None:
+            await type(self).first_gate.wait()
         return ModelResult(
             "UNKNOWN", prepared.request_id, prepared.transport_attempt_id,
             prepared.payload_digest, error_code="TEST_MODEL_RESULT_UNKNOWN",
@@ -1639,7 +1643,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 
 @pytest.mark.postgres
-async def test_group_trigger_recall_reaches_provider_request(tmp_path):
+@pytest.mark.parametrize("scenario", ("text", "visual", "cross-group"))
+async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
@@ -1652,20 +1657,26 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path):
         bot_id="bot-agent-recall-test", dsn=uri,
         model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
         model="test-model", model_deployment_id="provider.chat-completions/test",
-        model_max_output_tokens=1024, model_input_modalities=("text",),
+        model_max_output_tokens=1024,
+        model_input_modalities=("text", "image") if scenario == "visual" else ("text",),
         embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
         embedding_api_key="test-embedding-key",
         embedding_deployment_id="embedding.multimodal/qiyu-vl/test",
         embedding_model_revision="test-revision/1",
         embedding_model="Qwen/Qwen3-VL-Embedding-8B", embedding_dimensions=4096,
         onebot_self_id="123456789", onebot_websocket_url="ws://127.0.0.1:3001/",
-        onebot_access_token="test-onebot-token", allowed_group_ids=("933179609",),
+        onebot_access_token="test-onebot-token",
+        allowed_group_ids=("933179609", "933179610") if scenario == "cross-group"
+        else ("933179609",),
         group_trigger_mode="MENTION", private_enabled=True,
         shell_administrator_ids=("42",),
         agent_system_prompt="The Agent-Memory request integration fixture.",
     )
     clients = []
     RecordingUnknownModelClient.requests = []
+    RecordingUnknownModelClient.first_gate = (
+        asyncio.Event() if scenario == "cross-group" else None
+    )
 
     async def create_websocket(_url, _token, **_limits):
         client = FakeWebSocketClient(settings.onebot_self_id)
@@ -1707,6 +1718,10 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path):
             "message": [
                 {"type": "at", "data": {"qq": settings.onebot_self_id}},
                 {"type": "text", "data": {"text": "What is in memory?"}},
+                *([{"type": "image", "data": {
+                    "file": "current-question-image",
+                    "url": "https://media.example/current-question-image",
+                }}] if scenario == "visual" else []),
             ],
         }).encode())
         try:
@@ -1733,8 +1748,51 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path):
         assert manifest["memory_evidence"]["current_source"]["external_group_id"] == "933179609"
         assert any(item["author"]["principal_ref"] == "qq:20001"
                    for item in manifest["source_manifest"])
-        assert b"image_url" not in prepared.body
+        if scenario == "visual":
+            assert b"image_url" in prepared.body
+            assert manifest["media_transform_refs"]
+        else:
+            assert b"image_url" not in prepared.body
+        if scenario == "cross-group":
+            await clients[-1].handler(json.dumps({
+                "self_id": int(settings.onebot_self_id), "post_type": "message",
+                "message_type": "group", "sub_type": "normal",
+                "time": int(datetime.now(timezone.utc).timestamp()),
+                "message_id": 90003, "user_id": 20003, "group_id": 933179609,
+                "sender": {"user_id": 20003, "nickname": "Queued tester",
+                           "card": "", "role": "member"},
+                "message": [
+                    {"type": "at", "data": {"qq": settings.onebot_self_id}},
+                    {"type": "text", "data": {"text": "Queued for the same group"}},
+                ],
+            }).encode())
+            await clients[-1].handler(json.dumps({
+                "self_id": int(settings.onebot_self_id), "post_type": "message",
+                "message_type": "group", "sub_type": "normal",
+                "time": int(datetime.now(timezone.utc).timestamp()),
+                "message_id": 90002, "user_id": 20002, "group_id": 933179610,
+                "sender": {"user_id": 20002, "nickname": "Other group tester",
+                           "card": "", "role": "member"},
+                "message": [
+                    {"type": "at", "data": {"qq": settings.onebot_self_id}},
+                    {"type": "text", "data": {"text": "What about this group?"}},
+                ],
+            }).encode())
+            async with asyncio.timeout(35):
+                while len(RecordingUnknownModelClient.requests) < 2:
+                    await asyncio.sleep(0.1)
+            second = RecordingUnknownModelClient.requests[1]
+            second.verify()
+            assert len(RecordingUnknownModelClient.requests) == 2
+            assert b"Queued for the same group" not in prepared.body
+            assert second.manifest["memory_evidence"]["current_source"][
+                "external_group_id"
+            ] == "933179610"
+            assert second.manifest["memory_evidence"]["status"] == "READY"
     finally:
+        if RecordingUnknownModelClient.first_gate is not None:
+            RecordingUnknownModelClient.first_gate.set()
+        RecordingUnknownModelClient.first_gate = None
         await host.close()
         assert name.startswith("forest_recall_") and len(name) == 46
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
