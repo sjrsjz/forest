@@ -209,7 +209,7 @@ Memory 管理关系新增 `memory.relations.neighbourhood` 只读端口：从指
 
 后续已把试验 facet 接入 Memory 的嵌入 claim、handoff 资格复核与向量发布：认领时要求 Bot/Generation、未过期的试验输入、固定 part 和 PayloadRef；handoff 前重新锁定并核验，旧 Generation 不可继续派发。发布事务仍按当前 Generation 与到期时间判定，失效向量写 ref-only 删除 outbox 并抑制 facet；向量发布 Worker 的任务契约不再暴露群来源字段。隔离 PostgreSQL 已验证图文试验认领、旧 Generation 拒绝、正常发布为 READY、旧 Generation 发布时墓碑删除，以及删除 outbox 的认领与结算；该阶段完整 Memory 包 15 项、静态检查和本地 441 项回归通过。
 
-Memory 的常驻向量删除 Worker 现在每次认领前有界扫描已过期试验：未派发的 PENDING/FAILED facet 直接抑制；已派发或结果不确定的 facet 先登记 ref-only 删除屏障，等待原任务收敛；EMBEDDED/READY 同事务登记删除并抑制。单次最多处理 32 个 facet，扫描索引只收录待处理状态，不包含已抑制的历史行；索引删除继续由原 owned-work 租约与结算完成。真实 PostgreSQL 验证了已发布试验在静默到期后无法读取、被抑制、两个并发认领合流为唯一删除任务、结算及二次轮询不重复领取。完整 Memory 包 16 项通过。此机制处理向量索引生命周期，尚未物理回收试验查询、part 和 Payload 记录；完整 TTL 清理仍待实现。
+Memory 的常驻向量删除 Worker 每次认领前有界扫描已过期试验：未曾派发的 facet 直接抑制；曾有任何嵌入尝试或可能产生迟到写入的 facet 先登记 ref-only 删除屏障，等待原任务收敛；EMBEDDED/READY 同事务登记删除并抑制。单次最多处理 32 个 facet，扫描索引只收录待处理状态，不包含已抑制的历史行；索引删除继续由原 owned-work 租约与结算完成。真实 PostgreSQL 验证了已发布试验在静默到期后无法读取、被抑制、两个并发认领合流为唯一删除任务、结算及二次轮询不重复领取。后续版本加入完整试验元数据回收；Kernel Payload 另由自身的 TTL 撤销和清扫路径处理。
 
 管理试验复用正式查询的召回 owned-work 状态机时，状态读取现按 Bot、Generation 和有效期拒绝失效试验；任务认领及旧 claim token 重放会把到期或换代的试验收敛为 `FAILED/MEMORY_TRIAL_INPUT_UNAVAILABLE`，避免继续调度图扩散。SQL 定向验证覆盖有效试验状态、换代拒读、旧 claim 重放和待领取工作终止。
 
@@ -217,11 +217,11 @@ Memory 包现已声明 `memory.trial.start`、`memory.trial.get`、`memory.trial
 
 取消 action 现同时给试验输入写入单向 `cancelled_at`，阻断后续 part 读取、facet 准备、嵌入领取与派发资格；向量发布不能确认取消后的 READY，向量删除 Worker 将取消与过期试验一起清扫，包括已准备但尚未派发的 `PREPARED` facet。PostgreSQL 覆盖了已领取召回工作的取消后结算、待嵌入和已准备 facet 不再领取并被抑制。已派发的外部请求仍按原 at-most-once 效果结算，不能许诺即时撤销网络调用。
 
-Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。结果 query 已读取发布证据并在读取前后复核管理员与查询状态；试验查询/part 的完整物理 TTL 清理仍未完成。
+Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后按回收事务的固定顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。结果 query 已读取发布证据并在读取前后复核管理员与查询状态。
 
 试验输入的多个 part 现使用由 `query_id` 与 `part_id` 派生的独立 Kernel Payload owner_id；Memory 的启动命令与表约束同时复核该身份，避免图文 part 争用同一唯一 owner。隔离 PostgreSQL 已验证两个真实 Payload 能在同一管理试验登记，错误摘要和字节数仍被拒绝。
 
-管理资产通道已新增于 `kernel.payload`：包清单声明可上传资产，部署管理路由对 256 KiB 原始块设硬上限，Bot Web ticket/策略/审计和分块写入在同一事务内完成。上传会话绑定 Bot、管理员、组件 Generation、目标 query/part、owner 与总体摘要；5 分钟未完成超时、30 分钟最终 Payload TTL，数据库约束块身份，限流窗口及每 Bot 保留量设上界，常驻 Kernel 清理撤销过期 Payload。完成时从真实图片字节解析尺寸；Memory 试验 action 对每个 part 复核同一管理员、Generation、query/part、元数据及剩余有效期。试验状态、结果和图片查询由 Web 网关注入管理员主体，Memory 对查询与取消复核主体/Generation；不同管理员不能凭试验 ID 读取或取消。结果、图片和遗忘预览服务现声明为管理专用，只能经包管理入口调用，不出现在公共依赖图和 RuntimeGraph。隔离包 UI 已加入图文上传、启动、状态、证据分页、按需原图分块显示和取消入口；定向 PostgreSQL 已验证分块幂等、绑定拒绝和到期撤销，HTTP 与前端还需完整真实会话验收，试验查询/part 的物理 TTL 回收仍待完成。
+管理资产通道已新增于 `kernel.payload`：包清单声明可上传资产，部署管理路由对 256 KiB 原始块设硬上限，Bot Web ticket/策略/审计和分块写入在同一事务内完成。上传会话绑定 Bot、管理员、组件 Generation、目标 query/part、owner 与总体摘要；5 分钟未完成超时、30 分钟最终 Payload TTL，数据库约束块身份，限流窗口及每 Bot 保留量设上界，常驻 Kernel 清理撤销过期 Payload。完成时从真实图片字节解析尺寸；Memory 试验 action 对每个 part 复核同一管理员、Generation、query/part、元数据及剩余有效期。试验状态、结果和图片查询由 Web 网关注入管理员主体，Memory 对查询与取消复核主体/Generation；不同管理员不能凭试验 ID 读取或取消。结果、图片和遗忘预览服务现声明为管理专用，只能经包管理入口调用，不出现在公共依赖图和 RuntimeGraph。隔离包 UI 已加入图文上传、启动、状态、证据分页、按需原图分块显示和取消入口；定向 PostgreSQL 已验证分块幂等、绑定拒绝和到期撤销，HTTP 与前端还需完整真实会话验收。
 
 ## 8. 下一切换顺序
 
@@ -233,4 +233,6 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 
 生产图已经是微内核包系统；目标重型 Bot 框架仍需完成 Memory 主链和长期运行验证。
 
-现行 Memory 包 UI 增加独立真实浏览器冒烟脚本 `scripts/smoke_memory_module.py`：本机 Edge 验证了隔离 MessageChannel 初始化、管理试验结果中的群号/作者归因、超过两个 96 KiB 块的原图显示，以及分块被篡改时摘要拒绝显示。旧管理静态目录已经移除，依赖它的 12 个旧面板冒烟脚本同步删除；此浏览器 fixture 不替代真实 HTTP 会话、数据库和供应商图文召回验收。试验查询、part 和 Memory 持久记录的物理 TTL 回收仍待按外键、不可变事实及向量删除屏障实现。
+现行 Memory 包 UI 增加独立真实浏览器冒烟脚本 `scripts/smoke_memory_module.py`：本机 Edge 验证了隔离 MessageChannel 初始化、管理试验结果中的群号/作者归因、超过两个 96 KiB 块的原图显示，以及分块被篡改时摘要拒绝显示。旧管理静态目录已经移除，依赖它的旧面板脚本及仍引用旧页面 DOM 的旧整站冒烟脚本同步删除；此浏览器 fixture 不替代真实 HTTP 会话、数据库和供应商图文召回验收。
+
+试验元数据回收现位于 `memory_graph` 包的向量删除 owned-work 认领事务：先有界抑制到期 facet 并为任何曾尝试派发的 facet 登记删除屏障；没有待领删除任务时，每轮最多回收一份到期试验、检查八份候选。Bot 级持久游标跨轮轮转和回绕，使前八份因有效租约而阻塞时，第九份仍能被回收。事务锁定试验输入，要求召回工作终结、所有 facet 已抑制、相关向量删除均结算、嵌入 claim/attempt/发布/恢复工作没有在途状态、预算预留已结算且没有成功回复联想日志。过期但没有外部尝试的旧 claim 与召回工作由该事务收敛，再按外键顺序删除试验 part、查询、facet、证据区域和包内结算行；向量删除 tombstone 与费用预算保留。仅对应 Bot、试验查询、bundle 和 claim 的不可变事实触发器在该事务内放行，正常群查询不受影响。真实 PostgreSQL 冻结 bundle/证据、过期 claim、有效租约阻断、向量屏障、游标轮转及并发认领用例通过，Memory 包 19 项数据库回归通过；Kernel Payload 的物理清扫仍按其独立 TTL 路径运行。真实 HTTP 会话、供应商图文召回和长时间运行验收尚未完成。

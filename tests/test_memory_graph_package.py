@@ -1402,6 +1402,98 @@ async def test_expired_trial_vectors_are_suppressed_and_deleted(clean_authority,
             "'text/plain',4,%s,0,'READY','facet/expired-vector',%s,"
             "'embedding-result/expired',%s,clock_timestamp())"
         ).format(namespace), (store.bot_id, digest, digest, digest, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.query_facet_preparations "
+            "(bot_id,query_id,facet_count,accepted_deletion_epoch) "
+            "VALUES (%s,'query/expired-vector',1,0)"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.query_match_preparations "
+            "(bot_id,query_id,operation_id,input_digest,space_id,policy,"
+            "facet_count,accepted_deletion_epoch) VALUES "
+            "(%s,'query/expired-vector','match/expired',%s,%s,%s,1,0)"
+        ).format(namespace), (store.bot_id, digest, digest, Jsonb({})))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.query_match_receipts "
+            "(bot_id,query_id,query_facet_id,operation_id,input_digest,"
+            "accepted_deletion_epoch,match_count) VALUES "
+            "(%s,'query/expired-vector','facet/expired-vector',"
+            "'match-receipt/expired',%s,0,0)"
+        ).format(namespace), (store.bot_id, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.retrieval_bundles "
+            "(bot_id,bundle_id,query_id,operation_id,input_digest,"
+            "accepted_deletion_epoch,read_count,truncated,association_sampled,"
+            "seed_count,result_count) VALUES "
+            "(%s,'bundle/expired-vector','query/expired-vector',"
+            "'freeze/expired',%s,0,0,false,false,0,0)"
+        ).format(namespace), (store.bot_id, digest))
+        await conn.execute(sql.SQL(
+            "UPDATE {}.memory_queries SET state='FROZEN',"
+            "bundle_id='bundle/expired-vector',frozen_at=clock_timestamp() "
+            "WHERE bot_id=%s AND query_id='query/expired-vector'"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.retrieval_materializations "
+            "(bot_id,bundle_id,evidence_ref,item_indexes,accepted_deletion_epoch,"
+            "content_truncated,missing_count) VALUES "
+            "(%s,'bundle/expired-vector',%s,%s,0,false,0)"
+        ).format(namespace), (store.bot_id, Jsonb({"payload_id": "evidence/expired"}), []))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_claims "
+            "(bot_id,claim_id,purpose,space_id,source_epoch_high_watermark,"
+            "lease_seconds,lease_deadline,item_limit,item_count,claim_payload,state) "
+            "VALUES (%s,'claim/expired','QUERY',%s,0,60,"
+            "clock_timestamp()-interval '1 minute',1,1,%s,'EXPIRED')"
+        ).format(namespace), (store.bot_id, digest, Jsonb({"claim": "expired"})))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_claim_items "
+            "(bot_id,claim_id,item_index,facet_id) "
+            "VALUES (%s,'claim/expired',0,'facet/expired-vector')"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_claims "
+            "(bot_id,claim_id,purpose,space_id,source_epoch_high_watermark,"
+            "lease_seconds,lease_deadline,item_limit,item_count,claim_payload) "
+            "VALUES (%s,'claim/stale','QUERY',%s,0,60,"
+            "clock_timestamp()-interval '1 minute',1,1,%s)"
+        ).format(namespace), (store.bot_id, digest, Jsonb({"claim": "stale"})))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_claim_items "
+            "(bot_id,claim_id,item_index,facet_id) "
+            "VALUES (%s,'claim/stale',0,'facet/expired-vector')"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_claims "
+            "(bot_id,claim_id,purpose,space_id,source_epoch_high_watermark,"
+            "lease_seconds,lease_deadline,item_limit,item_count,claim_payload) "
+            "VALUES (%s,'claim/live','QUERY',%s,0,60,"
+            "clock_timestamp()+interval '10 minutes',1,1,%s)"
+        ).format(namespace), (store.bot_id, digest, Jsonb({"claim": "live"})))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_claim_items "
+            "(bot_id,claim_id,item_index,facet_id) "
+            "VALUES (%s,'claim/live',0,'facet/expired-vector')"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_recovery_work (bot_id,claim_id,state) "
+            "VALUES (%s,'claim/expired','SETTLED')"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_work_settlements "
+            "(bot_id,claim_token,input_payload,result_payload) "
+            "VALUES (%s,'claim/expired',%s,%s)"
+        ).format(namespace), (store.bot_id, Jsonb({}), Jsonb({})))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.query_recall_work (bot_id,query_id,deadline_at,state) "
+            "VALUES (%s,'query/expired-vector',clock_timestamp(),'READY')"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.query_recall_settlements "
+            "(bot_id,claim_token,input_payload,result_payload) "
+            "VALUES (%s,'recall/expired',%s,%s)"
+        ).format(namespace), (store.bot_id, Jsonb({"payload": {
+            "query_id": "query/expired-vector"}}), Jsonb({})))
     async with store.pool.connection() as conn:
         expired_read = (await (await conn.execute(sql.SQL(
             "SELECT {}.memory_read_query_parts(%s,%s) AS result"
@@ -1442,6 +1534,12 @@ async def test_expired_trial_vectors_are_suppressed_and_deleted(clean_authority,
         ).format(namespace, namespace), (store.bot_id,))).fetchone())
     assert row == {"state": "SUPPRESSED", "deletion_state": "PENDING"}
     async with store.pool.connection() as conn:
+        retained = (await (await conn.execute(sql.SQL(
+            "SELECT count(*) AS count FROM {}.memory_trial_inputs "
+            "WHERE bot_id=%s AND query_id='query/expired-vector'"
+        ).format(namespace), (store.bot_id,))).fetchone())["count"]
+    assert retained == 1
+    async with store.pool.connection() as conn:
         settled = (await (await conn.execute(sql.SQL(
             "SELECT {}.memory_settle_vector_deletion(%s,%s) AS result"
         ).format(namespace), (
@@ -1463,6 +1561,124 @@ async def test_expired_trial_vectors_are_suppressed_and_deleted(clean_authority,
                    "claim_token": "delete/expired-vector/next", "lease_seconds": 360}),
         ))).fetchone())["result"]
     assert next_claim["ok"] and next_claim["value"] is None
+    async with store.pool.connection() as conn, conn.transaction():
+        retained_with_live_claim = (await (await conn.execute(sql.SQL(
+            "SELECT count(*) AS count FROM {}.memory_trial_inputs "
+            "WHERE bot_id=%s AND query_id='query/expired-vector'"
+        ).format(namespace), (store.bot_id,))).fetchone())["count"]
+        assert retained_with_live_claim == 1
+        await conn.execute(sql.SQL(
+            "UPDATE {}.embedding_claims SET state='EXPIRED' "
+            "WHERE bot_id=%s AND claim_id='claim/live'"
+        ).format(namespace), (store.bot_id,))
+    final_claim = await claim_deletion("delete/expired-vector/final")
+    assert final_claim["ok"] and final_claim["value"] is None
+    async with store.pool.connection() as conn:
+        counts = {}
+        for table in ("memory_queries", "memory_trial_inputs", "memory_trial_parts",
+                      "embedding_facets", "query_facet_preparations",
+                      "query_match_preparations", "query_match_receipts",
+                      "retrieval_bundles", "retrieval_materializations",
+                      "query_recall_work"):
+            column = ("trial_query_id" if table == "embedding_facets"
+                      else "bundle_id" if table == "retrieval_materializations"
+                      else "query_id")
+            identifier = ("bundle/expired-vector" if column == "bundle_id"
+                          else "query/expired-vector")
+            counts[table] = (await (await conn.execute(sql.SQL(
+                "SELECT count(*) AS count FROM {}.{} WHERE bot_id=%s AND {}=%s"
+            ).format(namespace, sql.Identifier(table), sql.Identifier(column)),
+                (store.bot_id, identifier))).fetchone())["count"]
+        fence = (await (await conn.execute(sql.SQL(
+            "SELECT state FROM {}.vector_index_deletions "
+            "WHERE bot_id=%s AND index_ref_id='facet/expired-vector'"
+        ).format(namespace), (store.bot_id,))).fetchone())
+        claim = (await (await conn.execute(sql.SQL(
+            "SELECT count(*) AS count FROM {}.embedding_claims "
+            "WHERE bot_id=%s AND claim_id IN "
+            "('claim/expired','claim/stale','claim/live')"
+        ).format(namespace), (store.bot_id,))).fetchone())["count"]
+        recall_settlement = (await (await conn.execute(sql.SQL(
+            "SELECT count(*) AS count FROM {}.query_recall_settlements "
+            "WHERE bot_id=%s AND claim_token='recall/expired'"
+        ).format(namespace), (store.bot_id,))).fetchone())["count"]
+    assert counts == {table: 0 for table in counts}
+    assert fence == {"state": "DELETED"}
+    assert claim == 0 and recall_settlement == 0
+
+
+@pytest.mark.postgres
+async def test_trial_gc_cursor_reaches_later_trial_behind_live_claims(clean_authority, tmp_path):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "trial-gc-cursor-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    digest = "sha256:" + "b" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        for index in range(9):
+            query_id = f"trial/gc/{index:02}"
+            part_id = f"part/{index:02}"
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.memory_queries "
+                "(bot_id,query_id,operation_id,input_digest,input_kind,query_mode,"
+                "fusion_policy_revision,accepted_deletion_epoch) "
+                "VALUES (%s,%s,%s,%s,'ADMIN_TRIAL','TEXT','fusion/1',0)"
+            ).format(namespace), (store.bot_id, query_id, f"register/{index:02}", digest))
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.memory_trial_inputs "
+                "(bot_id,query_id,actor_subject_ref,generation_id,created_at,expires_at) "
+                "VALUES (%s,%s,'web:admin','generation/gc',"
+                "clock_timestamp()-interval '3 minutes',"
+                "clock_timestamp()-interval '2 minutes'+%s*interval '1 second')"
+            ).format(namespace), (store.bot_id, query_id, index))
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.memory_trial_parts "
+                "(bot_id,query_id,query_part_index,part_id,modality,media_type,"
+                "byte_length,payload_id,payload_digest,payload_owner_component_id,"
+                "payload_owner_kind,payload_owner_id) VALUES "
+                "(%s,%s,0,%s,'TEXT','text/plain',4,%s,%s,'memory.graph',"
+                "'trial.input',%s)"
+            ).format(namespace), (store.bot_id, query_id, part_id,
+                f"payload/{index:02}", digest, _trial_owner_id(query_id, part_id)))
+            if index < 8:
+                await conn.execute(sql.SQL(
+                    "INSERT INTO {}.query_recall_work "
+                    "(bot_id,query_id,deadline_at,state,claim_token,claim_payload,"
+                    "lease_deadline) VALUES "
+                    "(%s,%s,clock_timestamp()-interval '1 minute','CLAIMED',%s,%s,"
+                    "clock_timestamp()+interval '10 minutes')"
+                ).format(namespace), (store.bot_id, query_id,
+                    f"recall/claimed/{index:02}", Jsonb({"query_id": query_id})))
+
+    async def poll(token):
+        async with store.pool.connection() as conn:
+            return (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_claim_vector_deletion(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id}),
+                Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                       "claim_token": token, "lease_seconds": 75}),
+            ))).fetchone())["result"]
+
+    first = await poll("trial/gc/poll/1")
+    assert first["ok"] and first["value"] is None
+    async with store.pool.connection() as conn:
+        cursor = (await (await conn.execute(sql.SQL(
+            "SELECT last_query_id FROM {}.memory_trial_gc_cursors WHERE bot_id=%s"
+        ).format(namespace), (store.bot_id,))).fetchone())
+    assert cursor == {"last_query_id": "trial/gc/07"}
+    second = await poll("trial/gc/poll/2")
+    assert second["ok"] and second["value"] is None
+    async with store.pool.connection() as conn:
+        rows = (await (await conn.execute(sql.SQL(
+            "SELECT query_id FROM {}.memory_trial_inputs "
+            "WHERE bot_id=%s ORDER BY query_id"
+        ).format(namespace), (store.bot_id,))).fetchall())
+    assert [row["query_id"] for row in rows] == [f"trial/gc/{index:02}" for index in range(8)]
 
 
 def _envelope(

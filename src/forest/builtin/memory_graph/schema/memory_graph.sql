@@ -549,6 +549,14 @@ CREATE TABLE memory_trial_parts (
 
 CREATE INDEX memory_trial_inputs_expiry_idx ON memory_trial_inputs(bot_id,expires_at,query_id);
 
+CREATE TABLE memory_trial_gc_cursors (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    last_expires_at timestamptz,
+    last_query_id text,
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK ((last_expires_at IS NULL) = (last_query_id IS NULL))
+);
+
 CREATE TABLE facet_preparation_operations (
     bot_id text NOT NULL,
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
@@ -948,7 +956,8 @@ CREATE TABLE retrieval_bundles (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,bundle_id),
     UNIQUE (bot_id,query_id),
-    FOREIGN KEY (bot_id,query_id) REFERENCES query_match_preparations(bot_id,query_id),
+    FOREIGN KEY (bot_id,query_id) REFERENCES query_match_preparations(bot_id,query_id)
+        DEFERRABLE INITIALLY DEFERRED,
     UNIQUE (bot_id,query_id,bundle_id)
 );
 
@@ -1191,8 +1200,34 @@ CREATE INDEX embedding_budget_reservations_state_idx ON embedding_budget_reserva
     bot_id,state,budget_day,reservation_id
 );
 
+CREATE FUNCTION memory_trial_gc_context() RETURNS jsonb LANGUAGE sql STABLE AS $$
+    SELECT coalesce(nullif(current_setting('forest.memory_trial_gc',true),'')::jsonb,'{}'::jsonb)
+$$;
+
 CREATE FUNCTION reject_immutable_row() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE gc jsonb := __forest_module_schema__.memory_trial_gc_context();
+        fact jsonb := to_jsonb(OLD);
 BEGIN
+    IF TG_OP='DELETE' AND fact->>'bot_id'=gc->>'bot_id' AND (
+        (TG_TABLE_NAME IN ('query_facet_preparations','query_match_preparations',
+            'query_match_receipts','query_seed_matches') AND fact->>'query_id'=gc->>'query_id')
+        OR (TG_TABLE_NAME='facet_preparation_operations'
+            AND fact->>'target_kind'='QUERY' AND fact->>'target_id'=gc->>'query_id')
+        OR (TG_TABLE_NAME='embedding_claim_items'
+            AND gc->'claim_ids' ? (fact->>'claim_id') AND EXISTS (
+                SELECT 1 FROM __forest_module_schema__.embedding_facets f
+                WHERE f.bot_id=fact->>'bot_id' AND f.facet_id=fact->>'facet_id'
+                  AND f.input_kind='ADMIN_TRIAL' AND f.query_id=gc->>'query_id'
+            ))
+        OR (TG_TABLE_NAME='embedding_work_settlements'
+            AND gc->'claim_ids' ? (fact->>'claim_token'))
+        OR (TG_TABLE_NAME='query_recall_settlements'
+            AND fact#>>'{input_payload,payload,query_id}'=gc->>'query_id')
+        OR (TG_TABLE_NAME='retrieval_bundles'
+            AND fact->>'query_id'=gc->>'query_id' AND fact->>'bundle_id'=gc->>'bundle_id')
+        OR (TG_TABLE_NAME IN ('retrieval_items','retrieval_materializations',
+            'retrieval_relations') AND fact->>'bundle_id'=gc->>'bundle_id')
+    ) THEN RETURN OLD; END IF;
     RAISE EXCEPTION 'memory.graph immutable fact cannot change' USING ERRCODE='55000';
 END;
 $$;
@@ -3462,6 +3497,174 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
 END;
 $$;
 
+CREATE FUNCTION memory_reap_expired_trial(requested_bot text)
+RETURNS integer LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    trial_row record;
+    gc_cursor __forest_module_schema__.memory_trial_gc_cursors%ROWTYPE;
+    claim_ids text[];
+    attempt_ids text[];
+    prior_gc text;
+    considered boolean := false;
+BEGIN
+    INSERT INTO __forest_module_schema__.memory_trial_gc_cursors(bot_id)
+    VALUES(requested_bot) ON CONFLICT (bot_id) DO NOTHING;
+    SELECT * INTO gc_cursor FROM __forest_module_schema__.memory_trial_gc_cursors
+    WHERE bot_id=requested_bot FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN RETURN 0; END IF;
+    -- The durable cursor rotates past unsettled trials; each poll still checks
+    -- at most eight rows and deletes at most one. The next empty pass wraps.
+    FOR trial_row IN
+        SELECT t.query_id,t.expires_at,q.bundle_id
+        FROM __forest_module_schema__.memory_trial_inputs t
+        JOIN __forest_module_schema__.memory_queries q
+          ON q.bot_id=t.bot_id AND q.query_id=t.query_id
+         AND q.input_kind='ADMIN_TRIAL'
+        WHERE t.bot_id=requested_bot AND t.expires_at<=clock_timestamp()
+          AND (gc_cursor.last_expires_at IS NULL OR
+               (t.expires_at,t.query_id)>(gc_cursor.last_expires_at,gc_cursor.last_query_id))
+        ORDER BY t.expires_at,t.query_id LIMIT 8
+        FOR UPDATE OF t SKIP LOCKED
+    LOOP
+        considered := true;
+        UPDATE __forest_module_schema__.memory_trial_gc_cursors
+        SET last_expires_at=trial_row.expires_at,last_query_id=trial_row.query_id,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot;
+        UPDATE __forest_module_schema__.query_recall_work w
+        SET state='FAILED',last_error_code='MEMORY_TRIAL_INPUT_UNAVAILABLE',
+            claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+            updated_at=clock_timestamp()
+        WHERE w.bot_id=requested_bot AND w.query_id=trial_row.query_id
+          AND w.state IN ('PENDING','CLAIMED','BLOCKED_UNKNOWN')
+          AND (w.state<>'CLAIMED' OR w.lease_deadline<=clock_timestamp());
+        IF EXISTS (
+            SELECT 1 FROM __forest_module_schema__.embedding_facets f
+            LEFT JOIN __forest_module_schema__.vector_index_deletions d
+              ON d.bot_id=f.bot_id AND d.index_ref_id=f.facet_id
+            WHERE f.bot_id=requested_bot AND f.trial_query_id=trial_row.query_id
+              AND (f.state<>'SUPPRESSED'
+                   OR d.state IS NOT NULL AND d.state<>'DELETED'
+                   OR ((f.attempt_count>0 OR f.current_attempt_id IS NOT NULL)
+                       AND d.state IS DISTINCT FROM 'DELETED'))
+        ) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.query_recall_work w
+            WHERE w.bot_id=requested_bot AND w.query_id=trial_row.query_id
+              AND w.state NOT IN ('READY','FAILED','CANCELLED')
+        ) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.association_journal j
+            WHERE j.bot_id=requested_bot AND j.bundle_id=trial_row.bundle_id
+        ) THEN CONTINUE; END IF;
+
+        SELECT coalesce(array_agg(DISTINCT ci.claim_id),ARRAY[]::text[])
+        INTO claim_ids
+        FROM __forest_module_schema__.embedding_claim_items ci
+        JOIN __forest_module_schema__.embedding_facets f
+          ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+        WHERE f.bot_id=requested_bot AND f.trial_query_id=trial_row.query_id;
+        SELECT coalesce(array_agg(a.attempt_id),ARRAY[]::text[])
+        INTO attempt_ids
+        FROM __forest_module_schema__.embedding_batch_attempts a
+        WHERE a.bot_id=requested_bot AND a.claim_id=ANY(claim_ids);
+        UPDATE __forest_module_schema__.embedding_claims c
+        SET state='EXPIRED'
+        WHERE c.bot_id=requested_bot AND c.claim_id=ANY(claim_ids)
+          AND c.state='CLAIMED' AND c.lease_deadline<=clock_timestamp()
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts a
+              WHERE a.bot_id=c.bot_id AND a.claim_id=c.claim_id
+          );
+        IF EXISTS (
+            SELECT 1 FROM __forest_module_schema__.embedding_claim_items ci
+            JOIN __forest_module_schema__.embedding_facets f
+              ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+            WHERE ci.bot_id=requested_bot AND ci.claim_id=ANY(claim_ids)
+              AND (f.input_kind<>'ADMIN_TRIAL' OR f.query_id<>trial_row.query_id)
+        ) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.embedding_claims c
+            WHERE c.bot_id=requested_bot AND c.claim_id=ANY(claim_ids)
+              AND c.state='CLAIMED'
+        ) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts a
+            WHERE a.bot_id=requested_bot AND a.attempt_id=ANY(attempt_ids)
+              AND a.state IN ('PREPARED','DISPATCHED')
+        ) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.embedding_recovery_work r
+            WHERE r.bot_id=requested_bot AND r.claim_id=ANY(claim_ids)
+              AND r.state<>'SETTLED'
+        ) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.vector_publish_batches b
+            WHERE b.bot_id=requested_bot AND b.attempt_id=ANY(attempt_ids)
+              AND b.state<>'SETTLED'
+        ) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts a
+            JOIN __forest_module_schema__.embedding_budget_reservations r
+              ON r.bot_id=a.bot_id AND r.reservation_id=a.reservation_id
+            WHERE a.bot_id=requested_bot AND a.attempt_id=ANY(attempt_ids)
+              AND r.state='RESERVED'
+        ) THEN CONTINUE; END IF;
+
+        prior_gc := current_setting('forest.memory_trial_gc',true);
+        PERFORM set_config('forest.memory_trial_gc',jsonb_build_object(
+            'bot_id',requested_bot,'query_id',trial_row.query_id,
+            'bundle_id',trial_row.bundle_id,'claim_ids',to_jsonb(claim_ids),
+            'attempt_ids',to_jsonb(attempt_ids))::text,true);
+        DELETE FROM __forest_module_schema__.retrieval_relations
+        WHERE bot_id=requested_bot AND bundle_id=trial_row.bundle_id;
+        DELETE FROM __forest_module_schema__.retrieval_materializations
+        WHERE bot_id=requested_bot AND bundle_id=trial_row.bundle_id;
+        DELETE FROM __forest_module_schema__.retrieval_items
+        WHERE bot_id=requested_bot AND bundle_id=trial_row.bundle_id;
+        DELETE FROM __forest_module_schema__.query_seed_matches
+        WHERE bot_id=requested_bot AND query_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.query_match_receipts
+        WHERE bot_id=requested_bot AND query_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.embedding_claim_items
+        WHERE bot_id=requested_bot AND claim_id=ANY(claim_ids);
+        DELETE FROM __forest_module_schema__.embedding_facets
+        WHERE bot_id=requested_bot AND trial_query_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.vector_publish_batches
+        WHERE bot_id=requested_bot AND attempt_id=ANY(attempt_ids);
+        DELETE FROM __forest_module_schema__.embedding_recovery_work
+        WHERE bot_id=requested_bot AND claim_id=ANY(claim_ids);
+        DELETE FROM __forest_module_schema__.embedding_batch_attempts
+        WHERE bot_id=requested_bot AND attempt_id=ANY(attempt_ids);
+        DELETE FROM __forest_module_schema__.embedding_claims
+        WHERE bot_id=requested_bot AND claim_id=ANY(claim_ids);
+        DELETE FROM __forest_module_schema__.embedding_work_settlements
+        WHERE bot_id=requested_bot AND claim_token=ANY(claim_ids);
+        DELETE FROM __forest_module_schema__.query_recall_settlements
+        WHERE bot_id=requested_bot
+          AND input_payload#>>'{payload,query_id}'=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.memory_trial_parts
+        WHERE bot_id=requested_bot AND query_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.memory_trial_inputs
+        WHERE bot_id=requested_bot AND query_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.query_facet_preparations
+        WHERE bot_id=requested_bot AND query_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.query_recall_work
+        WHERE bot_id=requested_bot AND query_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.facet_preparation_operations
+        WHERE bot_id=requested_bot AND target_kind='QUERY'
+          AND target_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.query_match_preparations
+        WHERE bot_id=requested_bot AND query_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.memory_queries
+        WHERE bot_id=requested_bot AND query_id=trial_row.query_id;
+        DELETE FROM __forest_module_schema__.retrieval_bundles
+        WHERE bot_id=requested_bot AND bundle_id=trial_row.bundle_id;
+        PERFORM set_config('forest.memory_trial_gc',coalesce(prior_gc,''),true);
+        RETURN 1;
+    END LOOP;
+    IF NOT considered THEN
+        UPDATE __forest_module_schema__.memory_trial_gc_cursors
+        SET last_expires_at=NULL,last_query_id=NULL,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot;
+    END IF;
+    RETURN 0;
+END;
+$$;
+
 CREATE FUNCTION memory_claim_vector_deletion(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -3489,7 +3692,8 @@ BEGIN
     -- Expiry and cancellation are Memory facts. Retire a bounded set before
     -- selecting deletion work so a silent Bot also removes stale trial vectors.
     FOR expired_facet IN
-        SELECT f.facet_id,f.space_id,f.accepted_deletion_epoch,f.state
+        SELECT f.facet_id,f.space_id,f.accepted_deletion_epoch,f.state,
+               f.attempt_count,f.current_attempt_id
         FROM __forest_module_schema__.memory_trial_inputs t
         JOIN __forest_module_schema__.embedding_facets f
           ON f.bot_id=t.bot_id AND f.trial_query_id=t.query_id
@@ -3504,7 +3708,11 @@ BEGIN
         ORDER BY t.expires_at,f.facet_id LIMIT 32
         FOR UPDATE OF f SKIP LOCKED
     LOOP
-        IF expired_facet.state IN ('DISPATCHED','UNKNOWN','EMBEDDED','READY') THEN
+        -- A retried PENDING/PREPARED or FAILED facet may still have a delayed
+        -- external write from an earlier attempt. Fence every attempted facet.
+        IF expired_facet.attempt_count>0
+           OR expired_facet.current_attempt_id IS NOT NULL
+           OR expired_facet.state IN ('DISPATCHED','UNKNOWN','EMBEDDED','READY') THEN
             INSERT INTO __forest_module_schema__.vector_index_deletions(
                 bot_id,index_ref_id,space_id,deletion_epoch)
             VALUES(requested_bot,expired_facet.facet_id,expired_facet.space_id,
@@ -3525,6 +3733,7 @@ BEGIN
       AND (claim_token IS NULL OR lease_deadline<=clock_timestamp())
     ORDER BY next_attempt_at,index_ref_id LIMIT 1 FOR UPDATE SKIP LOCKED;
     IF NOT FOUND THEN
+        PERFORM __forest_module_schema__.memory_reap_expired_trial(requested_bot);
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
     END IF;
     task_payload := jsonb_build_object(
@@ -3734,7 +3943,12 @@ END;
 $$;
 
 CREATE FUNCTION guard_memory_query() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE gc jsonb := __forest_module_schema__.memory_trial_gc_context();
 BEGIN
+    IF TG_OP='DELETE' AND OLD.bot_id=gc->>'bot_id'
+       AND OLD.query_id=gc->>'query_id' AND OLD.input_kind='ADMIN_TRIAL' THEN
+        RETURN OLD;
+    END IF;
     IF ROW(NEW.bot_id,NEW.query_id,NEW.operation_id,NEW.input_digest,
            NEW.input_kind,NEW.current_source_id,NEW.input_batch_ref,NEW.context_revision,
            NEW.query_mode,NEW.fusion_policy_revision,NEW.accepted_deletion_epoch,
@@ -3778,7 +3992,11 @@ END;
 $$;
 
 CREATE FUNCTION guard_embedding_facet() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE gc jsonb := __forest_module_schema__.memory_trial_gc_context();
 BEGIN
+    IF TG_OP='DELETE' AND OLD.bot_id=gc->>'bot_id'
+       AND OLD.query_id=gc->>'query_id' AND OLD.input_kind='ADMIN_TRIAL'
+       AND OLD.state='SUPPRESSED' THEN RETURN OLD; END IF;
     IF ROW(NEW.bot_id,NEW.facet_id,NEW.purpose,NEW.query_id,NEW.input_kind,
            NEW.input_ref,NEW.input_revision,NEW.trial_query_id,NEW.source_unit_id,
            NEW.source_revision,NEW.part_id,NEW.modality,NEW.selector_start_char,
@@ -3816,7 +4034,13 @@ END;
 $$;
 
 CREATE FUNCTION guard_embedding_attempt() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE gc jsonb := __forest_module_schema__.memory_trial_gc_context();
 BEGIN
+    IF TG_OP='DELETE' AND OLD.bot_id=gc->>'bot_id'
+       AND gc->'claim_ids' ? OLD.claim_id
+       AND OLD.state IN ('SUCCEEDED','NOT_SENT','UNKNOWN','FAILED') THEN
+        RETURN OLD;
+    END IF;
     IF ROW(NEW.bot_id,NEW.attempt_id,NEW.claim_id,
            NEW.effect_operation_id,NEW.executor_component_id,
            NEW.executor_generation_id,NEW.fence_graph_id,NEW.fence_graph_revision,
@@ -3870,7 +4094,12 @@ END;
 $$;
 
 CREATE FUNCTION guard_vector_publish_batch() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE gc jsonb := __forest_module_schema__.memory_trial_gc_context();
 BEGIN
+    IF TG_OP='DELETE' AND OLD.bot_id=gc->>'bot_id'
+       AND gc->'attempt_ids' ? OLD.attempt_id AND OLD.state='SETTLED' THEN
+        RETURN OLD;
+    END IF;
     IF ROW(NEW.bot_id,NEW.attempt_id,NEW.created_at) IS DISTINCT FROM
        ROW(OLD.bot_id,OLD.attempt_id,OLD.created_at) THEN
         RAISE EXCEPTION 'Vector publish work identity is immutable' USING ERRCODE='55000';
@@ -3913,7 +4142,11 @@ END;
 $$;
 
 CREATE FUNCTION guard_embedding_claim() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE gc jsonb := __forest_module_schema__.memory_trial_gc_context();
 BEGIN
+    IF TG_OP='DELETE' AND OLD.bot_id=gc->>'bot_id'
+       AND gc->'claim_ids' ? OLD.claim_id
+       AND OLD.state IN ('EXPIRED','SETTLED') THEN RETURN OLD; END IF;
     IF ROW(NEW.bot_id,NEW.claim_id,NEW.purpose,NEW.space_id,
            NEW.source_epoch_high_watermark,NEW.lease_seconds,NEW.lease_deadline,
            NEW.item_limit,NEW.item_count,NEW.claim_payload,NEW.created_at)
