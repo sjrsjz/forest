@@ -262,3 +262,5 @@ Memory 包自带管理 UI 现接入已存在的冻结选择和有界批次预览
 QiYu 配置中的 SiliconFlow `Qwen/Qwen3-VL-Embedding-8B` 已用于一次低频真实供应商请求：Forest 的 `EmbeddingClient` 按自身冻结请求格式同时发送一段文本和一张 64×64 PNG 的 data URI，收到 HTTP 200、两条 4096 维向量以及供应商报告的 41 个总 token（含 4 个图片 token）。该结果证明当前端点对 Forest 图文请求格式兼容；它没有经过 Bot 宿主的完整索引与召回链，也不证明远端模型修订身份或长期稳定性。
 
 跨主干学习的隔离 PostgreSQL 验收现把“回复联想日志 → 归档提升”接到后续真实查询快照：后续群消息使旧触发来源不再是当前输入，包内邻接查询从另一群种子读到提升后的 `ASSOCIATED` 边；`graph_region.expand` 沿该边扩散，节点分别保留原群号、主干和作者。这证明包内关系与扩散路径可合流，仍未证明真实 QQ 的跨群成功回复或完整 Agent 证据物化。
+
+真实 Milvus 与隔离 PostgreSQL 的向量索引测试现覆盖外部写入成功而确认丢失：测试专用 collection 中第一笔 upsert 已写入 Milvus，随后故意抛出传输错误；PostgreSQL ref 权威记录仍为空。关闭该 Generation 的驱动并重新创建后，相同 ref/向量重放成功、ref 变为 ACTIVE，后续检索与删除仍通过。该验证覆盖向量索引包的写后失联/重启窗口；Memory 包 Worker 对整批发布的崩溃重放仍需单独验收。

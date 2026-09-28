@@ -112,16 +112,59 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         assert {field["name"] for field in collection["fields"]} == {
             "ref_id", "bot_id", "space_id", "purpose", "embedding",
         }
+        # Milvus may commit a write while its acknowledgement is lost. The
+        # PostgreSQL ref fence must remain uncommitted until the retry confirms
+        # the same immutable row.
+        class LostAcknowledgement:
+            def __init__(self, client):
+                self.client = client
+                self.fail_once = True
+
+            def __getattr__(self, name):
+                return getattr(self.client, name)
+
+            async def upsert(self, **values):
+                result = await self.client.upsert(**values)
+                if self.fail_once:
+                    self.fail_once = False
+                    raise OSError("injected lost Milvus acknowledgement")
+                return result
+
+        upsert_driver = drivers["vector.index.upsert"]
+        upsert_driver.client = LostAcknowledgement(upsert_driver.client)
+        near_row = {
+            "ref_id": "ref/document/near",
+            "space_id": space_id,
+            "purpose": "DOCUMENT",
+            "vector": [1.0, 0.0, 0.0, 0.0],
+        }
+        with pytest.raises(ForestError) as uncertain:
+            await upsert_driver.invoke(
+                near_row, scope=scope, invocation=invocation,
+            )
+        assert uncertain.value.code == "VECTOR_INDEX_UPSERT_UNAVAILABLE"
+        assert await upsert_driver.client.get(
+            collection_name=collection_name, ids=["ref/document/near"],
+            output_fields=["ref_id"], consistency_level="Strong",
+        ) == [{"ref_id": "ref/document/near"}]
+        async with store.pool.connection() as conn, conn.transaction():
+            assert await upsert_driver.refs.lock(conn, "ref/document/near") is None
+        await upsert_driver.close()
+        upsert_driver = MilvusVectorIndexEffectDriver(
+            configuration, 1, identity,
+            {"name": "vector.index.upsert", "kind": "vector-index.milvus"},
+            bot_id=bot_id, store=store, runtime=kernel_runtime,
+            token_resolver=resolve_token,
+        )
+        drivers["vector.index.upsert"] = upsert_driver
+        await upsert_driver.start()
         await drivers["vector.index.upsert"].invoke(
-            {
-                "ref_id": "ref/document/near",
-                "space_id": space_id,
-                "purpose": "DOCUMENT",
-                "vector": [1.0, 0.0, 0.0, 0.0],
-            },
+            near_row,
             scope=scope,
             invocation=invocation,
         )
+        async with store.pool.connection() as conn, conn.transaction():
+            assert (await upsert_driver.refs.lock(conn, "ref/document/near"))["state"] == "ACTIVE"
         await drivers["vector.index.upsert"].invoke(
             {
                 "ref_id": "ref/document/far",
