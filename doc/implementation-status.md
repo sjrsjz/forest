@@ -63,7 +63,7 @@
 
 | 组件 | 生产包 | 当前状态 | 剩余工作 |
 |---|---|---|---|
-| Agent | `builtin/agent_runtime` | 隔离 Worker、私有 SQL、manifest UoW 与 owned-work 已接入生产图 | 删除未引用的旧宿主实现；继续补齐可观测管理面 |
+| Agent | `builtin/agent_runtime` | 隔离 Worker、私有 SQL、manifest UoW 与 owned-work 已接入生产图 | 继续审计剩余宿主边界并补齐可观测管理面 |
 | Conversation | `builtin/conversation_scheduler` | 入站、分类、静默归档、Agent 调度与安全边界合流已接入生产图 | 扩充管理查询与长时间压力验证 |
 | Memory | `builtin/memory_graph` | 多模态来源、归档资格、精确/语义召回、DOCUMENT/QUERY 嵌入发布、按需图扩散、检索区域冻结、规范证据物化/发布、成功回复联想日志及归档提升、单来源遗忘事务和撤销正文后台清理已运行 | 真实跨群学习验收、遗忘固定影响计划和完整管理面 |
 
@@ -95,7 +95,7 @@ Agent 已进入生产组合根。支持查询的 ToolCall 能在 handoff 后通�
 
 包运行时现已具备能力受控的分块 Payload 端口：`payload.read` 只接受完整 owner/digest 引用并在 Worker 端复核最终摘要，`payload.write` 强制当前组件所有权、连续 offset、声明长度/摘要与精确父引用；提交结果由 SDK 强制收敛为五字段 PayloadRef，传输元数据不能混入跨模块引用。单代暂存最多 32 MiB，并随调用和 Generation 回收。该端口解决了长期 Context、模型输入和图片不能穿过 256 KiB 控制帧的问题，是把 Agent、Memory、Conversation 执行逻辑移入 Worker 的基础设施。它本身不代表三个模块已完成切换。
 
-Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱动在所属 Generation 下原子写入 `model.result`/`model.usage`，服务回执与 Kernel Effect evidence 只持有精确引用；旧宿主 Agent 过渡执行器和新的包内 model attempt 都只能把这些引用交给 Agent observation，不能再以 Provider 身份复制载荷。Effect/Agent 私有 schema 已用独立 PostgreSQL 重建验证；完整 Agent 执行循环仍待接入 Worker 公共服务。
+Provider 的 `provider.model.dispatch/2` 已移除内联模型正文：效果驱动在所属 Generation 下原子写入 `model.result`/`model.usage`，服务回执与 Kernel Effect evidence 只持有精确引用；包内 model attempt 只能把这些引用交给 Agent observation，不能再以 Provider 身份复制载荷。Effect/Agent 私有 schema 已用独立 PostgreSQL 重建验证；当前完整 Agent 执行循环已位于隔离 Worker，旧宿主执行器已删除。
 
 ## 6. Conversation 生产包已经拥有的部分
 
@@ -184,6 +184,8 @@ Agent 包的模型安全边界选择每次观察使用新的 operation identity�
 单来源遗忘新增 `memory.source.forget.preview/1` 包服务和三步 UnitOfWork：Memory 先取得作者 anchor，Kernel Payload 在删除时钟锁下选定包含派生节点的闭包，Memory 对来源、向量删除引用、关系贡献与待归档联想日志计算计数及完整集合摘要。携带计划执行时，Payload 复核删除纪元和选中摘要，Memory 复核影响计划；任一变化都会使整个遗忘事务回滚。FinalReply UnitOfWork 也先捕获删除屏障，再提交 Agent、Conversation 和 Memory 联想，避免关系提升绕过遗忘的固定影响计划。隔离 PostgreSQL 验证了新增派生 Payload 后旧计划被拒绝且纪元未前进，以及关系证据变化后旧计划被拒绝、重新预览成功；完整宿主测试经过热替换和重启，伪 OneBot 成功回复链也通过。最终本地回归 438 项通过、94 项跳过，未发真实 QQ 消息。Memory 管理 UI 已接入预览、管理员确认入队和请求状态查询；较大范围选择器仍待实现。
 
 Memory 管理面现以包 manifest 映射 `memory.forget.preview` 只读服务、`memory.forget.enqueue` P0 Domain Command 和 `memory.forget.status` Domain Query。管理员确认的完整计划通过 JSON Pointer 进入 Web authority ticket 摘要；票据、Bot 策略和审计在同一入队事务内核验，动作只写 Memory 自有队列。Memory owned-work 随 Generation 领取请求，沿稳定 operation ID 调用跨模块遗忘 UnitOfWork，旧计划失败保留错误码；已提交遗忘在租约过期后从不可变 `source_forget_operations` 收敛为成功。隔离 PostgreSQL 宿主验证了旧计划 `FAILED` 且删除纪元不前进、有效计划在真实 Web 票据保护下成功、热替换与重启后的状态查询一致。模块 UI 使用现有隔离 MessageChannel 完成预览、显式确认、入队和终态查询，并加入群主干、作者、模态、类型与时间过滤；没有发送真实 QQ 消息。
+
+旧宿主 Agent 模型/工具执行器、上下文投影及工具授权/效果桥接代码已从生产树删除，其旧测试也已清理。内核自有 `runtime_status` 工具改为直接接受冻结的 `forest.agent-tool-execute/1` 命令并返回包工具使用的 `forest.agent-tool-receipt/1`，不再依赖旧 Python `ToolDispatchResult`。这只完成旧执行路径清理；管理召回试验、大范围遗忘选择器、真实供应商与 QQ 验收仍未完成。
 
 ## 8. 下一切换顺序
 

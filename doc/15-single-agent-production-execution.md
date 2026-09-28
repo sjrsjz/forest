@@ -70,7 +70,7 @@ ToolCall 固定目标 component、Generation、service、契约摘要、完整 b
 
 执行回执只能进入 `agent.observe-tool-effect/1`：`kernel.effect` 先冻结 executor evidence，Agent participant 在同一事务内复核 evidence 与当前 ToolCall 后收敛状态。handoff 后超时、断连或 Worker/Generation 切换一律进入 `UNKNOWN`；只有 manifest 声明 `supports_query=true` 时，才允许通过同一冻结服务的 `forest.agent-tool-query/1` 查询原 operation，并以 `RECONCILIATION` evidence 收敛。查询不是重发。目标 Generation 必须在已 handoff Effect 得出可证明终态之前保留恢复端口和资源租约；无法证明时 Run 保持 `BLOCKED_UNKNOWN`。
 
-Agent 的工具目录 SDK 因此只有 `list`、`dispatch_prepared` 和 `query_handed_off` 三种能力。后两者都要求内核签发的精确 permit，不能接受裸工具名、临时 service handle 或 Worker 提供的“已授权”布尔值。旧 `KernelToolExecutionPort` 的进程内 callback、直接 Python `ToolDispatchResult` 和宿主工具映射不属于生产协议，builtin 工具迁移完成后直接删除。
+Agent 的工具目录 SDK 因此只有 `list`、`dispatch_prepared` 和 `query_handed_off` 三种能力。后两者都要求内核签发的精确 permit，不能接受裸工具名、临时 service handle 或 Worker 提供的“已授权”布尔值。旧 `KernelToolExecutionPort` 的进程内 callback、直接 Python `ToolDispatchResult` 和宿主工具映射已删除。`kernel.runtime` 自有的 `runtime_status` 工具也接受同一 `forest.agent-tool-execute/1` 命令，并返回 `forest.agent-tool-receipt/1` 与归属明确的 PayloadRef。
 
 ## 3. 单 Agent 执行循环
 
