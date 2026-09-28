@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol": {"const": "forest.component-host-modules/1"},
+    "bot_id": {"type": "string"},
+    "graph_id": {"type": "string"},
+    "graph_revision": {"type": "integer", "minimum": 1},
+    "members": {
+      "type": "array", "maxItems": 32,
+      "items": {
+        "type": "object",
+        "properties": {
+          "component_id": {"type": "string"},
+          "status": {"type": "string"},
+          "package_id": {"type": "string"},
+          "package_version": {"type": "string"}
+        },
+        "required": ["component_id", "status", "package_id", "package_version"],
+        "additionalProperties": false
+      }
+    },
+    "next_after": {"type": ["string", "null"]}
+  },
+  "required": ["protocol", "bot_id", "graph_id", "graph_revision", "members", "next_after"],
+  "additionalProperties": false
+}

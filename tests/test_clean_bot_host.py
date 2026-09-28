@@ -617,6 +617,24 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             )
             assert agent_member["member"]["data_admission"] is True
             assert agent_member["member"]["control_admission"] is True
+            first_modules = await worker_host.management_contract.query(
+                "modules", {"limit": 3}
+            )
+            assert len(first_modules["members"]) == 3
+            assert first_modules["next_after"] == first_modules["members"][-1][
+                "component_id"
+            ]
+            next_modules = await worker_host.management_contract.query(
+                "modules",
+                {
+                    "graph_id": first_modules["graph_id"],
+                    "after": first_modules["next_after"],
+                    "limit": 3,
+                },
+            )
+            assert first_modules["members"][-1]["component_id"] < next_modules[
+                "members"
+            ][0]["component_id"]
             assert next(
                 descriptor.component_id
                 for descriptor in host.registry.descriptors
@@ -2022,6 +2040,16 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 "module", {"component_id": "agent.runtime"}
             )
             assert current_module["graph_revision"] == replacement_graph.graph_identity.graph_revision
+            with pytest.raises(ForestError) as stale_page:
+                await current_worker_host.management_contract.query(
+                    "modules",
+                    {
+                        "graph_id": first_modules["graph_id"],
+                        "after": first_modules["next_after"],
+                        "limit": 3,
+                    },
+                )
+            assert stale_page.value.code == "COMPONENT_HOST_GRAPH_CHANGED"
             assert current_worker_host.generation_identity != worker_host.generation_identity
             with pytest.raises(ForestError):
                 await worker_host.management_contract.query(

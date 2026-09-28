@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.1.0"
+version = "1.2.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -44,6 +44,14 @@ required = true
 startup_dependency = true
 
 [[components.provides]]
+name = "component.host.modules"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/modules-input.json"
+output_schema = "schemas/modules-output.json"
+
+[[components.provides]]
 name = "component.host.module"
 contract = "1.0"
 semantics = "read"
@@ -69,6 +77,11 @@ target_scope = "BOT"
 service_class = "P1"
 required_capabilities = ["runtime.status.read"]
 output_policy = "SHORT"
+timeout_s = 10
+
+[[components.management_queries]]
+id = "modules"
+port = "component.host.modules"
 timeout_s = 10
 
 [[components.management_queries]]

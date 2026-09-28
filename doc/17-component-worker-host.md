@@ -59,6 +59,6 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 
 ## 落地顺序与当前差距
 
-当前 `CleanManagementGateway` 直接解析 `registry.get(component_id).management_contract`，调用组件配置 repository，然后持有 Bot Host 触发 `replace_runtime_graph()`。当前 `CleanBotHost._assemble_registry()` 也静态拼装官方组件。两者都不是上述 Worker Host；现有 Web 配置入口的可用性不证明组件控制权已经模块化。
+当前 `component.worker-host` 的包内 `modules`/`module` 只读端口可以分页列出已发布 RuntimeGraph 成员并检查单个 Generation；分页游标绑定 Graph 身份，换代后拒绝旧页。它不等于可选择的包工件目录。`CleanManagementGateway` 仍直接解析 `registry.get(component_id).management_contract`，调用组件配置 repository，然后持有 Bot Host 触发 `replace_runtime_graph()`；`CleanBotHost._assemble_registry()` 仍静态拼装官方组件。两者都不是上述 Worker Host，现有 Web 配置入口的可用性不证明组件控制权已经模块化。
 
 落地时先建立 Worker Host 私有 schema、真实包 manifest 和仅查询的 `packages/module/module.validate` 端口，并让它通过内核受限目录快照工作。再建立配置端口与带 revision/plan digest 的 desired 控制账本，把配置 plan/apply 与显式启停切换到 Worker Host；最后将 Web/Shell/CLI 指向它、移除 gateway 的直接配置和图替换逻辑。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，实现状态必须标记此控制面为未完成。

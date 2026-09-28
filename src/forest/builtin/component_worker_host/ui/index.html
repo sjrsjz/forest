@@ -9,8 +9,8 @@
     h1{font-size:16px;margin:0}p{margin:0;color:#a9c1b2}
     .form{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
     label{display:grid;gap:5px;flex:1 1 280px;color:#a9c1b2}
-    input,button{box-sizing:border-box;padding:9px 11px;border:1px solid #395247;border-radius:8px;background:#13231b;color:inherit}
-    input{width:100%}button{cursor:pointer;background:#255844}
+    input,select,button{box-sizing:border-box;padding:9px 11px;border:1px solid #395247;border-radius:8px;background:#13231b;color:inherit}
+    input,select{width:100%}button{cursor:pointer;background:#255844}
     dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
     dl div{border:1px solid #284036;border-radius:8px;padding:8px 10px;min-width:0}
     dt{color:#a9c1b2}dd{margin:3px 0 0;overflow-wrap:anywhere}
@@ -21,6 +21,10 @@
   <main>
     <h1>当前 Graph 的组件</h1>
     <p>按组件 ID 查询已发布代际和包工件。此视图只读取内核的冻结 Graph 事实。</p>
+    <div class="form">
+      <label>已运行组件<select id="components"><option value="">正在读取…</option></select></label>
+      <button id="more" type="button" hidden>更多组件</button>
+    </div>
     <div class="form">
       <label>组件 ID<input id="component-id" value="component.worker-host"></label>
       <button id="inspect" type="button">查询</button>
@@ -37,10 +41,39 @@
   </main>
   <script>
     (()=>{'use strict';
-      let port=null,nonce='',sequence=0,pending='';
+      let port=null,nonce='',sequence=0,pending='',pendingList='',graphId='',nextAfter=null,listPageAfter=null;
       const byId=id=>document.getElementById(id);
       const send=(type,value={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...value});
       const resize=()=>send('resize',{height:document.documentElement.scrollHeight});
+      const queryList=(after=null)=>{
+        listPageAfter=after;
+        pendingList=`component-list:${++sequence}`;
+        byId('status').textContent='正在读取组件…';
+        if(after===null)byId('details').hidden=true;
+        const value=after===null?{limit:32}:{graph_id:graphId,after,limit:32};
+        send('query',{request_id:pendingList,operation_id:'modules',value});
+      };
+      const renderList=value=>{
+        const firstPage=!graphId;
+        if(!graphId||graphId!==value.graph_id){
+          byId('components').replaceChildren();
+          graphId=value.graph_id;
+        }
+        for(const member of value.members){
+          const option=document.createElement('option');
+          option.value=member.component_id;
+          option.textContent=`${member.component_id} · ${member.status}`;
+          byId('components').append(option);
+        }
+        nextAfter=value.next_after;
+        byId('more').hidden=nextAfter===null;
+        byId('status').textContent='';
+        if(firstPage&&byId('components').value){
+          byId('component-id').value=byId('components').value;
+          query();
+        }
+        resize();
+      };
       const query=()=>{
         const component_id=byId('component-id').value.trim();
         if(!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(component_id)){
@@ -70,10 +103,22 @@
         port.onmessage=event=>{
           const response=event.data||{};
           if(response.protocol!=='forest.management-ui-channel/1'||response.nonce!==nonce)return;
-          if(response.type==='initialize'){query();resize();return;}
-          if(response.request_id!==pending)return;
-          if(response.type==='query-result')render(response.value);
+          if(response.type==='initialize'){queryList();resize();return;}
+          if(response.request_id!==pending&&response.request_id!==pendingList)return;
+          if(response.type==='query-result'){
+            if(response.request_id===pendingList){pendingList='';renderList(response.value);}
+            else{
+              pending='';
+              if(response.value.graph_id!==graphId){graphId='';queryList();return;}
+              render(response.value);
+            }
+          }
           else if(response.type==='operation-error'){
+            if(response.request_id===pendingList){
+              pendingList='';
+              if(listPageAfter!==null){graphId='';nextAfter=null;queryList();return;}
+            }
+            else pending='';
             byId('details').hidden=true;
             byId('status').textContent=response.message||'查询失败';
             resize();
@@ -82,6 +127,10 @@
         port.start();send('ready');
       },{once:true});
       byId('inspect').addEventListener('click',()=>{if(port)query();});
+      byId('components').addEventListener('change',()=>{
+        if(port&&byId('components').value){byId('component-id').value=byId('components').value;query();}
+      });
+      byId('more').addEventListener('click',()=>{if(port&&nextAfter!==null)queryList(nextAfter);});
       byId('component-id').addEventListener('keydown',event=>{
         if(event.key==='Enter'){event.preventDefault();if(port)query();}
       });

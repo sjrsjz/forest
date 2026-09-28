@@ -298,3 +298,7 @@ Memory 整批向量发布又通过一次真实进程崩溃注入：独立宿主�
 Conversation 的无触发 `SILENT_DRAIN` 现在每次只选择最多 64 条连续已分类消息，结算后由持久扫描领取后续批次，避免断线积压形成一次巨型输入事务。隔离 PostgreSQL 在停住包自有 Worker 后注入 65 条普通消息，再恢复 Worker，实际提交了序号 `4..67` 与 `68..68` 两批，分类/Context 水位最终均为 68（`1 passed`，42.66 秒）。这只封闭了静默输入选择的大小；带触发的超长前缀、已入 Context 后仍需继续裁剪的长尾维护，以及单次归档候选的硬上限仍待实现，不能据此宣称全部积压路径已受界。
 
 Conversation 包现另有 `conversation.context-maintenance.pending` 自有任务：仅在会话空闲、输入已排空且没有未决触发时领取 actor；配置 Generation 或 Context/视图修订变化后重新检查，成功裁剪后逐批追赶，失败延时重试，旧 actor 不能结算新租约。每次归档候选硬限 64 个。`active_context_units` 是与不可变 Context/归档成员同事务更新的活动视图索引，Context 分页和裁剪旧前缀不再每次扫描完整历史。隔离 PostgreSQL 在输入水位 68 已排空时额外建立 67 个活动单元，维护任务无新消息自行完成 `64+4` 两次归档，活动索引与视图计数都收敛为 1；Conversation 和 Agent 包级用例 `2 passed`（122.47 秒），完整 Bot 宿主的记忆、热替换与重启用例 `1 passed`（198.96 秒）。带触发的超长输入前缀仍可能进入一个大事务，长期压力与实际运行验收也未完成。
+
+RuntimeGraph 的启动服务边现由冻结包描述符的 `provides`、`effect_services` 和 `requires.startup_dependency=true` 编译，宿主已删除五处组件名手写启动顺序；非启动服务和 UnitOfWork participant 保持晚绑定。完整 Bot 启动、退役、重启用例在隔离 PostgreSQL 通过（`1 passed`，195.46 秒）。`clean_bot_host` 仍逐个安装官方包并硬编码初始配置，动态包选择尚未完成。
+
+`component.worker-host` 增加 `modules` 包内管理查询，分页读取当前 RuntimeGraph 的已运行组件，返回稳定组件 ID、包版本与状态；后续页绑定 Graph ID，热替换后旧游标被拒绝。包内 UI 可从列表选择组件再查看 Generation 详情；Edge 隔离 iframe/MessageChannel 冒烟覆盖列表加载、选择与详情呈现。这是运行图浏览，不是可选择工件目录或配置/启停控制。包清单与局部回归 `108 passed, 1 skipped`，完整 Bot 宿主查询和热替换用例在隔离 PostgreSQL 通过（`1 passed`，196.37 秒）。
