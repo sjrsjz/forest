@@ -8,10 +8,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from forest.clean_management_contract import (
-    CleanManagementActionResult,
-    CleanModuleConfigurationContract,
-)
+from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.kernel_audit import AuditEnvelope
@@ -564,20 +561,15 @@ class CleanManagementGateway:
                 authorization=authorization,
                 authorization_guard=self._authorize_mutation_in,
             )
-            if not isinstance(result, CleanManagementActionResult):
+            if not isinstance(result, dict):
                 raise ForestError(
                     "MODULE_MANAGEMENT_CONTRACT_INVALID",
                     "Module action returned an invalid result",
                     500,
                 )
-            replaced = result.replace_runtime_graph
-            registry = (
-                await self.host.replace_runtime_graph() if replaced else self.registry()
-            )
-            graph = registry.graph_identity
+            graph = self.registry().graph_identity
             return {
-                **result.value,
-                "replaced": replaced,
+                **result,
                 "graph_id": graph.graph_id,
                 "graph_revision": graph.graph_revision,
             }

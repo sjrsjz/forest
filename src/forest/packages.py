@@ -647,7 +647,6 @@ MANIFEST_SCHEMA = {
                                 "priority": {"enum": ["P0", "P1", "P2"]},
                                 "authorization_path": {"type": "string"},
                                 "actor_field": {"type": "string"},
-                                "replace_runtime_graph": {"type": "boolean"},
                                 "timeout_s": {
                                     "type": "number",
                                     "exclusiveMinimum": 0,

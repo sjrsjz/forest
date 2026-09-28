@@ -3,17 +3,10 @@
 from __future__ import annotations
 
 import inspect
-from dataclasses import dataclass
 from typing import Callable
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-
-
-@dataclass(frozen=True)
-class CleanManagementActionResult:
-    value: dict
-    replace_runtime_graph: bool = False
 
 
 class CleanModuleConfigurationContract:

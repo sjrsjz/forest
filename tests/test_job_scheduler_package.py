@@ -65,7 +65,7 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
         )
         for _ in range(200):
             item = await runtime.management_contract.query(
-                "jobs.read", {"job_id": queued.value["job_id"]}
+                "jobs.read", {"job_id": queued["job_id"]}
             )
             if item["state"] in {
                 "SUCCEEDED",

@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from forest.clean_management_contract import (
-    CleanManagementActionResult,
-    CleanModuleConfigurationContract,
-)
+from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.errors import ForestError
 from forest.packages import digest_json
 
@@ -165,7 +162,7 @@ class PackageManagementContract(CleanModuleConfigurationContract):
         payload: dict,
         authorization=None,
         authorization_guard=None,
-    ) -> CleanManagementActionResult:
+    ) -> dict:
         try:
             declaration, port = self._actions[action_id]
         except KeyError:
@@ -209,10 +206,7 @@ class PackageManagementContract(CleanModuleConfigurationContract):
             authorization=authorization,
             authorization_guard=authorization_guard,
         )
-        return CleanManagementActionResult(
-            result,
-            replace_runtime_graph=declaration.get("replace_runtime_graph", False),
-        )
+        return result
 
     def _public_action_schema(self, declaration: dict, port: dict) -> dict:
         schema = deepcopy(self.adapter.snapshot.schema(port["input_schema"]))

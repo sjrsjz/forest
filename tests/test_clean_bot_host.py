@@ -597,12 +597,12 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
                 authorization=SimpleNamespace(web_subject_ref="subject/host-admin"),
                 authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
             )
-            assert web_request.value["state"] == "QUEUED"
-            assert web_request.value["requested_by"] == "subject/host-admin"
+            assert web_request["state"] == "QUEUED"
+            assert web_request["requested_by"] == "subject/host-admin"
             async with asyncio.timeout(20):
                 while True:
                     web_status = await worker_host.management_contract.query(
-                        "reload", {"request_id": web_request.value["request_id"]}
+                        "reload", {"request_id": web_request["request_id"]}
                     )
                     if web_status["state"] == "FAILED":
                         break
@@ -1992,7 +1992,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 while True:
                     stale_work = await memory_instance.management_contract.query(
                         "memory.forget.status",
-                        {"request_id": stale_request.value["request_id"]},
+                        {"request_id": stale_request["request_id"]},
                     )
                     if stale_work["state"] in {"SUCCEEDED", "FAILED", "UNKNOWN"}:
                         break
@@ -2762,7 +2762,7 @@ async def test_real_vl_auto_archive_cross_group_recall_and_management_trial(tmp_
             authorization=trial_authorization,
             authorization_guard=accept_trial_ticket,
         )
-        assert started.value["query_id"] == trial_id
+        assert started["query_id"] == trial_id
         async with asyncio.timeout(180):
             while True:
                 trial_state = await memory.management_contract.query_authorized(

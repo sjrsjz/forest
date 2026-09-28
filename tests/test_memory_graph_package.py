@@ -1047,7 +1047,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
             "memory.trial.start", operation_id="web:trial-valid", payload=body,
             authorization=web_actor, authorization_guard=accept_fixture_ticket,
         )
-        assert started.value["query_id"] == "query/authority"
+        assert started["query_id"] == "query/authority"
         assert await instance.management_contract.action(
             "memory.trial.start", operation_id="web:trial-valid", payload=body,
             authorization=web_actor, authorization_guard=accept_fixture_ticket,
@@ -1068,7 +1068,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
             payload={"query_id": "query/authority"},
             authorization=web_actor, authorization_guard=accept_fixture_ticket,
         )
-        assert cancelled.value["query_id"] == "query/authority"
+        assert cancelled["query_id"] == "query/authority"
     finally:
         assert await registry.close() == []
 

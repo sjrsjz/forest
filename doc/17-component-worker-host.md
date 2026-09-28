@@ -18,7 +18,7 @@ Worker Host 不能负责物理启动或停止自己，也不能握住其他 Work
 | namespace / repository | `schema_id = forest.component.worker-host`，宿主派生 SQL namespace，`forest.component-worker-host.repository/1`；只写组件选择、启停意图、控制计划及回执 |
 | provides | `component.host.packages/1`、`component.host.module/1`、`component.host.validate/1` 读端口；`component.host.configuration.plan/1`、`component.host.configuration.apply/1`、`component.host.enable/1`、`component.host.disable/1` 控制端口 |
 | requires | 内核受限 `runtime.graph-replacement.request/1`、冻结 Graph 查询、部署包目录只读工件快照、目标组件配置端口；不直接持有 Host、registry、其他 Worker 或其 repository |
-| UnitOfWork | `component.host.commit-control-intent/1` 与内核替换请求 participant 合成计划；目标组件配置提交以其声明的 participant 加入，不通过 Web 打开跨模块事务 |
+| UnitOfWork | `component.host.commit-control-intent/1` 与目标组件标准配置 apply participant 原子提交 desired 和 `PENDING_REBUILD`；内核替换请求由包内持久任务幂等提交，不通过 Web 打开跨模块事务 |
 | 管理贡献 | 随本包 Generation 发布组件目录、配置、历史、验证与启停 UI；包内 UI 使用受限 artifact 操作读取 |
 | 并发围栏 | Bot ID、Host lease、目标 Graph revision、目标 Generation、目标配置 revision、控制 desired revision、工件 digest 和 operation ID |
 | 删除行为 | 停用保留模块存储与回执；删除工件前跨 Bot 检查选择、活动图及未结算引用；本包不可自停用 |
@@ -29,7 +29,15 @@ Worker Host 不能负责物理启动或停止自己，也不能握住其他 Work
 
 `deployment.package-registry` 向 Worker Host 提供只读、内容寻址的可安装包目录与工件校验快照。Worker Host 只保存选中的 `package_digest`、`component_id`、manifest digest 与所需能力，不读取 `web_packages` 或任意 ZIP 路径。包选择和显式启停的 Bot 级控制事实存入 `component.worker-host` 私有 schema，键为 `(bot_id, component_id)`；状态记录包含单调 `desired_revision`、当前选择、启用意图、最后接受的操作 ID、目标 graph revision。每次控制写入必须比较 expected revision，幂等重放返回原回执。
 
-组件私有配置 repository 仍拥有其 `desired/effective` 值、配置计划、修订与不可变路径约束。Worker Host 通过冻结目标 Generation 的 `component.configuration.read/plan/apply/1` 调用这些端口；预览时还需校验候选工件 schema、能力申请、接管声明和配置来源摘要。apply 时目标组件事务校验 plan digest、期望 revision、当前授权与代际围栏；写成 desired 后，Worker Host 在同一受限 UnitOfWork 内记录重建意图并请求内核替换。若跨组件事务暂不能成立，apply 必须记录可恢复的 `PENDING_REBUILD` 事实，由 Worker Host 重放提交重建请求；不得把“配置已保存”显示为“新代际已生效”。effective 只能由内核发布新图后，通过目标组件的配置端口更新或核对。
+组件私有配置 repository 仍拥有其 `desired/effective` 值、配置计划、修订与不可变路径约束。Worker Host 通过冻结目标 Generation 的版本化 `component.configuration.read/plan/1` 端口读取和规划；预览时还需校验候选工件 schema、能力申请、接管声明和配置来源摘要。配置 apply 不能先写目标 repository 再调用 Worker Host，也不能把同步 `replace_runtime_graph()` 包进 Web 请求。它必须先作为 Worker Host 持久控制请求接受，再由包内任务提交单个受限 UnitOfWork：目标组件的 `component.configuration.apply/1` participant 校验 plan digest、期望 desired/effective revision、不可变路径与代际围栏并写入 desired；Worker Host 的控制 participant 在同一事务记录 `PENDING_REBUILD` 和精确的目标配置 revision。事务失败时两边都不写。成功后，Worker Host owned-work 用稳定 operation ID 请求内核图替换；该内核请求不伪装成跨模块 SQL 原子提交，丢失回执时可从持久控制事实重放。effective 只由内核发布新图后的目标组件配置激活推进，管理界面必须分开展示“已接收、desired 已提交、图替换已请求、effective 已生效”。
+
+### 配置切换的路由与恢复围栏
+
+跨组件配置端口需要把 `(bot_id, component_id, generation_id, contract_major)` 作为完整目标身份。内核按冻结 Graph 和包描述符解析该端口，不将目标 `CleanModuleConfigurationContract`、repository 或数据库连接注入 Worker 进程，也不让 Worker Host 读取目标私表。配置计划保留在目标私有 schema；Worker Host 只保存 plan ID、目标组件/Generation、期望配置与 Graph revision、操作 ID、授权主体和控制状态，不复制配置正文。Web ticket 在接收控制请求时由包 Domain Command 于事务内消费；真正执行 UnitOfWork 时，再用持久授权回执及当前政策校验，不以一个已过期的 Python ticket 对象作为后台执行权限。
+
+由于目标组件由管理请求选择，`component.host.apply-configuration/1` 的 UnitOfWork 声明必须显式允许一个类型化目标 participant 槽位，并限定为冻结 Graph 中该 `component_id` 的标准 `component.configuration.apply/1`；不得让请求携带任意 participant 名称、schema 或 SQL。Worker Host 自己的控制 participant 是固定步骤。内核在同一事务检查 Bot、Graph、两方 Generation、目标配置 plan、desired/effective CAS 与控制操作幂等键。这个目标槽位是版本化路由能力，不是允许包任意调用别的模块 repository 的后门。
+
+控制状态按 `QUEUED -> APPLYING -> PENDING_REBUILD -> REBUILD_REQUESTED -> EFFECTIVE` 推进。提交 desired 以前的永久拒绝为 `FAILED`，提交以后图替换失败为 `REBUILD_FAILED`，不能把尚未激活的 desired 当成 effective，也不能回滚已提交的配置修订。任务 claim 过期后重领并重放同一 UnitOfWork/内核 operation ID；旧 claim 不得结算新结果。若其他图替换先发生，Worker Host 重新读取当前 Graph 并确认目标组件仍存在、当前候选会采纳该 desired revision，再以当前 Graph revision 提交内核请求；无法满足时停在 `REBUILD_FAILED` 并暴露原因。重复 Web/Shell 操作只返回原请求，新的配置操作必须重新规划和比较 revision。
 
 Worker Host 的私有表只存选择、启停、验证与控制回执，不存其他模块的配置正文、业务消息或可执行 Python 对象。Graph/Generation 和物理替换请求保留在 `kernel.runtime`；包 ZIP、安装校验和下载保留在 `deployment.package-registry`。唯一跨 schema 的原子动作必须声明 UnitOfWork participant，不能由 Web gateway 打开多个 repository 事务凑合。
 

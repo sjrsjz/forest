@@ -16,10 +16,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from forest.clean_management_app import CleanManagementGateway
-from forest.clean_management_contract import (
-    CleanManagementActionResult,
-    CleanModuleConfigurationContract,
-)
+from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.deployment_management_app import create_deployment_management_app
 from forest.errors import ForestError
 from forest.storage.deployment_web_identity import (
@@ -239,9 +236,7 @@ class _Contract(CleanModuleConfigurationContract):
                 ).hexdigest(),
                 plan_digest=None,
             )
-        return CleanManagementActionResult(
-            {"action_id": action_id, "operation_id": operation_id, "payload": payload}
-        )
+        return {"action_id": action_id, "operation_id": operation_id, "payload": payload}
 
 
 class _Registry:
