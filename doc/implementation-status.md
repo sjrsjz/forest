@@ -119,7 +119,7 @@ OneBot 入站已经调用 Memory 的 manifest UnitOfWork，文本与图片 part 
 
 Memory 包已注册 `memory.embedding.dispatch` 和 `memory.embedding.recover` 两类 owned-work：Provider 成功绑定并完成 domain.bind 后才自动领取最多 32 个图文 facet；Memory 持有预算、Kernel Effect 与 facet 的 prepare/handoff/observe 事务，Provider 包只物化请求并执行 HTTP。原 claim 在 Bot 级事务锁下合流，避免并发重复领取；失败和明确未发送有冷却时间，预算耗尽延至下一 UTC 日。过期 PREPARED attempt 只放弃并释放预算，DISPATCHED attempt 只观察 UNKNOWN，恢复任务绝不重发网络请求。PostgreSQL 域状态测试和宿主启动/重启测试已通过；真实宿主图已用假 HTTP 客户端验证一条归档群消息的文本与图片 facet 经 `EMBEDDED` 发布为 `READY`，并写入独立向量索引。
 
-旧宿主 Memory 执行栈已移除，图区域扩散算法位于 `builtin/memory_graph/python/graph_region.py`。嵌入派发已通过 Kernel Effect、Memory 和 Embedding 包的联合测试；崩溃后恢复与真实供应商响应尚未端到端验收。独立向量索引包已有 PostgreSQL 持久 ref 围栏：同 ref 写删串行、删除建立不可逆 tombstone，删除后的 upsert 被拒绝；后台周期清扫会重放 tombstone 删除，以收敛 Milvus 超时后的迟到写入。Memory 已用包内 owned-work 按 Embedding batch 读取结果、验证每个 facet 的向量摘要并发布稳定 ref；PostgreSQL 复核来源后才把 facet 置为 `READY`，失效候选写删除 outbox，另一包内任务执行删除。隔离 PostgreSQL 加真实 Milvus 的索引测试，以及假 Embedding HTTP、假 Milvus 的宿主图文发布、outbox 删除、热替换和重启测试已通过。单来源遗忘事务已接入包公开服务；管理面的固定目标计划与物理载荷清理、跨主干联想写入、语义召回及真实召回试验仍未完成。在接入并验收之前，管理 UI 不能宣称这些能力可用。
+旧宿主 Memory 执行栈已移除，图区域扩散算法位于 `builtin/memory_graph/python/graph_region.py`。嵌入派发已通过 Kernel Effect、Memory 和 Embedding 包的联合测试；崩溃后恢复与真实供应商响应尚未端到端验收。独立向量索引包已有 PostgreSQL 持久 ref 围栏：同 ref 写删串行、删除建立不可逆 tombstone，删除后的 upsert 被拒绝；后台周期清扫会重放 tombstone 删除，以收敛 Milvus 超时后的迟到写入。Memory 已用包内 owned-work 按 Embedding batch 读取结果、验证每个 facet 的向量摘要并发布稳定 ref；PostgreSQL 复核来源后才把 facet 置为 `READY`，失效候选写删除 outbox，另一包内任务执行删除。隔离 PostgreSQL 加真实 Milvus 的索引测试，以及假 Embedding HTTP、假 Milvus 的宿主图文发布、outbox 删除、热替换和重启测试已通过。单来源遗忘事务、固定影响计划、管理入队和 Payload 正文清理已接入包公开服务；跨主干联想写入与语义召回主链已有后续实现，真实召回试验和大范围遗忘选择器仍待完成。管理 UI 不应将待验收能力标为可用。
 
 `memory.source.forget/1` 是单来源的事务原语，尚未作为 WebUI 高影响操作开放。Memory prepare participant 锁定来源单元并输出其作者载荷锚点；`kernel.payload` 的通用 `payload.forget-anchor-from-prior` 仅接受具有唯一完整根来源的不可变锚点，按当前删除屏障撤销该来源及所有已知派生 Payload。Memory apply participant 只消费版本化回执和选中 Payload ID 集合，在自己的 namespace 内同步失效受影响 source unit/occurrence/facet、停用关系端点与证据贡献，并为全部 facet ref 写不可逆删除 outbox。任一步拒绝整体回滚；重放返回原回执，同 operation 并发只推进一次 epoch。跨群派生载荷如果命中来源闭包也会失效，不按当前查询群覆盖来源。Kernel Payload 现在由 Generation 自有的受监督任务持续分批删除 `REVOKED` 正文，宿主 PostgreSQL 遗忘/热替换测试已验证 `SCRUBBED` 且 `payload_bodies` 无对应行；更大范围选择器与固定影响集合预览仍待完成。
 
@@ -181,11 +181,13 @@ Agent 包的模型安全边界选择每次观察使用新的 operation identity�
 
 成功回复链路的隔离验收进一步使用合规的模型 XML 回执，真实 Agent 包完成 `FINAL_READY` 后经 Scheduler 的 FinalReply UnitOfWork 提交 Run 终态、Conversation 回复单元、Memory 联想日志和 Delivery Intent，伪 OneBot 收到一条投递；未发送真实 QQ 消息。此前 `agent.commit-final-run-record` 的 SQL 同名变量错误已修正。新增学习路径冻结实际投影的直接种子和 part，排除扩散节点、未投影图片及失败 Run；Memory 在同事务复核触发事件、查询 part 和冻结检索种子。隔离 PostgreSQL 验证了活动消息只留待归档日志、归档后跨主干提升、重放与重复召回不累加边权。真实 QQ 跨群成功回复和遗忘竞争长时间验收仍待执行。
 
-单来源遗忘新增 `memory.source.forget.preview/1` 包服务和三步 UnitOfWork：Memory 先取得作者 anchor，Kernel Payload 在删除时钟锁下选定包含派生节点的闭包，Memory 对来源、向量删除引用、关系贡献与待归档联想日志计算计数及完整集合摘要。携带计划执行时，Payload 复核删除纪元和选中摘要，Memory 复核影响计划；任一变化都会使整个遗忘事务回滚。FinalReply UnitOfWork 也先捕获删除屏障，再提交 Agent、Conversation 和 Memory 联想，避免关系提升绕过遗忘的固定影响计划。隔离 PostgreSQL 验证了新增派生 Payload 后旧计划被拒绝且纪元未前进，以及关系证据变化后旧计划被拒绝、重新预览成功；完整宿主测试经过热替换和重启，伪 OneBot 成功回复链也通过。最终本地回归 438 项通过、94 项跳过，未发真实 QQ 消息。管理 UI 尚未调用这项计划服务，也尚未提供管理员确认入口。
+单来源遗忘新增 `memory.source.forget.preview/1` 包服务和三步 UnitOfWork：Memory 先取得作者 anchor，Kernel Payload 在删除时钟锁下选定包含派生节点的闭包，Memory 对来源、向量删除引用、关系贡献与待归档联想日志计算计数及完整集合摘要。携带计划执行时，Payload 复核删除纪元和选中摘要，Memory 复核影响计划；任一变化都会使整个遗忘事务回滚。FinalReply UnitOfWork 也先捕获删除屏障，再提交 Agent、Conversation 和 Memory 联想，避免关系提升绕过遗忘的固定影响计划。隔离 PostgreSQL 验证了新增派生 Payload 后旧计划被拒绝且纪元未前进，以及关系证据变化后旧计划被拒绝、重新预览成功；完整宿主测试经过热替换和重启，伪 OneBot 成功回复链也通过。最终本地回归 438 项通过、94 项跳过，未发真实 QQ 消息。Memory 管理 UI 已接入预览、管理员确认入队和请求状态查询；较大范围选择器仍待实现。
+
+Memory 管理面现以包 manifest 映射 `memory.forget.preview` 只读服务、`memory.forget.enqueue` P0 Domain Command 和 `memory.forget.status` Domain Query。管理员确认的完整计划通过 JSON Pointer 进入 Web authority ticket 摘要；票据、Bot 策略和审计在同一入队事务内核验，动作只写 Memory 自有队列。Memory owned-work 随 Generation 领取请求，沿稳定 operation ID 调用跨模块遗忘 UnitOfWork，旧计划失败保留错误码；已提交遗忘在租约过期后从不可变 `source_forget_operations` 收敛为成功。隔离 PostgreSQL 宿主验证了旧计划 `FAILED` 且删除纪元不前进、有效计划在真实 Web 票据保护下成功、热替换与重启后的状态查询一致。模块 UI 使用现有隔离 MessageChannel 完成预览、显式确认、入队和终态查询，并加入群主干、作者、模态、类型与时间过滤；没有发送真实 QQ 消息。
 
 ## 8. 下一切换顺序
 
-1. 将已有单来源固定影响计划接入 Memory 管理 UI 和管理员授权执行，补齐较大范围选择器；补齐发布崩溃重放验证。
+1. 补齐较大范围遗忘选择器与分页管理，完成管理召回试验；补齐发布崩溃重放验证。
 2. 验证 Agent 语义召回的真实 QQ 群聊链、图片召回命中与跨群成功回复及联想提升；恢复及重放需与删除 epoch、Generation 围栏收敛。
 3. 补齐证据浏览的进一步分页以及图文真实召回试验。
 4. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。

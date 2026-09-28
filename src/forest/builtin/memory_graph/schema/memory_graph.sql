@@ -350,6 +350,39 @@ CREATE TABLE source_forget_operations (
     FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id)
 );
 
+CREATE TABLE management_forget_work (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    request_id text NOT NULL CHECK (octet_length(request_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    source_unit_id text NOT NULL,
+    requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
+    plan jsonb NOT NULL,
+    state text NOT NULL DEFAULT 'QUEUED' CHECK (
+        state IN ('QUEUED','RUNNING','SUCCEEDED','FAILED','UNKNOWN')),
+    claim_token text CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 3),
+    result_payload jsonb,
+    error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,request_id),
+    UNIQUE (bot_id,claim_token),
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    CHECK ((state='RUNNING') = (claim_token IS NOT NULL AND lease_deadline IS NOT NULL)),
+    CHECK ((state='SUCCEEDED') = (result_payload IS NOT NULL))
+);
+CREATE INDEX management_forget_claim_idx
+    ON management_forget_work(bot_id,state,created_at,request_id);
+
+CREATE TABLE management_forget_settlements (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    PRIMARY KEY (bot_id,claim_token)
+);
+
 CREATE TABLE relation_contributions (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     contribution_id text NOT NULL CHECK (octet_length(contribution_id) BETWEEN 1 AND 256),
@@ -5227,6 +5260,209 @@ BEGIN
 EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow OR not_null_violation OR check_violation THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
         'code','MEMORY_CAPTURE_INPUT_INVALID','message','Memory capture payload is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_forget_work_projection(requested_bot text, requested_id text)
+RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT jsonb_build_object(
+        'protocol','forest.memory-forget-work/1',
+        'request_id',w.request_id,
+        'source_unit_id',w.source_unit_id,
+        'state',w.state,
+        'attempt_count',w.attempt_count,
+        'result',w.result_payload,
+        'error_code',w.error_code,
+        'created_at',w.created_at,
+        'updated_at',w.updated_at)
+    FROM __forest_module_schema__.management_forget_work w
+    WHERE w.bot_id=requested_bot AND w.request_id=requested_id
+$$;
+
+CREATE FUNCTION memory_enqueue_management_forget(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_id text := context->>'operation_id';
+    requested_digest text := 'sha256:' ||
+        encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    plan_value jsonb := input->'plan';
+    existing record;
+BEGIN
+    IF requested_id IS NULL OR octet_length(requested_id) NOT BETWEEN 1 AND 256
+       OR jsonb_typeof(plan_value) IS DISTINCT FROM 'object'
+       OR plan_value->>'protocol' IS DISTINCT FROM 'forest.memory-forget-impact-plan/1'
+       OR plan_value->>'source_unit_id' IS DISTINCT FROM input->>'source_unit_id'
+       OR plan_value->>'plan_digest' IS DISTINCT FROM ('sha256:' ||
+           encode(sha256(convert_to((plan_value-'plan_digest')::text,'UTF8')),'hex'))
+       OR input->>'requested_by' IS NULL
+       OR octet_length(input->>'requested_by') NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_MANAGEMENT_INPUT_INVALID',
+                'message','Management forget request is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/management-forget/' || requested_bot || '/' || requested_id,0));
+    SELECT * INTO existing FROM __forest_module_schema__.management_forget_work
+    WHERE bot_id=requested_bot AND request_id=requested_id;
+    IF existing IS NOT NULL THEN
+        IF existing.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FORGET_OPERATION_CONFLICT',
+                    'message','Management forget request differs','status',409));
+        END IF;
+    ELSE
+        IF NOT EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_units
+            WHERE bot_id=requested_bot AND source_unit_id=input->>'source_unit_id') THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_SOURCE_NOT_FOUND',
+                    'message','Memory source unit does not exist','status',404));
+        END IF;
+        INSERT INTO __forest_module_schema__.management_forget_work(
+            bot_id,request_id,input_digest,source_unit_id,requested_by,plan)
+        VALUES(requested_bot,requested_id,requested_digest,
+            input->>'source_unit_id',input->>'requested_by',plan_value);
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.memory-forget-enqueued/1','request_id',requested_id));
+END;
+$$;
+
+CREATE FUNCTION memory_query_management_forget(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    result_value jsonb;
+BEGIN
+    result_value := __forest_module_schema__.memory_forget_work_projection(
+        context->>'bot_id',input->>'request_id');
+    IF result_value IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_REQUEST_NOT_FOUND',
+                'message','Memory forget request does not exist','status',404));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',result_value);
+END;
+$$;
+
+CREATE FUNCTION memory_claim_management_forget(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work_row __forest_module_schema__.management_forget_work%ROWTYPE;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_CLAIM_INVALID',
+                'message','Management forget claim is invalid','status',422));
+    END IF;
+    UPDATE __forest_module_schema__.management_forget_work w
+    SET state=CASE WHEN EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_forget_operations o
+            WHERE o.bot_id=w.bot_id AND o.operation_id=w.request_id
+        ) THEN 'SUCCEEDED' WHEN attempt_count<3 THEN 'QUEUED' ELSE 'UNKNOWN' END,
+        claim_token=NULL,lease_deadline=NULL,
+        result_payload=(
+            SELECT o.result_payload FROM __forest_module_schema__.source_forget_operations o
+            WHERE o.bot_id=w.bot_id AND o.operation_id=w.request_id),
+        error_code=CASE WHEN EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_forget_operations o
+            WHERE o.bot_id=w.bot_id AND o.operation_id=w.request_id
+        ) OR attempt_count<3 THEN NULL ELSE 'MEMORY_FORGET_OUTCOME_UNKNOWN' END,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND state='RUNNING' AND lease_deadline<=clock_timestamp();
+    SELECT * INTO work_row FROM __forest_module_schema__.management_forget_work
+    WHERE bot_id=requested_bot AND state='QUEUED'
+    ORDER BY created_at,request_id FOR UPDATE SKIP LOCKED LIMIT 1;
+    IF work_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    UPDATE __forest_module_schema__.management_forget_work
+    SET state='RUNNING',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id RETURNING * INTO work_row;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-claim/1',
+            'work_id',work_row.request_id,
+            'claim_token',requested_token,
+            'attempt',work_row.attempt_count,
+            'operation_id','memory-forget-work:' || encode(sha256(convert_to(
+                work_row.request_id || '/' || work_row.attempt_count,'UTF8')),'hex'),
+            'causal_root_kind','memory.forget',
+            'causal_root_id',work_row.request_id,
+            'payload',jsonb_build_object(
+                'request_id',work_row.request_id,
+                'source_unit_id',work_row.source_unit_id,
+                'plan',work_row.plan)));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_management_forget(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    old_row record;
+    work_row __forest_module_schema__.management_forget_work%ROWTYPE;
+    result_value jsonb;
+    next_state text;
+BEGIN
+    SELECT * INTO old_row FROM __forest_module_schema__.management_forget_settlements
+    WHERE bot_id=requested_bot AND claim_token=input->>'claim_token';
+    IF old_row IS NOT NULL THEN
+        IF old_row.input_payload=input THEN RETURN old_row.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_SETTLEMENT_CONFLICT',
+                'message','Management forget claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.management_forget_work
+    WHERE bot_id=requested_bot AND request_id=input->>'work_id' FOR UPDATE;
+    IF work_row IS NULL OR work_row.state<>'RUNNING'
+       OR work_row.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_CLAIM_LOST',
+                'message','Management forget claim is no longer current','status',409));
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.source_forget_operations o
+        WHERE o.bot_id=requested_bot AND o.operation_id=work_row.request_id
+    ) THEN
+        next_state := 'SUCCEEDED';
+    ELSIF input#>>'{outcome,status}'='SUCCEEDED' THEN
+        next_state := 'UNKNOWN';
+    ELSIF input#>>'{outcome,error,retryable}'='true' AND work_row.attempt_count<3 THEN
+        next_state := 'QUEUED';
+    ELSIF input#>>'{outcome,error,unknown}'='true' THEN
+        next_state := 'UNKNOWN';
+    ELSE
+        next_state := 'FAILED';
+    END IF;
+    UPDATE __forest_module_schema__.management_forget_work
+    SET state=next_state,claim_token=NULL,lease_deadline=NULL,
+        result_payload=CASE WHEN next_state='SUCCEEDED' THEN COALESCE(
+            (SELECT o.result_payload FROM __forest_module_schema__.source_forget_operations o
+             WHERE o.bot_id=requested_bot AND o.operation_id=work_row.request_id),
+            input#>'{outcome,result}') ELSE NULL END,
+        error_code=CASE WHEN next_state='SUCCEEDED' THEN NULL
+                        WHEN next_state='UNKNOWN' THEN 'MEMORY_FORGET_OUTCOME_UNKNOWN'
+                        ELSE input#>>'{outcome,error,code}' END,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work_row.request_id));
+    INSERT INTO __forest_module_schema__.management_forget_settlements(
+        bot_id,claim_token,input_payload,result_payload)
+    VALUES(requested_bot,input->>'claim_token',input,result_value);
+    RETURN result_value;
 END;
 $$;
 

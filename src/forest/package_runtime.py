@@ -1542,16 +1542,16 @@ class PackageGenerationAdapter:
         *,
         timeout_seconds: float,
     ) -> Any:
-        if declaration not in self.component.get("domain_queries", ()):
+        domain_query = declaration in self.component.get("domain_queries", ())
+        read_service = (
+            declaration in self.component.get("provides", ())
+            and declaration["semantics"] == "read"
+        )
+        if not domain_query and not read_service:
             raise ForestError(
                 "MODULE_MANAGEMENT_BINDING_INVALID",
                 "Management query is not bound to this package Generation",
                 409,
-            )
-        authority = self._domain_queries
-        if authority is None:
-            raise ForestError(
-                "CAPABILITY_UNAVAILABLE", "Domain query authority is unavailable", 503
             )
         input_validator, output_validator = self._service_schemas[declaration["name"]]
         if not isinstance(payload, dict) or not input_validator.is_valid(payload):
@@ -1562,13 +1562,46 @@ class PackageGenerationAdapter:
             )
         operation_id = "management-query:" + uuid4().hex
         scope, parent_call_id = self._management_scope(operation_id)
-        result = await authority.invoke_query(
-            scope,
-            declaration,
-            payload,
-            parent_call_id=parent_call_id,
-            timeout_seconds=timeout_seconds,
-        )
+        if domain_query:
+            authority = self._domain_queries
+            if authority is None:
+                raise ForestError(
+                    "CAPABILITY_UNAVAILABLE", "Domain query authority is unavailable", 503
+                )
+            result = await authority.invoke_query(
+                scope,
+                declaration,
+                payload,
+                parent_call_id=parent_call_id,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            identity = self.generation_identity
+            if identity is None:
+                raise ForestError(
+                    "RUNTIME_GENERATION_NOT_BOUND", "Management service has no Generation", 409
+                )
+            route = FrozenServiceRoute(
+                service_id=declaration["name"],
+                version=_major(declaration["contract"]),
+                caller_component_id=self.component_id,
+                provider_component_id=self.component_id,
+                provider_generation_id=identity.generation_id,
+                graph_id=identity.graph_id,
+                graph_revision=identity.graph_revision,
+                admission_lane="DATA",
+                owned_work=False,
+            )
+            invocation = RuntimeServiceInvocation(
+                operation_id=operation_id,
+                timeout_seconds=timeout_seconds,
+                causal_root_kind=scope.causal_root_kind,
+                causal_root_id=scope.causal_root_id,
+                parent_call_id=parent_call_id,
+            )
+            result = await self._service_handler(declaration["name"]).invoke_routed(
+                route, invocation, (payload,), {}
+            )
         if not output_validator.is_valid(result):
             raise ForestError(
                 "MODULE_MANAGEMENT_OUTPUT_INVALID",

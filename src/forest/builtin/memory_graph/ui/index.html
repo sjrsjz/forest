@@ -8,20 +8,29 @@
   <style>
     :root{color-scheme:dark;font:13px/1.4 system-ui,sans-serif;background:#0c1712;color:#dcebe3}
     *{box-sizing:border-box}body{margin:0;padding:8px;height:610px}button,input,select{font:inherit;border:1px solid #345344;border-radius:6px;background:#102019;color:inherit;padding:6px 8px}button{cursor:pointer;background:#255743}button:disabled{opacity:.5}
-    .app{height:100%;display:grid;grid-template-rows:auto auto minmax(0,1fr) auto;gap:8px}.bar,.filters,.pager{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.bar{justify-content:space-between}.muted{color:#8fa99b}nav{display:flex;gap:5px}nav button.active{background:#70cfa1;color:#092015}.panel{min-height:0;overflow:auto;border:1px solid #2c493b;border-radius:8px;padding:10px;background:#102019}.hidden{display:none}.filters{margin-bottom:8px}.filters input{min-width:9rem}.table{width:100%;border-collapse:collapse;table-layout:fixed}.table th,.table td{padding:7px;border-bottom:1px solid #294538;vertical-align:top;overflow-wrap:anywhere;text-align:left}.table th{color:#9ab8a7;font-weight:600}.table tr[data-unit]{cursor:pointer}.table tr[data-unit]:hover{background:#1b3529}.pager{margin-top:8px}.detail{white-space:pre-wrap;overflow-wrap:anywhere;color:#a9c3b4;margin:5px 0 12px}.relation{border:1px solid #2b4939;border-radius:7px;padding:8px;margin-bottom:8px}.relation strong{color:#8ddbb0}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.grid label{display:grid;gap:4px;color:#9db6a7}.grid input{width:100%;min-width:0}.wide{grid-column:span 2}.status{min-height:20px;color:#8ddbb0}@media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.table th:nth-child(4),.table td:nth-child(4){display:none}}
+    .app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:8px}.bar,.filters,.pager{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.bar{justify-content:space-between}.muted{color:#8fa99b}nav{display:flex;gap:5px}nav button.active{background:#70cfa1;color:#092015}.panel{min-height:0;overflow:auto;border:1px solid #2c493b;border-radius:8px;padding:10px;background:#102019}.hidden{display:none}.filters{margin-bottom:8px}.filters input{min-width:9rem}.table{width:100%;border-collapse:collapse;table-layout:fixed}.table th,.table td{padding:7px;border-bottom:1px solid #294538;vertical-align:top;overflow-wrap:anywhere;text-align:left}.table th{color:#9ab8a7;font-weight:600}.table tr[data-unit]{cursor:pointer}.table tr[data-unit]:hover{background:#1b3529}.pager{margin-top:8px}.detail{white-space:pre-wrap;overflow-wrap:anywhere;color:#a9c3b4;margin:5px 0 12px}.relation{border:1px solid #2b4939;border-radius:7px;padding:8px;margin-bottom:8px}.relation strong{color:#8ddbb0}.grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}.grid label{display:grid;gap:4px;color:#9db6a7}.grid input{width:100%;min-width:0}.wide{grid-column:span 2}.status{min-height:20px;color:#8ddbb0}.danger{background:#8a3b33}.review{border:1px solid #345344;border-radius:7px;padding:10px;margin:10px 0}.review strong{color:#ffc18f}.confirm{display:flex;align-items:center;gap:6px}.confirm input{min-width:0}.forget-id{width:min(100%,38rem)}@media(max-width:850px){.grid{grid-template-columns:repeat(2,minmax(0,1fr))}.table th:nth-child(4),.table td:nth-child(4){display:none}}
   </style>
 </head>
 <body>
 <div class="app">
-  <div class="bar"><div><strong>Memory Graph</strong> <span id="revision" class="muted"></span></div><nav><button data-tab="sources" class="active">来源</button><button data-tab="relations">关系</button><button data-tab="settings">设置</button></nav></div>
+  <div class="bar"><div><strong>Memory Graph</strong> <span id="revision" class="muted"></span></div><nav><button data-tab="sources" class="active">来源</button><button data-tab="relations">关系</button><button data-tab="forget">遗忘</button><button data-tab="settings">设置</button></nav></div>
   <section id="sources" class="panel">
-    <div class="filters"><select id="trunk"><option value="">全部群主干</option></select><input id="author" placeholder="作者主体"><select id="modality"><option value="">全部模态</option><option>TEXT</option><option>IMAGE</option><option>MIXED</option><option>CONTROL</option></select><input id="unit-kind" placeholder="单元类型"><button id="source-search">查询</button></div>
-    <table class="table"><thead><tr><th style="width:26%">来源单元</th><th style="width:17%">群 / 主干</th><th style="width:18%">作者</th><th style="width:15%">类型</th><th>发生时间</th></tr></thead><tbody id="source-rows"></tbody></table>
+    <div class="filters"><select id="trunk"><option value="">全部群主干</option></select><input id="author" placeholder="作者主体"><select id="modality"><option value="">全部模态</option><option>TEXT</option><option>IMAGE</option><option>MIXED</option><option>CONTROL</option></select><input id="unit-kind" placeholder="单元类型"><label>从 <input id="occurred-from" type="datetime-local"></label><label>至 <input id="occurred-to" type="datetime-local"></label><button id="source-search">查询</button></div>
+    <table class="table"><thead><tr><th style="width:24%">来源单元</th><th style="width:16%">群 / 主干</th><th style="width:17%">作者</th><th style="width:14%">类型</th><th>发生时间</th><th style="width:8%">操作</th></tr></thead><tbody id="source-rows"></tbody></table>
     <div class="pager"><span id="source-count" class="muted"></span><button id="source-next" disabled>下一页</button></div>
   </section>
   <section id="relations" class="panel hidden">
     <div class="filters"><select id="endpoint-kind"><option>SOURCE_UNIT</option><option>ASSERTION</option><option>ENTITY</option><option>ARTIFACT</option></select><input id="endpoint-id" style="flex:1" placeholder="节点 ID；可从来源列表点击选取"><button id="relation-search">遍历关系</button></div>
     <div id="relation-rows"></div><div class="pager"><span id="relation-count" class="muted"></span><button id="relation-next" disabled>下一页</button></div>
+  </section>
+  <section id="forget" class="panel hidden">
+    <p class="muted">按来源单元预览影响范围。预览后内容或关系变化时，执行会拒绝旧计划；请求状态可按 ID 查询。</p>
+    <div class="filters"><input id="forget-source" class="forget-id" placeholder="来源单元 ID"><button id="forget-preview">生成影响计划</button></div>
+    <div id="forget-impact" class="review muted">尚未生成计划。</div>
+    <label class="confirm"><input id="forget-confirm" type="checkbox" disabled>我已核对来源和影响范围，确认执行不可恢复的遗忘</label>
+    <div class="pager"><button id="forget-enqueue" class="danger" disabled>确认并排队遗忘</button></div>
+    <div class="filters"><input id="forget-request" class="forget-id" placeholder="遗忘请求 ID"><button id="forget-refresh">查询请求状态</button></div>
+    <div id="forget-state" class="detail"></div>
   </section>
   <section id="settings" class="panel hidden">
     <p class="muted">嵌入模型种类、修订和维度随 Bot 生命周期冻结；仅端点可在 Embedding 组件中轮换。</p>
@@ -33,22 +42,59 @@
 </div>
 <script>
 (()=>{'use strict';
-  let port,nonce='',sequence=0,draft=null,sourcePage=null,relationPage=null;
+  let port,nonce='',sequence=0,draft=null,sourcePage=null,relationPage=null,forgetPlan=null,forgetTimer=null;
   const pending=new Map(),$=id=>document.getElementById(id);
   const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',type,nonce,...payload});
-  const call=(operation_id,value)=>new Promise((resolve,reject)=>{const request_id=`memory-ui:${++sequence}`;pending.set(request_id,{resolve,reject});send('query',{request_id,operation_id,value});});
+  const request=(type,operation_id,value)=>new Promise((resolve,reject)=>{const request_id=`memory-ui:${++sequence}`;pending.set(request_id,{resolve,reject});send(type,{request_id,operation_id,value});});
+  const call=(operation_id,value)=>request('query',operation_id,value);
+  const action=(operation_id,value)=>request('action',operation_id,value);
   const status=text=>$('status').textContent=text||'';
   const cell=(row,value)=>{const node=row.insertCell();node.textContent=value??'—';return node;};
   const stamp=value=>value?new Date(value).toLocaleString():'—';
-  function show(tab){for(const panel of ['sources','relations','settings'])$(panel).classList.toggle('hidden',panel!==tab);document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
-  function sourceInput(){const value={limit:50};if($('trunk').value)value.trunk_id=$('trunk').value;if($('author').value.trim())value.author_subject_ref=$('author').value.trim();if($('modality').value)value.modality=$('modality').value;if($('unit-kind').value.trim())value.unit_kind=$('unit-kind').value.trim();return value;}
+  function show(tab){for(const panel of ['sources','relations','forget','settings'])$(panel).classList.toggle('hidden',panel!==tab);document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
+  function sourceInput(){const value={limit:50};if($('trunk').value)value.trunk_id=$('trunk').value;if($('author').value.trim())value.author_subject_ref=$('author').value.trim();if($('modality').value)value.modality=$('modality').value;if($('unit-kind').value.trim())value.unit_kind=$('unit-kind').value.trim();if($('occurred-from').value)value.occurred_from=new Date($('occurred-from').value).toISOString();if($('occurred-to').value)value.occurred_to=new Date($('occurred-to').value).toISOString();return value;}
   async function loadTrunks(){const result=await call('memory.trunks.list',{});const select=$('trunk');select.replaceChildren(new Option('全部群主干',''));for(const trunk of result.items)select.add(new Option(`${trunk.external_group_id} · ${trunk.eligible_sources} 可召回`,trunk.trunk_id));}
-  async function loadSources(next=false){const input=sourceInput();if(next&&sourcePage?.next_cursor){input.snapshot_accepted_at=sourcePage.snapshot_accepted_at;input.after_occurred_at=sourcePage.next_cursor.occurred_at;input.after_source_unit_id=sourcePage.next_cursor.source_unit_id;input.cursor_filter_digest=sourcePage.filter_digest;}const page=await call('memory.sources.query',input);sourcePage=page;const rows=$('source-rows');rows.replaceChildren();for(const item of page.items){const row=rows.insertRow();row.dataset.unit=item.source_unit_id;cell(row,item.source_unit_id);cell(row,item.external_group_id?`${item.external_group_id}\n${item.trunk_id}`:item.source_kind);cell(row,item.author_subject_ref);cell(row,`${item.modality} / ${item.unit_kind}`);cell(row,stamp(item.occurred_at));row.onclick=()=>{$('endpoint-kind').value='SOURCE_UNIT';$('endpoint-id').value=item.source_unit_id;show('relations');loadRelations().catch(error=>status(error.message));};}if(!page.items.length)rows.insertRow().insertCell().textContent='没有匹配的来源。';$('source-count').textContent=`本页 ${page.items.length} 条 · 快照 ${stamp(page.snapshot_accepted_at)}`;$('source-next').disabled=!page.has_more;}
+  async function loadSources(next=false){const input=sourceInput();if(next&&sourcePage?.next_cursor){input.snapshot_accepted_at=sourcePage.snapshot_accepted_at;input.after_occurred_at=sourcePage.next_cursor.occurred_at;input.after_source_unit_id=sourcePage.next_cursor.source_unit_id;input.cursor_filter_digest=sourcePage.filter_digest;}const page=await call('memory.sources.query',input);sourcePage=page;const rows=$('source-rows');rows.replaceChildren();for(const item of page.items){const row=rows.insertRow();row.dataset.unit=item.source_unit_id;cell(row,item.source_unit_id);cell(row,item.external_group_id?`${item.external_group_id}\n${item.trunk_id}`:item.source_kind);cell(row,item.author_subject_ref);cell(row,`${item.modality} / ${item.unit_kind}`);cell(row,stamp(item.occurred_at));const button=document.createElement('button');button.textContent='预览遗忘';button.onclick=event=>{event.stopPropagation();$('forget-source').value=item.source_unit_id;show('forget');loadForgetPlan().catch(error=>status(error.message));};row.insertCell().append(button);row.onclick=()=>{$('endpoint-kind').value='SOURCE_UNIT';$('endpoint-id').value=item.source_unit_id;show('relations');loadRelations().catch(error=>status(error.message));};}if(!page.items.length)rows.insertRow().insertCell().textContent='没有匹配的来源。';$('source-count').textContent=`本页 ${page.items.length} 条 · 快照 ${stamp(page.snapshot_accepted_at)}`;$('source-next').disabled=!page.has_more;}
   async function loadRelations(next=false){const endpoint_id=$('endpoint-id').value.trim();if(!endpoint_id){status('请填写节点 ID');return;}const input={endpoint_kind:$('endpoint-kind').value,endpoint_id,limit:10};if(next&&relationPage?.next_cursor){input.snapshot_created_at=relationPage.snapshot_created_at;input.after_relation_id=relationPage.next_cursor.relation_id;input.after_contribution_id=relationPage.next_cursor.contribution_id;input.cursor_filter_digest=relationPage.filter_digest;}const page=await call('memory.relations.query',input);relationPage=page;const rows=$('relation-rows');rows.replaceChildren();for(const item of page.items){const box=document.createElement('div');box.className='relation';const title=document.createElement('strong');title.textContent=`${item.relation_kind}: ${item.left_kind}:${item.left_id} → ${item.right_kind}:${item.right_id}`;const meta=document.createElement('div');meta.className='muted';meta.textContent=`关系 ${item.relation_id} · 贡献 ${item.contribution_id} · 权重 ${item.weight_micros}/1000000`;const evidence=document.createElement('div');evidence.className='detail';evidence.textContent=item.evidence.length?item.evidence.map(e=>`群 ${e.external_group_id??'非群来源'} · 主干 ${e.trunk_id??'—'} · ${e.source_unit_id} / ${e.part_id} · 作者 ${e.author_subject_ref}`).join('\n'):'没有附带来源证据';if(item.evidence_count>item.evidence.length)evidence.textContent+=`\n还有 ${item.evidence_count-item.evidence.length} 条证据未在本页展开`;box.append(title,meta,evidence);rows.append(box);}if(!page.items.length)rows.textContent='该节点没有可见关系。';$('relation-count').textContent=`本页 ${page.items.length} 条 · 快照 ${stamp(page.snapshot_created_at)}`;$('relation-next').disabled=!page.has_more;}
+  function clearForgetPlan(){forgetPlan=null;$('forget-confirm').checked=false;$('forget-confirm').disabled=true;$('forget-enqueue').disabled=true;$('forget-impact').textContent='尚未生成计划。';}
+  async function loadForgetPlan(){
+    const source_unit_id=$('forget-source').value.trim();clearForgetPlan();
+    if(!source_unit_id){status('请填写来源单元 ID');return;}
+    status('计算遗忘影响中');
+    const plan=await call('memory.forget.preview',{source_unit_id});
+    if($('forget-source').value.trim()!==source_unit_id)return;
+    forgetPlan=plan;
+    $('forget-impact').textContent=`来源 ${plan.source_unit_id}\nPayload ${plan.selected_payload_count} · 来源单元 ${plan.source_unit_count} · 向量删除 ${plan.vector_deletion_count} · 关系撤销 ${plan.relation_retraction_count} · 待归档联想 ${plan.association_journal_count}\n删除纪元 ${plan.deletion_epoch} · 计划 ${plan.plan_digest}\n来源样本：${plan.source_unit_sample.join('、')}`;
+    $('forget-confirm').disabled=false;status('请核对影响范围，再确认排队');
+  }
+  async function loadForgetStatus(request_id=$('forget-request').value.trim()){
+    if(!request_id){status('请填写遗忘请求 ID');return;}
+    clearTimeout(forgetTimer);
+    const result=await call('memory.forget.status',{request_id});
+    if($('forget-request').value.trim()!==request_id)return;
+    $('forget-state').textContent=`${result.state} · ${result.source_unit_id} · 尝试 ${result.attempt_count} 次\n${result.error_code??''}${result.result?`\n抑制 ${result.result.suppressed_source_units} 个来源单元 · 向量删除 ${result.result.vector_deletions} · 关系撤销 ${result.result.retracted_relations}`:''}`;
+    if(result.state==='QUEUED'||result.state==='RUNNING')forgetTimer=setTimeout(()=>loadForgetStatus(request_id).catch(error=>status(error.message)),1500);
+    else if(result.state==='SUCCEEDED'){clearForgetPlan();loadSources().catch(error=>status(error.message));}
+    else{clearForgetPlan();status('遗忘未完成；请重新预览后决定是否重试');}
+  }
+  async function enqueueForget(){
+    const plan=forgetPlan,source_unit_id=$('forget-source').value.trim();
+    if(!plan||plan.source_unit_id!==source_unit_id||!$('forget-confirm').checked)return;
+    $('forget-enqueue').disabled=true;
+    const queued=await action('memory.forget.enqueue',{source_unit_id,plan});
+    $('forget-request').value=queued.request_id;
+    $('forget-state').textContent=`QUEUED · ${queued.request_id}`;
+    status('管理员请求已入队');await loadForgetStatus(queued.request_id);
+  }
   function renderSettings(){const embedding=draft.embedding,retrieval=draft.retrieval;for(const [id,value] of [['deployment',embedding.deployment_id],['model',embedding.model],['kind',embedding.model_kind],['dimensions',embedding.dimensions]])$(id).value=value;document.querySelectorAll('[data-path]').forEach(input=>input.value=retrieval[input.dataset.path]);}
   function changeSettings(){document.querySelectorAll('[data-path]').forEach(input=>draft.retrieval[input.dataset.path]=Number(input.value));send('set-draft',{value:draft});status('设置草稿已更新');}
   document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>show(button.dataset.tab));document.querySelectorAll('[data-path]').forEach(input=>input.onchange=changeSettings);
   $('source-search').onclick=()=>loadSources().catch(error=>status(error.message));$('source-next').onclick=()=>loadSources(true).catch(error=>status(error.message));$('relation-search').onclick=()=>loadRelations().catch(error=>status(error.message));$('relation-next').onclick=()=>loadRelations(true).catch(error=>status(error.message));$('plan').onclick=()=>{changeSettings();send('request-plan');status('服务端校验中');};
+  $('forget-source').oninput=clearForgetPlan;
+  $('forget-confirm').onchange=()=>$('forget-enqueue').disabled=!forgetPlan||!$('forget-confirm').checked;
+  $('forget-preview').onclick=()=>loadForgetPlan().catch(error=>status(error.message));
+  $('forget-enqueue').onclick=()=>enqueueForget().catch(error=>{status(error.message);$('forget-enqueue').disabled=false;});
+  $('forget-refresh').onclick=()=>loadForgetStatus().catch(error=>status(error.message));
   addEventListener('message',event=>{const message=event.data||{};if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect')return;port=event.ports[0];nonce=message.nonce;port.onmessage=async event=>{const data=event.data||{};if(data.protocol!=='forest.management-ui-channel/1'||data.nonce!==nonce)return;if(data.type==='initialize'){draft=structuredClone(data.configuration.desired.value);$('revision').textContent=`期望 r${data.configuration.desired.revision} · 生效 r${data.configuration.effective.revision}`;$('plan').disabled=false;renderSettings();try{await loadTrunks();await loadSources();}catch(error){status(error.message);}send('resize',{height:610});return;}if(data.type==='reset'){draft=structuredClone(data.value);renderSettings();status('草稿已丢弃');return;}if(data.type==='plan-ready'){status('计划已生成，请在宿主栏确认应用');return;}if(data.type==='applied'){status(`配置 r${data.revision} 已生效`);return;}const waiter=pending.get(data.request_id);if(waiter){pending.delete(data.request_id);if(data.type==='operation-error')waiter.reject(new Error(data.message||'查询失败'));else waiter.resolve(data.value);}else if(data.type==='error')status(data.message||'操作失败');};port.start();send('ready');},{once:true});
 })();
 </script>

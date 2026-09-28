@@ -13,7 +13,7 @@ from forest.packages import digest_json
 
 
 class PackageManagementContract(CleanModuleConfigurationContract):
-    """Expose only manifest-mapped package Query/Command ports to the Web gateway."""
+    """Expose manifest-mapped read and command ports to the Web gateway."""
 
     protocol = "forest.package-management/1"
 
@@ -31,6 +31,11 @@ class PackageManagementContract(CleanModuleConfigurationContract):
         query_ports = {
             item["name"]: item for item in component.get("domain_queries", ())
         }
+        query_ports.update(
+            (item["name"], item)
+            for item in component.get("provides", ())
+            if item["semantics"] == "read"
+        )
         command_ports = {
             item["name"]: item for item in component.get("domain_commands", ())
         }

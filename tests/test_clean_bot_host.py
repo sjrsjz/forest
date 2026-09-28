@@ -18,13 +18,16 @@ from psycopg import sql
 
 from forest.adapters.onebot import SendResult
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
+from forest.clean_management_app import CleanManagementGateway
 from forest.embeddings import EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
 from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import ModuleLifecycleState
+from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSubject
+from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 from model_projection import prepare_model_request
@@ -1578,26 +1581,107 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 )
             assert changed_plan.value.code == "MEMORY_FORGET_PLAN_CHANGED"
             assert await host._kernel.payload.epoch() == previous_epoch
-            current_plan = await preview_forget("memory-forget-preview-after-relation")
+            stale_request = await memory_instance.management_contract.action(
+                "memory.forget.enqueue",
+                operation_id="web:memory-forget-stale-queued",
+                payload={"source_unit_id": forget_input["source_unit_id"],
+                         "plan": stale_plan},
+            )
+            async with asyncio.timeout(20):
+                while True:
+                    stale_work = await memory_instance.management_contract.query(
+                        "memory.forget.status",
+                        {"request_id": stale_request.value["request_id"]},
+                    )
+                    if stale_work["state"] in {"SUCCEEDED", "FAILED", "UNKNOWN"}:
+                        break
+                    await asyncio.sleep(0.2)
+            assert stale_work["state"] == "FAILED", stale_work
+            assert stale_work["error_code"] == "MEMORY_FORGET_PLAN_CHANGED"
+            assert await host._kernel.payload.epoch() == previous_epoch
+            current_plan = await memory_instance.management_contract.query(
+                "memory.forget.preview", {"source_unit_id": "onebot-unit:" + event_hash}
+            )
             assert current_plan["relation_retraction_count"] == (
                 stale_plan["relation_retraction_count"] + 1
             )
             forget_input["plan"] = current_plan
-            forget = await memory_instance.runtime_service_handlers()[
-                ("memory.source.forget", 1)
-            ].invoke_routed(
-                forget_route,
-                RuntimeServiceInvocation(
-                    "memory-forget-host-embedding", 30,
-                    "memory.forget", "bot-production-test",
+            gateway = CleanManagementGateway(
+                host,
+                "test-management-token-long-enough",
+                ticket_authority=WebAuthorityTicketAuthority(
+                    issuer_id="deployment/host-test",
+                    active_key_id="master/host-test/1",
+                    key_resolver=lambda _key_id: b"k" * 32,
                 ),
-                (),
-                forget_input,
             )
+            management_body = {
+                "source_unit_id": forget_input["source_unit_id"], "plan": current_plan
+            }
+            management_operation = gateway.operation_id(
+                "memory.graph", "memory.forget.enqueue", "host-forget"
+            )
+            management_ticket = await gateway.ticket_authority.issue(
+                session=AuthenticatedWebSession(
+                    "token-digest", "session/host-test", 1, "csrf-digest",
+                    WebSubject("subject/host-admin", "admin", "Administrator", "ADMIN", True, 1),
+                    datetime.now(timezone.utc) + timedelta(hours=1),
+                ),
+                target_scope_kind="bot",
+                target_scope_id=settings.bot_id,
+                target_component_id="memory.graph",
+                target_generation_id=memory_identity.generation_id,
+                target_graph_revision=memory_identity.graph_revision,
+                target_operation_ref=management_operation,
+                action_key="memory.forget.enqueue",
+                input_digest=digest_json(management_body),
+                plan_digest=digest_json(current_plan),
+            )
+            queued = await gateway.module_action(
+                "memory.graph", "memory.forget.enqueue",
+                body=management_body,
+                idempotency_key="host-forget",
+                authorization=management_ticket,
+                operation_id=management_operation,
+            )
+            request_id = queued["request_id"]
+            assert request_id == management_operation
+            async with asyncio.timeout(30):
+                while True:
+                    work = await memory_instance.management_contract.query(
+                        "memory.forget.status", {"request_id": request_id}
+                    )
+                    if work["state"] in {"SUCCEEDED", "FAILED", "UNKNOWN"}:
+                        break
+                    await asyncio.sleep(0.2)
+            assert work["state"] == "SUCCEEDED", work
+            forget = work["result"]
+            forget_input["operation_id"] = request_id
             assert forget["deletion_epoch"] == previous_epoch + 1
             assert forget["suppressed_source_units"] == 1
             assert forget["vector_deletions"] == len(facets) + len(query_facets)
             assert forget["retracted_relations"] == 1
+            async with host.store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {}.management_forget_work SET state='RUNNING',"
+                        "claim_token='claim:simulated-crash',"
+                        "lease_deadline=clock_timestamp()-interval '1 second',"
+                        "attempt_count=1,result_payload=NULL,updated_at=clock_timestamp() "
+                        "WHERE bot_id=%s AND request_id=%s"
+                    ).format(sql.Identifier(memory_namespace)),
+                    (settings.bot_id, request_id),
+                )
+            async with asyncio.timeout(10):
+                while True:
+                    recovered_work = await memory_instance.management_contract.query(
+                        "memory.forget.status", {"request_id": request_id}
+                    )
+                    if recovered_work["state"] == "SUCCEEDED":
+                        break
+                    await asyncio.sleep(0.2)
+            assert recovered_work["result"] == forget
+            assert await host._kernel.payload.epoch() == previous_epoch + 1
             assert (await query_stage(recall_query["query_id"], "seeds/recall-after-forget"))["seeds"] == []
             with pytest.raises(ForestError) as revoked_work:
                 await query_stage(automatic_query["query_id"],
@@ -1688,6 +1772,11 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             replacement_graph = await host.replace_runtime_graph()
             assert replacement_graph.graph_identity.graph_id != previous.graph_id
             assert set(replacement_graph.states.values()) == {ModuleLifecycleState.ACTIVE}
+            replaced_work = await host.registry.get("memory.graph").management_contract.query(
+                "memory.forget.status", {"request_id": request_id}
+            )
+            assert replaced_work["state"] == "SUCCEEDED"
+            assert replaced_work["result"] == forget
             assert clients[-2].closed is True
             async with host.store.pool.connection() as conn:
                 previous_state = await (
@@ -1709,6 +1798,13 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
         try:
             assert restarted.registry.graph_identity.graph_id != replaced_graph_id
             assert set(restarted.registry.states.values()) == {ModuleLifecycleState.ACTIVE}
+            restarted_work = await restarted.registry.get(
+                "memory.graph"
+            ).management_contract.query(
+                "memory.forget.status", {"request_id": request_id}
+            )
+            assert restarted_work["state"] == "SUCCEEDED"
+            assert restarted_work["result"] == forget
         finally:
             await restarted.close()
         assert clients[-1].closed is True

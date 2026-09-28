@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.33.0"
+version = "1.35.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -55,6 +55,7 @@ requests = [
   "domain.query:memory.list-trunks",
   "domain.query:memory.query-sources",
   "domain.query:memory.query-relations",
+  "domain.query:memory.forget-work-status",
   "uow.execute:memory.capture-source",
   "uow.execute:memory.forget-source",
   "uow.execute:memory.preview-source-forget",
@@ -236,9 +237,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.31.0"
+schema_version = "3.32.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "27891605762104e31650f063ef387e0d75417cdd4fcb540c0a8db84c34a30c53"
+baseline_sha256 = "3f2860e6cc8911558e98c300670665af6766b0e25016447ddd6d7cb314539b62"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -292,6 +293,20 @@ function = "memory_query_relations"
 input_schema = "schemas/query-relations-input.json"
 output_schema = "schemas/query-relations-output.json"
 
+[[components.domain_queries]]
+name = "memory.forget-work-status"
+contract = "1.0"
+function = "memory_query_management_forget"
+input_schema = "schemas/forget-work-status-input.json"
+output_schema = "schemas/forget-work-status-output.json"
+
+[[components.domain_commands]]
+name = "memory.enqueue-management-forget"
+contract = "1.0"
+function = "memory_enqueue_management_forget"
+input_schema = "schemas/forget-management-action-input.json"
+output_schema = "schemas/forget-management-enqueued-output.json"
+
 [[components.management_queries]]
 id = "memory.trunks.list"
 port = "memory.list-trunks"
@@ -310,6 +325,24 @@ port = "memory.query-relations"
 default_limit = 10
 max_limit = 20
 timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.forget.preview"
+port = "memory.source.forget.preview"
+timeout_s = 30
+
+[[components.management_queries]]
+id = "memory.forget.status"
+port = "memory.forget-work-status"
+timeout_s = 10
+
+[[components.management_actions]]
+id = "memory.forget.enqueue"
+port = "memory.enqueue-management-forget"
+priority = "P0"
+actor_field = "requested_by"
+authorization_path = "/plan"
+timeout_s = 15
 
 [[components.unit_of_work_participants]]
 name = "memory.begin-query-record"
@@ -581,6 +614,21 @@ claim_timeout_s = 5
 handler_timeout_s = 300
 settle_timeout_s = 5
 lease_seconds = 360
+
+[[components.owned_work_handlers]]
+name = "memory.forget.manage-work"
+contract = "1.0"
+handler = "memory.forget.manage-work"
+claim_function = "memory_claim_management_forget"
+settle_function = "memory_settle_management_forget"
+input_schema = "schemas/forget-work-input.json"
+output_schema = "schemas/forget-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 60
+settle_timeout_s = 5
+lease_seconds = 90
 
 [[components.owned_work_handlers]]
 name = "memory.query.advance"

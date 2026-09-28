@@ -668,6 +668,18 @@ class MemoryGraph(Plugin):
             timeout=30,
         )
 
+    @job("memory.forget.manage-work")
+    async def execute_management_forget(self, task, ctx):
+        request = task["payload"]
+        return await self.forget_source(
+            {
+                "operation_id": request["request_id"],
+                "source_unit_id": request["source_unit_id"],
+                "plan": request["plan"],
+            },
+            ctx,
+        )
+
     @service(
         "agent.tool.memory-exact-recall",
         semantics="idempotent",

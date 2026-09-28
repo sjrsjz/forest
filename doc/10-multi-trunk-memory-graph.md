@@ -179,7 +179,7 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 发布顺序是“先写派生索引，后发布权威引用”。进程在两步之间崩溃时，Worker 以同一 `ref_id` 重放 Milvus upsert；重复成功不会产生第二条记忆。抑制或删除先在 PostgreSQL 提交不可见事实并写 `vector_index_deletions`，查询立即回表过滤；后台再按 outbox 删除 Milvus 条目。即使删除暂时失败，旧向量也只能成为被 PostgreSQL 拒绝的无效候选，不能复活正文。
 
-删除 outbox 必须覆盖曾经可能发出 upsert 的 facet，包括仍为 `EMBEDDED`、尚未提交 `READY` 的 facet。`vector.index` 包按 `(bot_id, ref_id)` 串行处理写入与删除，保留不可逆 tombstone；删除先到时也要建立 tombstone，后到的同 ref upsert 必须拒绝。Milvus 在客户端超时后仍可能迟到提交，所以事务锁本身不足以证明物理删除：索引包还要周期性重放 tombstone 删除，Memory 的召回始终回查 PostgreSQL 的来源资格、facet 状态和修订。Memory 发布 Worker 按已结算的 Embedding batch 读取一次结果 Payload，逐项验证 facet 和向量摘要，再调用索引包；随后在带删除 epoch 的短事务中复核来源，只有有效 facet 可以提交 `READY`，其余进入删除 outbox。Memory 的删除 Worker 重放 outbox，索引包的 ref 围栏和周期清扫负责迟到写入。`memory.source.forget/1` 已在抑制来源与相关 facet 的同一事务里为全部可能已发布的 ref 写 outbox，并撤销 Kernel Payload 来源闭包；`kernel.payload` 的 Generation 自有清理任务持续将 `REVOKED` 正文批量删除并标记 `SCRUBBED`，热替换时随旧代排空。`memory.source.forget.preview/1` 已通过跨模块 UnitOfWork 返回单来源固定影响计划；管理端的计划展示、授权执行与较大范围选择器仍待接入。此处的正文删除不等同于 PostgreSQL WAL、备份或存储介质的安全擦除。
+删除 outbox 必须覆盖曾经可能发出 upsert 的 facet，包括仍为 `EMBEDDED`、尚未提交 `READY` 的 facet。`vector.index` 包按 `(bot_id, ref_id)` 串行处理写入与删除，保留不可逆 tombstone；删除先到时也要建立 tombstone，后到的同 ref upsert 必须拒绝。Milvus 在客户端超时后仍可能迟到提交，所以事务锁本身不足以证明物理删除：索引包还要周期性重放 tombstone 删除，Memory 的召回始终回查 PostgreSQL 的来源资格、facet 状态和修订。Memory 发布 Worker 按已结算的 Embedding batch 读取一次结果 Payload，逐项验证 facet 和向量摘要，再调用索引包；随后在带删除 epoch 的短事务中复核来源，只有有效 facet 可以提交 `READY`，其余进入删除 outbox。Memory 的删除 Worker 重放 outbox，索引包的 ref 围栏和周期清扫负责迟到写入。`memory.source.forget/1` 已在抑制来源与相关 facet 的同一事务里为全部可能已发布的 ref 写 outbox，并撤销 Kernel Payload 来源闭包；`kernel.payload` 的 Generation 自有清理任务持续将 `REVOKED` 正文批量删除并标记 `SCRUBBED`，热替换时随旧代排空。`memory.source.forget.preview/1` 已通过跨模块 UnitOfWork 返回单来源固定影响计划；管理端已通过只读查询和 P0 动作提供计划展示、授权入队与状态跟踪；较大范围选择器仍待实现。此处的正文删除不等同于 PostgreSQL WAL、备份或存储介质的安全擦除。
 
 每个 Bot 的 collection 身份由 `(bot_id, space_id, dimensions, metric)` 一次冻结。模型种类、模型修订、维度或空间改变必须创建新 Bot/新隔离索引；兼容 endpoint 和凭据可以经 `vector.index` 配置新 Generation 替换。Milvus 是可重建派生库：丢失后从当前合格 facet 与稳定 ref 重放，不得反向把 Milvus 当作消息或关系权威。
 
@@ -286,7 +286,7 @@ MemoryQuery
 
 单来源遗忘的 prepare participant 只读取不可变作者 anchor，不提前锁定源单元；Kernel Payload 删除屏障先取得，Memory apply 随后按稳定顺序锁定并抑制来源。匹配事务同样先捕获 Payload 屏障，再锁查询准备和插入匹配事实，避免外键检查与“先锁源、后取删除屏障”的遗忘事务形成反向等待。提交时的资格复核由实际写入 participant 完成，prepare 不承担状态更新。
 
-遗忘预览沿同一作者 anchor 取得 Kernel Payload 的来源及派生闭包。Payload Authority 持有删除时钟的排他事务锁，返回选中 Payload 的摘要与当前删除纪元；Memory 在同一预览事务计算将被抑制的来源单元、将写入删除 outbox 的向量引用、将撤销的关系贡献及待归档联想日志，返回各项计数、少量来源 ID 样本和覆盖完整集合的影响摘要。预览不撤销正文。携带计划执行时，Payload 在删除屏障内重算闭包并同时核对纪元与选中摘要，Memory 在同一 UnitOfWork 内重算影响计划并核对全部字段和计划摘要；任何变化返回冲突，整笔事务回滚。FinalReply UnitOfWork 也先捕获 Payload 删除屏障，再提交 Agent、Conversation 与 Memory 联想，使成功回复的关系提升与遗忘有确定先后。无计划的内部 `memory.source.forget/1` 调用仍保留原有直接遗忘语义；Web 管理入口尚未将计划与管理员授权绑定。
+遗忘预览沿同一作者 anchor 取得 Kernel Payload 的来源及派生闭包。Payload Authority 持有删除时钟的排他事务锁，返回选中 Payload 的摘要与当前删除纪元；Memory 在同一预览事务计算将被抑制的来源单元、将写入删除 outbox 的向量引用、将撤销的关系贡献及待归档联想日志，返回各项计数、少量来源 ID 样本和覆盖完整集合的影响摘要。预览不撤销正文。携带计划执行时，Payload 在删除屏障内重算闭包并同时核对纪元与选中摘要，Memory 在同一 UnitOfWork 内重算影响计划并核对全部字段和计划摘要；任何变化返回冲突，整笔事务回滚。FinalReply UnitOfWork 也先捕获 Payload 删除屏障，再提交 Agent、Conversation 与 Memory 联想，使成功回复的关系提升与遗忘有确定先后。无计划的内部 `memory.source.forget/1` 调用仍保留原有直接遗忘语义；Web 管理动作将计划绑定到管理员授权票据并原子入队，模块 owned-work 执行时重算计划；过期计划记录 FAILED，查询保留终态。
 
 模型从 EvidenceBundle 得到稳定 `source_unit_id` 后，可调用 Memory 模块贡献的 `memory_recall_exact` 工具读取一至八个准确归档单元。精确召回不调用 ANN，也不接受 `REGISTERED/ADMITTED` 活跃消息；结果仍逐项携带来源群、主干、作者和图文 parts，并受当前删除 epoch 与工具授权链约束。
 

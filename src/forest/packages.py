@@ -1366,6 +1366,9 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 )
             step_ids.add(step_id)
     query_ports = {item["name"] for item in domain_queries}
+    query_ports.update(
+        item["name"] for item in services if item["semantics"] == "read"
+    )
     command_ports = {item["name"] for item in domain_commands}
     management_ids = set()
     for declaration in (*management_queries, *management_actions):
@@ -1380,7 +1383,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         if declaration.get("port") not in query_ports:
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",
-                "Management queries must bind an exact declared Domain Query port",
+                "Management queries must bind a Domain Query or read-only service port",
             )
         if declaration.get("default_limit", 1) > declaration.get("max_limit", 10000):
             _fail(
