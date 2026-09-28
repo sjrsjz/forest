@@ -787,5 +787,91 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "conversation.input",
         ]
         assert page["units"][1]["author_subject_ref"] == "qq:43"
+
+        instance.freeze_owned_admission()
+        await instance.drain_owned_work()
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.conversation_lanes SET actor_owner_id=NULL,"
+                    "actor_expires_at=NULL WHERE bot_id=%s AND conversation_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, "conversation/onebot/group/silent"),
+            )
+        for index in range(4, 69):
+            next_event_id = f"event/onebot/silent-{index}"
+            next_content = await _payload(
+                kernel.payload,
+                owner_kind="onebot.normalized-event",
+                event_id=next_event_id,
+                content=b'{"segments":[{"type":"text","text":"backlog"}]}',
+            )
+            next_author = await _payload(
+                kernel.payload,
+                owner_kind="onebot.author-snapshot",
+                event_id=next_event_id,
+                content=b'{"subject_ref":"qq:43","display_name":"ordinary"}',
+            )
+            next_admission = copy.deepcopy(silent_admission)
+            now = datetime.now(timezone.utc)
+            next_admission["input"].update(
+                {
+                    "event_id": next_event_id,
+                    "source_event_ref": f"onebot-message/silent-{index}",
+                    "platform_message_ref": f"message/silent-{index}",
+                    "content": next_content,
+                    "author": next_author,
+                    "received_at": now.isoformat(),
+                    "classification_deadline": (now + timedelta(seconds=30)).isoformat(),
+                    "sent_at": now.isoformat(),
+                }
+            )
+            next_classification = copy.deepcopy(silent_classification)
+            next_classification["input"]["event_id"] = next_event_id
+            async with store.pool.connection() as conn, conn.transaction():
+                await participant.invoke_in(
+                    conn, "conversation.admit-message", next_admission,
+                    operation_id=f"uow-step:conversation-admit/silent-{index}",
+                    causal_root_kind="onebot.ingress", causal_root_id=next_event_id,
+                    parent_call_id=f"call:ingress/silent-{index}", timeout_seconds=10,
+                )
+                await participant.invoke_in(
+                    conn, "conversation.complete-classification", next_classification,
+                    operation_id=f"uow-step:conversation-classify/silent-{index}",
+                    causal_root_kind="onebot.ingress", causal_root_id=next_event_id,
+                    parent_call_id=f"call:ingress/silent-{index}", timeout_seconds=10,
+                )
+        instance.open_owned_admission()
+        async with asyncio.timeout(60):
+            while True:
+                async with store.pool.connection() as conn:
+                    lane = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT context_applied_seq,classified_through_seq,"
+                                "actor_owner_id FROM {}.conversation_lanes "
+                                "WHERE bot_id=%s AND conversation_id=%s"
+                            ).format(sql.Identifier(namespace)),
+                            (store.bot_id, "conversation/onebot/group/silent"),
+                        )
+                    ).fetchone()
+                if lane["context_applied_seq"] == 68 and lane["actor_owner_id"] is None:
+                    break
+                await asyncio.sleep(0.1)
+        assert lane["classified_through_seq"] == 68
+        async with store.pool.connection() as conn:
+            batches = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT start_seq,end_seq FROM {}.input_batches "
+                        "WHERE bot_id=%s AND conversation_id=%s "
+                        "AND kind='SILENT_DRAIN' AND start_seq>=4 ORDER BY start_seq"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "conversation/onebot/group/silent"),
+                )
+            ).fetchall()
+        assert [(row["start_seq"], row["end_seq"]) for row in batches] == [
+            (4, 67), (68, 68)
+        ]
     finally:
         assert await registry.close() == []

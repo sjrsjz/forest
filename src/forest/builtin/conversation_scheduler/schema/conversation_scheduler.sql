@@ -1241,7 +1241,11 @@ BEGIN
     ELSIF lane.classified_through_seq > lane.context_applied_seq THEN
         selection_kind := 'SILENT_DRAIN';
         selection_start := lane.context_applied_seq + 1;
-        selection_end := lane.classified_through_seq;
+        -- A long silent backlog must never become one unbounded UoW frame.
+        -- The settlement releases this actor; the next claim takes the next
+        -- contiguous prefix while retaining the same per-group order.
+        selection_end := LEAST(lane.classified_through_seq,
+                               lane.context_applied_seq + 64);
         selection_trigger_cut := NULL;
         selected_session := NULL;
         selected_run := NULL;
