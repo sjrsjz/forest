@@ -384,6 +384,39 @@ CREATE TABLE management_forget_settlements (
     PRIMARY KEY (bot_id,claim_token)
 );
 
+CREATE TABLE forget_selections (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    selection_id text NOT NULL CHECK (octet_length(selection_id) BETWEEN 1 AND 256),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
+    filters jsonb NOT NULL CHECK (jsonb_typeof(filters)='object'),
+    snapshot_xid pg_snapshot NOT NULL,
+    snapshot_accepted_at timestamptz NOT NULL,
+    member_count integer NOT NULL CHECK (member_count BETWEEN 1 AND 1000000),
+    member_digest text NOT NULL CHECK (member_digest ~ '^sha256:[a-f0-9]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,selection_id),
+    UNIQUE (bot_id,operation_id)
+);
+
+CREATE TABLE forget_selection_members (
+    bot_id text NOT NULL,
+    selection_id text NOT NULL,
+    ordinal integer NOT NULL CHECK (ordinal BETWEEN 1 AND 1000000),
+    source_unit_id text NOT NULL,
+    source_revision bigint NOT NULL CHECK (source_revision > 0),
+    anchor_payload_id text NOT NULL CHECK (octet_length(anchor_payload_id) BETWEEN 1 AND 256),
+    PRIMARY KEY (bot_id,selection_id,ordinal),
+    UNIQUE (bot_id,selection_id,source_unit_id),
+    FOREIGN KEY (bot_id,selection_id) REFERENCES forget_selections(bot_id,selection_id)
+        DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (bot_id,source_unit_id,source_revision)
+        REFERENCES source_units(bot_id,source_unit_id,source_revision)
+);
+CREATE INDEX forget_selection_members_source_idx
+    ON forget_selection_members(bot_id,source_unit_id);
+
 CREATE TABLE relation_contributions (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     contribution_id text NOT NULL CHECK (octet_length(contribution_id) BETWEEN 1 AND 256),
@@ -1229,6 +1262,20 @@ BEGIN
             'retrieval_relations') AND fact->>'bundle_id'=gc->>'bundle_id')
     ) THEN RETURN OLD; END IF;
     RAISE EXCEPTION 'memory.graph immutable fact cannot change' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION guard_forget_selection_member() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.forget_selections
+        WHERE bot_id=OLD.bot_id AND selection_id=OLD.selection_id
+    ) THEN
+        RAISE EXCEPTION 'memory.graph frozen selection member cannot change'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN OLD;
 END;
 $$;
 
@@ -4215,6 +4262,11 @@ CREATE TRIGGER source_suppressions_immutable BEFORE UPDATE OR DELETE ON source_s
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER source_forget_operations_immutable BEFORE UPDATE OR DELETE ON source_forget_operations
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER forget_selections_immutable BEFORE UPDATE OR DELETE ON forget_selections
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER forget_selection_members_frozen
+    BEFORE UPDATE OR DELETE ON forget_selection_members
+    FOR EACH ROW EXECUTE FUNCTION guard_forget_selection_member();
 CREATE TRIGGER relation_evidence_immutable BEFORE UPDATE OR DELETE ON relation_evidence
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER relation_retractions_immutable BEFORE UPDATE OR DELETE ON relation_retractions
@@ -7906,6 +7958,61 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_filtered_source_units(
+    requested_bot text, filters jsonb, snapshot_time timestamptz,
+    snapshot_value pg_snapshot)
+RETURNS TABLE (
+    source_unit_id text, source_id text, trunk_id text, source_kind text,
+    platform text, realm_id text, external_group_id text,
+    author_subject_ref text, unit_kind text, modality text,
+    occurred_at timestamptz, source_order_seq bigint, part_count integer,
+    eligibility_state text, source_status text, source_revision bigint,
+    author_payload_id text)
+LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT u.source_unit_id,u.source_id,u.trunk_id,s.source_kind,
+        s.platform,s.realm_id,s.external_group_id,u.author_subject_ref,
+        u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
+        u.eligibility_state,s.status,u.source_revision,u.author_payload_id
+    FROM __forest_module_schema__.source_units u
+    JOIN __forest_module_schema__.memory_sources s
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+    WHERE u.bot_id=requested_bot
+      AND u.eligibility_state=COALESCE(filters->>'eligibility_state','ELIGIBLE')
+      AND s.status=COALESCE(filters->>'source_status','ACTIVE')
+      AND u.accepted_at<=snapshot_time
+      AND pg_visible_in_snapshot(u.accepted_xid,snapshot_value)
+      AND (u.eligible_at IS NULL OR u.eligible_at<=snapshot_time)
+      AND (COALESCE(filters->>'eligibility_state','ELIGIBLE')<>'ELIGIBLE' OR
+           (u.eligible_xid IS NOT NULL AND
+            pg_visible_in_snapshot(u.eligible_xid,snapshot_value)))
+      AND (filters->>'trunk_id' IS NULL OR u.trunk_id=filters->>'trunk_id')
+      AND (filters->>'source_id' IS NULL OR u.source_id=filters->>'source_id')
+      AND (NOT filters ? 'group_source_ids' OR
+           (s.source_kind='GROUP' AND u.source_id IN (
+              SELECT value FROM jsonb_array_elements_text(filters->'group_source_ids'))))
+      AND (filters->>'source_kind' IS NULL OR s.source_kind=filters->>'source_kind')
+      AND (filters->>'platform' IS NULL OR s.platform=filters->>'platform')
+      AND (filters->>'realm_id' IS NULL OR s.realm_id=filters->>'realm_id')
+      AND (filters->>'external_group_id' IS NULL OR
+           s.external_group_id=filters->>'external_group_id')
+      AND (filters->>'binding_ref' IS NULL OR EXISTS (
+          SELECT 1 FROM __forest_module_schema__.source_occurrences o
+          WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
+            AND o.binding_ref=filters->>'binding_ref'))
+      AND (filters->>'author_subject_ref' IS NULL OR
+           u.author_subject_ref=filters->>'author_subject_ref')
+      AND (filters->>'modality' IS NULL OR u.modality=filters->>'modality')
+      AND (filters->>'unit_kind' IS NULL OR u.unit_kind=filters->>'unit_kind')
+      AND (filters->>'source_order_from' IS NULL OR
+           u.source_order_seq>=(filters->>'source_order_from')::bigint)
+      AND (filters->>'source_order_to' IS NULL OR
+           u.source_order_seq<(filters->>'source_order_to')::bigint)
+      AND (filters->>'occurred_from' IS NULL OR
+           u.occurred_at>=(filters->>'occurred_from')::timestamptz)
+      AND (filters->>'occurred_to' IS NULL OR
+           u.occurred_at<(filters->>'occurred_to')::timestamptz);
+$$;
+
 CREATE FUNCTION memory_query_sources(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
@@ -7950,43 +8057,14 @@ BEGIN
                 'message','Source page limit or cursor is invalid','status',422));
     END IF;
     WITH page AS (
-        SELECT u.source_unit_id,u.source_id,u.trunk_id,s.source_kind,
-            s.platform,s.realm_id,s.external_group_id,u.author_subject_ref,
+        SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
+            u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
             u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
-            u.eligibility_state,s.status AS source_status
-        FROM __forest_module_schema__.source_units u
-        JOIN __forest_module_schema__.memory_sources s
-            ON s.bot_id=u.bot_id AND s.source_id=u.source_id
-        WHERE u.bot_id=context->>'bot_id' AND u.eligibility_state=selected_state
-          AND s.status=selected_source_status
-          AND u.accepted_at<=snapshot_time
-          AND pg_visible_in_snapshot(u.accepted_xid,snapshot_value)
-          AND (u.eligible_at IS NULL OR u.eligible_at<=snapshot_time)
-          AND (selected_state<>'ELIGIBLE' OR
-               (u.eligible_xid IS NOT NULL AND
-                pg_visible_in_snapshot(u.eligible_xid,snapshot_value)))
-          AND (input->>'trunk_id' IS NULL OR u.trunk_id=input->>'trunk_id')
-          AND (input->>'source_id' IS NULL OR u.source_id=input->>'source_id')
-          AND (selected_sources IS NULL OR
-               (s.source_kind='GROUP' AND u.source_id=ANY(selected_sources)))
-          AND (input->>'source_kind' IS NULL OR s.source_kind=input->>'source_kind')
-          AND (input->>'platform' IS NULL OR s.platform=input->>'platform')
-          AND (input->>'realm_id' IS NULL OR s.realm_id=input->>'realm_id')
-          AND (input->>'external_group_id' IS NULL OR s.external_group_id=input->>'external_group_id')
-          AND (input->>'binding_ref' IS NULL OR EXISTS (
-              SELECT 1 FROM __forest_module_schema__.source_occurrences o
-              WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
-                AND o.binding_ref=input->>'binding_ref'))
-          AND (input->>'author_subject_ref' IS NULL OR u.author_subject_ref=input->>'author_subject_ref')
-          AND (input->>'modality' IS NULL OR u.modality=input->>'modality')
-          AND (input->>'unit_kind' IS NULL OR u.unit_kind=input->>'unit_kind')
-          AND (input->>'source_order_from' IS NULL OR
-               u.source_order_seq>=(input->>'source_order_from')::bigint)
-          AND (input->>'source_order_to' IS NULL OR
-               u.source_order_seq<(input->>'source_order_to')::bigint)
-          AND (from_time IS NULL OR u.occurred_at>=from_time)
-          AND (to_time IS NULL OR u.occurred_at<to_time)
-          AND (after_time IS NULL OR (u.occurred_at,u.source_unit_id)<(after_time,input->>'after_source_unit_id'))
+            u.eligibility_state,u.source_status
+        FROM __forest_module_schema__.memory_filtered_source_units(
+            context->>'bot_id',input,snapshot_time,snapshot_value) u
+        WHERE after_time IS NULL OR
+            (u.occurred_at,u.source_unit_id)<(after_time,input->>'after_source_unit_id')
         ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT page_limit+1
     ), visible AS (
         SELECT * FROM page ORDER BY occurred_at DESC,source_unit_id DESC LIMIT page_limit
@@ -8004,6 +8082,150 @@ BEGIN
             'filter_digest',filter_digest,
             'items',items,'has_more',more,
             'next_cursor',CASE WHEN more THEN cursor_value ELSE NULL END));
+END;
+$$;
+
+CREATE FUNCTION memory_freeze_forget_selection(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_selection text := input->>'selection_id';
+    requested_digest text := 'sha256:' ||
+        encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    requested_filters jsonb := input->'filters';
+    snapshot_value pg_snapshot := pg_current_snapshot();
+    snapshot_time timestamptz := clock_timestamp();
+    validation jsonb;
+    existing __forest_module_schema__.forget_selections%ROWTYPE;
+    selected_count integer;
+    selected_digest text;
+BEGIN
+    IF requested_operation IS NULL OR
+       octet_length(requested_operation) NOT BETWEEN 1 AND 256 OR
+       requested_selection IS NULL OR
+       octet_length(requested_selection) NOT BETWEEN 1 AND 256 OR
+       input->>'requested_by' IS NULL OR
+       octet_length(input->>'requested_by') NOT BETWEEN 1 AND 256 OR
+       jsonb_typeof(requested_filters) IS DISTINCT FROM 'object' OR
+       requested_filters->>'eligibility_state' = 'SUPPRESSED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_INVALID',
+                'message','Forget selection input is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/forget-selection-operation/' || requested_bot ||
+        '/' || requested_operation,0));
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/forget-selection-id/' || requested_bot ||
+        '/' || requested_selection,0));
+    SELECT * INTO existing FROM __forest_module_schema__.forget_selections
+    WHERE bot_id=requested_bot AND
+          (selection_id=requested_selection OR operation_id=requested_operation);
+    IF existing IS NOT NULL THEN
+        IF existing.operation_id IS DISTINCT FROM requested_operation OR
+           existing.selection_id IS DISTINCT FROM requested_selection OR
+           existing.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_CONFLICT',
+                    'message','Forget selection identity differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.memory-forget-selection/1',
+                'selection_id',existing.selection_id,
+                'member_count',existing.member_count,
+                'member_digest',existing.member_digest,
+                'snapshot_xid',existing.snapshot_xid::text,
+                'snapshot_accepted_at',existing.snapshot_accepted_at));
+    END IF;
+    validation := __forest_module_schema__.memory_query_sources(
+        context,requested_filters || jsonb_build_object('limit',1,
+            'snapshot_xid',snapshot_value::text,
+            'snapshot_accepted_at',snapshot_time));
+    IF validation->>'ok' IS DISTINCT FROM 'true' THEN
+        RETURN validation;
+    END IF;
+    INSERT INTO __forest_module_schema__.forget_selection_members(
+        bot_id,selection_id,ordinal,source_unit_id,source_revision,
+        anchor_payload_id)
+    SELECT requested_bot,requested_selection,
+           row_number() OVER (ORDER BY chosen.occurred_at DESC,
+               chosen.source_unit_id DESC),
+           chosen.source_unit_id,chosen.source_revision,chosen.author_payload_id
+    FROM (
+        SELECT source_unit_id,source_revision,author_payload_id,occurred_at
+        FROM __forest_module_schema__.memory_filtered_source_units(
+            requested_bot,requested_filters,snapshot_time,snapshot_value)
+        ORDER BY occurred_at DESC,source_unit_id DESC LIMIT 1000001
+    ) chosen;
+    GET DIAGNOSTICS selected_count = ROW_COUNT;
+    IF selected_count=0 OR selected_count>1000000 THEN
+        DELETE FROM __forest_module_schema__.forget_selection_members
+        WHERE bot_id=requested_bot AND selection_id=requested_selection;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_SIZE_INVALID',
+                'message','Forget selection must contain 1..1000000 units',
+                'status',422));
+    END IF;
+    SELECT 'sha256:' || encode(sha256(convert_to(string_agg(
+        encode(sha256(convert_to(jsonb_build_array(source_unit_id,
+            source_revision,anchor_payload_id)::text,'UTF8')),'hex'),''
+            ORDER BY ordinal),'UTF8')),'hex')
+    INTO selected_digest
+    FROM __forest_module_schema__.forget_selection_members
+    WHERE bot_id=requested_bot AND selection_id=requested_selection;
+    INSERT INTO __forest_module_schema__.forget_selections(
+        bot_id,selection_id,operation_id,input_digest,requested_by,filters,
+        snapshot_xid,snapshot_accepted_at,member_count,member_digest)
+    VALUES(requested_bot,requested_selection,requested_operation,requested_digest,
+        input->>'requested_by',requested_filters,snapshot_value,snapshot_time,
+        selected_count,selected_digest);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-forget-selection/1',
+            'selection_id',requested_selection,'member_count',selected_count,
+            'member_digest',selected_digest,'snapshot_xid',snapshot_value::text,
+            'snapshot_accepted_at',snapshot_time));
+END;
+$$;
+
+CREATE FUNCTION memory_query_forget_selection(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    selection_row __forest_module_schema__.forget_selections%ROWTYPE;
+    after_ordinal integer := COALESCE((input->>'after_ordinal')::integer,0);
+    page_limit integer := COALESCE((input->>'limit')::integer,50);
+    items jsonb;
+BEGIN
+    IF after_ordinal<0 OR page_limit NOT BETWEEN 1 AND 100 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_QUERY_INVALID',
+                'message','Forget selection page is invalid','status',422));
+    END IF;
+    SELECT * INTO selection_row FROM __forest_module_schema__.forget_selections
+    WHERE bot_id=context->>'bot_id' AND selection_id=input->>'selection_id'
+      AND requested_by=input->>'requested_by';
+    IF selection_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_NOT_FOUND',
+                'message','Forget selection does not exist','status',404));
+    END IF;
+    SELECT COALESCE(jsonb_agg(to_jsonb(page) ORDER BY page.ordinal),'[]'::jsonb)
+    INTO items FROM (
+        SELECT ordinal,source_unit_id,source_revision,anchor_payload_id
+        FROM __forest_module_schema__.forget_selection_members
+        WHERE bot_id=selection_row.bot_id AND
+              selection_id=selection_row.selection_id AND ordinal>after_ordinal
+        ORDER BY ordinal LIMIT page_limit
+    ) page;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-forget-selection-page/1',
+            'selection_id',selection_row.selection_id,
+            'member_count',selection_row.member_count,
+            'member_digest',selection_row.member_digest,
+            'snapshot_xid',selection_row.snapshot_xid::text,
+            'snapshot_accepted_at',selection_row.snapshot_accepted_at,
+            'filters',selection_row.filters,'items',items,
+            'has_more',after_ordinal+jsonb_array_length(items)<selection_row.member_count));
 END;
 $$;
 

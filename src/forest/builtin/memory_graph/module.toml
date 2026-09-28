@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.53.0"
+version = "1.54.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -256,9 +256,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.45.0"
+schema_version = "3.46.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "3860af5b529e4ed5e0fe81ceed28c64f0c6f2975d75715d10c573c379403952f"
+baseline_sha256 = "0f391b09b730a558bde66b1769889a4c63e6244e8c61e51569647725ba564fa4"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -306,6 +306,13 @@ input_schema = "schemas/query-sources-input.json"
 output_schema = "schemas/query-sources-output.json"
 
 [[components.domain_queries]]
+name = "memory.query-forget-selection"
+contract = "1.0"
+function = "memory_query_forget_selection"
+input_schema = "schemas/forget-selection-query-input.json"
+output_schema = "schemas/forget-selection-query-output.json"
+
+[[components.domain_queries]]
 name = "memory.query-relations"
 contract = "1.0"
 function = "memory_query_relations"
@@ -348,6 +355,13 @@ input_schema = "schemas/forget-management-action-input.json"
 output_schema = "schemas/forget-management-enqueued-output.json"
 
 [[components.domain_commands]]
+name = "memory.freeze-forget-selection"
+contract = "1.0"
+function = "memory_freeze_forget_selection"
+input_schema = "schemas/forget-selection-create-input.json"
+output_schema = "schemas/forget-selection-create-output.json"
+
+[[components.domain_commands]]
 name = "memory.start-management-trial"
 contract = "1.0"
 function = "memory_start_management_trial"
@@ -386,6 +400,15 @@ port = "memory.query-sources"
 default_limit = 50
 max_limit = 100
 timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.forget.selection"
+port = "memory.query-forget-selection"
+required_role = "ADMIN"
+actor_field = "requested_by"
+default_limit = 50
+max_limit = 100
+timeout_s = 15
 
 [[components.management_queries]]
 id = "memory.relations.query"
@@ -437,6 +460,13 @@ priority = "P0"
 actor_field = "requested_by"
 authorization_path = "/plan"
 timeout_s = 15
+
+[[components.management_actions]]
+id = "memory.forget.select"
+port = "memory.freeze-forget-selection"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 90
 
 [[components.management_actions]]
 id = "memory.trial.start"

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["selection_id", "filters", "requested_by"],
+  "properties": {
+    "selection_id": {"$ref": "#/$defs/id"},
+    "requested_by": {"type": "string", "minLength": 1, "maxLength": 256},
+    "filters": {"type": "object", "additionalProperties": false,
+      "properties": {
+        "trunk_id": {"$ref": "#/$defs/id"},
+        "source_id": {"$ref": "#/$defs/id"},
+        "group_source_ids": {"type": "array", "minItems": 1, "maxItems": 256,
+          "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+        "source_kind": {"enum": ["GROUP", "DIRECT", "DOCUMENT", "SYSTEM", "UNKNOWN"]},
+        "platform": {"type": "string", "minLength": 1, "maxLength": 64},
+        "realm_id": {"$ref": "#/$defs/id"},
+        "external_group_id": {"$ref": "#/$defs/id"},
+        "binding_ref": {"$ref": "#/$defs/id"},
+        "author_subject_ref": {"$ref": "#/$defs/id"},
+        "modality": {"enum": ["TEXT", "IMAGE", "MIXED", "CONTROL"]},
+        "unit_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "eligibility_state": {"enum": ["REGISTERED", "ELIGIBLE"]},
+        "source_status": {"enum": ["ACTIVE", "RETIRED"]},
+        "source_order_from": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+        "source_order_to": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},
+        "occurred_from": {"type": "string", "format": "date-time"},
+        "occurred_to": {"type": "string", "format": "date-time"}
+      },
+      "dependentRequired": {
+        "source_order_from": ["source_id"],
+        "source_order_to": ["source_id"]
+      }
+    }
+  },
+  "$defs": {"id": {"type": "string", "minLength": 1, "maxLength": 256}}
+}

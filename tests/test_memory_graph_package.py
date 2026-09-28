@@ -405,6 +405,99 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
         ]
 
 
+@pytest.mark.postgres
+async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "forget-selection-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    digest = "sha256:" + "a" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_sources "
+            "(bot_id,source_id,registration_operation_id,input_digest,source_kind,"
+            "identity_incarnation,identity_digest) "
+            "VALUES (%s,'source/selection','register/selection',%s,'DOCUMENT',1,%s)"
+        ).format(namespace), (store.bot_id, digest, digest))
+
+    async def insert_unit(name, order, author):
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.source_units "
+                "(bot_id,source_unit_id,capture_operation_id,input_digest,source_id,"
+                "source_order_seq,source_revision,unit_kind,modality,part_count,"
+                "content_manifest_digest,author_subject_ref,author_payload_id,"
+                "author_payload_digest,author_owner_component_id,author_owner_kind,"
+                "author_owner_id,accepted_deletion_epoch,eligibility_state,"
+                "eligible_at,eligible_xid,occurred_at) VALUES "
+                "(%s,%s,%s,%s,'source/selection',%s,1,'MESSAGE','TEXT',1,"
+                "%s,%s,%s,%s,'memory.graph','test',%s,0,'ELIGIBLE',"
+                "clock_timestamp(),pg_current_xact_id(),%s::timestamptz)"
+            ).format(namespace), (
+                store.bot_id, f"unit/{name}", f"capture/{name}", digest,
+                order, digest, author, f"payload/{name}", digest,
+                f"unit/{name}", f"2026-01-{order:02d}T00:00:00Z",
+            ))
+
+    await insert_unit("one", 1, "author/target")
+    await insert_unit("other", 2, "author/other")
+    await insert_unit("three", 3, "author/target")
+
+    async def invoke(function, context, body):
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (await conn.execute(
+                sql.SQL("SELECT {}.{}(%s,%s) AS result").format(
+                    namespace, sql.Identifier(function)),
+                (Jsonb(context), Jsonb(body)),
+            )).fetchone()
+            return row["result"]
+
+    body = {"selection_id": "selection/target", "requested_by": "admin/one",
+            "filters": {"author_subject_ref": "author/target"}}
+    context = {"bot_id": store.bot_id, "operation_id": "selection/create"}
+    created = await invoke("memory_freeze_forget_selection", context, body)
+    assert created["ok"] is True, created
+    assert created["value"]["member_count"] == 2
+    assert await invoke("memory_freeze_forget_selection", context, body) == created
+    await insert_unit("late", 4, "author/target")
+    page = await invoke("memory_query_forget_selection", {"bot_id": store.bot_id}, {
+        "selection_id": "selection/target", "requested_by": "admin/one", "limit": 1,
+    })
+    assert page["ok"] is True, page
+    assert [item["source_unit_id"] for item in page["value"]["items"]] == [
+        "unit/three"
+    ]
+    assert page["value"]["has_more"] is True
+    second = await invoke("memory_query_forget_selection", {"bot_id": store.bot_id}, {
+        "selection_id": "selection/target", "requested_by": "admin/one",
+        "after_ordinal": 1, "limit": 1,
+    })
+    assert [item["source_unit_id"] for item in second["value"]["items"]] == [
+        "unit/one"
+    ]
+    assert second["value"]["has_more"] is False
+    foreign = await invoke("memory_query_forget_selection", {"bot_id": store.bot_id}, {
+        "selection_id": "selection/target", "requested_by": "admin/two",
+    })
+    assert foreign["error"]["code"] == "MEMORY_FORGET_SELECTION_NOT_FOUND"
+    conflict = await invoke("memory_freeze_forget_selection", context, {
+        **body, "filters": {"author_subject_ref": "author/other"},
+    })
+    assert conflict["error"]["code"] == "MEMORY_FORGET_SELECTION_CONFLICT"
+    with pytest.raises(errors.ObjectNotInPrerequisiteState):
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(sql.SQL(
+                "DELETE FROM {}.forget_selection_members "
+                "WHERE bot_id=%s AND selection_id='selection/target' AND ordinal=1"
+            ).format(namespace), (store.bot_id,))
+
+
 def _configuration():
     return {
         "protocol": "forest.memory.graph/2",

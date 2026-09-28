@@ -67,7 +67,7 @@
 |---|---|---|---|
 | Agent | `builtin/agent_runtime` | 隔离 Worker、私有 SQL、manifest UoW 与 owned-work 已接入生产图 | 继续审计剩余宿主边界并补齐可观测管理面 |
 | Conversation | `builtin/conversation_scheduler` | 入站、分类、静默归档、Agent 调度与安全边界合流已接入生产图 | 扩充管理查询与长时间压力验证 |
-| Memory | `builtin/memory_graph` | 多模态来源、归档资格、精确/语义召回、DOCUMENT/QUERY 嵌入发布、按需图扩散、检索区域冻结、规范证据物化/发布、成功回复联想日志及归档提升、单来源遗忘固定计划/管理入队和撤销正文后台清理已运行 | 真实跨群学习验收、大范围遗忘选择器、管理召回试验和完整管理面 |
+| Memory | `builtin/memory_graph` | 多模态来源、归档资格、精确/语义召回、DOCUMENT/QUERY 嵌入发布、按需图扩散、检索区域冻结、规范证据物化/发布、成功回复联想日志及归档提升、单来源遗忘固定计划/管理入队和撤销正文后台清理，以及大范围遗忘的冻结成员目录已运行 | 真实跨群学习验收、大范围遗忘的批次计划/授权/执行、管理召回试验和完整管理面 |
 
 OneBot Adapter 现在按消息形态调用 manifest 声明的四条入站 UnitOfWork 计划。Conversation、Memory/Media、Shell 与分类 participant 在同一事务计划内提交；Host 不再提供 `kernel.uow.onebot.ingress` 业务服务。
 
@@ -243,4 +243,6 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 
 包管理动作的最后入口也已收紧：`PackageGenerationAdapter.invoke_management_action` 必须同时收到 Web authority ticket 与事务内授权 guard，缺失即拒绝；声明 `actor_field` 的动作只从非空 `web_subject_ref` 注入审计主体，不再使用 `management:shared-token`。隔离 PostgreSQL 下的 Memory 管理试验、Job Scheduler 动作和完整 Bot 宿主遗忘/重启链路已通过；这些测试使用显式测试票据和 guard，生产路径仍由部署网关签发、消费真实票据。大范围遗忘选择器和长期压力验收尚未完成。
 
-Memory 单次遗忘的执行阶段已将来源锁定、抑制记录、资格/观察更新、向量删除屏障、facet 和准备任务收敛改为有界集合写入，保留 Payload 删除纪元、固定影响计划、幂等操作回执和关系撤销。私有 PostgreSQL 上 19 项 Memory 包回归通过；修改后真实宿主遗忘、向量删除故障、热替换及重启链路通过。此改动只是大范围遗忘的写入基础，尚未交付持久选择目录、分批计划或批量管理 UI。
+Memory 单次遗忘的执行阶段已将来源锁定、抑制记录、资格/观察更新、向量删除屏障、facet 和准备任务收敛改为有界集合写入，保留 Payload 删除纪元、固定影响计划、幂等操作回执和关系撤销。私有 PostgreSQL 上 19 项 Memory 包回归通过；修改后真实宿主遗忘、向量删除故障、热替换及重启链路通过。此改动是大范围遗忘的写入基础，仍缺分批计划和批量管理 UI。
+
+Memory 已新增私有的 `forget_selections` 和 `forget_selection_members`：选择动作与来源浏览使用同一个 SQL 过滤函数，在 PostgreSQL 快照和接受时间下冻结最多一百万个来源的修订、作者载荷锚点、筛选条件、有序成员摘要和管理员主体；成员目录按序号分页，已冻结事实不可修改。同一创建操作幂等，新消息不会追加到旧选择，其他管理员不能读取成员。隔离 PostgreSQL 下新增选择、分页、主体隔离和来源浏览快照回归通过。此阶段尚未接通批次影响计划、P0 批次授权、持久进度、执行和批量管理 UI，因此选择目录不能被标为完成了大范围遗忘。
