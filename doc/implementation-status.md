@@ -211,6 +211,8 @@ Memory 管理关系新增 `memory.relations.neighbourhood` 只读端口：从指
 
 Memory 的常驻向量删除 Worker 现在每次认领前有界扫描已过期试验：未派发的 PENDING/FAILED facet 直接抑制；已派发或结果不确定的 facet 先登记 ref-only 删除屏障，等待原任务收敛；EMBEDDED/READY 同事务登记删除并抑制。单次最多处理 32 个 facet，扫描索引只收录待处理状态，不包含已抑制的历史行；索引删除继续由原 owned-work 租约与结算完成。真实 PostgreSQL 验证了已发布试验在静默到期后无法读取、被抑制、两个并发认领合流为唯一删除任务、结算及二次轮询不重复领取。完整 Memory 包 16 项通过。此机制处理向量索引生命周期，尚未物理回收试验查询、part 和 Payload 记录；完整 TTL 清理仍待实现。
 
+管理试验复用正式查询的召回 owned-work 状态机时，状态读取现按 Bot、Generation 和有效期拒绝失效试验；任务认领及旧 claim token 重放会把到期或换代的试验收敛为 `FAILED/MEMORY_TRIAL_INPUT_UNAVAILABLE`，避免继续调度图扩散。SQL 定向验证覆盖有效试验状态、换代拒读、旧 claim 重放和待领取工作终止。管理启动/取消 action、资产上传、结果查询与物理 TTL 清理仍未完成，试验尚不可从 WebUI 启动。
+
 Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。管理启动 action、受管临时资产接纳、试验 owned-work、结果查询和 TTL 清理仍未完成。
 
 ## 8. 下一切换顺序

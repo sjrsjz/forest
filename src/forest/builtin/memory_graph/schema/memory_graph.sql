@@ -2335,6 +2335,8 @@ CREATE FUNCTION memory_read_recall_work(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
     work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    trial_row __forest_module_schema__.memory_trial_inputs%ROWTYPE;
+    input_kind_value text;
     check_value jsonb;
     state_value text;
     error_value text;
@@ -2346,6 +2348,18 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_RECALL_NOT_REQUESTED',
                 'message','Query has no requested recall work','status',404));
+    END IF;
+    SELECT input_kind INTO input_kind_value FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=work_row.bot_id AND query_id=work_row.query_id;
+    IF input_kind_value='ADMIN_TRIAL' THEN
+        SELECT * INTO trial_row FROM __forest_module_schema__.memory_trial_inputs
+        WHERE bot_id=work_row.bot_id AND query_id=work_row.query_id;
+        IF NOT FOUND OR trial_row.generation_id IS DISTINCT FROM context->>'generation_id'
+           OR trial_row.expires_at<=clock_timestamp() THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
+                    'message','Trial input has expired or its Generation was replaced','status',410));
+        END IF;
     END IF;
     state_value := work_row.state;
     error_value := work_row.last_error_code;
@@ -2473,6 +2487,7 @@ DECLARE
     requested_token text := input->>'claim_token';
     requested_lease integer := (input->>'lease_seconds')::integer;
     work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    input_kind_value text;
     task_payload jsonb;
 BEGIN
     IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
@@ -2483,8 +2498,22 @@ BEGIN
                 'message','Recall claim is invalid','status',422));
     END IF;
     SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
-    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    WHERE bot_id=requested_bot AND claim_token=requested_token FOR UPDATE;
     IF FOUND THEN
+        SELECT input_kind INTO input_kind_value FROM __forest_module_schema__.memory_queries
+        WHERE bot_id=requested_bot AND query_id=work_row.query_id;
+        IF input_kind_value='ADMIN_TRIAL' AND NOT EXISTS (
+            SELECT 1 FROM __forest_module_schema__.memory_trial_inputs
+            WHERE bot_id=requested_bot AND query_id=work_row.query_id
+              AND generation_id=context->>'generation_id' AND expires_at>clock_timestamp()
+        ) THEN
+            UPDATE __forest_module_schema__.query_recall_work
+            SET state='FAILED',last_error_code='MEMORY_TRIAL_INPUT_UNAVAILABLE',
+                claim_token=NULL,claim_payload=NULL,lease_deadline=NULL,
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND query_id=work_row.query_id;
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+        END IF;
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',work_row.claim_payload);
     END IF;
     IF EXISTS (
@@ -2513,6 +2542,19 @@ BEGIN
     IF work_row.deadline_at<=clock_timestamp() THEN
         UPDATE __forest_module_schema__.query_recall_work
         SET state='FAILED',last_error_code='MEMORY_RECALL_DEADLINE',claim_token=NULL,
+            claim_payload=NULL,lease_deadline=NULL,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND query_id=work_row.query_id;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    SELECT input_kind INTO input_kind_value FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=requested_bot AND query_id=work_row.query_id;
+    IF input_kind_value='ADMIN_TRIAL' AND NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_trial_inputs
+        WHERE bot_id=requested_bot AND query_id=work_row.query_id
+          AND generation_id=context->>'generation_id' AND expires_at>clock_timestamp()
+    ) THEN
+        UPDATE __forest_module_schema__.query_recall_work
+        SET state='FAILED',last_error_code='MEMORY_TRIAL_INPUT_UNAVAILABLE',claim_token=NULL,
             claim_payload=NULL,lease_deadline=NULL,updated_at=clock_timestamp()
         WHERE bot_id=requested_bot AND query_id=work_row.query_id;
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);

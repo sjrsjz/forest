@@ -912,6 +912,46 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
     assert ready == 2
     stale = await browse("generation/replaced")
     assert stale["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.query_recall_work(bot_id,query_id,deadline_at) "
+            "VALUES (%s,'query/trial',clock_timestamp()+interval '5 minutes')"
+        ).format(namespace), (store.bot_id,))
+    async def read_recall(query_id, generation):
+        async with store.pool.connection() as conn:
+            return (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_read_recall_work(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id, "generation_id": generation}),
+                Jsonb({"query_id": query_id}),
+            ))).fetchone())["result"]
+
+    current_recall = await read_recall("query/trial", "generation/trial")
+    assert current_recall["ok"] and current_recall["value"]["state"] == "PENDING"
+    stale_recall = await read_recall("query/trial", "generation/replaced")
+    assert stale_recall["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
+    async def claim_recall(generation, token):
+        async with store.pool.connection() as conn:
+            return (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_claim_recall(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id, "generation_id": generation}),
+                Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                       "claim_token": token, "lease_seconds": 60}),
+            ))).fetchone())["result"]
+
+    current_claim = await claim_recall("generation/trial", "recall/current-trial")
+    assert current_claim["ok"] and current_claim["value"]["work_id"] == "query/trial"
+    assert await claim_recall("generation/trial", "recall/current-trial") == current_claim
+    stale_claim = await claim_recall("generation/replaced", "recall/current-trial")
+    assert stale_claim["ok"] and stale_claim["value"] is None
+    async with store.pool.connection() as conn:
+        failed_recall = (await (await conn.execute(sql.SQL(
+            "SELECT state,last_error_code FROM {}.query_recall_work "
+            "WHERE bot_id=%s AND query_id='query/trial'"
+        ).format(namespace), (store.bot_id,))).fetchone())
+    assert failed_recall["state"] == "FAILED"
+    assert failed_recall["last_error_code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
     async with store.pool.connection() as conn:
         with pytest.raises(errors.ObjectNotInPrerequisiteState):
             async with conn.transaction():
@@ -939,6 +979,14 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
             "'text/plain',4,'payload/expired',%s,'memory.graph','trial.input',"
             "'query/expired')"
         ).format(namespace), (store.bot_id, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.query_recall_work(bot_id,query_id,deadline_at) "
+            "VALUES (%s,'query/expired',clock_timestamp()+interval '5 minutes')"
+        ).format(namespace), (store.bot_id,))
+    expired_recall = await read_recall("query/expired", "generation/trial")
+    assert expired_recall["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
+    expired_claim = await claim_recall("generation/trial", "recall/expired-trial")
+    assert expired_claim["ok"] and expired_claim["value"] is None
     async with store.pool.connection() as conn, conn.transaction():
         await conn.execute(sql.SQL(
             "DELETE FROM {}.memory_trial_parts WHERE bot_id=%s AND query_id='query/expired'"
