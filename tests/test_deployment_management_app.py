@@ -312,6 +312,34 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
                     "has_more": False,
                     "snapshot_accepted_at": "2026-09-28T00:00:00Z",
                 }
+            if query_id == "memory.forget.selection":
+                assert payload["selection_id"] == "selection/browser-smoke"
+                return {
+                    "selection_id": payload["selection_id"],
+                    "member_count": 2,
+                    "member_digest": "sha256:" + "a" * 64,
+                    "snapshot_accepted_at": "2026-09-28T00:00:00Z",
+                    "filters": {"trunk_id": "trunk/example"},
+                    "items": [{
+                        "ordinal": 1, "source_unit_id": "unit/example",
+                        "source_revision": 1, "anchor_payload_id": "payload/example",
+                    }],
+                    "has_more": False,
+                }
+            if query_id == "memory.forget.batch.preview":
+                assert payload == {
+                    "selection_id": "selection/browser-smoke",
+                    "after_ordinal": 0, "batch_size": 32,
+                }
+                return {
+                    "first_ordinal": 1, "last_ordinal": 2,
+                    "batch_member_count": 2, "source_unit_count": 2,
+                    "selected_payload_count": 2, "vector_deletion_count": 1,
+                    "relation_retraction_count": 0,
+                    "association_journal_count": 0, "deletion_epoch": 3,
+                    "plan_digest": "sha256:" + "b" * 64,
+                    "batch_source_unit_sample": ["unit/example"],
+                }
             raise AssertionError(f"Unexpected Memory UI query: {query_id}")
 
     contract = MemoryContract(MemoryConfiguration(), schema={"type": "object"})
@@ -430,6 +458,14 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
                 expect(frame.locator('[data-tab="trial"]')).to_be_visible()
                 expect(frame.locator("#revision")).to_contain_text("r1")
                 expect(frame.locator("#source-count")).not_to_be_empty()
+                frame.locator('[data-tab="forget"]').click()
+                frame.locator("#forget details summary").click()
+                frame.locator("#batch-selection-id").fill("selection/browser-smoke")
+                frame.locator("#batch-load").click()
+                expect(frame.locator("#batch-selection-meta")).to_contain_text("冻结成员 2 个")
+                expect(frame.locator("#batch-members")).to_contain_text("unit/example")
+                frame.locator("#batch-preview").click()
+                expect(frame.locator("#batch-impact")).to_contain_text("向量删除 1")
                 assert not errors, errors
                 page.locator("#back").click()
                 expect(page.locator("iframe.package-ui-frame")).to_have_count(0)

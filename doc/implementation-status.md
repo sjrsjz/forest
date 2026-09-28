@@ -67,7 +67,7 @@
 |---|---|---|---|
 | Agent | `builtin/agent_runtime` | 隔离 Worker、私有 SQL、manifest UoW 与 owned-work 已接入生产图 | 继续审计剩余宿主边界并补齐可观测管理面 |
 | Conversation | `builtin/conversation_scheduler` | 入站、分类、静默归档、Agent 调度与安全边界合流已接入生产图 | 扩充管理查询与长时间压力验证 |
-| Memory | `builtin/memory_graph` | 多模态来源、归档资格、精确/语义召回、DOCUMENT/QUERY 嵌入发布、按需图扩散、检索区域冻结、规范证据物化/发布、成功回复联想日志及归档提升、单来源遗忘固定计划/管理入队和撤销正文后台清理，以及大范围遗忘的冻结成员目录、有界批次预览和私有执行事务已运行 | 真实跨群学习验收、大范围遗忘的批次 P0 授权/进度与 UI、管理试验的真实浏览器及供应商图文验收、完整管理面 |
+| Memory | `builtin/memory_graph` | 多模态来源、归档资格、精确/语义召回、DOCUMENT/QUERY 嵌入发布、按需图扩散、检索区域冻结、规范证据物化/发布、成功回复联想日志及归档提升、单来源遗忘固定计划/管理入队和撤销正文后台清理，以及大范围遗忘的冻结成员目录、有界批次预览和只读核对 UI、私有执行事务已运行 | 真实跨群学习验收、大范围遗忘的批次 P0 授权/执行进度与 UI、管理试验的真实浏览器及供应商图文验收、完整管理面 |
 
 OneBot Adapter 现在按消息形态调用 manifest 声明的四条入站 UnitOfWork 计划。Conversation、Memory/Media、Shell 与分类 participant 在同一事务计划内提交；Host 不再提供 `kernel.uow.onebot.ingress` 业务服务。
 
@@ -256,3 +256,5 @@ Memory 包内现有私有 `memory.forget-batch` 三步 UnitOfWork：从冻结成
 管理图文召回试验现经完整 Bot 宿主、真实 PostgreSQL、包自有 owned-work、假 Embedding HTTP 和假 Milvus 贯通：两份经过管理资产权威绑定的文本/PNG 输入启动独立试验，自动准备/匹配/冻结/物化后达到 READY；结果分页返回原群号与作者，图片按归属 part 读取，另一管理员无法读取。发现并修正试验没有当前来源时证据节点把 `is_current_source` 投影成 SQL NULL 的协议错误，现明确为 `false`。宿主测试随后继续通过遗忘、向量删除故障重试、热替换和重启。冷启动时 30 秒 HostLease 在慢装配中可能过期；宿主现以十秒续期频率使用两分钟 TTL，测试验证本轮完整启动。
 
 图文试验宿主验收现进一步走部署管理 App 的真实 ASGI HTTP 路由：登录会话经 CSRF 与 Web authority ticket，按管理资产声明分块上传文本和 PNG，管理 action 入队后由包自有 Worker 完成召回；状态、结果与归属图片均经 HTTP 管理 query 读取。此路径与真实 PostgreSQL、假 Embedding HTTP 和假 Milvus 的完整 Bot 宿主集成用例通过。当前证明 HTTP 协议及事务授权链路可用；真实浏览器对实际宿主、真实 Embedding/向量供应商请求和长期运行仍待验收。
+
+Memory 包自带管理 UI 现接入已存在的冻结选择和有界批次预览端口：管理员从来源页当前筛选生成不可变成员目录，按序号分页核对根来源及作者锚点，并按起点/大小查看 Payload、来源、向量、关系及联想日志影响。界面明确只作核对和预览；跨批 P0 授权、执行进度及批量确认仍未接入。
