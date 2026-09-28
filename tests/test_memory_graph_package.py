@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 from psycopg import sql
 from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
@@ -227,6 +228,75 @@ async def test_graph_snapshot_excludes_facts_committed_after_registration(
         assert current["items"][0]["cross_trunk"] is False
         assert (await browse({"snapshot_xid": current["snapshot_xid"],
                              "relation_kinds": ["CONTRADICTS"]}))["items"] == []
+
+
+@pytest.mark.postgres
+async def test_memory_neighbourhood_browses_two_hops_with_shared_snapshot_and_bounds(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "neighbourhood-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    async with store.pool.connection() as conn, conn.transaction():
+        for left, right in (("a", "b"), ("b", "c")):
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.relation_contributions "
+                    "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
+                    "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
+                    "weight_micros,admitted_deletion_epoch) VALUES "
+                    "(%s,%s,%s,%s,%s,'ASSOCIATES_WITH','ENTITY',%s,'ENTITY',%s,"
+                    "'RULE',500000,0)"
+                ).format(namespace),
+                (
+                    store.bot_id, f"edge/{left}-{right}", f"operation/{left}-{right}",
+                    "sha256:" + "a" * 64, f"relation/{left}-{right}", left, right,
+                ),
+            )
+
+    async def browse(**budget):
+        async with store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.memory_query_neighbourhood(%s,%s) AS result").format(
+                        namespace
+                    ),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                        "endpoint_kind": "ENTITY", "endpoint_id": "a", **budget,
+                    })),
+                )
+            ).fetchone()
+        assert row["result"]["ok"] is True
+        value = row["result"]["value"]
+        Draft202012Validator(package.snapshot.schema(
+            "schemas/query-neighbourhood-output.json"
+        )).validate(value)
+        return value
+
+    full = await browse(max_hops=2, max_nodes=3, max_edges=2)
+    assert [(node["id"], node["depth"]) for node in full["nodes"]] == [
+        ("a", 0), ("b", 1), ("c", 2)
+    ]
+    assert [(edge["from_id"], edge["traversal_depth"]) for edge in full["edges"]] == [
+        ("a", 1), ("b", 2)
+    ]
+    assert full["truncated"] is False
+    limited = await browse(max_hops=2, max_nodes=2, max_edges=2)
+    assert [edge["relation_id"] for edge in limited["edges"]] == ["relation/a-b"]
+    assert limited["truncation_reason"] == "NODE_LIMIT"
+    edge_limited = await browse(max_hops=2, max_nodes=3, max_edges=1)
+    assert [edge["relation_id"] for edge in edge_limited["edges"]] == [
+        "relation/a-b"
+    ]
+    assert edge_limited["truncation_reason"] == "EDGE_LIMIT"
+    one_hop = await browse(max_hops=1, max_nodes=3, max_edges=2)
+    assert [edge["relation_id"] for edge in one_hop["edges"]] == ["relation/a-b"]
+    assert one_hop["truncated"] is False
 
 
 @pytest.mark.postgres

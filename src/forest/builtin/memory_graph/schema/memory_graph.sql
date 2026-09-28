@@ -7179,3 +7179,116 @@ EXCEPTION WHEN invalid_text_representation THEN
             'message','Relation snapshot is invalid','status',422));
 END;
 $$;
+
+CREATE FUNCTION memory_query_neighbourhood(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    max_hops integer := COALESCE((input->>'max_hops')::integer,2);
+    max_nodes integer := COALESCE((input->>'max_nodes')::integer,16);
+    max_edges integer := COALESCE((input->>'max_edges')::integer,16);
+    snapshot_value pg_snapshot := pg_current_snapshot();
+    request_base jsonb := input - 'endpoint_kind' - 'endpoint_id'
+        - 'max_hops' - 'max_nodes' - 'max_edges';
+    queue jsonb := jsonb_build_array(jsonb_build_object(
+        'kind',input->>'endpoint_kind','id',input->>'endpoint_id','depth',0));
+    nodes jsonb := queue;
+    edges jsonb := '[]'::jsonb;
+    seen_nodes text[] := ARRAY[jsonb_build_array(
+        input->>'endpoint_kind',input->>'endpoint_id')::text];
+    seen_edges text[] := ARRAY[]::text[];
+    head integer := 0;
+    pages_read integer := 0;
+    current_node jsonb;
+    current_kind text;
+    current_id text;
+    current_depth integer;
+    next_kind text;
+    next_id text;
+    next_key text;
+    request_value jsonb;
+    page_result jsonb;
+    page_value jsonb;
+    edge_value jsonb;
+    edge_id text;
+    cursor_value jsonb;
+    reason text;
+    deadline_at timestamptz := clock_timestamp() + interval '8 seconds';
+BEGIN
+    IF max_hops NOT BETWEEN 1 AND 3 OR max_nodes NOT BETWEEN 1 AND 32
+       OR max_edges NOT BETWEEN 1 AND 32
+       OR input->>'endpoint_kind' NOT IN ('SOURCE_UNIT','ASSERTION','ENTITY','ARTIFACT')
+       OR input->>'endpoint_id' IS NULL
+       OR octet_length(input->>'endpoint_id') NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Graph traversal request is invalid','status',422));
+    END IF;
+    <<walk>>
+    WHILE head<jsonb_array_length(queue) LOOP
+        current_node := queue->head;
+        head := head+1;
+        current_depth := (current_node->>'depth')::integer;
+        IF current_depth>=max_hops THEN CONTINUE; END IF;
+        current_kind := current_node->>'kind';
+        current_id := current_node->>'id';
+        cursor_value := NULL;
+        LOOP
+            IF pages_read>=64 THEN reason := 'PAGE_LIMIT'; EXIT walk; END IF;
+            IF clock_timestamp()>=deadline_at THEN reason := 'DEADLINE'; EXIT walk; END IF;
+            request_value := request_base || jsonb_build_object(
+                'endpoint_kind',current_kind,'endpoint_id',current_id,
+                'snapshot_xid',snapshot_value::text,'limit',20);
+            IF cursor_value IS NOT NULL THEN
+                request_value := request_value || jsonb_build_object(
+                    'after_relation_id',cursor_value->>'relation_id',
+                    'after_contribution_id',cursor_value->>'contribution_id',
+                    'cursor_filter_digest',page_value->>'filter_digest');
+            END IF;
+            page_result := __forest_module_schema__.memory_query_relations(context,request_value);
+            IF page_result->>'ok' IS DISTINCT FROM 'true' THEN RETURN page_result; END IF;
+            page_value := page_result->'value';
+            pages_read := pages_read+1;
+            FOR edge_value IN SELECT value FROM jsonb_array_elements(page_value->'items') LOOP
+                edge_id := edge_value->>'contribution_id';
+                IF edge_id=ANY(seen_edges) THEN CONTINUE; END IF;
+                IF jsonb_array_length(edges)>=max_edges THEN
+                    reason := 'EDGE_LIMIT'; EXIT walk;
+                END IF;
+                IF edge_value->>'left_kind'=current_kind
+                   AND edge_value->>'left_id'=current_id THEN
+                    next_kind := edge_value->>'right_kind';
+                    next_id := edge_value->>'right_id';
+                ELSE
+                    next_kind := edge_value->>'left_kind';
+                    next_id := edge_value->>'left_id';
+                END IF;
+                next_key := jsonb_build_array(next_kind,next_id)::text;
+                IF NOT next_key=ANY(seen_nodes) AND jsonb_array_length(nodes)>=max_nodes THEN
+                    reason := 'NODE_LIMIT'; EXIT walk;
+                END IF;
+                seen_edges := array_append(seen_edges,edge_id);
+                edges := edges || jsonb_build_array(edge_value || jsonb_build_object(
+                    'traversal_depth',current_depth+1,'from_kind',current_kind,
+                    'from_id',current_id,'evidence',(
+                        SELECT COALESCE(jsonb_agg(e.value ORDER BY e.ordinality),'[]'::jsonb)
+                        FROM jsonb_array_elements(edge_value->'evidence') WITH ORDINALITY e(value,ordinality)
+                        WHERE e.ordinality<=4)));
+                IF NOT next_key=ANY(seen_nodes) THEN
+                    seen_nodes := array_append(seen_nodes,next_key);
+                    current_node := jsonb_build_object(
+                        'kind',next_kind,'id',next_id,'depth',current_depth+1);
+                    nodes := nodes || jsonb_build_array(current_node);
+                    queue := queue || jsonb_build_array(current_node);
+                END IF;
+            END LOOP;
+            EXIT WHEN page_value->>'has_more' IS DISTINCT FROM 'true';
+            cursor_value := page_value->'next_cursor';
+        END LOOP;
+    END LOOP;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'snapshot_xid',snapshot_value::text,'nodes',nodes,'edges',edges,
+            'pages_read',pages_read,'truncated',reason IS NOT NULL,
+            'truncation_reason',reason));
+END;
+$$;

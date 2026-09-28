@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.39.0"
+version = "1.40.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -237,9 +237,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.36.0"
+schema_version = "3.37.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "0cd7c4c9177d74e77e66239a011e5d437c16cd12314499a497d8852b823ca310"
+baseline_sha256 = "bac2c422d77a5c8e884b95b97d454504899f2708bc62950b355c9dd1bc413216"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -294,6 +294,13 @@ input_schema = "schemas/query-relations-input.json"
 output_schema = "schemas/query-relations-output.json"
 
 [[components.domain_queries]]
+name = "memory.query-neighbourhood"
+contract = "1.0"
+function = "memory_query_neighbourhood"
+input_schema = "schemas/query-neighbourhood-input.json"
+output_schema = "schemas/query-neighbourhood-output.json"
+
+[[components.domain_queries]]
 name = "memory.forget-work-status"
 contract = "1.0"
 function = "memory_query_management_forget"
@@ -325,6 +332,11 @@ port = "memory.query-relations"
 default_limit = 10
 max_limit = 20
 timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.relations.neighbourhood"
+port = "memory.query-neighbourhood"
+timeout_s = 12
 
 [[components.management_queries]]
 id = "memory.forget.preview"
