@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -16,7 +17,24 @@ from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
-from forest.storage.agent_runtime_authority import AgentPayloadRef, AgentRuntimeRepository
+
+
+@dataclass(frozen=True)
+class _PayloadRef:
+    payload_id: str
+    digest: str
+    owner_component_id: str
+    owner_kind: str
+    owner_id: str
+
+    def canonical(self):
+        return {
+            "payload_id": self.payload_id,
+            "digest": self.digest,
+            "owner_component_id": self.owner_component_id,
+            "owner_kind": self.owner_kind,
+            "owner_id": self.owner_id,
+        }
 
 
 async def _payload(
@@ -26,7 +44,7 @@ async def _payload(
     owner_id: str,
     value: bytes,
     owner_component_id: str = "agent.runtime",
-) -> AgentPayloadRef:
+) -> _PayloadRef:
     saved = await kernel.payload.put_bytes(
         owner_component_id=owner_component_id,
         owner_kind=owner_kind,
@@ -35,7 +53,7 @@ async def _payload(
         content=value,
         expected_deletion_epoch=await kernel.payload.epoch(),
     )
-    return AgentPayloadRef(
+    return _PayloadRef(
         saved.payload_id,
         saved.content_digest,
         owner_component_id,
@@ -44,43 +62,47 @@ async def _payload(
     )
 
 
-async def _advance_to_final_ready(repository, kernel, owner, prefix: str):
-    phase = "PREPARING_MODEL"
-    for index, target in enumerate(("MODEL_PENDING", "PARSING", "SAFE_BOUNDARY"), 1):
-        state = await _payload(
-            kernel,
-            owner_kind="checkpoint.state",
-            owner_id=f"{prefix}/phase/{index}",
-            value=(f'{{"phase":"{target}"}}').encode(),
+async def _seed_final_ready(store, namespace, run_id):
+    """Set only the precondition for the final-session UOW under the current schema guard."""
+    async with store.pool.connection() as conn, conn.transaction():
+        for expected, target in (
+            ("PREPARING_MODEL", "MODEL_PENDING"),
+            ("MODEL_PENDING", "PARSING"),
+            ("PARSING", "SAFE_BOUNDARY"),
+            ("SAFE_BOUNDARY", "FINAL_READY"),
+        ):
+            row = await (await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.agent_runs SET state=%s WHERE bot_id=%s AND run_id=%s "
+                    "AND state=%s RETURNING run_id"
+                ).format(sql.Identifier(namespace)),
+                (target, store.bot_id, run_id, expected),
+            )).fetchone()
+            assert row == {"run_id": run_id}
+
+
+async def _lease_operation(store, participant, generation_id, name, input_body, operation_id):
+    run_id = input_body.get("run_id") or input_body["owner"]["run_id"]
+    async with store.pool.connection() as conn, conn.transaction():
+        return await participant.invoke_in(
+            conn,
+            name,
+            {
+                "protocol": "forest.uow-step/1",
+                "caller": {"component_id": "agent.runtime", "generation_id": generation_id},
+                "input": input_body,
+                "prior": {},
+            },
+            operation_id=operation_id,
+            causal_root_kind="agent.run",
+            causal_root_id=run_id,
+            parent_call_id="call:" + operation_id,
+            timeout_seconds=10,
         )
-        await repository.transition(
-            owner,
-            checkpoint_id=state.owner_id,
-            expected_phase=phase,
-            target_phase=target,
-            state=state,
-        )
-        phase = target
-    ready = await _payload(
-        kernel,
-        owner_kind="checkpoint.state",
-        owner_id=f"{prefix}/final-ready",
-        value=b'{"phase":"FINAL_READY"}',
-    )
-    candidate = await _payload(
-        kernel,
-        owner_kind="final.candidate",
-        owner_id=f"{prefix}/candidate",
-        value=b'{"assistant":"done"}',
-    )
-    await repository.transition(
-        owner,
-        checkpoint_id=ready.owner_id,
-        expected_phase="SAFE_BOUNDARY",
-        target_phase="FINAL_READY",
-        state=ready,
-        final_candidate=candidate,
-    )
+
+
+def _owner_ref(owner):
+    return {key: owner[key] for key in ("run_id", "owner_id", "epoch")}
 
 
 @pytest.mark.postgres
@@ -1694,27 +1716,19 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "reload_generation_id": None,
         }
 
-        repository = AgentRuntimeRepository(
-            store,
-            namespace=package.configuration.namespace,
-            payload_verifier=kernel.payload.verify_in,
-        )
         conversation_caller = {
             "component_id": "conversation.scheduler",
             "generation_id": "generation/conversation/package-test",
         }
         replacement_participant = replacement.unit_of_work_participant()
-        first_owner = await repository.acquire_run(
-            "run/agent-package/1",
-            "agent-worker/finalize/1",
-            lease_seconds=120,
+        first_owner = await _lease_operation(
+            store, replacement_participant, replacement_generation,
+            "agent.acquire-run-record",
+            {"run_id": "run/agent-package/1", "owner_id": "agent-worker/finalize/1",
+             "lease_seconds": 120},
+            "agent-acquire/package/first",
         )
-        await _advance_to_final_ready(
-            repository,
-            kernel,
-            first_owner,
-            "checkpoint/package/first",
-        )
+        await _seed_final_ready(store, package.configuration.namespace, first_owner["run_id"])
         first_completed_state = await _payload(
             kernel,
             owner_kind="checkpoint.state",
@@ -1726,9 +1740,9 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "caller": conversation_caller,
             "input": {
                 "owner": {
-                    "run_id": first_owner.run_id,
-                    "owner_id": first_owner.owner_id,
-                    "epoch": first_owner.epoch,
+                    "run_id": first_owner["run_id"],
+                    "owner_id": first_owner["owner_id"],
+                    "epoch": first_owner["epoch"],
                 },
                 "checkpoint_id": first_completed_state.owner_id,
                 "state": first_completed_state.canonical(),
@@ -1748,7 +1762,11 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             )
         assert completed["state"] == "COMPLETED"
         assert completed["session"]["active_run_id"] == "run/agent-package/1"
-        await repository.release_run(first_owner)
+        assert await _lease_operation(
+            store, replacement_participant, replacement_generation,
+            "agent.release-run-record", {"owner": _owner_ref(first_owner)},
+            "agent-release/package/first",
+        ) == {"run_id": first_owner["run_id"], "released": True}
 
         successor_envelope = {
             "protocol": "forest.uow-step/1",
@@ -1794,17 +1812,14 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert successor["session"]["session_epoch"] == 2
         assert successor["profile"] == completed["profile"]
 
-        second_owner = await repository.acquire_run(
-            "run/agent-package/2",
-            "agent-worker/finalize/2",
-            lease_seconds=120,
+        second_owner = await _lease_operation(
+            store, replacement_participant, replacement_generation,
+            "agent.acquire-run-record",
+            {"run_id": "run/agent-package/2", "owner_id": "agent-worker/finalize/2",
+             "lease_seconds": 120},
+            "agent-acquire/package/second",
         )
-        await _advance_to_final_ready(
-            repository,
-            kernel,
-            second_owner,
-            "checkpoint/package/second",
-        )
+        await _seed_final_ready(store, package.configuration.namespace, second_owner["run_id"])
         second_completed_state = await _payload(
             kernel,
             owner_kind="checkpoint.state",
@@ -1820,9 +1835,9 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "caller": conversation_caller,
                     "input": {
                         "owner": {
-                            "run_id": second_owner.run_id,
-                            "owner_id": second_owner.owner_id,
-                            "epoch": second_owner.epoch,
+                            "run_id": second_owner["run_id"],
+                            "owner_id": second_owner["owner_id"],
+                            "epoch": second_owner["epoch"],
                         },
                         "checkpoint_id": second_completed_state.owner_id,
                         "state": second_completed_state.canonical(),
@@ -1836,7 +1851,11 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 timeout_seconds=10,
             )
         assert second_completed["state"] == "COMPLETED"
-        await repository.release_run(second_owner)
+        assert await _lease_operation(
+            store, replacement_participant, replacement_generation,
+            "agent.release-run-record", {"owner": _owner_ref(second_owner)},
+            "agent-release/package/second",
+        ) == {"run_id": second_owner["run_id"], "released": True}
 
         close_envelope = {
             "protocol": "forest.uow-step/1",
@@ -1860,7 +1879,15 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             )
         assert closed["session_id"] == "session/agent-package/1"
         assert closed["completed_run_id"] == "run/agent-package/2"
-        final_snapshot = await repository.load("run/agent-package/2")
+        final_snapshot = await replacement_endpoint.invoke_routed(
+            replacement_route,
+            RuntimeServiceInvocation(
+                "agent-run-query/package/final", 10,
+                "test.agent-runtime-package", "run/agent-package/2",
+            ),
+            ({"run_id": "run/agent-package/2"},),
+            {},
+        )
         assert final_snapshot["session"]["state"] == "CLOSED"
         assert final_snapshot["session"]["active_run_id"] is None
     finally:
