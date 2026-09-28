@@ -1,7 +1,9 @@
-"""Component control projection in an isolated, hot-reloadable package Worker."""
+"""Component control projection and durable reload submission."""
+
+from hashlib import md5
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, service
+from forest.sdk import Plugin, job, service
 
 
 class ComponentWorkerHost(Plugin):
@@ -80,7 +82,7 @@ class ComponentWorkerHost(Plugin):
     async def shell(self, payload, ctx):
         graph = await self._graph(ctx)
         return {
-            "text": "Forest RuntimeGraph 模块：\n"
+            "text": "Forest RuntimeGraph components:\n"
             + "\n".join(
                 f"{item['component_id']} {item['status']} "
                 f"r{item['config_revision']} {item['generation_id']}"
@@ -88,40 +90,116 @@ class ComponentWorkerHost(Plugin):
             )
         }
 
+    @service("component.host.reload", semantics="read")
+    async def reload_status(self, payload, ctx):
+        saved = await ctx.queries.call("component.reload.read", payload)
+        kernel = None
+        if saved["state"] == "SUBMITTED":
+            kernel = await ctx.services.call(
+                "runtime.graph-replacement.status",
+                {
+                    "protocol": "forest.runtime-graph-replacement-status-request/1",
+                    "operation_id": "component-reload:" + saved["request_id"],
+                },
+                operation_id=ctx.operations.stable("read-graph-replacement"),
+                timeout=10,
+            )
+        return {
+            "protocol": "forest.component-reload-status/1",
+            "request_id": saved["request_id"],
+            "component_id": saved["component_id"],
+            "expected_graph_revision": saved["expected_graph_revision"],
+            "requested_by": saved["requested_by"],
+            "state": saved["state"],
+            "attempt_count": saved["attempt_count"],
+            "error_code": saved["error_code"],
+            "kernel": kernel,
+            "created_at": saved["created_at"],
+            "updated_at": saved["updated_at"],
+        }
+
     @service("shell.component-host.reload", semantics="idempotent")
     async def reload(self, payload, ctx):
         arguments = payload["arguments"]
         component_id = arguments["component_id"]
+        expected = arguments["expected_graph_revision"]
         graph = await self._graph(ctx)
+        operation_id = ctx.operations.stable("module-reload-enqueue")
+        command = {
+            "component_id": component_id,
+            "expected_graph_revision": expected,
+            "requested_by": payload["principal_ref"],
+        }
+        if graph["graph_revision"] != expected:
+            request_id = "reload:" + md5(
+                (graph["bot_id"] + "\x1f" + operation_id).encode("utf-8"),
+                usedforsecurity=False,
+            ).hexdigest()
+            try:
+                saved = await ctx.queries.call(
+                    "component.reload.read", {"request_id": request_id}
+                )
+            except ForestError as error:
+                if error.code != "COMPONENT_RELOAD_NOT_FOUND":
+                    raise
+                raise ForestError(
+                    "RUNTIME_GRAPH_REVISION_CONFLICT", "RuntimeGraph revision changed", 409
+                ) from error
+            if (
+                saved["component_id"] != component_id
+                or saved["expected_graph_revision"] != expected
+                or saved["requested_by"] != payload["principal_ref"]
+            ):
+                raise ForestError(
+                    "COMPONENT_RELOAD_OPERATION_CONFLICT", "Reload operation input differs", 409
+                )
+            return {
+                "text": f"Reload request for earlier Graph r{expected}: "
+                f"{saved['request_id']} ({saved['state']})."
+            }
         if not any(item["component_id"] == component_id for item in graph["members"]):
             raise ForestError(
-                "COMPONENT_HOST_MODULE_NOT_FOUND",
-                "Component is not in the active graph",
-                404,
+                "COMPONENT_HOST_MODULE_NOT_FOUND", "Component is not in the active graph", 404
             )
-        receipt = await ctx.services.call(
-            "runtime.graph-replacement.request",
-            {
-                "protocol": "forest.runtime-graph-replacement-request/1",
-                "operation_id": ctx.operations.stable("module-reload-request"),
-                "expected_graph_revision": arguments["expected_graph_revision"],
-                "requested_by": payload["principal_ref"],
-            },
-            operation_id=ctx.operations.stable("submit-graph-replacement"),
-            timeout=10,
+        saved = await ctx.commands.call(
+            "component.reload.enqueue", command, operation_id=operation_id
         )
-        if receipt["expected_graph_revision"] != graph["graph_revision"]:
-            return {
-                "text": (
-                    f"此前 Graph r{receipt['expected_graph_revision']} 的组件重载请求"
-                    f"已记录（{receipt['state']}）；operation={receipt['operation_id']}"
-                )
-            }
         affected = ", ".join(item["component_id"] for item in graph["members"])
         return {
-            "text": (
-                f"组件 {component_id} 的重载请求已记录（{receipt['state']}）；"
-                f"当前实现会更换整张 Graph 的 {len(graph['members'])} 个 Generation："
-                f"{affected}；operation={receipt['operation_id']}"
-            )
+            "text": f"Reload request queued for {component_id}: {saved['request_id']} "
+            f"({saved['state']}). Current implementation will replace full Graph "
+            f"with {len(graph['members'])} new Generations: {affected}."
         }
+
+    @job("component.reload.submit")
+    async def submit_reload(self, task, ctx):
+        work = task["payload"]
+        try:
+            graph = await self._graph(ctx)
+            if graph["graph_revision"] == work["expected_graph_revision"] and not any(
+                member["component_id"] == work["component_id"]
+                for member in graph["members"]
+            ):
+                return {
+                    "disposition": "FAILED",
+                    "receipt": None,
+                    "error_code": "COMPONENT_HOST_MODULE_NOT_FOUND",
+                }
+            receipt = await ctx.services.call(
+                "runtime.graph-replacement.request",
+                {
+                    "protocol": "forest.runtime-graph-replacement-request/1",
+                    "operation_id": "component-reload:" + work["request_id"],
+                    "expected_graph_revision": work["expected_graph_revision"],
+                    "requested_by": work["requested_by"],
+                },
+                operation_id=ctx.operations.stable("submit-graph-replacement"),
+                timeout=10,
+            )
+            return {"disposition": "SUCCEEDED", "receipt": receipt, "error_code": None}
+        except ForestError as error:
+            return {
+                "disposition": "RETRY" if error.status >= 500 else "FAILED",
+                "receipt": None,
+                "error_code": error.code,
+            }

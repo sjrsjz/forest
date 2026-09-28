@@ -586,6 +586,29 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
         await host.start()
         try:
             previous = host.registry.graph_identity
+            worker_host = host.registry.get("component.worker-host")
+            web_request = await worker_host.management_contract.action(
+                "module.reload",
+                operation_id="web:reload-missing",
+                payload={
+                    "component_id": "module.missing",
+                    "expected_graph_revision": previous.graph_revision,
+                },
+                authorization=SimpleNamespace(web_subject_ref="subject/host-admin"),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            assert web_request.value["state"] == "QUEUED"
+            assert web_request.value["requested_by"] == "subject/host-admin"
+            async with asyncio.timeout(20):
+                while True:
+                    web_status = await worker_host.management_contract.query(
+                        "reload", {"request_id": web_request.value["request_id"]}
+                    )
+                    if web_status["state"] == "FAILED":
+                        break
+                    await asyncio.sleep(0.1)
+            assert web_status["error_code"] == "COMPONENT_HOST_MODULE_NOT_FOUND"
+            assert web_status["kernel"] is None
             handle = next(
                 handle for key, handle in host.registry.contract_router._requests.items()
                 if key[0] == "shell.command" and key[1] == "shell.component-host.reload"
@@ -617,7 +640,7 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
                 await reload("agent.runtime", previous.graph_revision + 1, "reload/stale")
             assert stale.value.code == "RUNTIME_GRAPH_REVISION_CONFLICT"
             result = await reload("agent.runtime", previous.graph_revision, "reload/valid")
-            assert "会更换整张 Graph" in result.text
+            assert "Graph" in result.text
             assert "agent.runtime" in result.text
             assert "memory.graph" in result.text
             async with asyncio.timeout(180):
@@ -632,6 +655,14 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
                 replacement.generations[component_id] != previous.generations[component_id]
                 for component_id in previous.generations
             )
+            request_id = "reload:" + result.text.split("reload:", 1)[1][:32]
+            new_worker_host = host.registry.get("component.worker-host")
+            status = await new_worker_host.management_contract.query(
+                "reload", {"request_id": request_id}
+            )
+            assert status["state"] == "SUBMITTED"
+            assert status["kernel"]["state"] == "SUCCEEDED"
+            assert status["kernel"]["graph_revision"] == replacement.graph_revision
             current_handle = next(
                 route for key, route in host.registry.contract_router._requests.items()
                 if key[0] == "shell.command" and key[1] == "shell.component-host.reload"
@@ -639,7 +670,7 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
             replay = await reload(
                 "agent.runtime", previous.graph_revision, "reload/valid", route=current_handle
             )
-            assert f"此前 Graph r{previous.graph_revision}" in replay.text
+            assert f"Graph r{previous.graph_revision}" in replay.text
             assert host.registry.graph_identity.graph_id == replacement.graph_id
         finally:
             await host.close()

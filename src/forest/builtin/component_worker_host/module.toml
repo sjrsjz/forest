@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.3.0"
+version = "1.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -29,7 +29,10 @@ stop_timeout_s = 10
 [components.capabilities]
 requests = [
   "service.call:runtime.graph.snapshot",
-  "service.call:runtime.graph-replacement.request"
+  "service.call:runtime.graph-replacement.request",
+  "service.call:runtime.graph-replacement.status",
+  "domain.query:component.reload.read",
+  "domain.command:component.reload.enqueue"
 ]
 
 [components.management_ui]
@@ -40,6 +43,15 @@ label = "组件"
 group = "runtime"
 order = 2
 
+[components.storage]
+schema_id = "forest.component.worker-host"
+schema_version = "1.0.0"
+baseline = "schema/control.sql"
+baseline_sha256 = "42f1be2b664790d452da2949dd348aaeffaf8fbcc987713614fa4434da615459"
+scope = "bot"
+repository_contract = "forest.component-worker-host.repository/1"
+execution_profile = "official"
+
 [[components.requires]]
 name = "runtime.graph.snapshot"
 contract = ">=1.0,<2.0"
@@ -48,6 +60,12 @@ startup_dependency = true
 
 [[components.requires]]
 name = "runtime.graph-replacement.request"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
+
+[[components.requires]]
+name = "runtime.graph-replacement.status"
 contract = ">=1.0,<2.0"
 required = true
 startup_dependency = false
@@ -67,6 +85,14 @@ semantics = "read"
 visibility = "management"
 input_schema = "schemas/module-input.json"
 output_schema = "schemas/module-output.json"
+
+[[components.provides]]
+name = "component.host.reload"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/reload-read.json"
+output_schema = "schemas/reload-status-output.json"
 
 [[components.provides]]
 name = "shell.component-host.execute"
@@ -118,3 +144,44 @@ timeout_s = 10
 id = "module"
 port = "component.host.module"
 timeout_s = 10
+
+[[components.domain_commands]]
+name = "component.reload.enqueue"
+contract = "1.0"
+function = "component_reload_enqueue"
+input_schema = "schemas/reload-enqueue.json"
+output_schema = "schemas/reload-output.json"
+
+[[components.domain_queries]]
+name = "component.reload.read"
+contract = "1.0"
+function = "component_reload_read"
+input_schema = "schemas/reload-read.json"
+output_schema = "schemas/reload-output.json"
+
+[[components.management_actions]]
+id = "module.reload"
+port = "component.reload.enqueue"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 15
+
+[[components.management_queries]]
+id = "reload"
+port = "component.host.reload"
+timeout_s = 10
+
+[[components.owned_work_handlers]]
+name = "component.reload.pending"
+contract = "1.0"
+handler = "component.reload.submit"
+claim_function = "component_reload_claim"
+settle_function = "component_reload_settle"
+input_schema = "schemas/reload-work-input.json"
+output_schema = "schemas/reload-work-output.json"
+max_concurrency = 1
+poll_interval_ms = 200
+claim_timeout_s = 5
+handler_timeout_s = 20
+settle_timeout_s = 5
+lease_seconds = 45

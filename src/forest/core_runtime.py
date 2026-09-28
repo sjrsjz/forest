@@ -129,6 +129,7 @@ _MODULES = {
             "runtime.state.publish",
             "runtime.graph.reload",
             "runtime.graph-replacement.request",
+            "runtime.graph-replacement.status",
             "runtime.graph.snapshot",
             "kernel.uow.conversation.final-reply",
             "kernel.uow.conversation.select-input",
@@ -146,6 +147,7 @@ _MODULES = {
             "runtime.state.publish",
             "runtime.graph.reload",
             "runtime.graph-replacement.request",
+            "runtime.graph-replacement.status",
             "runtime.graph.snapshot",
         ),
     },
@@ -267,6 +269,33 @@ def runtime_graph_replacement_request_service(context):
         }
 
     return request
+
+
+def runtime_graph_replacement_status_service(context):
+    """Read one persisted replacement outcome by its stable operation identity."""
+
+    runtime = context.participant("kernel.runtime").service
+
+    async def status(payload):
+        if (
+            type(payload) is not dict
+            or set(payload) != {"protocol", "operation_id"}
+            or payload["protocol"] != "forest.runtime-graph-replacement-status-request/1"
+        ):
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Replacement status request is invalid", 422
+            )
+        saved = await runtime.graph_replacement(payload["operation_id"])
+        return {
+            "protocol": "forest.runtime-graph-replacement-status/1",
+            "operation_id": saved["operation_id"],
+            "state": saved["state"],
+            "graph_id": saved["result_graph_id"],
+            "graph_revision": saved["result_graph_revision"],
+            "error_code": saved["error_code"],
+        }
+
+    return status
 
 
 class PreparedAuditAuthorityModule(PreparedAuthorityModule):
@@ -631,6 +660,12 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                         1,
                         ("kernel.runtime",),
                         runtime_graph_replacement_request_service,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "runtime.graph-replacement.status",
+                        1,
+                        ("kernel.runtime",),
+                        runtime_graph_replacement_status_service,
                     ),
                     RuntimeKernelServiceSpec(
                         RUNTIME_HEALTH_SNAPSHOT_JOB.service_id,
