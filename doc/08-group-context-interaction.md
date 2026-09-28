@@ -250,7 +250,7 @@ CHAT 回复分配同会话递增 `response_seq`，Delivery 依序领取，避免
 
 ### 5.2 静默推入的两种入口
 
-空闲收到普通消息和 Agent 结束后的尾部排空使用同一个 `SILENT_DRAIN` 协议。每个有界维护批次都在协调行锁内先检查触发，再冻结 `silent_end_seq = min(classified_through_seq, context_applied_seq + 64)`，只追加这一段连续前缀并推进游标；结算释放 actor 后，仍有未消费消息就重新领取下一批。提交前按“现有活动单元 + 本批单元”检查 Context 高水位；越界时先可靠归档足够的旧前缀，使本批提交后的活动窗口回到低水位目标。它可以发布新的持久裁剪视图，但不创建回复型 Run，也不调用 LLM。
+空闲收到普通消息和 Agent 结束后的尾部排空使用同一个 `SILENT_DRAIN` 协议。每个有界维护批次都在协调行锁内先检查触发，再冻结 `silent_end_seq = min(classified_through_seq, context_applied_seq + 64)`，只追加这一段连续前缀并推进游标；结算释放 actor 后，仍有未消费消息就重新领取下一批。提交前按“现有活动单元 + 本批单元”检查 Context 高水位；越界时可靠归档至多 64 个旧单元并发布裁剪视图。若本批后仍高于水位，由 Conversation 自有的持久 Context 维护任务继续领取和归档，不把全部历史塞进一个事务。它不创建回复型 Run，也不调用 LLM。
 
 如果检查时有待处理触发，立即改走触发选择，不能先把整条普通尾部静默推完。安全点之后新消息的序号大于已冻结边界，不影响已选择的输入批次；下一维护批次再次检查触发，不沿用上次“没有触发”的判断。
 
@@ -450,7 +450,7 @@ async def silent_drain_or_close(conversation_id, actor_fence, operation_id):
 
 ### 8.1 持久 Context 维护与 Run 模型视图冻结
 
-持久 Context 维护不依赖 Agent 是否正在工作。`SILENT_DRAIN` 与空闲边界的 `TRIGGER_INPUT` 在提交前按 Context 自身策略检查“现有活动单元 + 本批单元”；越过高水位就先可靠归档旧前缀并裁剪到低水位，再追加本批。由此，Bot 即使数月没有被触发，活动窗口也保持有界，完整原文仍在 CanonicalContext/Archive 中可追溯。
+持久 Context 维护不依赖 Agent 是否正在工作。`SILENT_DRAIN` 与新 Run 首次模型调用前的裁剪在提交后按 Context 自身策略检查活动单元；越过高水位就以至多 64 个单元的事务批次可靠归档。空闲且无待处理触发时，包自有维护任务依据持久 Context/视图修订持续领取，直到降到策略水位或没有可归档单元；配置 Generation 改变也重新检查已有群会话。活动视图由事务内 `active_context_units` 索引读取，完整原文仍在不可变 `context_units` 与 Archive 中可追溯。
 
 新 Run 准备第一次模型调用时冻结当时的持久 ContextView，并加入本 Run 当前 RAG、触发输入和必要因果后缀。这里的“一次”指每个 Run 只做一次模型视图选择，不表示空闲期停止持久裁剪。同一 Run 后续模型、工具、思考、修复以及安全点接入消息只调用 `extend`，不得重新选择历史前缀；活动 Run 期间也不发布会改写该冻结前缀的后台裁剪。Run 的步骤数、工具数和排队接入量由 Agent 自身上限约束。
 

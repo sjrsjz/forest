@@ -404,6 +404,16 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 )
             await conn.execute(
                 sql.SQL(
+                    "INSERT INTO {}.active_context_units("
+                    "bot_id,conversation_id,unit_id,context_revision,unit_index) "
+                    "SELECT bot_id,conversation_id,unit_id,context_revision,unit_index "
+                    "FROM {}.context_units WHERE bot_id=%s AND conversation_id=%s "
+                    "AND context_revision IN (2,3)"
+                ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                (store.bot_id, actor["conversation_id"]),
+            )
+            await conn.execute(
+                sql.SQL(
                     "UPDATE {}.conversation_lanes SET context_revision=3,"
                     "context_view_unit_count=3 WHERE bot_id=%s AND conversation_id=%s"
                 ).format(sql.Identifier(namespace)),
@@ -873,5 +883,105 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         assert [(row["start_seq"], row["end_seq"]) for row in batches] == [
             (4, 67), (68, 68)
         ]
+
+        instance.freeze_owned_admission()
+        await instance.drain_owned_work()
+        async with store.pool.connection() as conn, conn.transaction():
+            prior = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT context_revision,context_view_revision,"
+                        "context_view_unit_count,context_archived_unit_count "
+                        "FROM {}.conversation_lanes WHERE bot_id=%s AND conversation_id=%s "
+                        "FOR UPDATE"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "conversation/onebot/group/silent"),
+                )
+            ).fetchone()
+            assert prior["context_view_unit_count"] == 2
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {m}.context_units("
+                    "bot_id,conversation_id,unit_id,context_revision,unit_index,kind,"
+                    "source_component_id,source_kind,source_id,payload_id,payload_digest,"
+                    "payload_owner_component_id,payload_owner_kind,payload_owner_id) "
+                    "SELECT %s,%s,'maintenance-control:'||g::text,%s,g-1,'CONTROL',"
+                    "'conversation.scheduler','context.maintenance-fixture',"
+                    "'maintenance-control:'||g::text,%s,%s,%s,%s,%s "
+                    "FROM generate_series(1,67) AS g"
+                ).format(m=sql.Identifier(namespace)),
+                (
+                    store.bot_id, "conversation/onebot/group/silent",
+                    prior["context_revision"] + 1,
+                    silent_content["payload_id"], silent_content["digest"],
+                    silent_content["owner_component_id"], silent_content["owner_kind"],
+                    silent_content["owner_id"],
+                ),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {m}.active_context_units("
+                    "bot_id,conversation_id,unit_id,context_revision,unit_index) "
+                    "SELECT bot_id,conversation_id,unit_id,context_revision,unit_index "
+                    "FROM {m}.context_units WHERE bot_id=%s AND conversation_id=%s "
+                    "AND context_revision=%s"
+                ).format(m=sql.Identifier(namespace)),
+                (store.bot_id, "conversation/onebot/group/silent",
+                 prior["context_revision"] + 1),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.conversation_lanes SET context_revision=context_revision+1,"
+                    "context_view_unit_count=context_view_unit_count+67,"
+                    "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, "conversation/onebot/group/silent"),
+            )
+        instance.open_owned_admission()
+        async with asyncio.timeout(90):
+            while True:
+                async with store.pool.connection() as conn:
+                    maintained = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT context_applied_seq,context_view_unit_count,"
+                                "context_archived_unit_count,actor_owner_id "
+                                "FROM {}.conversation_lanes WHERE bot_id=%s "
+                                "AND conversation_id=%s"
+                            ).format(sql.Identifier(namespace)),
+                            (store.bot_id, "conversation/onebot/group/silent"),
+                        )
+                    ).fetchone()
+                if (maintained["context_view_unit_count"] == 1
+                        and maintained["actor_owner_id"] is None):
+                    break
+                await asyncio.sleep(0.1)
+        assert maintained["context_applied_seq"] == 68
+        assert maintained["context_archived_unit_count"] == (
+            prior["context_archived_unit_count"] + 68
+        )
+        async with store.pool.connection() as conn:
+            maintenance_archives = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT archived_unit_count FROM {}.context_compactions "
+                        "WHERE bot_id=%s AND conversation_id=%s "
+                        "AND published_view_revision>%s ORDER BY published_view_revision"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "conversation/onebot/group/silent",
+                     prior["context_view_revision"]),
+                )
+            ).fetchall()
+            active_count = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT count(*) AS n FROM {}.active_context_units "
+                        "WHERE bot_id=%s AND conversation_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, "conversation/onebot/group/silent"),
+                )
+            ).fetchone()
+        assert [row["archived_unit_count"] for row in maintenance_archives] == [64, 4]
+        assert active_count["n"] == maintained["context_view_unit_count"] == 1
     finally:
         assert await registry.close() == []

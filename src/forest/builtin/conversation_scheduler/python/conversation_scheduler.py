@@ -254,6 +254,35 @@ class ConversationScheduler(Plugin):
             )
         return result
 
+    @job("conversation.context-maintenance")
+    async def context_maintenance(self, task, ctx):
+        actor = task["payload"]["actor"]
+        result = await ctx.uow.call(
+            "conversation.compact-before-run",
+            {
+                "anchor": {
+                    "protocol": "forest.conversation-pre-run-anchor/1",
+                    "conversation_id": actor["conversation_id"],
+                    "actor": actor,
+                },
+                "context_view": self._context_view,
+                "payload": {
+                    "protocol": "forest.payload-json-from-prior/1",
+                    "prior_step_id": "prepare",
+                },
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                "memory": {},
+            },
+            operation_id=ctx.operations.stable("context-maintenance:v1"),
+        )
+        if result.get("conversation_id") != actor["conversation_id"]:
+            raise ForestError(
+                "CONVERSATION_MAINTENANCE_RESULT_INVALID",
+                "Context maintenance returned another conversation",
+                409,
+            )
+        return result
+
     @staticmethod
     def _stable(kind, *parts):
         encoded = "\0".join(str(part) for part in parts).encode("utf-8")

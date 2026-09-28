@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.8.1"
+version = "4.9.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -60,9 +60,9 @@ output_schema = "schemas/context-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.4.1"
+schema_version = "4.5.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "9e54ba25d347f974c03d91ce4741a2211c78972e1d6a97f5930fb323af7d34ab"
+baseline_sha256 = "2f1b03c63648126f6f51c348ff8b613a70b722b1b3bbb4ec3ca7803874aba412"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -224,6 +224,22 @@ input_schema = "schemas/silent-drain-input.json"
 output_schema = "schemas/select-input-output.json"
 max_concurrency = 16
 poll_interval_ms = 100
+claim_timeout_s = 5
+handler_timeout_s = 30
+settle_timeout_s = 5
+lease_seconds = 45
+drain_policy = "inflight"
+
+[[components.owned_work_handlers]]
+name = "conversation.context-maintenance.pending"
+contract = "1.0"
+handler = "conversation.context-maintenance"
+claim_function = "conversation_claim_context_maintenance"
+settle_function = "conversation_settle_context_maintenance"
+input_schema = "schemas/context-maintenance-input.json"
+output_schema = "schemas/pre-run-compaction-output.json"
+max_concurrency = 2
+poll_interval_ms = 1000
 claim_timeout_s = 5
 handler_timeout_s = 30
 settle_timeout_s = 5

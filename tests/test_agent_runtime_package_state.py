@@ -1366,6 +1366,14 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 ).format(sql.Identifier(conversation_namespace)),
                 (store.bot_id, "conversation/onebot/group/933179609", digest),
             )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.active_context_units("
+                    "bot_id,conversation_id,unit_id,context_revision,unit_index) "
+                    "VALUES (%s,%s,'context/initial',1,0)"
+                ).format(sql.Identifier(conversation_namespace)),
+                (store.bot_id, "conversation/onebot/group/933179609"),
+            )
             for ingress_seq, event_id, decision in (
                 (2, "event/package/2", "NO_TRIGGER"),
                 (3, "event/package/3", "TRIGGER"),

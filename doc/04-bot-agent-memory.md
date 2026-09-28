@@ -372,7 +372,7 @@ Milvus ANN 只选择直接种子；各查询 facet 的候选经 RRF 排序后取
 
 Context 归档先写可靠 Archive 和来源映射，再提交确定性裁剪视图；索引异步失败可以重试，不能把未可靠归档的上下文直接裁掉。**裁剪不调用摘要模型，不创建记忆摘要或摘要Job**：按本地token预算保留近期完整单元、必要触发及工具因果组，将其余已归档单元移出活动视图，保留准确来源范围/引用。裁剪改变活动视图，不删除已提交日志；遗忘操作另行处理。
 
-群聊 InputBatch 与 `SILENT_DRAIN` 都可靠追加 Context；空闲维护批次越过高水位时立即归档并裁剪到低水位，不等待下一次触发。新 Run 首次模型调用只冻结当时已经维护好的 ContextView；同一 Run 后续步骤只扩展因果后缀。超长普通前缀先分块持久化；模型只看到 ContextView 保留的原文单元及明确的归档省略范围，不能宣称看过被移出的正文。保留未回应触发的必要原文、作者及工具边界；最小必要集合仍超过 Context 策略硬界时由 Context/Agent 明确失败，不偷偷用 LLM 摘要补救。Provider 不接收预算估算。context_applied_seq 不随裁剪回退，视图 manifest 保存 author/source 覆盖，异步旧视图发布仍遵守 06 的输入与删除屏障。详见[08](08-group-context-interaction.md)。
+群聊 InputBatch 与 `SILENT_DRAIN` 都可靠追加 Context；空闲维护批次越过高水位时立即开始有界归档，由持久维护任务继续裁剪到策略水位，不等待下一次触发。新 Run 首次模型调用只冻结当时已经维护好的 ContextView；同一 Run 后续步骤只扩展因果后缀。超长普通前缀先分块持久化；模型只看到 ContextView 保留的原文单元及明确的归档省略范围，不能宣称看过被移出的正文。保留未回应触发的必要原文、作者及工具边界；最小必要集合仍超过 Context 策略硬界时由 Context/Agent 明确失败，不偷偷用 LLM 摘要补救。Provider 不接收预算估算。context_applied_seq 不随裁剪回退，视图 manifest 保存 author/source 覆盖，异步旧视图发布仍遵守 06 的输入与删除屏障。详见[08](08-group-context-interaction.md)。
 
 归档/索引 Job 使用稳定源单元及覆盖源集digest去重，主干结构无需LLM生成。向量可以按有界批量异步建立，Embedding失败不阻塞裁剪；不能把一次裁剪自动变成逐消息的摘要、事实抽取或联想模型调用。显式 Agent/管理任务若需要语义提取，独立申请预算并沿用06的工件协议，不成为接入/裁剪的隐藏依赖。多模态媒体采用引用计数/lineage，清理前确认没有合法剩余引用。
 

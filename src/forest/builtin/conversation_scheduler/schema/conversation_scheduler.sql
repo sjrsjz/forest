@@ -17,6 +17,17 @@ CREATE TABLE conversation_lanes (
     context_view_unit_count bigint NOT NULL DEFAULT 0 CHECK (context_view_unit_count >= 0),
     context_archived_unit_count bigint NOT NULL DEFAULT 0
         CHECK (context_archived_unit_count >= 0),
+    maintenance_generation_id text CHECK (
+        maintenance_generation_id IS NULL
+        OR octet_length(maintenance_generation_id) BETWEEN 1 AND 256
+    ),
+    maintenance_context_revision bigint CHECK (
+        maintenance_context_revision IS NULL OR maintenance_context_revision >= 0
+    ),
+    maintenance_view_revision bigint CHECK (
+        maintenance_view_revision IS NULL OR maintenance_view_revision >= 0
+    ),
+    maintenance_retry_at timestamptz,
     actor_owner_id text CHECK (actor_owner_id IS NULL OR octet_length(actor_owner_id) BETWEEN 1 AND 256),
     actor_epoch bigint NOT NULL DEFAULT 0 CHECK (actor_epoch >= 0),
     actor_expires_at timestamptz,
@@ -46,7 +57,14 @@ CREATE TABLE conversation_lanes (
     CHECK (active_run_ref IS NULL OR active_session_ref IS NOT NULL),
     CHECK ((resume_not_before IS NULL) = (resume_reason_code IS NULL)),
     CHECK (resume_reason_ref IS NULL OR resume_reason_code IS NOT NULL),
-    CHECK (resume_not_before IS NULL OR active_session_ref IS NOT NULL)
+    CHECK (resume_not_before IS NULL OR active_session_ref IS NOT NULL),
+    CHECK (
+        (maintenance_generation_id IS NULL AND maintenance_context_revision IS NULL
+         AND maintenance_view_revision IS NULL)
+        OR (maintenance_generation_id IS NOT NULL
+            AND maintenance_context_revision IS NOT NULL
+            AND maintenance_view_revision IS NOT NULL)
+    )
 );
 
 CREATE TABLE inbox_messages (
@@ -443,6 +461,21 @@ CREATE TABLE context_compaction_units (
         REFERENCES context_units(bot_id, conversation_id, unit_id)
 );
 
+-- A transactional current-view index. Immutable context_units and archive
+-- membership remain the authority; this avoids scanning years of archived
+-- units on every Context read or bounded compaction claim.
+CREATE TABLE active_context_units (
+    bot_id text NOT NULL,
+    conversation_id text NOT NULL,
+    unit_id text NOT NULL,
+    context_revision bigint NOT NULL CHECK (context_revision>0),
+    unit_index integer NOT NULL CHECK (unit_index>=0),
+    PRIMARY KEY (bot_id,conversation_id,unit_id),
+    UNIQUE (bot_id,conversation_id,context_revision,unit_index),
+    FOREIGN KEY (bot_id,conversation_id,unit_id)
+        REFERENCES context_units(bot_id,conversation_id,unit_id)
+);
+
 CREATE INDEX inbox_classification_idx
     ON inbox_messages(bot_id, conversation_id, ingress_seq, classification_state);
 CREATE INDEX trigger_pending_idx
@@ -454,6 +487,9 @@ CREATE INDEX context_compaction_order_idx
 CREATE INDEX lane_wakeup_idx ON conversation_lanes(
     bot_id,resume_not_before,mailbox_revision,conversation_id
 );
+CREATE INDEX lane_context_maintenance_idx ON conversation_lanes(
+    bot_id,maintenance_retry_at,updated_at,conversation_id
+) WHERE context_view_unit_count>1;
 
 CREATE TABLE trigger_terminal_operations (
     bot_id text NOT NULL,
@@ -555,6 +591,43 @@ BEGIN
     RAISE EXCEPTION 'Scheduler fact is immutable' USING ERRCODE='55000';
 END;
 $$;
+CREATE FUNCTION guard_active_context_unit() RETURNS trigger LANGUAGE plpgsql
+SET search_path = pg_catalog AS $$
+DECLARE
+    source_row record;
+BEGIN
+    IF TG_OP='INSERT' THEN
+        SELECT u.context_revision,u.unit_index INTO source_row
+        FROM __forest_module_schema__.context_units u
+        WHERE u.bot_id=NEW.bot_id AND u.conversation_id=NEW.conversation_id
+          AND u.unit_id=NEW.unit_id;
+        IF source_row IS NULL
+           OR source_row.context_revision IS DISTINCT FROM NEW.context_revision
+           OR source_row.unit_index IS DISTINCT FROM NEW.unit_index
+           OR EXISTS (
+               SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
+               WHERE cu.bot_id=NEW.bot_id AND cu.conversation_id=NEW.conversation_id
+                 AND cu.unit_id=NEW.unit_id
+           ) THEN
+            RAISE EXCEPTION 'Active Context index differs from immutable source'
+                USING ERRCODE='55000';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP='DELETE' AND EXISTS (
+        SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
+        WHERE cu.bot_id=OLD.bot_id AND cu.conversation_id=OLD.conversation_id
+          AND cu.unit_id=OLD.unit_id
+    ) THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'Active Context index transition is invalid'
+        USING ERRCODE='55000';
+END;
+$$;
+CREATE TRIGGER active_context_unit_guard
+    BEFORE INSERT OR UPDATE OR DELETE ON active_context_units
+    FOR EACH ROW EXECUTE FUNCTION guard_active_context_unit();
 CREATE TRIGGER input_batches_immutable BEFORE UPDATE OR DELETE ON input_batches
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER selection_operations_immutable BEFORE UPDATE OR DELETE ON selection_operations
@@ -1355,6 +1428,13 @@ BEGIN
         WHERE bot_id=requested_bot AND conversation_id=requested_conversation
           AND ingress_seq BETWEEN selection_start AND selection_end
         ORDER BY ingress_seq;
+        INSERT INTO __forest_module_schema__.active_context_units(
+            bot_id,conversation_id,unit_id,context_revision,unit_index
+        )
+        SELECT bot_id,conversation_id,unit_id,context_revision,unit_index
+        FROM __forest_module_schema__.context_units
+        WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+          AND context_revision=selection_context_revision;
     END IF;
     IF pending_count > 0 THEN
         UPDATE __forest_module_schema__.conversation_triggers
@@ -1473,14 +1553,7 @@ BEGIN
     FROM __forest_module_schema__.context_compactions
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
     ORDER BY published_view_revision DESC LIMIT 1;
-    SELECT count(*) INTO total_units
-    FROM __forest_module_schema__.context_units u
-    WHERE u.bot_id=requested_bot AND u.conversation_id=requested_conversation
-      AND NOT EXISTS (
-          SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
-          WHERE cu.bot_id=u.bot_id AND cu.conversation_id=u.conversation_id
-            AND cu.unit_id=u.unit_id
-      );
+    total_units := lane.context_view_unit_count;
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
         'conversation_id',u.conversation_id,'unit_id',u.unit_id,
         'context_revision',u.context_revision,'unit_index',u.unit_index,
@@ -1503,17 +1576,25 @@ BEGIN
     INTO units
     FROM (
         SELECT u.*
-        FROM __forest_module_schema__.context_units u
-        WHERE u.bot_id=requested_bot AND u.conversation_id=requested_conversation
-          AND NOT EXISTS (
-              SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
-              WHERE cu.bot_id=u.bot_id AND cu.conversation_id=u.conversation_id
-                AND cu.unit_id=u.unit_id
-          )
-        ORDER BY u.context_revision,u.unit_index
+        FROM __forest_module_schema__.active_context_units a
+        JOIN __forest_module_schema__.context_units u
+          ON u.bot_id=a.bot_id AND u.conversation_id=a.conversation_id
+         AND u.unit_id=a.unit_id
+        WHERE a.bot_id=requested_bot AND a.conversation_id=requested_conversation
+        ORDER BY a.context_revision,a.unit_index
         OFFSET requested_offset LIMIT requested_limit
     ) u;
     returned_count := jsonb_array_length(units);
+    IF (requested_offset<total_units AND returned_count=0)
+       OR requested_offset+returned_count>total_units THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONTEXT_ACTIVE_INDEX_INVALID',
+                'message','Active Context index does not cover the view','status',409
+            )
+        );
+    END IF;
     IF requested_offset+returned_count<total_units THEN
         next_offset := requested_offset+returned_count;
     END IF;
@@ -1746,23 +1827,21 @@ BEGIN
             )
         );
     END IF;
-    archive_target := lane.context_view_unit_count-retain_units;
-    WITH active AS (
-        SELECT u.*,
-               row_number() OVER (
-                   ORDER BY u.context_revision DESC,u.unit_index DESC
-               ) AS recent_rank
-        FROM __forest_module_schema__.context_units u
-        WHERE u.bot_id=requested_bot AND u.conversation_id=requested_conversation
-          AND NOT EXISTS (
-              SELECT 1 FROM __forest_module_schema__.context_compaction_units cu
-              WHERE cu.bot_id=u.bot_id AND cu.conversation_id=u.conversation_id
-                AND cu.unit_id=u.unit_id
-          )
+    -- Keep the archive manifest and its Memory eligibility proof bounded.
+    -- A later maintenance claim will continue from the next active prefix.
+    archive_target := LEAST(lane.context_view_unit_count-retain_units,64);
+    WITH oldest AS MATERIALIZED (
+        SELECT u.*
+        FROM __forest_module_schema__.active_context_units a
+        JOIN __forest_module_schema__.context_units u
+          ON u.bot_id=a.bot_id AND u.conversation_id=a.conversation_id
+         AND u.unit_id=a.unit_id
+        WHERE a.bot_id=requested_bot AND a.conversation_id=requested_conversation
+        ORDER BY a.context_revision,a.unit_index
+        LIMIT archive_target
     ), candidates AS (
-        SELECT a.* FROM active a
-        WHERE a.recent_rank>retain_units
-          AND NOT EXISTS (
+        SELECT a.* FROM oldest a
+        WHERE NOT EXISTS (
               SELECT 1 FROM __forest_module_schema__.conversation_triggers t
               WHERE t.bot_id=a.bot_id AND t.conversation_id=a.conversation_id
                 AND t.event_id=a.event_id AND t.status IN ('PENDING','CLAIMED')
@@ -1782,7 +1861,6 @@ BEGIN
               )
           )
         ORDER BY a.context_revision,a.unit_index
-        LIMIT archive_target
     )
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
                'unit_id',unit_id,'context_revision',context_revision,
@@ -1995,6 +2073,24 @@ BEGIN
                u.item->>'author_payload_digest'
         FROM jsonb_array_elements(commit_value->'units')
              WITH ORDINALITY AS u(item,ordinality);
+        DELETE FROM __forest_module_schema__.active_context_units a
+        USING __forest_module_schema__.context_compaction_units cu
+        WHERE cu.bot_id=requested_bot
+          AND cu.conversation_id=commit_value->>'conversation_id'
+          AND cu.compaction_id=commit_value->>'compaction_id'
+          AND a.bot_id=cu.bot_id AND a.conversation_id=cu.conversation_id
+          AND a.unit_id=cu.unit_id;
+        GET DIAGNOSTICS unit_count = ROW_COUNT;
+        IF unit_count<>(commit_value->>'archived_unit_count')::bigint THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONTEXT_ACTIVE_INDEX_INVALID',
+                    'message','Active Context index differs from archive membership',
+                    'status',409
+                )
+            );
+        END IF;
         UPDATE __forest_module_schema__.conversation_lanes
         SET context_view_revision=(commit_value->>'published_view_revision')::bigint,
             context_view_unit_count=(commit_value->>'resulting_view_unit_count')::bigint,
@@ -2225,6 +2321,172 @@ BEGIN
 END;
 $$;
 
+CREATE TABLE conversation_context_maintenance_settlements (
+    claim_token text PRIMARY KEY CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE TRIGGER conversation_context_maintenance_settlements_immutable
+    BEFORE UPDATE OR DELETE ON conversation_context_maintenance_settlements
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+
+CREATE FUNCTION conversation_claim_context_maintenance(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_generation text := context->>'generation_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    lane record;
+    next_epoch bigint;
+    identity_digest text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_generation IS NULL
+       OR octet_length(requested_generation) NOT BETWEEN 1 AND 256
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 3600 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONVERSATION_MAINTENANCE_CLAIM_INVALID',
+                'message','Context maintenance claim is invalid','status',422));
+    END IF;
+    SELECT * INTO lane FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND actor_owner_id=requested_token
+      AND actor_expires_at>clock_timestamp() FOR UPDATE;
+    IF lane IS NULL THEN
+        SELECT l.* INTO lane FROM __forest_module_schema__.conversation_lanes l
+        WHERE l.bot_id=requested_bot AND l.context_view_unit_count>1
+          AND l.active_session_ref IS NULL
+          AND l.context_applied_seq=l.classified_through_seq
+          AND (l.actor_owner_id IS NULL OR l.actor_expires_at<=clock_timestamp())
+          AND (l.maintenance_retry_at IS NULL
+               OR l.maintenance_retry_at<=clock_timestamp())
+          AND (l.maintenance_generation_id IS DISTINCT FROM requested_generation
+               OR l.maintenance_context_revision IS DISTINCT FROM l.context_revision
+               OR l.maintenance_view_revision IS DISTINCT FROM l.context_view_revision)
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.conversation_triggers t
+              WHERE t.bot_id=l.bot_id AND t.conversation_id=l.conversation_id
+                AND t.status IN ('PENDING','CLAIMED')
+          )
+        ORDER BY l.updated_at,l.conversation_id
+        FOR UPDATE SKIP LOCKED LIMIT 1;
+        IF lane IS NULL THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                'ok',true,'value',NULL);
+        END IF;
+        next_epoch := lane.actor_epoch+1;
+        UPDATE __forest_module_schema__.conversation_lanes
+        SET actor_owner_id=requested_token,actor_epoch=next_epoch,
+            actor_expires_at=clock_timestamp()+(requested_lease*interval '1 second'),
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND conversation_id=lane.conversation_id
+        RETURNING * INTO lane;
+    END IF;
+    identity_digest := encode(sha256(convert_to(jsonb_build_array(
+        requested_bot,lane.conversation_id,lane.actor_epoch
+    )::text,'UTF8')),'hex');
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-claim/1',
+            'work_id',lane.conversation_id,'claim_token',requested_token,
+            'attempt',lane.actor_epoch,
+            'operation_id','conversation-maintenance:'||identity_digest,
+            'causal_root_kind','conversation.context-maintenance',
+            'causal_root_id',lane.conversation_id,
+            'payload',jsonb_build_object('actor',jsonb_build_object(
+                'conversation_id',lane.conversation_id,
+                'owner_id',requested_token,'epoch',lane.actor_epoch
+            ))
+        ));
+END;
+$$;
+
+CREATE FUNCTION conversation_settle_context_maintenance(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_generation text := context->>'generation_id';
+    requested_work text := input->>'work_id';
+    requested_token text := input->>'claim_token';
+    requested_attempt bigint := (input->>'attempt')::bigint;
+    outcome_status text := input#>>'{outcome,status}';
+    maintenance_result jsonb := input#>'{outcome,result}';
+    prior record;
+    lane record;
+    result_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_bot IS NULL OR requested_generation IS NULL
+       OR requested_work IS NULL OR requested_token IS NULL
+       OR requested_attempt IS NULL OR requested_attempt<1
+       OR (outcome_status IS DISTINCT FROM 'SUCCEEDED'
+           AND outcome_status IS DISTINCT FROM 'FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONVERSATION_MAINTENANCE_SETTLEMENT_INVALID',
+                'message','Context maintenance settlement is invalid','status',422));
+    END IF;
+    SELECT * INTO prior
+    FROM __forest_module_schema__.conversation_context_maintenance_settlements
+    WHERE claim_token=requested_token;
+    IF prior IS NOT NULL THEN
+        IF prior.input_payload=input THEN RETURN prior.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONVERSATION_MAINTENANCE_SETTLEMENT_CONFLICT',
+                'message','Context maintenance settled differently','status',409));
+    END IF;
+    SELECT * INTO lane FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_work FOR UPDATE;
+    IF lane IS NULL OR lane.actor_owner_id IS DISTINCT FROM requested_token
+       OR lane.actor_epoch IS DISTINCT FROM requested_attempt THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','STALE_CONVERSATION_ACTOR',
+                'message','Context maintenance actor is stale','status',409));
+    END IF;
+    IF outcome_status='SUCCEEDED' THEN
+        IF maintenance_result->>'protocol' IS DISTINCT FROM
+                'forest.context-pre-run-compaction/1'
+           OR maintenance_result->>'conversation_id' IS DISTINCT FROM requested_work
+           OR (maintenance_result->>'status' IS DISTINCT FROM 'COMPACTED'
+               AND maintenance_result->>'status' IS DISTINCT FROM 'SKIPPED')
+           OR (maintenance_result->>'status'='COMPACTED' AND (
+               lane.context_view_revision=0 OR
+               maintenance_result->>'context_view_revision' IS DISTINCT FROM
+                   lane.context_view_revision::text)) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','CONVERSATION_MAINTENANCE_RESULT_INVALID',
+                    'message','Context maintenance result differs from the lane','status',409));
+        END IF;
+        UPDATE __forest_module_schema__.conversation_lanes
+        SET actor_owner_id=NULL,actor_expires_at=NULL,
+            maintenance_generation_id=requested_generation,
+            maintenance_context_revision=lane.context_revision,
+            maintenance_view_revision=lane.context_view_revision-
+                CASE WHEN maintenance_result->>'status'='COMPACTED' THEN 1 ELSE 0 END,
+            maintenance_retry_at=NULL,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND conversation_id=requested_work;
+    ELSE
+        UPDATE __forest_module_schema__.conversation_lanes
+        SET actor_owner_id=NULL,actor_expires_at=NULL,
+            maintenance_retry_at=clock_timestamp()+interval '5 seconds',
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND conversation_id=requested_work;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',requested_work));
+    INSERT INTO __forest_module_schema__.conversation_context_maintenance_settlements(
+        claim_token,input_payload,result_payload
+    ) VALUES(requested_token,input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','CONVERSATION_MAINTENANCE_SETTLEMENT_INVALID',
+            'message','Context maintenance settlement is invalid','status',422));
+END;
+$$;
+
 CREATE FUNCTION conversation_append_final_reply(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -2371,6 +2633,9 @@ BEGIN
         reply_value->>'owner_component_id',reply_value->>'owner_kind',
         reply_value->>'owner_id',NULL,NULL,NULL,NULL,NULL,NULL,NULL
     );
+    INSERT INTO __forest_module_schema__.active_context_units(
+        bot_id,conversation_id,unit_id,context_revision,unit_index
+    ) VALUES(requested_bot,requested_conversation,requested_unit,context_revision_value,0);
     UPDATE __forest_module_schema__.conversation_triggers t
     SET status='ANSWERED',answered_reply_ref=requested_reply,updated_at=clock_timestamp()
     FROM jsonb_array_elements_text(trigger_values) requested(trigger_id)
