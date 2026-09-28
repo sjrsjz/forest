@@ -612,6 +612,9 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert agent_member["member"]["package_digest"] == (
                 host.registry.get("agent.runtime").snapshot.digest
             )
+            assert "conversation.context.prefill" in (
+                host.registry.get("agent.runtime")._service_routes
+            )
             assert agent_member["member"]["data_admission"] is True
             assert agent_member["member"]["control_admission"] is True
             assert next(
@@ -653,23 +656,36 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 for descriptor in host.registry.descriptors
                 if descriptor.component_id == "memory.graph"
             )
-            async with asyncio.timeout(20):
-                while True:
-                    async with host.store.pool.connection() as conn:
-                        saved_domain = await (
-                            await conn.execute(
-                                sql.SQL(
-                                    "SELECT d.space_id,d.dimensions,w.state FROM {}.memory_domains d "
-                                    "JOIN {}.memory_domain_bind_work w USING(bot_id)"
-                                ).format(
-                                    sql.Identifier(memory_schema),
-                                    sql.Identifier(memory_schema),
+            try:
+                async with asyncio.timeout(20):
+                    while True:
+                        async with host.store.pool.connection() as conn:
+                            saved_domain = await (
+                                await conn.execute(
+                                    sql.SQL(
+                                        "SELECT d.space_id,d.dimensions,w.state FROM {}.memory_domains d "
+                                        "JOIN {}.memory_domain_bind_work w USING(bot_id)"
+                                    ).format(
+                                        sql.Identifier(memory_schema),
+                                        sql.Identifier(memory_schema),
+                                    )
                                 )
-                            )
-                        ).fetchone()
-                    if saved_domain is not None and saved_domain["state"] == "READY":
-                        break
-                    await asyncio.sleep(0.1)
+                            ).fetchone()
+                        if saved_domain is not None and saved_domain["state"] == "READY":
+                            break
+                        await asyncio.sleep(0.1)
+            except TimeoutError:
+                async with host.store.pool.connection() as conn:
+                    bind_work = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT state,attempt_count,last_error_code "
+                                "FROM {}.memory_domain_bind_work WHERE bot_id=%s"
+                            ).format(sql.Identifier(memory_schema)),
+                            (settings.bot_id,),
+                        )
+                    ).fetchone()
+                pytest.fail(f"Memory domain bind did not settle: {bind_work}")
             memory_instance = host.registry.get("memory.graph")
             memory_identity = memory_instance.generation_identity
             domain = await memory_instance.runtime_service_handlers()[

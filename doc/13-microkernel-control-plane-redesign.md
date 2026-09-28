@@ -279,6 +279,8 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 系统不得从 Worker 内存临时拼 service 图。每个 Generation 在注册时固化 `provides` 的精确契约与输入/输出 schema 摘要，以及 `requires` 的版本范围、必需性和启动依赖标记；发布事务同时切换组件 route、service head、command head、message-handler head、event subscription head 和 job head。普通 service 调用在交给 Worker 前核对持久 service head、目标 Generation 和 `route_epoch`，随后由调用准入事务决定新根调用或已保留父调用是否可继续。冻结阶段不会因为只读解析提前拒绝已经入场的调用树。
 
+Builtin 安装器从包的 `requires` 推导服务调用绑定，宿主不再复制一份按组件手写的服务清单；显式绑定只能选择该包声明范围内的契约。当前 `clean_bot_host` 仍逐个硬编码 builtin 包的安装和部分启动顺序，这是组合根的未完成重构，不能把已经自动推导服务版本误认为模块安装已完全动态化。
+
 `routing.graph` 的交互查询在 PostgreSQL `REPEATABLE READ` 快照中读取这些权威 head，输出确定排序的节点、边、各注册表 revision 和 `graph_digest`。消息接纳路径必须持有 Bot runtime fence，并按发布顺序锁定 command、message-handler、service、runtime graph clock；它用四类 revision 与 component route 摘要查找内容寻址快照，稳定路由直接复用，只有键变化才扫描其余 head 并重建完整图，随后在 Inbox 固化不可变 `graph_digest`。这样既避免每条流式群消息重扫全图，也避免把整条高并发接纳事务提升为会产生 serialization failure 的隔离级别，同时阻止路由发布或策略 revision 在图读取中途穿过。缺失、不兼容或歧义依赖作为边的解析状态出现，runtime module 及其依赖边也从持久 head 投影；WebUI 只读呈现当前或指定摘要快照，不能产生另一套可编辑路由。
 
 组件命令授权绑定 `(bot_id, binding_id/group_scope, command_id, component_generation, principal_class)`。`shell.command` 对保留管理前缀的检查先行，但不会使普通组件命令获得管理权限。路由快照在一条消息入场时固定，热重载只影响之后接纳的工作；兼容接管必须显式声明并经过旧/新代际协议验证。

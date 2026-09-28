@@ -58,6 +58,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "policy_revision": "context-view-unit-window-v1",
             },
         },
+        resolved_contracts={},
     )
     memory = await bootstrap_builtin_package(
         Path(str(files("forest").joinpath("builtin/memory_graph"))),
@@ -95,6 +96,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "reservation_tokens": 32768,
             },
         },
+        resolved_contracts={},
     )
     lease = await kernel.runtime.claim_host("conversation-host", "conversation-incarnation")
     host = SimpleNamespace(

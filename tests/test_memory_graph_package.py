@@ -41,6 +41,7 @@ async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "budget-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = package.descriptor.storage.spec.namespace
 
@@ -183,6 +184,7 @@ async def test_graph_snapshot_excludes_facts_committed_after_registration(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "snapshot-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     async with store.pool.connection() as writer, store.pool.connection() as reader:
@@ -250,6 +252,7 @@ async def test_memory_neighbourhood_browses_two_hops_with_shared_snapshot_and_bo
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "neighbourhood-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     async with store.pool.connection() as conn, conn.transaction():
@@ -319,6 +322,7 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "source-cursor-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     digest = "sha256:" + "a" * 64
@@ -490,6 +494,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "forget-selection-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     digest = "sha256:" + "a" * 64
@@ -899,6 +904,7 @@ async def test_query_facet_persistence_rejects_unbound_input_identity(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "facet-identity-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     body = {
@@ -936,6 +942,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "trial-authority-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     lease = await kernel.runtime.claim_host(
         "trial-authority-host", "trial-authority-incarnation", ttl=timedelta(minutes=5),
@@ -1076,6 +1083,7 @@ async def test_management_trial_registers_mixed_input_and_separate_cancellation(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "trial-action-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     digest = "sha256:" + "a" * 64
@@ -1277,6 +1285,7 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "trial-input-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     digest = "sha256:" + "a" * 64
@@ -1741,6 +1750,7 @@ async def test_expired_trial_vectors_are_suppressed_and_deleted(clean_authority,
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "expired-trial-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     digest = "sha256:" + "a" * 64
@@ -2003,6 +2013,7 @@ async def test_trial_gc_cursor_reaches_later_trial_behind_live_claims(clean_auth
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "trial-gc-cursor-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     digest = "sha256:" + "b" * 64
@@ -2176,6 +2187,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
         installer,
         kernel=kernel,
         initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     lease = await kernel.runtime.claim_host(
         "memory-package-host",

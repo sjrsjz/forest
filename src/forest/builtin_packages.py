@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from forest.errors import ForestError
 from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.package_effects import (
     EMPTY_PACKAGE_EFFECT_DRIVERS,
@@ -22,7 +23,13 @@ from forest.package_state_ports import (
     KernelPackageStateQueries,
 )
 from forest.package_unit_of_work import package_uow_coordinator_factory
-from forest.packages import PackageCatalog, PackageSnapshot, digest_json
+from forest.packages import (
+    PackageCatalog,
+    PackageSnapshot,
+    contract_matches,
+    contract_range,
+    digest_json,
+)
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
     RuntimePackageManagementContribution,
@@ -40,6 +47,35 @@ class BuiltinPackageModule:
     descriptor: RuntimeModuleDescriptor
     configuration: ModuleConfigurationRepository
     grants: object
+
+
+def _required_service_contracts(
+    snapshot: PackageSnapshot, overrides: dict[str, str] | None
+) -> dict[str, str]:
+    declared = {item["name"]: item for item in snapshot.component.get("requires", ())}
+    if overrides == {}:
+        # Isolated package harnesses may deliberately omit peer providers.
+        # Production assembly passes None and binds the manifest set.
+        return {}
+    supplied = dict(overrides or {})
+    if set(supplied) - set(declared):
+        raise ForestError(
+            "PACKAGE_DEPENDENCY_BINDING_INVALID",
+            "A service binding is absent from the package manifest",
+            422,
+        )
+    result = {}
+    for name, dependency in declared.items():
+        lower, _upper = contract_range(dependency["contract"])
+        selected = supplied.get(name, f"{lower[0]}.{lower[1]}")
+        if not contract_matches(dependency["contract"], selected):
+            raise ForestError(
+                "PACKAGE_DEPENDENCY_BINDING_INVALID",
+                "A service binding violates the package contract range",
+                422,
+            )
+        result[name] = selected
+    return result
 
 
 def _configuration_storage(snapshot: PackageSnapshot) -> RuntimeStorageBundle:
@@ -189,7 +225,7 @@ async def bootstrap_builtin_package(
         bot_id=store.bot_id,
         module_configuration=configuration,
         grants=grants,
-        resolved_contracts=resolved_contracts or {},
+        resolved_contracts=_required_service_contracts(snapshot, resolved_contracts),
         startup_components=tuple(
             dict.fromkeys(
                 (

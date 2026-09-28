@@ -27,6 +27,7 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "neighbour-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     validator = Draft202012Validator(package.snapshot.schema("schemas/read-graph-neighbours-output.json"))

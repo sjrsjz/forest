@@ -42,6 +42,27 @@ def test_build_never_imports_and_captures_complete_helpers(tmp_path):
         catalog.build(root)
 
 
+@pytest.mark.parametrize("grant", [False, True])
+def test_service_call_grants_require_manifest_dependencies(tmp_path, grant):
+    root = source(tmp_path)
+    manifest = root / "module.toml"
+    value = manifest.read_text(encoding="utf-8")
+    if grant:
+        value = value.replace(
+            'requests = ["state.read", "state.write"]',
+            'requests = ["state.read", "state.write", "service.call:memory.query.begin"]',
+        )
+    else:
+        value += (
+            '\n[[components.requires]]\nname = "memory.query.begin"\n'
+            'contract = ">=1.0,<2.0"\nrequired = true\nstartup_dependency = false\n'
+        )
+    manifest.write_text(value, encoding="utf-8")
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(root)
+    assert caught.value.code == "INVALID_DEPENDENCY"
+
+
 @pytest.mark.parametrize("change,code", [
     ("syntax", "PACKAGE_SYNTAX_ERROR"),
     ("schema", "INVALID_SCHEMA"),

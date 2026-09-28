@@ -1220,6 +1220,17 @@ def _manifest(files: dict[str, bytes]) -> dict:
             _fail("INVALID_DEPENDENCY", "Dependency service names must be valid and unique")
         contract_range(dependency["contract"])
         dependency_names.add(name)
+    service_call_grants = {
+        item.removeprefix("service.call:")
+        for item in component.get("capabilities", {}).get("requests", ())
+        if item.startswith("service.call:")
+    }
+    local_effects = {item["name"] for item in component.get("effect_services", ())}
+    if dependency_names - service_call_grants or service_call_grants - dependency_names - local_effects:
+        _fail(
+            "INVALID_DEPENDENCY",
+            "Service call grants must name a declared dependency or local effect",
+        )
     _schema(files, component.get("config_schema"))
     _management_ui(files, component)
     _storage_bundle(files, component)

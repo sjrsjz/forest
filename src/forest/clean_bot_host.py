@@ -400,7 +400,6 @@ class CleanBotHost:
             self.schema_bundle_installer,
             kernel=self._kernel,
             initial_configuration={"protocol": "forest.component-worker-host/1"},
-            resolved_contracts={"runtime.graph.snapshot": "1.0"},
         )
         embedding_profile = {
             "deployment_id": self.settings.embedding_deployment_id,
@@ -527,14 +526,6 @@ class CleanBotHost:
                     "reservation_tokens": 32768,
                 },
             },
-            resolved_contracts={
-                "embedding.profile.bind": "1.0",
-                "embedding.request.materialize": "1.0",
-                "embedding.encode": "2.0",
-                "vector.index.upsert": "2.0",
-                "vector.index.delete": "1.0",
-                "vector.index.search": "2.0",
-            },
             additional_grants=(
                 CapabilityGrant("embedding.invoke", "bot", self.store.bot_id, delegable=True),
             ),
@@ -554,10 +545,6 @@ class CleanBotHost:
                 "max_connections": 4,
                 "max_attempts": 3,
                 "context_wait_seconds": 3,
-            },
-            resolved_contracts={
-                "memory.source.capture": "1.0",
-                "memory.source.unavailable": "1.0",
             },
             startup_components=("memory.graph",),
             effect_driver_registry=PackageEffectDriverRegistry(
@@ -606,16 +593,6 @@ class CleanBotHost:
                 "max_steps": 64,
                 "output_tokens": self.settings.model_max_output_tokens,
                 "stream": True,
-            },
-            resolved_contracts={
-                "provider.profile.bind": "1.0",
-                "provider.model.dispatch": "2.0",
-                "conversation.context.snapshot": "2.0",
-                "media.context.resolve": "1.0",
-                "memory.query.begin": "1.0",
-                "memory.query.request": "1.0",
-                "memory.query.work-status": "1.0",
-                "memory.query.cancel": "1.0",
             },
             startup_components=(
                 "provider.chat-completions", "media.capture", "memory.graph",
@@ -709,10 +686,6 @@ class CleanBotHost:
                     "policy_revision": "context-view-unit-window-v1",
                 },
             },
-            resolved_contracts={
-                "agent.execute": "2.0",
-                "agent.execution.policy": "1.0",
-            },
             startup_components=("agent.runtime",),
         )
         delivery = await bootstrap_builtin_package(
@@ -722,10 +695,6 @@ class CleanBotHost:
             self.schema_bundle_installer,
             kernel=self._kernel,
             initial_configuration={"protocol": "forest.delivery/1"},
-            resolved_contracts={
-                "adapter.onebot.delivery.prepare": "2.0",
-                "adapter.onebot.delivery.dispatch": "2.0",
-            },
             startup_components=("adapter.onebot",),
             effect_driver_registry=PackageEffectDriverRegistry(
                 {
@@ -793,12 +762,6 @@ class CleanBotHost:
                         "enabled": True,
                     }
                 ],
-            },
-            resolved_contracts={
-                "onebot.codec.normalize": "1.0",
-                "onebot.codec.prepare-send": "1.0",
-                "conversation.trigger.classify": "1.0",
-                "shell.ingress.inspect": "1.0",
             },
             startup_components=(
                 "codec.onebot",

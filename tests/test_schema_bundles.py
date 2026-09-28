@@ -1081,6 +1081,7 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
                 )
             }
         ),
+        resolved_contracts={},
     )
     reply_ref = "reply/1"
     epoch = await kernel.payload.epoch()

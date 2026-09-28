@@ -123,6 +123,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "policy_revision": "context-view-unit-window-v1",
             },
         },
+        resolved_contracts={},
     )
     memory_package = await bootstrap_builtin_package(
         Path(str(files("forest").joinpath("builtin/memory_graph"))),
@@ -160,6 +161,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "reservation_tokens": 32768,
             },
         },
+        resolved_contracts={},
     )
     preset = await _payload(
         kernel,
@@ -187,6 +189,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "output_tokens": 4096,
             "stream": True,
         },
+        resolved_contracts={},
     )
     lease = await kernel.runtime.claim_host(
         "agent-package-host",

@@ -26,6 +26,7 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "association-packages"),
         store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
     )
     schema = sql.Identifier(package.descriptor.storage.spec.namespace)
     digest = "sha256:" + "a" * 64
