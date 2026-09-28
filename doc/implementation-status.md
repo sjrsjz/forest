@@ -207,6 +207,8 @@ Memory 管理关系新增 `memory.relations.neighbourhood` 只读端口：从指
 
 试验临时图片 part 现在必须保存并约束真实宽高，文本 part 禁止伪造宽高；Embedding 物化服务支持独立的 `ADMIN_TRIAL` 查询身份和图片快照，冻结请求验证不再需要伪造群来源单元。图文物化在两种 VL 模型请求格式下通过回放验证，原有群来源物化回归通过。试验 facet 的 claim、预算/Generation 围栏、向量发布和管理启动 action 仍待接通，因此不能将物化能力表述为可用的管理召回试验。
 
+后续已把试验 facet 接入 Memory 的嵌入 claim、handoff 资格复核与向量发布：认领时要求 Bot/Generation、未过期的试验输入、固定 part 和 PayloadRef；handoff 前重新锁定并核验，旧 Generation 不可继续派发。发布事务仍按当前 Generation 与到期时间判定，失效向量写 ref-only 删除 outbox 并抑制 facet；向量发布 Worker 的任务契约不再暴露群来源字段。隔离 PostgreSQL 已验证图文试验认领、旧 Generation 拒绝、正常发布为 READY、旧 Generation 发布时墓碑删除，以及删除 outbox 的认领与结算；完整 Memory 包 15 项、静态检查和本地 441 项回归通过。管理启动/取消 action、受管资产入口、试验调度/结果查询与 TTL 清理尚未完成，因此管理试验仍不可用。
+
 Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。管理启动 action、受管临时资产接纳、试验 owned-work、结果查询和 TTL 清理仍未完成。
 
 ## 8. 下一切换顺序

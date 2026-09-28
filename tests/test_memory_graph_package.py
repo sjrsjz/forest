@@ -744,6 +744,172 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
             Jsonb(complete),
         ))).fetchone())["result"]
     assert result["ok"] and result["value"]["facet_count"] == 2, result
+    async def claim_trial(generation, token):
+        async with store.pool.connection() as conn:
+            return (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_claim_embedding_batch(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id, "generation_id": generation}),
+                Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                       "claim_token": token, "lease_seconds": 360}),
+            ))).fetchone())["result"]
+
+    stale_claim = await claim_trial("generation/replaced", "claim/stale-trial")
+    assert stale_claim["ok"] and stale_claim["value"] is None
+    trial_claim = await claim_trial("generation/trial", "claim/current-trial")
+    assert trial_claim["ok"] and trial_claim["value"] is not None, trial_claim
+    trial_work = trial_claim["value"]["payload"]
+    Draft202012Validator(package.snapshot.schema(
+        "schemas/embedding-work-input.json"
+    )).validate(trial_work)
+    assert [(facet["input_kind"], facet["input_ref"], facet["input_revision"])
+            for facet in trial_work["facets"]] == [
+                ("ADMIN_TRIAL", "query/trial", 1),
+                ("ADMIN_TRIAL", "query/trial", 1),
+            ]
+    assert all("source_unit_id" not in facet for facet in trial_work["facets"])
+    assert trial_work["facets"][1]["width"] == 1
+    assert trial_work["facets"][1]["height"] == 1
+    assert await claim_trial("generation/trial", "claim/current-trial") == trial_claim
+    async with store.pool.connection() as conn:
+        eligibility = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_count_eligible_embedding_facets("
+            "%s,%s,%s,0,'PENDING',NULL,%s) AS valid"
+        ).format(namespace), (
+            store.bot_id, "claim/current-trial", digest, "generation/trial",
+        ))).fetchone())["valid"]
+        stale_eligibility = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_count_eligible_embedding_facets("
+            "%s,%s,%s,0,'PENDING',NULL,%s) AS valid"
+        ).format(namespace), (
+            store.bot_id, "claim/current-trial", digest, "generation/replaced",
+        ))).fetchone())["valid"]
+    assert eligibility == 2 and stale_eligibility == 0
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_domain_bind_work(bot_id,state) VALUES (%s,'READY')"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_budget_days "
+            "(bot_id,budget_day,settled_requests,charged_tokens) "
+            "VALUES (%s,current_date,1,1)"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_budget_reservations "
+            "(bot_id,reservation_id,operation_id,input_digest,batch_ref,"
+            "policy_revision,budget_day,request_limit,token_limit,reserved_tokens,"
+            "deadline_at,state,settlement_operation_id,settlement_input_digest,"
+            "charged_tokens,settled_at) VALUES "
+            "(%s,'reservation/trial','reserve/trial',%s,'claim/current-trial',"
+            "'policy/trial',current_date,10,1000,1,"
+            "clock_timestamp()+interval '1 minute','CHARGED',"
+            "'settle/trial',%s,1,clock_timestamp())"
+        ).format(namespace), (store.bot_id, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_batch_attempts "
+            "(bot_id,attempt_id,claim_id,effect_operation_id,executor_component_id,"
+            "executor_generation_id,fence_graph_id,fence_graph_revision,"
+            "accepted_deletion_epoch,effect_wire_payload_id,effect_wire_payload_digest,"
+            "reservation_id,deadline_at,state,handoff_operation_id,"
+            "settlement_operation_id,settlement_input_digest,result_payload_id,"
+            "result_payload_digest,dispatched_at,settled_at) VALUES "
+            "(%s,'attempt/trial','claim/current-trial','effect/trial',"
+            "'embedding.multimodal','generation/trial','graph/trial',1,0,"
+            "'effect-wire/trial',%s,'reservation/trial',"
+            "clock_timestamp()+interval '1 minute','SUCCEEDED','handoff/trial',"
+            "'settlement/trial',%s,'embedding-result/trial',%s,"
+            "clock_timestamp(),clock_timestamp())"
+        ).format(namespace), (store.bot_id, digest, digest, digest))
+        for state in ("PREPARED", "DISPATCHED", "EMBEDDED"):
+            await conn.execute(sql.SQL(
+                "UPDATE {}.embedding_facets SET state=%s,current_attempt_id='attempt/trial',"
+                "vector_digest=CASE WHEN %s='EMBEDDED' THEN %s ELSE NULL END,"
+                "result_payload_id=CASE WHEN %s='EMBEDDED' "
+                "THEN 'embedding-result/trial' ELSE NULL END,"
+                "result_payload_digest=CASE WHEN %s='EMBEDDED' THEN %s ELSE NULL END "
+                "WHERE bot_id=%s AND query_id='query/trial'"
+            ).format(namespace), (state, state, digest, state, state, digest,
+                                  store.bot_id))
+    async with store.pool.connection() as conn:
+        publish_claim = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_claim_vector_publish(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id, "generation_id": "generation/trial"}),
+            Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                   "claim_token": "publish/trial", "lease_seconds": 360}),
+        ))).fetchone())["result"]
+    assert publish_claim["ok"], publish_claim
+    publish_work = publish_claim["value"]["payload"]
+    Draft202012Validator(package.snapshot.schema(
+        "schemas/vector-publish-work-input.json"
+    )).validate(publish_work)
+    assert all("source_unit_id" not in facet for facet in publish_work["facets"])
+    publish_body = {
+        "protocol": "forest.memory-vector-publish/1",
+        "attempt_id": "attempt/trial", "claim_token": "publish/trial",
+        "space_id": digest,
+        "results": [{"facet_id": facet["facet_id"], "status": "PUBLISHED"}
+                    for facet in publish_work["facets"]],
+    }
+    publish_context = {
+        "bot_id": store.bot_id, "generation_id": "generation/trial",
+        "operation_id": "publish/trial-operation",
+        "participant_input_digest": digest_json(publish_body),
+    }
+    publish_envelope = {
+        "protocol": "forest.uow-step/1", "caller": {"component_id": "memory.graph"},
+        "input": publish_body,
+        "prior": {"payload_epoch": {"protocol": "forest.payload-epoch/1",
+                                    "deletion_epoch": 0}},
+    }
+    with pytest.raises(RuntimeError, match="rollback stale publication"):
+        async with store.pool.connection() as conn, conn.transaction():
+            stale_publish = (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_publish_vector_batch(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({**publish_context, "generation_id": "generation/replaced"}),
+                Jsonb(publish_envelope),
+            ))).fetchone())["result"]
+            assert stale_publish["ok"] and stale_publish["value"]["deletion_count"] == 2
+            deleted = (await (await conn.execute(sql.SQL(
+                "SELECT count(*) AS n FROM {}.vector_index_deletions WHERE bot_id=%s"
+            ).format(namespace), (store.bot_id,))).fetchone())["n"]
+            assert deleted == 2
+            deletion_claim = (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_claim_vector_deletion(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id}),
+                Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                       "claim_token": "delete/trial", "lease_seconds": 360}),
+            ))).fetchone())["result"]
+            assert deletion_claim["ok"] and deletion_claim["value"] is not None
+            deletion_ref = deletion_claim["value"]["payload"]["index_ref_id"]
+            deletion_settlement = (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_settle_vector_deletion(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id}),
+                Jsonb({"protocol": "forest.owned-work-settle-request/1",
+                       "work_id": deletion_ref, "claim_token": "delete/trial",
+                       "attempt": 1,
+                       "outcome": {"status": "SUCCEEDED",
+                                   "result": {"index_ref_id": deletion_ref,
+                                              "deleted": True}}}),
+            ))).fetchone())["result"]
+            assert deletion_settlement["ok"], deletion_settlement
+            raise RuntimeError("rollback stale publication")
+    async with store.pool.connection() as conn:
+        published = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_publish_vector_batch(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb(publish_context), Jsonb(publish_envelope),
+        ))).fetchone())["result"]
+    assert published["ok"] and published["value"]["ready_count"] == 2, published
+    async with store.pool.connection() as conn:
+        ready = (await (await conn.execute(sql.SQL(
+            "SELECT count(*) AS n FROM {}.embedding_facets "
+            "WHERE bot_id=%s AND query_id='query/trial' AND state='READY'"
+        ).format(namespace), (store.bot_id,))).fetchone())["n"]
+    assert ready == 2
     stale = await browse("generation/replaced")
     assert stale["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
     async with store.pool.connection() as conn:

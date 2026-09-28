@@ -12,13 +12,27 @@
       "items": {
         "type": "object", "additionalProperties": false,
         "required": [
-          "facet_id", "source_unit_id", "source_revision", "part_id", "trunk_id",
-          "conversation_ref", "author_ref", "modality", "selector_start_char",
+          "facet_id", "part_id", "modality", "selector_start_char",
           "selector_end_char", "input_payload", "facet_content_digest",
           "input_byte_length", "media_type", "width", "height"
         ],
+        "oneOf": [
+          {"required": ["source_unit_id", "source_revision", "trunk_id", "conversation_ref", "author_ref"],
+           "not": {"required": ["input_kind"]}},
+          {"required": ["input_kind", "input_ref", "input_revision", "query_id"],
+           "properties": {"input_kind": {"const": "ADMIN_TRIAL"}},
+           "not": {"anyOf": [
+             {"required": ["source_unit_id"]}, {"required": ["source_revision"]},
+             {"required": ["trunk_id"]}, {"required": ["conversation_ref"]},
+             {"required": ["author_ref"]}
+           ]}}
+        ],
         "properties": {
           "facet_id": {"$ref": "#/$defs/id"},
+          "input_kind": {"const": "ADMIN_TRIAL"},
+          "input_ref": {"$ref": "#/$defs/id"},
+          "input_revision": {"type": "integer", "minimum": 1},
+          "query_id": {"$ref": "#/$defs/id"},
           "source_unit_id": {"$ref": "#/$defs/id"},
           "source_revision": {"type": "integer", "minimum": 1},
           "part_id": {"$ref": "#/$defs/id"},
@@ -49,7 +63,7 @@
         "digest": {"$ref": "#/$defs/digest"},
         "owner_component_id": {"$ref": "#/$defs/id"},
         "owner_kind": {"$ref": "#/$defs/id"},
-        "owner_id": {"$ref": "#/$defs/id"}
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
       }
     }
   }

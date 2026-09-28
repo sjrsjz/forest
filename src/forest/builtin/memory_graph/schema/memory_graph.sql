@@ -1070,7 +1070,6 @@ CREATE TABLE vector_index_deletions (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     index_ref_id text NOT NULL CHECK (octet_length(index_ref_id) BETWEEN 1 AND 256),
     space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
-    source_unit_id text NOT NULL CHECK (octet_length(source_unit_id) BETWEEN 1 AND 256),
     deletion_epoch bigint NOT NULL CHECK (deletion_epoch >= 0),
     state text NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING','DELETED')),
     claim_token text CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
@@ -2802,7 +2801,6 @@ BEGIN
     END IF;
     SELECT jsonb_agg(jsonb_build_object(
         'facet_id',f.facet_id,'item_index',ci.item_index,
-        'source_unit_id',f.source_unit_id,'source_revision',f.source_revision,
         'modality',f.modality,'state',f.state,'vector_digest',f.vector_digest
     ) ORDER BY ci.item_index) INTO facets_value
     FROM __forest_module_schema__.embedding_claim_items ci
@@ -2862,7 +2860,7 @@ DECLARE
     prior_row __forest_module_schema__.vector_publish_operations%ROWTYPE;
     facet_row record;
     item_result jsonb;
-    source_eligible boolean;
+    input_eligible boolean;
     ready_count integer := 0;
     deletion_count integer := 0;
     seen_count integer := 0;
@@ -2912,33 +2910,65 @@ BEGIN
                 'message','Vector publication membership differs','status',409));
     END IF;
     FOR facet_row IN
-        SELECT ci.item_index,f.facet_id,f.state AS facet_state,f.source_unit_id,f.purpose,
-               f.source_revision,f.space_id,f.accepted_deletion_epoch,
-               f.index_ref_id,u.source_revision AS unit_revision,
-               u.eligibility_state AS unit_state,
-               u.accepted_deletion_epoch AS unit_epoch,
-               s.status AS source_state,o.occurrence_id
+        SELECT ci.item_index,f.facet_id,f.state AS facet_state,f.input_kind,
+               f.purpose,f.source_revision,f.input_revision,
+               f.input_payload_id,f.input_payload_digest,f.space_id,
+               f.accepted_deletion_epoch,f.index_ref_id,
+               source_data.unit_revision,source_data.unit_state,
+               source_data.unit_epoch,source_data.source_state,
+               source_data.occurrence_id,
+               trial_data.input_revision AS trial_revision,
+               trial_data.generation_id AS trial_generation,
+               trial_data.expires_at AS trial_expiry,
+               trial_data.query_state,trial_data.query_epoch,
+               trial_data.payload_id AS trial_payload_id,
+               trial_data.payload_digest AS trial_payload_digest
         FROM __forest_module_schema__.embedding_claim_items ci
         JOIN __forest_module_schema__.embedding_facets f
           ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
-        JOIN __forest_module_schema__.source_units u
-          ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
-        JOIN __forest_module_schema__.memory_sources s
-          ON s.bot_id=u.bot_id AND s.source_id=u.source_id
         LEFT JOIN LATERAL (
-            SELECT occurrence.occurrence_id
-            FROM __forest_module_schema__.source_occurrences occurrence
-            WHERE occurrence.bot_id=f.bot_id
-              AND occurrence.source_unit_id=f.source_unit_id
-              AND ((f.purpose='DOCUMENT' AND occurrence.eligibility_state='ELIGIBLE')
-                   OR (f.purpose='QUERY' AND
-                       __forest_module_schema__.memory_query_occurrence_matches(
-                           f.bot_id,f.query_id,f.source_unit_id,f.source_revision,
-                           f.part_id,occurrence.occurrence_id)))
-            ORDER BY occurrence.occurrence_id LIMIT 1 FOR SHARE
-        ) o ON true
+            SELECT u.source_revision AS unit_revision,
+                   u.eligibility_state AS unit_state,
+                   u.accepted_deletion_epoch AS unit_epoch,
+                   s.status AS source_state,o.occurrence_id
+            FROM __forest_module_schema__.source_units u
+            JOIN __forest_module_schema__.memory_sources s
+              ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+            LEFT JOIN LATERAL (
+                SELECT occurrence.occurrence_id
+                FROM __forest_module_schema__.source_occurrences occurrence
+                WHERE occurrence.bot_id=f.bot_id
+                  AND occurrence.source_unit_id=f.source_unit_id
+                  AND ((f.purpose='DOCUMENT' AND occurrence.eligibility_state='ELIGIBLE')
+                       OR (f.purpose='QUERY' AND
+                           __forest_module_schema__.memory_query_occurrence_matches(
+                               f.bot_id,f.query_id,f.source_unit_id,f.source_revision,
+                               f.part_id,occurrence.occurrence_id)))
+                ORDER BY occurrence.occurrence_id LIMIT 1 FOR SHARE
+            ) o ON true
+            WHERE f.input_kind='SOURCE_UNIT'
+              AND u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+            FOR SHARE OF u,s
+        ) source_data ON true
+        LEFT JOIN LATERAL (
+            SELECT t.input_revision,t.generation_id,t.expires_at,
+                   q.state AS query_state,
+                   q.accepted_deletion_epoch AS query_epoch,
+                   p.payload_id,p.payload_digest
+            FROM __forest_module_schema__.memory_trial_inputs t
+            JOIN __forest_module_schema__.memory_queries q
+              ON q.bot_id=t.bot_id AND q.query_id=t.query_id
+             AND q.input_kind='ADMIN_TRIAL'
+            JOIN __forest_module_schema__.memory_trial_parts p
+              ON p.bot_id=t.bot_id AND p.query_id=t.query_id
+             AND p.part_id=f.part_id AND p.modality=f.modality
+            WHERE f.input_kind='ADMIN_TRIAL'
+              AND t.bot_id=f.bot_id AND t.query_id=f.trial_query_id
+              AND t.query_id=f.query_id
+            FOR SHARE OF t,q,p
+        ) trial_data ON true
         WHERE ci.bot_id=requested_bot AND ci.claim_id=attempt_row.claim_id
-        ORDER BY ci.item_index FOR UPDATE OF f FOR SHARE OF u,s
+        ORDER BY ci.item_index FOR UPDATE OF f
     LOOP
         seen_count := seen_count+1;
         item_result := results_value->facet_row.item_index;
@@ -2948,18 +2978,29 @@ BEGIN
            OR facet_row.purpose IS DISTINCT FROM claim_row.purpose
            OR facet_row.facet_state NOT IN ('EMBEDDED','READY','SUPPRESSED')
            OR facet_row.accepted_deletion_epoch>epoch_number
-           OR facet_row.unit_epoch>epoch_number THEN
+           OR facet_row.unit_epoch>epoch_number
+           OR facet_row.query_epoch>epoch_number THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','MEMORY_VECTOR_PUBLISH_MEMBERS_INVALID',
                     'message','Vector publication facet differs','status',409));
         END IF;
-        source_eligible := facet_row.facet_state<>'SUPPRESSED'
-            AND (facet_row.unit_state='ELIGIBLE'
-                 OR (facet_row.purpose='QUERY' AND facet_row.unit_state='REGISTERED'))
-            AND facet_row.unit_revision=facet_row.source_revision
-            AND facet_row.source_state='ACTIVE'
-            AND facet_row.occurrence_id IS NOT NULL;
-        IF source_eligible THEN
+        input_eligible := facet_row.facet_state<>'SUPPRESSED' AND (
+            (facet_row.input_kind='SOURCE_UNIT'
+             AND facet_row.unit_state IN ('ELIGIBLE','REGISTERED')
+             AND (facet_row.unit_state='ELIGIBLE' OR facet_row.purpose='QUERY')
+             AND facet_row.unit_revision=facet_row.source_revision
+             AND facet_row.source_state='ACTIVE'
+             AND facet_row.occurrence_id IS NOT NULL)
+            OR
+            (facet_row.input_kind='ADMIN_TRIAL' AND facet_row.purpose='QUERY'
+             AND facet_row.trial_revision=facet_row.input_revision
+             AND facet_row.trial_generation=context->>'generation_id'
+             AND facet_row.trial_expiry>clock_timestamp()
+             AND facet_row.query_state='OPEN'
+             AND facet_row.trial_payload_id=facet_row.input_payload_id
+             AND facet_row.trial_payload_digest=facet_row.input_payload_digest)
+        );
+        IF input_eligible THEN
             IF item_result->>'status'<>'PUBLISHED' THEN
                 RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                     'error',jsonb_build_object('code','MEMORY_VECTOR_REF_NOT_PUBLISHED',
@@ -2978,9 +3019,8 @@ BEGIN
             ready_count := ready_count+1;
         ELSE
             INSERT INTO __forest_module_schema__.vector_index_deletions(
-                bot_id,index_ref_id,space_id,source_unit_id,deletion_epoch)
-            VALUES(requested_bot,facet_row.facet_id,facet_row.space_id,
-                facet_row.source_unit_id,epoch_number)
+                bot_id,index_ref_id,space_id,deletion_epoch)
+            VALUES(requested_bot,facet_row.facet_id,facet_row.space_id,epoch_number)
             ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
             IF facet_row.facet_state IN ('EMBEDDED','READY') THEN
                 UPDATE __forest_module_schema__.embedding_facets
@@ -3427,10 +3467,10 @@ $$;
 
 CREATE FUNCTION guard_vector_index_deletion() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF ROW(NEW.bot_id,NEW.index_ref_id,NEW.space_id,NEW.source_unit_id,
+    IF ROW(NEW.bot_id,NEW.index_ref_id,NEW.space_id,
            NEW.deletion_epoch,NEW.created_at)
        IS DISTINCT FROM
-       ROW(OLD.bot_id,OLD.index_ref_id,OLD.space_id,OLD.source_unit_id,
+       ROW(OLD.bot_id,OLD.index_ref_id,OLD.space_id,
            OLD.deletion_epoch,OLD.created_at) THEN
         RAISE EXCEPTION 'Vector index deletion identity is immutable' USING ERRCODE='55000';
     END IF;
@@ -4295,7 +4335,8 @@ $$;
 
 CREATE FUNCTION memory_count_eligible_embedding_facets(
     requested_bot text, requested_claim text, expected_space text,
-    epoch_number bigint, expected_state text, expected_attempt text
+    epoch_number bigint, expected_state text, expected_attempt text,
+    expected_generation text
 ) RETURNS integer LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE qualified_count integer;
 BEGIN
@@ -4304,34 +4345,58 @@ BEGIN
         FROM __forest_module_schema__.embedding_claim_items ci
         JOIN __forest_module_schema__.embedding_facets f
           ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
-        JOIN __forest_module_schema__.source_units u
-          ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
-         AND u.source_revision=f.source_revision
-         AND (u.eligibility_state='ELIGIBLE'
-              OR (f.purpose='QUERY' AND u.eligibility_state='REGISTERED'))
-        JOIN __forest_module_schema__.memory_sources s
-          ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
-        JOIN __forest_module_schema__.source_parts p
-          ON p.bot_id=f.bot_id AND p.source_unit_id=f.source_unit_id
-         AND p.part_id=f.part_id AND p.payload_id=f.input_payload_id
-         AND p.payload_digest=f.input_payload_digest
-        JOIN LATERAL (
-            SELECT o.occurrence_id
-            FROM __forest_module_schema__.source_occurrences o
-            WHERE o.bot_id=f.bot_id AND o.source_unit_id=f.source_unit_id
-              AND ((f.purpose='DOCUMENT' AND o.eligibility_state='ELIGIBLE')
-                   OR (f.purpose='QUERY' AND
-                       __forest_module_schema__.memory_query_occurrence_matches(
-                           f.bot_id,f.query_id,f.source_unit_id,f.source_revision,
-                           f.part_id,o.occurrence_id)))
-            ORDER BY o.occurrence_id LIMIT 1 FOR SHARE
-        ) occurrence ON true
+        LEFT JOIN LATERAL (
+            SELECT 1 AS eligible
+            FROM __forest_module_schema__.source_units u
+            JOIN __forest_module_schema__.memory_sources s
+              ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+            JOIN __forest_module_schema__.source_parts p
+              ON p.bot_id=f.bot_id AND p.source_unit_id=f.source_unit_id
+             AND p.part_id=f.part_id AND p.payload_id=f.input_payload_id
+             AND p.payload_digest=f.input_payload_digest
+            JOIN LATERAL (
+                SELECT o.occurrence_id
+                FROM __forest_module_schema__.source_occurrences o
+                WHERE o.bot_id=f.bot_id AND o.source_unit_id=f.source_unit_id
+                  AND ((f.purpose='DOCUMENT' AND o.eligibility_state='ELIGIBLE')
+                       OR (f.purpose='QUERY' AND
+                           __forest_module_schema__.memory_query_occurrence_matches(
+                               f.bot_id,f.query_id,f.source_unit_id,f.source_revision,
+                               f.part_id,o.occurrence_id)))
+                ORDER BY o.occurrence_id LIMIT 1 FOR SHARE
+            ) occurrence ON true
+            WHERE f.input_kind='SOURCE_UNIT'
+              AND u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+              AND u.source_revision=f.source_revision
+              AND (u.eligibility_state='ELIGIBLE'
+                   OR (f.purpose='QUERY' AND u.eligibility_state='REGISTERED'))
+            FOR SHARE OF u,s,p
+        ) source_member ON true
+        LEFT JOIN LATERAL (
+            SELECT 1 AS eligible
+            FROM __forest_module_schema__.memory_trial_inputs t
+            JOIN __forest_module_schema__.memory_queries q
+              ON q.bot_id=t.bot_id AND q.query_id=t.query_id
+             AND q.input_kind='ADMIN_TRIAL' AND q.state='OPEN'
+            JOIN __forest_module_schema__.memory_trial_parts p
+              ON p.bot_id=t.bot_id AND p.query_id=t.query_id
+             AND p.part_id=f.part_id AND p.modality=f.modality
+             AND p.payload_id=f.input_payload_id
+             AND p.payload_digest=f.input_payload_digest
+            WHERE f.input_kind='ADMIN_TRIAL' AND f.purpose='QUERY'
+              AND t.bot_id=f.bot_id AND t.query_id=f.trial_query_id
+              AND t.query_id=f.query_id AND t.input_revision=f.input_revision
+              AND t.generation_id=expected_generation
+              AND t.expires_at>clock_timestamp()
+            FOR SHARE OF t,q,p
+        ) trial_member ON true
         WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
           AND f.state=expected_state AND f.space_id=expected_space
           AND f.current_attempt_id IS NOT DISTINCT FROM expected_attempt
           AND f.accepted_deletion_epoch<=epoch_number
+          AND (source_member.eligible IS NOT NULL OR trial_member.eligible IS NOT NULL)
         ORDER BY ci.item_index
-        FOR UPDATE OF f FOR SHARE OF u,s
+        FOR UPDATE OF f
     )
     SELECT count(*) INTO qualified_count FROM locked;
     RETURN qualified_count;
@@ -4443,7 +4508,8 @@ BEGIN
                 'message','Embedding batch claim is no longer eligible','status',409));
     END IF;
     qualified_count := __forest_module_schema__.memory_count_eligible_embedding_facets(
-        requested_bot,requested_claim,claim_row.space_id,epoch_number,'PENDING',NULL);
+        requested_bot,requested_claim,claim_row.space_id,epoch_number,
+        'PENDING',NULL,context->>'generation_id');
     IF qualified_count<>claim_row.item_count THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_SOURCE_CHANGED',
@@ -4546,7 +4612,7 @@ BEGIN
     END IF;
     qualified_count := __forest_module_schema__.memory_count_eligible_embedding_facets(
         requested_bot,requested_claim,claim_row.space_id,epoch_number,
-        'PREPARED',requested_attempt);
+        'PREPARED',requested_attempt,context->>'generation_id');
     IF qualified_count<>claim_row.item_count THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_SOURCE_CHANGED',
@@ -5991,8 +6057,8 @@ BEGIN
         WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id
           AND eligibility_state<>'SUPPRESSED';
         INSERT INTO __forest_module_schema__.vector_index_deletions(
-            bot_id,index_ref_id,space_id,source_unit_id,deletion_epoch)
-        SELECT bot_id,facet_id,space_id,source_unit_id,deletion_epoch_value
+            bot_id,index_ref_id,space_id,deletion_epoch)
+        SELECT bot_id,facet_id,space_id,deletion_epoch_value
         FROM __forest_module_schema__.embedding_facets
         WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id
         ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
@@ -6677,36 +6743,69 @@ BEGIN
           WHERE a.bot_id=c.bot_id AND a.claim_id=c.claim_id
       );
     WITH candidates AS MATERIALIZED (
-        SELECT f.*,u.trunk_id,u.author_subject_ref,p.width,p.height,
-               p.payload_owner_component_id,p.payload_owner_kind,p.payload_owner_id,
-               o.conversation_ref
+        SELECT f.*,source_data.trunk_id,source_data.author_subject_ref,
+               source_data.conversation_ref,
+               coalesce(source_data.width,trial_data.width) AS width,
+               coalesce(source_data.height,trial_data.height) AS height,
+               coalesce(source_data.payload_owner_component_id,
+                        trial_data.payload_owner_component_id) AS payload_owner_component_id,
+               coalesce(source_data.payload_owner_kind,
+                        trial_data.payload_owner_kind) AS payload_owner_kind,
+               coalesce(source_data.payload_owner_id,
+                        trial_data.payload_owner_id) AS payload_owner_id
         FROM __forest_module_schema__.embedding_facets f
-        JOIN __forest_module_schema__.source_units u
-          ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
-         AND u.source_revision=f.source_revision
-         AND (u.eligibility_state='ELIGIBLE'
-              OR (f.purpose='QUERY' AND u.eligibility_state='REGISTERED'))
-        JOIN __forest_module_schema__.memory_sources s
-          ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
-        JOIN __forest_module_schema__.source_parts p
-          ON p.bot_id=f.bot_id AND p.source_unit_id=f.source_unit_id
-         AND p.part_id=f.part_id AND p.payload_id=f.input_payload_id
-         AND p.payload_digest=f.input_payload_digest
-        JOIN LATERAL (
-            SELECT occurrence.conversation_ref
-            FROM __forest_module_schema__.source_occurrences occurrence
-            WHERE occurrence.bot_id=f.bot_id
-              AND occurrence.source_unit_id=f.source_unit_id
-              AND ((f.purpose='DOCUMENT' AND occurrence.eligibility_state='ELIGIBLE')
-                   OR (f.purpose='QUERY' AND
-                       __forest_module_schema__.memory_query_occurrence_matches(
-                           f.bot_id,f.query_id,f.source_unit_id,f.source_revision,
-                           f.part_id,occurrence.occurrence_id)))
-            ORDER BY occurrence.observed_at,occurrence.occurrence_id LIMIT 1
-        ) o ON true
+        LEFT JOIN LATERAL (
+            SELECT u.trunk_id,u.author_subject_ref,p.width,p.height,
+                   p.payload_owner_component_id,p.payload_owner_kind,p.payload_owner_id,
+                   o.conversation_ref
+            FROM __forest_module_schema__.source_units u
+            JOIN __forest_module_schema__.memory_sources s
+              ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+            JOIN __forest_module_schema__.source_parts p
+              ON p.bot_id=u.bot_id AND p.source_unit_id=u.source_unit_id
+             AND p.part_id=f.part_id AND p.payload_id=f.input_payload_id
+             AND p.payload_digest=f.input_payload_digest
+            JOIN LATERAL (
+                SELECT occurrence.conversation_ref
+                FROM __forest_module_schema__.source_occurrences occurrence
+                WHERE occurrence.bot_id=f.bot_id
+                  AND occurrence.source_unit_id=f.source_unit_id
+                  AND ((f.purpose='DOCUMENT' AND occurrence.eligibility_state='ELIGIBLE')
+                       OR (f.purpose='QUERY' AND
+                           __forest_module_schema__.memory_query_occurrence_matches(
+                               f.bot_id,f.query_id,f.source_unit_id,f.source_revision,
+                               f.part_id,occurrence.occurrence_id)))
+                ORDER BY occurrence.observed_at,occurrence.occurrence_id LIMIT 1
+            ) o ON true
+            WHERE f.input_kind='SOURCE_UNIT'
+              AND u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+              AND u.source_revision=f.source_revision
+              AND (u.eligibility_state='ELIGIBLE'
+                   OR (f.purpose='QUERY' AND u.eligibility_state='REGISTERED'))
+        ) source_data ON true
+        LEFT JOIN LATERAL (
+            SELECT p.width,p.height,p.payload_owner_component_id,
+                   p.payload_owner_kind,p.payload_owner_id
+            FROM __forest_module_schema__.memory_trial_inputs t
+            JOIN __forest_module_schema__.memory_queries q
+              ON q.bot_id=t.bot_id AND q.query_id=t.query_id
+             AND q.input_kind='ADMIN_TRIAL' AND q.state='OPEN'
+            JOIN __forest_module_schema__.memory_trial_parts p
+              ON p.bot_id=t.bot_id AND p.query_id=t.query_id
+             AND p.part_id=f.part_id AND p.modality=f.modality
+             AND p.payload_id=f.input_payload_id
+             AND p.payload_digest=f.input_payload_digest
+            WHERE f.input_kind='ADMIN_TRIAL' AND f.purpose='QUERY'
+              AND t.bot_id=f.bot_id AND t.query_id=f.trial_query_id
+              AND t.query_id=f.query_id AND t.input_revision=f.input_revision
+              AND t.generation_id=context->>'generation_id'
+              AND t.expires_at>clock_timestamp()
+        ) trial_data ON true
         WHERE f.bot_id=requested_bot
           AND f.state='PENDING' AND f.space_id=domain_space
           AND f.next_attempt_at<=clock_timestamp()
+          AND (source_data.conversation_ref IS NOT NULL
+               OR trial_data.payload_owner_id IS NOT NULL)
           AND NOT EXISTS (
               SELECT 1 FROM __forest_module_schema__.embedding_claim_items ci
               JOIN __forest_module_schema__.embedding_claims c
@@ -6728,10 +6827,7 @@ BEGIN
           AND candidates.query_id IS NOT DISTINCT FROM focus.query_id
     )
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
-        'facet_id',facet_id,'source_unit_id',source_unit_id,
-        'source_revision',source_revision,'part_id',part_id,
-        'trunk_id',trunk_id,'conversation_ref',conversation_ref,
-        'author_ref',author_subject_ref,'modality',modality,
+        'facet_id',facet_id,'part_id',part_id,'modality',modality,
         'selector_start_char',selector_start_char,
         'selector_end_char',selector_end_char,
         'input_payload',jsonb_build_object(
@@ -6741,7 +6837,14 @@ BEGIN
         'facet_content_digest',facet_content_digest,
         'input_byte_length',input_byte_length,'media_type',input_media_type,
         'width',width,'height',height
-    ) ORDER BY created_at,facet_id),'[]'::jsonb),
+    ) || CASE input_kind WHEN 'ADMIN_TRIAL' THEN jsonb_build_object(
+        'input_kind','ADMIN_TRIAL','input_ref',input_ref,
+        'input_revision',input_revision,'query_id',query_id)
+      ELSE jsonb_build_object(
+        'source_unit_id',source_unit_id,'source_revision',source_revision,
+        'trunk_id',trunk_id,'conversation_ref',conversation_ref,
+        'author_ref',author_subject_ref) END
+      ORDER BY created_at,facet_id),'[]'::jsonb),
         max(accepted_deletion_epoch),min(purpose)
     INTO selected_facets,deletion_epoch_value,selected_purpose
     FROM ranked WHERE image_bytes<=8388608;
