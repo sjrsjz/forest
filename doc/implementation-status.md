@@ -219,6 +219,8 @@ Memory 包现已声明 `memory.trial.start`、`memory.trial.get` 和独立 `memo
 
 Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。通用管理资产上传、结果内容读取和完整 TTL 清理仍未完成。
 
+试验输入的多个 part 现使用由 `query_id` 与 `part_id` 派生的独立 Kernel Payload owner_id；Memory 的启动命令与表约束同时复核该身份，避免图文 part 争用同一唯一 owner。隔离 PostgreSQL 已验证两个真实 Payload 能在同一管理试验登记，错误摘要和字节数仍被拒绝。通用分块上传与试验结果读取仍待实现。
+
 ## 8. 下一切换顺序
 
 1. 补齐较大范围遗忘选择器与分页管理，完成管理召回试验；补齐发布崩溃重放验证。

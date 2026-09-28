@@ -537,7 +537,9 @@ CREATE TABLE memory_trial_parts (
     payload_owner_kind text NOT NULL
         CHECK (octet_length(payload_owner_kind) BETWEEN 1 AND 128),
     payload_owner_id text NOT NULL
-        CHECK (octet_length(payload_owner_id) BETWEEN 1 AND 512),
+        CHECK (payload_owner_id = 'trial:' || encode(sha256(
+            convert_to(query_id, 'UTF8') || decode('00', 'hex') ||
+            convert_to(part_id, 'UTF8')), 'hex')),
     PRIMARY KEY (bot_id,query_id,query_part_index),
     UNIQUE (bot_id,query_id,part_id),
     FOREIGN KEY (bot_id,query_id) REFERENCES memory_trial_inputs(bot_id,query_id),
@@ -1272,7 +1274,10 @@ BEGIN
                OR (p->>'byte_length')::bigint>8388608
                OR p#>>'{payload,owner_component_id}' IS DISTINCT FROM 'memory.graph'
                OR p#>>'{payload,owner_kind}' IS DISTINCT FROM 'trial.input'
-               OR p#>>'{payload,owner_id}' IS DISTINCT FROM requested_query
+               OR p#>>'{payload,owner_id}' IS DISTINCT FROM
+                  'trial:' || encode(sha256(
+                      convert_to(requested_query, 'UTF8') || decode('00', 'hex') ||
+                      convert_to(p->>'part_id', 'UTF8')), 'hex')
                OR (p->>'modality'='TEXT' AND (
                    p->>'media_type'<>'text/plain' OR p->>'width' IS NOT NULL
                    OR p->>'height' IS NOT NULL OR (p->>'byte_length')::bigint>65536))

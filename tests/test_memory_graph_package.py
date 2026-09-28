@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hashlib
 import json
 from datetime import timedelta
 from pathlib import Path
@@ -19,6 +20,12 @@ from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.module_configuration import ModuleConfigurationRepository
+
+
+def _trial_owner_id(query_id: str, part_id: str) -> str:
+    return "trial:" + hashlib.sha256(
+        (query_id + "\0" + part_id).encode("utf-8")
+    ).hexdigest()
 
 
 @pytest.mark.postgres
@@ -623,15 +630,32 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
             ).format(namespace), (store.bot_id, digest, digest, digest))
         stored = await kernel.payload.put_bytes(
             owner_component_id="memory.graph", owner_kind="trial.input",
-            owner_id="query/authority", media_type="text/plain", content=b"hello trial",
+            owner_id=_trial_owner_id("query/authority", "text/0"),
+            media_type="text/plain", content=b"hello trial",
             expected_deletion_epoch=await kernel.payload.epoch(),
         )
+        second = await kernel.payload.put_bytes(
+            owner_component_id="memory.graph", owner_kind="trial.input",
+            owner_id=_trial_owner_id("query/authority", "text/1"),
+            media_type="text/plain", content=b"second trial",
+            expected_deletion_epoch=await kernel.payload.epoch(),
+        )
+        assert second.payload_id != stored.payload_id
         reference = {"payload_id": stored.payload_id, "digest": stored.content_digest,
                      "owner_component_id": "memory.graph", "owner_kind": "trial.input",
-                     "owner_id": "query/authority"}
+                     "owner_id": _trial_owner_id("query/authority", "text/0")}
+        second_reference = {
+            "payload_id": second.payload_id, "digest": second.content_digest,
+            "owner_component_id": "memory.graph", "owner_kind": "trial.input",
+            "owner_id": _trial_owner_id("query/authority", "text/1"),
+        }
         body = {"query_id": "query/authority", "parts": [{
             "part_id": "text/0", "modality": "TEXT", "media_type": "text/plain",
             "byte_length": 11, "width": None, "height": None, "payload": reference,
+        }, {
+            "part_id": "text/1", "modality": "TEXT", "media_type": "text/plain",
+            "byte_length": 12, "width": None, "height": None,
+            "payload": second_reference,
         }]}
         invalid = {**body, "parts": [{**body["parts"][0], "payload": {
             **reference, "digest": "sha256:" + "b" * 64,
@@ -704,7 +728,7 @@ async def test_management_trial_registers_mixed_input_and_separate_cancellation(
             "height": 1 if modality == "IMAGE" else None,
             "payload": {"payload_id": f"payload/{index}", "digest": digest,
                         "owner_component_id": "memory.graph", "owner_kind": "trial.input",
-                        "owner_id": "query/management"},
+                        "owner_id": _trial_owner_id("query/management", f"part/{index}")},
         }
 
     body = {"query_id": "query/management", "requested_by": "web:admin",
@@ -786,7 +810,9 @@ async def test_management_trial_registers_mixed_input_and_separate_cancellation(
     in_flight_body = json.loads(json.dumps(body))
     in_flight_body["query_id"] = "query/management-in-flight"
     for item in in_flight_body["parts"]:
-        item["payload"]["owner_id"] = in_flight_body["query_id"]
+        item["payload"]["owner_id"] = _trial_owner_id(
+            in_flight_body["query_id"], item["part_id"]
+        )
     in_flight_start = await invoke("memory_start_management_trial", {
         "operation_id": "trial/start/2", "input_digest": digest_json(in_flight_body),
     }, in_flight_body)
@@ -905,12 +931,13 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
                 "byte_length,width,height,payload_id,payload_digest,payload_owner_component_id,"
                 "payload_owner_kind,payload_owner_id) VALUES "
                 "(%s,'query/trial',%s,%s,%s,%s,4,%s,%s,%s,%s,'memory.graph',"
-                "'trial.input','query/trial')"
+                "'trial.input',%s)"
             ).format(namespace), (
                 store.bot_id, index, f"part/{index}", modality, media_type,
                 1 if modality == "IMAGE" else None,
                 1 if modality == "IMAGE" else None,
                 f"payload/{index}", digest,
+                _trial_owner_id("query/trial", f"part/{index}"),
             ))
 
     async with store.pool.connection() as conn:
@@ -929,8 +956,9 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
                     "byte_length,payload_id,payload_digest,payload_owner_component_id,"
                     "payload_owner_kind,payload_owner_id) VALUES "
                     "(%s,'query/trial',2,'part/no-size','IMAGE','image/png',4,"
-                    "'payload/no-size',%s,'memory.graph','trial.input','query/trial')"
-                ).format(namespace), (store.bot_id, digest))
+                    "'payload/no-size',%s,'memory.graph','trial.input',%s)"
+                ).format(namespace), (store.bot_id, digest,
+                    _trial_owner_id("query/trial", "part/no-size")))
 
     async def browse(generation, after=-1):
         async with store.pool.connection() as conn:
@@ -1252,8 +1280,9 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
             "payload_id,payload_digest,payload_owner_component_id,payload_owner_kind,"
             "payload_owner_id) VALUES (%s,'query/expired',0,'part/expired','TEXT',"
             "'text/plain',4,'payload/expired',%s,'memory.graph','trial.input',"
-            "'query/expired')"
-        ).format(namespace), (store.bot_id, digest))
+            "%s)"
+        ).format(namespace), (store.bot_id, digest,
+            _trial_owner_id("query/expired", "part/expired")))
         await conn.execute(sql.SQL(
             "INSERT INTO {}.query_recall_work(bot_id,query_id,deadline_at) "
             "VALUES (%s,'query/expired',clock_timestamp()+interval '5 minutes')"
@@ -1311,8 +1340,9 @@ async def test_expired_trial_vectors_are_suppressed_and_deleted(clean_authority,
             "payload_owner_kind,payload_owner_id) VALUES "
             "(%s,'query/expired-vector',0,'part/expired-vector','TEXT',"
             "'text/plain',4,'payload/expired-vector',%s,'memory.graph',"
-            "'trial.input','query/expired-vector')"
-        ).format(namespace), (store.bot_id, digest))
+            "'trial.input',%s)"
+        ).format(namespace), (store.bot_id, digest,
+            _trial_owner_id("query/expired-vector", "part/expired-vector")))
         await conn.execute(sql.SQL(
             "INSERT INTO {}.embedding_facets "
             "(bot_id,facet_id,purpose,query_id,input_kind,input_ref,input_revision,"
