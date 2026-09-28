@@ -1309,6 +1309,8 @@ BEGIN
         SELECT qp.query_part_index,jsonb_build_object(
             'query_part_index',qp.query_part_index,'source_unit_id',qp.source_unit_id,
             'source_revision',qp.source_revision,'occurrence_id',qp.occurrence_id,
+            'input_identity',jsonb_build_object('kind','SOURCE_UNIT',
+                'ref',qp.source_unit_id,'revision',qp.source_revision),
             'part_id',p.part_id,'part_index',p.part_index,'part_kind',p.part_kind,
             'media_type',p.media_type,'byte_length',p.byte_length,
             'payload',jsonb_build_object('payload_id',p.payload_id,'digest',p.payload_digest,

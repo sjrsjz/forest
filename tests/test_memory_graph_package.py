@@ -10,7 +10,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
-from forest.builtin.memory_graph.python.facet_preparation import document_facets
+from forest.builtin.memory_graph.python.facet_preparation import document_facets, query_part_facets
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
@@ -388,6 +388,52 @@ def test_document_facets_preserve_text_spans_and_image_identity():
     assert first[3]["modality"] == "IMAGE"
     assert first[3]["facet_content_digest"] == image_ref["digest"]
     assert len({item["facet_id"] for item in first}) == 4
+
+
+def test_query_facets_keep_trial_input_identity_separate_from_source_identity():
+    text = "same words and image intent"
+    part = {
+        "part_id": "part/text", "part_kind": "TEXT", "byte_length": len(text.encode()),
+        "payload": {
+            "payload_id": "payload/input", "digest": "sha256:" + "1" * 64,
+            "owner_component_id": "memory.graph", "owner_kind": "trial.input",
+            "owner_id": "input/1",
+        },
+    }
+    source = query_part_facets(
+        "query/1", "space/1", {
+            **part, "source_unit_id": "unit/1", "source_revision": 1,
+            "input_identity": {
+                "kind": "SOURCE_UNIT", "ref": "unit/1", "revision": 1,
+            },
+        }, {"part/text": text},
+    )
+    trial = query_part_facets(
+        "query/1", "space/1", {
+            **part, "input_identity": {
+                "kind": "ADMIN_TRIAL", "ref": "unit/1", "revision": 1,
+            },
+        }, {"part/text": text},
+    )
+    assert source[0]["facet_id"] != trial[0]["facet_id"]
+    with pytest.raises(ValueError, match="must not carry admitted source identity"):
+        query_part_facets(
+            "query/1", "space/1", {
+                **part, "source_unit_id": "unit/1",
+                "input_identity": {
+                    "kind": "ADMIN_TRIAL", "ref": "unit/1", "revision": 1,
+                },
+            }, {"part/text": text},
+        )
+    with pytest.raises(ValueError, match="differs from its admitted part"):
+        query_part_facets(
+            "query/1", "space/1", {
+                **part, "source_unit_id": "unit/1", "source_revision": 1,
+                "input_identity": {
+                    "kind": "SOURCE_UNIT", "ref": "another/source", "revision": 1,
+                },
+            }, {"part/text": text},
+        )
 
 
 def _envelope(

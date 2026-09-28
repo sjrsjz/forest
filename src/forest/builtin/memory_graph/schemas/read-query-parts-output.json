@@ -44,6 +44,7 @@
         "byte_length",
         "payload",
         "query_part_index",
+        "input_identity",
         "source_unit_id",
         "source_revision",
         "occurrence_id"
@@ -84,6 +85,16 @@
           "type": "integer",
           "minimum": 0,
           "maximum": 255
+        },
+        "input_identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "ref", "revision"],
+          "properties": {
+            "kind": {"enum": ["SOURCE_UNIT", "ADMIN_TRIAL"]},
+            "ref": {"type": "string", "minLength": 1, "maxLength": 256},
+            "revision": {"type": "integer", "minimum": 1}
+          }
         },
         "source_unit_id": {
           "type": "string",

@@ -94,14 +94,31 @@ def batch_operation_id(source_unit_id, source_revision, space_id, batch_index):
 
 
 def query_part_facets(query_id, space_id, part, text_parts):
+    identity = part["input_identity"]
+    if identity["kind"] not in {"SOURCE_UNIT", "ADMIN_TRIAL"}:
+        raise ValueError("Query input identity kind is unsupported")
+    input_ref = identity["ref"]
+    input_revision = identity["revision"]
+    if not isinstance(input_ref, str) or not input_ref or type(input_revision) is not int or input_revision < 1:
+        raise ValueError("Query input identity is invalid")
+    if identity["kind"] == "SOURCE_UNIT" and (
+        input_ref != part["source_unit_id"] or input_revision != part["source_revision"]
+    ):
+        raise ValueError("Query source identity differs from its admitted part")
+    if identity["kind"] == "ADMIN_TRIAL" and any(
+        field in part for field in ("source_unit_id", "source_revision", "occurrence_id")
+    ):
+        raise ValueError("Trial input must not carry admitted source identity")
     facets = document_facets(
-        part["source_unit_id"], part["source_revision"], space_id, [part], text_parts,
+        input_ref, input_revision, space_id, [part], text_parts,
         max_facets=FACET_BATCH_SIZE,
     )
     if part["part_kind"] == "IMAGE" and part["byte_length"] > MAX_QUERY_SINGLE_IMAGE_BYTES:
         raise ValueError("Query image exceeds the embedding batch limit")
     return [
-        {**facet, "facet_id": "query-facet:" + _digest([query_id, facet["facet_id"]])[7:]}
+        {**facet, "facet_id": "query-facet:" + _digest([
+            query_id, identity["kind"], facet["facet_id"]
+        ])[7:]}
         for facet in facets
     ]
 
