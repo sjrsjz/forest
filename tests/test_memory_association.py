@@ -2,6 +2,7 @@
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from psycopg import sql
@@ -9,6 +10,7 @@ from psycopg.types.json import Jsonb
 from test_memory_graph_package import _configuration
 from test_schema_bundles import clean_authority as clean_authority
 
+from forest.builtin.memory_graph.python.graph_region import expand
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.packages import PackageCatalog
@@ -193,3 +195,99 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
             "SELECT count(*) AS count FROM {}.relation_evidence WHERE bot_id=%s",
             (bot,),
         )).fetchone())["count"] == 2
+
+    # A later question in the original group sees the promoted edge to the
+    # other trunk, with both endpoints still carrying their own source labels.
+    async with store.pool.connection() as conn:
+        async def execute_later(statement, params=()):
+            return await conn.execute(sql.SQL(statement).format(schema), params)
+
+        await execute_later(
+            "INSERT INTO {}.source_units(bot_id,source_unit_id,capture_operation_id,"
+            "input_digest,source_id,trunk_id,source_order_seq,source_revision,unit_kind,"
+            "modality,part_count,content_manifest_digest,author_subject_ref,author_payload_id,"
+            "author_payload_digest,author_owner_component_id,author_owner_kind,author_owner_id,"
+            "accepted_deletion_epoch,eligibility_state,eligible_at,occurred_at) VALUES "
+            "(%s,'later','capture/later',%s,'question','trunk/question',2,1,"
+            "'GROUP_MESSAGE','TEXT',1,%s,'author/later','author-payload/later',%s,"
+            "'adapter.onebot','message.author','later',0,'REGISTERED',NULL,clock_timestamp())",
+            (bot, digest, digest, digest),
+        )
+        await execute_later(
+            "INSERT INTO {}.source_parts(bot_id,source_unit_id,part_id,part_index,"
+            "part_kind,media_type,payload_id,payload_digest,payload_owner_component_id,"
+            "payload_owner_kind,payload_owner_id,byte_length) VALUES "
+            "(%s,'later','text',0,'TEXT','text/plain','payload/later',%s,"
+            "'adapter.onebot','context.input','later',1)",
+            (bot, digest),
+        )
+        await execute_later(
+            "INSERT INTO {}.source_occurrences(bot_id,occurrence_id,source_unit_id,"
+            "binding_ref,conversation_ref,event_ref,ingress_seq,input_batch_ref,"
+            "context_revision,eligibility_state,observed_at) VALUES "
+            "(%s,'occ/later','later','binding/main','conv/question','event/later',"
+            "2,'batch/later',1,'ADMITTED',clock_timestamp())",
+            (bot,),
+        )
+        await execute_later(
+            "INSERT INTO {}.memory_queries(bot_id,query_id,operation_id,input_digest,"
+            "current_source_id,input_batch_ref,context_revision,query_mode,"
+            "fusion_policy_revision,accepted_deletion_epoch) VALUES "
+            "(%s,'query/later','begin/later',%s,'question','batch/later',1,'TEXT',"
+            "'independent-facets/1',0)",
+            (bot, digest),
+        )
+        await execute_later(
+            "INSERT INTO {}.memory_query_parts(bot_id,query_id,query_part_index,"
+            "source_unit_id,source_revision,occurrence_id,part_id,modality) VALUES "
+            "(%s,'query/later',0,'later',1,'occ/later','text','TEXT')",
+            (bot,),
+        )
+        observed = []
+        for unit in ("seed", "trigger"):
+            row = await (await execute_later(
+                "SELECT {}.memory_read_graph_neighbours(%s::jsonb,%s::jsonb) AS result",
+                (
+                    Jsonb({"bot_id": bot}),
+                    Jsonb({
+                        "query_id": "query/later",
+                        "source_unit_id": unit,
+                        "association_limit": 8,
+                    }),
+                ),
+            )).fetchone()
+            assert row["result"]["ok"], row["result"]
+            observed.append(row["result"]["value"])
+
+        class GraphQueries:
+            async def call(self, name, request, *, timeout):
+                assert name == "memory.read-graph-neighbours" and timeout == 10
+                row = await (await execute_later(
+                    "SELECT {}.memory_read_graph_neighbours(%s::jsonb,%s::jsonb) AS result",
+                    (Jsonb({"bot_id": bot}), Jsonb(request)),
+                )).fetchone()
+                assert row["result"]["ok"], row["result"]
+                return row["result"]["value"]
+
+        region = await expand(
+            SimpleNamespace(queries=GraphQueries()),
+            "query/later", [{"source_unit_id": "seed", "rank_score": 0.8}],
+            {
+                "max_graph_nodes": 3, "max_association_edges_per_node": 8,
+                "sequence_weight": 0.5, "association_weight": 0.9,
+                "min_graph_relevance": 0.01,
+            },
+        )
+    assert observed[0]["node"]["external_group_id"] == "memory"
+    assert observed[0]["node"]["author_subject_ref"] == "author/seed"
+    assert observed[1]["node"]["external_group_id"] == "question"
+    assert observed[1]["node"]["author_subject_ref"] == "author/trigger"
+    assert any(
+        edge["relation"] == "ASSOCIATED" and edge["target_id"] == "trigger"
+        for edge in observed[0]["edges"]
+    )
+    assert [node["source_unit_id"] for node in region["nodes"]] == ["seed", "trigger"]
+    assert region["nodes"][1]["trunk_id"] == "trunk/question"
+    assert region["nodes"][1]["external_group_id"] == "question"
+    assert region["nodes"][1]["path_parent_source_unit_id"] == "seed"
+    assert region["nodes"][1]["activation"] == 0.9
