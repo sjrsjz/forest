@@ -265,11 +265,11 @@ QiYu 配置中的 SiliconFlow `Qwen/Qwen3-VL-Embedding-8B` 已用于一次低频
 
 跨主干学习的隔离 PostgreSQL 验收现把“回复联想日志 → 归档提升”接到后续真实查询快照：后续群消息使旧触发来源不再是当前输入，包内邻接查询从另一群种子读到提升后的 `ASSOCIATED` 边；`graph_region.expand` 沿该边扩散，节点分别保留原群号、主干和作者。这证明包内关系与扩散路径可合流，仍未证明真实 QQ 的跨群成功回复或完整 Agent 证据物化。
 
-真实 Milvus 与隔离 PostgreSQL 的向量索引测试现覆盖外部写入成功而确认丢失：测试专用 collection 中第一笔 upsert 已写入 Milvus，随后故意抛出传输错误；PostgreSQL ref 权威记录仍为空。关闭该 Generation 的驱动并重新创建后，相同 ref/向量重放成功、ref 变为 ACTIVE，后续检索与删除仍通过。该验证覆盖向量索引包的写后失联/重启窗口；Memory 包 Worker 对整批发布的崩溃重放仍需单独验收。
+真实 Milvus 与隔离 PostgreSQL 的向量索引测试现覆盖外部写入成功而确认丢失：测试专用 collection 中第一笔 upsert 已写入 Milvus，随后故意抛出传输错误；PostgreSQL ref 权威记录仍为空。关闭该 Generation 的驱动并重新创建后，相同 ref/向量重放成功、ref 变为 ACTIVE，后续检索与删除仍通过。该验证覆盖向量索引包的写后失联/重启窗口；Memory 包 Worker 的实际进程崩溃验证见下文。
 
-完整 Bot 宿主的隔离 PostgreSQL + 假 Milvus 用例又在文档 facet 首次向量发布时注入“一条 ref 已写入、确认丢失”：Memory 包自有 Worker 将该批工作重试至少一次，所有文档 facet 最终 READY，后续召回、遗忘、热替换和重启仍通过。这证明 Memory 整批发布在运行中可从部分外部成功收敛；实际进程在该窗口立即崩溃并重启的验收尚未完成。
+完整 Bot 宿主的隔离 PostgreSQL + 假 Milvus 用例又在文档 facet 首次向量发布时注入“一条 ref 已写入、确认丢失”：Memory 包自有 Worker 将该批工作重试至少一次，所有文档 facet 最终 READY，后续召回、遗忘、热替换和重启仍通过。这证明 Memory 整批发布在运行中可从部分外部成功收敛；实际进程崩溃的后续验证见下文。
 
-Memory 包的 PostgreSQL 用例还覆盖了另一个崩溃边界：批次发布事务已把全部 facet 置为 READY，但 Worker 尚未写任务结算就失去租约。租约到期后，新 claim 对同一批次重新计算并提交幂等发布回执；旧 claim 的结算被拒绝，新 claim 可结算为 SETTLED。此验证没有实际杀死进程，也不替代外部 Milvus 写入时进程崩溃后的整批重放验收。
+Memory 包的 PostgreSQL 用例还覆盖了另一个崩溃边界：批次发布事务已把全部 facet 置为 READY，但 Worker 尚未写任务结算就失去租约。租约到期后，新 claim 对同一批次重新计算并提交幂等发布回执；旧 claim 的结算被拒绝，新 claim 可结算为 SETTLED。此验证没有实际杀死进程；外部 Milvus 写入时的真实进程崩溃另见下文。
 
 冻结遗忘选择的成员页现在按当前权威来源与抑制记录标记“有效 / 本选择已遗忘 / 外部已抑制”，并返回对应遗忘操作 ID；UI 在同一分页表中显示状态。真实 PostgreSQL 用例核对了批次事务提交前后的状态变化和管理员主体隔离。它只展示已发生的成员事实，不提供跨批任务进度、P0 授权或自动继续执行；批次授权语义确定后仍需实现这些能力。
 
@@ -292,3 +292,5 @@ Memory 包的 PostgreSQL 用例还覆盖了另一个崩溃边界：批次发布�
 `component.worker-host` 的首条真实只读控制链已经进入 Bot RuntimeGraph：官方 Python Worker 包通过声明的 `service.call:runtime.graph.snapshot` capability 调用 `kernel.runtime` 的受限 Graph 投影，包管理 `module` query 从该投影读取准确组件 Generation；`module.list` Shell 命令贡献已从 `kernel.runtime` 移到此包。包清单构建、Python Ruff 和无数据库回归通过（`452 passed, 85 skipped`），隔离 PostgreSQL 的完整 Bot 宿主查询、热替换后新代继续查询及旧代拒绝调用、重启用例通过（`1 passed`，196.70 秒）。它尚未拥有可选工件目录、配置写入、启停意图、配置/启停管理 UI 或局部 Generation 重建；现有 Web gateway 的组件配置直接路径仍需按 [17](17-component-worker-host.md) 切换。
 
 Worker Host 的 `module` 查询现从 `kernel.runtime` 持久 Graph 成员事实取得包 ID、版本、摘要及 DATA/CONTROL 接纳状态，包自带只读组件检查 UI 随 Generation 发布。包工件清单校验与页面脚本语法检查通过；最终 `1.1.0` 工件在隔离 PostgreSQL 的完整宿主用例中核对了 Agent 工件摘要等于实际加载快照，并再次覆盖热替换和重启（`1 passed`，204.12 秒）；无数据库回归 `452 passed, 85 skipped`，临时 PostgreSQL 已清理。本机 Edge 的隔离 iframe/MessageChannel 冒烟发现表单提交被 sandbox 拦截、HTML pattern 在新版正则下失效；页面改用受控按钮与回车事件后，两次组件查询及包身份展示通过。此页只读当前已发布组件，不提供包选择、配置管理或启停；跨模块配置提交与 Graph 重建申请的原子事务仍是下一项关键缺口。
+
+Memory 整批向量发布又通过一次真实进程崩溃注入：独立宿主在真实 Milvus 确认第一条 DOCUMENT upsert 后立即退出，此时隔离 PostgreSQL 中该批 facet 仍为 `EMBEDDED`、向量 ref 尚无权威确认、发布工作仍为第一次 `CLAIMED`。等待原宿主和发布 claim 的真实租约自然到期后，以同一 Bot 库和包目录启动新宿主；同一批工作重领至少一次并达到 `SETTLED`，facet 全部转为 `READY`，对应 PostgreSQL ref 均为 `ACTIVE`（`1 passed`，359.36 秒）。这验证了 Memory Worker 与 VectorIndex 跨进程的写后崩溃重放；用例采用假 OneBot 与假 Embedding、真实 Milvus 和一次性 PostgreSQL，未发送 QQ 消息，也不替代真实 VL 或长期运行验收。RuntimeGraph 只读投影同时按 Bot 全局 DATA/CONTROL 准入与成员准入的交集报告有效状态，避免普通暂停后组件界面仍显示开放。
