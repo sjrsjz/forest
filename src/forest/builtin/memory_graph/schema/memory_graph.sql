@@ -8250,11 +8250,23 @@ BEGIN
     END IF;
     SELECT COALESCE(jsonb_agg(to_jsonb(page) ORDER BY page.ordinal),'[]'::jsonb)
     INTO items FROM (
-        SELECT ordinal,source_unit_id,source_revision,anchor_payload_id
-        FROM __forest_module_schema__.forget_selection_members
-        WHERE bot_id=selection_row.bot_id AND
-              selection_id=selection_row.selection_id AND ordinal>after_ordinal
-        ORDER BY ordinal LIMIT page_limit
+        SELECT m.ordinal,m.source_unit_id,m.source_revision,m.anchor_payload_id,
+               CASE WHEN u.eligibility_state<>'SUPPRESSED' THEN 'ACTIVE'
+                    WHEN b.operation_id IS NOT NULL THEN 'FORGOTTEN_BY_SELECTION'
+                    ELSE 'SUPPRESSED_EXTERNALLY' END AS forget_state,
+               CASE WHEN u.eligibility_state='SUPPRESSED'
+                    THEN s.operation_id ELSE NULL END AS forget_operation_id
+        FROM __forest_module_schema__.forget_selection_members m
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=m.bot_id AND u.source_unit_id=m.source_unit_id
+        LEFT JOIN __forest_module_schema__.source_suppressions s
+          ON s.bot_id=m.bot_id AND s.source_unit_id=m.source_unit_id
+        LEFT JOIN __forest_module_schema__.batch_forget_operations b
+          ON b.bot_id=s.bot_id AND b.operation_id=s.operation_id
+         AND b.selection_id=m.selection_id
+        WHERE m.bot_id=selection_row.bot_id AND
+              m.selection_id=selection_row.selection_id AND m.ordinal>after_ordinal
+        ORDER BY m.ordinal LIMIT page_limit
     ) page;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('protocol','forest.memory-forget-selection-page/1',

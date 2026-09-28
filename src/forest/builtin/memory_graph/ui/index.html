@@ -38,7 +38,7 @@
       <p class="muted">使用“来源”页当前筛选条件冻结成员目录。此处只核对范围和预览影响，尚不执行批量遗忘。</p>
       <div class="filters"><input id="batch-selection-id" class="forget-id" placeholder="选择 ID；新建时自动生成，也可填入已有 ID"><button id="batch-select">冻结当前筛选</button><button id="batch-load">读取选择</button></div>
       <div id="batch-selection-meta" class="detail"></div>
-      <table class="table"><thead><tr><th>序号</th><th>来源单元</th><th>修订</th><th>作者锚点</th></tr></thead><tbody id="batch-members"></tbody></table>
+      <table class="table"><thead><tr><th>序号</th><th>来源单元</th><th>修订</th><th>作者锚点</th><th>当前状态</th></tr></thead><tbody id="batch-members"></tbody></table>
       <div class="pager"><button id="batch-next" disabled>下一页成员</button></div>
       <div class="filters"><label>批次起点（前一成员序号）<input id="batch-after" type="number" min="0" max="999999" value="0"></label><label>批次大小<input id="batch-size" type="number" min="1" max="64" value="32"></label><button id="batch-preview">预览该批</button></div>
       <div id="batch-impact" class="review muted">尚未预览批次。</div>
@@ -281,6 +281,9 @@
       const row=rows.insertRow();
       cell(row,item.ordinal);cell(row,item.source_unit_id);
       cell(row,item.source_revision);cell(row,item.anchor_payload_id);
+      const state=cell(row,({ACTIVE:'有效',FORGOTTEN_BY_SELECTION:'本选择已遗忘',
+        SUPPRESSED_EXTERNALLY:'外部已抑制'})[item.forget_state]||item.forget_state);
+      state.title=item.forget_operation_id||'';
     }
     if(!page.items.length)rows.insertRow().insertCell().textContent='这一页没有成员';
     $('batch-next').disabled=!page.has_more;

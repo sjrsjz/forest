@@ -13,12 +13,17 @@
     "filters": {"type": "object"},
     "items": {"type": "array", "maxItems": 100,
       "items": {"type": "object", "additionalProperties": false,
-        "required": ["ordinal", "source_unit_id", "source_revision", "anchor_payload_id"],
+        "required": ["ordinal", "source_unit_id", "source_revision", "anchor_payload_id",
+          "forget_state", "forget_operation_id"],
         "properties": {
           "ordinal": {"type": "integer", "minimum": 1, "maximum": 1000000},
           "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
           "source_revision": {"type": "integer", "minimum": 1},
-          "anchor_payload_id": {"type": "string", "minLength": 1, "maxLength": 256}
+          "anchor_payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+          "forget_state": {"enum": ["ACTIVE", "FORGOTTEN_BY_SELECTION",
+            "SUPPRESSED_EXTERNALLY"]},
+          "forget_operation_id": {"type": ["string", "null"], "minLength": 1,
+            "maxLength": 256}
         }
       }
     },
