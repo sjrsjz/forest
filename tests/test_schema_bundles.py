@@ -3809,6 +3809,83 @@ async def test_kernel_payload_admission_and_forget_converge_in_both_lock_orders(
 
 
 @pytest.mark.postgres
+async def test_kernel_payload_forget_preview_fences_a_changed_derivation(clean_authority):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    storage = official_storage_bundle(
+        "kernel.payload",
+        "forest.kernel.payload",
+        "forest.kernel-payload.repository/1",
+        "storage/official/kernel_payload.sql",
+    )
+    await installer.install(
+        storage.spec,
+        storage.baseline,
+        storage.package_digest,
+        execution_profile=storage.execution_profile,
+    )
+    repository = KernelPayloadRepository(store, namespace=storage.spec.namespace)
+    source = PayloadSource("conversation.scheduler", "group.message", "message/plan", 1)
+    target = SourceTarget(
+        source.source_component_id,
+        source.source_kind,
+        source.source_id,
+        source.source_revision,
+    )
+    root = await repository.put_bytes(
+        owner_component_id="conversation.scheduler",
+        owner_kind="context.input",
+        owner_id="plan/root",
+        media_type="text/plain",
+        content=b"root",
+        sources=(source,),
+        expected_deletion_epoch=0,
+    )
+    async with store.pool.connection() as conn, conn.transaction():
+        first_plan = await repository.preview_forget_in(conn, source_targets=(target,))
+    assert first_plan["deletion_epoch"] == 0
+    assert first_plan["selected_payload_ids"] == [root.payload_id]
+
+    child = await repository.put_bytes(
+        owner_component_id="memory.graph",
+        owner_kind="embedding.result",
+        owner_id="plan/child",
+        media_type="application/json",
+        content=b"{}",
+        parents=(root.payload_id,),
+        expected_deletion_epoch=0,
+    )
+    with pytest.raises(ForestError) as changed:
+        await repository.forget(
+            operation_id="forget/plan",
+            source_targets=(target,),
+            expected_deletion_epoch=first_plan["deletion_epoch"],
+            expected_selection_digest=first_plan["selection_digest"],
+        )
+    assert changed.value.code == "FORGET_SELECTION_CONFLICT"
+    assert await repository.epoch() == 0
+
+    async with store.pool.connection() as conn, conn.transaction():
+        plan = await repository.preview_forget_in(conn, source_targets=(target,))
+    assert plan["selected_payload_ids"] == sorted([root.payload_id, child.payload_id])
+    receipt = await repository.forget(
+        operation_id="forget/plan",
+        source_targets=(target,),
+        expected_deletion_epoch=plan["deletion_epoch"],
+        expected_selection_digest=plan["selection_digest"],
+    )
+    assert receipt["selected_count"] == 2
+    assert receipt["selection_digest"] == plan["selection_digest"]
+    assert await repository.epoch() == 1
+    assert await repository.forget(
+        operation_id="forget/plan",
+        source_targets=(target,),
+        expected_deletion_epoch=plan["deletion_epoch"],
+        expected_selection_digest=plan["selection_digest"],
+    ) == receipt
+
+
+@pytest.mark.postgres
 async def test_kernel_audit_requires_payload_authority_identity(clean_authority):
     store, installer = clean_authority
     await installer.initialize_kernel()

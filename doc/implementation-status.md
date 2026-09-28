@@ -181,9 +181,11 @@ Agent 包的模型安全边界选择每次观察使用新的 operation identity�
 
 成功回复链路的隔离验收进一步使用合规的模型 XML 回执，真实 Agent 包完成 `FINAL_READY` 后经 Scheduler 的 FinalReply UnitOfWork 提交 Run 终态、Conversation 回复单元、Memory 联想日志和 Delivery Intent，伪 OneBot 收到一条投递；未发送真实 QQ 消息。此前 `agent.commit-final-run-record` 的 SQL 同名变量错误已修正。新增学习路径冻结实际投影的直接种子和 part，排除扩散节点、未投影图片及失败 Run；Memory 在同事务复核触发事件、查询 part 和冻结检索种子。隔离 PostgreSQL 验证了活动消息只留待归档日志、归档后跨主干提升、重放与重复召回不累加边权。真实 QQ 跨群成功回复和遗忘竞争长时间验收仍待执行。
 
+单来源遗忘新增 `memory.source.forget.preview/1` 包服务和三步 UnitOfWork：Memory 先取得作者 anchor，Kernel Payload 在删除时钟锁下选定包含派生节点的闭包，Memory 对来源、向量删除引用、关系贡献与待归档联想日志计算计数及完整集合摘要。携带计划执行时，Payload 复核删除纪元和选中摘要，Memory 复核影响计划；任一变化都会使整个遗忘事务回滚。FinalReply UnitOfWork 也先捕获删除屏障，再提交 Agent、Conversation 和 Memory 联想，避免关系提升绕过遗忘的固定影响计划。隔离 PostgreSQL 验证了新增派生 Payload 后旧计划被拒绝且纪元未前进，以及关系证据变化后旧计划被拒绝、重新预览成功；完整宿主测试经过热替换和重启，伪 OneBot 成功回复链也通过。最终本地回归 438 项通过、94 项跳过，未发真实 QQ 消息。管理 UI 尚未调用这项计划服务，也尚未提供管理员确认入口。
+
 ## 8. 下一切换顺序
 
-1. 补齐遗忘管理的固定目标计划与较大范围选择器；补齐发布崩溃重放验证。
+1. 将已有单来源固定影响计划接入 Memory 管理 UI 和管理员授权执行，补齐较大范围选择器；补齐发布崩溃重放验证。
 2. 验证 Agent 语义召回的真实 QQ 群聊链、图片召回命中与跨群成功回复及联想提升；恢复及重放需与删除 epoch、Generation 围栏收敛。
 3. 补齐证据浏览的进一步分页以及图文真实召回试验。
 4. 验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。

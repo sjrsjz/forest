@@ -600,6 +600,37 @@ class MemoryGraph(Plugin):
         )
 
     @service(
+        "memory.source.forget.preview",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/forget-preview-service-input.json",
+        output_schema="schemas/forget-preview-output.json",
+    )
+    async def preview_source_forget(self, payload, ctx):
+        source_unit_id = payload["source_unit_id"]
+        operation_id = ctx.operations.stable("memory-forget-preview")
+        return await ctx.uow.call(
+            "memory.preview-source-forget",
+            {
+                "prepare": {
+                    "operation_id": operation_id,
+                    "source_unit_id": source_unit_id,
+                },
+                "payload": {
+                    "protocol": "forest.payload-forget-anchor-preview/1",
+                    "prior_step_id": "prepare",
+                },
+                "memory": {
+                    "source_unit_id": source_unit_id,
+                    "prepare_step_id": "prepare",
+                    "preview_step_id": "payload",
+                },
+            },
+            operation_id=operation_id,
+            timeout=30,
+        )
+
+    @service(
         "memory.source.forget",
         semantics="idempotent",
         contract="1.0",
@@ -610,21 +641,28 @@ class MemoryGraph(Plugin):
         request = _plain(payload)
         operation_id = request["operation_id"]
         source_unit_id = request["source_unit_id"]
+        plan = request.get("plan")
+        payload_step = {
+            "protocol": "forest.payload-forget-anchor/1",
+            "prior_step_id": "prepare",
+            "operation_id": operation_id,
+        }
+        memory_step = {
+            "operation_id": operation_id,
+            "source_unit_id": source_unit_id,
+            "prepare_step_id": "prepare",
+            "forget_step_id": "payload",
+        }
+        if plan is not None:
+            payload_step["expected_deletion_epoch"] = plan["deletion_epoch"]
+            payload_step["expected_selection_digest"] = plan["selection_digest"]
+            memory_step["plan"] = plan
         return await ctx.uow.call(
             "memory.forget-source",
             {
-                "prepare": request,
-                "payload": {
-                    "protocol": "forest.payload-forget-anchor/1",
-                    "prior_step_id": "prepare",
-                    "operation_id": operation_id,
-                },
-                "memory": {
-                    "operation_id": operation_id,
-                    "source_unit_id": source_unit_id,
-                    "prepare_step_id": "prepare",
-                    "forget_step_id": "payload",
-                },
+                "prepare": {"operation_id": operation_id, "source_unit_id": source_unit_id},
+                "payload": payload_step,
+                "memory": memory_step,
             },
             operation_id=operation_id,
             timeout=30,

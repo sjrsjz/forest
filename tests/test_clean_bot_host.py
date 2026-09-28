@@ -1500,6 +1500,31 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             # The public UoW revokes Payload, Memory eligibility, graph evidence,
             # and vector refs together before the asynchronous Milvus deletion.
             previous_epoch = await host._kernel.payload.epoch()
+            preview_route = FrozenServiceRoute(
+                service_id="memory.source.forget.preview",
+                version=1,
+                caller_component_id="memory.graph",
+                provider_component_id="memory.graph",
+                provider_generation_id=memory_identity.generation_id,
+                graph_id=memory_identity.graph_id,
+                graph_revision=memory_identity.graph_revision,
+                admission_lane="DATA",
+                owned_work=False,
+            )
+            async def preview_forget(operation_id):
+                return await memory_instance.runtime_service_handlers()[
+                    ("memory.source.forget.preview", 1)
+                ].invoke_routed(
+                    preview_route,
+                    RuntimeServiceInvocation(
+                        operation_id, 30, "memory.forget", "bot-production-test"
+                    ),
+                    (),
+                    {"source_unit_id": "onebot-unit:" + event_hash},
+                )
+
+            stale_plan = await preview_forget("memory-forget-preview-before-relation")
+            assert stale_plan["deletion_epoch"] == previous_epoch
             async with host.store.pool.connection() as conn, conn.transaction():
                 await conn.execute(
                     sql.SQL(
@@ -1539,6 +1564,25 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 admission_lane="DATA",
                 owned_work=False,
             )
+            with pytest.raises(ForestError) as changed_plan:
+                await memory_instance.runtime_service_handlers()[
+                    ("memory.source.forget", 1)
+                ].invoke_routed(
+                    forget_route,
+                    RuntimeServiceInvocation(
+                        "memory-forget-stale-plan", 30,
+                        "memory.forget", "bot-production-test",
+                    ),
+                    (),
+                    {**forget_input, "operation_id": "memory-forget-stale-plan", "plan": stale_plan},
+                )
+            assert changed_plan.value.code == "MEMORY_FORGET_PLAN_CHANGED"
+            assert await host._kernel.payload.epoch() == previous_epoch
+            current_plan = await preview_forget("memory-forget-preview-after-relation")
+            assert current_plan["relation_retraction_count"] == (
+                stale_plan["relation_retraction_count"] + 1
+            )
+            forget_input["plan"] = current_plan
             forget = await memory_instance.runtime_service_handlers()[
                 ("memory.source.forget", 1)
             ].invoke_routed(

@@ -18,7 +18,9 @@
       "properties": {
         "protocol": {"const": "forest.payload-forget-anchor/1"},
         "prior_step_id": {"const": "prepare"},
-        "operation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+        "operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "expected_deletion_epoch": {"type": "integer", "minimum": 0},
+        "expected_selection_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
       }
     },
     "memory": {
@@ -28,7 +30,12 @@
         "operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "prepare_step_id": {"const": "prepare"},
-        "forget_step_id": {"const": "payload"}
+        "forget_step_id": {"const": "payload"},
+        "plan": {"type": "object", "required": ["protocol", "plan_digest"],
+          "properties": {
+            "protocol": {"const": "forest.memory-forget-impact-plan/1"},
+            "plan_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+          }}
       }
     }
   }

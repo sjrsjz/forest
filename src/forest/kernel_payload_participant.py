@@ -61,7 +61,11 @@ class KernelPayloadUnitOfWorkParticipant:
                 "protocol": "forest.payload-epoch/1",
                 "deletion_epoch": epoch,
             }
-        if name == "payload.forget-anchor-from-prior":
+        if name in {
+            "payload.preview-forget-anchor-from-prior",
+            "payload.forget-anchor-from-prior",
+        }:
+            preview = name == "payload.preview-forget-anchor-from-prior"
             envelope = _object(
                 payload, {"protocol", "caller", "input", "prior"},
                 "PAYLOAD_UOW_INPUT_INVALID",
@@ -70,20 +74,37 @@ class KernelPayloadUnitOfWorkParticipant:
                 envelope["caller"], {"component_id", "generation_id"},
                 "PAYLOAD_UOW_INPUT_INVALID",
             )
-            request = _object(
-                envelope["input"], {"protocol", "prior_step_id", "operation_id"},
-                "PAYLOAD_UOW_INPUT_INVALID",
-            )
+            request = envelope["input"]
+            required = {"protocol", "prior_step_id"}
+            optional = set() if preview else {
+                "operation_id", "expected_deletion_epoch", "expected_selection_digest"
+            }
+            if (
+                not isinstance(request, dict)
+                or not required <= set(request)
+                or not set(request) <= required | optional
+                or (not preview and "operation_id" not in request)
+            ):
+                raise ForestError(
+                    "PAYLOAD_UOW_INPUT_INVALID", "Payload forget request is invalid", 422
+                )
             prior = envelope["prior"]
             if (
                 envelope["protocol"] != "forest.uow-step/1"
                 or any(not isinstance(value, str) or not value for value in caller.values())
-                or request["protocol"] != "forest.payload-forget-anchor/1"
+                or request["protocol"] != (
+                    "forest.payload-forget-anchor-preview/1"
+                    if preview else "forest.payload-forget-anchor/1"
+                )
                 or not isinstance(prior, dict)
                 or not isinstance(request["prior_step_id"], str)
                 or request["prior_step_id"] not in prior
-                or not isinstance(request["operation_id"], str)
-                or not 1 <= len(request["operation_id"].encode("utf-8")) <= 256
+                or (
+                    not preview and (
+                        not isinstance(request["operation_id"], str)
+                        or not 1 <= len(request["operation_id"].encode("utf-8")) <= 256
+                    )
+                )
             ):
                 raise ForestError(
                     "PAYLOAD_UOW_INPUT_INVALID", "Payload forget plan is invalid", 422
@@ -116,10 +137,17 @@ class KernelPayloadUnitOfWorkParticipant:
                 source_id=source.source_id,
                 source_revision=source.source_revision,
             )
+            if preview:
+                result = await self.service.preview_forget_in(
+                    conn, source_targets=(target,)
+                )
+                return {"protocol": "forest.payload-forget-preview/1", **result}
             receipt = await self.service.forget_in(
                 conn,
                 operation_id=request["operation_id"],
                 source_targets=(target,),
+                expected_deletion_epoch=request.get("expected_deletion_epoch"),
+                expected_selection_digest=request.get("expected_selection_digest"),
             )
             selected_ids = await self.service.forget_selected_payload_ids_in(
                 conn, request["operation_id"]

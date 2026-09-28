@@ -5230,6 +5230,116 @@ EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow OR not_nul
 END;
 $$;
 
+CREATE FUNCTION memory_source_forget_impact(requested_bot text, selected_ids text[])
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    affected_ids text[] := ARRAY[]::text[];
+    vector_ids text[] := ARRAY[]::text[];
+    relation_ids text[] := ARRAY[]::text[];
+    journal_ids text[] := ARRAY[]::text[];
+    scope_value jsonb;
+BEGIN
+    SELECT COALESCE(array_agg(u.source_unit_id ORDER BY u.source_unit_id),ARRAY[]::text[])
+    INTO affected_ids
+    FROM __forest_module_schema__.source_units u
+    WHERE u.bot_id=requested_bot AND u.eligibility_state<>'SUPPRESSED' AND (
+        u.author_payload_id=ANY(selected_ids) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_parts p
+            WHERE p.bot_id=u.bot_id AND p.source_unit_id=u.source_unit_id
+              AND p.payload_id=ANY(selected_ids)));
+    SELECT COALESCE(array_agg(f.facet_id ORDER BY f.facet_id),ARRAY[]::text[])
+    INTO vector_ids
+    FROM __forest_module_schema__.embedding_facets f
+    WHERE f.bot_id=requested_bot AND f.source_unit_id=ANY(affected_ids)
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.vector_index_deletions d
+          WHERE d.bot_id=f.bot_id AND d.index_ref_id=f.facet_id);
+    SELECT COALESCE(array_agg(c.contribution_id ORDER BY c.contribution_id),ARRAY[]::text[])
+    INTO relation_ids
+    FROM __forest_module_schema__.relation_contributions c
+    WHERE c.bot_id=requested_bot AND c.active AND (
+        (c.left_kind='SOURCE_UNIT' AND c.left_id=ANY(affected_ids)) OR
+        (c.right_kind='SOURCE_UNIT' AND c.right_id=ANY(affected_ids)) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.relation_evidence e
+            WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
+              AND e.source_unit_id=ANY(affected_ids)));
+    SELECT COALESCE(array_agg(j.journal_id ORDER BY j.journal_id),ARRAY[]::text[])
+    INTO journal_ids
+    FROM __forest_module_schema__.association_journal j
+    WHERE j.bot_id=requested_bot AND j.state='PENDING_ARCHIVE'
+      AND (j.trigger_source_unit_id=ANY(affected_ids)
+           OR j.seed_source_unit_id=ANY(affected_ids));
+    scope_value := jsonb_build_object(
+        'source_unit_ids',to_jsonb(affected_ids),
+        'vector_index_ref_ids',to_jsonb(vector_ids),
+        'relation_contribution_ids',to_jsonb(relation_ids),
+        'association_journal_ids',to_jsonb(journal_ids));
+    RETURN jsonb_build_object(
+        'memory_impact_digest','sha256:' ||
+            encode(sha256(convert_to(scope_value::text,'UTF8')),'hex'),
+        'source_unit_count',cardinality(affected_ids),
+        'vector_deletion_count',cardinality(vector_ids),
+        'relation_retraction_count',cardinality(relation_ids),
+        'association_journal_count',cardinality(journal_ids),
+        'source_unit_sample',to_jsonb(affected_ids[1:20]));
+END;
+$$;
+
+CREATE FUNCTION memory_preview_source_forget(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    prior jsonb := envelope->'prior';
+    prepared jsonb := prior->(body->>'prepare_step_id');
+    preview jsonb := prior->(body->>'preview_step_id');
+    requested_bot text := context->>'bot_id';
+    selected_ids text[];
+    impact jsonb;
+    plan_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'source_unit_id' IS NULL
+       OR octet_length(body->>'source_unit_id') NOT BETWEEN 1 AND 256
+       OR prepared->>'protocol' IS DISTINCT FROM 'forest.payload-forget-plan/1'
+       OR preview->>'protocol' IS DISTINCT FROM 'forest.payload-forget-preview/1'
+       OR preview->>'selection_digest' !~ '^sha256:[a-f0-9]{64}$'
+       OR preview->>'deletion_epoch' !~ '^[0-9]+$'
+       OR preview->>'selected_count' !~ '^[0-9]+$'
+       OR jsonb_typeof(preview->'selected_payload_ids') IS DISTINCT FROM 'array'
+       OR jsonb_array_length(preview->'selected_payload_ids') > 100000 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_PREVIEW_INVALID',
+                'message','Memory forget preview is invalid','status',422));
+    END IF;
+    SELECT array_agg(value ORDER BY value) INTO selected_ids
+    FROM jsonb_array_elements_text(preview->'selected_payload_ids');
+    IF selected_ids IS NULL OR cardinality(selected_ids)<>(preview->>'selected_count')::integer
+       OR prepared->>'anchor_payload_id' <> ALL(selected_ids)
+       OR NOT EXISTS (
+           SELECT 1 FROM __forest_module_schema__.source_units u
+           WHERE u.bot_id=requested_bot AND u.source_unit_id=body->>'source_unit_id'
+             AND u.author_payload_id=prepared->>'anchor_payload_id'
+             AND u.eligibility_state<>'SUPPRESSED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_PREVIEW_CHANGED',
+                'message','Memory forget preview target changed','status',409));
+    END IF;
+    impact := __forest_module_schema__.memory_source_forget_impact(requested_bot,selected_ids);
+    plan_value := jsonb_build_object(
+        'protocol','forest.memory-forget-impact-plan/1',
+        'source_unit_id',body->>'source_unit_id',
+        'anchor_payload_id',prepared->>'anchor_payload_id',
+        'deletion_epoch',(preview->>'deletion_epoch')::bigint,
+        'selection_digest',preview->>'selection_digest',
+        'selected_payload_count',(preview->>'selected_count')::integer)
+        || impact;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',plan_value || jsonb_build_object('plan_digest','sha256:' ||
+            encode(sha256(convert_to(plan_value::text,'UTF8')),'hex')));
+END;
+$$;
+
 CREATE FUNCTION memory_prepare_source_forget(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -5288,6 +5398,8 @@ DECLARE
     deleted_refs integer := 0;
     inserted_refs integer;
     retracted_count integer := 0;
+    impact_value jsonb;
+    current_plan jsonb;
     result_value jsonb;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
@@ -5338,6 +5450,26 @@ BEGIN
         END IF;
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
             'value',operation_row.result_payload);
+    END IF;
+    IF body ? 'plan' THEN
+        impact_value := __forest_module_schema__.memory_source_forget_impact(
+            requested_bot,selected_ids);
+        current_plan := jsonb_build_object(
+            'protocol','forest.memory-forget-impact-plan/1',
+            'source_unit_id',body->>'source_unit_id',
+            'anchor_payload_id',prepared->>'anchor_payload_id',
+            'deletion_epoch',deletion_epoch_value-1,
+            'selection_digest',forgotten->>'selection_digest',
+            'selected_payload_count',cardinality(selected_ids)) || impact_value;
+        current_plan := current_plan || jsonb_build_object(
+            'plan_digest','sha256:' ||
+                encode(sha256(convert_to(current_plan::text,'UTF8')),'hex'));
+        IF body->'plan' IS DISTINCT FROM current_plan THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FORGET_PLAN_CHANGED',
+                    'message','Memory forget impact differs from the approved plan',
+                    'status',409));
+        END IF;
     END IF;
     FOR unit_row IN
         SELECT u.* FROM __forest_module_schema__.source_units u

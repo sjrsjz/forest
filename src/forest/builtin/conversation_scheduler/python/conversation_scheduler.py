@@ -295,6 +295,7 @@ class ConversationScheduler(Plugin):
         await ctx.uow.call(
             "conversation.commit-final-reply",
             {
+                "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
                 "agent": {
                     "run_id": run_ref,
                     "session_id": execution["session_ref"],

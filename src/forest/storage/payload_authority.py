@@ -598,29 +598,26 @@ class KernelPayloadRepository:
         source_targets=(),
         payload_ids=(),
         expected_deletion_epoch: int | None = None,
+        expected_selection_digest: str | None = None,
     ) -> dict:
         _bounded(operation_id, "operation_id", 256)
         if expected_deletion_epoch is not None and (
             type(expected_deletion_epoch) is not int or expected_deletion_epoch < 0
         ):
             raise ForestError("PAYLOAD_INPUT_INVALID", "Invalid deletion epoch", 422)
-        targets = tuple(source_targets)
-        if len(targets) > MAX_SOURCES or any(type(item) is not SourceTarget for item in targets):
-            raise ForestError("PAYLOAD_INPUT_INVALID", "Invalid forget source targets", 422)
-        for target in targets:
-            target.validate()
-        targets = tuple(sorted(set(targets), key=lambda item: tuple(asdict(item).values())))
-        requested_payloads = tuple(sorted(set(payload_ids)))
-        if len(requested_payloads) > MAX_FORGET_SELECTION:
-            raise ForestError("FORGET_SCOPE_LIMIT", "Forget selection exceeds 100000", 422)
-        for payload_id in requested_payloads:
-            _bounded(payload_id, "payload_id", 256)
-        if not targets and not requested_payloads:
-            raise ForestError("PAYLOAD_INPUT_INVALID", "Forget request has no target", 422)
+        if expected_selection_digest is not None and (
+            not isinstance(expected_selection_digest, str)
+            or len(expected_selection_digest) != 71
+            or not expected_selection_digest.startswith("sha256:")
+            or any(char not in "0123456789abcdef" for char in expected_selection_digest[7:])
+        ):
+            raise ForestError("PAYLOAD_INPUT_INVALID", "Invalid selection digest", 422)
+        targets, requested_payloads = self._forget_selection_input(source_targets, payload_ids)
         input_digest = _digest(
             _canonical(
                 [
                     expected_deletion_epoch,
+                    expected_selection_digest,
                     [asdict(target) for target in targets],
                     requested_payloads,
                 ]
@@ -652,6 +649,95 @@ class KernelPayloadRepository:
         current_epoch = await self._clock_in(
             conn, expected=expected_deletion_epoch, update=True
         )
+        selected_ids = await self._select_forget_payload_ids_in(
+            conn, targets=targets, requested_payloads=requested_payloads
+        )
+        selection_digest = _digest(_canonical(selected_ids))
+        if (
+            expected_selection_digest is not None
+            and selection_digest != expected_selection_digest
+        ):
+            raise ForestError(
+                "FORGET_SELECTION_CONFLICT", "Payload forget selection changed", 409
+            )
+        new_epoch = current_epoch + 1
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}(bot_id,operation_id,input_digest,selection_digest,"
+                "selected_count,deletion_epoch) VALUES (%s,%s,%s,%s,%s,%s)"
+            ).format(self._table("forget_requests")),
+            (
+                self.store.bot_id,
+                operation_id,
+                input_digest,
+                selection_digest,
+                len(selected_ids),
+                new_epoch,
+            ),
+        )
+        for target in targets:
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}(bot_id,operation_id,source_component_id,source_kind,"
+                    "source_id,source_revision,part_id) VALUES (%s,%s,%s,%s,%s,%s,%s)"
+                ).format(self._table("forget_source_targets")),
+                (
+                    self.store.bot_id,
+                    operation_id,
+                    target.source_component_id,
+                    target.source_kind,
+                    target.source_id,
+                    target.source_revision,
+                    target.part_id,
+                ),
+            )
+        for payload_id in selected_ids:
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}(bot_id,operation_id,payload_id) VALUES (%s,%s,%s)"
+                ).format(self._table("forget_payload_targets")),
+                (self.store.bot_id, operation_id, payload_id),
+            )
+        await conn.execute(
+            sql.SQL("UPDATE {} SET deletion_epoch=%s WHERE bot_id=%s").format(
+                self._table("deletion_clock")
+            ),
+            (new_epoch, self.store.bot_id),
+        )
+        if selected_ids:
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='REVOKED',revoke_operation_id=%s,"
+                    "revoked_at=clock_timestamp() WHERE bot_id=%s "
+                    "AND payload_id=ANY(%s) AND state='ACTIVE'"
+                ).format(self._table("payload_headers")),
+                (operation_id, self.store.bot_id, list(selected_ids)),
+            )
+        return {
+            "operation_id": operation_id,
+            "deletion_epoch": new_epoch,
+            "selected_count": len(selected_ids),
+            "selection_digest": selection_digest,
+        }
+
+    @staticmethod
+    def _forget_selection_input(source_targets, payload_ids):
+        targets = tuple(source_targets)
+        if len(targets) > MAX_SOURCES or any(type(item) is not SourceTarget for item in targets):
+            raise ForestError("PAYLOAD_INPUT_INVALID", "Invalid forget source targets", 422)
+        for target in targets:
+            target.validate()
+        targets = tuple(sorted(set(targets), key=lambda item: tuple(asdict(item).values())))
+        requested_payloads = tuple(sorted(set(payload_ids)))
+        if len(requested_payloads) > MAX_FORGET_SELECTION:
+            raise ForestError("FORGET_SCOPE_LIMIT", "Forget selection exceeds 100000", 422)
+        for payload_id in requested_payloads:
+            _bounded(payload_id, "payload_id", 256)
+        if not targets and not requested_payloads:
+            raise ForestError("PAYLOAD_INPUT_INVALID", "Forget request has no target", 422)
+        return targets, requested_payloads
+
+    async def _select_forget_payload_ids_in(self, conn, *, targets, requested_payloads):
         if requested_payloads:
             existing_payloads = {
                 row["payload_id"]
@@ -713,66 +799,23 @@ class KernelPayloadRepository:
             if len(selected) > MAX_FORGET_SELECTION:
                 raise ForestError("FORGET_SCOPE_LIMIT", "Forget closure exceeds 100000", 422)
             frontier = discovered
-        selected_ids = tuple(sorted(selected))
-        selection_digest = _digest(_canonical(selected_ids))
-        new_epoch = current_epoch + 1
-        await conn.execute(
-            sql.SQL(
-                "INSERT INTO {}(bot_id,operation_id,input_digest,selection_digest,"
-                "selected_count,deletion_epoch) VALUES (%s,%s,%s,%s,%s,%s)"
-            ).format(self._table("forget_requests")),
-            (
-                self.store.bot_id,
-                operation_id,
-                input_digest,
-                selection_digest,
-                len(selected_ids),
-                new_epoch,
-            ),
+        return tuple(sorted(selected))
+
+    async def preview_forget_in(self, conn, *, source_targets=(), payload_ids=()) -> dict:
+        """Return an exact closure while fencing admissions and other forgets."""
+
+        targets, requested_payloads = self._forget_selection_input(
+            source_targets, payload_ids
         )
-        for target in targets:
-            await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}(bot_id,operation_id,source_component_id,source_kind,"
-                    "source_id,source_revision,part_id) VALUES (%s,%s,%s,%s,%s,%s,%s)"
-                ).format(self._table("forget_source_targets")),
-                (
-                    self.store.bot_id,
-                    operation_id,
-                    target.source_component_id,
-                    target.source_kind,
-                    target.source_id,
-                    target.source_revision,
-                    target.part_id,
-                ),
-            )
-        for payload_id in selected_ids:
-            await conn.execute(
-                sql.SQL(
-                    "INSERT INTO {}(bot_id,operation_id,payload_id) VALUES (%s,%s,%s)"
-                ).format(self._table("forget_payload_targets")),
-                (self.store.bot_id, operation_id, payload_id),
-            )
-        await conn.execute(
-            sql.SQL("UPDATE {} SET deletion_epoch=%s WHERE bot_id=%s").format(
-                self._table("deletion_clock")
-            ),
-            (new_epoch, self.store.bot_id),
+        current_epoch = await self._clock_in(conn, update=True)
+        selected_ids = await self._select_forget_payload_ids_in(
+            conn, targets=targets, requested_payloads=requested_payloads
         )
-        if selected_ids:
-            await conn.execute(
-                sql.SQL(
-                    "UPDATE {} SET state='REVOKED',revoke_operation_id=%s,"
-                    "revoked_at=clock_timestamp() WHERE bot_id=%s "
-                    "AND payload_id=ANY(%s) AND state='ACTIVE'"
-                ).format(self._table("payload_headers")),
-                (operation_id, self.store.bot_id, list(selected_ids)),
-            )
         return {
-            "operation_id": operation_id,
-            "deletion_epoch": new_epoch,
+            "deletion_epoch": current_epoch,
             "selected_count": len(selected_ids),
-            "selection_digest": selection_digest,
+            "selection_digest": _digest(_canonical(selected_ids)),
+            "selected_payload_ids": list(selected_ids),
         }
 
     async def forget_selected_payload_ids_in(self, conn, operation_id: str) -> list[str]:
