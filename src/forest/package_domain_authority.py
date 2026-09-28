@@ -153,7 +153,7 @@ class PostgresPackageDomainAuthority:
                         "Managed payload reference differs from its frozen port declaration",
                         409,
                     )
-                await self.payloads.verify_in(
+                verified = await self.payloads.verify_in(
                     conn,
                     payload_id=reference.get("payload_id"),
                     digest=reference.get("digest"),
@@ -161,6 +161,20 @@ class PostgresPackageDomainAuthority:
                     owner_kind=reference["owner_kind"],
                     owner_id=reference["owner_id"],
                 )
+                media_type_path = declaration_ref.get("media_type_path")
+                byte_length_path = declaration_ref.get("byte_length_path")
+                if (
+                    media_type_path is not None
+                    and self._pointer(payload, media_type_path, bindings) != verified.media_type
+                ) or (
+                    byte_length_path is not None
+                    and self._pointer(payload, byte_length_path, bindings) != verified.byte_length
+                ):
+                    raise ForestError(
+                        "DOMAIN_PAYLOAD_METADATA_CONFLICT",
+                        "Managed payload metadata differs from its authoritative bytes",
+                        409,
+                    )
 
     async def invoke_query(
         self,

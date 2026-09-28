@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.44.0"
+version = "1.45.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -43,6 +43,7 @@ requests = [
   "domain.query:memory.read-query-parts",
   "domain.query:memory.read-query-progress",
   "domain.query:memory.read-recall-work",
+  "domain.query:memory.assert-public-query",
   "domain.query:memory.read-query-vectors",
   "domain.query:memory.read-match-preparation",
   "domain.query:memory.read-matched-seeds",
@@ -237,9 +238,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.40.0"
+schema_version = "3.41.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "4da3f11b9f15816e545a21670bb1308541fe78e1f065b8f7ab665f354f8b1cd6"
+baseline_sha256 = "27f382ade4dae3588691f76672501a037acf3fe9ddf9d7c5d34744da25e38981"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -307,12 +308,48 @@ function = "memory_query_management_forget"
 input_schema = "schemas/forget-work-status-input.json"
 output_schema = "schemas/forget-work-status-output.json"
 
+[[components.domain_queries]]
+name = "memory.read-management-trial"
+contract = "1.0"
+function = "memory_read_management_trial"
+input_schema = "schemas/trial-get-input.json"
+output_schema = "schemas/trial-get-output.json"
+
+[[components.domain_queries]]
+name = "memory.assert-public-query"
+contract = "1.0"
+function = "memory_assert_public_query"
+input_schema = "schemas/query-prepare-input.json"
+output_schema = "schemas/public-query-output.json"
+
 [[components.domain_commands]]
 name = "memory.enqueue-management-forget"
 contract = "1.0"
 function = "memory_enqueue_management_forget"
 input_schema = "schemas/forget-management-action-input.json"
 output_schema = "schemas/forget-management-enqueued-output.json"
+
+[[components.domain_commands]]
+name = "memory.start-management-trial"
+contract = "1.0"
+function = "memory_start_management_trial"
+input_schema = "schemas/trial-start-input.json"
+output_schema = "schemas/trial-start-output.json"
+
+[[components.domain_commands.payload_refs]]
+path = "/parts/*/payload"
+owner_component = "memory.graph"
+owner_kind = "trial.input"
+owner_id_path = "/parts/*/payload/owner_id"
+media_type_path = "/parts/*/media_type"
+byte_length_path = "/parts/*/byte_length"
+
+[[components.domain_commands]]
+name = "memory.cancel-management-trial"
+contract = "1.0"
+function = "memory_cancel_management_trial"
+input_schema = "schemas/trial-cancel-input.json"
+output_schema = "schemas/trial-cancel-output.json"
 
 [[components.management_queries]]
 id = "memory.trunks.list"
@@ -348,12 +385,31 @@ id = "memory.forget.status"
 port = "memory.forget-work-status"
 timeout_s = 10
 
+[[components.management_queries]]
+id = "memory.trial.get"
+port = "memory.read-management-trial"
+timeout_s = 10
+
 [[components.management_actions]]
 id = "memory.forget.enqueue"
 port = "memory.enqueue-management-forget"
 priority = "P0"
 actor_field = "requested_by"
 authorization_path = "/plan"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "memory.trial.start"
+port = "memory.start-management-trial"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "memory.trial.cancel"
+port = "memory.cancel-management-trial"
+priority = "P1"
+actor_field = "requested_by"
 timeout_s = 15
 
 [[components.unit_of_work_participants]]

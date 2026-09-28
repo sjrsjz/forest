@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "query_id", "status"],
+  "properties": {
+    "protocol": {"const": "forest.memory-trial-cancelled/1"},
+    "query_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "status": {"enum": ["CANCELLED", "CANCELLING", "TERMINAL"]}
+  }
+}

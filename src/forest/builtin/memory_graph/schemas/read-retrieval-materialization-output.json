@@ -5,6 +5,7 @@
   "required": [
     "bundle_id",
     "result_count",
+    "input_kind",
     "current_source",
     "max_retrieval_chars",
     "truncated",
@@ -26,9 +27,10 @@
       "minimum": 0,
       "maximum": 64
     },
+    "input_kind": {"enum": ["SOURCE_UNIT", "ADMIN_TRIAL"]},
     "current_source": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "type": "object",
+      "type": ["object", "null"],
       "additionalProperties": false,
       "required": [
         "source_id",
@@ -173,5 +175,11 @@
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
     }
-  }
+  },
+  "allOf": [
+    {"if": {"properties": {"input_kind": {"const": "SOURCE_UNIT"}}},
+     "then": {"properties": {"current_source": {"type": "object"}}}},
+    {"if": {"properties": {"input_kind": {"const": "ADMIN_TRIAL"}}},
+     "then": {"properties": {"current_source": {"type": "null"}}}}
+  ]
 }

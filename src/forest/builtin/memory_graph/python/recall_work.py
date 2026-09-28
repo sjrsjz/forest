@@ -19,7 +19,7 @@ async def advance(plugin, task, ctx):
         work = await ctx.queries.call("memory.read-recall-work", request, timeout=10)
         if work["state"] in {"CANCELLING", "CANCELLED"}:
             return {"query_id": payload["query_id"]}
-        progress = await plugin.query_progress(request, ctx)
+        progress = await ctx.queries.call("memory.read-query-progress", request, timeout=30)
         phase = progress["phase"]
         action = {
             "NEED_PREPARATION": plugin.prepare_query,

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "query_id", "expires_at", "deadline_at"],
+  "properties": {
+    "protocol": {"const": "forest.memory-trial-started/1"},
+    "query_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "deadline_at": {"type": "string", "format": "date-time"}
+  }
+}

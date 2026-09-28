@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "query_id", "query_mode", "state", "deadline_at", "expires_at", "error_code", "evidence_ref"],
+  "properties": {
+    "protocol": {"const": "forest.memory-trial/1"},
+    "query_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "query_mode": {"enum": ["TEXT", "IMAGE", "MIXED"]},
+    "state": {"enum": ["PENDING", "CLAIMED", "BLOCKED_UNKNOWN", "CANCELLING", "READY", "FAILED", "CANCELLED"]},
+    "deadline_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "error_code": {"type": ["string", "null"]},
+    "evidence_ref": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "object", "additionalProperties": false,
+         "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+         "properties": {
+           "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+           "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+           "owner_component_id": {"const": "memory.graph"},
+           "owner_kind": {"const": "retrieval.evidence"},
+           "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+         }}
+      ]
+    }
+  }
+}

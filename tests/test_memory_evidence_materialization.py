@@ -13,7 +13,8 @@ def _ref(name):
             "owner_component_id": "adapter.onebot", "owner_kind": "source", "owner_id": name}
 
 
-def _context(*, images=1, dependencies=3, query_parts=1, text=b"abc", budget=256, author_bytes=None):
+def _context(*, images=1, dependencies=3, query_parts=1, text=b"abc", budget=256,
+             author_bytes=None, input_kind="SOURCE_UNIT"):
     documents = {}
     ancestry = {}
     published = []
@@ -23,7 +24,8 @@ def _context(*, images=1, dependencies=3, query_parts=1, text=b"abc", budget=256
                      for i in range(images))
     node = {"source_unit_id": "unit/test", "author_payload": _ref("author"), "part_count": len(raw_parts)}
     state = {"evidence_ref": None, "bundle_id": "retrieval/test", "result_count": 1,
-             "max_retrieval_chars": budget, "current_source": {"source_id": "group/query"},
+             "input_kind": input_kind, "max_retrieval_chars": budget,
+             "current_source": None if input_kind == "ADMIN_TRIAL" else {"source_id": "group/query"},
              "truncated": False, "association_sampled": False, "read_count": 1}
 
     async def query(port, body, **_kwargs):
@@ -84,6 +86,17 @@ async def test_evidence_cuts_unicode_text_and_keeps_images_with_source_dependenc
     parents = {parent for group in ancestry.values() for parent in group}
     assert {"text", "image/0", "query/0", "anchor/0", "anchor/1", "anchor/2"} <= parents
     assert len(published) == 1
+
+
+@pytest.mark.asyncio
+async def test_management_trial_evidence_has_no_fabricated_current_source():
+    ctx, documents, _ancestry, _published = _context(input_kind="ADMIN_TRIAL")
+    result = await materialize(ctx, "query/test", digest_json)
+    document = documents[result["evidence_ref"]["payload_id"]]
+    assert document["protocol"] == "forest.memory-trial-evidence/1"
+    assert document["input_kind"] == "ADMIN_TRIAL"
+    assert document["current_source"] is None
+    assert document["evidence"][0]["source_unit_id"] == "unit/test"
 
 
 @pytest.mark.asyncio

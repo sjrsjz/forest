@@ -145,6 +145,9 @@ class MemoryGraph(Plugin):
         output_schema="schemas/query-progress-output.json",
     )
     async def query_progress(self, payload, ctx):
+        await ctx.queries.call(
+            "memory.assert-public-query", {"query_id": payload["query_id"]}, timeout=10
+        )
         progress = await ctx.queries.call(
             "memory.read-query-progress", {"query_id": payload["query_id"]}, timeout=30
         )
@@ -189,6 +192,9 @@ class MemoryGraph(Plugin):
         output_schema="schemas/recall-work-output.json",
     )
     async def recall_status(self, payload, ctx):
+        await ctx.queries.call(
+            "memory.assert-public-query", {"query_id": payload["query_id"]}, timeout=10
+        )
         state = await ctx.queries.call(
             "memory.read-recall-work", {"query_id": payload["query_id"]}, timeout=30
         )

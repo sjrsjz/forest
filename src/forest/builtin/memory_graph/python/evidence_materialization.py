@@ -113,14 +113,18 @@ async def materialize(ctx, query_id, digest):
             evidence.append(unit)
             selected.append(index)
             content_truncated |= unit_truncated
+        trial_input = state["input_kind"] == "ADMIN_TRIAL"
         document = {
-            "protocol": "forest.memory-evidence/1", "bot_id": ctx.identity["bot_id"],
+            "protocol": "forest.memory-trial-evidence/1" if trial_input else "forest.memory-evidence/1",
+            "bot_id": ctx.identity["bot_id"],
             "query_id": query_id, "bundle_id": bundle_id, "graph_snapshot_ref": "memory-query:" + query_id,
             "current_source": state["current_source"], "evidence": evidence,
             "content_truncated": content_truncated, "missing_count": missing_count,
             "truncated": state["truncated"], "association_sampled": state["association_sampled"],
             "read_count": state["read_count"], "max_retrieval_chars": state["max_retrieval_chars"],
         }
+        if trial_input:
+            document["input_kind"] = "ADMIN_TRIAL"
         evidence_ref = await put(document, "retrieval.evidence", [query_lineage, *unit_refs])
         body = {"protocol": "forest.memory-evidence-publish/1", "query_id": query_id,
                 "evidence_ref": evidence_ref, "item_indexes": selected, "missing_count": missing_count,

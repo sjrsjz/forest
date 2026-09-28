@@ -512,10 +512,12 @@ CREATE TABLE memory_trial_inputs (
     generation_id text NOT NULL CHECK (octet_length(generation_id) BETWEEN 1 AND 256),
     expires_at timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    cancelled_at timestamptz,
     PRIMARY KEY (bot_id,query_id),
     FOREIGN KEY (bot_id,query_id,input_kind)
         REFERENCES memory_queries(bot_id,query_id,input_kind),
-    CHECK (expires_at>created_at AND expires_at<=created_at+interval '1 hour')
+    CHECK (expires_at>created_at AND expires_at<=created_at+interval '1 hour'),
+    CHECK (cancelled_at IS NULL OR cancelled_at>=created_at)
 );
 
 CREATE TABLE memory_trial_parts (
@@ -577,7 +579,7 @@ CREATE TABLE query_recall_work (
     state text NOT NULL DEFAULT 'PENDING'
         CHECK (state IN ('PENDING','CLAIMED','BLOCKED_UNKNOWN','READY','FAILED','CANCELLED')),
     cancel_requested boolean NOT NULL DEFAULT false,
-    cancel_reason text CHECK (cancel_reason IS NULL OR cancel_reason='SUPERSEDED'),
+    cancel_reason text CHECK (cancel_reason IS NULL OR cancel_reason IN ('SUPERSEDED','ADMIN_CANCELLED')),
     claim_token text UNIQUE,
     claim_payload jsonb,
     lease_deadline timestamptz,
@@ -1158,7 +1160,7 @@ CREATE INDEX embedding_facets_query_idx ON embedding_facets(
 CREATE INDEX embedding_facets_trial_expiry_idx ON embedding_facets(
     bot_id,state,trial_query_id,facet_id
 ) WHERE input_kind='ADMIN_TRIAL'
-    AND state IN ('PENDING','DISPATCHED','EMBEDDED','READY','UNKNOWN','FAILED');
+    AND state IN ('PENDING','PREPARED','DISPATCHED','EMBEDDED','READY','UNKNOWN','FAILED');
 CREATE INDEX embedding_facets_snapshot_idx ON embedding_facets(
     bot_id,space_id,purpose,state,published_at,facet_id
 );
@@ -1190,6 +1192,258 @@ CREATE INDEX embedding_budget_reservations_state_idx ON embedding_budget_reserva
 CREATE FUNCTION reject_immutable_row() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION 'memory.graph immutable fact cannot change' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION memory_start_management_trial(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_query text := input->>'query_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'input_digest';
+    requested_actor text := input->>'requested_by';
+    domain_row __forest_module_schema__.memory_domains%ROWTYPE;
+    query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    trial_row __forest_module_schema__.memory_trial_inputs%ROWTYPE;
+    part_value jsonb;
+    part_index bigint;
+    text_count integer := 0;
+    image_count integer := 0;
+    total_bytes bigint := 0;
+    expiry_value timestamptz;
+    deadline_value timestamptz;
+BEGIN
+    IF requested_query IS NULL OR octet_length(requested_query) NOT BETWEEN 1 AND 256
+       OR requested_operation IS NULL OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_actor IS NULL OR octet_length(requested_actor) NOT BETWEEN 1 AND 256
+       OR context->>'generation_id' IS NULL
+       OR jsonb_typeof(input->'parts') IS DISTINCT FROM 'array' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_INVALID',
+                'message','Management trial input is invalid','status',422));
+    END IF;
+    IF jsonb_array_length(input->'parts') NOT BETWEEN 1 AND 8 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_INVALID',
+                'message','Management trial requires one to eight parts','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/query/'||requested_bot||'/'||requested_query,0));
+    SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=requested_bot AND query_id=requested_query;
+    IF FOUND THEN
+        SELECT * INTO trial_row FROM __forest_module_schema__.memory_trial_inputs
+        WHERE bot_id=requested_bot AND query_id=requested_query;
+        IF query_row.input_kind<>'ADMIN_TRIAL'
+           OR query_row.operation_id IS DISTINCT FROM requested_operation
+           OR query_row.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TRIAL_IDENTITY_CONFLICT',
+                    'message','Trial identity was bound to another request','status',409));
+        END IF;
+        IF trial_row.generation_id IS DISTINCT FROM context->>'generation_id'
+           OR trial_row.expires_at<=clock_timestamp() THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
+                    'message','Trial input has expired or its Generation was replaced','status',410));
+        END IF;
+    ELSE
+        IF EXISTS (SELECT 1 FROM __forest_module_schema__.memory_queries
+            WHERE bot_id=requested_bot AND operation_id=requested_operation) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TRIAL_IDENTITY_CONFLICT',
+                    'message','Trial operation was bound to another query','status',409));
+        END IF;
+        SELECT * INTO domain_row FROM __forest_module_schema__.memory_domains
+        WHERE bot_id=requested_bot FOR SHARE;
+        IF NOT FOUND THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_DOMAIN_UNBOUND',
+                    'message','Trial requires a bound embedding domain','status',409));
+        END IF;
+        IF EXISTS (
+            SELECT 1 FROM jsonb_array_elements(input->'parts') p
+            WHERE jsonb_typeof(p) IS DISTINCT FROM 'object'
+               OR p->>'part_id' IS NULL OR octet_length(p->>'part_id') NOT BETWEEN 1 AND 256
+               OR p->>'modality' NOT IN ('TEXT','IMAGE')
+               OR p->>'byte_length' !~ '^[1-9][0-9]*$'
+               OR (p->>'byte_length')::bigint>8388608
+               OR p#>>'{payload,owner_component_id}' IS DISTINCT FROM 'memory.graph'
+               OR p#>>'{payload,owner_kind}' IS DISTINCT FROM 'trial.input'
+               OR p#>>'{payload,owner_id}' IS DISTINCT FROM requested_query
+               OR (p->>'modality'='TEXT' AND (
+                   p->>'media_type'<>'text/plain' OR p->>'width' IS NOT NULL
+                   OR p->>'height' IS NOT NULL OR (p->>'byte_length')::bigint>65536))
+               OR (p->>'modality'='IMAGE' AND (
+                   p->>'media_type' NOT IN ('image/png','image/jpeg','image/webp')
+                   OR p->>'width' !~ '^[1-9][0-9]*$'
+                   OR p->>'height' !~ '^[1-9][0-9]*$'
+                   OR (p->>'width')::integer>100000 OR (p->>'height')::integer>100000))
+        ) OR EXISTS (
+            SELECT 1 FROM jsonb_array_elements(input->'parts') p
+            GROUP BY p->>'part_id' HAVING count(*)>1
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_INVALID',
+                    'message','Trial parts violate modality, size or PayloadRef bounds','status',422));
+        END IF;
+        SELECT count(*) FILTER (WHERE p->>'modality'='TEXT'),
+               count(*) FILTER (WHERE p->>'modality'='IMAGE'),
+               sum((p->>'byte_length')::bigint)
+        INTO text_count,image_count,total_bytes
+        FROM jsonb_array_elements(input->'parts') p;
+        IF total_bytes>33554432 THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_INVALID',
+                    'message','Trial parts exceed the aggregate byte budget','status',422));
+        END IF;
+        expiry_value := clock_timestamp()+interval '10 minutes';
+        deadline_value := clock_timestamp()+interval '8 minutes';
+        INSERT INTO __forest_module_schema__.memory_queries(
+            bot_id,query_id,operation_id,input_digest,input_kind,query_mode,
+            fusion_policy_revision,accepted_deletion_epoch)
+        VALUES(requested_bot,requested_query,requested_operation,requested_digest,
+            'ADMIN_TRIAL',CASE WHEN text_count=0 THEN 'IMAGE'
+                WHEN image_count=0 THEN 'TEXT' ELSE 'MIXED' END,
+            domain_row.fusion_policy_revision,0);
+        INSERT INTO __forest_module_schema__.memory_trial_inputs(
+            bot_id,query_id,actor_subject_ref,generation_id,expires_at)
+        VALUES(requested_bot,requested_query,requested_actor,context->>'generation_id',expiry_value);
+        FOR part_value,part_index IN
+            SELECT value,ordinality FROM jsonb_array_elements(input->'parts') WITH ORDINALITY
+        LOOP
+            INSERT INTO __forest_module_schema__.memory_trial_parts(
+                bot_id,query_id,query_part_index,part_id,modality,media_type,byte_length,
+                width,height,payload_id,payload_digest,payload_owner_component_id,
+                payload_owner_kind,payload_owner_id)
+            VALUES(requested_bot,requested_query,(part_index-1)::integer,
+                part_value->>'part_id',part_value->>'modality',part_value->>'media_type',
+                (part_value->>'byte_length')::integer,(part_value->>'width')::integer,
+                (part_value->>'height')::integer,part_value#>>'{payload,payload_id}',
+                part_value#>>'{payload,digest}',part_value#>>'{payload,owner_component_id}',
+                part_value#>>'{payload,owner_kind}',part_value#>>'{payload,owner_id}');
+        END LOOP;
+        INSERT INTO __forest_module_schema__.query_recall_work(bot_id,query_id,deadline_at)
+        VALUES(requested_bot,requested_query,deadline_value);
+        SELECT * INTO trial_row FROM __forest_module_schema__.memory_trial_inputs
+        WHERE bot_id=requested_bot AND query_id=requested_query;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-trial-started/1',
+            'query_id',requested_query,'expires_at',trial_row.expires_at,
+            'deadline_at',(SELECT deadline_at FROM __forest_module_schema__.query_recall_work
+                WHERE bot_id=requested_bot AND query_id=requested_query)));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_INVALID',
+            'message','Management trial input is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_read_management_trial(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    trial_row __forest_module_schema__.memory_trial_inputs%ROWTYPE;
+    work_value jsonb;
+BEGIN
+    SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=context->>'bot_id' AND query_id=input->>'query_id'
+      AND input_kind='ADMIN_TRIAL';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_NOT_FOUND',
+                'message','Management trial does not exist','status',404));
+    END IF;
+    SELECT * INTO trial_row FROM __forest_module_schema__.memory_trial_inputs
+    WHERE bot_id=query_row.bot_id AND query_id=query_row.query_id;
+    IF NOT FOUND OR trial_row.generation_id IS DISTINCT FROM context->>'generation_id'
+       OR trial_row.expires_at<=clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
+                'message','Trial input has expired or its Generation was replaced','status',410));
+    END IF;
+    work_value := __forest_module_schema__.memory_read_recall_work(context,input);
+    IF work_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN work_value; END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-trial/1',
+            'query_id',query_row.query_id,'query_mode',query_row.query_mode,
+            'state',work_value#>>'{value,state}',
+            'deadline_at',work_value#>>'{value,deadline_at}',
+            'expires_at',trial_row.expires_at,
+            'error_code',work_value#>'{value,error_code}',
+            'evidence_ref',work_value#>'{value,evidence_ref}'));
+END;
+$$;
+
+CREATE FUNCTION memory_cancel_management_trial(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    status_value text;
+BEGIN
+    SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
+    WHERE bot_id=context->>'bot_id' AND query_id=input->>'query_id'
+      AND input_kind='ADMIN_TRIAL';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_NOT_FOUND',
+                'message','Management trial does not exist','status',404));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
+    WHERE bot_id=query_row.bot_id AND query_id=query_row.query_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RECALL_NOT_REQUESTED',
+                'message','Trial has no recall work','status',404));
+    END IF;
+    IF work_row.state<>'READY' THEN
+        UPDATE __forest_module_schema__.memory_trial_inputs
+        SET cancelled_at=clock_timestamp()
+        WHERE bot_id=query_row.bot_id AND query_id=query_row.query_id
+          AND cancelled_at IS NULL;
+    END IF;
+    IF work_row.cancel_requested THEN
+        status_value := CASE WHEN work_row.state='CANCELLED' THEN 'CANCELLED'
+            ELSE 'CANCELLING' END;
+    ELSIF work_row.state IN ('READY','FAILED') THEN
+        status_value := 'TERMINAL';
+    ELSIF work_row.state='CLAIMED' THEN
+        UPDATE __forest_module_schema__.query_recall_work
+        SET cancel_requested=true,cancel_reason='ADMIN_CANCELLED',updated_at=clock_timestamp()
+        WHERE bot_id=work_row.bot_id AND query_id=work_row.query_id;
+        status_value := 'CANCELLING';
+    ELSE
+        UPDATE __forest_module_schema__.query_recall_work
+        SET state='CANCELLED',cancel_requested=true,cancel_reason='ADMIN_CANCELLED',
+            updated_at=clock_timestamp()
+        WHERE bot_id=work_row.bot_id AND query_id=work_row.query_id;
+        status_value := 'CANCELLED';
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-trial-cancelled/1',
+            'query_id',query_row.query_id,'status',status_value));
+END;
+$$;
+
+CREATE FUNCTION memory_assert_public_query(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.memory_queries
+        WHERE bot_id=context->>'bot_id' AND query_id=input->>'query_id'
+          AND input_kind='ADMIN_TRIAL'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_NOT_FOUND',
+                'message','Public query does not exist','status',404));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-public-query/1',
+            'query_id',input->>'query_id'));
 END;
 $$;
 
@@ -1234,7 +1488,8 @@ BEGIN
     SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
     WHERE bot_id=requested_bot AND query_id=requested_query;
     IF FOUND THEN
-        IF query_row.operation_id IS DISTINCT FROM requested_operation
+        IF query_row.input_kind<>'SOURCE_UNIT'
+           OR query_row.operation_id IS DISTINCT FROM requested_operation
            OR query_row.input_digest IS DISTINCT FROM requested_digest THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','MEMORY_QUERY_IDENTITY_CONFLICT',
@@ -1363,7 +1618,8 @@ BEGIN
         SELECT * INTO trial_row FROM __forest_module_schema__.memory_trial_inputs
         WHERE bot_id=requested_bot AND query_id=requested_query;
         IF NOT FOUND OR trial_row.generation_id IS DISTINCT FROM context->>'generation_id'
-           OR trial_row.expires_at<=clock_timestamp() THEN
+           OR trial_row.expires_at<=clock_timestamp()
+           OR trial_row.cancelled_at IS NOT NULL THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
                     'message','Trial input has expired or its Generation was replaced','status',410));
@@ -2256,6 +2512,8 @@ BEGIN
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
         'bundle_id',bundle_row.bundle_id,'result_count',bundle_row.result_count,
+        'input_kind',(SELECT input_kind FROM __forest_module_schema__.memory_queries
+            WHERE bot_id=bundle_row.bot_id AND query_id=bundle_row.query_id),
         'current_source',current_source,'max_retrieval_chars',max_chars,
         'truncated',bundle_row.truncated,'association_sampled',bundle_row.association_sampled,
         'read_count',bundle_row.read_count,'evidence_ref',projection_row.evidence_ref,
@@ -2389,6 +2647,7 @@ RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
     body jsonb := envelope->'input';
     work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    check_value jsonb;
     result_status text;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
@@ -2399,6 +2658,8 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_RECALL_CANCEL_INVALID',
                 'message','Recall cancellation is invalid','status',422));
     END IF;
+    check_value := __forest_module_schema__.memory_assert_public_query(context,body);
+    IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
     SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
     WHERE bot_id=context->>'bot_id' AND query_id=body->>'query_id' FOR UPDATE;
     IF NOT FOUND THEN
@@ -2450,6 +2711,8 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_RECALL_REQUEST_INVALID',
                 'message','Recall request is invalid','status',422));
     END IF;
+    check_value := __forest_module_schema__.memory_assert_public_query(context,body);
+    IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
     SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
     WHERE bot_id=requested_bot AND query_id=requested_query;
     IF NOT FOUND THEN
@@ -2966,6 +3229,7 @@ BEGIN
                trial_data.input_revision AS trial_revision,
                trial_data.generation_id AS trial_generation,
                trial_data.expires_at AS trial_expiry,
+               trial_data.cancelled_at AS trial_cancelled_at,
                trial_data.query_state,trial_data.query_epoch,
                trial_data.payload_id AS trial_payload_id,
                trial_data.payload_digest AS trial_payload_digest
@@ -2997,7 +3261,7 @@ BEGIN
             FOR SHARE OF u,s
         ) source_data ON true
         LEFT JOIN LATERAL (
-            SELECT t.input_revision,t.generation_id,t.expires_at,
+            SELECT t.input_revision,t.generation_id,t.expires_at,t.cancelled_at,
                    q.state AS query_state,
                    q.accepted_deletion_epoch AS query_epoch,
                    p.payload_id,p.payload_digest
@@ -3042,6 +3306,7 @@ BEGIN
              AND facet_row.trial_revision=facet_row.input_revision
              AND facet_row.trial_generation=context->>'generation_id'
              AND facet_row.trial_expiry>clock_timestamp()
+             AND facet_row.trial_cancelled_at IS NULL
              AND facet_row.query_state='OPEN'
              AND facet_row.trial_payload_id=facet_row.input_payload_id
              AND facet_row.trial_payload_digest=facet_row.input_payload_digest)
@@ -3197,16 +3462,17 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
             'value',work_row.claim_payload);
     END IF;
-    -- Expiry is a Memory fact. Retire a bounded set before selecting deletion
-    -- work so a silent Bot also removes stale trial vectors from the index.
+    -- Expiry and cancellation are Memory facts. Retire a bounded set before
+    -- selecting deletion work so a silent Bot also removes stale trial vectors.
     FOR expired_facet IN
         SELECT f.facet_id,f.space_id,f.accepted_deletion_epoch,f.state
         FROM __forest_module_schema__.memory_trial_inputs t
         JOIN __forest_module_schema__.embedding_facets f
           ON f.bot_id=t.bot_id AND f.trial_query_id=t.query_id
          AND f.input_kind='ADMIN_TRIAL'
-        WHERE t.bot_id=requested_bot AND t.expires_at<=clock_timestamp()
-          AND f.state IN ('PENDING','DISPATCHED','EMBEDDED','READY','UNKNOWN','FAILED')
+        WHERE t.bot_id=requested_bot
+          AND (t.expires_at<=clock_timestamp() OR t.cancelled_at IS NOT NULL)
+          AND f.state IN ('PENDING','PREPARED','DISPATCHED','EMBEDDED','READY','UNKNOWN','FAILED')
           AND (f.state NOT IN ('DISPATCHED','UNKNOWN') OR NOT EXISTS (
                    SELECT 1 FROM __forest_module_schema__.vector_index_deletions d
                    WHERE d.bot_id=f.bot_id AND d.index_ref_id=f.facet_id
@@ -3221,7 +3487,7 @@ BEGIN
                 expired_facet.accepted_deletion_epoch)
             ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
         END IF;
-        IF expired_facet.state IN ('PENDING','EMBEDDED','READY','FAILED') THEN
+        IF expired_facet.state IN ('PENDING','PREPARED','EMBEDDED','READY','FAILED') THEN
             UPDATE __forest_module_schema__.embedding_facets
             SET state='SUPPRESSED',index_ref_id=NULL,vector_digest=NULL,
                 result_payload_id=NULL,result_payload_digest=NULL,
@@ -3467,6 +3733,11 @@ CREATE FUNCTION guard_trial_input_retention() RETURNS trigger LANGUAGE plpgsql A
 DECLARE expiry timestamptz;
 BEGIN
     IF TG_OP='UPDATE' THEN
+        IF TG_TABLE_NAME='memory_trial_inputs'
+           AND OLD.cancelled_at IS NULL AND NEW.cancelled_at IS NOT NULL
+           AND to_jsonb(NEW)-'cancelled_at' = to_jsonb(OLD)-'cancelled_at' THEN
+            RETURN NEW;
+        END IF;
         RAISE EXCEPTION 'Trial input identity is immutable' USING ERRCODE='55000';
     END IF;
     IF TG_TABLE_NAME='memory_trial_inputs' THEN
@@ -4152,6 +4423,7 @@ BEGIN
               AND t.generation_id=context->>'generation_id'
               AND t.input_revision=input_revision_value
               AND t.expires_at>clock_timestamp()
+              AND t.cancelled_at IS NULL
         ) THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
@@ -4201,6 +4473,7 @@ BEGIN
            OR query_row.input_kind<>'ADMIN_TRIAL'
            OR trial_row.generation_id IS DISTINCT FROM context->>'generation_id'
            OR trial_row.expires_at<=clock_timestamp()
+           OR trial_row.cancelled_at IS NOT NULL
            OR trial_row.input_revision IS DISTINCT FROM input_revision_value THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
@@ -4467,6 +4740,7 @@ BEGIN
               AND t.query_id=f.query_id AND t.input_revision=f.input_revision
               AND t.generation_id=expected_generation
               AND t.expires_at>clock_timestamp()
+              AND t.cancelled_at IS NULL
             FOR SHARE OF t,q,p
         ) trial_member ON true
         WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
@@ -6879,6 +7153,7 @@ BEGIN
               AND t.query_id=f.query_id AND t.input_revision=f.input_revision
               AND t.generation_id=context->>'generation_id'
               AND t.expires_at>clock_timestamp()
+              AND t.cancelled_at IS NULL
         ) trial_data ON true
         WHERE f.bot_id=requested_bot
           AND f.state='PENDING' AND f.space_id=domain_space

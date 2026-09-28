@@ -350,6 +350,8 @@ MANIFEST_SCHEMA = {
                                                 "owner_kind": {"type": "string"},
                                                 "owner_kind_path": {"type": "string"},
                                                 "owner_id_path": {"type": "string"},
+                                                "media_type_path": {"type": "string"},
+                                                "byte_length_path": {"type": "string"},
                                             },
                                             "allOf": [
                                                 {
@@ -1282,13 +1284,18 @@ def _manifest(files: dict[str, bytes]) -> dict:
             )
         for reference in payload_refs:
             path = reference.get("path")
-            owner_paths = [reference.get("owner_id_path")]
+            bound_paths = [reference.get("owner_id_path")]
             owner_component = reference.get("owner_component")
             component_path = reference.get("owner_component_path")
             owner_kind = reference.get("owner_kind")
             owner_kind_path = reference.get("owner_kind_path")
-            owner_paths.extend(
+            bound_paths.extend(
                 value for value in (component_path, owner_kind_path) if value is not None
+            )
+            bound_paths.extend(
+                value for value in (
+                    reference.get("media_type_path"), reference.get("byte_length_path")
+                ) if value is not None
             )
             if (
                 not _valid_json_pointer(path, wildcards=True)
@@ -1296,7 +1303,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     not _valid_json_pointer(owner_path, wildcards=True)
                     or path.split("/").count("*")
                     != owner_path.split("/").count("*")
-                    for owner_path in owner_paths
+                    for owner_path in bound_paths
                 )
                 or (owner_component is None) == (component_path is None)
                 or (owner_kind is None) == (owner_kind_path is None)

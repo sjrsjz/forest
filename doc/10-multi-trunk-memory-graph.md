@@ -457,6 +457,10 @@ MemoryRelationView
 
 试验图片 part 必须保存尺寸并与受管图片 Payload 同时冻结，文本 part 的尺寸为空。嵌入 claim 按输入种类读取各自的权威表；试验任务在认领和 API handoff 前核验 Bot、Generation、输入修订、part/PayloadRef 和有效期。向量发布前再次核验这些约束；过期或换代的已计算向量写入仅含 ref 的删除 outbox，Memory 抑制其权威 facet。发布 Worker 只拿 ref、空间、用途及向量，不接收群来源字段；群来源及试验身份均留在 Memory 的 PostgreSQL 事实中。即便临时向量已发布，试验读取仍须按有效期拒绝结果。常驻删除 Worker 有界扫描过期试验并删除其向量 ref；试验查询、part 与 Payload 的物理回收必须在未决效果结算及索引删除后按依赖顺序完成。
 
+`memory.trial.start` 在 Memory 自有事务里一次性固定试验查询、按序 part、Bot/管理员/Generation、到期时间与召回工作；所有输入 PayloadRef 在进入该事务前由 Kernel Payload 核对身份、媒体类型及字节数。`memory.trial.get` 只读取 `ADMIN_TRIAL` 查询，独立取消 action 使用 `ADMIN_CANCELLED` 原因；Agent 公开的查询请求、取消、进度及状态服务只接受 `SOURCE_UNIT`。试验证据采用 `forest.memory-trial-evidence/1`，声明 `input_kind=ADMIN_TRIAL` 且 `current_source=null`，逐项命中仍保留真实群、主干和作者归因，不能送入 Agent 的群来源证据投影。
+
+试验取消还写入不可逆的 `cancelled_at`，使后续 part 读取、facet 准备、嵌入 claim 与 handoff 资格复核立即失效；发布阶段不得把已取消输入的计算结果确认为 READY，并须为可能已发出的向量登记删除。到期/取消清扫走同一有界向量删除路径。已 handoff 的外部请求无法假定可撤销，但其结算不得恢复试验资格；管理员状态查询仍可看到取消终态，直到 TTL 回收。
+
 图片经通用管理资产通道按有限块上传，完成后由 Kernel Payload 管理临时字节，Memory 只持有受 Bot、管理员、模块 Generation 与过期时间约束的引用；大小、类型、摘要、总块数和频率在宿主边界复核。浏览器关闭不取消已接纳的工作，重试以稳定 request ID 幂等；超时或取消停止未提交的工作，TTL 回收临时输入、派生向量/索引引用和证据 Payload。试验输入及派生物不能成为图证据、联想边、来源正文或模型对话。热重载时已接纳的试验按 owned-work 租约和明确的 Generation 接管/失败规则收敛，不能由旧 Worker 在新契约下继续提交。
 
 结果必须标出使用的实际图快照、索引空间与发布版本、各阶段命中数/耗时/预算与截断或降级原因、融合策略，以及最终 `EvidenceBundle`。证据逐项保留原始来源群、平台、作者、发生时间与引用；跨群命中不得被表述为当前群发言。状态、阶段计数和结果分页均按同一个已授权快照读取，遗忘与权限收紧在每次物化和展示前重新核验；对不可见来源连计数也不泄露。缺少已发布索引或某阶段失败时明确返回未执行/降级状态，不能填充推测的命中和版本。

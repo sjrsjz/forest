@@ -197,23 +197,27 @@ Memory 来源管理查询新增群来源集合、精确来源、平台/Realm/群
 
 Kernel Payload 的遗忘基础路径已将多来源根选择改为一次 `unnest` 集合连接，将来源目标与闭包 Payload 记录改为集合插入；删除屏障、完整闭包摘要、100000 Payload 上限及重放围栏不变。真实 PostgreSQL 的多来源共享派生载荷验证表明，同一派生 Payload 只进入闭包一次，未选来源仍保留；原有单来源、预览变更和双锁顺序并发测试均通过。这是大范围遗忘选择器需要的下层基础，不等于已交付 Memory 私有选择目录、分批计划或管理 UI。
 
-管理召回试验的目标契约为“启动 action + 状态/结果 query + 独立取消 action”。试验已有独立查询身份和私有临时 part 表；通用管理图片资产传输、启动/取消 action、试验 owned-work 与结果查询尚无实现。不能把现有 Agent 召回包装为管理试验，也不能借群消息表的外键伪造来源。后续须使试验共用嵌入、索引、图扩散和证据物化链路。
+管理召回试验的目标契约为“启动 action + 状态/结果 query + 独立取消 action”。试验使用独立查询身份和私有临时 part 表，不借群消息表的外键伪造来源；它与正式查询共用嵌入、索引、图扩散和证据物化链路。通用管理资产传输及结果内容读取仍待接通。
 
-正式召回的 `memory.read-query-parts` 显式返回 `SOURCE_UNIT` 输入身份，查询 facet 的稳定 ID 将输入种类并入摘要，且校验来源身份与已接纳 part 一致。相同的纯 facet 切分函数接受 `ADMIN_TRIAL`，后者还有独立私有存储与 SQL 准备分支；试验的受管资产、管理 action、后续执行与结果 UI 尚未接通，不能表述为召回试验可用。
+正式召回的 `memory.read-query-parts` 显式返回 `SOURCE_UNIT` 输入身份，查询 facet 的稳定 ID 将输入种类并入摘要，且校验来源身份与已接纳 part 一致。相同的纯 facet 切分函数接受 `ADMIN_TRIAL`，后者还有独立私有存储与 SQL 准备分支；试验的通用管理资产入口和结果 UI 尚未接通，不能表述为召回试验可用。
 
 Memory 管理关系新增 `memory.relations.neighbourhood` 只读端口：从指定权威节点按固定 PostgreSQL 语句快照展开 1 至 3 跳，节点与边各至多 32 个，最多读取 64 页并有 8 秒截止；返回前驱、跳数、关系类型、方向、创建来源及逐项真实来源证据，遇预算给出明确截断原因。模块 UI 可设置预算并浏览节点与边。它复用一跳关系的当前资格和删除过滤，仍不代表可重建发布图投影、人工审核或图版本状态；管理召回试验和大范围遗忘选择器仍未完成。
 
-查询 part 的读取与 facet 准备契约按 `SOURCE_UNIT` / `ADMIN_TRIAL` 输入身份分支：试验 part 不允许携带群来源单元、修订或 occurrence 字段，正式来源 part 必须携带；Worker 将身份传到准备事务。`embedding_facets` 以身份判别式分别约束真实来源 part 和试验临时 part，试验准备事务校验 Bot、Generation、有效期、修订、有序 part 与 PayloadRef，查询准备完结按相应 part 表计数；PostgreSQL 已验证图文试验 facet 的登记和完结。准备后的试验 facet 仍未进入嵌入 claim、向量发布及召回工作流，因此管理试验尚不可用。
+查询 part 的读取与 facet 准备契约按 `SOURCE_UNIT` / `ADMIN_TRIAL` 输入身份分支：试验 part 不允许携带群来源单元、修订或 occurrence 字段，正式来源 part 必须携带；Worker 将身份传到准备事务。`embedding_facets` 以身份判别式分别约束真实来源 part 和试验临时 part，试验准备事务校验 Bot、Generation、有效期、修订、有序 part 与 PayloadRef，查询准备完结按相应 part 表计数；PostgreSQL 已验证图文试验 facet 的登记和完结。
 
-试验临时图片 part 现在必须保存并约束真实宽高，文本 part 禁止伪造宽高；Embedding 物化服务支持独立的 `ADMIN_TRIAL` 查询身份和图片快照，冻结请求验证不再需要伪造群来源单元。图文物化在两种 VL 模型请求格式下通过回放验证，原有群来源物化回归通过。试验 facet 的 claim、预算/Generation 围栏、向量发布和管理启动 action 仍待接通，因此不能将物化能力表述为可用的管理召回试验。
+试验临时图片 part 现在必须保存并约束真实宽高，文本 part 禁止伪造宽高；Embedding 物化服务支持独立的 `ADMIN_TRIAL` 查询身份和图片快照，冻结请求验证不再需要伪造群来源单元。图文物化在两种 VL 模型请求格式下通过回放验证，原有群来源物化回归通过。
 
-后续已把试验 facet 接入 Memory 的嵌入 claim、handoff 资格复核与向量发布：认领时要求 Bot/Generation、未过期的试验输入、固定 part 和 PayloadRef；handoff 前重新锁定并核验，旧 Generation 不可继续派发。发布事务仍按当前 Generation 与到期时间判定，失效向量写 ref-only 删除 outbox 并抑制 facet；向量发布 Worker 的任务契约不再暴露群来源字段。隔离 PostgreSQL 已验证图文试验认领、旧 Generation 拒绝、正常发布为 READY、旧 Generation 发布时墓碑删除，以及删除 outbox 的认领与结算；完整 Memory 包 15 项、静态检查和本地 441 项回归通过。管理启动/取消 action、受管资产入口、试验调度/结果查询与 TTL 清理尚未完成，因此管理试验仍不可用。
+后续已把试验 facet 接入 Memory 的嵌入 claim、handoff 资格复核与向量发布：认领时要求 Bot/Generation、未过期的试验输入、固定 part 和 PayloadRef；handoff 前重新锁定并核验，旧 Generation 不可继续派发。发布事务仍按当前 Generation 与到期时间判定，失效向量写 ref-only 删除 outbox 并抑制 facet；向量发布 Worker 的任务契约不再暴露群来源字段。隔离 PostgreSQL 已验证图文试验认领、旧 Generation 拒绝、正常发布为 READY、旧 Generation 发布时墓碑删除，以及删除 outbox 的认领与结算；该阶段完整 Memory 包 15 项、静态检查和本地 441 项回归通过。
 
 Memory 的常驻向量删除 Worker 现在每次认领前有界扫描已过期试验：未派发的 PENDING/FAILED facet 直接抑制；已派发或结果不确定的 facet 先登记 ref-only 删除屏障，等待原任务收敛；EMBEDDED/READY 同事务登记删除并抑制。单次最多处理 32 个 facet，扫描索引只收录待处理状态，不包含已抑制的历史行；索引删除继续由原 owned-work 租约与结算完成。真实 PostgreSQL 验证了已发布试验在静默到期后无法读取、被抑制、两个并发认领合流为唯一删除任务、结算及二次轮询不重复领取。完整 Memory 包 16 项通过。此机制处理向量索引生命周期，尚未物理回收试验查询、part 和 Payload 记录；完整 TTL 清理仍待实现。
 
-管理试验复用正式查询的召回 owned-work 状态机时，状态读取现按 Bot、Generation 和有效期拒绝失效试验；任务认领及旧 claim token 重放会把到期或换代的试验收敛为 `FAILED/MEMORY_TRIAL_INPUT_UNAVAILABLE`，避免继续调度图扩散。SQL 定向验证覆盖有效试验状态、换代拒读、旧 claim 重放和待领取工作终止。管理启动/取消 action、资产上传、结果查询与物理 TTL 清理仍未完成，试验尚不可从 WebUI 启动。
+管理试验复用正式查询的召回 owned-work 状态机时，状态读取现按 Bot、Generation 和有效期拒绝失效试验；任务认领及旧 claim token 重放会把到期或换代的试验收敛为 `FAILED/MEMORY_TRIAL_INPUT_UNAVAILABLE`，避免继续调度图扩散。SQL 定向验证覆盖有效试验状态、换代拒读、旧 claim 重放和待领取工作终止。
 
-Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。管理启动 action、受管临时资产接纳、试验 owned-work、结果查询和 TTL 清理仍未完成。
+Memory 包现已声明 `memory.trial.start`、`memory.trial.get` 和独立 `memory.trial.cancel` 管理端口。启动 action 在同一权威事务内冻结 Bot/管理员/Generation、图文 part、十分钟有效期及八分钟召回截止；Memory 的 Domain Command Authority 在提交前向 Kernel Payload 核验每个精确引用的身份、媒体类型和字节数。PostgreSQL 验证了图文登记幂等、伪造摘要和字节数拒绝、独立取消以及 Agent 公开端口拒绝试验 ID。试验证据物化使用单独协议，不伪造“当前群来源”；既有群来源证据协议保持原样。通用分块管理资产上传、结果内容读取、主动到期回收和真实图文全链尚未完成，WebUI 仍不能实际启动试验。
+
+取消 action 现同时给试验输入写入单向 `cancelled_at`，阻断后续 part 读取、facet 准备、嵌入领取与派发资格；向量发布不能确认取消后的 READY，向量删除 Worker 将取消与过期试验一起清扫，包括已准备但尚未派发的 `PREPARED` facet。PostgreSQL 覆盖了已领取召回工作的取消后结算、待嵌入和已准备 facet 不再领取并被抑制。已派发的外部请求仍按原 at-most-once 效果结算，不能许诺即时撤销网络调用。
+
+Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和管理试验查询；正式查询仍必须持有真实来源、InputBatch 与 Context 修订，试验查询的这些字段必须为空。试验元数据及有序图文 part 位于独立表（有效期内不可改删，过期后允许按清理顺序删除），外键按输入种类防止试验查询写入正式来源 part 表；包内 part 读取按 Bot、Generation 和到期时间拒绝旧输入。通用管理资产上传、结果内容读取和完整 TTL 清理仍未完成。
 
 ## 8. 下一切换顺序
 

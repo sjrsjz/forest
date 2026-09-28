@@ -589,6 +589,281 @@ async def test_query_facet_persistence_rejects_unbound_input_identity(
 
 
 @pytest.mark.postgres
+async def test_management_trial_action_requires_live_exact_payload_reference(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "trial-authority-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    lease = await kernel.runtime.claim_host(
+        "trial-authority-host", "trial-authority-incarnation", ttl=timedelta(minutes=5),
+    )
+    host = SimpleNamespace(
+        scope_kind="bot", bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer, generation_authority=kernel.runtime,
+    )
+    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+    await registry.start()
+    try:
+        instance = registry.get("memory.graph")
+        digest = "sha256:" + "a" * 64
+        namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.memory_domains "
+                "(bot_id,initialization_operation_id,input_digest,space_id,"
+                "embedding_model_kind,model_revision_digest,dimensions,normalization,"
+                "fusion_policy_revision) VALUES (%s,'trial-domain',%s,%s,'TEXT_IMAGE',%s,"
+                "4096,'L2','fusion/1') ON CONFLICT (bot_id) DO NOTHING"
+            ).format(namespace), (store.bot_id, digest, digest, digest))
+        stored = await kernel.payload.put_bytes(
+            owner_component_id="memory.graph", owner_kind="trial.input",
+            owner_id="query/authority", media_type="text/plain", content=b"hello trial",
+            expected_deletion_epoch=await kernel.payload.epoch(),
+        )
+        reference = {"payload_id": stored.payload_id, "digest": stored.content_digest,
+                     "owner_component_id": "memory.graph", "owner_kind": "trial.input",
+                     "owner_id": "query/authority"}
+        body = {"query_id": "query/authority", "parts": [{
+            "part_id": "text/0", "modality": "TEXT", "media_type": "text/plain",
+            "byte_length": 11, "width": None, "height": None, "payload": reference,
+        }]}
+        invalid = {**body, "parts": [{**body["parts"][0], "payload": {
+            **reference, "digest": "sha256:" + "b" * 64,
+        }}]}
+        with pytest.raises(ForestError) as rejected:
+            await instance.management_contract.action(
+                "memory.trial.start", operation_id="web:trial-invalid", payload=invalid,
+            )
+        assert rejected.value.code == "PAYLOAD_IDENTITY_CONFLICT"
+        wrong_length = {**body, "parts": [{**body["parts"][0], "byte_length": 10}]}
+        with pytest.raises(ForestError) as rejected:
+            await instance.management_contract.action(
+                "memory.trial.start", operation_id="web:trial-wrong-length",
+                payload=wrong_length,
+            )
+        assert rejected.value.code == "DOMAIN_PAYLOAD_METADATA_CONFLICT"
+        started = await instance.management_contract.action(
+            "memory.trial.start", operation_id="web:trial-valid", payload=body,
+        )
+        assert started.value["query_id"] == "query/authority"
+        assert await instance.management_contract.action(
+            "memory.trial.start", operation_id="web:trial-valid", payload=body,
+        ) == started
+        async with store.pool.connection() as conn:
+            actor = (await (await conn.execute(sql.SQL(
+                "SELECT actor_subject_ref FROM {}.memory_trial_inputs "
+                "WHERE bot_id=%s AND query_id='query/authority'"
+            ).format(namespace), (store.bot_id,))).fetchone())["actor_subject_ref"]
+        assert actor == "management:shared-token"
+        viewed = await instance.management_contract.query(
+            "memory.trial.get", {"query_id": "query/authority"},
+        )
+        assert viewed["query_id"] == "query/authority"
+        cancelled = await instance.management_contract.action(
+            "memory.trial.cancel", operation_id="web:trial-cancel",
+            payload={"query_id": "query/authority"},
+        )
+        assert cancelled.value["query_id"] == "query/authority"
+    finally:
+        assert await registry.close() == []
+
+
+@pytest.mark.postgres
+async def test_management_trial_registers_mixed_input_and_separate_cancellation(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "trial-action-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    digest = "sha256:" + "a" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_domains "
+            "(bot_id,initialization_operation_id,input_digest,space_id,"
+            "embedding_model_kind,model_revision_digest,dimensions,normalization,"
+            "fusion_policy_revision) VALUES (%s,'trial-domain',%s,%s,'TEXT_IMAGE',%s,"
+            "4096,'L2','fusion/1')"
+        ).format(namespace), (store.bot_id, digest, digest, digest))
+
+    def part(index, modality, media_type):
+        return {
+            "part_id": f"part/{index}", "modality": modality,
+            "media_type": media_type, "byte_length": 4,
+            "width": 1 if modality == "IMAGE" else None,
+            "height": 1 if modality == "IMAGE" else None,
+            "payload": {"payload_id": f"payload/{index}", "digest": digest,
+                        "owner_component_id": "memory.graph", "owner_kind": "trial.input",
+                        "owner_id": "query/management"},
+        }
+
+    body = {"query_id": "query/management", "requested_by": "web:admin",
+            "parts": [part(0, "TEXT", "text/plain"), part(1, "IMAGE", "image/png")]}
+
+    async def invoke(function, context, payload):
+        async with store.pool.connection() as conn:
+            return (await (await conn.execute(sql.SQL(
+                "SELECT {}.{}(%s,%s) AS result"
+            ).format(namespace, sql.Identifier(function)), (
+                Jsonb({"bot_id": store.bot_id, "generation_id": "generation/trial", **context}),
+                Jsonb(payload),
+            ))).fetchone())["result"]
+
+    start_context = {"operation_id": "trial/start/1", "input_digest": digest_json(body)}
+    started = await invoke("memory_start_management_trial", start_context, body)
+    assert started["ok"], started
+    Draft202012Validator(package.snapshot.schema(
+        "schemas/trial-start-output.json"
+    )).validate(started["value"])
+    assert await invoke("memory_start_management_trial", start_context, body) == started
+    conflict = await invoke("memory_start_management_trial", {
+        "operation_id": "trial/start/other", "input_digest": digest_json(body),
+    }, body)
+    assert conflict["error"]["code"] == "MEMORY_TRIAL_IDENTITY_CONFLICT"
+    current = await invoke("memory_read_management_trial", {}, {"query_id": "query/management"})
+    assert current["ok"] and current["value"]["query_mode"] == "MIXED"
+    assert current["value"]["state"] == "PENDING"
+    Draft202012Validator(package.snapshot.schema(
+        "schemas/trial-get-output.json"
+    )).validate(current["value"])
+    public_lookup = await invoke("memory_assert_public_query", {}, {
+        "query_id": "query/management",
+    })
+    assert public_lookup["error"]["code"] == "MEMORY_QUERY_NOT_FOUND"
+    absent_lookup = await invoke("memory_assert_public_query", {}, {
+        "query_id": "query/not-yet-registered",
+    })
+    assert absent_lookup["ok"]
+    public_cancel = await invoke("memory_cancel_recall", {}, {
+        "protocol": "forest.uow-step/1",
+        "caller": {"component_id": "memory.graph"},
+        "input": {"protocol": "forest.memory-recall-cancel/1",
+                  "query_id": "query/management", "reason_code": "SUPERSEDED"},
+        "prior": {},
+    })
+    assert public_cancel["error"]["code"] == "MEMORY_QUERY_NOT_FOUND"
+    public_request = await invoke("memory_request_recall", {}, {
+        "protocol": "forest.uow-step/1",
+        "caller": {"component_id": "memory.graph"},
+        "input": {"protocol": "forest.memory-recall-request/1",
+                  "query_id": "query/management",
+                  "deadline_at": started["value"]["deadline_at"]},
+        "prior": {},
+    })
+    assert public_request["error"]["code"] == "MEMORY_QUERY_NOT_FOUND"
+    async with store.pool.connection() as conn:
+        source_count = (await (await conn.execute(sql.SQL(
+            "SELECT count(*) AS n FROM {}.source_units WHERE bot_id=%s"
+        ).format(namespace), (store.bot_id,))).fetchone())["n"]
+    assert source_count == 0
+    cancelled = await invoke("memory_cancel_management_trial", {}, {
+        "query_id": "query/management", "requested_by": "web:admin",
+    })
+    assert cancelled["ok"] and cancelled["value"]["status"] == "CANCELLED"
+    Draft202012Validator(package.snapshot.schema(
+        "schemas/trial-cancel-output.json"
+    )).validate(cancelled["value"])
+    assert await invoke("memory_cancel_management_trial", {}, {
+        "query_id": "query/management", "requested_by": "web:admin",
+    }) == cancelled
+    after = await invoke("memory_read_management_trial", {}, {"query_id": "query/management"})
+    assert after["value"]["state"] == "CANCELLED"
+    foreign_generation = await invoke("memory_read_management_trial", {
+        "generation_id": "generation/replaced",
+    }, {"query_id": "query/management"})
+    assert foreign_generation["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
+
+    in_flight_body = json.loads(json.dumps(body))
+    in_flight_body["query_id"] = "query/management-in-flight"
+    for item in in_flight_body["parts"]:
+        item["payload"]["owner_id"] = in_flight_body["query_id"]
+    in_flight_start = await invoke("memory_start_management_trial", {
+        "operation_id": "trial/start/2", "input_digest": digest_json(in_flight_body),
+    }, in_flight_body)
+    assert in_flight_start["ok"]
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_facets "
+            "(bot_id,facet_id,purpose,query_id,input_kind,input_ref,input_revision,"
+            "trial_query_id,part_id,modality,selector_start_char,selector_end_char,"
+            "input_payload_id,input_payload_digest,facet_content_digest,input_media_type,"
+            "input_byte_length,space_id,accepted_deletion_epoch) VALUES "
+            "(%s,'trial/cancel/facet','QUERY','query/management-in-flight',"
+            "'ADMIN_TRIAL','query/management-in-flight',1,"
+            "'query/management-in-flight','part/0','TEXT',0,4,'payload/0',"
+            "%s,%s,'text/plain',4,%s,0)"
+        ).format(namespace), (store.bot_id, digest, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_facets "
+            "(bot_id,facet_id,purpose,query_id,input_kind,input_ref,input_revision,"
+            "trial_query_id,part_id,modality,input_payload_id,input_payload_digest,"
+            "facet_content_digest,input_media_type,input_byte_length,space_id,"
+            "accepted_deletion_epoch) VALUES "
+            "(%s,'trial/cancel/prepared','QUERY','query/management-in-flight',"
+            "'ADMIN_TRIAL','query/management-in-flight',1,"
+            "'query/management-in-flight','part/1','IMAGE','payload/1',"
+            "%s,%s,'image/png',4,%s,0)"
+        ).format(namespace), (store.bot_id, digest, digest, digest))
+        await conn.execute(sql.SQL(
+            "UPDATE {}.embedding_facets SET state='PREPARED' WHERE bot_id=%s "
+            "AND facet_id='trial/cancel/prepared'"
+        ).format(namespace), (store.bot_id,))
+    claim = await invoke("memory_claim_recall", {}, {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "trial/claim/in-flight", "lease_seconds": 60,
+    })
+    assert claim["value"]["work_id"] == in_flight_body["query_id"]
+    cancelling = await invoke("memory_cancel_management_trial", {}, {
+        "query_id": in_flight_body["query_id"], "requested_by": "web:admin",
+    })
+    assert cancelling["value"]["status"] == "CANCELLING"
+    rejected_parts = await invoke("memory_read_query_parts", {}, {
+        "query_id": in_flight_body["query_id"], "after_part_index": -1, "limit": 1,
+    })
+    assert rejected_parts["error"]["code"] == "MEMORY_TRIAL_INPUT_UNAVAILABLE"
+    skipped_embedding = await invoke("memory_claim_embedding_batch", {}, {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "trial/embedding/cancelled", "lease_seconds": 60,
+    })
+    assert skipped_embedding["ok"] and skipped_embedding["value"] is None
+    retired = await invoke("memory_claim_vector_deletion", {}, {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "trial/delete/cancelled", "lease_seconds": 60,
+    })
+    assert retired["ok"] and retired["value"] is None
+    async with store.pool.connection() as conn:
+        facet_states = (await (await conn.execute(sql.SQL(
+            "SELECT facet_id,state FROM {}.embedding_facets WHERE bot_id=%s "
+            "AND facet_id IN ('trial/cancel/facet','trial/cancel/prepared') "
+            "ORDER BY facet_id"
+        ).format(namespace), (store.bot_id,))).fetchall())
+    assert [row["state"] for row in facet_states] == ["SUPPRESSED", "SUPPRESSED"]
+    settled = await invoke("memory_settle_recall", {}, {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": in_flight_body["query_id"],
+        "claim_token": "trial/claim/in-flight", "attempt": 1,
+        "outcome": {"status": "SUCCEEDED", "result": {
+            "query_id": in_flight_body["query_id"],
+        }},
+    })
+    assert settled["ok"]
+    cancelled_in_flight = await invoke("memory_read_management_trial", {}, {
+        "query_id": in_flight_body["query_id"],
+    })
+    assert cancelled_in_flight["value"]["state"] == "CANCELLED"
+
+
+@pytest.mark.postgres
 async def test_trial_parts_are_isolated_from_source_membership_and_generation(
     clean_authority, tmp_path
 ):
