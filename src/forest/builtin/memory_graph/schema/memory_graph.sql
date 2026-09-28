@@ -6602,6 +6602,81 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_apply_forget_effects(
+    requested_bot text, requested_operation text, requested_digest text,
+    selected_ids text[], deletion_epoch_value bigint, required_source_ids text[])
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    affected_ids text[] := ARRAY[]::text[];
+    deleted_refs integer := 0;
+    retracted_count integer := 0;
+BEGIN
+    SELECT COALESCE(array_agg(locked.source_unit_id ORDER BY locked.source_unit_id),
+                    ARRAY[]::text[])
+    INTO affected_ids
+    FROM (
+        SELECT u.source_unit_id FROM __forest_module_schema__.source_units u
+        WHERE u.bot_id=requested_bot AND u.eligibility_state<>'SUPPRESSED' AND (
+            u.author_payload_id=ANY(selected_ids) OR EXISTS (
+                SELECT 1 FROM __forest_module_schema__.source_parts p
+                WHERE p.bot_id=u.bot_id AND p.source_unit_id=u.source_unit_id
+                  AND p.payload_id=ANY(selected_ids)))
+        ORDER BY u.source_unit_id FOR UPDATE
+    ) locked;
+    IF required_source_ids IS NULL OR cardinality(required_source_ids)=0 OR
+       NOT required_source_ids <@ affected_ids THEN
+        RETURN NULL;
+    END IF;
+    INSERT INTO __forest_module_schema__.source_suppressions(
+        bot_id,operation_id,input_digest,source_unit_id,deletion_epoch,reason_code)
+    SELECT requested_bot,requested_operation,requested_digest,source_unit_id,
+           deletion_epoch_value,'PUBLIC_FORGET'
+    FROM unnest(affected_ids) AS selected(source_unit_id);
+    UPDATE __forest_module_schema__.source_units
+    SET eligibility_state='SUPPRESSED',eligibility_revision=eligibility_revision+1,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids);
+    UPDATE __forest_module_schema__.source_occurrences
+    SET eligibility_state='SUPPRESSED',input_batch_ref=NULL,context_revision=NULL
+    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids)
+      AND eligibility_state<>'SUPPRESSED';
+    INSERT INTO __forest_module_schema__.vector_index_deletions(
+        bot_id,index_ref_id,space_id,deletion_epoch)
+    SELECT bot_id,facet_id,space_id,deletion_epoch_value
+    FROM __forest_module_schema__.embedding_facets
+    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids)
+    ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
+    GET DIAGNOSTICS deleted_refs = ROW_COUNT;
+    UPDATE __forest_module_schema__.embedding_facets
+    SET state='SUPPRESSED',index_ref_id=NULL,vector_digest=NULL,
+        result_payload_id=NULL,result_payload_digest=NULL,published_at=NULL,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids)
+      AND state<>'SUPPRESSED';
+    UPDATE __forest_module_schema__.facet_preparation_work
+    SET state='SUPPRESSED',claim_token=NULL,lease_deadline=NULL,
+        prepared_facet_count=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids)
+      AND state NOT IN ('SUPPRESSED','CLAIMED');
+    UPDATE __forest_module_schema__.association_journal
+    SET state='SUPPRESSED'
+    WHERE bot_id=requested_bot AND state='PENDING_ARCHIVE'
+      AND (trigger_source_unit_id=ANY(affected_ids)
+           OR seed_source_unit_id=ANY(affected_ids));
+    UPDATE __forest_module_schema__.relation_contributions c SET active=false
+    WHERE c.bot_id=requested_bot AND c.active AND (
+        (c.left_kind='SOURCE_UNIT' AND c.left_id=ANY(affected_ids)) OR
+        (c.right_kind='SOURCE_UNIT' AND c.right_id=ANY(affected_ids)) OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.relation_evidence e
+            WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
+              AND e.source_unit_id=ANY(affected_ids)));
+    GET DIAGNOSTICS retracted_count = ROW_COUNT;
+    RETURN jsonb_build_object(
+        'suppressed_source_units',cardinality(affected_ids),
+        'vector_deletions',deleted_refs,'retracted_relations',retracted_count);
+END;
+$$;
+
 CREATE FUNCTION memory_apply_source_forget(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -6613,11 +6688,8 @@ DECLARE
     requested_digest text := context->>'participant_input_digest';
     operation_row record;
     selected_ids text[];
-    affected_ids text[] := ARRAY[]::text[];
     deletion_epoch_value bigint;
-    suppressed_count integer := 0;
-    deleted_refs integer := 0;
-    retracted_count integer := 0;
+    effects jsonb;
     impact_value jsonb;
     current_plan jsonb;
     result_value jsonb;
@@ -6691,72 +6763,17 @@ BEGIN
                     'status',409));
         END IF;
     END IF;
-    SELECT COALESCE(array_agg(locked.source_unit_id ORDER BY locked.source_unit_id),
-                    ARRAY[]::text[])
-    INTO affected_ids
-    FROM (
-        SELECT u.source_unit_id FROM __forest_module_schema__.source_units u
-        WHERE u.bot_id=requested_bot AND u.eligibility_state<>'SUPPRESSED' AND (
-            u.author_payload_id=ANY(selected_ids) OR EXISTS (
-                SELECT 1 FROM __forest_module_schema__.source_parts p
-                WHERE p.bot_id=u.bot_id AND p.source_unit_id=u.source_unit_id
-                  AND p.payload_id=ANY(selected_ids)))
-        ORDER BY u.source_unit_id FOR UPDATE
-    ) locked;
-    IF (body->>'source_unit_id') <> ALL(affected_ids) THEN
+    effects := __forest_module_schema__.memory_apply_forget_effects(
+        requested_bot,body->>'operation_id',requested_digest,selected_ids,
+        deletion_epoch_value,ARRAY[body->>'source_unit_id']);
+    IF effects IS NULL THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_FORGET_ANCHOR_MISSING',
                 'message','Memory source unit was not selected by Payload','status',409));
     END IF;
-    suppressed_count := cardinality(affected_ids);
-    INSERT INTO __forest_module_schema__.source_suppressions(
-        bot_id,operation_id,input_digest,source_unit_id,deletion_epoch,reason_code)
-    SELECT requested_bot,body->>'operation_id',requested_digest,source_unit_id,
-           deletion_epoch_value,'PUBLIC_FORGET'
-    FROM unnest(affected_ids) AS selected(source_unit_id);
-    UPDATE __forest_module_schema__.source_units
-    SET eligibility_state='SUPPRESSED',eligibility_revision=eligibility_revision+1,
-        updated_at=clock_timestamp()
-    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids);
-    UPDATE __forest_module_schema__.source_occurrences
-    SET eligibility_state='SUPPRESSED',input_batch_ref=NULL,context_revision=NULL
-    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids)
-      AND eligibility_state<>'SUPPRESSED';
-    INSERT INTO __forest_module_schema__.vector_index_deletions(
-        bot_id,index_ref_id,space_id,deletion_epoch)
-    SELECT bot_id,facet_id,space_id,deletion_epoch_value
-    FROM __forest_module_schema__.embedding_facets
-    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids)
-    ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
-    GET DIAGNOSTICS deleted_refs = ROW_COUNT;
-    UPDATE __forest_module_schema__.embedding_facets
-    SET state='SUPPRESSED',index_ref_id=NULL,vector_digest=NULL,
-        result_payload_id=NULL,result_payload_digest=NULL,published_at=NULL,
-        updated_at=clock_timestamp()
-    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids)
-      AND state<>'SUPPRESSED';
-    UPDATE __forest_module_schema__.facet_preparation_work
-    SET state='SUPPRESSED',claim_token=NULL,lease_deadline=NULL,
-        prepared_facet_count=NULL,updated_at=clock_timestamp()
-    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids)
-      AND state NOT IN ('SUPPRESSED','CLAIMED');
-    UPDATE __forest_module_schema__.association_journal
-    SET state='SUPPRESSED'
-    WHERE bot_id=requested_bot AND state='PENDING_ARCHIVE'
-      AND (trigger_source_unit_id=ANY(affected_ids)
-           OR seed_source_unit_id=ANY(affected_ids));
-    UPDATE __forest_module_schema__.relation_contributions c SET active=false
-    WHERE c.bot_id=requested_bot AND c.active AND (
-        (c.left_kind='SOURCE_UNIT' AND c.left_id=ANY(affected_ids)) OR
-        (c.right_kind='SOURCE_UNIT' AND c.right_id=ANY(affected_ids)) OR EXISTS (
-            SELECT 1 FROM __forest_module_schema__.relation_evidence e
-            WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
-              AND e.source_unit_id=ANY(affected_ids)));
-    GET DIAGNOSTICS retracted_count = ROW_COUNT;
     result_value := jsonb_build_object('protocol','forest.memory-source-forgotten/1',
-        'source_unit_id',body->>'source_unit_id','deletion_epoch',deletion_epoch_value,
-        'suppressed_source_units',suppressed_count,'vector_deletions',deleted_refs,
-        'retracted_relations',retracted_count);
+        'source_unit_id',body->>'source_unit_id','deletion_epoch',deletion_epoch_value)
+        || effects;
     INSERT INTO __forest_module_schema__.source_forget_operations(
         bot_id,operation_id,input_digest,source_unit_id,selection_digest,
         deletion_epoch,result_payload)
