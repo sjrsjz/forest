@@ -75,30 +75,30 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 
 当前 `component.worker-host` 的包内 `modules`/`module` 只读端口可以分页列出已发布 RuntimeGraph 成员并检查单个 Generation；分页游标绑定 Graph 身份，换代后拒绝旧页。新增 `packages` 只读端口经受限服务路由读取部署共用的 `PackageCatalog` 内容寻址目录，逐页校验包字节，返回 manifest 摘要、组件身份和能力申请；目录修订变化拒绝旧页，包内 UI 折叠展示候选声明。它只是候选工件浏览，不构成已授权的选择、启停或兼容性验收。包内 UI 已提供持久 `module.reload` 和配置重建状态查询。18 个 builtin 包和两项可配置的内核 authority 均从自身 Generation 发起标准配置事务，原子提交 desired 与 Worker Host 控制意图；Web gateway 只路由已授权的管理契约，不直接写配置或同步替换 Graph。`CleanBotHost._assemble_registry()` 仍静态拼装官方组件。
 
-群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/2` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执明确列出当前实现会替换整图所有 Generation；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable、工件选择控制及保留未变化 Generation 仍待完成。
+群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/2` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执说明目标及其依赖闭包会换代；实际成员变化以发布后的 Graph 为准；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable 与工件选择控制仍待完成。
 
-当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录、持久重载账本及标准配置控制意图。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须建立部署工件的安装/校验权威和 `module.validate`，再以 Worker Host 私有选择事实实现显式启停、包选择和未变化 Generation 保留，并让 Shell/CLI 使用相同控制端口。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
+当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录、持久重载账本及标准配置控制意图。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须建立部署工件的安装/校验权威和 `module.validate`，再以 Worker Host 私有选择事实实现显式启停、包选择，使候选成员增删复用现有 Generation 保留机制，并让 Shell/CLI 使用相同控制端口。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
 
 ### 局部换代的内核边界
 
-当前 `RuntimeModuleRegistry` 为每张候选图重新构造全部实例和 Generation；`RuntimeContractRouter` 的服务句柄又按准确 Graph ID/revision 封口。因此，只让 Worker Host 在 `module.reload` 输入里写目标组件 ID，或者在宿主循环里跳过几个 `bootstrap_builtin_package()`，都无法保留旧 Worker。内核持久层现已允许候选图引用当前图的原 Generation，但宿主实例转移、服务句柄与 owned-work 所有权尚未接通；局部换代不能因此宣称完成。
+当前 `RuntimeModuleRegistry` 用冻结描述符摘要和启动/保留依赖计算换代闭包，只为闭包创建新实例与 Generation；闭包外的原实例、Worker 进程、Generation 身份及配置 effective 均不重绑定。候选 Router 登记保留提供方以接收新图入站调用；保留实例内部的旧句柄继续使用原 Router，并由内核核对调用方和提供方准确 Generation 的当前成员身份。Graph 发布成功后，旧 Registry 只关闭换代成员，原 Router 随被保留的 Generation 保持可用；新 Registry 负责这些实例的监督和最终关闭。
 
-候选计划从当前已发布图及冻结包描述符计算 `replace | retain | remove | add` 成员集合。目标组件、其包摘要/配置生效修订变化者，以及持有受影响组件冻结启动路由或贡献目录的消费者进入替换闭包；闭包外组件只有在原 Generation、描述符摘要、配置生效修订、Host 围栏与路由依赖都不变时才能 `retain`。计划必须列出精确影响集合和资源预算，写入持久控制意图；预热只为 `replace/add` 创建新 Worker。`retain` 不执行 `prepare/start/stop`，不重新绑定其不可变 Generation 身份，也不改写其私有配置 effective 或 owned-work 租约。
+完整候选规划应从当前已发布图及冻结包描述符计算 `replace | retain | remove | add` 成员集合；现有目标重载只处理成员集合不变时的 `replace | retain`。目标组件、其包摘要/配置生效修订变化者，以及持有受影响组件冻结启动路由或贡献目录的消费者进入替换闭包；闭包外组件只有在原 Generation、描述符摘要、配置生效修订、Host 围栏与路由依赖都不变时才能 `retain`。计划必须列出精确影响集合和资源预算，写入持久控制意图；预热只为 `replace/add` 创建新 Worker。`retain` 不执行 `prepare/start/stop`，不重新绑定其不可变 Generation 身份，也不改写其私有配置 effective 或 owned-work 租约。
 
-新图成员事实可以引用仍然 `ACTIVE` 的旧 Generation。内核持久层现按来源 Graph ID、准确 Generation ID、当前 Host lease 和冻结依赖事实验证保留成员：保留者的依赖若指向换代或移除组件，候选准备直接拒绝；发布时来源图必须仍是当前图，新建成员仍须 `READY`。发布事务只把 `replace/remove` 旧代变为 `QUIESCING`，只对这些路由增加 epoch；`retain` 的 Generation 与路由 epoch 保持原值，且不重复推进配置 effective 或发布回调。历史图不能把当前图保留的 Generation 标为停止。这些是内核的事务能力，尚无 Worker Host 控制操作可使用。后续宿主回滚候选时也只能清理本操作新建的 Worker，不得关闭被引用的旧代。
+新图成员事实可以引用仍然 `ACTIVE` 的旧 Generation。内核持久层现按来源 Graph ID、准确 Generation ID、当前 Host lease 和冻结依赖事实验证保留成员：保留者的依赖若指向换代或移除组件，候选准备直接拒绝；发布时来源图必须仍是当前图，新建成员仍须 `READY`。发布事务只把 `replace/remove` 旧代变为 `QUIESCING`，只对这些路由增加 epoch；`retain` 的 Generation 与路由 epoch 保持原值，且不重复推进配置 effective 或发布回调。历史图不能把当前图保留的 Generation 标为停止。Worker Host 的目标重载已使用这些内核事务能力。候选发布前失败时，宿主只清理本次新建 Worker，不关闭借用的旧代。
 
 服务句柄在每次新调用入场时冻结**当前图**的路由快照；已入场调用继续用原调用树的准确 Generation/route epoch 完成，前提是目标未被换代且授权仍有效。持有旧 Graph ID 的句柄不能在发布后自动获得调用新目标的权力；对 `replace/remove` 的旧路由必须由 epoch 拒绝。保留组件若需调用换代目标，必须进入替换闭包并按自身 handoff 协议重建，除非它声明并实现可验证的安全边界重新绑定契约。这样既允许独立组件保持运行，也不把旧 Generation 偷偷伪装为新代。局部发布、失败回滚和宿主关闭都须按实际成员所有权只排空/释放一次；热重载验收须核对未变化 Generation ID、进程、配置生效修订和 owned-work 租约保持不变，而目标及依赖闭包获得新 Generation。
 
-内核路由器已在一次事务内核对当前图中原调用方和原服务提供方的准确 Generation；仅两者都被保留时，旧句柄本次调用的路由快照才改用当前 Graph 身份。服务操作账本以当前图记录新尝试，结算则验证执行 Generation 仍是当前成员，因此保留者跨图完成的持久调用不会因原图 ID 而失败。外部效果的 `runtime.graph` 围栏接受准确原图成员身份，但必须同时证明执行 Generation 仍在当前图；这不允许已被换代的执行者重放旧 permit。标准配置事务等延迟绑定的 participant 依赖现已纳入保留依赖；宿主仍须实现实例所有权转移、按替换闭包排空，这些内核能力目前不会被现有 `module.reload` 使用。
+内核路由器已在一次事务内核对当前图中原调用方和原服务提供方的准确 Generation；仅两者都被保留时，旧句柄本次调用的路由快照才改用当前 Graph 身份。服务操作账本以当前图记录新尝试，结算则验证执行 Generation 仍是当前成员，因此保留者跨图完成的持久调用不会因原图 ID 而失败。外部效果的 `runtime.graph` 围栏接受准确原图成员身份，但必须同时证明执行 Generation 仍在当前图；这不允许已被换代的执行者重放旧 permit。标准配置事务等延迟绑定的 participant 依赖现已纳入保留依赖；宿主现按替换闭包排空并在发布成功后转移实例所有权；旧 Router 保留到其最后一个原 Generation 关闭。
 
 ### 目标组件与保留依赖的当前落地
 
 Worker Host 已把目标 `component_id` 随 `runtime.graph-replacement.request/2` 写入内核持久请求；内核在期望 Graph revision 上核对目标成员，并把目标纳入幂等摘要。`RuntimeModuleRegistry.replacement_closure()` 按启动依赖和单独的保留依赖计算需要换代的反向闭包。保留依赖包括普通服务句柄、UnitOfWork participant 和配置控制引用；这些引用可以成环，不能并入启动 DAG。冻结 Generation 绑定及内核图事实分别记录保留依赖，候选图保留旧 Generation 时会验证其所依赖的组件也被保留。
 
-当前宿主执行器仍按整图重建，尚未消费请求中的目标或闭包，也尚未转移未变化的 Worker 实例所有权。因此此进度不构成局部热重载验收；下一步必须让宿主只为闭包创建新 Generation，并在成功发布、失败回滚和最终关闭中分别处理新旧实例。
+宿主现消费持久请求中的目标，比较候选与当前冻结描述符，再只为目标、描述符变化者及其依赖消费者创建新 Generation。候选预热借用闭包外实例，发布前不接管关闭所有权；成功发布后接管，旧 Registry 只释放被换代实例。隔离 PostgreSQL 的最小真实图和完整官方包宿主用例已验证这一行为。动态新增/移除组件的候选规划及部署工件选择仍待完成。
 
-内核 admission 围栏现在接受明确的成员集合，并依据当前图持久的启动依赖与保留依赖拒绝不闭合的集合；只有选中成员的路由 admission 和 epoch 发生变化，失败恢复也只重新打开选中成员。整图维护仍使用同一个端口的全图模式。宿主尚未把替换闭包传给此端口，现有 `module.reload` 因而仍会冻结整图。
+内核 admission 围栏现在接受明确的成员集合，并依据当前图持久的启动依赖与保留依赖拒绝不闭合的集合；只有选中成员的路由 admission 和 epoch 发生变化，失败恢复也只重新打开选中成员。整图维护仍使用同一个端口的全图模式。宿主现在把替换闭包传给此端口；`core reload` 仍使用整图模式。
 
 Registry 的替换排空现接受与内核围栏相同的成员集合：只冻结选中组件的 owned-work gate、排空其任务并执行其 `begin_replacement`/`quiesce`；保留成员的 Router admission 保持开放。失败回滚只恢复选中组件的本地 gate、任务状态和内核路由。整图替换仍可省略成员集合，保持原有全图生命周期。
 
-保留 Worker 的内部服务句柄绑定原 Router 及冻结的 Graph 路由身份。候选 Registry 可以取得实例的最终监督与关闭所有权，但不得把原 WorkerIdentity 改写成新 Graph 身份，也不得在发布后立即销毁原 Router。后续实例转移必须明确保留这些旧句柄所需的路由上下文，同时释放被换代组件的旧端点和任务；旧路由只能在调用方与提供方的准确 Generation 都仍为当前成员时跨图调用。当前宿主仍关闭整张旧 Registry，尚未完成这一步。
+保留 Worker 的内部服务句柄绑定原 Router 及冻结的 Graph 路由身份。候选 Registry 可以取得实例的最终监督与关闭所有权，但不得把原 WorkerIdentity 改写成新 Graph 身份，也不得在发布后立即销毁原 Router。已发布的新 Registry 接管保留实例的监督与最终关闭；旧 Registry 只清理被换代实例，保留原路由上下文，直到最后一个借用者关闭时再释放。旧路由仍须在调用方和提供方的准确 Generation 都为当前成员时才能跨图调用。

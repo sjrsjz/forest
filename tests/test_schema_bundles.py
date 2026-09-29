@@ -2315,6 +2315,82 @@ async def test_clean_kernel_bootstrap_publishes_all_required_authorities(clean_a
 
 
 @pytest.mark.postgres
+async def test_runtime_registry_transfers_unaffected_generations_without_restarting_them(
+    clean_authority,
+):
+    store, installer = clean_authority
+    core = await bootstrap_clean_kernel(store, installer)
+    lease = await core.runtime.claim_host("host-local", "inc-local")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer,
+        generation_authority=core.runtime,
+    )
+    previous = RuntimeModuleRegistry(host, core.descriptors)
+    await previous.start()
+    original_graph = previous.graph_identity
+    original_instances = dict(previous.instances)
+
+    runtime_descriptor = next(
+        item for item in core.descriptors if item.component_id == "kernel.runtime"
+    )
+
+    def fail_target(runtime, dependencies):
+        instance = runtime_descriptor.factory(runtime, dependencies)
+
+        async def fail_start():
+            raise RuntimeError("candidate prewarm failed")
+
+        instance.start = fail_start
+        return instance
+
+    failed = RuntimeModuleRegistry(
+        host,
+        tuple(
+            replace(item, factory=fail_target)
+            if item.component_id == "kernel.runtime"
+            else item
+            for item in core.descriptors
+        ),
+    )
+    assert failed.plan_retained_generations(previous, "kernel.runtime") == (
+        "kernel.runtime",
+    )
+    with pytest.raises(RuntimeError, match="candidate prewarm failed"):
+        await failed.prewarm()
+    assert await failed.close() == []
+    assert (await core.runtime.status())["graph_id"] == original_graph.graph_id
+    assert previous.instances == original_instances
+
+    candidate = RuntimeModuleRegistry(host, core.descriptors)
+    affected = candidate.plan_retained_generations(previous, "kernel.runtime")
+    assert affected == ("kernel.runtime",)
+    await candidate.prewarm()
+    await previous.drain_owned_work_for_replacement(
+        candidate.activation_id, components=affected
+    )
+    await candidate.start()
+    candidate.accept_retained_ownership()
+    assert await previous.close() == []
+
+    assert candidate.graph_identity.graph_revision > original_graph.graph_revision
+    assert candidate.get("kernel.runtime") is not original_instances["kernel.runtime"]
+    assert candidate.graph_identity.generations["kernel.runtime"] != (
+        original_graph.generations["kernel.runtime"]
+    )
+    for component_id in original_graph.generations:
+        if component_id == "kernel.runtime":
+            continue
+        assert candidate.get(component_id) is original_instances[component_id]
+        assert candidate.graph_identity.generations[component_id] == (
+            original_graph.generations[component_id]
+        )
+    assert await candidate.close() == []
+
+
+@pytest.mark.postgres
 async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent(
     clean_authority,
 ):

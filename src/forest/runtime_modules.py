@@ -811,6 +811,11 @@ class RuntimeModuleRegistry:
         self._replacement_owned_frozen: tuple[str, ...] = ()
         self._replacement_operation_id: str | None = None
         self._replacement_components: tuple[str, ...] | None = None
+        self._retained_from: RuntimeModuleRegistry | None = None
+        self._retained_components: frozenset[str] = frozenset()
+        self._retained_committed = False
+        self._retained_sources: dict[str, RuntimeModuleRegistry] = {}
+        self._transferred_components: set[str] = set()
         self._generation_identities_bound = False
         self.graph_identity = None
         self.activation_id = str(uuid4()) if activation_id is None else activation_id
@@ -939,6 +944,115 @@ class RuntimeModuleRegistry:
             if expanded == affected:
                 return tuple(item for item in self.order if item in affected)
             affected = expanded
+
+    def plan_retained_generations(
+        self, previous: RuntimeModuleRegistry, target_component_id: str
+    ) -> tuple[str, ...]:
+        """Freeze a component replacement plan before constructing any new instance."""
+
+        if self.instances or self.graph_identity is not None or self._retained_from is not None:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_PLAN_LATE",
+                "Retained Generations must be planned before candidate preparation",
+                409,
+            )
+        if (
+            previous.graph_identity is None
+            or target_component_id not in previous.states
+            or target_component_id not in self.states
+            or set(previous.states) != set(self.states)
+            or any(state != ModuleLifecycleState.ACTIVE for state in previous.states.values())
+        ):
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_PLAN_INVALID",
+                "Component replacement requires matching active source and candidate members",
+                409,
+            )
+        changed = {target_component_id}
+        previous_descriptors = {item.component_id: item for item in previous.descriptors}
+        for descriptor in self.descriptors:
+            component_id = descriptor.component_id
+            self.instances[component_id] = previous.instances[component_id]
+            try:
+                candidate_digest = self._descriptor_fact(descriptor)["descriptor_digest"]
+            finally:
+                del self.instances[component_id]
+            if candidate_digest != previous.generation_bindings[component_id].descriptor_digest:
+                changed.add(component_id)
+        while True:
+            expanded = changed | {
+                component_id
+                for registry, descriptors in (
+                    (previous, previous_descriptors),
+                    (self, {item.component_id: item for item in self.descriptors}),
+                )
+                for component_id, descriptor in descriptors.items()
+                if (
+                    set(registry._effective_requires(descriptor))
+                    | set(registry._retention_requires(descriptor))
+                ) & changed
+            }
+            if expanded == changed:
+                break
+            changed = expanded
+        retained = frozenset(self.states) - changed
+        if retained:
+            self._retained_from = previous
+            self._retained_components = retained
+        return tuple(item for item in self.order if item in changed)
+
+    def accept_retained_ownership(self) -> None:
+        """Transfer retained instances only after their new Graph is published."""
+
+        if not self._retained_components:
+            return
+        previous = self._retained_from
+        if (
+            self._retained_committed
+            or previous is None
+            or self.graph_identity is None
+            or any(self.states[item] != ModuleLifecycleState.ACTIVE for item in self.states)
+            or any(
+                item in previous._transferred_components
+                or previous.instances[item] is not self.instances[item]
+                or previous.graph_identity.generations[item]
+                != self.graph_identity.generations[item]
+                for item in self._retained_components
+            )
+        ):
+            raise ForestError(
+                "RUNTIME_RETAINED_OWNERSHIP_INVALID",
+                "Retained instances cannot transfer before successful publication",
+                409,
+            )
+        for item in self._retained_components:
+            previous._transferred_components.add(item)
+            self._retained_sources[item] = previous._retained_sources.get(item, previous)
+        self._retained_committed = True
+
+    def _release_transferred(self, component_id: str) -> None:
+        """Drop a borrowed route capsule after its final owner closed the instance."""
+
+        if component_id not in self._transferred_components:
+            raise ForestError(
+                "RUNTIME_RETAINED_OWNERSHIP_INVALID",
+                "RuntimeGraph does not own this transferred Generation",
+                409,
+            )
+        self._transferred_components.remove(component_id)
+        for state in (
+            ModuleLifecycleState.QUIESCING,
+            ModuleLifecycleState.QUIESCENT,
+            ModuleLifecycleState.STOPPED,
+        ):
+            self._transition(component_id, state)
+        self.instances.pop(component_id, None)
+        self.contract_router.release_provider(component_id)
+        if not any(
+            item not in self._retained_sources
+            for item in self._transferred_components
+        ):
+            self.contract_router.deactivate()
 
     def _descriptor_fact(self, descriptor: RuntimeModuleDescriptor) -> dict:
         instance = self.instances.get(descriptor.component_id)
@@ -1079,6 +1193,8 @@ class RuntimeModuleRegistry:
                 503,
             )
         for component_id in self.order:
+            if component_id in self._retained_components:
+                continue
             identity = BoundGenerationIdentity(
                 component_id=component_id,
                 generation_id=self.graph_identity.generations[component_id],
@@ -1110,6 +1226,8 @@ class RuntimeModuleRegistry:
             return
         states = {}
         for component_id, state in self.states.items():
+            if component_id in self._retained_components and not self._retained_committed:
+                continue
             if state == ModuleLifecycleState.FAILED:
                 states[component_id] = ("FAILED", failure_code or "MODULE_LIFECYCLE_FAILED")
             elif state == ModuleLifecycleState.STOPPED:
@@ -1296,6 +1414,15 @@ class RuntimeModuleRegistry:
                 item for item in self.descriptors if item.component_id == component_id
             )
             try:
+                if component_id in self._retained_components:
+                    instance = self._retained_from.instances[component_id]
+                    self.instances[component_id] = instance
+                    self.generation_bindings[component_id] = (
+                        self._retained_from.generation_bindings[component_id]
+                    )
+                    self.contract_router.register(component_id, instance)
+                    self._transition(component_id, ModuleLifecycleState.PREPARED)
+                    continue
                 await self._install_storage(descriptor)
                 dependencies = self.contract_router.context(component_id)
                 instance = descriptor.factory(self.runtime, dependencies)
@@ -1314,6 +1441,8 @@ class RuntimeModuleRegistry:
     async def _rollback_preparation(self) -> list[Exception]:
         errors = []
         for component_id in reversed(self.order):
+            if component_id in self._retained_components:
+                continue
             state = self.states[component_id]
             if state == ModuleLifecycleState.PREPARED:
                 try:
@@ -1360,8 +1489,23 @@ class RuntimeModuleRegistry:
             if self.graph_identity is None:
                 self.graph_identity = await self.generation_authority.prepare_graph(
                     lease,
-                    [self.generation_bindings[item] for item in self.order],
+                    [
+                        self.generation_bindings[item]
+                        for item in self.order
+                        if item not in self._retained_components
+                    ],
                     self.activation_id,
+                    retained_generations={
+                        item: self._retained_from.graph_identity.generations[item]
+                        for item in self._retained_components
+                    }
+                    if self._retained_components
+                    else None,
+                    source_graph=(
+                        self._retained_from.graph_identity
+                        if self._retained_components
+                        else None
+                    ),
                 )
             await self._bind_generation_identities()
             if not self._contract_routes_sealed:
@@ -1463,6 +1607,8 @@ class RuntimeModuleRegistry:
         try:
             if not self._prewarmed:
                 for component_id in self.order:
+                    if component_id in self._retained_components:
+                        continue
                     current = component_id
                     if self.states[component_id] != ModuleLifecycleState.PREPARED:
                         raise ForestError(
@@ -1485,10 +1631,12 @@ class RuntimeModuleRegistry:
                 configuration_activators={
                     component_id: self.instances[component_id].module_configuration
                     for component_id in self.order
+                    if component_id not in self._retained_components
                 },
                 publication_participants={
                     component_id: self.instances[component_id]
                     for component_id in self.order
+                    if component_id not in self._retained_components
                     if getattr(self.instances[component_id], "publish_generation_in", None)
                     is not None
                 },
@@ -1497,21 +1645,28 @@ class RuntimeModuleRegistry:
 
             for component_id in self.order:
                 current = component_id
-                activate = self.instances[component_id].activate_generation
-                result = activate()
-                if inspect.isawaitable(result):
-                    close = getattr(result, "close", None)
-                    if close is not None:
-                        close()
-                    raise ForestError(
-                        "RUNTIME_GENERATION_ACTIVATION_INVALID",
-                        "Post-publication activation must be local and synchronous",
-                        503,
-                    )
+                if component_id not in self._retained_components:
+                    activate = self.instances[component_id].activate_generation
+                    result = activate()
+                    if inspect.isawaitable(result):
+                        close = getattr(result, "close", None)
+                        if close is not None:
+                            close()
+                        raise ForestError(
+                            "RUNTIME_GENERATION_ACTIVATION_INVALID",
+                            "Post-publication activation must be local and synchronous",
+                            503,
+                        )
                 self._transition(component_id, ModuleLifecycleState.ACTIVE)
                 activated.append(component_id)
             self.contract_router.activate()
-            self._open_owned_admission(self._owned_work_components())
+            self._open_owned_admission(
+                tuple(
+                    item
+                    for item in self._owned_work_components()
+                    if item not in self._retained_components
+                )
+            )
         except BaseException as exc:
             failure_code = (
                 exc.code if isinstance(exc, ForestError) else "RUNTIME_MODULE_START_FAILED"
@@ -1534,6 +1689,8 @@ class RuntimeModuleRegistry:
                     rollback_errors.append(rollback_error)
 
             for component_id in reversed(self.order):
+                if component_id in self._retained_components:
+                    continue
                 if component_id not in self.instances:
                     continue
                 try:
@@ -1886,15 +2043,35 @@ class RuntimeModuleRegistry:
                         # Its persistent graph remains historical until the current
                         # owner atomically replaces or retires it.
                         lease = None
-            self.contract_router.deactivate()
+            if not any(
+                item not in self._retained_sources
+                for item in self._transferred_components
+            ):
+                self.contract_router.deactivate()
             errors = []
-            if not self._replacement_owned_frozen and not self._replacement_quiesced:
+            released_sources: set[RuntimeModuleRegistry] = set()
+            if (
+                self._replacement_operation_id is None
+                and not self._replacement_owned_frozen
+                and not self._replacement_quiesced
+            ):
                 try:
-                    frozen = self._freeze_owned_admission()
+                    owned = tuple(
+                        item
+                        for item in self.order
+                        if item not in self._transferred_components
+                        and (item not in self._retained_components or self._retained_committed)
+                    )
+                    frozen = self._freeze_owned_admission(components=owned)
                     await self._drain_frozen_owned_work(frozen)
                 except Exception as exc:
                     errors.append(exc)
             for component_id in reversed(self.order):
+                if component_id in self._transferred_components or (
+                    component_id in self._retained_components
+                    and not self._retained_committed
+                ):
+                    continue
                 try:
                     state = self.states[component_id]
                     if state == ModuleLifecycleState.ACTIVE:
@@ -1910,6 +2087,11 @@ class RuntimeModuleRegistry:
                             self._transition(component_id, ModuleLifecycleState.STOPPED)
                     elif state == ModuleLifecycleState.VALIDATED:
                         self._transition(component_id, ModuleLifecycleState.STOPPED)
+                    source = self._retained_sources.get(component_id)
+                    if source is not None and self.states[component_id] == ModuleLifecycleState.STOPPED:
+                        source._release_transferred(component_id)
+                        released_sources.add(source)
+                        del self._retained_sources[component_id]
                 except Exception as exc:
                     errors.append(exc)
             if lease is not None:
@@ -1927,8 +2109,16 @@ class RuntimeModuleRegistry:
                     else ("RUNTIME_MODULE_CLEANUP_FAILED" if errors else None)
                 )
                 await self._record_current_states(lease, failure_code=failure_code)
+                for source in released_sources:
+                    await source._record_current_states(lease, failure_code=failure_code)
             self._closed = not errors and all(
-                state == ModuleLifecycleState.STOPPED for state in self.states.values()
+                component_id in self._transferred_components
+                or (
+                    component_id in self._retained_components
+                    and not self._retained_committed
+                )
+                or state == ModuleLifecycleState.STOPPED
+                for component_id, state in self.states.items()
             )
             return errors
 
@@ -1958,10 +2148,13 @@ class RuntimeModuleRegistry:
                 self._transition(component_id, ModuleLifecycleState.FAILED)
             raise
         self._transition(component_id, ModuleLifecycleState.STOPPED)
+        self.contract_router.release_provider(component_id)
 
     def tasks(self):
         result = []
         for component_id in self.order:
+            if component_id in self._transferred_components:
+                continue
             if self.states[component_id] != ModuleLifecycleState.ACTIVE:
                 continue
             instance = self.instances[component_id]

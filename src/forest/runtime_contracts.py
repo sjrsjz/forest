@@ -664,6 +664,13 @@ class RuntimeContractRouter:
     def deactivate(self) -> None:
         self.graph_admission.clear()
 
+    def release_provider(self, component_id: str) -> None:
+        """Forget closed provider handlers after all its callers have drained."""
+
+        self._providers = {
+            key: value for key, value in self._providers.items() if value[0] != component_id
+        }
+
     def route(self, request_key: tuple) -> FrozenServiceRoute:
         route = self._routes.get(request_key)
         if route is None:

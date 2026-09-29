@@ -364,3 +364,5 @@ Worker Host 的 `runtime.graph-replacement.request/2` 现携带目标组件 ID�
 `kernel.runtime` 新增成员级 admission 围栏：在当前 Graph/Host lease 事务内核对成员集合及启动、保留依赖的反向闭包，不闭合时拒绝；冻结与失败恢复只递增选中成员的 route epoch。隔离 PostgreSQL 验证了遗漏依赖消费者会被拒绝、合法叶子成员冻结/恢复后未选中成员 Generation 和 route epoch 均保持不变，原整图路径仍通过（`2 passed`）。宿主尚未调用成员级端口，局部实例转移与真实局部热重载仍未完成。
 
 `RuntimeModuleRegistry.drain_owned_work_for_replacement()` 已支持选中成员：它调用内核依赖闭包围栏，只冻结/排空选中组件的 owned work，保留成员的 Router admission 持续开放；失败恢复按同一成员集合回滚。轻量生命周期验证通过（`10 passed`，其中新增用例核对未变化组件不被冻结、同操作改目标冲突和精确恢复）。宿主替换循环仍使用整图模式，实例所有权与旧 Router 寿命转移尚未接通，因此 `module.reload` 仍是整图重建。
+
+Worker Host 的目标组件重载现执行局部换代。宿主比较候选与当前冻结描述符，把目标、变化组件和依赖消费者纳入换代闭包；候选只为闭包预热新实例，其他组件沿用原 Generation、Python 实例和 Worker，且不重复激活配置。发布成功后新 Registry 接管保留实例的监督及最终关闭；旧 Registry 只关闭换代成员，原 Router 保留至其最后一个原 Generation 被关闭。隔离 PostgreSQL 的五成员图验证了单目标换代、四成员身份与实例保留，以及候选预热失败不关闭借用实例（`1 passed`）；完整官方包宿主在 Fake OneBot 下经 Shell 请求、跨图旧句柄重放和后续配置重建走通（`1 passed`，301.62 秒，未向 QQ 发消息）。动态新增/移除成员、部署工件选择与发布后的激活故障恢复仍未完成，不能把全部组件控制面标记为生产验收通过。

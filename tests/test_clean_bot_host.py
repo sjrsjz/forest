@@ -385,8 +385,9 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
     events = []
 
     class Previous:
-        async def drain_owned_work_for_replacement(self, operation_id):
+        async def drain_owned_work_for_replacement(self, operation_id, *, components):
             assert operation_id == "replacement/one"
+            assert components is None
             events.append("drain-previous")
 
         async def close(self):
@@ -401,6 +402,9 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
 
         async def start(self):
             events.append("publish-candidate")
+
+        def accept_retained_ownership(self):
+            pass
 
         async def close(self):
             events.append("close-candidate")
@@ -486,6 +490,7 @@ async def test_durable_reload_worker_executes_exact_revision_and_settles_request
             {
                 "activation_id": "00000000-0000-0000-0000-000000000008",
                 "expected_graph_revision": 7,
+                "target_component_id": None,
             },
         ),
         (
@@ -505,8 +510,9 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
     events = []
 
     class Previous:
-        async def drain_owned_work_for_replacement(self, operation_id):
+        async def drain_owned_work_for_replacement(self, operation_id, *, components):
             assert operation_id == "replacement/failing"
+            assert components is None
             events.append("drain-previous")
 
         async def resume_owned_work_after_failed_replacement(self):
@@ -551,7 +557,7 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
 
 
 @pytest.mark.postgres
-async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(tmp_path):
+async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_path):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
@@ -593,6 +599,8 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
         await host.start()
         try:
             previous = host.registry.graph_identity
+            affected = set(host.registry.replacement_closure("agent.runtime"))
+            assert affected < set(previous.generations)
             worker_host = host.registry.get("component.worker-host")
             web_request = await worker_host.management_contract.action(
                 "module.reload",
@@ -647,9 +655,7 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
                 await reload("agent.runtime", previous.graph_revision + 1, "reload/stale")
             assert stale.value.code == "RUNTIME_GRAPH_REVISION_CONFLICT"
             result = await reload("agent.runtime", previous.graph_revision, "reload/valid")
-            assert "Graph" in result.text
             assert "agent.runtime" in result.text
-            assert "memory.graph" in result.text
             async with asyncio.timeout(180):
                 while host.registry.graph_identity.graph_id == previous.graph_id:
                     await asyncio.sleep(0.1)
@@ -659,7 +665,8 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
             assert replacement.graph_revision == previous.graph_revision + 1
             assert set(replacement.generations) == set(previous.generations)
             assert all(
-                replacement.generations[component_id] != previous.generations[component_id]
+                (replacement.generations[component_id] != previous.generations[component_id])
+                == (component_id in affected)
                 for component_id in previous.generations
             )
             request_id = "reload:" + result.text.split("reload:", 1)[1][:32]
@@ -670,9 +677,13 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
             assert status["state"] == "SUBMITTED"
             assert status["kernel"]["state"] == "SUCCEEDED"
             assert status["kernel"]["graph_revision"] == replacement.graph_revision
-            current_handle = next(
-                route for key, route in host.registry.contract_router._requests.items()
-                if key[0] == "shell.command" and key[1] == "shell.component-host.reload"
+            current_handle = (
+                next(
+                    route for key, route in host.registry.contract_router._requests.items()
+                    if key[0] == "shell.command" and key[1] == "shell.component-host.reload"
+                )
+                if "shell.command" in affected
+                else handle
             )
             replay = await reload(
                 "agent.runtime", previous.graph_revision, "reload/valid", route=current_handle

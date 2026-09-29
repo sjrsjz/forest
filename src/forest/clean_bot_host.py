@@ -842,6 +842,7 @@ class CleanBotHost:
         *,
         activation_id: str | None = None,
         expected_graph_revision: int | None = None,
+        target_component_id: str | None = None,
     ) -> RuntimeModuleRegistry:
         """Prewarm a candidate, drain the current graph, then publish and resume it."""
 
@@ -866,12 +867,25 @@ class CleanBotHost:
                 if activation_id is None
                 else await self._assemble_registry(activation_id)
             )
+            affected = (
+                candidate.plan_retained_generations(previous, target_component_id)
+                if target_component_id is not None
+                else None
+            )
             previous_drained = False
             try:
                 await candidate.prewarm()
-                await previous.drain_owned_work_for_replacement(candidate.activation_id)
+                await previous.drain_owned_work_for_replacement(
+                    candidate.activation_id,
+                    components=(
+                        affected
+                        if affected is not None and len(affected) < len(previous.order)
+                        else None
+                    ),
+                )
                 previous_drained = True
                 await candidate.start()
+                candidate.accept_retained_ownership()
             except BaseException as replacement_error:
                 cleanup_error = None
                 try:
@@ -974,6 +988,7 @@ class CleanBotHost:
         registry = await self.replace_runtime_graph(
             activation_id=request["activation_id"],
             expected_graph_revision=request["expected_graph_revision"],
+            target_component_id=request.get("target_component_id"),
         )
         await self._kernel.runtime.finish_graph_replacement(
             self._authority(),

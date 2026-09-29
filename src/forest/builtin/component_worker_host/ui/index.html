@@ -47,7 +47,7 @@
       <div class="row"><button id="load-packages" type="button">读取目录</button><button id="more-packages" type="button" hidden>下一页</button></div>
       <div id="package-items"></div>
     </details>
-    <p>Current reload implementation replaces every Generation in the Graph. The request remains visible after the old Worker retires.</p>
+    <p>Reload replaces the selected component and dependent Generations. Unaffected Generations retain their identity. The request remains visible after the old Worker retires.</p>
     <div id="reload-result" hidden></div>
     <button id="refresh-reload" type="button" hidden>Refresh reload status</button>
     <div class="row">

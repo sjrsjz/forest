@@ -177,11 +177,10 @@ class ComponentWorkerHost(Plugin):
         saved = await ctx.commands.call(
             "component.reload.enqueue", command, operation_id=operation_id
         )
-        affected = ", ".join(item["component_id"] for item in graph["members"])
         return {
             "text": f"Reload request queued for {component_id}: {saved['request_id']} "
-            f"({saved['state']}). Current implementation will replace full Graph "
-            f"with {len(graph['members'])} new Generations: {affected}."
+            f"({saved['state']}). The target and its dependent Generations will be "
+            "replaced; unaffected Generations retain their identity."
         }
 
     @job("component.reload.submit")
