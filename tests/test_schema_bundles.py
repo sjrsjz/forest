@@ -315,6 +315,7 @@ async def test_clean_kernel_runtime_bundle_owns_only_generic_runtime_facts(clean
             "state_heads",
             "runtime_graphs",
             "runtime_graph_modules",
+            "runtime_graph_retention_dependencies",
         } <= names
         assert not any(
             token in name
@@ -725,8 +726,9 @@ async def test_runtime_graph_retains_unchanged_generations_without_republishing_
     runtime = kernel.runtime
     lease = await runtime.claim_host("retain-host", "retain-incarnation")
     provider = runtime_binding("example.provider", marker="a")
-    caller = runtime_binding(
-        "example.caller", marker="d", requires=("example.provider",)
+    caller = replace(
+        runtime_binding("example.caller", marker="d"),
+        retention_requires=("example.provider",),
     )
     consumer = runtime_binding(
         "example.consumer", marker="b", requires=("example.provider",)
@@ -925,6 +927,22 @@ async def test_runtime_graph_retains_unchanged_generations_without_republishing_
             str(uuid4()),
             retained_generations={
                 "example.consumer": second.generations["example.consumer"]
+            },
+            source_graph=second,
+        )
+    assert conflict.value.code == "RUNTIME_RETAINED_DEPENDENCY_CHANGED"
+    with pytest.raises(ForestError) as conflict:
+        await runtime.prepare_graph(
+            lease,
+            [
+                runtime_binding("example.provider", marker="d"),
+                runtime_binding(
+                    "example.consumer", marker="e", requires=("example.provider",)
+                ),
+            ],
+            str(uuid4()),
+            retained_generations={
+                "example.caller": second.generations["example.caller"]
             },
             source_graph=second,
         )
@@ -2272,6 +2290,19 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
     await current.start()
     graph = current.graph_identity
 
+    with pytest.raises(ForestError) as missing_target:
+        await core.runtime.request_graph_replacement(
+            lease,
+            operation_id="reload/missing-target",
+            expected_graph_revision=graph.graph_revision,
+            requested_by="qq:42",
+            target_component_id="example.absent",
+        )
+    assert missing_target.value.code == "RUNTIME_MODULE_NOT_FOUND"
+    with pytest.raises(ForestError) as not_queued:
+        await core.runtime.graph_replacement("reload/missing-target")
+    assert not_queued.value.code == "RUNTIME_REPLACEMENT_NOT_FOUND"
+
     requested = await core.runtime.request_graph_replacement(
         lease,
         operation_id="reload/one",
@@ -2321,12 +2352,26 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
     ) == settled
     assert (await core.runtime.graph_replacement("reload/one"))["state"] == "SUCCEEDED"
 
-    await core.runtime.request_graph_replacement(
+    targeted = await core.runtime.request_graph_replacement(
         lease,
         operation_id="reload/two",
         expected_graph_revision=candidate.graph_identity.graph_revision,
         requested_by="qq:42",
+        target_component_id="kernel.runtime",
     )
+    assert targeted["target_component_id"] == "kernel.runtime"
+    assert (await core.runtime.status())["latest_replacement"]["target_component_id"] == (
+        "kernel.runtime"
+    )
+    with pytest.raises(ForestError) as retargeted:
+        await core.runtime.request_graph_replacement(
+            lease,
+            operation_id="reload/two",
+            expected_graph_revision=candidate.graph_identity.graph_revision,
+            requested_by="qq:42",
+            target_component_id=None,
+        )
+    assert retargeted.value.code == "RUNTIME_REPLACEMENT_CONFLICT"
     left, right = await asyncio.gather(
         core.runtime.claim_graph_replacement(lease),
         core.runtime.claim_graph_replacement(lease),

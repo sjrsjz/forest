@@ -2307,6 +2307,7 @@ class PackageGenerationAdapter:
         binding = PreparedGenerationBinding(
             component_id=context.component_id,
             requires=context.requires,
+            retention_requires=context.retention_requires,
             package_id=context.package_id,
             package_version=context.package_version,
             package_digest=context.package_digest,
@@ -2947,4 +2948,22 @@ def package_runtime_descriptor(
             for item in component.get("requires", ())
             if item.get("startup_dependency") and item["name"] in resolved_contracts
         ),
+        retention_requires=tuple(
+            sorted(
+                (
+                    {
+                        step["component_id"]
+                        for plan in component.get("unit_of_work_plans", ())
+                        for step in plan["steps"]
+                    }
+                    | (
+                        {"component.worker-host"}
+                        if component.get("configuration_apply")
+                        else set()
+                    )
+                )
+                - {component["id"]}
+            )
+        ),
+        retention_service_requires=tuple(sorted(resolved_contracts.items())),
     )

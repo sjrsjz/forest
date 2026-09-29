@@ -80,7 +80,8 @@ class KernelRuntimeRepository:
             replacement = await (
                 await conn.execute(
                     sql.SQL(
-                        "SELECT operation_id,requested_by,expected_graph_revision,activation_id,"
+                        "SELECT operation_id,requested_by,expected_graph_revision,"
+                        "target_component_id,activation_id,"
                         "state,attempt_count,result_graph_id,result_graph_revision,error_code,"
                         "created_at,updated_at FROM {} WHERE bot_id=%s "
                         "ORDER BY created_at DESC,operation_id DESC LIMIT 1"
@@ -103,8 +104,9 @@ class KernelRuntimeRepository:
         operation_id: str,
         expected_graph_revision: int,
         requested_by: str,
+        target_component_id: str | None = None,
     ) -> dict:
-        """Persist one graph-wide reload request without draining the calling Shell worker."""
+        """Persist one exact graph or component reload intent."""
 
         for value, field in ((operation_id, "operation_id"), (requested_by, "requested_by")):
             if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
@@ -113,10 +115,18 @@ class KernelRuntimeRepository:
             raise ForestError(
                 "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid expected graph revision", 422
             )
+        if target_component_id is not None and (
+            not isinstance(target_component_id, str)
+            or _IDENTIFIER.fullmatch(target_component_id) is None
+        ):
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid target component", 422
+            )
         input_digest = digest_json(
             {
                 "expected_graph_revision": expected_graph_revision,
                 "requested_by": requested_by,
+                "target_component_id": target_component_id,
             }
         )
         activation_id = str(
@@ -160,11 +170,28 @@ class KernelRuntimeRepository:
                     409,
                     details={"graph_revision": None if head is None else head["graph_revision"]},
                 )
+            if target_component_id is not None:
+                target = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT 1 FROM {} WHERE bot_id=%s AND graph_id=%s "
+                            "AND component_id=%s"
+                        ).format(self._table("runtime_graph_modules")),
+                        (self.store.bot_id, head["graph_id"], target_component_id),
+                    )
+                ).fetchone()
+                if target is None:
+                    raise ForestError(
+                        "RUNTIME_MODULE_NOT_FOUND",
+                        "Reload target is not in this RuntimeGraph",
+                        404,
+                    )
             saved = await (
                 await conn.execute(
                     sql.SQL(
                         "INSERT INTO {}(bot_id,operation_id,input_digest,requested_by,"
-                        "expected_graph_revision,activation_id) VALUES (%s,%s,%s,%s,%s,%s) "
+                        "expected_graph_revision,target_component_id,activation_id) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s) "
                         "RETURNING *"
                     ).format(self._table("graph_replacement_requests")),
                     (
@@ -173,6 +200,7 @@ class KernelRuntimeRepository:
                         input_digest,
                         requested_by,
                         expected_graph_revision,
+                        target_component_id,
                         activation_id,
                     ),
                 )
@@ -1167,9 +1195,19 @@ class KernelRuntimeRepository:
                     await conn.execute(
                         sql.SQL(
                             "SELECT component_id,required_component_id FROM {} "
+                            "WHERE bot_id=%s AND graph_id=%s UNION "
+                            "SELECT component_id,required_component_id FROM {} "
                             "WHERE bot_id=%s AND graph_id=%s"
-                        ).format(self._table("runtime_graph_dependencies")),
-                        (self.store.bot_id, source_graph.graph_id),
+                        ).format(
+                            self._table("runtime_graph_dependencies"),
+                            self._table("runtime_graph_retention_dependencies"),
+                        ),
+                        (
+                            self.store.bot_id,
+                            source_graph.graph_id,
+                            self.store.bot_id,
+                            source_graph.graph_id,
+                        ),
                     )
                 ).fetchall()
                 retained_dependencies = [
@@ -1330,19 +1368,34 @@ class KernelRuntimeRepository:
                         ).format(self._table("runtime_graph_dependencies")),
                         (self.store.bot_id, graph_id, item.component_id, required),
                     )
+                for required in item.retention_requires:
+                    await conn.execute(
+                        sql.SQL(
+                            "INSERT INTO {}(bot_id,graph_id,component_id,required_component_id) "
+                            "VALUES (%s,%s,%s,%s)"
+                        ).format(self._table("runtime_graph_retention_dependencies")),
+                        (self.store.bot_id, graph_id, item.component_id, required),
+                    )
             for dependency in retained_dependencies if retained else ():
-                await conn.execute(
-                    sql.SQL(
-                        "INSERT INTO {}(bot_id,graph_id,component_id,required_component_id) "
-                        "VALUES (%s,%s,%s,%s)"
-                    ).format(self._table("runtime_graph_dependencies")),
-                    (
-                        self.store.bot_id,
-                        graph_id,
-                        dependency["component_id"],
-                        dependency["required_component_id"],
-                    ),
-                )
+                for table in (
+                    "runtime_graph_dependencies",
+                    "runtime_graph_retention_dependencies",
+                ):
+                    await conn.execute(
+                        sql.SQL(
+                            "INSERT INTO {}(bot_id,graph_id,component_id,required_component_id) "
+                            "SELECT bot_id,%s,component_id,required_component_id FROM {} "
+                            "WHERE bot_id=%s AND graph_id=%s AND component_id=%s "
+                            "AND required_component_id=%s"
+                        ).format(self._table(table), self._table(table)),
+                        (
+                            graph_id,
+                            self.store.bot_id,
+                            source_graph.graph_id,
+                            dependency["component_id"],
+                            dependency["required_component_id"],
+                        ),
+                    )
         return RuntimeGenerationGraph(graph_id, revision, graph_digest, activation_id, generations)
 
     async def publish_graph(
@@ -2063,6 +2116,9 @@ class KernelRuntimeRepository:
                 or len(item.requires) != len(set(item.requires))
                 or item.component_id in item.requires
                 or set(item.requires) - required_components
+                or len(item.retention_requires) != len(set(item.retention_requires))
+                or item.component_id in item.retention_requires
+                or set(item.retention_requires) - required_components
                 or invalid_storage
             ):
                 raise ForestError(

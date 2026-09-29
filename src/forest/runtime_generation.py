@@ -46,6 +46,7 @@ class PreparedGenerationContext:
     state_schema: int
     state_contract_digest: str
     storage: RuntimeStorageBinding | None
+    retention_requires: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -74,12 +75,14 @@ class PreparedGenerationBinding:
     data_admission: bool
     control_admission: bool
     storage: RuntimeStorageBinding | None = None
+    retention_requires: tuple[str, ...] = ()
 
     def as_fact(self) -> dict:
         return {
             "protocol": "forest.prepared-generation/1",
             "component_id": self.component_id,
             "requires": list(self.requires),
+            "retention_requires": list(self.retention_requires),
             "package": {
                 "package_id": self.package_id,
                 "package_version": self.package_version,

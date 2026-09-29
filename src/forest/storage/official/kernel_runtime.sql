@@ -305,6 +305,19 @@ CREATE TABLE runtime_graph_dependencies (
     CHECK (component_id <> required_component_id)
 );
 
+CREATE TABLE runtime_graph_retention_dependencies (
+    bot_id text NOT NULL,
+    graph_id text NOT NULL,
+    component_id text NOT NULL,
+    required_component_id text NOT NULL,
+    PRIMARY KEY (bot_id, graph_id, component_id, required_component_id),
+    FOREIGN KEY (bot_id, graph_id, component_id)
+        REFERENCES runtime_graph_modules(bot_id, graph_id, component_id),
+    FOREIGN KEY (bot_id, graph_id, required_component_id)
+        REFERENCES runtime_graph_modules(bot_id, graph_id, component_id),
+    CHECK (component_id <> required_component_id)
+);
+
 CREATE TABLE runtime_graph_lifecycle_facts (
     bot_id text NOT NULL,
     graph_id text NOT NULL,
@@ -336,6 +349,10 @@ CREATE TABLE graph_replacement_requests (
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
     expected_graph_revision bigint NOT NULL CHECK (expected_graph_revision > 0),
+    target_component_id text CHECK (
+        target_component_id IS NULL
+        OR target_component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
+    ),
     activation_id text NOT NULL,
     state text NOT NULL DEFAULT 'QUEUED'
         CHECK (state IN ('QUEUED','RUNNING','SUCCEEDED','FAILED')),

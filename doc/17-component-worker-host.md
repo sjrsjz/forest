@@ -6,7 +6,7 @@
 
 `component.worker-host` 是 Bot scope 的官方包，具有自己的不可变工件、Generation、能力集合、私有 schema bundle、管理契约和 UI。它拥有**组件控制意图**：某 Bot 选择哪些包、启用状态、待应用配置计划、验证结果、组件操作回执，以及向内核申请代际重建。它不拥有其他组件的业务数据、包工件目录或 Web 登录会话。目标组件的配置值和配置修订由该组件私有 repository 保存；Worker Host 只通过该组件的版本化配置端口规划和提交，不复制一份可写配置真相。
 
-Worker Host 不能负责物理启动或停止自己，也不能握住其他 Worker 对象。内核的 RuntimeGraph 执行器仅按冻结候选图执行通用的 prepare、prewarm、drain、start、publish、stop、rollback；这些动作不理解组件选择政策或配置内容。Worker Host 经受限的 `runtime.graph-replacement.request/1` 端口提交冻结控制意图，Bot Host 的租约监督循环领取请求并驱动内核执行器。Worker Host 热重载时，它自己的旧 Generation 与其他组件一样被排空；原操作的持久回执和替换请求不依赖旧 Python 对象存活。Worker Host 失效时，已有业务 Generation 可以继续运行，但组件控制写入拒绝；不得回退到 Web gateway 的直接写路径。
+Worker Host 不能负责物理启动或停止自己，也不能握住其他 Worker 对象。内核的 RuntimeGraph 执行器仅按冻结候选图执行通用的 prepare、prewarm、drain、start、publish、stop、rollback；这些动作不理解组件选择政策或配置内容。Worker Host 经受限的 `runtime.graph-replacement.request/2` 端口提交冻结控制意图，Bot Host 的租约监督循环领取请求并驱动内核执行器。Worker Host 热重载时，它自己的旧 Generation 与其他组件一样被排空；原操作的持久回执和替换请求不依赖旧 Python 对象存活。Worker Host 失效时，已有业务 Generation 可以继续运行，但组件控制写入拒绝；不得回退到 Web gateway 的直接写路径。
 
 `kernel.runtime` 继续拥有 Bot 整体 admission、Graph/Generation 事实、Host lease 和通用图替换队列。Shell 的 `core reload` 是整个 RuntimeGraph 的维护请求，属于内核；`component reload/enable/disable/validate` 是 Worker Host 的独立操作，不能把 `core reload` 伪称为单组件热重载。若候选图暂时只能整体重新实例化，必须在结果中明示影响的所有 Generation；在能保留未变化 Generation 之前，不宣称已实现局部重载。
 
@@ -17,7 +17,7 @@ Worker Host 不能负责物理启动或停止自己，也不能握住其他 Work
 | owner / scope | `component.worker-host` / `bot`，官方 `python-worker`，`reload_mode = drain` |
 | namespace / repository | `schema_id = forest.component.worker-host`，宿主派生 SQL namespace，`forest.component-worker-host.repository/1`；只写组件选择、启停意图、控制计划及回执 |
 | provides | `component.host.packages/1`、`component.host.module/1`、`component.host.validate/1` 读端口；`component.host.configuration.plan/1`、`component.host.configuration.apply/1`、`component.host.enable/1`、`component.host.disable/1` 控制端口 |
-| requires | 内核受限 `runtime.graph-replacement.request/1`、冻结 Graph 查询、部署包目录只读工件快照、目标组件配置端口；不直接持有 Host、registry、其他 Worker 或其 repository |
+| requires | 内核受限 `runtime.graph-replacement.request/2`、冻结 Graph 查询、部署包目录只读工件快照、目标组件配置端口；不直接持有 Host、registry、其他 Worker 或其 repository |
 | UnitOfWork | `component.host.commit-control-intent/1` 与目标组件标准配置 apply participant 原子提交 desired 和 `PENDING_REBUILD`；内核替换请求由包内持久任务幂等提交，不通过 Web 打开跨模块事务 |
 | 管理贡献 | 随本包 Generation 发布组件目录、配置、历史、验证与启停 UI；包内 UI 使用受限 artifact 操作读取 |
 | 并发围栏 | Bot ID、Host lease、目标 Graph revision、目标 Generation、目标配置 revision、控制 desired revision、工件 digest 和 operation ID |
@@ -75,7 +75,7 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 
 当前 `component.worker-host` 的包内 `modules`/`module` 只读端口可以分页列出已发布 RuntimeGraph 成员并检查单个 Generation；分页游标绑定 Graph 身份，换代后拒绝旧页。新增 `packages` 只读端口经受限服务路由读取部署共用的 `PackageCatalog` 内容寻址目录，逐页校验包字节，返回 manifest 摘要、组件身份和能力申请；目录修订变化拒绝旧页，包内 UI 折叠展示候选声明。它只是候选工件浏览，不构成已授权的选择、启停或兼容性验收。包内 UI 已提供持久 `module.reload` 和配置重建状态查询。18 个 builtin 包和两项可配置的内核 authority 均从自身 Generation 发起标准配置事务，原子提交 desired 与 Worker Host 控制意图；Web gateway 只路由已授权的管理契约，不直接写配置或同步替换 Graph。`CleanBotHost._assemble_registry()` 仍静态拼装官方组件。
 
-群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/1` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执明确列出当前实现会替换整图所有 Generation；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable、工件选择控制及保留未变化 Generation 仍待完成。
+群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/2` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执明确列出当前实现会替换整图所有 Generation；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable、工件选择控制及保留未变化 Generation 仍待完成。
 
 当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录、持久重载账本及标准配置控制意图。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须建立部署工件的安装/校验权威和 `module.validate`，再以 Worker Host 私有选择事实实现显式启停、包选择和未变化 Generation 保留，并让 Shell/CLI 使用相同控制端口。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
 
@@ -89,4 +89,10 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 
 服务句柄在每次新调用入场时冻结**当前图**的路由快照；已入场调用继续用原调用树的准确 Generation/route epoch 完成，前提是目标未被换代且授权仍有效。持有旧 Graph ID 的句柄不能在发布后自动获得调用新目标的权力；对 `replace/remove` 的旧路由必须由 epoch 拒绝。保留组件若需调用换代目标，必须进入替换闭包并按自身 handoff 协议重建，除非它声明并实现可验证的安全边界重新绑定契约。这样既允许独立组件保持运行，也不把旧 Generation 偷偷伪装为新代。局部发布、失败回滚和宿主关闭都须按实际成员所有权只排空/释放一次；热重载验收须核对未变化 Generation ID、进程、配置生效修订和 owned-work 租约保持不变，而目标及依赖闭包获得新 Generation。
 
-内核路由器已在一次事务内核对当前图中原调用方和原服务提供方的准确 Generation；仅两者都被保留时，旧句柄本次调用的路由快照才改用当前 Graph 身份。服务操作账本以当前图记录新尝试，结算则验证执行 Generation 仍是当前成员，因此保留者跨图完成的持久调用不会因原图 ID 而失败。外部效果的 `runtime.graph` 围栏接受准确原图成员身份，但必须同时证明执行 Generation 仍在当前图；这不允许已被换代的执行者重放旧 permit。宿主尚须实现实例所有权转移、按替换闭包排空，并把标准配置事务等延迟绑定的 participant 依赖纳入闭包；这些内核能力目前不会被现有 `module.reload` 使用。
+内核路由器已在一次事务内核对当前图中原调用方和原服务提供方的准确 Generation；仅两者都被保留时，旧句柄本次调用的路由快照才改用当前 Graph 身份。服务操作账本以当前图记录新尝试，结算则验证执行 Generation 仍是当前成员，因此保留者跨图完成的持久调用不会因原图 ID 而失败。外部效果的 `runtime.graph` 围栏接受准确原图成员身份，但必须同时证明执行 Generation 仍在当前图；这不允许已被换代的执行者重放旧 permit。标准配置事务等延迟绑定的 participant 依赖现已纳入保留依赖；宿主仍须实现实例所有权转移、按替换闭包排空，这些内核能力目前不会被现有 `module.reload` 使用。
+
+### 目标组件与保留依赖的当前落地
+
+Worker Host 已把目标 `component_id` 随 `runtime.graph-replacement.request/2` 写入内核持久请求；内核在期望 Graph revision 上核对目标成员，并把目标纳入幂等摘要。`RuntimeModuleRegistry.replacement_closure()` 按启动依赖和单独的保留依赖计算需要换代的反向闭包。保留依赖包括普通服务句柄、UnitOfWork participant 和配置控制引用；这些引用可以成环，不能并入启动 DAG。冻结 Generation 绑定及内核图事实分别记录保留依赖，候选图保留旧 Generation 时会验证其所依赖的组件也被保留。
+
+当前宿主执行器仍按整图重建，尚未消费请求中的目标或闭包，也尚未转移未变化的 Worker 实例所有权。因此此进度不构成局部热重载验收；下一步必须让宿主只为闭包创建新 Generation，并在成功发布、失败回滚和最终关闭中分别处理新旧实例。

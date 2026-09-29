@@ -687,6 +687,8 @@ class RuntimeModuleDescriptor:
     owned_work_lifecycle: OwnedWorkLifecycle = OwnedWorkLifecycle.NONE
     provided_services: tuple[tuple[str, str], ...] = ()
     startup_service_requires: tuple[tuple[str, str], ...] = ()
+    retention_requires: tuple[str, ...] = ()
+    retention_service_requires: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         identities = [item.contribution_id for item in self.management]
@@ -732,6 +734,13 @@ class RuntimeModuleDescriptor:
             raise ValueError("Runtime provided service identities must be unique")
         if len(self.startup_service_requires) != len(set(self.startup_service_requires)):
             raise ValueError("Runtime startup service requirements must be unique")
+        if (
+            len(self.retention_requires) != len(set(self.retention_requires))
+            or self.component_id in self.retention_requires
+            or len(self.retention_service_requires)
+            != len(set(self.retention_service_requires))
+        ):
+            raise ValueError("Runtime retention requirements must be unique and external")
 
 
 class ModuleLifecycleState(StrEnum):
@@ -811,6 +820,7 @@ class RuntimeModuleRegistry:
                 "RUNTIME_ACTIVATION_ID_INVALID", "Runtime activation identity is invalid", 422
             ) from None
         component_ids = {descriptor.component_id for descriptor in self.descriptors}
+        self._component_ids = component_ids
         dynamic_requires = {component_id: set() for component_id in component_ids}
         if "agent.runtime" in component_ids:
             dynamic_requires["agent.runtime"].update(
@@ -848,20 +858,37 @@ class RuntimeModuleRegistry:
                     )
                 providers[key] = (descriptor.component_id, service_version)
         self._service_startup_requires = {}
+        self._service_retention_requires = {}
         for descriptor in self.descriptors:
-            required_components = set()
-            for service_id, contract in descriptor.startup_service_requires:
-                lower_major = contract_range(contract)[0][0]
-                provider = providers.get((service_id, lower_major))
-                if provider is None or not contract_matches(contract, provider[1]):
-                    raise ForestError(
-                        "RUNTIME_SERVICE_DEPENDENCY_MISSING",
-                        "Startup service has no provider satisfying its contract",
-                        422,
-                        details={"component_id": descriptor.component_id, "service_id": service_id},
-                    )
-                required_components.add(provider[0])
-            self._service_startup_requires[descriptor.component_id] = tuple(sorted(required_components))
+            for requirements, destination, missing_message in (
+                (
+                    descriptor.startup_service_requires,
+                    self._service_startup_requires,
+                    "Startup service has no provider satisfying its contract",
+                ),
+                (
+                    descriptor.retention_service_requires,
+                    self._service_retention_requires,
+                    "Retained service has no provider satisfying its contract",
+                ),
+            ):
+                required_components = set()
+                for service_id, contract in requirements:
+                    lower_major = contract_range(contract)[0][0]
+                    provider = providers.get((service_id, lower_major))
+                    if provider is None or not contract_matches(contract, provider[1]):
+                        raise ForestError(
+                            "RUNTIME_SERVICE_DEPENDENCY_MISSING",
+                            missing_message,
+                            422,
+                            details={
+                                "component_id": descriptor.component_id,
+                                "service_id": service_id,
+                            },
+                        )
+                    if provider[0] != descriptor.component_id:
+                        required_components.add(provider[0])
+                destination[descriptor.component_id] = tuple(sorted(required_components))
         self.contract_router = RuntimeContractRouter(self)
         self.scope_kind = getattr(runtime, "scope_kind", "bot")
         self.generation_authority = getattr(runtime, "generation_authority", None)
@@ -878,6 +905,40 @@ class RuntimeModuleRegistry:
             )
         )
 
+    def _retention_requires(self, descriptor: RuntimeModuleDescriptor) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                (
+                    set(descriptor.retention_requires)
+                    | set(self._service_retention_requires[descriptor.component_id])
+                )
+                & self._component_ids
+                - set(self._effective_requires(descriptor))
+                - {descriptor.component_id}
+            )
+        )
+
+    def replacement_closure(self, component_id: str) -> tuple[str, ...]:
+        """Include every Generation whose frozen references touch the target."""
+
+        if component_id not in self.states:
+            raise ForestError(
+                "RUNTIME_MODULE_NOT_FOUND", "Reload target is not in this RuntimeGraph", 404
+            )
+        affected = {component_id}
+        while True:
+            expanded = affected | {
+                descriptor.component_id
+                for descriptor in self.descriptors
+                if (
+                    set(self._effective_requires(descriptor))
+                    | set(self._retention_requires(descriptor))
+                ) & affected
+            }
+            if expanded == affected:
+                return tuple(item for item in self.order if item in affected)
+            affected = expanded
+
     def _descriptor_fact(self, descriptor: RuntimeModuleDescriptor) -> dict:
         instance = self.instances.get(descriptor.component_id)
         contract = getattr(instance, "management_contract", None)
@@ -885,6 +946,7 @@ class RuntimeModuleRegistry:
             "protocol": "forest.runtime-module/1",
             "component_id": descriptor.component_id,
             "requires": list(self._effective_requires(descriptor)),
+            "retention_requires": list(self._retention_requires(descriptor)),
             "factory_ref": (
                 "forest.package-generation-adapter/1"
                 if descriptor.artifact.driver == "forest.python-worker/1"
@@ -958,6 +1020,7 @@ class RuntimeModuleRegistry:
             activation_id=self.activation_id,
             component_id=descriptor.component_id,
             requires=self._effective_requires(descriptor),
+            retention_requires=self._retention_requires(descriptor),
             package_id=descriptor.artifact.package_id,
             package_version=descriptor.artifact.package_version,
             package_digest=descriptor.artifact.package_digest,
@@ -983,6 +1046,7 @@ class RuntimeModuleRegistry:
         expected = {
             "component_id": context.component_id,
             "requires": context.requires,
+            "retention_requires": context.retention_requires,
             "package_id": context.package_id,
             "package_version": context.package_version,
             "package_digest": context.package_digest,

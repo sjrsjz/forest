@@ -72,6 +72,48 @@ def test_manifest_service_dependencies_define_startup_order_without_late_bound_c
         RuntimeModuleRegistry(_runtime(), (consumer,))
 
 
+def test_replacement_closure_includes_service_and_transaction_references():
+    provider = RuntimeModuleDescriptor(
+        "module.provider",
+        (),
+        lambda *_: object(),
+        _ARTIFACT,
+        provided_services=(("demo.request", "1.0"),),
+    )
+    consumer = RuntimeModuleDescriptor(
+        "module.consumer",
+        (),
+        lambda *_: object(),
+        _ARTIFACT,
+        retention_service_requires=(("demo.request", ">=1.0,<2.0"),),
+        retention_requires=("module.transaction",),
+    )
+    transaction = RuntimeModuleDescriptor(
+        "module.transaction",
+        (),
+        lambda *_: object(),
+        _ARTIFACT,
+        retention_requires=("module.consumer",),
+    )
+    independent = RuntimeModuleDescriptor(
+        "module.independent", (), lambda *_: object(), _ARTIFACT
+    )
+    registry = RuntimeModuleRegistry(
+        _runtime(), (independent, transaction, consumer, provider)
+    )
+    assert set(registry.replacement_closure("module.provider")) == {
+        "module.provider",
+        "module.consumer",
+        "module.transaction",
+    }
+    assert registry.replacement_closure("module.independent") == (
+        "module.independent",
+    )
+    with pytest.raises(ForestError) as error:
+        registry.replacement_closure("module.missing")
+    assert error.value.code == "RUNTIME_MODULE_NOT_FOUND"
+
+
 def _command(service_id: str) -> RuntimeShellCommandContribution:
     return RuntimeShellCommandContribution(
         "module.inspect",

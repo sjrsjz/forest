@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from uuid import uuid4
 
@@ -198,6 +199,7 @@ class PreparedAuthorityModule:
         return PreparedGenerationBinding(
             component_id=context.component_id,
             requires=context.requires,
+            retention_requires=context.retention_requires,
             package_id=context.package_id,
             package_version=context.package_version,
             package_digest=context.package_digest,
@@ -294,14 +296,24 @@ def runtime_graph_replacement_request_service(context):
         if (
             type(payload) is not dict
             or set(payload)
-            != {"protocol", "operation_id", "expected_graph_revision", "requested_by"}
-            or payload["protocol"] != "forest.runtime-graph-replacement-request/1"
+            != {
+                "protocol",
+                "operation_id",
+                "expected_graph_revision",
+                "requested_by",
+                "target_component_id",
+            }
+            or payload["protocol"] != "forest.runtime-graph-replacement-request/2"
             or not isinstance(payload["operation_id"], str)
             or not 1 <= len(payload["operation_id"].encode()) <= 256
             or type(payload["expected_graph_revision"]) is not int
             or payload["expected_graph_revision"] <= 0
             or not isinstance(payload["requested_by"], str)
             or not 1 <= len(payload["requested_by"].encode()) <= 256
+            or not isinstance(payload["target_component_id"], str)
+            or re.fullmatch(
+                r"[a-z0-9][a-z0-9._-]{0,127}", payload["target_component_id"]
+            ) is None
         ):
             raise ForestError(
                 "RUNTIME_REPLACEMENT_INPUT_INVALID",
@@ -313,13 +325,15 @@ def runtime_graph_replacement_request_service(context):
             operation_id=payload["operation_id"],
             expected_graph_revision=payload["expected_graph_revision"],
             requested_by=payload["requested_by"],
+            target_component_id=payload["target_component_id"],
         )
         return {
-            "protocol": "forest.runtime-graph-replacement-receipt/1",
+            "protocol": "forest.runtime-graph-replacement-receipt/2",
             "operation_id": saved["operation_id"],
             "activation_id": saved["activation_id"],
             "state": saved["state"],
             "expected_graph_revision": saved["expected_graph_revision"],
+            "target_component_id": saved["target_component_id"],
         }
 
     return request
@@ -767,6 +781,11 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 else ()
             ),
             job_types=((RUNTIME_HEALTH_SNAPSHOT_JOB,) if component_id == "kernel.runtime" else ()),
+            retention_requires=(
+                ("component.worker-host",)
+                if component_id in {"kernel.audit", "kernel.authorization"}
+                else ()
+            ),
         )
         for component_id, definition in _MODULES.items()
     )

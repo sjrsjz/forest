@@ -201,10 +201,11 @@ class ComponentWorkerHost(Plugin):
             receipt = await ctx.services.call(
                 "runtime.graph-replacement.request",
                 {
-                    "protocol": "forest.runtime-graph-replacement-request/1",
+                    "protocol": "forest.runtime-graph-replacement-request/2",
                     "operation_id": "component-reload:" + work["request_id"],
                     "expected_graph_revision": work["expected_graph_revision"],
                     "requested_by": work["requested_by"],
+                    "target_component_id": work["component_id"],
                 },
                 operation_id=ctx.operations.stable("submit-graph-replacement"),
                 timeout=10,
@@ -274,13 +275,14 @@ class ComponentWorkerHost(Plugin):
             receipt = await ctx.services.call(
                 "runtime.graph-replacement.request",
                 {
-                    "protocol": "forest.runtime-graph-replacement-request/1",
+                    "protocol": "forest.runtime-graph-replacement-request/2",
                     "operation_id": (
                         "configuration-rebuild:" + work["request_id"]
                         + ":graph:" + str(graph["graph_revision"])
                     ),
                     "expected_graph_revision": graph["graph_revision"],
                     "requested_by": work["requested_by"],
+                    "target_component_id": work["target_component_id"],
                 },
                 operation_id=ctx.operations.stable("submit-configuration-rebuild"),
                 timeout=10,
