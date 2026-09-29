@@ -22,10 +22,6 @@ from forest.package_state_ports import (
     KernelPackageStateCommands,
     KernelPackageStateQueries,
 )
-from forest.package_unit_of_work import (
-    PostgresPackageConfigurationApplyCoordinator,
-    package_uow_coordinator_factory,
-)
 from forest.packages import (
     PackageCatalog,
     PackageSnapshot,
@@ -43,6 +39,10 @@ from forest.runtime_modules import (
 from forest.schema_bundles import StorageBundleSpec
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.module_configuration import ModuleConfigurationRepository
+from forest.unit_of_work import (
+    PostgresComponentConfigurationApplyCoordinator,
+    package_uow_coordinator_factory,
+)
 
 
 @dataclass(frozen=True)
@@ -243,7 +243,7 @@ async def bootstrap_builtin_package(
             runtime=kernel.runtime,
         ),
         configuration_apply_coordinator_factory=lambda target, repository, control: (
-            PostgresPackageConfigurationApplyCoordinator(
+            PostgresComponentConfigurationApplyCoordinator(
                 store,
                 kernel.runtime,
                 component_id=target,

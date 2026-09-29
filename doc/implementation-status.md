@@ -230,7 +230,7 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 1. 将已有冻结选择与批次预览接到 P0 授权、持久分批执行、部分完成状态和分页管理 UI；补齐发布崩溃重放验证。批次授权范围仍待用户确认，不能私自确定为整选择或逐批。
 2. 验证 Agent 语义召回的真实 QQ 群聊链、图片召回命中与跨群成功回复及联想提升；恢复及重放需与删除 epoch、Generation 围栏收敛。
 3. 补齐证据浏览的进一步分页和长期混合图文负载验收。
-4. 实现 [17](17-component-worker-host.md) 的 Bot scope `component.worker-host` 真包和控制端口，移除 Web gateway 对组件配置 repository 与 Bot Host 图替换的直接调用；验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
+4. 继续完成 [17](17-component-worker-host.md) 的包选择、显式启停和未变化 Generation 保留；对 Worker Host 配置控制事务验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
 5. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。
 
 生产图已经是微内核包系统；目标重型 Bot 框架仍需完成 Memory 主链和长期运行验证。
@@ -318,3 +318,5 @@ All 18 builtin package manifests now declare the standard `configuration_apply =
 Builtin and generic package storage identities are now derived from the storage schema and execution profile rather than the full runtime package digest. A Python/UI-only package revision therefore keeps the installed storage identity while publishing a new immutable package Generation; a focused package build test confirms two runtime digests with one storage digest. This is a pre-release identity change: existing development databases with the earlier storage ledger need to be rebuilt, while unchanged-schema hot reloads after that rebuild no longer require a database reset.
 
 Generic package UnitOfWork plans now reject the Worker Host configuration-rebuild record participant at manifest validation, and the participant checks the management-configuration causal root. This reserves the control intent for the authorized standard configuration transaction; the malicious-plan package validation case passes. Worker Host package version and baseline hash were refreshed for this pre-release guard change.
+
+内核 `kernel.audit` 与 `kernel.authorization` 的管理配置现与 builtin 包共用同一标准组件配置事务：目标 authority Generation 内绑定自身配置仓库和 Worker Host 控制 participant，Web gateway 只调用该代管理契约，不再持有全 Bot 配置锁、直接写 desired 或同步执行 `replace_runtime_graph()`。配置提交返回持久重建请求，管理页面区分 desired 提交与 effective 生效。隔离 PostgreSQL 完整宿主测试覆盖 Shell 重载、包配置拒绝回滚与重放，以及内核授权策略配置从真实 Web ticket 提交至 `EFFECTIVE`（`1 passed`，191.92 秒）；本地管理/包回归 `92 passed, 2 skipped`，JS 与 Ruff 检查通过。测试使用独立临时库和假 OneBot/模型客户端，未向真实群发消息。显式启停、包选择、局部 Generation 保留及长期真实链路验收仍未完成。

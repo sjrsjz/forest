@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from uuid import uuid4
 
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
 from forest.builtin_runtime_graph_snapshot import runtime_graph_snapshot_service
@@ -24,6 +25,7 @@ from forest.kernel_authorization_participant import (
 )
 from forest.kernel_effect_participant import KernelEffectUnitOfWorkParticipant
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
+from forest.package_capabilities import PackageCallScope
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_generation import PreparedGenerationBinding
@@ -44,6 +46,7 @@ from forest.storage.kernel_runtime import KernelRuntimeRepository
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.payload_authority import KernelPayloadRepository
+from forest.unit_of_work import PostgresComponentConfigurationApplyCoordinator
 from forest.web_operation_policy import (
     WEB_OPERATION_POLICY_DEFAULT,
     WEB_OPERATION_POLICY_SCHEMA,
@@ -180,10 +183,15 @@ class PreparedAuthorityModule:
         }
         self.generation_identity = None
         self.generation_active = False
+        self._prepared_binding = None
+        self._configuration_apply_coordinator = None
+        self._management_inflight = 0
+        self._management_drained = asyncio.Event()
+        self._management_drained.set()
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         desired = await self.module_configuration.desired()
-        return PreparedGenerationBinding(
+        binding = PreparedGenerationBinding(
             component_id=context.component_id,
             requires=context.requires,
             package_id=context.package_id,
@@ -207,6 +215,54 @@ class PreparedAuthorityModule:
             control_admission=True,
             storage=context.storage,
         )
+        self._prepared_binding = binding
+        return binding
+
+    async def apply_configuration(
+        self,
+        *,
+        operation_id: str,
+        plan_id: str,
+        expected_desired_revision: int,
+        authorization,
+        authorization_guard,
+        authorization_replay_guard,
+    ) -> dict:
+        identity = self.generation_identity
+        binding = self._prepared_binding
+        coordinator = self._configuration_apply_coordinator
+        if not self.generation_active or identity is None or binding is None or coordinator is None:
+            raise ForestError(
+                "KERNEL_CONFIGURATION_APPLY_UNAVAILABLE",
+                "Kernel authority Generation is not active for configuration apply",
+                409,
+            )
+        self._management_inflight += 1
+        self._management_drained.clear()
+        try:
+            return await coordinator.execute(
+                PackageCallScope(
+                    bot_id=self.module_configuration.store.bot_id,
+                    component_id=self.component_id,
+                    generation_id=identity.generation_id,
+                    instance_id=binding.instance_id,
+                    worker_incarnation=binding.worker_incarnation,
+                    call_id="call:" + uuid4().hex,
+                    call_operation_id=operation_id,
+                    causal_root_kind="management.configuration",
+                    causal_root_id=operation_id,
+                ),
+                operation_id=operation_id,
+                plan_id=plan_id,
+                expected_desired_revision=expected_desired_revision,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                authorization_replay_guard=authorization_replay_guard,
+            )
+        finally:
+            self._management_inflight -= 1
+            if self._management_inflight == 0:
+                self._management_drained.set()
 
     async def bind_generation(self, identity) -> None:
         if identity.component_id != self.component_id:
@@ -226,9 +282,11 @@ class PreparedAuthorityModule:
 
     async def quiesce(self) -> None:
         self.generation_active = False
+        await self._management_drained.wait()
 
     async def close(self) -> None:
         self.generation_active = False
+        await self._management_drained.wait()
 
 
 def runtime_graph_replacement_request_service(context):
@@ -323,6 +381,7 @@ class PreparedAuditAuthorityModule(PreparedAuthorityModule):
             configuration,
             audit=service,
             schema=_KERNEL_CONFIGURATION_SCHEMA,
+            apply_callback=self.apply_configuration,
         )
 
     def runtime_service_handlers(self) -> dict:
@@ -360,6 +419,7 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
             configuration,
             schema=WEB_OPERATION_POLICY_SCHEMA,
             validator=validate_web_operation_policy,
+            apply_callback=self.apply_configuration,
         )
 
     def unit_of_work_participant(self):
@@ -595,7 +655,20 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
             )
             if component_id == "kernel.effect":
                 return PreparedEffectAuthorityModule(*arguments, payload)
-            return prepared_type(*arguments)
+            module = prepared_type(*arguments)
+            if component_id in {"kernel.audit", "kernel.authorization"}:
+                module._configuration_apply_coordinator = (
+                    PostgresComponentConfigurationApplyCoordinator(
+                        store,
+                        runtime,
+                        component_id=component_id,
+                        configuration=configurations[component_id],
+                        control_handle=_modules.unit_of_work_participant(
+                            "component.worker-host"
+                        ),
+                    )
+                )
+            return module
 
         return create
 

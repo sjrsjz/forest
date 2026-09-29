@@ -22,7 +22,12 @@ class PackageManagementContract(CleanModuleConfigurationContract):
         schema: dict,
         validator=None,
     ) -> None:
-        super().__init__(configuration, schema=schema, validator=validator)
+        super().__init__(
+            configuration,
+            schema=schema,
+            validator=validator,
+            apply_callback=adapter.apply_configuration,
+        )
         self.adapter = adapter
         component = adapter.component
         query_ports = {
@@ -96,29 +101,6 @@ class PackageManagementContract(CleanModuleConfigurationContract):
                 "MODULE_MANAGEMENT_ASSET_NOT_FOUND",
                 "Package management asset does not exist", 404,
             ) from None
-
-    async def apply(
-        self,
-        *,
-        operation_id: str,
-        plan_id: str,
-        expected_desired_revision: int,
-        authorization=None,
-        authorization_guard=None,
-        authorization_replay_guard=None,
-    ) -> dict:
-        result = await self.adapter.apply_configuration(
-            operation_id=operation_id,
-            plan_id=plan_id,
-            expected_desired_revision=expected_desired_revision,
-            authorization=authorization,
-            authorization_guard=authorization_guard,
-            authorization_replay_guard=authorization_replay_guard,
-        )
-        return {
-            "configuration": self._configuration(result["configuration"]),
-            "rebuild": result["rebuild"],
-        }
 
     def query_required_role(self, query_id: str) -> str:
         try:

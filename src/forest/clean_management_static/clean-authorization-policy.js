@@ -25,19 +25,21 @@ function collect(rows) {
     allowed_subject_refs: splitSubjects(row.querySelector('[data-field="subjects"]').value),
   }));
   if (rules.some(rule => !rule.target_component_id || !rule.action_key)) {
-    throw new Error('组件和动作不能为空。');
+    throw new Error('目标组件和动作不能为空。');
   }
   const identities = rules.map(rule => `${rule.target_component_id}\u0000${rule.action_key}`);
-  if (new Set(identities).size !== identities.length) throw new Error('组件与动作组合不能重复。');
+  if (new Set(identities).size !== identities.length) {
+    throw new Error('目标组件与动作组合不能重复。');
+  }
   return {protocol: PROTOCOL, rules};
 }
 
 export async function mount({root, component, api, notice, refresh}) {
+  const base = `/management/v1/modules/${encodeURIComponent(component.component_id)}/configuration`;
   const rows = root.querySelector('#policy-rows');
   const template = root.querySelector('#policy-row-template');
-  const revision = root.querySelector('#policy-revision');
-  const current = await api(`/management/v1/modules/${encodeURIComponent(component.component_id)}/configuration`);
-  revision.textContent = `期望 r${current.desired.revision} · 生效 r${current.effective.revision}`;
+  const current = await api(base);
+  root.querySelector('#policy-revision').textContent = `期望 r${current.desired.revision} · 生效 r${current.effective.revision}`;
   for (const rule of current.desired.value.rules) addRow(rows, template, rule);
   root.querySelector('#policy-add').onclick = () => addRow(rows, template);
   root.querySelector('#policy-save').onclick = async event => {
@@ -47,17 +49,17 @@ export async function mount({root, component, api, notice, refresh}) {
     try {
       const value = collect(rows);
       const key = crypto.randomUUID();
-      const plan = await api(`/management/v1/modules/${encodeURIComponent(component.component_id)}/configuration/plans`, {
+      const plan = await api(`${base}/plans`, {
         method: 'POST',
         headers: {'idempotency-key': `${key}:plan`},
         body: JSON.stringify({expected_desired_revision: current.desired.revision, value}),
       });
-      const applied = await api(`/management/v1/modules/${encodeURIComponent(component.component_id)}/configuration/apply`, {
+      const applied = await api(`${base}/apply`, {
         method: 'POST',
         headers: {'idempotency-key': `${key}:apply`},
         body: JSON.stringify({plan_id: plan.plan_id, expected_desired_revision: current.desired.revision}),
       });
-      notice(`策略 r${applied.configuration.revision} 已随 RuntimeGraph ${applied.graph_revision} 生效。`);
+      notice(`策略 r${applied.configuration.revision} 已提交；重建请求 ${applied.rebuild.request_id} 正在处理。`);
       await refresh();
     } catch (error) {
       notice(error.message);

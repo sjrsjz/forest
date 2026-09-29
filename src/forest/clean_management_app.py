@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 from typing import Any
 
@@ -10,7 +9,6 @@ from pydantic import BaseModel, ConfigDict
 
 from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.errors import ForestError
-from forest.package_management import PackageManagementContract
 from forest.packages import digest_json
 from forest.storage.kernel_audit import AuditEnvelope
 from forest.storage.management_asset_authority import (
@@ -42,7 +40,6 @@ class CleanManagementGateway:
         self.host = host
         self.ticket_authority = ticket_authority
         self.scope_id = scope_id or host.settings.bot_id
-        self._apply_lock = asyncio.Lock()
 
     def contract(self, component_id: str) -> CleanModuleConfigurationContract:
         registry = self.registry()
@@ -497,36 +494,14 @@ class CleanManagementGateway:
             plan_digest=digest_json({"plan_id": body.plan_id}),
             required_role="ADMIN",
         )
-        contract = self.contract(component_id)
-        if isinstance(contract, PackageManagementContract):
-            return await contract.apply(
-                operation_id=operation_id,
-                plan_id=body.plan_id,
-                expected_desired_revision=body.expected_desired_revision,
-                authorization=authorization,
-                authorization_guard=self._authorize_mutation_in,
-                authorization_replay_guard=self._verify_management_target_in,
-            )
-        async with self._apply_lock:
-            saved = await contract.apply(
-                operation_id=operation_id,
-                plan_id=body.plan_id,
-                expected_desired_revision=body.expected_desired_revision,
-                authorization=authorization,
-                authorization_guard=self._authorize_mutation_in,
-            )
-            effective = await contract.configuration.effective()
-            replaced = effective.revision != saved["revision"]
-            registry = (
-                await self.host.replace_runtime_graph() if replaced else self.registry()
-            )
-            graph = registry.graph_identity
-            return {
-                "configuration": saved,
-                "replaced": replaced,
-                "graph_id": graph.graph_id,
-                "graph_revision": graph.graph_revision,
-            }
+        return await self.contract(component_id).apply(
+            operation_id=operation_id,
+            plan_id=body.plan_id,
+            expected_desired_revision=body.expected_desired_revision,
+            authorization=authorization,
+            authorization_guard=self._authorize_mutation_in,
+            authorization_replay_guard=self._verify_management_target_in,
+        )
 
     async def module_query(
         self,
@@ -576,31 +551,30 @@ class CleanManagementGateway:
             plan_digest=plan_digest,
             required_role="ADMIN",
         )
-        async with self._apply_lock:
-            contract = self.contract(component_id)
-            action = getattr(contract, "action", None)
-            if not callable(action):
-                raise ForestError(
-                    "MODULE_MANAGEMENT_OPERATION_NOT_FOUND",
-                    "Module action does not exist",
-                    404,
-                )
-            result = await action(
-                action_id,
-                operation_id=operation_id,
-                payload=body,
-                authorization=authorization,
-                authorization_guard=self._authorize_mutation_in,
+        contract = self.contract(component_id)
+        action = getattr(contract, "action", None)
+        if not callable(action):
+            raise ForestError(
+                "MODULE_MANAGEMENT_OPERATION_NOT_FOUND",
+                "Module action does not exist",
+                404,
             )
-            if not isinstance(result, dict):
-                raise ForestError(
-                    "MODULE_MANAGEMENT_CONTRACT_INVALID",
-                    "Module action returned an invalid result",
-                    500,
-                )
-            graph = self.registry().graph_identity
-            return {
-                **result,
-                "graph_id": graph.graph_id,
-                "graph_revision": graph.graph_revision,
-            }
+        result = await action(
+            action_id,
+            operation_id=operation_id,
+            payload=body,
+            authorization=authorization,
+            authorization_guard=self._authorize_mutation_in,
+        )
+        if not isinstance(result, dict):
+            raise ForestError(
+                "MODULE_MANAGEMENT_CONTRACT_INVALID",
+                "Module action returned an invalid result",
+                500,
+            )
+        graph = self.registry().graph_identity
+        return {
+            **result,
+            "graph_id": graph.graph_id,
+            "graph_revision": graph.graph_revision,
+        }

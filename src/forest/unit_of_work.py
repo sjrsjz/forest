@@ -22,8 +22,8 @@ def _step_operation(operation_id: str, plan_name: str, step_id: str) -> str:
     return "uow-step:" + digest
 
 
-class PostgresPackageConfigurationApplyCoordinator:
-    """Commit one package's desired configuration with Worker Host control intent."""
+class PostgresComponentConfigurationApplyCoordinator:
+    """Commit one Generation's desired configuration with Worker Host control intent."""
 
     def __init__(self, store, runtime, *, component_id: str, configuration, control_handle) -> None:
         self.store = store
@@ -50,8 +50,8 @@ class PostgresPackageConfigurationApplyCoordinator:
             or authorization_guard is None
         ):
             raise ForestError(
-                "PACKAGE_CONFIGURATION_APPLY_AUTHORITY_INVALID",
-                "Configuration apply requires the target package and Web authority",
+                "COMPONENT_CONFIGURATION_APPLY_AUTHORITY_INVALID",
+                "Configuration apply requires the target Generation and Web authority",
                 403,
             )
         try:
@@ -69,13 +69,13 @@ class PostgresPackageConfigurationApplyCoordinator:
             raise
         except TimeoutError as exc:
             raise ForestError(
-                "PACKAGE_CONFIGURATION_APPLY_TIMEOUT",
+                "COMPONENT_CONFIGURATION_APPLY_TIMEOUT",
                 "Configuration apply exceeded its deadline",
                 504,
             ) from exc
         except psycopg.Error as exc:
             raise ForestError(
-                "PACKAGE_CONFIGURATION_APPLY_FAILED",
+                "COMPONENT_CONFIGURATION_APPLY_FAILED",
                 "Configuration apply transaction failed",
                 503,
             ) from exc
@@ -127,7 +127,7 @@ class PostgresPackageConfigurationApplyCoordinator:
             else:
                 if authorization_replay_guard is None:
                     raise ForestError(
-                        "PACKAGE_CONFIGURATION_REPLAY_AUTHORITY_UNAVAILABLE",
+                        "COMPONENT_CONFIGURATION_REPLAY_AUTHORITY_UNAVAILABLE",
                         "Configuration replay requires current Web authority",
                         403,
                     )

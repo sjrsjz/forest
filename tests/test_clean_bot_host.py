@@ -32,7 +32,6 @@ from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
 from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
 from forest.package_capabilities import PackageCallScope
-from forest.package_unit_of_work import PostgresPackageConfigurationApplyCoordinator
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import (
     FrozenServiceRoute,
@@ -43,6 +42,7 @@ from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.vector_index_authority import VectorIndexIdentityRepository
+from forest.unit_of_work import PostgresComponentConfigurationApplyCoordinator
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
@@ -709,7 +709,7 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
                 generation_id=replacement.generations["component.worker-host"],
                 invoke_in=reject_control,
             )
-            rejected_coordinator = PostgresPackageConfigurationApplyCoordinator(
+            rejected_coordinator = PostgresComponentConfigurationApplyCoordinator(
                 host._kernel.runtime.store,
                 host._kernel.runtime,
                 component_id="agent.runtime",
@@ -810,6 +810,62 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
             assert replayed["configuration"] == committed["configuration"]
             assert replayed["rebuild"]["request_id"] == request_id
             assert host.registry.graph_identity.graph_id == active_graph.graph_id
+            authority = host.registry.get("kernel.authorization")
+            policy = await authority.management_contract.read()
+            policy_plan = await authority.management_contract.plan(
+                operation_id="web:policy-plan/atomic-test",
+                expected_desired_revision=policy["desired"]["revision"],
+                value=policy["desired"]["value"],
+            )
+            policy_body = ConfigurationApplyInput(
+                plan_id=policy_plan["plan_id"],
+                expected_desired_revision=policy["desired"]["revision"],
+            )
+            policy_operation = "web:policy-apply/atomic-test"
+            policy_ticket = await gateway.ticket_authority.issue(
+                session=AuthenticatedWebSession(
+                    "token-digest", "session/configuration-test", 1, "csrf-digest",
+                    WebSubject("subject/host-admin", "admin", "Administrator", "ADMIN", True, 1),
+                    datetime.now(timezone.utc) + timedelta(hours=1),
+                ),
+                target_scope_kind="bot",
+                target_scope_id=settings.bot_id,
+                target_component_id="kernel.authorization",
+                target_generation_id=active_graph.generations["kernel.authorization"],
+                target_graph_revision=active_graph.graph_revision,
+                target_operation_ref=policy_operation,
+                action_key="configuration.apply",
+                input_digest=digest_json(policy_body.model_dump(mode="json")),
+                plan_digest=digest_json({"plan_id": policy_body.plan_id}),
+            )
+            policy_committed = await gateway.apply_configuration(
+                "kernel.authorization",
+                body=policy_body,
+                idempotency_key="policy-atomic-test",
+                authorization=policy_ticket,
+                operation_id=policy_operation,
+            )
+            assert policy_committed["configuration"]["revision"] == policy["desired"]["revision"] + 1
+            assert policy_committed["rebuild"]["target_component_id"] == "kernel.authorization"
+            policy_request_id = policy_committed["rebuild"]["request_id"]
+            async with asyncio.timeout(180):
+                while True:
+                    try:
+                        policy_rebuild = await host.registry.get(
+                            "component.worker-host"
+                        ).management_contract.query(
+                            "configuration-rebuild", {"request_id": policy_request_id}
+                        )
+                    except ForestError as error:
+                        if error.status != 409:
+                            raise
+                        await asyncio.sleep(0.2)
+                        continue
+                    if policy_rebuild["state"] in ("EFFECTIVE", "REBUILD_FAILED"):
+                        break
+                    await asyncio.sleep(0.2)
+            assert policy_rebuild["state"] == "EFFECTIVE", policy_rebuild
+            assert host.registry.graph_identity.graph_revision > active_graph.graph_revision
         finally:
             await host.close()
     finally:

@@ -148,7 +148,9 @@ class _PolicyConfiguration:
 
 
 async def test_bot_gateway_applies_exact_web_operation_policy_after_signature_check():
-    contract = _Contract(_Configuration(), schema={"type": "object"})
+    contract = _Contract(
+        _Configuration(), schema={"type": "object"}, apply_callback=lambda **_: None
+    )
     policy = {
         "protocol": "forest.web-operation-policy/1",
         "rules": [
@@ -523,6 +525,7 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
     contract = _Contract(
         _Configuration(),
         schema={"type": "object", "properties": {"enabled": {"type": "boolean"}}},
+        apply_callback=lambda **_: None,
     )
     accepted_receipts = []
     audit_records = []

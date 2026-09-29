@@ -19,6 +19,7 @@ class CleanModuleConfigurationContract:
         configuration,
         *,
         schema: dict,
+        apply_callback: Callable,
         validator: Callable[[object], object] | None = None,
         reload_policy: str = "generation",
     ) -> None:
@@ -28,6 +29,7 @@ class CleanModuleConfigurationContract:
         self.schema = schema
         self.schema_digest = digest_json(schema)
         self.validator = validator
+        self._apply_callback = apply_callback
         self.reload_policy = reload_policy
 
     def describe(self) -> dict:
@@ -109,15 +111,20 @@ class CleanModuleConfigurationContract:
         expected_desired_revision: int,
         authorization=None,
         authorization_guard=None,
+        authorization_replay_guard=None,
     ) -> dict:
-        saved = await self.configuration.apply(
+        result = await self._apply_callback(
             operation_id=operation_id,
             plan_id=plan_id,
             expected_desired_revision=expected_desired_revision,
             authorization=authorization,
             authorization_guard=authorization_guard,
+            authorization_replay_guard=authorization_replay_guard,
         )
-        return self._configuration(saved)
+        return {
+            "configuration": self._configuration(result["configuration"]),
+            "rebuild": result["rebuild"],
+        }
 
     @staticmethod
     def _configuration(value) -> dict:
@@ -145,8 +152,8 @@ class CleanAuditManagementContract(CleanModuleConfigurationContract):
         "limit",
     }
 
-    def __init__(self, configuration, *, audit, schema: dict) -> None:
-        super().__init__(configuration, schema=schema)
+    def __init__(self, configuration, *, audit, schema: dict, apply_callback: Callable) -> None:
+        super().__init__(configuration, schema=schema, apply_callback=apply_callback)
         self.audit = audit
 
     def describe(self) -> dict:
