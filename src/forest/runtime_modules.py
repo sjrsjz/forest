@@ -810,6 +810,7 @@ class RuntimeModuleRegistry:
         self._replacement_quiesced: tuple[str, ...] = ()
         self._replacement_owned_frozen: tuple[str, ...] = ()
         self._replacement_operation_id: str | None = None
+        self._replacement_components: tuple[str, ...] | None = None
         self._generation_identities_bound = False
         self.graph_identity = None
         self.activation_id = str(uuid4()) if activation_id is None else activation_id
@@ -1562,9 +1563,30 @@ class RuntimeModuleRegistry:
                 ) from exc
             raise
 
-    async def drain_owned_work_for_replacement(self, operation_id: str) -> None:
-        """Freeze ingress and drain restartable workers before another graph publishes."""
+    async def drain_owned_work_for_replacement(
+        self,
+        operation_id: str,
+        *,
+        components: tuple[str, ...] | None = None,
+    ) -> None:
+        """Freeze and drain only the Generations selected for replacement."""
 
+        if components is not None and (
+            not isinstance(components, tuple)
+            or not components
+            or any(not isinstance(item, str) or item not in self.states for item in components)
+            or len(components) != len(set(components))
+        ):
+            raise ForestError(
+                "RUNTIME_GRAPH_MEMBER_SELECTION_INVALID",
+                "Replacement must select distinct current Graph members",
+                422,
+            )
+        selected = (
+            tuple(item for item in self.order if item in components)
+            if components is not None
+            else None
+        )
         if not operation_id or len(operation_id.encode("utf-8")) > 256:
             raise ForestError(
                 "RUNTIME_REPLACEMENT_OPERATION_INVALID",
@@ -1581,7 +1603,10 @@ class RuntimeModuleRegistry:
             self._lifecycle_lock = asyncio.Lock()
         async with self._lifecycle_lock:
             if self._replacement_operation_id is not None:
-                if self._replacement_operation_id != operation_id:
+                if (
+                    self._replacement_operation_id != operation_id
+                    or self._replacement_components != selected
+                ):
                     raise ForestError(
                         "RUNTIME_REPLACEMENT_OPERATION_CONFLICT",
                         "RuntimeGraph is already draining for another replacement",
@@ -1598,17 +1623,25 @@ class RuntimeModuleRegistry:
             await self.generation_authority.freeze_graph_admission(
                 lease,
                 self.graph_identity,
+                components=selected,
             )
             self._replacement_operation_id = operation_id
+            self._replacement_components = selected
             drained: list[str] = []
             try:
-                self.contract_router.deactivate()
-                self._replacement_owned_frozen = self._freeze_owned_admission()
+                if selected is None:
+                    self.contract_router.deactivate()
+                self._replacement_owned_frozen = self._freeze_owned_admission(
+                    components=selected
+                )
                 await self._drain_frozen_owned_work(
                     self._replacement_owned_frozen
                 )
                 for component_id in reversed(self.order):
-                    if component_id == "adapter.onebot":
+                    if (
+                        component_id == "adapter.onebot"
+                        or (selected is not None and component_id not in selected)
+                    ):
                         continue
                     owned = getattr(self.instances[component_id], "owned_tasks", None)
                     tasks = tuple(owned()) if owned is not None else ()
@@ -1681,7 +1714,12 @@ class RuntimeModuleRegistry:
                 "A partially failed RuntimeGraph cannot reopen admission",
                 503,
             )
-        agent = self.instances.get("agent.runtime")
+        selected = self._replacement_components
+        agent = (
+            self.instances.get("agent.runtime")
+            if selected is None or "agent.runtime" in selected
+            else None
+        )
         pending = set(quiesced)
         for component_id in self.order:
             if component_id not in pending:
@@ -1706,7 +1744,8 @@ class RuntimeModuleRegistry:
             self._replacement_quiesced = tuple(
                 item for item in self._replacement_quiesced if item != component_id
             )
-        self.contract_router.activate()
+        if selected is None:
+            self.contract_router.activate()
         resumed_runs = ()
         if agent is not None:
             resumed_runs = await agent.resume_reload_wait(operation_id)
@@ -1722,8 +1761,10 @@ class RuntimeModuleRegistry:
         await self.generation_authority.resume_graph_admission(
             lease,
             self.graph_identity,
+            components=selected,
         )
         self._replacement_operation_id = None
+        self._replacement_components = None
         if resumed_runs:
             self.notify_work()
 
@@ -1757,12 +1798,16 @@ class RuntimeModuleRegistry:
                 503,
             )
 
-    def _freeze_owned_admission(self) -> tuple[str, ...]:
-        """Close every owned-work gate before any asynchronous drain can yield."""
+    def _freeze_owned_admission(
+        self, *, components: tuple[str, ...] | None = None
+    ) -> tuple[str, ...]:
+        """Close selected owned-work gates before any asynchronous drain can yield."""
 
         frozen: list[str] = []
         try:
             for component_id in self._owned_work_components():
+                if components is not None and component_id not in components:
+                    continue
                 result = self.instances[component_id].freeze_owned_admission()
                 if inspect.isawaitable(result):
                     close = getattr(result, "close", None)

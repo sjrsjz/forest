@@ -6,6 +6,8 @@ import pytest
 
 from forest.errors import ForestError
 from forest.runtime_modules import (
+    ModuleLifecycleState,
+    OwnedWorkLifecycle,
     RuntimeAgentToolContribution,
     RuntimeArtifactIdentity,
     RuntimeModuleDescriptor,
@@ -277,3 +279,89 @@ def test_dynamic_command_dependency_participates_in_cycle_rejection():
     with pytest.raises(ForestError) as caught:
         RuntimeModuleRegistry(_runtime(), descriptors)
     assert caught.value.code == "RUNTIME_MODULE_DEPENDENCY_CYCLE"
+
+
+@pytest.mark.asyncio
+async def test_replacement_drain_preserves_unselected_owned_work_and_router():
+    events = []
+
+    class Authority:
+        async def freeze_graph_admission(self, _lease, _graph, *, components):
+            events.append(("freeze-routes", components))
+
+        async def resume_graph_admission(self, _lease, _graph, *, components):
+            events.append(("resume-routes", components))
+
+    class Module:
+        requires_replacement_quiesce = True
+
+        def __init__(self, name):
+            self.name = name
+
+        async def quiesce(self):
+            events.append(("quiesce", self.name))
+
+        async def resume(self):
+            events.append(("resume", self.name))
+
+        def activate_generation(self):
+            events.append(("activate", self.name))
+
+        def freeze_owned_admission(self):
+            events.append(("freeze-work", self.name))
+
+        async def drain_owned_work(self):
+            events.append(("drain-work", self.name))
+
+        def open_owned_admission(self):
+            events.append(("open-work", self.name))
+
+        def owned_tasks(self):
+            return ()
+
+    descriptors = tuple(
+        RuntimeModuleDescriptor(
+            name,
+            (),
+            lambda *_: object(),
+            _ARTIFACT,
+            owned_work_lifecycle=OwnedWorkLifecycle.FREEZE_DRAIN,
+        )
+        for name in ("module.changed", "module.retained")
+    )
+    runtime = SimpleNamespace(
+        scope_kind="bot",
+        generation_authority=Authority(),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: "lease"),
+    )
+    registry = RuntimeModuleRegistry(runtime, descriptors)
+    registry.graph_identity = object()
+    registry.instances = {name: Module(name) for name in registry.order}
+    registry.states = {name: ModuleLifecycleState.ACTIVE for name in registry.order}
+    registry.contract_router.seal()
+    registry.contract_router.activate()
+
+    await registry.drain_owned_work_for_replacement(
+        "reload/changed", components=("module.changed",)
+    )
+    assert registry.contract_router.graph_admission.is_set()
+    assert events == [
+        ("freeze-routes", ("module.changed",)),
+        ("freeze-work", "module.changed"),
+        ("drain-work", "module.changed"),
+        ("quiesce", "module.changed"),
+    ]
+    with pytest.raises(ForestError) as conflict:
+        await registry.drain_owned_work_for_replacement(
+            "reload/changed", components=("module.retained",)
+        )
+    assert conflict.value.code == "RUNTIME_REPLACEMENT_OPERATION_CONFLICT"
+
+    await registry.resume_owned_work_after_failed_replacement()
+    assert registry.contract_router.graph_admission.is_set()
+    assert events[-4:] == [
+        ("resume", "module.changed"),
+        ("activate", "module.changed"),
+        ("open-work", "module.changed"),
+        ("resume-routes", ("module.changed",)),
+    ]

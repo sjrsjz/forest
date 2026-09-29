@@ -362,3 +362,5 @@ Worker Host 包新增 `packages` 只读管理查询。它通过声明的 `deploy
 Worker Host 的 `runtime.graph-replacement.request/2` 现携带目标组件 ID，内核在期望 Graph revision 上验证成员身份，并把目标纳入幂等摘要。Registry 将启动 DAG 与保留依赖分开：普通服务、UnitOfWork participant 和配置控制引用可成环，但在局部换代规划中参与反向闭包；冻结 Generation 绑定及内核图事实记录保留依赖。独立 PostgreSQL 验证了缺失目标不入队、同操作不同目标冲突、保留者不能依赖被换代者，以及图状态显示目标；Worker Host 的完整宿主重载用例通过（`1 passed`，288.01 秒，未向 QQ 发消息）。宿主仍执行整图重建，尚未消费目标闭包或转移未变化 Worker 实例；这项工作仍未完成。
 
 `kernel.runtime` 新增成员级 admission 围栏：在当前 Graph/Host lease 事务内核对成员集合及启动、保留依赖的反向闭包，不闭合时拒绝；冻结与失败恢复只递增选中成员的 route epoch。隔离 PostgreSQL 验证了遗漏依赖消费者会被拒绝、合法叶子成员冻结/恢复后未选中成员 Generation 和 route epoch 均保持不变，原整图路径仍通过（`2 passed`）。宿主尚未调用成员级端口，局部实例转移与真实局部热重载仍未完成。
+
+`RuntimeModuleRegistry.drain_owned_work_for_replacement()` 已支持选中成员：它调用内核依赖闭包围栏，只冻结/排空选中组件的 owned work，保留成员的 Router admission 持续开放；失败恢复按同一成员集合回滚。轻量生命周期验证通过（`10 passed`，其中新增用例核对未变化组件不被冻结、同操作改目标冲突和精确恢复）。宿主替换循环仍使用整图模式，实例所有权与旧 Router 寿命转移尚未接通，因此 `module.reload` 仍是整图重建。

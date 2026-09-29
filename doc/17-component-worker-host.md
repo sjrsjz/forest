@@ -98,3 +98,7 @@ Worker Host 已把目标 `component_id` 随 `runtime.graph-replacement.request/2
 当前宿主执行器仍按整图重建，尚未消费请求中的目标或闭包，也尚未转移未变化的 Worker 实例所有权。因此此进度不构成局部热重载验收；下一步必须让宿主只为闭包创建新 Generation，并在成功发布、失败回滚和最终关闭中分别处理新旧实例。
 
 内核 admission 围栏现在接受明确的成员集合，并依据当前图持久的启动依赖与保留依赖拒绝不闭合的集合；只有选中成员的路由 admission 和 epoch 发生变化，失败恢复也只重新打开选中成员。整图维护仍使用同一个端口的全图模式。宿主尚未把替换闭包传给此端口，现有 `module.reload` 因而仍会冻结整图。
+
+Registry 的替换排空现接受与内核围栏相同的成员集合：只冻结选中组件的 owned-work gate、排空其任务并执行其 `begin_replacement`/`quiesce`；保留成员的 Router admission 保持开放。失败回滚只恢复选中组件的本地 gate、任务状态和内核路由。整图替换仍可省略成员集合，保持原有全图生命周期。
+
+保留 Worker 的内部服务句柄绑定原 Router 及冻结的 Graph 路由身份。候选 Registry 可以取得实例的最终监督与关闭所有权，但不得把原 WorkerIdentity 改写成新 Graph 身份，也不得在发布后立即销毁原 Router。后续实例转移必须明确保留这些旧句柄所需的路由上下文，同时释放被换代组件的旧端点和任务；旧路由只能在调用方与提供方的准确 Generation 都仍为当前成员时跨图调用。当前宿主仍关闭整张旧 Registry，尚未完成这一步。
