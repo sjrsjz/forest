@@ -616,9 +616,29 @@ def prepare_model_request(
     for name in ("input_revision", "context_revision", "context_view_revision", "selected_input_end_seq"):
         if type(snapshot.get(name)) is not int or snapshot[name] < 0:
             raise _error("MODEL_INPUT_INVALID", "Input revisions/cut must be nonnegative integers")
-    for name in ("trigger_ids", "input_batch_ids"):
-        if not isinstance(snapshot.get(name), list) or any(not isinstance(v, str) for v in snapshot[name]):
-            raise _error("MODEL_INPUT_INVALID", "Input requires frozen trigger/batch identities")
+    claims = snapshot.get("trigger_claims")
+    if not isinstance(claims, list) or not claims:
+        raise _error("MODEL_INPUT_INVALID", "Input requires frozen trigger claims")
+    for claim in claims:
+        if not isinstance(claim, dict) or set(claim) != {
+            "input_batch_ref", "trigger_count", "last_trigger_ref",
+            "last_trigger_ingress_seq", "source_manifest_digest",
+        }:
+            raise _error("MODEL_INPUT_INVALID", "Trigger claim identity is invalid")
+        _identifier(claim["input_batch_ref"], "input_batch_ref")
+        _identifier(claim["last_trigger_ref"], "last_trigger_ref")
+        if (type(claim["trigger_count"]) is not int or claim["trigger_count"] < 1
+                or type(claim["last_trigger_ingress_seq"]) is not int
+                or claim["last_trigger_ingress_seq"] < 1
+                or not isinstance(claim["source_manifest_digest"], str)
+                or not re.fullmatch(r"sha256:[a-f0-9]{64}", claim["source_manifest_digest"])):
+            raise _error("MODEL_INPUT_INVALID", "Trigger claim summary is invalid")
+    if not isinstance(snapshot.get("input_batch_ids"), list) or any(
+        not isinstance(v, str) for v in snapshot["input_batch_ids"]
+    ):
+        raise _error("MODEL_INPUT_INVALID", "Input requires frozen batch identities")
+    if [claim["input_batch_ref"] for claim in claims] != snapshot["input_batch_ids"]:
+        raise _error("MODEL_INPUT_INVALID", "Trigger claims differ from input batches")
     for name, value in (("request_id", request_id), ("transport_attempt_id", transport_attempt_id)):
         _identifier(value, name)
     if (type(output_tokens) is not int or not 1 <= output_tokens <= capabilities.max_output_tokens
@@ -655,7 +675,7 @@ def prepare_model_request(
             "context_revision",
             "context_view_revision",
             "selected_input_end_seq",
-            "trigger_ids",
+            "trigger_claims",
             "input_batch_ids",
         )
         semantic = [message.copy() for message in messages]
@@ -780,7 +800,7 @@ def prepare_model_request(
     manifest = {
         "request_id": request_id, **{name: snapshot[name] for name in (
             "bot_id", "run_id", "logical_step_id", "input_revision", "context_revision",
-            "context_view_revision", "selected_input_end_seq", "trigger_ids", "input_batch_ids",
+            "context_view_revision", "selected_input_end_seq", "trigger_claims", "input_batch_ids",
         )},
         "actual_deployment_id": capabilities.deployment_id, "model": capabilities.model,
         "model_revision": capabilities.model_revision, "capability_snapshot": capabilities.as_dict(),
@@ -796,7 +816,7 @@ def prepare_model_request(
         "evidence_renderer_revision": "typed-source-json-v1",
         "source_cut_digest": digest_json({name: snapshot[name] for name in (
             "input_revision", "context_revision", "context_view_revision", "selected_input_end_seq",
-            "trigger_ids", "input_batch_ids",
+            "trigger_claims", "input_batch_ids",
         )}),
         "input_digest": digest_json(snapshot), "source_manifest": projector.sources,
         "included_part_refs": projector.included, "omitted_part_refs": projector.omitted,

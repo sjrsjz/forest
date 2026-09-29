@@ -124,12 +124,12 @@ async def test_agent_package_interleaves_run_history_at_input_revision_boundary(
             "context_view_revision": 0,
         },
         "inputs": [
-            {"input_revision": 1, "input_batch_ref": "batch:1"},
-            {"input_revision": 2, "input_batch_ref": "batch:2"},
-        ],
-        "triggers": [
-            {"input_revision": 1, "trigger_ref": "trigger:1", "ingress_seq": 1},
-            {"input_revision": 2, "trigger_ref": "trigger:2", "ingress_seq": 2},
+            {"input_revision": 1, "input_batch_ref": "batch:1", "trigger_count": 1,
+             "last_trigger_ref": "trigger:1", "last_trigger_ingress_seq": 1,
+             "source_manifest_digest": "sha256:" + "1" * 64},
+            {"input_revision": 2, "input_batch_ref": "batch:2", "trigger_count": 1,
+             "last_trigger_ref": "trigger:2", "last_trigger_ingress_seq": 2,
+             "source_manifest_digest": "sha256:" + "2" * 64},
         ],
     }
     history = {
@@ -163,4 +163,6 @@ async def test_agent_package_interleaves_run_history_at_input_revision_boundary(
     assert view["units"][0]["author"]["principal_ref"] == "qq:100"
     assert view["units"][2]["author"]["principal_ref"] == "qq:200"
     assert view["required_unit_ids"] == ["second"]
-    assert view["trigger_ids"] == ["trigger:1", "trigger:2"]
+    assert [item["last_trigger_ref"] for item in view["trigger_claims"]] == [
+        "trigger:1", "trigger:2"
+    ]

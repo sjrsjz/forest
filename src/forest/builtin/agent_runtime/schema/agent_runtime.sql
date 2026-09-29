@@ -162,24 +162,13 @@ CREATE TABLE run_inputs (
     context_view_revision bigint NOT NULL CHECK (context_view_revision >= 0),
     source_manifest_digest text NOT NULL CHECK (source_manifest_digest ~ '^sha256:[a-f0-9]{64}$'),
     trigger_count integer NOT NULL CHECK (trigger_count > 0),
+    last_trigger_ref text NOT NULL CHECK (octet_length(last_trigger_ref) BETWEEN 1 AND 256),
+    last_trigger_ingress_seq bigint NOT NULL CHECK (last_trigger_ingress_seq > 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,run_id,input_revision),
     UNIQUE (bot_id,input_batch_ref),
-    FOREIGN KEY (bot_id,run_id) REFERENCES agent_runs(bot_id,run_id)
-);
-
-CREATE TABLE run_input_triggers (
-    bot_id text NOT NULL,
-    run_id text NOT NULL,
-    input_revision bigint NOT NULL,
-    trigger_index integer NOT NULL CHECK (trigger_index >= 0),
-    trigger_ref text NOT NULL CHECK (octet_length(trigger_ref) BETWEEN 1 AND 256),
-    principal_ref text NOT NULL CHECK (octet_length(principal_ref) BETWEEN 1 AND 256),
-    ingress_seq bigint NOT NULL CHECK (ingress_seq > 0),
-    PRIMARY KEY (bot_id,run_id,input_revision,trigger_index),
-    UNIQUE (bot_id,run_id,input_revision,trigger_ref),
-    FOREIGN KEY (bot_id,run_id,input_revision)
-        REFERENCES run_inputs(bot_id,run_id,input_revision)
+    FOREIGN KEY (bot_id,run_id) REFERENCES agent_runs(bot_id,run_id),
+    CHECK (last_trigger_ingress_seq<=selected_input_end_seq)
 );
 
 CREATE TABLE run_checkpoints (
@@ -584,8 +573,6 @@ END;
 $$;
 CREATE TRIGGER run_inputs_immutable BEFORE UPDATE OR DELETE ON run_inputs
     FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
-CREATE TRIGGER run_input_triggers_immutable BEFORE UPDATE OR DELETE ON run_input_triggers
-    FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
 CREATE TRIGGER run_checkpoints_immutable BEFORE UPDATE OR DELETE ON run_checkpoints
     FOR EACH ROW EXECUTE FUNCTION reject_agent_fact_change();
 CREATE TRIGGER run_cancel_requests_immutable BEFORE UPDATE OR DELETE ON run_cancel_requests
@@ -762,7 +749,6 @@ DECLARE
     run_row record;
     session_row record;
     inputs_value jsonb;
-    triggers_value jsonb;
     cancel_value jsonb;
     owner_value jsonb := NULL;
     final_value jsonb := NULL;
@@ -787,18 +773,13 @@ BEGIN
         'selected_input_end_seq',i.selected_input_end_seq,
         'context_revision',i.context_revision,'context_view_revision',i.context_view_revision,
         'source_manifest_digest',i.source_manifest_digest,'trigger_count',i.trigger_count,
+        'last_trigger_ref',i.last_trigger_ref,
+        'last_trigger_ingress_seq',i.last_trigger_ingress_seq,
         'created_at',i.created_at
     ) ORDER BY i.input_revision),'[]'::jsonb)
     INTO inputs_value
     FROM __forest_module_schema__.run_inputs i
     WHERE i.bot_id=requested_bot AND i.run_id=requested_run;
-    SELECT COALESCE(jsonb_agg(jsonb_build_object(
-        'input_revision',t.input_revision,'trigger_index',t.trigger_index,
-        'trigger_ref',t.trigger_ref,'principal_ref',t.principal_ref,'ingress_seq',t.ingress_seq
-    ) ORDER BY t.input_revision,t.trigger_index),'[]'::jsonb)
-    INTO triggers_value
-    FROM __forest_module_schema__.run_input_triggers t
-    WHERE t.bot_id=requested_bot AND t.run_id=requested_run;
     SELECT CASE WHEN count(*)=0 THEN NULL ELSE jsonb_build_object(
         'operation_id',min(c.operation_id),'input_digest',min(c.input_digest),
         'expected_checkpoint_seq',min(c.expected_checkpoint_seq),
@@ -869,7 +850,7 @@ BEGIN
                 'created_at',session_row.created_at,'updated_at',session_row.updated_at,
                 'closed_at',session_row.closed_at
             ),
-            'inputs',inputs_value,'triggers',triggers_value,'cancel_request',cancel_value,
+            'inputs',inputs_value,'cancel_request',cancel_value,
             'created_at',run_row.created_at,'updated_at',run_row.updated_at,
             'terminal_at',run_row.terminal_at
         )
@@ -3055,6 +3036,14 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_batch_tail(batch jsonb)
+RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $$
+    SELECT item
+    FROM jsonb_array_elements(batch->'triggers') AS t(item)
+    ORDER BY (item->>'ingress_seq')::bigint DESC,item->>'trigger_ref' DESC
+    LIMIT 1
+$$;
+
 CREATE FUNCTION agent_start_run(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -3073,8 +3062,6 @@ DECLARE
     deadline_value timestamptz;
     now_value timestamptz;
     existing record;
-    trigger_value jsonb;
-    trigger_index integer := 0;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
@@ -3198,22 +3185,15 @@ BEGIN
     INSERT INTO __forest_module_schema__.run_inputs(
         bot_id,run_id,input_revision,input_batch_ref,input_batch_digest,
         selected_input_end_seq,context_revision,context_view_revision,
-        source_manifest_digest,trigger_count
+        source_manifest_digest,trigger_count,last_trigger_ref,last_trigger_ingress_seq
     ) VALUES (
         requested_bot,requested_run,1,batch->>'input_batch_ref',batch->>'input_batch_digest',
         (batch->>'selected_input_end_seq')::bigint,(batch->>'context_revision')::bigint,
         (batch->>'context_view_revision')::bigint,batch->>'source_manifest_digest',
-        jsonb_array_length(batch->'triggers')
+        jsonb_array_length(batch->'triggers'),
+        __forest_module_schema__.agent_batch_tail(batch)->>'trigger_ref',
+        (__forest_module_schema__.agent_batch_tail(batch)->>'ingress_seq')::bigint
     );
-    FOR trigger_value IN SELECT value FROM jsonb_array_elements(batch->'triggers') LOOP
-        INSERT INTO __forest_module_schema__.run_input_triggers(
-            bot_id,run_id,input_revision,trigger_index,trigger_ref,principal_ref,ingress_seq
-        ) VALUES (
-            requested_bot,requested_run,1,trigger_index,trigger_value->>'trigger_ref',
-            trigger_value->>'principal_ref',(trigger_value->>'ingress_seq')::bigint
-        );
-        trigger_index := trigger_index+1;
-    END LOOP;
     RETURN __forest_module_schema__.agent_run_snapshot(
         context,jsonb_build_object('run_id',requested_run)
     );
@@ -3369,8 +3349,6 @@ DECLARE
     run_row record;
     existing record;
     next_revision bigint;
-    trigger_value jsonb;
-    trigger_index integer := 0;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime' THEN
@@ -3406,7 +3384,11 @@ BEGIN
            OR existing.context_revision IS DISTINCT FROM (batch->>'context_revision')::bigint
            OR existing.context_view_revision IS DISTINCT FROM (batch->>'context_view_revision')::bigint
            OR existing.source_manifest_digest IS DISTINCT FROM batch->>'source_manifest_digest'
-           OR existing.trigger_count IS DISTINCT FROM jsonb_array_length(batch->'triggers') THEN
+           OR existing.trigger_count IS DISTINCT FROM jsonb_array_length(batch->'triggers')
+           OR existing.last_trigger_ref IS DISTINCT FROM
+                __forest_module_schema__.agent_batch_tail(batch)->>'trigger_ref'
+           OR existing.last_trigger_ingress_seq IS DISTINCT FROM
+                (__forest_module_schema__.agent_batch_tail(batch)->>'ingress_seq')::bigint THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object(
@@ -3462,23 +3444,15 @@ BEGIN
     INSERT INTO __forest_module_schema__.run_inputs(
         bot_id,run_id,input_revision,input_batch_ref,input_batch_digest,
         selected_input_end_seq,context_revision,context_view_revision,
-        source_manifest_digest,trigger_count
+        source_manifest_digest,trigger_count,last_trigger_ref,last_trigger_ingress_seq
     ) VALUES (
         requested_bot,requested_run,next_revision,batch->>'input_batch_ref',
         batch->>'input_batch_digest',(batch->>'selected_input_end_seq')::bigint,
         (batch->>'context_revision')::bigint,(batch->>'context_view_revision')::bigint,
-        batch->>'source_manifest_digest',jsonb_array_length(batch->'triggers')
+        batch->>'source_manifest_digest',jsonb_array_length(batch->'triggers'),
+        __forest_module_schema__.agent_batch_tail(batch)->>'trigger_ref',
+        (__forest_module_schema__.agent_batch_tail(batch)->>'ingress_seq')::bigint
     );
-    FOR trigger_value IN SELECT value FROM jsonb_array_elements(batch->'triggers') LOOP
-        INSERT INTO __forest_module_schema__.run_input_triggers(
-            bot_id,run_id,input_revision,trigger_index,trigger_ref,principal_ref,ingress_seq
-        ) VALUES (
-            requested_bot,requested_run,next_revision,trigger_index,
-            trigger_value->>'trigger_ref',trigger_value->>'principal_ref',
-            (trigger_value->>'ingress_seq')::bigint
-        );
-        trigger_index := trigger_index+1;
-    END LOOP;
     UPDATE __forest_module_schema__.agent_runs
     SET state='PREPARING_MODEL',input_revision=next_revision,
         selected_input_end_seq=(batch->>'selected_input_end_seq')::bigint,
@@ -4128,8 +4102,6 @@ DECLARE
     session_row record;
     previous record;
     existing record;
-    trigger_value jsonb;
-    trigger_index integer := 0;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
@@ -4247,22 +4219,15 @@ BEGIN
     INSERT INTO __forest_module_schema__.run_inputs(
         bot_id,run_id,input_revision,input_batch_ref,input_batch_digest,
         selected_input_end_seq,context_revision,context_view_revision,
-        source_manifest_digest,trigger_count
+        source_manifest_digest,trigger_count,last_trigger_ref,last_trigger_ingress_seq
     ) VALUES (
         requested_bot,requested_run,1,batch->>'input_batch_ref',batch->>'input_batch_digest',
         (batch->>'selected_input_end_seq')::bigint,(batch->>'context_revision')::bigint,
         (batch->>'context_view_revision')::bigint,batch->>'source_manifest_digest',
-        jsonb_array_length(batch->'triggers')
+        jsonb_array_length(batch->'triggers'),
+        __forest_module_schema__.agent_batch_tail(batch)->>'trigger_ref',
+        (__forest_module_schema__.agent_batch_tail(batch)->>'ingress_seq')::bigint
     );
-    FOR trigger_value IN SELECT value FROM jsonb_array_elements(batch->'triggers') LOOP
-        INSERT INTO __forest_module_schema__.run_input_triggers(
-            bot_id,run_id,input_revision,trigger_index,trigger_ref,principal_ref,ingress_seq
-        ) VALUES (
-            requested_bot,requested_run,1,trigger_index,trigger_value->>'trigger_ref',
-            trigger_value->>'principal_ref',(trigger_value->>'ingress_seq')::bigint
-        );
-        trigger_index := trigger_index+1;
-    END LOOP;
     UPDATE __forest_module_schema__.agent_sessions
     SET active_run_id=requested_run,session_epoch=session_epoch+1,
         updated_at=clock_timestamp()
@@ -4373,16 +4338,13 @@ $$;
 CREATE FUNCTION agent_final_learning(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     WITH pairs AS (
-        SELECT r.step_seq,r.request_id,r.input_revision,t.trigger_ref,
+        SELECT r.step_seq,r.request_id,r.input_revision,i.last_trigger_ref AS trigger_ref,
             candidate.value AS seed,
             candidate.value->>'source_unit_id' AS seed_source_unit_id
         FROM __forest_module_schema__.model_requests r
-        JOIN LATERAL (
-            SELECT trigger_ref FROM __forest_module_schema__.run_input_triggers
-            WHERE bot_id=r.bot_id AND run_id=r.run_id
-              AND input_revision=r.input_revision
-            ORDER BY trigger_index DESC LIMIT 1
-        ) t ON true
+        JOIN __forest_module_schema__.run_inputs i
+          ON i.bot_id=r.bot_id AND i.run_id=r.run_id
+         AND i.input_revision=r.input_revision
         CROSS JOIN LATERAL jsonb_array_elements(r.learning_candidates) candidate(value)
         WHERE r.bot_id=context->>'bot_id' AND r.run_id=input->>'run_id'
           AND r.state='SUCCEEDED' AND r.request_kind IN ('PRIMARY','CONTINUATION')

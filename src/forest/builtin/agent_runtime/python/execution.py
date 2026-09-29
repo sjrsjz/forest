@@ -6,7 +6,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from context_projection import ContextSnapshotReader
+from context_projection import ContextSnapshotReader, claim_summaries
 from model_execution import ModelExecution
 from tool_execution import ToolExecution
 from turn_recording import TurnRecorder, stable, tool_directory
@@ -418,7 +418,7 @@ class AgentExecution:
             "context_revision": run["progress"]["context_revision"],
             "context_view_revision": run["progress"]["context_view_revision"],
             "selected_input_end_seq": run["progress"]["selected_input_end_seq"],
-            "trigger_ids": [item["trigger_ref"] for item in run["triggers"]],
+            "trigger_claims": claim_summaries(run["inputs"]),
             "input_batch_ids": [item["input_batch_ref"] for item in run["inputs"]],
             "units": [],
         }

@@ -45,6 +45,20 @@ _PAGE_FIELDS = {
 }
 
 
+def claim_summaries(inputs: list[dict]) -> list[dict]:
+    """Project each durable input cut without copying its trigger members."""
+    return [
+        {
+            "input_batch_ref": item["input_batch_ref"],
+            "trigger_count": item["trigger_count"],
+            "last_trigger_ref": item["last_trigger_ref"],
+            "last_trigger_ingress_seq": item["last_trigger_ingress_seq"],
+            "source_manifest_digest": item["source_manifest_digest"],
+        }
+        for item in inputs
+    ]
+
+
 def _exact_ref(value, *, component: str | None = None, kinds=()) -> dict:
     if not isinstance(value, dict) or set(value) != _REF_FIELDS:
         raise ForestError(
@@ -467,14 +481,12 @@ class ContextSnapshotReader:
         base = await self.project(snapshot)
         progress = run.get("progress")
         inputs = run.get("inputs")
-        triggers = run.get("triggers")
         history_protocol = history.get("protocol") if isinstance(history, dict) else None
         history_run_id = history.get("run_id") if isinstance(history, dict) else None
         turns = history.get("turns") if isinstance(history, dict) else None
         if (
             not isinstance(progress, dict)
             or not isinstance(inputs, list)
-            or not isinstance(triggers, list)
             or history_protocol != "forest.agent-execution-history/1"
             or history_run_id != run.get("run_id")
             or not isinstance(turns, list)
@@ -645,8 +657,8 @@ class ContextSnapshotReader:
 
         latest_revision = progress["input_revision"]
         latest_trigger_seqs = {
-            item["ingress_seq"]
-            for item in triggers
+            item["last_trigger_ingress_seq"]
+            for item in inputs
             if item["input_revision"] == latest_revision
         }
         required = [
@@ -678,7 +690,7 @@ class ContextSnapshotReader:
             "context_revision": progress["context_revision"],
             "context_view_revision": progress["context_view_revision"],
             "selected_input_end_seq": progress["selected_input_end_seq"],
-            "trigger_ids": [item["trigger_ref"] for item in triggers],
+            "trigger_claims": claim_summaries(inputs),
             "input_batch_ids": [item["input_batch_ref"] for item in inputs],
             "units": ordered,
             "conversation": conversation,

@@ -4,7 +4,7 @@
   "required": [
     "run_id", "session_id", "conversation_ref", "state", "profile", "absolute_deadline",
     "progress", "owner", "current", "final_candidate", "error_code", "session",
-    "inputs", "triggers", "cancel_request", "created_at", "updated_at", "terminal_at"
+    "inputs", "cancel_request", "created_at", "updated_at", "terminal_at"
   ],
   "properties": {
     "run_id": {"$ref": "#/$defs/id"},
@@ -24,7 +24,6 @@
     "error_code": {"$ref": "#/$defs/nullable_string"},
     "session": {"$ref": "#/$defs/session"},
     "inputs": {"type": "array", "items": {"$ref": "#/$defs/input"}},
-    "triggers": {"type": "array", "items": {"$ref": "#/$defs/trigger"}},
     "cancel_request": {
       "oneOf": [{"type": "null"}, {"$ref": "#/$defs/cancel"}]
     },
@@ -174,6 +173,7 @@
       "required": [
         "input_revision", "input_batch_ref", "input_batch_digest", "selected_input_end_seq",
         "context_revision", "context_view_revision", "source_manifest_digest", "trigger_count",
+        "last_trigger_ref", "last_trigger_ingress_seq",
         "created_at"
       ],
       "properties": {
@@ -185,19 +185,9 @@
         "context_view_revision": {"type": "integer", "minimum": 0},
         "source_manifest_digest": {"$ref": "#/$defs/digest"},
         "trigger_count": {"type": "integer", "minimum": 1},
+        "last_trigger_ref": {"$ref": "#/$defs/id"},
+        "last_trigger_ingress_seq": {"type": "integer", "minimum": 1},
         "created_at": {"$ref": "#/$defs/time"}
-      },
-      "additionalProperties": false
-    },
-    "trigger": {
-      "type": "object",
-      "required": ["input_revision", "trigger_index", "trigger_ref", "principal_ref", "ingress_seq"],
-      "properties": {
-        "input_revision": {"type": "integer", "minimum": 1},
-        "trigger_index": {"type": "integer", "minimum": 0},
-        "trigger_ref": {"$ref": "#/$defs/id"},
-        "principal_ref": {"$ref": "#/$defs/id"},
-        "ingress_seq": {"type": "integer", "minimum": 1}
       },
       "additionalProperties": false
     },

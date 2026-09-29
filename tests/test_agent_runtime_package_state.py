@@ -295,15 +295,10 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         )
         assert snapshot["conversation_ref"] == "conversation/onebot/group/933179609"
         assert snapshot["profile"]["core_prompt_digest"].startswith("sha256:")
-        assert snapshot["triggers"] == [
-            {
-                "input_revision": 1,
-                "trigger_index": 0,
-                "trigger_ref": "trigger/1",
-                "principal_ref": "qq:42",
-                "ingress_seq": 1,
-            }
-        ]
+        assert snapshot["inputs"][0]["trigger_count"] == 1
+        assert snapshot["inputs"][0]["last_trigger_ref"] == "trigger/1"
+        assert snapshot["inputs"][0]["last_trigger_ingress_seq"] == 1
+        assert "triggers" not in snapshot
 
         recovery_declaration = next(
             item
@@ -1523,10 +1518,10 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "tool_count": 0,
             "thinking_count": 0,
         }
-        assert [item["principal_ref"] for item in appended["triggers"]] == [
-            "qq:42",
-            "qq:43",
+        assert [item["last_trigger_ref"] for item in appended["inputs"]] == [
+            "trigger/1", "trigger/2"
         ]
+        assert [item["last_trigger_ingress_seq"] for item in appended["inputs"]] == [1, 3]
 
         start_declaration = next(
             item
@@ -1586,15 +1581,10 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert atomic_start["status"] == "STARTED"
         assert atomic_start["run"]["run_id"] == "run/start-atomic"
         assert atomic_start["run"]["progress"]["selected_input_end_seq"] == 1
-        assert atomic_start["run"]["triggers"] == [
-            {
-                "input_revision": 1,
-                "trigger_index": 0,
-                "trigger_ref": "trigger/start-atomic",
-                "principal_ref": "qq:99",
-                "ingress_seq": 1,
-            }
-        ]
+        assert atomic_start["run"]["inputs"][0]["last_trigger_ref"] == (
+            "trigger/start-atomic"
+        )
+        assert atomic_start["run"]["inputs"][0]["last_trigger_ingress_seq"] == 1
         assert atomic_start["memory_qualified_count"] == 0
         assert atomic_start["memory_pending_count"] == 1
 

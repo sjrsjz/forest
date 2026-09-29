@@ -37,7 +37,15 @@ def snapshot(*units, required=None):
     result = {
         "bot_id": "bot-a", "run_id": "run-a", "logical_step_id": "step-a", "input_revision": 2,
         "context_revision": 4, "context_view_revision": 3, "selected_input_end_seq": 8,
-        "trigger_ids": ["trigger-a", "trigger-b"], "input_batch_ids": ["batch-a", "batch-b"],
+        "trigger_claims": [
+            {"input_batch_ref": "batch-a", "trigger_count": 1,
+             "last_trigger_ref": "trigger-a", "last_trigger_ingress_seq": 3,
+             "source_manifest_digest": "sha256:" + "a" * 64},
+            {"input_batch_ref": "batch-b", "trigger_count": 1,
+             "last_trigger_ref": "trigger-b", "last_trigger_ingress_seq": 8,
+             "source_manifest_digest": "sha256:" + "b" * 64},
+        ],
+        "input_batch_ids": ["batch-a", "batch-b"],
         "units": list(units) or [unit()],
     }
     if required is not None:
@@ -113,10 +121,10 @@ def test_group_authors_and_literal_data_are_preserved_without_role_forgery():
         assert header["source"]["channel_id"] == expected_group
     assert json.loads(messages[1]["content"][1]["text"])["text"] == value["units"][0]["parts"][0]["text"]
     assert value == before
-    assert result.manifest["trigger_ids"] == value["trigger_ids"]
+    assert result.manifest["trigger_claims"] == value["trigger_claims"]
     assert result.manifest["selected_input_end_seq"] == 8
-    result.manifest["trigger_ids"].clear()
-    assert result.manifest["trigger_ids"] == value["trigger_ids"]
+    result.manifest["trigger_claims"].clear()
+    assert result.manifest["trigger_claims"] == value["trigger_claims"]
 
 
 def test_protocol_repair_projection_contains_only_the_durable_invalid_candidate():
@@ -137,7 +145,7 @@ def test_protocol_repair_projection_contains_only_the_durable_invalid_candidate(
     assert "invalid candidate excerpt" in content
     assert "Rewrite that candidate only" in content
     assert result.manifest["agent_protocol"]["repair_count"] == 1
-    assert result.manifest["trigger_ids"] == value["trigger_ids"]
+    assert result.manifest["trigger_claims"] == value["trigger_claims"]
     assert result.manifest["input_revision"] == value["input_revision"]
     assert result.manifest["source_manifest"] == []
     assert result.manifest["included_part_refs"] == []
@@ -202,7 +210,9 @@ def test_pure_image_trigger_survives_missing_media_and_text_only_projection():
     for caps, expected in ((capabilities(), "MODEL_IMAGE_UNSUPPORTED"),
                            (capabilities(input_modalities=("text", "image")), "MEDIA_UNAVAILABLE")):
         result = prepared(value, caps)
-        assert result.manifest["trigger_ids"] == ["trigger-a", "trigger-b"]
+        assert [item["last_trigger_ref"] for item in result.manifest["trigger_claims"]] == [
+            "trigger-a", "trigger-b"
+        ]
         assert result.manifest["omitted_part_refs"][0]["reason"] == expected
         assert json.loads(result.body)["messages"][1]["content"]
 

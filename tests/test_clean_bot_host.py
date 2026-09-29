@@ -1824,7 +1824,13 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 "logical_step_id": "step/host-recall-projection",
                 "input_revision": 1, "context_revision": recall_revision,
                 "context_view_revision": recall_revision, "selected_input_end_seq": 2,
-                "trigger_ids": ["trigger/host-recall-projection"],
+                "trigger_claims": [{
+                    "input_batch_ref": recall_batch,
+                    "trigger_count": 1,
+                    "last_trigger_ref": "trigger/host-recall-projection",
+                    "last_trigger_ingress_seq": 2,
+                    "source_manifest_digest": "sha256:" + "1" * 64,
+                }],
                 "input_batch_ids": [recall_batch],
                 "conversation": {
                     "conversation_id": current_group, "group_source_id": current_group,

@@ -181,7 +181,7 @@ Agent 结束且没有待处理触发时，剩余消息按有限批次静默写�
 
 持久意图固定 `operation_id, contract_version, schema_digest, owner_generation, input_digest, ReplyRoute`。在途工作绑定原 Generation；热重载必须先排空或由已验证的 takeover contract 接管，否则阻止切换。Forest 首发前不保留开发期 schema 兼容执行器，也禁止用新 schema 重新解释旧参数。
 
-群聊批次保留 `trigger_ids` 和逐条作者，回复的会话目标固定，引用锚点可取该批最后触发消息，同时记录实际覆盖的全部 trigger_id。不能把锚点用户当成其他消息的作者或授权主体。每次 CHAT 最终回复事务分配会话单调 `response_seq`，Delivery 按 `(conversation_id, response_seq, part_index)` 发出，同群后续轮次不能因独立 Worker 更快而抢先发送。
+群聊领取组按至多 64 项的分段持久保存触发身份和逐条作者；跨模块批次只传组引用、累计摘要与末触发身份。回复的会话目标固定，引用锚点可取末触发消息；全部实际覆盖成员由 Conversation 的领取组及终结事实确定，不能把锚点用户当成其他消息的作者或授权主体。每次 CHAT 最终回复事务分配会话单调 `response_seq`，Delivery 按 `(conversation_id, response_seq, part_index)` 发出，同群后续轮次不能因独立 Worker 更快而抢先发送。
 
 管理回执使用 `send_lane=CONTROL`，按 `(command_id, control_seq, part_index)` 排序，不占用 Agent 的 response_seq 或 Session。不同命令之间可以按服务类别调度，长输出分页并受额外额度限制。CONTROL 可越过 CHAT 的队首等待，共用 Binding 所有权、平台限流、当前输出权限和效果账本；不能越过已发出网络请求，也不能突破平台对同群或账号的硬限制。控制回执不得作为对话 Agent 的另一个 ModelTurn，具体规则见[09](09-group-shell-command-system.md)。
 
