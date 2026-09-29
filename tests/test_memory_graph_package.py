@@ -2,7 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,15 +14,18 @@ from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin.memory_graph.python.facet_preparation import document_facets, query_part_facets
 from forest.builtin_packages import bootstrap_builtin_package
+from forest.clean_management_app import CleanManagementGateway
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
+from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSubject
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.payload_authority import PayloadSource
+from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 
 def _trial_owner_id(query_id: str, part_id: str) -> str:
@@ -815,6 +818,75 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         "unit/late": "ELIGIBLE", "unit/one": "SUPPRESSED",
         "unit/other": "ELIGIBLE", "unit/three": "SUPPRESSED",
     }
+
+    # A fresh Generation accepts a real P0 Web ticket for the remaining root;
+    # its own durable worker executes the batch without a host-side forget path.
+    late_selection = await invoke("memory_freeze_forget_selection", {
+        "bot_id": store.bot_id, "operation_id": "selection/create-late",
+    }, {
+        "selection_id": "selection/late", "requested_by": "admin/one",
+        "filters": {"author_subject_ref": "author/target"},
+    })
+    assert late_selection["value"]["member_count"] == 1
+    host.settings = SimpleNamespace(bot_id=store.bot_id)
+    host._kernel = kernel
+    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+    await registry.start()
+    host.registry = registry
+    try:
+        memory = registry.get("memory.graph")
+        plan = await memory.management_contract.query_authorized(
+            "memory.forget.batch.preview",
+            {"selection_id": "selection/late", "after_ordinal": 0,
+             "batch_size": 1},
+            authorization=SimpleNamespace(web_subject_ref="admin/one"),
+        )
+        signer = WebAuthorityTicketAuthority(
+            issuer_id="deployment/batch-test", active_key_id="batch-key/1",
+            key_resolver=lambda _key_id: b"k" * 32,
+        )
+        gateway = CleanManagementGateway(host, ticket_authority=signer)
+        action_id = "memory.forget.batch.enqueue"
+        action_body = {"selection_id": "selection/late", "after_ordinal": 0,
+                       "batch_size": 1, "plan": plan}
+        operation_id = gateway.operation_id("memory.graph", action_id, "batch-late")
+        ticket = await signer.issue(
+            session=AuthenticatedWebSession(
+                "token-digest", "session/batch-test", 1, "csrf-digest",
+                WebSubject("admin/one", "admin", "Administrator", "ADMIN", True, 1),
+                datetime.now(timezone.utc) + timedelta(hours=1),
+            ),
+            target_scope_kind="bot", target_scope_id=store.bot_id,
+            target_component_id="memory.graph",
+            target_generation_id=registry.graph_identity.generations["memory.graph"],
+            target_graph_revision=registry.graph_identity.graph_revision,
+            target_operation_ref=operation_id, action_key=action_id,
+            input_digest=digest_json(action_body), plan_digest=digest_json(plan),
+        )
+        submitted = await gateway.module_action(
+            "memory.graph", action_id, body=action_body,
+            idempotency_key="batch-late", authorization=ticket,
+            operation_id=operation_id,
+        )
+        assert submitted["request_id"] == operation_id
+        async with asyncio.timeout(30):
+            while True:
+                work = await memory.management_contract.query_authorized(
+                    "memory.forget.batch.status", {"request_id": operation_id},
+                    authorization=SimpleNamespace(web_subject_ref="admin/one"),
+                )
+                if work["state"] in {"SUCCEEDED", "FAILED", "UNKNOWN"}:
+                    break
+                await asyncio.sleep(0.2)
+        assert work["state"] == "SUCCEEDED", work
+        assert work["result"]["suppressed_source_units"] == 1
+        progress = await memory.management_contract.query_authorized(
+            "memory.forget.selection", {"selection_id": "selection/late"},
+            authorization=SimpleNamespace(web_subject_ref="admin/one"),
+        )
+        assert progress["progress_state"] == "COMPLETE"
+    finally:
+        assert await registry.close() == []
 
 
 def _configuration():

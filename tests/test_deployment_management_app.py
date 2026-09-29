@@ -19,6 +19,7 @@ from forest.clean_management_app import CleanManagementGateway
 from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.deployment_management_app import create_deployment_management_app
 from forest.errors import ForestError
+from forest.packages import digest_json
 from forest.storage.deployment_web_identity import (
     AuthenticatedWebSession,
     WebSession,
@@ -300,6 +301,23 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
             return result
 
     class MemoryContract(_Contract):
+        batch_applied = False
+
+        def authorization_plan_digest(self, action_id, payload):
+            assert action_id == "memory.forget.batch.enqueue"
+            return digest_json(payload["plan"])
+
+        async def action(self, action_id, *, operation_id, payload,
+                         authorization=None, authorization_guard=None):
+            assert action_id == "memory.forget.batch.enqueue"
+            assert operation_id.startswith("web:sha256:")
+            assert payload["selection_id"] == "selection/browser-smoke"
+            assert payload["after_ordinal"] == 0
+            assert payload["batch_size"] == 32
+            assert authorization.web_subject_ref == "web-subject/test"
+            self.batch_applied = True
+            return {"request_id": operation_id}
+
         async def query(self, query_id, payload):
             if query_id == "memory.trunks.list":
                 return {"items": []}
@@ -316,6 +334,10 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
                     "member_count": 2,
                     "member_digest": "sha256:" + "a" * 64,
                     "snapshot_accepted_at": "2026-09-28T00:00:00Z",
+                    "progress_state": "COMPLETE" if self.batch_applied else "FROZEN",
+                    "applied_member_count": 2 if self.batch_applied else 0,
+                    "applied_batch_count": 1 if self.batch_applied else 0,
+                    "next_unapplied_ordinal": None if self.batch_applied else 1,
                     "filters": {"trunk_id": "trunk/example"},
                     "items": [{
                         "ordinal": 1, "source_unit_id": "unit/example",
@@ -337,9 +359,20 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
                     "plan_digest": "sha256:" + "b" * 64,
                     "batch_source_unit_sample": ["unit/example"],
                 }
+            if query_id == "memory.forget.batch.status":
+                assert payload["request_id"].startswith("web:sha256:")
+                return {
+                    "state": "SUCCEEDED", "selection_id": "selection/browser-smoke",
+                    "after_ordinal": 0, "attempt_count": 1, "error_code": None,
+                    "result": {"first_ordinal": 1, "last_ordinal": 2,
+                               "suppressed_source_units": 2,
+                               "vector_deletions": 1, "retracted_relations": 0},
+                }
             raise AssertionError(f"Unexpected Memory UI query: {query_id}")
 
-    contract = MemoryContract(MemoryConfiguration(), schema={"type": "object"})
+    contract = MemoryContract(
+        MemoryConfiguration(), schema={"type": "object"}, apply_callback=lambda **_: None,
+    )
     def read_memory_ui(expected):
         assert expected == digest
         return {"sha256": digest}, memory_html
@@ -463,6 +496,11 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
                 expect(frame.locator("#batch-members")).to_contain_text("unit/example")
                 frame.locator("#batch-preview").click()
                 expect(frame.locator("#batch-impact")).to_contain_text("向量删除 1")
+                frame.locator("#batch-confirm").check()
+                frame.locator("#batch-enqueue").click()
+                expect(frame.locator("#batch-state")).to_contain_text("SUCCEEDED")
+                expect(frame.locator("#batch-selection-meta")).to_contain_text("全部完成")
+                assert contract.batch_applied
                 assert not errors, errors
                 page.locator("#back").click()
                 expect(page.locator("iframe.package-ui-frame")).to_have_count(0)
