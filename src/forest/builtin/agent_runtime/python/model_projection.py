@@ -621,15 +621,19 @@ def prepare_model_request(
         raise _error("MODEL_INPUT_INVALID", "Input requires frozen trigger claims")
     for claim in claims:
         if not isinstance(claim, dict) or set(claim) != {
-            "input_batch_ref", "trigger_count", "last_trigger_ref",
+            "input_batch_ref", "trigger_claim_ref", "trigger_claim_digest",
+            "trigger_count", "last_trigger_ref",
             "last_trigger_ingress_seq", "source_manifest_digest",
         }:
             raise _error("MODEL_INPUT_INVALID", "Trigger claim identity is invalid")
         _identifier(claim["input_batch_ref"], "input_batch_ref")
+        _identifier(claim["trigger_claim_ref"], "trigger_claim_ref")
         _identifier(claim["last_trigger_ref"], "last_trigger_ref")
         if (type(claim["trigger_count"]) is not int or claim["trigger_count"] < 1
                 or type(claim["last_trigger_ingress_seq"]) is not int
                 or claim["last_trigger_ingress_seq"] < 1
+                or not isinstance(claim["trigger_claim_digest"], str)
+                or not re.fullmatch(r"sha256:[a-f0-9]{64}", claim["trigger_claim_digest"])
                 or not isinstance(claim["source_manifest_digest"], str)
                 or not re.fullmatch(r"sha256:[a-f0-9]{64}", claim["source_manifest_digest"])):
             raise _error("MODEL_INPUT_INVALID", "Trigger claim summary is invalid")

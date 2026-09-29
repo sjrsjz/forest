@@ -161,6 +161,10 @@ CREATE TABLE run_inputs (
     context_revision bigint NOT NULL CHECK (context_revision > 0),
     context_view_revision bigint NOT NULL CHECK (context_view_revision >= 0),
     source_manifest_digest text NOT NULL CHECK (source_manifest_digest ~ '^sha256:[a-f0-9]{64}$'),
+    trigger_claim_ref text NOT NULL CHECK (octet_length(trigger_claim_ref) BETWEEN 1 AND 256),
+    trigger_claim_digest text NOT NULL CHECK (
+        trigger_claim_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
     trigger_count integer NOT NULL CHECK (trigger_count > 0),
     last_trigger_ref text NOT NULL CHECK (octet_length(last_trigger_ref) BETWEEN 1 AND 256),
     last_trigger_ingress_seq bigint NOT NULL CHECK (last_trigger_ingress_seq > 0),
@@ -772,7 +776,10 @@ BEGIN
         'input_batch_digest',i.input_batch_digest,
         'selected_input_end_seq',i.selected_input_end_seq,
         'context_revision',i.context_revision,'context_view_revision',i.context_view_revision,
-        'source_manifest_digest',i.source_manifest_digest,'trigger_count',i.trigger_count,
+        'source_manifest_digest',i.source_manifest_digest,
+        'trigger_claim_ref',i.trigger_claim_ref,
+        'trigger_claim_digest',i.trigger_claim_digest,
+        'trigger_count',i.trigger_count,
         'last_trigger_ref',i.last_trigger_ref,
         'last_trigger_ingress_seq',i.last_trigger_ingress_seq,
         'created_at',i.created_at
@@ -3036,12 +3043,16 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION agent_batch_tail(batch jsonb)
-RETURNS jsonb LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $$
-    SELECT item
-    FROM jsonb_array_elements(batch->'triggers') AS t(item)
-    ORDER BY (item->>'ingress_seq')::bigint DESC,item->>'trigger_ref' DESC
-    LIMIT 1
+CREATE FUNCTION agent_claim_input_valid(batch jsonb)
+RETURNS boolean LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $$
+    SELECT COALESCE(
+        batch#>>'{trigger_claim,ref}'=batch->>'input_batch_ref'
+        AND (batch#>>'{trigger_claim,count}')::integer>0
+        AND (batch#>>'{trigger_claim,last_trigger_ingress_seq}')::bigint
+            <=(batch->>'selected_input_end_seq')::bigint
+        AND batch#>>'{trigger_claim,digest}' ~ '^sha256:[a-f0-9]{64}$',
+        false
+    )
 $$;
 
 CREATE FUNCTION agent_start_run(context jsonb, envelope jsonb)
@@ -3090,18 +3101,12 @@ BEGIN
             )
         );
     END;
-    IF EXISTS (
-        SELECT 1 FROM jsonb_array_elements(batch->'triggers') item
-        WHERE (item->>'ingress_seq')::bigint>(batch->>'selected_input_end_seq')::bigint
-    ) OR (
-        SELECT count(*)<>count(DISTINCT item->>'trigger_ref')
-        FROM jsonb_array_elements(batch->'triggers') item
-    ) THEN
+    IF NOT __forest_module_schema__.agent_claim_input_valid(batch) THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','AGENT_RUNTIME_INPUT_INVALID',
-                'message','Agent input trigger set is invalid','status',422
+                'message','Agent input trigger claim is invalid','status',422
             )
         );
     END IF;
@@ -3185,17 +3190,49 @@ BEGIN
     INSERT INTO __forest_module_schema__.run_inputs(
         bot_id,run_id,input_revision,input_batch_ref,input_batch_digest,
         selected_input_end_seq,context_revision,context_view_revision,
-        source_manifest_digest,trigger_count,last_trigger_ref,last_trigger_ingress_seq
+        source_manifest_digest,trigger_claim_ref,trigger_claim_digest,
+        trigger_count,last_trigger_ref,last_trigger_ingress_seq
     ) VALUES (
         requested_bot,requested_run,1,batch->>'input_batch_ref',batch->>'input_batch_digest',
         (batch->>'selected_input_end_seq')::bigint,(batch->>'context_revision')::bigint,
         (batch->>'context_view_revision')::bigint,batch->>'source_manifest_digest',
-        jsonb_array_length(batch->'triggers'),
-        __forest_module_schema__.agent_batch_tail(batch)->>'trigger_ref',
-        (__forest_module_schema__.agent_batch_tail(batch)->>'ingress_seq')::bigint
+        batch#>>'{trigger_claim,ref}',batch#>>'{trigger_claim,digest}',
+        (batch#>>'{trigger_claim,count}')::integer,
+        batch#>>'{trigger_claim,last_trigger_ref}',
+        (batch#>>'{trigger_claim,last_trigger_ingress_seq}')::bigint
     );
     RETURN __forest_module_schema__.agent_run_snapshot(
         context,jsonb_build_object('run_id',requested_run)
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_batch_from_selection(selection jsonb)
+RETURNS jsonb LANGUAGE plpgsql IMMUTABLE SET search_path = pg_catalog AS $$
+DECLARE
+    source_manifest jsonb;
+    source_digest text;
+BEGIN
+    source_manifest := jsonb_build_object(
+        'conversation_id',selection->>'conversation_id',
+        'input_batch_ref',selection->>'input_batch_id',
+        'event_ids',selection->'event_ids',
+        'trigger_claim',selection->'trigger_claim',
+        'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
+        'context_revision',(selection->>'context_revision')::bigint,
+        'context_view_revision',(selection->>'context_view_revision')::bigint
+    );
+    source_digest := 'sha256:' || encode(
+        sha256(convert_to(source_manifest::text,'UTF8')),'hex'
+    );
+    RETURN jsonb_build_object(
+        'input_batch_ref',selection->>'input_batch_id',
+        'input_batch_digest',source_digest,
+        'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
+        'context_revision',(selection->>'context_revision')::bigint,
+        'context_view_revision',(selection->>'context_view_revision')::bigint,
+        'source_manifest_digest',source_digest,
+        'trigger_claim',selection->'trigger_claim'
     );
 END;
 $$;
@@ -3210,10 +3247,7 @@ DECLARE
     body jsonb := envelope->'input';
     selection jsonb := envelope->'prior'->(body->>'selection_step_id');
     memory_value jsonb := envelope->'prior'->(body->>'memory_step_id');
-    source_manifest jsonb;
-    source_digest text;
     batch_value jsonb;
-    triggers_value jsonb;
     start_result jsonb;
     event_count integer;
     qualified_count integer;
@@ -3262,8 +3296,7 @@ BEGIN
     IF selection->>'kind' IS DISTINCT FROM 'TRIGGER_INPUT'
        OR selection->>'input_batch_id' IS NULL
        OR jsonb_typeof(selection->'event_ids') IS DISTINCT FROM 'array'
-       OR jsonb_typeof(selection->'triggers') IS DISTINCT FROM 'array'
-       OR jsonb_array_length(selection->'triggers')=0
+       OR jsonb_typeof(selection->'trigger_claim') IS DISTINCT FROM 'object'
        OR memory_value->>'input_batch_ref' IS DISTINCT FROM selection->>'input_batch_id' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
@@ -3284,31 +3317,7 @@ BEGIN
             )
         );
     END IF;
-    SELECT COALESCE(jsonb_agg(jsonb_build_object(
-        'trigger_ref',item->>'trigger_id',
-        'principal_ref',item->>'principal_ref',
-        'ingress_seq',(item->>'ingress_seq')::bigint
-    ) ORDER BY ordinal),'[]'::jsonb)
-    INTO triggers_value
-    FROM jsonb_array_elements(selection->'triggers') WITH ORDINALITY AS t(item,ordinal);
-    source_manifest := jsonb_build_object(
-        'conversation_id',selection->>'conversation_id',
-        'input_batch_ref',selection->>'input_batch_id',
-        'event_ids',selection->'event_ids','triggers',selection->'triggers',
-        'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
-        'context_revision',(selection->>'context_revision')::bigint,
-        'context_view_revision',(selection->>'context_view_revision')::bigint
-    );
-    source_digest := 'sha256:' || encode(
-        sha256(convert_to(source_manifest::text,'UTF8')),'hex'
-    );
-    batch_value := jsonb_build_object(
-        'input_batch_ref',selection->>'input_batch_id','input_batch_digest',source_digest,
-        'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
-        'context_revision',(selection->>'context_revision')::bigint,
-        'context_view_revision',(selection->>'context_view_revision')::bigint,
-        'source_manifest_digest',source_digest,'triggers',triggers_value
-    );
+    batch_value := __forest_module_schema__.agent_batch_from_selection(selection);
     start_result := __forest_module_schema__.agent_start_run(
         context,
         jsonb_build_object(
@@ -3384,11 +3393,13 @@ BEGIN
            OR existing.context_revision IS DISTINCT FROM (batch->>'context_revision')::bigint
            OR existing.context_view_revision IS DISTINCT FROM (batch->>'context_view_revision')::bigint
            OR existing.source_manifest_digest IS DISTINCT FROM batch->>'source_manifest_digest'
-           OR existing.trigger_count IS DISTINCT FROM jsonb_array_length(batch->'triggers')
+           OR existing.trigger_claim_ref IS DISTINCT FROM batch#>>'{trigger_claim,ref}'
+           OR existing.trigger_claim_digest IS DISTINCT FROM batch#>>'{trigger_claim,digest}'
+           OR existing.trigger_count IS DISTINCT FROM (batch#>>'{trigger_claim,count}')::integer
            OR existing.last_trigger_ref IS DISTINCT FROM
-                __forest_module_schema__.agent_batch_tail(batch)->>'trigger_ref'
+                batch#>>'{trigger_claim,last_trigger_ref}'
            OR existing.last_trigger_ingress_seq IS DISTINCT FROM
-                (__forest_module_schema__.agent_batch_tail(batch)->>'ingress_seq')::bigint THEN
+                (batch#>>'{trigger_claim,last_trigger_ingress_seq}')::bigint THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object(
@@ -3425,14 +3436,7 @@ BEGIN
     IF (batch->>'selected_input_end_seq')::bigint<=run_row.selected_input_end_seq
        OR (batch->>'context_revision')::bigint<=run_row.context_revision
        OR (batch->>'context_view_revision')::bigint<run_row.context_view_revision
-       OR EXISTS (
-           SELECT 1 FROM jsonb_array_elements(batch->'triggers') item
-           WHERE (item->>'ingress_seq')::bigint>(batch->>'selected_input_end_seq')::bigint
-       )
-       OR (
-           SELECT count(*)<>count(DISTINCT item->>'trigger_ref')
-           FROM jsonb_array_elements(batch->'triggers') item
-       ) THEN
+       OR NOT __forest_module_schema__.agent_claim_input_valid(batch) THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -3444,14 +3448,17 @@ BEGIN
     INSERT INTO __forest_module_schema__.run_inputs(
         bot_id,run_id,input_revision,input_batch_ref,input_batch_digest,
         selected_input_end_seq,context_revision,context_view_revision,
-        source_manifest_digest,trigger_count,last_trigger_ref,last_trigger_ingress_seq
+        source_manifest_digest,trigger_claim_ref,trigger_claim_digest,
+        trigger_count,last_trigger_ref,last_trigger_ingress_seq
     ) VALUES (
         requested_bot,requested_run,next_revision,batch->>'input_batch_ref',
         batch->>'input_batch_digest',(batch->>'selected_input_end_seq')::bigint,
         (batch->>'context_revision')::bigint,(batch->>'context_view_revision')::bigint,
-        batch->>'source_manifest_digest',jsonb_array_length(batch->'triggers'),
-        __forest_module_schema__.agent_batch_tail(batch)->>'trigger_ref',
-        (__forest_module_schema__.agent_batch_tail(batch)->>'ingress_seq')::bigint
+        batch->>'source_manifest_digest',
+        batch#>>'{trigger_claim,ref}',batch#>>'{trigger_claim,digest}',
+        (batch#>>'{trigger_claim,count}')::integer,
+        batch#>>'{trigger_claim,last_trigger_ref}',
+        (batch#>>'{trigger_claim,last_trigger_ingress_seq}')::bigint
     );
     UPDATE __forest_module_schema__.agent_runs
     SET state='PREPARING_MODEL',input_revision=next_revision,
@@ -3481,10 +3488,7 @@ DECLARE
     selection jsonb := prior->(body->>'selection_step_id');
     memory_value jsonb := prior->(body->>'memory_step_id');
     selection_status text;
-    source_manifest jsonb;
-    source_digest text;
     batch_value jsonb;
-    triggers_value jsonb;
     append_result jsonb;
     snapshot jsonb;
     event_count integer;
@@ -3551,7 +3555,7 @@ BEGIN
        OR selection->>'context_revision' IS NULL
        OR selection->>'context_view_revision' IS NULL
        OR jsonb_typeof(selection->'event_ids') IS DISTINCT FROM 'array'
-       OR jsonb_typeof(selection->'triggers') IS DISTINCT FROM 'array'
+       OR jsonb_typeof(selection->'trigger_claim') IS DISTINCT FROM 'object'
        OR memory_value->>'input_batch_ref' IS DISTINCT FROM selection->>'input_batch_id' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
@@ -3571,34 +3575,7 @@ BEGIN
             )
         );
     END IF;
-    SELECT COALESCE(jsonb_agg(jsonb_build_object(
-        'trigger_ref',item->>'trigger_id',
-        'principal_ref',item->>'principal_ref',
-        'ingress_seq',(item->>'ingress_seq')::bigint
-    ) ORDER BY ordinal),'[]'::jsonb)
-    INTO triggers_value
-    FROM jsonb_array_elements(selection->'triggers') WITH ORDINALITY AS t(item,ordinal);
-    source_manifest := jsonb_build_object(
-        'conversation_id',selection->>'conversation_id',
-        'input_batch_ref',selection->>'input_batch_id',
-        'event_ids',selection->'event_ids',
-        'triggers',selection->'triggers',
-        'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
-        'context_revision',(selection->>'context_revision')::bigint,
-        'context_view_revision',(selection->>'context_view_revision')::bigint
-    );
-    source_digest := 'sha256:' || encode(
-        sha256(convert_to(source_manifest::text,'UTF8')),'hex'
-    );
-    batch_value := jsonb_build_object(
-        'input_batch_ref',selection->>'input_batch_id',
-        'input_batch_digest',source_digest,
-        'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
-        'context_revision',(selection->>'context_revision')::bigint,
-        'context_view_revision',(selection->>'context_view_revision')::bigint,
-        'source_manifest_digest',source_digest,
-        'triggers',triggers_value
-    );
+    batch_value := __forest_module_schema__.agent_batch_from_selection(selection);
     append_result := __forest_module_schema__.agent_append_run_input(
         context,
         jsonb_build_object(
@@ -4126,18 +4103,12 @@ BEGIN
             )
         );
     END;
-    IF EXISTS (
-        SELECT 1 FROM jsonb_array_elements(batch->'triggers') item
-        WHERE (item->>'ingress_seq')::bigint>(batch->>'selected_input_end_seq')::bigint
-    ) OR (
-        SELECT count(*)<>count(DISTINCT item->>'trigger_ref')
-        FROM jsonb_array_elements(batch->'triggers') item
-    ) THEN
+    IF NOT __forest_module_schema__.agent_claim_input_valid(batch) THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','AGENT_SUCCESSOR_INPUT_INVALID',
-                'message','Agent successor trigger set is invalid','status',422
+                'message','Agent successor trigger claim is invalid','status',422
             )
         );
     END IF;
@@ -4219,14 +4190,16 @@ BEGIN
     INSERT INTO __forest_module_schema__.run_inputs(
         bot_id,run_id,input_revision,input_batch_ref,input_batch_digest,
         selected_input_end_seq,context_revision,context_view_revision,
-        source_manifest_digest,trigger_count,last_trigger_ref,last_trigger_ingress_seq
+        source_manifest_digest,trigger_claim_ref,trigger_claim_digest,
+        trigger_count,last_trigger_ref,last_trigger_ingress_seq
     ) VALUES (
         requested_bot,requested_run,1,batch->>'input_batch_ref',batch->>'input_batch_digest',
         (batch->>'selected_input_end_seq')::bigint,(batch->>'context_revision')::bigint,
         (batch->>'context_view_revision')::bigint,batch->>'source_manifest_digest',
-        jsonb_array_length(batch->'triggers'),
-        __forest_module_schema__.agent_batch_tail(batch)->>'trigger_ref',
-        (__forest_module_schema__.agent_batch_tail(batch)->>'ingress_seq')::bigint
+        batch#>>'{trigger_claim,ref}',batch#>>'{trigger_claim,digest}',
+        (batch#>>'{trigger_claim,count}')::integer,
+        batch#>>'{trigger_claim,last_trigger_ref}',
+        (batch#>>'{trigger_claim,last_trigger_ingress_seq}')::bigint
     );
     UPDATE __forest_module_schema__.agent_sessions
     SET active_run_id=requested_run,session_epoch=session_epoch+1,
@@ -4507,9 +4480,6 @@ DECLARE
     requested_session text := body->>'session_id';
     requested_completed text := body->>'completed_run_id';
     requested_successor text := body->>'successor_run_id';
-    triggers_value jsonb;
-    source_manifest jsonb;
-    source_digest text;
     batch_value jsonb;
     delegated jsonb;
     event_count integer;
@@ -4553,30 +4523,7 @@ BEGIN
                 )
             );
         END IF;
-        SELECT COALESCE(jsonb_agg(jsonb_build_object(
-            'trigger_ref',item->>'trigger_id','principal_ref',item->>'principal_ref',
-            'ingress_seq',(item->>'ingress_seq')::bigint
-        ) ORDER BY ordinal),'[]'::jsonb)
-        INTO triggers_value
-        FROM jsonb_array_elements(selection->'triggers') WITH ORDINALITY AS t(item,ordinal);
-        source_manifest := jsonb_build_object(
-            'conversation_id',selection->>'conversation_id',
-            'input_batch_ref',selection->>'input_batch_id',
-            'event_ids',selection->'event_ids','triggers',selection->'triggers',
-            'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
-            'context_revision',(selection->>'context_revision')::bigint,
-            'context_view_revision',(selection->>'context_view_revision')::bigint
-        );
-        source_digest := 'sha256:' || encode(
-            sha256(convert_to(source_manifest::text,'UTF8')),'hex'
-        );
-        batch_value := jsonb_build_object(
-            'input_batch_ref',selection->>'input_batch_id','input_batch_digest',source_digest,
-            'selected_input_end_seq',(selection->>'selected_input_end_seq')::bigint,
-            'context_revision',(selection->>'context_revision')::bigint,
-            'context_view_revision',(selection->>'context_view_revision')::bigint,
-            'source_manifest_digest',source_digest,'triggers',triggers_value
-        );
+        batch_value := __forest_module_schema__.agent_batch_from_selection(selection);
         delegated := __forest_module_schema__.agent_start_successor(
             context,jsonb_build_object(
                 'protocol','forest.uow-step/1','caller',envelope->'caller',

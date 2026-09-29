@@ -101,8 +101,7 @@
                 "context_revision",
                 "context_view_revision",
                 "event_ids",
-                "trigger_ids",
-                "triggers"
+                "trigger_claim"
               ],
               "properties": {
                 "status": {
@@ -173,35 +172,22 @@
                     "type": "string"
                   }
                 },
-                "trigger_ids": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "triggers": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "required": [
-                      "trigger_id",
-                      "principal_ref",
-                      "ingress_seq"
-                    ],
-                    "properties": {
-                      "trigger_id": {
-                        "type": "string"
+                "trigger_claim": {
+                  "oneOf": [
+                    {"type": "null"},
+                    {
+                      "type": "object",
+                      "required": ["ref", "count", "last_trigger_ref", "last_trigger_ingress_seq", "digest"],
+                      "properties": {
+                        "ref": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "count": {"type": "integer", "minimum": 1},
+                        "last_trigger_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+                        "last_trigger_ingress_seq": {"type": "integer", "minimum": 1},
+                        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
                       },
-                      "principal_ref": {
-                        "type": "string"
-                      },
-                      "ingress_seq": {
-                        "type": "integer",
-                        "minimum": 1
-                      }
-                    },
-                    "additionalProperties": false
-                  }
+                      "additionalProperties": false
+                    }
+                  ]
                 }
               }
             }

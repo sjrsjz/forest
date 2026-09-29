@@ -238,13 +238,11 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "context_revision": 1,
                     "context_view_revision": 0,
                     "source_manifest_digest": digest_json({"source": 1}),
-                    "triggers": [
-                        {
-                            "trigger_ref": "trigger/1",
-                            "principal_ref": "qq:42",
-                            "ingress_seq": 1,
-                        }
-                    ],
+                    "trigger_claim": {
+                        "ref": "input-batch/agent-package/1", "count": 1,
+                        "last_trigger_ref": "trigger/1", "last_trigger_ingress_seq": 1,
+                        "digest": digest_json({"claim": 1}),
+                    },
                 },
                 "agent_spec_revision": "agent-spec/1",
                 "config": config.canonical(),
@@ -340,13 +338,12 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "input_batch_ref": "input-batch/agent-package/model-port",
                     "input_batch_digest": digest_json({"batch": "model-port"}),
                     "source_manifest_digest": digest_json({"source": "model-port"}),
-                    "triggers": [
-                        {
-                            "trigger_ref": "trigger/model-port",
-                            "principal_ref": "qq:43",
-                            "ingress_seq": 1,
-                        }
-                    ],
+                    "trigger_claim": {
+                        "ref": "input-batch/agent-package/model-port", "count": 1,
+                        "last_trigger_ref": "trigger/model-port",
+                        "last_trigger_ingress_seq": 1,
+                        "digest": digest_json({"claim": "model-port"}),
+                    },
                 },
             },
         }
@@ -1792,13 +1789,11 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "context_revision": 3,
                     "context_view_revision": 1,
                     "source_manifest_digest": digest_json({"source": 3}),
-                    "triggers": [
-                        {
-                            "trigger_ref": "trigger/3",
-                            "principal_ref": "qq:44",
-                            "ingress_seq": 4,
-                        }
-                    ],
+                    "trigger_claim": {
+                        "ref": "input-batch/agent-package/3", "count": 1,
+                        "last_trigger_ref": "trigger/3", "last_trigger_ingress_seq": 4,
+                        "digest": digest_json({"claim": 3}),
+                    },
                 },
                 "absolute_deadline": (
                     datetime.now(timezone.utc) + timedelta(minutes=5)

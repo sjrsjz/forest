@@ -1278,8 +1278,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 "context_revision": context_revision,
                 "context_view_revision": context_revision,
                 "event_ids": [event_ref],
-                "trigger_ids": [],
-                "triggers": [],
+                "trigger_claim": None,
                 "memory_archive": {
                     "compaction_ref": compaction_ref,
                     "event_refs": [event_ref],
@@ -1826,6 +1825,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 "context_view_revision": recall_revision, "selected_input_end_seq": 2,
                 "trigger_claims": [{
                     "input_batch_ref": recall_batch,
+                    "trigger_claim_ref": recall_batch,
+                    "trigger_claim_digest": "sha256:" + "2" * 64,
                     "trigger_count": 1,
                     "last_trigger_ref": "trigger/host-recall-projection",
                     "last_trigger_ingress_seq": 2,

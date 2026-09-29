@@ -68,7 +68,7 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 | `conversation.scheduler` | `conversation_lanes` | `conversation_id, next_ingress_seq, classified_through_seq, context_applied_seq, mailbox_revision, context_revision, context_view_revision, actor_owner_id, actor_epoch, actor_expires_at`；可保留 `active_session_ref/active_run_ref`，但它们只是不可解引用的稳定引用 |
 | `conversation.scheduler` | `inbox_messages` | 不可变来源身份、`ingress_seq`、正文/作者 PayloadRef、分类状态、触发决定；每条已接纳消息都存在，不因 `NO_TRIGGER` 或控制命令而删除 |
 | `conversation.scheduler` | `conversation_triggers` | `trigger_id, event_id, ingress_seq, status, principal_ref, claimed_session_ref, claimed_run_ref, input_batch_id, answered_reply_ref` |
-| `conversation.scheduler` | `input_batches` | `input_batch_id, kind, start_seq?, end_seq?, trigger_cut_seq?, selected_input_end_seq, session_ref?, run_ref?, context_revision`；固定来源切口与输入语义 |
+| `conversation.scheduler` | `input_batches` | `input_batch_id, kind, start_seq?, end_seq?, trigger_cut_seq?, selected_input_end_seq, session_ref?, run_ref?, context_revision, trigger_count?, last_trigger_ref?, last_trigger_ingress_seq?, trigger_claim_digest?`；固定来源切口与批次领取摘要；累计组引用仍待实现 |
 | `conversation.scheduler` | `selection_operations` | 每次选择 operation 的输入摘要、边界、冻结结果和可选 InputBatch 引用；`WAIT_INPUT/CONTINUE/IDLE` 也有可重放回执 |
 | `conversation.scheduler` | `input_batch_events / input_batch_triggers` | 规范化批次成员；长时间运行的数据不能塞入 JSON 数组后失去索引、唯一约束和逐项审计能力 |
 | `conversation.scheduler` | `trigger_claim_groups / trigger_claim_segments` | 按 Session/Run 冻结领取引用、累计数量和有序摘要；每个分段只含至多 64 个触发，通过 InputBatch 成员索引审计 |
@@ -125,7 +125,7 @@ PENDING ------------> FAILED / CANCELLED
 
 触发身份按群消息逐条持久保存，但跨模块调用帧不能把完整积压变成 JSON 数组。每次预填和最终输入选择至多处理 64 条连续消息，并在同一 lane 围栏下建立最多 64 项的 `trigger_claim_segment`；组头只保存目标 Session/Run、已覆盖序号、累计触发数和按分段顺序滚动的摘要。相同 operation 重放原分段，不重复推进摘要。Agent 启动、下一次模型调用和 Session 交接只接收组引用、摘要、末触发身份与输入切口；取某个触发的作者和授权资格时，调用调度器提供的按引用/触发 ID 精确核验端口。Agent 不跨 schema 读 Inbox，也不复制整组触发到自身 Run 快照。
 
-完成回复、失败和取消只提交组级终结事实及有界回执，不能把几十万项 `answered_trigger_ids` 或 `answered_events` 放进 UnitOfWork/Worker/模型帧。Memory 的回复联想仅对有界提案中的触发与事件逐项核验，不要求传输整组回答成员。逐触发物理结算由单调游标分段完成；它必须能在进程崩溃和热替换后重领，旧领取不能结算新分段。`PENDING`、`CLAIMED`、`ANSWERED` 等对外有效状态由领取组与终结事实共同决定，在物理结算未完成时仍保持正确。当前数组式实现未达到此契约，具体差距以[实现状态](implementation-status.md)为准。
+完成回复、失败和取消只提交组级终结事实及有界回执，不能把几十万项 `answered_trigger_ids` 或 `answered_events` 放进 UnitOfWork/Worker/模型帧。Memory 的回复联想仅对有界提案中的触发与事件逐项核验，不要求传输整组回答成员。逐触发物理结算由单调游标分段完成；它必须能在进程崩溃和热替换后重领，旧领取不能结算新分段。`PENDING`、`CLAIMED`、`ANSWERED` 等对外有效状态由领取组与终结事实共同决定，在物理结算未完成时仍保持正确。当前实现已将跨模块触发数组改为批次领取摘要，但单次数据库领取和物理终结仍处理整组，尚未达到有界分段与累计组引用契约；具体差距以[实现状态](implementation-status.md)为准。
 
 ## 3. 上下文消息与用户身份
 

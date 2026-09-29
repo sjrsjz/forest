@@ -2373,8 +2373,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                             "context_revision": 1,
                             "context_view_revision": 1,
                             "event_ids": ["event/pending"],
-                            "trigger_ids": [],
-                            "triggers": [],
+                            "trigger_claim": None,
                             "memory_archive": {
                                 "compaction_ref": "compaction/memory/pending",
                                 "event_refs": ["event/pending"],
@@ -2624,8 +2623,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
             "context_revision": 2,
             "context_view_revision": 2,
             "event_ids": ["event/captured"],
-            "trigger_ids": [],
-            "triggers": [],
+            "trigger_claim": None,
             "memory_archive": {
                 "compaction_ref": "compaction/memory/test",
                 "event_refs": ["event/captured"],

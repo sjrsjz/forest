@@ -288,7 +288,8 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         assert selected["status"] == "BATCH"
         assert selected["kind"] == "TRIGGER_INPUT"
         assert selected["event_ids"] == [event_id]
-        assert selected["trigger_ids"] == ["trigger/1"]
+        assert selected["trigger_claim"]["count"] == 1
+        assert selected["trigger_claim"]["last_trigger_ref"] == "trigger/1"
         assert selected["session_ref"] == "session/1"
         assert selected["run_ref"] == "run/1"
         assert selected["selected_input_end_seq"] == 1
@@ -1204,7 +1205,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             assert prefilled["kind"] == "CONTEXT_PREFILL"
             assert (prefilled["start_seq"], prefilled["end_seq"]) == expected_range
             assert len(prefilled["event_ids"]) == 64
-            assert prefilled["trigger_ids"] == []
+            assert prefilled["trigger_claim"] is None
         envelope["input"].update(
             selection_mode="ANY", session_ref="prefill-session", run_ref="prefill-run"
         )
@@ -1219,8 +1220,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             )
         assert final["kind"] == "TRIGGER_INPUT"
         assert final["event_ids"] == ["prefill-event/129", "prefill-event/130"]
-        assert final["trigger_ids"] == ["prefill-trigger/30", "prefill-trigger/130"]
-        assert [item["principal_ref"] for item in final["triggers"]] == ["qq:30", "qq:130"]
+        assert final["trigger_claim"]["count"] == 2
+        assert final["trigger_claim"]["last_trigger_ref"] == "prefill-trigger/130"
+        assert final["trigger_claim"]["last_trigger_ingress_seq"] == 130
         reply_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": {

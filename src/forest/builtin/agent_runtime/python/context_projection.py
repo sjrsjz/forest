@@ -50,6 +50,8 @@ def claim_summaries(inputs: list[dict]) -> list[dict]:
     return [
         {
             "input_batch_ref": item["input_batch_ref"],
+            "trigger_claim_ref": item["trigger_claim_ref"],
+            "trigger_claim_digest": item["trigger_claim_digest"],
             "trigger_count": item["trigger_count"],
             "last_trigger_ref": item["last_trigger_ref"],
             "last_trigger_ingress_seq": item["last_trigger_ingress_seq"],

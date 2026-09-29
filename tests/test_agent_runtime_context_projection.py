@@ -125,9 +125,11 @@ async def test_agent_package_interleaves_run_history_at_input_revision_boundary(
         },
         "inputs": [
             {"input_revision": 1, "input_batch_ref": "batch:1", "trigger_count": 1,
+             "trigger_claim_ref": "batch:1", "trigger_claim_digest": "sha256:" + "3" * 64,
              "last_trigger_ref": "trigger:1", "last_trigger_ingress_seq": 1,
              "source_manifest_digest": "sha256:" + "1" * 64},
             {"input_revision": 2, "input_batch_ref": "batch:2", "trigger_count": 1,
+             "trigger_claim_ref": "batch:2", "trigger_claim_digest": "sha256:" + "4" * 64,
              "last_trigger_ref": "trigger:2", "last_trigger_ingress_seq": 2,
              "source_manifest_digest": "sha256:" + "2" * 64},
         ],

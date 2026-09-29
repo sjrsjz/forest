@@ -172,7 +172,8 @@
       "type": "object",
       "required": [
         "input_revision", "input_batch_ref", "input_batch_digest", "selected_input_end_seq",
-        "context_revision", "context_view_revision", "source_manifest_digest", "trigger_count",
+        "context_revision", "context_view_revision", "source_manifest_digest",
+        "trigger_claim_ref", "trigger_claim_digest", "trigger_count",
         "last_trigger_ref", "last_trigger_ingress_seq",
         "created_at"
       ],
@@ -184,6 +185,8 @@
         "context_revision": {"type": "integer", "minimum": 1},
         "context_view_revision": {"type": "integer", "minimum": 0},
         "source_manifest_digest": {"$ref": "#/$defs/digest"},
+        "trigger_claim_ref": {"$ref": "#/$defs/id"},
+        "trigger_claim_digest": {"$ref": "#/$defs/digest"},
         "trigger_count": {"type": "integer", "minimum": 1},
         "last_trigger_ref": {"$ref": "#/$defs/id"},
         "last_trigger_ingress_seq": {"type": "integer", "minimum": 1},

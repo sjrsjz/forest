@@ -214,12 +214,32 @@ CREATE TABLE input_batches (
     actor_epoch bigint NOT NULL CHECK (actor_epoch > 0),
     context_revision bigint NOT NULL CHECK (context_revision > 0),
     context_view_revision bigint NOT NULL CHECK (context_view_revision >= 0),
+    trigger_count integer CHECK (trigger_count IS NULL OR trigger_count > 0),
+    last_trigger_ref text CHECK (
+        last_trigger_ref IS NULL OR octet_length(last_trigger_ref) BETWEEN 1 AND 256
+    ),
+    last_trigger_ingress_seq bigint CHECK (
+        last_trigger_ingress_seq IS NULL OR last_trigger_ingress_seq > 0
+    ),
+    trigger_claim_digest text CHECK (
+        trigger_claim_digest IS NULL OR trigger_claim_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, input_batch_id),
     UNIQUE (bot_id, operation_id),
     FOREIGN KEY (bot_id, conversation_id)
         REFERENCES conversation_lanes(bot_id, conversation_id),
     CHECK ((session_ref IS NULL) = (run_ref IS NULL)),
+    CHECK (
+        (kind IN ('TRIGGER_INPUT','RECOVERY_CLAIM')
+            AND trigger_count IS NOT NULL AND last_trigger_ref IS NOT NULL
+            AND last_trigger_ingress_seq IS NOT NULL
+            AND last_trigger_ingress_seq<=trigger_cut_seq
+            AND trigger_claim_digest IS NOT NULL)
+        OR (kind IN ('CONTEXT_PREFILL','SILENT_DRAIN')
+            AND trigger_count IS NULL AND last_trigger_ref IS NULL
+            AND last_trigger_ingress_seq IS NULL AND trigger_claim_digest IS NULL)
+    ),
     CHECK (
         (kind='TRIGGER_INPUT' AND start_seq IS NOT NULL AND end_seq IS NOT NULL
             AND start_seq <= end_seq AND trigger_cut_seq=end_seq
@@ -1059,6 +1079,43 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION conversation_pending_trigger_summary(
+    requested_bot text, requested_conversation text, selected_through_seq bigint
+) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    item record;
+    count_value integer := 0;
+    tail_ref text;
+    tail_seq bigint;
+    rolling_digest bytea := sha256(convert_to(jsonb_build_array(
+        'forest.trigger-claim/1',requested_bot,requested_conversation
+    )::text,'UTF8'));
+BEGIN
+    FOR item IN
+        SELECT trigger_id,principal_ref,ingress_seq
+        FROM __forest_module_schema__.conversation_triggers
+        WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+          AND status='PENDING' AND ingress_seq<=selected_through_seq
+        ORDER BY ingress_seq,trigger_id
+    LOOP
+        count_value := count_value+1;
+        rolling_digest := sha256(rolling_digest || convert_to(jsonb_build_array(
+            item.trigger_id,item.principal_ref,item.ingress_seq
+        )::text,'UTF8'));
+        tail_ref := item.trigger_id;
+        tail_seq := item.ingress_seq;
+    END LOOP;
+    IF count_value=0 THEN
+        RETURN NULL;
+    END IF;
+    RETURN jsonb_build_object(
+        'count',count_value,'last_trigger_ref',tail_ref,
+        'last_trigger_ingress_seq',tail_seq,
+        'digest','sha256:' || encode(rolling_digest,'hex')
+    );
+END;
+$$;
+
 CREATE FUNCTION conversation_selection_result(requested_bot text, requested_operation text)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -1069,8 +1126,6 @@ DECLARE
     receipt record;
     batch record;
     event_ids jsonb;
-    trigger_ids jsonb;
-    triggers jsonb;
 BEGIN
     SELECT * INTO receipt
     FROM __forest_module_schema__.selection_operations
@@ -1095,20 +1150,6 @@ BEGIN
     INTO event_ids
     FROM __forest_module_schema__.input_batch_events
     WHERE bot_id=requested_bot AND input_batch_id=receipt.input_batch_id;
-    SELECT
-        COALESCE(jsonb_agg(m.trigger_id ORDER BY m.trigger_index),'[]'::jsonb),
-        COALESCE(jsonb_agg(
-            jsonb_build_object(
-                'trigger_id',t.trigger_id,
-                'principal_ref',t.principal_ref,
-                'ingress_seq',t.ingress_seq
-            ) ORDER BY m.trigger_index
-        ),'[]'::jsonb)
-    INTO trigger_ids,triggers
-    FROM __forest_module_schema__.input_batch_triggers m
-    JOIN __forest_module_schema__.conversation_triggers t
-      ON t.bot_id=m.bot_id AND t.trigger_id=m.trigger_id
-    WHERE m.bot_id=requested_bot AND m.input_batch_id=receipt.input_batch_id;
     RETURN jsonb_build_object(
         'status','BATCH',
         'operation_id',receipt.operation_id,
@@ -1127,8 +1168,13 @@ BEGIN
         'context_revision',batch.context_revision,
         'context_view_revision',batch.context_view_revision,
         'event_ids',event_ids,
-        'trigger_ids',trigger_ids,
-        'triggers',triggers
+        'trigger_claim',CASE WHEN batch.trigger_count IS NULL THEN NULL
+            ELSE jsonb_build_object(
+                'ref',batch.input_batch_id,'count',batch.trigger_count,
+                'last_trigger_ref',batch.last_trigger_ref,
+                'last_trigger_ingress_seq',batch.last_trigger_ingress_seq,
+                'digest',batch.trigger_claim_digest
+            ) END
     );
 END;
 $$;
@@ -1167,6 +1213,8 @@ DECLARE
     selection_trigger_cut bigint;
     selection_context_revision bigint;
     batch_id text;
+    claim_summary jsonb;
+    claimed_count integer;
     event_count integer;
     final_event_count integer;
 BEGIN
@@ -1428,16 +1476,33 @@ BEGIN
     batch_id := 'batch:' || encode(sha256(convert_to(
         jsonb_build_array(requested_bot,requested_operation)::text,'UTF8'
     )),'hex');
+    IF selection_kind IN ('TRIGGER_INPUT','RECOVERY_CLAIM') THEN
+        claim_summary := __forest_module_schema__.conversation_pending_trigger_summary(
+            requested_bot,requested_conversation,lane.classified_through_seq
+        );
+        IF claim_summary IS NULL THEN
+            RETURN jsonb_build_object(
+                'protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object(
+                    'code','CONVERSATION_TRIGGER_STATE_CONFLICT',
+                    'message','Selected trigger group has no pending members','status',409
+                )
+            );
+        END IF;
+    END IF;
     INSERT INTO __forest_module_schema__.input_batches(
         bot_id,conversation_id,input_batch_id,operation_id,input_digest,boundary,kind,
         start_seq,end_seq,trigger_cut_seq,selected_input_end_seq,session_ref,run_ref,
-        actor_owner_id,actor_epoch,context_revision,context_view_revision
+        actor_owner_id,actor_epoch,context_revision,context_view_revision,
+        trigger_count,last_trigger_ref,last_trigger_ingress_seq,trigger_claim_digest
     ) VALUES (
         requested_bot,requested_conversation,batch_id,requested_operation,requested_digest,
         requested_boundary,selection_kind,selection_start,selection_end,
         selection_trigger_cut,COALESCE(selection_end,lane.context_applied_seq),
         selected_session,selected_run,requested_owner,requested_epoch,
-        selection_context_revision,lane.context_view_revision
+        selection_context_revision,lane.context_view_revision,
+        (claim_summary->>'count')::integer,claim_summary->>'last_trigger_ref',
+        (claim_summary->>'last_trigger_ingress_seq')::bigint,claim_summary->>'digest'
     );
     IF selection_start IS NOT NULL THEN
         INSERT INTO __forest_module_schema__.input_batch_events(
@@ -1488,6 +1553,11 @@ BEGIN
             updated_at=clock_timestamp()
         WHERE bot_id=requested_bot AND conversation_id=requested_conversation
           AND status='PENDING' AND ingress_seq<=lane.classified_through_seq;
+        GET DIAGNOSTICS claimed_count = ROW_COUNT;
+        IF claimed_count<>(claim_summary->>'count')::integer THEN
+            RAISE EXCEPTION 'Trigger claim changed inside the lane fence'
+                USING ERRCODE='55000';
+        END IF;
         INSERT INTO __forest_module_schema__.input_batch_triggers(
             bot_id,input_batch_id,trigger_index,trigger_id
         )

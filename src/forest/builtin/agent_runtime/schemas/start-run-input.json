@@ -16,13 +16,15 @@
       },
       "additionalProperties": false
     },
-    "trigger": {
+    "claim": {
       "type": "object",
-      "required": ["trigger_ref", "principal_ref", "ingress_seq"],
+      "required": ["ref", "count", "last_trigger_ref", "last_trigger_ingress_seq", "digest"],
       "properties": {
-        "trigger_ref": {"$ref": "#/$defs/id"},
-        "principal_ref": {"$ref": "#/$defs/id"},
-        "ingress_seq": {"type": "integer", "minimum": 1}
+        "ref": {"$ref": "#/$defs/id"},
+        "count": {"type": "integer", "minimum": 1},
+        "last_trigger_ref": {"$ref": "#/$defs/id"},
+        "last_trigger_ingress_seq": {"type": "integer", "minimum": 1},
+        "digest": {"$ref": "#/$defs/digest"}
       },
       "additionalProperties": false
     },
@@ -30,7 +32,7 @@
       "type": "object",
       "required": [
         "input_batch_ref", "input_batch_digest", "selected_input_end_seq",
-        "context_revision", "context_view_revision", "source_manifest_digest", "triggers"
+        "context_revision", "context_view_revision", "source_manifest_digest", "trigger_claim"
       ],
       "properties": {
         "input_batch_ref": {"$ref": "#/$defs/id"},
@@ -39,10 +41,7 @@
         "context_revision": {"type": "integer", "minimum": 1},
         "context_view_revision": {"type": "integer", "minimum": 0},
         "source_manifest_digest": {"$ref": "#/$defs/digest"},
-        "triggers": {
-          "type": "array", "minItems": 1, "maxItems": 4096,
-          "items": {"$ref": "#/$defs/trigger"}
-        }
+        "trigger_claim": {"$ref": "#/$defs/claim"}
       },
       "additionalProperties": false
     },

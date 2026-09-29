@@ -39,9 +39,11 @@ def snapshot(*units, required=None):
         "context_revision": 4, "context_view_revision": 3, "selected_input_end_seq": 8,
         "trigger_claims": [
             {"input_batch_ref": "batch-a", "trigger_count": 1,
+             "trigger_claim_ref": "batch-a", "trigger_claim_digest": "sha256:" + "c" * 64,
              "last_trigger_ref": "trigger-a", "last_trigger_ingress_seq": 3,
              "source_manifest_digest": "sha256:" + "a" * 64},
             {"input_batch_ref": "batch-b", "trigger_count": 1,
+             "trigger_claim_ref": "batch-b", "trigger_claim_digest": "sha256:" + "d" * 64,
              "last_trigger_ref": "trigger-b", "last_trigger_ingress_seq": 8,
              "source_manifest_digest": "sha256:" + "b" * 64},
         ],
