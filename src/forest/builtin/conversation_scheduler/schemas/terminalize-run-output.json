@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
-  "required": ["protocol", "conversation_id", "session_ref", "run_ref", "terminal_status", "reason_code", "trigger_ids"],
+  "required": ["protocol", "conversation_id", "session_ref", "run_ref", "terminal_status", "reason_code", "trigger_count"],
   "properties": {
     "protocol": {"const": "forest.conversation-run-terminal/1"},
     "conversation_id": {"$ref": "#/$defs/id"},
@@ -10,10 +10,7 @@
     "run_ref": {"$ref": "#/$defs/id"},
     "terminal_status": {"enum": ["FAILED", "CANCELLED"]},
     "reason_code": {"type": "string", "minLength": 1, "maxLength": 128},
-    "trigger_ids": {
-      "type": "array", "minItems": 1, "maxItems": 100000,
-      "uniqueItems": true, "items": {"$ref": "#/$defs/id"}
-    }
+    "trigger_count": {"type": "integer", "minimum": 1}
   },
   "$defs": {"id": {"type": "string", "minLength": 1, "maxLength": 512}}
 }

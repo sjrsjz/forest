@@ -362,11 +362,10 @@ class ConversationScheduler(Plugin):
 
     async def _commit_final_reply(self, task, execution, ctx):
         reply = execution["reply"]
-        triggers = execution["answered_trigger_ids"]
-        if reply is None or not triggers or len(triggers) != len(set(triggers)):
+        if reply is None:
             raise ForestError(
                 "CONVERSATION_AGENT_RESULT_INVALID",
-                "Agent final boundary omitted its exact reply or trigger set",
+                "Agent final boundary omitted its reply",
                 409,
             )
         run_ref = execution["run_ref"]
@@ -387,7 +386,6 @@ class ConversationScheduler(Plugin):
                     "session_ref": execution["session_ref"],
                     "run_ref": run_ref,
                     "reply": reply,
-                    "answered_trigger_ids": triggers,
                     "unit_id": self._stable("context-reply", run_ref),
                 },
                 "memory": {
@@ -480,17 +478,14 @@ class ConversationScheduler(Plugin):
         return {"action": "WAIT_INPUT"}
 
     async def _commit_terminal(self, task, execution, ctx):
-        trigger_ids = execution["answered_trigger_ids"]
         reason_code = execution["error_code"]
         if (
-            not trigger_ids
-            or len(trigger_ids) != len(set(trigger_ids))
-            or not isinstance(reason_code, str)
+            not isinstance(reason_code, str)
             or not reason_code
         ):
             raise ForestError(
                 "CONVERSATION_AGENT_RESULT_INVALID",
-                "Terminal Agent result omitted its exact trigger set or reason",
+                "Terminal Agent result omitted its reason",
                 409,
             )
         await ctx.uow.call(
@@ -502,7 +497,6 @@ class ConversationScheduler(Plugin):
                     "run_ref": execution["run_ref"],
                     "terminal_status": execution["status"],
                     "reason_code": reason_code,
-                    "trigger_ids": trigger_ids,
                 }
             },
             operation_id=ctx.operations.stable(

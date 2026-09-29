@@ -4,7 +4,7 @@
   "additionalProperties": false,
   "required": [
     "protocol", "status", "session_ref", "run_ref", "reply",
-    "answered_trigger_ids", "approval_ref", "error_code"
+    "approval_ref", "error_code"
   ],
   "properties": {
     "protocol": {"const": "forest.agent-execution/2"},
@@ -18,11 +18,6 @@
     "run_ref": {"$ref": "#/$defs/id"},
     "reply": {
       "oneOf": [{"type": "null"}, {"$ref": "#/$defs/reply"}]
-    },
-    "answered_trigger_ids": {
-      "type": "array",
-      "maxItems": 100000,
-      "items": {"$ref": "#/$defs/id"}
     },
     "approval_ref": {"type": ["string", "null"], "minLength": 1, "maxLength": 512},
     "error_code": {"type": ["string", "null"], "minLength": 1, "maxLength": 256}

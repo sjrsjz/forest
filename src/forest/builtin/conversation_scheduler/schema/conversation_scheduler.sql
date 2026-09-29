@@ -292,38 +292,6 @@ CREATE TABLE input_batch_triggers (
         REFERENCES conversation_triggers(bot_id, trigger_id)
 );
 
-CREATE TABLE trigger_requeues (
-    bot_id text NOT NULL,
-    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
-    conversation_id text NOT NULL,
-    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
-    abandoned_session_ref text NOT NULL
-        CHECK (octet_length(abandoned_session_ref) BETWEEN 1 AND 256),
-    abandoned_run_ref text NOT NULL
-        CHECK (octet_length(abandoned_run_ref) BETWEEN 1 AND 256),
-    reason_code text NOT NULL CHECK (octet_length(reason_code) BETWEEN 1 AND 128),
-    actor_owner_id text NOT NULL CHECK (octet_length(actor_owner_id) BETWEEN 1 AND 256),
-    actor_epoch bigint NOT NULL CHECK (actor_epoch > 0),
-    trigger_count integer NOT NULL CHECK (trigger_count > 0),
-    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    PRIMARY KEY (bot_id, operation_id),
-    FOREIGN KEY (bot_id, conversation_id)
-        REFERENCES conversation_lanes(bot_id, conversation_id)
-);
-
-CREATE TABLE trigger_requeue_items (
-    bot_id text NOT NULL,
-    operation_id text NOT NULL,
-    item_index integer NOT NULL CHECK (item_index >= 0),
-    trigger_id text NOT NULL,
-    PRIMARY KEY (bot_id, operation_id, item_index),
-    UNIQUE (bot_id, operation_id, trigger_id),
-    FOREIGN KEY (bot_id, operation_id)
-        REFERENCES trigger_requeues(bot_id, operation_id),
-    FOREIGN KEY (bot_id, trigger_id)
-        REFERENCES conversation_triggers(bot_id, trigger_id)
-);
-
 CREATE TABLE context_units (
     bot_id text NOT NULL,
     conversation_id text NOT NULL,
@@ -514,19 +482,6 @@ CREATE TABLE trigger_terminal_operations (
         REFERENCES conversation_lanes(bot_id, conversation_id)
 );
 
-CREATE TABLE trigger_terminal_items (
-    bot_id text NOT NULL,
-    operation_id text NOT NULL,
-    item_index integer NOT NULL CHECK (item_index >= 0),
-    trigger_id text NOT NULL,
-    PRIMARY KEY (bot_id, operation_id, item_index),
-    UNIQUE (bot_id, operation_id, trigger_id),
-    FOREIGN KEY (bot_id, operation_id)
-        REFERENCES trigger_terminal_operations(bot_id, operation_id),
-    FOREIGN KEY (bot_id, trigger_id)
-        REFERENCES conversation_triggers(bot_id, trigger_id)
-);
-
 CREATE FUNCTION guard_inbox_message() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
@@ -640,13 +595,7 @@ CREATE TRIGGER input_batch_events_immutable BEFORE UPDATE OR DELETE ON input_bat
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER input_batch_triggers_immutable BEFORE UPDATE OR DELETE ON input_batch_triggers
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
-CREATE TRIGGER trigger_requeues_immutable BEFORE UPDATE OR DELETE ON trigger_requeues
-    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
-CREATE TRIGGER trigger_requeue_items_immutable BEFORE UPDATE OR DELETE ON trigger_requeue_items
-    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER trigger_terminal_operations_immutable BEFORE UPDATE OR DELETE ON trigger_terminal_operations
-    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
-CREATE TRIGGER trigger_terminal_items_immutable BEFORE UPDATE OR DELETE ON trigger_terminal_items
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_units_immutable BEFORE UPDATE OR DELETE ON context_units
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
@@ -2523,6 +2472,24 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
 END;
 $$;
 
+CREATE FUNCTION conversation_answered_proposal_events(
+    requested_bot text, requested_conversation text, requested_session text,
+    requested_run text, requested_reply text, proposals jsonb
+) RETURNS jsonb LANGUAGE sql STABLE SET search_path=pg_catalog AS $$
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'trigger_ref',t.trigger_id,'event_ref',t.event_id
+    ) ORDER BY t.trigger_id),'[]'::jsonb)
+    FROM (
+        SELECT DISTINCT item->>'trigger_ref' AS trigger_id
+        FROM jsonb_array_elements(proposals) item
+    ) requested
+    JOIN __forest_module_schema__.conversation_triggers t
+      ON t.trigger_id=requested.trigger_id
+    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
+      AND t.claimed_session_ref=requested_session AND t.claimed_run_ref=requested_run
+      AND t.status='ANSWERED' AND t.answered_reply_ref=requested_reply
+$$;
+
 CREATE FUNCTION conversation_append_final_reply(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -2534,7 +2501,7 @@ DECLARE
     actor jsonb := body->'actor';
     reply_value jsonb := body->'reply';
     agent_value jsonb := envelope#>'{prior,agent}';
-    trigger_values jsonb := body->'answered_trigger_ids';
+    learning_proposals jsonb := agent_value#>'{learning,proposals}';
     requested_bot text := context->>'bot_id';
     requested_operation text := context->>'operation_id';
     requested_digest text := context->>'participant_input_digest';
@@ -2548,18 +2515,14 @@ DECLARE
     lane record;
     replay record;
     context_revision_value bigint;
-    requested_trigger_count integer;
-    distinct_requested_trigger_count integer;
     claimed_trigger_count integer;
-    matched_trigger_count integer;
-    trigger_ids_value jsonb;
     answered_events_value jsonb;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
        OR requested_operation IS NULL OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
-       OR jsonb_typeof(trigger_values) IS DISTINCT FROM 'array'
-       OR jsonb_array_length(trigger_values)=0
+       OR jsonb_typeof(learning_proposals) IS DISTINCT FROM 'array'
+       OR jsonb_array_length(learning_proposals)>128
        OR reply_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
        OR reply_value->>'owner_kind' IS DISTINCT FROM 'final.reply'
        OR agent_value->>'run_id' IS DISTINCT FROM requested_run
@@ -2611,47 +2574,31 @@ BEGIN
                 )
             );
         END IF;
-        SELECT COALESCE(jsonb_agg(t.trigger_id ORDER BY t.trigger_id),'[]'::jsonb),
-               COALESCE(jsonb_agg(jsonb_build_object(
-                   'trigger_ref',t.trigger_id,'event_ref',t.event_id
-               ) ORDER BY t.trigger_id),'[]'::jsonb)
-        INTO trigger_ids_value,answered_events_value
-        FROM __forest_module_schema__.conversation_triggers t
-        WHERE t.bot_id=requested_bot AND t.answered_reply_ref=requested_reply
-          AND t.claimed_session_ref=requested_session AND t.claimed_run_ref=requested_run;
+        answered_events_value := __forest_module_schema__.conversation_answered_proposal_events(
+            requested_bot,requested_conversation,requested_session,requested_run,
+            requested_reply,learning_proposals
+        );
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object(
                 'operation_id',requested_operation,'context_revision',replay.context_revision,
-                'unit_id',requested_unit,'answered_trigger_ids',trigger_ids_value,
+                'unit_id',requested_unit,'answered_trigger_count',replay.answered_trigger_count,
                 'answered_events',answered_events_value,
                 'reply_ref',requested_reply
             )
         );
     END IF;
-    SELECT count(*)::integer,count(DISTINCT requested.trigger_id)::integer
-    INTO requested_trigger_count,distinct_requested_trigger_count
-    FROM jsonb_array_elements_text(trigger_values) requested(trigger_id);
     SELECT count(*)::integer INTO claimed_trigger_count
     FROM __forest_module_schema__.conversation_triggers t
     WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
       AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
       AND t.claimed_run_ref=requested_run;
-    SELECT count(*)::integer INTO matched_trigger_count
-    FROM __forest_module_schema__.conversation_triggers t
-    JOIN jsonb_array_elements_text(trigger_values) requested(trigger_id)
-      ON requested.trigger_id=t.trigger_id
-    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
-      AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
-      AND t.claimed_run_ref=requested_run;
-    IF requested_trigger_count<>distinct_requested_trigger_count
-       OR claimed_trigger_count<>requested_trigger_count
-       OR matched_trigger_count<>requested_trigger_count THEN
+    IF claimed_trigger_count=0 THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','TRIGGER_STATE_CONFLICT',
-                'message','Final reply triggers differ from this Run claim','status',409
+                'message','Final reply Run has no claimed triggers','status',409
             )
         );
     END IF;
@@ -2663,7 +2610,7 @@ BEGIN
     ) VALUES (
         requested_bot,requested_operation,requested_conversation,requested_digest,
         'FINAL_REPLY',requested_session,requested_run,context_revision_value,1,
-        requested_trigger_count,requested_reply,requested_owner,requested_epoch
+        claimed_trigger_count,requested_reply,requested_owner,requested_epoch
     );
     INSERT INTO __forest_module_schema__.context_units(
         bot_id,conversation_id,unit_id,context_revision,unit_index,kind,
@@ -2684,27 +2631,23 @@ BEGIN
     ) VALUES(requested_bot,requested_conversation,requested_unit,context_revision_value,0);
     UPDATE __forest_module_schema__.conversation_triggers t
     SET status='ANSWERED',answered_reply_ref=requested_reply,updated_at=clock_timestamp()
-    FROM jsonb_array_elements_text(trigger_values) requested(trigger_id)
-    WHERE t.bot_id=requested_bot AND t.trigger_id=requested.trigger_id;
+    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
+      AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
+      AND t.claimed_run_ref=requested_run;
     UPDATE __forest_module_schema__.conversation_lanes
     SET context_revision=context_revision_value,
         context_view_unit_count=context_view_unit_count+1,
         mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
-    SELECT COALESCE(jsonb_agg(t.trigger_id ORDER BY t.trigger_id),'[]'::jsonb),
-           COALESCE(jsonb_agg(jsonb_build_object(
-               'trigger_ref',t.trigger_id,'event_ref',t.event_id
-           ) ORDER BY t.trigger_id),'[]'::jsonb)
-    INTO trigger_ids_value,answered_events_value
-    FROM __forest_module_schema__.conversation_triggers t
-    JOIN jsonb_array_elements_text(trigger_values) requested(trigger_id)
-      ON requested.trigger_id=t.trigger_id
-    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation;
+    answered_events_value := __forest_module_schema__.conversation_answered_proposal_events(
+        requested_bot,requested_conversation,requested_session,requested_run,
+        requested_reply,learning_proposals
+    );
     RETURN jsonb_build_object(
         'protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object(
             'operation_id',requested_operation,'context_revision',context_revision_value,
-            'unit_id',requested_unit,'answered_trigger_ids',trigger_ids_value,
+            'unit_id',requested_unit,'answered_trigger_count',claimed_trigger_count,
             'answered_events',answered_events_value,
             'reply_ref',requested_reply
         )
@@ -2731,8 +2674,6 @@ DECLARE
     requested_run text := body->>'run_ref';
     requested_status text := body->>'terminal_status';
     requested_reason text := body->>'reason_code';
-    requested_triggers jsonb;
-    actual_triggers jsonb;
     trigger_count_value integer;
     lane record;
     replay record;
@@ -2745,30 +2686,12 @@ BEGIN
        OR requested_epoch IS NULL OR requested_epoch<1
        OR requested_session IS NULL OR requested_run IS NULL
        OR requested_status NOT IN ('FAILED','CANCELLED')
-       OR requested_reason IS NULL OR octet_length(requested_reason) NOT BETWEEN 1 AND 128
-       OR jsonb_typeof(body->'trigger_ids') IS DISTINCT FROM 'array'
-       OR jsonb_array_length(body->'trigger_ids')=0 THEN
+       OR requested_reason IS NULL OR octet_length(requested_reason) NOT BETWEEN 1 AND 128 THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','CONVERSATION_TERMINAL_INPUT_INVALID',
                 'message','Conversation terminal Run envelope is invalid','status',422
-            )
-        );
-    END IF;
-    SELECT jsonb_agg(value ORDER BY value),count(*)::integer
-    INTO requested_triggers,trigger_count_value
-    FROM jsonb_array_elements_text(body->'trigger_ids');
-    IF trigger_count_value IS DISTINCT FROM jsonb_array_length(body->'trigger_ids')
-       OR trigger_count_value IS DISTINCT FROM (
-           SELECT count(DISTINCT value)::integer
-           FROM jsonb_array_elements_text(body->'trigger_ids')
-       ) THEN
-        RETURN jsonb_build_object(
-            'protocol','forest.domain-result/1','ok',false,
-            'error',jsonb_build_object(
-                'code','CONVERSATION_TERMINAL_INPUT_INVALID',
-                'message','Conversation terminal trigger set is invalid','status',422
             )
         );
     END IF;
@@ -2792,16 +2715,13 @@ BEGIN
                 )
             );
         END IF;
-        SELECT jsonb_agg(trigger_id ORDER BY trigger_id) INTO actual_triggers
-        FROM __forest_module_schema__.trigger_terminal_items
-        WHERE bot_id=requested_bot AND operation_id=requested_operation;
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object(
                 'protocol','forest.conversation-run-terminal/1',
                 'conversation_id',requested_conversation,'session_ref',requested_session,
                 'run_ref',requested_run,'terminal_status',requested_status,
-                'reason_code',requested_reason,'trigger_ids',actual_triggers
+                'reason_code',requested_reason,'trigger_count',replay.trigger_count
             )
         );
     END IF;
@@ -2820,18 +2740,17 @@ BEGIN
             )
         );
     END IF;
-    SELECT COALESCE(jsonb_agg(trigger_id ORDER BY trigger_id),'[]'::jsonb),count(*)::integer
-    INTO actual_triggers,trigger_count_value
+    SELECT count(*)::integer INTO trigger_count_value
     FROM __forest_module_schema__.conversation_triggers
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
       AND claimed_session_ref=requested_session
       AND claimed_run_ref=requested_run AND status='CLAIMED';
-    IF actual_triggers IS DISTINCT FROM requested_triggers OR trigger_count_value=0 THEN
+    IF trigger_count_value=0 THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','CONVERSATION_TERMINAL_TRIGGER_CONFLICT',
-                'message','Terminal Run trigger set differs from the claimed Session','status',409
+                'message','Terminal Run has no claimed triggers','status',409
             )
         );
     END IF;
@@ -2844,11 +2763,6 @@ BEGIN
         requested_session,requested_run,requested_status,requested_reason,
         requested_owner,requested_epoch,trigger_count_value
     );
-    INSERT INTO __forest_module_schema__.trigger_terminal_items(
-        bot_id,operation_id,item_index,trigger_id
-    )
-    SELECT requested_bot,requested_operation,ordinality-1,value
-    FROM jsonb_array_elements_text(actual_triggers) WITH ORDINALITY;
     UPDATE __forest_module_schema__.conversation_triggers
     SET status=requested_status,terminal_reason_code=requested_reason,
         updated_at=clock_timestamp()
@@ -2865,7 +2779,7 @@ BEGIN
             'protocol','forest.conversation-run-terminal/1',
             'conversation_id',requested_conversation,'session_ref',requested_session,
             'run_ref',requested_run,'terminal_status',requested_status,
-            'reason_code',requested_reason,'trigger_ids',actual_triggers
+            'reason_code',requested_reason,'trigger_count',trigger_count_value
         )
     );
 END;

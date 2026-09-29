@@ -269,16 +269,12 @@ class AgentExecution:
 
     @staticmethod
     def _result(request: dict, status: str, run: dict | None = None, **values) -> dict:
-        triggers = [] if run is None else list(dict.fromkeys(
-            item["trigger_ref"] for item in run["triggers"]
-        ))
         return {
             "protocol": "forest.agent-execution/2",
             "status": status,
             "session_ref": request["session_ref"],
             "run_ref": request["run_ref"],
             "reply": None if run is None else AgentExecution._reply(run),
-            "answered_trigger_ids": triggers,
             "approval_ref": values.get("approval_ref"),
             "error_code": values.get("error_code"),
         }

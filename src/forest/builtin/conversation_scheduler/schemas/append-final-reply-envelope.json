@@ -15,16 +15,12 @@
     },
     "input": {
       "type": "object", "additionalProperties": false,
-      "required": ["actor", "session_ref", "run_ref", "reply", "answered_trigger_ids", "unit_id"],
+      "required": ["actor", "session_ref", "run_ref", "reply", "unit_id"],
       "properties": {
         "actor": {"$ref": "#/$defs/actor"},
         "session_ref": {"$ref": "#/$defs/id"},
         "run_ref": {"$ref": "#/$defs/id"},
         "reply": {"$ref": "#/$defs/reply"},
-        "answered_trigger_ids": {
-          "type": "array", "minItems": 1, "maxItems": 4096,
-          "uniqueItems": true, "items": {"$ref": "#/$defs/id"}
-        },
         "unit_id": {"$ref": "#/$defs/id"}
       }
     },
