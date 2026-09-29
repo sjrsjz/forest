@@ -45,6 +45,8 @@ Worker Host 不能负责物理启动或停止自己，也不能握住其他 Work
 
 Worker Host 的私有表只存选择、启停、验证与控制回执，不存其他模块的配置正文、业务消息或可执行 Python 对象。Graph/Generation 和物理替换请求保留在 `kernel.runtime`；包 ZIP、安装校验和下载保留在 `deployment.package-registry`。唯一跨 schema 的原子动作必须声明 UnitOfWork participant，不能由 Web gateway 打开多个 repository 事务凑合。
 
+通用 Web 配置栏在 apply 返回时只能显示 desired 已提交及 Worker Host 重建请求 ID。它应通过 Worker Host 的持久 `configuration-rebuild` 查询观察 `EFFECTIVE` 或 `REBUILD_FAILED`，并在旧 Generation 消失、查询暂时冲突时重试；只有查到 `EFFECTIVE` 后才能显示“已生效”。模块自带 UI 收到的提交事件也只代表 desired 提交，不得自行把该事件解释为 effective。页面离开当前 Bot/工作区时停止轮询，后续仍可按请求 ID 在 Worker Host 页面查询。
+
 ## 类型化操作
 
 所有入口调用同一组 Worker Host 管理操作；WebUI、Shell 和 CLI 不各自实现组件逻辑。下表的目标 `component_id` 是参数，不改变 operation 的拥有者；每个操作携带 Bot scope、目标 Generation/Graph revision、操作 ID 和授权主体。

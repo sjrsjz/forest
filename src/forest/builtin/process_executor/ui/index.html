@@ -64,7 +64,7 @@
           const value=channel.data;if(!value||value.protocol!=='forest.management-ui-channel/1'||value.nonce!==nonce)return;
           if(value.type==='initialize'){configuration=value.configuration;profiles=structuredClone(configuration.desired.value.profiles||[]);selected=profiles.length?0:-1;byId('revision').textContent=`期望 r${configuration.desired.revision} · 生效 r${configuration.effective.revision}`;if(selected>=0)byId('editor').value=JSON.stringify(profiles[0],null,2);enable(true);render();show('')}
           else if(value.type==='plan-ready')show('计划已生成，请在宿主栏确认应用');
-          else if(value.type==='applied')show(`配置 r${value.revision} 已生效`);
+          else if(value.type==='desired-committed')show(`配置 r${value.revision} 已提交，等待组件图生效`);
           else if(value.type==='reset'){profiles=structuredClone(value.value.profiles||[]);selected=profiles.length?0:-1;if(selected>=0)byId('editor').value=JSON.stringify(profiles[0],null,2);render();show('草稿已丢弃')}
           else if(value.type==='error')show(value.message||'操作失败');
         };port.start();send('ready');

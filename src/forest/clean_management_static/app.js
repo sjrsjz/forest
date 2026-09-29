@@ -50,6 +50,43 @@ function notice(message) {
   $('notice').classList.toggle('hidden', !message);
 }
 
+async function watchConfigurationRebuild(requestId, componentId, revision, scope, epoch) {
+  const endpoint = '/management/v1/modules/component.worker-host/queries/configuration-rebuild';
+  const deadline = Date.now() + 180000;
+  while (apiBase === scope && workspaceEpoch === epoch && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    if (apiBase !== scope || workspaceEpoch !== epoch) return;
+    let result;
+    try {
+      result = await api(endpoint, {
+        method: 'POST', body: JSON.stringify({request_id: requestId}),
+      });
+    } catch (error) {
+      if ([404, 409, 429].includes(error.status) || error.status >= 500) continue;
+      notice(`配置 r${revision} 已提交；重建 ${requestId} 状态查询失败：${error.message}`);
+      return;
+    }
+    if (result.request_id !== requestId
+      || result.target_component_id !== componentId
+      || result.desired_revision !== revision) {
+      notice(`配置 r${revision} 已提交；重建 ${requestId} 回执身份不符`);
+      return;
+    }
+    if (result.state === 'REBUILD_FAILED') {
+      notice(`配置 r${revision} 已提交，但重建失败：${result.error_code || requestId}`);
+      return;
+    }
+    if (result.state === 'EFFECTIVE') {
+      await refresh();
+      notice(`配置 r${revision} 已生效`);
+      return;
+    }
+  }
+  if (apiBase === scope && workspaceEpoch === epoch) {
+    notice(`配置 r${revision} 已提交；重建 ${requestId} 仍在进行，可在组件控制页查询`);
+  }
+}
+
 let activeSandboxCleanup = null;
 
 async function fetchText(path) {
@@ -269,8 +306,9 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   apply.onclick = async () => {
     if (!plan) return;
     apply.disabled = true;
+    let result;
     try {
-      const result = await api(`${base}/apply`, {
+      result = await api(`${base}/apply`, {
         method: 'POST',
         headers: {'idempotency-key': `${apply.dataset.key}:apply`},
         body: JSON.stringify({
@@ -278,12 +316,32 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
           expected_desired_revision: configuration.desired.revision,
         }),
       });
-      state.textContent = `配置 r${result.configuration.revision} 已生效`;
-      send('applied', {revision: result.configuration.revision});
-      await refresh();
     } catch (error) {
       apply.disabled = false;
       fail(error);
+      return;
+    }
+    const revision = result.configuration.revision;
+    const requestId = result.rebuild?.request_id;
+    state.textContent = `配置 r${revision} 已提交，等待组件图生效`;
+    send('desired-committed', {revision, request_id: requestId});
+    const submittedScope = apiBase;
+    try {
+      await refresh();
+    } catch (error) {
+      notice(`配置 r${revision} 已提交；页面刷新失败：${error.message}`);
+      return;
+    }
+    if (apiBase !== submittedScope) return;
+    if (requestId) {
+      notice(`配置 r${revision} 已提交；重建请求 ${requestId} 等待生效`);
+      const scope = submittedScope, epoch = workspaceEpoch;
+      void watchConfigurationRebuild(requestId, row.component_id, revision, scope, epoch).catch(error => {
+        if (apiBase === scope && workspaceEpoch === epoch)
+          notice(`配置 r${revision} 已提交；重建 ${requestId} 状态查询失败：${error.message}`);
+      });
+    } else {
+      notice(`配置 r${revision} 已提交；请查询目标组件的生效修订`);
     }
   };
   frame.onload = () => frame.contentWindow.postMessage({

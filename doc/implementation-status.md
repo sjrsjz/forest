@@ -348,3 +348,5 @@ Conversation 终态现在先提交权威组事实：成功回复使用不可变 
 终态提交不再扫描整组触发行计数，直接使用每次领取时以最多 64 项事务更新的组头 `trigger_count`；回复、失败和取消均要求组仍为 `ACTIVE`。逐触发行进入终态时，数据库触发器还核对它在不可变领取分段内的成员身份、组级权威终态及对应回复/失败操作事实。没有显式重排事实的 `CLAIMED→PENDING` 转换已关闭，避免失租约或误操作绕过组事实复活触发。这让终态提交的读取量不随组长增长；组成员物理写入仍由分段结算完成。受控重排尚需单独设计和实现，不能直接恢复旧的无条件状态回退。
 
 Memory 的冻结遗忘选择查询现从不可变 `batch_forget_operations` 按选择计算已完成批数、成员数、首个未处理序号及 `FROZEN/PARTIAL/COMPLETE` 状态；该读取有 `(Bot,selection,ordinal)` 索引，模块 UI 同页展示进度和逐成员的实际抑制归属。隔离 PostgreSQL 的真实批次事务用例核对执行前后进度由 `FROZEN` 收敛为 `COMPLETE`。这只是已提交事实的持久只读投影，不代表 P0 授权、自动继续执行、失败重预览或跨批任务控制已经开放；这些仍待补齐。
+
+通用 Web 配置栏现在把 apply 回执严格表述为 desired 已提交，保留 Worker Host 的持久重建请求 ID，并在当前 Bot 工作区内轮询其 `EFFECTIVE/REBUILD_FAILED` 状态。只有 `EFFECTIVE` 回执才报告“已生效”；重建失败会保留已提交 desired 与错误码。apply 成功后的页面刷新若失败，也只报告刷新失败，不重新开放提交按钮或把已提交事务报成失败。Memory 与 Process Executor 的包内 UI 同步改用 `desired-committed` 事件，不再把提交当生效。三处 JavaScript 语法检查和实际包清单验证通过；不再由任何贡献引用的旧 `clean-agent`、`clean-onebot` 静态页面已删除。此修正不等于实现了显式 enable/disable 或动态候选图；它们仍须按 [17](17-component-worker-host.md) 完成。
