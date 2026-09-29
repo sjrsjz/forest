@@ -624,6 +624,48 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
         generation_id=graph_v2.generations["example.consumer"],
     )
     assert active_route.graph_id == graph_v2.graph_id
+    kernel_route = await repository.verify_active_generation(
+        component_id="kernel.runtime",
+        generation_id=graph_v2.generations["kernel.runtime"],
+    )
+    with pytest.raises(ForestError) as unsafe:
+        await repository.freeze_graph_admission(
+            renewed, graph_v2, components=("kernel.runtime",)
+        )
+    assert unsafe.value.code == "RUNTIME_GRAPH_MEMBER_SELECTION_UNSAFE"
+    with pytest.raises(ForestError) as unknown:
+        await repository.freeze_graph_admission(
+            renewed, graph_v2, components=("example.absent",)
+        )
+    assert unknown.value.code == "RUNTIME_GRAPH_MEMBER_SELECTION_INVALID"
+    await repository.freeze_graph_admission(
+        renewed, graph_v2, components=("example.consumer",)
+    )
+    kept_route = await repository.verify_active_generation(
+        component_id="kernel.runtime",
+        generation_id=graph_v2.generations["kernel.runtime"],
+    )
+    assert kept_route.route_epoch == kernel_route.route_epoch
+    with pytest.raises(ForestError) as frozen:
+        await repository.verify_active_generation(
+            component_id="example.consumer",
+            generation_id=graph_v2.generations["example.consumer"],
+        )
+    assert frozen.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    await repository.resume_graph_admission(
+        renewed, graph_v2, components=("example.consumer",)
+    )
+    active_route = await repository.verify_active_generation(
+        component_id="example.consumer",
+        generation_id=graph_v2.generations["example.consumer"],
+    )
+    assert active_route.route_epoch == 4
+    assert (
+        await repository.verify_active_generation(
+            component_id="kernel.runtime",
+            generation_id=graph_v2.generations["kernel.runtime"],
+        )
+    ).route_epoch == kernel_route.route_epoch
     await repository.freeze_graph_admission(renewed, graph_v2)
     with pytest.raises(ForestError) as caught:
         await repository.verify_active_generation(

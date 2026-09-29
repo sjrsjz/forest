@@ -360,3 +360,5 @@ Memory 的冻结遗忘选择查询现从不可变 `batch_forget_operations` 按�
 Worker Host 包新增 `packages` 只读管理查询。它通过声明的 `deployment.package-registry.packages` 路由访问部署共用的 `PackageCatalog`，按目录修订分页读取、逐页校验不可变包字节，只返回包/组件身份、manifest 与工件摘要和能力申请，不暴露 ZIP/路径；包内 WebUI 折叠展示候选。包目录并发新增后旧页返回 `PACKAGE_CATALOG_CHANGED`。本地目录/包运行时回归 `8 passed`，隔离 PostgreSQL 完整 Bot 宿主在激活的 Worker Host Generation 上查询官方包候选，并完成原有热替换/重启链（`1 passed`，230.85 秒）。这一步只建立可审计的候选浏览端口，尚无部署安装权威、Bot 级选择/启停事实、兼容性验证或未变化 Generation 保留。
 
 Worker Host 的 `runtime.graph-replacement.request/2` 现携带目标组件 ID，内核在期望 Graph revision 上验证成员身份，并把目标纳入幂等摘要。Registry 将启动 DAG 与保留依赖分开：普通服务、UnitOfWork participant 和配置控制引用可成环，但在局部换代规划中参与反向闭包；冻结 Generation 绑定及内核图事实记录保留依赖。独立 PostgreSQL 验证了缺失目标不入队、同操作不同目标冲突、保留者不能依赖被换代者，以及图状态显示目标；Worker Host 的完整宿主重载用例通过（`1 passed`，288.01 秒，未向 QQ 发消息）。宿主仍执行整图重建，尚未消费目标闭包或转移未变化 Worker 实例；这项工作仍未完成。
+
+`kernel.runtime` 新增成员级 admission 围栏：在当前 Graph/Host lease 事务内核对成员集合及启动、保留依赖的反向闭包，不闭合时拒绝；冻结与失败恢复只递增选中成员的 route epoch。隔离 PostgreSQL 验证了遗漏依赖消费者会被拒绝、合法叶子成员冻结/恢复后未选中成员 Generation 和 route epoch 均保持不变，原整图路径仍通过（`2 passed`）。宿主尚未调用成员级端口，局部实例转移与真实局部热重载仍未完成。

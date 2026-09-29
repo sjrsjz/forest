@@ -1589,9 +1589,16 @@ class KernelRuntimeRepository:
             )
             return graph.graph_revision
 
-    async def freeze_graph_admission(self, lease: HostLease, graph: RuntimeGenerationGraph) -> None:
-        """Stop new route admission while keeping the exact graph current for draining work."""
+    async def freeze_graph_admission(
+        self,
+        lease: HostLease,
+        graph: RuntimeGenerationGraph,
+        *,
+        components: tuple[str, ...] | None = None,
+    ) -> None:
+        """Stop new route admission for a dependency-closed set of current members."""
 
+        selected = self._admission_selection(components)
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
             await self._host_in(conn, lease)
@@ -1604,8 +1611,36 @@ class KernelRuntimeRepository:
                     409,
                 )
             members = await self._members_in(conn, graph, lock=True)
+            self._validate_admission_selection(selected, members)
+            if selected is not None:
+                dependencies = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT component_id,required_component_id FROM {} "
+                            "WHERE bot_id=%s AND graph_id=%s UNION "
+                            "SELECT component_id,required_component_id FROM {} "
+                            "WHERE bot_id=%s AND graph_id=%s"
+                        ).format(
+                            self._table("runtime_graph_dependencies"),
+                            self._table("runtime_graph_retention_dependencies"),
+                        ),
+                        (self.store.bot_id, graph.graph_id, self.store.bot_id, graph.graph_id),
+                    )
+                ).fetchall()
+                if any(
+                    item["required_component_id"] in selected
+                    and item["component_id"] not in selected
+                    for item in dependencies
+                ):
+                    raise ForestError(
+                        "RUNTIME_GRAPH_MEMBER_SELECTION_UNSAFE",
+                        "Selected members omit a Generation that depends on them",
+                        409,
+                    )
             for item in members:
-                await conn.execute(
+                if selected is not None and item["component_id"] not in selected:
+                    continue
+                cursor = await conn.execute(
                     sql.SQL(
                         "UPDATE {} SET data_admission=false,control_admission=false,"
                         "route_epoch=route_epoch+1 WHERE bot_id=%s AND component_id=%s "
@@ -1613,10 +1648,23 @@ class KernelRuntimeRepository:
                     ).format(self._table("routes")),
                     (self.store.bot_id, item["component_id"], item["generation_id"]),
                 )
+                if cursor.rowcount != 1:
+                    raise ForestError(
+                        "RUNTIME_GRAPH_ROUTE_CONFLICT",
+                        "RuntimeGraph route changed while admission was frozen",
+                        409,
+                    )
 
-    async def resume_graph_admission(self, lease: HostLease, graph: RuntimeGenerationGraph) -> None:
-        """Reopen a still-current graph after a replacement aborts before publication."""
+    async def resume_graph_admission(
+        self,
+        lease: HostLease,
+        graph: RuntimeGenerationGraph,
+        *,
+        components: tuple[str, ...] | None = None,
+    ) -> None:
+        """Reopen selected members if the source Graph remains current."""
 
+        selected = self._admission_selection(components)
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
             await self._host_in(conn, lease)
@@ -1629,13 +1677,20 @@ class KernelRuntimeRepository:
                     409,
                 )
             members = await self._members_in(conn, graph, lock=True)
-            if any(item["status"] != "ACTIVE" for item in members):
+            self._validate_admission_selection(selected, members)
+            if any(
+                item["status"] != "ACTIVE"
+                for item in members
+                if selected is None or item["component_id"] in selected
+            ):
                 raise ForestError(
                     "RUNTIME_GENERATION_NOT_READY",
                     "A graph with retired Generations cannot resume admission",
                     409,
                 )
             for item in members:
+                if selected is not None and item["component_id"] not in selected:
+                    continue
                 cursor = await conn.execute(
                     sql.SQL(
                         "UPDATE {} SET data_admission=%s,control_admission=%s,"
@@ -1656,6 +1711,35 @@ class KernelRuntimeRepository:
                         "RuntimeGraph route changed while admission was frozen",
                         409,
                     )
+
+    @staticmethod
+    def _admission_selection(components: tuple[str, ...] | None) -> set[str] | None:
+        if components is None:
+            return None
+        if (
+            not isinstance(components, tuple)
+            or not components
+            or any(
+                not isinstance(item, str) or _IDENTIFIER.fullmatch(item) is None
+                for item in components
+            )
+            or len(components) != len(set(components))
+        ):
+            raise ForestError(
+                "RUNTIME_GRAPH_MEMBER_SELECTION_INVALID",
+                "Admission selection must name distinct components",
+                422,
+            )
+        return set(components)
+
+    @staticmethod
+    def _validate_admission_selection(selected: set[str] | None, members) -> None:
+        if selected is not None and selected - {item["component_id"] for item in members}:
+            raise ForestError(
+                "RUNTIME_GRAPH_MEMBER_SELECTION_INVALID",
+                "Admission selection contains a component outside this RuntimeGraph",
+                422,
+            )
 
     async def retire_graph(self, lease: HostLease, graph: RuntimeGenerationGraph) -> int:
         async with self.store.pool.connection() as conn, conn.transaction():

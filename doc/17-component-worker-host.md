@@ -96,3 +96,5 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 Worker Host 已把目标 `component_id` 随 `runtime.graph-replacement.request/2` 写入内核持久请求；内核在期望 Graph revision 上核对目标成员，并把目标纳入幂等摘要。`RuntimeModuleRegistry.replacement_closure()` 按启动依赖和单独的保留依赖计算需要换代的反向闭包。保留依赖包括普通服务句柄、UnitOfWork participant 和配置控制引用；这些引用可以成环，不能并入启动 DAG。冻结 Generation 绑定及内核图事实分别记录保留依赖，候选图保留旧 Generation 时会验证其所依赖的组件也被保留。
 
 当前宿主执行器仍按整图重建，尚未消费请求中的目标或闭包，也尚未转移未变化的 Worker 实例所有权。因此此进度不构成局部热重载验收；下一步必须让宿主只为闭包创建新 Generation，并在成功发布、失败回滚和最终关闭中分别处理新旧实例。
+
+内核 admission 围栏现在接受明确的成员集合，并依据当前图持久的启动依赖与保留依赖拒绝不闭合的集合；只有选中成员的路由 admission 和 epoch 发生变化，失败恢复也只重新打开选中成员。整图维护仍使用同一个端口的全图模式。宿主尚未把替换闭包传给此端口，现有 `module.reload` 因而仍会冻结整图。
