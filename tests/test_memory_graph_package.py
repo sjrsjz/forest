@@ -2,6 +2,10 @@ import asyncio
 import base64
 import hashlib
 import json
+import os
+import socket
+import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,12 +14,14 @@ import pytest
 from jsonschema import Draft202012Validator
 from psycopg import errors, sql
 from psycopg.types.json import Jsonb
+from test_deployment_management_app import _IdentityAuthority
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin.memory_graph.python.facet_preparation import document_facets, query_part_facets
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.clean_management_app import CleanManagementGateway
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.deployment_management_app import create_deployment_management_app
 from forest.errors import ForestError
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
 from forest.packages import PackageCatalog, digest_json
@@ -32,6 +38,101 @@ def _trial_owner_id(query_id: str, part_id: str) -> str:
     return "trial:" + hashlib.sha256(
         (query_id + "\0" + part_id).encode("utf-8")
     ).hexdigest()
+
+
+async def _browser_apply_real_forget_batch(host, selection_id: str) -> str:
+    import uvicorn
+    from playwright.sync_api import expect, sync_playwright
+
+    bot_id = host.settings.bot_id
+
+    class Supervisor:
+        async def management_scopes(self):
+            return ({
+                "scope_id": bot_id, "scope_kind": "bot", "bot_id": bot_id,
+                "label": "Memory batch integration", "available": True,
+                "desired_state": "ONLINE", "observed_state": "ONLINE",
+            },)
+
+        @asynccontextmanager
+        async def management_host(self, scope_id):
+            assert scope_id == bot_id
+            yield host
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(128)
+    origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
+    identity = _IdentityAuthority()
+    identity.subject = WebSubject("admin/one", "admin", "Administrator", "ADMIN", True, 1)
+    app = create_deployment_management_app(
+        deployment_id="deployment/real-memory-batch", components=(),
+        identity_authority=identity, allowed_origin=origin,
+        bot_supervisor=Supervisor(),
+    )
+    server = uvicorn.Server(uvicorn.Config(
+        app, host="127.0.0.1", port=listener.getsockname()[1], log_level="error",
+    ))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        async with asyncio.timeout(10):
+            while not server.started:
+                if serving.done():
+                    await serving
+                await asyncio.sleep(0.05)
+        def drive_browser():
+            executable = os.environ.get("FOREST_BROWSER_EXECUTABLE")
+            if executable is None and sys.platform == "win32":
+                edge = Path("C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")
+                if edge.is_file():
+                    executable = str(edge)
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch(
+                    headless=True,
+                    **({"executable_path": executable} if executable else {}),
+                )
+                try:
+                    page = browser.new_page()
+                    page.set_default_timeout(60_000)
+                    errors = []
+                    page.on("pageerror", lambda error: errors.append(str(error)))
+                    page.goto(origin + "/")
+                    expect(page.locator("#login")).to_be_visible()
+                    page.locator('#login-form [name="username"]').fill("admin")
+                    page.locator('#login-form [name="password"]').fill("correct-password")
+                    page.locator("#login-form button").click()
+                    expect(page.locator("#console")).to_be_visible()
+                    page.locator("#scope-select").select_option(f"bot:{bot_id}")
+                    page.locator("#module-nav button", has_text="memory.graph").click()
+                    frame = page.frame_locator("iframe.package-ui-frame")
+                    expect(frame.locator('[data-tab="forget"]')).to_be_visible()
+                    frame.locator('[data-tab="forget"]').click()
+                    frame.locator("#forget details summary").click()
+                    frame.locator("#batch-selection-id").fill(selection_id)
+                    frame.locator("#batch-load").click()
+                    expect(frame.locator("#batch-selection-meta")).to_contain_text("冻结成员 1 个")
+                    expect(frame.locator("#batch-members")).to_contain_text("unit/browser")
+                    frame.locator("#batch-preview").click()
+                    expect(frame.locator("#batch-impact")).to_contain_text("来源 1")
+                    frame.locator("#batch-confirm").check()
+                    frame.locator("#batch-enqueue").click()
+                    expect(frame.locator("#batch-state")).to_contain_text("SUCCEEDED")
+                    expect(frame.locator("#batch-selection-meta")).to_contain_text("全部完成")
+                    assert not errors, errors
+                    return frame.locator("#batch-request").input_value()
+                finally:
+                    browser.close()
+
+        previous_policy = asyncio.get_event_loop_policy()
+        try:
+            if sys.platform == "win32":
+                asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+            return await asyncio.to_thread(drive_browser)
+        finally:
+            asyncio.set_event_loop_policy(previous_policy)
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(serving, timeout=15)
 
 
 @pytest.mark.postgres
@@ -510,13 +611,14 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         ).format(namespace), (store.bot_id, digest, digest))
 
     async def insert_unit(name, order, author):
+        epoch = await kernel.payload.epoch()
         root = await kernel.payload.put_bytes(
             owner_component_id="conversation.scheduler", owner_kind="context.input",
             owner_id=f"input/{name}", media_type="text/plain",
             content=f"message {name}".encode(),
             sources=(PayloadSource(
                 "conversation.scheduler", "group.message", f"message/{name}", 1,
-            ),), expected_deletion_epoch=0,
+            ),), expected_deletion_epoch=epoch,
         )
         async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(sql.SQL(
@@ -528,12 +630,12 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
                 "author_owner_id,accepted_deletion_epoch,eligibility_state,"
                 "eligible_at,eligible_xid,occurred_at) VALUES "
                 "(%s,%s,%s,%s,'source/selection',%s,1,'MESSAGE','TEXT',1,"
-                "%s,%s,%s,%s,'conversation.scheduler','context.input',%s,0,'ELIGIBLE',"
+                "%s,%s,%s,%s,'conversation.scheduler','context.input',%s,%s,'ELIGIBLE',"
                 "clock_timestamp(),pg_current_xact_id(),%s::timestamptz)"
             ).format(namespace), (
                 store.bot_id, f"unit/{name}", f"capture/{name}", digest,
                 order, digest, author, root.payload_id, root.content_digest,
-                f"input/{name}", f"2026-01-{order:02d}T00:00:00Z",
+                f"input/{name}", epoch, f"2026-01-{order:02d}T00:00:00Z",
             ))
         return root
 
@@ -885,6 +987,30 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
             authorization=SimpleNamespace(web_subject_ref="admin/one"),
         )
         assert progress["progress_state"] == "COMPLETE"
+        if os.environ.get("FOREST_BROWSER_SMOKE") == "1":
+            await insert_unit("browser", 5, "author/browser")
+            browser_selection = await invoke("memory_freeze_forget_selection", {
+                "bot_id": store.bot_id, "operation_id": "selection/create-browser",
+            }, {
+                "selection_id": "selection/browser-real",
+                "requested_by": "admin/one",
+                "filters": {"author_subject_ref": "author/browser"},
+            })
+            assert browser_selection["value"]["member_count"] == 1
+            browser_request = await _browser_apply_real_forget_batch(
+                host, "selection/browser-real",
+            )
+            browser_work = await memory.management_contract.query_authorized(
+                "memory.forget.batch.status", {"request_id": browser_request},
+                authorization=SimpleNamespace(web_subject_ref="admin/one"),
+            )
+            assert browser_work["state"] == "SUCCEEDED"
+            assert browser_work["result"]["suppressed_source_units"] == 1
+            browser_progress = await memory.management_contract.query_authorized(
+                "memory.forget.selection", {"selection_id": "selection/browser-real"},
+                authorization=SimpleNamespace(web_subject_ref="admin/one"),
+            )
+            assert browser_progress["progress_state"] == "COMPLETE"
     finally:
         assert await registry.close() == []
 

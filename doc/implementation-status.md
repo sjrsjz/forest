@@ -227,9 +227,9 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 
 ## 8. 下一切换顺序
 
-逐批遗忘的管理授权新增两层验收。隔离 PostgreSQL 用例在新 Memory Generation 上由真实 Web authority ticket 经 `CleanManagementGateway` 提交冻结选择的剩余批次，再由包自有 Worker 结算为 `SUCCEEDED`，选择进度收敛为 `COMPLETE`（`1 passed`）；真实 Edge 用例经部署 ASGI HTTP 和隔离 iframe 完成批次确认、票据签发、提交、终态轮询与进度刷新（`1 passed`），但其包契约是测试替身。这两层共同覆盖授权入口和持久执行的关键边界，尚不等于单个浏览器连接真实 PostgreSQL 的端到端验收，也不覆盖大批量压力或发布崩溃重放。
+逐批遗忘的管理授权已完成同一路径联合验收：隔离 PostgreSQL 中冻结来源选择，真实 Edge 经部署 ASGI HTTP、隔离 iframe 和 Web authority ticket 完成预览、确认、提交与轮询；Memory 包自有 Worker 结算为 `SUCCEEDED`，页面及包内持久查询均显示选择 `COMPLETE`、一个来源单元被抑制（`1 passed`，106.85 秒）。该浏览器测试使用真实包契约与数据库，不连接 QQ；此前的分层网关/浏览器测试仍保留。大规模批次压力、发布崩溃重放及长期运行尚未验收。
 
-1. 补齐大范围遗忘的批量压力、发布崩溃重放和部分完成后的恢复验收；逐批 P0 票据、部署管理网关、包自有 Worker 与真实浏览器链路已分别验收，仍需同一浏览器到 PostgreSQL 的联合场景。
+1. 补齐大范围遗忘的批量压力、发布崩溃重放和部分完成后的恢复验收；逐批 P0 票据、部署管理网关、包自有 Worker 与真实浏览器到 PostgreSQL 的联合场景已验收。
 2. 验证 Agent 语义召回的真实 QQ 群聊链、图片召回命中与跨群成功回复及联想提升；恢复及重放需与删除 epoch、Generation 围栏收敛。
 3. 补齐证据浏览的进一步分页和长期混合图文负载验收。
 4. 继续完成 [17](17-component-worker-host.md) 的包选择、显式启停和未变化 Generation 保留；对 Worker Host 配置控制事务验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
