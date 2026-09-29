@@ -367,6 +367,8 @@ CREATE TABLE batch_forget_operations (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,operation_id)
 );
+CREATE INDEX batch_forget_selection_progress_idx
+    ON batch_forget_operations(bot_id,selection_id,first_ordinal,last_ordinal);
 
 CREATE TABLE management_forget_work (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
@@ -8331,6 +8333,12 @@ DECLARE
     after_ordinal integer := COALESCE((input->>'after_ordinal')::integer,0);
     page_limit integer := COALESCE((input->>'limit')::integer,50);
     items jsonb;
+    applied_batch_count integer;
+    applied_member_count integer;
+    first_gap_ordinal integer;
+    last_applied_ordinal integer;
+    next_unapplied_ordinal integer;
+    progress_state text;
 BEGIN
     IF after_ordinal<0 OR page_limit NOT BETWEEN 1 AND 100 THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
@@ -8345,6 +8353,28 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_NOT_FOUND',
                 'message','Forget selection does not exist','status',404));
     END IF;
+    WITH ordered AS (
+        SELECT first_ordinal,last_ordinal,
+               COALESCE(max(last_ordinal) OVER (
+                   ORDER BY first_ordinal,last_ordinal
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+               ),0) AS previous_end
+        FROM __forest_module_schema__.batch_forget_operations
+        WHERE bot_id=selection_row.bot_id
+          AND selection_id=selection_row.selection_id
+    )
+    SELECT count(*)::integer,
+           COALESCE(sum(last_ordinal-first_ordinal+1),0)::integer,
+           min(previous_end+1) FILTER (WHERE first_ordinal>previous_end+1),
+           COALESCE(max(last_ordinal),0)
+    INTO applied_batch_count,applied_member_count,first_gap_ordinal,
+         last_applied_ordinal
+    FROM ordered;
+    next_unapplied_ordinal := COALESCE(first_gap_ordinal,
+                                      last_applied_ordinal+1);
+    progress_state := CASE WHEN applied_batch_count=0 THEN 'FROZEN'
+        WHEN next_unapplied_ordinal>selection_row.member_count THEN 'COMPLETE'
+        ELSE 'PARTIAL' END;
     SELECT COALESCE(jsonb_agg(to_jsonb(page) ORDER BY page.ordinal),'[]'::jsonb)
     INTO items FROM (
         SELECT m.ordinal,m.source_unit_id,m.source_revision,m.anchor_payload_id,
@@ -8370,6 +8400,12 @@ BEGIN
             'selection_id',selection_row.selection_id,
             'member_count',selection_row.member_count,
             'member_digest',selection_row.member_digest,
+            'progress_state',progress_state,
+            'applied_batch_count',applied_batch_count,
+            'applied_member_count',applied_member_count,
+            'next_unapplied_ordinal',CASE
+                WHEN progress_state='COMPLETE' THEN NULL
+                ELSE next_unapplied_ordinal END,
             'snapshot_xid',selection_row.snapshot_xid::text,
             'snapshot_accepted_at',selection_row.snapshot_accepted_at,
             'filters',selection_row.filters,'items',items,

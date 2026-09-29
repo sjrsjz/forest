@@ -571,6 +571,10 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
     ]
     assert page["value"]["items"][0]["forget_state"] == "ACTIVE"
     assert page["value"]["items"][0]["forget_operation_id"] is None
+    assert page["value"]["progress_state"] == "FROZEN"
+    assert page["value"]["applied_batch_count"] == 0
+    assert page["value"]["applied_member_count"] == 0
+    assert page["value"]["next_unapplied_ordinal"] == 1
     assert page["value"]["has_more"] is True
     second = await invoke("memory_query_forget_selection", {"bot_id": store.bot_id}, {
         "selection_id": "selection/target", "requested_by": "admin/one",
@@ -729,6 +733,10 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         ("unit/three", "FORGOTTEN_BY_SELECTION", operation_id),
         ("unit/one", "FORGOTTEN_BY_SELECTION", operation_id),
     ]
+    assert forgotten_page["value"]["progress_state"] == "COMPLETE"
+    assert forgotten_page["value"]["applied_batch_count"] == 1
+    assert forgotten_page["value"]["applied_member_count"] == 2
+    assert forgotten_page["value"]["next_unapplied_ordinal"] is None
     async with store.pool.connection() as conn:
         rows = await (await conn.execute(sql.SQL(
             "SELECT source_unit_id,eligibility_state FROM {}.source_units "

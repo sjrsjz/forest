@@ -274,8 +274,9 @@
     });
     if($('batch-selection-id').value.trim()!==selection_id)return;
     batchPage=page;
+    const progress=({FROZEN:'未执行',PARTIAL:'部分完成',COMPLETE:'全部完成'})[page.progress_state]||page.progress_state;
     $('batch-selection-meta').textContent=
-      `冻结成员 ${page.member_count} 个 · 快照 ${stamp(page.snapshot_accepted_at)}\n选择摘要 ${page.member_digest}\n筛选 ${JSON.stringify(page.filters)}`;
+      `冻结成员 ${page.member_count} 个 · 快照 ${stamp(page.snapshot_accepted_at)}\n执行进度 ${progress} · 已完成 ${page.applied_member_count}/${page.member_count} 个成员、${page.applied_batch_count} 批 · 下个未处理序号 ${page.next_unapplied_ordinal??'无'}\n选择摘要 ${page.member_digest}\n筛选 ${JSON.stringify(page.filters)}`;
     const rows=$('batch-members');rows.replaceChildren();
     for(const item of page.items){
       const row=rows.insertRow();
