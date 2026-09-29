@@ -355,4 +355,6 @@ Memory 的冻结遗忘选择查询现从不可变 `batch_forget_operations` 按�
 
 逐批遗忘补齐了“事务已提交、Worker 未结算”故障窗口的隔离 PostgreSQL 验证：测试使持有领取的租约过期，下一次认领先读不可变 `batch_forget_operations` 回执，将队列直接收敛为 `SUCCEEDED`、保留原尝试次数和效果，且旧领取不得迟到结算，也未再次提高 Payload 删除纪元。真实 Edge 在隔离 MessageChannel fixture 中走通批次页展开、选择读取、预览、确认、携稳定幂等键的 action、状态轮询和进度刷新；该浏览器 fixture 模拟管理回执，不证明真实 Web 票据签发、PostgreSQL 入队或大规模批次压力。
 
-局部 Generation 保留的内核边界已核对：当前 Registry 的候选图构造、`kernel.runtime.publish_graph` 对全部成员的 READY/退役处理，以及 Contract Router 对准确 Graph ID/revision 的封口，共同决定了 `module.reload` 只能换整图。目标协议和需要保持的成员、路由、租约不变量已写入 [17](17-component-worker-host.md#局部换代的内核边界)；运行时代码、可选择包目录、显式启停及真正的局部换代仍未实现，不得把现有整图重建标为模块级热重载完成。
+局部 Generation 保留的内核边界已核对：当前 Registry 的候选图构造、`kernel.runtime.publish_graph` 对全部成员的 READY/退役处理，以及 Contract Router 对准确 Graph ID/revision 的封口，共同决定了 `module.reload` 只能换整图。目标协议和需要保持的成员、路由、租约不变量已写入 [17](17-component-worker-host.md#局部换代的内核边界)；显式启停及真正的局部换代仍未实现，不得把现有整图重建标为模块级热重载完成。
+
+Worker Host 包新增 `packages` 只读管理查询。它通过声明的 `deployment.package-registry.packages` 路由访问部署共用的 `PackageCatalog`，按目录修订分页读取、逐页校验不可变包字节，只返回包/组件身份、manifest 与工件摘要和能力申请，不暴露 ZIP/路径；包内 WebUI 折叠展示候选。包目录并发新增后旧页返回 `PACKAGE_CATALOG_CHANGED`。本地目录/包运行时回归 `8 passed`，隔离 PostgreSQL 完整 Bot 宿主在激活的 Worker Host Generation 上查询官方包候选，并完成原有热替换/重启链（`1 passed`，230.85 秒）。这一步只建立可审计的候选浏览端口，尚无部署安装权威、Bot 级选择/启停事实、兼容性验证或未变化 Generation 保留。

@@ -24,6 +24,15 @@ class ComponentWorkerHost(Plugin):
             timeout=10,
         )
 
+    @service("component.host.packages", semantics="read")
+    async def packages(self, payload, ctx):
+        return await ctx.services.call(
+            "deployment.package-registry.packages",
+            {"protocol": "forest.package-catalog-page-request/1", **payload},
+            operation_id=ctx.operations.stable("package-catalog-page"),
+            timeout=30,
+        )
+
     @service("component.host.modules", semantics="read")
     async def modules(self, payload, ctx):
         graph = await self._graph(ctx)

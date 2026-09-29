@@ -42,6 +42,54 @@ def test_build_never_imports_and_captures_complete_helpers(tmp_path):
         catalog.build(root)
 
 
+def test_catalog_page_verifies_artifacts_and_fences_concurrent_imports(tmp_path):
+    first_source = source(tmp_path)
+    catalog = PackageCatalog(tmp_path / "catalog")
+    first = catalog.build(first_source)
+    page = catalog.page(limit=1)
+    assert page["items"] == [{
+        "package_id": first.manifest["package_id"],
+        "package_version": first.manifest["version"],
+        "package_digest": first.digest,
+        "manifest_digest": packages.digest_json(first.manifest),
+        "component_id": first.component["id"],
+        "scope": first.component["scope"],
+        "runtime": first.manifest["runtime"],
+        "kernel_api": first.manifest["kernel_api"],
+        "requested_capabilities": first.component["capabilities"]["requests"],
+    }]
+    assert page["next_after"] is None
+    second_source = tmp_path / "second"
+    shutil.copytree(EXAMPLE, second_source)
+    manifest = second_source / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace('version = "0.1.0"', 'version = "0.1.1"'),
+        encoding="utf-8",
+    )
+    second = catalog.build(second_source)
+    with pytest.raises(ForestError) as changed:
+        catalog.page(catalog_revision=page["catalog_revision"])
+    assert changed.value.code == "PACKAGE_CATALOG_CHANGED"
+    first_page = catalog.page(limit=1)
+    assert first_page["next_after"] == {
+        "package_id": first.manifest["package_id"], "version": first.manifest["version"],
+    }
+    with pytest.raises(ForestError) as unfenced:
+        catalog.page(
+            after_package_id=first_page["next_after"]["package_id"],
+            after_version=first_page["next_after"]["version"],
+            limit=1,
+        )
+    assert unfenced.value.code == "PACKAGE_CATALOG_PAGE_INVALID"
+    second_page = catalog.page(
+        after_package_id=first_page["next_after"]["package_id"],
+        after_version=first_page["next_after"]["version"],
+        catalog_revision=first_page["catalog_revision"], limit=1,
+    )
+    assert second_page["items"][0]["package_digest"] == second.digest
+    assert second_page["next_after"] is None
+
+
 @pytest.mark.parametrize("grant", [False, True])
 def test_service_call_grants_require_manifest_dependencies(tmp_path, grant):
     root = source(tmp_path)

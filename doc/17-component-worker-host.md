@@ -73,11 +73,11 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 
 ## 落地顺序与当前差距
 
-当前 `component.worker-host` 的包内 `modules`/`module` 只读端口可以分页列出已发布 RuntimeGraph 成员并检查单个 Generation；分页游标绑定 Graph 身份，换代后拒绝旧页。它不等于可选择的包工件目录。包内 UI 已提供持久 `module.reload` 和配置重建状态查询。18 个 builtin 包和两项可配置的内核 authority 均从自身 Generation 发起标准配置事务，原子提交 desired 与 Worker Host 控制意图；Web gateway 只路由已授权的管理契约，不直接写配置或同步替换 Graph。`CleanBotHost._assemble_registry()` 仍静态拼装官方组件，可选择工件目录与显式启停尚未实现。
+当前 `component.worker-host` 的包内 `modules`/`module` 只读端口可以分页列出已发布 RuntimeGraph 成员并检查单个 Generation；分页游标绑定 Graph 身份，换代后拒绝旧页。新增 `packages` 只读端口经受限服务路由读取部署共用的 `PackageCatalog` 内容寻址目录，逐页校验包字节，返回 manifest 摘要、组件身份和能力申请；目录修订变化拒绝旧页，包内 UI 折叠展示候选声明。它只是候选工件浏览，不构成已授权的选择、启停或兼容性验收。包内 UI 已提供持久 `module.reload` 和配置重建状态查询。18 个 builtin 包和两项可配置的内核 authority 均从自身 Generation 发起标准配置事务，原子提交 desired 与 Worker Host 控制意图；Web gateway 只路由已授权的管理契约，不直接写配置或同步替换 Graph。`CleanBotHost._assemble_registry()` 仍静态拼装官方组件。
 
-群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/1` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执明确列出当前实现会替换整图所有 Generation；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable、可选择工件目录及保留未变化 Generation 仍待完成。
+群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/1` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执明确列出当前实现会替换整图所有 Generation；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable、工件选择控制及保留未变化 Generation 仍待完成。
 
-当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、持久重载账本及标准配置控制意图；可选择工件的 `packages`/`module.validate` 端口仍需通过内核受限目录快照建立。下一步实现显式启停、包选择和未变化 Generation 保留，并让 Shell/CLI 使用相同控制端口。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
+当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录、持久重载账本及标准配置控制意图。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须建立部署工件的安装/校验权威和 `module.validate`，再以 Worker Host 私有选择事实实现显式启停、包选择和未变化 Generation 保留，并让 Shell/CLI 使用相同控制端口。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
 
 ### 局部换代的内核边界
 

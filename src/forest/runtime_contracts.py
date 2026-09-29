@@ -135,6 +135,16 @@ class RuntimeKernelServiceContext:
 
         return self._registry._lease()
 
+    @property
+    def package_catalog(self):
+        """Read-only deployment artifact directory attached to this Bot host."""
+        catalog = getattr(self._registry.runtime.bot, "package_catalog", None)
+        if catalog is None:
+            raise ForestError(
+                "PACKAGE_CATALOG_UNAVAILABLE", "Deployment package catalog is unavailable", 503
+            )
+        return catalog
+
     def participant(self, component_id: str):
         if component_id not in self._participants:
             raise ForestError(

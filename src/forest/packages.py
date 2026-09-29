@@ -19,6 +19,7 @@ import sys
 import tomllib
 import zipfile
 from collections.abc import Callable
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -1986,11 +1987,81 @@ class PackageCatalog:
             )
         ]
 
+    def page(
+        self,
+        *,
+        after_package_id: str = "",
+        after_version: str = "",
+        limit: int = 32,
+        catalog_revision: str | None = None,
+    ) -> dict:
+        """Project verified installable artifacts without exposing files or paths."""
+        if (
+            not isinstance(after_package_id, str)
+            or not isinstance(after_version, str)
+            or (not after_package_id and after_version)
+            or (after_package_id and (not after_version or catalog_revision is None))
+            or (after_package_id and not re.fullmatch(
+                r"[a-z0-9][a-z0-9._-]{0,127}", after_package_id
+            ))
+            or (after_version and not re.fullmatch(
+                r"[0-9A-Za-z][0-9A-Za-z.+-]{0,127}", after_version
+            ))
+            or type(limit) is not int
+            or not 1 <= limit <= 64
+            or (catalog_revision is not None and not isinstance(catalog_revision, str))
+        ):
+            _fail("PACKAGE_CATALOG_PAGE_INVALID", "Package catalog page input is invalid")
+        rows = self._rows(
+            "SELECT package_id,version,digest FROM packages ORDER BY package_id,version", ()
+        )
+        revision = digest_json({
+            "protocol": "forest.package-catalog-revision/1", "entries": rows,
+        })
+        if catalog_revision is not None and catalog_revision != revision:
+            raise ForestError(
+                "PACKAGE_CATALOG_CHANGED", "Package catalog changed during pagination", 409
+            )
+        following = [
+            row for row in rows if (row[0], row[1]) > (after_package_id, after_version)
+        ]
+        page = following[:limit]
+        items = []
+        for package_id, package_version, digest in page:
+            snapshot = self.get(digest)
+            if (snapshot.manifest["package_id"], snapshot.manifest["version"]) != (
+                package_id, package_version
+            ):
+                _fail("PACKAGE_TAMPERED", "Catalog index differs from its immutable package")
+            component = snapshot.component
+            items.append({
+                "package_id": package_id,
+                "package_version": package_version,
+                "package_digest": digest,
+                "manifest_digest": digest_json(snapshot.manifest),
+                "component_id": component["id"],
+                "scope": component["scope"],
+                "runtime": snapshot.manifest["runtime"],
+                "kernel_api": snapshot.manifest["kernel_api"],
+                "requested_capabilities": list(
+                    component.get("capabilities", {}).get("requests", ())
+                ),
+            })
+        return {
+            "protocol": "forest.package-catalog-page/1",
+            "catalog_revision": revision,
+            "items": items,
+            "next_after": (
+                {"package_id": page[-1][0], "version": page[-1][1]}
+                if len(following) > limit else None
+            ),
+        }
+
     def _rows(self, query: str, parameters: tuple, *, table: str = "packages") -> list[tuple]:
         path = self.root / "catalog.sqlite3"
         if not path.exists():
             return []
-        with sqlite3.connect(path, timeout=10) as db:
+        with closing(sqlite3.connect(path, timeout=10)) as db:
             if not db.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
             ).fetchone():
@@ -2003,7 +2074,7 @@ class PackageCatalog:
             {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
         )
         destination = self.root / digest.removeprefix("sha256:")
-        with sqlite3.connect(self.root / "catalog.sqlite3", timeout=10) as db:
+        with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
             db.execute("PRAGMA synchronous=FULL")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS packages (package_id TEXT, version TEXT, "

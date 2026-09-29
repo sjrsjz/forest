@@ -15,6 +15,7 @@
     dl div{border:1px solid #284036;border-radius:8px;padding:8px 10px;min-width:0}
     dt{color:#a9c1b2}dd{margin:3px 0 0;overflow-wrap:anywhere}
     #status{min-height:1.4em}#reload-result,#configuration-result{padding:10px;border:1px solid #284036;border-radius:8px;overflow-wrap:anywhere}
+    details{border:1px solid #284036;border-radius:8px;padding:9px 11px}summary{cursor:pointer}#package-items{max-height:300px;overflow:auto;margin:8px 0}#package-items div{padding:7px 0;border-bottom:1px solid #284036;overflow-wrap:anywhere}#package-items small{display:block;color:#a9c1b2}
     @media(max-width:640px){dl{grid-template-columns:1fr}}
   </style>
 </head>
@@ -40,6 +41,12 @@
       <div><dt>Generation</dt><dd id="generation"></dd></div>
       <div><dt>Admission</dt><dd id="admission"></dd></div>
     </dl>
+    <details id="catalog">
+      <summary>已登记包工件</summary>
+      <p>这里只显示经校验的工件声明；选择、启停和局部换代控制尚未开放。</p>
+      <div class="row"><button id="load-packages" type="button">读取目录</button><button id="more-packages" type="button" hidden>下一页</button></div>
+      <div id="package-items"></div>
+    </details>
     <p>Current reload implementation replaces every Generation in the Graph. The request remains visible after the old Worker retires.</p>
     <div id="reload-result" hidden></div>
     <button id="refresh-reload" type="button" hidden>Refresh reload status</button>
@@ -51,7 +58,7 @@
   </main>
   <script>
   (()=>{'use strict';
-    let port,nonce,sequence=0,graphId='',graphRevision=0,nextAfter=null,selected='',reloadId='';
+    let port,nonce,sequence=0,graphId='',graphRevision=0,nextAfter=null,selected='',reloadId='',catalogRevision='',catalogNext=null;
     const pending=new Map(),byId=id=>document.getElementById(id);
     const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
     const resize=()=>send('resize',{height:document.documentElement.scrollHeight});
@@ -89,6 +96,27 @@
       byId('generation').textContent=member.generation_id;
       byId('admission').textContent=`DATA ${member.data_admission?'open':'closed'} / CONTROL ${member.control_admission?'open':'closed'}`;
       byId('details').hidden=false;byId('reload').disabled=false;resize();
+    }
+    async function listPackages(next=false){
+      const input={limit:16};
+      if(next&&catalogNext){
+        input.after_package_id=catalogNext.package_id;
+        input.after_version=catalogNext.version;
+        input.catalog_revision=catalogRevision;
+      }
+      const page=await call('query','packages',input);
+      if(!next)byId('package-items').replaceChildren();
+      catalogRevision=page.catalog_revision;catalogNext=page.next_after;
+      for(const item of page.items){
+        const box=document.createElement('div');
+        const name=document.createElement('strong');
+        name.textContent=`${item.package_id} ${item.package_version} · ${item.component_id} (${item.scope})`;
+        const facts=document.createElement('small');
+        facts.textContent=`工件 ${item.package_digest} · 清单 ${item.manifest_digest}\n能力申请：${item.requested_capabilities.join('、')||'无'}`;
+        box.append(name,facts);byId('package-items').append(box);
+      }
+      if(!page.items.length&&!next)byId('package-items').textContent='目录中没有已登记工件。';
+      byId('more-packages').hidden=!catalogNext;resize();
     }
     async function reload(){
       if(!selected||byId('component-id').value.trim()!==selected)throw new Error('Inspect the selected component first');
@@ -138,6 +166,8 @@
     byId('refresh-reload').onclick=()=>reloadStatus().catch(error=>notice(error.message));
     byId('refresh-configuration').onclick=()=>configurationStatus().catch(error=>notice(error.message));
     byId('more').onclick=()=>list(nextAfter).catch(error=>notice(error.message));
+    byId('load-packages').onclick=()=>listPackages().catch(error=>notice(error.message));
+    byId('more-packages').onclick=()=>listPackages(true).catch(error=>notice(error.message));
     byId('components').onchange=()=>{
       byId('component-id').value=byId('components').value;inspect().catch(error=>notice(error.message));
     };
