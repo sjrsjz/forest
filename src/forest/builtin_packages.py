@@ -22,13 +22,17 @@ from forest.package_state_ports import (
     KernelPackageStateCommands,
     KernelPackageStateQueries,
 )
-from forest.package_unit_of_work import package_uow_coordinator_factory
+from forest.package_unit_of_work import (
+    PostgresPackageConfigurationApplyCoordinator,
+    package_uow_coordinator_factory,
+)
 from forest.packages import (
     PackageCatalog,
     PackageSnapshot,
     contract_matches,
     contract_range,
     digest_json,
+    storage_bundle_digest,
 )
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
@@ -83,6 +87,7 @@ def _configuration_storage(snapshot: PackageSnapshot) -> RuntimeStorageBundle:
 
     from importlib.resources import files
 
+    component_id = snapshot.component["id"]
     common = files("forest").joinpath("storage/official/module_configuration.sql").read_bytes()
     declared = snapshot.storage_bundle()
     if declared is None:
@@ -97,22 +102,16 @@ def _configuration_storage(snapshot: PackageSnapshot) -> RuntimeStorageBundle:
         repository_contract = metadata["repository_contract"]
     baseline = common + (b"\n" + owned if owned else b"")
     baseline_sha256 = hashlib.sha256(baseline).hexdigest()
-    storage_digest = digest_json(
-        {
-            "protocol": "forest.builtin-package-storage/1",
-            "package_digest": snapshot.digest,
-            "baseline_sha256": baseline_sha256,
-            "repository_contract": repository_contract,
-        }
+    spec = StorageBundleSpec(
+        component_id,
+        schema_id,
+        schema_version,
+        baseline_sha256,
+        repository_contract,
     )
+    storage_digest = storage_bundle_digest(spec, "official")
     return RuntimeStorageBundle(
-        StorageBundleSpec(
-            component_id=snapshot.component["id"],
-            schema_id=schema_id,
-            schema_version=schema_version,
-            baseline_sha256=baseline_sha256,
-            repository_contract=repository_contract,
-        ),
+        spec,
         baseline,
         storage_digest,
         execution_profile="official",
@@ -242,6 +241,15 @@ async def bootstrap_builtin_package(
         unit_of_work_coordinator_factory=package_uow_coordinator_factory(
             store=store,
             runtime=kernel.runtime,
+        ),
+        configuration_apply_coordinator_factory=lambda target, repository, control: (
+            PostgresPackageConfigurationApplyCoordinator(
+                store,
+                kernel.runtime,
+                component_id=target,
+                configuration=repository,
+                control_handle=control,
+            )
         ),
         owned_work_authority=domain_authority,
         agent_tool_effects=kernel.effect,

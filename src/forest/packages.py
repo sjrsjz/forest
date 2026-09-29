@@ -113,6 +113,7 @@ MANIFEST_SCHEMA = {
                         key: {"type": "string"}
                         for key in ("id", "scope", "reload_mode", "config_schema")
                     },
+                    "configuration_apply": {"const": "worker-host/1"},
                     "state_schema": {"type": "integer", "minimum": 1, "maximum": 2147483647},
                     "config_immutable_paths": {
                         "type": "array",
@@ -1096,6 +1097,19 @@ def _management_ui(files: dict[str, bytes], component: dict) -> dict | None:
     }
 
 
+def storage_bundle_digest(spec: StorageBundleSpec, execution_profile: str) -> str:
+    """Bind installed storage to its schema, independently of runtime code."""
+
+    return digest_json(
+        {
+            "protocol": "forest.storage-bundle/1",
+            **spec.as_fact(),
+            "component_id": spec.component_id,
+            "execution_profile": execution_profile,
+        }
+    )
+
+
 def _storage_bundle(files: dict[str, bytes], component: dict) -> dict | None:
     declaration = component.get("storage")
     if declaration is None:
@@ -1140,6 +1154,7 @@ def _storage_bundle(files: dict[str, bytes], component: dict) -> dict | None:
         "repository_contract": spec.repository_contract,
         "execution_profile": execution_profile,
         "bytes": len(content),
+        "package_digest": storage_bundle_digest(spec, execution_profile),
     }
 
 
@@ -1858,7 +1873,7 @@ class PackageSnapshot:
         metadata = _storage_bundle(files, self.component)
         if metadata is None:
             return None
-        return {**metadata, "package_digest": self.digest}, files[metadata["baseline"]]
+        return metadata, files[metadata["baseline"]]
 
     def _verified_files(self) -> dict[str, bytes]:
         files = _capture(self.root)

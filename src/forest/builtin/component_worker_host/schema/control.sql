@@ -102,7 +102,11 @@ BEGIN
   SELECT * INTO saved FROM __forest_module_schema__.configuration_rebuild_intents
    WHERE bot_id=bot AND operation_id=operation;
   IF FOUND THEN
-    IF saved.input_digest IS DISTINCT FROM context->>'input_digest' THEN
+    IF saved.target_component_id IS DISTINCT FROM input->>'target_component_id'
+       OR saved.plan_id IS DISTINCT FROM input->>'plan_id'
+       OR saved.desired_revision IS DISTINCT FROM (input->>'desired_revision')::bigint
+       OR saved.payload_digest IS DISTINCT FROM input->>'payload_digest'
+       OR saved.requested_by IS DISTINCT FROM input->>'requested_by' THEN
       RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
         jsonb_build_object('code','COMPONENT_CONFIGURATION_REBUILD_CONFLICT',
           'message','Configuration rebuild operation input differs','status',409));

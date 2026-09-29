@@ -656,6 +656,7 @@ async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_p
         state_commands=None,
         service_operation_ledger=EffectServiceLedger(),
         effect_driver_factories={"process.native.spawn": driver_factory},
+        configuration_apply_coordinator_factory=lambda *_args: SimpleNamespace(),
     )
     assert descriptor.job_types[0].as_fact() == {
         "protocol": "forest.job-type-contribution/1",

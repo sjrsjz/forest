@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict
 
 from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.errors import ForestError
+from forest.package_management import PackageManagementContract
 from forest.packages import digest_json
 from forest.storage.kernel_audit import AuditEnvelope
 from forest.storage.management_asset_authority import (
@@ -301,36 +302,14 @@ class CleanManagementGateway:
         input_digest: str,
         plan_digest: str | None,
     ) -> dict:
-        await self.ticket_authority.verify(
-            ticket,
-            target_scope_kind="bot",
-            target_scope_id=self.scope_id,
-            target_component_id=component_id,
-            target_generation_id=ticket.target_generation_id,
-            target_graph_revision=ticket.target_graph_revision,
-            target_operation_ref=operation_id,
+        await self._verify_management_target_in(
+            conn,
+            ticket=ticket,
+            component_id=component_id,
+            operation_id=operation_id,
             action_key=action_key,
             input_digest=input_digest,
             plan_digest=plan_digest,
-            required_role="ADMIN",
-        )
-        route = await self.host._kernel.runtime.verify_active_generation_in(
-            conn,
-            component_id=component_id,
-            generation_id=ticket.target_generation_id,
-            admission_lane="CONTROL",
-        )
-        if route.graph_revision != ticket.target_graph_revision:
-            raise ForestError(
-                "WEB_AUTHORITY_TICKET_TARGET_MISMATCH",
-                "Web authority ticket names another RuntimeGraph revision",
-                403,
-            )
-        await self._authorize_bot_policy(
-            ticket,
-            component_id=component_id,
-            action_key=action_key,
-            conn=conn,
         )
         receipt = await self.host._kernel.authorization.accept_web_authority_ticket_in(
             conn, ticket=ticket
@@ -364,6 +343,49 @@ class CleanManagementGateway:
             ),
         )
         return receipt
+
+    async def _verify_management_target_in(
+        self,
+        conn,
+        *,
+        ticket,
+        component_id: str,
+        operation_id: str,
+        action_key: str,
+        input_digest: str,
+        plan_digest: str | None,
+    ) -> None:
+        await self.ticket_authority.verify(
+            ticket,
+            target_scope_kind="bot",
+            target_scope_id=self.scope_id,
+            target_component_id=component_id,
+            target_generation_id=ticket.target_generation_id,
+            target_graph_revision=ticket.target_graph_revision,
+            target_operation_ref=operation_id,
+            action_key=action_key,
+            input_digest=input_digest,
+            plan_digest=plan_digest,
+            required_role="ADMIN",
+        )
+        route = await self.host._kernel.runtime.verify_active_generation_in(
+            conn,
+            component_id=component_id,
+            generation_id=ticket.target_generation_id,
+            admission_lane="CONTROL",
+        )
+        if route.graph_revision != ticket.target_graph_revision:
+            raise ForestError(
+                "WEB_AUTHORITY_TICKET_TARGET_MISMATCH",
+                "Web authority ticket names another RuntimeGraph revision",
+                403,
+            )
+        await self._authorize_bot_policy(
+            ticket,
+            component_id=component_id,
+            action_key=action_key,
+            conn=conn,
+        )
 
     async def runtime(self, *, authorization=None, operation_id=None) -> dict:
         await self._authorize(
@@ -475,8 +497,17 @@ class CleanManagementGateway:
             plan_digest=digest_json({"plan_id": body.plan_id}),
             required_role="ADMIN",
         )
+        contract = self.contract(component_id)
+        if isinstance(contract, PackageManagementContract):
+            return await contract.apply(
+                operation_id=operation_id,
+                plan_id=body.plan_id,
+                expected_desired_revision=body.expected_desired_revision,
+                authorization=authorization,
+                authorization_guard=self._authorize_mutation_in,
+                authorization_replay_guard=self._verify_management_target_in,
+            )
         async with self._apply_lock:
-            contract = self.contract(component_id)
             saved = await contract.apply(
                 operation_id=operation_id,
                 plan_id=body.plan_id,

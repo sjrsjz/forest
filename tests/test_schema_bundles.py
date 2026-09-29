@@ -7,6 +7,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
+from shutil import copytree, ignore_patterns
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -16,7 +17,7 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
-from forest.builtin_packages import bootstrap_builtin_package
+from forest.builtin_packages import _configuration_storage, bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
@@ -248,6 +249,26 @@ def test_official_storage_identity_is_independent_from_runtime_distribution():
     assert first.package_digest != runtime_artifact.package_digest
     assert first.package_digest != another.package_digest
     assert first.as_fact()["package_digest"] == first.package_digest
+
+
+def test_builtin_storage_identity_survives_code_only_hot_reload(tmp_path):
+    source = tmp_path / "counter"
+    copytree(
+        Path(__file__).resolve().parents[1] / "src/forest/builtin/counter",
+        source,
+        ignore=ignore_patterns("__pycache__", "*.pyc"),
+    )
+    catalog = PackageCatalog(tmp_path / "catalog")
+    before = catalog.build(source, development=True)
+    worker = source / "python/counter.py"
+    worker.write_bytes(worker.read_bytes() + b"\n# code-only package revision\n")
+    after = catalog.build(source, development=True)
+
+    assert before.digest != after.digest
+    assert before.manifest["version"] != after.manifest["version"]
+    assert _configuration_storage(before).package_digest == _configuration_storage(
+        after
+    ).package_digest
 
 
 @pytest.mark.postgres

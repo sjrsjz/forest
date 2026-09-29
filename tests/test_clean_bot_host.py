@@ -25,7 +25,7 @@ from pymilvus import AsyncMilvusClient
 
 from forest.adapters.onebot import SendResult
 from forest.clean_bot_host import CleanBotHost, CleanBotSettings
-from forest.clean_management_app import CleanManagementGateway
+from forest.clean_management_app import CleanManagementGateway, ConfigurationApplyInput
 from forest.deployment_management_app import create_deployment_management_app
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
@@ -37,7 +37,6 @@ from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import (
     FrozenServiceRoute,
     RuntimeServiceInvocation,
-    RuntimeUnitOfWorkParticipantHandle,
 )
 from forest.runtime_modules import ModuleLifecycleState
 from forest.shell_command_protocol import ShellCommandExecutionRequest
@@ -728,22 +727,44 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
                 await rejected_coordinator.execute(configuration_scope, **apply_args)
             assert rejected.value.code == "TEST_CONTROL_REJECTED"
             assert (await agent_configuration.desired()).revision == current_configuration.revision
-            configuration_coordinator = PostgresPackageConfigurationApplyCoordinator(
-                host._kernel.runtime.store,
-                host._kernel.runtime,
-                component_id="agent.runtime",
-                configuration=agent_configuration,
-                control_handle=RuntimeUnitOfWorkParticipantHandle(
-                    host.registry.contract_router, "component.worker-host"
+            gateway = CleanManagementGateway(
+                host,
+                ticket_authority=WebAuthorityTicketAuthority(
+                    issuer_id="deployment/configuration-test",
+                    active_key_id="master/configuration-test/1",
+                    key_resolver=lambda _key_id: b"k" * 32,
                 ),
             )
-            committed = await configuration_coordinator.execute(configuration_scope, **apply_args)
-            assert committed["configuration"].revision == current_configuration.revision + 1
+            body = ConfigurationApplyInput(
+                plan_id=configuration_plan["plan_id"],
+                expected_desired_revision=current_configuration.revision,
+            )
+            web_ticket = await gateway.ticket_authority.issue(
+                session=AuthenticatedWebSession(
+                    "token-digest", "session/configuration-test", 1, "csrf-digest",
+                    WebSubject("subject/host-admin", "admin", "Administrator", "ADMIN", True, 1),
+                    datetime.now(timezone.utc) + timedelta(hours=1),
+                ),
+                target_scope_kind="bot",
+                target_scope_id=settings.bot_id,
+                target_component_id="agent.runtime",
+                target_generation_id=replacement.generations["agent.runtime"],
+                target_graph_revision=replacement.graph_revision,
+                target_operation_ref=apply_args["operation_id"],
+                action_key="configuration.apply",
+                input_digest=digest_json(body.model_dump(mode="json")),
+                plan_digest=digest_json({"plan_id": body.plan_id}),
+            )
+            committed = await gateway.apply_configuration(
+                "agent.runtime",
+                body=body,
+                idempotency_key="atomic-test",
+                authorization=web_ticket,
+                operation_id=apply_args["operation_id"],
+            )
+            assert committed["configuration"]["revision"] == current_configuration.revision + 1
             assert committed["rebuild"]["target_component_id"] == "agent.runtime"
             request_id = committed["rebuild"]["request_id"]
-            replayed = await configuration_coordinator.execute(configuration_scope, **apply_args)
-            assert replayed["configuration"] == committed["configuration"]
-            assert replayed["rebuild"]["request_id"] == request_id
             async with asyncio.timeout(180):
                 while True:
                     try:
@@ -762,6 +783,33 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
                     await asyncio.sleep(0.2)
             assert rebuild["state"] == "EFFECTIVE", rebuild
             assert host.registry.graph_identity.graph_revision > replacement.graph_revision
+            active_graph = host.registry.graph_identity
+            replay_ticket = await gateway.ticket_authority.issue(
+                session=AuthenticatedWebSession(
+                    "token-digest", "session/configuration-test", 1, "csrf-digest",
+                    WebSubject("subject/host-admin", "admin", "Administrator", "ADMIN", True, 1),
+                    datetime.now(timezone.utc) + timedelta(hours=1),
+                ),
+                target_scope_kind="bot",
+                target_scope_id=settings.bot_id,
+                target_component_id="agent.runtime",
+                target_generation_id=active_graph.generations["agent.runtime"],
+                target_graph_revision=active_graph.graph_revision,
+                target_operation_ref=apply_args["operation_id"],
+                action_key="configuration.apply",
+                input_digest=digest_json(body.model_dump(mode="json")),
+                plan_digest=digest_json({"plan_id": body.plan_id}),
+            )
+            replayed = await gateway.apply_configuration(
+                "agent.runtime",
+                body=body,
+                idempotency_key="atomic-test",
+                authorization=replay_ticket,
+                operation_id=apply_args["operation_id"],
+            )
+            assert replayed["configuration"] == committed["configuration"]
+            assert replayed["rebuild"]["request_id"] == request_id
+            assert host.registry.graph_identity.graph_id == active_graph.graph_id
         finally:
             await host.close()
     finally:

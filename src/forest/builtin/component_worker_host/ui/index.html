@@ -14,7 +14,7 @@
     dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
     dl div{border:1px solid #284036;border-radius:8px;padding:8px 10px;min-width:0}
     dt{color:#a9c1b2}dd{margin:3px 0 0;overflow-wrap:anywhere}
-    #status{min-height:1.4em}#reload-result{padding:10px;border:1px solid #284036;border-radius:8px;overflow-wrap:anywhere}
+    #status{min-height:1.4em}#reload-result,#configuration-result{padding:10px;border:1px solid #284036;border-radius:8px;overflow-wrap:anywhere}
     @media(max-width:640px){dl{grid-template-columns:1fr}}
   </style>
 </head>
@@ -43,6 +43,11 @@
     <p>Current reload implementation replaces every Generation in the Graph. The request remains visible after the old Worker retires.</p>
     <div id="reload-result" hidden></div>
     <button id="refresh-reload" type="button" hidden>Refresh reload status</button>
+    <div class="row">
+      <label>Configuration rebuild request<input id="configuration-request-id" placeholder="config-rebuild:..."></label>
+      <button id="refresh-configuration" type="button">Check status</button>
+    </div>
+    <div id="configuration-result" hidden></div>
   </main>
   <script>
   (()=>{'use strict';
@@ -104,6 +109,16 @@
         (kernel?.error_code||value.error_code?` / ${kernel?.error_code||value.error_code}`:'');
       resize();
     }
+    async function configurationStatus(){
+      const request_id=byId('configuration-request-id').value.trim();
+      if(!/^config-rebuild:[0-9a-f]{32}$/.test(request_id))throw new Error('Invalid configuration rebuild request ID');
+      const value=await call('query','configuration-rebuild',{request_id});
+      byId('configuration-result').hidden=false;
+      byId('configuration-result').textContent=`${value.target_component_id} / desired r${value.desired_revision} / ${value.state}`+
+        (value.error_code?` / ${value.error_code}`:'')+
+        (value.kernel_receipt?.operation_id?` / ${value.kernel_receipt.operation_id}`:'');
+      resize();
+    }
     addEventListener('message',event=>{
       const message=event.data||{};
       if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect'||typeof message.nonce!=='string')return;
@@ -121,6 +136,7 @@
     byId('inspect').onclick=()=>inspect().catch(error=>notice(error.message));
     byId('reload').onclick=()=>reload().catch(error=>notice(error.message));
     byId('refresh-reload').onclick=()=>reloadStatus().catch(error=>notice(error.message));
+    byId('refresh-configuration').onclick=()=>configurationStatus().catch(error=>notice(error.message));
     byId('more').onclick=()=>list(nextAfter).catch(error=>notice(error.message));
     byId('components').onchange=()=>{
       byId('component-id').value=byId('components').value;inspect().catch(error=>notice(error.message));

@@ -14,7 +14,7 @@ import pytest
 from forest import packages
 from forest.errors import ForestError
 from forest.packages import PackageCatalog
-from forest.schema_bundles import module_schema_namespace
+from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "counter"
 
@@ -220,7 +220,12 @@ def test_storage_bundle_is_content_addressed_package_content(tmp_path):
         "repository_contract": "counter.repository/1",
         "execution_profile": "declarative",
         "bytes": len(sql),
-        "package_digest": snapshot.digest,
+        "package_digest": packages.storage_bundle_digest(
+            StorageBundleSpec(
+                "example.counter", "counter.state", "1.0.0", digest, "counter.repository/1"
+            ),
+            "declarative",
+        ),
     }
     copied = snapshot.root / "schema" / "baseline.sql"
     copied.chmod(0o600)

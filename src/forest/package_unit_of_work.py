@@ -12,6 +12,7 @@ import psycopg
 
 from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope, PackageOwnedWorkCallScope
+from forest.packages import digest_json
 
 
 def _step_operation(operation_id: str, plan_name: str, step_id: str) -> str:
@@ -40,6 +41,7 @@ class PostgresPackageConfigurationApplyCoordinator:
         expected_desired_revision: int,
         authorization,
         authorization_guard,
+        authorization_replay_guard=None,
     ) -> dict:
         if (
             scope.component_id != self.component_id
@@ -61,6 +63,7 @@ class PostgresPackageConfigurationApplyCoordinator:
                     expected_desired_revision=expected_desired_revision,
                     authorization=authorization,
                     authorization_guard=authorization_guard,
+                    authorization_replay_guard=authorization_replay_guard,
                 )
         except ForestError:
             raise
@@ -86,6 +89,7 @@ class PostgresPackageConfigurationApplyCoordinator:
         expected_desired_revision: int,
         authorization,
         authorization_guard,
+        authorization_replay_guard,
     ) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.runtime.verify_active_generation_in(
@@ -105,14 +109,42 @@ class PostgresPackageConfigurationApplyCoordinator:
                 component_id=control.component_id,
                 generation_id=control.generation_id,
             )
-            saved = await self.configuration.apply_in(
+            saved = await self.configuration.applied_by_operation_in(
                 conn,
                 operation_id=operation_id,
                 plan_id=plan_id,
                 expected_desired_revision=expected_desired_revision,
-                authorization=authorization,
-                authorization_guard=authorization_guard,
             )
+            if saved is None:
+                saved = await self.configuration.apply_in(
+                    conn,
+                    operation_id=operation_id,
+                    plan_id=plan_id,
+                    expected_desired_revision=expected_desired_revision,
+                    authorization=authorization,
+                    authorization_guard=authorization_guard,
+                )
+            else:
+                if authorization_replay_guard is None:
+                    raise ForestError(
+                        "PACKAGE_CONFIGURATION_REPLAY_AUTHORITY_UNAVAILABLE",
+                        "Configuration replay requires current Web authority",
+                        403,
+                    )
+                await authorization_replay_guard(
+                    conn,
+                    ticket=authorization,
+                    component_id=self.component_id,
+                    operation_id=operation_id,
+                    action_key="configuration.apply",
+                    input_digest=digest_json(
+                        {
+                            "plan_id": plan_id,
+                            "expected_desired_revision": expected_desired_revision,
+                        }
+                    ),
+                    plan_digest=digest_json({"plan_id": plan_id}),
+                )
             configuration = {
                 "component_id": self.component_id,
                 "generation_id": scope.generation_id,

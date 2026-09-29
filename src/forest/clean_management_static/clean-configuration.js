@@ -6,6 +6,8 @@ export async function mount({root, component, api, notice, refresh}) {
   get('config-save').onclick=async()=>{const button=get('config-save');button.disabled=true;notice('');try{let value;try{value=JSON.parse(get('config-editor').value);}catch{throw new Error('JSON 格式无效。');}
     const key=crypto.randomUUID();const plan=await api(`/management/v1/modules/${encodeURIComponent(component.component_id)}/configuration/plans`,{method:'POST',headers:{'idempotency-key':`${key}:plan`},body:JSON.stringify({expected_desired_revision:current.desired.revision,value})});
     const applied=await api(`/management/v1/modules/${encodeURIComponent(component.component_id)}/configuration/apply`,{method:'POST',headers:{'idempotency-key':`${key}:apply`},body:JSON.stringify({plan_id:plan.plan_id,expected_desired_revision:current.desired.revision})});
-    notice(`配置 r${applied.configuration.revision} 已随 RuntimeGraph ${applied.graph_revision} 生效。`);await refresh();
+    notice(applied.rebuild
+      ? `配置 r${applied.configuration.revision} 已提交；重建请求 ${applied.rebuild.request_id} 正在处理。`
+      : `配置 r${applied.configuration.revision} 已随 RuntimeGraph ${applied.graph_revision} 生效。`);await refresh();
   }catch(error){notice(error.message);}finally{button.disabled=false;}};
 }

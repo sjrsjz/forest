@@ -357,6 +357,35 @@ class ModuleConfigurationRepository:
         )
         return self._configuration(row)
 
+    async def applied_by_operation_in(
+        self,
+        conn,
+        *,
+        operation_id: str,
+        plan_id: str,
+        expected_desired_revision: int,
+    ) -> EffectiveModuleConfiguration | None:
+        """Read an exact committed apply for authorized, side-effect-free replay."""
+
+        existing = await self._revision_by_operation_in(conn, operation_id)
+        if existing is None:
+            return None
+        input_digest = digest_json(
+            [
+                "forest.module-configuration.apply/1",
+                self.component_id,
+                plan_id,
+                expected_desired_revision,
+            ]
+        )
+        self._guard_revision(
+            existing,
+            input_digest,
+            previous_revision=expected_desired_revision,
+            plan_id=plan_id,
+        )
+        return self._configuration(existing)
+
     async def activate_in(
         self,
         conn,

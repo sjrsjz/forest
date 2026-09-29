@@ -229,6 +229,7 @@ class PackageGenerationAdapter:
         domain_commands: PackageDomainCommands | None = None,
         unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
         unit_of_work_coordinator: PackageUnitOfWorkCoordinator | None = None,
+        configuration_apply_coordinator=None,
         owned_work_authority: PackageOwnedWorkAuthority | None = None,
         service_operation_ledger: PackageServiceOperationLedger,
         configuration_validator: Callable[[object], Any] | None = None,
@@ -259,6 +260,7 @@ class PackageGenerationAdapter:
         self._domain_commands = domain_commands
         self._unit_of_work_authority = unit_of_work_authority
         self._unit_of_work_coordinator = unit_of_work_coordinator
+        self._configuration_apply_coordinator = configuration_apply_coordinator
         self._service_operation_ledger = service_operation_ledger
         self._configuration_validator = configuration_validator
         self._effect_driver_factories = dict(effect_driver_factories or {})
@@ -560,6 +562,60 @@ class PackageGenerationAdapter:
                 404,
             )
         return artifact
+
+    async def apply_configuration(
+        self,
+        *,
+        operation_id: str,
+        plan_id: str,
+        expected_desired_revision: int,
+        authorization,
+        authorization_guard,
+        authorization_replay_guard,
+    ) -> dict:
+        """Run this Generation's declared standard configuration transaction."""
+
+        identity = self.generation_identity
+        binding = self._prepared_binding
+        coordinator = self._configuration_apply_coordinator
+        if (
+            self.component.get("configuration_apply") != "worker-host/1"
+            or identity is None
+            or binding is None
+            or coordinator is None
+            or self.state is not PackageGenerationState.ACTIVE
+        ):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_APPLY_UNAVAILABLE",
+                "Active package Generation does not publish configuration apply",
+                409,
+            )
+        self._service_inflight += 1
+        self._services_drained.clear()
+        try:
+            return await coordinator.execute(
+                PackageCallScope(
+                    bot_id=self.bot_id,
+                    component_id=self.component_id,
+                    generation_id=identity.generation_id,
+                    instance_id=binding.instance_id,
+                    worker_incarnation=binding.worker_incarnation,
+                    call_id="call:" + uuid4().hex,
+                    call_operation_id=operation_id,
+                    causal_root_kind="management.configuration",
+                    causal_root_id=operation_id,
+                ),
+                operation_id=operation_id,
+                plan_id=plan_id,
+                expected_desired_revision=expected_desired_revision,
+                authorization=authorization,
+                authorization_guard=authorization_guard,
+                authorization_replay_guard=authorization_replay_guard,
+            )
+        finally:
+            self._service_inflight -= 1
+            if self._service_inflight == 0:
+                self._services_drained.set()
 
     def unit_of_work_participant(self) -> PackageUnitOfWorkParticipant:
         """Resolve a narrow handle bound to this exact package Generation."""
@@ -2536,6 +2592,7 @@ def package_runtime_descriptor(
         [str, Mapping[str, Any]], PackageUnitOfWorkCoordinator
     ]
     | None = None,
+    configuration_apply_coordinator_factory=None,
     owned_work_authority: PackageOwnedWorkAuthority | None = None,
     agent_tool_effects: PackageAgentToolEffectAuthority | None = None,
     service_operation_ledger: PackageServiceOperationLedger,
@@ -2639,6 +2696,12 @@ def package_runtime_descriptor(
         raise ForestError(
             "PACKAGE_UOW_COORDINATOR_UNAVAILABLE",
             "Package declares UnitOfWork plans without an installed coordinator",
+            503,
+        )
+    if component.get("configuration_apply") and configuration_apply_coordinator_factory is None:
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_APPLY_COORDINATOR_UNAVAILABLE",
+            "Package declares configuration apply without the standard coordinator",
             503,
         )
     if component.get("owned_work_handlers") and owned_work_authority is None:
@@ -2787,6 +2850,15 @@ def package_runtime_descriptor(
             and component.get("unit_of_work_plans")
             else None
         )
+        configuration_apply_coordinator = (
+            configuration_apply_coordinator_factory(
+                component["id"],
+                module_configuration,
+                contracts.unit_of_work_participant("component.worker-host"),
+            )
+            if component.get("configuration_apply")
+            else None
+        )
         adapter = PackageGenerationAdapter(
             snapshot=snapshot,
             bot_id=bot_id,
@@ -2803,6 +2875,7 @@ def package_runtime_descriptor(
             domain_commands=domain_commands,
             unit_of_work_authority=unit_of_work_authority,
             unit_of_work_coordinator=unit_of_work_coordinator,
+            configuration_apply_coordinator=configuration_apply_coordinator,
             owned_work_authority=owned_work_authority,
             service_operation_ledger=service_operation_ledger,
             configuration_validator=configuration_validator,
