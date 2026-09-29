@@ -1,4 +1,4 @@
-"""Manifest-frozen cross-module UnitOfWork execution for package Workers."""
+"""Standard component configuration and manifest-frozen package UnitOfWork execution."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import psycopg
@@ -22,6 +23,29 @@ def _step_operation(operation_id: str, plan_name: str, step_id: str) -> str:
     return "uow-step:" + digest
 
 
+@dataclass(frozen=True)
+class ComponentConfigurationApplyScope:
+    """Exact Generation and causal identity for one management configuration apply."""
+
+    component_id: str
+    generation_id: str
+    call_id: str
+    operation_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.component_id, str)
+            or not 1 <= len(self.component_id.encode()) <= 128
+            or not isinstance(self.generation_id, str)
+            or not 1 <= len(self.generation_id.encode()) <= 256
+            or not isinstance(self.call_id, str)
+            or not 1 <= len(self.call_id.encode()) <= 256
+            or not isinstance(self.operation_id, str)
+            or not 1 <= len(self.operation_id.encode()) <= 256
+        ):
+            raise ValueError("Component configuration apply scope is invalid")
+
+
 class PostgresComponentConfigurationApplyCoordinator:
     """Commit one Generation's desired configuration with Worker Host control intent."""
 
@@ -34,7 +58,7 @@ class PostgresComponentConfigurationApplyCoordinator:
 
     async def execute(
         self,
-        scope: PackageCallScope,
+        scope: ComponentConfigurationApplyScope,
         *,
         operation_id: str,
         plan_id: str,
@@ -44,8 +68,9 @@ class PostgresComponentConfigurationApplyCoordinator:
         authorization_replay_guard=None,
     ) -> dict:
         if (
-            scope.component_id != self.component_id
-            or scope.call_operation_id != operation_id
+            type(scope) is not ComponentConfigurationApplyScope
+            or scope.component_id != self.component_id
+            or scope.operation_id != operation_id
             or authorization is None
             or authorization_guard is None
         ):
@@ -82,7 +107,7 @@ class PostgresComponentConfigurationApplyCoordinator:
 
     async def _execute_in_transaction(
         self,
-        scope: PackageCallScope,
+        scope: ComponentConfigurationApplyScope,
         *,
         operation_id: str,
         plan_id: str,
@@ -175,8 +200,8 @@ class PostgresComponentConfigurationApplyCoordinator:
                 operation_id=_step_operation(
                     operation_id, "component.configuration.apply", "control"
                 ),
-                causal_root_kind=scope.causal_root_kind,
-                causal_root_id=scope.causal_root_id,
+                causal_root_kind="management.configuration",
+                causal_root_id=scope.operation_id,
                 parent_call_id=scope.call_id,
                 timeout_seconds=20,
             )

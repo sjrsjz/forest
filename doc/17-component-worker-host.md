@@ -37,6 +37,8 @@ Worker Host 不能负责物理启动或停止自己，也不能握住其他 Work
 
 每个目标包的标准配置 apply 计划只有两个静态步骤：`component_id = 本包` 的标准配置仓库步骤，以及 `component_id = component.worker-host` 的控制 participant。目标由调用包身份决定，不从请求正文读取，更不扩展成可指向任意组件的动态 UnitOfWork 槽位。协调器在同一事务检查 Bot、Graph、两方 Generation、目标配置 plan、desired/effective CAS 与控制操作幂等键；Worker Host participant 从第一步的类型化回执读取新 desired revision。这个固定协议随包快照进入 Generation 描述符，不是宿主按组件名拼接的临时事务。
 
+包与不可卸载的内核 authority 均以 `ComponentConfigurationApplyScope` 调用标准配置协调器；这个作用域只承载组件、Generation、调用 ID 与管理 operation ID。`PackageCallScope` 只用于包 Worker 的普通服务、状态和通用 UnitOfWork，不伪装内核 authority。协调器固定生成 `management.configuration` 因果根，不能接受调用方提供的另一种根来记录重建意图。
+
 `component.configuration-rebuild.record` 是标准管理事务专用端口。普通包的通用 UnitOfWork 计划不得引用它；包清单在发布前拒绝该引用，Host participant 还核对 `management.configuration` 因果根。普通插件可以声明自己的 UnitOfWork 计划，但不能用自造的“配置已提交”前序回执驱动组件重建。
 
 控制状态按 `PENDING_REBUILD -> REBUILD_REQUESTED -> EFFECTIVE` 推进。配置 apply 的永久拒绝使两方事务一起回滚；提交以后图替换失败为 `REBUILD_FAILED`，不能把尚未激活的 desired 当成 effective，也不能回滚已提交的配置修订。任务 claim 过期后重领并重放同一内核 operation ID；旧 claim 不得结算新结果。若其他图替换先发生，Worker Host 重新读取当前 Graph 并确认目标组件仍存在、当前候选会采纳该 desired revision，再以当前 Graph revision 提交内核请求；无法满足时停在 `REBUILD_FAILED` 并暴露原因。重复 Web/Shell 操作只返回原请求，新的配置操作必须重新规划和比较 revision。跨 Generation 的配置重放须验证当前 Web 票据与 Bot 授权策略，但只读回原配置修订及控制意图，不得把新票据当作原写操作再次消费，也不得提交第二次图替换。

@@ -25,7 +25,6 @@ from forest.kernel_authorization_participant import (
 )
 from forest.kernel_effect_participant import KernelEffectUnitOfWorkParticipant
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
-from forest.package_capabilities import PackageCallScope
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_generation import PreparedGenerationBinding
@@ -46,7 +45,10 @@ from forest.storage.kernel_runtime import KernelRuntimeRepository
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.payload_authority import KernelPayloadRepository
-from forest.unit_of_work import PostgresComponentConfigurationApplyCoordinator
+from forest.unit_of_work import (
+    ComponentConfigurationApplyScope,
+    PostgresComponentConfigurationApplyCoordinator,
+)
 from forest.web_operation_policy import (
     WEB_OPERATION_POLICY_DEFAULT,
     WEB_OPERATION_POLICY_SCHEMA,
@@ -183,7 +185,6 @@ class PreparedAuthorityModule:
         }
         self.generation_identity = None
         self.generation_active = False
-        self._prepared_binding = None
         self._configuration_apply_coordinator = None
         self._management_inflight = 0
         self._management_drained = asyncio.Event()
@@ -191,7 +192,7 @@ class PreparedAuthorityModule:
 
     async def prepare_generation(self, context) -> PreparedGenerationBinding:
         desired = await self.module_configuration.desired()
-        binding = PreparedGenerationBinding(
+        return PreparedGenerationBinding(
             component_id=context.component_id,
             requires=context.requires,
             package_id=context.package_id,
@@ -215,8 +216,6 @@ class PreparedAuthorityModule:
             control_admission=True,
             storage=context.storage,
         )
-        self._prepared_binding = binding
-        return binding
 
     async def apply_configuration(
         self,
@@ -229,9 +228,8 @@ class PreparedAuthorityModule:
         authorization_replay_guard,
     ) -> dict:
         identity = self.generation_identity
-        binding = self._prepared_binding
         coordinator = self._configuration_apply_coordinator
-        if not self.generation_active or identity is None or binding is None or coordinator is None:
+        if not self.generation_active or identity is None or coordinator is None:
             raise ForestError(
                 "KERNEL_CONFIGURATION_APPLY_UNAVAILABLE",
                 "Kernel authority Generation is not active for configuration apply",
@@ -241,16 +239,11 @@ class PreparedAuthorityModule:
         self._management_drained.clear()
         try:
             return await coordinator.execute(
-                PackageCallScope(
-                    bot_id=self.module_configuration.store.bot_id,
+                ComponentConfigurationApplyScope(
                     component_id=self.component_id,
                     generation_id=identity.generation_id,
-                    instance_id=binding.instance_id,
-                    worker_incarnation=binding.worker_incarnation,
                     call_id="call:" + uuid4().hex,
-                    call_operation_id=operation_id,
-                    causal_root_kind="management.configuration",
-                    causal_root_id=operation_id,
+                    operation_id=operation_id,
                 ),
                 operation_id=operation_id,
                 plan_id=plan_id,

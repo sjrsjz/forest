@@ -70,6 +70,7 @@ from forest.shell_command_protocol import (
     ShellCommandExecutionRequest,
     ShellCommandExecutionResult,
 )
+from forest.unit_of_work import ComponentConfigurationApplyScope
 
 
 class PackageGenerationState(StrEnum):
@@ -594,16 +595,11 @@ class PackageGenerationAdapter:
         self._services_drained.clear()
         try:
             return await coordinator.execute(
-                PackageCallScope(
-                    bot_id=self.bot_id,
+                ComponentConfigurationApplyScope(
                     component_id=self.component_id,
                     generation_id=identity.generation_id,
-                    instance_id=binding.instance_id,
-                    worker_incarnation=binding.worker_incarnation,
                     call_id="call:" + uuid4().hex,
-                    call_operation_id=operation_id,
-                    causal_root_kind="management.configuration",
-                    causal_root_id=operation_id,
+                    operation_id=operation_id,
                 ),
                 operation_id=operation_id,
                 plan_id=plan_id,

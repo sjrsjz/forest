@@ -31,7 +31,6 @@ from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
 from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
-from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import (
     FrozenServiceRoute,
@@ -42,7 +41,10 @@ from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.vector_index_authority import VectorIndexIdentityRepository
-from forest.unit_of_work import PostgresComponentConfigurationApplyCoordinator
+from forest.unit_of_work import (
+    ComponentConfigurationApplyScope,
+    PostgresComponentConfigurationApplyCoordinator,
+)
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
@@ -685,16 +687,11 @@ async def test_worker_host_shell_reload_requests_fenced_full_graph_replacement(t
                 value=current_configuration.value,
                 validation_digest=current_configuration.validation_digest,
             )
-            configuration_scope = PackageCallScope(
-                bot_id=settings.bot_id,
+            configuration_scope = ComponentConfigurationApplyScope(
                 component_id="agent.runtime",
                 generation_id=replacement.generations["agent.runtime"],
-                instance_id="test/configuration",
-                worker_incarnation="test/configuration",
                 call_id="call:test/configuration",
-                call_operation_id="web:configuration-apply/atomic-test",
-                causal_root_kind="management.configuration",
-                causal_root_id="web:configuration-apply/atomic-test",
+                operation_id="web:configuration-apply/atomic-test",
             )
             actor = SimpleNamespace(
                 target_graph_revision=replacement.graph_revision,
