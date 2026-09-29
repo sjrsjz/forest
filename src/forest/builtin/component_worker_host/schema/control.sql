@@ -83,6 +83,7 @@ DECLARE input jsonb:=envelope->'input'; prior jsonb:=envelope->'prior'->'configu
 BEGIN
   IF context->>'port_kind' IS DISTINCT FROM 'participant'
      OR context->>'port_name' IS DISTINCT FROM 'component.configuration-rebuild.record'
+     OR context->>'causal_root_kind' IS DISTINCT FROM 'management.configuration'
      OR envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
      OR envelope->'caller'->>'component_id' IS DISTINCT FROM input->>'target_component_id'
      OR envelope->'caller'->>'generation_id' IS DISTINCT FROM input->>'target_generation_id'

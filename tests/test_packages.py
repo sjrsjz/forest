@@ -235,6 +235,22 @@ def test_storage_bundle_is_content_addressed_package_content(tmp_path):
     assert caught.value.code == "PACKAGE_TAMPERED"
 
 
+def test_generic_uow_cannot_claim_configuration_rebuild_authority(tmp_path):
+    root = source(tmp_path)
+    with (root / "module.toml").open("a", encoding="utf-8") as stream:
+        stream.write(
+            '\n[[components.unit_of_work_plans]]\nname = "forge.rebuild"\n'
+            'contract = "1.0"\ninput_schema = "schemas/input.json"\n'
+            'output_schema = "schemas/output.json"\ntimeout_s = 10\n'
+            '[[components.unit_of_work_plans.steps]]\nid = "control"\n'
+            'component_id = "component.worker-host"\n'
+            'participant = "component.configuration-rebuild.record"\n'
+        )
+    with pytest.raises(ForestError) as caught:
+        PackageCatalog(tmp_path / "catalog").build(root)
+    assert caught.value.code == "INVALID_UNIT_OF_WORK_PLAN"
+
+
 @pytest.mark.parametrize(
     "baseline,digest,contract,code",
     [

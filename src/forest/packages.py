@@ -1445,7 +1445,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "participant_generation_field"
             )
             if (
-                not IDENTIFIER.fullmatch(step_id)
+                participant == "component.configuration-rebuild.record"
+                or not IDENTIFIER.fullmatch(step_id)
                 or step_id in step_ids
                 or not IDENTIFIER.fullmatch(component_id)
                 or not IDENTIFIER.fullmatch(participant)
