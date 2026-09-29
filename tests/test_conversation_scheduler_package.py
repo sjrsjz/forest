@@ -232,6 +232,59 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "epoch": 1,
         }
         namespace = package.descriptor.storage.spec.namespace
+        async def settle_one_segment(claim_ref: str, token: str) -> dict | None:
+            async with store.pool.connection() as conn, conn.transaction():
+                claimed = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.conversation_claim_trigger_settlement("
+                                "%s::jsonb,%s::jsonb) AS result")
+                        .format(sql.Identifier(namespace)),
+                        (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                            "protocol": "forest.owned-work-claim-request/1",
+                            "claim_token": token, "lease_seconds": 60,
+                        })),
+                    )
+                ).fetchone()
+            assert claimed["result"]["ok"] is True
+            claim = claimed["result"]["value"]
+            if claim is None:
+                return None
+            assert claim["work_id"] == claim_ref
+            async with store.pool.connection() as conn, conn.transaction():
+                settled = await participant.invoke_in(
+                    conn, "conversation.settle-trigger-segment-record",
+                    {
+                        "protocol": "forest.uow-step/1",
+                        "caller": {
+                            "component_id": "conversation.scheduler",
+                            "generation_id": participant.generation_id,
+                        },
+                        "input": claim["payload"], "prior": {},
+                    },
+                    operation_id=f"uow-step:trigger-settle/{token}",
+                    causal_root_kind="conversation.trigger-settlement",
+                    causal_root_id=claim_ref,
+                    parent_call_id=f"call:trigger-settle/{token}",
+                    timeout_seconds=10,
+                )
+            async with store.pool.connection() as conn, conn.transaction():
+                acknowledged = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.conversation_settle_trigger_owned_work("
+                                "%s::jsonb,%s::jsonb) AS result")
+                        .format(sql.Identifier(namespace)),
+                        (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                            "protocol": "forest.owned-work-settle-request/1",
+                            "work_id": claim_ref,
+                            "claim_token": token,
+                            "attempt": claim["attempt"],
+                            "outcome": {"status": "SUCCEEDED", "result": settled},
+                        })),
+                    )
+                ).fetchone()
+            assert acknowledged["result"]["ok"] is True
+            return settled
+
         async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(
                 sql.SQL(
@@ -451,20 +504,104 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             terminal_state = await (
                 await conn.execute(
                     sql.SQL(
-                        "SELECT t.status,t.terminal_reason_code,l.active_session_ref,"
+                        "SELECT t.status,t.terminal_reason_code,"
+                        "{}.conversation_trigger_effective_status(%s,%s) AS effective_status,"
+                        "l.active_session_ref,"
                         "l.active_run_ref FROM {}.conversation_triggers t JOIN "
                         "{}.conversation_lanes l ON l.bot_id=t.bot_id AND "
                         "l.conversation_id=t.conversation_id WHERE t.bot_id=%s "
                         "AND t.trigger_id=%s"
-                    ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
-                    (store.bot_id, "trigger/1"),
+                    ).format(*(sql.Identifier(namespace) for _ in range(3))),
+                    (store.bot_id, "trigger/1", store.bot_id, "trigger/1"),
                 )
             ).fetchone()
         assert dict(terminal_state) == {
-            "status": "FAILED",
-            "terminal_reason_code": "AGENT_PROTOCOL_FAILED",
+            "status": "CLAIMED",
+            "terminal_reason_code": None,
+            "effective_status": "FAILED",
             "active_session_ref": None,
             "active_run_ref": None,
+        }
+        async with store.pool.connection() as conn:
+            revoked = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_authorize_run_trigger("
+                            "%s::jsonb,%s::jsonb) AS result")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb(authority_envelope)),
+                )
+            ).fetchone()
+        assert revoked["result"]["error"]["code"] == "AGENT_TOOL_AUTHORITY_INVALID"
+        failed_ref = selected["trigger_claim"]["ref"]
+        async with store.pool.connection() as conn, conn.transaction():
+            stale_claim = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_claim_trigger_settlement("
+                            "%s::jsonb,%s::jsonb) AS result")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                        "protocol": "forest.owned-work-claim-request/1",
+                        "claim_token": "claim:stale-failed-segment", "lease_seconds": 3,
+                    })),
+                )
+            ).fetchone()
+        stale_payload = stale_claim["result"]["value"]["payload"]
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("UPDATE {}.trigger_settlement_progress SET "
+                        "lease_expires_at=clock_timestamp()-interval '1 second' "
+                        "WHERE bot_id=%s AND claim_ref=%s")
+                .format(sql.Identifier(namespace)),
+                (store.bot_id, failed_ref),
+            )
+            fresh_claim = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_claim_trigger_settlement("
+                            "%s::jsonb,%s::jsonb) AS result")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                        "protocol": "forest.owned-work-claim-request/1",
+                        "claim_token": "claim:fresh-failed-segment", "lease_seconds": 60,
+                    })),
+                )
+            ).fetchone()
+            stale_result = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_settle_trigger_segment("
+                            "%s::jsonb,%s::jsonb) AS result")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                        "protocol": "forest.uow-step/1",
+                        "caller": {
+                            "component_id": "conversation.scheduler",
+                            "generation_id": participant.generation_id,
+                        },
+                        "input": stale_payload, "prior": {},
+                    })),
+                )
+            ).fetchone()
+        assert fresh_claim["result"]["value"]["attempt"] == (
+            stale_claim["result"]["value"]["attempt"]+1
+        )
+        assert stale_result["result"]["error"]["code"] == (
+            "STALE_TRIGGER_SETTLEMENT_LEASE"
+        )
+        failed_segment = await settle_one_segment(
+            failed_ref, "claim:fresh-failed-segment"
+        )
+        assert failed_segment is not None
+        assert failed_segment["settled_count"] == 1
+        async with store.pool.connection() as conn:
+            physically_failed = await (
+                await conn.execute(
+                    sql.SQL("SELECT status,terminal_reason_code FROM {}.conversation_triggers "
+                            "WHERE bot_id=%s AND trigger_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, "trigger/1"),
+                )
+            ).fetchone()
+        assert dict(physically_failed) == {
+            "status": "FAILED", "terminal_reason_code": "AGENT_PROTOCOL_FAILED"
         }
 
         async with store.pool.connection() as conn, conn.transaction():
@@ -1372,14 +1509,58 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         async with store.pool.connection() as conn:
             answered = await (
                 await conn.execute(
-                    sql.SQL("SELECT status FROM {}.conversation_triggers "
-                            "WHERE bot_id=%s AND conversation_id=%s ORDER BY ingress_seq")
+                    sql.SQL("SELECT count(*) AS total,"
+                            "count(*) FILTER (WHERE status='CLAIMED') AS raw_claimed,"
+                            "count(*) FILTER (WHERE {}.conversation_trigger_effective_status("
+                            "bot_id,trigger_id)='ANSWERED') AS effective_answered "
+                            "FROM {}.conversation_triggers "
+                            "WHERE bot_id=%s AND conversation_id=%s")
+                    .format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                    (store.bot_id, prefill_conversation),
+                )
+            ).fetchone()
+        assert answered["total"] == answered["effective_answered"] == 130
+        async with asyncio.timeout(15):
+            for attempt in range(60):
+                async with store.pool.connection() as conn:
+                    progress = await (
+                        await conn.execute(
+                            sql.SQL("SELECT next_segment_index,completed_at FROM {}."
+                                    "trigger_settlement_progress WHERE bot_id=%s "
+                                    "AND claim_ref=%s")
+                            .format(sql.Identifier(namespace)),
+                            (store.bot_id, claim_ref),
+                        )
+                    ).fetchone()
+                if progress["completed_at"] is not None:
+                    break
+                await settle_one_segment(claim_ref, f"claim:reply-segment/{attempt}")
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError("Trigger settlement did not complete")
+        async with store.pool.connection() as conn:
+            receipts = await (
+                await conn.execute(
+                    sql.SQL("SELECT segment_index,settled_count FROM {}."
+                            "trigger_segment_settlements WHERE bot_id=%s AND claim_ref=%s "
+                            "ORDER BY segment_index")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, claim_ref),
+                )
+            ).fetchall()
+            physical = await (
+                await conn.execute(
+                    sql.SQL("SELECT count(*) AS answered FROM {}.conversation_triggers "
+                            "WHERE bot_id=%s AND conversation_id=%s "
+                            "AND status='ANSWERED'")
                     .format(sql.Identifier(namespace)),
                     (store.bot_id, prefill_conversation),
                 )
-            ).fetchall()
-        assert len(answered) == 130
-        assert {row["status"] for row in answered} == {"ANSWERED"}
+            ).fetchone()
+        assert [(row["segment_index"], row["settled_count"]) for row in receipts] == [
+            (0, 64), (1, 64), (2, 2)
+        ]
+        assert physical["answered"] == 130
         drained = await prefill_endpoint.invoke_routed(
             prefill_route,
             RuntimeServiceInvocation(

@@ -340,11 +340,15 @@ CREATE TABLE trigger_claim_groups (
     terminal_operation_id text CHECK (
         terminal_operation_id IS NULL OR octet_length(terminal_operation_id) BETWEEN 1 AND 256
     ),
+    terminal_status text CHECK (
+        terminal_status IS NULL OR terminal_status IN ('ANSWERED','FAILED','CANCELLED')
+    ),
     PRIMARY KEY (bot_id,claim_ref),
     UNIQUE (bot_id,conversation_id,session_ref,run_ref),
     FOREIGN KEY (bot_id,conversation_id)
         REFERENCES conversation_lanes(bot_id,conversation_id),
-    CHECK ((claim_state='ACTIVE')=(terminal_operation_id IS NULL))
+    CHECK ((claim_state='ACTIVE')=(terminal_operation_id IS NULL)),
+    CHECK ((claim_state='ACTIVE')=(terminal_status IS NULL))
 );
 
 CREATE TABLE trigger_claim_segments (
@@ -553,6 +557,47 @@ CREATE TABLE trigger_terminal_operations (
         REFERENCES conversation_lanes(bot_id, conversation_id)
 );
 
+CREATE TABLE trigger_settlement_progress (
+    bot_id text NOT NULL,
+    claim_ref text NOT NULL,
+    next_segment_index integer NOT NULL DEFAULT 0 CHECK (next_segment_index>=0),
+    lease_token text CHECK (lease_token IS NULL OR octet_length(lease_token) BETWEEN 1 AND 256),
+    lease_epoch integer NOT NULL DEFAULT 0 CHECK (lease_epoch>=0),
+    lease_expires_at timestamptz,
+    completed_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,claim_ref),
+    FOREIGN KEY (bot_id,claim_ref) REFERENCES trigger_claim_groups(bot_id,claim_ref),
+    CHECK ((lease_token IS NULL)=(lease_expires_at IS NULL)),
+    CHECK (completed_at IS NULL OR lease_token IS NULL)
+);
+CREATE INDEX trigger_settlement_pending_idx
+    ON trigger_settlement_progress(bot_id,updated_at,claim_ref)
+    WHERE completed_at IS NULL;
+CREATE UNIQUE INDEX trigger_settlement_lease_token_idx
+    ON trigger_settlement_progress(bot_id,lease_token)
+    WHERE lease_token IS NOT NULL;
+
+CREATE TABLE trigger_segment_settlements (
+    bot_id text NOT NULL,
+    claim_ref text NOT NULL,
+    segment_index integer NOT NULL CHECK (segment_index>=0),
+    claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    lease_epoch integer NOT NULL CHECK (lease_epoch>0),
+    settled_count integer NOT NULL CHECK (settled_count BETWEEN 1 AND 64),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,claim_ref,segment_index),
+    UNIQUE (bot_id,claim_token),
+    FOREIGN KEY (bot_id,claim_ref) REFERENCES trigger_claim_groups(bot_id,claim_ref)
+);
+
+CREATE TABLE trigger_owned_work_settlements (
+    claim_token text PRIMARY KEY CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE FUNCTION guard_inbox_message() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
@@ -687,24 +732,26 @@ BEGIN
         RETURN NEW;
     END IF;
     IF NEW.claim_state='TERMINAL' AND NEW.terminal_operation_id IS NOT NULL
+       AND NEW.terminal_status IS NOT NULL
        AND ROW(NEW.trigger_count,NEW.segment_count,NEW.last_trigger_ref,
                NEW.last_trigger_ingress_seq,NEW.claim_digest)
            IS NOT DISTINCT FROM ROW(OLD.trigger_count,OLD.segment_count,
                OLD.last_trigger_ref,OLD.last_trigger_ingress_seq,OLD.claim_digest)
        AND (
-           EXISTS (
+           (NEW.terminal_status='ANSWERED' AND EXISTS (
                SELECT 1 FROM context_append_operations a
                WHERE a.bot_id=NEW.bot_id AND a.operation_id=NEW.terminal_operation_id
                  AND a.conversation_id=NEW.conversation_id
                  AND a.session_ref=NEW.session_ref AND a.run_ref=NEW.run_ref
                  AND a.append_kind='FINAL_REPLY'
-           ) OR EXISTS (
+           )) OR (NEW.terminal_status IN ('FAILED','CANCELLED') AND EXISTS (
                SELECT 1 FROM trigger_terminal_operations t
                WHERE t.bot_id=NEW.bot_id AND t.operation_id=NEW.terminal_operation_id
                  AND t.conversation_id=NEW.conversation_id
                  AND t.terminal_session_ref=NEW.session_ref
                  AND t.terminal_run_ref=NEW.run_ref
-           )
+                 AND t.resulting_status=NEW.terminal_status
+           ))
        ) THEN
         RETURN NEW;
     END IF;
@@ -714,6 +761,12 @@ $$;
 CREATE TRIGGER trigger_claim_group_one_way BEFORE UPDATE OR DELETE ON trigger_claim_groups
     FOR EACH ROW EXECUTE FUNCTION guard_trigger_claim_group();
 CREATE TRIGGER trigger_terminal_operations_immutable BEFORE UPDATE OR DELETE ON trigger_terminal_operations
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+CREATE TRIGGER trigger_segment_settlements_immutable
+    BEFORE UPDATE OR DELETE ON trigger_segment_settlements
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+CREATE TRIGGER trigger_owned_work_settlements_immutable
+    BEFORE UPDATE OR DELETE ON trigger_owned_work_settlements
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_units_immutable BEFORE UPDATE OR DELETE ON context_units
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
@@ -1153,8 +1206,12 @@ BEGIN
     SELECT t.conversation_id,t.claimed_session_ref,t.principal_ref
     INTO match_row
     FROM __forest_module_schema__.conversation_triggers t
+    JOIN __forest_module_schema__.trigger_claim_groups g
+      ON g.bot_id=t.bot_id AND g.conversation_id=t.conversation_id
+     AND g.session_ref=t.claimed_session_ref AND g.run_ref=t.claimed_run_ref
     WHERE t.bot_id=requested_bot AND t.trigger_id=requested_trigger
-      AND t.status<>'PENDING' AND t.claimed_run_ref=requested_run;
+      AND t.status='CLAIMED' AND t.claimed_run_ref=requested_run
+      AND g.claim_state='ACTIVE';
     IF NOT FOUND THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
@@ -1175,6 +1232,18 @@ BEGIN
         )
     );
 END;
+$$;
+
+CREATE FUNCTION conversation_trigger_effective_status(
+    requested_bot text, requested_trigger text
+) RETURNS text LANGUAGE sql STABLE SET search_path=pg_catalog AS $$
+    SELECT CASE WHEN t.status='CLAIMED' AND g.claim_state='TERMINAL'
+                THEN g.terminal_status ELSE t.status END
+    FROM __forest_module_schema__.conversation_triggers t
+    LEFT JOIN __forest_module_schema__.trigger_claim_groups g
+      ON g.bot_id=t.bot_id AND g.conversation_id=t.conversation_id
+     AND g.session_ref=t.claimed_session_ref AND g.run_ref=t.claimed_run_ref
+    WHERE t.bot_id=requested_bot AND t.trigger_id=requested_trigger
 $$;
 
 CREATE FUNCTION conversation_pending_trigger_summary(
@@ -2169,7 +2238,15 @@ BEGIN
         WHERE NOT EXISTS (
               SELECT 1 FROM __forest_module_schema__.conversation_triggers t
               WHERE t.bot_id=a.bot_id AND t.conversation_id=a.conversation_id
-                AND t.event_id=a.event_id AND t.status IN ('PENDING','CLAIMED')
+                AND t.event_id=a.event_id AND (
+                    t.status='PENDING' OR (t.status='CLAIMED' AND NOT EXISTS (
+                        SELECT 1 FROM __forest_module_schema__.trigger_claim_groups g
+                        WHERE g.bot_id=t.bot_id AND g.conversation_id=t.conversation_id
+                          AND g.session_ref=t.claimed_session_ref
+                          AND g.run_ref=t.claimed_run_ref
+                          AND g.claim_state='TERMINAL'
+                    ))
+                )
           )
           AND NOT (
               lane.active_session_ref IS NOT NULL AND (
@@ -2693,7 +2770,12 @@ BEGIN
           AND NOT EXISTS (
               SELECT 1 FROM __forest_module_schema__.conversation_triggers t
               WHERE t.bot_id=l.bot_id AND t.conversation_id=l.conversation_id
-                AND t.status IN ('PENDING','CLAIMED')
+                AND (t.status='PENDING' OR (t.status='CLAIMED' AND NOT EXISTS (
+                    SELECT 1 FROM __forest_module_schema__.trigger_claim_groups g
+                    WHERE g.bot_id=t.bot_id AND g.conversation_id=t.conversation_id
+                      AND g.session_ref=t.claimed_session_ref
+                      AND g.run_ref=t.claimed_run_ref AND g.claim_state='TERMINAL'
+                )))
           )
         ORDER BY l.updated_at,l.conversation_id
         FOR UPDATE SKIP LOCKED LIMIT 1;
@@ -2825,9 +2907,18 @@ CREATE FUNCTION conversation_answered_proposal_events(
     ) requested
     JOIN __forest_module_schema__.conversation_triggers t
       ON t.trigger_id=requested.trigger_id
+    JOIN __forest_module_schema__.trigger_claim_groups g
+      ON g.bot_id=t.bot_id AND g.conversation_id=t.conversation_id
+     AND g.session_ref=t.claimed_session_ref AND g.run_ref=t.claimed_run_ref
+    JOIN __forest_module_schema__.context_append_operations a
+      ON a.bot_id=g.bot_id AND a.operation_id=g.terminal_operation_id
+     AND a.conversation_id=g.conversation_id
+     AND a.session_ref=g.session_ref AND a.run_ref=g.run_ref
     WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
       AND t.claimed_session_ref=requested_session AND t.claimed_run_ref=requested_run
-      AND t.status='ANSWERED' AND t.answered_reply_ref=requested_reply
+      AND t.status IN ('CLAIMED','ANSWERED')
+      AND g.claim_state='TERMINAL' AND g.terminal_status='ANSWERED'
+      AND a.append_kind='FINAL_REPLY' AND a.reply_ref=requested_reply
 $$;
 
 CREATE FUNCTION conversation_append_final_reply(context jsonb, envelope jsonb)
@@ -2983,14 +3074,12 @@ BEGIN
     INSERT INTO __forest_module_schema__.active_context_units(
         bot_id,conversation_id,unit_id,context_revision,unit_index
     ) VALUES(requested_bot,requested_conversation,requested_unit,context_revision_value,0);
-    UPDATE __forest_module_schema__.conversation_triggers t
-    SET status='ANSWERED',answered_reply_ref=requested_reply,updated_at=clock_timestamp()
-    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
-      AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
-      AND t.claimed_run_ref=requested_run;
     UPDATE __forest_module_schema__.trigger_claim_groups
-    SET claim_state='TERMINAL',terminal_operation_id=requested_operation
+    SET claim_state='TERMINAL',terminal_operation_id=requested_operation,
+        terminal_status='ANSWERED'
     WHERE bot_id=requested_bot AND claim_ref=claim_group.claim_ref;
+    INSERT INTO __forest_module_schema__.trigger_settlement_progress(bot_id,claim_ref)
+    VALUES(requested_bot,claim_group.claim_ref);
     UPDATE __forest_module_schema__.conversation_lanes
     SET context_revision=context_revision_value,
         context_view_unit_count=context_view_unit_count+1,
@@ -3134,15 +3223,12 @@ BEGIN
         requested_session,requested_run,requested_status,requested_reason,
         requested_owner,requested_epoch,trigger_count_value
     );
-    UPDATE __forest_module_schema__.conversation_triggers
-    SET status=requested_status,terminal_reason_code=requested_reason,
-        updated_at=clock_timestamp()
-    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
-      AND claimed_session_ref=requested_session
-      AND claimed_run_ref=requested_run AND status='CLAIMED';
     UPDATE __forest_module_schema__.trigger_claim_groups
-    SET claim_state='TERMINAL',terminal_operation_id=requested_operation
+    SET claim_state='TERMINAL',terminal_operation_id=requested_operation,
+        terminal_status=requested_status
     WHERE bot_id=requested_bot AND claim_ref=claim_group.claim_ref;
+    INSERT INTO __forest_module_schema__.trigger_settlement_progress(bot_id,claim_ref)
+    VALUES(requested_bot,claim_group.claim_ref);
     UPDATE __forest_module_schema__.conversation_lanes
     SET active_session_ref=NULL,active_run_ref=NULL,resume_not_before=NULL,
         resume_reason_code=NULL,resume_reason_ref=NULL,updated_at=clock_timestamp()
@@ -3156,6 +3242,291 @@ BEGIN
             'reason_code',requested_reason,'trigger_count',trigger_count_value
         )
     );
+END;
+$$;
+
+CREATE FUNCTION conversation_settle_trigger_segment(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_ref text := body->>'claim_ref';
+    requested_index integer := (body->>'segment_index')::integer;
+    requested_token text := body->>'claim_token';
+    requested_epoch integer := (body->>'lease_epoch')::integer;
+    progress record;
+    claim_group record;
+    segment record;
+    receipt record;
+    reply_ref_value text;
+    reason_value text;
+    changed_count integer;
+    result_value jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.trigger-segment-settle/1'
+       OR requested_ref IS NULL OR requested_ref !~ '^claim:[a-f0-9]{64}$'
+       OR requested_index IS NULL OR requested_index<0
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_epoch IS NULL OR requested_epoch<1 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','TRIGGER_SETTLEMENT_INVALID',
+                'message','Trigger segment settlement input is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.conversation.scheduler/trigger-settle/' || requested_bot || '/' ||
+        requested_ref || '/' || requested_index::text,0
+    ));
+    SELECT * INTO receipt
+    FROM __forest_module_schema__.trigger_segment_settlements
+    WHERE bot_id=requested_bot AND claim_ref=requested_ref
+      AND segment_index=requested_index;
+    IF receipt IS NOT NULL THEN
+        IF receipt.claim_token IS DISTINCT FROM requested_token
+           OR receipt.lease_epoch IS DISTINCT FROM requested_epoch THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','TRIGGER_SETTLEMENT_CONFLICT',
+                    'message','Trigger segment was settled by another lease','status',409));
+        END IF;
+        SELECT g.segment_count INTO claim_group
+        FROM __forest_module_schema__.trigger_claim_groups g
+        WHERE g.bot_id=requested_bot AND g.claim_ref=requested_ref;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.trigger-segment-settled/1',
+                'claim_ref',requested_ref,'segment_index',requested_index,
+                'settled_count',receipt.settled_count,
+                'remaining_segments',claim_group.segment_count-requested_index-1));
+    END IF;
+    SELECT * INTO progress
+    FROM __forest_module_schema__.trigger_settlement_progress
+    WHERE bot_id=requested_bot AND claim_ref=requested_ref FOR UPDATE;
+    IF progress IS NULL OR progress.next_segment_index IS DISTINCT FROM requested_index
+       OR progress.lease_token IS DISTINCT FROM requested_token
+       OR progress.lease_epoch IS DISTINCT FROM requested_epoch
+       OR progress.lease_expires_at<=clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','STALE_TRIGGER_SETTLEMENT_LEASE',
+                'message','Trigger segment lease is no longer current','status',409));
+    END IF;
+    SELECT * INTO claim_group
+    FROM __forest_module_schema__.trigger_claim_groups
+    WHERE bot_id=requested_bot AND claim_ref=requested_ref;
+    SELECT * INTO segment
+    FROM __forest_module_schema__.trigger_claim_segments
+    WHERE bot_id=requested_bot AND claim_ref=requested_ref
+      AND segment_index=requested_index;
+    IF claim_group IS NULL OR claim_group.claim_state<>'TERMINAL'
+       OR segment IS NULL OR requested_index>=claim_group.segment_count THEN
+        RAISE EXCEPTION 'Trigger settlement cursor has no terminal segment'
+            USING ERRCODE='55000';
+    END IF;
+    IF claim_group.terminal_status='ANSWERED' THEN
+        SELECT reply_ref INTO reply_ref_value
+        FROM __forest_module_schema__.context_append_operations
+        WHERE bot_id=requested_bot
+          AND operation_id=claim_group.terminal_operation_id
+          AND conversation_id=claim_group.conversation_id
+          AND session_ref=claim_group.session_ref AND run_ref=claim_group.run_ref
+          AND append_kind='FINAL_REPLY';
+        IF reply_ref_value IS NULL THEN
+            RAISE EXCEPTION 'Answered trigger group has no final reply fact'
+                USING ERRCODE='55000';
+        END IF;
+    ELSE
+        SELECT reason_code INTO reason_value
+        FROM __forest_module_schema__.trigger_terminal_operations
+        WHERE bot_id=requested_bot
+          AND operation_id=claim_group.terminal_operation_id
+          AND resulting_status=claim_group.terminal_status;
+        IF reason_value IS NULL THEN
+            RAISE EXCEPTION 'Terminal trigger group has no reason fact'
+                USING ERRCODE='55000';
+        END IF;
+    END IF;
+    UPDATE __forest_module_schema__.conversation_triggers t
+    SET status=claim_group.terminal_status,
+        answered_reply_ref=reply_ref_value,terminal_reason_code=reason_value,
+        updated_at=clock_timestamp()
+    FROM __forest_module_schema__.input_batch_triggers m
+    WHERE m.bot_id=requested_bot AND m.input_batch_id=segment.input_batch_id
+      AND t.bot_id=m.bot_id AND t.trigger_id=m.trigger_id
+      AND t.conversation_id=claim_group.conversation_id
+      AND t.claimed_session_ref=claim_group.session_ref
+      AND t.claimed_run_ref=claim_group.run_ref
+      AND t.input_batch_id=segment.input_batch_id AND t.status='CLAIMED';
+    GET DIAGNOSTICS changed_count = ROW_COUNT;
+    IF changed_count<>segment.trigger_count THEN
+        RAISE EXCEPTION 'Trigger settlement segment membership changed'
+            USING ERRCODE='55000';
+    END IF;
+    INSERT INTO __forest_module_schema__.trigger_segment_settlements(
+        bot_id,claim_ref,segment_index,claim_token,lease_epoch,settled_count
+    ) VALUES (
+        requested_bot,requested_ref,requested_index,requested_token,
+        requested_epoch,changed_count
+    );
+    UPDATE __forest_module_schema__.trigger_settlement_progress
+    SET next_segment_index=requested_index+1,lease_token=NULL,lease_expires_at=NULL,
+        completed_at=CASE WHEN requested_index+1=claim_group.segment_count
+                          THEN clock_timestamp() ELSE NULL END,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND claim_ref=requested_ref;
+    result_value := jsonb_build_object('protocol','forest.trigger-segment-settled/1',
+        'claim_ref',requested_ref,'segment_index',requested_index,
+        'settled_count',changed_count,
+        'remaining_segments',claim_group.segment_count-requested_index-1);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+                              'value',result_value);
+END;
+$$;
+
+CREATE FUNCTION conversation_claim_trigger_settlement(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    progress record;
+    next_epoch integer;
+    identity_digest text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 3600 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','TRIGGER_SETTLEMENT_CLAIM_INVALID',
+                'message','Trigger settlement claim is invalid','status',422));
+    END IF;
+    SELECT p.*,g.segment_count INTO progress
+    FROM __forest_module_schema__.trigger_settlement_progress p
+    JOIN __forest_module_schema__.trigger_claim_groups g
+      ON g.bot_id=p.bot_id AND g.claim_ref=p.claim_ref
+    WHERE p.bot_id=requested_bot AND p.lease_token=requested_token
+      AND p.lease_expires_at>clock_timestamp()
+    FOR UPDATE OF p;
+    IF progress IS NULL THEN
+        SELECT p.*,g.segment_count INTO progress
+        FROM __forest_module_schema__.trigger_settlement_progress p
+        JOIN __forest_module_schema__.trigger_claim_groups g
+          ON g.bot_id=p.bot_id AND g.claim_ref=p.claim_ref
+        WHERE p.bot_id=requested_bot AND p.completed_at IS NULL
+          AND p.next_segment_index<g.segment_count
+          AND (p.lease_token IS NULL OR p.lease_expires_at<=clock_timestamp())
+        ORDER BY p.updated_at,p.claim_ref
+        FOR UPDATE OF p SKIP LOCKED LIMIT 1;
+        IF progress IS NULL THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                                      'ok',true,'value',NULL);
+        END IF;
+        IF progress.lease_epoch>=2147483647 THEN
+            RAISE EXCEPTION 'Trigger settlement lease epoch exhausted'
+                USING ERRCODE='54000';
+        END IF;
+        next_epoch := progress.lease_epoch+1;
+        UPDATE __forest_module_schema__.trigger_settlement_progress
+        SET lease_token=requested_token,lease_epoch=next_epoch,
+            lease_expires_at=clock_timestamp()+(requested_lease*interval '1 second'),
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND claim_ref=progress.claim_ref;
+    ELSE
+        next_epoch := progress.lease_epoch;
+    END IF;
+    identity_digest := encode(sha256(convert_to(jsonb_build_array(
+        requested_bot,progress.claim_ref,progress.next_segment_index,next_epoch
+    )::text,'UTF8')),'hex');
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-claim/1',
+            'work_id',progress.claim_ref,'claim_token',requested_token,
+            'attempt',next_epoch,'operation_id','trigger-settlement:'||identity_digest,
+            'causal_root_kind','conversation.trigger-settlement',
+            'causal_root_id',progress.claim_ref,
+            'payload',jsonb_build_object(
+                'protocol','forest.trigger-segment-settle/1',
+                'claim_ref',progress.claim_ref,
+                'segment_index',progress.next_segment_index,
+                'claim_token',requested_token,'lease_epoch',next_epoch
+            )
+        ));
+END;
+$$;
+
+CREATE FUNCTION conversation_settle_trigger_owned_work(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_ref text := input->>'work_id';
+    requested_token text := input->>'claim_token';
+    requested_epoch integer := (input->>'attempt')::integer;
+    outcome_status text := input#>>'{outcome,status}';
+    outcome_result jsonb := input#>'{outcome,result}';
+    prior record;
+    receipt record;
+    progress record;
+    result_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_ref IS NULL OR requested_ref !~ '^claim:[a-f0-9]{64}$'
+       OR requested_token IS NULL OR requested_epoch IS NULL OR requested_epoch<1
+       OR outcome_status NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','TRIGGER_OWNED_SETTLEMENT_INVALID',
+                'message','Owned trigger settlement is invalid','status',422));
+    END IF;
+    SELECT * INTO prior FROM __forest_module_schema__.trigger_owned_work_settlements
+    WHERE claim_token=requested_token;
+    IF prior IS NOT NULL THEN
+        IF prior.input_payload=input THEN RETURN prior.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','TRIGGER_OWNED_SETTLEMENT_CONFLICT',
+                'message','Trigger work claim has another settlement','status',409));
+    END IF;
+    SELECT s.*,g.segment_count INTO receipt
+    FROM __forest_module_schema__.trigger_segment_settlements s
+    JOIN __forest_module_schema__.trigger_claim_groups g
+      ON g.bot_id=s.bot_id AND g.claim_ref=s.claim_ref
+    WHERE s.bot_id=requested_bot AND s.claim_ref=requested_ref
+      AND s.claim_token=requested_token AND s.lease_epoch=requested_epoch;
+    IF receipt IS NOT NULL THEN
+        IF outcome_status='SUCCEEDED' AND (
+            outcome_result->>'protocol' IS DISTINCT FROM 'forest.trigger-segment-settled/1'
+            OR outcome_result->>'claim_ref' IS DISTINCT FROM requested_ref
+            OR (outcome_result->>'segment_index')::integer IS DISTINCT FROM receipt.segment_index
+            OR (outcome_result->>'settled_count')::integer IS DISTINCT FROM receipt.settled_count
+            OR (outcome_result->>'remaining_segments')::integer IS DISTINCT FROM
+                receipt.segment_count-receipt.segment_index-1
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','TRIGGER_OWNED_RESULT_INVALID',
+                    'message','Trigger worker result differs from committed segment','status',409));
+        END IF;
+    ELSE
+        IF outcome_status='SUCCEEDED' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','TRIGGER_OWNED_RESULT_MISSING',
+                    'message','Worker reported success without a committed segment','status',409));
+        END IF;
+        SELECT * INTO progress
+        FROM __forest_module_schema__.trigger_settlement_progress
+        WHERE bot_id=requested_bot AND claim_ref=requested_ref FOR UPDATE;
+        IF progress IS NULL OR progress.lease_token IS DISTINCT FROM requested_token
+           OR progress.lease_epoch IS DISTINCT FROM requested_epoch THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','STALE_TRIGGER_SETTLEMENT_LEASE',
+                    'message','Trigger work lease is stale','status',409));
+        END IF;
+        UPDATE __forest_module_schema__.trigger_settlement_progress
+        SET lease_token=NULL,lease_expires_at=NULL,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND claim_ref=requested_ref;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+                                   'work_id',requested_ref));
+    INSERT INTO __forest_module_schema__.trigger_owned_work_settlements(
+        claim_token,input_payload,result_payload
+    ) VALUES(requested_token,input,result_value);
+    RETURN result_value;
 END;
 $$;
 

@@ -335,6 +335,35 @@ class ConversationScheduler(Plugin):
             )
         return result
 
+    @job("conversation.trigger-settlement")
+    async def trigger_settlement(self, task, ctx):
+        claim = task["payload"]
+        if claim["lease_epoch"] != task["attempt"]:
+            raise ForestError(
+                "TRIGGER_SETTLEMENT_CLAIM_INVALID",
+                "Trigger settlement lease epoch differs from its task",
+                409,
+            )
+        result = await ctx.uow.call(
+            "conversation.settle-trigger-segment",
+            claim,
+            operation_id=ctx.operations.stable(
+                "settle-trigger-segment:"
+                f"{claim['claim_ref']}:{claim['segment_index']}:{claim['claim_token']}"
+            ),
+            timeout=20,
+        )
+        if (
+            result["claim_ref"] != claim["claim_ref"]
+            or result["segment_index"] != claim["segment_index"]
+        ):
+            raise ForestError(
+                "TRIGGER_SETTLEMENT_RESULT_INVALID",
+                "Settled trigger segment differs from its claim",
+                409,
+            )
+        return result
+
     @staticmethod
     def _stable(kind, *parts):
         encoded = "\0".join(str(part) for part in parts).encode("utf-8")

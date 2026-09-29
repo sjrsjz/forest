@@ -2696,6 +2696,38 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                 raise AssertionError(f"Successful model response did not deliver: {diagnostics}") from exc
             assert len(clients[-1].sent) == 1
             assert b"Forest success fixture" in clients[-1].sent[0].wire_body
+            conversation_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "conversation.scheduler"
+            )
+            async with asyncio.timeout(20):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        physical = await (
+                            await conn.execute(
+                                sql.SQL("SELECT count(*) AS total,"
+                                        "count(*) FILTER (WHERE status='ANSWERED') AS answered "
+                                        "FROM {}.conversation_triggers WHERE bot_id=%s")
+                                .format(sql.Identifier(conversation_schema)),
+                                (settings.bot_id,),
+                            )
+                        ).fetchone()
+                        pending = await (
+                            await conn.execute(
+                                sql.SQL("SELECT count(*) AS count FROM {}."
+                                        "trigger_settlement_progress WHERE bot_id=%s "
+                                        "AND completed_at IS NULL")
+                                .format(sql.Identifier(conversation_schema)),
+                                (settings.bot_id,),
+                            )
+                        ).fetchone()
+                    if (
+                        physical["total"] >= 1
+                        and physical["answered"] == physical["total"]
+                        and pending["count"] == 0
+                    ):
+                        break
+                    await asyncio.sleep(0.1)
     finally:
         if RecordingModelClient.first_gate is not None:
             RecordingModelClient.first_gate.set()

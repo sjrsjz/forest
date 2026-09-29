@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "conversation.scheduler"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "claim_ref", "segment_index", "claim_token", "lease_epoch"],
+      "properties": {
+        "protocol": {"const": "forest.trigger-segment-settle/1"},
+        "claim_ref": {"type": "string", "pattern": "^claim:[a-f0-9]{64}$"},
+        "segment_index": {"type": "integer", "minimum": 0},
+        "claim_token": {"type": "string", "minLength": 1, "maxLength": 256},
+        "lease_epoch": {"type": "integer", "minimum": 1}
+      }
+    },
+    "prior": {"type": "object"}
+  }
+}

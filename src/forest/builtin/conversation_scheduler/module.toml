@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.15.0"
+version = "4.16.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -38,7 +38,8 @@ requests = [
   "uow.execute:conversation.compact-before-run",
   "uow.execute:conversation.commit-final-reply",
   "uow.execute:conversation.session-handoff",
-  "uow.execute:conversation.commit-terminal-run"
+  "uow.execute:conversation.commit-terminal-run",
+  "uow.execute:conversation.settle-trigger-segment"
 ]
 
 [[components.requires]]
@@ -69,9 +70,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.11.0"
+schema_version = "4.12.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "1f2f4695e158a1587dc2eef7b0d2d3ac96db4690d5991df119b24fad335c1350"
+baseline_sha256 = "f35ef4d3899a5213b69297e0332226d6614641c7976e326ec0d42e9d541574dc"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -164,6 +165,13 @@ function = "conversation_terminalize_run"
 input_schema = "schemas/terminalize-run-envelope.json"
 output_schema = "schemas/terminalize-run-output.json"
 
+[[components.unit_of_work_participants]]
+name = "conversation.settle-trigger-segment-record"
+contract = "1.0"
+function = "conversation_settle_trigger_segment"
+input_schema = "schemas/trigger-settle-envelope.json"
+output_schema = "schemas/trigger-settle-output.json"
+
 [[components.unit_of_work_plans]]
 name = "conversation.compact-before-run"
 contract = "1.0"
@@ -246,6 +254,16 @@ steps = [
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.terminalize-run", input_path = "/conversation" }
 ]
 
+[[components.unit_of_work_plans]]
+name = "conversation.settle-trigger-segment"
+contract = "1.0"
+input_schema = "schemas/trigger-settle-input.json"
+output_schema = "schemas/trigger-settle-output.json"
+timeout_s = 20
+steps = [
+  { id = "settle", component_id = "conversation.scheduler", participant = "conversation.settle-trigger-segment-record" }
+]
+
 [[components.owned_work_handlers]]
 name = "conversation.silent-drain.pending"
 contract = "1.0"
@@ -292,4 +310,20 @@ claim_timeout_s = 5
 handler_timeout_s = 600
 settle_timeout_s = 5
 lease_seconds = 660
+drain_policy = "inflight"
+
+[[components.owned_work_handlers]]
+name = "conversation.trigger-settlement.pending"
+contract = "1.0"
+handler = "conversation.trigger-settlement"
+claim_function = "conversation_claim_trigger_settlement"
+settle_function = "conversation_settle_trigger_owned_work"
+input_schema = "schemas/trigger-settle-input.json"
+output_schema = "schemas/trigger-settle-output.json"
+max_concurrency = 4
+poll_interval_ms = 250
+claim_timeout_s = 5
+handler_timeout_s = 25
+settle_timeout_s = 5
+lease_seconds = 35
 drain_policy = "inflight"

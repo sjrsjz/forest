@@ -73,7 +73,7 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 | `conversation.scheduler` | `input_batch_events / input_batch_triggers` | 规范化批次成员；长时间运行的数据不能塞入 JSON 数组后失去索引、唯一约束和逐项审计能力 |
 | `conversation.scheduler` | `trigger_claim_groups / trigger_claim_segments` | 按 Session/Run 冻结领取引用、累计数量和有序摘要；每个分段只含至多 64 个触发，通过 InputBatch 成员索引审计 |
 | `conversation.scheduler` | `trigger_requeues` | 可恢复的 Worker/Run 明确失效后的幂等重排事实及有界分段进度；不能靠 `context_applied_seq` 猜测触发已经完成 |
-| `conversation.scheduler` | `trigger_terminal_operations` | Run 成功、失败或取消的权威终结事实、回复引用、原因和有界分段结算进度；保留原 Session/Run 归属并释放 lane |
+| `conversation.scheduler` | `context_append_operations / trigger_terminal_operations / trigger_settlement_progress / trigger_segment_settlements` | 成功回复与失败/取消各自的不可变终结事实，以及独立的分段结算游标和回执；保留原 Session/Run 归属 |
 | `conversation.scheduler` | `context_units` | 输入及其他模块已提交事实的有序 PayloadRef；保存来源、作者、所属批次和 `commit_seq/unit_index`，不复制正文 |
 | `conversation.scheduler` | `context_append_operations` | Agent/控制模块追加闭合步骤或最终回复的幂等回执；固定 Context revision、unit 集及可选回复引用 |
 | `conversation.scheduler` | `context_compactions` | 裁剪覆盖范围、源集digest、归档引用、保留/移出单元清单、裁剪策略版本、基础/发布视图版本；无摘要模型工件 |
@@ -125,7 +125,7 @@ PENDING ------------> FAILED / CANCELLED
 
 触发身份按群消息逐条持久保存，但跨模块调用帧不能把完整积压变成 JSON 数组。每次预填和最终输入选择至多处理 64 条连续消息，并在同一 lane 围栏下建立最多 64 项的 `trigger_claim_segment`；组头只保存目标 Session/Run、已覆盖序号、累计触发数和按分段顺序滚动的摘要。相同 operation 重放原分段，不重复推进摘要。Agent 启动、下一次模型调用和 Session 交接只接收组引用、摘要、末触发身份与输入切口；取某个触发的作者和授权资格时，调用调度器提供的按引用/触发 ID 精确核验端口。Agent 不跨 schema 读 Inbox，也不复制整组触发到自身 Run 快照。
 
-完成回复、失败和取消只提交组级终结事实及有界回执，不能把几十万项 `answered_trigger_ids` 或 `answered_events` 放进 UnitOfWork/Worker/模型帧。Memory 的回复联想仅对有界提案中的触发与事件逐项核验，不要求传输整组回答成员。逐触发物理结算由单调游标分段完成；它必须能在进程崩溃和热替换后重领，旧领取不能结算新分段。`PENDING`、`CLAIMED`、`ANSWERED` 等对外有效状态由领取组与终结事实共同决定，在物理结算未完成时仍保持正确。当前实现已有预填与最终输入之间的累计领取组和最多 64 项的领取分段；失租约后 IDLE 预填可重领原 Run，`SESSION_END` 后继 Run 身份也跨租约稳定。组级权威终态、可恢复的有界物理结算及失败/取消后的受控重排仍未达到此契约，具体差距以[实现状态](implementation-status.md)为准。
+完成回复、失败和取消只提交组级终结事实及有界回执，不能把几十万项 `answered_trigger_ids` 或 `answered_events` 放进 UnitOfWork/Worker/模型帧。Memory 的回复联想仅对有界提案中的触发与事件逐项核验，不要求传输整组回答成员。逐触发物理结算由单调游标分段完成；它必须能在进程崩溃和热替换后重领，旧领取不能结算新分段。`PENDING`、`CLAIMED`、`ANSWERED` 等对外有效状态由领取组与终结事实共同决定，在物理结算未完成时仍保持正确。当前实现已有累计领取组、最多 64 项的领取与终态结算分段、失租约后 IDLE 预填原 Run 重领，以及跨租约稳定的 `SESSION_END` 后继 Run 身份。失败/取消后的显式受控重排、异常孤儿组处置及长期规模验收仍待完成，具体差距以[实现状态](implementation-status.md)为准。
 
 ## 3. 上下文消息与用户身份
 
