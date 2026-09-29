@@ -2194,6 +2194,7 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
     body jsonb := envelope->'input';
+    authority_value jsonb := envelope#>'{prior,authority}';
     owner_value jsonb := body->'owner';
     turn_value jsonb := body->'turn';
     blocks_value jsonb := turn_value->'blocks';
@@ -2223,7 +2224,6 @@ DECLARE
     existing record;
     stored_tool record;
     repair_row record;
-    trigger_row record;
     principal_value text := NULL;
 BEGIN
     SELECT item->'payload' INTO turn_artifact
@@ -2297,6 +2297,33 @@ BEGIN
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','STALE_AGENT_RUN_OWNER','message','Agent Run owner is stale','status',409
+            )
+        );
+    END IF;
+    IF authority_value->>'protocol' IS DISTINCT FROM
+            'forest.conversation-run-trigger-authority/1'
+       OR authority_value->>'run_ref' IS DISTINCT FROM requested_run
+       OR authority_value->>'trigger_ref' IS DISTINCT FROM
+            tool_value->>'authority_trigger_ref'
+       OR (tool_value IS NULL AND (
+            authority_value->>'session_ref' IS NOT NULL
+            OR authority_value->>'conversation_ref' IS NOT NULL
+            OR authority_value->>'principal_ref' IS NOT NULL
+       ))
+       OR (tool_value IS NOT NULL AND (
+            authority_value->>'principal_ref' IS NULL
+            OR NOT EXISTS (
+                SELECT 1 FROM __forest_module_schema__.agent_sessions s
+                WHERE s.bot_id=requested_bot AND s.session_id=run_row.session_id
+                  AND s.session_id=authority_value->>'session_ref'
+                  AND s.conversation_ref=authority_value->>'conversation_ref'
+            )
+       )) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_TOOL_AUTHORITY_INVALID',
+                'message','Conversation trigger authority differs from this Run','status',403
             )
         );
     END IF;
@@ -2408,21 +2435,7 @@ BEGIN
         );
     END IF;
     IF tool_value IS NOT NULL THEN
-        SELECT * INTO trigger_row
-        FROM __forest_module_schema__.run_input_triggers
-        WHERE bot_id=requested_bot AND run_id=requested_run
-          AND trigger_ref=tool_value->>'authority_trigger_ref'
-        ORDER BY input_revision DESC LIMIT 1;
-        IF trigger_row.trigger_ref IS NULL THEN
-            RETURN jsonb_build_object(
-                'protocol','forest.domain-result/1','ok',false,
-                'error',jsonb_build_object(
-                    'code','AGENT_TOOL_AUTHORITY_INVALID',
-                    'message','Tool trigger is not owned by this Run','status',403
-                )
-            );
-        END IF;
-        principal_value := trigger_row.principal_ref;
+        principal_value := authority_value->>'principal_ref';
     END IF;
     INSERT INTO __forest_module_schema__.model_turns(
         bot_id,turn_id,run_id,request_id,step_seq,protocol_version,

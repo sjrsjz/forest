@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.11.0"
+version = "4.12.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -69,9 +69,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.7.0"
+schema_version = "4.8.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "6b8e4f437bf1e9fa8c1293df8cc14a9c6aba0cc06019d9fe3a57f2b8343a04c4"
+baseline_sha256 = "222305cd8e88e82bcc9f3b0919ff33173ff22b7d37cdd75e15a3aef85f74f5f5"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -122,6 +122,13 @@ contract = "1.0"
 function = "conversation_select_input"
 input_schema = "schemas/select-input-envelope.json"
 output_schema = "schemas/select-input-output.json"
+
+[[components.unit_of_work_participants]]
+name = "conversation.authorize-run-trigger"
+contract = "1.0"
+function = "conversation_authorize_run_trigger"
+input_schema = "schemas/authorize-run-trigger-envelope.json"
+output_schema = "schemas/authorize-run-trigger-output.json"
 
 [[components.unit_of_work_participants]]
 name = "conversation.prepare-context-compaction"

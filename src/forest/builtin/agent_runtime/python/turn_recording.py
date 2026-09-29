@@ -309,13 +309,21 @@ class TurnRecorder:
         saved = await self.ctx.uow.call(
             "agent.record-model-turn",
             {
-                "owner": owner,
-                "turn_id": turn_id,
-                "request_id": request_id,
-                "turn": turn.as_dict(),
-                "artifacts": artifacts,
-                "tool": proposal,
-                "repair_of_request_id": repair_of_request_id,
+                "authority": {
+                    "run_ref": owner["run_id"],
+                    "trigger_ref": (
+                        proposal["authority_trigger_ref"] if proposal is not None else None
+                    ),
+                },
+                "agent": {
+                    "owner": owner,
+                    "turn_id": turn_id,
+                    "request_id": request_id,
+                    "turn": turn.as_dict(),
+                    "artifacts": artifacts,
+                    "tool": proposal,
+                    "repair_of_request_id": repair_of_request_id,
+                },
             },
             operation_id=self.ctx.operations.stable(f"model-turn:{request_id}"),
             timeout=15,

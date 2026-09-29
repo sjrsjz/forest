@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.9.0"
+version = "4.10.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -155,9 +155,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.4.0"
+schema_version = "2.5.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "a7d731fae167cbce325f56256bc53968af8f2271c3e8662d7e208e1eee79f2ca"
+baseline_sha256 = "2f015f8b2fcdd946655d2705ad91a558880ec5cf9ef0a581cf25ffb74acefcfd"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -625,7 +625,8 @@ input_schema = "schemas/record-model-turn-input.json"
 output_schema = "schemas/model-turn-output.json"
 timeout_s = 10
 steps = [
-  { id = "agent", component_id = "agent.runtime", participant = "agent.record-model-turn-record" }
+  { id = "authority", component_id = "conversation.scheduler", participant = "conversation.authorize-run-trigger", input_path = "/authority" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.record-model-turn-record", input_path = "/agent" }
 ]
 
 [[components.unit_of_work_plans]]

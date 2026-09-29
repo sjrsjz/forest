@@ -318,6 +318,41 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "trigger_decision": "TRIGGER",
         }
 
+        authority_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": {"component_id": "agent.runtime", "generation_id": "agent/test"},
+            "input": {"run_ref": "run/1", "trigger_ref": "trigger/1"},
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            authorized = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_authorize_run_trigger(%s::jsonb,%s::jsonb) AS result").format(
+                        sql.Identifier(namespace)
+                    ),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb(authority_envelope)),
+                )
+            ).fetchone()
+            wrong_run = copy.deepcopy(authority_envelope)
+            wrong_run["input"]["run_ref"] = "run/other"
+            rejected = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_authorize_run_trigger(%s::jsonb,%s::jsonb) AS result").format(
+                        sql.Identifier(namespace)
+                    ),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb(wrong_run)),
+                )
+            ).fetchone()
+        assert authorized["result"]["value"] == {
+            "protocol": "forest.conversation-run-trigger-authority/1",
+            "run_ref": "run/1",
+            "trigger_ref": "trigger/1",
+            "session_ref": "session/1",
+            "conversation_ref": actor["conversation_id"],
+            "principal_ref": "qq:42",
+        }
+        assert rejected["result"]["error"]["code"] == "AGENT_TOOL_AUTHORITY_INVALID"
+
         terminal = {
             "protocol": "forest.uow-step/1",
             "caller": {

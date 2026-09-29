@@ -1,7 +1,24 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$ref": "#/$defs/input",
+  "$ref": "#/$defs/plan",
   "$defs": {
+    "plan": {
+      "type": "object",
+      "required": ["authority", "agent"],
+      "properties": {
+        "authority": {
+          "type": "object",
+          "required": ["run_ref", "trigger_ref"],
+          "properties": {
+            "run_ref": {"$ref": "#/$defs/id"},
+            "trigger_ref": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/id"}]}
+          },
+          "additionalProperties": false
+        },
+        "agent": {"$ref": "#/$defs/input"}
+      },
+      "additionalProperties": false
+    },
     "id": {"type": "string", "minLength": 1, "maxLength": 256},
     "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "owner": {

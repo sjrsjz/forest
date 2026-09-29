@@ -999,6 +999,66 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION conversation_authorize_run_trigger(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_run text := envelope#>>'{input,run_ref}';
+    requested_trigger text := envelope#>>'{input,trigger_ref}';
+    match_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR requested_run IS NULL THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_TRIGGER_AUTHORITY_INVALID',
+                'message','Run trigger authority request is invalid','status',422
+            )
+        );
+    END IF;
+    IF requested_trigger IS NULL THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.conversation-run-trigger-authority/1',
+                'run_ref',requested_run,'trigger_ref',NULL,
+                'session_ref',NULL,'conversation_ref',NULL,'principal_ref',NULL
+            )
+        );
+    END IF;
+    SELECT t.conversation_id,t.claimed_session_ref,t.principal_ref
+    INTO match_row
+    FROM __forest_module_schema__.conversation_triggers t
+    WHERE t.bot_id=requested_bot AND t.trigger_id=requested_trigger
+      AND t.status<>'PENDING' AND t.claimed_run_ref=requested_run;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_TOOL_AUTHORITY_INVALID',
+                'message','Tool trigger does not belong to this Run','status',403
+            )
+        );
+    END IF;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.conversation-run-trigger-authority/1',
+            'run_ref',requested_run,'trigger_ref',requested_trigger,
+            'session_ref',match_row.claimed_session_ref,
+            'conversation_ref',match_row.conversation_id,
+            'principal_ref',match_row.principal_ref
+        )
+    );
+END;
+$$;
+
 CREATE FUNCTION conversation_selection_result(requested_bot text, requested_operation text)
 RETURNS jsonb
 LANGUAGE plpgsql

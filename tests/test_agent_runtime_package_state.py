@@ -943,7 +943,16 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 },
                 "repair_of_request_id": "model-request/package/1",
             },
-            "prior": {},
+            "prior": {
+                "authority": {
+                    "protocol": "forest.conversation-run-trigger-authority/1",
+                    "run_ref": "run/agent-package/model-port",
+                    "trigger_ref": "trigger/model-port",
+                    "session_ref": "session/agent-package/model-port",
+                    "conversation_ref": "conversation/onebot/group/model-port",
+                    "principal_ref": "qq:43",
+                }
+            },
         }
         async with store.pool.connection() as conn, conn.transaction():
             repaired_turn = await participant.invoke_in(
