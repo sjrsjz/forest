@@ -350,3 +350,7 @@ Conversation 终态现在先提交权威组事实：成功回复使用不可变 
 Memory 的冻结遗忘选择查询现从不可变 `batch_forget_operations` 按选择计算已完成批数、成员数、首个未处理序号及 `FROZEN/PARTIAL/COMPLETE` 状态；该读取有 `(Bot,selection,ordinal)` 索引，模块 UI 同页展示进度和逐成员的实际抑制归属。隔离 PostgreSQL 的真实批次事务用例核对执行前后进度由 `FROZEN` 收敛为 `COMPLETE`。这只是已提交事实的持久只读投影，不代表 P0 授权、自动继续执行、失败重预览或跨批任务控制已经开放；这些仍待补齐。
 
 通用 Web 配置栏现在把 apply 回执严格表述为 desired 已提交，保留 Worker Host 的持久重建请求 ID，并在当前 Bot 工作区内轮询其 `EFFECTIVE/REBUILD_FAILED` 状态。只有 `EFFECTIVE` 回执才报告“已生效”；重建失败会保留已提交 desired 与错误码。apply 成功后的页面刷新若失败，也只报告刷新失败，不重新开放提交按钮或把已提交事务报成失败。Memory 与 Process Executor 的包内 UI 同步改用 `desired-committed` 事件，不再把提交当生效。三处 JavaScript 语法检查和实际包清单验证通过；不再由任何贡献引用的旧 `clean-agent`、`clean-onebot` 静态页面已删除。此修正不等于实现了显式 enable/disable 或动态候选图；它们仍须按 [17](17-component-worker-host.md) 完成。
+
+逐批遗忘补齐了“事务已提交、Worker 未结算”故障窗口的隔离 PostgreSQL 验证：测试使持有领取的租约过期，下一次认领先读不可变 `batch_forget_operations` 回执，将队列直接收敛为 `SUCCEEDED`、保留原尝试次数和效果，且旧领取不得迟到结算，也未再次提高 Payload 删除纪元。真实 Edge 在隔离 MessageChannel fixture 中走通批次页展开、选择读取、预览、确认、携稳定幂等键的 action、状态轮询和进度刷新；该浏览器 fixture 模拟管理回执，不证明真实 Web 票据签发、PostgreSQL 入队或大规模批次压力。
+
+局部 Generation 保留的内核边界已核对：当前 Registry 的候选图构造、`kernel.runtime.publish_graph` 对全部成员的 READY/退役处理，以及 Contract Router 对准确 Graph ID/revision 的封口，共同决定了 `module.reload` 只能换整图。目标协议和需要保持的成员、路由、租约不变量已写入 [17](17-component-worker-host.md#局部换代的内核边界)；运行时代码、可选择包目录、显式启停及真正的局部换代仍未实现，不得把现有整图重建标为模块级热重载完成。

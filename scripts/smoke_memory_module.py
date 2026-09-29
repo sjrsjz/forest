@@ -67,7 +67,7 @@ def main() -> None:
 const fixture=__FIXTURE__;
 const bytes=Uint8Array.from(atob(fixture.image_base64),char=>char.charCodeAt(0));
 const frame=document.getElementById('memory'),channel=new MessageChannel(),nonce='memory-smoke';
-window.calls=[];window.ready=false;window.corrupt=false;
+window.calls=[];window.ready=false;window.corrupt=false;window.batchApplied=false;
 frame.addEventListener('load',()=>{
   channel.port1.onmessage=event=>{
     const data=event.data;
@@ -79,12 +79,38 @@ frame.addEventListener('load',()=>{
           retrieval:{}}},effective:{revision:1}}});
       window.ready=true;return;
     }
-    if(data.type!=='query')return;
-    calls.push({operation_id:data.operation_id,value:data.value});
+    if(data.type!=='query'&&data.type!=='action')return;
+    calls.push({type:data.type,operation_id:data.operation_id,
+      idempotency_key:data.idempotency_key,value:data.value});
     let value;
-    if(data.operation_id==='memory.trunks.list')value={items:[]};
+    if(data.type==='action'&&data.operation_id==='memory.forget.batch.enqueue'){
+      window.batchApplied=true;
+      value={protocol:'forest.memory-forget-batch-enqueued/1',request_id:'batch:smoke'};
+    }
+    else if(data.operation_id==='memory.trunks.list')value={items:[]};
     else if(data.operation_id==='memory.sources.query')value={items:[],has_more:false,
       snapshot_accepted_at:'2026-09-28T00:00:00Z'};
+    else if(data.operation_id==='memory.forget.selection')value={
+      selection_id:'selection:smoke',member_count:2,
+      member_digest:'sha256:'+'a'.repeat(64),
+      snapshot_accepted_at:'2026-09-28T00:00:00Z',
+      progress_state:window.batchApplied?'COMPLETE':'FROZEN',
+      applied_member_count:window.batchApplied?2:0,
+      applied_batch_count:window.batchApplied?1:0,
+      next_unapplied_ordinal:window.batchApplied?null:1,
+      filters:{author_subject_ref:'qq:author-1'},items:[],has_more:false};
+    else if(data.operation_id==='memory.forget.batch.preview')value={
+      protocol:'forest.memory-forget-batch-impact-plan/1',
+      selection_id:'selection:smoke',first_ordinal:1,last_ordinal:2,
+      batch_member_count:2,source_unit_count:2,selected_payload_count:2,
+      vector_deletion_count:0,relation_retraction_count:0,
+      association_journal_count:0,deletion_epoch:0,
+      plan_digest:'sha256:'+'b'.repeat(64),
+      batch_source_unit_sample:['unit/one','unit/two']};
+    else if(data.operation_id==='memory.forget.batch.status')value={
+      state:'SUCCEEDED',selection_id:'selection:smoke',after_ordinal:0,
+      attempt_count:1,error_code:null,result:{first_ordinal:1,last_ordinal:2,
+        suppressed_source_units:2,vector_deletions:0,retracted_relations:0}};
     else if(data.operation_id==='memory.trial.get')value={state:'READY',query_mode:'MIXED',
       expires_at:'2026-09-29T00:00:00Z',evidence_ref:{payload_id:'evidence-1'}};
     else if(data.operation_id==='memory.trial.result')value={query_id:'trial:smoke',
@@ -108,7 +134,8 @@ frame.addEventListener('load',()=>{
         byte_length:bytes.length,eof:offset+size===bytes.length,
         data_base64:btoa(String.fromCharCode(...chunkBytes))};
     }else throw Error('Unexpected operation '+data.operation_id);
-    channel.port1.postMessage({protocol:data.protocol,type:'query-result',nonce,
+    channel.port1.postMessage({protocol:data.protocol,
+      type:data.type==='action'?'action-result':'query-result',nonce,
       request_id:data.request_id,value});
   };
   channel.port1.start();
@@ -168,7 +195,27 @@ frame.addEventListener('load',()=>{
                 frame.locator("#trial-results button").click()
                 expect(frame.locator("#status")).to_have_text("图片摘要不匹配")
                 expect(frame.locator("#trial-results img")).to_have_count(0)
+                frame.locator('[data-tab="forget"]').click()
+                frame.locator("#forget details summary").click()
+                frame.locator("#batch-selection-id").fill("selection:smoke")
+                frame.locator("#batch-load").click()
+                expect(frame.locator("#batch-selection-meta")).to_contain_text("冻结成员 2 个")
+                frame.locator("#batch-size").fill("2")
+                frame.locator("#batch-preview").click()
+                expect(frame.locator("#batch-impact")).to_contain_text("成员 1–2")
+                frame.locator("#batch-confirm").check()
+                frame.locator("#batch-enqueue").click()
+                expect(frame.locator("#batch-state")).to_contain_text("SUCCEEDED")
+                expect(frame.locator("#batch-selection-meta")).to_contain_text("全部完成")
+                expect(frame.locator("#batch-after")).to_have_value("2")
                 assert not errors, errors
+                action_calls = [call for call in page.evaluate("window.calls")
+                                if call["operation_id"] == "memory.forget.batch.enqueue"]
+                assert len(action_calls) == 1, action_calls
+                assert action_calls[0]["idempotency_key"].startswith("forget-batch:")
+                assert set(action_calls[0]["value"]) == {
+                    "selection_id", "after_ordinal", "batch_size", "plan",
+                }
             finally:
                 browser.close()
     finally:

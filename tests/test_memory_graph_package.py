@@ -760,22 +760,37 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
     assert applied["deletion_epoch"] == before_epoch + 1
     assert await execute_batch(planned["value"]) == applied
     assert await kernel.payload.epoch() == before_epoch + 1
-    settled = await invoke("memory_settle_management_forget",
-                           {"bot_id": store.bot_id}, {
-                               "protocol": "forest.owned-work-settle-request/1",
-                               "work_id": operation_id,
-                               "claim_token": "batch/selection-claim",
-                               "attempt": 1,
-                               "outcome": {"status": "SUCCEEDED", "result": applied},
-                           })
-    assert settled["ok"]
+    # The UOW committed, but the worker lost its settlement before its lease expired.
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "UPDATE {}.management_forget_work SET lease_deadline=clock_timestamp()"
+            " - interval '1 second' WHERE bot_id=%s AND request_id=%s"
+        ).format(namespace), (store.bot_id, operation_id))
+    recovered = await invoke("memory_claim_management_forget",
+                             {"bot_id": store.bot_id}, {
+                                 "protocol": "forest.owned-work-claim-request/1",
+                                 "claim_token": "batch/recovery-probe",
+                                 "lease_seconds": 90,
+                             })
+    assert recovered["ok"] and recovered["value"] is None
     status = await invoke("memory_query_management_forget_batch",
                           {"bot_id": store.bot_id}, {
                               "request_id": operation_id,
                               "requested_by": "admin/one",
                           })
     assert status["value"]["state"] == "SUCCEEDED"
+    assert status["value"]["attempt_count"] == 1
     assert status["value"]["result"] == applied
+    stale_settlement = await invoke("memory_settle_management_forget",
+                                    {"bot_id": store.bot_id}, {
+                                        "protocol": "forest.owned-work-settle-request/1",
+                                        "work_id": operation_id,
+                                        "claim_token": "batch/selection-claim",
+                                        "attempt": 1,
+                                        "outcome": {"status": "SUCCEEDED", "result": applied},
+                                    })
+    assert stale_settlement["error"]["code"] == "MEMORY_FORGET_CLAIM_LOST"
+    assert await kernel.payload.epoch() == before_epoch + 1
     forgotten_page = await invoke(
         "memory_query_forget_selection", {"bot_id": store.bot_id}, {
             "selection_id": "selection/target", "requested_by": "admin/one",

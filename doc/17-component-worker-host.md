@@ -78,3 +78,13 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/1` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执明确列出当前实现会替换整图所有 Generation；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable、可选择工件目录及保留未变化 Generation 仍待完成。
 
 当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、持久重载账本及标准配置控制意图；可选择工件的 `packages`/`module.validate` 端口仍需通过内核受限目录快照建立。下一步实现显式启停、包选择和未变化 Generation 保留，并让 Shell/CLI 使用相同控制端口。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
+
+### 局部换代的内核边界
+
+当前 `RuntimeModuleRegistry` 为每张候选图重新构造全部实例和 Generation；`kernel.runtime.publish_graph` 要求候选图全部成员是新建 `READY`，随后把旧图全部 `ACTIVE` Generation 推进 `QUIESCING`；`RuntimeContractRouter` 的服务句柄又按准确 Graph ID/revision 封口。因此，只让 Worker Host 在 `module.reload` 输入里写目标组件 ID，或者在宿主循环里跳过几个 `bootstrap_builtin_package()`，都无法保留旧 Generation。实现局部换代必须先修改这三个内核契约，不能在包 UI 或业务模块里缓存旧 Worker 对象。
+
+候选计划从当前已发布图及冻结包描述符计算 `replace | retain | remove | add` 成员集合。目标组件、其包摘要/配置生效修订变化者，以及持有受影响组件冻结启动路由或贡献目录的消费者进入替换闭包；闭包外组件只有在原 Generation、描述符摘要、配置生效修订、Host 围栏与路由依赖都不变时才能 `retain`。计划必须列出精确影响集合和资源预算，写入持久控制意图；预热只为 `replace/add` 创建新 Worker。`retain` 不执行 `prepare/start/stop`，不重新绑定其不可变 Generation 身份，也不改写其私有配置 effective 或 owned-work 租约。
+
+新图成员事实可以引用仍然 `ACTIVE` 的旧 Generation，但内核须逐个验证该引用属于当前图、当前 Host lease、准确组件和描述符，且不在另一个相交替换操作中；新建成员仍须 `READY`。发布事务只把 `replace/remove` 旧代变为 `QUIESCING`，只对这些路由增加 epoch；`retain` 的 Generation 与路由 epoch 保持原值，同时写入新图成员引用和新的 Graph head。Graph 历史和 Generation 生命周期因此必须分开建模，不能把“旧图已退休”推导成“旧图所有 Generation 已退休”。回滚候选时也只能清理本操作新建的 Worker，不得关闭被引用的旧代。
+
+服务句柄在每次新调用入场时冻结**当前图**的路由快照；已入场调用继续用原调用树的准确 Generation/route epoch 完成，前提是目标未被换代且授权仍有效。持有旧 Graph ID 的句柄不能在发布后自动获得调用新目标的权力；对 `replace/remove` 的旧路由必须由 epoch 拒绝。保留组件若需调用换代目标，必须进入替换闭包并按自身 handoff 协议重建，除非它声明并实现可验证的安全边界重新绑定契约。这样既允许独立组件保持运行，也不把旧 Generation 偷偷伪装为新代。局部发布、失败回滚和宿主关闭都须按实际成员所有权只排空/释放一次；热重载验收须核对未变化 Generation ID、进程、配置生效修订和 owned-work 租约保持不变，而目标及依赖闭包获得新 Generation。
