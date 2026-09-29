@@ -112,7 +112,7 @@ PENDING ------------> FAILED / CANCELLED
 
 `CLAIMED` 只说明某个会话执行承诺处理该触发；模型启动、一次工具调用结束、输入被裁剪或 Agent 已阅读，都不等于 `ANSWERED`。最终回复事务把实际纳入该回答输入、归属于该 Run 的触发关联到回复意图并标记 `ANSWERED`。该状态表示回复事实已提交，平台是否送达另查 Delivery；它不声称模型回答的内容质量已经得到证明。
 
-最终回复必须经调度器的 Context 追加端口提交：同一事务写 `context_append_operations`、不可变 `REPLY` Context unit，并把明确列出的、仍由该 Session/Run 领取的 trigger 转为 `ANSWERED`。禁止提供一个能绕过回复 Context 单独“批量回答 trigger”的公开端口。闭合的非最终 Agent 步骤也通过同一追加端口写 `AGENT_STEP`，但不终结 trigger。
+最终回复必须经调度器的 Context 追加端口提交：同一事务写 `context_append_operations`、不可变 `REPLY` Context unit，并把明确列出的、仍由该 Session/Run 领取的 trigger 转为 `ANSWERED`。列出的 trigger 必须无重复，且与该 Run 当前所有仍处于 `CLAIMED` 的 trigger **完全相等**；遗漏或混入另一 Run 的触发都使整笔回复事务失败，不能留下已完成 Run 的孤儿触发。禁止提供一个能绕过回复 Context 单独“批量回答 trigger”的公开端口。闭合的非最终 Agent 步骤也通过同一追加端口写 `AGENT_STEP`，但不终结 trigger。
 
 同一批次可以领取多个触发并产生一次连贯回复，不要求每条触发独立启动 Run 或独立发一条消息。每条触发仍保留自己的用户、来源、取消/失败结果及回复关联。新近入队、尚未出现在该模型输入中的触发不能被顺手标为已回答。
 

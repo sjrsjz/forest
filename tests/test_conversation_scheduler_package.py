@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from psycopg import sql
+from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
@@ -1139,6 +1140,72 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         assert final["event_ids"] == ["prefill-event/129", "prefill-event/130"]
         assert final["trigger_ids"] == ["prefill-trigger/30", "prefill-trigger/130"]
         assert [item["principal_ref"] for item in final["triggers"]] == ["qq:30", "qq:130"]
+        reply_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": {
+                "component_id": "conversation.scheduler",
+                "generation_id": participant.generation_id,
+            },
+            "input": {
+                "actor": prefill_actor,
+                "session_ref": "prefill-session",
+                "run_ref": "prefill-run",
+                "reply": {
+                    "payload_id": "prefill-reply/payload",
+                    "digest": digest,
+                    "owner_component_id": "agent.runtime",
+                    "owner_kind": "final.reply",
+                    "owner_id": "prefill-reply",
+                },
+                "unit_id": "prefill-reply/unit",
+            },
+            "prior": {"agent": {
+                "run_id": "prefill-run",
+                "session_id": "prefill-session",
+                "conversation_ref": prefill_conversation,
+                "state": "COMPLETED",
+                "final_candidate": {
+                    "payload_id": "prefill-reply/payload", "digest": digest,
+                },
+            }},
+        }
+        async def append_reply(trigger_ids, operation_id):
+            envelope = copy.deepcopy(reply_envelope)
+            envelope["input"]["answered_trigger_ids"] = trigger_ids
+            async with store.pool.connection() as conn, conn.transaction():
+                row = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.conversation_append_final_reply(%s::jsonb,%s::jsonb) "
+                                "AS result").format(sql.Identifier(namespace)),
+                        (Jsonb({
+                            "bot_id": store.bot_id,
+                            "operation_id": operation_id,
+                            "participant_input_digest": digest,
+                        }), Jsonb(envelope)),
+                    )
+                ).fetchone()
+            return row["result"]
+
+        for trigger_ids in (["prefill-trigger/130"],
+                            ["prefill-trigger/30", "prefill-trigger/30"]):
+            rejected = await append_reply(trigger_ids, "prefill-reply/rejected")
+            assert rejected["ok"] is False
+            assert rejected["error"]["code"] == "TRIGGER_STATE_CONFLICT"
+        async with store.pool.connection() as conn:
+            claimed = await (
+                await conn.execute(
+                    sql.SQL("SELECT status FROM {}.conversation_triggers "
+                            "WHERE bot_id=%s AND conversation_id=%s ORDER BY ingress_seq")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, prefill_conversation),
+                )
+            ).fetchall()
+        assert [row["status"] for row in claimed] == ["CLAIMED", "CLAIMED"]
+        accepted = await append_reply(final["trigger_ids"], "prefill-reply/accepted")
+        assert accepted["ok"] is True
+        assert accepted["value"]["answered_trigger_ids"] == [
+            "prefill-trigger/130", "prefill-trigger/30",
+        ]
         drained = await prefill_endpoint.invoke_routed(
             prefill_route,
             RuntimeServiceInvocation(

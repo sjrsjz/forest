@@ -2549,6 +2549,8 @@ DECLARE
     replay record;
     context_revision_value bigint;
     requested_trigger_count integer;
+    distinct_requested_trigger_count integer;
+    claimed_trigger_count integer;
     matched_trigger_count integer;
     trigger_ids_value jsonb;
     answered_events_value jsonb;
@@ -2627,8 +2629,14 @@ BEGIN
             )
         );
     END IF;
-    SELECT count(*)::integer INTO requested_trigger_count
-    FROM jsonb_array_elements_text(trigger_values);
+    SELECT count(*)::integer,count(DISTINCT requested.trigger_id)::integer
+    INTO requested_trigger_count,distinct_requested_trigger_count
+    FROM jsonb_array_elements_text(trigger_values) requested(trigger_id);
+    SELECT count(*)::integer INTO claimed_trigger_count
+    FROM __forest_module_schema__.conversation_triggers t
+    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
+      AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
+      AND t.claimed_run_ref=requested_run;
     SELECT count(*)::integer INTO matched_trigger_count
     FROM __forest_module_schema__.conversation_triggers t
     JOIN jsonb_array_elements_text(trigger_values) requested(trigger_id)
@@ -2636,12 +2644,14 @@ BEGIN
     WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
       AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
       AND t.claimed_run_ref=requested_run;
-    IF matched_trigger_count<>requested_trigger_count THEN
+    IF requested_trigger_count<>distinct_requested_trigger_count
+       OR claimed_trigger_count<>requested_trigger_count
+       OR matched_trigger_count<>requested_trigger_count THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','TRIGGER_STATE_CONFLICT',
-                'message','A final reply trigger is not owned by this Run','status',409
+                'message','Final reply triggers differ from this Run claim','status',409
             )
         );
     END IF;

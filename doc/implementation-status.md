@@ -326,3 +326,5 @@ Conversation 的 `CONTEXT_PREFILL` 已在此前实现：带触发前缀分 64 �
 标准配置事务的调用作用域现从包专用 `PackageCallScope` 分离为 `ComponentConfigurationApplyScope`；内核 authority 不再构造包 Worker 身份，包 Generation 只在普通服务和通用 UnitOfWork 使用包作用域。新作用域保留精确组件/Generation/调用/operation 身份，`management.configuration` 因果根由协调器固定生成。包与 Web 管理本地回归 `92 passed, 2 skipped`；隔离 PostgreSQL 完整宿主测试再次覆盖包配置拒绝回滚、跨代重放及内核授权配置到 `EFFECTIVE`（`1 passed`，189.87 秒）。临时库和容器已清理。
 
 Memory 图的高出度 `ASSOCIATES_WITH` 邻接读取现使用贡献 ID 的持久伪随机键和查询/源节点派生的游标起点，从双向局部索引分别读取起点后及回绕前的有界候选，再合并选取扩散边。可见性、证据及快照资格在各段达到上限前验证；同查询结果稳定，换查询通常改变窗口。隔离 PostgreSQL 用例覆盖双向索引可用性、跨主干采样、隐藏证据、快照与来源归因（`1 passed`），包构建及 Ruff 检查通过。大量不可见边仍可能增加索引扫描长度；该方案是伪随机窗口，不宣称独立均匀抽样。长期真实群聊及完整遗忘管理仍待验收。
+
+Conversation 最终回复现在在持有会话 lane 锁的事务中校验 Agent 提交的触发 ID 无重复，且与该 Session/Run 仍处于 `CLAIMED` 的完整集合相等。此前只验证提交集合属于当前 Run，漏列触发会在 Run 完成后遗留孤儿领取；现在整个回复提交拒绝此情况。隔离 PostgreSQL 的长前缀预填场景以两个不同作者的触发验证漏列和重复均不改状态、完整集合可以回答（`1 passed`）；完整 Bot 宿主的正常成功回复链也通过（`1 passed`）。包构建与 Ruff 通过。最后一次领取仍会返回无界触发数组，而最终回复输入最多允许 4096 个 ID；超过此数尚无分段归属协议，本修正只封闭集合正确性，不宣称规模上界已解决。
