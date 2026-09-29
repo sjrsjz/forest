@@ -11,7 +11,7 @@ import asyncio
 import inspect
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from forest.errors import ForestError
@@ -712,19 +712,48 @@ class RuntimeContractRouter:
             )
         authority = self.registry.generation_authority
         if authority is not None:
-            if route.owned_work:
-                async with authority.store.pool.connection() as conn, conn.transaction():
-                    await authority.verify_generation_member_in(
+            async with authority.store.pool.connection() as conn, conn.transaction():
+                if route.owned_work:
+                    accepted = await authority.verify_generation_member_in(
                         conn,
                         component_id=route.provider_component_id,
                         generation_id=route.provider_generation_id,
                     )
-            else:
-                await authority.verify_active_generation(
-                    component_id=route.provider_component_id,
-                    generation_id=route.provider_generation_id,
-                    admission_lane=route.admission_lane,
-                )
+                else:
+                    accepted = await authority.verify_active_generation_in(
+                        conn,
+                        component_id=route.provider_component_id,
+                        generation_id=route.provider_generation_id,
+                        admission_lane=route.admission_lane,
+                    )
+                if (
+                    accepted.graph_id != route.graph_id
+                    or accepted.graph_revision != route.graph_revision
+                ):
+                    # A handle may outlive its original Graph only when both
+                    # exact Generations survive. Hold the Graph head fence
+                    # across both membership checks.
+                    caller_generation_id = self.registry.graph_identity.generations[
+                        route.caller_component_id
+                    ]
+                    if route.owned_work:
+                        await authority.verify_generation_member_in(
+                            conn,
+                            component_id=route.caller_component_id,
+                            generation_id=caller_generation_id,
+                        )
+                    else:
+                        await authority.verify_active_generation_in(
+                            conn,
+                            component_id=route.caller_component_id,
+                            generation_id=caller_generation_id,
+                            admission_lane=route.admission_lane,
+                        )
+                    route = replace(
+                        route,
+                        graph_id=accepted.graph_id,
+                        graph_revision=accepted.graph_revision,
+                    )
         provider_component_id, handler = self._providers[(route.service_id, route.version)]
         if provider_component_id != route.provider_component_id:
             raise ForestError(

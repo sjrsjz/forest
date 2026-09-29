@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 from psycopg import sql
@@ -34,7 +35,7 @@ class KernelServiceOperationLedger:
         self.runtime = runtime
         self.payloads = payloads
 
-    async def _verify_begin_route(self, conn, scope, route) -> None:
+    async def _current_begin_route(self, conn, scope, route) -> PackageServiceRoute:
         if route.owned_work:
             accepted = await self.runtime.verify_generation_member_in(
                 conn,
@@ -52,27 +53,28 @@ class KernelServiceOperationLedger:
             accepted.graph_id != route.graph_id
             or accepted.graph_revision != route.graph_revision
         ):
-            raise ForestError(
-                "SERVICE_OPERATION_ROUTE_STALE",
-                "Service operation route differs from the current RuntimeGraph",
-                409,
+            await self.runtime.verify_generation_graph_fence_in(
+                conn,
+                component_id=scope.component_id,
+                generation_id=scope.generation_id,
+                graph_id=route.graph_id,
+                graph_revision=route.graph_revision,
             )
+        # The exact Generation is the durable owner. A retained Worker keeps
+        # its immutable origin identity, while each new attempt records the
+        # current Graph under the same transaction as its admission check.
+        return replace(
+            route,
+            graph_id=accepted.graph_id,
+            graph_revision=accepted.graph_revision,
+        )
 
     async def _verify_completion_route(self, conn, scope, route) -> None:
-        accepted = await self.runtime.verify_generation_member_in(
+        await self.runtime.verify_generation_member_in(
             conn,
             component_id=scope.component_id,
             generation_id=scope.generation_id,
         )
-        if (
-            accepted.graph_id != route.graph_id
-            or accepted.graph_revision != route.graph_revision
-        ):
-            raise ForestError(
-                "SERVICE_OPERATION_ROUTE_STALE",
-                "Service operation no longer belongs to the current RuntimeGraph",
-                409,
-            )
 
     def _validate(self, scope: PackageCallScope, route: PackageServiceRoute) -> None:
         for value, field, limit in (
@@ -229,7 +231,7 @@ class KernelServiceOperationLedger:
             {"service_id": route.service_id, "input": input_value}
         )
         async with self.runtime.store.pool.connection() as conn, conn.transaction():
-            await self._verify_begin_route(conn, scope, route)
+            route = await self._current_begin_route(conn, scope, route)
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 (

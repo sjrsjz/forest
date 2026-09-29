@@ -694,6 +694,70 @@ class KernelRuntimeRepository:
             lock=True,
         )
 
+    async def verify_generation_graph_fence_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        generation_id: str,
+        graph_id: str,
+        graph_revision: int,
+    ) -> RuntimeGenerationGraph:
+        """Accept an origin Graph fence only while its exact Generation survives."""
+
+        if (
+            not isinstance(graph_id, str)
+            or not 1 <= len(graph_id) <= 512
+            or type(graph_revision) is not int
+            or graph_revision <= 0
+        ):
+            raise ForestError(
+                "RUNTIME_GENERATION_FENCE_INVALID",
+                "Generation Graph fence identity is invalid",
+                422,
+            )
+        current = await self.verify_generation_member_in(
+            conn, component_id=component_id, generation_id=generation_id
+        )
+        if current.graph_id == graph_id and current.graph_revision == graph_revision:
+            return current
+        origin = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT graph.graph_id FROM {} graph JOIN {} member "
+                    "ON member.bot_id=graph.bot_id AND member.graph_id=graph.graph_id "
+                    "JOIN {} lifecycle ON lifecycle.bot_id=member.bot_id "
+                    "AND lifecycle.graph_id=member.graph_id "
+                    "AND lifecycle.component_id=member.component_id "
+                    "AND lifecycle.state='ACTIVE' "
+                    "WHERE graph.bot_id=%s AND graph.graph_id=%s "
+                    "AND graph.graph_revision=%s AND graph.graph_revision<%s "
+                    "AND graph.state IN ('RETIRED','FAILED','STOPPED') "
+                    "AND member.component_id=%s AND member.generation_id=%s "
+                    "FOR SHARE OF graph,member,lifecycle"
+                ).format(
+                    self._table("runtime_graphs"),
+                    self._table("runtime_graph_modules"),
+                    self._table("runtime_graph_lifecycle_facts"),
+                ),
+                (
+                    self.store.bot_id,
+                    graph_id,
+                    graph_revision,
+                    current.graph_revision,
+                    component_id,
+                    generation_id,
+                ),
+            )
+        ).fetchone()
+        if origin is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_GRAPH_FENCE_STALE",
+                "Origin Graph does not own the currently retained Generation",
+                409,
+            )
+        return current
+
     async def _host_owned_generation_in(
         self,
         conn,

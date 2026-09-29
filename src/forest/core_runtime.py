@@ -558,19 +558,22 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         fence_id,
         fence_epoch,
     ):
-        graph = await runtime.verify_generation_member_in(
-            conn,
-            component_id=executor_component_id,
-            generation_id=executor_generation_id,
-        )
-        if (
-            fence_kind != "runtime.graph"
-            or fence_id != graph.graph_id
-            or fence_epoch != graph.graph_revision
-        ):
+        if fence_kind != "runtime.graph":
             raise ForestError(
                 "EFFECT_STALE_FENCE", "Executor RuntimeGraph fence is no longer current", 409
             )
+        try:
+            await runtime.verify_generation_graph_fence_in(
+                conn,
+                component_id=executor_component_id,
+                generation_id=executor_generation_id,
+                graph_id=fence_id,
+                graph_revision=fence_epoch,
+            )
+        except ForestError as exc:
+            raise ForestError(
+                "EFFECT_STALE_FENCE", "Executor RuntimeGraph fence is no longer current", 409
+            ) from exc
 
     effect = KernelEffectRepository(
         store,

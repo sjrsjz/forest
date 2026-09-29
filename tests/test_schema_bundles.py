@@ -22,10 +22,13 @@ from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
+from forest.package_capabilities import PackageCallScope, PackageServiceRoute
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import (
     FrozenServiceRoute,
+    RoutedServiceEndpoint,
+    RuntimeContractRouter,
     RuntimeKernelServiceContext,
     RuntimeServiceInvocation,
 )
@@ -62,6 +65,7 @@ from forest.storage.payload_authority import (
     SourceTarget,
 )
 from forest.storage.schema_bundles import SchemaBundleInstaller
+from forest.storage.service_operations import KernelServiceOperationLedger
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 
@@ -721,21 +725,88 @@ async def test_runtime_graph_retains_unchanged_generations_without_republishing_
     runtime = kernel.runtime
     lease = await runtime.claim_host("retain-host", "retain-incarnation")
     provider = runtime_binding("example.provider", marker="a")
+    caller = runtime_binding(
+        "example.caller", marker="d", requires=("example.provider",)
+    )
     consumer = runtime_binding(
         "example.consumer", marker="b", requires=("example.provider",)
     )
-    first = await runtime.prepare_graph(lease, [provider, consumer], str(uuid4()))
+    first = await runtime.prepare_graph(lease, [provider, caller, consumer], str(uuid4()))
     await runtime.publish_graph(lease, first)
     retained_id = first.generations["example.provider"]
+    provider_instance = SimpleNamespace(
+        runtime_contract={"services": [{"service_id": "example.effect", "version": 1}]},
+        runtime_service_handlers=lambda: {
+            ("example.effect", 1): RoutedServiceEndpoint(
+                lambda route, _invocation, payload: {
+                    "graph_id": route.graph_id,
+                    "graph_revision": route.graph_revision,
+                    "value": payload["value"],
+                }
+            )
+        },
+        generation_identity=SimpleNamespace(generation_id=retained_id),
+    )
+    caller_instance = SimpleNamespace(
+        runtime_contract={"requires": [{"service_id": "example.effect", "version": 1}]}
+    )
+    registry = SimpleNamespace(
+        graph_identity=first,
+        instances={
+            "example.provider": provider_instance,
+            "example.caller": caller_instance,
+        },
+        states={
+            "example.provider": ModuleLifecycleState.ACTIVE,
+            "example.caller": ModuleLifecycleState.ACTIVE,
+        },
+        generation_authority=runtime,
+    )
+    router = RuntimeContractRouter(registry)
+    handle = router.request(
+        caller_component_id="example.caller",
+        service_id="example.effect",
+        version=1,
+        admission_lane="DATA",
+        owned_work=False,
+    )
+    router.register("example.provider", provider_instance)
+    router.seal()
+    router.activate()
     before = await runtime.verify_active_generation(
         component_id="example.provider", generation_id=retained_id
     )
+    ledger = KernelServiceOperationLedger(runtime, kernel.payload)
+    scope = PackageCallScope(
+        bot_id=store.bot_id,
+        component_id="example.provider",
+        generation_id=retained_id,
+        instance_id="instance:example.provider:a",
+        worker_incarnation="worker:example.provider:a",
+        call_id="call:retained-before",
+        call_operation_id="operation:retained-before",
+        causal_root_kind="test.runtime",
+        causal_root_id="source:retained",
+    )
+    origin_route = PackageServiceRoute(
+        service_id="example.effect",
+        graph_id=first.graph_id,
+        graph_revision=first.graph_revision,
+        admission_lane="DATA",
+        owned_work=True,
+        parent_call_id=None,
+        timeout_seconds=30,
+    )
+    assert (await ledger.begin(scope, origin_route, {"value": 1})).execute
 
     second = await runtime.prepare_graph(
         lease,
         [runtime_binding("example.consumer", marker="c", requires=("example.provider",))],
         str(uuid4()),
-        retained_generations={"example.provider": retained_id},
+        retained_generations={
+            "example.provider": retained_id,
+            "example.caller": first.generations["example.caller"],
+        },
         source_graph=first,
     )
     assert second.generations["example.provider"] == retained_id
@@ -743,7 +814,10 @@ async def test_runtime_graph_retains_unchanged_generations_without_republishing_
         lease,
         [runtime_binding("example.consumer", marker="c", requires=("example.provider",))],
         second.activation_id,
-        retained_generations={"example.provider": retained_id},
+        retained_generations={
+            "example.provider": retained_id,
+            "example.caller": first.generations["example.caller"],
+        },
         source_graph=first,
     ) == second
     with pytest.raises(ForestError) as conflict:
@@ -757,6 +831,48 @@ async def test_runtime_graph_retains_unchanged_generations_without_republishing_
     )
     assert after.route_epoch == before.route_epoch
     assert after.graph_id == second.graph_id
+    async with store.pool.connection() as conn, conn.transaction():
+        assert await runtime.verify_generation_graph_fence_in(
+            conn,
+            component_id="example.provider",
+            generation_id=retained_id,
+            graph_id=first.graph_id,
+            graph_revision=first.graph_revision,
+        ) == second
+        with pytest.raises(ForestError) as conflict:
+            await runtime.verify_generation_graph_fence_in(
+                conn,
+                component_id="example.provider",
+                generation_id=retained_id,
+                graph_id=first.graph_id,
+                graph_revision=second.graph_revision,
+            )
+        assert conflict.value.code == "RUNTIME_GENERATION_GRAPH_FENCE_STALE"
+    assert await handle.invoke(
+        {"value": 7},
+        operation_id="call:retained-router",
+        causal_root_kind="test.runtime",
+        causal_root_id="source:retained",
+    ) == {
+        "graph_id": second.graph_id,
+        "graph_revision": second.graph_revision,
+        "value": 7,
+    }
+    await ledger.succeed(scope, origin_route, {"value": 1})
+    later_scope = replace(
+        scope,
+        call_id="call:retained-after",
+        call_operation_id="operation:retained-after",
+    )
+    with pytest.raises(ForestError) as conflict:
+        await ledger.begin(
+            later_scope,
+            replace(origin_route, graph_revision=second.graph_revision),
+            {"value": 2},
+        )
+    assert conflict.value.code == "RUNTIME_GENERATION_GRAPH_FENCE_STALE"
+    assert (await ledger.begin(later_scope, origin_route, {"value": 2})).execute
+    await ledger.succeed(later_scope, origin_route, {"value": 2})
     async with store.pool.connection() as conn:
         statuses = await (
             await conn.execute(
@@ -767,9 +883,26 @@ async def test_runtime_graph_retains_unchanged_generations_without_republishing_
                 (list(first.generations.values()),),
             )
         ).fetchall()
+        attempts = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT call_id,graph_id,graph_revision,status FROM {}.service_call_attempts "
+                    "WHERE call_id IN (%s,%s) ORDER BY call_id"
+                ).format(sql.Identifier(runtime.namespace)),
+                (scope.call_id, later_scope.call_id),
+            )
+        ).fetchall()
     assert {item["generation_id"]: item["status"] for item in statuses} == {
         retained_id: "ACTIVE",
+        first.generations["example.caller"]: "ACTIVE",
         first.generations["example.consumer"]: "QUIESCING",
+    }
+    assert {
+        item["call_id"]: (item["graph_id"], item["graph_revision"], item["status"])
+        for item in attempts
+    } == {
+        scope.call_id: (first.graph_id, first.graph_revision, "SUCCEEDED"),
+        later_scope.call_id: (second.graph_id, second.graph_revision, "SUCCEEDED"),
     }
     with pytest.raises(ForestError) as conflict:
         await runtime.record_states(
@@ -818,6 +951,25 @@ async def test_runtime_graph_retains_unchanged_generations_without_republishing_
     with pytest.raises(ForestError) as conflict:
         await runtime.publish_graph(lease, stale)
     assert conflict.value.code == "RUNTIME_RETAINED_GENERATION_STALE"
+    with pytest.raises(ForestError) as conflict:
+        await handle.invoke(
+            {"value": 8},
+            operation_id="call:stale-router",
+            causal_root_kind="test.runtime",
+            causal_root_id="source:retained",
+        )
+    assert conflict.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    with pytest.raises(ForestError) as conflict:
+        await ledger.begin(
+            replace(
+                scope,
+                call_id="call:retired-provider",
+                call_operation_id="operation:retired-provider",
+            ),
+            origin_route,
+            {"value": 3},
+        )
+    assert conflict.value.code == "RUNTIME_GENERATION_NOT_CURRENT"
 
 
 @pytest.mark.postgres
