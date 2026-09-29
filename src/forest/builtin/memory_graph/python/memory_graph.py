@@ -736,6 +736,41 @@ class MemoryGraph(Plugin):
     @job("memory.forget.manage-work")
     async def execute_management_forget(self, task, ctx):
         request = task["payload"]
+        if request["work_kind"] == "BATCH":
+            operation_id = request["request_id"]
+            selection_id = request["selection_id"]
+            requested_by = request["requested_by"]
+            after_ordinal = request["after_ordinal"]
+            batch_size = request["batch_size"]
+            plan = request["plan"]
+            selection = {
+                "operation_id": operation_id,
+                "selection_id": selection_id,
+                "requested_by": requested_by,
+                "after_ordinal": after_ordinal,
+                "batch_size": batch_size,
+            }
+            return await ctx.uow.call(
+                "memory.forget-batch",
+                {
+                    "prepare": selection,
+                    "payload": {
+                        "protocol": "forest.payload-forget-anchors/1",
+                        "prior_step_id": "prepare",
+                        "operation_id": operation_id,
+                        "expected_deletion_epoch": plan["deletion_epoch"],
+                        "expected_selection_digest": plan["selection_digest"],
+                    },
+                    "memory": {
+                        **selection,
+                        "prepare_step_id": "prepare",
+                        "forget_step_id": "payload",
+                        "plan": plan,
+                    },
+                },
+                operation_id=operation_id,
+                timeout=30,
+            )
         return await self.forget_source(
             {
                 "operation_id": request["request_id"],

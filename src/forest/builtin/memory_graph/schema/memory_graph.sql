@@ -374,7 +374,11 @@ CREATE TABLE management_forget_work (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     request_id text NOT NULL CHECK (octet_length(request_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
-    source_unit_id text NOT NULL,
+    work_kind text NOT NULL DEFAULT 'SOURCE' CHECK (work_kind IN ('SOURCE','BATCH')),
+    source_unit_id text,
+    selection_id text,
+    after_ordinal integer CHECK (after_ordinal IS NULL OR after_ordinal BETWEEN 0 AND 999999),
+    batch_size integer CHECK (batch_size IS NULL OR batch_size BETWEEN 1 AND 64),
     requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
     plan jsonb NOT NULL,
     state text NOT NULL DEFAULT 'QUEUED' CHECK (
@@ -389,6 +393,12 @@ CREATE TABLE management_forget_work (
     PRIMARY KEY (bot_id,request_id),
     UNIQUE (bot_id,claim_token),
     FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    CHECK (
+        (work_kind='SOURCE' AND source_unit_id IS NOT NULL AND selection_id IS NULL
+         AND after_ordinal IS NULL AND batch_size IS NULL)
+        OR (work_kind='BATCH' AND source_unit_id IS NULL AND selection_id IS NOT NULL
+            AND after_ordinal IS NOT NULL AND batch_size IS NOT NULL)
+    ),
     CHECK ((state='RUNNING') = (claim_token IS NOT NULL AND lease_deadline IS NOT NULL)),
     CHECK ((state='SUCCEEDED') = (result_payload IS NOT NULL))
 );
@@ -419,6 +429,8 @@ CREATE TABLE forget_selections (
     UNIQUE (bot_id,operation_id)
 );
 ALTER TABLE batch_forget_operations ADD CONSTRAINT batch_forget_selection_fk
+    FOREIGN KEY (bot_id,selection_id) REFERENCES forget_selections(bot_id,selection_id);
+ALTER TABLE management_forget_work ADD CONSTRAINT management_forget_selection_fk
     FOREIGN KEY (bot_id,selection_id) REFERENCES forget_selections(bot_id,selection_id);
 
 CREATE TABLE forget_selection_members (
@@ -6352,17 +6364,33 @@ $$;
 CREATE FUNCTION memory_forget_work_projection(requested_bot text, requested_id text)
 RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     SELECT jsonb_build_object(
-        'protocol','forest.memory-forget-work/1',
+        'protocol',CASE WHEN w.work_kind='BATCH'
+            THEN 'forest.memory-forget-batch-work/1'
+            ELSE 'forest.memory-forget-work/1' END,
         'request_id',w.request_id,
-        'source_unit_id',w.source_unit_id,
         'state',w.state,
         'attempt_count',w.attempt_count,
         'result',w.result_payload,
         'error_code',w.error_code,
         'created_at',w.created_at,
-        'updated_at',w.updated_at)
+        'updated_at',w.updated_at) || CASE WHEN w.work_kind='BATCH' THEN
+            jsonb_build_object('selection_id',w.selection_id,
+                'after_ordinal',w.after_ordinal,'batch_size',w.batch_size)
+            ELSE jsonb_build_object('source_unit_id',w.source_unit_id) END
     FROM __forest_module_schema__.management_forget_work w
     WHERE w.bot_id=requested_bot AND w.request_id=requested_id
+$$;
+
+CREATE FUNCTION memory_committed_forget_result(
+    requested_bot text, requested_kind text, requested_id text
+) RETURNS jsonb LANGUAGE sql STABLE SET search_path=pg_catalog AS $$
+    SELECT CASE WHEN requested_kind='BATCH' THEN (
+        SELECT o.result_payload FROM __forest_module_schema__.batch_forget_operations o
+        WHERE o.bot_id=requested_bot AND o.operation_id=requested_id
+    ) ELSE (
+        SELECT o.result_payload FROM __forest_module_schema__.source_forget_operations o
+        WHERE o.bot_id=requested_bot AND o.operation_id=requested_id
+    ) END
 $$;
 
 CREATE FUNCTION memory_enqueue_management_forget(context jsonb, input jsonb)
@@ -6391,7 +6419,7 @@ BEGIN
         'forest.memory.graph/management-forget/' || requested_bot || '/' || requested_id,0));
     SELECT * INTO existing FROM __forest_module_schema__.management_forget_work
     WHERE bot_id=requested_bot AND request_id=requested_id;
-    IF existing IS NOT NULL THEN
+    IF FOUND THEN
         IF existing.input_digest IS DISTINCT FROM requested_digest THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','MEMORY_FORGET_OPERATION_CONFLICT',
@@ -6423,13 +6451,104 @@ DECLARE
 BEGIN
     result_value := __forest_module_schema__.memory_forget_work_projection(
         context->>'bot_id',input->>'request_id');
-    IF result_value IS NULL THEN
+    IF result_value IS NULL OR result_value->>'protocol'<>'forest.memory-forget-work/1' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_FORGET_REQUEST_NOT_FOUND',
                 'message','Memory forget request does not exist','status',404));
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',result_value);
+END;
+$$;
+
+CREATE FUNCTION memory_enqueue_management_forget_batch(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_id text := context->>'operation_id';
+    requested_digest text := 'sha256:' ||
+        encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    requested_selection text := input->>'selection_id';
+    requested_actor text := input->>'requested_by';
+    after_value integer := (input->>'after_ordinal')::integer;
+    batch_size_value integer := (input->>'batch_size')::integer;
+    plan_value jsonb := input->'plan';
+    selection_row __forest_module_schema__.forget_selections%ROWTYPE;
+    existing __forest_module_schema__.management_forget_work%ROWTYPE;
+BEGIN
+    IF requested_id IS NULL OR octet_length(requested_id) NOT BETWEEN 1 AND 256
+       OR requested_selection IS NULL OR octet_length(requested_selection) NOT BETWEEN 1 AND 256
+       OR requested_actor IS NULL OR octet_length(requested_actor) NOT BETWEEN 1 AND 256
+       OR after_value IS NULL OR after_value<0
+       OR batch_size_value IS NULL OR batch_size_value NOT BETWEEN 1 AND 64
+       OR jsonb_typeof(plan_value) IS DISTINCT FROM 'object'
+       OR plan_value->>'protocol' IS DISTINCT FROM 'forest.memory-forget-batch-impact-plan/1'
+       OR plan_value->>'selection_id' IS DISTINCT FROM requested_selection
+       OR (plan_value->>'first_ordinal')::integer IS DISTINCT FROM after_value+1
+       OR plan_value->>'plan_digest' IS DISTINCT FROM ('sha256:' ||
+           encode(sha256(convert_to((plan_value-'plan_digest')::text,'UTF8')),'hex')) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_MANAGEMENT_INPUT_INVALID',
+                'message','Management batch forget request is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/management-forget/' || requested_bot || '/' || requested_id,0));
+    SELECT * INTO existing FROM __forest_module_schema__.management_forget_work
+    WHERE bot_id=requested_bot AND request_id=requested_id;
+    IF FOUND THEN
+        IF existing.work_kind IS DISTINCT FROM 'BATCH'
+           OR existing.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FORGET_OPERATION_CONFLICT',
+                    'message','Management forget request differs','status',409));
+        END IF;
+    ELSE
+        SELECT * INTO selection_row FROM __forest_module_schema__.forget_selections
+        WHERE bot_id=requested_bot AND selection_id=requested_selection
+          AND requested_by=requested_actor;
+        IF selection_row IS NULL THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FORGET_SELECTION_NOT_FOUND',
+                    'message','Forget selection does not exist','status',404));
+        END IF;
+        IF after_value>=selection_row.member_count
+           OR (plan_value->>'last_ordinal')::integer IS DISTINCT FROM
+              LEAST(after_value+batch_size_value,selection_row.member_count)
+           OR plan_value->>'member_digest' IS DISTINCT FROM selection_row.member_digest
+           OR (plan_value->>'batch_member_count')::integer IS DISTINCT FROM
+              LEAST(batch_size_value,selection_row.member_count-after_value) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_SELECTION_CONFLICT',
+                    'message','Batch plan differs from the frozen selection','status',409));
+        END IF;
+        INSERT INTO __forest_module_schema__.management_forget_work(
+            bot_id,request_id,input_digest,work_kind,selection_id,after_ordinal,
+            batch_size,requested_by,plan)
+        VALUES(requested_bot,requested_id,requested_digest,'BATCH',requested_selection,
+               after_value,batch_size_value,requested_actor,plan_value);
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.memory-forget-batch-enqueued/1','request_id',requested_id));
+END;
+$$;
+
+CREATE FUNCTION memory_query_management_forget_batch(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE
+    result_value jsonb;
+BEGIN
+    SELECT __forest_module_schema__.memory_forget_work_projection(w.bot_id,w.request_id)
+    INTO result_value FROM __forest_module_schema__.management_forget_work w
+    WHERE w.bot_id=context->>'bot_id' AND w.request_id=input->>'request_id'
+      AND w.work_kind='BATCH' AND w.requested_by=input->>'requested_by';
+    IF result_value IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_FORGET_BATCH_REQUEST_NOT_FOUND',
+                'message','Management batch forget request does not exist','status',404));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+                              'value',result_value);
 END;
 $$;
 
@@ -6449,18 +6568,15 @@ BEGIN
                 'message','Management forget claim is invalid','status',422));
     END IF;
     UPDATE __forest_module_schema__.management_forget_work w
-    SET state=CASE WHEN EXISTS (
-            SELECT 1 FROM __forest_module_schema__.source_forget_operations o
-            WHERE o.bot_id=w.bot_id AND o.operation_id=w.request_id
-        ) THEN 'SUCCEEDED' WHEN attempt_count<3 THEN 'QUEUED' ELSE 'UNKNOWN' END,
+    SET state=CASE WHEN __forest_module_schema__.memory_committed_forget_result(
+            w.bot_id,w.work_kind,w.request_id) IS NOT NULL
+            THEN 'SUCCEEDED' WHEN attempt_count<3 THEN 'QUEUED' ELSE 'UNKNOWN' END,
         claim_token=NULL,lease_deadline=NULL,
-        result_payload=(
-            SELECT o.result_payload FROM __forest_module_schema__.source_forget_operations o
-            WHERE o.bot_id=w.bot_id AND o.operation_id=w.request_id),
-        error_code=CASE WHEN EXISTS (
-            SELECT 1 FROM __forest_module_schema__.source_forget_operations o
-            WHERE o.bot_id=w.bot_id AND o.operation_id=w.request_id
-        ) OR attempt_count<3 THEN NULL ELSE 'MEMORY_FORGET_OUTCOME_UNKNOWN' END,
+        result_payload=__forest_module_schema__.memory_committed_forget_result(
+            w.bot_id,w.work_kind,w.request_id),
+        error_code=CASE WHEN __forest_module_schema__.memory_committed_forget_result(
+            w.bot_id,w.work_kind,w.request_id) IS NOT NULL
+            OR attempt_count<3 THEN NULL ELSE 'MEMORY_FORGET_OUTCOME_UNKNOWN' END,
         updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND state='RUNNING' AND lease_deadline<=clock_timestamp();
     SELECT * INTO work_row FROM __forest_module_schema__.management_forget_work
@@ -6482,12 +6598,18 @@ BEGIN
             'attempt',work_row.attempt_count,
             'operation_id','memory-forget-work:' || encode(sha256(convert_to(
                 work_row.request_id || '/' || work_row.attempt_count,'UTF8')),'hex'),
-            'causal_root_kind','memory.forget',
+            'causal_root_kind',CASE WHEN work_row.work_kind='BATCH'
+                THEN 'memory.forget.batch' ELSE 'memory.forget' END,
             'causal_root_id',work_row.request_id,
             'payload',jsonb_build_object(
                 'request_id',work_row.request_id,
-                'source_unit_id',work_row.source_unit_id,
-                'plan',work_row.plan)));
+                'work_kind',work_row.work_kind,
+                'plan',work_row.plan) || CASE WHEN work_row.work_kind='BATCH' THEN
+                    jsonb_build_object('selection_id',work_row.selection_id,
+                        'requested_by',work_row.requested_by,
+                        'after_ordinal',work_row.after_ordinal,
+                        'batch_size',work_row.batch_size)
+                    ELSE jsonb_build_object('source_unit_id',work_row.source_unit_id) END));
 END;
 $$;
 
@@ -6517,10 +6639,9 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_FORGET_CLAIM_LOST',
                 'message','Management forget claim is no longer current','status',409));
     END IF;
-    IF EXISTS (
-        SELECT 1 FROM __forest_module_schema__.source_forget_operations o
-        WHERE o.bot_id=requested_bot AND o.operation_id=work_row.request_id
-    ) THEN
+    result_value := __forest_module_schema__.memory_committed_forget_result(
+        requested_bot,work_row.work_kind,work_row.request_id);
+    IF result_value IS NOT NULL THEN
         next_state := 'SUCCEEDED';
     ELSIF input#>>'{outcome,status}'='SUCCEEDED' THEN
         next_state := 'UNKNOWN';
@@ -6533,10 +6654,7 @@ BEGIN
     END IF;
     UPDATE __forest_module_schema__.management_forget_work
     SET state=next_state,claim_token=NULL,lease_deadline=NULL,
-        result_payload=CASE WHEN next_state='SUCCEEDED' THEN COALESCE(
-            (SELECT o.result_payload FROM __forest_module_schema__.source_forget_operations o
-             WHERE o.bot_id=requested_bot AND o.operation_id=work_row.request_id),
-            input#>'{outcome,result}') ELSE NULL END,
+        result_payload=CASE WHEN next_state='SUCCEEDED' THEN result_value ELSE NULL END,
         error_code=CASE WHEN next_state='SUCCEEDED' THEN NULL
                         WHEN next_state='UNKNOWN' THEN 'MEMORY_FORGET_OUTCOME_UNKNOWN'
                         ELSE input#>>'{outcome,error,code}' END,

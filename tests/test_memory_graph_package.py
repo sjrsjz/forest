@@ -656,6 +656,16 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
                 authorization=SimpleNamespace(web_subject_ref="admin/two"),
             )
         assert forbidden.value.code == "MEMORY_FORGET_SELECTION_NOT_FOUND"
+        with pytest.raises(ForestError) as forbidden_action:
+            await registry.get("memory.graph").management_contract.action(
+                "memory.forget.batch.enqueue",
+                operation_id="batch/foreign-actor",
+                payload={"selection_id": "selection/target", "after_ordinal": 0,
+                         "batch_size": 2, "plan": planned["value"]},
+                authorization=SimpleNamespace(web_subject_ref="admin/two"),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+        assert forbidden_action.value.code == "MEMORY_FORGET_SELECTION_NOT_FOUND"
     finally:
         assert await registry.close() == []
     foreign = await invoke("memory_query_forget_selection", {"bot_id": store.bot_id}, {
@@ -716,12 +726,56 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         await execute_batch(stale_plan)
     assert changed.value.code == "MEMORY_FORGET_BATCH_PLAN_CHANGED"
     assert await kernel.payload.epoch() == before_epoch
+    queue_context = {"bot_id": store.bot_id, "operation_id": operation_id}
+    queue_input = {**batch_request, "plan": planned["value"]}
+    queued = await invoke("memory_enqueue_management_forget_batch",
+                          queue_context, queue_input)
+    assert queued["ok"] and queued["value"]["request_id"] == operation_id
+    assert await invoke("memory_enqueue_management_forget_batch",
+                        queue_context, queue_input) == queued
+    hidden = await invoke("memory_query_management_forget_batch",
+                          {"bot_id": store.bot_id}, {
+                              "request_id": operation_id,
+                              "requested_by": "admin/two",
+                          })
+    assert hidden["error"]["code"] == "MEMORY_FORGET_BATCH_REQUEST_NOT_FOUND"
+    source_status = await invoke("memory_query_management_forget",
+                                 {"bot_id": store.bot_id}, {
+                                     "request_id": operation_id,
+                                 })
+    assert source_status["error"]["code"] == "MEMORY_FORGET_REQUEST_NOT_FOUND"
+    claimed = await invoke("memory_claim_management_forget",
+                           {"bot_id": store.bot_id}, {
+                               "protocol": "forest.owned-work-claim-request/1",
+                               "claim_token": "batch/selection-claim",
+                               "lease_seconds": 180,
+                           })
+    assert claimed["ok"] and claimed["value"]["payload"] == {
+        "request_id": operation_id, "work_kind": "BATCH",
+        **batch_request, "plan": planned["value"],
+    }
     applied = await execute_batch(planned["value"])
     assert applied["protocol"] == "forest.memory-forget-batch-applied/1"
     assert applied["suppressed_source_units"] == 2
     assert applied["deletion_epoch"] == before_epoch + 1
     assert await execute_batch(planned["value"]) == applied
     assert await kernel.payload.epoch() == before_epoch + 1
+    settled = await invoke("memory_settle_management_forget",
+                           {"bot_id": store.bot_id}, {
+                               "protocol": "forest.owned-work-settle-request/1",
+                               "work_id": operation_id,
+                               "claim_token": "batch/selection-claim",
+                               "attempt": 1,
+                               "outcome": {"status": "SUCCEEDED", "result": applied},
+                           })
+    assert settled["ok"]
+    status = await invoke("memory_query_management_forget_batch",
+                          {"bot_id": store.bot_id}, {
+                              "request_id": operation_id,
+                              "requested_by": "admin/one",
+                          })
+    assert status["value"]["state"] == "SUCCEEDED"
+    assert status["value"]["result"] == applied
     forgotten_page = await invoke(
         "memory_query_forget_selection", {"bot_id": store.bot_id}, {
             "selection_id": "selection/target", "requested_by": "admin/one",

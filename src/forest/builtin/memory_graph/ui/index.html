@@ -34,14 +34,18 @@
     <div class="filters"><input id="forget-request" class="forget-id" placeholder="遗忘请求 ID"><button id="forget-refresh">查询请求状态</button></div>
     <div id="forget-state" class="detail"></div>
     <details>
-      <summary>批量选择与分批影响预览</summary>
-      <p class="muted">使用“来源”页当前筛选条件冻结成员目录。此处只核对范围和预览影响，尚不执行批量遗忘。</p>
+      <summary>批量选择与分批遗忘</summary>
+      <p class="muted">使用“来源”页当前筛选条件冻结成员目录；每批最多 64 个成员，分别预览影响、确认并授权。</p>
       <div class="filters"><input id="batch-selection-id" class="forget-id" placeholder="选择 ID；新建时自动生成，也可填入已有 ID"><button id="batch-select">冻结当前筛选</button><button id="batch-load">读取选择</button></div>
       <div id="batch-selection-meta" class="detail"></div>
       <table class="table"><thead><tr><th>序号</th><th>来源单元</th><th>修订</th><th>作者锚点</th><th>当前状态</th></tr></thead><tbody id="batch-members"></tbody></table>
       <div class="pager"><button id="batch-next" disabled>下一页成员</button></div>
       <div class="filters"><label>批次起点（前一成员序号）<input id="batch-after" type="number" min="0" max="999999" value="0"></label><label>批次大小<input id="batch-size" type="number" min="1" max="64" value="32"></label><button id="batch-preview">预览该批</button></div>
       <div id="batch-impact" class="review muted">尚未预览批次。</div>
+      <label class="confirm"><input id="batch-confirm" type="checkbox" disabled>我已核对本批次成员和影响范围，确认执行不可恢复的遗忘</label>
+      <div class="pager"><button id="batch-enqueue" class="danger" disabled>确认并排队该批</button></div>
+      <div class="filters"><input id="batch-request" class="forget-id" placeholder="批次请求 ID"><button id="batch-refresh">查询批次状态</button></div>
+      <div id="batch-state" class="detail"></div>
     </details>
   </section>
   <section id="trial" class="panel hidden">
@@ -63,7 +67,7 @@
 </div>
 <script>
 (()=>{'use strict';
-  let port,nonce='',sequence=0,draft=null,sourcePage=null,relationPage=null,forgetPlan=null,forgetTimer=null,trialTimer=null,trialPage=null,batchPage=null;
+  let port,nonce='',sequence=0,draft=null,sourcePage=null,relationPage=null,forgetPlan=null,forgetTimer=null,trialTimer=null,trialPage=null,batchPage=null,batchPlan=null,batchTimer=null;
   const trialImageUrls=new Set();
   function clearTrialImages(){for(const url of trialImageUrls)URL.revokeObjectURL(url);trialImageUrls.clear();}
   const pending=new Map(),$=id=>document.getElementById(id);
@@ -289,6 +293,13 @@
     if(!page.items.length)rows.insertRow().insertCell().textContent='这一页没有成员';
     $('batch-next').disabled=!page.has_more;
   }
+  function clearBatchPlan(){
+    batchPlan=null;
+    $('batch-confirm').checked=false;
+    $('batch-confirm').disabled=true;
+    $('batch-enqueue').disabled=true;
+    $('batch-impact').textContent='尚未预览批次。';
+  }
   async function freezeBatchSelection(){
     const filters=sourceInput();delete filters.limit;
     if(filters.eligibility_state==='SUPPRESSED')
@@ -304,11 +315,12 @@
       if($('batch-selection-id').value.trim()!==selection_id)return;
       $('batch-selection-meta').textContent=
         `冻结成员 ${frozen.member_count} 个 · 摘要 ${frozen.member_digest}`;
-      $('batch-impact').textContent='尚未预览批次。';
+      clearBatchPlan();
       await loadBatchSelection();
     }finally{$('batch-select').disabled=false;}
   }
   async function previewBatch(){
+    clearBatchPlan();
     const selection_id=$('batch-selection-id').value.trim();
     if(!selection_id)throw Error('请先冻结或读取选择');
     const after_ordinal=Number($('batch-after').value);
@@ -319,13 +331,56 @@
     const plan=await call('memory.forget.batch.preview',{
       selection_id,after_ordinal,batch_size
     });
-    if($('batch-selection-id').value.trim()!==selection_id)return;
+    if($('batch-selection-id').value.trim()!==selection_id||
+       Number($('batch-after').value)!==after_ordinal||
+       Number($('batch-size').value)!==batch_size)return;
+    batchPlan={selection_id,after_ordinal,batch_size,plan,
+      idempotency_key:`forget-batch:${crypto.randomUUID()}`};
     $('batch-impact').textContent=
       `成员 ${plan.first_ordinal}–${plan.last_ordinal}（${plan.batch_member_count} 个）\n`+
       `来源 ${plan.source_unit_count} · Payload ${plan.selected_payload_count} · 向量删除 ${plan.vector_deletion_count}\n`+
       `关系撤销 ${plan.relation_retraction_count} · 联想日志 ${plan.association_journal_count}\n`+
       `删除纪元 ${plan.deletion_epoch} · 计划 ${plan.plan_digest}\n`+
       `根成员样本：${plan.batch_source_unit_sample.join('、')}`;
+    $('batch-confirm').disabled=false;
+    status('请核对本批次影响范围，再确认排队');
+  }
+  async function loadBatchStatus(request_id=$('batch-request').value.trim()){
+    if(!request_id){status('请填写批次请求 ID');return;}
+    clearTimeout(batchTimer);
+    const result=await call('memory.forget.batch.status',{request_id});
+    if($('batch-request').value.trim()!==request_id)return;
+    $('batch-state').textContent=
+      `${result.state} · ${result.selection_id} · 成员 ${result.after_ordinal+1} 起 · 尝试 ${result.attempt_count} 次\n`+
+      `${result.error_code??''}${result.result?`\n已处理序号 ${result.result.first_ordinal}–${result.result.last_ordinal} · 抑制 ${result.result.suppressed_source_units} 个来源单元 · 向量删除 ${result.result.vector_deletions} · 关系撤销 ${result.result.retracted_relations}`:''}`;
+    if(result.state==='QUEUED'||result.state==='RUNNING')
+      batchTimer=setTimeout(()=>loadBatchStatus(request_id).catch(error=>status(error.message)),1500);
+    else if(result.state==='SUCCEEDED'){
+      if($('batch-selection-id').value.trim()===result.selection_id){
+        if(Number($('batch-after').value)===result.after_ordinal){
+          clearBatchPlan();
+          $('batch-after').value=result.result.last_ordinal;
+        }
+        await loadBatchSelection();
+      }
+      loadSources().catch(error=>status(error.message));
+    }else{status('该批未完成；请重新预览后决定是否重试');}
+  }
+  async function enqueueBatch(){
+    const selected=batchPlan;
+    if(!selected||!$('batch-confirm').checked||
+       $('batch-selection-id').value.trim()!==selected.selection_id||
+       Number($('batch-after').value)!==selected.after_ordinal||
+       Number($('batch-size').value)!==selected.batch_size)return;
+    $('batch-enqueue').disabled=true;
+    const queued=await action('memory.forget.batch.enqueue',{
+      selection_id:selected.selection_id,after_ordinal:selected.after_ordinal,
+      batch_size:selected.batch_size,plan:selected.plan,
+    },selected.idempotency_key);
+    $('batch-request').value=queued.request_id;
+    $('batch-state').textContent=`QUEUED · ${queued.request_id}`;
+    status('该批管理员请求已入队');
+    await loadBatchStatus(queued.request_id);
   }
   async function cancelTrial(){
     const query_id=$('trial-query').value.trim();if(!query_id)throw Error('请填写试验 ID');
@@ -342,11 +397,16 @@
   $('forget-preview').onclick=()=>loadForgetPlan().catch(error=>status(error.message));
   $('forget-enqueue').onclick=()=>enqueueForget().catch(error=>{status(error.message);$('forget-enqueue').disabled=false;});
   $('forget-refresh').onclick=()=>loadForgetStatus().catch(error=>status(error.message));
-  $('batch-selection-id').oninput=()=>{batchPage=null;$('batch-next').disabled=true;$('batch-members').replaceChildren();$('batch-selection-meta').textContent='';$('batch-impact').textContent='尚未预览批次。';};
+  $('batch-selection-id').oninput=()=>{batchPage=null;$('batch-next').disabled=true;$('batch-members').replaceChildren();$('batch-selection-meta').textContent='';clearBatchPlan();};
+  $('batch-after').oninput=clearBatchPlan;
+  $('batch-size').oninput=clearBatchPlan;
+  $('batch-confirm').onchange=()=>$('batch-enqueue').disabled=!batchPlan||!$('batch-confirm').checked;
   $('batch-select').onclick=()=>freezeBatchSelection().catch(error=>status(error.message));
   $('batch-load').onclick=()=>loadBatchSelection().catch(error=>status(error.message));
   $('batch-next').onclick=()=>loadBatchSelection(true).catch(error=>status(error.message));
   $('batch-preview').onclick=()=>previewBatch().catch(error=>status(error.message));
+  $('batch-enqueue').onclick=()=>enqueueBatch().catch(error=>{status(error.message);$('batch-enqueue').disabled=!batchPlan;});
+  $('batch-refresh').onclick=()=>loadBatchStatus().catch(error=>status(error.message));
   $('trial-start').onclick=()=>startTrial().catch(error=>status(error.message));
   $('trial-get').onclick=()=>loadTrial().catch(error=>status(error.message));
   $('trial-cancel').onclick=()=>cancelTrial().catch(error=>status(error.message));
