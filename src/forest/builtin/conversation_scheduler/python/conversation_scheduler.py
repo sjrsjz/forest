@@ -64,7 +64,7 @@ class ConversationScheduler(Plugin):
             "selection_mode": "PREFILL_ONLY",
             "session_ref": request["session_ref"],
             "run_ref": request["run_ref"],
-            "next_run_ref": None,
+            "next_run_ref": request["next_run_ref"],
         }
         result = await ctx.uow.call(
             "conversation.prefill-trigger-input",
@@ -453,6 +453,10 @@ class ConversationScheduler(Plugin):
         )
 
     async def _handoff(self, task, execution, deadline, ctx):
+        successor = self._stable(
+            "run-successor", task["conversation_id"], execution["run_ref"],
+            task["actor"]["epoch"],
+        )
         for _ in range(2):
             try:
                 return await self._handoff_once(task, execution, deadline, ctx)
@@ -468,6 +472,7 @@ class ConversationScheduler(Plugin):
                             "boundary": "SESSION_END",
                             "session_ref": execution["session_ref"],
                             "run_ref": execution["run_ref"],
+                            "next_run_ref": successor,
                         },
                         ctx,
                     )

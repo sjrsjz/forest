@@ -3046,7 +3046,7 @@ $$;
 CREATE FUNCTION agent_claim_input_valid(batch jsonb)
 RETURNS boolean LANGUAGE sql IMMUTABLE SET search_path = pg_catalog AS $$
     SELECT COALESCE(
-        batch#>>'{trigger_claim,ref}'=batch->>'input_batch_ref'
+        batch#>>'{trigger_claim,ref}' ~ '^claim:[a-f0-9]{64}$'
         AND (batch#>>'{trigger_claim,count}')::integer>0
         AND (batch#>>'{trigger_claim,last_trigger_ingress_seq}')::bigint
             <=(batch->>'selected_input_end_seq')::bigint

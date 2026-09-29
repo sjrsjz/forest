@@ -239,7 +239,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "context_view_revision": 0,
                     "source_manifest_digest": digest_json({"source": 1}),
                     "trigger_claim": {
-                        "ref": "input-batch/agent-package/1", "count": 1,
+                        "ref": "claim:" + "1" * 64, "count": 1,
                         "last_trigger_ref": "trigger/1", "last_trigger_ingress_seq": 1,
                         "digest": digest_json({"claim": 1}),
                     },
@@ -339,7 +339,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "input_batch_digest": digest_json({"batch": "model-port"}),
                     "source_manifest_digest": digest_json({"source": "model-port"}),
                     "trigger_claim": {
-                        "ref": "input-batch/agent-package/model-port", "count": 1,
+                        "ref": "claim:" + "2" * 64, "count": 1,
                         "last_trigger_ref": "trigger/model-port",
                         "last_trigger_ingress_seq": 1,
                         "digest": digest_json({"claim": "model-port"}),
@@ -1790,7 +1790,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "context_view_revision": 1,
                     "source_manifest_digest": digest_json({"source": 3}),
                     "trigger_claim": {
-                        "ref": "input-batch/agent-package/3", "count": 1,
+                        "ref": "claim:" + "3" * 64, "count": 1,
                         "last_trigger_ref": "trigger/3", "last_trigger_ingress_seq": 4,
                         "digest": digest_json({"claim": 3}),
                     },

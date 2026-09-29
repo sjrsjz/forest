@@ -1104,8 +1104,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "'onebot.normalized-event','prefill-event/'||n,"
                     "'payload/author/'||n,%s,'adapter.onebot',"
                     "'onebot.author-snapshot','prefill-event/'||n,'MATERIALIZE',"
-                    "'FINAL',CASE WHEN n IN (30,130) THEN 'TRIGGER' "
-                    "ELSE 'NO_TRIGGER' END,'prefill-classify/'||n,%s,"
+                    "'FINAL','TRIGGER','prefill-classify/'||n,%s,"
                     "'conversation.scheduler','generation/test',clock_timestamp(),"
                     "clock_timestamp()+interval '1 hour',clock_timestamp() "
                     "FROM generate_series(1,130) AS n"
@@ -1118,7 +1117,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "bot_id,conversation_id,trigger_id,event_id,ingress_seq,"
                     "principal_ref,input_digest) "
                     "SELECT %s,%s,'prefill-trigger/'||n,'prefill-event/'||n,n,"
-                    "'qq:'||n,%s FROM (VALUES (30),(130)) AS t(n)"
+                    "'qq:'||n,%s FROM generate_series(1,130) AS n"
                 ).format(sql.Identifier(namespace)),
                 (store.bot_id, prefill_conversation, digest),
             )
@@ -1152,8 +1151,8 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "actor": prefill_actor,
                     "boundary": "IDLE",
                     "selection_mode": "PREFILL_ONLY",
-                    "session_ref": None,
-                    "run_ref": None,
+                    "session_ref": "prefill-session",
+                    "run_ref": "prefill-run",
                     "next_run_ref": None,
                 },
                 "prior": {},
@@ -1170,8 +1169,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                         "request_id": "prefill-first",
                         "actor": prefill_actor,
                         "boundary": "IDLE",
-                        "session_ref": None,
-                        "run_ref": None,
+                        "session_ref": "prefill-session",
+                        "run_ref": "prefill-run",
+                        "next_run_ref": None,
                     },),
                     {},
                 )
@@ -1186,8 +1186,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                         "request_id": "prefill-first",
                         "actor": prefill_actor,
                         "boundary": "IDLE",
-                        "session_ref": None,
-                        "run_ref": None,
+                        "session_ref": "prefill-session",
+                        "run_ref": "prefill-run",
+                        "next_run_ref": None,
                     },),
                     {},
                 )
@@ -1205,7 +1206,14 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             assert prefilled["kind"] == "CONTEXT_PREFILL"
             assert (prefilled["start_seq"], prefilled["end_seq"]) == expected_range
             assert len(prefilled["event_ids"]) == 64
-            assert prefilled["trigger_claim"] is None
+            if index == 0:
+                assert prefilled["trigger_claim"]["count"] == 64
+                assert prefilled["trigger_claim"]["last_trigger_ref"] == "prefill-trigger/64"
+                claim_ref = prefilled["trigger_claim"]["ref"]
+            else:
+                assert prefilled["trigger_claim"]["count"] == 128
+                assert prefilled["trigger_claim"]["last_trigger_ref"] == "prefill-trigger/128"
+                assert prefilled["trigger_claim"]["ref"] == claim_ref
         envelope["input"].update(
             selection_mode="ANY", session_ref="prefill-session", run_ref="prefill-run"
         )
@@ -1220,9 +1228,22 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             )
         assert final["kind"] == "TRIGGER_INPUT"
         assert final["event_ids"] == ["prefill-event/129", "prefill-event/130"]
-        assert final["trigger_claim"]["count"] == 2
+        assert final["trigger_claim"]["count"] == 130
+        assert final["trigger_claim"]["ref"] == claim_ref
         assert final["trigger_claim"]["last_trigger_ref"] == "prefill-trigger/130"
         assert final["trigger_claim"]["last_trigger_ingress_seq"] == 130
+        async with store.pool.connection() as conn:
+            segments = await (
+                await conn.execute(
+                    sql.SQL("SELECT segment_index,trigger_count FROM {}.trigger_claim_segments "
+                            "WHERE bot_id=%s AND claim_ref=%s ORDER BY segment_index")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, claim_ref),
+                )
+            ).fetchall()
+        assert [(row["segment_index"], row["trigger_count"]) for row in segments] == [
+            (0, 64), (1, 64), (2, 2)
+        ]
         reply_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": {
@@ -1280,10 +1301,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     (store.bot_id, prefill_conversation),
                 )
             ).fetchall()
-        assert [row["status"] for row in claimed] == ["CLAIMED", "CLAIMED"]
+        assert len(claimed) == 130
+        assert {row["status"] for row in claimed} == {"CLAIMED"}
         accepted = await append_reply("prefill-reply/accepted")
         assert accepted["ok"] is True
-        assert accepted["value"]["answered_trigger_count"] == 2
+        assert accepted["value"]["answered_trigger_count"] == 130
         assert accepted["value"]["answered_events"] == [{
             "trigger_ref": "prefill-trigger/130",
             "event_ref": "prefill-event/130",
@@ -1298,7 +1320,8 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     (store.bot_id, prefill_conversation),
                 )
             ).fetchall()
-        assert [row["status"] for row in answered] == ["ANSWERED", "ANSWERED"]
+        assert len(answered) == 130
+        assert {row["status"] for row in answered} == {"ANSWERED"}
         drained = await prefill_endpoint.invoke_routed(
             prefill_route,
             RuntimeServiceInvocation(
@@ -1311,9 +1334,84 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "boundary": "MODEL_SAFE_POINT",
                 "session_ref": "prefill-session",
                 "run_ref": "prefill-run",
+                "next_run_ref": None,
             },),
             {},
         )
         assert drained["status"] == "CONTINUE"
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {}.conversation_lanes SET next_ingress_seq=261,"
+                    "classified_through_seq=260 WHERE bot_id=%s AND conversation_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, prefill_conversation),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.inbox_messages("
+                    "bot_id,conversation_id,event_id,ingress_seq,admission_operation_id,"
+                    "input_digest,source_component_id,source_event_ref,event_kind,"
+                    "author_subject_ref,content_payload_id,content_payload_digest,"
+                    "content_owner_component_id,content_owner_kind,content_owner_id,"
+                    "author_payload_id,author_payload_digest,author_owner_component_id,"
+                    "author_owner_kind,author_owner_id,context_disposition,"
+                    "classification_state,trigger_decision,classification_operation_id,"
+                    "classification_input_digest,classifier_component_id,"
+                    "classifier_generation_id,received_at,classification_deadline,"
+                    "classified_at) "
+                    "SELECT %s,%s,'prefill-event/'||n,n,'prefill-admit/'||n,%s,"
+                    "'adapter.onebot','prefill-source/'||n,'message.group',"
+                    "'qq:'||n,'payload/content/'||n,%s,'adapter.onebot',"
+                    "'onebot.normalized-event','prefill-event/'||n,"
+                    "'payload/author/'||n,%s,'adapter.onebot',"
+                    "'onebot.author-snapshot','prefill-event/'||n,'MATERIALIZE',"
+                    "'FINAL','TRIGGER','prefill-classify/'||n,%s,"
+                    "'conversation.scheduler','generation/test',clock_timestamp(),"
+                    "clock_timestamp()+interval '1 hour',clock_timestamp() "
+                    "FROM generate_series(131,260) AS n"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, prefill_conversation, digest, digest, digest, digest),
+            )
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.conversation_triggers("
+                    "bot_id,conversation_id,trigger_id,event_id,ingress_seq,"
+                    "principal_ref,input_digest) "
+                    "SELECT %s,%s,'prefill-trigger/'||n,'prefill-event/'||n,n,"
+                    "'qq:'||n,%s FROM generate_series(131,260) AS n"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, prefill_conversation, digest),
+            )
+        successor_prefill = await prefill_endpoint.invoke_routed(
+            prefill_route,
+            RuntimeServiceInvocation(
+                "conversation:prefill:successor", 30,
+                "test.conversation", prefill_conversation,
+            ),
+            ({
+                "protocol": "forest.conversation-context-prefill/1",
+                "request_id": "prefill-successor",
+                "actor": prefill_actor,
+                "boundary": "SESSION_END",
+                "session_ref": "prefill-session",
+                "run_ref": "prefill-run",
+                "next_run_ref": "prefill-successor",
+            },),
+            {},
+        )
+        assert successor_prefill["kind"] == "CONTEXT_PREFILL"
+        assert successor_prefill["trigger_claim"]["count"] == 64
+        assert successor_prefill["run_ref"] == "prefill-successor"
+        async with store.pool.connection() as conn:
+            lane_after = await (
+                await conn.execute(
+                    sql.SQL("SELECT active_run_ref FROM {}.conversation_lanes "
+                            "WHERE bot_id=%s AND conversation_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, prefill_conversation),
+                )
+            ).fetchone()
+        assert lane_after["active_run_ref"] == "prefill-run"
     finally:
         assert await registry.close() == []

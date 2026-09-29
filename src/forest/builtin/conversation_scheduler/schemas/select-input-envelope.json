@@ -67,18 +67,22 @@
         {
           "if": {"properties": {"selection_mode": {"const": "PREFILL_ONLY"}}},
           "then": {
-            "properties": {"next_run_ref": {"type": "null"}},
             "allOf": [
               {
                 "if": {"properties": {"boundary": {"const": "IDLE"}}},
-                "then": {"properties": {"session_ref": {"type": "null"}, "run_ref": {"type": "null"}}}
+                "then": {"properties": {"session_ref": {"type": "string", "minLength": 1}, "run_ref": {"type": "string", "minLength": 1}, "next_run_ref": {"type": "null"}}}
               },
               {
-                "if": {"properties": {"boundary": {"enum": ["MODEL_SAFE_POINT", "SESSION_END"]}}},
+                "if": {"properties": {"boundary": {"const": "MODEL_SAFE_POINT"}}},
                 "then": {"properties": {
                   "session_ref": {"type": "string", "minLength": 1},
-                  "run_ref": {"type": "string", "minLength": 1}
+                  "run_ref": {"type": "string", "minLength": 1},
+                  "next_run_ref": {"type": "null"}
                 }}
+              },
+              {
+                "if": {"properties": {"boundary": {"const": "SESSION_END"}}},
+                "then": {"properties": {"session_ref": {"type": "string", "minLength": 1}, "run_ref": {"type": "string", "minLength": 1}, "next_run_ref": {"type": "string", "minLength": 1}}}
               }
             ]
           }
