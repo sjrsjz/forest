@@ -1193,6 +1193,54 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     {},
                 )
                 assert replay == prefilled
+                wrong_selection = {
+                    **envelope,
+                    "input": {
+                        **envelope["input"],
+                        "session_ref": "unrelated-session",
+                        "run_ref": "unrelated-run",
+                    },
+                }
+                async with store.pool.connection() as conn, conn.transaction():
+                    rejected = await (
+                        await conn.execute(
+                            sql.SQL("SELECT {}.conversation_select_input(%s::jsonb,%s::jsonb) "
+                                    "AS result").format(sql.Identifier(namespace)),
+                            (Jsonb({
+                                "bot_id": store.bot_id,
+                                "operation_id": "prefill-wrong-target",
+                                "participant_input_digest": digest,
+                            }), Jsonb(wrong_selection)),
+                        )
+                    ).fetchone()
+                assert rejected["result"]["error"]["code"] == (
+                    "CONVERSATION_PREFILL_TARGET_CONFLICT"
+                )
+                async with store.pool.connection() as conn, conn.transaction():
+                    await conn.execute(
+                        sql.SQL("UPDATE {}.conversation_lanes SET channel_kind='GROUP',"
+                                "actor_expires_at=clock_timestamp()-interval '1 second' "
+                                "WHERE bot_id=%s AND conversation_id=%s")
+                        .format(sql.Identifier(namespace)),
+                        (store.bot_id, prefill_conversation),
+                    )
+                    reclaimed = await (
+                        await conn.execute(
+                            sql.SQL("SELECT {}.conversation_claim_agent_run(%s::jsonb,%s::jsonb) "
+                                    "AS result").format(sql.Identifier(namespace)),
+                            (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                                "protocol": "forest.owned-work-claim-request/1",
+                                "claim_token": "prefill-recovered-owner",
+                                "lease_seconds": 3600,
+                            })),
+                        )
+                    ).fetchone()
+                assert reclaimed["result"]["ok"] is True
+                recovered = reclaimed["result"]["value"]["payload"]
+                assert recovered["session_ref"] == "prefill-session"
+                assert recovered["run_ref"] == "prefill-run"
+                assert recovered["resume"] is False
+                prefill_actor.update(owner_id="prefill-recovered-owner", epoch=2)
             else:
                 async with store.pool.connection() as conn, conn.transaction():
                     prefilled = await participant.invoke_in(
@@ -1310,6 +1358,16 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "trigger_ref": "prefill-trigger/130",
             "event_ref": "prefill-event/130",
         }]
+        async with store.pool.connection() as conn:
+            group_state = await (
+                await conn.execute(
+                    sql.SQL("SELECT claim_state FROM {}.trigger_claim_groups "
+                            "WHERE bot_id=%s AND claim_ref=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, claim_ref),
+                )
+            ).fetchone()
+        assert group_state["claim_state"] == "TERMINAL"
         assert await append_reply("prefill-reply/accepted") == accepted
         async with store.pool.connection() as conn:
             answered = await (

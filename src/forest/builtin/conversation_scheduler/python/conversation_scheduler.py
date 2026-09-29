@@ -420,9 +420,7 @@ class ConversationScheduler(Plugin):
 
     async def _handoff_once(self, task, execution, deadline, ctx):
         completed = execution["run_ref"]
-        successor = self._stable(
-            "run-successor", task["conversation_id"], completed, task["actor"]["epoch"]
-        )
+        successor = self._stable("run-successor", task["conversation_id"], completed)
         return await ctx.uow.call(
             "conversation.session-handoff",
             {
@@ -454,8 +452,7 @@ class ConversationScheduler(Plugin):
 
     async def _handoff(self, task, execution, deadline, ctx):
         successor = self._stable(
-            "run-successor", task["conversation_id"], execution["run_ref"],
-            task["actor"]["epoch"],
+            "run-successor", task["conversation_id"], execution["run_ref"]
         )
         for _ in range(2):
             try:

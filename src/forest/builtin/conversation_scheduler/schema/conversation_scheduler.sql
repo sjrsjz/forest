@@ -336,10 +336,15 @@ CREATE TABLE trigger_claim_groups (
     last_trigger_ref text NOT NULL CHECK (octet_length(last_trigger_ref) BETWEEN 1 AND 256),
     last_trigger_ingress_seq bigint NOT NULL CHECK (last_trigger_ingress_seq>0),
     claim_digest text NOT NULL CHECK (claim_digest ~ '^sha256:[a-f0-9]{64}$'),
+    claim_state text NOT NULL DEFAULT 'ACTIVE' CHECK (claim_state IN ('ACTIVE','TERMINAL')),
+    terminal_operation_id text CHECK (
+        terminal_operation_id IS NULL OR octet_length(terminal_operation_id) BETWEEN 1 AND 256
+    ),
     PRIMARY KEY (bot_id,claim_ref),
     UNIQUE (bot_id,conversation_id,session_ref,run_ref),
     FOREIGN KEY (bot_id,conversation_id)
-        REFERENCES conversation_lanes(bot_id,conversation_id)
+        REFERENCES conversation_lanes(bot_id,conversation_id),
+    CHECK ((claim_state='ACTIVE')=(terminal_operation_id IS NULL))
 );
 
 CREATE TABLE trigger_claim_segments (
@@ -515,6 +520,9 @@ CREATE INDEX inbox_classification_idx
     ON inbox_messages(bot_id, conversation_id, ingress_seq, classification_state);
 CREATE INDEX trigger_pending_idx
     ON conversation_triggers(bot_id, conversation_id, status, ingress_seq, trigger_id);
+CREATE INDEX active_trigger_claim_group_idx
+    ON trigger_claim_groups(bot_id,conversation_id,claim_ref)
+    WHERE claim_state='ACTIVE';
 CREATE INDEX context_order_idx
     ON context_units(bot_id, conversation_id, context_revision, unit_index);
 CREATE INDEX context_compaction_order_idx
@@ -660,6 +668,51 @@ CREATE TRIGGER input_batch_triggers_immutable BEFORE UPDATE OR DELETE ON input_b
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER trigger_claim_segments_immutable BEFORE UPDATE OR DELETE ON trigger_claim_segments
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+CREATE FUNCTION guard_trigger_claim_group() RETURNS trigger LANGUAGE plpgsql
+SET search_path FROM CURRENT AS $$
+BEGIN
+    IF TG_OP='DELETE' OR ROW(
+        NEW.bot_id,NEW.conversation_id,NEW.claim_ref,NEW.session_ref,NEW.run_ref
+    ) IS DISTINCT FROM ROW(
+        OLD.bot_id,OLD.conversation_id,OLD.claim_ref,OLD.session_ref,OLD.run_ref
+    ) OR OLD.claim_state<>'ACTIVE' THEN
+        RAISE EXCEPTION 'Trigger claim group identity or terminal state is immutable'
+            USING ERRCODE='55000';
+    END IF;
+    IF NEW.claim_state='ACTIVE' AND NEW.terminal_operation_id IS NULL
+       AND NEW.segment_count=OLD.segment_count+1
+       AND NEW.trigger_count>OLD.trigger_count
+       AND NEW.last_trigger_ingress_seq>OLD.last_trigger_ingress_seq
+       AND NEW.claim_digest IS DISTINCT FROM OLD.claim_digest THEN
+        RETURN NEW;
+    END IF;
+    IF NEW.claim_state='TERMINAL' AND NEW.terminal_operation_id IS NOT NULL
+       AND ROW(NEW.trigger_count,NEW.segment_count,NEW.last_trigger_ref,
+               NEW.last_trigger_ingress_seq,NEW.claim_digest)
+           IS NOT DISTINCT FROM ROW(OLD.trigger_count,OLD.segment_count,
+               OLD.last_trigger_ref,OLD.last_trigger_ingress_seq,OLD.claim_digest)
+       AND (
+           EXISTS (
+               SELECT 1 FROM context_append_operations a
+               WHERE a.bot_id=NEW.bot_id AND a.operation_id=NEW.terminal_operation_id
+                 AND a.conversation_id=NEW.conversation_id
+                 AND a.session_ref=NEW.session_ref AND a.run_ref=NEW.run_ref
+                 AND a.append_kind='FINAL_REPLY'
+           ) OR EXISTS (
+               SELECT 1 FROM trigger_terminal_operations t
+               WHERE t.bot_id=NEW.bot_id AND t.operation_id=NEW.terminal_operation_id
+                 AND t.conversation_id=NEW.conversation_id
+                 AND t.terminal_session_ref=NEW.session_ref
+                 AND t.terminal_run_ref=NEW.run_ref
+           )
+       ) THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'Illegal trigger claim group transition' USING ERRCODE='55000';
+END;
+$$;
+CREATE TRIGGER trigger_claim_group_one_way BEFORE UPDATE OR DELETE ON trigger_claim_groups
+    FOR EACH ROW EXECUTE FUNCTION guard_trigger_claim_group();
 CREATE TRIGGER trigger_terminal_operations_immutable BEFORE UPDATE OR DELETE ON trigger_terminal_operations
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_units_immutable BEFORE UPDATE OR DELETE ON context_units
@@ -1357,6 +1410,21 @@ BEGIN
             )
         );
     END IF;
+    IF requested_boundary='IDLE' AND EXISTS (
+        SELECT 1 FROM __forest_module_schema__.trigger_claim_groups g
+        WHERE g.bot_id=requested_bot AND g.conversation_id=requested_conversation
+          AND g.claim_state='ACTIVE'
+          AND (g.session_ref IS DISTINCT FROM requested_session
+               OR g.run_ref IS DISTINCT FROM requested_run)
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_PREFILL_TARGET_CONFLICT',
+                'message','An unfinished prefill belongs to another Run','status',409
+            )
+        );
+    END IF;
     -- Classification and every trigger-state transition hold this lane row
     -- first. The lane fence stabilizes the pending set without locking an
     -- arbitrarily large trigger backlog during each 64-event prefill.
@@ -1572,6 +1640,7 @@ BEGIN
                 existing_claim.conversation_id IS DISTINCT FROM requested_conversation
                 OR existing_claim.session_ref IS DISTINCT FROM selected_session
                 OR existing_claim.run_ref IS DISTINCT FROM selected_run
+                OR existing_claim.claim_state IS DISTINCT FROM 'ACTIVE'
             ) THEN
                 RAISE EXCEPTION 'Trigger claim identity collision' USING ERRCODE='55000';
             END IF;
@@ -2919,6 +2988,9 @@ BEGIN
     WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
       AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
       AND t.claimed_run_ref=requested_run;
+    UPDATE __forest_module_schema__.trigger_claim_groups
+    SET claim_state='TERMINAL',terminal_operation_id=requested_operation
+    WHERE bot_id=requested_bot AND claim_ref=claim_group.claim_ref;
     UPDATE __forest_module_schema__.conversation_lanes
     SET context_revision=context_revision_value,
         context_view_unit_count=context_view_unit_count+1,
@@ -3068,6 +3140,9 @@ BEGIN
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
       AND claimed_session_ref=requested_session
       AND claimed_run_ref=requested_run AND status='CLAIMED';
+    UPDATE __forest_module_schema__.trigger_claim_groups
+    SET claim_state='TERMINAL',terminal_operation_id=requested_operation
+    WHERE bot_id=requested_bot AND claim_ref=claim_group.claim_ref;
     UPDATE __forest_module_schema__.conversation_lanes
     SET active_session_ref=NULL,active_run_ref=NULL,resume_not_before=NULL,
         resume_reason_code=NULL,resume_reason_ref=NULL,updated_at=clock_timestamp()
@@ -3111,6 +3186,9 @@ DECLARE
     selected_run text;
     resume_value boolean;
     claimed_at_value timestamptz;
+    unfinished_session text;
+    unfinished_run text;
+    unfinished_count integer;
 BEGIN
     IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
        OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
@@ -3170,9 +3248,27 @@ BEGIN
     identity_digest := encode(sha256(convert_to(jsonb_build_array(
         requested_bot,lane.conversation_id,lane.actor_epoch
     )::text,'UTF8')),'hex');
+    IF lane.active_session_ref IS NULL THEN
+        SELECT count(*)::integer INTO unfinished_count
+        FROM __forest_module_schema__.trigger_claim_groups g
+        WHERE g.bot_id=requested_bot AND g.conversation_id=lane.conversation_id
+          AND g.claim_state='ACTIVE';
+        IF unfinished_count>1 THEN
+            RAISE EXCEPTION 'More than one unfinished Run owns prefilled triggers'
+                USING ERRCODE='55000';
+        END IF;
+        IF unfinished_count=1 THEN
+            SELECT g.session_ref,g.run_ref INTO unfinished_session,unfinished_run
+            FROM __forest_module_schema__.trigger_claim_groups g
+            WHERE g.bot_id=requested_bot AND g.conversation_id=lane.conversation_id
+              AND g.claim_state='ACTIVE';
+        END IF;
+    END IF;
     resume_value := lane.active_session_ref IS NOT NULL;
-    selected_session := COALESCE(lane.active_session_ref,'session:' || identity_digest);
-    selected_run := COALESCE(lane.active_run_ref,'run:' || identity_digest);
+    selected_session := COALESCE(lane.active_session_ref,unfinished_session,
+                                 'session:' || identity_digest);
+    selected_run := COALESCE(lane.active_run_ref,unfinished_run,
+                             'run:' || identity_digest);
     RETURN jsonb_build_object(
         'protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object(
