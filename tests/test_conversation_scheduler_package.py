@@ -1488,6 +1488,16 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ).fetchall()
         assert len(claimed) == 130
         assert {row["status"] for row in claimed} == {"CLAIMED"}
+        async with store.pool.connection() as conn:
+            with pytest.raises(Exception, match="Illegal trigger transition"):
+                async with conn.transaction():
+                    await conn.execute(
+                        sql.SQL("UPDATE {}.conversation_triggers SET status='PENDING', "
+                                "claimed_session_ref=NULL,claimed_run_ref=NULL,"
+                                "input_batch_id=NULL WHERE bot_id=%s AND trigger_id=%s")
+                        .format(sql.Identifier(namespace)),
+                        (store.bot_id, "prefill-trigger/1"),
+                    )
         accepted = await append_reply("prefill-reply/accepted")
         assert accepted["ok"] is True
         assert accepted["value"]["answered_trigger_count"] == 130

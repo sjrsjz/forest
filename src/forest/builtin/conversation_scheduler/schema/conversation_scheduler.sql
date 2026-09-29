@@ -632,6 +632,8 @@ CREATE TRIGGER inbox_message_one_way BEFORE UPDATE OR DELETE ON inbox_messages
 
 CREATE FUNCTION guard_conversation_trigger() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
+DECLARE
+    terminal_group record;
 BEGIN
     IF TG_OP='DELETE' OR
        ROW(NEW.bot_id,NEW.conversation_id,NEW.trigger_id,NEW.event_id,
@@ -641,18 +643,50 @@ BEGIN
            OLD.ingress_seq,OLD.principal_ref,OLD.input_digest,OLD.created_at) THEN
         RAISE EXCEPTION 'Trigger identity is immutable' USING ERRCODE='55000';
     END IF;
-    IF (OLD.status='PENDING' AND NEW.status IN ('CLAIMED','FAILED','CANCELLED'))
-       OR (OLD.status='CLAIMED' AND NEW.status IN ('ANSWERED','FAILED','CANCELLED','PENDING')) THEN
-        IF NEW.status='ANSWERED' AND NOT EXISTS (
+    IF OLD.status='PENDING' AND NEW.status='CLAIMED' THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.status='CLAIMED' AND NEW.status IN ('ANSWERED','FAILED','CANCELLED')
+       AND ROW(NEW.claimed_session_ref,NEW.claimed_run_ref,NEW.input_batch_id)
+           IS NOT DISTINCT FROM
+           ROW(OLD.claimed_session_ref,OLD.claimed_run_ref,OLD.input_batch_id) THEN
+        SELECT g.claim_ref,g.terminal_status,g.terminal_operation_id
+        INTO terminal_group
+        FROM trigger_claim_groups g
+        JOIN trigger_claim_segments s
+          ON s.bot_id=g.bot_id AND s.claim_ref=g.claim_ref
+         AND s.input_batch_id=OLD.input_batch_id
+        JOIN input_batch_triggers m
+          ON m.bot_id=s.bot_id AND m.input_batch_id=s.input_batch_id
+         AND m.trigger_id=OLD.trigger_id
+        WHERE g.bot_id=OLD.bot_id AND g.conversation_id=OLD.conversation_id
+          AND g.session_ref=OLD.claimed_session_ref
+          AND g.run_ref=OLD.claimed_run_ref
+          AND g.claim_state='TERMINAL' AND g.terminal_status=NEW.status;
+        IF terminal_group IS NULL THEN
+            RAISE EXCEPTION 'Terminal trigger has no matching claim group membership'
+                USING ERRCODE='55000';
+        END IF;
+        IF NEW.status='ANSWERED' AND EXISTS (
             SELECT 1 FROM context_append_operations a
-            WHERE a.bot_id=NEW.bot_id AND a.conversation_id=NEW.conversation_id
+            WHERE a.bot_id=NEW.bot_id AND a.operation_id=terminal_group.terminal_operation_id
+              AND a.conversation_id=NEW.conversation_id
               AND a.append_kind='FINAL_REPLY' AND a.reply_ref=NEW.answered_reply_ref
               AND a.session_ref=NEW.claimed_session_ref AND a.run_ref=NEW.claimed_run_ref
         ) THEN
-            RAISE EXCEPTION 'Answered trigger has no final reply append operation'
-                USING ERRCODE='55000';
+            RETURN NEW;
         END IF;
-        RETURN NEW;
+        IF NEW.status IN ('FAILED','CANCELLED') AND EXISTS (
+            SELECT 1 FROM trigger_terminal_operations t
+            WHERE t.bot_id=NEW.bot_id AND t.operation_id=terminal_group.terminal_operation_id
+              AND t.conversation_id=NEW.conversation_id
+              AND t.terminal_session_ref=NEW.claimed_session_ref
+              AND t.terminal_run_ref=NEW.claimed_run_ref
+              AND t.resulting_status=NEW.status
+              AND t.reason_code=NEW.terminal_reason_code
+        ) THEN
+            RETURN NEW;
+        END IF;
     END IF;
     RAISE EXCEPTION 'Illegal trigger transition' USING ERRCODE='55000';
 END;
@@ -3020,33 +3054,20 @@ BEGIN
             )
         );
     END IF;
-    SELECT count(*)::integer INTO claimed_trigger_count
-    FROM __forest_module_schema__.conversation_triggers t
-    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
-      AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
-      AND t.claimed_run_ref=requested_run;
-    IF claimed_trigger_count=0 THEN
-        RETURN jsonb_build_object(
-            'protocol','forest.domain-result/1','ok',false,
-            'error',jsonb_build_object(
-                'code','TRIGGER_STATE_CONFLICT',
-                'message','Final reply Run has no claimed triggers','status',409
-            )
-        );
-    END IF;
     SELECT * INTO claim_group
     FROM __forest_module_schema__.trigger_claim_groups
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
       AND session_ref=requested_session AND run_ref=requested_run;
-    IF claim_group IS NULL OR claim_group.trigger_count IS DISTINCT FROM claimed_trigger_count THEN
+    IF claim_group IS NULL OR claim_group.claim_state<>'ACTIVE' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','TRIGGER_CLAIM_GROUP_CONFLICT',
-                'message','Final reply claim group differs from the Run members','status',409
+                'message','Final reply has no active claim group','status',409
             )
         );
     END IF;
+    claimed_trigger_count := claim_group.trigger_count;
     context_revision_value := lane.context_revision+1;
     INSERT INTO __forest_module_schema__.context_append_operations(
         bot_id,operation_id,conversation_id,input_digest,append_kind,
@@ -3187,33 +3208,20 @@ BEGIN
             )
         );
     END IF;
-    SELECT count(*)::integer INTO trigger_count_value
-    FROM __forest_module_schema__.conversation_triggers
-    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
-      AND claimed_session_ref=requested_session
-      AND claimed_run_ref=requested_run AND status='CLAIMED';
-    IF trigger_count_value=0 THEN
-        RETURN jsonb_build_object(
-            'protocol','forest.domain-result/1','ok',false,
-            'error',jsonb_build_object(
-                'code','CONVERSATION_TERMINAL_TRIGGER_CONFLICT',
-                'message','Terminal Run has no claimed triggers','status',409
-            )
-        );
-    END IF;
     SELECT * INTO claim_group
     FROM __forest_module_schema__.trigger_claim_groups
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
       AND session_ref=requested_session AND run_ref=requested_run;
-    IF claim_group IS NULL OR claim_group.trigger_count IS DISTINCT FROM trigger_count_value THEN
+    IF claim_group IS NULL OR claim_group.claim_state<>'ACTIVE' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','TRIGGER_CLAIM_GROUP_CONFLICT',
-                'message','Terminal claim group differs from the Run members','status',409
+                'message','Terminal Run has no active claim group','status',409
             )
         );
     END IF;
+    trigger_count_value := claim_group.trigger_count;
     INSERT INTO __forest_module_schema__.trigger_terminal_operations(
         bot_id,operation_id,conversation_id,input_digest,terminal_session_ref,
         terminal_run_ref,resulting_status,reason_code,actor_owner_id,actor_epoch,
