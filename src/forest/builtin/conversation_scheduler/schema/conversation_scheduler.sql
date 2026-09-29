@@ -2824,7 +2824,8 @@ BEGIN
     INTO actual_triggers,trigger_count_value
     FROM __forest_module_schema__.conversation_triggers
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
-      AND claimed_session_ref=requested_session AND status='CLAIMED';
+      AND claimed_session_ref=requested_session
+      AND claimed_run_ref=requested_run AND status='CLAIMED';
     IF actual_triggers IS DISTINCT FROM requested_triggers OR trigger_count_value=0 THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
@@ -2852,7 +2853,8 @@ BEGIN
     SET status=requested_status,terminal_reason_code=requested_reason,
         updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
-      AND claimed_session_ref=requested_session AND status='CLAIMED';
+      AND claimed_session_ref=requested_session
+      AND claimed_run_ref=requested_run AND status='CLAIMED';
     UPDATE __forest_module_schema__.conversation_lanes
     SET active_session_ref=NULL,active_run_ref=NULL,resume_not_before=NULL,
         resume_reason_code=NULL,resume_reason_ref=NULL,updated_at=clock_timestamp()

@@ -71,8 +71,9 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 | `conversation.scheduler` | `input_batches` | `input_batch_id, kind, start_seq?, end_seq?, trigger_cut_seq?, selected_input_end_seq, session_ref?, run_ref?, context_revision`；固定来源切口与输入语义 |
 | `conversation.scheduler` | `selection_operations` | 每次选择 operation 的输入摘要、边界、冻结结果和可选 InputBatch 引用；`WAIT_INPUT/CONTINUE/IDLE` 也有可重放回执 |
 | `conversation.scheduler` | `input_batch_events / input_batch_triggers` | 规范化批次成员；长时间运行的数据不能塞入 JSON 数组后失去索引、唯一约束和逐项审计能力 |
-| `conversation.scheduler` | `trigger_requeues / trigger_requeue_items` | 可恢复的 Worker/Run 明确失效后的幂等重排事实及逐 trigger 成员；不能靠 `context_applied_seq` 猜测触发已经完成 |
-| `conversation.scheduler` | `trigger_terminal_operations / trigger_terminal_items` | Run 失败或取消后的幂等终结事实、目标状态、原因及逐 trigger 成员；保留原 Session/Run 归属并释放 lane |
+| `conversation.scheduler` | `trigger_claim_groups / trigger_claim_segments` | 按 Session/Run 冻结领取引用、累计数量和有序摘要；每个分段只含至多 64 个触发，通过 InputBatch 成员索引审计 |
+| `conversation.scheduler` | `trigger_requeues` | 可恢复的 Worker/Run 明确失效后的幂等重排事实及有界分段进度；不能靠 `context_applied_seq` 猜测触发已经完成 |
+| `conversation.scheduler` | `trigger_terminal_operations` | Run 成功、失败或取消的权威终结事实、回复引用、原因和有界分段结算进度；保留原 Session/Run 归属并释放 lane |
 | `conversation.scheduler` | `context_units` | 输入及其他模块已提交事实的有序 PayloadRef；保存来源、作者、所属批次和 `commit_seq/unit_index`，不复制正文 |
 | `conversation.scheduler` | `context_append_operations` | Agent/控制模块追加闭合步骤或最终回复的幂等回执；固定 Context revision、unit 集及可选回复引用 |
 | `conversation.scheduler` | `context_compactions` | 裁剪覆盖范围、源集digest、归档引用、保留/移出单元清单、裁剪策略版本、基础/发布视图版本；无摘要模型工件 |
@@ -83,12 +84,12 @@ Pipeline 可以并发完成预处理。每条记录必须最终进入已定义�
 
 两个模块之间只交换类型化引用和带摘要的消息，不建立跨 schema 外键或 join。调度器提交 InputBatch 后发布 `InputBatchCommitted`；Agent 以幂等 operation 接受该引用并更新自己的 Session/Run。Agent 最终回答、闭合步骤或取消结果再经调度器端口追加 Context 单元、终结所领取 trigger。任一侧崩溃时重放同一 operation；不得用双写表或定时扫描猜测另一侧是否成功。
 
-一个模型调用固定`input_revision, context_revision, context_view_revision, selected_input_end_seq, trigger_ids, source_manifest_digest`及ModelRequestManifest。后者记录实际Provider/model、能力快照、included_part_refs/omitted_part_refs、媒体revision与projected_content_digest；精确载荷在事务外构建后，由最终许可事务另存ModelTransportAttempt的payload_digest，结合派发/回执状态说明该模型实际收到哪些内容。input_revision随同一Run新增InputBatch递增，媒体物化/模型投影另行版本化，不能冒充新增群输入；正在进行的调用不更改自己的版本。trigger_ids包含该Run为完整回复累计领取、尚未终结的触发，不只保存最近一批。
+一个模型调用固定 `input_revision, context_revision, context_view_revision, selected_input_end_seq, trigger_claim_ref, trigger_claim_digest, last_trigger_ref, source_manifest_digest` 及 ModelRequestManifest。后者记录实际 Provider/model、能力快照、included_part_refs/omitted_part_refs、媒体 revision 与 projected_content_digest；精确载荷在事务外构建后，由最终许可事务另存 ModelTransportAttempt 的 payload_digest，结合派发/回执状态说明该模型实际收到哪些内容。input_revision 随同一 Run 新增 InputBatch 递增，媒体物化/模型投影另行版本化，不能冒充新增群输入；正在进行的调用不更改自己的版本。领取引用覆盖该 Run 累计领取且尚未终结的全部触发，不能只指向最近一批；作者和原始消息仍通过 Context 单元进入模型输入。
 
 InputBatch 的 `kind` 分为：
 
 - `TRIGGER_INPUT`：选择触发后增加新的来源前缀，并把对应触发领取给当前 Session/Run。
-- `CONTEXT_PREFILL`：触发切口距离已提交游标超过 64 条时，每次只提交至多 64 条连续消息和它们的 Memory 输入资格；不领取任何触发，不创建或推进 Agent Run，最后一个触发消息始终留在最终的 `TRIGGER_INPUT` 中。早期触发的作者、来源和待领取状态保持不变。
+- `CONTEXT_PREFILL`：触发切口距离已提交游标超过 64 条时，每次只提交至多 64 条连续消息和它们的 Memory 输入资格；同时按调用方冻结的目标 Session/Run 引用，将该段内至多 64 个触发记入有界领取分段。它不创建或推进 Agent Run，最后一个触发消息始终留在最终的 `TRIGGER_INPUT` 中。若目标 Run 尚未创建就失败或丢失 Actor，恢复器必须先按分段归还领取，不能让预填产生永久孤儿。
 - `SILENT_DRAIN`：无触发时追加普通来源前缀，并在越过 Context 高水位时于同一维护事务归档、裁剪；`run_id = null`，不产生回复型 Run。
 - `RECOVERY_CLAIM`：恢复尚未完成的触发，而其来源已经提交过；`start_seq = end_seq = null`，引用既有 Context 单元，不重复追加消息。
 
@@ -98,7 +99,7 @@ InputBatch 的 `kind` 分为：
 - `MODEL_SAFE_POINT`：仅在当前模型调用和工具因果组已经闭合、下一次模型调用尚未冻结时使用。有 trigger 则先分批预填超长前缀，再截到最后一个 trigger；无 trigger 时返回 `WAIT_INPUT` 或 `CONTINUE`，绝不吸收普通尾部。
 - `SESSION_END`：Agent 已结束本次回答且没有可领取 trigger 时，把连续普通尾部提交为 `SILENT_DRAIN`；若已有 trigger，则返回新的 `TRIGGER_INPUT`，由同群串行状态机继续工作。
 
-旧实现中的字符串 `SAFE_POINT` 只是过渡名称，干净契约使用 `MODEL_SAFE_POINT`。Repository 必须拒绝未知边界、过期 actor epoch、与现有 operation 不同输入的幂等键重用。每次选择都先写不可变 `selection_operations` 回执，包括不产生批次的 `WAIT_INPUT/CONTINUE/IDLE`；同一 operation 永远重放第一次观察到的结果，状态变化后调用者必须使用新 operation。`PREFILL_ONLY` 只在有效 actor fence 下推进连续前缀，跨 Conversation 不共享行锁；普通 `ANY` 选择若遇到超过 64 条尚未提交的触发前缀，必须拒绝并要求预填。预填和 Memory 资格、归档处于同一 UOW，最后一个触发留给最终批次以维持召回输入。`SESSION_END` 在领取下一轮触发前也执行相同预填，当前回复的触发集合不受新消息影响。
+旧实现中的字符串 `SAFE_POINT` 只是过渡名称，干净契约使用 `MODEL_SAFE_POINT`。Repository 必须拒绝未知边界、过期 actor epoch、与现有 operation 不同输入的幂等键重用。每次选择都先写不可变 `selection_operations` 回执，包括不产生批次的 `WAIT_INPUT/CONTINUE/IDLE`；同一 operation 永远重放第一次观察到的结果，状态变化后调用者必须使用新 operation。`PREFILL_ONLY` 只在有效 actor fence 下推进连续前缀，跨 Conversation 不共享行锁；普通 `ANY` 选择若遇到超过 64 条尚未提交的触发前缀，必须拒绝并要求预填。预填、分段触发领取、Memory 资格和归档处于同一 UOW，最后一个触发留给最终批次以维持召回输入。`SESSION_END` 预填必须携带**后继** Run 引用，不能把新触发领取给刚完成的 Run；当前回复的领取组不受新消息影响。
 
 ### 2.3 触发状态独立于消费游标
 
@@ -112,13 +113,19 @@ PENDING ------------> FAILED / CANCELLED
 
 `CLAIMED` 只说明某个会话执行承诺处理该触发；模型启动、一次工具调用结束、输入被裁剪或 Agent 已阅读，都不等于 `ANSWERED`。最终回复事务把实际纳入该回答输入、归属于该 Run 的触发关联到回复意图并标记 `ANSWERED`。该状态表示回复事实已提交，平台是否送达另查 Delivery；它不声称模型回答的内容质量已经得到证明。
 
-最终回复必须经调度器的 Context 追加端口提交：同一事务写 `context_append_operations`、不可变 `REPLY` Context unit，并把明确列出的、仍由该 Session/Run 领取的 trigger 转为 `ANSWERED`。列出的 trigger 必须无重复，且与该 Run 当前所有仍处于 `CLAIMED` 的 trigger **完全相等**；遗漏或混入另一 Run 的触发都使整笔回复事务失败，不能留下已完成 Run 的孤儿触发。禁止提供一个能绕过回复 Context 单独“批量回答 trigger”的公开端口。闭合的非最终 Agent 步骤也通过同一追加端口写 `AGENT_STEP`，但不终结 trigger。
+最终回复必须经调度器的 Context 追加端口提交：同一事务写 `context_append_operations`、不可变 `REPLY` Context unit，并按稳定 `trigger_claim_ref` 把**该 Session/Run 的完整领取组**关联到回复。调度器复核组的目标 Run、累计数量、有序摘要、末触发序号以及所有已提交分段；遗漏或混入另一 Run 的分段使整笔回复事务失败。权威终结事实与回复 Context 同事务提交，逐触发物理状态可由受围栏的后台任务按每批至多 64 项收敛；查询和下一轮选择在此期间必须按终结事实给出正确的有效状态，不能把已回答触发重新入队。禁止提供绕过回复 Context 单独“批量回答 trigger”的公开端口。闭合的非最终 Agent 步骤也通过同一追加端口写 `AGENT_STEP`，但不终结 trigger。
 
 同一批次可以领取多个触发并产生一次连贯回复，不要求每条触发独立启动 Run 或独立发一条消息。每条触发仍保留自己的用户、来源、取消/失败结果及回复关联。新近入队、尚未出现在该模型输入中的触发不能被顺手标为已回答。
 
 对被取消、过期或明确终结的触发保留原因。其他用户后来加入的独立触发不因当前 Run 被取消而自动取消。可恢复故障可以继续原 Run，或由恢复器在提升所有权 epoch 后重新排队；不能仅因 `context_applied_seq >= trigger.ingress_seq` 就忽略它。
 
-重排是显式 operation：持有效 actor 的恢复器必须指出失效的 `session_ref/run_ref` 与原因，事务锁定 lane 及该 Run 已领取的 trigger，写 `trigger_requeues` 和规范化成员后才把这些 trigger 从 `CLAIMED` 放回 `PENDING` 并释放 lane 的活动 Session 引用。失败或取消使用独立 `trigger_terminal_operations` operation，在相同精确 fence 下按不可变 `resulting_status` 把成员置为 `FAILED` 或 `CANCELLED` 并记录原因，不能借重排反复调用同一失败模型。相同 operation 精确重放同一成员集；不能扫描所有 `CLAIMED` 项后无条件重置，也不能把别的 Run 后来领取的 trigger 一并回退。
+重排是显式 operation：持有效 actor 的恢复器必须指出失效的 `session_ref/run_ref`、领取引用与原因，事务锁定 lane 和领取组，写入幂等重排事实，再逐段把该组的触发从 `CLAIMED` 放回 `PENDING`；重排未收敛前不允许新 Run 越过这些触发。失败或取消使用独立的 Run 终结 operation，在相同精确 fence 下先提交不可变终结事实，再按有界分段结算 `FAILED` 或 `CANCELLED` 与原因，不能借重排反复调用同一失败模型。相同 operation 精确重放同一领取组；不能扫描整个 Session 的 `CLAIMED` 项后无条件重置，也不能把别的 Run 后来领取的触发一并回退。
+
+### 2.4 超长触发积压的传递与结算
+
+触发身份按群消息逐条持久保存，但跨模块调用帧不能把完整积压变成 JSON 数组。每次预填和最终输入选择至多处理 64 条连续消息，并在同一 lane 围栏下建立最多 64 项的 `trigger_claim_segment`；组头只保存目标 Session/Run、已覆盖序号、累计触发数和按分段顺序滚动的摘要。相同 operation 重放原分段，不重复推进摘要。Agent 启动、下一次模型调用和 Session 交接只接收组引用、摘要、末触发身份与输入切口；取某个触发的作者和授权资格时，调用调度器提供的按引用/触发 ID 精确核验端口。Agent 不跨 schema 读 Inbox，也不复制整组触发到自身 Run 快照。
+
+完成回复、失败和取消只提交组级终结事实及有界回执，不能把几十万项 `answered_trigger_ids` 或 `answered_events` 放进 UnitOfWork/Worker/模型帧。Memory 的回复联想仅对有界提案中的触发与事件逐项核验，不要求传输整组回答成员。逐触发物理结算由单调游标分段完成；它必须能在进程崩溃和热替换后重领，旧领取不能结算新分段。`PENDING`、`CLAIMED`、`ANSWERED` 等对外有效状态由领取组与终结事实共同决定，在物理结算未完成时仍保持正确。当前数组式实现未达到此契约，具体差距以[实现状态](implementation-status.md)为准。
 
 ## 3. 上下文消息与用户身份
 

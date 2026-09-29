@@ -334,6 +334,53 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             },
             "prior": {},
         }
+        class RollbackProbe(Exception):
+            pass
+
+        with pytest.raises(RollbackProbe):
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.inbox_messages SELECT "
+                        "(jsonb_populate_record(NULL::{}.inbox_messages,to_jsonb(m)||"
+                        "jsonb_build_object('event_id','event/other-run',"
+                        "'ingress_seq',2,'admission_operation_id','admit/other-run',"
+                        "'classification_operation_id','classify/other-run'))).* "
+                        "FROM {}.inbox_messages m WHERE m.bot_id=%s AND m.event_id=%s"
+                    ).format(*(sql.Identifier(namespace) for _ in range(3))),
+                    (store.bot_id, event_id),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.conversation_triggers("
+                        "bot_id,conversation_id,trigger_id,event_id,ingress_seq,"
+                        "principal_ref,input_digest,status,claimed_session_ref,"
+                        "claimed_run_ref,input_batch_id) VALUES "
+                        "(%s,%s,'trigger/other-run','event/other-run',2,'qq:other',"
+                        "%s,'CLAIMED','session/1','run/other',%s)"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, actor["conversation_id"],
+                     "sha256:" + "0" * 64, selected["input_batch_id"]),
+                )
+                guarded = await participant.invoke_in(
+                    conn, "conversation.terminalize-run", terminal,
+                    operation_id="uow-step:conversation-terminal/probe",
+                    causal_root_kind="conversation.agent-run",
+                    causal_root_id="run/1",
+                    parent_call_id="call:conversation/terminal-probe",
+                    timeout_seconds=10,
+                )
+                assert guarded["trigger_ids"] == ["trigger/1"]
+                other = await (
+                    await conn.execute(
+                        sql.SQL("SELECT status FROM {}.conversation_triggers "
+                                "WHERE bot_id=%s AND trigger_id='trigger/other-run'")
+                        .format(sql.Identifier(namespace)),
+                        (store.bot_id,),
+                    )
+                ).fetchone()
+                assert other["status"] == "CLAIMED"
+                raise RollbackProbe
         async with store.pool.connection() as conn, conn.transaction():
             terminal_result = await participant.invoke_in(
                 conn,

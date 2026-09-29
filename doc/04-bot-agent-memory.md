@@ -140,7 +140,7 @@ Provider 输出先按字节、事件数和 UTF-8 限制收敛，再由禁用 DTD
 
 ### 3.2 Run 输入与资源
 
-一次 Run 固定 `bot_id, conversation_id?, session_id?, ReplyRoute 的会话目标, agent_config_revision, preset_context_revision, agent_contract, module_generation, context_view_revision, service_principal_ref`。这些引用分别指向其 owner 的不可变事实，不是一份跨模块 Bot 配置。Run 输入使用追加式 InputBatch，不再假定整个 Run 的 input_event_ids 从启动到结束永远不变；每批冻结来源前缀、trigger_ids、逐触发 principal_ref 与 input_revision，每次模型调用固定其所见输入版本。
+一次 Run 固定 `bot_id, conversation_id?, session_id?, ReplyRoute 的会话目标, agent_config_revision, preset_context_revision, agent_contract, module_generation, context_view_revision, service_principal_ref`。这些引用分别指向其 owner 的不可变事实，不是一份跨模块 Bot 配置。Run 输入使用追加式 InputBatch，不再假定整个 Run 的 input_event_ids 从启动到结束永远不变；每批冻结来源前缀、Conversation 所有的触发领取组引用/摘要与 input_revision，每次模型调用固定其所见输入版本。逐触发 principal_ref 由 Conversation 在精确资格核验时返回，不能把完整群聊积压复制进 Agent 的输入帧或 checkpoint。
 
 Agent 的 Prompt 使用冻结的配置版本；安全权限与删除状态始终重验，不能冻结一份权限后无限有效。Run 读取的长期记忆附 `source_revision, projection_revision, evidence_ids, deletion_epoch`，其结果可能在执行期间失效。
 
@@ -201,7 +201,7 @@ RunCheckpoint
   phase, continuation_kind, pending_step_id
   session_id, session_epoch, input_revision, input_batch_ids
   context_base_revision, context_view_revision, context_applied_seq
-  selected_input_end_seq, claimed_trigger_ids, flushed_step_ids
+  selected_input_end_seq, trigger_claim_ref, trigger_claim_digest, flushed_step_ids
   committed_step_ids, tool_operation_ids
   evidence_ids, source_revision, deletion_epoch
   model_request_manifest_refs, model_transport_attempt_refs, model_call_epoch
