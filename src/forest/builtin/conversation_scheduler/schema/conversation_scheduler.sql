@@ -1148,7 +1148,6 @@ DECLARE
     selected_session text;
     lane record;
     replay record;
-    pending_count integer;
     trigger_cut bigint;
     has_gap boolean;
     selection_status text;
@@ -1246,14 +1245,14 @@ BEGIN
     -- Classification and every trigger-state transition hold this lane row
     -- first. The lane fence stabilizes the pending set without locking an
     -- arbitrarily large trigger backlog during each 64-event prefill.
-    SELECT count(*)::integer,max(ingress_seq)
-    INTO pending_count,trigger_cut
+    SELECT ingress_seq INTO trigger_cut
     FROM __forest_module_schema__.conversation_triggers
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
-      AND status='PENDING' AND ingress_seq<=lane.classified_through_seq;
+      AND status='PENDING' AND ingress_seq<=lane.classified_through_seq
+    ORDER BY ingress_seq DESC,trigger_id DESC LIMIT 1;
     has_gap := lane.classified_through_seq < lane.next_ingress_seq - 1;
     IF requested_mode='PREFILL_ONLY' THEN
-        IF pending_count > 0 AND trigger_cut-lane.context_applied_seq > 64 THEN
+        IF trigger_cut IS NOT NULL AND trigger_cut-lane.context_applied_seq > 64 THEN
             -- Retain the last trigger in the final Agent InputBatch. Earlier
             -- triggers stay PENDING while their source events enter Context.
             selection_kind := 'CONTEXT_PREFILL';
@@ -1279,7 +1278,7 @@ BEGIN
                 )
             );
         END IF;
-    ELSIF pending_count > 0 THEN
+    ELSIF trigger_cut IS NOT NULL THEN
         IF requested_mode='SILENT_ONLY' THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
@@ -1473,7 +1472,7 @@ BEGIN
         WHERE bot_id=requested_bot AND conversation_id=requested_conversation
           AND context_revision=selection_context_revision;
     END IF;
-    IF pending_count > 0 AND selection_kind <> 'CONTEXT_PREFILL' THEN
+    IF trigger_cut IS NOT NULL AND selection_kind <> 'CONTEXT_PREFILL' THEN
         UPDATE __forest_module_schema__.conversation_triggers
         SET status='CLAIMED',claimed_session_ref=selected_session,
             claimed_run_ref=selected_run,input_batch_id=batch_id,
