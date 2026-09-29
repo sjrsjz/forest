@@ -980,18 +980,64 @@ class KernelRuntimeRepository:
         lease: HostLease,
         bindings: tuple[PreparedGenerationBinding, ...] | list[PreparedGenerationBinding],
         activation_id: str,
+        *,
+        retained_generations: dict[str, str] | None = None,
+        source_graph: RuntimeGenerationGraph | None = None,
     ) -> RuntimeGenerationGraph:
-        ordered = self._validate_bindings(bindings, activation_id)
+        if retained_generations is not None and not isinstance(
+            retained_generations, dict
+        ):
+            raise ForestError(
+                "RUNTIME_RETAINED_GENERATION_INVALID",
+                "Retained member identities must be a component-to-Generation mapping",
+                422,
+            )
+        retained = dict(retained_generations or {})
+        if (
+            (bool(retained) != (source_graph is not None))
+            or (source_graph is not None and not isinstance(source_graph, RuntimeGenerationGraph))
+            or any(
+                not isinstance(component_id, str)
+                or _IDENTIFIER.fullmatch(component_id) is None
+                or not isinstance(generation_id, str)
+                or not generation_id
+                or len(generation_id) > 512
+                for component_id, generation_id in retained.items()
+            )
+        ):
+            raise ForestError(
+                "RUNTIME_RETAINED_GENERATION_INVALID",
+                "Retained members require exact source Graph and Generation identities",
+                422,
+            )
+        ordered = self._validate_bindings(
+            bindings, activation_id, available_components=set(retained)
+        )
+        if set(retained) & {item.component_id for item in ordered}:
+            raise ForestError(
+                "RUNTIME_RETAINED_GENERATION_INVALID",
+                "A component cannot be retained and prepared again in one graph",
+                422,
+            )
         graph_digest = digest_json(
             {
                 "protocol": "forest.runtime-graph/1",
                 "members": [item.as_fact() for item in ordered],
+                **(
+                    {
+                        "retained_from": source_graph.graph_id,
+                        "retained": sorted(retained.items()),
+                    }
+                    if retained
+                    else {}
+                ),
             }
         )
         generations = {
             item.component_id: (f"generation:{activation_id}:{digest_json(item.as_fact())[-24:]}")
             for item in ordered
         }
+        generations.update(retained)
         graph_id = f"runtime-graph:{activation_id}"
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
@@ -1027,6 +1073,53 @@ class KernelRuntimeRepository:
                     activation_id,
                     generations,
                 )
+            if retained:
+                head = await self._graph_head_in(conn, lock=True)
+                await self._graph_in(conn, source_graph, lock=True)
+                if head is None or head["graph_id"] != source_graph.graph_id:
+                    raise ForestError(
+                        "RUNTIME_RETAINED_GENERATION_STALE",
+                        "Retained Generations must belong to the current Graph",
+                        409,
+                    )
+                source_members = {
+                    item["component_id"]: item
+                    for item in await self._members_in(conn, source_graph, lock=True)
+                }
+                if any(
+                    component_id not in source_members
+                    or source_members[component_id]["generation_id"] != generation_id
+                    or source_members[component_id]["status"] != "ACTIVE"
+                    or source_members[component_id]["host_incarnation"] != lease.incarnation
+                    or source_members[component_id]["host_owner_epoch"] != lease.owner_epoch
+                    for component_id, generation_id in retained.items()
+                ):
+                    raise ForestError(
+                        "RUNTIME_RETAINED_GENERATION_STALE",
+                        "Retained Generation is not active under this Host lease",
+                        409,
+                    )
+                dependencies = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT component_id,required_component_id FROM {} "
+                            "WHERE bot_id=%s AND graph_id=%s"
+                        ).format(self._table("runtime_graph_dependencies")),
+                        (self.store.bot_id, source_graph.graph_id),
+                    )
+                ).fetchall()
+                retained_dependencies = [
+                    item for item in dependencies if item["component_id"] in retained
+                ]
+                if any(
+                    item["required_component_id"] not in retained
+                    for item in retained_dependencies
+                ):
+                    raise ForestError(
+                        "RUNTIME_RETAINED_DEPENDENCY_CHANGED",
+                        "A retained Generation cannot keep a route to a replaced member",
+                        409,
+                    )
             revision = clock["next_revision"]
             await conn.execute(
                 sql.SQL("UPDATE {} SET next_revision=next_revision+1 WHERE bot_id=%s").format(
@@ -1036,10 +1129,18 @@ class KernelRuntimeRepository:
             )
             await conn.execute(
                 sql.SQL(
-                    "INSERT INTO {}(bot_id,graph_id,graph_revision,graph_digest,activation_id,state) "
-                    "VALUES (%s,%s,%s,%s,%s,'PREPARED')"
+                    "INSERT INTO {}(bot_id,graph_id,graph_revision,graph_digest,"
+                    "activation_id,source_graph_id,state) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,'PREPARED')"
                 ).format(self._table("runtime_graphs")),
-                (self.store.bot_id, graph_id, revision, graph_digest, activation_id),
+                (
+                    self.store.bot_id,
+                    graph_id,
+                    revision,
+                    graph_digest,
+                    activation_id,
+                    source_graph.graph_id if source_graph is not None else None,
+                ),
             )
             for item in ordered:
                 await self._storage_in(conn, item)
@@ -1112,6 +1213,50 @@ class KernelRuntimeRepository:
                     ).format(self._table("runtime_graph_lifecycle_facts")),
                     (self.store.bot_id, graph_id, item.component_id),
                 )
+            for component_id, generation_id in sorted(retained.items()):
+                copied = await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,graph_id,component_id,generation_id,"
+                        "package_id,package_version,package_digest,driver,trust_level,"
+                        "descriptor_digest,route_contract_digest,management_contract_digest,"
+                        "management_ui_digest,data_admission,control_admission,"
+                        "storage_schema_id,storage_schema_version,storage_namespace,"
+                        "storage_baseline_sha256,storage_package_digest,"
+                        "storage_repository_contract,storage_execution_profile) "
+                        "SELECT bot_id,%s,component_id,generation_id,package_id,"
+                        "package_version,package_digest,driver,trust_level,"
+                        "descriptor_digest,route_contract_digest,management_contract_digest,"
+                        "management_ui_digest,data_admission,control_admission,"
+                        "storage_schema_id,storage_schema_version,storage_namespace,"
+                        "storage_baseline_sha256,storage_package_digest,"
+                        "storage_repository_contract,storage_execution_profile "
+                        "FROM {} WHERE bot_id=%s AND graph_id=%s AND component_id=%s "
+                        "AND generation_id=%s"
+                    ).format(
+                        self._table("runtime_graph_modules"),
+                        self._table("runtime_graph_modules"),
+                    ),
+                    (
+                        graph_id,
+                        self.store.bot_id,
+                        source_graph.graph_id,
+                        component_id,
+                        generation_id,
+                    ),
+                )
+                if copied.rowcount != 1:
+                    raise ForestError(
+                        "RUNTIME_RETAINED_GENERATION_STALE",
+                        "Retained Graph member changed during preparation",
+                        409,
+                    )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,graph_id,component_id,sequence,state) "
+                        "VALUES (%s,%s,%s,1,'PREPARED')"
+                    ).format(self._table("runtime_graph_lifecycle_facts")),
+                    (self.store.bot_id, graph_id, component_id),
+                )
             for item in ordered:
                 for required in item.requires:
                     await conn.execute(
@@ -1121,6 +1266,19 @@ class KernelRuntimeRepository:
                         ).format(self._table("runtime_graph_dependencies")),
                         (self.store.bot_id, graph_id, item.component_id, required),
                     )
+            for dependency in retained_dependencies if retained else ():
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}(bot_id,graph_id,component_id,required_component_id) "
+                        "VALUES (%s,%s,%s,%s)"
+                    ).format(self._table("runtime_graph_dependencies")),
+                    (
+                        self.store.bot_id,
+                        graph_id,
+                        dependency["component_id"],
+                        dependency["required_component_id"],
+                    ),
+                )
         return RuntimeGenerationGraph(graph_id, revision, graph_digest, activation_id, generations)
 
     async def publish_graph(
@@ -1148,27 +1306,54 @@ class KernelRuntimeRepository:
                 raise ForestError(
                     "RUNTIME_GRAPH_STALE", "A newer runtime publication already exists", 409
                 )
+            if (
+                saved["source_graph_id"] is not None
+                and (head is None or head["graph_id"] != saved["source_graph_id"])
+            ):
+                raise ForestError(
+                    "RUNTIME_RETAINED_GENERATION_STALE",
+                    "The source Graph changed before retained Generations could publish",
+                    409,
+                )
             members = await self._members_in(conn, graph, lock=True)
+            old_members = (
+                await self._members_for_id_in(conn, head["graph_id"], lock=True)
+                if head is not None and head["graph_id"] is not None
+                else ()
+            )
+            old_by_component = {item["component_id"]: item for item in old_members}
+            retained = {
+                item["component_id"]
+                for item in members
+                if item["component_id"] in old_by_component
+                and old_by_component[item["component_id"]]["generation_id"]
+                == item["generation_id"]
+            }
             if any(
                 item["host_incarnation"] != lease.incarnation
                 or item["host_owner_epoch"] != lease.owner_epoch
-                or item["status"] != "READY"
+                or item["status"]
+                != ("ACTIVE" if item["component_id"] in retained else "READY")
                 for item in members
             ):
                 raise ForestError(
                     "RUNTIME_GENERATION_NOT_READY",
-                    "Every graph Generation must be READY under the current Host fence",
+                    "New Generations must be READY and retained Generations ACTIVE under this Host",
                     409,
                 )
             if configuration_activators is not None:
-                components = {item["component_id"] for item in members}
+                components = {
+                    item["component_id"] for item in members
+                } - retained
                 if set(configuration_activators) != components:
                     raise ForestError(
                         "RUNTIME_CONFIGURATION_PARTICIPANTS_INVALID",
-                        "Every graph member must provide exactly one configuration activator",
+                        "Every new Generation must provide exactly one configuration activator",
                         503,
                     )
                 for item in members:
+                    if item["component_id"] in retained:
+                        continue
                     activator = configuration_activators[item["component_id"]]
                     activate = getattr(activator, "activate_in", None)
                     if activate is None:
@@ -1186,7 +1371,9 @@ class KernelRuntimeRepository:
                         expected_payload_digest=item["config_payload_digest"],
                     )
             if publication_participants is not None:
-                components = {item["component_id"] for item in members}
+                components = {
+                    item["component_id"] for item in members
+                } - retained
                 if set(publication_participants) - components:
                     raise ForestError(
                         "RUNTIME_PUBLICATION_PARTICIPANTS_INVALID",
@@ -1211,7 +1398,6 @@ class KernelRuntimeRepository:
                     )
             old_components: set[str] = set()
             if head is not None and head["graph_id"] is not None:
-                old_members = await self._members_for_id_in(conn, head["graph_id"], lock=True)
                 old_components = {item["component_id"] for item in old_members}
                 await conn.execute(
                     sql.SQL("UPDATE {} SET state='RETIRED' WHERE bot_id=%s AND graph_id=%s").format(
@@ -1220,7 +1406,7 @@ class KernelRuntimeRepository:
                     (self.store.bot_id, head["graph_id"]),
                 )
                 for item in old_members:
-                    if item["status"] == "ACTIVE":
+                    if item["status"] == "ACTIVE" and item["component_id"] not in retained:
                         await conn.execute(
                             sql.SQL(
                                 "UPDATE {} SET status='QUIESCING' "
@@ -1240,29 +1426,30 @@ class KernelRuntimeRepository:
             new_components = set()
             for item in members:
                 new_components.add(item["component_id"])
-                await conn.execute(
-                    sql.SQL(
-                        "UPDATE {} SET status='ACTIVE' WHERE bot_id=%s AND generation_id=%s"
-                    ).format(self._table("generations")),
-                    (self.store.bot_id, item["generation_id"]),
-                )
-                await conn.execute(
-                    sql.SQL(
-                        "INSERT INTO {}(bot_id,component_id,generation_id,route_epoch,"
-                        "data_admission,control_admission) VALUES (%s,%s,%s,1,%s,%s) "
-                        "ON CONFLICT (bot_id,component_id) DO UPDATE SET "
-                        "generation_id=EXCLUDED.generation_id,route_epoch=routes.route_epoch+1,"
-                        "data_admission=EXCLUDED.data_admission,"
-                        "control_admission=EXCLUDED.control_admission"
-                    ).format(self._table("routes")),
-                    (
-                        self.store.bot_id,
-                        item["component_id"],
-                        item["generation_id"],
-                        item["data_admission"],
-                        item["control_admission"],
-                    ),
-                )
+                if item["component_id"] not in retained:
+                    await conn.execute(
+                        sql.SQL(
+                            "UPDATE {} SET status='ACTIVE' WHERE bot_id=%s AND generation_id=%s"
+                        ).format(self._table("generations")),
+                        (self.store.bot_id, item["generation_id"]),
+                    )
+                    await conn.execute(
+                        sql.SQL(
+                            "INSERT INTO {}(bot_id,component_id,generation_id,route_epoch,"
+                            "data_admission,control_admission) VALUES (%s,%s,%s,1,%s,%s) "
+                            "ON CONFLICT (bot_id,component_id) DO UPDATE SET "
+                            "generation_id=EXCLUDED.generation_id,route_epoch=routes.route_epoch+1,"
+                            "data_admission=EXCLUDED.data_admission,"
+                            "control_admission=EXCLUDED.control_admission"
+                        ).format(self._table("routes")),
+                        (
+                            self.store.bot_id,
+                            item["component_id"],
+                            item["generation_id"],
+                            item["data_admission"],
+                            item["control_admission"],
+                        ),
+                    )
                 await self._append_lifecycle_in(
                     conn, graph.graph_id, item["component_id"], "ACTIVE"
                 )
@@ -1428,13 +1615,34 @@ class KernelRuntimeRepository:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._identity_in(conn)
             await self._host_in(conn, lease)
+            head = await self._graph_head_in(conn, lock=True)
             await self._graph_in(conn, graph, lock=True)
             members = {
                 item["component_id"]: item
                 for item in await self._members_in(conn, graph, lock=True)
             }
+            current_members = (
+                {
+                    item["component_id"]: item["generation_id"]
+                    for item in await self._members_for_id_in(
+                        conn, head["graph_id"], lock=False
+                    )
+                }
+                if head is not None and head["graph_id"] != graph.graph_id
+                and head["graph_id"] is not None
+                else {}
+            )
             for component_id, (state, error_code) in sorted(states.items()):
                 member = members[component_id]
+                if (
+                    current_members.get(component_id) == member["generation_id"]
+                    and state != "ACTIVE"
+                ):
+                    raise ForestError(
+                        "RUNTIME_RETAINED_GENERATION_ACTIVE",
+                        "A historical Graph cannot retire a Generation retained by the head",
+                        409,
+                    )
                 latest = await self._latest_lifecycle_in(conn, graph.graph_id, component_id)
                 path = self._lifecycle_path(latest["state"], state)
                 for step in path:
@@ -1724,6 +1932,8 @@ class KernelRuntimeRepository:
     def _validate_bindings(
         bindings: tuple[PreparedGenerationBinding, ...] | list[PreparedGenerationBinding],
         activation_id: str,
+        *,
+        available_components: set[str] | None = None,
     ) -> list[PreparedGenerationBinding]:
         try:
             UUID(activation_id)
@@ -1733,6 +1943,7 @@ class KernelRuntimeRepository:
             ) from None
         ordered = sorted(bindings, key=lambda item: item.component_id)
         components = {item.component_id for item in ordered}
+        required_components = components | (available_components or set())
         if not ordered or len(components) != len(ordered):
             raise ForestError(
                 "RUNTIME_GENERATION_BINDING_INVALID",
@@ -1787,7 +1998,7 @@ class KernelRuntimeRepository:
                 or type(item.control_admission) is not bool
                 or len(item.requires) != len(set(item.requires))
                 or item.component_id in item.requires
-                or set(item.requires) - components
+                or set(item.requires) - required_components
                 or invalid_storage
             ):
                 raise ForestError(

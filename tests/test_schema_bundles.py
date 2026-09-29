@@ -713,6 +713,114 @@ async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_a
 
 
 @pytest.mark.postgres
+async def test_runtime_graph_retains_unchanged_generations_without_republishing_them(
+    clean_authority,
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    runtime = kernel.runtime
+    lease = await runtime.claim_host("retain-host", "retain-incarnation")
+    provider = runtime_binding("example.provider", marker="a")
+    consumer = runtime_binding(
+        "example.consumer", marker="b", requires=("example.provider",)
+    )
+    first = await runtime.prepare_graph(lease, [provider, consumer], str(uuid4()))
+    await runtime.publish_graph(lease, first)
+    retained_id = first.generations["example.provider"]
+    before = await runtime.verify_active_generation(
+        component_id="example.provider", generation_id=retained_id
+    )
+
+    second = await runtime.prepare_graph(
+        lease,
+        [runtime_binding("example.consumer", marker="c", requires=("example.provider",))],
+        str(uuid4()),
+        retained_generations={"example.provider": retained_id},
+        source_graph=first,
+    )
+    assert second.generations["example.provider"] == retained_id
+    assert await runtime.prepare_graph(
+        lease,
+        [runtime_binding("example.consumer", marker="c", requires=("example.provider",))],
+        second.activation_id,
+        retained_generations={"example.provider": retained_id},
+        source_graph=first,
+    ) == second
+    with pytest.raises(ForestError) as conflict:
+        await runtime.publish_graph(
+            lease, second, configuration_activators={"example.provider": object()}
+        )
+    assert conflict.value.code == "RUNTIME_CONFIGURATION_PARTICIPANTS_INVALID"
+    await runtime.publish_graph(lease, second)
+    after = await runtime.verify_active_generation(
+        component_id="example.provider", generation_id=retained_id
+    )
+    assert after.route_epoch == before.route_epoch
+    assert after.graph_id == second.graph_id
+    async with store.pool.connection() as conn:
+        statuses = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT generation_id,status FROM {}.generations "
+                    "WHERE generation_id=ANY(%s)"
+                ).format(sql.Identifier(runtime.namespace)),
+                (list(first.generations.values()),),
+            )
+        ).fetchall()
+    assert {item["generation_id"]: item["status"] for item in statuses} == {
+        retained_id: "ACTIVE",
+        first.generations["example.consumer"]: "QUIESCING",
+    }
+    with pytest.raises(ForestError) as conflict:
+        await runtime.record_states(
+            lease, first, {"example.provider": ("STOPPED", None)}
+        )
+    assert conflict.value.code == "RUNTIME_RETAINED_GENERATION_ACTIVE"
+    await runtime.record_states(
+        lease, first, {"example.consumer": ("STOPPED", None)}
+    )
+    assert (
+        await runtime.verify_active_generation(
+            component_id="example.provider", generation_id=retained_id
+        )
+    ).route_epoch == before.route_epoch
+
+    with pytest.raises(ForestError) as conflict:
+        await runtime.prepare_graph(
+            lease,
+            [runtime_binding("example.provider", marker="d")],
+            str(uuid4()),
+            retained_generations={
+                "example.consumer": second.generations["example.consumer"]
+            },
+            source_graph=second,
+        )
+    assert conflict.value.code == "RUNTIME_RETAINED_DEPENDENCY_CHANGED"
+
+    newer = await runtime.prepare_graph(
+        lease,
+        [
+            runtime_binding("example.provider", marker="f"),
+            runtime_binding(
+                "example.consumer", marker="1", requires=("example.provider",)
+            ),
+        ],
+        str(uuid4()),
+    )
+    stale = await runtime.prepare_graph(
+        lease,
+        [runtime_binding("example.consumer", marker="e", requires=("example.provider",))],
+        str(uuid4()),
+        retained_generations={"example.provider": retained_id},
+        source_graph=second,
+    )
+    await runtime.publish_graph(lease, newer)
+    with pytest.raises(ForestError) as conflict:
+        await runtime.publish_graph(lease, stale)
+    assert conflict.value.code == "RUNTIME_RETAINED_GENERATION_STALE"
+
+
+@pytest.mark.postgres
 async def test_component_state_separates_queries_from_revision_checked_commands(
     clean_authority,
 ):

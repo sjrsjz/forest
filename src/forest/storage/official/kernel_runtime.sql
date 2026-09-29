@@ -237,11 +237,13 @@ CREATE TABLE runtime_graphs (
     graph_revision bigint NOT NULL CHECK (graph_revision > 0),
     graph_digest text NOT NULL CHECK (graph_digest ~ '^sha256:[a-f0-9]{64}$'),
     activation_id text NOT NULL,
+    source_graph_id text,
     state text NOT NULL CHECK (state IN ('PREPARED', 'ACTIVE', 'RETIRED', 'FAILED', 'STOPPED')),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, graph_id),
     UNIQUE (bot_id, graph_revision),
-    UNIQUE (bot_id, activation_id)
+    UNIQUE (bot_id, activation_id),
+    FOREIGN KEY (bot_id, source_graph_id) REFERENCES runtime_graphs(bot_id, graph_id)
 );
 
 CREATE TABLE runtime_graph_modules (
