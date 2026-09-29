@@ -454,6 +454,7 @@ CREATE TABLE relation_contributions (
     weight_micros bigint NOT NULL CHECK (weight_micros BETWEEN 0 AND 1000000000000),
     admitted_deletion_epoch bigint NOT NULL CHECK (admitted_deletion_epoch >= 0),
     active boolean NOT NULL DEFAULT true,
+    sample_key text COLLATE "C" GENERATED ALWAYS AS (md5(contribution_id)) STORED,
     created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,contribution_id),
@@ -1208,6 +1209,14 @@ CREATE INDEX relation_left_idx ON relation_contributions(
 CREATE INDEX relation_right_idx ON relation_contributions(
     bot_id,right_kind,right_id,active,relation_id,contribution_id
 );
+CREATE INDEX relation_association_left_sample_idx ON relation_contributions(
+    bot_id,left_id,sample_key,contribution_id
+) WHERE left_kind='SOURCE_UNIT' AND right_kind='SOURCE_UNIT'
+    AND relation_kind='ASSOCIATES_WITH' AND active;
+CREATE INDEX relation_association_right_sample_idx ON relation_contributions(
+    bot_id,right_id,sample_key,contribution_id
+) WHERE left_kind='SOURCE_UNIT' AND right_kind='SOURCE_UNIT'
+    AND relation_kind='ASSOCIATES_WITH' AND active;
 CREATE INDEX embedding_facets_work_idx ON embedding_facets(
     bot_id,state,purpose,next_attempt_at,created_at,facet_id
 );
@@ -1951,6 +1960,27 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_graph_association_visible(
+    requested_bot text, contribution_ref text, contribution_xid xid8,
+    target_ref text, graph_snapshot_value pg_snapshot, requested_query text,
+    conversation_value text, cut_value bigint
+) RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT pg_visible_in_snapshot(contribution_xid,graph_snapshot_value)
+       AND __forest_module_schema__.memory_graph_unit_visible(
+           requested_bot,target_ref,graph_snapshot_value,
+           requested_query,conversation_value,cut_value)
+       AND EXISTS (
+           SELECT 1 FROM __forest_module_schema__.relation_evidence e
+           WHERE e.bot_id=requested_bot AND e.contribution_id=contribution_ref
+       ) AND NOT EXISTS (
+           SELECT 1 FROM __forest_module_schema__.relation_evidence e
+           WHERE e.bot_id=requested_bot AND e.contribution_id=contribution_ref
+             AND NOT __forest_module_schema__.memory_graph_unit_visible(
+                 requested_bot,e.source_unit_id,graph_snapshot_value,
+                 requested_query,conversation_value,cut_value)
+       )
+$$;
+
 CREATE FUNCTION memory_read_graph_neighbours(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
@@ -1967,6 +1997,7 @@ DECLARE
     sequence_edges jsonb;
     association_edges jsonb;
     association_sampled boolean;
+    sample_pivot text;
 BEGIN
     IF association_limit IS NULL OR association_limit NOT BETWEEN 1 AND 128
        OR requested_unit IS NULL OR octet_length(requested_unit) NOT BETWEEN 1 AND 256 THEN
@@ -1999,6 +2030,7 @@ BEGIN
         'author_subject_ref',unit_row.author_subject_ref)
     INTO node_value FROM __forest_module_schema__.memory_sources s
     WHERE s.bot_id=requested_bot AND s.source_id=unit_row.source_id;
+    sample_pivot := md5(requested_query || chr(31) || requested_unit);
     -- Two indexed directional seeks. Hidden units are skipped without exposing
     -- their count; this is adjacency in the authorised archived view.
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
@@ -2025,37 +2057,61 @@ BEGIN
                requested_query,conversation_value,cut_value)
          ORDER BY u.source_order_seq LIMIT 1)
     ) neighbours;
-    WITH outgoing AS (
-        SELECT c.*,c.right_id AS target_id FROM __forest_module_schema__.relation_contributions c
-        WHERE c.bot_id=requested_bot AND c.left_kind='SOURCE_UNIT' AND c.left_id=requested_unit
-          AND c.right_kind='SOURCE_UNIT' AND c.relation_kind='ASSOCIATES_WITH' AND c.active
+    -- Four bounded index seeks cover both edge orientations and both sides of
+    -- the query's random pivot. Only the small merged set is sorted; hidden
+    -- candidates are filtered before each seek reaches its limit.
+    WITH candidates AS MATERIALIZED (
+        (SELECT c.contribution_id,c.relation_id,c.right_id AS target_id,c.sample_key
+         FROM __forest_module_schema__.relation_contributions c
+         WHERE c.bot_id=requested_bot AND c.left_kind='SOURCE_UNIT'
+           AND c.left_id=requested_unit AND c.right_kind='SOURCE_UNIT'
+           AND c.relation_kind='ASSOCIATES_WITH' AND c.active
+           AND c.sample_key>=sample_pivot
+           AND __forest_module_schema__.memory_graph_association_visible(
+               requested_bot,c.contribution_id,c.created_xid,c.right_id,
+               query_row.graph_snapshot,requested_query,conversation_value,cut_value)
+         ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
         UNION ALL
-        SELECT c.*,c.left_id AS target_id FROM __forest_module_schema__.relation_contributions c
-        WHERE c.bot_id=requested_bot AND c.right_kind='SOURCE_UNIT' AND c.right_id=requested_unit
-          AND c.left_kind='SOURCE_UNIT' AND c.relation_kind='ASSOCIATES_WITH' AND c.active
+        (SELECT c.contribution_id,c.relation_id,c.right_id AS target_id,c.sample_key
+         FROM __forest_module_schema__.relation_contributions c
+         WHERE c.bot_id=requested_bot AND c.left_kind='SOURCE_UNIT'
+           AND c.left_id=requested_unit AND c.right_kind='SOURCE_UNIT'
+           AND c.relation_kind='ASSOCIATES_WITH' AND c.active
+           AND c.sample_key<sample_pivot
+           AND __forest_module_schema__.memory_graph_association_visible(
+               requested_bot,c.contribution_id,c.created_xid,c.right_id,
+               query_row.graph_snapshot,requested_query,conversation_value,cut_value)
+         ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
+        UNION ALL
+        (SELECT c.contribution_id,c.relation_id,c.left_id AS target_id,c.sample_key
+         FROM __forest_module_schema__.relation_contributions c
+         WHERE c.bot_id=requested_bot AND c.right_kind='SOURCE_UNIT'
+           AND c.right_id=requested_unit AND c.left_kind='SOURCE_UNIT'
+           AND c.relation_kind='ASSOCIATES_WITH' AND c.active
+           AND c.sample_key>=sample_pivot
+           AND __forest_module_schema__.memory_graph_association_visible(
+               requested_bot,c.contribution_id,c.created_xid,c.left_id,
+               query_row.graph_snapshot,requested_query,conversation_value,cut_value)
+         ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
+        UNION ALL
+        (SELECT c.contribution_id,c.relation_id,c.left_id AS target_id,c.sample_key
+         FROM __forest_module_schema__.relation_contributions c
+         WHERE c.bot_id=requested_bot AND c.right_kind='SOURCE_UNIT'
+           AND c.right_id=requested_unit AND c.left_kind='SOURCE_UNIT'
+           AND c.relation_kind='ASSOCIATES_WITH' AND c.active
+           AND c.sample_key<sample_pivot
+           AND __forest_module_schema__.memory_graph_association_visible(
+               requested_bot,c.contribution_id,c.created_xid,c.left_id,
+               query_row.graph_snapshot,requested_query,conversation_value,cut_value)
+         ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
     ), sampled AS MATERIALIZED (
-        SELECT c.*,encode(sha256(convert_to(jsonb_build_array(
-            requested_query,requested_unit,c.relation_id,c.contribution_id,c.target_id
-        )::text,'UTF8')),'hex') AS sample_rank
-        FROM outgoing c
-        WHERE pg_visible_in_snapshot(c.created_xid,query_row.graph_snapshot)
-          AND __forest_module_schema__.memory_graph_unit_visible(
-              requested_bot,c.target_id,query_row.graph_snapshot,
-              requested_query,conversation_value,cut_value)
-          AND EXISTS (
-              SELECT 1 FROM __forest_module_schema__.relation_evidence e
-              WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
-          ) AND NOT EXISTS (
-              SELECT 1 FROM __forest_module_schema__.relation_evidence e
-              WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
-                AND NOT __forest_module_schema__.memory_graph_unit_visible(
-                    requested_bot,e.source_unit_id,query_row.graph_snapshot,
-                    requested_query,conversation_value,cut_value)
-          )
-        ORDER BY sample_rank,c.contribution_id,c.target_id LIMIT association_limit+1
+        SELECT * FROM candidates
+        ORDER BY (sample_key<sample_pivot),sample_key,contribution_id,target_id
+        LIMIT association_limit+1
     ), ranked AS (
-        SELECT *,row_number() OVER (ORDER BY sample_rank,contribution_id,target_id) AS rank
-        FROM sampled
+        SELECT *,row_number() OVER (
+            ORDER BY (sample_key<sample_pivot),sample_key,contribution_id,target_id
+        ) AS rank FROM sampled
     )
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
         'target_id',target_id,'relation','ASSOCIATED','edge_id',contribution_id,

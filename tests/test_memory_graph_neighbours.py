@@ -113,6 +113,26 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
 
         for index in range(40):
             await contribution(f"edge/{index}", f"n{index:02}", reverse=bool(index % 2))
+        pivot = hashlib.md5(b"query/one\x1fseed", usedforsecurity=False).hexdigest()
+        await conn.execute("SET enable_seqscan=off")
+        try:
+            for side in ("left", "right"):
+                plan = await (
+                    await execute(
+                        "EXPLAIN (COSTS OFF) SELECT contribution_id FROM {}.relation_contributions "
+                        f"WHERE bot_id=%s AND {side}_kind='SOURCE_UNIT' "
+                        f"AND {side}_id='seed' AND "
+                        f"{'right' if side == 'left' else 'left'}_kind='SOURCE_UNIT' "
+                        "AND relation_kind='ASSOCIATES_WITH' AND active "
+                        "AND sample_key >= %s ORDER BY sample_key,contribution_id LIMIT 6",
+                        (store.bot_id, pivot),
+                    )
+                ).fetchall()
+                assert f"relation_association_{side}_sample_idx" in "\n".join(
+                    row["QUERY PLAN"] for row in plan
+                )
+        finally:
+            await conn.execute("RESET enable_seqscan")
         async def browse_relations(values):
             row = await (
                 await execute(

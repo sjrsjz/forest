@@ -324,3 +324,5 @@ Generic package UnitOfWork plans now reject the Worker Host configuration-rebuil
 Conversation 的 `CONTEXT_PREFILL` 已在此前实现：带触发前缀分 64 条提交，最终 `TRIGGER_INPUT` 保留最后一个触发，130 条消息及两处触发的隔离 PostgreSQL 用例验证了两次预填、原作者与触发领取。本轮将每次预填时的全量待触发 `count(*)/max()` 改为沿 `(bot_id, conversation_id, status, ingress_seq, trigger_id)` 索引读取最后一个待触发序号；原有切口和状态转移不变，包构建及该数据库用例再次通过（`1 passed`，41.24 秒）。极端情况下，最终批次仍会一次领取所有积压触发并返回完整触发列表；该集合尚无独立分页/分段认领协议，不能宣称触发数量本身已受界。
 
 标准配置事务的调用作用域现从包专用 `PackageCallScope` 分离为 `ComponentConfigurationApplyScope`；内核 authority 不再构造包 Worker 身份，包 Generation 只在普通服务和通用 UnitOfWork 使用包作用域。新作用域保留精确组件/Generation/调用/operation 身份，`management.configuration` 因果根由协调器固定生成。包与 Web 管理本地回归 `92 passed, 2 skipped`；隔离 PostgreSQL 完整宿主测试再次覆盖包配置拒绝回滚、跨代重放及内核授权配置到 `EFFECTIVE`（`1 passed`，189.87 秒）。临时库和容器已清理。
+
+Memory 图的高出度 `ASSOCIATES_WITH` 邻接读取现使用贡献 ID 的持久伪随机键和查询/源节点派生的游标起点，从双向局部索引分别读取起点后及回绕前的有界候选，再合并选取扩散边。可见性、证据及快照资格在各段达到上限前验证；同查询结果稳定，换查询通常改变窗口。隔离 PostgreSQL 用例覆盖双向索引可用性、跨主干采样、隐藏证据、快照与来源归因（`1 passed`），包构建及 Ruff 检查通过。大量不可见边仍可能增加索引扫描长度；该方案是伪随机窗口，不宣称独立均匀抽样。长期真实群聊及完整遗忘管理仍待验收。

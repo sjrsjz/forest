@@ -277,7 +277,7 @@ MemoryQuery
 1. 最多保留 `seed_limit` 个 ANN 直接种子，每个种子激活值为 `1.0`。
 2. 路径分数是沿途边权乘积；同一节点只保留最大乘积路径。低于 `min_graph_relevance` 的候选不再入队，按激活值从高到低确定性出队，最多物化 `max_graph_nodes` 个节点。
 3. 同主干相邻边使用 `sequence_weight`，联想边使用 `association_weight`。两种权重及 `min_graph_relevance` 均须在 `(0,1]`，因此路径分数不会沿边增大，最大激活优先出队可只读取每个节点一次。联想贡献自己的业务权重保留为证据元数据，但不能偷偷改变本版本的扩散权重。
-4. 每次展开一个节点时，时序边不占用联想边配额；若合格 `ASSOCIATES_WITH` 边超过 `max_association_edges_per_node`，先按 `(query_id, source_unit_id, relation_id, contribution_id, target_id)` 派生的伪随机顺序选取至多该数量，再进行扩散。相同查询可审计重放，不同查询会得到不同子样本，数据库不得先取全量高出度邻接再在进程内裁剪。
+4. 每次展开一个节点时，时序边不占用联想边配额。每条 `ASSOCIATES_WITH` 贡献保存由 `contribution_id` 派生的固定伪随机键；查询以 `(query_id, source_unit_id)` 派生游标起点，从两种端点方向各自沿索引读取起点后和回绕前的合格边，每段最多读取 `max_association_edges_per_node + 1` 条，再合并选取至多该数量进行扩散。来源、证据、删除和快照资格必须在各段达到数量上限前核验。相同查询可审计重放，不同查询通常落在不同伪随机窗口；这不是均匀独立抽样。数据库只对有界候选集排序，不得先取全量高出度邻接再在进程内裁剪；若大量边不可见，索引扫描仍可能越过这些边。
 5. 检索包冻结直接种子、图激活、前驱边、实际进入区域的关系和删除 epoch。Memory 规范证据发布写独立不可变 `retrieval_materializations` 回执，不修改检索项；模型能力投影及确认由 Agent 的请求 manifest 持有，不在 Memory 中建立第二份模型投影状态。
 
 默认值为：`seed_limit=4`、`candidate_limit_per_facet=64`、`min_similarity=0.35`、`min_graph_relevance=0.05`、`max_graph_nodes=32`、`max_association_edges_per_node=32`、`sequence_weight=0.55`、`association_weight=0.90`。这些值由 `memory.graph` 的模块配置冻结，可随新 Generation 发布，但一个已冻结检索包不受后来配置变更影响。
