@@ -689,6 +689,19 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
             affected = set(host.registry.replacement_closure("agent.runtime"))
             assert affected < set(previous.generations)
             worker_host = host.registry.get("component.worker-host")
+            worker_host_artifact = host.package_catalog.find(
+                "forest.component-worker-host", "1.5.4"
+            )
+            artifact = await worker_host.management_contract.query(
+                "artifact", {"package_digest": worker_host_artifact.digest}
+            )
+            assert artifact["component_id"] == "component.worker-host"
+            assert artifact["package_digest"] == worker_host_artifact.digest
+            assert artifact["manifest_digest"] == digest_json(worker_host_artifact.manifest)
+            assert any(
+                item["name"] == "deployment.package-registry.artifact"
+                for item in artifact["requires"]
+            )
             web_request = await worker_host.management_contract.action(
                 "module.reload",
                 operation_id="web:reload-missing",

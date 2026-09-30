@@ -8,7 +8,10 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
-from forest.builtin_package_catalog_snapshot import package_catalog_page_service
+from forest.builtin_package_catalog_snapshot import (
+    package_catalog_artifact_service,
+    package_catalog_page_service,
+)
 from forest.builtin_runtime_graph_snapshot import runtime_graph_snapshot_service
 from forest.builtin_runtime_job import (
     RUNTIME_HEALTH_SNAPSHOT_JOB,
@@ -139,6 +142,7 @@ _MODULES = {
             "runtime.graph-replacement.status",
             "runtime.graph.snapshot",
             "deployment.package-registry.packages",
+            "deployment.package-registry.artifact",
             "kernel.uow.conversation.final-reply",
             "kernel.uow.conversation.select-input",
             "kernel.uow.conversation.session-handoff",
@@ -158,6 +162,7 @@ _MODULES = {
             "runtime.graph-replacement.status",
             "runtime.graph.snapshot",
             "deployment.package-registry.packages",
+            "deployment.package-registry.artifact",
         ),
     },
 }
@@ -746,6 +751,12 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                         1,
                         ("kernel.runtime",),
                         package_catalog_page_service,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "deployment.package-registry.artifact",
+                        1,
+                        ("kernel.runtime",),
+                        package_catalog_artifact_service,
                     ),
                     RuntimeKernelServiceSpec(
                         "runtime.graph-replacement.request",

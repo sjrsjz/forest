@@ -33,6 +33,15 @@ class ComponentWorkerHost(Plugin):
             timeout=30,
         )
 
+    @service("component.host.artifact", semantics="read")
+    async def artifact(self, payload, ctx):
+        return await ctx.services.call(
+            "deployment.package-registry.artifact",
+            {"protocol": "forest.package-catalog-artifact-request/1", **payload},
+            operation_id=ctx.operations.stable("package-catalog-artifact"),
+            timeout=30,
+        )
+
     @service("component.host.modules", semantics="read")
     async def modules(self, payload, ctx):
         graph = await self._graph(ctx)

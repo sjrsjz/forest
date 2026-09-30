@@ -15,6 +15,7 @@
     dl div{border:1px solid #284036;border-radius:8px;padding:8px 10px;min-width:0}
     dt{color:#a9c1b2}dd{margin:3px 0 0;overflow-wrap:anywhere}
     #status{min-height:1.4em}#reload-result,#configuration-result{padding:10px;border:1px solid #284036;border-radius:8px;overflow-wrap:anywhere}
+    #artifact-details{max-height:260px;overflow:auto;margin-top:8px}#artifact-details dd{white-space:pre-wrap}
     details{border:1px solid #284036;border-radius:8px;padding:9px 11px}summary{cursor:pointer}#package-items{max-height:300px;overflow:auto;margin:8px 0}#package-items div{padding:7px 0;border-bottom:1px solid #284036;overflow-wrap:anywhere}#package-items small{display:block;color:#a9c1b2}
     @media(max-width:640px){dl{grid-template-columns:1fr}}
   </style>
@@ -46,6 +47,14 @@
       <p>这里只显示经校验的工件声明；选择、启停和局部换代控制尚未开放。</p>
       <div class="row"><button id="load-packages" type="button">读取目录</button><button id="more-packages" type="button" hidden>下一页</button></div>
       <div id="package-items"></div>
+      <dl id="artifact-details" hidden>
+        <div><dt>工件 / 组件</dt><dd id="artifact-identity"></dd></div>
+        <div><dt>运行时 / 存储权限</dt><dd id="artifact-runtime"></dd></div>
+        <div><dt>配置 Schema 摘要</dt><dd id="artifact-schema"></dd></div>
+        <div><dt>能力申请</dt><dd id="artifact-capabilities"></dd></div>
+        <div><dt>服务依赖</dt><dd id="artifact-requires"></dd></div>
+        <div><dt>提供服务</dt><dd id="artifact-provides"></dd></div>
+      </dl>
     </details>
     <p>Reload replaces the selected component and dependent Generations. Unaffected Generations retain their identity. The request remains visible after the old Worker retires.</p>
     <div id="reload-result" hidden></div>
@@ -105,7 +114,7 @@
         input.catalog_revision=catalogRevision;
       }
       const page=await call('query','packages',input);
-      if(!next)byId('package-items').replaceChildren();
+      if(!next){byId('package-items').replaceChildren();byId('artifact-details').hidden=true;}
       catalogRevision=page.catalog_revision;catalogNext=page.next_after;
       for(const item of page.items){
         const box=document.createElement('div');
@@ -113,10 +122,24 @@
         name.textContent=`${item.package_id} ${item.package_version} · ${item.component_id} (${item.scope})`;
         const facts=document.createElement('small');
         facts.textContent=`工件 ${item.package_digest} · 清单 ${item.manifest_digest}\n能力申请：${item.requested_capabilities.join('、')||'无'}`;
-        box.append(name,facts);byId('package-items').append(box);
+        const inspectButton=document.createElement('button');
+        inspectButton.type='button';inspectButton.textContent='检查声明';
+        inspectButton.onclick=()=>inspectArtifact(item.package_digest).catch(error=>notice(error.message));
+        box.append(name,facts,inspectButton);byId('package-items').append(box);
       }
       if(!page.items.length&&!next)byId('package-items').textContent='目录中没有已登记工件。';
       byId('more-packages').hidden=!catalogNext;resize();
+    }
+    async function inspectArtifact(packageDigest){
+      const item=await call('query','artifact',{package_digest:packageDigest});
+      if(item.package_digest!==packageDigest)throw new Error('工件摘要与请求不符');
+      byId('artifact-identity').textContent=`${item.package_id} ${item.package_version} / ${item.component_id}\n${item.package_digest}`;
+      byId('artifact-runtime').textContent=`${item.runtime} / ${item.scope} / ${item.storage_execution_profile||'无自有存储'}`;
+      byId('artifact-schema').textContent=item.configuration_schema_digest;
+      byId('artifact-capabilities').textContent=item.requested_capabilities.join('\n')||'无';
+      byId('artifact-requires').textContent=item.requires.map(value=>`${value.name} ${value.contract}${value.startup_dependency?' · 启动依赖':''}`).join('\n')||'无';
+      byId('artifact-provides').textContent=item.provides.map(value=>`${value.name} ${value.contract}`).join('\n')||'无';
+      byId('artifact-details').hidden=false;resize();
     }
     async function reload(){
       if(!selected||byId('component-id').value.trim()!==selected)throw new Error('Inspect the selected component first');

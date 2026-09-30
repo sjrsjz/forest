@@ -1987,6 +1987,53 @@ class PackageCatalog:
             )
         ]
 
+    @staticmethod
+    def _item(snapshot: PackageSnapshot) -> dict:
+        component = snapshot.component
+        return {
+            "package_id": snapshot.manifest["package_id"],
+            "package_version": snapshot.manifest["version"],
+            "package_digest": snapshot.digest,
+            "manifest_digest": digest_json(snapshot.manifest),
+            "component_id": component["id"],
+            "scope": component["scope"],
+            "runtime": snapshot.manifest["runtime"],
+            "kernel_api": snapshot.manifest["kernel_api"],
+            "requested_capabilities": list(
+                component.get("capabilities", {}).get("requests", ())
+            ),
+        }
+
+    def artifact(self, package_digest: str) -> dict:
+        """Project one verified immutable artifact for component selection."""
+        snapshot = self.get(package_digest)
+        component = snapshot.component
+        storage = component.get("storage")
+        return {
+            "protocol": "forest.package-catalog-artifact/1",
+            **self._item(snapshot),
+            "configuration_schema_digest": digest_json(
+                snapshot.schema(component["config_schema"])
+            ),
+            "requires": [
+                {
+                    "name": item["name"],
+                    "contract": item["contract"],
+                    "required": item.get("required", True),
+                    "startup_dependency": item.get("startup_dependency", False),
+                }
+                for item in component.get("requires", ())
+            ],
+            "provides": [
+                {"name": item["name"], "contract": item["contract"]}
+                for item in component.get("provides", ())
+            ],
+            "storage_execution_profile": (
+                storage.get("execution_profile", "declarative")
+                if storage is not None else None
+            ),
+        }
+
     def page(
         self,
         *,
@@ -2033,20 +2080,7 @@ class PackageCatalog:
                 package_id, package_version
             ):
                 _fail("PACKAGE_TAMPERED", "Catalog index differs from its immutable package")
-            component = snapshot.component
-            items.append({
-                "package_id": package_id,
-                "package_version": package_version,
-                "package_digest": digest,
-                "manifest_digest": digest_json(snapshot.manifest),
-                "component_id": component["id"],
-                "scope": component["scope"],
-                "runtime": snapshot.manifest["runtime"],
-                "kernel_api": snapshot.manifest["kernel_api"],
-                "requested_capabilities": list(
-                    component.get("capabilities", {}).get("requests", ())
-                ),
-            })
+            items.append(self._item(snapshot))
         return {
             "protocol": "forest.package-catalog-page/1",
             "catalog_revision": revision,

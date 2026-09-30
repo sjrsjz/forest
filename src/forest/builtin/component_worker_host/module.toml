@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.5.3"
+version = "1.5.4"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -31,6 +31,7 @@ stop_timeout_s = 10
 requests = [
   "service.call:runtime.graph.snapshot",
   "service.call:deployment.package-registry.packages",
+  "service.call:deployment.package-registry.artifact",
   "service.call:runtime.graph-replacement.request",
   "service.call:runtime.graph-replacement.status",
   "domain.query:component.reload.read",
@@ -68,6 +69,12 @@ required = true
 startup_dependency = false
 
 [[components.requires]]
+name = "deployment.package-registry.artifact"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
+
+[[components.requires]]
 name = "runtime.graph-replacement.request"
 contract = ">=1.0,<2.0"
 required = true
@@ -94,6 +101,14 @@ semantics = "read"
 visibility = "management"
 input_schema = "schemas/packages-input.json"
 output_schema = "schemas/packages-output.json"
+
+[[components.provides]]
+name = "component.host.artifact"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/artifact-input.json"
+output_schema = "schemas/artifact-output.json"
 
 [[components.provides]]
 name = "component.host.module"
@@ -168,6 +183,11 @@ timeout_s = 10
 [[components.management_queries]]
 id = "packages"
 port = "component.host.packages"
+timeout_s = 30
+
+[[components.management_queries]]
+id = "artifact"
+port = "component.host.artifact"
 timeout_s = 30
 
 [[components.management_queries]]

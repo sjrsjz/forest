@@ -373,3 +373,5 @@ RuntimeGraph 成员集合变化已贯通 Registry 规划与宿主替换入口：
 
 已安装外部包的独立装配入口现从 PackageCatalog 按不可变摘要取快照，要求 Bot scope、Python Worker、静态配置 schema 与精确批准的能力集合；框架标准配置账本和外部包声明式 SQL 分别安装到独立 namespace，后者以稳定存储契约摘要绑定，绝不借用官方 SQL 执行权限。真实 PostgreSQL 用例从 ZIP 导入带声明式表的测试插件，并以 1.0.0 -> 1.0.1 两个不同工件摘要热替换，确认未变的 SQL schema 可复用且内核 Generation 保留。外部包 SQL 函数、UnitOfWork participant、owned-work SQL 与 host effect driver 仍被明确拒绝，需后续独立受审查 authority；部署 Web 安装、Worker Host 选择事实和宿主自动装配尚未接通。
 本轮隔离 PostgreSQL schema/运行时套件 44 passed；包、Worker 与宿主非 PostgreSQL 套件 98 passed、1 skipped；Ruff 和 diff 检查通过。测试使用独立数据库与假 Bot 链路，未向 QQ 发消息。
+
+部署包目录现有精确工件摘要读取：`PackageCatalog.artifact` 对每次查询重新验证内容寻址工件，返回与分页目录一致的身份及 manifest 摘要，并附配置 schema 摘要、能力申请、服务依赖/提供声明和存储执行权限。受限 `deployment.package-registry.artifact` 只读服务与 Worker Host 包内 `artifact` 管理 query 已接通，包内 UI 可展开检查声明。18 个 builtin 工件投影均通过输出 schema 校验；包目录本地回归 `84 passed, 1 skipped`，完整官方宿主的真实 Worker Host 查询、目标热重载和配置链在隔离 PostgreSQL 通过（`1 passed`，264.65 秒），临时容器已清理。它仍只是安装与选择前的可信候选声明读取；部署 Web 安装、完整 `module.validate`、Bot 私有选择事实、显式启停及宿主按选择装配尚未完成。

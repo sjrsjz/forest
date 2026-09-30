@@ -28,3 +28,22 @@ def package_catalog_page_service(context):
         )
 
     return read
+
+
+def package_catalog_artifact_service(context):
+    async def read(request):
+        if (
+            not isinstance(request, dict)
+            or set(request) != {"protocol", "package_digest"}
+            or request.get("protocol") != "forest.package-catalog-artifact-request/1"
+        ):
+            raise ForestError(
+                "PACKAGE_CATALOG_ARTIFACT_INVALID",
+                "Package artifact request is invalid",
+                422,
+            )
+        return await asyncio.to_thread(
+            context.package_catalog.artifact, request["package_digest"]
+        )
+
+    return read

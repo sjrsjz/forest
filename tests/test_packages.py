@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from forest import packages
 from forest.builtin_packages import bootstrap_installed_package
@@ -96,6 +97,24 @@ def test_catalog_page_verifies_artifacts_and_fences_concurrent_imports(tmp_path)
         "requested_capabilities": first.component["capabilities"]["requests"],
     }]
     assert page["next_after"] is None
+    artifact = catalog.artifact(first.digest)
+    output_schema = json.loads((
+        Path(__file__).resolve().parents[1]
+        / "src/forest/builtin/component_worker_host/schemas/artifact-output.json"
+    ).read_text(encoding="utf-8"))
+    Draft202012Validator(output_schema).validate(artifact)
+    assert artifact["package_digest"] == page["items"][0]["package_digest"]
+    assert artifact["manifest_digest"] == page["items"][0]["manifest_digest"]
+    assert artifact["configuration_schema_digest"] == packages.digest_json(
+        first.schema(first.component["config_schema"])
+    )
+    assert artifact["provides"] == [
+        {"name": item["name"], "contract": item["contract"]}
+        for item in first.component["provides"]
+    ]
+    with pytest.raises(ForestError) as missing:
+        catalog.artifact("sha256:" + "0" * 64)
+    assert missing.value.code == "PACKAGE_NOT_FOUND"
     second_source = tmp_path / "second"
     shutil.copytree(EXAMPLE, second_source)
     manifest = second_source / "module.toml"
