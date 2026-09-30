@@ -23,6 +23,7 @@ from forest.builtin_packages import (
     _configuration_storage,
     bootstrap_builtin_package,
     bootstrap_installed_package,
+    inspect_installed_package,
 )
 from forest.clean_bot_host import BotGraphCandidate, CleanBotHost
 from forest.component_selection import ComponentSelectionReader, ComponentSelectionSnapshot
@@ -2711,13 +2712,48 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     source = source_catalog.build(package_root)
     catalog = PackageCatalog(tmp_path / "installed-packages")
     installed_snapshot = catalog.import_archive(source_catalog.export_archive(source.digest))
+    approved = ("event.publish:tests.ready", "job.schedule:tests.echo")
+    async with store.pool.connection() as conn:
+        before = await (
+            await conn.execute(
+                "SELECT count(*) AS n FROM forest_kernel.schema_bundles "
+                "WHERE bot_id=%s AND component_id=%s",
+                (store.bot_id, "tests.routing-component"),
+            )
+        ).fetchone()
+    with pytest.raises(ForestError) as preview_unconfigured:
+        await inspect_installed_package(
+            installed_snapshot.digest, catalog, store, kernel=core,
+            approved_capabilities=approved,
+            expected_manifest_digest=digest_json(installed_snapshot.manifest),
+            expected_configuration_revision=1,
+        )
+    assert preview_unconfigured.value.code == "PACKAGE_CONFIGURATION_REQUIRED"
+    async with store.pool.connection() as conn:
+        after = await (
+            await conn.execute(
+                "SELECT count(*) AS n FROM forest_kernel.schema_bundles "
+                "WHERE bot_id=%s AND component_id=%s",
+                (store.bot_id, "tests.routing-component"),
+            )
+        ).fetchone()
+    assert after == before
     with pytest.raises(ForestError) as not_configured:
         await bootstrap_installed_package(
             installed_snapshot.digest, catalog, store, installer,
             kernel=core, initial_configuration=None,
-            approved_capabilities=("event.publish:tests.ready", "job.schedule:tests.echo"),
+            approved_capabilities=approved,
         )
     assert not_configured.value.code == "PACKAGE_CONFIGURATION_REQUIRED"
+    async with store.pool.connection() as conn:
+        after_failed_bootstrap = await (
+            await conn.execute(
+                "SELECT count(*) AS n FROM forest_kernel.schema_bundles "
+                "WHERE bot_id=%s AND component_id=%s",
+                (store.bot_id, "tests.routing-component"),
+            )
+        ).fetchone()
+    assert after_failed_bootstrap == before
     installed = await bootstrap_installed_package(
         installed_snapshot.digest,
         catalog,
@@ -2725,11 +2761,33 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
         installer,
         kernel=core,
         initial_configuration={},
-        approved_capabilities=(
-            "event.publish:tests.ready",
-            "job.schedule:tests.echo",
-        ),
+        approved_capabilities=approved,
     )
+    inspected = await inspect_installed_package(
+        installed_snapshot.digest, catalog, store, kernel=core,
+        approved_capabilities=approved,
+        expected_manifest_digest=digest_json(installed_snapshot.manifest),
+        expected_configuration_revision=1,
+    )
+    assert inspected.component_id == "tests.routing-component"
+    assert inspected.package_digest == installed_snapshot.digest
+    assert inspected.manifest_digest == digest_json(installed_snapshot.manifest)
+    desired_fact = await installed.configuration.desired()
+    assert inspected.configuration_revision == desired_fact.revision == 1
+    assert inspected.configuration_payload_id == desired_fact.payload_id
+    assert inspected.configuration_payload_digest == desired_fact.payload_digest
+    assert inspected.configuration_schema_digest == digest_json(
+        installed_snapshot.schema(installed_snapshot.component["config_schema"])
+    )
+    assert inspected.storage_digest == installed.descriptor.storage.package_digest
+    with pytest.raises(ForestError) as stale_configuration:
+        await inspect_installed_package(
+            installed_snapshot.digest, catalog, store, kernel=core,
+            approved_capabilities=approved,
+            expected_manifest_digest=digest_json(installed_snapshot.manifest),
+            expected_configuration_revision=2,
+        )
+    assert stale_configuration.value.code == "MODULE_CONFIGURATION_REVISION_CONFLICT"
     assert installed.descriptor.artifact.trust_level == "installed"
     assert installed.descriptor.storage is not None
     assert installed.descriptor.storage.execution_profile == "declarative"

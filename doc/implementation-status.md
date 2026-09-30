@@ -393,3 +393,5 @@ Worker Host 包内管理页现提供显式选择快照与选择请求状态查�
 Worker Host 选择任务的崩溃重领现保留原 Graph 围栏直接请求内核，不再先以当前 Graph revision 将旧请求判为失败；内核先按稳定 operation ID 重放已有请求，只有新请求才执行 Graph revision CAS。包版本升至 `1.6.3`，本地 Worker Host 用例 `8 passed`，隔离 PostgreSQL 的内核请求跨 Graph 发布重放用例 `1 passed`，新包清单构建通过。选择快照被后续操作覆盖时仍按原规则结算 `SUPERSEDED`；这项修正不代表 Web/Shell 选择入口已开放。
 
 正式 `RuntimeModuleRegistry` 的换代规划现拆为只读 `preview_graph_transition()` 与应用计划的 `plan_graph_transition()`：前者复用现有描述符摘要、启动依赖和保留依赖闭包，返回替换、保留、移除、新增以及排空/预热集合，不写入候选实例或绑定保留所有权；后者消费同一结果执行原有局部换代。非数据库 Registry/宿主回归 `18 passed`，隔离 PostgreSQL 的真实局部替换和纯增删成员两项用例 `2 passed`。这为 `module.validate` 提供了唯一的影响集合计算入口；精确工件/配置的无副作用描述符编译、计划摘要与授权提交复核仍未接通。
+
+已安装包的静态约束现由装配与 `inspect_installed_package()` 共用：精确工件/manifest 摘要、Bot scope、Python Worker、能力批准、外部 SQL/Effect 权限和配置 schema 均使用同一判定。目标配置 desired 值、修订和不可变字段在一个 `REPEATABLE READ` 快照中读取；为保留 Payload 删除围栏仍获取短暂共享锁，但无持久写入。生产装配在引用已初始化配置时先预检，缺失配置不会先安装 schema；隔离 PostgreSQL 的外部包热重载用例 `1 passed`，并核对预检及失败装配前后 schema bundle 数量不变、过期配置修订被拒绝。本地包目录/装配回归 `84 passed, 1 skipped`。完整 `module.validate` 尚缺把检查结果编译为候选描述符、调用正式 Graph 预览、冻结计划摘要并在授权提交事务中复核。

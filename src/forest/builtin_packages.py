@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from jsonschema import Draft202012Validator
+from psycopg.errors import InvalidSchemaName, SerializationFailure, UndefinedTable
 
 from forest.errors import ForestError
 from forest.package_domain_authority import PostgresPackageDomainAuthority
@@ -41,7 +42,10 @@ from forest.runtime_modules import (
 )
 from forest.schema_bundles import StorageBundleSpec
 from forest.storage.authorization_authority import CapabilityGrant
-from forest.storage.module_configuration import ModuleConfigurationRepository
+from forest.storage.module_configuration import (
+    EffectiveModuleConfiguration,
+    ModuleConfigurationRepository,
+)
 from forest.unit_of_work import (
     PostgresComponentConfigurationApplyCoordinator,
     package_uow_coordinator_factory,
@@ -54,6 +58,28 @@ class ProvisionedPackageModule:
     descriptor: RuntimeModuleDescriptor
     configuration: ModuleConfigurationRepository
     grants: object
+
+
+@dataclass(frozen=True)
+class InstalledPackageInspection:
+    """Verified Bot artifact and target configuration, without provisioning."""
+
+    component_id: str
+    package_digest: str
+    manifest_digest: str
+    configuration_revision: int
+    configuration_payload_id: str
+    configuration_payload_digest: str
+    configuration_schema_digest: str
+    storage_digest: str | None
+
+
+@dataclass(frozen=True)
+class _InstalledPackageLayout:
+    schema: dict[str, Any]
+    schema_digest: str
+    configuration_storage: RuntimeStorageBundle
+    storage: RuntimeStorageBundle | None
 
 
 def _required_service_contracts(
@@ -165,6 +191,176 @@ def _installed_domain_storage(snapshot: PackageSnapshot) -> RuntimeStorageBundle
     )
 
 
+def _installed_package_layout(
+    snapshot: PackageSnapshot,
+    approved_capabilities: tuple[str, ...] | None,
+    initial_configuration: dict[str, Any] | None = None,
+) -> _InstalledPackageLayout:
+    component = snapshot.component
+    if component["scope"] != "bot":
+        raise ForestError(
+            "PACKAGE_SCOPE_UNSUPPORTED",
+            "Bot package assembly requires a Bot-scoped component",
+            422,
+        )
+    requested = frozenset(component.get("capabilities", {}).get("requests", ()))
+    if (
+        not isinstance(approved_capabilities, tuple)
+        or any(not isinstance(item, str) for item in approved_capabilities)
+        or len(approved_capabilities) != len(set(approved_capabilities))
+        or frozenset(approved_capabilities) != requested
+    ):
+        raise ForestError(
+            "PACKAGE_CAPABILITY_APPROVAL_REQUIRED",
+            "Installed package capabilities require an exact approved set",
+            403,
+        )
+    if snapshot.manifest["runtime"] != "python-worker":
+        raise ForestError(
+            "PACKAGE_RUNTIME_UNSUPPORTED",
+            "Installed package requires the Python Worker runtime",
+            422,
+        )
+    schema = snapshot.schema(component["config_schema"])
+    if initial_configuration is not None and not Draft202012Validator(schema).is_valid(
+        initial_configuration
+    ):
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_INVALID",
+            "Initial package configuration violates its declared schema",
+            422,
+        )
+    storage = _installed_domain_storage(snapshot)
+    if any(
+        component.get(name)
+        for name in (
+            "domain_queries", "domain_commands", "unit_of_work_participants",
+            "owned_work_handlers",
+        )
+    ):
+        raise ForestError(
+            "PACKAGE_DOMAIN_AUTHORITY_UNAVAILABLE",
+            "Installed package SQL procedures require a separate reviewed authority",
+            422,
+        )
+    if component.get("effect_services"):
+        raise ForestError(
+            "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
+            "Installed package has no approved host effect driver binding",
+            422,
+        )
+    configuration_storage = _installed_configuration_storage(component["id"])
+    if storage is not None and storage.spec.schema_id == configuration_storage.spec.schema_id:
+        raise ForestError(
+            "PACKAGE_STORAGE_IDENTITY_CONFLICT",
+            "Installed package storage collides with its configuration ledger",
+            422,
+        )
+    return _InstalledPackageLayout(
+        schema, digest_json(schema), configuration_storage, storage
+    )
+
+
+async def _installed_desired(
+    layout: _InstalledPackageLayout,
+    configuration: ModuleConfigurationRepository,
+    *,
+    expected_revision: int | None = None,
+) -> EffectiveModuleConfiguration:
+    try:
+        desired = await configuration.desired_checked()
+    except ForestError as error:
+        if error.code != "MODULE_CONFIGURATION_UNINITIALIZED":
+            raise
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_REQUIRED",
+            "Installed package configuration must be initialized before selection",
+            409,
+        ) from error
+    except (InvalidSchemaName, UndefinedTable) as error:
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_REQUIRED",
+            "Installed package configuration must be initialized before selection",
+            409,
+        ) from error
+    except SerializationFailure as error:
+        raise ForestError(
+            "MODULE_CONFIGURATION_REVISION_CONFLICT",
+            "Target package configuration changed during inspection",
+            409,
+        ) from error
+    if expected_revision is not None and desired.revision != expected_revision:
+        raise ForestError(
+            "MODULE_CONFIGURATION_REVISION_CONFLICT",
+            "Target package configuration revision changed",
+            409,
+        )
+    if desired.validation_digest != layout.schema_digest or not Draft202012Validator(
+        layout.schema
+    ).is_valid(desired.value):
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+            "Installed package configuration was not validated for this artifact schema",
+            409,
+        )
+    return desired
+
+
+async def _inspect_installed_snapshot(
+    snapshot: PackageSnapshot,
+    store,
+    *,
+    kernel,
+    approved_capabilities: tuple[str, ...],
+    expected_configuration_revision: int | None = None,
+) -> InstalledPackageInspection:
+    layout = _installed_package_layout(snapshot, approved_capabilities)
+    configuration = ModuleConfigurationRepository(
+        store,
+        component_id=snapshot.component["id"],
+        namespace=layout.configuration_storage.spec.namespace,
+        payloads=kernel.payload,
+        immutable_paths=tuple(snapshot.component.get("config_immutable_paths", ())),
+    )
+    desired = await _installed_desired(
+        layout, configuration, expected_revision=expected_configuration_revision
+    )
+    return InstalledPackageInspection(
+        snapshot.component["id"], snapshot.digest, digest_json(snapshot.manifest),
+        desired.revision, desired.payload_id, desired.payload_digest,
+        layout.schema_digest,
+        layout.storage.package_digest if layout.storage is not None else None,
+    )
+
+
+async def inspect_installed_package(
+    package_digest: str,
+    catalog: PackageCatalog,
+    store,
+    *,
+    kernel,
+    approved_capabilities: tuple[str, ...],
+    expected_manifest_digest: str,
+    expected_configuration_revision: int,
+) -> InstalledPackageInspection:
+    """Read one exact installed candidate without schema, grant, or configuration writes."""
+
+    snapshot = catalog.get(package_digest)
+    if digest_json(snapshot.manifest) != expected_manifest_digest:
+        raise ForestError(
+            "COMPONENT_SELECTION_ARTIFACT_CHANGED",
+            "Selected package declaration differs from its pinned artifact",
+            409,
+        )
+    return await _inspect_installed_snapshot(
+        snapshot,
+        store,
+        kernel=kernel,
+        approved_capabilities=approved_capabilities,
+        expected_configuration_revision=expected_configuration_revision,
+    )
+
+
 async def bootstrap_builtin_package(
     source: Path,
     catalog: PackageCatalog,
@@ -209,23 +405,10 @@ async def bootstrap_installed_package(
     """Bind an approved artifact to its own initialized configuration ledger."""
 
     snapshot = catalog.get(package_digest)
-    if snapshot.component["scope"] != "bot":
-        raise ForestError(
-            "PACKAGE_SCOPE_UNSUPPORTED",
-            "Bot package assembly requires a Bot-scoped component",
-            422,
-        )
-    requested = frozenset(snapshot.component.get("capabilities", {}).get("requests", ()))
-    if (
-        not isinstance(approved_capabilities, tuple)
-        or any(not isinstance(item, str) for item in approved_capabilities)
-        or len(approved_capabilities) != len(set(approved_capabilities))
-        or frozenset(approved_capabilities) != requested
-    ):
-        raise ForestError(
-            "PACKAGE_CAPABILITY_APPROVAL_REQUIRED",
-            "Installed package capabilities require an exact approved set",
-            403,
+    if initial_configuration is None:
+        await _inspect_installed_snapshot(
+            snapshot, store, kernel=kernel,
+            approved_capabilities=approved_capabilities,
         )
     return await _bootstrap_package_snapshot(
         snapshot,
@@ -234,6 +417,7 @@ async def bootstrap_installed_package(
         kernel=kernel,
         initial_configuration=initial_configuration,
         resolved_contracts=resolved_contracts,
+        approved_capabilities=approved_capabilities,
         trust_level="installed",
     )
 
@@ -249,56 +433,20 @@ async def _bootstrap_package_snapshot(
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     configuration_validator_factory: Callable[[str], Callable] | None = None,
     additional_grants: tuple[CapabilityGrant, ...] = (),
+    approved_capabilities: tuple[str, ...] | None = None,
     trust_level: str,
 ) -> ProvisionedPackageModule:
     component_id = snapshot.component["id"]
-    configuration_schema = snapshot.schema(snapshot.component["config_schema"])
     if trust_level == "official":
+        configuration_schema = snapshot.schema(snapshot.component["config_schema"])
         configuration_storage = storage = _configuration_storage(snapshot)
     elif trust_level == "installed":
-        if snapshot.manifest["runtime"] != "python-worker":
-            raise ForestError(
-                "PACKAGE_RUNTIME_UNSUPPORTED",
-                "Installed package requires the Python Worker runtime",
-                422,
-            )
-        if initial_configuration is not None and not Draft202012Validator(
-            configuration_schema
-        ).is_valid(initial_configuration):
-            raise ForestError(
-                "PACKAGE_CONFIGURATION_INVALID",
-                "Initial package configuration violates its declared schema",
-                422,
-            )
-        domain_storage = _installed_domain_storage(snapshot)
-        if any(
-            snapshot.component.get(name)
-            for name in (
-                "domain_queries",
-                "domain_commands",
-                "unit_of_work_participants",
-                "owned_work_handlers",
-            )
-        ):
-            raise ForestError(
-                "PACKAGE_DOMAIN_AUTHORITY_UNAVAILABLE",
-                "Installed package SQL procedures require a separate reviewed authority",
-                422,
-            )
-        if snapshot.component.get("effect_services"):
-            raise ForestError(
-                "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
-                "Installed package has no approved host effect driver binding",
-                422,
-            )
-        configuration_storage = _installed_configuration_storage(component_id)
-        storage = domain_storage
-        if storage is not None and storage.spec.schema_id == configuration_storage.spec.schema_id:
-            raise ForestError(
-                "PACKAGE_STORAGE_IDENTITY_CONFLICT",
-                "Installed package storage collides with its configuration ledger",
-                422,
-            )
+        layout = _installed_package_layout(
+            snapshot, approved_capabilities, initial_configuration
+        )
+        configuration_schema = layout.schema
+        configuration_storage = layout.configuration_storage
+        storage = layout.storage
     else:
         raise ValueError("Package trust level is invalid")
     if trust_level == "installed" and storage is not None:
@@ -338,25 +486,7 @@ async def _bootstrap_package_snapshot(
     elif trust_level != "installed":
         raise ValueError("Official package configuration is required")
     if trust_level == "installed":
-        try:
-            desired = await configuration.desired(include_value=True)
-        except ForestError as error:
-            if error.code != "MODULE_CONFIGURATION_UNINITIALIZED":
-                raise
-            raise ForestError(
-                "PACKAGE_CONFIGURATION_REQUIRED",
-                "Installed package configuration must be initialized before selection",
-                409,
-            ) from error
-        if desired.validation_digest != schema_digest or not Draft202012Validator(
-            configuration_schema
-        ).is_valid(desired.value):
-            raise ForestError(
-                "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
-                "Installed package configuration was not validated for this artifact schema",
-                409,
-            )
-        await configuration.assert_immutable(desired.value)
+        await _installed_desired(layout, configuration)
     else:
         await configuration.assert_immutable(initial_configuration)
     requested = tuple(snapshot.component.get("capabilities", {}).get("requests", ()))

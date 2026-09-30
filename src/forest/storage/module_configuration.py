@@ -515,6 +515,17 @@ class ModuleConfigurationRepository:
 
         return await self._head_configuration("desired_revision", include_value=include_value)
 
+    async def desired_checked(self) -> EffectiveModuleConfiguration:
+        """Read desired and verify Bot-lifetime fields in one snapshot without writes."""
+
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            desired = await self._head_configuration_in(
+                conn, "desired_revision", include_value=True
+            )
+            await self._assert_immutable_in(conn, desired.value)
+            return desired
+
     async def owner_id(self, revision: int) -> str:
         if type(revision) is not int or revision < 1:
             raise ForestError(
