@@ -10,7 +10,6 @@ import pytest
 
 from forest.errors import ForestError
 from forest.job_protocol import DurableJobExecutionRequest
-from forest.module_validation import resolve_dependencies
 from forest.package_runtime import (
     PackageGenerationAdapter,
     PackageGenerationState,
@@ -82,17 +81,6 @@ def test_management_only_memory_services_have_no_runtime_routes(tmp_path):
         assert (name, 1) not in public
         assert (name, 1) not in routed
         assert name in adapter._provided_services
-
-    with pytest.raises(ForestError) as missing:
-        resolve_dependencies({
-            "memory.graph": snapshot,
-            "another.component": SimpleNamespace(component={
-                "provides": [],
-                "requires": [{"name": "memory.trial.image", "contract": ">=1.0,<2.0"}],
-            }),
-        })
-    assert missing.value.code == "DEPENDENCY_MISSING"
-
 
 def test_package_publishes_agent_tool_from_its_own_service(tmp_path):
     source = tmp_path / "source"

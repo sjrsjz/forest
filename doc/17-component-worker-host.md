@@ -67,6 +67,8 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 
 组件自身的业务管理 query/action 仍归组件自己，Worker Host 不成为 Agent、Memory、OneBot 或 Routing 的总管理代理。`service.invoke` 只给受限的通用服务调用提供入口，不能替代那些组件的管理契约。Worker Host 自带的组件目录、配置表单、历史和生命周期页面随它的 Generation 发布；包内 UI 的字节和来源证明仍由所选包快照提供。壳层只处理通用 scope、授权票据和受限 artifact 传输。
 
+`module.validate` 的依赖、接管和资源判断必须使用与实际候选图装配相同的冻结描述符及 `RuntimeModuleRegistry` 规划规则。启动依赖参与有向无环启动顺序；普通服务句柄、UnitOfWork 与配置控制属于保留依赖，允许成环但影响换代闭包。旧 `module_validation.py` 把所有服务要求合成单一 DAG，生产路径也未使用它，现已删除；不得将它的规则复制进 Worker Host 查询以制造与实际发布不同的第二套规划器。
+
 ## 并发、失败和删除
 
 控制操作的线性化点是 Bot 库中的 desired revision CAS。计划包含选中工件摘要、目标配置 revision、Graph revision、可见影响集和 plan digest；apply 重新验证这些事实，任何变化都返回冲突，不能沿用旧计划。单进程锁只用于减少重复候选装配，不能作为跨重启正确性前提。Graph 替换申请以 `(bot_id, operation_id)` 幂等；Host lease 与 activation ID 围住执行权；旧 Generation 在新图发布后不能再接受控制效果。发布前替换失败保留旧图，desired 标记为待重试或失败，effective 不前进。发布事务已提交而本地激活失败时，内核撤下候选图并封闭路由；旧图已经退役，不得假称回滚成功或恢复旧图 admission。替换请求记录失败，Bot 宿主进入失败态并释放两代资源，等待新的宿主重新构造图。发布成功但旧图排空失败也使宿主失败，不能将资源泄漏当成成功替换。

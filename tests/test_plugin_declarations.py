@@ -11,7 +11,6 @@ import pytest
 
 from forest.cli import run_plugin_command
 from forest.errors import ForestError
-from forest.module_validation import validate_component_values
 from forest.package_runtime import package_runtime_descriptor
 from forest.packages import PackageCatalog, source_fingerprint
 from forest.sdk import Plugin, command, declared_commands, declared_services, plugin, service
@@ -189,22 +188,6 @@ class Handlers:
     with pytest.raises(ForestError) as caught:
         PackageCatalog(tmp_path / "catalog").build(source)
     assert caught.value.code in {"INVALID_MANIFEST", "INVALID_MESSAGE_HANDLERS"}
-
-
-def test_component_configuration_cannot_enable_undeclared_takeover(tmp_path):
-    snapshot = PackageCatalog(tmp_path / "catalog").build(auto_source(tmp_path))
-    with pytest.raises(ForestError) as caught:
-        validate_component_values(
-            {snapshot.digest: snapshot},
-            "example.auto",
-            {
-                "package_digest": snapshot.digest,
-                "config": {},
-                "grants": [],
-                "message_handler_takeover": True,
-            },
-        )
-    assert caught.value.code == "CONFIG_INVALID"
 
 
 @pytest.mark.parametrize(

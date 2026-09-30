@@ -375,3 +375,5 @@ RuntimeGraph 成员集合变化已贯通 Registry 规划与宿主替换入口：
 本轮隔离 PostgreSQL schema/运行时套件 44 passed；包、Worker 与宿主非 PostgreSQL 套件 98 passed、1 skipped；Ruff 和 diff 检查通过。测试使用独立数据库与假 Bot 链路，未向 QQ 发消息。
 
 部署包目录现有精确工件摘要读取：`PackageCatalog.artifact` 对每次查询重新验证内容寻址工件，返回与分页目录一致的身份及 manifest 摘要，并附配置 schema 摘要、能力申请、服务依赖/提供声明和存储执行权限。受限 `deployment.package-registry.artifact` 只读服务与 Worker Host 包内 `artifact` 管理 query 已接通，包内 UI 可展开检查声明。18 个 builtin 工件投影均通过输出 schema 校验；包目录本地回归 `84 passed, 1 skipped`，完整官方宿主的真实 Worker Host 查询、目标热重载和配置链在隔离 PostgreSQL 通过（`1 passed`，264.65 秒），临时容器已清理。它仍只是安装与选择前的可信候选声明读取；部署 Web 安装、完整 `module.validate`、Bot 私有选择事实、显式启停及宿主按选择装配尚未完成。
+
+接入组件选择前清除了未被生产代码调用的旧 `module_validation.py`：它将所有服务要求当作同一启动 DAG，和现行 RuntimeGraph 的启动依赖/保留依赖分离规则冲突。两处仅针对旧规划器的测试随之删除；其余包声明与运行时本地回归 `34 passed`，Ruff 通过。后续 `module.validate` 必须复用实际 Registry 候选图规则；选择修订、授权写入和宿主冻结读取仍待实现。
