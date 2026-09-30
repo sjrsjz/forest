@@ -406,3 +406,9 @@ Graph 描述符构造已改为读取 Generation 预编译的管理 schema 副本
 Worker Host 包内管理页现有折叠式候选图预检，按实时选择修订与当前 Graph revision 调用只读 `validate`，展示计划摘要和六类完整影响成员；外部包的工件、manifest、能力批准与目标配置修订由管理员显式填写。页面不提供启停提交。包版本升至 `1.6.5`，内嵌脚本通过 Node 语法检查，完整包工件构建通过；系统 Edge 的真实 MessageChannel 冒烟验证了请求修订、目标及影响集合渲染。Web 授权提交、资源预算及长时运行验收仍待完成。
 
 只读候选预检的并发事实边界已收紧：宿主先取 Graph 替换锁和选择共享围栏，再以另一个 `REPEATABLE READ` 连接读取候选中全部包的配置与 Payload；配置读取复用调用方事务，避免每个包各取独立快照后拼出不存在的事实组合。若未读到的配置在该快照建立后被并发改写，预检以序列化冲突失败。隔离 PostgreSQL 的双配置并发改写、外部包 Graph 预览、选择 CAS 和完整 Worker Host 管理查询/热重载用例各 `1 passed`；后者耗时 173.95 秒。本地宿主和 schema 非数据库用例分别 `8 passed`、`11 passed`，Ruff 通过。宿主已移除无调用者的旧预检包装方法。此边界仍是只读预检，启停提交所需的同事务授权、资源预算与计划复核尚未实现。
+
+通用管理 action 现可在 manifest 声明 `transaction_preflight` 宿主能力；Generation 装配和调用均在缺失绑定时拒绝，action ID 与 Domain Command 端口强制对应。前置检查作用域先于 Domain Command 事务进入，Web 票据和检查回调在写入前于同一事务执行，等待锁也计入 action 超时。Domain Command 返回值现在于事务内通过包的输出 schema，错误输出回滚包内写入。包运行时本地用例 `8 passed`；隔离 PostgreSQL 的 Job Scheduler 管理 action 用例证明故意制造输出 schema 错误时 enqueue 账本未提交，正常提交和热重载仍通过（`1 passed`）。Worker Host 的启停 action 尚未声明，组件选择具体检查能力、资源预算和 Web/Shell 入口仍未实现。
+
+组件选择 SQL 已限定只接受内核标记的 `management_action` 端口种类，普通 Domain Command 不能绕过管理事务调用选择写入。Worker Host 包版本升至 `1.6.6`、私有 SQL schema 版本升至 `1.4.0`；隔离 PostgreSQL 的选择 CAS/幂等重放用例验证普通命令被拒绝，管理端口的选择操作与发布围栏仍通过（`1 passed`）。这是对未来启停提交的必要封口，启停 action 当前仍未开放。
+
+包清单与运行时非数据库回归 `92 passed, 1 skipped`，Job Scheduler 管理 action 的 PostgreSQL 回滚与正常热重载用例最终复跑 `1 passed`；Ruff 和差异检查通过。

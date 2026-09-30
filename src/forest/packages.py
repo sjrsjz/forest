@@ -648,6 +648,7 @@ MANIFEST_SCHEMA = {
                                 "port": {"type": "string"},
                                 "priority": {"enum": ["P0", "P1", "P2"]},
                                 "authorization_path": {"type": "string"},
+                                "transaction_preflight": {"type": "string"},
                                 "actor_field": {"type": "string"},
                                 "timeout_s": {
                                     "type": "number",
@@ -1526,6 +1527,12 @@ def _manifest(files: dict[str, bytes]) -> dict:
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",
                 "Management actions must bind an exact declared Domain Command port",
+            )
+        preflight = declaration.get("transaction_preflight")
+        if preflight is not None and not IDENTIFIER.fullmatch(preflight):
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Management transaction_preflight must name one host capability",
             )
         pointer = declaration.get("authorization_path")
         if pointer is not None and not _valid_json_pointer(pointer):

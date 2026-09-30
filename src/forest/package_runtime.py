@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -237,6 +238,7 @@ class PackageGenerationAdapter:
         unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
         unit_of_work_coordinator: PackageUnitOfWorkCoordinator | None = None,
         configuration_apply_coordinator=None,
+        management_action_preflights: Mapping[str, Callable] | None = None,
         owned_work_authority: PackageOwnedWorkAuthority | None = None,
         service_operation_ledger: PackageServiceOperationLedger,
         configuration_validator: Callable[[object], Any] | None = None,
@@ -268,6 +270,11 @@ class PackageGenerationAdapter:
         self._unit_of_work_authority = unit_of_work_authority
         self._unit_of_work_coordinator = unit_of_work_coordinator
         self._configuration_apply_coordinator = configuration_apply_coordinator
+        self._management_action_preflights = dict(management_action_preflights or {})
+        self._management_actions = {
+            item["id"]: item
+            for item in self.component.get("management_actions", ())
+        }
         self._service_operation_ledger = service_operation_ledger
         self._configuration_validator = configuration_validator
         self._effect_driver_factories = dict(effect_driver_factories or {})
@@ -1695,6 +1702,13 @@ class PackageGenerationAdapter:
                 "Management action is not bound to this package Generation",
                 409,
             )
+        action = self._management_actions.get(action_id)
+        if action is None or action["port"] != declaration["name"]:
+            raise ForestError(
+                "MODULE_MANAGEMENT_BINDING_INVALID",
+                "Management action ID does not bind this Domain Command port",
+                409,
+            )
         authority = self._domain_commands
         if authority is None:
             raise ForestError(
@@ -1709,33 +1723,56 @@ class PackageGenerationAdapter:
             )
         scope, parent_call_id = self._management_scope(operation_id)
 
-        async def before_write(conn) -> None:
-            await authorization_guard(
-                conn,
-                ticket=authorization,
-                component_id=self.component_id,
-                operation_id=operation_id,
-                action_key=action_id,
-                input_digest=request_digest,
-                plan_digest=plan_digest,
-            )
-
-        result = await authority.invoke_management_action(
-            scope,
-            declaration,
-            payload,
-            parent_call_id=parent_call_id,
-            timeout_seconds=timeout_seconds,
-            before_write=before_write,
-            management_authorization=authorization,
-        )
-        if not output_validator.is_valid(result):
+        preflight = self._management_action_preflights.get(action_id)
+        if action.get("transaction_preflight") is not None and preflight is None:
             raise ForestError(
-                "MODULE_MANAGEMENT_OUTPUT_INVALID",
-                "Management action result violates its immutable package schema",
-                502,
+                "MODULE_MANAGEMENT_PREFLIGHT_UNAVAILABLE",
+                "Declared management transaction preflight is unavailable",
+                503,
             )
-        return result
+        guard_scope = (
+            preflight(payload, operation_id=operation_id)
+            if preflight is not None else nullcontext(None)
+        )
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                async with guard_scope as verify_in:
+                    if preflight is not None and not callable(verify_in):
+                        raise ForestError(
+                            "MODULE_MANAGEMENT_PREFLIGHT_INVALID",
+                            "Management transaction preflight has no verifier",
+                            503,
+                        )
+
+                    async def before_write(conn) -> None:
+                        await authorization_guard(
+                            conn,
+                            ticket=authorization,
+                            component_id=self.component_id,
+                            operation_id=operation_id,
+                            action_key=action_id,
+                            input_digest=request_digest,
+                            plan_digest=plan_digest,
+                        )
+                        if verify_in is not None:
+                            await verify_in(conn)
+
+                    return await authority.invoke_management_action(
+                        scope,
+                        declaration,
+                        payload,
+                        parent_call_id=parent_call_id,
+                        timeout_seconds=timeout_seconds,
+                        before_write=before_write,
+                        management_authorization=authorization,
+                        result_validator=output_validator.is_valid,
+                    )
+        except TimeoutError as exc:
+            raise ForestError(
+                "MODULE_MANAGEMENT_TIMEOUT",
+                "Management action exceeded its deadline",
+                504,
+            ) from exc
 
     async def _invoke_local_effect(
         self,
@@ -2794,6 +2831,30 @@ def package_runtime_descriptor(
     )
 
     def factory(_runtime, contracts):
+        preflights = {}
+        for action in component.get("management_actions", ()):
+            preflight_id = action.get("transaction_preflight")
+            if preflight_id is None:
+                continue
+            resolver = getattr(_runtime, "resolve_management_action_preflight", None)
+            if not callable(resolver):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_PREFLIGHT_UNAVAILABLE",
+                    "Declared management transaction preflight is unavailable",
+                    503,
+                )
+            preflight = resolver(
+                preflight_id,
+                component_id=component["id"],
+                package_digest=snapshot.digest,
+            )
+            if not callable(preflight):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_PREFLIGHT_UNAVAILABLE",
+                    "Declared management transaction preflight has no binding",
+                    503,
+                )
+            preflights[action["id"]] = preflight
         routes = {
             name: contracts.service(
                 name,
@@ -2880,6 +2941,7 @@ def package_runtime_descriptor(
             unit_of_work_authority=unit_of_work_authority,
             unit_of_work_coordinator=unit_of_work_coordinator,
             configuration_apply_coordinator=configuration_apply_coordinator,
+            management_action_preflights=preflights,
             owned_work_authority=owned_work_authority,
             service_operation_ledger=service_operation_ledger,
             configuration_validator=configuration_validator,

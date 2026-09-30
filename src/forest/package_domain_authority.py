@@ -266,6 +266,7 @@ class PostgresPackageDomainAuthority:
         timeout_seconds: float,
         before_write=None,
         management_authorization=None,
+        result_validator=None,
     ) -> Any:
         """Run one package Command behind the current CONTROL route and Web fence."""
 
@@ -278,6 +279,7 @@ class PostgresPackageDomainAuthority:
             timeout_seconds=timeout_seconds,
             before_write=before_write,
             management_authorization=management_authorization,
+            result_validator=result_validator,
         )
 
     async def invoke_preparation_command(
@@ -384,6 +386,7 @@ class PostgresPackageDomainAuthority:
         timeout_seconds: float,
         before_write=None,
         management_authorization=None,
+        result_validator=None,
     ) -> Any:
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -434,15 +437,10 @@ class PostgresPackageDomainAuthority:
                             await guarded
                     port_kind = (
                         "command"
-                        if kind
-                        in {
-                            "management_action",
-                            "preparation_command",
-                            "cleanup_command",
-                        }
+                        if kind in {"preparation_command", "cleanup_command"}
                         else kind
                     )
-                    return await self._invoke_in(
+                    result = await self._invoke_in(
                         conn,
                         port_kind,
                         scope,
@@ -453,6 +451,13 @@ class PostgresPackageDomainAuthority:
                         generation_verified=True,
                         management_authorization=management_authorization,
                     )
+                    if result_validator is not None and not result_validator(result):
+                        raise ForestError(
+                            "MODULE_MANAGEMENT_OUTPUT_INVALID",
+                            "Management action result violates its immutable package schema",
+                            502,
+                        )
+                    return result
         except ForestError:
             raise
         except TimeoutError as exc:

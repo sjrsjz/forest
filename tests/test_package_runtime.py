@@ -3,6 +3,7 @@ import hashlib
 import json
 import shutil
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -49,6 +50,124 @@ class Configuration:
             payload_digest=digest_json(value),
             value=value if include_value else None,
         )
+
+
+async def test_management_preflight_wraps_the_domain_transaction(tmp_path):
+    source = tmp_path / "worker-host"
+    shutil.copytree(
+        Path(__file__).parents[1] / "src/forest/builtin/component_worker_host", source
+    )
+    manifest = source / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'id = "module.reload"\nport = "component.reload.enqueue"',
+            'id = "module.reload"\nport = "component.reload.enqueue"\n'
+            'transaction_preflight = "fixture.serialized"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    events = []
+
+    @asynccontextmanager
+    async def preflight(_payload, *, operation_id):
+        assert operation_id == "operation/one"
+        events.append("host-lock")
+
+        async def verify_in(conn):
+            assert conn == "transaction"
+            events.append("verify")
+
+        try:
+            yield verify_in
+        finally:
+            events.append("unlock")
+
+    class Commands:
+        async def invoke_management_action(
+            self, _scope, _declaration, _payload, *, before_write,
+            result_validator, **_kwargs,
+        ):
+            events.append("transaction")
+            await before_write("transaction")
+            events.append("write")
+            result = {
+                "protocol": "forest.component-reload/1",
+                "request_id": "reload:" + "a" * 32,
+                "component_id": "agent.runtime",
+                "expected_graph_revision": 1,
+                "requested_by": "web:admin",
+                "state": "QUEUED",
+                "attempt_count": 0,
+                "receipt": None,
+                "error_code": None,
+                "created_at": "now",
+                "updated_at": "now",
+            }
+            assert result_validator(result)
+            events.append("validate")
+            return result
+
+    adapter = PackageGenerationAdapter(
+        snapshot=snapshot,
+        bot_id="bot-package-runtime",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        service_routes={}, resolved_contracts={},
+        generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=None, state_commands=None,
+        domain_commands=Commands(), service_operation_ledger=NoServiceLedger(),
+        owned_work_authority=SimpleNamespace(),
+        management_action_preflights={"module.reload": preflight},
+    )
+    adapter.state = PackageGenerationState.ACTIVE
+    adapter.generation_identity = SimpleNamespace(generation_id="generation/one")
+    adapter._prepared_binding = SimpleNamespace(
+        instance_id="instance/one", worker_incarnation="incarnation/one"
+    )
+    command = next(
+        item for item in snapshot.component["domain_commands"]
+        if item["name"] == "component.reload.enqueue"
+    )
+    payload = {
+        "component_id": "agent.runtime", "expected_graph_revision": 1,
+        "requested_by": "web:admin",
+    }
+
+    async def authorize(conn, **_kwargs):
+        assert conn == "transaction"
+        events.append("authorize")
+
+    with pytest.raises(ForestError) as wrong_action:
+        await adapter.invoke_management_action(
+            command, payload, action_id="module.missing", operation_id="operation/one",
+            plan_digest=None, request_digest=digest_json(payload), timeout_seconds=2,
+            authorization=object(), authorization_guard=authorize,
+        )
+    assert wrong_action.value.code == "MODULE_MANAGEMENT_BINDING_INVALID"
+    assert events == []
+    result = await adapter.invoke_management_action(
+        command, payload, action_id="module.reload", operation_id="operation/one",
+        plan_digest=None, request_digest=digest_json(payload), timeout_seconds=2,
+        authorization=object(), authorization_guard=authorize,
+    )
+    assert result["state"] == "QUEUED"
+    assert events == [
+        "host-lock", "transaction", "authorize", "verify", "write", "validate", "unlock"
+    ]
+    adapter._management_action_preflights.clear()
+    with pytest.raises(ForestError) as missing_binding:
+        await adapter.invoke_management_action(
+            command, payload, action_id="module.reload", operation_id="operation/one",
+            plan_digest=None, request_digest=digest_json(payload), timeout_seconds=2,
+            authorization=object(), authorization_guard=authorize,
+        )
+    assert missing_binding.value.code == "MODULE_MANAGEMENT_PREFLIGHT_UNAVAILABLE"
+    assert events == [
+        "host-lock", "transaction", "authorize", "verify", "write", "validate", "unlock"
+    ]
 
 
 def test_management_only_memory_services_have_no_runtime_routes(tmp_path):

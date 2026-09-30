@@ -217,10 +217,10 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
         execution_profile="official",
     )
 
-    async def call(function, operation_id, payload):
+    async def call(function, operation_id, payload, *, port_kind="management_action"):
         name = "component.selection." + function
         context = {
-            "bot_id": store.bot_id, "port_kind": "command", "port_name": name,
+            "bot_id": store.bot_id, "port_kind": port_kind, "port_name": name,
             "operation_id": operation_id, "input_digest": digest_json(payload),
         }
         async with store.pool.connection() as conn:
@@ -238,6 +238,8 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
         "approved_capabilities": [], "expected_selection_revision": 0,
         "expected_graph_revision": 1, "requested_by": "subject/admin",
     }
+    bypass = await call("enable", "selection/bypass", source, port_kind="command")
+    assert bypass["error"]["code"] == "COMPONENT_SELECTION_INVALID"
     first, rival = await asyncio.gather(
         call("enable", "selection/first", source),
         call("disable", "selection/rival", source),

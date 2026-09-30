@@ -101,7 +101,7 @@ DECLARE bot text:=context->>'bot_id'; op text:=context->>'operation_id';
         head_revision bigint; existing __forest_module_schema__.selection_operations%ROWTYPE;
         new_revision bigint; result jsonb; frozen jsonb;
 BEGIN
-  IF context->>'port_kind' NOT IN ('command','management_action')
+  IF context->>'port_kind' IS DISTINCT FROM 'management_action'
      OR (enabled AND context->>'port_name' IS DISTINCT FROM 'component.selection.enable')
      OR (NOT enabled AND context->>'port_name' IS DISTINCT FROM 'component.selection.disable')
      OR op IS NULL OR octet_length(op) NOT BETWEEN 1 AND 256

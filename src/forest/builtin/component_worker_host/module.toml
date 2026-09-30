@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.5"
+version = "1.6.6"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -54,9 +54,9 @@ order = 2
 
 [components.storage]
 schema_id = "forest.component.worker-host"
-schema_version = "1.3.0"
+schema_version = "1.4.0"
 baseline = "schema/control.sql"
-baseline_sha256 = "13051d5e177417b8665bf78fd2f4c2f97a8393a0b1739f5ffc62a55fa8cc11ef"
+baseline_sha256 = "4d5cb43b8c364f54c8ecc1890fda3097d0e821da85817a9ab5a5d5de3214066e"
 scope = "bot"
 repository_contract = "forest.component-worker-host.repository/1"
 execution_profile = "official"

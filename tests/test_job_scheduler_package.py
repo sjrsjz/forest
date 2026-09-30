@@ -5,10 +5,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
+from psycopg import sql
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.errors import ForestError
 from forest.packages import PackageCatalog
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
 from forest.storage.authorization_authority import CapabilityGrant
@@ -51,6 +54,34 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
         assert [item["job_type"] for item in types["items"]] == [
             "runtime.health-snapshot"
         ]
+
+        input_validator, output_validator = runtime._service_schemas["jobs.enqueue"]
+        runtime._service_schemas["jobs.enqueue"] = (
+            input_validator, Draft202012Validator({"not": {}})
+        )
+        try:
+            with pytest.raises(ForestError) as rejected:
+                await runtime.management_contract.action(
+                    "jobs.run", operation_id="test:job-package:invalid-output",
+                    payload={
+                        "job_type": "runtime.health-snapshot",
+                        "source_conversation_ref": None, "input": {},
+                    },
+                    authorization=SimpleNamespace(web_subject_ref="test-admin"),
+                    authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+                )
+            assert rejected.value.code == "MODULE_MANAGEMENT_OUTPUT_INVALID"
+        finally:
+            runtime._service_schemas["jobs.enqueue"] = (input_validator, output_validator)
+        async with store.pool.connection() as conn:
+            rows = await conn.execute(
+                sql.SQL("SELECT count(*) AS n FROM {}.enqueue_operations "
+                        "WHERE bot_id=%s AND operation_id=%s").format(
+                    sql.Identifier(package.descriptor.storage.spec.namespace)
+                ),
+                (store.bot_id, "test:job-package:invalid-output"),
+            )
+            assert (await rows.fetchone())["n"] == 0
 
         queued = await runtime.management_contract.action(
             "jobs.run",

@@ -136,6 +136,8 @@ class PackageDomainCommands(Protocol):
         parent_call_id: str,
         timeout_seconds: float,
         before_write=None,
+        management_authorization=None,
+        result_validator=None,
     ) -> Any: ...
 
     async def invoke_preparation_command(

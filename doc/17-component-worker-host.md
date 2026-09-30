@@ -159,4 +159,8 @@ Web 的 `module.enable` 与 `module.disable` 必须是两个 action ID、两个�
 
 宿主锁必须先于 Domain Command 事务取得：当前通用入口在 `before_write` 之前已经验证活动 Generation 并进入内核 Graph 数据库围栏，而图替换按“宿主锁→数据库围栏”执行。反过来在 `before_write` 中才等待宿主锁会制造锁序环。提交前置检查必须由 manifest 明确声明且在缺失绑定时拒绝启动或拒绝 action，不允许退化为普通 Domain Command。它可以使用宿主提供的只读候选编译能力和调用方事务连接，但 Worker Host 仍拥有 action、选择 SQL、幂等和结果语义；通用包运行时只编排声明的检查，不硬编码 `component.worker-host` 的策略。
 
+通用包运行时已接受管理 action 的 `transaction_preflight` 声明：装配 Generation 时从宿主解析对应能力，缺失则拒绝装配；action ID 必须与声明的 Domain Command 端口一致，声明了检查却丢失绑定时拒绝调用。宿主检查作用域先于数据库事务进入并一直保持至提交/回滚，Web 票据验证与检查回调在 Domain Command 写入前于同一连接执行；等待锁、校验和事务执行共用 action 超时。管理 action 的输出 schema 现于事务提交前验证，错误输出导致整笔写入回滚。当前只接通这条通用机制，`module.enable`/`module.disable` 尚未发布，也没有注册组件选择的具体检查能力。
+
+管理 action 的 `port_kind` 由内核标记为 `management_action`，不再降格为普通 `command`；Worker Host 的 `component.selection.enable/disable` SQL 只接受该标记。这样即使包持有同名 Domain Command 能力，也不能经普通命令绕过未来的 Web 票据和前置检查。包私有 SQL 仍只维护选择账本，不能代替宿主的 Graph 与候选计划复核。
+
 同 operation ID 的准确重放需要在选择独占围栏内先查包私有不可变操作账本。若签票目标 Generation/Graph 仍然有效，输入摘要与启停方向相同就返回旧回执，不再以变化的选择或配置事实否定已经接受的操作；同 ID 不同输入仍冲突。换代后的旧 Web 票据不再有效，调用方通过持久状态查询追踪原操作。新的操作必须完成全部实时复核。事务提交后，现有 owned-work 只依冻结选择 revision/digest 请求内核 `/3`；它不能把预检时的 Graph 当作已发布事实。实际发布继续在选择共享围栏下核对准确快照。目标资源预算必须来自明确的 Bot 策略及包声明，不得把已有 IPC/队列上限伪称为 CPU 或内存保证。
