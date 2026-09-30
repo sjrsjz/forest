@@ -13,10 +13,11 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
-from forest.builtin_packages import bootstrap_builtin_package
+from forest.builtin_packages import bootstrap_builtin_package, bootstrap_installed_package
 from forest.chat_completions_effect_driver import (
     chat_completions_effect_driver_factory,
 )
+from forest.component_selection import ComponentSelectionReader, ComponentSelectionSnapshot
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.embedding_builtin import embedding_configuration_validator_factory
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
@@ -27,7 +28,7 @@ from forest.media_capture_effect_driver import media_image_fetch_effect_driver_f
 from forest.model_contract import ModelCapabilities
 from forest.onebot_transport_effect_driver import onebot_transport_effect_driver_factory
 from forest.package_effects import PackageEffectDriverRegistry
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, digest_json
 from forest.process_executor_builtin import (
     default_process_executor_configuration,
     process_executor_configuration_validator_factory,
@@ -44,6 +45,12 @@ from forest.vector_index_builtin import (
 from forest.vector_index_effect_driver import milvus_vector_index_effect_driver_factory
 
 _HOST_LEASE_TTL = timedelta(minutes=2)
+
+
+@dataclass(frozen=True)
+class BotGraphCandidate:
+    registry: RuntimeModuleRegistry
+    selection: ComponentSelectionSnapshot
 
 
 def _required(name: str) -> str:
@@ -324,6 +331,7 @@ class CleanBotHost:
         self.package_catalog = package_catalog or PackageCatalog(
             Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
         )
+        self.selection_reader = ComponentSelectionReader(self.store)
 
     @property
     def bot(self):
@@ -345,9 +353,9 @@ class CleanBotHost:
         if self.registry is not None:
             self.registry.notify_work()
 
-    async def _assemble_registry(
+    async def _assemble_candidate(
         self, activation_id: str | None = None
-    ) -> RuntimeModuleRegistry:
+    ) -> BotGraphCandidate:
         capabilities = self.settings.model_capabilities or ModelCapabilities(
             deployment_id=self.settings.model_deployment_id,
             model=self.settings.model,
@@ -402,6 +410,7 @@ class CleanBotHost:
             kernel=self._kernel,
             initial_configuration={"protocol": "forest.component-worker-host/1"},
         )
+        selection = await self.selection_reader.snapshot()
         embedding_profile = {
             "deployment_id": self.settings.embedding_deployment_id,
             "model_revision": self.settings.embedding_model_revision,
@@ -773,9 +782,7 @@ class CleanBotHost:
                 }
             ),
         )
-        descriptors = (
-            self._kernel.descriptors
-            + (
+        official_descriptors = (
                 provider.descriptor,
                 worker_host.descriptor,
                 embedding.descriptor,
@@ -790,10 +797,65 @@ class CleanBotHost:
                 jobs.descriptor,
                 shell.descriptor,
                 adapter.descriptor,
-            )
-            + (conversation.descriptor, delivery.descriptor)
+                conversation.descriptor,
+                delivery.descriptor,
         )
-        return RuntimeModuleRegistry(self, descriptors, activation_id=activation_id)
+        official_ids = {item.component_id for item in official_descriptors}
+        disabled: set[str] = set()
+        installed = []
+        for entry in selection.entries:
+            if entry.component_id.startswith("kernel."):
+                raise ForestError(
+                    "COMPONENT_SELECTION_INVALID",
+                    "Kernel authorities cannot be selected as packages",
+                    409,
+                )
+            if entry.source_kind == "builtin":
+                if entry.component_id not in official_ids or (
+                    entry.component_id == "component.worker-host" and not entry.desired_enabled
+                ):
+                    raise ForestError(
+                        "COMPONENT_SELECTION_INVALID",
+                        "Builtin component selection is invalid",
+                        409,
+                    )
+                if not entry.desired_enabled:
+                    disabled.add(entry.component_id)
+                continue
+            if entry.component_id in official_ids:
+                raise ForestError(
+                    "COMPONENT_SELECTION_INVALID",
+                    "Installed package cannot replace an official component identity",
+                    409,
+                )
+            snapshot = self.package_catalog.get(entry.package_digest)
+            if (
+                snapshot.component["id"] != entry.component_id
+                or digest_json(snapshot.manifest) != entry.manifest_digest
+            ):
+                raise ForestError(
+                    "COMPONENT_SELECTION_ARTIFACT_CHANGED",
+                    "Selected package declaration differs from its pinned artifact",
+                    409,
+                )
+            if entry.desired_enabled:
+                installed.append((await bootstrap_installed_package(
+                    entry.package_digest,
+                    self.package_catalog,
+                    self.store,
+                    self.schema_bundle_installer,
+                    kernel=self._kernel,
+                    initial_configuration=None,
+                    approved_capabilities=entry.approved_capabilities,
+                )).descriptor)
+        descriptors = (
+            self._kernel.descriptors
+            + tuple(item for item in official_descriptors if item.component_id not in disabled)
+            + tuple(installed)
+        )
+        return BotGraphCandidate(
+            RuntimeModuleRegistry(self, descriptors, activation_id=activation_id), selection
+        )
 
     async def start(self) -> None:
         await self.store.open()
@@ -801,7 +863,8 @@ class CleanBotHost:
             self._kernel = await bootstrap_clean_kernel(self.store, self.schema_bundle_installer)
             self.generation_authority = self._kernel.runtime
             self._replacement_lock = asyncio.Lock()
-            registry = await self._assemble_registry()
+            assembled = await self._assemble_candidate()
+            registry = assembled.registry
             self._lease = await self._kernel.runtime.claim_host(
                 self._host_id, self._incarnation, ttl=_HOST_LEASE_TTL
             )
@@ -811,7 +874,11 @@ class CleanBotHost:
             self._renewal_task = asyncio.create_task(
                 self._renew_lease(), name=f"bot-host-lease:{self.settings.bot_id}"
             )
-            await registry.start()
+            async with self.selection_reader.publication_fence(
+                expected_revision=assembled.selection.revision,
+                expected_digest=assembled.selection.digest,
+            ):
+                await registry.start()
             self.registry = registry
             self._replacement_task = asyncio.create_task(
                 self._run_graph_replacements(),
@@ -833,8 +900,10 @@ class CleanBotHost:
         await self.store.open()
         try:
             self._kernel = await bootstrap_clean_kernel(self.store, self.schema_bundle_installer)
-            registry = await self._assemble_registry()
-            return tuple(descriptor.component_id for descriptor in registry.descriptors)
+            assembled = await self._assemble_candidate()
+            return tuple(
+                descriptor.component_id for descriptor in assembled.registry.descriptors
+            )
         finally:
             await self.store.close()
 
@@ -863,11 +932,12 @@ class CleanBotHost:
                     "RuntimeGraph revision changed before replacement",
                     409,
                 )
-            candidate = (
-                await self._assemble_registry()
+            assembled = (
+                await self._assemble_candidate()
                 if activation_id is None
-                else await self._assemble_registry(activation_id)
+                else await self._assemble_candidate(activation_id)
             )
+            candidate = assembled.registry
             membership_changed = set(candidate.states) != set(previous.states)
             affected = (
                 candidate.plan_graph_transition(
@@ -893,8 +963,12 @@ class CleanBotHost:
                         ),
                     )
                     previous_drained = True
-                await candidate.start()
-                candidate.accept_retained_ownership()
+                async with self.selection_reader.publication_fence(
+                    expected_revision=assembled.selection.revision,
+                    expected_digest=assembled.selection.digest,
+                ):
+                    await candidate.start()
+                    candidate.accept_retained_ownership()
             except BaseException as replacement_error:
                 publication_committed = bool(
                     getattr(candidate, "publication_committed", False)

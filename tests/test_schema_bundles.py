@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
@@ -23,8 +24,8 @@ from forest.builtin_packages import (
     bootstrap_builtin_package,
     bootstrap_installed_package,
 )
-from forest.clean_bot_host import CleanBotHost
-from forest.component_selection import ComponentSelectionReader
+from forest.clean_bot_host import BotGraphCandidate, CleanBotHost
+from forest.component_selection import ComponentSelectionReader, ComponentSelectionSnapshot
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
@@ -2535,11 +2536,18 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     controller._replacement_lock = asyncio.Lock()
     controller._closing = False
     controller.registry = first
+    selection = ComponentSelectionSnapshot(0, (), "sha256:" + "0" * 64)
+
+    @asynccontextmanager
+    async def publication_fence(**_kwargs):
+        yield selection
+
+    controller.selection_reader = SimpleNamespace(publication_fence=publication_fence)
 
     async def assemble_added(_activation_id=None):
-        return added
+        return BotGraphCandidate(added, selection)
 
-    controller._assemble_registry = assemble_added
+    controller._assemble_candidate = assemble_added
     assert await controller.replace_runtime_graph(
         target_component_id="forest.counter"
     ) is added
@@ -2552,9 +2560,9 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     removed = RuntimeModuleRegistry(host, core.descriptors)
 
     async def assemble_removed(_activation_id=None):
-        return removed
+        return BotGraphCandidate(removed, selection)
 
-    controller._assemble_registry = assemble_removed
+    controller._assemble_candidate = assemble_removed
     assert await controller.replace_runtime_graph(
         target_component_id="forest.counter"
     ) is removed
@@ -2598,6 +2606,13 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     source = source_catalog.build(package_root)
     catalog = PackageCatalog(tmp_path / "installed-packages")
     installed_snapshot = catalog.import_archive(source_catalog.export_archive(source.digest))
+    with pytest.raises(ForestError) as not_configured:
+        await bootstrap_installed_package(
+            installed_snapshot.digest, catalog, store, installer,
+            kernel=core, initial_configuration=None,
+            approved_capabilities=("event.publish:tests.ready", "job.schedule:tests.echo"),
+        )
+    assert not_configured.value.code == "PACKAGE_CONFIGURATION_REQUIRED"
     installed = await bootstrap_installed_package(
         installed_snapshot.digest,
         catalog,
@@ -2671,13 +2686,14 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
         store,
         installer,
         kernel=core,
-        initial_configuration={},
+        initial_configuration=None,
         approved_capabilities=(
             "event.publish:tests.ready",
             "job.schedule:tests.echo",
         ),
     )
     assert updated.snapshot.digest != installed.snapshot.digest
+    assert (await updated.configuration.desired(include_value=True)).value == {}
     assert updated.descriptor.storage.package_digest == installed.descriptor.storage.package_digest
     candidate = RuntimeModuleRegistry(
         host, core.descriptors + (routing.descriptor, updated.descriptor)

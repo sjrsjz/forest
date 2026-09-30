@@ -202,11 +202,11 @@ async def bootstrap_installed_package(
     installer,
     *,
     kernel,
-    initial_configuration: dict[str, Any],
+    initial_configuration: dict[str, Any] | None,
     approved_capabilities: tuple[str, ...],
     resolved_contracts: dict[str, str] | None = None,
 ) -> ProvisionedPackageModule:
-    """Bind one approved catalog artifact without treating its SQL as official code."""
+    """Bind an approved artifact to its own initialized configuration ledger."""
 
     snapshot = catalog.get(package_digest)
     if snapshot.component["scope"] != "bot":
@@ -244,7 +244,7 @@ async def _bootstrap_package_snapshot(
     installer,
     *,
     kernel,
-    initial_configuration: dict[str, Any],
+    initial_configuration: dict[str, Any] | None,
     resolved_contracts: dict[str, str] | None = None,
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     configuration_validator_factory: Callable[[str], Callable] | None = None,
@@ -262,7 +262,9 @@ async def _bootstrap_package_snapshot(
                 "Installed package requires the Python Worker runtime",
                 422,
             )
-        if not Draft202012Validator(configuration_schema).is_valid(initial_configuration):
+        if initial_configuration is not None and not Draft202012Validator(
+            configuration_schema
+        ).is_valid(initial_configuration):
             raise ForestError(
                 "PACKAGE_CONFIGURATION_INVALID",
                 "Initial package configuration violates its declared schema",
@@ -324,14 +326,39 @@ async def _bootstrap_package_snapshot(
         if configuration_validator_factory is not None
         else None
     )
-    if configuration_validator is not None:
-        await configuration_validator(initial_configuration)
-    await configuration.ensure_initialized(
-        operation_id=f"bootstrap:{component_id}:configuration",
-        value=initial_configuration,
-        validation_digest=digest_json(configuration_schema),
-    )
-    await configuration.assert_immutable(initial_configuration)
+    schema_digest = digest_json(configuration_schema)
+    if initial_configuration is not None:
+        if configuration_validator is not None:
+            await configuration_validator(initial_configuration)
+        await configuration.ensure_initialized(
+            operation_id=f"bootstrap:{component_id}:configuration",
+            value=initial_configuration,
+            validation_digest=schema_digest,
+        )
+    elif trust_level != "installed":
+        raise ValueError("Official package configuration is required")
+    if trust_level == "installed":
+        try:
+            desired = await configuration.desired(include_value=True)
+        except ForestError as error:
+            if error.code != "MODULE_CONFIGURATION_UNINITIALIZED":
+                raise
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_REQUIRED",
+                "Installed package configuration must be initialized before selection",
+                409,
+            ) from error
+        if desired.validation_digest != schema_digest or not Draft202012Validator(
+            configuration_schema
+        ).is_valid(desired.value):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+                "Installed package configuration was not validated for this artifact schema",
+                409,
+            )
+        await configuration.assert_immutable(desired.value)
+    else:
+        await configuration.assert_immutable(initial_configuration)
     requested = tuple(snapshot.component.get("capabilities", {}).get("requests", ()))
     policy_revision = await kernel.authorization.revision()
     grants = await kernel.authorization.create_grant_set(

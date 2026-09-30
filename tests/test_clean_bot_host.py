@@ -21,11 +21,14 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
 from psycopg import sql
+from psycopg.types.json import Jsonb
 from pymilvus import AsyncMilvusClient
 
 from forest.adapters.onebot import SendResult
-from forest.clean_bot_host import CleanBotHost, CleanBotSettings
+from forest.builtin_packages import bootstrap_installed_package
+from forest.clean_bot_host import BotGraphCandidate, CleanBotHost, CleanBotSettings
 from forest.clean_management_app import CleanManagementGateway, ConfigurationApplyInput
+from forest.component_selection import ComponentSelectionSnapshot
 from forest.deployment_management_app import create_deployment_management_app
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
@@ -37,6 +40,7 @@ from forest.runtime_contracts import (
     RuntimeServiceInvocation,
 )
 from forest.runtime_modules import ModuleLifecycleState
+from forest.schema_bundles import module_schema_namespace
 from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
 from forest.storage.management_asset_authority import ManagementAssetAuthority
@@ -49,6 +53,14 @@ from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 from model_projection import prepare_model_request
+
+_TEST_SELECTION = ComponentSelectionSnapshot(0, (), "sha256:" + "0" * 64)
+
+
+class FakeSelectionReader:
+    @asynccontextmanager
+    async def publication_fence(self, **_kwargs):
+        yield _TEST_SELECTION
 
 
 class FakeModelClient:
@@ -431,12 +443,13 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
     host._replacement_lock = asyncio.Lock()
     host._closing = False
     host.registry = previous
+    host.selection_reader = FakeSelectionReader()
 
     async def assemble():
         events.append("assemble-candidate")
-        return candidate
+        return BotGraphCandidate(candidate, _TEST_SELECTION)
 
-    host._assemble_registry = assemble
+    host._assemble_candidate = assemble
     result = await host.replace_runtime_graph()
 
     assert result is candidate
@@ -544,11 +557,12 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
     host._replacement_lock = asyncio.Lock()
     host._closing = False
     host.registry = previous
+    host.selection_reader = FakeSelectionReader()
 
     async def assemble():
-        return candidate
+        return BotGraphCandidate(candidate, _TEST_SELECTION)
 
-    host._assemble_registry = assemble
+    host._assemble_candidate = assemble
     with pytest.raises(RuntimeError, match="publication failed"):
         await host.replace_runtime_graph()
 
@@ -598,12 +612,13 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
     host._closing = False
     host._fatal_replacement_error = None
     host.registry = Previous()
+    host.selection_reader = FakeSelectionReader()
     candidate = Candidate()
 
     async def assemble():
-        return candidate
+        return BotGraphCandidate(candidate, _TEST_SELECTION)
 
-    host._assemble_registry = assemble
+    host._assemble_candidate = assemble
     with pytest.raises(ForestError) as raised:
         await host.replace_runtime_graph()
 
@@ -972,6 +987,81 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                     await asyncio.sleep(0.2)
             assert policy_rebuild["state"] == "EFFECTIVE", policy_rebuild
             assert host.registry.graph_identity.graph_revision > active_graph.graph_revision
+
+            source_catalog = PackageCatalog(tmp_path / "counter-source")
+            source = source_catalog.build(
+                Path(__file__).parents[1] / "examples/counter"
+            )
+            counter = host.package_catalog.import_archive(
+                source_catalog.export_archive(source.digest)
+            )
+            await bootstrap_installed_package(
+                counter.digest, host.package_catalog, host.store,
+                host.schema_bundle_installer, kernel=host._kernel,
+                initial_configuration={},
+                approved_capabilities=("state.read", "state.write"),
+            )
+            selection_namespace = module_schema_namespace("forest.component.worker-host")
+
+            async def select(function, operation_id, selection_revision, graph_revision):
+                payload = {
+                    "component_id": "example.counter", "source_kind": "installed",
+                    "package_digest": counter.digest,
+                    "manifest_digest": digest_json(counter.manifest),
+                    "approved_capabilities": ["state.read", "state.write"],
+                    "expected_selection_revision": selection_revision,
+                    "expected_graph_revision": graph_revision,
+                    "requested_by": "subject/host-admin",
+                }
+                context = {
+                    "bot_id": host.store.bot_id, "port_kind": "command",
+                    "port_name": "component.selection." + function,
+                    "operation_id": operation_id, "input_digest": digest_json(payload),
+                }
+                async with host.store.pool.connection() as conn:
+                    query = await conn.execute(
+                        sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
+                            sql.Identifier(
+                                selection_namespace, "component_selection_" + function
+                            )
+                        ),
+                        (Jsonb(context), Jsonb(payload)),
+                    )
+                    result = (await query.fetchone())["result"]
+                assert result["ok"], result
+                return result["value"]
+
+            before_add = host.registry.graph_identity
+            enabled = await select(
+                "enable", "selection/enable-counter", 0, before_add.graph_revision
+            )
+            assert enabled["selection_revision"] == 1
+            await host.replace_runtime_graph(
+                expected_graph_revision=before_add.graph_revision,
+                target_component_id="example.counter",
+            )
+            with_counter = host.registry.graph_identity
+            assert "example.counter" in with_counter.generations
+            assert all(
+                with_counter.generations[component_id] == generation_id
+                for component_id, generation_id in before_add.generations.items()
+            )
+            old_counter = host.registry.get("example.counter")
+            disabled = await select(
+                "disable", "selection/disable-counter", 1, with_counter.graph_revision
+            )
+            assert disabled["selection_revision"] == 2
+            await host.replace_runtime_graph(
+                expected_graph_revision=with_counter.graph_revision,
+                target_component_id="example.counter",
+            )
+            without_counter = host.registry.graph_identity
+            assert "example.counter" not in without_counter.generations
+            assert old_counter.state.value == "STOPPED"
+            assert all(
+                without_counter.generations[component_id] == generation_id
+                for component_id, generation_id in before_add.generations.items()
+            )
         finally:
             await host.close()
     finally:

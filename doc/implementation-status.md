@@ -37,7 +37,7 @@
 
 ## 3. 当前生产装配
 
-`CleanBotHost._assemble_registry()` 当前直接以真实 builtin 包装入下列业务组件：
+`CleanBotHost._assemble_candidate()` 当前 provision 下列真实 builtin 包，并按 Worker Host 选择快照决定最终 RuntimeGraph 成员；已启用的外部包按精确摘要装配：
 
 | 组件 | builtin 包 | 当前边界 |
 |---|---|---|
@@ -369,7 +369,7 @@ Worker Host 的目标组件重载现执行局部换代。宿主比较候选与�
 
 RuntimeGraph 热替换的发布后故障现按故障边界处理：候选图提交后若本地 Generation 激活失败，Registry 撤下候选路由，Host 不再尝试恢复已退役的旧图，也不把替换请求结算为成功；宿主监督器使该 Bot 失败并关闭两代资源。发布前失败仍可恢复旧图；若排空、恢复或清理本身失败，则宿主同样失败。针对性本地用例 7 passed，隔离 PostgreSQL 发布后激活故障用例 1 passed，Ruff 通过。新宿主自动恢复策略及动态成员增删、部署包启停仍未完成。
 
-RuntimeGraph 成员集合变化已贯通 Registry 规划与宿主替换入口：候选与来源成员取对称差，叠加描述符变化和启动/保留依赖消费者闭包；纯新增跳过旧图排空，纯移除允许零个新建 Generation 并保留其余实例、路由和身份。隔离 PostgreSQL 用例经宿主入口依次加入、移除真实 Counter builtin 包，核对五个内核 Generation 和实例始终不变、移除后旧包路由失效（1 passed）。这只是图执行能力；CleanBotHost._assemble_registry() 尚未读取 Worker Host 的持久包选择与启停事实，管理端安装/校验/选择仍未完成，不能宣称用户可经 WebUI 动态安装插件。
+RuntimeGraph 成员集合变化已贯通 Registry 规划与宿主替换入口：候选与来源成员取对称差，叠加描述符变化和启动/保留依赖消费者闭包；纯新增跳过旧图排空，纯移除允许零个新建 Generation 并保留其余实例、路由和身份。隔离 PostgreSQL 用例经宿主入口依次加入、移除真实 Counter builtin 包，核对五个内核 Generation 和实例始终不变、移除后旧包路由失效（1 passed）。该阶段只有图执行能力，尚未读取 Worker Host 的持久选择事实；后续进展见本文件末尾。管理端安装/校验/选择仍未完成，不能宣称用户可经 WebUI 动态安装插件。
 
 已安装外部包的独立装配入口现从 PackageCatalog 按不可变摘要取快照，要求 Bot scope、Python Worker、静态配置 schema 与精确批准的能力集合；框架标准配置账本和外部包声明式 SQL 分别安装到独立 namespace，后者以稳定存储契约摘要绑定，绝不借用官方 SQL 执行权限。真实 PostgreSQL 用例从 ZIP 导入带声明式表的测试插件，并以 1.0.0 -> 1.0.1 两个不同工件摘要热替换，确认未变的 SQL schema 可复用且内核 Generation 保留。外部包 SQL 函数、UnitOfWork participant、owned-work SQL 与 host effect driver 仍被明确拒绝，需后续独立受审查 authority；部署 Web 安装、Worker Host 选择事实和宿主自动装配尚未接通。
 本轮隔离 PostgreSQL schema/运行时套件 44 passed；包、Worker 与宿主非 PostgreSQL 套件 98 passed、1 skipped；Ruff 和 diff 检查通过。测试使用独立数据库与假 Bot 链路，未向 QQ 发消息。
@@ -379,3 +379,5 @@ RuntimeGraph 成员集合变化已贯通 Registry 规划与宿主替换入口：
 接入组件选择前清除了未被生产代码调用的旧 `module_validation.py`：它将所有服务要求当作同一启动 DAG，和现行 RuntimeGraph 的启动依赖/保留依赖分离规则冲突。两处仅针对旧规划器的测试随之删除；其余包声明与运行时本地回归 `34 passed`，Ruff 通过。后续 `module.validate` 必须复用实际 Registry 候选图规则；选择修订、授权写入和宿主冻结读取仍待实现。
 
 Worker Host 私有 schema 已加入 Bot 级选择修订头、每组件选择条目、幂等操作账本以及独立启用/停用 SQL 端口；选择快照只读查询按组件排序返回事实。宿主侧 `ComponentSelectionReader` 可在共享 PostgreSQL 选择围栏下读取规范化快照和摘要，并在发布期间持有该围栏；选择写入使用相同键的独占围栏。隔离 PostgreSQL 用例验证两笔同修订并发写只有一笔成功、操作重放和输入冲突、快照投影、发布围栏阻塞新写及旧摘要拒绝（`1 passed`）。这只是内部持久/读取契约：尚未通过目录工件校验后开放 Web/Shell 管理动作，内核请求尚未携带冻结选择凭据，宿主尚未按选择装配候选图。
+
+宿主候选装配现消费 Worker Host 的选择快照：builtin 条目控制候选图成员，外部包条目按目录中精确工件与 manifest 摘要核对后装配；与官方组件 ID 冲突、非法内核目标和停用 Worker Host 均拒绝。发布前在数据库共享选择围栏下复核修订与摘要，写入不能在旧候选发布期间抢先完成。外部包热重载可从目标私有配置账本读取已初始化的 desired；不存在的配置明确拒绝，schema 摘要或实际值不符合当前工件则拒绝。隔离 PostgreSQL 已验证首次未初始化拒绝及同一配置账本跨外部包代码版本换代，完整官方宿主的空选择热重载回归通过（`1 passed`，278.97 秒）。同一完整宿主用例随后经内部 SQL 选择事实热加入、停用已安装 Counter 包，核对所有原有 Generation 保留、新包获得 Generation、停用后旧代停止（`1 passed`，346.28 秒），未向 QQ 发送消息。Web/Shell 授权选择、冻结内核请求和自动执行仍未接通。
