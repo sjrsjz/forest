@@ -56,7 +56,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin
 from component_worker_host import ComponentWorkerHost
 from model_projection import prepare_model_request
 
-_TEST_SELECTION = ComponentSelectionSnapshot(0, (), "sha256:" + "0" * 64)
+_TEST_SELECTION = ComponentSelectionSnapshot(0, (), digest_json({
+    "protocol": "forest.component-selection-snapshot/1",
+    "revision": 0,
+    "entries": [],
+}))
 
 
 class FakeSelectionReader:

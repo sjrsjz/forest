@@ -87,6 +87,42 @@ class ComponentSelectionSnapshot:
     entries: tuple[ComponentSelectionEntry, ...]
     digest: str
 
+    def __post_init__(self) -> None:
+        if (
+            type(self.revision) is not int
+            or self.revision < 0
+            or not isinstance(self.entries, tuple)
+            or len(self.entries) > 128
+            or any(not isinstance(item, ComponentSelectionEntry) for item in self.entries)
+            or tuple(item.component_id for item in self.entries) != tuple(
+                sorted({item.component_id for item in self.entries})
+            )
+            or any(item.desired_revision > self.revision for item in self.entries)
+        ):
+            raise ForestError(
+                "COMPONENT_SELECTION_SNAPSHOT_INVALID",
+                "Worker Host selection snapshot is invalid",
+                503,
+            )
+        for item in self.entries:
+            if ComponentSelectionEntry.from_dict(item.as_dict()) != item:
+                raise ForestError(
+                    "COMPONENT_SELECTION_SNAPSHOT_INVALID",
+                    "Worker Host selection snapshot is invalid",
+                    503,
+                )
+        frozen = {
+            "protocol": "forest.component-selection-snapshot/1",
+            "revision": self.revision,
+            "entries": [item.as_dict() for item in self.entries],
+        }
+        if digest_json(frozen) != self.digest:
+            raise ForestError(
+                "COMPONENT_SELECTION_SNAPSHOT_INVALID",
+                "Worker Host selection digest is invalid",
+                503,
+            )
+
 
 @dataclass(frozen=True)
 class SelectedPackageMembers:
@@ -236,14 +272,6 @@ class ComponentSelectionReader:
                     503,
                 )
             entries = tuple(ComponentSelectionEntry.from_dict(item) for item in value["entries"])
-            if tuple(item.component_id for item in entries) != tuple(
-                sorted({item.component_id for item in entries})
-            ):
-                raise ForestError(
-                    "COMPONENT_SELECTION_SNAPSHOT_INVALID",
-                    "Worker Host selection order is invalid",
-                    503,
-                )
             frozen = {
                 "protocol": "forest.component-selection-snapshot/1",
                 "revision": value["revision"],

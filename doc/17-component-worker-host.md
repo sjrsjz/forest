@@ -130,9 +130,14 @@ Registry 的替换排空现接受与内核围栏相同的成员集合：只冻�
 
 `compile_installed_candidate_descriptor()` 按精确工件、manifest 摘要、批准能力及目标配置修订读取候选，并与生产装配共用包描述符编译器。编译结果保留相同的组件依赖、端口、存储绑定和管理贡献，但不含可执行的 Worker factory；它只在宿主可信进程内交给 `RuntimeModuleRegistry.preview_graph_transition()` 计算影响集合，不跨 Worker 或 Web 边界传输。Registry 在准备 Graph 前拒绝含此类描述符的实例，避免预览误触发 schema、grant 或 Generation 写入。
 
-这只解决了精确候选的静态编译和正式 Graph 规划复用。完整 `module.validate` 仍需按 Bot 选择快照编译全部候选成员，冻结 Graph/选择/配置修订与计划摘要，核对资源预算，并在授权提交事务中复核。预览不是启停授权，也不是对后续发布的无条件保证。
+这只解决了精确候选的静态编译和正式 Graph 规划复用。随后已接入完整冻结选择快照的成员编译及 Graph/选择/配置事实摘要；完整 `module.validate` 仍需核对资源预算，并在授权提交事务中复核。预览不是启停授权，也不是对后续发布的无条件保证。
 ### 冻结选择快照的只读 Graph 预览
 
 生产装配与候选预览现在共用 `select_package_members()`：相同的 builtin 启停、内核目标禁选、官方身份冲突、精确已安装工件及 manifest 核对规则决定候选成员。`project_component_selection()` 以当前快照和一笔拟议写入生成下一修订的规范化快照，其排序与摘要已和 Worker Host 的 PostgreSQL 账本对照。候选编译为每个启用的外部包读取并记录配置 revision、Payload 身份、schema 与存储摘要；拟启用或换代的目标外部包必须显式指定配置 revision。禁用包仍核对工件身份，但不创建 Worker。
 
-宿主可信进程的 `preview_selection_transition()` 在当前 Graph 替换锁内把冻结快照交给 `preview_selected_graph()`，使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；当前预览没有冻结计划摘要、资源预算或授权提交事务，也未开放为 Web/Shell `module.validate`。
+宿主可信进程的 `preview_selection_transition()` 在当前 Graph 替换锁内把冻结快照交给 `preview_selected_graph()`，使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；当前预览已有事实摘要，但没有资源预算或授权提交事务，也未开放为 Web/Shell `module.validate`。
+### 候选事实摘要与提交复核边界
+
+`SelectionGraphPreview.plan_digest` 使用规范化事实计算：Bot 身份、来源 Graph ID/revision、目标组件、冻结选择 revision/digest、正式 Registry 的全部候选成员描述符摘要、候选包的配置 revision/Payload 身份/schema/存储摘要，以及换代影响集合。官方包与已安装包均读取各自私有配置账本的 desired 值并校验当前工件 schema；官方包按最近一次真实装配的精确工件读取，预览本身不 provision。选择快照类型自身保证排序、条目修订与摘要一致。相同事实重复预览得到相同摘要；工件或配置事实改变必须得到新摘要。
+
+这个摘要只证明一次只读预览的输入身份。Worker Host 的授权提交还必须在选择写入事务中复核来源 Graph、当前选择、精确工件与全部配置事实，并核对资源预算及管理票据；宿主实际装配和发布还须验证新候选与摘要相符。未完成这些围栏之前，不得把 `plan_digest` 当作已授权启停凭据或向 Web/Shell 开放选择动作。

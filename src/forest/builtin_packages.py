@@ -61,10 +61,11 @@ class ProvisionedPackageModule:
 
 
 @dataclass(frozen=True)
-class InstalledPackageInspection:
-    """Verified Bot artifact and target configuration, without provisioning."""
+class PackageCandidateInspection:
+    """Verified Bot package and configuration facts, without provisioning."""
 
     component_id: str
+    trust_level: str
     package_digest: str
     manifest_digest: str
     configuration_revision: int
@@ -72,6 +73,19 @@ class InstalledPackageInspection:
     configuration_payload_digest: str
     configuration_schema_digest: str
     storage_digest: str | None
+
+    def as_fact(self) -> dict[str, Any]:
+        return {
+            "component_id": self.component_id,
+            "trust_level": self.trust_level,
+            "package_digest": self.package_digest,
+            "manifest_digest": self.manifest_digest,
+            "configuration_revision": self.configuration_revision,
+            "configuration_payload_id": self.configuration_payload_id,
+            "configuration_payload_digest": self.configuration_payload_digest,
+            "configuration_schema_digest": self.configuration_schema_digest,
+            "storage_digest": self.storage_digest,
+        }
 
 
 @dataclass(frozen=True)
@@ -313,7 +327,7 @@ async def _inspect_installed_snapshot(
     kernel,
     approved_capabilities: tuple[str, ...],
     expected_configuration_revision: int | None = None,
-) -> tuple[InstalledPackageInspection, _InstalledPackageLayout, ModuleConfigurationRepository]:
+) -> tuple[PackageCandidateInspection, _InstalledPackageLayout, ModuleConfigurationRepository]:
     layout = _installed_package_layout(snapshot, approved_capabilities)
     configuration = ModuleConfigurationRepository(
         store,
@@ -325,8 +339,8 @@ async def _inspect_installed_snapshot(
     desired = await _installed_desired(
         layout, configuration, expected_revision=expected_configuration_revision
     )
-    inspected = InstalledPackageInspection(
-        snapshot.component["id"], snapshot.digest, digest_json(snapshot.manifest),
+    inspected = PackageCandidateInspection(
+        snapshot.component["id"], "installed", snapshot.digest, digest_json(snapshot.manifest),
         desired.revision, desired.payload_id, desired.payload_digest,
         layout.schema_digest,
         layout.storage.package_digest if layout.storage is not None else None,
@@ -356,7 +370,7 @@ async def inspect_installed_package(
     approved_capabilities: tuple[str, ...],
     expected_manifest_digest: str,
     expected_configuration_revision: int,
-) -> InstalledPackageInspection:
+) -> PackageCandidateInspection:
     """Read one exact installed candidate without schema, grant, or configuration writes."""
 
     snapshot = _pinned_installed_snapshot(
@@ -370,6 +384,76 @@ async def inspect_installed_package(
         expected_configuration_revision=expected_configuration_revision,
     )
     return inspected
+
+
+async def inspect_official_candidate_descriptor(
+    descriptor: RuntimeModuleDescriptor,
+    catalog: PackageCatalog,
+    store,
+    *,
+    kernel,
+) -> PackageCandidateInspection:
+    """Pin an assembled official package to its current desired configuration."""
+
+    artifact = descriptor.artifact
+    snapshot = catalog.get(artifact.package_digest)
+    if (
+        artifact.trust_level != "official"
+        or artifact.driver != "forest.python-worker/1"
+        or snapshot.component["id"] != descriptor.component_id
+        or snapshot.component["scope"] != "bot"
+        or snapshot.manifest["runtime"] != "python-worker"
+        or snapshot.manifest["package_id"] != artifact.package_id
+        or snapshot.manifest["version"] != artifact.package_version
+    ):
+        raise ForestError(
+            "COMPONENT_SELECTION_ARTIFACT_CHANGED",
+            "Official package descriptor differs from its pinned artifact",
+            409,
+        )
+    storage = _configuration_storage(snapshot)
+    if descriptor.storage is None or descriptor.storage.package_digest != storage.package_digest:
+        raise ForestError(
+            "COMPONENT_SELECTION_ARTIFACT_CHANGED",
+            "Official package storage differs from its pinned artifact",
+            409,
+        )
+    schema = snapshot.schema(snapshot.component["config_schema"])
+    schema_digest = digest_json(schema)
+    configuration = ModuleConfigurationRepository(
+        store,
+        component_id=descriptor.component_id,
+        namespace=storage.spec.namespace,
+        payloads=kernel.payload,
+        immutable_paths=tuple(snapshot.component.get("config_immutable_paths", ())),
+    )
+    try:
+        desired = await configuration.desired_checked()
+    except (InvalidSchemaName, UndefinedTable) as error:
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_REQUIRED",
+            "Official package configuration is unavailable",
+            409,
+        ) from error
+    except SerializationFailure as error:
+        raise ForestError(
+            "MODULE_CONFIGURATION_REVISION_CONFLICT",
+            "Official package configuration changed during inspection",
+            409,
+        ) from error
+    if desired.validation_digest != schema_digest or not Draft202012Validator(
+        schema
+    ).is_valid(desired.value):
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+            "Official package configuration was not validated for this artifact schema",
+            409,
+        )
+    return PackageCandidateInspection(
+        descriptor.component_id, "official", snapshot.digest,
+        digest_json(snapshot.manifest), desired.revision, desired.payload_id,
+        desired.payload_digest, schema_digest, storage.package_digest,
+    )
 
 
 async def bootstrap_builtin_package(
@@ -544,7 +628,7 @@ async def compile_installed_candidate_descriptor(
     approved_capabilities: tuple[str, ...],
     expected_manifest_digest: str,
     expected_configuration_revision: int | None = None,
-) -> tuple[InstalledPackageInspection, RuntimeModuleDescriptor]:
+) -> tuple[PackageCandidateInspection, RuntimeModuleDescriptor]:
     """Compile an exact package into the production Graph rules without provisioning."""
 
     snapshot = _pinned_installed_snapshot(

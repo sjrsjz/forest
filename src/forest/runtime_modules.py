@@ -1169,6 +1169,22 @@ class RuntimeModuleRegistry:
         }
         return {**fact, "descriptor_digest": digest_json(fact)}
 
+    def preview_descriptor_digests(
+        self, previous: RuntimeModuleRegistry
+    ) -> tuple[tuple[str, str], ...]:
+        """Hash candidate members through the production descriptor projection."""
+
+        return tuple(
+            (
+                descriptor.component_id,
+                self._descriptor_fact(
+                    descriptor,
+                    instance_override=previous.instances.get(descriptor.component_id),
+                )["descriptor_digest"],
+            )
+            for descriptor in self.descriptors
+        )
+
     async def _prepare_generation_binding(
         self, descriptor: RuntimeModuleDescriptor, instance: Any
     ) -> PreparedGenerationBinding:

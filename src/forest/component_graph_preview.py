@@ -6,15 +6,16 @@ from dataclasses import dataclass
 from typing import Mapping
 
 from forest.builtin_packages import (
-    InstalledPackageInspection,
+    PackageCandidateInspection,
     compile_installed_candidate_descriptor,
+    inspect_official_candidate_descriptor,
 )
 from forest.component_selection import (
     ComponentSelectionSnapshot,
     select_package_members,
 )
 from forest.errors import ForestError
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, digest_json
 from forest.runtime_modules import (
     RuntimeGraphTransitionPlan,
     RuntimeModuleDescriptor,
@@ -25,10 +26,12 @@ from forest.runtime_modules import (
 @dataclass(frozen=True)
 class SelectionGraphPreview:
     selection: ComponentSelectionSnapshot
+    source_graph_id: str
     source_graph_revision: int
     target_component_id: str
     impact: RuntimeGraphTransitionPlan
-    installed: tuple[InstalledPackageInspection, ...]
+    packages: tuple[PackageCandidateInspection, ...]
+    plan_digest: str
 
 
 async def preview_selected_graph(
@@ -67,9 +70,14 @@ async def preview_selected_graph(
             "Selected installed package requires an exact target configuration revision",
             422,
         )
-    inspected = []
-    descriptors = []
     selected = select_package_members(selection, official_descriptors, catalog)
+    inspected = [
+        await inspect_official_candidate_descriptor(
+            descriptor, catalog, store, kernel=kernel
+        )
+        for descriptor in selected.official
+    ]
+    descriptors = []
     for entry in selected.installed:
         fact, descriptor = await compile_installed_candidate_descriptor(
             entry.package_digest,
@@ -94,7 +102,26 @@ async def preview_selected_graph(
     impact = candidate.preview_graph_transition(
         current, target_component_id=target_component_id
     )
+    packages = tuple(sorted(inspected, key=lambda item: item.component_id))
+    plan_digest = digest_json({
+        "protocol": "forest.component-selection-plan/1",
+        "bot_id": store.bot_id,
+        "source_graph_id": graph.graph_id,
+        "source_graph_revision": expected_graph_revision,
+        "selection_revision": selection.revision,
+        "selection_digest": selection.digest,
+        "target_component_id": target_component_id,
+        "members": [
+            {"component_id": component_id, "descriptor_digest": descriptor_digest}
+            for component_id, descriptor_digest in candidate.preview_descriptor_digests(current)
+        ],
+        "packages": [item.as_fact() for item in packages],
+        "impact": {
+            field: list(getattr(impact, field))
+            for field in ("replace", "retain", "remove", "add", "drain", "prepare")
+        },
+    })
     return SelectionGraphPreview(
-        selection, expected_graph_revision, target_component_id, impact,
-        tuple(inspected),
+        selection, graph.graph_id, expected_graph_revision, target_component_id,
+        impact, packages, plan_digest,
     )

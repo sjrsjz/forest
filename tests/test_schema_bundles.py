@@ -2654,7 +2654,11 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     controller._replacement_lock = asyncio.Lock()
     controller._closing = False
     controller.registry = first
-    selection = ComponentSelectionSnapshot(0, (), "sha256:" + "0" * 64)
+    selection = ComponentSelectionSnapshot(0, (), digest_json({
+        "protocol": "forest.component-selection-snapshot/1",
+        "revision": 0,
+        "entries": [],
+    }))
 
     @asynccontextmanager
     async def publication_fence(**_kwargs):
@@ -2895,7 +2899,33 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
         expected_configuration_revisions={"tests.routing-component": 1},
     )
     assert selected_preview.impact == planned_impact
-    assert selected_preview.installed == (planned_artifact,)
+    assert planned_artifact in selected_preview.packages
+    assert selected_preview.plan_digest.startswith("sha256:")
+    repeated_preview = await preview_selected_graph(
+        first, selection, (routing.descriptor,), catalog, store,
+        kernel=core,
+        target_component_id="tests.routing-component",
+        expected_graph_revision=first_graph.graph_revision,
+        expected_configuration_revisions={"tests.routing-component": 1},
+    )
+    assert repeated_preview.plan_digest == selected_preview.plan_digest
+    prior_selection = project_component_selection(
+        ComponentSelectionSnapshot(0, (), digest_json(empty_selection)),
+        component_id="tests.routing-component",
+        source_kind="installed",
+        package_digest=installed_snapshot.digest,
+        manifest_digest=digest_json(installed_snapshot.manifest),
+        approved_capabilities=approved,
+        desired_enabled=True,
+    )
+    prior_preview = await preview_selected_graph(
+        first, prior_selection, (routing.descriptor,), catalog, store,
+        kernel=core,
+        target_component_id="tests.routing-component",
+        expected_graph_revision=first_graph.graph_revision,
+        expected_configuration_revisions={"tests.routing-component": 1},
+    )
+    assert prior_preview.plan_digest != selected_preview.plan_digest
     with pytest.raises(ForestError) as not_executable:
         await planned_registry.prewarm()
     assert not_executable.value.code == "RUNTIME_MODULE_PLAN_NOT_EXECUTABLE"
