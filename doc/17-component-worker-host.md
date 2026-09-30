@@ -93,6 +93,8 @@ Worker Host 提交内核替换请求时，冻结所接受选择操作的全局�
 
 ### 管理入口的预验证与提交边界
 
+选择任务重领时，只用当前选择快照判断是否已被较新意图覆盖；它始终用原操作的 `expected_graph_revision` 和稳定 operation ID 请求内核。内核先查不可变请求账本，已有同输入请求直接重放，即使当前 Graph 已发布新修订也如此；尚无旧请求时才检查 Graph revision 并拒绝过期提交。Worker Host 不得在调用内核前用当前 Graph revision 拦截重放，否则“内核已提交、包任务未结算”的崩溃窗口会被误判为永久失败。
+
 包内管理页现可读取显式选择快照，并分别查询选择任务和内核替换的结算结果；它不把 `SUBMITTED` 当成 Graph 已发布。当前通用 management action ABI 仅能直接绑定 Domain Command，无法把工件检查、目标配置检查和真实候选图规划作为同一授权提交的前置条件。因此不能仅将内部 `component.selection.enable/disable` 登记成 Web action。需要先建立只读 `module.validate`：输入精确工件摘要、批准能力、目标配置 revision、选择 revision 和 Graph revision，借用正式 `RuntimeModuleRegistry` 的描述符、启动依赖与保留依赖规则产生影响集合和计划摘要；验证期间不安装 schema、不创建 grant、不推进配置或选择账本。部署级包安装权威只负责内容寻址工件与版本登记，Bot 级预验证只读取该目录和目标配置账本。
 
 提交时 Web authority 在选择写入事务内核对管理票据、计划摘要、当前选择修订以及预验证冻结的 Graph、工件和目标配置事实，随后由 Worker Host 私有命令写入选择操作与任务。任何事实变化返回冲突并要求重新验证；不同 action 键分别约束 enable 与 disable。群 Shell 使用同一计划与提交端口，但保留 Shell 自身优先级和管理员身份检查。内核只传递冻结凭据，不解释包策略；宿主最终预热与发布继续以数据库围栏核对准确快照。通用管理 ABI 必须先具备这种预验证加事务复核能力，才开放选择写入，避免一个仅有界面校验、实际可绕过的控制入口。

@@ -389,3 +389,5 @@ Worker Host 现于选择写入事务中保存不可改写的操作后快照，�
 Worker Host 包内管理页现提供显式选择快照与选择请求状态查询；后者将包私有任务状态和内核 Graph 替换结算分别显示，避免 `SUBMITTED` 被误读成成功发布。包声明与 UI 脚本语法已验证，本地服务状态用例 `1 passed`。对外启停仍保持关闭：现行通用 management action 只允许直接映射 Domain Command，无法在同一次授权写入前完成工件、配置和真实候选图预验证。设计文档明确要求先扩展预验证加事务复核契约，再发布两个独立授权动作。
 
 在重新启动 Docker、确认宿主机端口可连接并把 pytest 临时目录移到 D 盘后，完整 Worker Host PostgreSQL 用例通过（`1 passed`，392.39 秒）。它按顺序验证组件重载、两次配置重建、选择任务驱动的外部 Counter 热加入与停用，以及内核结算后的旧 Generation 停止；均使用假 Bot 客户端，未向 QQ 发消息。上次在 `QUIESCENT` 上失败是测试先于旧 Registry 排空读取状态的时序问题，现于内核选择请求 `SUCCEEDED` 后断言。此结果只覆盖内部选择执行链；部署安装、无副作用的完整 `module.validate`、Web/Shell 授权选择和长期运行仍未验收。
+
+Worker Host 选择任务的崩溃重领现保留原 Graph 围栏直接请求内核，不再先以当前 Graph revision 将旧请求判为失败；内核先按稳定 operation ID 重放已有请求，只有新请求才执行 Graph revision CAS。包版本升至 `1.6.3`，本地 Worker Host 用例 `8 passed`，隔离 PostgreSQL 的内核请求跨 Graph 发布重放用例 `1 passed`，新包清单构建通过。选择快照被后续操作覆盖时仍按原规则结算 `SUPERSEDED`；这项修正不代表 Web/Shell 选择入口已开放。

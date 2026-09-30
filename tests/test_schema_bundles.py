@@ -2943,6 +2943,12 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
         graph_revision=candidate.graph_identity.graph_revision,
     ) == settled
     assert (await core.runtime.graph_replacement("reload/one"))["state"] == "SUCCEEDED"
+    assert await core.runtime.request_graph_replacement(
+        lease,
+        operation_id="reload/one",
+        expected_graph_revision=graph.graph_revision,
+        requested_by="qq:42",
+    ) == settled
 
     frozen = await core.runtime.request_graph_replacement(
         lease,

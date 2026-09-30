@@ -257,12 +257,7 @@ class ComponentWorkerHost(Plugin):
                     "disposition": "SUPERSEDED", "receipt": None,
                     "error_code": "COMPONENT_SELECTION_CHANGED",
                 }
-            graph = await self._graph(ctx)
-            if graph["graph_revision"] != work["expected_graph_revision"]:
-                return {
-                    "disposition": "FAILED", "receipt": None,
-                    "error_code": "RUNTIME_GRAPH_REVISION_CONFLICT",
-                }
+            # Kernel replays this exact operation before checking a new Graph revision.
             encoded = json.dumps(
                 work["snapshot"], sort_keys=True, separators=(",", ":"),
                 ensure_ascii=False, allow_nan=False,
