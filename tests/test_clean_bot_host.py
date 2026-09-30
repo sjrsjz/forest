@@ -450,6 +450,13 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
         return BotGraphCandidate(candidate, _TEST_SELECTION)
 
     host._assemble_candidate = assemble
+    with pytest.raises(ForestError) as stale_selection:
+        await host.replace_runtime_graph(
+            selection_revision=1, selection_digest="sha256:" + "1" * 64
+        )
+    assert stale_selection.value.code == "COMPONENT_SELECTION_CHANGED"
+    assert events == ["assemble-candidate"]
+    events.clear()
     result = await host.replace_runtime_graph()
 
     assert result is candidate
@@ -507,6 +514,8 @@ async def test_durable_reload_worker_executes_exact_revision_and_settles_request
                 "activation_id": "00000000-0000-0000-0000-000000000008",
                 "expected_graph_revision": 7,
                 "target_component_id": None,
+                "selection_revision": None,
+                "selection_digest": None,
             },
         ),
         (

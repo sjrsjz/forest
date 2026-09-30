@@ -913,6 +913,8 @@ class CleanBotHost:
         activation_id: str | None = None,
         expected_graph_revision: int | None = None,
         target_component_id: str | None = None,
+        selection_revision: int | None = None,
+        selection_digest: str | None = None,
     ) -> RuntimeModuleRegistry:
         """Prewarm a candidate, drain the current graph, then publish and resume it."""
 
@@ -937,6 +939,18 @@ class CleanBotHost:
                 if activation_id is None
                 else await self._assemble_candidate(activation_id)
             )
+            if (
+                selection_revision is not None
+                and (
+                    assembled.selection.revision != selection_revision
+                    or assembled.selection.digest != selection_digest
+                )
+            ):
+                raise ForestError(
+                    "COMPONENT_SELECTION_CHANGED",
+                    "Frozen selection changed before candidate assembly",
+                    409,
+                )
             candidate = assembled.registry
             membership_changed = set(candidate.states) != set(previous.states)
             affected = (
@@ -1134,6 +1148,8 @@ class CleanBotHost:
             activation_id=request["activation_id"],
             expected_graph_revision=request["expected_graph_revision"],
             target_component_id=request.get("target_component_id"),
+            selection_revision=request.get("selection_revision"),
+            selection_digest=request.get("selection_digest"),
         )
         await self._kernel.runtime.finish_graph_replacement(
             self._authority(),

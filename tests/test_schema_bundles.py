@@ -26,7 +26,10 @@ from forest.builtin_packages import (
 )
 from forest.clean_bot_host import BotGraphCandidate, CleanBotHost
 from forest.component_selection import ComponentSelectionReader, ComponentSelectionSnapshot
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import (
+    bootstrap_clean_kernel,
+    runtime_graph_replacement_request_service,
+)
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
@@ -156,6 +159,41 @@ async def clean_authority():
         await admin.close()
 
 
+async def test_kernel_replacement_service_preserves_frozen_selection_credentials():
+    calls = []
+
+    class Runtime:
+        async def request_graph_replacement(self, lease, **values):
+            calls.append((lease, values))
+            return {**values, "activation_id": "activation/one", "state": "QUEUED"}
+
+    context = SimpleNamespace(
+        participant=lambda _name: SimpleNamespace(service=Runtime()),
+        host_lease="lease/one",
+    )
+    request = runtime_graph_replacement_request_service(context)
+    payload = {
+        "protocol": "forest.runtime-graph-replacement-request/3",
+        "operation_id": "selection/one",
+        "expected_graph_revision": 7,
+        "requested_by": "web:admin",
+        "target_component_id": "example.counter",
+        "selection_revision": 2,
+        "selection_digest": "sha256:" + "a" * 64,
+    }
+    receipt = await request(payload)
+    assert receipt["protocol"] == "forest.runtime-graph-replacement-receipt/3"
+    assert receipt["selection_revision"] == 2
+    assert receipt["selection_digest"] == payload["selection_digest"]
+    assert calls == [
+        ("lease/one", {key: value for key, value in payload.items() if key != "protocol"})
+    ]
+    with pytest.raises(ForestError) as malformed:
+        await request({**payload, "selection_digest": "sha256:bad"})
+    assert malformed.value.code == "RUNTIME_REPLACEMENT_INPUT_INVALID"
+    assert len(calls) == 1
+
+
 @pytest.mark.postgres
 async def test_worker_host_selection_revision_cas_and_operation_replay(
     clean_authority, tmp_path
@@ -165,6 +203,8 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     snapshot = PackageCatalog(tmp_path / "selection-packages").build(
         Path(__file__).parents[1] / "src/forest/builtin/component_worker_host"
     )
+
+
     storage = _configuration_storage(snapshot)
     await installer.install(
         storage.spec, storage.baseline, storage.package_digest,
@@ -2855,6 +2895,44 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
         graph_revision=candidate.graph_identity.graph_revision,
     ) == settled
     assert (await core.runtime.graph_replacement("reload/one"))["state"] == "SUCCEEDED"
+
+    frozen = await core.runtime.request_graph_replacement(
+        lease,
+        operation_id="selection/add-counter",
+        expected_graph_revision=candidate.graph_identity.graph_revision,
+        requested_by="web:admin",
+        target_component_id="example.counter",
+        selection_revision=1,
+        selection_digest="sha256:" + "a" * 64,
+    )
+    assert frozen["state"] == "QUEUED"
+    assert frozen["selection_revision"] == 1
+    assert frozen["selection_digest"] == "sha256:" + "a" * 64
+    assert await core.runtime.request_graph_replacement(
+        lease,
+        operation_id="selection/add-counter",
+        expected_graph_revision=candidate.graph_identity.graph_revision,
+        requested_by="web:admin",
+        target_component_id="example.counter",
+        selection_revision=1,
+        selection_digest="sha256:" + "a" * 64,
+    ) == frozen
+    with pytest.raises(ForestError) as changed_selection:
+        await core.runtime.request_graph_replacement(
+            lease,
+            operation_id="selection/add-counter",
+            expected_graph_revision=candidate.graph_identity.graph_revision,
+            requested_by="web:admin",
+            target_component_id="example.counter",
+            selection_revision=2,
+            selection_digest="sha256:" + "b" * 64,
+        )
+    assert changed_selection.value.code == "RUNTIME_REPLACEMENT_CONFLICT"
+    frozen_claim = await core.runtime.claim_graph_replacement(lease)
+    assert frozen_claim["operation_id"] == "selection/add-counter"
+    await core.runtime.fail_graph_replacement(
+        lease, operation_id="selection/add-counter", error_code="COMPONENT_SELECTION_CHANGED"
+    )
 
     targeted = await core.runtime.request_graph_replacement(
         lease,

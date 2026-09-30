@@ -105,6 +105,8 @@ class KernelRuntimeRepository:
         expected_graph_revision: int,
         requested_by: str,
         target_component_id: str | None = None,
+        selection_revision: int | None = None,
+        selection_digest: str | None = None,
     ) -> dict:
         """Persist one exact graph or component reload intent."""
 
@@ -122,11 +124,26 @@ class KernelRuntimeRepository:
             raise ForestError(
                 "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid target component", 422
             )
+        if (selection_revision is None) != (selection_digest is None) or (
+            selection_revision is not None
+            and (
+                type(selection_revision) is not int
+                or selection_revision < 0
+                or target_component_id is None
+                or not isinstance(selection_digest, str)
+                or re.fullmatch(r"sha256:[a-f0-9]{64}", selection_digest) is None
+            )
+        ):
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid frozen component selection", 422
+            )
         input_digest = digest_json(
             {
                 "expected_graph_revision": expected_graph_revision,
                 "requested_by": requested_by,
                 "target_component_id": target_component_id,
+                "selection_revision": selection_revision,
+                "selection_digest": selection_digest,
             }
         )
         activation_id = str(
@@ -170,7 +187,7 @@ class KernelRuntimeRepository:
                     409,
                     details={"graph_revision": None if head is None else head["graph_revision"]},
                 )
-            if target_component_id is not None:
+            if target_component_id is not None and selection_revision is None:
                 target = await (
                     await conn.execute(
                         sql.SQL(
@@ -190,8 +207,9 @@ class KernelRuntimeRepository:
                 await conn.execute(
                     sql.SQL(
                         "INSERT INTO {}(bot_id,operation_id,input_digest,requested_by,"
-                        "expected_graph_revision,target_component_id,activation_id) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s) "
+                        "expected_graph_revision,target_component_id,selection_revision,"
+                        "selection_digest,activation_id) "
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                         "RETURNING *"
                     ).format(self._table("graph_replacement_requests")),
                     (
@@ -201,6 +219,8 @@ class KernelRuntimeRepository:
                         requested_by,
                         expected_graph_revision,
                         target_component_id,
+                        selection_revision,
+                        selection_digest,
                         activation_id,
                     ),
                 )

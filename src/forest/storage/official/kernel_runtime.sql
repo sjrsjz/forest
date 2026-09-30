@@ -349,6 +349,10 @@ CREATE TABLE graph_replacement_requests (
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
     expected_graph_revision bigint NOT NULL CHECK (expected_graph_revision > 0),
+    selection_revision bigint CHECK (selection_revision IS NULL OR selection_revision >= 0),
+    selection_digest text CHECK (
+        selection_digest IS NULL OR selection_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
     target_component_id text CHECK (
         target_component_id IS NULL
         OR target_component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'
@@ -369,6 +373,8 @@ CREATE TABLE graph_replacement_requests (
     PRIMARY KEY (bot_id,operation_id),
     UNIQUE (bot_id,activation_id),
     FOREIGN KEY (bot_id,result_graph_id) REFERENCES runtime_graphs(bot_id,graph_id),
+    CHECK ((selection_revision IS NULL) = (selection_digest IS NULL)),
+    CHECK (selection_revision IS NULL OR target_component_id IS NOT NULL),
     CHECK ((owner_host_id IS NULL) = (owner_incarnation IS NULL)),
     CHECK ((owner_host_id IS NULL) = (owner_epoch IS NULL)),
     CHECK (
@@ -494,10 +500,12 @@ BEGIN
     END IF;
     IF ROW(
         OLD.bot_id, OLD.operation_id, OLD.input_digest, OLD.requested_by,
-        OLD.expected_graph_revision, OLD.activation_id, OLD.created_at
+        OLD.expected_graph_revision, OLD.selection_revision, OLD.selection_digest,
+        OLD.target_component_id, OLD.activation_id, OLD.created_at
     ) IS DISTINCT FROM ROW(
         NEW.bot_id, NEW.operation_id, NEW.input_digest, NEW.requested_by,
-        NEW.expected_graph_revision, NEW.activation_id, NEW.created_at
+        NEW.expected_graph_revision, NEW.selection_revision, NEW.selection_digest,
+        NEW.target_component_id, NEW.activation_id, NEW.created_at
     ) THEN
         RAISE EXCEPTION 'Forest graph replacement identity is immutable' USING ERRCODE = '55000';
     END IF;

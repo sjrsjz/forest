@@ -298,17 +298,26 @@ def runtime_graph_replacement_request_service(context):
     runtime = context.participant("kernel.runtime").service
 
     async def request(payload):
+        frozen = (
+            type(payload) is dict
+            and payload.get("protocol") == "forest.runtime-graph-replacement-request/3"
+        )
+        required = {
+            "protocol",
+            "operation_id",
+            "expected_graph_revision",
+            "requested_by",
+            "target_component_id",
+        }
+        if frozen:
+            required |= {"selection_revision", "selection_digest"}
         if (
             type(payload) is not dict
-            or set(payload)
-            != {
-                "protocol",
-                "operation_id",
-                "expected_graph_revision",
-                "requested_by",
-                "target_component_id",
+            or set(payload) != required
+            or payload["protocol"] not in {
+                "forest.runtime-graph-replacement-request/2",
+                "forest.runtime-graph-replacement-request/3",
             }
-            or payload["protocol"] != "forest.runtime-graph-replacement-request/2"
             or not isinstance(payload["operation_id"], str)
             or not 1 <= len(payload["operation_id"].encode()) <= 256
             or type(payload["expected_graph_revision"]) is not int
@@ -319,6 +328,16 @@ def runtime_graph_replacement_request_service(context):
             or re.fullmatch(
                 r"[a-z0-9][a-z0-9._-]{0,127}", payload["target_component_id"]
             ) is None
+            or (
+                frozen
+                and (
+                    type(payload["selection_revision"]) is not int
+                    or payload["selection_revision"] < 0
+                    or not isinstance(payload["selection_digest"], str)
+                    or re.fullmatch(r"sha256:[a-f0-9]{64}", payload["selection_digest"])
+                    is None
+                )
+            )
         ):
             raise ForestError(
                 "RUNTIME_REPLACEMENT_INPUT_INVALID",
@@ -331,14 +350,27 @@ def runtime_graph_replacement_request_service(context):
             expected_graph_revision=payload["expected_graph_revision"],
             requested_by=payload["requested_by"],
             target_component_id=payload["target_component_id"],
+            selection_revision=payload["selection_revision"] if frozen else None,
+            selection_digest=payload["selection_digest"] if frozen else None,
         )
         return {
-            "protocol": "forest.runtime-graph-replacement-receipt/2",
+            "protocol": (
+                "forest.runtime-graph-replacement-receipt/3" if frozen
+                else "forest.runtime-graph-replacement-receipt/2"
+            ),
             "operation_id": saved["operation_id"],
             "activation_id": saved["activation_id"],
             "state": saved["state"],
             "expected_graph_revision": saved["expected_graph_revision"],
             "target_component_id": saved["target_component_id"],
+            **(
+                {
+                    "selection_revision": saved["selection_revision"],
+                    "selection_digest": saved["selection_digest"],
+                }
+                if frozen
+                else {}
+            ),
         }
 
     return request
