@@ -141,6 +141,8 @@ Registry 的替换排空现接受与内核围栏相同的成员集合：只冻�
 
 Graph 规划需要管理契约的 schema 描述，但这些 schema 已在 Generation 构造时从经校验的不可变包快照编译。`PackageManagementContract.describe()` 读取隔离的已编译副本，不在每次描述符比较时重复扫描工件；包工件及当前配置本身仍在预览时按精确摘要和修订检查。
 
+Worker Host 自带的隔离管理页现提供折叠式只读候选预检。页面在提交前读取最新选择修订，并携带当前 Graph revision；外部包需要手填精确工件、manifest、批准能力与目标配置修订。结果按换代、保留、移除、新增、排空、预热显示完整组件 ID 列表及计划摘要，未提供绕过授权提交围栏的启停按钮。预检运行中禁用重复提交，结果失效或失败时不显示旧预览。
+
 ### 候选事实摘要与提交复核边界
 
 `SelectionGraphPreview.plan_digest` 使用规范化事实计算：Bot 身份、来源 Graph ID/revision、目标组件、冻结选择 revision/digest、正式 Registry 的全部候选成员描述符摘要、候选包的配置 revision/Payload 身份/schema/存储摘要，以及换代影响集合。官方包与已安装包均读取各自私有配置账本的 desired 值并校验当前工件 schema；官方包按最近一次真实装配的精确工件读取，预览本身不 provision。选择快照类型自身保证排序、条目修订与摘要一致。相同事实重复预览得到相同摘要；工件或配置事实改变必须得到新摘要。

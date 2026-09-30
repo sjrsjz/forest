@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -9,12 +9,14 @@
     h1{font-size:17px;margin:0}p{margin:0;color:#a9c1b2}
     .row{display:flex;gap:8px;align-items:end;flex-wrap:wrap}
     label{display:grid;gap:5px;flex:1 1 260px;color:#a9c1b2}
-    input,select,button{box-sizing:border-box;padding:9px 11px;border:1px solid #395247;border-radius:8px;background:#13231b;color:inherit}
-    input,select{width:100%}button{cursor:pointer;background:#255844}button:disabled{opacity:.5;cursor:default}
+    input,select,textarea,button{box-sizing:border-box;padding:9px 11px;border:1px solid #395247;border-radius:8px;background:#13231b;color:inherit;font:inherit}
+    input,select,textarea{width:100%}textarea{min-height:58px;resize:vertical}button{cursor:pointer;background:#255844}button:disabled{opacity:.5;cursor:default}
+    [hidden]{display:none!important}
     dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
     dl div{border:1px solid #284036;border-radius:8px;padding:8px 10px;min-width:0}
     dt{color:#a9c1b2}dd{margin:3px 0 0;overflow-wrap:anywhere}
-    #status{min-height:1.4em}#reload-result,#configuration-result,#selection-result{padding:10px;border:1px solid #284036;border-radius:8px;overflow-wrap:anywhere}
+    #status{min-height:1.4em}#reload-result,#configuration-result,#selection-result,#preview-result{padding:10px;border:1px solid #284036;border-radius:8px;overflow-wrap:anywhere}
+    #preview-impact{max-height:240px;overflow:auto;margin-top:8px}#preview-impact div{padding:5px 0;border-bottom:1px solid #284036}
     #artifact-details{max-height:260px;overflow:auto;margin-top:8px}#artifact-details dd{white-space:pre-wrap}
     details{border:1px solid #284036;border-radius:8px;padding:9px 11px}summary{cursor:pointer}#package-items,#selection-items{max-height:300px;overflow:auto;margin:8px 0}#package-items div,#selection-items div{padding:7px 0;border-bottom:1px solid #284036;overflow-wrap:anywhere}#package-items small,#selection-items small{display:block;color:#a9c1b2}
     @media(max-width:640px){dl{grid-template-columns:1fr}}
@@ -22,29 +24,29 @@
 </head>
 <body>
   <main>
-    <h1>RuntimeGraph components</h1>
-    <p>Inspect a published Generation. Reload requests are durable and fenced by the current Graph revision.</p>
+    <h1>RuntimeGraph 组件</h1>
+    <p>查看已发布的 Generation；重载请求会持久保存，并受当前 Graph 修订围栏保护。</p>
     <div class="row">
-      <label>Active components<select id="components"><option value="">Loading...</option></select></label>
-      <button id="more" type="button" hidden>More</button>
+      <label>活动组件<select id="components"><option value="">加载中…</option></select></label>
+      <button id="more" type="button" hidden>更多</button>
     </div>
     <div class="row">
-      <label>Component ID<input id="component-id" value="component.worker-host"></label>
-      <button id="inspect" type="button">Inspect</button>
-      <button id="reload" type="button" disabled>Queue reload</button>
+      <label>组件 ID<input id="component-id" value="component.worker-host"></label>
+      <button id="inspect" type="button">查看</button>
+      <button id="reload" type="button" disabled>提交重载</button>
     </div>
     <p id="status" role="status"></p>
     <dl id="details" hidden>
       <div><dt>Bot / Graph</dt><dd id="graph"></dd></div>
-      <div><dt>Status</dt><dd id="state"></dd></div>
-      <div><dt>Package</dt><dd id="package"></dd></div>
-      <div><dt>Package digest</dt><dd id="digest"></dd></div>
+      <div><dt>状态</dt><dd id="state"></dd></div>
+      <div><dt>包</dt><dd id="package"></dd></div>
+      <div><dt>包摘要</dt><dd id="digest"></dd></div>
       <div><dt>Generation</dt><dd id="generation"></dd></div>
-      <div><dt>Admission</dt><dd id="admission"></dd></div>
+      <div><dt>准入</dt><dd id="admission"></dd></div>
     </dl>
     <details id="catalog">
       <summary>已登记包工件</summary>
-      <p>这里只显示经校验的工件声明；选择、启停和局部换代控制尚未开放。</p>
+      <p>这里显示经校验的工件声明。候选图可以只读预检；选择和启停提交尚未开放。</p>
       <div class="row"><button id="load-packages" type="button">读取目录</button><button id="more-packages" type="button" hidden>下一页</button></div>
       <div id="package-items"></div>
       <dl id="artifact-details" hidden>
@@ -61,17 +63,44 @@
       <div class="row"><button id="refresh-selection-snapshot" type="button">刷新选择快照</button><span id="selection-revision"></span></div>
       <div id="selection-items"></div>
     </details>
-    <p>Reload replaces the selected component and dependent Generations. Unaffected Generations retain their identity. The request remains visible after the old Worker retires.</p>
+    <details id="candidate-preview">
+      <summary>候选图预检</summary>
+      <p>按当前选择修订投影一笔启停意图，检查依赖与换代影响；预检不会修改 Bot。</p>
+      <div class="row">
+        <label>组件 ID<input id="preview-component-id" value="component.worker-host" autocomplete="off"></label>
+        <label>来源<select id="preview-source-kind"><option value="builtin">内置包</option><option value="installed">已登记外部包</option></select></label>
+        <label>意图<select id="preview-enabled"><option value="true">启用</option><option value="false">停用</option></select></label>
+      </div>
+      <div id="preview-installed" hidden>
+        <div class="row">
+          <label>工件摘要<input id="preview-package-digest" placeholder="sha256:..."></label>
+          <label>Manifest 摘要<input id="preview-manifest-digest" placeholder="sha256:..."></label>
+          <label>目标配置修订<input id="preview-config-revision" type="number" min="1" placeholder="启用外部包时必填"></label>
+        </div>
+        <label>批准能力（每行一项；留空表示不批准额外能力）<textarea id="preview-capabilities" spellcheck="false"></textarea></label>
+      </div>
+      <div class="row"><button id="run-preview" type="button">只读预检</button><span id="preview-note"></span></div>
+      <div id="preview-result" hidden>
+        <dl>
+          <div><dt>来源 Graph / 选择</dt><dd id="preview-source"></dd></div>
+          <div><dt>计划摘要</dt><dd id="preview-digest"></dd></div>
+          <div><dt>目标工件与配置</dt><dd id="preview-target"></dd></div>
+          <div><dt>影响概况</dt><dd id="preview-summary"></dd></div>
+        </dl>
+        <div id="preview-impact"></div>
+      </div>
+    </details>
+    <p>重载会替换目标及依赖它的 Generation；其他 Generation 保留原身份。旧 Worker 退役后仍可查询请求状态。</p>
     <div id="reload-result" hidden></div>
-    <button id="refresh-reload" type="button" hidden>Refresh reload status</button>
+    <button id="refresh-reload" type="button" hidden>刷新重载状态</button>
     <div class="row">
-      <label>Configuration rebuild request<input id="configuration-request-id" placeholder="config-rebuild:..."></label>
-      <button id="refresh-configuration" type="button">Check status</button>
+      <label>配置重建请求<input id="configuration-request-id" placeholder="config-rebuild:..."></label>
+      <button id="refresh-configuration" type="button">查询状态</button>
     </div>
     <div id="configuration-result" hidden></div>
     <div class="row">
-      <label>Selection request<input id="selection-request-id" placeholder="selection:..."></label>
-      <button id="refresh-selection" type="button">Check status</button>
+      <label>选择请求<input id="selection-request-id" placeholder="selection:..."></label>
+      <button id="refresh-selection" type="button">查询状态</button>
     </div>
     <div id="selection-result" hidden></div>
   </main>
@@ -107,6 +136,7 @@
       const value=await call('query','module',{component_id});
       if(graphId!==value.graph_id){graphId='';await list();return;}
       selected=component_id;graphRevision=value.graph_revision;
+      byId('preview-component-id').value=component_id;
       const member=value.member;
       byId('graph').textContent=`${value.bot_id} / r${value.graph_revision}`;
       byId('state').textContent=`${member.component_id} / ${member.status} / config r${member.config_revision}`;
@@ -165,7 +195,48 @@
         row.append(title,source);items.append(row);
       }
       if(!snapshot.entries.length)items.textContent='尚无显式选择；使用默认 builtin 成员。';
-      resize();
+      resize();return snapshot;
+    }
+    async function previewCandidate(){
+      const button=byId('run-preview');button.disabled=true;
+      byId('preview-result').hidden=true;byId('preview-note').textContent='正在检查候选图…';resize();
+      try{
+        const component_id=byId('preview-component-id').value.trim();
+        if(!/^[a-z0-9][a-z0-9._-]{0,127}$/.test(component_id))throw new Error('组件 ID 无效');
+        const source_kind=byId('preview-source-kind').value;
+        const desired_enabled=byId('preview-enabled').value==='true';
+        const installed=source_kind==='installed';
+        const package_digest=installed?byId('preview-package-digest').value.trim():null;
+        const manifest_digest=installed?byId('preview-manifest-digest').value.trim():null;
+        if(installed&&(!/^sha256:[a-f0-9]{64}$/.test(package_digest)||!/^sha256:[a-f0-9]{64}$/.test(manifest_digest)))throw new Error('外部包需要精确工件和 Manifest 摘要');
+        const approved_capabilities=installed?byId('preview-capabilities').value.split(/[\n,]/).map(value=>value.trim()).filter(Boolean):[];
+        if(new Set(approved_capabilities).size!==approved_capabilities.length)throw new Error('批准能力不能重复');
+        const config=byId('preview-config-revision').value.trim();
+        if(installed&&desired_enabled&&!/^[1-9][0-9]*$/.test(config))throw new Error('启用外部包需要目标配置修订');
+        if(installed&&desired_enabled&&!Number.isSafeInteger(Number(config)))throw new Error('目标配置修订超出可精确表示范围');
+        if(!graphRevision)await list();
+        const selection=await selectionSnapshot();
+        const value=await call('query','validate',{
+          component_id,source_kind,package_digest,manifest_digest,approved_capabilities,
+          desired_enabled,expected_selection_revision:selection.revision,
+          expected_graph_revision:graphRevision,
+          expected_configuration_revision:installed&&desired_enabled?Number(config):null
+        });
+        byId('preview-source').textContent=`${value.bot_id} / Graph r${value.source_graph_revision} / 选择 r${value.selection_revision}`;
+        byId('preview-digest').textContent=value.plan_digest;
+        const target=value.packages.find(item=>item.component_id===component_id);
+        byId('preview-target').textContent=target?`${target.trust_level} / ${target.package_digest} / 配置 r${target.configuration_revision}`:'目标不在启用候选图中';
+        const labels={replace:'换代',retain:'保留',remove:'移除',add:'新增',drain:'排空',prepare:'预热'};
+        byId('preview-summary').textContent=Object.entries(labels).map(([key,label])=>`${label} ${value.impact[key].length}`).join(' · ');
+        const impact=byId('preview-impact');impact.replaceChildren();
+        for(const [key,label] of Object.entries(labels)){
+          const line=document.createElement('div');
+          line.textContent=`${label}：${value.impact[key].join('、')||'无'}`;
+          impact.append(line);
+        }
+        byId('preview-result').hidden=false;
+        byId('preview-note').textContent='只读预检完成；启停提交尚未开放。';
+      }finally{button.disabled=false;resize();}
     }
     async function reload(){
       if(!selected||byId('component-id').value.trim()!==selected)throw new Error('Inspect the selected component first');
@@ -227,6 +298,8 @@
     byId('refresh-configuration').onclick=()=>configurationStatus().catch(error=>notice(error.message));
     byId('refresh-selection').onclick=()=>selectionStatus().catch(error=>notice(error.message));
     byId('refresh-selection-snapshot').onclick=()=>selectionSnapshot().catch(error=>notice(error.message));
+    byId('run-preview').onclick=()=>previewCandidate().catch(error=>{byId('preview-note').textContent='预检失败';notice(error.message);});
+    byId('preview-source-kind').onchange=()=>{byId('preview-installed').hidden=byId('preview-source-kind').value!=='installed';resize();};
     byId('more').onclick=()=>list(nextAfter).catch(error=>notice(error.message));
     byId('load-packages').onclick=()=>listPackages().catch(error=>notice(error.message));
     byId('more-packages').onclick=()=>listPackages(true).catch(error=>notice(error.message));
@@ -236,6 +309,7 @@
     byId('component-id').onkeydown=event=>{
       if(event.key==='Enter'){event.preventDefault();inspect().catch(error=>notice(error.message));}
     };
+    document.querySelectorAll('details').forEach(item=>item.addEventListener('toggle',resize));
   })();
   </script>
 </body>
