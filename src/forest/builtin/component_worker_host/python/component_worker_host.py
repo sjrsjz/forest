@@ -1,6 +1,7 @@
 """Component control projection and durable reload submission."""
 
-from hashlib import md5
+import json
+from hashlib import md5, sha256
 
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service
@@ -140,6 +141,10 @@ class ComponentWorkerHost(Plugin):
     async def configuration_rebuild_status(self, payload, ctx):
         return await ctx.queries.call("component.configuration-rebuild.read", payload)
 
+    @service("component.host.selection-application", semantics="read")
+    async def selection_application_status(self, payload, ctx):
+        return await ctx.queries.call("component.selection-application.read", payload)
+
     @service("shell.component-host.reload", semantics="idempotent")
     async def reload(self, payload, ctx):
         arguments = payload["arguments"]
@@ -219,6 +224,48 @@ class ComponentWorkerHost(Plugin):
                 timeout=10,
             )
             return {"disposition": "SUCCEEDED", "receipt": receipt, "error_code": None}
+        except ForestError as error:
+            return {
+                "disposition": "RETRY" if error.status >= 500 else "FAILED",
+                "receipt": None,
+                "error_code": error.code,
+            }
+
+    @job("component.selection.submit")
+    async def submit_selection(self, task, ctx):
+        work = task["payload"]
+        try:
+            current = await ctx.queries.call("component.selection.snapshot", {})
+            if current != work["snapshot"]:
+                return {
+                    "disposition": "SUPERSEDED", "receipt": None,
+                    "error_code": "COMPONENT_SELECTION_CHANGED",
+                }
+            graph = await self._graph(ctx)
+            if graph["graph_revision"] != work["expected_graph_revision"]:
+                return {
+                    "disposition": "FAILED", "receipt": None,
+                    "error_code": "RUNTIME_GRAPH_REVISION_CONFLICT",
+                }
+            encoded = json.dumps(
+                work["snapshot"], sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            ).encode("utf-8")
+            receipt = await ctx.services.call(
+                "runtime.graph-replacement.request",
+                {
+                    "protocol": "forest.runtime-graph-replacement-request/3",
+                    "operation_id": "component-selection:" + work["request_id"],
+                    "expected_graph_revision": work["expected_graph_revision"],
+                    "requested_by": work["requested_by"],
+                    "target_component_id": work["component_id"],
+                    "selection_revision": work["selection_revision"],
+                    "selection_digest": "sha256:" + sha256(encoded).hexdigest(),
+                },
+                operation_id=ctx.operations.stable("submit-selection-replacement"),
+                timeout=10,
+            )
+            return {"disposition": "SUBMITTED", "receipt": receipt, "error_code": None}
         except ForestError as error:
             return {
                 "disposition": "RETRY" if error.status >= 500 else "FAILED",

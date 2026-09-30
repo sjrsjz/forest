@@ -204,7 +204,6 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
         Path(__file__).parents[1] / "src/forest/builtin/component_worker_host"
     )
 
-
     storage = _configuration_storage(snapshot)
     await installer.install(
         storage.spec, storage.baseline, storage.package_digest,
@@ -284,6 +283,55 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
         assert not pending.done()
     next_result = await asyncio.wait_for(pending, timeout=5)
     assert next_result["value"]["selection_revision"] == 2
+    with pytest.raises(psycopg.Error) as immutable_operation:
+        async with store.pool.connection() as conn:
+            await conn.execute(
+                sql.SQL("UPDATE {} SET snapshot_payload='{{}}'::jsonb WHERE bot_id=%s").format(
+                    sql.Identifier(storage.spec.namespace, "selection_operations")
+                ),
+                (store.bot_id,),
+            )
+    assert immutable_operation.value.sqlstate == "55000"
+
+    async def work_call(function, payload):
+        async with store.pool.connection() as conn:
+            result = await conn.execute(
+                sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS value").format(
+                    sql.Identifier(
+                        storage.spec.namespace,
+                        "component_selection_application_" + function,
+                    )
+                ),
+                (Jsonb({"bot_id": store.bot_id}), Jsonb(payload)),
+            )
+            return (await result.fetchone())["value"]
+
+    first_claim = (await work_call(
+        "claim", {"claim_token": str(uuid4()), "lease_seconds": 45}
+    ))["value"]
+    assert first_claim["payload"]["snapshot"] == frozen
+    assert first_claim["payload"]["selection_revision"] == 1
+    settled = await work_call("settle", {
+        "work_id": first_claim["work_id"],
+        "claim_token": first_claim["claim_token"],
+        "outcome": {"status": "SUCCEEDED", "result": {
+            "disposition": "SUPERSEDED", "receipt": None,
+            "error_code": "COMPONENT_SELECTION_CHANGED",
+        }},
+    })
+    assert settled["ok"]
+    assert (await work_call("read", {"request_id": first_claim["work_id"]}))[
+        "value"
+    ]["state"] == "SUPERSEDED"
+    second_claim = (await work_call(
+        "claim", {"claim_token": str(uuid4()), "lease_seconds": 45}
+    ))["value"]
+    assert second_claim["payload"]["selection_revision"] == 2
+    assert second_claim["payload"]["snapshot"]["revision"] == 2
+    assert second_claim["payload"]["snapshot"] != frozen
+    assert (await work_call("claim", {
+        "claim_token": str(uuid4()), "lease_seconds": 45,
+    }))["value"] is None
     with pytest.raises(ForestError) as stale:
         async with reader.publication_fence(
             expected_revision=current.revision, expected_digest=current.digest

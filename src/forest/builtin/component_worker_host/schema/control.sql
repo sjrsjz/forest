@@ -31,6 +31,7 @@ CREATE TABLE selection_operations (
     operation_id text NOT NULL,
     input_digest text NOT NULL,
     input_payload jsonb NOT NULL,
+    snapshot_payload jsonb NOT NULL,
     desired_enabled boolean NOT NULL,
     resulting_revision bigint NOT NULL CHECK (resulting_revision > 0),
     expected_graph_revision bigint NOT NULL CHECK (expected_graph_revision > 0),
@@ -38,6 +39,44 @@ CREATE TABLE selection_operations (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, operation_id),
     UNIQUE (bot_id, resulting_revision)
+);
+
+CREATE FUNCTION selection_operation_immutable() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+BEGIN
+    RAISE EXCEPTION 'Forest component selection operation is immutable'
+        USING ERRCODE = '55000';
+END;
+$$;
+CREATE TRIGGER selection_operations_immutable
+    BEFORE UPDATE OR DELETE ON selection_operations
+    FOR EACH ROW EXECUTE FUNCTION selection_operation_immutable();
+
+CREATE TABLE selection_applications (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL,
+    request_id text NOT NULL,
+    state text NOT NULL DEFAULT 'PENDING'
+        CHECK (state IN ('PENDING','RUNNING','SUBMITTED','SUPERSEDED','FAILED')),
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    claim_token text,
+    lease_until timestamptz,
+    available_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    receipt jsonb,
+    error_code text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id, operation_id),
+    UNIQUE (bot_id, request_id),
+    FOREIGN KEY (bot_id, operation_id) REFERENCES selection_operations(bot_id, operation_id)
+);
+CREATE INDEX selection_applications_pending_idx
+    ON selection_applications(bot_id,state,available_at,created_at);
+
+CREATE TABLE selection_settlements (
+    claim_token text PRIMARY KEY,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL
 );
 
 CREATE FUNCTION component_selection_snapshot(context jsonb, input jsonb)
@@ -60,7 +99,7 @@ RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE bot text:=context->>'bot_id'; op text:=context->>'operation_id';
         source text:=input->>'source_kind'; target text:=input->>'component_id';
         head_revision bigint; existing __forest_module_schema__.selection_operations%ROWTYPE;
-        new_revision bigint; result jsonb;
+        new_revision bigint; result jsonb; frozen jsonb;
 BEGIN
   IF context->>'port_kind' NOT IN ('command','management_action')
      OR (enabled AND context->>'port_name' IS DISTINCT FROM 'component.selection.enable')
@@ -132,11 +171,17 @@ BEGIN
       approved_capabilities=EXCLUDED.approved_capabilities,
       desired_enabled=EXCLUDED.desired_enabled,desired_revision=EXCLUDED.desired_revision,
       updated_at=clock_timestamp();
+  SELECT value->'value' INTO frozen FROM (
+    SELECT __forest_module_schema__.component_selection_snapshot(
+      jsonb_build_object('bot_id',bot),'{}'::jsonb) AS value
+  ) AS snapshot;
   INSERT INTO __forest_module_schema__.selection_operations(
-      bot_id,operation_id,input_digest,input_payload,desired_enabled,
+      bot_id,operation_id,input_digest,input_payload,snapshot_payload,desired_enabled,
       resulting_revision,expected_graph_revision,requested_by)
-    VALUES(bot,op,context->>'input_digest',input,enabled,new_revision,
+    VALUES(bot,op,context->>'input_digest',input,frozen,enabled,new_revision,
       (input->>'expected_graph_revision')::bigint,input->>'requested_by');
+  INSERT INTO __forest_module_schema__.selection_applications(bot_id,operation_id,request_id)
+    VALUES(bot,op,'selection:'||md5(bot||chr(31)||op));
   result:=jsonb_build_object('protocol','forest.component-selection-operation/1',
     'operation_id',op,'component_id',target,'desired_enabled',enabled,
     'selection_revision',new_revision,
@@ -153,6 +198,123 @@ $$;
 CREATE FUNCTION component_selection_disable(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
 SELECT __forest_module_schema__.component_selection_set(context,input,false)
+$$;
+
+CREATE FUNCTION component_selection_application_read(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE item __forest_module_schema__.selection_applications%ROWTYPE;
+        accepted __forest_module_schema__.selection_operations%ROWTYPE;
+BEGIN
+  SELECT * INTO item FROM __forest_module_schema__.selection_applications
+    WHERE bot_id=context->>'bot_id' AND request_id=input->>'request_id';
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_NOT_FOUND',
+        'message','Selection application does not exist','status',404));
+  END IF;
+  SELECT * INTO accepted FROM __forest_module_schema__.selection_operations
+    WHERE bot_id=item.bot_id AND operation_id=item.operation_id;
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('protocol','forest.component-selection-application/1',
+      'request_id',item.request_id,'component_id',accepted.input_payload->>'component_id',
+      'desired_enabled',accepted.desired_enabled,
+      'selection_revision',accepted.resulting_revision,
+      'expected_graph_revision',accepted.expected_graph_revision,
+      'state',item.state,'attempt_count',item.attempt_count,
+      'receipt',item.receipt,'error_code',item.error_code,
+      'created_at',item.created_at,'updated_at',item.updated_at));
+END;
+$$;
+
+CREATE FUNCTION component_selection_application_claim(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE item __forest_module_schema__.selection_applications%ROWTYPE;
+        accepted __forest_module_schema__.selection_operations%ROWTYPE;
+BEGIN
+  UPDATE __forest_module_schema__.selection_applications
+    SET state='PENDING',claim_token=NULL,lease_until=NULL,
+      available_at=clock_timestamp(),updated_at=clock_timestamp()
+    WHERE bot_id=context->>'bot_id' AND state='RUNNING'
+      AND lease_until<=clock_timestamp();
+  SELECT * INTO item FROM __forest_module_schema__.selection_applications
+    WHERE bot_id=context->>'bot_id' AND state='PENDING'
+      AND available_at<=clock_timestamp()
+    ORDER BY available_at,created_at,request_id FOR UPDATE SKIP LOCKED LIMIT 1;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+  END IF;
+  SELECT * INTO accepted FROM __forest_module_schema__.selection_operations
+    WHERE bot_id=item.bot_id AND operation_id=item.operation_id;
+  UPDATE __forest_module_schema__.selection_applications
+    SET state='RUNNING',attempt_count=attempt_count+1,
+      claim_token=input->>'claim_token',
+      lease_until=clock_timestamp()+(input->>'lease_seconds')::integer*interval '1 second',
+      updated_at=clock_timestamp()
+    WHERE bot_id=item.bot_id AND operation_id=item.operation_id RETURNING * INTO item;
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('protocol','forest.owned-work-claim/1',
+      'work_id',item.request_id,'claim_token',item.claim_token,'attempt',item.attempt_count,
+      'operation_id','component-selection.run:'||item.request_id||':'||item.attempt_count,
+      'causal_root_kind','component.selection','causal_root_id',item.request_id,
+      'payload',jsonb_build_object('request_id',item.request_id,
+        'component_id',accepted.input_payload->>'component_id',
+        'expected_graph_revision',accepted.expected_graph_revision,
+        'selection_revision',accepted.resulting_revision,
+        'requested_by',accepted.requested_by,
+        'snapshot',accepted.snapshot_payload)));
+END;
+$$;
+
+CREATE FUNCTION component_selection_application_settle(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE item __forest_module_schema__.selection_applications%ROWTYPE;
+        old __forest_module_schema__.selection_settlements%ROWTYPE;
+        work jsonb:=input->'outcome'->'result';
+        disposition text; result_payload jsonb;
+BEGIN
+  SELECT * INTO old FROM __forest_module_schema__.selection_settlements
+    WHERE claim_token=input->>'claim_token';
+  IF FOUND THEN
+    IF old.input_payload=input THEN RETURN old.result_payload; END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_SETTLEMENT_CONFLICT',
+        'message','Claim has another settlement','status',409));
+  END IF;
+  SELECT * INTO item FROM __forest_module_schema__.selection_applications
+    WHERE bot_id=context->>'bot_id' AND request_id=input->>'work_id'
+      AND state='RUNNING' AND claim_token=input->>'claim_token'
+      AND lease_until>clock_timestamp() FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_STALE_CLAIM',
+        'message','Selection claim expired','status',409));
+  END IF;
+  IF input->'outcome'->>'status'='SUCCEEDED' THEN
+    disposition:=work->>'disposition';
+  ELSIF COALESCE((input->'outcome'->'error'->>'retryable')::boolean,false) THEN
+    disposition:='RETRY';
+  ELSE disposition:='FAILED';
+  END IF;
+  UPDATE __forest_module_schema__.selection_applications
+    SET state=CASE disposition WHEN 'SUBMITTED' THEN 'SUBMITTED'
+      WHEN 'SUPERSEDED' THEN 'SUPERSEDED'
+      WHEN 'RETRY' THEN 'PENDING' ELSE 'FAILED' END,
+      claim_token=NULL,lease_until=NULL,
+      available_at=CASE WHEN disposition='RETRY' THEN clock_timestamp()+
+        LEAST(60,2^LEAST(item.attempt_count,5)) * interval '1 second' ELSE available_at END,
+      receipt=CASE WHEN disposition='SUBMITTED' THEN work->'receipt' ELSE receipt END,
+      error_code=CASE WHEN disposition='SUBMITTED' THEN NULL
+        WHEN input->'outcome'->>'status'='SUCCEEDED' THEN work->>'error_code'
+        ELSE input->'outcome'->'error'->>'code' END,
+      updated_at=clock_timestamp()
+    WHERE bot_id=item.bot_id AND operation_id=item.operation_id;
+  result_payload:=jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('protocol','forest.owned-work-settled/1','work_id',item.request_id));
+  INSERT INTO __forest_module_schema__.selection_settlements(
+    claim_token,input_payload,result_payload)
+    VALUES(input->>'claim_token',input,result_payload);
+  RETURN result_payload;
+END;
 $$;
 
 CREATE TABLE reload_requests (

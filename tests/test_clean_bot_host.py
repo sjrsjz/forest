@@ -1045,11 +1045,20 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                 "enable", "selection/enable-counter", 0, before_add.graph_revision
             )
             assert enabled["selection_revision"] == 1
-            await host.replace_runtime_graph(
-                expected_graph_revision=before_add.graph_revision,
-                target_component_id="example.counter",
-            )
-            with_counter = host.registry.graph_identity
+
+            async def await_counter_membership(expected):
+                deadline = asyncio.get_running_loop().time() + 120
+                while asyncio.get_running_loop().time() < deadline:
+                    identity = host.registry.graph_identity
+                    if ("example.counter" in identity.generations) is expected:
+                        return identity
+                    await asyncio.sleep(0.25)
+                raise AssertionError(
+                    f"Selection task did not publish expected membership: "
+                    f"{await host._kernel.runtime.status()}"
+                )
+
+            with_counter = await await_counter_membership(True)
             assert "example.counter" in with_counter.generations
             assert all(
                 with_counter.generations[component_id] == generation_id
@@ -1060,11 +1069,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                 "disable", "selection/disable-counter", 1, with_counter.graph_revision
             )
             assert disabled["selection_revision"] == 2
-            await host.replace_runtime_graph(
-                expected_graph_revision=with_counter.graph_revision,
-                target_component_id="example.counter",
-            )
-            without_counter = host.registry.graph_identity
+            without_counter = await await_counter_membership(False)
             assert "example.counter" not in without_counter.generations
             assert old_counter.state.value == "STOPPED"
             assert all(
