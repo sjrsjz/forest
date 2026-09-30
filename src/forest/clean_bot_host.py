@@ -21,6 +21,7 @@ from forest.component_graph_preview import SelectionGraphPreview, preview_select
 from forest.component_selection import (
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
+    project_component_selection,
     select_package_members,
 )
 from forest.core_runtime import bootstrap_clean_kernel
@@ -913,6 +914,55 @@ class CleanBotHost:
                 expected_graph_revision=expected_graph_revision,
                 expected_configuration_revisions=expected_configuration_revisions,
             )
+
+    async def preview_component_change(
+        self,
+        *,
+        component_id: str,
+        source_kind: str,
+        package_digest: str | None,
+        manifest_digest: str | None,
+        approved_capabilities: tuple[str, ...],
+        desired_enabled: bool,
+        expected_selection_revision: int,
+        expected_graph_revision: int,
+        expected_configuration_revision: int | None,
+    ) -> SelectionGraphPreview:
+        """Project a selection write, then inspect its candidate without writing it."""
+
+        current = await self.selection_reader.snapshot()
+        if current.revision != expected_selection_revision:
+            raise ForestError(
+                "COMPONENT_SELECTION_REVISION_CONFLICT",
+                "Component selection changed before preview",
+                409,
+            )
+        if expected_configuration_revision is not None and (
+            source_kind != "installed" or not desired_enabled
+        ):
+            raise ForestError(
+                "MODULE_CONFIGURATION_REVISION_REQUIRED",
+                "Only an enabled installed package accepts a target configuration revision",
+                422,
+            )
+        selection = project_component_selection(
+            current,
+            component_id=component_id,
+            source_kind=source_kind,
+            package_digest=package_digest,
+            manifest_digest=manifest_digest,
+            approved_capabilities=approved_capabilities,
+            desired_enabled=desired_enabled,
+        )
+        return await self.preview_selection_transition(
+            selection,
+            target_component_id=component_id,
+            expected_graph_revision=expected_graph_revision,
+            expected_configuration_revisions=(
+                {component_id: expected_configuration_revision}
+                if expected_configuration_revision is not None else None
+            ),
+        )
 
     async def replace_runtime_graph(
         self,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Mapping
 
@@ -71,12 +72,17 @@ async def preview_selected_graph(
             422,
         )
     selected = select_package_members(selection, official_descriptors, catalog)
-    inspected = [
-        await inspect_official_candidate_descriptor(
-            descriptor, catalog, store, kernel=kernel
-        )
-        for descriptor in selected.official
-    ]
+    inspection_slots = asyncio.Semaphore(4)
+
+    async def inspect_official(descriptor):
+        async with inspection_slots:
+            return await inspect_official_candidate_descriptor(
+                descriptor, catalog, store, kernel=kernel
+            )
+
+    inspected = list(await asyncio.gather(*(
+        inspect_official(descriptor) for descriptor in selected.official
+    )))
     descriptors = []
     for entry in selected.installed:
         fact, descriptor = await compile_installed_candidate_descriptor(

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-
 from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.errors import ForestError
 from forest.packages import digest_json
@@ -60,7 +58,7 @@ class PackageManagementContract(CleanModuleConfigurationContract):
             {
                 "query_id": operation_id,
                 "input_schema": self._public_action_schema(declaration, port),
-                "output_schema": self.adapter.snapshot.schema(port["output_schema"]),
+                "output_schema": self.adapter.schema_snapshot(port["output_schema"]),
                 "required_role": declaration.get("required_role", "AUDITOR"),
                 **(
                     {"default_limit": declaration["default_limit"]}
@@ -80,7 +78,7 @@ class PackageManagementContract(CleanModuleConfigurationContract):
                 "action_id": operation_id,
                 "priority": declaration["priority"],
                 "input_schema": self._public_action_schema(declaration, port),
-                "output_schema": self.adapter.snapshot.schema(port["output_schema"]),
+                "output_schema": self.adapter.schema_snapshot(port["output_schema"]),
             }
             for operation_id, (declaration, port) in self._actions.items()
         ]
@@ -214,7 +212,7 @@ class PackageManagementContract(CleanModuleConfigurationContract):
         return result
 
     def _public_action_schema(self, declaration: dict, port: dict) -> dict:
-        schema = deepcopy(self.adapter.snapshot.schema(port["input_schema"]))
+        schema = self.adapter.schema_snapshot(port["input_schema"])
         actor_field = declaration.get("actor_field")
         if actor_field is None:
             return schema

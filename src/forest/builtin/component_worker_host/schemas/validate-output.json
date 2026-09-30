@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol", "bot_id", "source_graph_id", "source_graph_revision",
+    "selection_revision", "selection_digest", "target_component_id",
+    "desired_enabled", "plan_digest", "impact", "packages"
+  ],
+  "properties": {
+    "protocol": {"const": "forest.component-candidate-preview/1"},
+    "bot_id": {"type": "string", "minLength": 1},
+    "source_graph_id": {"type": "string", "minLength": 1},
+    "source_graph_revision": {"type": "integer", "minimum": 1},
+    "selection_revision": {"type": "integer", "minimum": 1},
+    "selection_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "target_component_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "desired_enabled": {"type": "boolean"},
+    "plan_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "impact": {
+      "type": "object", "additionalProperties": false,
+      "required": ["replace", "retain", "remove", "add", "drain", "prepare"],
+      "properties": {
+        "replace": {"$ref": "#/$defs/components"},
+        "retain": {"$ref": "#/$defs/components"},
+        "remove": {"$ref": "#/$defs/components"},
+        "add": {"$ref": "#/$defs/components"},
+        "drain": {"$ref": "#/$defs/components"},
+        "prepare": {"$ref": "#/$defs/components"}
+      }
+    },
+    "packages": {
+      "type": "array", "maxItems": 256,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": [
+          "component_id", "trust_level", "package_digest",
+          "configuration_revision", "configuration_schema_digest", "storage_digest"
+        ],
+        "properties": {
+          "component_id": {"type": "string"},
+          "trust_level": {"enum": ["official", "installed"]},
+          "package_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+          "configuration_revision": {"type": "integer", "minimum": 1},
+          "configuration_schema_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+          "storage_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "components": {
+      "type": "array", "maxItems": 256,
+      "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"}
+    }
+  }
+}

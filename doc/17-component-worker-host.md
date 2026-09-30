@@ -89,7 +89,7 @@ Worker Host 提交内核替换请求时，冻结所接受选择操作的全局�
 
 群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/2` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执说明目标及其依赖闭包会换代；实际成员变化以发布后的 Graph 为准；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable 与工件选择控制仍待完成。
 
-当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录与精确摘要 `artifact` 投影、持久重载账本及标准配置控制意图。私有 schema 还具备选择修订头、组件条目、幂等操作回执、内部启用/停用 SQL 端口和只读快照；宿主在构造候选图时读取快照，过滤已停用的 builtin，并从精确工件摘要装配已启用的外部包。外部包必须先有目标私有配置账本；装配时复核当前 desired 值的配置 schema 摘要与内容，未初始化或失配则拒绝。选择操作在同一私有事务内冻结操作后快照并生成独立的持久执行任务；操作事实不可改写，任务由包内 owned-work 领取、对照当前快照与 Graph revision，再向内核提交携带选择修订和摘要的 `/3` 请求。较新选择覆盖旧任务时，旧任务结算为 `SUPERSEDED`；内核请求与目标快照不符时，宿主拒绝发布。宿主在 Graph 发布期间持有与选择写入互斥的数据库围栏，旧候选不能在新的选择修订之后发布。只有冻结选择请求允许目标为旧图之外的新成员，普通重载仍要求目标属于旧图。当前内部选择端口已能自动驱动成员热加入和停用，但尚未发布为 Web/Shell 管理操作。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须建立部署工件的安装权威和完整 `module.validate`，再开放经过授权与校验的 Web/Shell/CLI 选择入口；提交前须拒绝不满足目标配置和依赖约束的选择。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
+当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录与精确摘要 `artifact` 投影、持久重载账本及标准配置控制意图。私有 schema 还具备选择修订头、组件条目、幂等操作回执、内部启用/停用 SQL 端口和只读快照；宿主在构造候选图时读取快照，过滤已停用的 builtin，并从精确工件摘要装配已启用的外部包。外部包必须先有目标私有配置账本；装配时复核当前 desired 值的配置 schema 摘要与内容，未初始化或失配则拒绝。选择操作在同一私有事务内冻结操作后快照并生成独立的持久执行任务；操作事实不可改写，任务由包内 owned-work 领取、对照当前快照与 Graph revision，再向内核提交携带选择修订和摘要的 `/3` 请求。较新选择覆盖旧任务时，旧任务结算为 `SUPERSEDED`；内核请求与目标快照不符时，宿主拒绝发布。宿主在 Graph 发布期间持有与选择写入互斥的数据库围栏，旧候选不能在新的选择修订之后发布。只有冻结选择请求允许目标为旧图之外的新成员，普通重载仍要求目标属于旧图。当前内部选择端口已能自动驱动成员热加入和停用，但尚未发布为 Web/Shell 管理操作。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须建立部署工件的安装权威、补齐资源预算与授权提交复核，再开放经过授权与校验的 Web/Shell/CLI 选择入口；提交前须拒绝不满足目标配置和依赖约束的选择。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
 
 ### 管理入口的预验证与提交边界
 
@@ -135,7 +135,12 @@ Registry 的替换排空现接受与内核围栏相同的成员集合：只冻�
 
 生产装配与候选预览现在共用 `select_package_members()`：相同的 builtin 启停、内核目标禁选、官方身份冲突、精确已安装工件及 manifest 核对规则决定候选成员。`project_component_selection()` 以当前快照和一笔拟议写入生成下一修订的规范化快照，其排序与摘要已和 Worker Host 的 PostgreSQL 账本对照。候选编译为每个启用的外部包读取并记录配置 revision、Payload 身份、schema 与存储摘要；拟启用或换代的目标外部包必须显式指定配置 revision。禁用包仍核对工件身份，但不创建 Worker。
 
-宿主可信进程的 `preview_selection_transition()` 在当前 Graph 替换锁内把冻结快照交给 `preview_selected_graph()`，使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；当前预览已有事实摘要，但没有资源预算或授权提交事务，也未开放为 Web/Shell `module.validate`。
+宿主可信进程的 `preview_selection_transition()` 在当前 Graph 替换锁内把冻结快照交给 `preview_selected_graph()`，使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；只读 `module.validate` 已接入 Web 管理查询，但没有资源预算、授权提交事务或 Shell 入口。
+
+`component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主读取当前选择快照、以相同规范化规则投影一笔拟议写入，再在图替换锁内编译不可执行候选。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。资源预算、授权提交事务中的计划事实复核及 Web/Shell 启停动作仍未完成。
+
+Graph 规划需要管理契约的 schema 描述，但这些 schema 已在 Generation 构造时从经校验的不可变包快照编译。`PackageManagementContract.describe()` 读取隔离的已编译副本，不在每次描述符比较时重复扫描工件；包工件及当前配置本身仍在预览时按精确摘要和修订检查。
+
 ### 候选事实摘要与提交复核边界
 
 `SelectionGraphPreview.plan_digest` 使用规范化事实计算：Bot 身份、来源 Graph ID/revision、目标组件、冻结选择 revision/digest、正式 Registry 的全部候选成员描述符摘要、候选包的配置 revision/Payload 身份/schema/存储摘要，以及换代影响集合。官方包与已安装包均读取各自私有配置账本的 desired 值并校验当前工件 schema；官方包按最近一次真实装配的精确工件读取，预览本身不 provision。选择快照类型自身保证排序、条目修订与摘要一致。相同事实重复预览得到相同摘要；工件或配置事实改变必须得到新摘要。

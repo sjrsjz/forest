@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.3"
+version = "1.6.4"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -30,6 +30,7 @@ stop_timeout_s = 10
 [components.capabilities]
 requests = [
   "service.call:runtime.graph.snapshot",
+  "service.call:runtime.component-candidate.preview",
   "service.call:deployment.package-registry.packages",
   "service.call:deployment.package-registry.artifact",
   "service.call:runtime.graph-replacement.request",
@@ -65,6 +66,12 @@ name = "runtime.graph.snapshot"
 contract = ">=1.0,<2.0"
 required = true
 startup_dependency = true
+
+[[components.requires]]
+name = "runtime.component-candidate.preview"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
 
 [[components.requires]]
 name = "deployment.package-registry.packages"
@@ -113,6 +120,14 @@ semantics = "read"
 visibility = "management"
 input_schema = "schemas/artifact-input.json"
 output_schema = "schemas/artifact-output.json"
+
+[[components.provides]]
+name = "component.host.validate"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/validate-input.json"
+output_schema = "schemas/validate-output.json"
 
 [[components.provides]]
 name = "component.host.module"
@@ -282,6 +297,11 @@ timeout_s = 10
 id = "selection"
 port = "component.selection.snapshot"
 timeout_s = 10
+
+[[components.management_queries]]
+id = "validate"
+port = "component.host.validate"
+timeout_s = 45
 
 [[components.owned_work_handlers]]
 name = "component.reload.pending"

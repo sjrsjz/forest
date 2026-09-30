@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -396,7 +397,7 @@ async def inspect_official_candidate_descriptor(
     """Pin an assembled official package to its current desired configuration."""
 
     artifact = descriptor.artifact
-    snapshot = catalog.get(artifact.package_digest)
+    snapshot = await asyncio.to_thread(catalog.get, artifact.package_digest)
     if (
         artifact.trust_level != "official"
         or artifact.driver != "forest.python-worker/1"
@@ -411,14 +412,14 @@ async def inspect_official_candidate_descriptor(
             "Official package descriptor differs from its pinned artifact",
             409,
         )
-    storage = _configuration_storage(snapshot)
+    storage = await asyncio.to_thread(_configuration_storage, snapshot)
     if descriptor.storage is None or descriptor.storage.package_digest != storage.package_digest:
         raise ForestError(
             "COMPONENT_SELECTION_ARTIFACT_CHANGED",
             "Official package storage differs from its pinned artifact",
             409,
         )
-    schema = snapshot.schema(snapshot.component["config_schema"])
+    schema = await asyncio.to_thread(snapshot.schema, snapshot.component["config_schema"])
     schema_digest = digest_json(schema)
     configuration = ModuleConfigurationRepository(
         store,

@@ -716,7 +716,7 @@ async def test_graph_replacement_worker_records_post_publication_failure():
 
 
 @pytest.mark.postgres
-async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_path):
+async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_path, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
@@ -772,6 +772,32 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                 item["name"] == "deployment.package-registry.artifact"
                 for item in artifact["requires"]
             )
+            selection_before_preview = await worker_host.management_contract.query(
+                "selection", {}
+            )
+            validation_input = {
+                    "component_id": "agent.runtime",
+                    "source_kind": "builtin",
+                    "package_digest": None,
+                    "manifest_digest": None,
+                    "approved_capabilities": [],
+                    "desired_enabled": True,
+                    "expected_selection_revision": selection_before_preview["revision"],
+                    "expected_graph_revision": previous.graph_revision,
+                    "expected_configuration_revision": None,
+            }
+            preview = await asyncio.wait_for(
+                worker_host.management_contract.query("validate", validation_input),
+                timeout=50,
+            )
+            assert preview["protocol"] == "forest.component-candidate-preview/1"
+            assert preview["target_component_id"] == "agent.runtime"
+            assert "agent.runtime" in preview["impact"]["replace"]
+            assert preview["plan_digest"].startswith("sha256:")
+            assert (await worker_host.management_contract.query("selection", {})) == (
+                selection_before_preview
+            )
+            assert host.registry.graph_identity == previous
             web_request = await worker_host.management_contract.action(
                 "module.reload",
                 operation_id="web:reload-missing",

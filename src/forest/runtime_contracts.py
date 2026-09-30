@@ -145,6 +145,19 @@ class RuntimeKernelServiceContext:
             )
         return catalog
 
+    @property
+    def component_candidate_previewer(self):
+        """Expose only the Host's read-only candidate preview operation."""
+
+        preview = getattr(self._registry.runtime.bot, "preview_component_change", None)
+        if not callable(preview):
+            raise ForestError(
+                "COMPONENT_PREVIEW_UNAVAILABLE",
+                "Bot host cannot preview component candidates",
+                503,
+            )
+        return preview
+
     def participant(self, component_id: str):
         if component_id not in self._participants:
             raise ForestError(

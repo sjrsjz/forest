@@ -43,6 +43,15 @@ class ComponentWorkerHost(Plugin):
             timeout=30,
         )
 
+    @service("component.host.validate", semantics="read")
+    async def validate(self, payload, ctx):
+        return await ctx.services.call(
+            "runtime.component-candidate.preview",
+            {"protocol": "forest.component-candidate-preview-request/1", **payload},
+            operation_id=ctx.operations.stable("component-candidate-preview"),
+            timeout=45,
+        )
+
     @service("component.host.modules", semantics="read")
     async def modules(self, payload, ctx):
         graph = await self._graph(ctx)

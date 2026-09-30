@@ -12,6 +12,7 @@ import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -211,6 +212,11 @@ class PackageGenerationAdapter:
     """One generic host-side handle for one immutable package Generation."""
 
     requires_replacement_quiesce = True
+
+    def schema_snapshot(self, reference: str) -> dict:
+        """Return an isolated copy of a schema frozen at Generation construction."""
+
+        return deepcopy(self._compiled_schemas[reference])
 
     def __init__(
         self,
