@@ -387,3 +387,5 @@ Worker Host 私有 schema 已加入 Bot 级选择修订头、每组件选择条�
 Worker Host 现于选择写入事务中保存不可改写的操作后快照，并在独立的 `selection_applications` 表排入持久任务；包内 owned-work 领取后比较当前快照和 Graph revision，按规范化快照摘要提交内核 `/3` 请求。过时任务结算 `SUPERSEDED`，执行状态、回执与错误留在包私有账本。隔离 PostgreSQL 已验证并发选择 CAS、快照冻结、任务领取/结算与操作不可变（`1 passed`）；完整官方宿主在假 Bot 链路下由任务自动热加入并停用已安装 Counter 包，原有 Generation 保留（`1 passed`，368.35 秒）。这仍是内部端口：部署安装、完整候选验证及 Web/Shell 授权选择尚未接通，不能宣称用户已可从管理界面安装插件。
 
 Worker Host 包内管理页现提供显式选择快照与选择请求状态查询；后者将包私有任务状态和内核 Graph 替换结算分别显示，避免 `SUBMITTED` 被误读成成功发布。包声明与 UI 脚本语法已验证，本地服务状态用例 `1 passed`。对外启停仍保持关闭：现行通用 management action 只允许直接映射 Domain Command，无法在同一次授权写入前完成工件、配置和真实候选图预验证。设计文档明确要求先扩展预验证加事务复核契约，再发布两个独立授权动作。
+
+在重新启动 Docker、确认宿主机端口可连接并把 pytest 临时目录移到 D 盘后，完整 Worker Host PostgreSQL 用例通过（`1 passed`，392.39 秒）。它按顺序验证组件重载、两次配置重建、选择任务驱动的外部 Counter 热加入与停用，以及内核结算后的旧 Generation 停止；均使用假 Bot 客户端，未向 QQ 发消息。上次在 `QUIESCENT` 上失败是测试先于旧 Registry 排空读取状态的时序问题，现于内核选择请求 `SUCCEEDED` 后断言。此结果只覆盖内部选择执行链；部署安装、无副作用的完整 `module.validate`、Web/Shell 授权选择和长期运行仍未验收。
