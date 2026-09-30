@@ -868,23 +868,31 @@ class CleanBotHost:
                 if activation_id is None
                 else await self._assemble_registry(activation_id)
             )
+            membership_changed = set(candidate.states) != set(previous.states)
             affected = (
-                candidate.plan_retained_generations(previous, target_component_id)
-                if target_component_id is not None
-                else None
+                candidate.plan_graph_transition(
+                    previous, target_component_id=target_component_id
+                )
+                if membership_changed
+                else (
+                    candidate.plan_retained_generations(previous, target_component_id)
+                    if target_component_id is not None
+                    else None
+                )
             )
             previous_drained = False
             try:
                 await candidate.prewarm()
-                await previous.drain_owned_work_for_replacement(
-                    candidate.activation_id,
-                    components=(
-                        affected
-                        if affected is not None and len(affected) < len(previous.order)
-                        else None
-                    ),
-                )
-                previous_drained = True
+                if affected is None or affected:
+                    await previous.drain_owned_work_for_replacement(
+                        candidate.activation_id,
+                        components=(
+                            affected
+                            if affected is not None and len(affected) < len(previous.order)
+                            else None
+                        ),
+                    )
+                    previous_drained = True
                 await candidate.start()
                 candidate.accept_retained_ownership()
             except BaseException as replacement_error:

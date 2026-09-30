@@ -368,3 +368,5 @@ Worker Host 的 `runtime.graph-replacement.request/2` 现携带目标组件 ID�
 Worker Host 的目标组件重载现执行局部换代。宿主比较候选与当前冻结描述符，把目标、变化组件和依赖消费者纳入换代闭包；候选只为闭包预热新实例，其他组件沿用原 Generation、Python 实例和 Worker，且不重复激活配置。发布成功后新 Registry 接管保留实例的监督及最终关闭；旧 Registry 只关闭换代成员，原 Router 保留至其最后一个原 Generation 被关闭。隔离 PostgreSQL 的五成员图验证了单目标换代、四成员身份与实例保留，以及候选预热失败不关闭借用实例（`1 passed`）；完整官方包宿主在 Fake OneBot 下经 Shell 请求、跨图旧句柄重放和后续配置重建走通（`1 passed`，301.62 秒，未向 QQ 发消息）。动态新增/移除成员、部署工件选择与发布后的激活故障恢复仍未完成，不能把全部组件控制面标记为生产验收通过。
 
 RuntimeGraph 热替换的发布后故障现按故障边界处理：候选图提交后若本地 Generation 激活失败，Registry 撤下候选路由，Host 不再尝试恢复已退役的旧图，也不把替换请求结算为成功；宿主监督器使该 Bot 失败并关闭两代资源。发布前失败仍可恢复旧图；若排空、恢复或清理本身失败，则宿主同样失败。针对性本地用例 7 passed，隔离 PostgreSQL 发布后激活故障用例 1 passed，Ruff 通过。新宿主自动恢复策略及动态成员增删、部署包启停仍未完成。
+
+RuntimeGraph 成员集合变化已贯通 Registry 规划与宿主替换入口：候选与来源成员取对称差，叠加描述符变化和启动/保留依赖消费者闭包；纯新增跳过旧图排空，纯移除允许零个新建 Generation 并保留其余实例、路由和身份。隔离 PostgreSQL 用例经宿主入口依次加入、移除真实 Counter builtin 包，核对五个内核 Generation 和实例始终不变、移除后旧包路由失效（1 passed）。这只是图执行能力；CleanBotHost._assemble_registry() 尚未读取 Worker Host 的持久包选择与启停事实，管理端安装/校验/选择仍未完成，不能宣称用户可经 WebUI 动态安装插件。

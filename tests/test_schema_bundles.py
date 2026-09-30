@@ -18,6 +18,7 @@ import pytest_asyncio
 from psycopg import sql
 
 from forest.builtin_packages import _configuration_storage, bootstrap_builtin_package
+from forest.clean_bot_host import CleanBotHost
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
@@ -2388,6 +2389,75 @@ async def test_runtime_registry_transfers_unaffected_generations_without_restart
             original_graph.generations[component_id]
         )
     assert await candidate.close() == []
+
+
+@pytest.mark.postgres
+async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kernel(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    core = await bootstrap_clean_kernel(store, installer)
+    lease = await core.runtime.claim_host("host-member-change", "inc-member-change")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer,
+        generation_authority=core.runtime,
+    )
+    first = RuntimeModuleRegistry(host, core.descriptors)
+    await first.start()
+    original_instances = dict(first.instances)
+    original_generations = dict(first.graph_identity.generations)
+    counter = await bootstrap_builtin_package(
+        Path(str(files("forest").joinpath("builtin/counter"))),
+        PackageCatalog(tmp_path / "member-change-packages"),
+        store,
+        installer,
+        kernel=core,
+        initial_configuration={"label": "optional", "multiplier": 1},
+    )
+
+    added = RuntimeModuleRegistry(host, core.descriptors + (counter.descriptor,))
+    controller = object.__new__(CleanBotHost)
+    controller._replacement_lock = asyncio.Lock()
+    controller._closing = False
+    controller.registry = first
+
+    async def assemble_added(_activation_id=None):
+        return added
+
+    controller._assemble_registry = assemble_added
+    assert await controller.replace_runtime_graph(
+        target_component_id="forest.counter"
+    ) is added
+    assert (await core.runtime.status())["graph_id"] == added.graph_identity.graph_id
+    for component_id, generation_id in original_generations.items():
+        assert added.get(component_id) is original_instances[component_id]
+        assert added.graph_identity.generations[component_id] == generation_id
+    counter_instance = added.get("forest.counter")
+
+    removed = RuntimeModuleRegistry(host, core.descriptors)
+
+    async def assemble_removed(_activation_id=None):
+        return removed
+
+    controller._assemble_registry = assemble_removed
+    assert await controller.replace_runtime_graph(
+        target_component_id="forest.counter"
+    ) is removed
+    assert counter_instance.state.value == "STOPPED"
+    assert (await core.runtime.status())["graph_id"] == removed.graph_identity.graph_id
+    for component_id, generation_id in original_generations.items():
+        assert removed.get(component_id) is original_instances[component_id]
+        assert removed.graph_identity.generations[component_id] == generation_id
+    with pytest.raises(ForestError) as missing:
+        await core.runtime.verify_active_generation(
+            component_id="forest.counter",
+            generation_id=added.graph_identity.generations["forest.counter"],
+        )
+    assert missing.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    assert await removed.close() == []
 
 
 @pytest.mark.postgres

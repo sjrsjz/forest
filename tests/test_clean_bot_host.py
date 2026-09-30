@@ -385,6 +385,8 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
     events = []
 
     class Previous:
+        states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
+
         async def drain_owned_work_for_replacement(self, operation_id, *, components):
             assert operation_id == "replacement/one"
             assert components is None
@@ -396,6 +398,7 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
 
     class Candidate:
         activation_id = "replacement/one"
+        states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
 
         async def prewarm(self):
             events.append("prewarm-candidate")
@@ -510,6 +513,8 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
     events = []
 
     class Previous:
+        states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
+
         async def drain_owned_work_for_replacement(self, operation_id, *, components):
             assert operation_id == "replacement/failing"
             assert components is None
@@ -520,6 +525,7 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
 
     class Candidate:
         activation_id = "replacement/failing"
+        states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
 
         async def prewarm(self):
             events.append("prewarm-candidate")
@@ -561,6 +567,8 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
     events = []
 
     class Previous:
+        states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
+
         async def drain_owned_work_for_replacement(self, _operation_id, *, components):
             assert components is None
             events.append("drain-previous")
@@ -571,6 +579,7 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
     class Candidate:
         activation_id = "replacement/activation-failure"
         publication_committed = False
+        states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
 
         async def prewarm(self):
             events.append("prewarm-candidate")

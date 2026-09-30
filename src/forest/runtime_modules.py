@@ -949,7 +949,25 @@ class RuntimeModuleRegistry:
     def plan_retained_generations(
         self, previous: RuntimeModuleRegistry, target_component_id: str
     ) -> tuple[str, ...]:
-        """Freeze a component replacement plan before constructing any new instance."""
+        """Replace a current member while retaining the unaffected Generations."""
+
+        if target_component_id not in previous.states or target_component_id not in self.states:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_PLAN_INVALID",
+                "Component replacement requires a member in both Graphs",
+                409,
+            )
+        return self.plan_graph_transition(
+            previous, target_component_id=target_component_id
+        )
+
+    def plan_graph_transition(
+        self,
+        previous: RuntimeModuleRegistry,
+        *,
+        target_component_id: str | None = None,
+    ) -> tuple[str, ...]:
+        """Plan replace, retain, add and remove against one active source Graph."""
 
         if self.instances or self.graph_identity is not None or self._retained_from is not None:
             raise ForestError(
@@ -959,20 +977,26 @@ class RuntimeModuleRegistry:
             )
         if (
             previous.graph_identity is None
-            or target_component_id not in previous.states
-            or target_component_id not in self.states
-            or set(previous.states) != set(self.states)
             or any(state != ModuleLifecycleState.ACTIVE for state in previous.states.values())
+            or (
+                target_component_id is not None
+                and target_component_id not in previous.states
+                and target_component_id not in self.states
+            )
         ):
             raise ForestError(
                 "RUNTIME_REPLACEMENT_PLAN_INVALID",
-                "Component replacement requires matching active source and candidate members",
+                "Graph transition requires an active source and a known target",
                 409,
             )
-        changed = {target_component_id}
+        changed = set(previous.states) ^ set(self.states)
+        if target_component_id is not None:
+            changed.add(target_component_id)
         previous_descriptors = {item.component_id: item for item in previous.descriptors}
         for descriptor in self.descriptors:
             component_id = descriptor.component_id
+            if component_id not in previous.states:
+                continue
             self.instances[component_id] = previous.instances[component_id]
             try:
                 candidate_digest = self._descriptor_fact(descriptor)["descriptor_digest"]
@@ -996,11 +1020,11 @@ class RuntimeModuleRegistry:
             if expanded == changed:
                 break
             changed = expanded
-        retained = frozenset(self.states) - changed
+        retained = frozenset(set(previous.states) & set(self.states) - changed)
         if retained:
             self._retained_from = previous
             self._retained_components = retained
-        return tuple(item for item in self.order if item in changed)
+        return tuple(item for item in previous.order if item in changed)
 
     def accept_retained_ownership(self) -> None:
         """Transfer retained instances only after their new Graph is published."""

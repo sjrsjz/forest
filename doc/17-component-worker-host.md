@@ -81,9 +81,9 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 
 ### 局部换代的内核边界
 
-当前 `RuntimeModuleRegistry` 用冻结描述符摘要和启动/保留依赖计算换代闭包，只为闭包创建新实例与 Generation；闭包外的原实例、Worker 进程、Generation 身份及配置 effective 均不重绑定。候选 Router 登记保留提供方以接收新图入站调用；保留实例内部的旧句柄继续使用原 Router，并由内核核对调用方和提供方准确 Generation 的当前成员身份。Graph 发布成功后，旧 Registry 只关闭换代成员，原 Router 随被保留的 Generation 保持可用；新 Registry 负责这些实例的监督和最终关闭。
+当前 `RuntimeModuleRegistry` 用冻结描述符摘要和启动/保留依赖计算换代闭包，只为闭包及新增成员创建新实例与 Generation；闭包外的原实例、Worker 进程、Generation 身份及配置 effective 均不重绑定。候选 Router 登记保留提供方以接收新图入站调用；保留实例内部的旧句柄继续使用原 Router，并由内核核对调用方和提供方准确 Generation 的当前成员身份。Graph 发布成功后，旧 Registry 只关闭换代或移除的成员，原 Router 随被保留的 Generation 保持可用；新 Registry 负责这些实例的监督和最终关闭。纯新增不排空旧图的任何成员；纯移除允许候选图全部引用保留 Generation，而不强迫虚构一个新代。
 
-完整候选规划应从当前已发布图及冻结包描述符计算 `replace | retain | remove | add` 成员集合；现有目标重载只处理成员集合不变时的 `replace | retain`。目标组件、其包摘要/配置生效修订变化者，以及持有受影响组件冻结启动路由或贡献目录的消费者进入替换闭包；闭包外组件只有在原 Generation、描述符摘要、配置生效修订、Host 围栏与路由依赖都不变时才能 `retain`。计划必须列出精确影响集合和资源预算，写入持久控制意图；预热只为 `replace/add` 创建新 Worker。`retain` 不执行 `prepare/start/stop`，不重新绑定其不可变 Generation 身份，也不改写其私有配置 effective 或 owned-work 租约。
+Registry 的候选规划现从当前已发布图及冻结描述符计算 `replace | retain | remove | add` 成员集合，宿主对成员变化调用该规划；目标组件、其包摘要/配置生效修订变化者，以及持有受影响组件冻结启动路由或贡献目录的消费者进入替换闭包。闭包外组件只有在原 Generation、描述符摘要、配置生效修订、Host 围栏与路由依赖都不变时才能 `retain`。Worker Host 仍缺少把这一规划与包选择事实、精确影响集合、资源预算一起写入持久控制意图的能力；当前 `CleanBotHost._assemble_registry()` 固定列出官方组件。预热只为 `replace/add` 创建新 Worker。`retain` 不执行 `prepare/start/stop`，不重新绑定其不可变 Generation 身份，也不改写其私有配置 effective 或 owned-work 租约。
 
 新图成员事实可以引用仍然 `ACTIVE` 的旧 Generation。内核持久层现按来源 Graph ID、准确 Generation ID、当前 Host lease 和冻结依赖事实验证保留成员：保留者的依赖若指向换代或移除组件，候选准备直接拒绝；发布时来源图必须仍是当前图，新建成员仍须 `READY`。发布事务只把 `replace/remove` 旧代变为 `QUIESCING`，只对这些路由增加 epoch；`retain` 的 Generation 与路由 epoch 保持原值，且不重复推进配置 effective 或发布回调。历史图不能把当前图保留的 Generation 标为停止。Worker Host 的目标重载已使用这些内核事务能力。候选发布前失败时，宿主只清理本次新建 Worker，不关闭借用的旧代。
 

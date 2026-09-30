@@ -2145,10 +2145,10 @@ class KernelRuntimeRepository:
         ordered = sorted(bindings, key=lambda item: item.component_id)
         components = {item.component_id for item in ordered}
         required_components = components | (available_components or set())
-        if not ordered or len(components) != len(ordered):
+        if (not ordered and not available_components) or len(components) != len(ordered):
             raise ForestError(
                 "RUNTIME_GENERATION_BINDING_INVALID",
-                "Runtime generation bindings must be non-empty and unique",
+                "Runtime generation bindings must be unique and the Graph non-empty",
                 422,
             )
         for item in ordered:
