@@ -1,12 +1,15 @@
-"""Generic provisioning for official builtin plugin packages."""
+"""Provision immutable official and installed package Generations."""
 
 from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
+
+from jsonschema import Draft202012Validator
 
 from forest.errors import ForestError
 from forest.package_domain_authority import PostgresPackageDomainAuthority
@@ -46,7 +49,7 @@ from forest.unit_of_work import (
 
 
 @dataclass(frozen=True)
-class BuiltinPackageModule:
+class ProvisionedPackageModule:
     snapshot: PackageSnapshot
     descriptor: RuntimeModuleDescriptor
     configuration: ModuleConfigurationRepository
@@ -85,8 +88,6 @@ def _required_service_contracts(
 def _configuration_storage(snapshot: PackageSnapshot) -> RuntimeStorageBundle:
     """Attach the standard configuration ledger to one official package namespace."""
 
-    from importlib.resources import files
-
     component_id = snapshot.component["id"]
     common = files("forest").joinpath("storage/official/module_configuration.sql").read_bytes()
     declared = snapshot.storage_bundle()
@@ -118,6 +119,52 @@ def _configuration_storage(snapshot: PackageSnapshot) -> RuntimeStorageBundle:
     )
 
 
+def _installed_configuration_storage(component_id: str) -> RuntimeStorageBundle:
+    """Keep trusted configuration SQL outside an installed package's SQL bundle."""
+
+    baseline = files("forest").joinpath("storage/official/module_configuration.sql").read_bytes()
+    schema_id = "forest.configuration." + hashlib.sha256(component_id.encode()).hexdigest()[:32]
+    spec = StorageBundleSpec(
+        component_id,
+        schema_id,
+        "1.0.0",
+        hashlib.sha256(baseline).hexdigest(),
+        "forest.module-configuration.repository/1",
+    )
+    return RuntimeStorageBundle(
+        spec,
+        baseline,
+        storage_bundle_digest(spec, "official"),
+        execution_profile="official",
+    )
+
+
+def _installed_domain_storage(snapshot: PackageSnapshot) -> RuntimeStorageBundle | None:
+    declared = snapshot.storage_bundle()
+    if declared is None:
+        return None
+    metadata, baseline = declared
+    if metadata["execution_profile"] != "declarative":
+        raise ForestError(
+            "PACKAGE_STORAGE_TRUST_REQUIRED",
+            "Installed package SQL must use the declarative profile",
+            403,
+        )
+    spec = StorageBundleSpec(
+        snapshot.component["id"],
+        metadata["schema_id"],
+        metadata["schema_version"],
+        metadata["baseline_sha256"],
+        metadata["repository_contract"],
+    )
+    return RuntimeStorageBundle(
+        spec,
+        baseline,
+        storage_bundle_digest(spec, "declarative"),
+        execution_profile="declarative",
+    )
+
+
 async def bootstrap_builtin_package(
     source: Path,
     catalog: PackageCatalog,
@@ -130,28 +177,150 @@ async def bootstrap_builtin_package(
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     configuration_validator_factory: Callable[[str], Callable] | None = None,
     additional_grants: tuple[CapabilityGrant, ...] = (),
-) -> BuiltinPackageModule:
+) -> ProvisionedPackageModule:
     """Build and provision one builtin through the same immutable package path."""
 
     snapshot = catalog.build(source)
+    return await _bootstrap_package_snapshot(
+        snapshot,
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration=initial_configuration,
+        resolved_contracts=resolved_contracts,
+        effect_driver_registry=effect_driver_registry,
+        configuration_validator_factory=configuration_validator_factory,
+        additional_grants=additional_grants,
+        trust_level="official",
+    )
+
+
+async def bootstrap_installed_package(
+    package_digest: str,
+    catalog: PackageCatalog,
+    store,
+    installer,
+    *,
+    kernel,
+    initial_configuration: dict[str, Any],
+    approved_capabilities: tuple[str, ...],
+    resolved_contracts: dict[str, str] | None = None,
+) -> ProvisionedPackageModule:
+    """Bind one approved catalog artifact without treating its SQL as official code."""
+
+    snapshot = catalog.get(package_digest)
+    if snapshot.component["scope"] != "bot":
+        raise ForestError(
+            "PACKAGE_SCOPE_UNSUPPORTED",
+            "Bot package assembly requires a Bot-scoped component",
+            422,
+        )
+    requested = frozenset(snapshot.component.get("capabilities", {}).get("requests", ()))
+    if (
+        not isinstance(approved_capabilities, tuple)
+        or any(not isinstance(item, str) for item in approved_capabilities)
+        or len(approved_capabilities) != len(set(approved_capabilities))
+        or frozenset(approved_capabilities) != requested
+    ):
+        raise ForestError(
+            "PACKAGE_CAPABILITY_APPROVAL_REQUIRED",
+            "Installed package capabilities require an exact approved set",
+            403,
+        )
+    return await _bootstrap_package_snapshot(
+        snapshot,
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration=initial_configuration,
+        resolved_contracts=resolved_contracts,
+        trust_level="installed",
+    )
+
+
+async def _bootstrap_package_snapshot(
+    snapshot: PackageSnapshot,
+    store,
+    installer,
+    *,
+    kernel,
+    initial_configuration: dict[str, Any],
+    resolved_contracts: dict[str, str] | None = None,
+    effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
+    configuration_validator_factory: Callable[[str], Callable] | None = None,
+    additional_grants: tuple[CapabilityGrant, ...] = (),
+    trust_level: str,
+) -> ProvisionedPackageModule:
     component_id = snapshot.component["id"]
-    storage = _configuration_storage(snapshot)
+    configuration_schema = snapshot.schema(snapshot.component["config_schema"])
+    if trust_level == "official":
+        configuration_storage = storage = _configuration_storage(snapshot)
+    elif trust_level == "installed":
+        if snapshot.manifest["runtime"] != "python-worker":
+            raise ForestError(
+                "PACKAGE_RUNTIME_UNSUPPORTED",
+                "Installed package requires the Python Worker runtime",
+                422,
+            )
+        if not Draft202012Validator(configuration_schema).is_valid(initial_configuration):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_INVALID",
+                "Initial package configuration violates its declared schema",
+                422,
+            )
+        domain_storage = _installed_domain_storage(snapshot)
+        if any(
+            snapshot.component.get(name)
+            for name in (
+                "domain_queries",
+                "domain_commands",
+                "unit_of_work_participants",
+                "owned_work_handlers",
+            )
+        ):
+            raise ForestError(
+                "PACKAGE_DOMAIN_AUTHORITY_UNAVAILABLE",
+                "Installed package SQL procedures require a separate reviewed authority",
+                422,
+            )
+        if snapshot.component.get("effect_services"):
+            raise ForestError(
+                "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
+                "Installed package has no approved host effect driver binding",
+                422,
+            )
+        configuration_storage = _installed_configuration_storage(component_id)
+        storage = domain_storage
+        if storage is not None and storage.spec.schema_id == configuration_storage.spec.schema_id:
+            raise ForestError(
+                "PACKAGE_STORAGE_IDENTITY_CONFLICT",
+                "Installed package storage collides with its configuration ledger",
+                422,
+            )
+    else:
+        raise ValueError("Package trust level is invalid")
+    if trust_level == "installed" and storage is not None:
+        await installer.install(
+            storage.spec,
+            storage.baseline,
+            storage.package_digest,
+            execution_profile=storage.execution_profile,
+        )
     await installer.install(
-        storage.spec,
-        storage.baseline,
-        storage.package_digest,
-        execution_profile=storage.execution_profile,
+        configuration_storage.spec,
+        configuration_storage.baseline,
+        configuration_storage.package_digest,
+        execution_profile=configuration_storage.execution_profile,
     )
     configuration = ModuleConfigurationRepository(
         store,
         component_id=component_id,
-        namespace=storage.spec.namespace,
+        namespace=configuration_storage.spec.namespace,
         payloads=kernel.payload,
         immutable_paths=tuple(snapshot.component.get("config_immutable_paths", ())),
     )
-    configuration_schema = snapshot.schema(snapshot.component["config_schema"])
     configuration_validator = (
-        configuration_validator_factory(storage.spec.namespace)
+        configuration_validator_factory(configuration_storage.spec.namespace)
         if configuration_validator_factory is not None
         else None
     )
@@ -267,6 +436,6 @@ async def bootstrap_builtin_package(
             schema=configuration_schema,
             validator=configuration_validator,
         ),
-        trust_level="official",
+        trust_level=trust_level,
     )
-    return BuiltinPackageModule(snapshot, descriptor, configuration, grants)
+    return ProvisionedPackageModule(snapshot, descriptor, configuration, grants)

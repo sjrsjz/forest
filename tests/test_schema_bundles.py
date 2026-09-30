@@ -17,7 +17,11 @@ import pytest
 import pytest_asyncio
 from psycopg import sql
 
-from forest.builtin_packages import _configuration_storage, bootstrap_builtin_package
+from forest.builtin_packages import (
+    _configuration_storage,
+    bootstrap_builtin_package,
+    bootstrap_installed_package,
+)
 from forest.clean_bot_host import CleanBotHost
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
@@ -1266,23 +1270,33 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
         async def reject_management_write(_conn, **_kwargs):
             raise ForestError("WEB_POLICY_DENIED", "denied", 403)
 
+        authorization = SimpleNamespace(
+            web_subject_ref="web:test",
+            target_generation_id=instance.generation_identity.generation_id,
+        )
         with pytest.raises(ForestError, match="denied"):
             await contract.action(
                 "counter.set",
                 operation_id="management:counter:set:denied",
                 payload={"value": 11, "expected_revision": 5},
+                authorization=authorization,
                 authorization_guard=reject_management_write,
             )
         assert await contract.query("counter.current", {}) == {
             "value": 10,
             "revision": 5,
         }
+        async def accept_management_write(_conn, **_kwargs):
+            return None
+
         changed = await contract.action(
             "counter.set",
             operation_id="management:counter:set:accepted",
             payload={"value": 12, "expected_revision": 5},
+            authorization=authorization,
+            authorization_guard=accept_management_write,
         )
-        assert changed.value == {"value": 12, "revision": 6}
+        assert changed == {"value": 12, "revision": 6}
         transaction_endpoint = instance.runtime_service_handlers()[
             ("counter.transaction", 1)
         ]
@@ -2458,6 +2472,135 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
         )
     assert missing.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
     assert await removed.close() == []
+
+
+@pytest.mark.postgres
+async def test_installed_archive_uses_separate_configuration_schema_and_hot_reloads(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    core = await bootstrap_clean_kernel(store, installer)
+    package_root = tmp_path / "installed-source"
+    copytree(Path(__file__).parent / "fixtures" / "routing_component", package_root)
+    baseline = b"CREATE TABLE plugin_records (record_id text PRIMARY KEY);"
+    (package_root / "schema").mkdir()
+    (package_root / "schema" / "records.sql").write_bytes(baseline)
+    with (package_root / "module.toml").open("a", encoding="utf-8") as manifest:
+        manifest.write(
+            "\n[components.storage]\n"
+            'schema_id = "tests.routing-component.records"\n'
+            'schema_version = "1.0.0"\n'
+            'baseline = "schema/records.sql"\n'
+            f'baseline_sha256 = "{hashlib.sha256(baseline).hexdigest()}"\n'
+            'scope = "bot"\n'
+            'repository_contract = "tests.routing-component.repository/1"\n'
+            'execution_profile = "declarative"\n'
+        )
+    source_catalog = PackageCatalog(tmp_path / "source-packages")
+    source = source_catalog.build(package_root)
+    catalog = PackageCatalog(tmp_path / "installed-packages")
+    installed_snapshot = catalog.import_archive(source_catalog.export_archive(source.digest))
+    installed = await bootstrap_installed_package(
+        installed_snapshot.digest,
+        catalog,
+        store,
+        installer,
+        kernel=core,
+        initial_configuration={},
+        approved_capabilities=(
+            "event.publish:tests.ready",
+            "job.schedule:tests.echo",
+        ),
+    )
+    assert installed.descriptor.artifact.trust_level == "installed"
+    assert installed.descriptor.storage is not None
+    assert installed.descriptor.storage.execution_profile == "declarative"
+    assert installed.descriptor.storage.package_digest != installed_snapshot.digest
+    assert installed.configuration.namespace != installed.descriptor.storage.spec.namespace
+    async with store.pool.connection() as conn:
+        config_bundle = await (
+            await conn.execute(
+                "SELECT component_id,execution_profile FROM forest_kernel.schema_bundles "
+                "WHERE bot_id=%s AND namespace=%s",
+                (store.bot_id, installed.configuration.namespace),
+            )
+        ).fetchone()
+    assert config_bundle["component_id"] == "tests.routing-component"
+    assert config_bundle["execution_profile"] == "official"
+    routing = await bootstrap_builtin_package(
+        Path(str(files("forest").joinpath("builtin/routing_graph"))),
+        catalog,
+        store,
+        installer,
+        kernel=core,
+        initial_configuration={"protocol": "forest.routing.graph/2"},
+    )
+    lease = await core.runtime.claim_host("host-installed-package", "inc-installed-package")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer,
+        generation_authority=core.runtime,
+    )
+    descriptors = core.descriptors + (routing.descriptor, installed.descriptor)
+    first = RuntimeModuleRegistry(host, descriptors)
+    await first.start()
+    first_graph = first.graph_identity
+    core_instances = {item: first.get(item) for item in first_graph.generations if item.startswith("kernel.")}
+
+    updated_root = tmp_path / "updated-source"
+    copytree(package_root, updated_root)
+    updated_manifest = updated_root / "module.toml"
+    updated_manifest.write_text(
+        updated_manifest.read_text(encoding="utf-8").replace(
+            'version = "1.0.0"', 'version = "1.0.1"', 1
+        ),
+        encoding="utf-8",
+    )
+    updated_code = updated_root / "python" / "routing_component.py"
+    updated_code.write_text(
+        updated_code.read_text(encoding="utf-8") + "\nGENERATION_MARKER = 'v2'\n",
+        encoding="utf-8",
+    )
+    updated_source = source_catalog.build(updated_root)
+    updated_snapshot = catalog.import_archive(
+        source_catalog.export_archive(updated_source.digest)
+    )
+    updated = await bootstrap_installed_package(
+        updated_snapshot.digest,
+        catalog,
+        store,
+        installer,
+        kernel=core,
+        initial_configuration={},
+        approved_capabilities=(
+            "event.publish:tests.ready",
+            "job.schedule:tests.echo",
+        ),
+    )
+    assert updated.snapshot.digest != installed.snapshot.digest
+    assert updated.descriptor.storage.package_digest == installed.descriptor.storage.package_digest
+    candidate = RuntimeModuleRegistry(
+        host, core.descriptors + (routing.descriptor, updated.descriptor)
+    )
+    affected = candidate.plan_retained_generations(first, "tests.routing-component")
+    await candidate.prewarm()
+    await first.drain_owned_work_for_replacement(
+        candidate.activation_id,
+        components=affected if len(affected) < len(first.order) else None,
+    )
+    await candidate.start()
+    candidate.accept_retained_ownership()
+    assert await first.close() == []
+    assert candidate.graph_identity.generations["tests.routing-component"] != (
+        first_graph.generations["tests.routing-component"]
+    )
+    assert candidate.get("tests.routing-component").snapshot.digest == updated_snapshot.digest
+    for component_id, instance in core_instances.items():
+        assert candidate.get(component_id) is instance
+        assert candidate.graph_identity.generations[component_id] == first_graph.generations[component_id]
+    assert await candidate.close() == []
 
 
 @pytest.mark.postgres

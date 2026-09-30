@@ -24,7 +24,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from forest.errors import ForestError
-from forest.packages import contract_matches, contract_range, digest_json
+from forest.packages import contract_matches, contract_range, digest_json, storage_bundle_digest
 from forest.runtime_contracts import RuntimeContractRouter, RuntimeKernelServiceSpec
 from forest.runtime_generation import (
     BoundGenerationIdentity,
@@ -1376,9 +1376,12 @@ class RuntimeModuleRegistry:
                     and (
                         descriptor.storage.spec.component_id != identity
                         or (
-                            descriptor.storage.execution_profile != "official"
-                            and descriptor.storage.package_digest
-                            != descriptor.artifact.package_digest
+                        descriptor.storage.execution_profile != "official"
+                        and descriptor.storage.package_digest
+                        != storage_bundle_digest(
+                            descriptor.storage.spec,
+                            descriptor.storage.execution_profile,
+                        )
                         )
                         or (
                             descriptor.storage.execution_profile == "official"

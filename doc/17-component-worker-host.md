@@ -29,6 +29,8 @@ Worker Host 不能负责物理启动或停止自己，也不能握住其他 Work
 
 `deployment.package-registry` 向 Worker Host 提供只读、内容寻址的可安装包目录与工件校验快照。Worker Host 只保存选中的 `package_digest`、`component_id`、manifest digest 与所需能力，不读取 `web_packages` 或任意 ZIP 路径。包选择和显式启停的 Bot 级控制事实存入 `component.worker-host` 私有 schema，键为 `(bot_id, component_id)`；状态记录包含单调 `desired_revision`、当前选择、启用意图、最后接受的操作 ID、目标 graph revision。每次控制写入必须比较 expected revision，幂等重放返回原回执。
 
+宿主从目录按精确 `package_digest` 装配已安装包时，必须核对 Bot scope、Python Worker runtime、静态配置 schema 和批准的能力集合。框架提供的标准配置账本在宿主派生的独立 namespace 以可信 baseline 安装；外部包自带的 SQL bundle 只能单独按 `declarative` 配置安装并绑定其 schema 内容与执行配置摘要，不能把两者拼接后使用 `official` 执行权限。存储摘要独立于 Python 工件摘要，使代码换代而 SQL 契约不变时可复用已安装 schema；RuntimeGraph 仍以工件摘要区分代码 Generation。没有自有 SQL bundle 的包不声明 Generation storage binding，仍使用独立配置账本。现有装配入口已落实这个边界，并在隔离 PostgreSQL 中通过同一外部包两个不同摘要的热重载；它尚未接入 Worker Host 的选择事实，也未建立 Web 安装权威。需要 SQL 函数、事务 participant 或 owned-work SQL 的外部包仍须专门的受审查 authority，不能把这些声明悄悄降级为普通表。
+
 组件私有配置 repository 仍拥有其 `desired/effective` 值、配置计划、修订与不可变路径约束。每个包的标准配置管理端口读取和规划本包配置；预览时还需校验候选工件 schema、能力申请、接管声明和配置来源摘要。配置 apply 不能先写目标 repository 再调用 Worker Host，也不能把同步 `replace_runtime_graph()` 包进 Web 请求。目标包清单声明 `configuration_apply = "worker-host/1"`，其 Generation 管理契约据此发起**描述符冻结的两方事务**：本包标准配置步骤在调用方持有的事务中校验 Web ticket、plan、desired/effective CAS、不可变路径与代际围栏并写入 desired；固定的 Worker Host UnitOfWork participant 在同一事务记录 `PENDING_REBUILD` 和精确的目标配置 revision。标准配置步骤使用 `ModuleConfigurationRepository.apply_in`，不是另造一个包私有 SQL participant。事务失败时两边都不写。成功后，Worker Host owned-work 用稳定 operation ID 请求内核图替换；该内核请求不伪装成跨模块 SQL 原子提交，丢失回执时可从持久控制事实重放。effective 只由内核发布新图后的目标组件配置激活推进，管理界面必须分开展示“desired 已提交、图替换已请求、effective 已生效”。
 
 ### 配置切换的路由与恢复围栏
@@ -95,7 +97,7 @@ Registry 的候选规划现从当前已发布图及冻结描述符计算 `replac
 
 Worker Host 已把目标 `component_id` 随 `runtime.graph-replacement.request/2` 写入内核持久请求；内核在期望 Graph revision 上核对目标成员，并把目标纳入幂等摘要。`RuntimeModuleRegistry.replacement_closure()` 按启动依赖和单独的保留依赖计算需要换代的反向闭包。保留依赖包括普通服务句柄、UnitOfWork participant 和配置控制引用；这些引用可以成环，不能并入启动 DAG。冻结 Generation 绑定及内核图事实分别记录保留依赖，候选图保留旧 Generation 时会验证其所依赖的组件也被保留。
 
-宿主现消费持久请求中的目标，比较候选与当前冻结描述符，再只为目标、描述符变化者及其依赖消费者创建新 Generation。候选预热借用闭包外实例，发布前不接管关闭所有权；成功发布后接管，旧 Registry 只释放被换代实例。隔离 PostgreSQL 的最小真实图和完整官方包宿主用例已验证这一行为。动态新增/移除组件的候选规划及部署工件选择仍待完成。
+宿主现消费持久请求中的目标，比较候选与当前冻结描述符，再只为目标、描述符变化者、新增成员及其依赖消费者创建新 Generation。候选预热借用闭包外实例，发布前不接管关闭所有权；成功发布后接管，旧 Registry 只释放被换代或移除的实例。隔离 PostgreSQL 的最小真实图、Counter 包成员增删及完整官方包宿主用例已验证这一执行边界。Worker Host 持久选择、启停和部署工件安装权威仍待完成；静态宿主装配尚不会自行改变成员集合。
 
 内核 admission 围栏现在接受明确的成员集合，并依据当前图持久的启动依赖与保留依赖拒绝不闭合的集合；只有选中成员的路由 admission 和 epoch 发生变化，失败恢复也只重新打开选中成员。整图维护仍使用同一个端口的全图模式。宿主现在把替换闭包传给此端口；`core reload` 仍使用整图模式。
 

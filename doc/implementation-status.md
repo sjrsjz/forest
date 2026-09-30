@@ -370,3 +370,6 @@ Worker Host 的目标组件重载现执行局部换代。宿主比较候选与�
 RuntimeGraph 热替换的发布后故障现按故障边界处理：候选图提交后若本地 Generation 激活失败，Registry 撤下候选路由，Host 不再尝试恢复已退役的旧图，也不把替换请求结算为成功；宿主监督器使该 Bot 失败并关闭两代资源。发布前失败仍可恢复旧图；若排空、恢复或清理本身失败，则宿主同样失败。针对性本地用例 7 passed，隔离 PostgreSQL 发布后激活故障用例 1 passed，Ruff 通过。新宿主自动恢复策略及动态成员增删、部署包启停仍未完成。
 
 RuntimeGraph 成员集合变化已贯通 Registry 规划与宿主替换入口：候选与来源成员取对称差，叠加描述符变化和启动/保留依赖消费者闭包；纯新增跳过旧图排空，纯移除允许零个新建 Generation 并保留其余实例、路由和身份。隔离 PostgreSQL 用例经宿主入口依次加入、移除真实 Counter builtin 包，核对五个内核 Generation 和实例始终不变、移除后旧包路由失效（1 passed）。这只是图执行能力；CleanBotHost._assemble_registry() 尚未读取 Worker Host 的持久包选择与启停事实，管理端安装/校验/选择仍未完成，不能宣称用户可经 WebUI 动态安装插件。
+
+已安装外部包的独立装配入口现从 PackageCatalog 按不可变摘要取快照，要求 Bot scope、Python Worker、静态配置 schema 与精确批准的能力集合；框架标准配置账本和外部包声明式 SQL 分别安装到独立 namespace，后者以稳定存储契约摘要绑定，绝不借用官方 SQL 执行权限。真实 PostgreSQL 用例从 ZIP 导入带声明式表的测试插件，并以 1.0.0 -> 1.0.1 两个不同工件摘要热替换，确认未变的 SQL schema 可复用且内核 Generation 保留。外部包 SQL 函数、UnitOfWork participant、owned-work SQL 与 host effect driver 仍被明确拒绝，需后续独立受审查 authority；部署 Web 安装、Worker Host 选择事实和宿主自动装配尚未接通。
+本轮隔离 PostgreSQL schema/运行时套件 44 passed；包、Worker 与宿主非 PostgreSQL 套件 98 passed、1 skipped；Ruff 和 diff 检查通过。测试使用独立数据库与假 Bot 链路，未向 QQ 发消息。

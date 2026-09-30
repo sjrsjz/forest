@@ -12,11 +12,48 @@ from pathlib import Path
 import pytest
 
 from forest import packages
+from forest.builtin_packages import bootstrap_installed_package
 from forest.errors import ForestError
 from forest.packages import PackageCatalog
 from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "counter"
+
+
+@pytest.mark.asyncio
+async def test_installed_package_requires_exact_capability_approval(tmp_path):
+    catalog = PackageCatalog(tmp_path / "catalog")
+    snapshot = catalog.build(EXAMPLE)
+    with pytest.raises(ForestError) as rejected:
+        await bootstrap_installed_package(
+            snapshot.digest,
+            catalog,
+            None,
+            None,
+            kernel=None,
+            initial_configuration={},
+            approved_capabilities=(),
+        )
+    assert rejected.value.code == "PACKAGE_CAPABILITY_APPROVAL_REQUIRED"
+
+
+@pytest.mark.asyncio
+async def test_installed_package_rejects_official_sql_before_database_access(tmp_path):
+    catalog = PackageCatalog(tmp_path / "catalog")
+    source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/counter"
+    snapshot = catalog.build(source_root)
+    requested = tuple(snapshot.component["capabilities"]["requests"])
+    with pytest.raises(ForestError) as rejected:
+        await bootstrap_installed_package(
+            snapshot.digest,
+            catalog,
+            None,
+            None,
+            kernel=None,
+            initial_configuration={"label": "untrusted", "multiplier": 1},
+            approved_capabilities=requested,
+        )
+    assert rejected.value.code == "PACKAGE_STORAGE_TRUST_REQUIRED"
 
 
 def source(tmp_path):
