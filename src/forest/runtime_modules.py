@@ -806,6 +806,7 @@ class RuntimeModuleRegistry:
         self._lifecycle_lock = None
         self._closed = False
         self._prewarmed = False
+        self._publication_committed = False
         self._contract_routes_sealed = False
         self._replacement_quiesced: tuple[str, ...] = ()
         self._replacement_owned_frozen: tuple[str, ...] = ()
@@ -1029,6 +1030,12 @@ class RuntimeModuleRegistry:
             previous._transferred_components.add(item)
             self._retained_sources[item] = previous._retained_sources.get(item, previous)
         self._retained_committed = True
+
+    @property
+    def publication_committed(self) -> bool:
+        """Whether this candidate crossed the irreversible graph-head commit."""
+
+        return self._publication_committed
 
     def _release_transferred(self, component_id: str) -> None:
         """Drop a borrowed route capsule after its final owner closed the instance."""
@@ -1642,6 +1649,7 @@ class RuntimeModuleRegistry:
                 },
             )
             published = True
+            self._publication_committed = True
 
             for component_id in self.order:
                 current = component_id

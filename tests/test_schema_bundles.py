@@ -2391,6 +2391,65 @@ async def test_runtime_registry_transfers_unaffected_generations_without_restart
 
 
 @pytest.mark.postgres
+async def test_post_publication_activation_failure_retires_retained_generations(
+    clean_authority,
+):
+    store, installer = clean_authority
+    core = await bootstrap_clean_kernel(store, installer)
+    lease = await core.runtime.claim_host("host-activation-failure", "inc-activation-failure")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        schema_bundle_installer=installer,
+        generation_authority=core.runtime,
+    )
+    previous = RuntimeModuleRegistry(host, core.descriptors)
+    await previous.start()
+    source_graph = previous.graph_identity
+    runtime_descriptor = next(
+        item for item in core.descriptors if item.component_id == "kernel.runtime"
+    )
+
+    def fail_activation(runtime, dependencies):
+        instance = runtime_descriptor.factory(runtime, dependencies)
+
+        def activate_generation():
+            raise RuntimeError("local activation failed")
+
+        instance.activate_generation = activate_generation
+        return instance
+
+    candidate = RuntimeModuleRegistry(
+        host,
+        tuple(
+            replace(item, factory=fail_activation)
+            if item.component_id == "kernel.runtime"
+            else item
+            for item in core.descriptors
+        ),
+    )
+    affected = candidate.plan_retained_generations(previous, "kernel.runtime")
+    await candidate.prewarm()
+    await previous.drain_owned_work_for_replacement(
+        candidate.activation_id, components=affected
+    )
+    with pytest.raises(RuntimeError, match="local activation failed"):
+        await candidate.start()
+
+    assert candidate.publication_committed
+    assert (await core.runtime.status())["graph_id"] is None
+    assert (await core.runtime.graph_for_activation(source_graph.activation_id))[
+        "state"
+    ] == "RETIRED"
+    with pytest.raises(ForestError) as rejected:
+        await previous.resume_owned_work_after_failed_replacement()
+    assert rejected.value.code == "RUNTIME_GRAPH_NOT_CURRENT"
+    assert await candidate.close() == []
+    assert await previous.close() == []
+
+
+@pytest.mark.postgres
 async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent(
     clean_authority,
 ):

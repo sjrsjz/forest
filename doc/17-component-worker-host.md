@@ -67,7 +67,7 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 
 ## 并发、失败和删除
 
-控制操作的线性化点是 Bot 库中的 desired revision CAS。计划包含选中工件摘要、目标配置 revision、Graph revision、可见影响集和 plan digest；apply 重新验证这些事实，任何变化都返回冲突，不能沿用旧计划。单进程锁只用于减少重复候选装配，不能作为跨重启正确性前提。Graph 替换申请以 `(bot_id, operation_id)` 幂等；Host lease 与 activation ID 围住执行权；旧 Generation 在新图发布后不能再接受控制效果。替换失败保留旧图，desired 标记为待重试或失败，effective 不前进。
+控制操作的线性化点是 Bot 库中的 desired revision CAS。计划包含选中工件摘要、目标配置 revision、Graph revision、可见影响集和 plan digest；apply 重新验证这些事实，任何变化都返回冲突，不能沿用旧计划。单进程锁只用于减少重复候选装配，不能作为跨重启正确性前提。Graph 替换申请以 `(bot_id, operation_id)` 幂等；Host lease 与 activation ID 围住执行权；旧 Generation 在新图发布后不能再接受控制效果。发布前替换失败保留旧图，desired 标记为待重试或失败，effective 不前进。发布事务已提交而本地激活失败时，内核撤下候选图并封闭路由；旧图已经退役，不得假称回滚成功或恢复旧图 admission。替换请求记录失败，Bot 宿主进入失败态并释放两代资源，等待新的宿主重新构造图。发布成功但旧图排空失败也使宿主失败，不能将资源泄漏当成成功替换。
 
 停用一个组件前必须从冻结候选图计算依赖和 Handler 接管影响。仍有必需依赖时拒绝停用；已接纳事件、Job、Session、外部效果按各拥有模块的 drain/replay 协议处理。停用不是删除数据，相关私有 schema、配置历史和 Payload 引用保持可审计；删除包工件须由部署包目录在确认无 Bot 选择、活动图、待处理重建和保留回执引用后执行。Worker Host 自身不可经其 `module.disable` 停用；它的替换走内核通用 Graph 机制。
 

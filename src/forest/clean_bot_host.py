@@ -312,6 +312,7 @@ class CleanBotHost:
         self._replacement_task: asyncio.Task | None = None
         self._supervision_task: asyncio.Task | None = None
         self._replacement_lock: asyncio.Lock | None = None
+        self._fatal_replacement_error: ForestError | None = None
         self._closing = False
         self._host_id = f"forest:{settings.bot_id}"
         self._incarnation = str(uuid4())
@@ -887,6 +888,25 @@ class CleanBotHost:
                 await candidate.start()
                 candidate.accept_retained_ownership()
             except BaseException as replacement_error:
+                publication_committed = bool(
+                    getattr(candidate, "publication_committed", False)
+                )
+                if (
+                    previous_drained
+                    and not publication_committed
+                    and getattr(candidate, "graph_identity", None) is not None
+                ):
+                    try:
+                        evidence = await self._kernel.runtime.graph_for_activation(
+                            candidate.activation_id
+                        )
+                        publication_committed = evidence is not None and evidence[
+                            "state"
+                        ] in {"ACTIVE", "RETIRED", "STOPPED"}
+                    except BaseException:
+                        # A lost publication acknowledgement cannot authorize
+                        # reopening the old graph while the DB outcome is unknown.
+                        publication_committed = True
                 cleanup_error = None
                 try:
                     cleanup_errors = await candidate.close()
@@ -894,31 +914,62 @@ class CleanBotHost:
                         cleanup_error = cleanup_errors[0]
                 except BaseException as exc:
                     cleanup_error = exc
+                if publication_committed:
+                    failure = ForestError(
+                        "RUNTIME_GRAPH_POST_PUBLICATION_FAILURE",
+                        "The published graph failed local activation; the Bot host must stop",
+                        503,
+                        details={
+                            "activation_error": getattr(
+                                replacement_error, "code", type(replacement_error).__name__
+                            ),
+                            "cleanup_error": (
+                                getattr(cleanup_error, "code", type(cleanup_error).__name__)
+                                if cleanup_error is not None
+                                else None
+                            ),
+                        },
+                    )
+                    self._fatal_replacement_error = failure
+                    raise failure from replacement_error
+                if (
+                    isinstance(replacement_error, ForestError)
+                    and replacement_error.code
+                    == "RUNTIME_GRAPH_REPLACEMENT_ROLLBACK_FAILED"
+                ):
+                    self._fatal_replacement_error = replacement_error
+                    raise replacement_error
                 if previous_drained:
                     try:
                         await previous.resume_owned_work_after_failed_replacement()
                     except BaseException as resume_error:
-                        raise ForestError(
+                        failure = ForestError(
                             "RUNTIME_GRAPH_REPLACEMENT_ROLLBACK_FAILED",
                             "Candidate publication failed and the previous graph could not resume",
                             503,
-                        ) from resume_error
+                        )
+                        self._fatal_replacement_error = failure
+                        raise failure from resume_error
                 if cleanup_error is not None:
-                    raise ForestError(
+                    failure = ForestError(
                         "RUNTIME_GRAPH_REPLACEMENT_CLEANUP_FAILED",
                         "Candidate publication failed and its resources did not close cleanly",
                         503,
-                    ) from cleanup_error
+                    )
+                    self._fatal_replacement_error = failure
+                    raise failure from cleanup_error
                 raise replacement_error
             self.registry = candidate
             errors = await previous.close()
             if errors:
-                raise ForestError(
+                failure = ForestError(
                     "RUNTIME_GRAPH_DRAIN_FAILED",
                     "The replacement graph is active but the superseded graph did not drain",
                     503,
                     details={"errors": len(errors)},
                 )
+                self._fatal_replacement_error = failure
+                raise failure
             return candidate
 
     async def _run_graph_replacements(self) -> None:
@@ -934,6 +985,18 @@ class CleanBotHost:
             except asyncio.CancelledError:
                 raise
             except BaseException as exc:
+                if isinstance(exc, ForestError) and exc.code in {
+                    "RUNTIME_GRAPH_POST_PUBLICATION_FAILURE",
+                    "RUNTIME_GRAPH_DRAIN_FAILED",
+                    "RUNTIME_GRAPH_REPLACEMENT_ROLLBACK_FAILED",
+                    "RUNTIME_GRAPH_REPLACEMENT_CLEANUP_FAILED",
+                }:
+                    await self._kernel.runtime.fail_graph_replacement(
+                        self._authority(),
+                        operation_id=request["operation_id"],
+                        error_code=exc.code,
+                    )
+                    raise
                 evidence = await self._kernel.runtime.graph_for_activation(
                     request["activation_id"]
                 )
@@ -1008,6 +1071,9 @@ class CleanBotHost:
         """Fail the Bot host when a task still owned by its active graph stops."""
 
         while not self._closing:
+            failure = getattr(self, "_fatal_replacement_error", None)
+            if failure is not None:
+                raise failure
             lock = self._replacement_lock
             if lock is None:
                 raise ForestError(

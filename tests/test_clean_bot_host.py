@@ -556,6 +556,84 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
     ]
 
 
+@pytest.mark.asyncio
+async def test_runtime_replacement_fails_host_after_publication_and_never_resumes_old_graph():
+    events = []
+
+    class Previous:
+        async def drain_owned_work_for_replacement(self, _operation_id, *, components):
+            assert components is None
+            events.append("drain-previous")
+
+        async def resume_owned_work_after_failed_replacement(self):
+            events.append("resume-previous")
+
+    class Candidate:
+        activation_id = "replacement/activation-failure"
+        publication_committed = False
+
+        async def prewarm(self):
+            events.append("prewarm-candidate")
+
+        async def start(self):
+            self.publication_committed = True
+            events.append("activate-candidate")
+            raise RuntimeError("local activation failed")
+
+        async def close(self):
+            events.append("close-candidate")
+            return []
+
+    host = object.__new__(CleanBotHost)
+    host._replacement_lock = asyncio.Lock()
+    host._closing = False
+    host._fatal_replacement_error = None
+    host.registry = Previous()
+    candidate = Candidate()
+
+    async def assemble():
+        return candidate
+
+    host._assemble_registry = assemble
+    with pytest.raises(ForestError) as raised:
+        await host.replace_runtime_graph()
+
+    assert raised.value.code == "RUNTIME_GRAPH_POST_PUBLICATION_FAILURE"
+    assert host._fatal_replacement_error is raised.value
+    assert events == ["prewarm-candidate", "drain-previous", "activate-candidate", "close-candidate"]
+
+
+@pytest.mark.asyncio
+async def test_graph_replacement_worker_records_post_publication_failure():
+    events = []
+
+    class Runtime:
+        async def claim_graph_replacement(self, _lease, *, lease_seconds):
+            assert lease_seconds == 120
+            return {"operation_id": "replacement/fatal"}
+
+        async def fail_graph_replacement(self, _lease, *, operation_id, error_code):
+            events.append((operation_id, error_code))
+
+        async def graph_for_activation(self, _activation_id):
+            raise AssertionError("Published activation must not be settled as success")
+
+    host = object.__new__(CleanBotHost)
+    host._closing = False
+    host._kernel = SimpleNamespace(runtime=Runtime())
+    host._authority = lambda: "lease/one"
+
+    async def execute(_request):
+        raise ForestError("RUNTIME_GRAPH_POST_PUBLICATION_FAILURE", "activation failed", 503)
+
+    host._execute_graph_replacement = execute
+    with pytest.raises(ForestError) as raised:
+        await host._run_graph_replacements()
+
+    assert raised.value.code == "RUNTIME_GRAPH_POST_PUBLICATION_FAILURE"
+    assert events == [("replacement/fatal", "RUNTIME_GRAPH_POST_PUBLICATION_FAILURE")]
+
+
 @pytest.mark.postgres
 async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_path):
     dsn = os.environ.get("FOREST_TEST_DSN")
