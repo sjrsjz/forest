@@ -143,7 +143,23 @@ class ComponentWorkerHost(Plugin):
 
     @service("component.host.selection-application", semantics="read")
     async def selection_application_status(self, payload, ctx):
-        return await ctx.queries.call("component.selection-application.read", payload)
+        saved = await ctx.queries.call("component.selection-application.read", payload)
+        kernel = None
+        if saved["state"] == "SUBMITTED":
+            kernel = await ctx.services.call(
+                "runtime.graph-replacement.status",
+                {
+                    "protocol": "forest.runtime-graph-replacement-status-request/1",
+                    "operation_id": "component-selection:" + saved["request_id"],
+                },
+                operation_id=ctx.operations.stable("read-selection-replacement"),
+                timeout=10,
+            )
+        return {
+            **saved,
+            "protocol": "forest.component-selection-application-status/1",
+            "kernel": kernel,
+        }
 
     @service("shell.component-host.reload", semantics="idempotent")
     async def reload(self, payload, ctx):

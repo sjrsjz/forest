@@ -14,9 +14,9 @@
     dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0}
     dl div{border:1px solid #284036;border-radius:8px;padding:8px 10px;min-width:0}
     dt{color:#a9c1b2}dd{margin:3px 0 0;overflow-wrap:anywhere}
-    #status{min-height:1.4em}#reload-result,#configuration-result{padding:10px;border:1px solid #284036;border-radius:8px;overflow-wrap:anywhere}
+    #status{min-height:1.4em}#reload-result,#configuration-result,#selection-result{padding:10px;border:1px solid #284036;border-radius:8px;overflow-wrap:anywhere}
     #artifact-details{max-height:260px;overflow:auto;margin-top:8px}#artifact-details dd{white-space:pre-wrap}
-    details{border:1px solid #284036;border-radius:8px;padding:9px 11px}summary{cursor:pointer}#package-items{max-height:300px;overflow:auto;margin:8px 0}#package-items div{padding:7px 0;border-bottom:1px solid #284036;overflow-wrap:anywhere}#package-items small{display:block;color:#a9c1b2}
+    details{border:1px solid #284036;border-radius:8px;padding:9px 11px}summary{cursor:pointer}#package-items,#selection-items{max-height:300px;overflow:auto;margin:8px 0}#package-items div,#selection-items div{padding:7px 0;border-bottom:1px solid #284036;overflow-wrap:anywhere}#package-items small,#selection-items small{display:block;color:#a9c1b2}
     @media(max-width:640px){dl{grid-template-columns:1fr}}
   </style>
 </head>
@@ -56,6 +56,11 @@
         <div><dt>提供服务</dt><dd id="artifact-provides"></dd></div>
       </dl>
     </details>
+    <details id="selection">
+      <summary>Bot 组件选择</summary>
+      <div class="row"><button id="refresh-selection-snapshot" type="button">刷新选择快照</button><span id="selection-revision"></span></div>
+      <div id="selection-items"></div>
+    </details>
     <p>Reload replaces the selected component and dependent Generations. Unaffected Generations retain their identity. The request remains visible after the old Worker retires.</p>
     <div id="reload-result" hidden></div>
     <button id="refresh-reload" type="button" hidden>Refresh reload status</button>
@@ -64,6 +69,11 @@
       <button id="refresh-configuration" type="button">Check status</button>
     </div>
     <div id="configuration-result" hidden></div>
+    <div class="row">
+      <label>Selection request<input id="selection-request-id" placeholder="selection:..."></label>
+      <button id="refresh-selection" type="button">Check status</button>
+    </div>
+    <div id="selection-result" hidden></div>
   </main>
   <script>
   (()=>{'use strict';
@@ -141,6 +151,22 @@
       byId('artifact-provides').textContent=item.provides.map(value=>`${value.name} ${value.contract}`).join('\n')||'无';
       byId('artifact-details').hidden=false;resize();
     }
+    async function selectionSnapshot(){
+      const snapshot=await call('query','selection',{});
+      byId('selection-revision').textContent=`选择修订 r${snapshot.revision}`;
+      const items=byId('selection-items');items.replaceChildren();
+      for(const item of snapshot.entries){
+        const row=document.createElement('div');
+        const title=document.createElement('strong');
+        title.textContent=`${item.component_id} · ${item.desired_enabled?'希望启用':'希望停用'}`;
+        const source=document.createElement('small');
+        source.textContent=`${item.source_kind} · 选择 r${item.desired_revision}`+
+          (item.package_digest?` · ${item.package_digest}`:'');
+        row.append(title,source);items.append(row);
+      }
+      if(!snapshot.entries.length)items.textContent='尚无显式选择；使用默认 builtin 成员。';
+      resize();
+    }
     async function reload(){
       if(!selected||byId('component-id').value.trim()!==selected)throw new Error('Inspect the selected component first');
       byId('reload').disabled=true;
@@ -170,6 +196,17 @@
         (value.kernel_receipt?.operation_id?` / ${value.kernel_receipt.operation_id}`:'');
       resize();
     }
+    async function selectionStatus(){
+      const request_id=byId('selection-request-id').value.trim();
+      if(!/^selection:[0-9a-f]{32}$/.test(request_id))throw new Error('Invalid selection request ID');
+      const value=await call('query','selection-application',{request_id});
+      const kernel=value.kernel;
+      byId('selection-result').hidden=false;
+      byId('selection-result').textContent=`${value.component_id} / desired ${value.desired_enabled?'enabled':'disabled'} / selection r${value.selection_revision} / ${kernel?.state||value.state}`+
+        (kernel?.graph_revision?` / published Graph r${kernel.graph_revision}`:'')+
+        (kernel?.error_code||value.error_code?` / ${kernel?.error_code||value.error_code}`:'');
+      resize();
+    }
     addEventListener('message',event=>{
       const message=event.data||{};
       if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect'||typeof message.nonce!=='string')return;
@@ -188,6 +225,8 @@
     byId('reload').onclick=()=>reload().catch(error=>notice(error.message));
     byId('refresh-reload').onclick=()=>reloadStatus().catch(error=>notice(error.message));
     byId('refresh-configuration').onclick=()=>configurationStatus().catch(error=>notice(error.message));
+    byId('refresh-selection').onclick=()=>selectionStatus().catch(error=>notice(error.message));
+    byId('refresh-selection-snapshot').onclick=()=>selectionSnapshot().catch(error=>notice(error.message));
     byId('more').onclick=()=>list(nextAfter).catch(error=>notice(error.message));
     byId('load-packages').onclick=()=>listPackages().catch(error=>notice(error.message));
     byId('more-packages').onclick=()=>listPackages(true).catch(error=>notice(error.message));

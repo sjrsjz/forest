@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.0"
+version = "1.6.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -144,7 +144,7 @@ contract = "1.0"
 semantics = "read"
 visibility = "management"
 input_schema = "schemas/selection-application-read.json"
-output_schema = "schemas/selection-application-output.json"
+output_schema = "schemas/selection-application-status-output.json"
 
 [[components.provides]]
 name = "shell.component-host.execute"
@@ -276,6 +276,11 @@ timeout_s = 10
 [[components.management_queries]]
 id = "selection-application"
 port = "component.host.selection-application"
+timeout_s = 10
+
+[[components.management_queries]]
+id = "selection"
+port = "component.selection.snapshot"
 timeout_s = 10
 
 [[components.owned_work_handlers]]

@@ -52,6 +52,8 @@ from forest.unit_of_work import (
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/component_worker_host/python"))
+from component_worker_host import ComponentWorkerHost
 from model_projection import prepare_model_request
 
 _TEST_SELECTION = ComponentSelectionSnapshot(0, (), "sha256:" + "0" * 64)
@@ -61,6 +63,48 @@ class FakeSelectionReader:
     @asynccontextmanager
     async def publication_fence(self, **_kwargs):
         yield _TEST_SELECTION
+
+
+async def test_worker_host_selection_status_reports_kernel_outcome():
+    requested = []
+
+    class Queries:
+        async def call(self, name, payload):
+            assert name == "component.selection-application.read"
+            assert payload == {"request_id": "selection:" + "a" * 32}
+            return {
+                "protocol": "forest.component-selection-application/1",
+                "request_id": payload["request_id"],
+                "component_id": "example.counter",
+                "state": "SUBMITTED",
+            }
+
+    class Services:
+        async def call(self, name, payload, **_kwargs):
+            requested.append((name, payload))
+            return {
+                "protocol": "forest.runtime-graph-replacement-status/1",
+                "state": "FAILED",
+                "error_code": "COMPONENT_SELECTION_CHANGED",
+            }
+
+    context = SimpleNamespace(
+        queries=Queries(), services=Services(),
+        operations=SimpleNamespace(stable=lambda _name: "read-selection-status"),
+    )
+    status = await object.__new__(ComponentWorkerHost).selection_application_status(
+        {"request_id": "selection:" + "a" * 32}, context
+    )
+    assert status["protocol"] == "forest.component-selection-application-status/1"
+    assert status["state"] == "SUBMITTED"
+    assert status["kernel"]["state"] == "FAILED"
+    assert requested == [(
+        "runtime.graph-replacement.status",
+        {
+            "protocol": "forest.runtime-graph-replacement-status-request/1",
+            "operation_id": "component-selection:selection:" + "a" * 32,
+        },
+    )]
 
 
 class FakeModelClient:
@@ -1060,6 +1104,37 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
 
             with_counter = await await_counter_membership(True)
             assert "example.counter" in with_counter.generations
+            worker_host = host.registry.get("component.worker-host")
+            selected = await worker_host.management_contract.query("selection", {})
+            assert selected["revision"] == 1
+            assert selected["entries"][0]["component_id"] == "example.counter"
+            assert selected["entries"][0]["desired_enabled"] is True
+            async def await_selection_settled(operation_id):
+                async with host.store.pool.connection() as conn:
+                    row = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT request_id FROM {} WHERE bot_id=%s AND operation_id=%s"
+                            ).format(
+                                sql.Identifier(selection_namespace, "selection_applications")
+                            ),
+                            (host.store.bot_id, operation_id),
+                        )
+                    ).fetchone()
+                async with asyncio.timeout(20):
+                    while True:
+                        application = await worker_host.management_contract.query(
+                            "selection-application", {"request_id": row["request_id"]}
+                        )
+                        if application["kernel"] is not None and application["kernel"][
+                            "state"
+                        ] == "SUCCEEDED":
+                            return application
+                        await asyncio.sleep(0.1)
+
+            application = await await_selection_settled("selection/enable-counter")
+            assert application["state"] == "SUBMITTED"
+            assert application["kernel"]["graph_revision"] == with_counter.graph_revision
             assert all(
                 with_counter.generations[component_id] == generation_id
                 for component_id, generation_id in before_add.generations.items()
@@ -1070,6 +1145,11 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
             )
             assert disabled["selection_revision"] == 2
             without_counter = await await_counter_membership(False)
+            application = await await_selection_settled("selection/disable-counter")
+            assert application["kernel"]["graph_revision"] == without_counter.graph_revision
+            selected = await worker_host.management_contract.query("selection", {})
+            assert selected["revision"] == 2
+            assert selected["entries"][0]["desired_enabled"] is False
             assert "example.counter" not in without_counter.generations
             assert old_counter.state.value == "STOPPED"
             assert all(
