@@ -520,11 +520,16 @@ class ModuleConfigurationRepository:
 
         async with self.store.pool.connection() as conn, conn.transaction():
             await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            desired = await self._head_configuration_in(
-                conn, "desired_revision", include_value=True
-            )
-            await self._assert_immutable_in(conn, desired.value)
-            return desired
+            return await self.desired_checked_in(conn)
+
+    async def desired_checked_in(self, conn) -> EffectiveModuleConfiguration:
+        """Verify desired in a caller-owned REPEATABLE READ transaction, retaining row locks."""
+
+        desired = await self._head_configuration_in(
+            conn, "desired_revision", include_value=True
+        )
+        await self._assert_immutable_in(conn, desired.value)
+        return desired
 
     async def owner_id(self, revision: int) -> str:
         if type(revision) is not int or revision < 1:

@@ -2167,6 +2167,58 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
 
 
 @pytest.mark.postgres
+async def test_configuration_preview_snapshot_rejects_concurrent_revision_mix(clean_authority):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    payload_storage = official_storage_bundle(
+        "kernel.payload", "forest.kernel.payload",
+        "forest.kernel-payload.repository/1", "storage/official/kernel_payload.sql",
+    )
+    runtime_storage = official_storage_bundle(
+        "kernel.runtime", "forest.kernel.runtime",
+        "forest.kernel-runtime.repository/1", "storage/official/kernel_runtime.sql",
+    )
+    authorization_storage = official_storage_bundle(
+        "kernel.authorization", "forest.kernel.authorization",
+        "forest.kernel-authorization.repository/1",
+        "storage/official/kernel_authorization.sql",
+    )
+    for bundle in (payload_storage, runtime_storage, authorization_storage):
+        await installer.install(
+            bundle.spec, bundle.baseline, bundle.package_digest,
+            execution_profile=bundle.execution_profile,
+        )
+    payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
+    configs = [
+        ModuleConfigurationRepository(
+            store, component_id=bundle.spec.component_id,
+            namespace=bundle.spec.namespace, payloads=payloads,
+        )
+        for bundle in (runtime_storage, authorization_storage)
+    ]
+    validation_digest = "sha256:" + "7" * 64
+    for index, config in enumerate(configs):
+        await config.initialize(
+            operation_id=f"preview.init.{index}", value={"version": 1},
+            validation_digest=validation_digest,
+        )
+    plan = await configs[1].plan(
+        operation_id="preview.plan.second", expected_desired_revision=1,
+        value={"version": 2}, validation_digest=validation_digest,
+    )
+    with pytest.raises(psycopg.errors.SerializationFailure):
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            assert (await configs[0].desired_checked_in(conn)).revision == 1
+            await configs[1].apply(
+                operation_id="preview.apply.second", plan_id=plan["plan_id"],
+                expected_desired_revision=1,
+            )
+            await configs[1].desired_checked_in(conn)
+    assert (await configs[1].desired_checked()).revision == 2
+
+
+@pytest.mark.postgres
 async def test_module_configuration_and_runtime_publication_are_one_transaction(
     clean_authority,
 ):

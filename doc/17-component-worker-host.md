@@ -135,9 +135,9 @@ Registry 的替换排空现接受与内核围栏相同的成员集合：只冻�
 
 生产装配与候选预览现在共用 `select_package_members()`：相同的 builtin 启停、内核目标禁选、官方身份冲突、精确已安装工件及 manifest 核对规则决定候选成员。`project_component_selection()` 以当前快照和一笔拟议写入生成下一修订的规范化快照，其排序与摘要已和 Worker Host 的 PostgreSQL 账本对照。候选编译为每个启用的外部包读取并记录配置 revision、Payload 身份、schema 与存储摘要；拟启用或换代的目标外部包必须显式指定配置 revision。禁用包仍核对工件身份，但不创建 Worker。
 
-宿主可信进程的 `preview_selection_transition()` 在当前 Graph 替换锁内把冻结快照交给 `preview_selected_graph()`，使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；只读 `module.validate` 已接入 Web 管理查询，但没有资源预算、授权提交事务或 Shell 入口。
+宿主可信进程的 `preview_component_change()` 在当前 Graph 替换锁和选择共享围栏内冻结选择，再交给 `preview_selected_graph()` 使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；只读 `module.validate` 已接入 Web 管理查询，但没有资源预算、授权提交事务或 Shell 入口。
 
-`component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主读取当前选择快照、以相同规范化规则投影一笔拟议写入，再在图替换锁内编译不可执行候选。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。资源预算、授权提交事务中的计划事实复核及 Web/Shell 启停动作仍未完成。
+`component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主在图替换锁内取得选择共享围栏、读取当前选择快照并投影拟议写入，然后从同一 `REPEATABLE READ` 事务快照读取候选中全部包的配置事实，编译不可执行候选。选择围栏先于配置快照建立，避免等待锁时冻结过时选择；两者使用两个连接，围栏持续至预览结束。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。资源预算、授权提交事务中的计划事实复核及 Web/Shell 启停动作仍未完成。
 
 Graph 规划需要管理契约的 schema 描述，但这些 schema 已在 Generation 构造时从经校验的不可变包快照编译。`PackageManagementContract.describe()` 读取隔离的已编译副本，不在每次描述符比较时重复扫描工件；包工件及当前配置本身仍在预览时按精确摘要和修订检查。
 
@@ -147,4 +147,16 @@ Worker Host 自带的隔离管理页现提供折叠式只读候选预检。页�
 
 `SelectionGraphPreview.plan_digest` 使用规范化事实计算：Bot 身份、来源 Graph ID/revision、目标组件、冻结选择 revision/digest、正式 Registry 的全部候选成员描述符摘要、候选包的配置 revision/Payload 身份/schema/存储摘要，以及换代影响集合。官方包与已安装包均读取各自私有配置账本的 desired 值并校验当前工件 schema；官方包按最近一次真实装配的精确工件读取，预览本身不 provision。选择快照类型自身保证排序、条目修订与摘要一致。相同事实重复预览得到相同摘要；工件或配置事实改变必须得到新摘要。
 
+全部配置事实必须来自同一数据库快照。配置头上的短暂共享锁在预览结束前持有，若另一个事务在快照建立后先改写尚未读取的配置头，预览以序列化冲突失败并要求重试，不得合成旧配置与新配置混用的摘要。工件目录按内容摘要校验且不由数据库快照保护；安装包目录需要继续保持内容不可变，提交时还须重新校验精确工件。
+
 这个摘要只证明一次只读预览的输入身份。Worker Host 的授权提交还必须在选择写入事务中复核来源 Graph、当前选择、精确工件与全部配置事实，并核对资源预算及管理票据；宿主实际装配和发布还须验证新候选与摘要相符。未完成这些围栏之前，不得把 `plan_digest` 当作已授权启停凭据或向 Web/Shell 开放选择动作。
+
+### 启停提交的锁序和原子复核
+
+Web 的 `module.enable` 与 `module.disable` 必须是两个 action ID、两个独立授权键，但共享 Worker Host 私有选择账本。输入固定包含只读预检返回的 `plan_digest`、目标配置修订、预期 Graph 与选择修订，以及与预检完全相同的目标工件和能力批准；action 的签票正文绑定这些字段。包内 SQL 端口不自行装配 RuntimeGraph，内核也不解释包依赖、能力或资源策略。尚未实现提交围栏时，两个 action 不得写入 manifest。
+
+管理 action 的执行顺序是：先由 Worker Host 的 Generation 绑定一个**必需**的提交前置检查，再在进入 Domain Command 事务之前取得宿主 Graph 替换锁；事务内先核对当前 Graph/Generation、Web 票据、Bot 策略和审计，再取得该 Bot 的选择独占 advisory 围栏，读取同一连接上的当前选择快照，并按组件 ID 顺序对候选中全部启用包的目标配置头取得共享锁。配置值、不可变字段和 Payload 身份也从同一连接验证。随后用正式的选择投影、内容寻址工件校验和 Registry 预览重新计算计划摘要；任何来源 Graph、选择、工件、配置或预算事实不符，都在调用选择写入函数前返回冲突，事务回滚。选择 SQL 在同一连接上重入该选择围栏，写不可变操作回执、操作后快照与持久执行任务；授权接受、审计和选择写入一同提交。
+
+宿主锁必须先于 Domain Command 事务取得：当前通用入口在 `before_write` 之前已经验证活动 Generation 并进入内核 Graph 数据库围栏，而图替换按“宿主锁→数据库围栏”执行。反过来在 `before_write` 中才等待宿主锁会制造锁序环。提交前置检查必须由 manifest 明确声明且在缺失绑定时拒绝启动或拒绝 action，不允许退化为普通 Domain Command。它可以使用宿主提供的只读候选编译能力和调用方事务连接，但 Worker Host 仍拥有 action、选择 SQL、幂等和结果语义；通用包运行时只编排声明的检查，不硬编码 `component.worker-host` 的策略。
+
+同 operation ID 的准确重放需要在选择独占围栏内先查包私有不可变操作账本。若签票目标 Generation/Graph 仍然有效，输入摘要与启停方向相同就返回旧回执，不再以变化的选择或配置事实否定已经接受的操作；同 ID 不同输入仍冲突。换代后的旧 Web 票据不再有效，调用方通过持久状态查询追踪原操作。新的操作必须完成全部实时复核。事务提交后，现有 owned-work 只依冻结选择 revision/digest 请求内核 `/3`；它不能把预检时的 Graph 当作已发布事实。实际发布继续在选择共享围栏下核对准确快照。目标资源预算必须来自明确的 Bot 策略及包声明，不得把已有 IPC/队列上限伪称为 CPU 或内存保证。

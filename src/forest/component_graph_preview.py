@@ -46,8 +46,43 @@ async def preview_selected_graph(
     target_component_id: str,
     expected_graph_revision: int,
     expected_configuration_revisions: Mapping[str, int] | None = None,
+    conn=None,
 ) -> SelectionGraphPreview:
-    """Compile selected package facts without preparing a Worker or writing a Graph."""
+    """Compile read-only package facts; a supplied connection must be REPEATABLE READ."""
+
+    if conn is None:
+        async with store.pool.connection() as owned_conn, owned_conn.transaction():
+            await owned_conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            return await _preview_selected_graph_in(
+                current, selection, official_descriptors, catalog, store,
+                kernel=kernel, target_component_id=target_component_id,
+                expected_graph_revision=expected_graph_revision,
+                expected_configuration_revisions=expected_configuration_revisions,
+                conn=owned_conn,
+            )
+    return await _preview_selected_graph_in(
+        current, selection, official_descriptors, catalog, store,
+        kernel=kernel, target_component_id=target_component_id,
+        expected_graph_revision=expected_graph_revision,
+        expected_configuration_revisions=expected_configuration_revisions,
+        conn=conn,
+    )
+
+
+async def _preview_selected_graph_in(
+    current: RuntimeModuleRegistry,
+    selection: ComponentSelectionSnapshot,
+    official_descriptors: tuple[RuntimeModuleDescriptor, ...],
+    catalog: PackageCatalog,
+    store,
+    *,
+    kernel,
+    target_component_id: str,
+    expected_graph_revision: int,
+    expected_configuration_revisions: Mapping[str, int] | None,
+    conn,
+) -> SelectionGraphPreview:
+    """Use one transaction snapshot for every package configuration fact."""
 
     graph = current.graph_identity
     if graph is None or graph.graph_revision != expected_graph_revision:
@@ -77,7 +112,7 @@ async def preview_selected_graph(
     async def inspect_official(descriptor):
         async with inspection_slots:
             return await inspect_official_candidate_descriptor(
-                descriptor, catalog, store, kernel=kernel
+                descriptor, catalog, store, kernel=kernel, conn=conn
             )
 
     inspected = list(await asyncio.gather(*(
@@ -93,6 +128,7 @@ async def preview_selected_graph(
             approved_capabilities=entry.approved_capabilities,
             expected_manifest_digest=entry.manifest_digest,
             expected_configuration_revision=pinned_revisions.get(entry.component_id),
+            conn=conn,
         )
         if descriptor.component_id != entry.component_id:
             raise ForestError(

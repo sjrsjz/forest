@@ -887,34 +887,6 @@ class CleanBotHost:
         finally:
             await self.store.close()
 
-    async def preview_selection_transition(
-        self,
-        selection: ComponentSelectionSnapshot,
-        *,
-        target_component_id: str,
-        expected_graph_revision: int,
-        expected_configuration_revisions: dict[str, int] | None = None,
-    ) -> SelectionGraphPreview:
-        """Preview frozen membership while the current Registry stays owned."""
-
-        lock = self._replacement_lock
-        if lock is None or self.registry is None or self._closing:
-            raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
-        async with lock:
-            if self.registry is None or self._closing or not self._official_descriptors:
-                raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
-            return await preview_selected_graph(
-                self.registry,
-                selection,
-                self._official_descriptors,
-                self.package_catalog,
-                self.store,
-                kernel=self._kernel,
-                target_component_id=target_component_id,
-                expected_graph_revision=expected_graph_revision,
-                expected_configuration_revisions=expected_configuration_revisions,
-            )
-
     async def preview_component_change(
         self,
         *,
@@ -930,13 +902,6 @@ class CleanBotHost:
     ) -> SelectionGraphPreview:
         """Project a selection write, then inspect its candidate without writing it."""
 
-        current = await self.selection_reader.snapshot()
-        if current.revision != expected_selection_revision:
-            raise ForestError(
-                "COMPONENT_SELECTION_REVISION_CONFLICT",
-                "Component selection changed before preview",
-                409,
-            )
         if expected_configuration_revision is not None and (
             source_kind != "installed" or not desired_enabled
         ):
@@ -945,24 +910,46 @@ class CleanBotHost:
                 "Only an enabled installed package accepts a target configuration revision",
                 422,
             )
-        selection = project_component_selection(
-            current,
-            component_id=component_id,
-            source_kind=source_kind,
-            package_digest=package_digest,
-            manifest_digest=manifest_digest,
-            approved_capabilities=approved_capabilities,
-            desired_enabled=desired_enabled,
-        )
-        return await self.preview_selection_transition(
-            selection,
-            target_component_id=component_id,
-            expected_graph_revision=expected_graph_revision,
-            expected_configuration_revisions=(
-                {component_id: expected_configuration_revision}
-                if expected_configuration_revision is not None else None
-            ),
-        )
+        lock = self._replacement_lock
+        if lock is None or self.registry is None or self._closing:
+            raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
+        async with lock:
+            if self.registry is None or self._closing or not self._official_descriptors:
+                raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
+            async with self.selection_reader.publication_fence() as current:
+                # Establish the configuration snapshot only after the selection fence.
+                if current.revision != expected_selection_revision:
+                    raise ForestError(
+                        "COMPONENT_SELECTION_REVISION_CONFLICT",
+                        "Component selection changed before preview",
+                        409,
+                    )
+                selection = project_component_selection(
+                    current,
+                    component_id=component_id,
+                    source_kind=source_kind,
+                    package_digest=package_digest,
+                    manifest_digest=manifest_digest,
+                    approved_capabilities=approved_capabilities,
+                    desired_enabled=desired_enabled,
+                )
+                async with self.store.pool.connection() as conn, conn.transaction():
+                    await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    return await preview_selected_graph(
+                        self.registry,
+                        selection,
+                        self._official_descriptors,
+                        self.package_catalog,
+                        self.store,
+                        kernel=self._kernel,
+                        target_component_id=component_id,
+                        expected_graph_revision=expected_graph_revision,
+                        expected_configuration_revisions=(
+                            {component_id: expected_configuration_revision}
+                            if expected_configuration_revision is not None else None
+                        ),
+                        conn=conn,
+                    )
 
     async def replace_runtime_graph(
         self,

@@ -239,47 +239,7 @@ class ComponentSelectionReader:
                 "SELECT pg_advisory_xact_lock_shared(hashtextextended(%s,0))",
                 ("forest.component.selection/" + self.store.bot_id,),
             )
-            result = await conn.execute(
-                sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
-                    sql.Identifier(self.namespace, "component_selection_snapshot")
-                ),
-                (Jsonb({"bot_id": self.store.bot_id}), Jsonb({})),
-            )
-            envelope = (await result.fetchone())["result"]
-            if (
-                not isinstance(envelope, dict)
-                or envelope.get("protocol") != "forest.domain-result/1"
-                or envelope.get("ok") is not True
-            ):
-                raise ForestError(
-                    "COMPONENT_SELECTION_SNAPSHOT_INVALID",
-                    "Worker Host selection snapshot is invalid",
-                    503,
-                )
-            value = envelope.get("value")
-            if (
-                not isinstance(value, dict)
-                or set(value) != {"protocol", "revision", "entries"}
-                or value.get("protocol") != "forest.component-selection-snapshot/1"
-                or type(value.get("revision")) is not int
-                or value["revision"] < 0
-                or not isinstance(value.get("entries"), list)
-                or len(value["entries"]) > 128
-            ):
-                raise ForestError(
-                    "COMPONENT_SELECTION_SNAPSHOT_INVALID",
-                    "Worker Host selection snapshot is invalid",
-                    503,
-                )
-            entries = tuple(ComponentSelectionEntry.from_dict(item) for item in value["entries"])
-            frozen = {
-                "protocol": "forest.component-selection-snapshot/1",
-                "revision": value["revision"],
-                "entries": [item.as_dict() for item in entries],
-            }
-            snapshot = ComponentSelectionSnapshot(
-                value["revision"], entries, digest_json(frozen)
-            )
+            snapshot = await self.snapshot_in(conn)
             if (
                 expected_revision is not None and snapshot.revision != expected_revision
             ) or (expected_digest is not None and snapshot.digest != expected_digest):
@@ -289,6 +249,51 @@ class ComponentSelectionReader:
                     409,
                 )
             yield snapshot
+
+    async def snapshot_in(self, conn) -> ComponentSelectionSnapshot:
+        """Read one selection snapshot on a caller-owned advisory-fenced transaction."""
+
+        result = await conn.execute(
+            sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
+                sql.Identifier(self.namespace, "component_selection_snapshot")
+            ),
+            (Jsonb({"bot_id": self.store.bot_id}), Jsonb({})),
+        )
+        envelope = (await result.fetchone())["result"]
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("protocol") != "forest.domain-result/1"
+            or envelope.get("ok") is not True
+        ):
+            raise ForestError(
+                "COMPONENT_SELECTION_SNAPSHOT_INVALID",
+                "Worker Host selection snapshot is invalid",
+                503,
+            )
+        value = envelope.get("value")
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"protocol", "revision", "entries"}
+            or value.get("protocol") != "forest.component-selection-snapshot/1"
+            or type(value.get("revision")) is not int
+            or value["revision"] < 0
+            or not isinstance(value.get("entries"), list)
+            or len(value["entries"]) > 128
+        ):
+            raise ForestError(
+                "COMPONENT_SELECTION_SNAPSHOT_INVALID",
+                "Worker Host selection snapshot is invalid",
+                503,
+            )
+        entries = tuple(ComponentSelectionEntry.from_dict(item) for item in value["entries"])
+        frozen = {
+            "protocol": "forest.component-selection-snapshot/1",
+            "revision": value["revision"],
+            "entries": [item.as_dict() for item in entries],
+        }
+        return ComponentSelectionSnapshot(
+            value["revision"], entries, digest_json(frozen)
+        )
 
     async def snapshot(self) -> ComponentSelectionSnapshot:
         async with self.publication_fence() as snapshot:

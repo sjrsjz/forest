@@ -281,9 +281,13 @@ async def _installed_desired(
     configuration: ModuleConfigurationRepository,
     *,
     expected_revision: int | None = None,
+    conn=None,
 ) -> EffectiveModuleConfiguration:
     try:
-        desired = await configuration.desired_checked()
+        desired = (
+            await configuration.desired_checked_in(conn)
+            if conn is not None else await configuration.desired_checked()
+        )
     except ForestError as error:
         if error.code != "MODULE_CONFIGURATION_UNINITIALIZED":
             raise
@@ -328,6 +332,7 @@ async def _inspect_installed_snapshot(
     kernel,
     approved_capabilities: tuple[str, ...],
     expected_configuration_revision: int | None = None,
+    conn=None,
 ) -> tuple[PackageCandidateInspection, _InstalledPackageLayout, ModuleConfigurationRepository]:
     layout = _installed_package_layout(snapshot, approved_capabilities)
     configuration = ModuleConfigurationRepository(
@@ -338,7 +343,8 @@ async def _inspect_installed_snapshot(
         immutable_paths=tuple(snapshot.component.get("config_immutable_paths", ())),
     )
     desired = await _installed_desired(
-        layout, configuration, expected_revision=expected_configuration_revision
+        layout, configuration, expected_revision=expected_configuration_revision,
+        conn=conn,
     )
     inspected = PackageCandidateInspection(
         snapshot.component["id"], "installed", snapshot.digest, digest_json(snapshot.manifest),
@@ -393,6 +399,7 @@ async def inspect_official_candidate_descriptor(
     store,
     *,
     kernel,
+    conn=None,
 ) -> PackageCandidateInspection:
     """Pin an assembled official package to its current desired configuration."""
 
@@ -429,7 +436,10 @@ async def inspect_official_candidate_descriptor(
         immutable_paths=tuple(snapshot.component.get("config_immutable_paths", ())),
     )
     try:
-        desired = await configuration.desired_checked()
+        desired = (
+            await configuration.desired_checked_in(conn)
+            if conn is not None else await configuration.desired_checked()
+        )
     except (InvalidSchemaName, UndefinedTable) as error:
         raise ForestError(
             "PACKAGE_CONFIGURATION_REQUIRED",
@@ -629,6 +639,7 @@ async def compile_installed_candidate_descriptor(
     approved_capabilities: tuple[str, ...],
     expected_manifest_digest: str,
     expected_configuration_revision: int | None = None,
+    conn=None,
 ) -> tuple[PackageCandidateInspection, RuntimeModuleDescriptor]:
     """Compile an exact package into the production Graph rules without provisioning."""
 
@@ -641,6 +652,7 @@ async def compile_installed_candidate_descriptor(
         kernel=kernel,
         approved_capabilities=approved_capabilities,
         expected_configuration_revision=expected_configuration_revision,
+        conn=conn,
     )
     descriptor = _compile_package_descriptor(
         snapshot, store, kernel=kernel, configuration=configuration,
