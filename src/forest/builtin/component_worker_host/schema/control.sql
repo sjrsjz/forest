@@ -1,3 +1,160 @@
+CREATE TABLE selection_heads (
+    bot_id text PRIMARY KEY,
+    revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0)
+);
+
+CREATE TABLE selection_entries (
+    bot_id text NOT NULL,
+    component_id text NOT NULL CHECK (component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
+    source_kind text NOT NULL CHECK (source_kind IN ('builtin','installed')),
+    package_digest text,
+    manifest_digest text,
+    approved_capabilities jsonb NOT NULL DEFAULT '[]'::jsonb,
+    desired_enabled boolean NOT NULL,
+    desired_revision bigint NOT NULL CHECK (desired_revision > 0),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id, component_id),
+    CHECK (
+        (source_kind='builtin' AND package_digest IS NULL AND manifest_digest IS NULL
+            AND approved_capabilities='[]'::jsonb)
+        OR (source_kind='installed'
+            AND package_digest IS NOT NULL AND manifest_digest IS NOT NULL
+            AND package_digest ~ '^sha256:[a-f0-9]{64}$'
+            AND manifest_digest ~ '^sha256:[a-f0-9]{64}$'
+            AND jsonb_typeof(approved_capabilities)='array'
+            AND jsonb_array_length(approved_capabilities)<=64)
+    )
+);
+
+CREATE TABLE selection_operations (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL,
+    input_digest text NOT NULL,
+    input_payload jsonb NOT NULL,
+    desired_enabled boolean NOT NULL,
+    resulting_revision bigint NOT NULL CHECK (resulting_revision > 0),
+    expected_graph_revision bigint NOT NULL CHECK (expected_graph_revision > 0),
+    requested_by text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id, operation_id),
+    UNIQUE (bot_id, resulting_revision)
+);
+
+CREATE FUNCTION component_selection_snapshot(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql STABLE SET search_path=pg_catalog AS $$
+SELECT jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+  jsonb_build_object('protocol','forest.component-selection-snapshot/1',
+    'revision',COALESCE((SELECT revision FROM __forest_module_schema__.selection_heads
+        WHERE bot_id=context->>'bot_id'),0),
+    'entries',COALESCE((SELECT jsonb_agg(jsonb_build_object(
+        'component_id',component_id,'source_kind',source_kind,
+        'package_digest',package_digest,'manifest_digest',manifest_digest,
+        'approved_capabilities',approved_capabilities,'desired_enabled',desired_enabled,
+        'desired_revision',desired_revision) ORDER BY component_id)
+        FROM __forest_module_schema__.selection_entries
+        WHERE bot_id=context->>'bot_id'),'[]'::jsonb)))
+$$;
+
+CREATE FUNCTION component_selection_set(context jsonb, input jsonb, enabled boolean)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE bot text:=context->>'bot_id'; op text:=context->>'operation_id';
+        source text:=input->>'source_kind'; target text:=input->>'component_id';
+        head_revision bigint; existing __forest_module_schema__.selection_operations%ROWTYPE;
+        new_revision bigint; result jsonb;
+BEGIN
+  IF context->>'port_kind' NOT IN ('command','management_action')
+     OR (enabled AND context->>'port_name' IS DISTINCT FROM 'component.selection.enable')
+     OR (NOT enabled AND context->>'port_name' IS DISTINCT FROM 'component.selection.disable')
+     OR op IS NULL OR octet_length(op) NOT BETWEEN 1 AND 256
+     OR target IS NULL OR target !~ '^[a-z0-9][a-z0-9._-]{0,127}$'
+     OR (NOT enabled AND target='component.worker-host')
+     OR source IS NULL OR source NOT IN ('builtin','installed')
+     OR (source='builtin' AND (input->'package_digest' IS DISTINCT FROM 'null'::jsonb
+         OR input->'manifest_digest' IS DISTINCT FROM 'null'::jsonb
+         OR input->'approved_capabilities' IS DISTINCT FROM '[]'::jsonb))
+     OR (source='installed' AND (input->>'package_digest' IS NULL
+         OR input->>'manifest_digest' IS NULL
+         OR input->>'package_digest' !~ '^sha256:[a-f0-9]{64}$'
+         OR input->>'manifest_digest' !~ '^sha256:[a-f0-9]{64}$'
+         OR jsonb_typeof(input->'approved_capabilities') IS DISTINCT FROM 'array'))
+     OR (input->>'expected_selection_revision')::bigint < 0
+     OR (input->>'expected_graph_revision')::bigint <= 0
+     OR octet_length(input->>'requested_by') NOT BETWEEN 1 AND 256
+  THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_INVALID',
+        'message','Component selection input is invalid','status',422));
+  END IF;
+  PERFORM pg_advisory_xact_lock(hashtextextended('forest.component.selection/'||bot,0));
+  INSERT INTO __forest_module_schema__.selection_heads(bot_id,revision)
+    VALUES(bot,0) ON CONFLICT (bot_id) DO NOTHING;
+  SELECT revision INTO head_revision FROM __forest_module_schema__.selection_heads
+    WHERE bot_id=bot FOR UPDATE;
+  SELECT * INTO existing FROM __forest_module_schema__.selection_operations
+    WHERE bot_id=bot AND operation_id=op;
+  IF FOUND THEN
+    IF existing.input_digest IS DISTINCT FROM context->>'input_digest'
+       OR existing.desired_enabled IS DISTINCT FROM enabled THEN
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+        jsonb_build_object('code','COMPONENT_SELECTION_OPERATION_CONFLICT',
+          'message','Selection operation input differs','status',409));
+    END IF;
+    result:=jsonb_build_object('protocol','forest.component-selection-operation/1',
+      'operation_id',op,'component_id',existing.input_payload->>'component_id',
+      'desired_enabled',enabled,'selection_revision',existing.resulting_revision,
+      'expected_graph_revision',existing.expected_graph_revision);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',result);
+  END IF;
+  IF head_revision IS DISTINCT FROM (input->>'expected_selection_revision')::bigint THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_REVISION_CONFLICT',
+        'message','Component selection revision changed','status',409));
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM __forest_module_schema__.selection_entries
+      WHERE bot_id=bot AND component_id=target)
+     AND (SELECT count(*) FROM __forest_module_schema__.selection_entries
+          WHERE bot_id=bot)>=128 THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_LIMIT',
+        'message','Bot component selection limit reached','status',422));
+  END IF;
+  new_revision:=head_revision+1;
+  UPDATE __forest_module_schema__.selection_heads
+    SET revision=new_revision WHERE bot_id=bot;
+  INSERT INTO __forest_module_schema__.selection_entries(
+      bot_id,component_id,source_kind,package_digest,manifest_digest,
+      approved_capabilities,desired_enabled,desired_revision)
+    VALUES(bot,target,source,input->>'package_digest',input->>'manifest_digest',
+      input->'approved_capabilities',enabled,new_revision)
+    ON CONFLICT (bot_id,component_id) DO UPDATE SET
+      source_kind=EXCLUDED.source_kind,package_digest=EXCLUDED.package_digest,
+      manifest_digest=EXCLUDED.manifest_digest,
+      approved_capabilities=EXCLUDED.approved_capabilities,
+      desired_enabled=EXCLUDED.desired_enabled,desired_revision=EXCLUDED.desired_revision,
+      updated_at=clock_timestamp();
+  INSERT INTO __forest_module_schema__.selection_operations(
+      bot_id,operation_id,input_digest,input_payload,desired_enabled,
+      resulting_revision,expected_graph_revision,requested_by)
+    VALUES(bot,op,context->>'input_digest',input,enabled,new_revision,
+      (input->>'expected_graph_revision')::bigint,input->>'requested_by');
+  result:=jsonb_build_object('protocol','forest.component-selection-operation/1',
+    'operation_id',op,'component_id',target,'desired_enabled',enabled,
+    'selection_revision',new_revision,
+    'expected_graph_revision',(input->>'expected_graph_revision')::bigint);
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',result);
+END;
+$$;
+
+CREATE FUNCTION component_selection_enable(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
+SELECT __forest_module_schema__.component_selection_set(context,input,true)
+$$;
+
+CREATE FUNCTION component_selection_disable(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
+SELECT __forest_module_schema__.component_selection_set(context,input,false)
+$$;
+
 CREATE TABLE reload_requests (
     bot_id text NOT NULL,
     request_id text NOT NULL,

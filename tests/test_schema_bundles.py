@@ -16,6 +16,7 @@ import psycopg
 import pytest
 import pytest_asyncio
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from forest.builtin_packages import (
     _configuration_storage,
@@ -23,6 +24,7 @@ from forest.builtin_packages import (
     bootstrap_installed_package,
 )
 from forest.clean_bot_host import CleanBotHost
+from forest.component_selection import ComponentSelectionReader
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
@@ -151,6 +153,102 @@ async def clean_authority():
         assert name.startswith("forest_bundle_") and len(name) == 46
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()
+
+
+@pytest.mark.postgres
+async def test_worker_host_selection_revision_cas_and_operation_replay(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    snapshot = PackageCatalog(tmp_path / "selection-packages").build(
+        Path(__file__).parents[1] / "src/forest/builtin/component_worker_host"
+    )
+    storage = _configuration_storage(snapshot)
+    await installer.install(
+        storage.spec, storage.baseline, storage.package_digest,
+        execution_profile="official",
+    )
+
+    async def call(function, operation_id, payload):
+        name = "component.selection." + function
+        context = {
+            "bot_id": store.bot_id, "port_kind": "command", "port_name": name,
+            "operation_id": operation_id, "input_digest": digest_json(payload),
+        }
+        async with store.pool.connection() as conn:
+            result = await conn.execute(
+                sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS value").format(
+                    sql.Identifier(storage.spec.namespace, "component_selection_" + function)
+                ),
+                (Jsonb(context), Jsonb(payload)),
+            )
+            return (await result.fetchone())["value"]
+
+    source = {
+        "component_id": "example.optional", "source_kind": "builtin",
+        "package_digest": None, "manifest_digest": None,
+        "approved_capabilities": [], "expected_selection_revision": 0,
+        "expected_graph_revision": 1, "requested_by": "subject/admin",
+    }
+    first, rival = await asyncio.gather(
+        call("enable", "selection/first", source),
+        call("disable", "selection/rival", source),
+    )
+    assert sorted((first["ok"], rival["ok"])) == [False, True]
+    winner = first if first["ok"] else rival
+    loser = rival if first["ok"] else first
+    assert winner["value"]["selection_revision"] == 1
+    assert loser["error"]["code"] == "COMPONENT_SELECTION_REVISION_CONFLICT"
+    replay = await call(
+        "enable" if first["ok"] else "disable",
+        "selection/first" if first["ok"] else "selection/rival",
+        source,
+    )
+    assert replay == winner
+    changed = {**source, "expected_selection_revision": 1}
+    conflict = await call(
+        "enable" if first["ok"] else "disable",
+        "selection/first" if first["ok"] else "selection/rival",
+        changed,
+    )
+    assert conflict["error"]["code"] == "COMPONENT_SELECTION_OPERATION_CONFLICT"
+    async with store.pool.connection() as conn:
+        result = await conn.execute(
+            sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS value").format(
+                sql.Identifier(storage.spec.namespace, "component_selection_snapshot")
+            ),
+            (Jsonb({"bot_id": store.bot_id}), Jsonb({})),
+        )
+        frozen = (await result.fetchone())["value"]["value"]
+    assert frozen["revision"] == 1
+    assert frozen["entries"] == [{
+        "component_id": "example.optional", "source_kind": "builtin",
+        "package_digest": None, "manifest_digest": None,
+        "approved_capabilities": [], "desired_enabled": winner["value"]["desired_enabled"],
+        "desired_revision": 1,
+    }]
+    reader = ComponentSelectionReader(store)
+    current = await reader.snapshot()
+    assert current.revision == frozen["revision"]
+    assert [entry.as_dict() for entry in current.entries] == frozen["entries"]
+    next_action = "disable" if winner["value"]["desired_enabled"] else "enable"
+    async with reader.publication_fence(
+        expected_revision=current.revision, expected_digest=current.digest
+    ):
+        pending = asyncio.create_task(
+            call(next_action, "selection/next", changed)
+        )
+        await asyncio.sleep(0.05)
+        assert not pending.done()
+    next_result = await asyncio.wait_for(pending, timeout=5)
+    assert next_result["value"]["selection_revision"] == 2
+    with pytest.raises(ForestError) as stale:
+        async with reader.publication_fence(
+            expected_revision=current.revision, expected_digest=current.digest
+        ):
+            pass
+    assert stale.value.code == "COMPONENT_SELECTION_CHANGED"
 
 
 @pytest.mark.postgres

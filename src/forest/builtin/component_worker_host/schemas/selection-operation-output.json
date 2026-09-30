@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol": {"const": "forest.component-selection-operation/1"},
+    "operation_id": {"type": "string"},
+    "component_id": {"type": "string"},
+    "desired_enabled": {"type": "boolean"},
+    "selection_revision": {"type": "integer", "minimum": 1},
+    "expected_graph_revision": {"type": "integer", "minimum": 1}
+  },
+  "required": ["protocol", "operation_id", "component_id", "desired_enabled", "selection_revision", "expected_graph_revision"],
+  "additionalProperties": false
+}

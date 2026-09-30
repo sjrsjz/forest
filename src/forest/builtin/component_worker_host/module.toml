@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.5.4"
+version = "1.5.5"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -36,7 +36,10 @@ requests = [
   "service.call:runtime.graph-replacement.status",
   "domain.query:component.reload.read",
   "domain.query:component.configuration-rebuild.read",
-  "domain.command:component.reload.enqueue"
+  "domain.query:component.selection.snapshot",
+  "domain.command:component.reload.enqueue",
+  "domain.command:component.selection.enable",
+  "domain.command:component.selection.disable"
 ]
 
 [components.management_ui]
@@ -49,9 +52,9 @@ order = 2
 
 [components.storage]
 schema_id = "forest.component.worker-host"
-schema_version = "1.1.0"
+schema_version = "1.2.0"
 baseline = "schema/control.sql"
-baseline_sha256 = "89cb98749e31a9ccf0bb8300b0ce67596e9be515accd5a7ee52a986cbab17a55"
+baseline_sha256 = "82559dc4c6a14a6ce47de85bf6c15a309df137f7e71931ae9c0ab191640084be"
 scope = "bot"
 repository_contract = "forest.component-worker-host.repository/1"
 execution_profile = "official"
@@ -201,6 +204,27 @@ contract = "1.0"
 function = "component_reload_enqueue"
 input_schema = "schemas/reload-enqueue.json"
 output_schema = "schemas/reload-output.json"
+
+[[components.domain_commands]]
+name = "component.selection.enable"
+contract = "1.0"
+function = "component_selection_enable"
+input_schema = "schemas/selection-write-input.json"
+output_schema = "schemas/selection-operation-output.json"
+
+[[components.domain_commands]]
+name = "component.selection.disable"
+contract = "1.0"
+function = "component_selection_disable"
+input_schema = "schemas/selection-write-input.json"
+output_schema = "schemas/selection-operation-output.json"
+
+[[components.domain_queries]]
+name = "component.selection.snapshot"
+contract = "1.0"
+function = "component_selection_snapshot"
+input_schema = "schemas/selection-snapshot-input.json"
+output_schema = "schemas/selection-snapshot-output.json"
 
 [[components.domain_queries]]
 name = "component.reload.read"

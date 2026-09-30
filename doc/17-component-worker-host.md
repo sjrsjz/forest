@@ -89,7 +89,7 @@ Worker Host 提交内核替换请求时，冻结所接受选择操作的全局�
 
 群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/2` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执说明目标及其依赖闭包会换代；实际成员变化以发布后的 Graph 为准；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable 与工件选择控制仍待完成。
 
-当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录与精确摘要 `artifact` 投影、持久重载账本及标准配置控制意图。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须建立部署工件的安装权威和完整 `module.validate`，再以 Worker Host 私有选择事实实现显式启停、包选择，使候选成员增删复用现有 Generation 保留机制，并让 Shell/CLI 使用相同控制端口。选择操作应冻结准确工件摘要、选择修订和预期 Graph；宿主在预热及发布前核对冻结事实，避免连续选择操作让旧请求装配较新的包。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
+当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录与精确摘要 `artifact` 投影、持久重载账本及标准配置控制意图。私有 schema 现还具备选择修订头、组件条目、幂等操作回执、内部启用/停用 SQL 端口和只读快照；宿主侧只读适配器以与选择写入互斥的数据库围栏取得快照。写入端口尚未发布为 Web/Shell 管理操作，宿主也尚未按该快照装配候选图。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须建立部署工件的安装权威和完整 `module.validate`，再把选择事实接入显式启停、包选择与候选图装配，使成员增删复用现有 Generation 保留机制，并让 Shell/CLI 使用相同控制端口。选择操作应冻结准确工件摘要、选择修订和预期 Graph；宿主在预热及发布前核对冻结事实，避免连续选择操作让旧请求装配较新的包。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
 
 ### 局部换代的内核边界
 
