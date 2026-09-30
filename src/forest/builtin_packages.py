@@ -313,7 +313,7 @@ async def _inspect_installed_snapshot(
     kernel,
     approved_capabilities: tuple[str, ...],
     expected_configuration_revision: int | None = None,
-) -> InstalledPackageInspection:
+) -> tuple[InstalledPackageInspection, _InstalledPackageLayout, ModuleConfigurationRepository]:
     layout = _installed_package_layout(snapshot, approved_capabilities)
     configuration = ModuleConfigurationRepository(
         store,
@@ -325,12 +325,26 @@ async def _inspect_installed_snapshot(
     desired = await _installed_desired(
         layout, configuration, expected_revision=expected_configuration_revision
     )
-    return InstalledPackageInspection(
+    inspected = InstalledPackageInspection(
         snapshot.component["id"], snapshot.digest, digest_json(snapshot.manifest),
         desired.revision, desired.payload_id, desired.payload_digest,
         layout.schema_digest,
         layout.storage.package_digest if layout.storage is not None else None,
     )
+    return inspected, layout, configuration
+
+
+def _pinned_installed_snapshot(
+    package_digest: str, catalog: PackageCatalog, expected_manifest_digest: str
+) -> PackageSnapshot:
+    snapshot = catalog.get(package_digest)
+    if digest_json(snapshot.manifest) != expected_manifest_digest:
+        raise ForestError(
+            "COMPONENT_SELECTION_ARTIFACT_CHANGED",
+            "Selected package declaration differs from its pinned artifact",
+            409,
+        )
+    return snapshot
 
 
 async def inspect_installed_package(
@@ -345,20 +359,17 @@ async def inspect_installed_package(
 ) -> InstalledPackageInspection:
     """Read one exact installed candidate without schema, grant, or configuration writes."""
 
-    snapshot = catalog.get(package_digest)
-    if digest_json(snapshot.manifest) != expected_manifest_digest:
-        raise ForestError(
-            "COMPONENT_SELECTION_ARTIFACT_CHANGED",
-            "Selected package declaration differs from its pinned artifact",
-            409,
-        )
-    return await _inspect_installed_snapshot(
+    snapshot = _pinned_installed_snapshot(
+        package_digest, catalog, expected_manifest_digest
+    )
+    inspected, _layout, _configuration = await _inspect_installed_snapshot(
         snapshot,
         store,
         kernel=kernel,
         approved_capabilities=approved_capabilities,
         expected_configuration_revision=expected_configuration_revision,
     )
+    return inspected
 
 
 async def bootstrap_builtin_package(
@@ -420,6 +431,140 @@ async def bootstrap_installed_package(
         approved_capabilities=approved_capabilities,
         trust_level="installed",
     )
+
+
+def _compile_package_descriptor(
+    snapshot: PackageSnapshot,
+    store,
+    *,
+    kernel,
+    configuration: ModuleConfigurationRepository,
+    configuration_schema: dict[str, Any],
+    storage: RuntimeStorageBundle | None,
+    grants,
+    resolved_contracts: dict[str, str] | None,
+    effect_driver_registry: PackageEffectDriverRegistry,
+    configuration_validator,
+    trust_level: str,
+    plan_only: bool = False,
+) -> RuntimeModuleDescriptor:
+    component_id = snapshot.component["id"]
+    effect_driver_factories = effect_driver_registry.resolve(
+        tuple(snapshot.component.get("effect_services", ()))
+    )
+    has_domain_authority = bool(
+        snapshot.component.get("domain_queries")
+        or snapshot.component.get("domain_commands")
+        or snapshot.component.get("unit_of_work_participants")
+        or snapshot.component.get("owned_work_handlers")
+    )
+    domain_authority = (
+        PostgresPackageDomainAuthority(
+            store,
+            kernel.runtime,
+            component_id=component_id,
+            runtime_package_digest=snapshot.digest,
+            storage_spec=storage.spec,
+            storage_package_digest=storage.package_digest,
+            storage_execution_profile=storage.execution_profile,
+            payloads=kernel.payload,
+        )
+        if has_domain_authority
+        else None
+    )
+    packaged_ui = snapshot.management_ui()
+    if packaged_ui is None:
+        management = (configuration_management_contribution(component_id),)
+    else:
+        ui_metadata, _content = packaged_ui
+        ui_declaration = snapshot.component["management_ui"]
+        management = (
+            RuntimePackageManagementContribution(
+                ui_declaration.get("contribution_id", "configuration"),
+                ui_declaration.get("label", component_id),
+                ("bot",),
+                component_id,
+                ui_metadata["sha256"],
+                group=ui_declaration.get("group", "configuration"),
+                order=ui_declaration.get("order", 10),
+            ),
+        )
+    return package_runtime_descriptor(
+        snapshot,
+        bot_id=store.bot_id,
+        module_configuration=configuration,
+        grants=grants,
+        resolved_contracts=_required_service_contracts(snapshot, resolved_contracts),
+        generation_verifier=kernel.runtime.verify_active_generation,
+        generation_member_verifier=kernel.runtime.verify_generation_member,
+        state_queries=KernelPackageStateQueries(kernel.runtime, kernel.payload),
+        state_commands=KernelPackageStateCommands(kernel.runtime, kernel.payload),
+        payload_authority=KernelPackagePayloadAuthority(kernel.payload),
+        domain_queries=domain_authority,
+        domain_commands=domain_authority,
+        unit_of_work_authority=domain_authority,
+        unit_of_work_coordinator_factory=package_uow_coordinator_factory(
+            store=store, runtime=kernel.runtime,
+        ),
+        configuration_apply_coordinator_factory=lambda target, repository, control: (
+            PostgresComponentConfigurationApplyCoordinator(
+                store,
+                kernel.runtime,
+                component_id=target,
+                configuration=repository,
+                control_handle=control,
+            )
+        ),
+        owned_work_authority=domain_authority,
+        agent_tool_effects=kernel.effect,
+        service_operation_ledger=KernelPackageServiceOperationLedger(
+            kernel.runtime, kernel.payload,
+        ),
+        configuration_validator=configuration_validator,
+        effect_driver_factories=effect_driver_factories,
+        storage=storage,
+        management=management,
+        management_contract_factory=lambda adapter: PackageManagementContract(
+            configuration,
+            adapter=adapter,
+            schema=configuration_schema,
+            validator=configuration_validator,
+        ),
+        trust_level=trust_level,
+        plan_only=plan_only,
+    )
+
+
+async def compile_installed_candidate_descriptor(
+    package_digest: str,
+    catalog: PackageCatalog,
+    store,
+    *,
+    kernel,
+    approved_capabilities: tuple[str, ...],
+    expected_manifest_digest: str,
+    expected_configuration_revision: int,
+) -> tuple[InstalledPackageInspection, RuntimeModuleDescriptor]:
+    """Compile an exact package into the production Graph rules without provisioning."""
+
+    snapshot = _pinned_installed_snapshot(
+        package_digest, catalog, expected_manifest_digest
+    )
+    inspected, layout, configuration = await _inspect_installed_snapshot(
+        snapshot,
+        store,
+        kernel=kernel,
+        approved_capabilities=approved_capabilities,
+        expected_configuration_revision=expected_configuration_revision,
+    )
+    descriptor = _compile_package_descriptor(
+        snapshot, store, kernel=kernel, configuration=configuration,
+        configuration_schema=layout.schema, storage=layout.storage, grants=None,
+        resolved_contracts=None,
+        effect_driver_registry=EMPTY_PACKAGE_EFFECT_DRIVERS,
+        configuration_validator=None, trust_level="installed", plan_only=True,
+    )
+    return inspected, descriptor
 
 
 async def _bootstrap_package_snapshot(
@@ -504,95 +649,12 @@ async def _bootstrap_package_snapshot(
         ),
         expected_policy_revision=policy_revision,
     )
-    effect_driver_factories = effect_driver_registry.resolve(
-        tuple(snapshot.component.get("effect_services", ()))
-    )
-    has_domain_authority = bool(
-        snapshot.component.get("domain_queries")
-        or snapshot.component.get("domain_commands")
-        or snapshot.component.get("unit_of_work_participants")
-        or snapshot.component.get("owned_work_handlers")
-    )
-    domain_authority = (
-        PostgresPackageDomainAuthority(
-            store,
-            kernel.runtime,
-            component_id=component_id,
-            runtime_package_digest=snapshot.digest,
-            storage_spec=storage.spec,
-            storage_package_digest=storage.package_digest,
-            storage_execution_profile=storage.execution_profile,
-            payloads=kernel.payload,
-        )
-        if has_domain_authority
-        else None
-    )
-    packaged_ui = snapshot.management_ui()
-    if packaged_ui is None:
-        management = (configuration_management_contribution(component_id),)
-    else:
-        ui_metadata, _content = packaged_ui
-        ui_declaration = snapshot.component["management_ui"]
-        management = (
-            RuntimePackageManagementContribution(
-                ui_declaration.get("contribution_id", "configuration"),
-                ui_declaration.get("label", component_id),
-                ("bot",),
-                component_id,
-                ui_metadata["sha256"],
-                group=ui_declaration.get("group", "configuration"),
-                order=ui_declaration.get("order", 10),
-            ),
-        )
-    descriptor = package_runtime_descriptor(
-        snapshot,
-        bot_id=store.bot_id,
-        module_configuration=configuration,
-        grants=grants,
-        resolved_contracts=_required_service_contracts(snapshot, resolved_contracts),
-        generation_verifier=kernel.runtime.verify_active_generation,
-        generation_member_verifier=kernel.runtime.verify_generation_member,
-        state_queries=KernelPackageStateQueries(
-            kernel.runtime,
-            kernel.payload,
-        ),
-        state_commands=KernelPackageStateCommands(
-            kernel.runtime,
-            kernel.payload,
-        ),
-        payload_authority=KernelPackagePayloadAuthority(kernel.payload),
-        domain_queries=domain_authority,
-        domain_commands=domain_authority,
-        unit_of_work_authority=domain_authority,
-        unit_of_work_coordinator_factory=package_uow_coordinator_factory(
-            store=store,
-            runtime=kernel.runtime,
-        ),
-        configuration_apply_coordinator_factory=lambda target, repository, control: (
-            PostgresComponentConfigurationApplyCoordinator(
-                store,
-                kernel.runtime,
-                component_id=target,
-                configuration=repository,
-                control_handle=control,
-            )
-        ),
-        owned_work_authority=domain_authority,
-        agent_tool_effects=kernel.effect,
-        service_operation_ledger=KernelPackageServiceOperationLedger(
-            kernel.runtime,
-            kernel.payload,
-        ),
+    descriptor = _compile_package_descriptor(
+        snapshot, store, kernel=kernel, configuration=configuration,
+        configuration_schema=configuration_schema, storage=storage, grants=grants,
+        resolved_contracts=resolved_contracts,
+        effect_driver_registry=effect_driver_registry,
         configuration_validator=configuration_validator,
-        effect_driver_factories=effect_driver_factories,
-        storage=storage,
-        management=management,
-        management_contract_factory=lambda adapter: PackageManagementContract(
-            configuration,
-            adapter=adapter,
-            schema=configuration_schema,
-            validator=configuration_validator,
-        ),
         trust_level=trust_level,
     )
     return ProvisionedPackageModule(snapshot, descriptor, configuration, grants)

@@ -2601,6 +2601,7 @@ def package_runtime_descriptor(
     management_contract_factory: Callable[[PackageGenerationAdapter], Any] | None = None,
     worker_factory: Callable[..., PythonWorker] = PythonWorker,
     trust_level: str = "installed",
+    plan_only: bool = False,
 ) -> RuntimeModuleDescriptor:
     """Compile one package snapshot without importing its Python entrypoint."""
 
@@ -2913,7 +2914,7 @@ def package_runtime_descriptor(
                 )
             )
         ),
-        factory=factory,
+        factory=None if plan_only else factory,
         artifact=RuntimeArtifactIdentity(
             package_id=snapshot.manifest["package_id"],
             package_version=snapshot.manifest["version"],

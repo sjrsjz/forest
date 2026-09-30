@@ -126,3 +126,8 @@ Worker Host 已把目标 `component_id` 随 `runtime.graph-replacement.request/2
 Registry 的替换排空现接受与内核围栏相同的成员集合：只冻结选中组件的 owned-work gate、排空其任务并执行其 `begin_replacement`/`quiesce`；保留成员的 Router admission 保持开放。失败回滚只恢复选中组件的本地 gate、任务状态和内核路由。整图替换仍可省略成员集合，保持原有全图生命周期。
 
 保留 Worker 的内部服务句柄绑定原 Router 及冻结的 Graph 路由身份。候选 Registry 可以取得实例的最终监督与关闭所有权，但不得把原 WorkerIdentity 改写成新 Graph 身份，也不得在发布后立即销毁原 Router。已发布的新 Registry 接管保留实例的监督与最终关闭；旧 Registry 只清理被换代实例，保留原路由上下文，直到最后一个借用者关闭时再释放。旧路由仍须在调用方和提供方的准确 Generation 都为当前成员时才能跨图调用。
+### 已安装工件的只读候选描述符
+
+`compile_installed_candidate_descriptor()` 按精确工件、manifest 摘要、批准能力及目标配置修订读取候选，并与生产装配共用包描述符编译器。编译结果保留相同的组件依赖、端口、存储绑定和管理贡献，但不含可执行的 Worker factory；它只在宿主可信进程内交给 `RuntimeModuleRegistry.preview_graph_transition()` 计算影响集合，不跨 Worker 或 Web 边界传输。Registry 在准备 Graph 前拒绝含此类描述符的实例，避免预览误触发 schema、grant 或 Generation 写入。
+
+这只解决了精确候选的静态编译和正式 Graph 规划复用。完整 `module.validate` 仍需按 Bot 选择快照编译全部候选成员，冻结 Graph/选择/配置修订与计划摘要，核对资源预算，并在授权提交事务中复核。预览不是启停授权，也不是对后续发布的无条件保证。

@@ -669,7 +669,7 @@ class OwnedWorkLifecycle(StrEnum):
 class RuntimeModuleDescriptor:
     component_id: str
     requires: tuple[str, ...]
-    factory: Callable[[Any, dict[str, Any]], Any]
+    factory: Callable[[Any, dict[str, Any]], Any] | None
     artifact: RuntimeArtifactIdentity
     management: tuple[
         RuntimeManagementContribution | RuntimePackageManagementContribution, ...
@@ -691,6 +691,10 @@ class RuntimeModuleDescriptor:
     retention_service_requires: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
+        if self.factory is None and self.artifact.driver != "forest.python-worker/1":
+            raise ValueError("Only Python package plans may omit a runtime factory")
+        if self.factory is not None and not callable(self.factory):
+            raise ValueError("Runtime module factory must be callable")
         identities = [item.contribution_id for item in self.management]
         if len(identities) != len(set(identities)):
             raise ValueError("Runtime management contribution identities must be unique")
@@ -1549,6 +1553,12 @@ class RuntimeModuleRegistry:
     async def _prepare_graph(self):
         lease = None
         try:
+            if any(descriptor.factory is None for descriptor in self.descriptors):
+                raise ForestError(
+                    "RUNTIME_MODULE_PLAN_NOT_EXECUTABLE",
+                    "A planning descriptor cannot prepare a RuntimeGraph",
+                    409,
+                )
             if self.generation_authority is None:
                 raise ForestError(
                     "RUNTIME_GENERATION_AUTHORITY_REQUIRED",

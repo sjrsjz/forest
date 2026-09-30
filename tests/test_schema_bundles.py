@@ -23,6 +23,7 @@ from forest.builtin_packages import (
     _configuration_storage,
     bootstrap_builtin_package,
     bootstrap_installed_package,
+    compile_installed_candidate_descriptor,
     inspect_installed_package,
 )
 from forest.clean_bot_host import BotGraphCandidate, CleanBotHost
@@ -2843,6 +2844,24 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     updated_snapshot = catalog.import_archive(
         source_catalog.export_archive(updated_source.digest)
     )
+    planned_artifact, planned_descriptor = await compile_installed_candidate_descriptor(
+        updated_snapshot.digest, catalog, store, kernel=core,
+        approved_capabilities=approved,
+        expected_manifest_digest=digest_json(updated_snapshot.manifest),
+        expected_configuration_revision=1,
+    )
+    assert planned_artifact.package_digest == updated_snapshot.digest
+    assert planned_descriptor.factory is None
+    planned_registry = RuntimeModuleRegistry(
+        host, core.descriptors + (routing.descriptor, planned_descriptor)
+    )
+    planned_impact = planned_registry.preview_graph_transition(
+        first, target_component_id="tests.routing-component"
+    )
+    with pytest.raises(ForestError) as not_executable:
+        await planned_registry.prewarm()
+    assert not_executable.value.code == "RUNTIME_MODULE_PLAN_NOT_EXECUTABLE"
+    assert (await core.runtime.status())["graph_revision"] == first_graph.graph_revision
     updated = await bootstrap_installed_package(
         updated_snapshot.digest,
         catalog,
@@ -2861,6 +2880,9 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     candidate = RuntimeModuleRegistry(
         host, core.descriptors + (routing.descriptor, updated.descriptor)
     )
+    assert candidate.preview_graph_transition(
+        first, target_component_id="tests.routing-component"
+    ) == planned_impact
     affected = candidate.plan_retained_generations(first, "tests.routing-component")
     await candidate.prewarm()
     await first.drain_owned_work_for_replacement(
