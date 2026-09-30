@@ -2567,6 +2567,15 @@ async def test_runtime_registry_transfers_unaffected_generations_without_restart
     assert previous.instances == original_instances
 
     candidate = RuntimeModuleRegistry(host, core.descriptors)
+    preview = candidate.preview_graph_transition(previous, target_component_id="kernel.runtime")
+    assert preview.replace == ("kernel.runtime",)
+    assert preview.retain == tuple(
+        component_id for component_id in previous.order if component_id != "kernel.runtime"
+    )
+    assert preview.remove == preview.add == ()
+    assert preview.drain == preview.prepare == ("kernel.runtime",)
+    assert candidate.instances == {}
+    assert candidate._retained_from is None
     affected = candidate.plan_retained_generations(previous, "kernel.runtime")
     assert affected == ("kernel.runtime",)
     await candidate.prewarm()
@@ -2620,6 +2629,10 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     )
 
     added = RuntimeModuleRegistry(host, core.descriptors + (counter.descriptor,))
+    add_plan = added.preview_graph_transition(first, target_component_id="forest.counter")
+    assert add_plan.replace == add_plan.remove == add_plan.drain == ()
+    assert add_plan.retain == tuple(first.order)
+    assert add_plan.add == add_plan.prepare == ("forest.counter",)
     controller = object.__new__(CleanBotHost)
     controller._replacement_lock = asyncio.Lock()
     controller._closing = False
@@ -2646,6 +2659,10 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     counter_instance = added.get("forest.counter")
 
     removed = RuntimeModuleRegistry(host, core.descriptors)
+    remove_plan = removed.preview_graph_transition(added, target_component_id="forest.counter")
+    assert remove_plan.replace == remove_plan.add == remove_plan.prepare == ()
+    assert remove_plan.retain == tuple(removed.order)
+    assert remove_plan.remove == remove_plan.drain == ("forest.counter",)
 
     async def assemble_removed(_activation_id=None):
         return BotGraphCandidate(removed, selection)

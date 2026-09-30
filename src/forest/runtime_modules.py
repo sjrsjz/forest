@@ -743,6 +743,18 @@ class RuntimeModuleDescriptor:
             raise ValueError("Runtime retention requirements must be unique and external")
 
 
+@dataclass(frozen=True)
+class RuntimeGraphTransitionPlan:
+    """Read-only member impact calculated by the production Graph planner."""
+
+    replace: tuple[str, ...]
+    retain: tuple[str, ...]
+    remove: tuple[str, ...]
+    add: tuple[str, ...]
+    drain: tuple[str, ...]
+    prepare: tuple[str, ...]
+
+
 class ModuleLifecycleState(StrEnum):
     DISCOVERED = "DISCOVERED"
     VALIDATED = "VALIDATED"
@@ -967,7 +979,23 @@ class RuntimeModuleRegistry:
         *,
         target_component_id: str | None = None,
     ) -> tuple[str, ...]:
-        """Plan replace, retain, add and remove against one active source Graph."""
+        """Bind retained ownership after calculating the production Graph impact."""
+
+        plan = self.preview_graph_transition(
+            previous, target_component_id=target_component_id
+        )
+        if plan.retain:
+            self._retained_from = previous
+            self._retained_components = frozenset(plan.retain)
+        return plan.drain
+
+    def preview_graph_transition(
+        self,
+        previous: RuntimeModuleRegistry,
+        *,
+        target_component_id: str | None = None,
+    ) -> RuntimeGraphTransitionPlan:
+        """Calculate the exact Graph impact without preparing or binding a Generation."""
 
         if self.instances or self.graph_identity is not None or self._retained_from is not None:
             raise ForestError(
@@ -997,11 +1025,9 @@ class RuntimeModuleRegistry:
             component_id = descriptor.component_id
             if component_id not in previous.states:
                 continue
-            self.instances[component_id] = previous.instances[component_id]
-            try:
-                candidate_digest = self._descriptor_fact(descriptor)["descriptor_digest"]
-            finally:
-                del self.instances[component_id]
+            candidate_digest = self._descriptor_fact(
+                descriptor, instance_override=previous.instances[component_id]
+            )["descriptor_digest"]
             if candidate_digest != previous.generation_bindings[component_id].descriptor_digest:
                 changed.add(component_id)
         while True:
@@ -1020,11 +1046,17 @@ class RuntimeModuleRegistry:
             if expanded == changed:
                 break
             changed = expanded
-        retained = frozenset(set(previous.states) & set(self.states) - changed)
-        if retained:
-            self._retained_from = previous
-            self._retained_components = retained
-        return tuple(item for item in previous.order if item in changed)
+        common = set(previous.states) & set(self.states)
+        replaced = common & changed
+        retained = common - changed
+        return RuntimeGraphTransitionPlan(
+            replace=tuple(item for item in previous.order if item in replaced),
+            retain=tuple(item for item in previous.order if item in retained),
+            remove=tuple(item for item in previous.order if item not in self.states),
+            add=tuple(item for item in self.order if item not in previous.states),
+            drain=tuple(item for item in previous.order if item in changed),
+            prepare=tuple(item for item in self.order if item in changed),
+        )
 
     def accept_retained_ownership(self) -> None:
         """Transfer retained instances only after their new Graph is published."""
@@ -1085,8 +1117,13 @@ class RuntimeModuleRegistry:
         ):
             self.contract_router.deactivate()
 
-    def _descriptor_fact(self, descriptor: RuntimeModuleDescriptor) -> dict:
-        instance = self.instances.get(descriptor.component_id)
+    def _descriptor_fact(
+        self, descriptor: RuntimeModuleDescriptor, *, instance_override: Any | None = None
+    ) -> dict:
+        instance = (
+            self.instances.get(descriptor.component_id)
+            if instance_override is None else instance_override
+        )
         contract = getattr(instance, "management_contract", None)
         fact = {
             "protocol": "forest.runtime-module/1",

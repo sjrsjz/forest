@@ -99,6 +99,8 @@ Worker Host 提交内核替换请求时，冻结所接受选择操作的全局�
 
 提交时 Web authority 在选择写入事务内核对管理票据、计划摘要、当前选择修订以及预验证冻结的 Graph、工件和目标配置事实，随后由 Worker Host 私有命令写入选择操作与任务。任何事实变化返回冲突并要求重新验证；不同 action 键分别约束 enable 与 disable。群 Shell 使用同一计划与提交端口，但保留 Shell 自身优先级和管理员身份检查。内核只传递冻结凭据，不解释包策略；宿主最终预热与发布继续以数据库围栏核对准确快照。通用管理 ABI 必须先具备这种预验证加事务复核能力，才开放选择写入，避免一个仅有界面校验、实际可绕过的控制入口。
 
+正式 Registry 现提供只读 `preview_graph_transition()`，从同一份候选与来源描述符计算 `replace/retain/remove/add`、旧图排空集合与新图预热集合；实际 `plan_graph_transition()` 消费该结果后才绑定保留实例的所有权。预览不准备 Generation、不安装 schema、不更改 Registry 实例表。它只是候选拓扑规划，不会自行读取或验证 Bot 选择账本、精确工件、目标配置 revision 和批准能力，也不产生可授权的计划摘要；`module.validate` 必须把这些冻结事实与预览结果一并核对，不能把这个底层方法单独暴露为管理入口。
+
 ### 局部换代的内核边界
 
 当前 `RuntimeModuleRegistry` 用冻结描述符摘要和启动/保留依赖计算换代闭包，只为闭包及新增成员创建新实例与 Generation；闭包外的原实例、Worker 进程、Generation 身份及配置 effective 均不重绑定。候选 Router 登记保留提供方以接收新图入站调用；保留实例内部的旧句柄继续使用原 Router，并由内核核对调用方和提供方准确 Generation 的当前成员身份。Graph 发布成功后，旧 Registry 只关闭换代或移除的成员，原 Router 随被保留的 Generation 保持可用；新 Registry 负责这些实例的监督和最终关闭。纯新增不排空旧图的任何成员；纯移除允许候选图全部引用保留 Generation，而不强迫虚构一个新代。
