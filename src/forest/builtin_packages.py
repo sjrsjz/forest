@@ -543,7 +543,7 @@ async def compile_installed_candidate_descriptor(
     kernel,
     approved_capabilities: tuple[str, ...],
     expected_manifest_digest: str,
-    expected_configuration_revision: int,
+    expected_configuration_revision: int | None = None,
 ) -> tuple[InstalledPackageInspection, RuntimeModuleDescriptor]:
     """Compile an exact package into the production Graph rules without provisioning."""
 

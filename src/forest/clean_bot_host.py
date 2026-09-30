@@ -17,7 +17,12 @@ from forest.builtin_packages import bootstrap_builtin_package, bootstrap_install
 from forest.chat_completions_effect_driver import (
     chat_completions_effect_driver_factory,
 )
-from forest.component_selection import ComponentSelectionReader, ComponentSelectionSnapshot
+from forest.component_graph_preview import SelectionGraphPreview, preview_selected_graph
+from forest.component_selection import (
+    ComponentSelectionReader,
+    ComponentSelectionSnapshot,
+    select_package_members,
+)
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.embedding_builtin import embedding_configuration_validator_factory
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
@@ -28,13 +33,13 @@ from forest.media_capture_effect_driver import media_image_fetch_effect_driver_f
 from forest.model_contract import ModelCapabilities
 from forest.onebot_transport_effect_driver import onebot_transport_effect_driver_factory
 from forest.package_effects import PackageEffectDriverRegistry
-from forest.packages import PackageCatalog, digest_json
+from forest.packages import PackageCatalog
 from forest.process_executor_builtin import (
     default_process_executor_configuration,
     process_executor_configuration_validator_factory,
 )
 from forest.process_executor_effect_driver import native_process_effect_driver_factory
-from forest.runtime_modules import RuntimeModuleRegistry
+from forest.runtime_modules import RuntimeModuleDescriptor, RuntimeModuleRegistry
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.schema_bundles import SchemaBundleInstaller
@@ -51,6 +56,7 @@ _HOST_LEASE_TTL = timedelta(minutes=2)
 class BotGraphCandidate:
     registry: RuntimeModuleRegistry
     selection: ComponentSelectionSnapshot
+    official_descriptors: tuple[RuntimeModuleDescriptor, ...] = ()
 
 
 def _required(name: str) -> str:
@@ -314,6 +320,7 @@ class CleanBotHost:
         self.schema_bundle_installer = SchemaBundleInstaller(self.store)
         self.generation_authority = None
         self.registry: RuntimeModuleRegistry | None = None
+        self._official_descriptors: tuple[RuntimeModuleDescriptor, ...] = ()
         self._lease = None
         self._renewal_task: asyncio.Task | None = None
         self._replacement_task: asyncio.Task | None = None
@@ -800,61 +807,32 @@ class CleanBotHost:
                 conversation.descriptor,
                 delivery.descriptor,
         )
-        official_ids = {item.component_id for item in official_descriptors}
-        disabled: set[str] = set()
+        selected = select_package_members(
+            selection, official_descriptors, self.package_catalog
+        )
         installed = []
-        for entry in selection.entries:
-            if entry.component_id.startswith("kernel."):
-                raise ForestError(
-                    "COMPONENT_SELECTION_INVALID",
-                    "Kernel authorities cannot be selected as packages",
-                    409,
-                )
-            if entry.source_kind == "builtin":
-                if entry.component_id not in official_ids or (
-                    entry.component_id == "component.worker-host" and not entry.desired_enabled
-                ):
-                    raise ForestError(
-                        "COMPONENT_SELECTION_INVALID",
-                        "Builtin component selection is invalid",
-                        409,
-                    )
-                if not entry.desired_enabled:
-                    disabled.add(entry.component_id)
-                continue
-            if entry.component_id in official_ids:
-                raise ForestError(
-                    "COMPONENT_SELECTION_INVALID",
-                    "Installed package cannot replace an official component identity",
-                    409,
-                )
-            snapshot = self.package_catalog.get(entry.package_digest)
-            if (
-                snapshot.component["id"] != entry.component_id
-                or digest_json(snapshot.manifest) != entry.manifest_digest
-            ):
+        for entry in selected.installed:
+            provisioned = await bootstrap_installed_package(
+                entry.package_digest,
+                self.package_catalog,
+                self.store,
+                self.schema_bundle_installer,
+                kernel=self._kernel,
+                initial_configuration=None,
+                approved_capabilities=entry.approved_capabilities,
+            )
+            if provisioned.descriptor.component_id != entry.component_id:
                 raise ForestError(
                     "COMPONENT_SELECTION_ARTIFACT_CHANGED",
-                    "Selected package declaration differs from its pinned artifact",
+                    "Resolved package component differs from its selection",
                     409,
                 )
-            if entry.desired_enabled:
-                installed.append((await bootstrap_installed_package(
-                    entry.package_digest,
-                    self.package_catalog,
-                    self.store,
-                    self.schema_bundle_installer,
-                    kernel=self._kernel,
-                    initial_configuration=None,
-                    approved_capabilities=entry.approved_capabilities,
-                )).descriptor)
-        descriptors = (
-            self._kernel.descriptors
-            + tuple(item for item in official_descriptors if item.component_id not in disabled)
-            + tuple(installed)
-        )
+            installed.append(provisioned.descriptor)
+        descriptors = self._kernel.descriptors + selected.official + tuple(installed)
         return BotGraphCandidate(
-            RuntimeModuleRegistry(self, descriptors, activation_id=activation_id), selection
+            RuntimeModuleRegistry(self, descriptors, activation_id=activation_id),
+            selection,
+            official_descriptors,
         )
 
     async def start(self) -> None:
@@ -880,6 +858,7 @@ class CleanBotHost:
             ):
                 await registry.start()
             self.registry = registry
+            self._official_descriptors = assembled.official_descriptors
             self._replacement_task = asyncio.create_task(
                 self._run_graph_replacements(),
                 name=f"bot-graph-replacement:{self.settings.bot_id}",
@@ -906,6 +885,34 @@ class CleanBotHost:
             )
         finally:
             await self.store.close()
+
+    async def preview_selection_transition(
+        self,
+        selection: ComponentSelectionSnapshot,
+        *,
+        target_component_id: str,
+        expected_graph_revision: int,
+        expected_configuration_revisions: dict[str, int] | None = None,
+    ) -> SelectionGraphPreview:
+        """Preview frozen membership while the current Registry stays owned."""
+
+        lock = self._replacement_lock
+        if lock is None or self.registry is None or self._closing:
+            raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
+        async with lock:
+            if self.registry is None or self._closing or not self._official_descriptors:
+                raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
+            return await preview_selected_graph(
+                self.registry,
+                selection,
+                self._official_descriptors,
+                self.package_catalog,
+                self.store,
+                kernel=self._kernel,
+                target_component_id=target_component_id,
+                expected_graph_revision=expected_graph_revision,
+                expected_configuration_revisions=expected_configuration_revisions,
+            )
 
     async def replace_runtime_graph(
         self,
@@ -1056,6 +1063,7 @@ class CleanBotHost:
                     raise failure from cleanup_error
                 raise replacement_error
             self.registry = candidate
+            self._official_descriptors = assembled.official_descriptors
             errors = await previous.close()
             if errors:
                 failure = ForestError(

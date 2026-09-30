@@ -9,7 +9,8 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
-from forest.packages import digest_json
+from forest.packages import PackageCatalog, digest_json
+from forest.runtime_modules import RuntimeModuleDescriptor
 from forest.schema_bundles import module_schema_namespace
 
 
@@ -85,6 +86,104 @@ class ComponentSelectionSnapshot:
     revision: int
     entries: tuple[ComponentSelectionEntry, ...]
     digest: str
+
+
+@dataclass(frozen=True)
+class SelectedPackageMembers:
+    official: tuple[RuntimeModuleDescriptor, ...]
+    installed: tuple[ComponentSelectionEntry, ...]
+
+
+def project_component_selection(
+    current: ComponentSelectionSnapshot,
+    *,
+    component_id: str,
+    source_kind: str,
+    package_digest: str | None,
+    manifest_digest: str | None,
+    approved_capabilities: tuple[str, ...],
+    desired_enabled: bool,
+) -> ComponentSelectionSnapshot:
+    """Project one selection write using the SQL ledger's revision and ordering."""
+
+    revision = current.revision + 1
+    changed = ComponentSelectionEntry.from_dict({
+        "component_id": component_id,
+        "source_kind": source_kind,
+        "package_digest": package_digest,
+        "manifest_digest": manifest_digest,
+        "approved_capabilities": list(approved_capabilities),
+        "desired_enabled": desired_enabled,
+        "desired_revision": revision,
+    })
+    entries = tuple(sorted(
+        [item for item in current.entries if item.component_id != component_id]
+        + [changed],
+        key=lambda item: item.component_id,
+    ))
+    if len(entries) > 128:
+        raise ForestError(
+            "COMPONENT_SELECTION_LIMIT", "Bot component selection limit reached", 422
+        )
+    frozen = {
+        "protocol": "forest.component-selection-snapshot/1",
+        "revision": revision,
+        "entries": [item.as_dict() for item in entries],
+    }
+    return ComponentSelectionSnapshot(revision, entries, digest_json(frozen))
+
+
+def select_package_members(
+    selection: ComponentSelectionSnapshot,
+    official_descriptors: tuple[RuntimeModuleDescriptor, ...],
+    catalog: PackageCatalog,
+) -> SelectedPackageMembers:
+    """Read one frozen membership before either preview or provisioning."""
+
+    official_ids = {item.component_id for item in official_descriptors}
+    disabled: set[str] = set()
+    selected_installed = []
+    for entry in selection.entries:
+        if entry.component_id.startswith("kernel."):
+            raise ForestError(
+                "COMPONENT_SELECTION_INVALID",
+                "Kernel authorities cannot be selected as packages",
+                409,
+            )
+        if entry.source_kind == "builtin":
+            if entry.component_id not in official_ids or (
+                entry.component_id == "component.worker-host" and not entry.desired_enabled
+            ):
+                raise ForestError(
+                    "COMPONENT_SELECTION_INVALID",
+                    "Builtin component selection is invalid",
+                    409,
+                )
+            if not entry.desired_enabled:
+                disabled.add(entry.component_id)
+            continue
+        if entry.component_id in official_ids:
+            raise ForestError(
+                "COMPONENT_SELECTION_INVALID",
+                "Installed package cannot replace an official component identity",
+                409,
+            )
+        snapshot = catalog.get(entry.package_digest)
+        if (
+            snapshot.component["id"] != entry.component_id
+            or digest_json(snapshot.manifest) != entry.manifest_digest
+        ):
+            raise ForestError(
+                "COMPONENT_SELECTION_ARTIFACT_CHANGED",
+                "Selected package declaration differs from its pinned artifact",
+                409,
+            )
+        if entry.desired_enabled:
+            selected_installed.append(entry)
+    return SelectedPackageMembers(
+        tuple(item for item in official_descriptors if item.component_id not in disabled),
+        tuple(selected_installed),
+    )
 
 
 class ComponentSelectionReader:

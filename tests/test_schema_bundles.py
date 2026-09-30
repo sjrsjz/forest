@@ -27,7 +27,12 @@ from forest.builtin_packages import (
     inspect_installed_package,
 )
 from forest.clean_bot_host import BotGraphCandidate, CleanBotHost
-from forest.component_selection import ComponentSelectionReader, ComponentSelectionSnapshot
+from forest.component_graph_preview import preview_selected_graph
+from forest.component_selection import (
+    ComponentSelectionReader,
+    ComponentSelectionSnapshot,
+    project_component_selection,
+)
 from forest.core_runtime import (
     bootstrap_clean_kernel,
     runtime_graph_replacement_request_service,
@@ -275,6 +280,15 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     assert current.revision == frozen["revision"]
     assert [entry.as_dict() for entry in current.entries] == frozen["entries"]
     next_action = "disable" if winner["value"]["desired_enabled"] else "enable"
+    projected = project_component_selection(
+        current,
+        component_id=source["component_id"],
+        source_kind=source["source_kind"],
+        package_digest=None,
+        manifest_digest=None,
+        approved_capabilities=(),
+        desired_enabled=next_action == "enable",
+    )
     async with reader.publication_fence(
         expected_revision=current.revision, expected_digest=current.digest
     ):
@@ -285,6 +299,7 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
         assert not pending.done()
     next_result = await asyncio.wait_for(pending, timeout=5)
     assert next_result["value"]["selection_revision"] == 2
+    assert projected == await reader.snapshot()
     with pytest.raises(psycopg.Error) as immutable_operation:
         async with store.pool.connection() as conn:
             await conn.execute(
@@ -2858,6 +2873,29 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     planned_impact = planned_registry.preview_graph_transition(
         first, target_component_id="tests.routing-component"
     )
+    empty_selection = {
+        "protocol": "forest.component-selection-snapshot/1",
+        "revision": 0,
+        "entries": [],
+    }
+    selection = project_component_selection(
+        ComponentSelectionSnapshot(0, (), digest_json(empty_selection)),
+        component_id="tests.routing-component",
+        source_kind="installed",
+        package_digest=updated_snapshot.digest,
+        manifest_digest=digest_json(updated_snapshot.manifest),
+        approved_capabilities=approved,
+        desired_enabled=True,
+    )
+    selected_preview = await preview_selected_graph(
+        first, selection, (routing.descriptor,), catalog, store,
+        kernel=core,
+        target_component_id="tests.routing-component",
+        expected_graph_revision=first_graph.graph_revision,
+        expected_configuration_revisions={"tests.routing-component": 1},
+    )
+    assert selected_preview.impact == planned_impact
+    assert selected_preview.installed == (planned_artifact,)
     with pytest.raises(ForestError) as not_executable:
         await planned_registry.prewarm()
     assert not_executable.value.code == "RUNTIME_MODULE_PLAN_NOT_EXECUTABLE"
