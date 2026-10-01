@@ -118,6 +118,47 @@ class AgentExecution:
     async def _history(self, run_id: str) -> dict:
         return await self.ctx.queries.call("agent.execution-history", {"run_id": run_id})
 
+    async def _fail_exhausted_model(self, request, owner, model_request, model_attempt):
+        if (not isinstance(model_attempt, dict)
+                or model_attempt["state"] != "NOT_APPLIED"):
+            raise ForestError(
+                "AGENT_MODEL_FAILURE_BOUNDARY_CLOSED",
+                "Model transport is not known to be unsent",
+                409,
+            )
+        request_id = model_request["request_id"]
+        attempt_id = model_attempt["attempt_id"]
+        checkpoint_id = stable("checkpoint-model-exhausted", request_id)
+        checkpoint = await self.ctx.payloads.put_json(
+            {
+                "phase": "FAILED",
+                "run_id": owner["run_id"],
+                "request_id": request_id,
+                "attempt_id": attempt_id,
+                "attempt_count": _MAX_TRANSPORT_ATTEMPTS,
+                "error_code": "AGENT_MODEL_TRANSPORT_FAILED",
+            },
+            owner_kind="checkpoint.state",
+            owner_id=checkpoint_id,
+            parents=(self._preset_ref(),),
+        )
+        await self.ctx.uow.call(
+            "agent.fail-exhausted-model",
+            {
+                "owner": owner,
+                "request_id": request_id,
+                "attempt_id": attempt_id,
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_state": checkpoint,
+            },
+            operation_id=self.ctx.operations.stable(f"model-exhausted:{request_id}"),
+            timeout=15,
+        )
+        run = await self._run(owner["run_id"])
+        return self._result(
+            request, "FAILED", run, error_code="AGENT_MODEL_TRANSPORT_FAILED"
+        )
+
     async def _start(self, request: dict) -> dict | None:
         started = await self.ctx.uow.call(
             "agent.start-from-conversation",
@@ -286,8 +327,8 @@ class AgentExecution:
         envelope = await self.ctx.services.call(
             "conversation.context.snapshot",
             {"actor": request["actor"]},
-            operation_id=self.ctx.operations.stable(
-                f"context-snapshot:{run['run_id']}:{run['progress']['input_revision']}"
+            operation_id=stable(
+                "context-snapshot", run["run_id"], run["progress"]["input_revision"]
             ),
             contract_major=2,
             timeout=120,
@@ -681,10 +722,9 @@ class AgentExecution:
                         )
                     if stored_request["state"] == "NOT_APPLIED":
                         if stored_request["attempt_count"] >= _MAX_TRANSPORT_ATTEMPTS:
-                            raise ForestError(
-                                "AGENT_MODEL_TRANSPORT_FAILED",
-                                "Model transport exhausted its bounded retry policy",
-                                503,
+                            return await self._fail_exhausted_model(
+                                request, owner, stored_request,
+                                recovery.get("model_attempt"),
                             )
                         delay = _BACKOFF_SECONDS[
                             min(stored_request["attempt_count"] - 1, len(_BACKOFF_SECONDS) - 1)

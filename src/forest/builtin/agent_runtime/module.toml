@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.15.0"
+version = "4.16.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -52,6 +52,7 @@ requests = [
   "uow.execute:agent.acquire-run-lease",
   "uow.execute:agent.renew-run-lease",
   "uow.execute:agent.release-run-lease",
+  "uow.execute:agent.fail-exhausted-model",
   "uow.execute:agent.prepare-model-request",
   "uow.execute:agent.prepare-model-effect",
   "uow.execute:agent.handoff-model-effect",
@@ -155,9 +156,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.10.0"
+schema_version = "2.11.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "e93011ac0897dac06173eba3e1c3ceed4ca8bf6c7beb27880355938ca01851fa"
+baseline_sha256 = "358ba4051a82539128aac94f9f0271e2741477fc077faf7f320402aafb023b7c"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -322,6 +323,19 @@ contract = "1.0"
 function = "agent_release_run"
 input_schema = "schemas/release-run-envelope.json"
 output_schema = "schemas/release-run-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.fail-exhausted-model-record"
+contract = "1.0"
+function = "agent_fail_exhausted_model"
+input_schema = "schemas/fail-exhausted-model-envelope.json"
+output_schema = "schemas/fail-exhausted-model-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/checkpoint_state"
+owner_component = "agent.runtime"
+owner_kind = "checkpoint.state"
+owner_id_path = "/input/checkpoint_id"
 
 [[components.unit_of_work_participants]]
 name = "agent.prepare-model-request-record"
@@ -569,6 +583,16 @@ output_schema = "schemas/release-run-output.json"
 timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.release-run-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.fail-exhausted-model"
+contract = "1.0"
+input_schema = "schemas/fail-exhausted-model-input.json"
+output_schema = "schemas/fail-exhausted-model-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.fail-exhausted-model-record" }
 ]
 
 [[components.unit_of_work_plans]]

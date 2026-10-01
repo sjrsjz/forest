@@ -1246,6 +1246,120 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_fail_exhausted_model(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    checkpoint_value jsonb := body->'checkpoint_state';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_request text := body->>'request_id';
+    requested_attempt text := body->>'attempt_id';
+    requested_checkpoint text := body->>'checkpoint_id';
+    input_digest_value text := context->>'participant_input_digest';
+    run_row record;
+    session_row record;
+    request_row record;
+    attempt_row record;
+    sequence_value bigint;
+    checkpoint_digest_value text;
+    checksum_value text;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR input_digest_value !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_checkpoint IS NULL
+       OR checkpoint_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR checkpoint_value->>'owner_kind' IS DISTINCT FROM 'checkpoint.state'
+       OR checkpoint_value->>'owner_id' IS DISTINCT FROM requested_checkpoint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_MODEL_FAILURE_INPUT_INVALID',
+                'message','Model exhaustion evidence is invalid','status',422));
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','STALE_AGENT_RUN_OWNER',
+                'message','Agent Run owner is stale','status',409));
+    END IF;
+    SELECT * INTO session_row FROM __forest_module_schema__.agent_sessions
+    WHERE bot_id=requested_bot AND session_id=run_row.session_id FOR UPDATE;
+    SELECT * INTO request_row FROM __forest_module_schema__.model_requests
+    WHERE bot_id=requested_bot AND request_id=requested_request FOR UPDATE;
+    SELECT * INTO attempt_row FROM __forest_module_schema__.model_transport_attempts
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt FOR SHARE;
+    IF run_row.state IS DISTINCT FROM 'PREPARING_MODEL'
+       OR run_row.current_model_request_id IS DISTINCT FROM requested_request
+       OR session_row.state IS DISTINCT FROM 'ACTIVE'
+       OR session_row.active_run_id IS DISTINCT FROM requested_run
+       OR request_row.run_id IS DISTINCT FROM requested_run
+       OR request_row.step_seq IS DISTINCT FROM run_row.next_step_seq
+       OR request_row.state IS DISTINCT FROM 'NOT_APPLIED'
+       OR request_row.attempt_count IS DISTINCT FROM 3
+       OR request_row.current_attempt_id IS DISTINCT FROM requested_attempt
+       OR attempt_row.request_id IS DISTINCT FROM requested_request
+       OR attempt_row.attempt_no IS DISTINCT FROM 3
+       OR attempt_row.state IS DISTINCT FROM 'NOT_APPLIED'
+       OR EXISTS (
+           SELECT 1 FROM __forest_module_schema__.model_transport_attempts a
+           WHERE a.bot_id=requested_bot AND a.request_id=requested_request
+             AND a.state NOT IN ('NOT_APPLIED','ABANDONED')
+       ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_MODEL_FAILURE_BOUNDARY_CLOSED',
+                'message','Model attempts are not all known to be unsent','status',409));
+    END IF;
+    sequence_value := run_row.checkpoint_seq+1;
+    checkpoint_digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
+        'run_id',requested_run,'request_id',requested_request,
+        'attempt_id',requested_attempt,'phase','FAILED',
+        'input_revision',run_row.input_revision,
+        'next_step_seq',run_row.next_step_seq,'state',checkpoint_value,
+        'owner_epoch',requested_epoch
+    )::text,'UTF8')),'hex');
+    checksum_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_array(
+        requested_run,sequence_value,'FAILED',run_row.input_revision,
+        run_row.next_step_seq,checkpoint_value->>'digest',requested_epoch
+    )::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.run_checkpoints(
+        bot_id,run_id,checkpoint_seq,checkpoint_id,input_digest,phase,input_revision,
+        next_step_seq,state_payload_id,state_payload_digest,state_owner_component_id,
+        state_owner_kind,state_owner_id,checkpoint_checksum,owner_epoch
+    ) VALUES (
+        requested_bot,requested_run,sequence_value,requested_checkpoint,
+        checkpoint_digest_value,'FAILED',run_row.input_revision,run_row.next_step_seq,
+        checkpoint_value->>'payload_id',checkpoint_value->>'digest',
+        checkpoint_value->>'owner_component_id',checkpoint_value->>'owner_kind',
+        checkpoint_value->>'owner_id',checksum_value,requested_epoch
+    );
+    UPDATE __forest_module_schema__.agent_runs
+    SET state='FAILED',checkpoint_seq=sequence_value,current_model_request_id=NULL,
+        error_code='AGENT_MODEL_TRANSPORT_FAILED',terminal_at=run_row.database_now,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    UPDATE __forest_module_schema__.agent_sessions
+    SET state='FAILED',active_run_id=NULL,
+        terminal_reason_code='AGENT_MODEL_TRANSPORT_FAILED',
+        closed_at=clock_timestamp(),updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND session_id=run_row.session_id;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('run_id',requested_run,'state','FAILED',
+            'error_code','AGENT_MODEL_TRANSPORT_FAILED'));
+END;
+$$;
+
 CREATE FUNCTION agent_prepare_model_request(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -1493,7 +1607,7 @@ BEGIN
     IF FOUND THEN
         IF existing.request_id IS DISTINCT FROM requested_request
            OR existing.effect_operation_ref IS DISTINCT FROM requested_effect
-           OR effect_permit->>'attempt_no' IS DISTINCT FROM existing.attempt_no::text
+           OR effect_permit->>'attempt_no' IS DISTINCT FROM '1'
            OR existing.wire_payload_id IS DISTINCT FROM wire_value->>'payload_id'
            OR existing.wire_payload_digest IS DISTINCT FROM wire_value->>'digest'
            OR existing.wire_owner_component_id IS DISTINCT FROM wire_value->>'owner_component_id'
@@ -1554,12 +1668,14 @@ BEGIN
         );
     END IF;
     attempt_no_value := request_row.attempt_count+1;
-    IF effect_permit->>'attempt_no' IS DISTINCT FROM attempt_no_value::text THEN
+    -- Each Model transport attempt owns a new Effect operation. Its Effect
+    -- attempt counter starts at one even when the Model request is retrying.
+    IF effect_permit->>'attempt_no' IS DISTINCT FROM '1' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
                 'code','AGENT_MODEL_ATTEMPT_INPUT_INVALID',
-                'message','Effect and model attempt numbers differ','status',422
+                'message','Model Effect must begin at its first attempt','status',422
             )
         );
     END IF;

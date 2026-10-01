@@ -205,6 +205,7 @@ class RecordingModelClient(FakeModelClient):
     requests = []
     first_gate = None
     reply_text = None
+    not_sent_attempts = 0
 
     async def dispatch(self, prepared, *, permitcheck):
         await permitcheck(prepared)
@@ -212,6 +213,11 @@ class RecordingModelClient(FakeModelClient):
         type(self).requests.append(prepared)
         if first and type(self).first_gate is not None:
             await type(self).first_gate.wait()
+        if len(type(self).requests) <= type(self).not_sent_attempts:
+            return ModelResult(
+                "NOT_SENT", prepared.request_id, prepared.transport_attempt_id,
+                prepared.payload_digest, error_code="TEST_MODEL_NOT_SENT",
+            )
         if type(self).reply_text is not None:
             return ModelResult(
                 "RESPONDED", prepared.request_id, prepared.transport_attempt_id,
@@ -3168,7 +3174,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize("scenario", ("text", "visual", "cross-group", "success"))
+@pytest.mark.parametrize("scenario", ("text", "visual", "cross-group", "success", "requeue"))
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
@@ -3216,8 +3222,9 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
     clients = []
     RecordingModelClient.requests = []
     RecordingModelClient.first_gate = (
-        asyncio.Event() if scenario == "cross-group" else None
+        asyncio.Event() if scenario in {"cross-group", "requeue"} else None
     )
+    RecordingModelClient.not_sent_attempts = 3 if scenario == "requeue" else 0
     RecordingModelClient.reply_text = (
         '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
         '<block block_type="Assistant"><content><text>Forest success fixture</text>'
@@ -3365,6 +3372,141 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
             assert manifest["media_transform_refs"]
         else:
             assert b"image_url" not in prepared.body
+        if scenario == "requeue":
+            class RequeueWebSupervisor:
+                async def management_scopes(self):
+                    return ({"scope_kind": "bot", "scope_id": settings.bot_id},)
+
+                @asynccontextmanager
+                async def management_host(self, scope_id):
+                    assert scope_id == settings.bot_id
+                    yield host
+
+            async with _real_web_identity_for_bot_test(dsn) as identity:
+                web_app = create_deployment_management_app(
+                    deployment_id="deployment/host-web-test", components=(),
+                    identity_authority=identity, allowed_origin="http://forest.test",
+                    bot_supervisor=RequeueWebSupervisor(),
+                )
+                base = (
+                    f"/management/v1/scopes/bot/{settings.bot_id}/"
+                    "modules/conversation.scheduler"
+                )
+                async with AsyncClient(
+                    transport=ASGITransport(app=web_app), base_url="http://forest.test",
+                ) as web:
+                    login = await web.post(
+                        "/management/v1/auth/login",
+                        headers={"origin": "http://forest.test"},
+                        json={"username": "admin", "password": "host-web-password-1"},
+                    )
+                    assert login.status_code == 200, login.text
+                    headers = {
+                        "origin": "http://forest.test",
+                        "x-forest-csrf": web.cookies["forest_management_csrf"],
+                    }
+                    candidates = await web.post(
+                        f"{base}/queries/conversation.requeue.candidates",
+                        headers=headers, json={"limit": 20},
+                    )
+                    assert candidates.status_code == 200, candidates.text
+                    items = candidates.json()["items"]
+                    assert len(items) == 1
+                    assert items[0]["channel_ref"] == "933179609"
+                    assert items[0]["request_state"] is None
+                    body = {
+                        "conversation_id": items[0]["conversation_id"],
+                        "run_ref": items[0]["run_ref"],
+                        "reason_code": "operator.retry-unsent",
+                    }
+                    request_url = f"{base}/actions/conversation.requeue.request"
+                    action_headers = {**headers, "idempotency-key": "requeue-unsent-run"}
+                    accepted = await web.post(
+                        request_url, headers=action_headers, json=body,
+                    )
+                    assert accepted.status_code == 200, accepted.text
+                    replay = await web.post(
+                        request_url, headers=action_headers, json=body,
+                    )
+                    assert replay.status_code == 200, replay.text
+                    assert replay.json()["request_id"] == accepted.json()["request_id"]
+                    status_url = f"{base}/queries/conversation.requeue.status"
+                    status_input = {key: body[key] for key in ("conversation_id", "run_ref")}
+                    pending = await web.post(
+                        status_url, headers=headers, json=status_input,
+                    )
+                    assert pending.status_code == 200, pending.text
+                    assert pending.json()["state"] == "PENDING"
+                    RecordingModelClient.first_gate.set()
+                    try:
+                        async with asyncio.timeout(35):
+                            while True:
+                                response = await web.post(
+                                    status_url, headers=headers, json=status_input,
+                                )
+                                assert response.status_code == 200, response.text
+                                state = response.json()
+                                if state["state"] == "APPLIED":
+                                    break
+                                assert state["state"] != "REJECTED", state
+                                await asyncio.sleep(0.2)
+                    except TimeoutError as exc:
+                        namespaces = {
+                            item.component_id: item.storage.spec.namespace
+                            for item in host.registry.descriptors if item.storage is not None
+                        }
+                        async with host.store.pool.connection() as conn:
+                            runs = await (await conn.execute(
+                                sql.SQL("SELECT state,error_code,current_model_request_id "
+                                        "FROM {}.agent_runs WHERE bot_id=%s")
+                                .format(sql.Identifier(namespaces["agent.runtime"])),
+                                (settings.bot_id,),
+                            )).fetchall()
+                            requests = await (await conn.execute(
+                                sql.SQL("SELECT state,attempt_count,current_attempt_id "
+                                        "FROM {}.model_requests WHERE bot_id=%s")
+                                .format(sql.Identifier(namespaces["agent.runtime"])),
+                                (settings.bot_id,),
+                            )).fetchall()
+                            attempts = await (await conn.execute(
+                                sql.SQL("SELECT state,attempt_no FROM {}.model_transport_attempts "
+                                        "WHERE bot_id=%s ORDER BY attempt_no")
+                                .format(sql.Identifier(namespaces["agent.runtime"])),
+                                (settings.bot_id,),
+                            )).fetchall()
+                            settlements = await (await conn.execute(
+                                sql.SQL("SELECT input_payload->'outcome' AS outcome FROM {}."
+                                        "conversation_agent_work_settlements "
+                                        "ORDER BY created_at DESC LIMIT 5")
+                                .format(sql.Identifier(namespaces["conversation.scheduler"])),
+                            )).fetchall()
+                            lanes = await (await conn.execute(
+                                sql.SQL("SELECT active_run_ref,resume_reason_code "
+                                        "FROM {}.conversation_lanes WHERE bot_id=%s")
+                                .format(sql.Identifier(namespaces["conversation.scheduler"])),
+                                (settings.bot_id,),
+                            )).fetchall()
+                        raise AssertionError(
+                            f"Requeue did not settle: request={state}, runs={runs}, "
+                            f"models={requests}, attempts={attempts}, "
+                            f"settlements={settlements}, lanes={lanes}, "
+                            f"worker_failure={host.registry.get('conversation.scheduler')._owned_work.failure}"
+                        ) from exc
+                    assert state["request_id"] == accepted.json()["request_id"]
+                    agent_schema = next(
+                        item.storage.spec.namespace for item in host.registry.descriptors
+                        if item.component_id == "agent.runtime"
+                    )
+                    async with host.store.pool.connection() as conn:
+                        failed = await (await conn.execute(
+                            sql.SQL("SELECT state,error_code FROM {}.agent_runs "
+                                    "WHERE bot_id=%s AND run_id=%s")
+                            .format(sql.Identifier(agent_schema)),
+                            (settings.bot_id, body["run_ref"]),
+                        )).fetchone()
+                    assert failed == {
+                        "state": "FAILED", "error_code": "AGENT_MODEL_TRANSPORT_FAILED"
+                    }
         if scenario == "cross-group":
             await clients[-1].handler(json.dumps({
                 "self_id": int(settings.onebot_self_id), "post_type": "message",
@@ -3466,6 +3608,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
             RecordingModelClient.first_gate.set()
         RecordingModelClient.first_gate = None
         RecordingModelClient.reply_text = None
+        RecordingModelClient.not_sent_attempts = 0
         await host.close()
         if real_transport:
             profile = EmbeddingProfile(

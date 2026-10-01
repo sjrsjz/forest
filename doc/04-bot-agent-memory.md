@@ -398,3 +398,9 @@ MemoryStoreProfile 更换不是普通配置刷新。只更换向量/embedding �
 | 多 Worker 重复处理同一记忆事件 | 操作集只接纳一次，投影语义不依赖重试次数与到达顺序 |
 | 图片触发查询，当前LLM只接受文本 | 原生图片嵌入完成召回；API请求仅含合法文本/来源/未见图片标记，原图记忆保留 |
 | 同一消息先用文本LLM、后在合法新请求中改用视觉LLM | 分别建立请求投影与可见清单；后者可从原始媒体恢复图片，不重建源事件 |
+
+## 12. 模型传输重试的冻结边界
+
+同一逻辑 `model_request_id` 的 `model.input` 与投影清单属于请求级不可变事实；每个 `transport_attempt_id` 只拥有自己的 wire、Effect 操作和观察。Agent 以 `(run_id, input_revision)` 生成跨 Worker 调用稳定的 Context 快照操作 ID，使重试读到同一个 Payload 引用与来源链；不能把 Worker 调用作用域 ID 当作跨次重试的冻结键。若 Context 的切口实际改变，须先结束或放弃旧请求，再创建新的逻辑请求，不得改写原请求。
+
+Model 请求的第 N 次尝试与 Kernel Effect 的 `attempt_no` 是两套计数。当前每个 Model 传输尝试各建一个 Effect 操作，因此该 Effect 初次许可的 `attempt_no` 为 1；Agent 自己的 `attempt_count` 按同一请求递增。只有 Provider 明确返回 `NOT_SENT` 才可准备下一次 Model 尝试；`UNKNOWN` 保持对账阻断。三次明确未发送后，Agent 在同一事务中核验所有尝试均无可能的外部副作用，并写入 FAILED checkpoint、Run 与 Session 终态。Conversation 随后可按现有 actor 租约与双包事务结算受控重排请求。

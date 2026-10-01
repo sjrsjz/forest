@@ -286,7 +286,6 @@ class ModelExecution:
         model_input = {
             "protocol": "forest.agent-model-input/1",
             "request_id": request_id,
-            "transport_attempt_id": attempt_id,
             "snapshot": snapshot,
             "preset_context": preset_context,
             "tools": tools,
@@ -305,7 +304,7 @@ class ModelExecution:
         model_input_ref = await self.ctx.payloads.put_json(
             model_input,
             owner_kind="model.input",
-            owner_id=attempt_id,
+            owner_id=request_id,
             parents=(
                 *((context_parent,) if context_parent is not None else ()),
                 *source_refs,
