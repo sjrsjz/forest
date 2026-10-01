@@ -166,6 +166,15 @@ class AgentExecution:
             )
         request_id = model_request["request_id"]
         attempt_id = model_attempt["attempt_id"]
+        frozen = await self.ctx.queries.call(
+            "agent.frozen-model-resume",
+            {"run_id": owner["run_id"], "request_id": request_id},
+        )
+        if frozen["state"] != "NOT_APPLIED" or len(frozen["attempts"]) != 3:
+            raise ForestError(
+                "AGENT_MODEL_FAILURE_BOUNDARY_CLOSED",
+                "Model attempts are not all known to be unsent", 409,
+            )
         checkpoint_id = stable("checkpoint-model-exhausted", request_id)
         checkpoint = await self.ctx.payloads.put_json(
             {
@@ -183,6 +192,13 @@ class AgentExecution:
         await self.ctx.uow.call(
             "agent.fail-exhausted-model",
             {
+                "effect": {
+                    "protocol": "forest.effect-unsent-proof-request/1",
+                    "attempts": [{
+                        "effect_operation_id": item["effect_operation_id"],
+                        "attempt_id": item["attempt_id"],
+                    } for item in frozen["attempts"]],
+                },
                 "owner": owner,
                 "request_id": request_id,
                 "attempt_id": attempt_id,

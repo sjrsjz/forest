@@ -1,11 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["protocol", "request_id", "state", "provider_generation_id", "provider_profile_ref", "model_ref", "capability_digest", "projection", "wire", "output_token_budget", "projected_content_digest", "source_manifest_digest"],
+  "required": ["protocol", "request_id", "state", "attempts", "provider_generation_id", "provider_profile_ref", "model_ref", "capability_digest", "projection", "wire", "output_token_budget", "projected_content_digest", "source_manifest_digest"],
   "properties": {
     "protocol": {"const": "forest.agent-frozen-model-resume/1"},
     "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "state": {"enum": ["READY", "NOT_APPLIED"]},
+    "attempts": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/attempt"}},
     "provider_generation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "provider_profile_ref": {"type": "string", "minLength": 1, "maxLength": 256},
     "model_ref": {"type": "string", "minLength": 1, "maxLength": 256},
@@ -18,6 +19,17 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "attempt": {
+      "type": "object",
+      "required": ["attempt_id", "effect_operation_id", "attempt_no", "state"],
+      "properties": {
+        "attempt_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "effect_operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "attempt_no": {"type": "integer", "minimum": 1},
+        "state": {"enum": ["NOT_APPLIED"]}
+      },
+      "additionalProperties": false
+    },
     "ref": {
       "type": "object",
       "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],

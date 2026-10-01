@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ import pytest
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.authorization_authority import CapabilityGrant
@@ -20,7 +22,10 @@ def _jsonable(value):
 
 
 @pytest.mark.postgres
-async def test_kernel_effect_freezes_command_and_permit_in_one_transaction(clean_authority):
+@pytest.mark.parametrize("observed_status", ("SUCCEEDED", "NOT_APPLIED"))
+async def test_kernel_effect_freezes_command_and_permit_in_one_transaction(
+    clean_authority, observed_status
+):
     store, installer = clean_authority
     kernel = await bootstrap_clean_kernel(store, installer)
     lease = await kernel.runtime.claim_host(
@@ -35,7 +40,17 @@ async def test_kernel_effect_freezes_command_and_permit_in_one_transaction(clean
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
-    registry = RuntimeModuleRegistry(host, kernel.descriptors)
+    available = {descriptor.component_id for descriptor in kernel.descriptors}
+    descriptors = tuple(
+        replace(
+            descriptor,
+            retention_requires=tuple(
+                component_id for component_id in descriptor.retention_requires
+                if component_id in available
+            ),
+        ) for descriptor in kernel.descriptors
+    )
+    registry = RuntimeModuleRegistry(host, descriptors)
     await registry.start()
     try:
         caller = registry.get("kernel.runtime").generation_identity
@@ -208,7 +223,7 @@ async def test_kernel_effect_freezes_command_and_permit_in_one_transaction(clean
                         "effect_operation_id": "effect-command/1",
                         "attempt_id": "effect-command-attempt/1",
                         "observation_operation_id": "observe/effect-command/1",
-                        "status": "SUCCEEDED",
+                        "status": observed_status,
                         "evidence_kind": "executor",
                         "evidence": {
                             "value": {"status": "ok", "result": parent_ref},
@@ -227,9 +242,51 @@ async def test_kernel_effect_freezes_command_and_permit_in_one_transaction(clean
         assert observed["evidence_payload"]["owner_kind"] == "effect.evidence"
         assert observed["evidence_parents"] == [parent_ref]
         assert observed["observation"]["accepted"] is True
-        assert observed["observation"]["resulting_state"] == "SUCCEEDED"
+        assert observed["observation"]["resulting_state"] == observed_status
         assert json.loads(
             await kernel.payload.read_bytes(observed["evidence_payload"]["payload_id"])
         ) == {"status": "ok", "result": parent_ref}
+        proof_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": {
+                "component_id": "kernel.runtime",
+                "generation_id": caller.generation_id,
+            },
+            "input": {
+                "protocol": "forest.effect-unsent-proof-request/1",
+                "attempts": [{
+                    "effect_operation_id": "effect-command/1",
+                    "attempt_id": "effect-command-attempt/1",
+                }],
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            participant = registry.get("kernel.effect").unit_of_work_participant()
+            if observed_status == "NOT_APPLIED":
+                proof = await participant.invoke_in(
+                    conn, "effect.prove-not-applied", proof_envelope,
+                    operation_id="uow-step/effect-proof/1",
+                    causal_root_kind="test.effect-command",
+                    causal_root_id="effect-command/1",
+                    parent_call_id="call/effect-proof/1",
+                    timeout_seconds=10,
+                )
+                assert proof["protocol"] == "forest.effect-unsent-proof/1"
+                assert proof["attempts"][0]["attempt_id"] == "effect-command-attempt/1"
+                assert proof["attempts"][0]["observation_operation_id"] == (
+                    "observe/effect-command/1"
+                )
+            else:
+                with pytest.raises(ForestError) as caught:
+                    await participant.invoke_in(
+                        conn, "effect.prove-not-applied", proof_envelope,
+                        operation_id="uow-step/effect-proof/1",
+                        causal_root_kind="test.effect-command",
+                        causal_root_id="effect-command/1",
+                        parent_call_id="call/effect-proof/1",
+                        timeout_seconds=10,
+                    )
+                assert caught.value.code == "EFFECT_UNSENT_PROOF_UNAVAILABLE"
     finally:
         assert await registry.close() == []

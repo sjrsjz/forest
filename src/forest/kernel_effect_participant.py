@@ -173,6 +173,8 @@ class KernelEffectUnitOfWorkParticipant:
             return await self._observe_command_result(conn, value)
         if name == "effect.abandon":
             return await self._abandon(conn, value)
+        if name == "effect.prove-not-applied":
+            return await self._prove_not_applied(conn, value)
         raise ForestError(
             "RUNTIME_UOW_PARTICIPANT_INPUT_INVALID",
             "Kernel Effect participant operation is undeclared",
@@ -615,3 +617,11 @@ class KernelEffectUnitOfWorkParticipant:
                 cancel_effect=request["cancel_effect"],
             )
         )
+
+    async def _prove_not_applied(self, conn, value: object) -> dict:
+        request = _object(
+            value, {"protocol", "attempts"}, "EFFECT_UOW_INPUT_INVALID"
+        )
+        if request["protocol"] != "forest.effect-unsent-proof-request/1":
+            raise ForestError("EFFECT_UOW_INPUT_INVALID", "Effect proof protocol is invalid", 422)
+        return await self.runtime.service.prove_not_applied_in(conn, request["attempts"])

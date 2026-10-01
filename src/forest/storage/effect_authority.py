@@ -303,6 +303,80 @@ class KernelEffectRepository:
             "observations": [dict(row) for row in observations],
         }
 
+    async def prove_not_applied_in(self, conn, attempts: list[dict]) -> dict:
+        """Lock settled Effect facts for a later participant in this transaction."""
+        if not isinstance(attempts, list) or len(attempts) > 64:
+            raise ForestError("EFFECT_INPUT_INVALID", "Effect proof set is invalid", 422)
+        identities = []
+        for item in attempts:
+            if not isinstance(item, dict) or set(item) != {
+                "effect_operation_id", "attempt_id"
+            }:
+                raise ForestError("EFFECT_INPUT_INVALID", "Effect proof identity is invalid", 422)
+            identities.append((
+                _bounded(item["effect_operation_id"], "effect_operation_id", 256),
+                _bounded(item["attempt_id"], "attempt_id", 256),
+            ))
+        if len({operation for operation, _ in identities}) != len(identities):
+            raise ForestError("EFFECT_INPUT_INVALID", "Effect proof repeats an operation", 422)
+        receipts = []
+        for operation_id, attempt_id in sorted(identities):
+            effect = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT state,current_attempt_id,attempt_count FROM {} "
+                        "WHERE bot_id=%s AND effect_operation_id=%s FOR UPDATE"
+                    ).format(self._table("effect_operations")),
+                    (self.store.bot_id, operation_id),
+                )
+            ).fetchone()
+            attempt = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT state,attempt_no FROM {} WHERE bot_id=%s AND "
+                        "effect_operation_id=%s AND attempt_id=%s FOR UPDATE"
+                    ).format(self._table("effect_attempts")),
+                    (self.store.bot_id, operation_id, attempt_id),
+                )
+            ).fetchone()
+            if (
+                effect is None or attempt is None
+                or effect["state"] != "NOT_APPLIED"
+                or effect["current_attempt_id"] != attempt_id
+                or effect["attempt_count"] != attempt["attempt_no"]
+            ):
+                raise ForestError(
+                    "EFFECT_UNSENT_PROOF_UNAVAILABLE",
+                    "Effect is not conclusively unsent", 409,
+                )
+            observation = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT observation_operation_id,evidence_payload_digest "
+                        "FROM {} WHERE bot_id=%s AND attempt_id=%s "
+                        "AND accepted AND resulting_state='NOT_APPLIED' "
+                        "ORDER BY observed_at DESC,observation_operation_id DESC LIMIT 1"
+                    ).format(self._table("effect_observations")),
+                    (self.store.bot_id, attempt_id),
+                )
+            ).fetchone()
+            if observation is None:
+                raise ForestError(
+                    "EFFECT_UNSENT_PROOF_UNAVAILABLE",
+                    "Effect has no accepted unsent observation", 409,
+                )
+            receipts.append({
+                "effect_operation_id": operation_id,
+                "attempt_id": attempt_id,
+                "observation_operation_id": observation["observation_operation_id"],
+                "evidence_payload_digest": observation["evidence_payload_digest"],
+            })
+        return {
+            "protocol": "forest.effect-unsent-proof/1",
+            "attempts": receipts,
+            "evidence_set_digest": _digest(receipts),
+        }
+
     async def permit_in(
         self,
         conn,

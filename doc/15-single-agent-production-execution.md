@@ -58,6 +58,8 @@ Agent 的恢复读取和模型写入都属于 `agent.runtime` 包内端口，不
 
 Request 已写为 `READY` 但尚无 Effect 时，以及既有 Attempt 全部明确 `NOT_APPLIED` 时，Agent 都通过 `agent.frozen-model-resume` 只读端口取得该 Request 首次 `model.wire` 和 `model.projection` 的不可变 PayloadRef。`READY` 要求零 Attempt，并直接复用首次 wire；`NOT_APPLIED` 要求所有既有 Attempt 均已确定未发送，将原 wire 字节复制为新 Attempt 的 `model.wire`，并建立到初始 wire 和投影的父链。两种恢复都不重新执行记忆召回、Context 读取或模型投影。`model_requests` 固定首次 wire 引用；Attempt 表里的 `kernel.effect/effect.wire` 只表示内核副作用命令，不能充当 Provider 请求正文。此路径仍要求旧 Provider Generation 和 profile 可用，跨 Provider Generation 的继承另按下述协议处理。
 
+`effect.prove-not-applied` 是内核 Effect 的只读 UnitOfWork participant：按稳定 ID 顺序锁定每个 Effect/Attempt，要求当前状态均为 `NOT_APPLIED`，并返回已接受的未发送 observation 身份与证据集合摘要。Agent 的三次尝试耗尽结算现先执行该 participant，再由 Agent 私有 participant 在同一事务内核对全部 Attempt/Observation 与证明回执后写入失败 checkpoint；任一侧不一致则整笔事务回滚。这个跨命名空间的证据端口也供后续请求继承使用，不允许 Agent SQL 直接读取 Kernel Effect 表。
+
 模型请求已冻结旧 Provider Generation 且尚未终结时，新 Agent 可以在保留该 Provider Generation 的定向替换后继续；若同一次 Graph 替换还要移除旧 Provider，Agent 包的 `agent.replacement-guard` 在旧图排空后拒绝发布，旧图恢复后继续原请求。不得让新代用新 Provider 身份重建同一个 request ID，或把 `MODEL_REQUEST_ID_CONFLICT` 当作调度暂时失败反复重试。要允许两者同时换代，必须完成下述请求继承协议；目前守卫仍拒绝该情形。
 
 ### 已确定未发送请求的跨 Provider Generation 继承（待实现）

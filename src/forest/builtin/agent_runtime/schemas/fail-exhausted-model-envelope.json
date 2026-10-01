@@ -14,8 +14,24 @@
     },
     "input": {
       "type": "object", "additionalProperties": false,
-      "required": ["owner", "request_id", "attempt_id", "checkpoint_id", "checkpoint_state"],
+      "required": ["effect", "owner", "request_id", "attempt_id", "checkpoint_id", "checkpoint_state"],
       "properties": {
+        "effect": {
+          "type": "object", "additionalProperties": false,
+          "required": ["protocol", "attempts"],
+          "properties": {
+            "protocol": {"const": "forest.effect-unsent-proof-request/1"},
+            "attempts": {"type": "array", "minItems": 3, "maxItems": 3,
+              "items": {"type": "object", "additionalProperties": false,
+                "required": ["effect_operation_id", "attempt_id"],
+                "properties": {
+                  "effect_operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+                  "attempt_id": {"type": "string", "minLength": 1, "maxLength": 256}
+                }
+              }
+            }
+          }
+        },
         "owner": {
           "type": "object", "additionalProperties": false,
           "required": ["run_id", "owner_id", "epoch"],

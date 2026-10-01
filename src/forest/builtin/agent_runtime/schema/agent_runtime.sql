@@ -1290,6 +1290,9 @@ DECLARE
     session_row record;
     request_row record;
     attempt_row record;
+    proof_attempts jsonb := envelope#>'{prior,effect,attempts}';
+    expected_effects jsonb;
+    proven_effects jsonb;
     sequence_value bigint;
     checkpoint_digest_value text;
     checksum_value text;
@@ -1337,11 +1340,31 @@ BEGIN
        OR EXISTS (
            SELECT 1 FROM __forest_module_schema__.model_transport_attempts a
            WHERE a.bot_id=requested_bot AND a.request_id=requested_request
-             AND a.state NOT IN ('NOT_APPLIED','ABANDONED')
+             AND (a.state<>'NOT_APPLIED' OR NOT EXISTS (
+                 SELECT 1 FROM __forest_module_schema__.model_observations o
+                 WHERE o.bot_id=a.bot_id AND o.attempt_id=a.attempt_id
+                   AND o.accepted AND o.resulting_state='NOT_APPLIED'
+             ))
        ) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','AGENT_MODEL_FAILURE_BOUNDARY_CLOSED',
                 'message','Model attempts are not all known to be unsent','status',409));
+    END IF;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'effect_operation_id',a.effect_operation_ref,'attempt_id',a.attempt_id
+    ) ORDER BY a.effect_operation_ref),'[]'::jsonb) INTO expected_effects
+    FROM __forest_module_schema__.model_transport_attempts a
+    WHERE a.bot_id=requested_bot AND a.request_id=requested_request;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'effect_operation_id',item->>'effect_operation_id',
+        'attempt_id',item->>'attempt_id'
+    ) ORDER BY item->>'effect_operation_id'),'[]'::jsonb) INTO proven_effects
+    FROM jsonb_array_elements(COALESCE(proof_attempts,'[]'::jsonb)) AS items(item);
+    IF envelope#>>'{prior,effect,protocol}' IS DISTINCT FROM 'forest.effect-unsent-proof/1'
+       OR expected_effects IS DISTINCT FROM proven_effects THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_MODEL_FAILURE_EFFECT_PROOF_INVALID',
+                'message','Effect unsent proof differs from Agent attempts','status',409));
     END IF;
     sequence_value := run_row.checkpoint_seq+1;
     checkpoint_digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
@@ -4849,6 +4872,7 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
     request_row record;
+    attempts_value jsonb;
 BEGIN
     SELECT request.* INTO request_row
     FROM __forest_module_schema__.model_requests request
@@ -4902,12 +4926,19 @@ BEGIN
             )
         );
     END IF;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'attempt_id',a.attempt_id,'effect_operation_id',a.effect_operation_ref,
+        'attempt_no',a.attempt_no,'state',a.state
+    ) ORDER BY a.attempt_no),'[]'::jsonb) INTO attempts_value
+    FROM __forest_module_schema__.model_transport_attempts a
+    WHERE a.bot_id=request_row.bot_id AND a.request_id=request_row.request_id;
     RETURN jsonb_build_object(
         'protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object(
             'protocol','forest.agent-frozen-model-resume/1',
             'request_id',request_row.request_id,
             'state',request_row.state,
+            'attempts',attempts_value,
             'provider_generation_id',request_row.provider_generation_id,
             'provider_profile_ref',request_row.provider_profile_ref,
             'model_ref',request_row.model_ref,

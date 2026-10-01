@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.19.0"
+version = "4.20.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -158,9 +158,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.15.0"
+schema_version = "2.16.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "c7a60ea6a6edce33539d95547975d1bab56e0e1d762ad05bf03658df1bfedb3f"
+baseline_sha256 = "2c9d3b425aa4e4ce13f96170a887f56e1f90ae7f519b1639f15e2ca5d0572f11"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -614,6 +614,7 @@ input_schema = "schemas/fail-exhausted-model-input.json"
 output_schema = "schemas/fail-exhausted-model-output.json"
 timeout_s = 10
 steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.prove-not-applied", input_path = "/effect" },
   { id = "agent", component_id = "agent.runtime", participant = "agent.fail-exhausted-model-record" }
 ]
 
