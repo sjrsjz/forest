@@ -474,19 +474,6 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             },
             "prior": {},
         }
-        async with store.pool.connection() as conn, conn.transaction():
-            requested = await (
-                await conn.execute(
-                    sql.SQL("SELECT {}.conversation_request_requeue(%s::jsonb,%s::jsonb) "
-                            "AS result").format(sql.Identifier(namespace)),
-                    (Jsonb({"bot_id": store.bot_id,
-                            "operation_id": "requeue-request/terminal-probe"}),
-                     Jsonb({"conversation_id": actor["conversation_id"],
-                            "run_ref": "run/1", "reason_code": "TEST_RETRY",
-                            "requested_by": "management:package-test"})),
-                )
-            ).fetchone()
-        assert requested["result"]["value"]["request_id"] == "requeue-request/terminal-probe"
         with pytest.raises(RollbackProbe):
             async with store.pool.connection() as conn, conn.transaction():
                 await conn.execute(
@@ -512,6 +499,19 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     (store.bot_id, actor["conversation_id"],
                      "sha256:" + "0" * 64, selected["input_batch_id"]),
                 )
+                requested = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.conversation_request_requeue("
+                                "%s::jsonb,%s::jsonb) AS result")
+                        .format(sql.Identifier(namespace)),
+                        (Jsonb({"bot_id": store.bot_id,
+                                "operation_id": "requeue-request/terminal-probe"}),
+                         Jsonb({"conversation_id": actor["conversation_id"],
+                                "run_ref": "run/1", "reason_code": "TEST_RETRY",
+                                "requested_by": "subject/package-admin"})),
+                    )
+                ).fetchone()
+                assert requested["result"]["ok"] is True
                 guarded = await participant.invoke_in(
                     conn, "conversation.terminalize-run", terminal,
                     operation_id="uow-step:conversation-terminal/probe",
@@ -530,6 +530,18 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     )
                 ).fetchone()
                 assert other["status"] == "CLAIMED"
+                request_state = await (
+                    await conn.execute(
+                        sql.SQL("SELECT state,disposition_code FROM {}."
+                                "conversation_requeue_requests WHERE bot_id=%s "
+                                "AND request_id=%s")
+                        .format(sql.Identifier(namespace)),
+                        (store.bot_id, "requeue-request/terminal-probe"),
+                    )
+                ).fetchone()
+                assert dict(request_state) == {
+                    "state": "REJECTED", "disposition_code": "RUN_TERMINALIZED"
+                }
                 raise RollbackProbe
         async with store.pool.connection() as conn, conn.transaction():
             terminal_result = await participant.invoke_in(
@@ -562,18 +574,6 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "reason_code": "AGENT_PROTOCOL_FAILED",
             "trigger_count": 1,
         }
-        async with store.pool.connection() as conn:
-            request_state = await (
-                await conn.execute(
-                    sql.SQL("SELECT {}.conversation_read_requeue_request(%s::jsonb,%s::jsonb) "
-                            "AS result").format(sql.Identifier(namespace)),
-                    (Jsonb({"bot_id": store.bot_id}),
-                     Jsonb({"conversation_id": actor["conversation_id"],
-                            "run_ref": "run/1"})),
-                )
-            ).fetchone()
-        assert request_state["result"]["value"]["state"] == "REJECTED"
-        assert request_state["result"]["value"]["disposition_code"] == "RUN_TERMINALIZED"
         async with store.pool.connection() as conn:
             terminal_state = await (
                 await conn.execute(
@@ -1515,6 +1515,45 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ).fetchone()
         assert candidates["result"]["value"]["items"][0]["run_ref"] == "prefill-run"
         assert candidates["result"]["value"]["has_more"] is False
+        authorization = SimpleNamespace(
+            actor_ref="subject/package-admin",
+            web_subject_ref="subject/package-admin",
+            target_generation_id=instance.generation_identity.generation_id,
+            target_graph_revision=instance.generation_identity.graph_revision,
+        )
+
+        async def accept_requeue_ticket(_conn, *, ticket, **_kwargs):
+            assert ticket is authorization
+
+        action_payload = {
+            "conversation_id": prefill_conversation,
+            "run_ref": "prefill-run",
+            "reason_code": "TEST_ABANDONED_RUN",
+        }
+        async def request_managed_requeue():
+            return await instance.management_contract.action(
+                "conversation.requeue.request",
+                operation_id="requeue-request/managed",
+                payload=action_payload,
+                authorization=authorization,
+                authorization_guard=accept_requeue_ticket,
+            )
+
+        requested, concurrent = await asyncio.gather(
+            request_managed_requeue(), request_managed_requeue()
+        )
+        assert requested == {
+            "protocol": "forest.conversation-requeue-requested/1",
+            "request_id": "requeue-request/managed",
+        }
+        assert concurrent == requested
+        assert await request_managed_requeue() == requested
+        managed_state = await instance.management_contract.query(
+            "conversation.requeue.status",
+            {"conversation_id": prefill_conversation, "run_ref": "prefill-run"},
+        )
+        assert managed_state["state"] == "PENDING"
+        assert managed_state["requested_by"] == "subject/package-admin"
         # An abandoned Run may return an already committed Context prefix to
         # PENDING. Its old claim settles in bounded pieces, and the new Run
         # claims that same prefix without duplicating Context units.
@@ -1538,16 +1577,6 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "operation_id": "prefill-requeue/one",
                     "participant_input_digest": digest,
                 }
-                requested = await call(
-                    "conversation_request_requeue",
-                    {"bot_id": store.bot_id,
-                     "operation_id": "prefill-requeue-request/one"},
-                    {"conversation_id": prefill_conversation,
-                     "run_ref": "prefill-run",
-                     "reason_code": "TEST_ABANDONED_RUN",
-                     "requested_by": "management:package-test"},
-                )
-                assert requested["value"]["request_id"] == "prefill-requeue-request/one"
                 requeue_envelope = {
                     "protocol": "forest.uow-step/1",
                     "caller": {
@@ -1557,7 +1586,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "input": {
                         "protocol": "forest.conversation-run-requeue/1",
                         "actor": prefill_actor,
-                        "request_id": "prefill-requeue-request/one",
+                        "request_id": "requeue-request/managed",
                         "session_ref": "prefill-session",
                         "run_ref": "prefill-run",
                         "claim_ref": claim_ref,
@@ -1896,5 +1925,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 )
             ).fetchone()
         assert lane_after["active_run_ref"] == "prefill-run"
+        managed_state = await instance.management_contract.query(
+            "conversation.requeue.status",
+            {"conversation_id": prefill_conversation, "run_ref": "prefill-run"},
+        )
+        assert managed_state["state"] == "REJECTED"
+        assert managed_state["disposition_code"] == "RUN_ANSWERED"
     finally:
         assert await registry.close() == []

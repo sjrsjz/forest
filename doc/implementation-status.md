@@ -472,3 +472,5 @@ Shell 启停入口审计：现有 Shell 仅贡献 `module.list/reload`；`module
 重排安全围栏（2026-10-01）：Agent 的同事务 verifier 除 Run 与 Session 均已终结外，现拒绝旧 Run 中存在任意 ToolCall 或 DISPATCHING、UNKNOWN 模型传输尝试的重排，避免新 Run 重复执行不可确定的外部效果。隔离 PostgreSQL 验证了可重排、在途模型和已登记工具调用三种边界；受控管理入口仍未接入，不能把内部 UOW 视为可用恢复功能。
 
 受控群触发重排入口（2026-10-01）：conversation.scheduler 包新增管理员动作 conversation.requeue.request，只在当前活跃 Run/领取组上登记持久请求；动作携带 Web 主体，按管理 operation 幂等。Scheduler 在旧 Agent Run 返回 FAILED/CANCELLED 后查询该请求，持有同群 actor 租约调用既有双包 UnitOfWork；Agent 的终态与外部效果核验失败则整笔回滚。外部效果不安全时按原失败路径终结领取组，并将请求标为 REJECTED；正常最终回答也使待处理请求失效。包内管理页展示按游标有界分页的活跃领取组、请求入口、结果查询及 Context 窗口配置。Conversation 包的隔离 PostgreSQL 定向用例验证了请求、候选列表、重排提交、正常失败的请求拒绝；完整假 Bot 装配/退役/重启回归 1 passed（282.68 秒），Ruff 与 UI 脚本语法通过。尚未完成从真实 Web 管理会话到请求再到 Agent 终态重排的端到端验收，异常孤儿组处置与长期规模验收也未完成；在线 Supervisor 仍运行旧候选镜像，本次变更尚未部署。
+
+重排管理动作复核（2026-10-01）：通过包的实际 management_contract.action 而非直接 SQL 验证了管理员主体注入、两个并发相同 operation 请求的合流及后续精确重放。复核发现 PostgreSQL 复合行含可空列时 record IS NOT NULL 不能表示查到请求；现按非空主键判断，防止把重放误判为另一管理请求。定向 PostgreSQL 用例 1 passed；正常回复使待处理请求变为 REJECTED/RUN_ANSWERED。第一次复测因 Docker 测试容器没有实际发布宿主端口而在建连阶段超时，换用已核实发布的隔离端口后通过。真实 HTTP Web 会话、浏览器操作及旧 Run 的端到端重排仍待验收；在线实例仍未部署新基线。

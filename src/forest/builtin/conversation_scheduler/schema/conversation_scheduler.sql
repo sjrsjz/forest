@@ -3481,7 +3481,7 @@ BEGIN
     END IF;
     SELECT * INTO existing FROM __forest_module_schema__.conversation_requeue_requests
     WHERE bot_id=requested_bot AND request_id=requested_id;
-    IF existing IS NOT NULL THEN
+    IF existing.request_id IS NOT NULL THEN
         IF existing.input_digest IS DISTINCT FROM requested_digest THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','CONVERSATION_REQUEUE_REQUEST_CONFLICT',
@@ -3508,7 +3508,7 @@ BEGIN
         claim_group.claim_ref,0));
     SELECT * INTO existing FROM __forest_module_schema__.conversation_requeue_requests
     WHERE bot_id=requested_bot AND request_id=requested_id;
-    IF existing IS NOT NULL THEN
+    IF existing.request_id IS NOT NULL THEN
         IF existing.input_digest IS DISTINCT FROM requested_digest THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','CONVERSATION_REQUEUE_REQUEST_CONFLICT',
