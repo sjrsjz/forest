@@ -11,6 +11,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -21,7 +24,11 @@ from psycopg.rows import dict_row
 
 from forest.clean_supervisor_host import CleanSupervisorSettings
 from forest.errors import ForestError
-from forest.official_bot_provisioning import OfficialBotProvisioner, OfficialBotSettingsResolver
+from forest.official_bot_provisioning import (
+    OFFICIAL_BOT_COMPONENT_IDS,
+    OfficialBotProvisioner,
+    OfficialBotSettingsResolver,
+)
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.clean_bot_store import CleanBotStore
@@ -48,6 +55,27 @@ def parser() -> argparse.ArgumentParser:
 def maintenance_dsn(dsn: str) -> str:
     parsed = urlsplit(dsn)
     return urlunsplit(parsed._replace(path="/postgres"))
+
+
+def verify_package_catalog_write_access() -> None:
+    configured = os.environ.get("FOREST_PACKAGE_CATALOG_ROOT")
+    if not configured or not Path(configured).is_absolute():
+        raise ForestError(
+            "BOT_REBUILD_PACKAGE_CATALOG_REQUIRED",
+            "FOREST_PACKAGE_CATALOG_ROOT must name an absolute writable package volume",
+            422,
+        )
+    root = Path(configured)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(prefix=".rebuild-preflight-", dir=root):
+            pass
+    except OSError as exc:
+        raise ForestError(
+            "BOT_REBUILD_PACKAGE_CATALOG_UNWRITABLE",
+            "Package catalog volume is not writable",
+            422,
+        ) from exc
 
 
 async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> dict:
@@ -110,6 +138,7 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                 "--confirm-database must exactly match the derived Bot database",
                 422,
             )
+        verify_package_catalog_write_access()
         guard = await catalog.claim_supervisor(
             "development-rebuild/" + bot_id,
             "incarnation/rebuild/" + str(uuid4()),
@@ -183,7 +212,7 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                     ).fetchone()
             finally:
                 await target.close()
-            if bundles["count"] != 20 or graph_heads["count"] != 0:
+            if bundles["count"] != len(OFFICIAL_BOT_COMPONENT_IDS) or graph_heads["count"] != 0:
                 raise ForestError(
                     "BOT_REBUILD_VERIFICATION_FAILED",
                     "Rebuilt Bot database does not contain the expected clean baseline",

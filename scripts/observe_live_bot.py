@@ -17,6 +17,7 @@ from urllib.request import urlopen
 from psycopg import sql
 
 from forest.clean_supervisor_host import CleanSupervisorSettings
+from forest.official_bot_provisioning import OFFICIAL_BOT_COMPONENT_IDS
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.clean_deployment_store import CleanDeploymentStore
@@ -29,6 +30,7 @@ MEMORY = module_schema_namespace("forest.memory.graph")
 AGENT = module_schema_namespace("forest.agent.runtime")
 DELIVERY = module_schema_namespace("forest.delivery")
 JOBS = module_schema_namespace("forest.job.scheduler")
+EXPECTED_COMPONENTS = len(OFFICIAL_BOT_COMPONENT_IDS)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -76,9 +78,9 @@ async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> d
             bundles = await (
                 await connection.execute("SELECT count(*) AS count FROM forest_kernel.schema_bundles")
             ).fetchone()
-            if bundles["count"] != 20:
+            if bundles["count"] != EXPECTED_COMPONENTS:
                 raise RuntimeError(
-                    f"BOT_SCHEMA_BUNDLES_MISMATCH: expected 20, found {bundles['count']}"
+                    f"BOT_SCHEMA_BUNDLES_MISMATCH: expected {EXPECTED_COMPONENTS}, found {bundles['count']}"
                 )
             memory_attempt_table = await (
                 await connection.execute(
@@ -182,9 +184,9 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
         failures.append("DEPLOYMENT_INTENT_INVALID")
     if deployment["observed_state"] != "ONLINE" or deployment["error_code"] is not None:
         failures.append("DEPLOYMENT_OBSERVATION_INVALID")
-    if bot["schema_bundles"] != 20 or bot["members"] != 20:
+    if bot["schema_bundles"] != EXPECTED_COMPONENTS or bot["members"] != EXPECTED_COMPONENTS:
         failures.append("RUNTIME_GRAPH_CARDINALITY_INVALID")
-    if bot["lifecycle_recorded"] != 20 or bot["active_members"] != 20:
+    if bot["lifecycle_recorded"] != EXPECTED_COMPONENTS or bot["active_members"] != EXPECTED_COMPONENTS:
         failures.append("RUNTIME_LIFECYCLE_INVALID")
     if bot["memory"]["stale_attempts"] or bot["memory"]["stale_reservations"]:
         failures.append("EMBEDDING_CONVERGENCE_STALE")

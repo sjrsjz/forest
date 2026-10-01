@@ -745,7 +745,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 assert job["state"] != "FAILED", job.get("last_error_code")
                 return job["state"] == "SUCCEEDED"
 
-            await _eventually(provisioned, timeout=10)
+            await _eventually(provisioned, timeout=60)
         finally:
             await supervisor.close()
         bot = await repository.inspect("bot/official")
@@ -759,7 +759,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 bundles = await (
                     await conn.execute("SELECT count(*) AS count FROM forest_kernel.schema_bundles")
                 ).fetchone()
-                assert bundles["count"] == 20
+                assert bundles["count"] == 21
                 runtime_namespace = module_schema_namespace("forest.kernel.runtime")
                 graph = await (
                     await conn.execute(

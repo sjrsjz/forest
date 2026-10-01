@@ -4,9 +4,9 @@
 
 ## 启动图
 
-`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 20 个成员：
+`forest bot` 在一个空的专用 PostgreSQL 数据库内安装并发布以下 21 个成员：
 
-- `kernel.runtime`、`kernel.payload`、`kernel.authorization`、`kernel.effect`、`kernel.audit`；
+- `kernel.runtime`、`kernel.payload`、`kernel.authorization`、`kernel.effect`、`kernel.audit`、`component.worker-host`；
 - `routing.graph`, `provider.chat-completions`、`embedding.multimodal`、`vector.index`、`memory.graph`、`media.capture`、`agent.runtime`；
 - `conversation.trigger-policy`、`conversation.scheduler`、`codec.onebot`；
 - `adapter.onebot`、`delivery`、`process.executor`、`job.scheduler`、`shell.command`。
@@ -84,13 +84,32 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supervisor`，镜像默认命令也是 `forest supervisor`。PostgreSQL 首次初始化只创建 `forest_deployment`；供应器为每个 Bot 按 Bot ID 派生稳定库名和无特权 login role，为该 role 生成随机口令，只允许在同一批准集群创建，并复核 role flags 与数据库 owner。Bot 运行时不持有 deployment 超级用户凭据。Supervisor 的健康检查只探测 loopback 管理监听，不读取 Web 凭据。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
 
-若 deployment catalog、加密 Secret 与冻结 Bootstrap profile 已经有效，只需要重建某个尚未发布的 Bot 库，则先正常停止 Supervisor 并等待其 lease 过期，再在候选镜像中挂载同一只读 Secret 卷和 `scripts/rebuild_bot_database.py`。脚本默认只输出派生库名、role、profile 摘要和 lease 状态；真正执行必须同时给出 `--execute` 和与派生结果逐字相同的 `--confirm-database`。它只允许删除由 Bot ID 派生、owner 也准确匹配的数据库，然后直接从现有 authority 安装当前 20 个 baseline；不修改 READY catalog、已完成 Provisioning Job、Secret 或 Bootstrap profile，不包含列迁移、双写或兼容读取。重建后必须得到 20 个 schema bundle 且没有 RuntimeGraph head，之后才可重启 Supervisor 发布新图。
+若 deployment catalog、加密 Secret 与冻结 Bootstrap profile 已经有效，只需要重建某个开发期 Bot 库，则先正常停止 Supervisor 并等待其 lease 过期，再在候选镜像中挂载只读 Secret 卷、可写 package catalog 卷和 `scripts/rebuild_bot_database.py`，并设置 `FOREST_PACKAGE_CATALOG_ROOT=/var/lib/forest-packages`。执行模式会在删库前验证 package catalog 可写。脚本默认只输出派生库名、role、profile 摘要和 lease 状态；真正执行必须同时给出 `--execute` 和与派生结果逐字相同的 `--confirm-database`。它只允许删除由 Bot ID 派生、owner 也准确匹配的数据库，然后直接从现有 authority 安装当前 21 个 baseline；不修改 READY catalog、已完成 Provisioning Job、Secret 或 Bootstrap profile，不包含列迁移、双写或兼容读取。重建后必须得到 21 个 schema bundle 且没有 RuntimeGraph head，之后才可重启 Supervisor 发布新图。
 
-长时实网验收使用 `scripts/observe_live_bot.py`，并在候选镜像、同一 deployment 网络和 Supervisor 的只读 Secret mount 中运行。该探针只输出 RuntimeGraph、工作项和 Memory 状态计数，不读取或输出凭据、Payload 正文、群消息、作者身份或媒体内容。每个样本使用 Bot 数据库的只读 repeatable-read 事务，检查 20 个 schema bundle、20 个当前图成员及最新生命周期、超过 deadline 且再宽限指定秒数仍未结算的 Embedding batch attempt/预算预留，以及同一 Agent session 是否出现多个未终结 Run；deployment 状态和管理端 HTTP 同期采样。OneBot 连接是模块运行时资源，当前持久化 schema 不提供 Binding/Client 在线事实；该数据库探针不能单独证明 WebSocket 在线，实网验收还需由适配器运行状态和低频端到端消息确认。若 Bot 库缺少当前候选基线的 `embedding_batch_attempts`，探针会以 `BOT_SCHEMA_INCOMPATIBLE` 失败，应先在隔离库安装候选基线，不能把旧在线库的结果当作新版本验收。任一样本出现违反项时最终退出码为 1，完整时段无违反项才退出 0。sidecar 不提供管理 HTTP，运行时应加 `--no-healthcheck`，避免继承 runtime 镜像的 Supervisor healthcheck：
+重建 sidecar 使用以下卷和环境；先省略末尾两个执行参数做 dry-run，核对派生库名和 lease，再将 dry-run 返回的 `database_name` 赋给 `$databaseName` 后提交执行。`forest-clean` 是本地 Compose 项目名，换环境时应替换成实际项目名。
 
 ```powershell
 docker run --rm --no-healthcheck --network forest-clean_default `
-  --volumes-from forest-clean-supervisor-1:ro `
+  --mount type=volume,source=forest-clean_forest_secrets,target=/run/forest-secrets,readonly `
+  --mount type=volume,source=forest-clean_forest_packages,target=/var/lib/forest-packages `
+  --mount "type=bind,source=$PWD\scripts\rebuild_bot_database.py,target=/tmp/rebuild_bot_database.py,readonly" `
+  -e FOREST_DEPLOYMENT_ID=forest/default `
+  -e FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE=/run/forest-secrets/postgres_password `
+  -e FOREST_DEPLOYMENT_DATABASE_HOST=postgres `
+  -e FOREST_DEPLOYMENT_DATABASE_NAME=forest_deployment `
+  -e FOREST_DEPLOYMENT_MASTER_KEYRING_FILE=/run/forest-secrets/deployment_master_keyring `
+  -e FOREST_DEPLOYMENT_WEB_BOOTSTRAP_FILE=/run/forest-secrets/deployment_web_bootstrap `
+  -e FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN=http://127.0.0.1:8080 `
+  -e FOREST_PACKAGE_CATALOG_ROOT=/var/lib/forest-packages `
+  forest:local python /tmp/rebuild_bot_database.py --bot-id forest-main `
+  --execute --confirm-database $databaseName
+```
+
+长时实网验收使用 `scripts/observe_live_bot.py`，并在候选镜像、同一 deployment 网络和 Supervisor 的只读 Secret mount 中运行。该探针只输出 RuntimeGraph、工作项和 Memory 状态计数，不读取或输出凭据、Payload 正文、群消息、作者身份或媒体内容。每个样本使用 Bot 数据库的只读 repeatable-read 事务，检查 21 个 schema bundle、21 个当前图成员及最新生命周期、超过 deadline 且再宽限指定秒数仍未结算的 Embedding batch attempt/预算预留，以及同一 Agent session 是否出现多个未终结 Run；deployment 状态和管理端 HTTP 同期采样。OneBot 连接是模块运行时资源，当前持久化 schema 不提供 Binding/Client 在线事实；该数据库探针不能单独证明 WebSocket 在线，实网验收还需由适配器运行状态和低频端到端消息确认。若 Bot 库缺少当前候选基线的 `embedding_batch_attempts`，探针会以 `BOT_SCHEMA_INCOMPATIBLE` 失败，应先在隔离库安装候选基线，不能把旧在线库的结果当作新版本验收。任一样本出现违反项时最终退出码为 1，完整时段无违反项才退出 0。sidecar 不提供管理 HTTP，运行时应加 `--no-healthcheck`，避免继承 runtime 镜像的 Supervisor healthcheck：
+
+```powershell
+docker run --rm --no-healthcheck --network forest-clean_default `
+  --mount type=volume,source=forest-clean_forest_secrets,target=/run/forest-secrets,readonly `
   --mount "type=bind,source=$PWD\scripts\observe_live_bot.py,target=/tmp/observe_live_bot.py,readonly" `
   -e FOREST_DEPLOYMENT_ID=forest/default `
   -e FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE=/run/forest-secrets/postgres_password `

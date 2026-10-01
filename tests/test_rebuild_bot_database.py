@@ -13,6 +13,7 @@ from psycopg import sql
 
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
+    OFFICIAL_BOT_COMPONENT_IDS,
     official_bootstrap_contributions,
     official_bootstrap_schema_digests,
 )
@@ -148,6 +149,7 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
     finally:
         await store.close()
 
+    monkeypatch.setenv("FOREST_PACKAGE_CATALOG_ROOT", str(tmp_path / "packages"))
     monkeypatch.setenv("FOREST_DEPLOYMENT_DSN", deployment_dsn)
     monkeypatch.setenv("FOREST_DEPLOYMENT_ID", "deployment/rebuild-test")
     monkeypatch.setenv("FOREST_DEPLOYMENT_MASTER_KEYRING_FILE", str(keyring_path))
@@ -174,12 +176,24 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
         finally:
             await release_store.close()
 
+        monkeypatch.delenv("FOREST_PACKAGE_CATALOG_ROOT")
+        with pytest.raises(ForestError) as missing_catalog:
+            await rebuild(bot_id=bot_id, execute=True, confirmation=target_name)
+        assert missing_catalog.value.code == "BOT_REBUILD_PACKAGE_CATALOG_REQUIRED"
+        target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
+        marker = await (
+            await target.execute("SELECT to_regclass('public.pre_rebuild_marker') AS marker")
+        ).fetchone()
+        assert marker[0] == "pre_rebuild_marker"
+        await target.close()
+        monkeypatch.setenv("FOREST_PACKAGE_CATALOG_ROOT", str(tmp_path / "packages"))
+
         result = await rebuild(
             bot_id=bot_id,
             execute=True,
             confirmation=target_name,
         )
-        assert result["schema_bundles"] == 20
+        assert result["schema_bundles"] == len(OFFICIAL_BOT_COMPONENT_IDS)
         assert result["runtime_graph_heads"] == 0
         target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
         marker = await (
