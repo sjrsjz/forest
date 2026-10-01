@@ -3305,7 +3305,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
         '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
         '<block block_type="Assistant"><content><text>Forest success fixture</text>'
         '</content></block></blocks></payload></valid_agent_protocol_content_block>'
-        if scenario == "success" else None
+        if scenario in {"success", "cross-group"} else None
     )
 
     async def create_websocket(_url, _token, **_limits):
@@ -3863,6 +3863,20 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                 "external_group_id"
             ] == "933179610"
             assert second.manifest["memory_evidence"]["status"] == "READY"
+            RecordingModelClient.first_gate.set()
+            async with asyncio.timeout(45):
+                while len(RecordingModelClient.requests) < 3:
+                    await asyncio.sleep(0.1)
+            queued = RecordingModelClient.requests[2]
+            queued.verify()
+            assert queued.manifest["memory_evidence"]["current_source"][
+                "external_group_id"
+            ] == "933179609"
+            assert b"Queued for the same group" in queued.body
+            assert any(
+                item["author"]["principal_ref"] == "qq:20003"
+                for item in queued.manifest["source_manifest"]
+            )
         if scenario == "success":
             try:
                 async with asyncio.timeout(15):
