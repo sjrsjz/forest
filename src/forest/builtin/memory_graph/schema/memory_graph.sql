@@ -1254,6 +1254,9 @@ CREATE INDEX facet_preparation_work_idx ON facet_preparation_work(
 CREATE INDEX embedding_facets_source_idx ON embedding_facets(
     bot_id,source_unit_id,source_revision,part_id,purpose,state
 );
+CREATE INDEX embedding_facets_ready_source_idx ON embedding_facets(
+    bot_id,source_unit_id
+) WHERE purpose='DOCUMENT' AND state='READY';
 CREATE INDEX embedding_facets_query_idx ON embedding_facets(
     bot_id,query_id,purpose,state,facet_id
 );
@@ -8308,6 +8311,7 @@ DECLARE
     selected_state text := COALESCE(input->>'eligibility_state','ELIGIBLE');
     selected_source_status text := COALESCE(input->>'source_status','ACTIVE');
     selected_index_coverage text := input->>'index_coverage';
+    ready_source_ids text[];
     items jsonb;
     more boolean;
     cursor_value jsonb;
@@ -8335,27 +8339,68 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
                 'message','Source page limit or cursor is invalid','status',422));
     END IF;
-    WITH page AS (
-        SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
-            u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
-            u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
-            u.eligibility_state,u.source_status,u.document_facet_count,
-            u.ready_document_facet_count,u.index_coverage
-        FROM __forest_module_schema__.memory_filtered_source_units(
-            context->>'bot_id',input,snapshot_time,snapshot_value) u
-        WHERE after_time IS NULL OR
-            (u.occurred_at,u.source_unit_id)<(after_time,input->>'after_source_unit_id')
-        ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT page_limit+1
-    ), visible AS (
-        SELECT * FROM page ORDER BY occurred_at DESC,source_unit_id DESC LIMIT page_limit
-    )
-    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.occurred_at DESC,v.source_unit_id DESC)
-                     FROM visible v),'[]'::jsonb),
-           (SELECT count(*)>page_limit FROM page),
-           (SELECT jsonb_build_object('occurred_at',v.occurred_at,
-                       'source_unit_id',v.source_unit_id)
-            FROM visible v ORDER BY v.occurred_at,v.source_unit_id LIMIT 1)
-    INTO items,more,cursor_value;
+    -- COMPLETE and PARTIAL require a READY document facet. Enumerate a bounded
+    -- set of source IDs first; a larger set uses the ordered source scan below.
+    IF selected_index_coverage IN ('COMPLETE','PARTIAL') THEN
+        SELECT array_agg(candidate.source_unit_id)
+        INTO ready_source_ids
+        FROM (
+            SELECT DISTINCT f.source_unit_id
+            FROM __forest_module_schema__.embedding_facets f
+            WHERE f.bot_id=context->>'bot_id'
+              AND f.purpose='DOCUMENT' AND f.state='READY'
+            ORDER BY f.source_unit_id LIMIT 8193
+        ) candidate;
+    END IF;
+    IF selected_index_coverage IN ('COMPLETE','PARTIAL') AND
+       COALESCE(cardinality(ready_source_ids),0)<=8192 THEN
+        WITH page AS (
+            SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
+                u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
+                u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
+                u.eligibility_state,u.source_status,u.document_facet_count,
+                u.ready_document_facet_count,u.index_coverage
+            FROM unnest(COALESCE(ready_source_ids,ARRAY[]::text[])) candidate(source_unit_id)
+            JOIN __forest_module_schema__.memory_filtered_source_units(
+                context->>'bot_id',input,snapshot_time,snapshot_value) u
+              ON u.source_unit_id=candidate.source_unit_id
+            WHERE after_time IS NULL OR
+                (u.occurred_at,u.source_unit_id)<
+                (after_time,input->>'after_source_unit_id')
+            ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT page_limit+1
+        ), visible AS (
+            SELECT * FROM page ORDER BY occurred_at DESC,source_unit_id DESC LIMIT page_limit
+        )
+        SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.occurred_at DESC,v.source_unit_id DESC)
+                         FROM visible v),'[]'::jsonb),
+               (SELECT count(*)>page_limit FROM page),
+               (SELECT jsonb_build_object('occurred_at',v.occurred_at,
+                           'source_unit_id',v.source_unit_id)
+                FROM visible v ORDER BY v.occurred_at,v.source_unit_id LIMIT 1)
+        INTO items,more,cursor_value;
+    ELSE
+        WITH page AS (
+            SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
+                u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
+                u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
+                u.eligibility_state,u.source_status,u.document_facet_count,
+                u.ready_document_facet_count,u.index_coverage
+            FROM __forest_module_schema__.memory_filtered_source_units(
+                context->>'bot_id',input,snapshot_time,snapshot_value) u
+            WHERE after_time IS NULL OR
+                (u.occurred_at,u.source_unit_id)<(after_time,input->>'after_source_unit_id')
+            ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT page_limit+1
+        ), visible AS (
+            SELECT * FROM page ORDER BY occurred_at DESC,source_unit_id DESC LIMIT page_limit
+        )
+        SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.occurred_at DESC,v.source_unit_id DESC)
+                         FROM visible v),'[]'::jsonb),
+               (SELECT count(*)>page_limit FROM page),
+               (SELECT jsonb_build_object('occurred_at',v.occurred_at,
+                           'source_unit_id',v.source_unit_id)
+                FROM visible v ORDER BY v.occurred_at,v.source_unit_id LIMIT 1)
+        INTO items,more,cursor_value;
+    END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('snapshot_accepted_at',snapshot_time,
             'snapshot_xid',snapshot_value::text,
