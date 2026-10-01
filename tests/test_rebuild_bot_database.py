@@ -194,6 +194,7 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
             bot_id, components["vector.index"]["space_id"]
         )
         vector_calls = []
+        vector_ready = False
 
         class FakeVectorClient:
             def __init__(self, *, uri, token, timeout):
@@ -201,6 +202,8 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
 
             async def has_collection(self, *, collection_name):
                 vector_calls.append(("has", collection_name))
+                if not vector_ready:
+                    raise OSError("isolated vector preflight failure")
                 return True
 
             async def drop_collection(self, *, collection_name):
@@ -210,6 +213,18 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
                 vector_calls.append(("close",))
 
         monkeypatch.setattr(rebuild_module, "AsyncMilvusClient", FakeVectorClient)
+
+        with pytest.raises(ForestError) as unavailable:
+            await rebuild(bot_id=bot_id, execute=True, confirmation=target_name)
+        assert unavailable.value.code == "BOT_REBUILD_VECTOR_PREFLIGHT_FAILED"
+        assert unavailable.value.details["database_rebuilt"] is False
+        target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
+        marker = await (
+            await target.execute("SELECT to_regclass('public.pre_rebuild_marker') AS marker")
+        ).fetchone()
+        assert marker[0] == "pre_rebuild_marker"
+        await target.close()
+        vector_ready = True
 
         result = await rebuild(
             bot_id=bot_id,

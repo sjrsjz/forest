@@ -81,6 +81,35 @@ def verify_package_catalog_write_access() -> None:
         ) from exc
 
 
+async def verify_vector_collection_access(settings, collection_name: str) -> None:
+    client = AsyncMilvusClient(
+        uri=settings.vector_index_endpoint,
+        token=settings.vector_index_token,
+        timeout=settings.vector_index_timeout_seconds,
+    )
+    try:
+        async with asyncio.timeout(settings.vector_index_timeout_seconds):
+            await client.has_collection(collection_name=collection_name)
+    finally:
+        await client.close()
+
+
+async def reset_vector_collection(settings, collection_name: str) -> bool:
+    client = AsyncMilvusClient(
+        uri=settings.vector_index_endpoint,
+        token=settings.vector_index_token,
+        timeout=settings.vector_index_timeout_seconds,
+    )
+    try:
+        async with asyncio.timeout(settings.vector_index_timeout_seconds):
+            existed = await client.has_collection(collection_name=collection_name)
+            if existed:
+                await client.drop_collection(collection_name=collection_name)
+            return existed
+    finally:
+        await client.close()
+
+
 async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> dict:
     settings = CleanSupervisorSettings.from_environment()
     store = CleanDeploymentStore(settings.dsn, settings.deployment_id)
@@ -167,6 +196,15 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
 
         guard_task = asyncio.create_task(renew_guard(), name="bot-database-rebuild-lease")
         try:
+            try:
+                await verify_vector_collection_access(bot_settings, collection_name)
+            except (TimeoutError, MilvusException, OSError) as exc:
+                raise ForestError(
+                    "BOT_REBUILD_VECTOR_PREFLIGHT_FAILED",
+                    "Vector index is unavailable; Bot database was not rebuilt",
+                    503,
+                    details={"database_rebuilt": False, "collection_name": collection_name},
+                ) from exc
             connection = await psycopg.AsyncConnection.connect(
                 maintenance_dsn(settings.dsn), autocommit=True, row_factory=dict_row
             )
@@ -228,20 +266,9 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                     500,
                 )
             try:
-                vector_client = AsyncMilvusClient(
-                    uri=bot_settings.vector_index_endpoint,
-                    token=bot_settings.vector_index_token,
-                    timeout=bot_settings.vector_index_timeout_seconds,
+                collection_existed = await reset_vector_collection(
+                    bot_settings, collection_name
                 )
-                try:
-                    async with asyncio.timeout(bot_settings.vector_index_timeout_seconds):
-                        collection_existed = await vector_client.has_collection(
-                            collection_name=collection_name
-                        )
-                        if collection_existed:
-                            await vector_client.drop_collection(collection_name=collection_name)
-                finally:
-                    await vector_client.close()
             except (TimeoutError, MilvusException, OSError) as exc:
                 raise ForestError(
                     "BOT_REBUILD_VECTOR_RESET_FAILED",
