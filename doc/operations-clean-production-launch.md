@@ -86,6 +86,8 @@ Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supe
 
 若 deployment catalog、加密 Secret 与冻结 Bootstrap profile 已经有效，只需要重建某个开发期 Bot 库，则先正常停止 Supervisor 并等待其 lease 过期，再在候选镜像中挂载只读 Secret 卷、可写 package catalog 卷和 `scripts/rebuild_bot_database.py`，并设置 `FOREST_PACKAGE_CATALOG_ROOT=/var/lib/forest-packages`。执行模式会在删库前验证 package catalog 可写。脚本默认只输出派生库名、role、profile 摘要、精确的向量集合名和 lease 状态；真正执行必须同时给出 `--execute` 和与派生结果逐字相同的 `--confirm-database`。它只允许删除由 Bot ID 派生、owner 也准确匹配的数据库，然后直接从现有 authority 安装当前 21 个 baseline；数据库验证通过后，删除同一 Bot 与冻结 `space_id` 派生的 Milvus 集合，避免无权威引用的旧向量占据召回候选。向量清理失败会明确报告数据库已重建，必须排除故障后重试或清理精确集合，再启动 Supervisor。不修改 READY catalog、已完成 Provisioning Job、Secret 或 Bootstrap profile，不包含列迁移、双写或兼容读取。重建后必须得到 21 个 schema bundle 且没有 RuntimeGraph head，之后才可重启 Supervisor 发布新图。
 
+重建前的 `pg_dump` 只保存 PostgreSQL 权威事实，不包含 Milvus 向量。执行集合删除后，该备份可供审计和提取原始来源，但不能单独恢复旧的 `READY` 向量召回；若需要可回滚的完整记忆，应另行保存同一集合或重新嵌入，并明确处理外部调用费用。
+
 重建 sidecar 使用以下卷和环境；先省略末尾两个执行参数做 dry-run，核对派生库名和 lease，再将 dry-run 返回的 `database_name` 赋给 `$databaseName` 后提交执行。`forest-clean` 是本地 Compose 项目名，换环境时应替换成实际项目名。
 
 ```powershell
