@@ -19,7 +19,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 from uuid import uuid4
 
 from forest.command_contract import schema_digest
@@ -116,6 +116,21 @@ class WorkerLimits:
     max_state_inflight: int = 16
     max_owned_tasks: int = 64
     max_owned_resources: int = 64
+
+    @classmethod
+    def from_component(cls, component: Mapping[str, Any]) -> WorkerLimits:
+        declared = component.get("resources", {})
+        defaults = cls()
+        return cls(**{
+            key: declared.get(key, getattr(defaults, key))
+            for key in (
+                "max_frame_bytes", "max_inflight", "max_queue_items",
+                "max_state_inflight", "max_owned_tasks", "max_owned_resources",
+            )
+        })
+
+    def as_fact(self) -> dict[str, int]:
+        return asdict(self)
 
     def __post_init__(self):
         if type(self.max_frame_bytes) is not int or not 1024 <= self.max_frame_bytes <= MAX_FRAME_BYTES:

@@ -30,6 +30,7 @@ from forest.clean_bot_host import BotGraphCandidate, CleanBotHost, CleanBotSetti
 from forest.clean_management_app import CleanManagementGateway, ConfigurationApplyInput
 from forest.component_selection import ComponentSelectionSnapshot
 from forest.deployment_management_app import create_deployment_management_app
+from forest.drivers.python_worker import WorkerLimits
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
@@ -794,6 +795,13 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
             assert preview["target_component_id"] == "agent.runtime"
             assert "agent.runtime" in preview["impact"]["replace"]
             assert preview["plan_digest"].startswith("sha256:")
+            agent_package = next(
+                item for item in preview["packages"]
+                if item["component_id"] == "agent.runtime"
+            )
+            assert agent_package["worker_limits"] == WorkerLimits.from_component(
+                host.package_catalog.get(agent_package["package_digest"]).component
+            ).as_fact()
             assert (await worker_host.management_contract.query("selection", {})) == (
                 selection_before_preview
             )

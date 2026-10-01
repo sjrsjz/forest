@@ -102,6 +102,7 @@ def component_candidate_preview_service(context):
                     "configuration_revision": item.configuration_revision,
                     "configuration_schema_digest": item.configuration_schema_digest,
                     "storage_digest": item.storage_digest,
+                    "worker_limits": item.worker_limits.as_fact(),
                 }
                 for item in preview.packages
             ],

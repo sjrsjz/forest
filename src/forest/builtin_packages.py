@@ -13,6 +13,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from psycopg.errors import InvalidSchemaName, SerializationFailure, UndefinedTable
 
+from forest.drivers.python_worker import WorkerLimits
 from forest.errors import ForestError
 from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.package_effects import (
@@ -74,6 +75,7 @@ class PackageCandidateInspection:
     configuration_payload_digest: str
     configuration_schema_digest: str
     storage_digest: str | None
+    worker_limits: WorkerLimits
 
     def as_fact(self) -> dict[str, Any]:
         return {
@@ -86,6 +88,7 @@ class PackageCandidateInspection:
             "configuration_payload_digest": self.configuration_payload_digest,
             "configuration_schema_digest": self.configuration_schema_digest,
             "storage_digest": self.storage_digest,
+            "worker_limits": self.worker_limits.as_fact(),
         }
 
 
@@ -351,6 +354,7 @@ async def _inspect_installed_snapshot(
         desired.revision, desired.payload_id, desired.payload_digest,
         layout.schema_digest,
         layout.storage.package_digest if layout.storage is not None else None,
+        WorkerLimits.from_component(snapshot.component),
     )
     return inspected, layout, configuration
 
@@ -464,6 +468,7 @@ async def inspect_official_candidate_descriptor(
         descriptor.component_id, "official", snapshot.digest,
         digest_json(snapshot.manifest), desired.revision, desired.payload_id,
         desired.payload_digest, schema_digest, storage.package_digest,
+        WorkerLimits.from_component(snapshot.component),
     )
 
 

@@ -85,6 +85,7 @@
           <div><dt>来源 Graph / 选择</dt><dd id="preview-source"></dd></div>
           <div><dt>计划摘要</dt><dd id="preview-digest"></dd></div>
           <div><dt>目标工件与配置</dt><dd id="preview-target"></dd></div>
+          <div><dt>目标 Worker 限额</dt><dd id="preview-worker-limits"></dd></div>
           <div><dt>影响概况</dt><dd id="preview-summary"></dd></div>
         </dl>
         <div id="preview-impact"></div>
@@ -226,6 +227,10 @@
         byId('preview-digest').textContent=value.plan_digest;
         const target=value.packages.find(item=>item.component_id===component_id);
         byId('preview-target').textContent=target?`${target.trust_level} / ${target.package_digest} / 配置 r${target.configuration_revision}`:'目标不在启用候选图中';
+        const limits=target?.worker_limits;
+        byId('preview-worker-limits').textContent=limits?
+          `帧 ${limits.max_frame_bytes} B · 并发 ${limits.max_inflight} · 队列 ${limits.max_queue_items} · 状态并发 ${limits.max_state_inflight} · 持有任务 ${limits.max_owned_tasks} · 持有资源 ${limits.max_owned_resources}`:
+          '目标未启用；无目标 Worker 限额';
         const labels={replace:'换代',retain:'保留',remove:'移除',add:'新增',drain:'排空',prepare:'预热'};
         byId('preview-summary').textContent=Object.entries(labels).map(([key,label])=>`${label} ${value.impact[key].length}`).join(' · ');
         const impact=byId('preview-impact');impact.replaceChildren();

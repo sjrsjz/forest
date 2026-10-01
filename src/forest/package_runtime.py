@@ -183,23 +183,6 @@ def _major(contract: str) -> int:
     return lower[0]
 
 
-def _worker_limits(component: Mapping[str, Any]) -> WorkerLimits:
-    declared = component.get("resources", {})
-    defaults = WorkerLimits()
-    return WorkerLimits(
-        max_frame_bytes=declared.get("max_frame_bytes", defaults.max_frame_bytes),
-        max_inflight=declared.get("max_inflight", defaults.max_inflight),
-        max_queue_items=declared.get("max_queue_items", defaults.max_queue_items),
-        max_state_inflight=declared.get(
-            "max_state_inflight", defaults.max_state_inflight
-        ),
-        max_owned_tasks=declared.get("max_owned_tasks", defaults.max_owned_tasks),
-        max_owned_resources=declared.get(
-            "max_owned_resources", defaults.max_owned_resources
-        ),
-    )
-
-
 def _timeout(component: Mapping[str, Any], name: str, default: float) -> float:
     return float(component.get("lifecycle", {}).get(name, default))
 
@@ -2414,7 +2397,7 @@ class PackageGenerationAdapter:
                 configuration_owner_id=configuration_owner_id,
             ),
             self._state_gateway,
-            limits=_worker_limits(self.component),
+            limits=WorkerLimits.from_component(self.component),
             service_handler=self._service_gateway,
             domain_query_handler=self._domain_query_gateway,
             domain_command_handler=self._domain_command_gateway,

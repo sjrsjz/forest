@@ -133,7 +133,7 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
     if args.plugin_command == "check":
         identity = WorkerIdentity(str(uuid4()), str(uuid4()), str(uuid4()), "package-check")
         worker = PythonWorker(
-            snapshot, identity, limits=WorkerLimits(**snapshot.component.get("resources", {}))
+            snapshot, identity, limits=WorkerLimits.from_component(snapshot.component)
         )
         timeouts = snapshot.component.get("lifecycle", {})
         try:

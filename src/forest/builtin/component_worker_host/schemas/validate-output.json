@@ -35,7 +35,8 @@
         "type": "object", "additionalProperties": false,
         "required": [
           "component_id", "trust_level", "package_digest",
-          "configuration_revision", "configuration_schema_digest", "storage_digest"
+          "configuration_revision", "configuration_schema_digest", "storage_digest",
+          "worker_limits"
         ],
         "properties": {
           "component_id": {"type": "string"},
@@ -43,7 +44,20 @@
           "package_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
           "configuration_revision": {"type": "integer", "minimum": 1},
           "configuration_schema_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
-          "storage_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"}
+          "storage_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+          "worker_limits": {
+            "type": "object", "additionalProperties": false,
+            "required": ["max_frame_bytes", "max_inflight", "max_queue_items",
+              "max_state_inflight", "max_owned_tasks", "max_owned_resources"],
+            "properties": {
+              "max_frame_bytes": {"type": "integer", "minimum": 1024, "maximum": 262144},
+              "max_inflight": {"type": "integer", "minimum": 1, "maximum": 256},
+              "max_queue_items": {"type": "integer", "minimum": 0, "maximum": 256},
+              "max_state_inflight": {"type": "integer", "minimum": 1, "maximum": 256},
+              "max_owned_tasks": {"type": "integer", "minimum": 1, "maximum": 256},
+              "max_owned_resources": {"type": "integer", "minimum": 1, "maximum": 256}
+            }
+          }
         }
       }
     }
