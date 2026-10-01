@@ -1608,7 +1608,7 @@ BEGIN
     SELECT * INTO replay
     FROM __forest_module_schema__.selection_operations
     WHERE bot_id=requested_bot AND operation_id=requested_operation;
-    IF replay IS NOT NULL THEN
+    IF replay.operation_id IS NOT NULL THEN
         IF replay.input_digest IS DISTINCT FROM requested_digest THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
@@ -1929,7 +1929,7 @@ BEGIN
             SELECT * INTO existing_claim
             FROM __forest_module_schema__.trigger_claim_groups
             WHERE bot_id=requested_bot AND claim_ref=claim_ref_value FOR UPDATE;
-            IF existing_claim IS NOT NULL AND (
+            IF existing_claim.claim_ref IS NOT NULL AND (
                 existing_claim.conversation_id IS DISTINCT FROM requested_conversation
                 OR existing_claim.session_ref IS DISTINCT FROM selected_session
                 OR existing_claim.run_ref IS DISTINCT FROM selected_run
@@ -1937,7 +1937,7 @@ BEGIN
             ) THEN
                 RAISE EXCEPTION 'Trigger claim identity collision' USING ERRCODE='55000';
             END IF;
-            claim_prior_digest := CASE WHEN existing_claim IS NULL
+            claim_prior_digest := CASE WHEN existing_claim.claim_ref IS NULL
                 THEN sha256(convert_to(jsonb_build_array(
                     'forest.trigger-group/1',requested_bot,requested_conversation,
                     selected_session,selected_run
@@ -2045,7 +2045,7 @@ BEGIN
         WHERE bot_id=requested_bot AND conversation_id=requested_conversation
           AND status='CLAIMED' AND input_batch_id=batch_id
         ORDER BY ingress_seq,trigger_id;
-        IF existing_claim IS NULL THEN
+        IF existing_claim.claim_ref IS NULL THEN
             INSERT INTO __forest_module_schema__.trigger_claim_groups(
                 bot_id,conversation_id,claim_ref,session_ref,run_ref,
                 trigger_count,segment_count,last_trigger_ref,

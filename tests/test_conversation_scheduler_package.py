@@ -1852,6 +1852,43 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         )
         assert drained["status"] == "CONTINUE"
         async with store.pool.connection() as conn, conn.transaction():
+            replay_key = await (
+                await conn.execute(
+                    sql.SQL("SELECT operation_id,input_digest FROM {}.selection_operations "
+                            "WHERE bot_id=%s AND conversation_id=%s AND result_status='CONTINUE' "
+                            "ORDER BY operation_id DESC LIMIT 1")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, prefill_conversation),
+                )
+            ).fetchone()
+            assert replay_key is not None
+            selected_again = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_select_input(%s::jsonb,%s::jsonb) AS result")
+                    .format(sql.Identifier(namespace)),
+                    (
+                        Jsonb({
+                            "bot_id": store.bot_id,
+                            "operation_id": replay_key["operation_id"],
+                            "participant_input_digest": replay_key["input_digest"],
+                        }),
+                        Jsonb({
+                            "protocol": "forest.uow-step/1",
+                            "input": {
+                                "actor": prefill_actor,
+                                "boundary": "MODEL_SAFE_POINT",
+                                "selection_mode": "PREFILL_ONLY",
+                                "session_ref": "prefill-session",
+                                "run_ref": "prefill-run",
+                                "next_run_ref": None,
+                            },
+                        }),
+                    ),
+                )
+            ).fetchone()
+        assert selected_again["result"]["ok"] is True
+        assert selected_again["result"]["value"]["status"] == "CONTINUE"
+        async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(
                 sql.SQL(
                     "UPDATE {}.conversation_lanes SET next_ingress_seq=261,"
