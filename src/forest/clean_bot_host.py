@@ -24,7 +24,6 @@ from forest.component_selection import (
     select_package_members,
 )
 from forest.core_runtime import bootstrap_clean_kernel
-from forest.embedding_builtin import embedding_configuration_validator_factory
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
@@ -43,10 +42,7 @@ from forest.runtime_modules import RuntimeModuleDescriptor, RuntimeModuleRegistr
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.schema_bundles import SchemaBundleInstaller
-from forest.vector_index_builtin import (
-    default_vector_index_configuration,
-    vector_index_configuration_validator_factory,
-)
+from forest.vector_index_builtin import default_vector_index_configuration
 from forest.vector_index_effect_driver import milvus_vector_index_effect_driver_factory
 
 _HOST_LEASE_TTL = timedelta(minutes=2)
@@ -463,9 +459,6 @@ class CleanBotHost:
                     )
                 }
             ),
-            configuration_validator_factory=(
-                embedding_configuration_validator_factory(self.store)
-            ),
         )
 
         async def resolve_vector_index_token(secret_ref, _revision):
@@ -505,9 +498,6 @@ class CleanBotHost:
                         **vector_index_driver_options,
                     )
                 }
-            ),
-            configuration_validator_factory=(
-                vector_index_configuration_validator_factory(self.store)
             ),
         )
         memory = await bootstrap_builtin_package(

@@ -8,7 +8,6 @@ from importlib.resources import files
 from jsonschema import Draft202012Validator
 
 from forest.errors import ForestError
-from forest.storage.vector_index_authority import VectorIndexIdentityRepository
 
 VECTOR_INDEX_CONFIGURATION_SCHEMA = json.loads(
     files("forest")
@@ -37,21 +36,3 @@ def validate_vector_index_configuration(value: object) -> dict:
             422,
         )
     return value
-
-
-def vector_index_configuration_validator_factory(store):
-    def create(namespace: str):
-        repository = VectorIndexIdentityRepository(store, namespace=namespace)
-
-        async def validate(value: object) -> None:
-            configuration = validate_vector_index_configuration(value)
-            await repository.initialize(
-                operation_id="vector.index:identity",
-                space_id=configuration["space_id"],
-                dimensions=configuration["dimensions"],
-                metric=configuration["metric"],
-            )
-
-        return validate
-
-    return create

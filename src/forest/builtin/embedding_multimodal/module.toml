@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.embedding.multimodal"
-version = "2.3.1"
+version = "2.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "embedding_provider:MultimodalEmbeddingProvider"
@@ -12,6 +12,7 @@ state_schema = 1
 reload_mode = "drain"
 config_schema = "schemas/config.json"
 configuration_apply = "worker-host/1"
+config_immutable_paths = ["/profile"]
 
 [components.resources]
 max_frame_bytes = 262144
@@ -29,14 +30,6 @@ prepare_timeout_s = 10
 start_timeout_s = 10
 drain_timeout_s = 120
 stop_timeout_s = 10
-
-[components.storage]
-schema_id = "forest.embedding.multimodal"
-schema_version = "2.0.0"
-baseline = "schema/baseline.sql"
-baseline_sha256 = "b6ee5b8c08a81ba925606dfcc04c6607cd2d628f4f956944e45a295ec612e3bb"
-scope = "bot"
-repository_contract = "forest.embedding-identity.repository/1"
 
 [[components.provides]]
 name = "embedding.profile.bind"

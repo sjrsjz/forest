@@ -134,6 +134,8 @@ EmbeddingProfile
 
 EmbeddingProfile 是 Bot 生命周期身份的一部分。Bot 的首次记忆配置确定实际部署身份、模型种类、模型/预处理修订和维度，此后这些字段不可变；endpoint、凭据和预算可以轮换，但新 endpoint 必须实现同一空间契约。不能在同一 Bot 内把历史向量就地解释为另一模型的空间。确需更换模型或维度时创建新 Bot，在隔离索引中重建后通过显式业务迁移切换 Binding，并保留旧 Bot 的审计与来源边界。
 
+实现上，`embedding.multimodal` 的包清单声明 `/profile` 为不可变配置路径，`vector.index` 声明 `/space_id`、`/dimensions`、`/metric` 不可变；通用配置账本在计划和候选装配中执行这些约束。`memory.graph` 自身的 `/embedding` 也被冻结。Embedding 和 Milvus 的 endpoint、凭据及传输限制仍可按正常配置换代。Bot Host 不得导入这两个包的身份仓库或另写一份身份表来代行配置策略；Milvus 私有持久化只保留删除 ref 的 tombstone 围栏。部署首次装配仍须校验三个包的空间身份相符，实际请求再由冻结 Generation 检查精确空间。
+
 仅文本 Embedding 加 OCR/caption 不能满足该准入条件。Bot 的完整多模态记忆配置缺少图片编码/查询能力时，配置验证报告 `MULTIMODAL_EMBEDDING_REQUIRED`；运行期图片服务故障报告降级状态，可继续可靠接纳和稍后补索引，但不得悄悄将“完整多模态就绪”改成文本就绪。
 
 `space_id` 表示完整的兼容性契约，绑定模型修订、预处理、归一化和度量。同一 Bot 的 space 不原地升级；新 Bot 的新索引回填后按事实水位和覆盖情况显式发布。新查询不能拿新模型向量去搜索旧空间，也不能对不同空间的向量做 cosine、平均或相加。

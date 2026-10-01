@@ -44,11 +44,11 @@ from forest.schema_bundles import module_schema_namespace
 from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
 from forest.storage.management_asset_authority import ManagementAssetAuthority
-from forest.storage.vector_index_authority import VectorIndexIdentityRepository
 from forest.unit_of_work import (
     ComponentConfigurationApplyScope,
     PostgresComponentConfigurationApplyCoordinator,
 )
+from forest.vector_index_effect_driver import vector_collection_name
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
@@ -3080,7 +3080,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                 model=settings.embedding_model,
                 dimensions=settings.embedding_dimensions,
             )
-            collection_name = VectorIndexIdentityRepository.collection_name(
+            collection_name = vector_collection_name(
                 settings.bot_id, profile.space_id
             )
             client = AsyncMilvusClient(uri=settings.vector_index_endpoint)
@@ -3381,7 +3381,7 @@ async def test_real_vl_auto_archive_cross_group_recall_and_management_trial(tmp_
                     model_revision=settings.embedding_model_revision,
                     model=settings.embedding_model, dimensions=settings.embedding_dimensions,
                 )
-                collection_name = VectorIndexIdentityRepository.collection_name(
+                collection_name = vector_collection_name(
                     settings.bot_id, profile.space_id
                 )
                 client = AsyncMilvusClient(uri=settings.vector_index_endpoint)

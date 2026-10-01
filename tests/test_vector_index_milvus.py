@@ -10,12 +10,14 @@ from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
+from forest.embedding_builtin import default_embedding_configuration
+from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.package_effects import PackageEffectDriverRegistry
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, digest_json
 from forest.vector_index_builtin import (
+    default_vector_index_configuration,
     validate_vector_index_configuration,
-    vector_index_configuration_validator_factory,
 )
 from forest.vector_index_effect_driver import (
     MilvusVectorIndexEffectDriver,
@@ -38,6 +40,70 @@ async def test_vector_index_configuration_rejects_mutable_space_shape():
             }
         )
     assert caught.value.code == "VECTOR_INDEX_CONFIGURATION_INVALID"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_embedding_and_vector_identity_are_package_declared_immutable_paths(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    catalog = PackageCatalog(tmp_path / "packages")
+    embedding_value = default_embedding_configuration()
+    embedding = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/embedding_multimodal",
+        catalog, store, installer, kernel=kernel,
+        initial_configuration=embedding_value,
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "embedding.multimodal.http": lambda *_args: None,
+        }),
+    )
+    embedding_schema = embedding.snapshot.schema(
+        embedding.snapshot.component["config_schema"]
+    )
+    embedding_digest = digest_json(embedding_schema)
+    endpoint_only = {**embedding_value, "endpoint": "https://example.org/embeddings"}
+    await embedding.configuration.plan(
+        operation_id="embedding.endpoint.change", expected_desired_revision=1,
+        value=endpoint_only, validation_digest=embedding_digest,
+    )
+    with pytest.raises(ForestError) as embedding_error:
+        await embedding.configuration.plan(
+            operation_id="embedding.profile.change", expected_desired_revision=1,
+            value={
+                **embedding_value,
+                "profile": {**embedding_value["profile"], "model_revision": "other"},
+            },
+            validation_digest=embedding_digest,
+        )
+    assert embedding_error.value.code == "MODULE_CONFIGURATION_IMMUTABLE"
+
+    profile = EmbeddingProfile(**embedding_value["profile"])
+    vector_value = default_vector_index_configuration(
+        space_id=profile.space_id, dimensions=profile.dimensions,
+    )
+    vector = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
+        catalog, store, installer, kernel=kernel,
+        initial_configuration=vector_value,
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "vector-index.milvus": lambda *_args: None,
+        }),
+    )
+    vector_digest = digest_json(vector.snapshot.schema(vector.snapshot.component["config_schema"]))
+    await vector.configuration.plan(
+        operation_id="vector.endpoint.change", expected_desired_revision=1,
+        value={**vector_value, "endpoint": "http://127.0.0.1:19530"},
+        validation_digest=vector_digest,
+    )
+    with pytest.raises(ForestError) as vector_error:
+        await vector.configuration.plan(
+            operation_id="vector.space.change", expected_desired_revision=1,
+            value={**vector_value, "dimensions": vector_value["dimensions"] - 1},
+            validation_digest=vector_digest,
+        )
+    assert vector_error.value.code == "MODULE_CONFIGURATION_IMMUTABLE"
 
 
 @pytest.mark.asyncio
@@ -71,7 +137,6 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
         PackageCatalog(tmp_path / "vector-packages"),
         store, installer, kernel=kernel, initial_configuration=configuration,
-        configuration_validator_factory=vector_index_configuration_validator_factory(store),
         effect_driver_registry=PackageEffectDriverRegistry({
             "vector-index.milvus": milvus_vector_index_effect_driver_factory(
                 bot_id=bot_id, store=store, runtime=kernel.runtime,

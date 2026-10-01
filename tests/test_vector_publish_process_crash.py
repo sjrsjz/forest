@@ -28,7 +28,7 @@ from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.embeddings import EmbeddingProfile
 from forest.packages import PackageCatalog, digest_json
 from forest.schema_bundles import module_schema_namespace
-from forest.storage.vector_index_authority import VectorIndexIdentityRepository
+from forest.vector_index_effect_driver import vector_collection_name
 
 
 class CrashAfterMilvusUpsert(AsyncMilvusClient):
@@ -183,7 +183,7 @@ async def test_memory_vector_publish_recovers_after_process_crash(tmp_path):
         model=settings.embedding_model,
         dimensions=settings.embedding_dimensions,
     )
-    collection = VectorIndexIdentityRepository.collection_name(bot_id, profile.space_id)
+    collection = vector_collection_name(bot_id, profile.space_id)
     memory_schema = module_schema_namespace("forest.memory.graph")
     vector_schema = module_schema_namespace("forest.vector.index")
     kernel_schema = module_schema_namespace("forest.kernel.runtime")

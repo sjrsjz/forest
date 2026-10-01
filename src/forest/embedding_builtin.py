@@ -9,7 +9,6 @@ from jsonschema import Draft202012Validator
 
 from forest.embeddings import SILICONFLOW_VL_MODEL, EmbeddingProfile
 from forest.errors import ForestError
-from forest.storage.embedding_provider_authority import EmbeddingProviderRepository
 
 EMBEDDING_CONFIGURATION_SCHEMA = json.loads(
     files("forest")
@@ -46,21 +45,3 @@ def validate_embedding_configuration(value: object) -> tuple[dict, EmbeddingProf
             "EMBEDDING_CONFIGURATION_INVALID", "Embedding profile is invalid", 422
         ) from exc
     return value, profile
-
-
-def embedding_configuration_validator_factory(store):
-    """Bind Bot-lifetime embedding identity validation to package-owned storage."""
-
-    def create(namespace: str):
-        repository = EmbeddingProviderRepository(store, namespace=namespace)
-
-        async def validate(value: object) -> None:
-            _configuration, profile = validate_embedding_configuration(value)
-            await repository.initialize_identity(
-                operation_id="embedding.multimodal:identity",
-                profile=profile,
-            )
-
-        return validate
-
-    return create

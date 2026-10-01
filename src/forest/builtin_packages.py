@@ -718,6 +718,12 @@ async def _bootstrap_package_snapshot(
     )
     schema_digest = digest_json(configuration_schema)
     if initial_configuration is not None:
+        if not Draft202012Validator(configuration_schema).is_valid(initial_configuration):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_INVALID",
+                "Initial configuration violates the package schema",
+                422,
+            )
         if configuration_validator is not None:
             await configuration_validator(initial_configuration)
         await configuration.ensure_initialized(

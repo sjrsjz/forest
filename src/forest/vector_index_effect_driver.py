@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -17,10 +18,7 @@ from pymilvus.exceptions import MilvusException
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.schema_bundles import module_schema_namespace
-from forest.storage.vector_index_authority import (
-    VectorIndexIdentityRepository,
-    VectorIndexRefRepository,
-)
+from forest.storage.vector_index_authority import VectorIndexRefRepository
 from forest.vector_index_builtin import validate_vector_index_configuration
 
 _REF = re.compile(r"[^\x00]{1,256}\Z")
@@ -40,6 +38,11 @@ def _valid_ref(value: str) -> bool:
         return _REF.fullmatch(value) is not None and len(value.encode("utf-8")) <= 256
     except UnicodeError:
         return False
+
+
+def vector_collection_name(bot_id: str, space_id: str) -> str:
+    suffix = hashlib.sha256((bot_id + "\0" + space_id).encode()).hexdigest()[:32]
+    return "forest_memory_ref2_" + suffix
 
 
 class MilvusVectorIndexEffectDriver:
@@ -76,9 +79,7 @@ class MilvusVectorIndexEffectDriver:
         self.runtime = runtime
         self.token_resolver = token_resolver
         self.client_factory = client_factory
-        self.collection_name = VectorIndexIdentityRepository.collection_name(
-            bot_id, configuration["space_id"]
-        )
+        self.collection_name = vector_collection_name(bot_id, configuration["space_id"])
         self.client = None
         self.accepting = False
         self._sweep_task = None
