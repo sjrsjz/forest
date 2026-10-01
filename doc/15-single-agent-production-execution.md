@@ -60,7 +60,7 @@ Request 已写为 `READY` 但尚无 Effect 时，以及既有 Attempt 全部明�
 
 `effect.prove-not-applied` 是内核 Effect 的只读 UnitOfWork participant：按稳定 ID 顺序锁定每个 Effect/Attempt，要求当前状态均为 `NOT_APPLIED`，并返回已接受的未发送 observation 身份与证据集合摘要。Agent 的三次尝试耗尽结算现先执行该 participant，再由 Agent 私有 participant 在同一事务内核对全部 Attempt/Observation 与证明回执后写入失败 checkpoint；任一侧不一致则整笔事务回滚。这个跨命名空间的证据端口也供后续请求继承使用，不允许 Agent SQL 直接读取 Kernel Effect 表。
 
-模型请求已冻结旧 Provider Generation 且尚未终结时，新 Agent 可以在保留该 Provider Generation 的定向替换后继续。同一次 Graph 替换移除旧 Provider 时，候选插件在预热后通过通用 `replacement_facts` 生命周期钩子声明不可变兼容性事实；内核只携带代次与事实，不解释 Provider 配置。Provider 包以 `forest.provider-profile/1` 声明 profile 引用、模型与能力摘要；Agent 包的 `agent.replacement-guard` 仅在这些值与冻结 Request 完全一致，且请求处于零 Attempt 的 `READY` 或全部 Attempt 明确未发送的 `NOT_APPLIED` 时放行。新 Agent 在首次 dispatch 前用下述继承协议创建新 Request。其余情形发布前拒绝并恢复旧图；不能用新 Provider 身份重建旧 request ID，或把请求 ID 冲突当作暂时失败反复重试。
+模型请求已冻结旧 Provider Generation 且尚未终结时，新 Agent 可以在保留该 Provider Generation 的定向替换后继续。同一次 Graph 替换移除旧 Provider 时，候选插件在预热后通过通用 `replacement_facts` 生命周期钩子声明不可变兼容性事实；声明非空事实的包必须在 manifest 的 `lifecycle.replacement_facts_schema` 给出 JSON Schema，候选发布前按冻结 schema 验证，不声明时只允许空对象。内核只携带代次与事实，不解释 Provider 配置。Provider 包以 `forest.provider-profile/1` 声明 profile 引用、模型与能力摘要；Agent 包的 `agent.replacement-guard` 仅在这些值与冻结 Request 完全一致，且请求处于零 Attempt 的 `READY` 或全部 Attempt 明确未发送的 `NOT_APPLIED` 时放行。新 Agent 在首次 dispatch 前用下述继承协议创建新 Request。其余情形发布前拒绝并恢复旧图；不能用新 Provider 身份重建旧 request ID，或把请求 ID 冲突当作暂时失败反复重试。
 
 ### 已确定未发送请求的跨 Provider Generation 继承
 

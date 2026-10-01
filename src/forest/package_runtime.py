@@ -99,6 +99,11 @@ def _component_schema_references(component: Mapping[str, Any]) -> tuple[str, ...
     state_value_schema = component.get("state_value_schema")
     if state_value_schema is not None:
         references.append(state_value_schema)
+    replacement_facts_schema = component.get("lifecycle", {}).get(
+        "replacement_facts_schema"
+    )
+    if replacement_facts_schema is not None:
+        references.append(replacement_facts_schema)
     for declarations in (
         component.get("provides", ()),
         component.get("effect_services", ()),
@@ -286,6 +291,13 @@ class PackageGenerationAdapter:
             compiled_schemas
             if compiled_schemas is not None
             else snapshot.schemas(_component_schema_references(self.component))
+        )
+        facts_schema = self.component.get("lifecycle", {}).get(
+            "replacement_facts_schema"
+        )
+        self._replacement_facts_validator = (
+            Draft202012Validator(self._compiled_schemas[facts_schema])
+            if facts_schema is not None else None
         )
         self._worker: PythonWorker | None = None
         self._configuration: dict[str, Any] | None = None
@@ -2585,6 +2597,19 @@ class PackageGenerationAdapter:
                 raise ForestError(
                     "REPLACEMENT_FACTS_INVALID",
                     "Prepared Worker returned invalid replacement facts",
+                    422,
+                )
+            if self._replacement_facts_validator is None:
+                if replacement_facts:
+                    raise ForestError(
+                        "REPLACEMENT_FACTS_UNDECLARED",
+                        "Plugin published facts without a manifest schema",
+                        422,
+                    )
+            elif not self._replacement_facts_validator.is_valid(replacement_facts):
+                raise ForestError(
+                    "REPLACEMENT_FACTS_INVALID",
+                    "Prepared Worker facts violate the package schema",
                     422,
                 )
             self._replacement_facts = deepcopy(replacement_facts)

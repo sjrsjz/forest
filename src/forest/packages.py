@@ -203,6 +203,7 @@ MANIFEST_SCHEMA = {
                                 "maximum": 120,
                             },
                             "replacement_guard_query": {"type": "string"},
+                            "replacement_facts_schema": {"type": "string"},
                         },
                     },
                     "capabilities": {
@@ -1250,6 +1251,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
             "Service call grants must name a declared dependency or local effect",
         )
     _schema(files, component.get("config_schema"))
+    replacement_facts_schema = component.get("lifecycle", {}).get(
+        "replacement_facts_schema"
+    )
+    if replacement_facts_schema is not None:
+        _schema(files, replacement_facts_schema)
     _management_ui(files, component)
     _storage_bundle(files, component)
     services = component.get("provides", [])

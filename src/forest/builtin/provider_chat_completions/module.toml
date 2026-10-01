@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.provider.chat-completions"
-version = "4.1.2"
+version = "4.2.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "provider:ChatCompletionsProvider"
@@ -26,6 +26,7 @@ prepare_timeout_s = 10
 start_timeout_s = 10
 drain_timeout_s = 120
 stop_timeout_s = 10
+replacement_facts_schema = "schemas/replacement-facts.json"
 
 [[components.provides]]
 name = "provider.profile.bind"
