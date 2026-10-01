@@ -234,6 +234,7 @@ async def _preview_selected_graph_in(
             field: list(getattr(impact, field))
             for field in ("replace", "retain", "remove", "add", "drain", "prepare")
         },
+        "worker_capacity": impact.worker_capacity.as_fact(),
     })
     return SelectionGraphPreview(
         selection, graph.graph_id, expected_graph_revision, target_component_id,

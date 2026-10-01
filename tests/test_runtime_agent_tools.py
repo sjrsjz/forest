@@ -161,6 +161,16 @@ def test_worker_claims_cover_old_and_new_generations_during_graph_prewarm():
         ("module.changed", new_limits), ("module.added", old_limits),
     )
     assert len(impact.worker_capacity.peak) == 4
+    assert impact.worker_capacity.as_fact() == {
+        "active": [
+            {"component_id": "module.changed", "limits": old_limits.as_fact()},
+            {"component_id": "module.retained", "limits": old_limits.as_fact()},
+        ],
+        "preparing": [
+            {"component_id": "module.changed", "limits": new_limits.as_fact()},
+            {"component_id": "module.added", "limits": old_limits.as_fact()},
+        ],
+    }
 
 
 def test_worker_resource_claim_is_required_only_for_worker_driver():

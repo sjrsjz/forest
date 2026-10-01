@@ -802,6 +802,18 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
             assert agent_package["worker_limits"] == WorkerLimits.from_component(
                 host.package_catalog.get(agent_package["package_digest"]).component
             ).as_fact()
+            capacity = preview["worker_capacity"]
+            assert len(capacity["active"]) == sum(
+                item.worker_limits is not None for item in host.registry.descriptors
+            )
+            assert {item["component_id"] for item in capacity["preparing"]} == set(
+                preview["impact"]["prepare"]
+            ) & {item["component_id"] for item in preview["packages"]}
+            assert any(
+                item["component_id"] == "agent.runtime"
+                and item["limits"] == agent_package["worker_limits"]
+                for item in capacity["preparing"]
+            )
             assert (await worker_host.management_contract.query("selection", {})) == (
                 selection_before_preview
             )

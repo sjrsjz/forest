@@ -764,6 +764,15 @@ class RuntimeWorkerCapacity:
     def peak(self) -> tuple[tuple[str, WorkerLimits], ...]:
         return self.active + self.preparing
 
+    def as_fact(self) -> dict[str, list[dict]]:
+        return {
+            phase: [
+                {"component_id": component_id, "limits": limits.as_fact()}
+                for component_id, limits in getattr(self, phase)
+            ]
+            for phase in ("active", "preparing")
+        }
+
 
 @dataclass(frozen=True)
 class RuntimeGraphTransitionPlan:
@@ -1082,9 +1091,9 @@ class RuntimeModuleRegistry:
             prepare=preparing,
             worker_capacity=RuntimeWorkerCapacity(
                 active=tuple(
-                    (item.component_id, item.worker_limits)
-                    for item in previous.descriptors
-                    if item.worker_limits is not None
+                    (component_id, previous_descriptors[component_id].worker_limits)
+                    for component_id in previous.order
+                    if previous_descriptors[component_id].worker_limits is not None
                 ),
                 preparing=tuple(
                     (item.component_id, item.worker_limits)

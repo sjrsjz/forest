@@ -440,3 +440,5 @@ Memory 关系全局浏览把展示用跨主干聚合移至键集分页之后；�
 Worker Host 候选图预览现显式返回每个启用包的六项 `worker_limits`，并将其纳入计划事实摘要；候选检查和实际 Python Worker 启动共用 `WorkerLimits.from_component()`，避免省略清单字段时分别套用不同默认值。包内 UI 展示目标包限额，包版本升至 `1.6.10`，私有 SQL 不变。本地包/宿主非数据库回归 `92 passed, 1 skipped`，Ruff、清单构建、输出 schema 和内嵌脚本检查通过。隔离 PostgreSQL 的完整假 Bot Worker Host 预检、授权事务复核、Shell 重载、配置重建和外部包热加入/停用用例 `1 passed`（200.77 秒）；预检中的 Agent 限额与其精确包工件声明一致。Bot 总量策略、硬 CPU/内存限制和公开启停 action 仍未完成。
 
 Worker 限额现作为通用 RuntimeModuleDescriptor 的不可变字段进入 Graph 事实和描述符摘要；正式规划结果同时保留旧图活动 Worker 与新图预热 Worker 的资源声明，热替换峰值包含新旧两代，保留成员不重复预热。限额模型加入隔离 Worker SDK 快照，实际子进程启动复验通过。本地相关回归 `139 passed, 1 skipped`，Ruff 通过；隔离 PostgreSQL 的完整假 Bot Worker Host 预检、授权复核、Shell 重载、配置重建和外部包加入/停用用例 `1 passed`（199.49 秒）。本步只给出准确容量事实，尚未设置 Bot 总量阈值、提交时 admission 或 CPU/内存硬隔离；公开启停 action 仍未完成。
+
+Worker Host 只读预检现在返回 `worker_capacity.active/preparing` 的逐组件限额，计划摘要绑定同一容量投影，包内管理页显示热替换时当前、预热及峰值 Worker 数；包版本升至 `1.6.11`，SQL 不变。独立规划器用例验证被替换的旧 Worker、新 Worker、新增 Worker 与保留 Worker 的计数和来源；本地包/宿主非数据库回归 `105 passed, 1 skipped`，Ruff、包工件构建和内嵌脚本语法通过。隔离 PostgreSQL 的完整假 Bot Worker Host 预检、同事务摘要复核及热替换用例 `1 passed`（201.05 秒）。Bot 级资源阈值与硬 CPU/内存隔离仍未配置或执行，公开启停 action 仍未完成。

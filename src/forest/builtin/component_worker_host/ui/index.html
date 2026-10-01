@@ -232,7 +232,9 @@
           `帧 ${limits.max_frame_bytes} B · 并发 ${limits.max_inflight} · 队列 ${limits.max_queue_items} · 状态并发 ${limits.max_state_inflight} · 持有任务 ${limits.max_owned_tasks} · 持有资源 ${limits.max_owned_resources}`:
           '目标未启用；无目标 Worker 限额';
         const labels={replace:'换代',retain:'保留',remove:'移除',add:'新增',drain:'排空',prepare:'预热'};
-        byId('preview-summary').textContent=Object.entries(labels).map(([key,label])=>`${label} ${value.impact[key].length}`).join(' · ');
+        const capacity=value.worker_capacity;
+        byId('preview-summary').textContent=Object.entries(labels).map(([key,label])=>`${label} ${value.impact[key].length}`).join(' · ')+
+          ` · 峰值 Worker ${capacity.active.length+capacity.preparing.length}（当前 ${capacity.active.length} + 预热 ${capacity.preparing.length}）`;
         const impact=byId('preview-impact');impact.replaceChildren();
         for(const [key,label] of Object.entries(labels)){
           const line=document.createElement('div');
