@@ -269,7 +269,7 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 - 当前非敏感值、字段级继承来源及读权限；
 - desired/effective/observed 状态和最近操作的脱敏摘要。
 
-模块 UI 只能发送 `ready`、`resize`、`set-draft`、`validate`、`request-plan`、`discard-draft`，调用本 Generation 已声明 management operation 的 `query/action`，以及下述通用资产传输消息。操作消息只能给出 operation ID、稳定 request ID 和 JSON 输入，不能提供 URL、HTTP 方法、组件 ID、权限名或任意控制调用；壳层把请求固定路由到当前 iframe 所属组件，并对 action 生成幂等键。所有消息有 schema、大小和频率限制，服务端仍按 manifest 的输入 schema、当前 Generation、权限和事务栅栏执行。密钥字段由宿主原生控件覆盖，模块 UI 只看 `secret_ref` 是否已设置。
+模块 UI 只能发送 `ready`、`resize`、`set-draft`、`validate`、`request-plan`、`discard-draft`，调用本 Generation 已声明 management operation 的 `query/action`，以及下述通用资产传输消息。操作消息只能给出 operation ID、稳定 request ID 和 JSON 输入，不能提供 URL、HTTP 方法、组件 ID、权限名或任意控制调用；壳层把请求固定路由到当前 iframe 所属组件，并对 action 生成幂等键。所有消息有 schema、大小和频率限制；高度上报、资产分块与普通操作分别计数，不能让频繁 `resize` 静默吞掉已提交动作后的状态查询。超限且带 request ID 的操作须收到明确错误，服务端仍按 manifest 的输入 schema、当前 Generation、权限和事务栅栏执行。密钥字段由宿主原生控件覆盖，模块 UI 只看 `secret_ref` 是否已设置。
 
 未声明 UI、UI 协议不兼容、资源校验失败或脚本崩溃时，控制台使用通用 schema 表单。自定义 UI 是呈现插件，不是配置权威，也不能成为模块可运行的必要条件。
 

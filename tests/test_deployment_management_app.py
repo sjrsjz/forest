@@ -268,8 +268,8 @@ class _Registry:
         ]
 
 
-def test_real_browser_loads_memory_package_through_authenticated_http():
-    """The package HTML must execute under the actual management response CSP."""
+def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
+    """Package UIs must complete their actions through the isolated HTTP bridge."""
     if os.environ.get("FOREST_BROWSER_SMOKE") != "1":
         pytest.skip("Set FOREST_BROWSER_SMOKE=1 for the real browser smoke")
     import uvicorn
@@ -280,6 +280,11 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
         / "src/forest/builtin/memory_graph/ui/index.html"
     ).read_bytes()
     digest = hashlib.sha256(memory_html).hexdigest()
+    worker_html = (
+        Path(__file__).resolve().parents[1]
+        / "src/forest/builtin/component_worker_host/ui/index.html"
+    ).read_bytes()
+    worker_digest = hashlib.sha256(worker_html).hexdigest()
 
     class MemoryConfiguration(_Configuration):
         component_id = "memory.graph"
@@ -381,16 +386,107 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
         management_contract=contract, management_ui_artifact=read_memory_ui
     )
 
+    class WorkerContract(_Contract):
+        selection_applied = False
+
+        def authorization_plan_digest(self, action_id, payload):
+            assert action_id == "module.enable"
+            return payload["plan_digest"]
+
+        async def query(self, query_id, payload):
+            if query_id == "modules":
+                return {
+                    "bot_id": "bot/browser-smoke", "graph_id": "graph/browser-smoke",
+                    "graph_revision": 1, "next_after": None,
+                    "members": [{"component_id": "component.worker-host", "status": "ACTIVE",
+                                 "package_id": "forest.component-worker-host",
+                                 "package_version": "1.6.17"}],
+                }
+            if query_id == "module":
+                assert payload["component_id"] == "component.worker-host"
+                return {
+                    "bot_id": "bot/browser-smoke", "graph_id": "graph/browser-smoke",
+                    "graph_revision": 1,
+                    "member": {"component_id": "component.worker-host",
+                               "generation_id": "generation/worker-browser-smoke",
+                               "status": "ACTIVE", "config_revision": 1,
+                               "package_id": "forest.component-worker-host",
+                               "package_version": "1.6.17",
+                               "package_digest": "sha256:" + "a" * 64,
+                               "data_admission": True, "control_admission": True},
+                }
+            if query_id == "selection":
+                return {"revision": 2 if self.selection_applied else 1,
+                        "entries": ([{"component_id": "process.executor",
+                                      "desired_enabled": True, "source_kind": "builtin",
+                                      "desired_revision": 2, "package_digest": None}]
+                                    if self.selection_applied else [])}
+            if query_id == "validate":
+                assert payload["component_id"] == "process.executor"
+                assert payload["desired_enabled"] is True
+                assert payload["expected_selection_revision"] == 1
+                assert payload["expected_graph_revision"] == 1
+                totals = {name: 100 for name in (
+                    "max_workers", "max_frame_bytes", "max_inflight", "max_queue_items",
+                    "max_state_inflight", "max_owned_tasks", "max_owned_resources"
+                )}
+                totals["max_frame_bytes"] = 65536
+                return {
+                    "bot_id": "bot/browser-smoke",
+                    "source_graph_id": "graph/browser-smoke",
+                    "source_graph_revision": 1, "selection_revision": 1,
+                    "plan_digest": "sha256:" + "b" * 64,
+                    "impact": {name: [] for name in (
+                        "replace", "retain", "remove", "add", "drain", "prepare"
+                    )},
+                    "worker_capacity": {"active": [], "preparing": []},
+                    "admission": {"policy_revision": 1,
+                                  "budget": totals, "peak": totals},
+                    "packages": [],
+                }
+            if query_id == "selection-application":
+                assert payload["request_id"] == "selection:" + "c" * 32
+                return {"request_id": payload["request_id"],
+                        "component_id": "process.executor", "desired_enabled": True,
+                        "selection_revision": 2, "state": "SUBMITTED",
+                        "kernel": {"state": "SUCCEEDED", "graph_revision": 2}}
+            raise AssertionError(f"Unexpected Worker Host query: {query_id}")
+
+        async def action(self, action_id, *, operation_id, payload,
+                         authorization=None, authorization_guard=None):
+            assert action_id == "module.enable"
+            assert payload["component_id"] == "process.executor"
+            assert payload["plan_digest"] == "sha256:" + "b" * 64
+            assert authorization.web_subject_ref == "web-subject/test"
+            assert operation_id.startswith("web:sha256:")
+            self.selection_applied = True
+            return {"request_id": "selection:" + "c" * 32}
+
+    worker_contract = WorkerContract(
+        _Configuration(), schema={"type": "object"}, apply_callback=lambda **_: None,
+    )
+
+    def read_worker_ui(expected):
+        assert expected == worker_digest
+        return {"sha256": worker_digest}, worker_html
+
+    worker_module = SimpleNamespace(
+        management_contract=worker_contract, management_ui_artifact=read_worker_ui
+    )
+
     class Registry:
         graph_identity = SimpleNamespace(
             graph_id="graph/browser-smoke", graph_revision=1,
-            generations={"memory.graph": "generation/browser-smoke"},
+            generations={"memory.graph": "generation/browser-smoke",
+                         "component.worker-host": "generation/worker-browser-smoke"},
         )
 
         def get(self, component_id):
-            if component_id != "memory.graph":
-                raise KeyError(component_id)
-            return module
+            if component_id == "memory.graph":
+                return module
+            if component_id == "component.worker-host":
+                return worker_module
+            raise KeyError(component_id)
 
         def describe(self):
             return [{
@@ -406,6 +502,24 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
                         "kind": "sandboxed-package",
                         "artifact": f"/management/v1/modules/memory.graph/management-ui/{digest}",
                         "sha256": digest,
+                    },
+                }],
+            }, {
+                "component_id": "component.worker-host",
+                "state": "ACTIVE",
+                "generation_id": "generation/worker-browser-smoke",
+                "artifact": {"package_id": "forest.component-worker-host"},
+                "management_contract": worker_contract.describe(),
+                "management_contributions": [{
+                    "contribution_id": "component.worker-host.management",
+                    "label": "Components",
+                    "surface": {
+                        "kind": "sandboxed-package",
+                        "artifact": (
+                            "/management/v1/modules/component.worker-host/"
+                            f"management-ui/{worker_digest}"
+                        ),
+                        "sha256": worker_digest,
                     },
                 }],
             }]
@@ -482,8 +596,7 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
                 page.locator("#login-form button").click()
                 expect(page.locator("#console")).to_be_visible()
                 page.locator("#scope-select").select_option("bot:browser-smoke")
-                expect(page.locator("#module-nav button")).to_have_text("memory.graph")
-                page.locator("#module-nav button").click()
+                page.locator("#module-nav button").filter(has_text="memory.graph").click()
                 frame = page.frame_locator("iframe.package-ui-frame")
                 expect(frame.locator('[data-tab="trial"]')).to_be_visible()
                 expect(frame.locator("#revision")).to_contain_text("r1")
@@ -504,6 +617,24 @@ def test_real_browser_loads_memory_package_through_authenticated_http():
                 assert not errors, errors
                 page.locator("#back").click()
                 expect(page.locator("iframe.package-ui-frame")).to_have_count(0)
+                page.locator("#module-nav button").filter(
+                    has_text="component.worker-host"
+                ).click()
+                worker_frame = page.frame_locator("iframe.package-ui-frame")
+                expect(worker_frame.locator("#details")).to_be_visible()
+                worker_frame.locator("#candidate-preview summary").click()
+                worker_frame.locator("#preview-component-id").fill("process.executor")
+                worker_frame.locator("#run-preview").click()
+                expect(worker_frame.locator("#preview-digest")).to_have_text(
+                    "sha256:" + "b" * 64
+                )
+                worker_frame.locator("#submit-selection").click()
+                expect(worker_frame.locator("#selection-result")).to_contain_text(
+                    "SUCCEEDED"
+                )
+                assert worker_contract.selection_applied
+                assert not errors, errors
+                page.locator("#back").click()
                 with page.expect_response("**/management/v1/auth/logout") as logout:
                     page.locator("#logout").click()
                 assert logout.value.status == 200

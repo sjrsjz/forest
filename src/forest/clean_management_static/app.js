@@ -117,6 +117,8 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   let draft = structuredClone(configuration.desired.value);
   let plan = null;
   let messages = [];
+  let assetChunkMessages = [];
+  let resizeMessages = [];
   const operationReplies = new Map();
   const nonce = crypto.randomUUID();
   const channel = new MessageChannel();
@@ -153,14 +155,29 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
     const message = event.data;
     let encoded;
     try { encoded = JSON.stringify(message); } catch { return; }
-    const now = Date.now();
-    messages = messages.filter(value => now - value < 1000);
     if (
       !message || message.protocol !== 'forest.management-ui-channel/1'
       || message.nonce !== nonce || encoded.length > 262144
-      || messages.length >= (message.type === 'asset-chunk' ? 64 : 20)
     ) return;
-    messages.push(now);
+    const now = Date.now();
+    const resize = message.type === 'resize';
+    const assetChunk = message.type === 'asset-chunk';
+    const recent = (resize ? resizeMessages : assetChunk ? assetChunkMessages : messages)
+      .filter(value => now - value < 1000);
+    if (resize) resizeMessages = recent;
+    else if (assetChunk) assetChunkMessages = recent;
+    else messages = recent;
+    if (recent.length >= (resize ? 30 : assetChunk ? 64 : 20)) {
+      if (!resize && typeof message.request_id === 'string') {
+        send('operation-error', {
+          request_id: message.request_id,
+          operation_id: message.operation_id,
+          message: '模块 UI 操作过快，请稍后重试',
+        });
+      }
+      return;
+    }
+    recent.push(now);
     try {
       if (message.type === 'ready') {
         state.textContent = 'UI 已隔离连接';
