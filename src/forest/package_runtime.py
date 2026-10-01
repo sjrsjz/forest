@@ -766,6 +766,32 @@ class PackageGenerationAdapter:
         self._replacement_operation_id = None
         self._recovered_generation = True
 
+    async def validate_replacement(self, replaced_components: tuple[str, ...]) -> None:
+        query_name = self.component.get("lifecycle", {}).get(
+            "replacement_guard_query"
+        )
+        if query_name is None:
+            return
+        declaration = next(
+            item for item in self.component["domain_queries"]
+            if item["name"] == query_name
+        )
+        result = await self.invoke_management_query(
+            declaration,
+            {"replaced_components": list(replaced_components)},
+            timeout_seconds=10,
+        )
+        if result["safe"] is not True:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_GUARD_REJECTED",
+                "Package has unresolved work bound to a replacing Generation",
+                409,
+                details={
+                    "component_id": self.component_id,
+                    "blocker_count": result["blocker_count"],
+                },
+            )
+
     async def _drain_owned_work(self) -> None:
         assert self._owned_work is not None
         try:

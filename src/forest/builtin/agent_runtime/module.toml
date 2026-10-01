@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.17.0"
+version = "4.17.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -26,6 +26,7 @@ prepare_timeout_s = 10
 start_timeout_s = 15
 drain_timeout_s = 960
 stop_timeout_s = 15
+replacement_guard_query = "agent.replacement-guard"
 
 [components.capabilities]
 requests = [
@@ -156,9 +157,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.12.0"
+schema_version = "2.12.1"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "19adec8da4a9d93a79cefe8320e1c097830c961f4dd60a45b6dbde0f3e035dd5"
+baseline_sha256 = "b1138b36f8e74ef44d43f68bdb9eab32b4eb29ea5dfda2b79438aa3f65a2a28a"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -183,6 +184,13 @@ contract = "1.0"
 function = "agent_execution_history"
 input_schema = "schemas/run-query-input.json"
 output_schema = "schemas/execution-history-output.json"
+
+[[components.domain_queries]]
+name = "agent.replacement-guard"
+contract = "1.0"
+function = "agent_replacement_guard"
+input_schema = "schemas/replacement-guard-input.json"
+output_schema = "schemas/replacement-guard-output.json"
 
 [[components.unit_of_work_participants]]
 name = "agent.start-run-record"

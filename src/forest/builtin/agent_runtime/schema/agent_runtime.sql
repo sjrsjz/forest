@@ -4767,3 +4767,44 @@ BEGIN
                               'value',prior_value);
 END;
 $$;
+
+CREATE FUNCTION agent_replacement_guard(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    replaced text[];
+    blockers integer;
+BEGIN
+    IF jsonb_typeof(input->'replaced_components') IS DISTINCT FROM 'array' THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_REPLACEMENT_GUARD_INPUT_INVALID',
+                'message','Replacement component set is invalid','status',422
+            )
+        );
+    END IF;
+    SELECT array_agg(value) INTO replaced
+    FROM jsonb_array_elements_text(input->'replaced_components') AS items(value);
+    SELECT count(*) INTO blockers
+    FROM __forest_module_schema__.model_requests request
+    JOIN __forest_module_schema__.agent_runs run
+      ON run.bot_id=request.bot_id AND run.run_id=request.run_id
+    WHERE request.bot_id=context->>'bot_id'
+      AND request.provider_component_id=ANY(replaced)
+      AND request.state IN (
+          'READY','ATTEMPT_PREPARED','DISPATCHING','NOT_APPLIED','UNKNOWN'
+      )
+      AND run.state NOT IN ('COMPLETED','FAILED','CANCELLED');
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.replacement-guard/1',
+            'safe',blockers=0,'blocker_count',blockers
+        )
+    );
+END;
+$$;

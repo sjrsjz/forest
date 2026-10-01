@@ -1969,6 +1969,15 @@ class RuntimeModuleRegistry:
                 await self._drain_frozen_owned_work(
                     self._replacement_owned_frozen
                 )
+                replaced_components = selected or tuple(self.order)
+                for component_id in reversed(replaced_components):
+                    validate_replacement = getattr(
+                        self.instances[component_id], "validate_replacement", None
+                    )
+                    if validate_replacement is not None:
+                        result = validate_replacement(replaced_components)
+                        if inspect.isawaitable(result):
+                            await result
                 for component_id in reversed(self.order):
                     if (
                         component_id == "adapter.onebot"

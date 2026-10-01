@@ -202,6 +202,7 @@ MANIFEST_SCHEMA = {
                                 "exclusiveMinimum": 0,
                                 "maximum": 120,
                             },
+                            "replacement_guard_query": {"type": "string"},
                         },
                     },
                     "capabilities": {
@@ -1469,6 +1470,14 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 )
             step_ids.add(step_id)
     query_ports = {item["name"] for item in domain_queries}
+    guard_query = component.get("lifecycle", {}).get("replacement_guard_query")
+    if guard_query is not None and guard_query not in {
+        item["name"] for item in domain_queries
+    }:
+        _fail(
+            "INVALID_REPLACEMENT_GUARD",
+            "Replacement guard must name a declared Domain Query",
+        )
     query_ports.update(
         item["name"] for item in services if item["semantics"] == "read"
     )

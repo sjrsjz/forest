@@ -3224,7 +3224,9 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 
 @pytest.mark.postgres
-@pytest.mark.parametrize("scenario", ("text", "visual", "cross-group", "success", "requeue"))
+@pytest.mark.parametrize(
+    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish")
+)
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
@@ -3272,9 +3274,11 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
     clients = []
     RecordingModelClient.requests = []
     RecordingModelClient.first_gate = (
-        asyncio.Event() if scenario in {"cross-group", "requeue"} else None
+        asyncio.Event() if scenario in {"cross-group", "requeue", "reload", "reload-publish"} else None
     )
-    RecordingModelClient.not_sent_attempts = 3 if scenario == "requeue" else 0
+    RecordingModelClient.not_sent_attempts = (
+        3 if scenario == "requeue" else 1 if scenario in {"reload", "reload-publish"} else 0
+    )
     RecordingModelClient.reply_text = (
         '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
         '<block block_type="Assistant"><content><text>Forest success fixture</text>'
@@ -3422,6 +3426,197 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
             assert manifest["media_transform_refs"]
         else:
             assert b"image_url" not in prepared.body
+        if scenario == "reload":
+            old_graph = host.registry
+            agent = old_graph.get("agent.runtime")
+            signalled = asyncio.Event()
+            guard_observed = asyncio.Event()
+            begin_replacement = agent.begin_replacement
+            validate_replacement = agent.validate_replacement
+            agent_schema = next(
+                item.storage.spec.namespace for item in old_graph.descriptors
+                if item.component_id == "agent.runtime"
+            )
+
+            async def tracked_replacement(operation_id):
+                await begin_replacement(operation_id)
+                signalled.set()
+
+            async def tracked_validation(replaced_components):
+                async with host.store.pool.connection() as conn:
+                    parked = await (await conn.execute(
+                        sql.SQL(
+                            "SELECT state,reload_operation_id,reload_generation_id "
+                            "FROM {}.agent_runs WHERE bot_id=%s"
+                        ).format(sql.Identifier(agent_schema)),
+                        (settings.bot_id,),
+                    )).fetchone()
+                assert parked == {
+                    "state": "RELOAD_WAIT",
+                    "reload_operation_id": reload_operation_id,
+                    "reload_generation_id": agent.generation_identity.generation_id,
+                }
+                assert len(RecordingModelClient.requests) == 1
+                guard_observed.set()
+                await validate_replacement(replaced_components)
+
+            agent.begin_replacement = tracked_replacement
+            agent.validate_replacement = tracked_validation
+            reload_operation_id = "runtime-reload/agent-inflight-test"
+            drain = None
+            try:
+                drain = asyncio.create_task(
+                    old_graph.drain_owned_work_for_replacement(
+                        reload_operation_id
+                    )
+                )
+                async with asyncio.timeout(30):
+                    while not signalled.is_set():
+                        if drain.done():
+                            await drain
+                        await asyncio.sleep(0.05)
+                assert not drain.done()
+                RecordingModelClient.first_gate.set()
+                with pytest.raises(ForestError) as rejected:
+                    async with asyncio.timeout(60):
+                        await drain
+                assert rejected.value.code == "RUNTIME_REPLACEMENT_GUARD_REJECTED"
+                assert guard_observed.is_set()
+                assert host.registry is old_graph
+            finally:
+                RecordingModelClient.first_gate.set()
+                if drain is not None and not drain.done():
+                    drain.cancel()
+                    await asyncio.gather(drain, return_exceptions=True)
+            async with asyncio.timeout(45):
+                while len(RecordingModelClient.requests) < 2:
+                    await asyncio.sleep(0.1)
+            async with host.store.pool.connection() as conn:
+                resumed = await (await conn.execute(
+                    sql.SQL(
+                        "SELECT state,reload_operation_id FROM {}.agent_runs "
+                        "WHERE bot_id=%s"
+                    ).format(sql.Identifier(agent_schema)),
+                    (settings.bot_id,),
+                )).fetchone()
+            assert resumed["reload_operation_id"] is None
+        if scenario == "reload-publish":
+            old_graph = host.registry
+            old_agent = old_graph.get("agent.runtime")
+            signalled = asyncio.Event()
+            drained = asyncio.Event()
+            publish_gate = asyncio.Event()
+            begin_replacement = old_agent.begin_replacement
+            drain_owned_work = old_graph.drain_owned_work_for_replacement
+
+            async def tracked_replacement(operation_id):
+                await begin_replacement(operation_id)
+                signalled.set()
+
+            async def tracked_drain(*args, **kwargs):
+                await drain_owned_work(*args, **kwargs)
+                drained.set()
+                await publish_gate.wait()
+
+            old_agent.begin_replacement = tracked_replacement
+            old_graph.drain_owned_work_for_replacement = tracked_drain
+            replacement_task = asyncio.create_task(
+                host.replace_runtime_graph(target_component_id="agent.runtime")
+            )
+            try:
+                async with asyncio.timeout(90):
+                    while not signalled.is_set():
+                        if replacement_task.done():
+                            await replacement_task
+                        await asyncio.sleep(0.05)
+                RecordingModelClient.first_gate.set()
+                async with asyncio.timeout(90):
+                    while not drained.is_set():
+                        if replacement_task.done():
+                            await replacement_task
+                        await asyncio.sleep(0.05)
+                agent_schema = next(
+                    item.storage.spec.namespace for item in old_graph.descriptors
+                    if item.component_id == "agent.runtime"
+                )
+                async with host.store.pool.connection() as conn:
+                    parked = await (await conn.execute(
+                        sql.SQL(
+                            "SELECT state,reload_operation_id,reload_generation_id "
+                            "FROM {}.agent_runs WHERE bot_id=%s"
+                        ).format(sql.Identifier(agent_schema)),
+                        (settings.bot_id,),
+                    )).fetchone()
+                assert parked["state"] == "RELOAD_WAIT"
+                assert parked["reload_operation_id"]
+                assert parked["reload_generation_id"] == (
+                    old_agent.generation_identity.generation_id
+                )
+                assert len(RecordingModelClient.requests) == 1
+                publish_gate.set()
+                async with asyncio.timeout(90):
+                    replacement = await replacement_task
+                assert host.registry is replacement
+                assert replacement.get("agent.runtime").generation_identity.generation_id != (
+                    parked["reload_generation_id"]
+                )
+                try:
+                    async with asyncio.timeout(45):
+                        while len(RecordingModelClient.requests) < 2:
+                            await asyncio.sleep(0.1)
+                except TimeoutError as error:
+                    conversation_schema = next(
+                        item.storage.spec.namespace for item in replacement.descriptors
+                        if item.component_id == "conversation.scheduler"
+                    )
+                    async with host.store.pool.connection() as conn:
+                        run_rows = await (await conn.execute(
+                            sql.SQL(
+                                "SELECT state,owner_id,reload_operation_id,error_code,"
+                                "current_model_request_id FROM {}.agent_runs WHERE bot_id=%s"
+                            ).format(sql.Identifier(agent_schema)),
+                            (settings.bot_id,),
+                        )).fetchall()
+                        lanes = await (await conn.execute(
+                            sql.SQL(
+                                "SELECT active_run_ref,resume_reason_code,resume_not_before "
+                                "FROM {}.conversation_lanes WHERE bot_id=%s"
+                            ).format(sql.Identifier(conversation_schema)),
+                            (settings.bot_id,),
+                        )).fetchall()
+                        settlements = await (await conn.execute(
+                            sql.SQL(
+                                "SELECT input_payload->'outcome' AS outcome FROM {}."
+                                "conversation_agent_work_settlements "
+                                "ORDER BY created_at DESC LIMIT 5"
+                            ).format(sql.Identifier(conversation_schema)),
+                        )).fetchall()
+                    failures = {
+                        component_id: work.failure
+                        for component_id, instance in replacement.instances.items()
+                        if (work := getattr(instance, "_owned_work", None)) is not None
+                        and work.failure is not None
+                    }
+                    raise AssertionError(
+                        f"Published Agent did not dispatch: runs={run_rows}, "
+                        f"lanes={lanes}, settlements={settlements}, "
+                        f"owned_failures={failures}"
+                    ) from error
+                async with host.store.pool.connection() as conn:
+                    resumed = await (await conn.execute(
+                        sql.SQL(
+                            "SELECT state,reload_operation_id FROM {}.agent_runs "
+                            "WHERE bot_id=%s"
+                        ).format(sql.Identifier(agent_schema)),
+                        (settings.bot_id,),
+                    )).fetchone()
+                assert resumed["reload_operation_id"] is None
+            finally:
+                RecordingModelClient.first_gate.set()
+                publish_gate.set()
+                if not replacement_task.done():
+                    replacement_task.cancel()
+                    await asyncio.gather(replacement_task, return_exceptions=True)
         if scenario == "requeue":
             class RequeueWebSupervisor:
                 async def management_scopes(self):
