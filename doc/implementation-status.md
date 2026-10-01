@@ -537,3 +537,6 @@ Validation (2026-10-02): The isolated PostgreSQL complete 21-component Graph sta
 
 
 宿主过渡命名清理（2026-10-02）：七个仍承担组合根、部署入口、管理网关及最小数据库句柄的 `clean_*` Python 文件已移至职责命名的模块，三个相应测试文件一并改名；`Clean*` 类型、`bootstrap_clean_kernel` 和 `run_clean_*` 旧名称及导入路径均未保留兼容转发。内核 `provided_services` 删除了五个已无实现和调用方的旧 Conversation/Agent UoW 服务声明。VL 嵌入大结果测试原以 32 个 facet 调用现行最大 8 个的供应商约束，已改为合法最大批量，同时仍验证结果 Payload 大于内联回执阈值。全量本地回归 474 passed、110 skipped，Ruff 通过；隔离 PostgreSQL 内核引导 1 passed，完整 21 组件 Bot Graph 启动、退役及重启 1 passed（387.19 秒）。这是工作树源码的验证；当前在线 Supervisor 仍是此前 `9a28547` 镜像，尚未切换此批重命名。
+
+
+宿主路径清理候选 `ec98f48` 在线切换（2026-10-02）：从 `9a28547` 到本候选未改模块或内核 SQL baseline；运行镜像 `sha256:f208b7bd1e940258afbeb58105107f7a2f1d3e04392dc0e0dd88969341aa51d5` 内，新宿主导入有效、旧 `forest.clean_bot_host` 导入不存在，官方自动安装发现 15 个 builtin。旧 Supervisor 正常退出，原镜像保留为本地 `forest:pre-ec98f48`；原 Bot 库用 `pg_dump -Fc` 备份至 Git 忽略的 `.local/backups/forest_bot_pre_ec98f48.dump`，`pg_restore --list` 可读，容器和工作区 SHA-256 均为 `8ccaf1f8f1f1dba2798d1af4a6a261e4c8af335d8e02ef61076e3ad0d3ddd6c1`。未重建数据库，现有 2 条 Memory 来源及 1 个群主干在跨版本重启后保留。切换时过早启动的首轮探针在 Bot `STARTING` 且图尚未发布的首样本正确报 3 项启动期违规，随后 4 个样本均健康；从稳定状态重新观察 60 秒的 5 个样本均为 21 个 ACTIVE 成员、部署 ONLINE、管理 HTTP 200、0 个重叠 Session/积压发送/过期嵌入工作及 0 项违规。Supervisor 健康、0 次容器重启。最新入站仍为非白名单群的 `NO_TRIGGER/group_not_allowed`，获准群 `933179609` 的 @、真实模型回复、发送及预填组 Web 重排尚未验收。
