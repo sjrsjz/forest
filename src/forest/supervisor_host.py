@@ -11,13 +11,13 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
 
-from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
+from forest.multi_bot_supervisor import MultiBotSupervisor
 from forest.official_bot_provisioning import (
     OfficialBotCatalogSettingsResolver,
     OfficialBotProvisioner,
@@ -25,13 +25,13 @@ from forest.official_bot_provisioning import (
     official_bootstrap_contributions,
 )
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
-from forest.storage.clean_deployment_store import CleanDeploymentStore
 from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
 
@@ -83,7 +83,7 @@ def _deployment_dsn() -> str:
 
 
 @dataclass(frozen=True)
-class CleanSupervisorSettings:
+class SupervisorSettings:
     deployment_id: str
     dsn: str = field(repr=False)
     master_keyring: DeploymentMasterKeyring = field(repr=False)
@@ -95,7 +95,7 @@ class CleanSupervisorSettings:
     management_origin: str = "http://127.0.0.1:8081"
 
     @classmethod
-    def from_environment(cls) -> "CleanSupervisorSettings":
+    def from_environment(cls) -> "SupervisorSettings":
         keyring = DeploymentMasterKeyring.read(
             Path(_required("FOREST_DEPLOYMENT_MASTER_KEYRING_FILE"))
         )
@@ -135,8 +135,8 @@ class CleanSupervisorSettings:
         )
 
 
-async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
-    store = CleanDeploymentStore(settings.dsn, settings.deployment_id)
+async def run_supervisor(settings: SupervisorSettings) -> None:
+    store = DeploymentStore(settings.dsn, settings.deployment_id)
     await store.open()
     incarnation = "incarnation/" + str(uuid4())
     secrets = DeploymentSecretAuthority(
@@ -168,7 +168,7 @@ async def run_clean_supervisor(settings: CleanSupervisorSettings) -> None:
         ),
         worker_id="deployment-provisioner/" + incarnation,
     )
-    supervisor = CleanMultiBotSupervisor(
+    supervisor = MultiBotSupervisor(
         catalog,
         storage_profiles=storage_profiles,
         settings_resolver=OfficialBotCatalogSettingsResolver(

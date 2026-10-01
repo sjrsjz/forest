@@ -27,7 +27,7 @@
 - 热重载发布完整候选 RuntimeGraph。新图校验、预热或发布失败时旧图继续服务；成功后新调用只进入新图，旧 Generation 在安全点排空，释放连接、子进程、socket、Secret materialization 和 Effect Driver 后进入终态；
 - 包删除后，内核中不存在该业务的隐藏工厂、后台循环、路由分支或 WebUI 专页。控制面只能枚举其声明贡献。
 
-`clean_*`、宿主 Runtime、直接 Repository 装配和为某个 builtin 特设的路由都是重构期间的待删除对象。把 Python 文件移动进 `builtin`、从宿主 import 一个包内类、或给旧对象外面套一个 descriptor，都不构成插件化。生产组合根完成切换前，系统应明确报告为混合图，不得宣称 builtin 模块系统已经闭合。
+宿主业务 Runtime、直接 Repository 装配和为某个 builtin 特设的路由都是重构期间的待删除对象；现行 `bot_host` 等组合根及最小部署/存储句柄不属于业务 Runtime。把 Python 文件移动进 `builtin`、从宿主 import 一个包内类、或给旧对象外面套一个 descriptor，都不构成插件化。生产组合根完成切换前，系统应明确报告为混合图，不得宣称 builtin 模块系统已经闭合。
 
 ## 2. 本阶段重构策略
 
@@ -136,7 +136,7 @@ Python 只用于降低模块实现与部署成本，不降低内核正确性要�
 
 ### 3.2 内核机制、模块与效果执行器
 
-代码位于宿主进程不等于它属于内核。只有 RuntimeGraph/Generation、Payload、授权、Effect 账本和审计这五类不可替代机制属于 bootstrap 内核；它们没有普通热重载语义，只能随受控宿主重启。`routing.graph`、Conversation、Agent、Memory、Shell、Job、Delivery、Adapter、Provider、Embedding、Vector Index、Media 与 Process Executor 都是模块，必须来自不可变包并获得独立 Generation。官方身份只改变签名、信任等级和可授予能力，不允许宿主用 `bootstrap_clean_*` 直接构造其业务对象。
+代码位于宿主进程不等于它属于内核。只有 RuntimeGraph/Generation、Payload、授权、Effect 账本和审计这五类不可替代机制属于 bootstrap 内核；它们没有普通热重载语义，只能随受控宿主重启。`routing.graph`、Conversation、Agent、Memory、Shell、Job、Delivery、Adapter、Provider、Embedding、Vector Index、Media 与 Process Executor 都是模块，必须来自不可变包并获得独立 Generation。官方身份只改变签名、信任等级和可授予能力，不允许宿主从组合根直接构造其业务对象。
 
 模块 Worker 与宿主效果驱动是两个执行对象，但只能属于同一个 Package Generation 生命周期。模块 Worker 拥有业务协议、参数投影、状态转换和结果解释，只能提交内容寻址、类型化且已授权的效果计划；包 manifest 仅以 `effect_services` 声明准确 effect kind、重放语义和输入/输出 schema，部署环境按 kind 提供最小受限驱动工厂。`job_types`、普通 service、Event、ComponentJob、Command 与消息 handler 都必须先进入包内 Worker，不能把业务 handler 塞进效果驱动。`PackageGenerationAdapter` 用冻结配置与准确 Generation 创建驱动，并统一执行 start、quiesce、resume、close；候选失败必须同时回收 Worker 与已启动驱动，旧代排空必须覆盖 Worker 调用、嵌套效果调用及终态提交。Effect authority 固化 operation、输入、目标、调用 Generation、执行器 Generation、deadline 与 fence 后，准确驱动才可解析 Secret 并发生网络、文件或进程交接。驱动不能理解上层 Job、Agent、Memory 或消息协议，不能脱离包路由形成另一个宿主业务模块，也不能独立切换配置。Secret 明文不进入 Worker、配置 Payload、Event、Job、trace 或结果；Worker 也不获得通用 HTTP、文件系统、子进程或任意 Secret 读取能力。Provider、Embedding、Vector Index、OneBot transport、Media fetch 与 Process Executor 各自使用受限 effect kind 和目标 schema，不能共享一个“万能网络请求”接口。
 

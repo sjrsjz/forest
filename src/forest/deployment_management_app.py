@@ -11,8 +11,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
-from forest.clean_management_app import ConfigurationApplyInput, ConfigurationPlanInput
 from forest.errors import ForestError
+from forest.management_gateway import ConfigurationApplyInput, ConfigurationPlanInput
 from forest.management_scopes import (
     BotManagementScopeProvider,
     DeploymentManagementGateway,

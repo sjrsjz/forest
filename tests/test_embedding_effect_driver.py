@@ -104,7 +104,7 @@ class _LargeResultClient:
                 EmbeddingVector(facet["facet_id"], index, values)
                 for index, facet in enumerate(prepared.manifest["facets"])
             ),
-            '{"total_tokens":32}',
+            '{"total_tokens":8}',
             http_status=200,
         )
 
@@ -198,7 +198,7 @@ async def test_maximum_vl_batch_returns_small_receipt_and_managed_result():
     )
     prepared = prepare_embedding_request(
         profile,
-        [EmbeddingInput(f"facet-{index}", text=f"text {index}") for index in range(32)],
+        [EmbeddingInput(f"facet-{index}", text=f"text {index}") for index in range(8)],
         request_id="request-1", transport_attempt_id="attempt-1",
     )
     manifest_bytes = prepared.manifest_json.encode("utf-8")
@@ -259,5 +259,5 @@ async def test_maximum_vl_batch_returns_small_receipt_and_managed_result():
     assert payloads.saved["parents"] == ("payload-body", "payload-manifest")
     document = json.loads(payloads.saved["content"])
     assert document["protocol"] == "forest.embedding-result/1"
-    assert len(document["vectors"]) == 32
+    assert len(document["vectors"]) == 8
     assert all(len(vector["values"]) == 4096 for vector in document["vectors"])

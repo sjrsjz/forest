@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from test_schema_bundles import clean_authority as clean_authority
 
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import bootstrap_kernel
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_modules import RuntimeModuleRegistry
@@ -27,7 +27,7 @@ async def test_kernel_effect_freezes_command_and_permit_in_one_transaction(
     clean_authority, observed_status
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     lease = await kernel.runtime.claim_host(
         "effect-command-host",
         "effect-command-incarnation",

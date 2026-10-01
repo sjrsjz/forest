@@ -6,7 +6,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 
-class CleanDeploymentStore:
+class DeploymentStore:
     """Own the deployment control-plane pool without any Bot business methods."""
 
     def __init__(self, dsn: str, deployment_id: str) -> None:

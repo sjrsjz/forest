@@ -13,33 +13,33 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
-from forest.clean_multi_bot_supervisor import CleanMultiBotSupervisor
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.model_contract import ModelCapabilities
+from forest.multi_bot_supervisor import MultiBotSupervisor
 from forest.official_bot_provisioning import (
     OfficialBotCatalogSettingsResolver,
     OfficialBotProvisioner,
     OfficialBotSettingsResolver,
+    default_vector_index_configuration,
     official_bootstrap_contributions,
     official_bootstrap_schema_digests,
 )
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.schema_bundles import module_schema_namespace
-from forest.storage.clean_bot_store import CleanBotStore
-from forest.storage.clean_deployment_store import CleanDeploymentStore
+from forest.storage.bot_store import BotStore
 from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
-from forest.official_bot_provisioning import default_vector_index_configuration
 
 
 @pytest_asyncio.fixture
@@ -52,7 +52,7 @@ async def deployment_catalog():
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = CleanDeploymentStore(uri, "deployment/test")
+    store = DeploymentStore(uri, "deployment/test")
     await store.open()
     repository = DeploymentCatalogRepository(store)
     try:
@@ -726,7 +726,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
             ),
             worker_id="worker/official",
         )
-        supervisor = CleanMultiBotSupervisor(
+        supervisor = MultiBotSupervisor(
             repository,
             storage_profiles=storage_profiles,
             settings_resolver=OfficialBotCatalogSettingsResolver(
@@ -752,7 +752,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
         assert bot["bootstrap_profile_ref"] == bootstrap.profile_ref
         assert bot["bootstrap_manifest_digest"] == bootstrap.manifest_digest
 
-        target = CleanBotStore(target_dsn, "bot/official")
+        target = BotStore(target_dsn, "bot/official")
         await target.open()
         try:
             async with target.pool.connection() as conn:
@@ -1128,7 +1128,7 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
         async def close(self):
             self.closed = True
 
-    supervisor = CleanMultiBotSupervisor(
+    supervisor = MultiBotSupervisor(
         repository,
         storage_profiles=storage_profiles,
         settings_resolver=lambda bot, storage: SimpleNamespace(
@@ -1237,7 +1237,7 @@ async def test_multi_bot_supervisor_contains_one_bot_start_failure(deployment_ca
     )
     storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
 
-    supervisor = CleanMultiBotSupervisor(
+    supervisor = MultiBotSupervisor(
         repository,
         storage_profiles=storage_profiles,
         settings_resolver=lambda bot, storage: SimpleNamespace(
@@ -1316,7 +1316,7 @@ async def test_multi_bot_supervisor_marks_runtime_owned_task_failure(deployment_
         key_resolver=lambda _key_id: bytes(range(32)),
     )
     storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
-    supervisor = CleanMultiBotSupervisor(
+    supervisor = MultiBotSupervisor(
         repository,
         storage_profiles=storage_profiles,
         settings_resolver=lambda bot, storage: SimpleNamespace(

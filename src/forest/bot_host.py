@@ -32,7 +32,7 @@ from forest.component_selection import (
     select_package_members,
 )
 from forest.component_selection_commit import resolve_selection_commit_preflight
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import bootstrap_kernel
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
@@ -54,7 +54,7 @@ from forest.runtime_modules import (
 )
 from forest.shell_management_authority import ShellManagementAuthorization
 from forest.storage.authorization_authority import CapabilityGrant
-from forest.storage.clean_bot_store import CleanBotStore
+from forest.storage.bot_store import BotStore
 from forest.storage.schema_bundles import SchemaBundleInstaller
 from forest.vector_index_effect_driver import milvus_vector_index_effect_driver_factory
 
@@ -173,7 +173,7 @@ def _bot_dsn() -> str:
 
 
 @dataclass(frozen=True)
-class CleanBotSettings:
+class BotSettings:
     bot_id: str
     dsn: str
     model_base_url: str
@@ -211,7 +211,7 @@ class CleanBotSettings:
     vector_index_timeout_seconds: float = 10
 
     @classmethod
-    def from_environment(cls) -> "CleanBotSettings":
+    def from_environment(cls) -> "BotSettings":
         groups = tuple(
             part.strip()
             for part in os.environ.get("FOREST_ALLOWED_GROUP_IDS", "").split(",")
@@ -309,14 +309,14 @@ class CleanBotSettings:
         )
 
 
-class CleanBotHost:
+class BotHost:
     """Own generic process resources for one immutable runtime graph."""
 
     scope_kind = "bot"
 
     def __init__(
         self,
-        settings: CleanBotSettings,
+        settings: BotSettings,
         *,
         model_client_factory=None,
         embedding_client_factory=None,
@@ -326,7 +326,7 @@ class CleanBotHost:
         package_catalog=None,
     ) -> None:
         self.settings = settings
-        self.store = CleanBotStore(settings.dsn, settings.bot_id)
+        self.store = BotStore(settings.dsn, settings.bot_id)
         self.schema_bundle_installer = SchemaBundleInstaller(self.store)
         self.generation_authority = None
         self.registry: RuntimeModuleRegistry | None = None
@@ -697,7 +697,7 @@ class CleanBotHost:
     async def start(self) -> None:
         await self.store.open()
         try:
-            self._kernel = await bootstrap_clean_kernel(self.store, self.schema_bundle_installer)
+            self._kernel = await bootstrap_kernel(self.store, self.schema_bundle_installer)
             self.generation_authority = self._kernel.runtime
             self._replacement_lock = asyncio.Lock()
             assembled = await self._assemble_candidate()
@@ -746,7 +746,7 @@ class CleanBotHost:
             raise ForestError("BOT_HOST_ALREADY_ACTIVE", "Active Bot host cannot provision", 409)
         await self.store.open()
         try:
-            self._kernel = await bootstrap_clean_kernel(self.store, self.schema_bundle_installer)
+            self._kernel = await bootstrap_kernel(self.store, self.schema_bundle_installer)
             assembled = await self._assemble_candidate()
             return tuple(
                 descriptor.component_id for descriptor in assembled.registry.descriptors
@@ -1216,8 +1216,8 @@ class CleanBotHost:
             raise failure
 
 
-async def run_clean_bot(settings: CleanBotSettings) -> None:
-    host = CleanBotHost(settings)
+async def run_bot(settings: BotSettings) -> None:
+    host = BotHost(settings)
     stop = asyncio.Event()
     stop_task = None
     status_file = os.environ.get("FOREST_RUNTIME_STATUS_FILE")

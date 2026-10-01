@@ -9,7 +9,7 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 
 
-class CleanModuleConfigurationContract:
+class ModuleConfigurationContract:
     """Expose one module-owned configuration authority to management gateways."""
 
     protocol = "forest.module-configuration-management/1"
@@ -137,7 +137,7 @@ class CleanModuleConfigurationContract:
         }
 
 
-class CleanAuditManagementContract(CleanModuleConfigurationContract):
+class AuditManagementContract(ModuleConfigurationContract):
     """Audit-owned metadata query projection plus immutable kernel configuration."""
 
     _fields_allowed = {

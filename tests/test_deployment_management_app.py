@@ -15,10 +15,10 @@ from types import SimpleNamespace
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from forest.clean_management_app import CleanManagementGateway
-from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.deployment_management_app import create_deployment_management_app
 from forest.errors import ForestError
+from forest.management_gateway import ManagementGateway
+from forest.module_management_contract import ModuleConfigurationContract
 from forest.packages import digest_json
 from forest.storage.deployment_web_identity import (
     AuthenticatedWebSession,
@@ -196,7 +196,7 @@ async def test_bot_gateway_applies_exact_web_operation_policy_after_signature_ch
         action_key="test.query",
         input_digest="sha256:" + hashlib.sha256(b"{}").hexdigest(),
     )
-    gateway = CleanManagementGateway(
+    gateway = ManagementGateway(
         host,
         ticket_authority=signer,
         scope_id="bot-scope-test",
@@ -212,7 +212,7 @@ async def test_bot_gateway_applies_exact_web_operation_policy_after_signature_ch
     assert denied.value.code == "WEB_OPERATION_POLICY_DENIED"
 
 
-class _Contract(CleanModuleConfigurationContract):
+class _Contract(ModuleConfigurationContract):
     transaction = object()
 
     async def query(self, query_id, payload):
@@ -921,7 +921,7 @@ async def test_asset_routes_forward_bounded_binary_under_bot_web_tickets(monkeyp
             calls.append(("finalize", upload_id, kwargs["authorization"]))
             return {"state": "FINALIZED", "upload_id": upload_id}
 
-    monkeypatch.setattr("forest.management_scopes.CleanManagementGateway", AssetGateway)
+    monkeypatch.setattr("forest.management_scopes.ManagementGateway", AssetGateway)
 
     class Supervisor:
         async def management_scopes(self):

@@ -79,17 +79,17 @@ def main() -> None:
         if sys.platform == "win32":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         if args.command == "bot":
-            from forest.clean_bot_host import CleanBotSettings, run_clean_bot
+            from forest.bot_host import BotSettings, run_bot
 
-            asyncio.run(run_clean_bot(CleanBotSettings.from_environment()))
+            asyncio.run(run_bot(BotSettings.from_environment()))
             return
         if args.command == "supervisor":
-            from forest.clean_supervisor_host import (
-                CleanSupervisorSettings,
-                run_clean_supervisor,
+            from forest.supervisor_host import (
+                SupervisorSettings,
+                run_supervisor,
             )
 
-            asyncio.run(run_clean_supervisor(CleanSupervisorSettings.from_environment()))
+            asyncio.run(run_supervisor(SupervisorSettings.from_environment()))
             return
         asyncio.run(run_plugin_command(args))
     except ForestError as exc:

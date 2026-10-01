@@ -7,11 +7,11 @@ from urllib.parse import urlsplit
 from jsonschema import Draft202012Validator
 
 from forest.bootstrap_contributions import BootstrapConfigurationContribution
+from forest.bot_host import BotHost, BotSettings
 from forest.builtin_packages import (
     official_builtin_configuration,
     official_builtin_configuration_schema,
 )
-from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.model_contract import ModelCapabilities
@@ -379,7 +379,7 @@ class OfficialBotSettingsResolver:
     def __init__(self, *, secrets) -> None:
         self.secrets = secrets
 
-    async def resolve(self, *, profile, storage) -> CleanBotSettings:
+    async def resolve(self, *, profile, storage) -> BotSettings:
         if (
             profile.bot_id != storage.bot_id
             or profile.storage_profile_ref != storage.profile_ref
@@ -476,7 +476,7 @@ class OfficialBotSettingsResolver:
         onebot_token = await self._secret(
             onebot["access_token_ref"], "adapter.onebot.access-token"
         )
-        return CleanBotSettings(
+        return BotSettings(
             bot_id=profile.bot_id,
             dsn=storage.dsn,
             model_base_url=provider["base_url"],
@@ -555,7 +555,7 @@ class OfficialBotCatalogSettingsResolver:
         self.bootstrap_profiles = bootstrap_profiles
         self.settings_resolver = settings_resolver
 
-    async def __call__(self, bot: dict, storage) -> CleanBotSettings:
+    async def __call__(self, bot: dict, storage) -> BotSettings:
         profile = await self.bootstrap_profiles.load(bot["bootstrap_profile_ref"])
         if profile.manifest_digest != bot["bootstrap_manifest_digest"]:
             raise ForestError(
@@ -570,7 +570,7 @@ class OfficialBotProvisioner:
     """Materialize official module authorities without starting the runtime graph."""
 
     def __init__(
-        self, *, settings_resolver, host_factory=CleanBotHost, database_allocator=None
+        self, *, settings_resolver, host_factory=BotHost, database_allocator=None
     ) -> None:
         self.settings_resolver = settings_resolver
         self.host_factory = host_factory

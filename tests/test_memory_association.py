@@ -12,7 +12,7 @@ from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin.memory_graph.python.graph_region import expand
 from forest.builtin_packages import bootstrap_builtin_package
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import bootstrap_kernel
 from forest.packages import PackageCatalog
 
 
@@ -21,7 +21,7 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "association-packages"),

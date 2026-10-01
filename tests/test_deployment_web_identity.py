@@ -13,8 +13,8 @@ import pytest_asyncio
 from psycopg import sql
 
 from forest.errors import ForestError
-from forest.storage.clean_deployment_store import CleanDeploymentStore
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
+from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
 
 _KEYS = {"master/test/1": bytes(range(32))}
@@ -30,7 +30,7 @@ async def deployment_catalog():
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = CleanDeploymentStore(uri, "deployment/test")
+    store = DeploymentStore(uri, "deployment/test")
     await store.open()
     repository = DeploymentCatalogRepository(store)
     try:

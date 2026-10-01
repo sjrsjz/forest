@@ -5,20 +5,20 @@ import random
 import pytest
 from PIL import Image
 from psycopg import sql
+from test_schema_bundles import clean_authority as clean_authority
 
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import bootstrap_kernel
 from forest.errors import ForestError
 from forest.storage.management_asset_authority import (
     CHUNK_BYTES,
     ManagementAssetAuthority,
 )
-from test_schema_bundles import clean_authority as clean_authority
 
 
 @pytest.mark.postgres
 async def test_management_asset_chunks_publish_one_bound_payload(clean_authority):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     authority = ManagementAssetAuthority(kernel.payload)
     pixels = random.Random(7).randbytes(512 * 512 * 3)
     image = Image.frombytes("RGB", (512, 512), pixels)
@@ -117,7 +117,7 @@ async def test_management_asset_chunks_publish_one_bound_payload(clean_authority
 @pytest.mark.postgres
 async def test_management_asset_expiry_revokes_payload(clean_authority):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     authority = ManagementAssetAuthority(kernel.payload)
     ref = await kernel.payload.put_bytes(
         owner_component_id="memory.graph", owner_kind="trial.input",

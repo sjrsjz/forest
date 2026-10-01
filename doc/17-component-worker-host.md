@@ -85,7 +85,7 @@ Worker Host 提交内核替换请求时，冻结所接受选择操作的全局�
 
 ## 落地顺序与当前差距
 
-当前 `component.worker-host` 的包内 `modules`/`module` 只读端口可以分页列出已发布 RuntimeGraph 成员并检查单个 Generation；分页游标绑定 Graph 身份，换代后拒绝旧页。`packages` 只读端口经受限服务路由读取部署共用的 `PackageCatalog` 内容寻址目录，逐页校验包字节，返回 manifest 摘要、组件身份和能力申请；目录修订变化拒绝旧页。`artifact` 端口按精确 SHA-256 工件摘要重新校验不可变包，并投影配置 schema 摘要、能力申请、服务依赖/提供声明与存储执行权限；包内 UI 可检查这些声明。两者仅供候选工件浏览，不构成已授权的选择、启停或完整兼容性验收。包内 UI 已提供持久 `module.reload` 和配置重建状态查询。18 个 builtin 包和两项可配置的内核 authority 均从自身 Generation 发起标准配置事务，原子提交 desired 与 Worker Host 控制意图；Web gateway 只路由已授权的管理契约，不直接写配置或同步替换 Graph。`CleanBotHost._assemble_candidate()` 仍逐个 provision 官方包，但最终成员集合已受 Worker Host 选择快照约束。
+当前 `component.worker-host` 的包内 `modules`/`module` 只读端口可以分页列出已发布 RuntimeGraph 成员并检查单个 Generation；分页游标绑定 Graph 身份，换代后拒绝旧页。`packages` 只读端口经受限服务路由读取部署共用的 `PackageCatalog` 内容寻址目录，逐页校验包字节，返回 manifest 摘要、组件身份和能力申请；目录修订变化拒绝旧页。`artifact` 端口按精确 SHA-256 工件摘要重新校验不可变包，并投影配置 schema 摘要、能力申请、服务依赖/提供声明与存储执行权限；包内 UI 可检查这些声明。两者仅供候选工件浏览，不构成已授权的选择、启停或完整兼容性验收。包内 UI 已提供持久 `module.reload` 和配置重建状态查询。18 个 builtin 包和两项可配置的内核 authority 均从自身 Generation 发起标准配置事务，原子提交 desired 与 Worker Host 控制意图；Web gateway 只路由已授权的管理契约，不直接写配置或同步替换 Graph。`BotHost._assemble_candidate()` 按包 manifest 自动发现并安装官方 builtin，最终成员集合仍由 Worker Host 选择快照决定；Worker Host 自身因提供选择账本而先引导。
 
 群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/2` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执说明目标及其依赖闭包会换代；实际成员变化以发布后的 Graph 为准；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，enable/disable 与工件选择控制现由公开 action、预检和持久任务完成。
 

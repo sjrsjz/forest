@@ -9,9 +9,9 @@ import re
 import secrets
 from contextlib import asynccontextmanager
 
-from forest.clean_management_app import CleanManagementGateway
 from forest.deployment_action_authorization import DeploymentActionAuthorization
 from forest.errors import ForestError
+from forest.management_gateway import ManagementGateway
 from forest.packages import digest_json
 
 _SCOPE_KIND = re.compile(r"[a-z][a-z0-9.-]{0,63}\Z")
@@ -295,7 +295,7 @@ class BotManagementScopeProvider:
             raise ValueError("Bot management requires a Web authority ticket signer")
         self.supervisor = supervisor
         self.ticket_authority = ticket_authority
-        self._gateways: dict[str, tuple[object, CleanManagementGateway]] = {}
+        self._gateways: dict[str, tuple[object, ManagementGateway]] = {}
 
     async def list_scopes(self) -> tuple[dict, ...]:
         return await self.supervisor.management_scopes()
@@ -307,7 +307,7 @@ class BotManagementScopeProvider:
             if cached is None or cached[0] is not host:
                 cached = (
                     host,
-                    CleanManagementGateway(
+                    ManagementGateway(
                         host,
                         ticket_authority=self.ticket_authority,
                         scope_id=scope_id,

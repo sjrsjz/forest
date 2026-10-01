@@ -15,7 +15,7 @@ from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import bootstrap_kernel
 from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
@@ -45,7 +45,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(str(files("forest").joinpath("builtin/conversation_scheduler"))),
         PackageCatalog(tmp_path / "conversation-packages"),

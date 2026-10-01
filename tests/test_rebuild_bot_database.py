@@ -19,11 +19,11 @@ from forest.official_bot_provisioning import (
     official_bootstrap_schema_digests,
 )
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
-from forest.storage.clean_deployment_store import CleanDeploymentStore
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_store import DeploymentStore
 from forest.vector_index_effect_driver import vector_collection_name
 from scripts.rebuild_bot_database import rebuild
 
@@ -74,7 +74,7 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
         ),
         encoding="ascii",
     )
-    store = CleanDeploymentStore(deployment_dsn, "deployment/rebuild-test")
+    store = DeploymentStore(deployment_dsn, "deployment/rebuild-test")
     await store.open()
     try:
         catalog = DeploymentCatalogRepository(store)
@@ -171,7 +171,7 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
         ).fetchone()
         assert marker[0] == "pre_rebuild_marker"
         await target.close()
-        release_store = CleanDeploymentStore(deployment_dsn, "deployment/rebuild-test")
+        release_store = DeploymentStore(deployment_dsn, "deployment/rebuild-test")
         await release_store.open()
         try:
             await DeploymentCatalogRepository(release_store).release_supervisor(active_lease)
@@ -243,7 +243,7 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
         ).fetchone()
         assert marker[0] is None
         await target.close()
-        verify_store = CleanDeploymentStore(deployment_dsn, "deployment/rebuild-test")
+        verify_store = DeploymentStore(deployment_dsn, "deployment/rebuild-test")
         await verify_store.open()
         try:
             bot = await DeploymentCatalogRepository(verify_store).inspect(bot_id)

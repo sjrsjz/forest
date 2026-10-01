@@ -37,7 +37,7 @@
 
 ## 3. 当前生产装配
 
-`CleanBotHost._assemble_candidate()` 当前 provision 下列真实 builtin 包，并按 Worker Host 选择快照决定最终 RuntimeGraph 成员；已启用的外部包按精确摘要装配：
+`BotHost._assemble_candidate()` 当前 provision 下列真实 builtin 包，并按 Worker Host 选择快照决定最终 RuntimeGraph 成员；已启用的外部包按精确摘要装配：
 
 | 组件 | builtin 包 | 当前边界 |
 |---|---|---|
@@ -73,7 +73,7 @@
 
 OneBot Adapter 现在按消息形态调用 manifest 声明的四条入站 UnitOfWork 计划。Conversation、Memory/Media、Shell 与分类 participant 在同一事务计划内提交；Host 不再提供 `kernel.uow.onebot.ingress` 业务服务。
 
-`clean_*` 是重构期间遗留的名称，不代表同一类代码。`clean_bot_host`、`clean_multi_bot_supervisor`、`clean_management_app` 和 storage 中的 Bot/Deployment Store 当前仍承载装配、部署与管理入口，不能按文件名前缀当作旧业务栈删除；应在拆清内核/宿主边界后改名并移走旧路径，不保留兼容转发。Provider、Embedding、Vector Index、Process Executor 的默认配置已归入各自 builtin 包，根目录配置 sidecar 已删除；启动目录读取包内声明，实际 Generation 继续以冻结包 schema 校验。Process Executor 的执行安全约束由宿主原生 effect driver 独立执行，不能交给 Worker 决定。业务状态和执行循环必须留在可热替换 builtin 包内，不能靠宿主 Python import 重新固定扩展点。
+旧 `clean_*` 宿主文件已改为职责名称：`bot_host`、`multi_bot_supervisor`、`supervisor_host`、`management_gateway`、`module_management_contract` 和 Bot/Deployment Store；旧 Python import 路径及 `Clean*` 类型名不保留兼容转发。这些现行文件承载组合根、部署入口、管理路由和最小数据库句柄，不能误判为可热重载的业务模块。内核服务列表中五个没有实现及调用方的旧 Conversation/Agent UoW 服务声明已删除。Provider、Embedding、Vector Index、Process Executor 的默认配置已归入各自 builtin 包，根目录配置 sidecar 已删除；启动目录读取包内声明，实际 Generation 继续以冻结包 schema 校验。Process Executor 的执行安全约束由宿主原生 effect driver 独立执行，不能交给 Worker 决定。业务状态和执行循环必须留在可热替换 builtin 包内，不能靠宿主 Python import 重新固定扩展点。
 
 ## 5. Agent 生产包已经拥有的部分
 
@@ -534,3 +534,6 @@ Validation (2026-10-02): The isolated PostgreSQL complete 21-component Graph sta
 未创建 Run 的预填组受控重排（2026-10-02）：Conversation 的候选列表与管理员请求现包含 lane 尚无 active Run、但唯一活动领取组已保存预填触发的状态。Scheduler 在 Agent 执行前先处理准确的待办重排请求；跨模块 UnitOfWork 先以 actor 围栏结算 Conversation 组，再由 Agent 在同事务及会话级 advisory lock 下证明目标 Run 与 Session 均不存在，或沿原规则证明旧 Run 已终结且外部效果安全。活动 Run/Session 不会被作为孤儿重排。独立 `agent.start-run` 计划及能力和不再使用的输入 schema 已删除，包内启动 participant 仍由带 Conversation 选择步骤的组合计划调用。两包版本分别为 `4.23.0`、`4.21.0`，SQL 基线为 `2.19.0`、`4.17.0`；未上线 Bot 库需重建。Conversation 与 Agent 隔离 PostgreSQL 用例各 1 passed（37.70/50.96 秒），完整 21 组件 Graph 启动、替换、退役和重启 1 passed（431.33 秒）；原有真实 HTTP 管理会话终态重排链路在新代码下仍通过（1 passed，82.97 秒），包目录 90 passed、Ruff 与模块 UI 脚本语法通过。第一次完整 Graph 运行时包 UI 文件被并发修改，正确报 `PACKAGE_VERSION_CONFLICT`；固定文件后从头重跑通过。尚未完成真实 Web 管理会话到预填组重排再到分段恢复的端到端验收，也未切换在线实例；其他违反持久约束的异常组仍需明确诊断。
 
 候选 `9a28547` 在线切换（2026-10-02）：旧 Supervisor 正常退出后，先将当前镜像保留为本地标签 `forest:pre-9a28547`，再以 `pg_dump -Fc` 备份开发期 Bot 库 `forest_bot_40d178eeaa530f486c034901`。`pg_restore --list` 可读，容器与工作区文件 SHA-256 均为 `e5ee977c1ac6ad8fb47a48d7ed6b07ca43aee523de105746f0a133f401b548c5`；备份位于被 Git 忽略的 `.local/backups/forest_bot_pre_9a28547.dump`，只覆盖 PostgreSQL，不覆盖 Milvus。确认 Supervisor lease 过期后，候选重建脚本返回 21 个 schema bundle、0 个 RuntimeGraph head，且精确向量集合已重置。Compose Supervisor 现使用镜像 `sha256:08fc50864e0b52395357a0da5ae08f88e7732325b8ba45a5a5ac7816b339df03`，健康且 0 次重启。切换后的只读探针持续 90 秒、7 次采样，均显示 21 个 ACTIVE 图成员、部署 ONLINE、管理 HTTP 200、0 个重叠 Session/积压发送/过期嵌入工作及 0 个违反项。新库尚无消息入站、Memory 来源或 Agent Run；这一观察不能证明 OneBot WebSocket、获准群 `933179609` 的 @ 触发、真实模型回复和发送。预填组 Web 端到端重排及长期负载验收仍未完成。
+
+
+宿主过渡命名清理（2026-10-02）：七个仍承担组合根、部署入口、管理网关及最小数据库句柄的 `clean_*` Python 文件已移至职责命名的模块，三个相应测试文件一并改名；`Clean*` 类型、`bootstrap_clean_kernel` 和 `run_clean_*` 旧名称及导入路径均未保留兼容转发。内核 `provided_services` 删除了五个已无实现和调用方的旧 Conversation/Agent UoW 服务声明。VL 嵌入大结果测试原以 32 个 facet 调用现行最大 8 个的供应商约束，已改为合法最大批量，同时仍验证结果 Payload 大于内联回执阈值。全量本地回归 474 passed、110 skipped，Ruff 通过；隔离 PostgreSQL 内核引导 1 passed，完整 21 组件 Bot Graph 启动、退役及重启 1 passed（387.19 秒）。这是工作树源码的验证；当前在线 Supervisor 仍是此前 `9a28547` 镜像，尚未切换此批重命名。

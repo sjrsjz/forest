@@ -5,10 +5,10 @@ import json
 
 import pytest
 
-from forest.clean_supervisor_host import CleanSupervisorSettings
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
+from forest.supervisor_host import SupervisorSettings
 
 
 def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, monkeypatch):
@@ -49,7 +49,7 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
     monkeypatch.setenv("FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN", "http://127.0.0.1:8080")
     monkeypatch.setenv("FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE", str(password))
     monkeypatch.setenv("FOREST_DEPLOYMENT_DATABASE_HOST", "postgres")
-    settings = CleanSupervisorSettings.from_environment()
+    settings = SupervisorSettings.from_environment()
     assert settings.dsn == (
         "postgresql://forest:database-password@postgres:5432/forest_deployment"
     )

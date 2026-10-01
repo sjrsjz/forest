@@ -9,16 +9,16 @@ import pytest
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import bootstrap_kernel
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
-from forest.package_effects import PackageEffectDriverRegistry
-from forest.packages import PackageCatalog, digest_json
 from forest.official_bot_provisioning import (
     default_embedding_configuration,
     default_vector_index_configuration,
     validate_vector_index_configuration,
 )
+from forest.package_effects import PackageEffectDriverRegistry
+from forest.packages import PackageCatalog, digest_json
 from forest.vector_index_effect_driver import (
     MilvusVectorIndexEffectDriver,
     milvus_vector_index_effect_driver_factory,
@@ -48,7 +48,7 @@ async def test_embedding_and_vector_identity_are_package_declared_immutable_path
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     catalog = PackageCatalog(tmp_path / "packages")
     embedding_value = default_embedding_configuration()
     embedding = await bootstrap_builtin_package(
@@ -114,7 +114,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         pytest.skip("FOREST_TEST_MILVUS_URI is not configured")
 
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     suffix = uuid4().hex
     bot_id = store.bot_id
     space_id = f"space/test/{suffix}"

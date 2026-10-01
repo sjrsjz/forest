@@ -10,7 +10,7 @@ from psycopg import sql
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import bootstrap_kernel
 from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog
@@ -23,7 +23,7 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     catalog = PackageCatalog(tmp_path / "catalog")
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/job_scheduler",

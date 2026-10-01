@@ -8,7 +8,7 @@ Forest 接受普通 Python 源码作为插件开发形式，但绝不把插件�
 
 这一体验参考 AliceBot 的“放入插件、声明处理器、修改代码后重载”，可靠性按[生命周期设计](02-kernel-lifecycle.md)执行。Wasm 仅是未来可选 RuntimeDriver，不是 SDK 使用条件或首版核心里程碑。
 
-“放入插件”不等于把目录加入宿主 `sys.path`。源码变化只能触发一次新的捕获与候选 Generation；活跃快照永不原地覆盖，旧 Worker 永不执行新摘要。builtin 与外部插件使用完全相同的 Worker/Generation 协议。任何只能在宿主重启后生效、只能通过 `importlib.reload()` 生效、或要求在 `clean_bot_host` 一类组合根中新增 import/factory 的业务扩展，都不属于 Forest 插件。
+“放入插件”不等于把目录加入宿主 `sys.path`。源码变化只能触发一次新的捕获与候选 Generation；活跃快照永不原地覆盖，旧 Worker 永不执行新摘要。builtin 与外部插件使用完全相同的 Worker/Generation 协议。任何只能在宿主重启后生效、只能通过 `importlib.reload()` 生效、或要求在 `bot_host` 一类组合根中新增 import/factory 的业务扩展，都不属于 Forest 插件。
 
 每个组件默认 `scope="bot"`，同一包可以被多个 Bot 启用。一个 Bot 的同一组件实例服务多个会话；类实例不是群级单例，`self` 与模块全局变量不能存放“当前群”“当前用户”或可变 Prompt。
 

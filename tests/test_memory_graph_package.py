@@ -20,11 +20,11 @@ from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin.memory_graph.python.facet_preparation import document_facets, query_part_facets
 from forest.builtin_packages import bootstrap_builtin_package
-from forest.clean_management_app import CleanManagementGateway
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import bootstrap_kernel
 from forest.deployment_management_app import create_deployment_management_app
 from forest.errors import ForestError
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
+from forest.management_gateway import ManagementGateway
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
@@ -153,7 +153,7 @@ async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "budget-packages"),
@@ -297,7 +297,7 @@ async def test_direct_source_identity_collision_is_rejected_before_capture_write
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "source-identity-packages"),
@@ -389,7 +389,7 @@ async def test_pending_archive_and_late_capture_preserve_batch_identity(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "late-capture-packages"),
@@ -556,7 +556,7 @@ async def test_graph_snapshot_excludes_facts_committed_after_registration(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "snapshot-packages"),
@@ -659,7 +659,7 @@ async def test_memory_neighbourhood_browses_two_hops_with_shared_snapshot_and_bo
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "neighbourhood-packages"),
@@ -729,7 +729,7 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "source-cursor-packages"),
@@ -901,7 +901,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "forget-selection-packages"),
@@ -1255,7 +1255,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
             issuer_id="deployment/batch-test", active_key_id="batch-key/1",
             key_resolver=lambda _key_id: b"k" * 32,
         )
-        gateway = CleanManagementGateway(host, ticket_authority=signer)
+        gateway = ManagementGateway(host, ticket_authority=signer)
         action_id = "memory.forget.batch.enqueue"
         action_body = {"selection_id": "selection/late", "after_ordinal": 0,
                        "batch_size": 1, "plan": plan}
@@ -1482,7 +1482,7 @@ async def test_query_facet_persistence_rejects_unbound_input_identity(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "facet-identity-packages"),
@@ -1520,7 +1520,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "trial-authority-packages"),
@@ -1667,7 +1667,7 @@ async def test_management_trial_registers_mixed_input_and_separate_cancellation(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "trial-action-packages"),
@@ -1869,7 +1869,7 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "trial-input-packages"),
@@ -2334,7 +2334,7 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
 @pytest.mark.postgres
 async def test_expired_trial_vectors_are_suppressed_and_deleted(clean_authority, tmp_path):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "expired-trial-packages"),
@@ -2597,7 +2597,7 @@ async def test_expired_trial_vectors_are_suppressed_and_deleted(clean_authority,
 @pytest.mark.postgres
 async def test_trial_gc_cursor_reaches_later_trial_behind_live_claims(clean_authority, tmp_path):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "trial-gc-cursor-packages"),
@@ -2699,7 +2699,7 @@ async def test_memory_embedding_identity_is_immutable_across_configuration_plans
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     source = Path(__file__).parents[1] / "src/forest/builtin/memory_graph"
     catalog = PackageCatalog(tmp_path / "memory-packages")
     package = await bootstrap_builtin_package(
@@ -2768,7 +2768,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
     clean_authority, tmp_path, resolution
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
         PackageCatalog(tmp_path / "memory-packages"),

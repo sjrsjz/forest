@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.errors import ForestError
+from forest.module_management_contract import ModuleConfigurationContract
 from forest.packages import digest_json
 
 
-class PackageManagementContract(CleanModuleConfigurationContract):
+class PackageManagementContract(ModuleConfigurationContract):
     """Expose manifest-mapped read and command ports to the Web gateway."""
 
     protocol = "forest.package-management/1"

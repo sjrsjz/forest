@@ -25,14 +25,14 @@ from psycopg import sql
 from pymilvus import AsyncMilvusClient
 
 from forest.adapters.onebot import SendResult
+from forest.bot_host import BotGraphCandidate, BotHost, BotSettings
 from forest.builtin_packages import bootstrap_installed_package
-from forest.clean_bot_host import BotGraphCandidate, CleanBotHost, CleanBotSettings
-from forest.clean_management_app import CleanManagementGateway, ConfigurationApplyInput
 from forest.component_selection import ComponentSelectionSnapshot
 from forest.deployment_management_app import create_deployment_management_app
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.kernel_resource_admission import KERNEL_RESOURCE_POLICY_SCHEMA
+from forest.management_gateway import ConfigurationApplyInput, ManagementGateway
 from forest.media_capture_io import CapturedImage
 from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
 from forest.packages import PackageCatalog, digest_json
@@ -42,8 +42,8 @@ from forest.runtime_contracts import (
 )
 from forest.runtime_modules import ModuleLifecycleState
 from forest.shell_command_protocol import ShellCommandExecutionRequest
-from forest.storage.clean_deployment_store import CleanDeploymentStore
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
+from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_identity import (
     AuthenticatedWebSession,
     DeploymentWebIdentityAuthority,
@@ -78,7 +78,7 @@ async def _real_web_identity_for_bot_test(dsn):
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = CleanDeploymentStore(uri, "deployment/host-web-test")
+    store = DeploymentStore(uri, "deployment/host-web-test")
     try:
         await store.open()
         await DeploymentCatalogRepository(store).initialize()
@@ -431,7 +431,7 @@ async def test_bot_host_supervision_propagates_current_module_task_failure():
     failed = asyncio.create_task(fail(), name="memory-owned-test")
     renewal = asyncio.create_task(keep_running(), name="renewal-test")
     replacement = asyncio.create_task(keep_running(), name="replacement-test")
-    host = object.__new__(CleanBotHost)
+    host = object.__new__(BotHost)
     host._closing = False
     host._replacement_lock = asyncio.Lock()
     host._renewal_task = renewal
@@ -459,7 +459,7 @@ async def test_bot_host_supervision_ignores_tasks_from_superseded_graph():
     new_task = asyncio.create_task(wait_for(new_release), name="new-graph-worker")
     renewal = asyncio.create_task(wait_for(new_release), name="renewal-test")
     replacement = asyncio.create_task(wait_for(new_release), name="replacement-test")
-    host = object.__new__(CleanBotHost)
+    host = object.__new__(BotHost)
     host._closing = False
     host._replacement_lock = asyncio.Lock()
     host._renewal_task = renewal
@@ -543,7 +543,7 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
 
     previous = Previous()
     candidate = Candidate()
-    host = object.__new__(CleanBotHost)
+    host = object.__new__(BotHost)
     host._replacement_lock = asyncio.Lock()
     host._closing = False
     host.registry = previous
@@ -589,7 +589,7 @@ async def test_durable_reload_worker_executes_exact_revision_and_settles_request
         async def graph_for_activation(self, _activation_id):
             return None
 
-    host = object.__new__(CleanBotHost)
+    host = object.__new__(BotHost)
     host._kernel = SimpleNamespace(runtime=Runtime())
     host._lease = "lease/one"
     host._closing = False
@@ -675,7 +675,7 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
 
     previous = Previous()
     candidate = Candidate()
-    host = object.__new__(CleanBotHost)
+    host = object.__new__(BotHost)
     host._replacement_lock = asyncio.Lock()
     host._closing = False
     host.registry = previous
@@ -738,7 +738,7 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
             events.append("close-candidate")
             return []
 
-    host = object.__new__(CleanBotHost)
+    host = object.__new__(BotHost)
     host._replacement_lock = asyncio.Lock()
     host._closing = False
     host._fatal_replacement_error = None
@@ -774,7 +774,7 @@ async def test_graph_replacement_worker_records_post_publication_failure():
         async def graph_for_activation(self, _activation_id):
             raise AssertionError("Published activation must not be settled as success")
 
-    host = object.__new__(CleanBotHost)
+    host = object.__new__(BotHost)
     host._closing = False
     host._kernel = SimpleNamespace(runtime=Runtime())
     host._authority = lambda: "lease/one"
@@ -800,7 +800,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    settings = CleanBotSettings(
+    settings = BotSettings(
         bot_id="bot-worker-host-reload-test", dsn=uri,
         model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
         model="test-model", model_deployment_id="provider.chat-completions/test",
@@ -820,7 +820,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
     async def create_websocket(_url, _token, **_limits):
         return FakeWebSocketClient(settings.onebot_self_id)
 
-    host = CleanBotHost(
+    host = BotHost(
         settings,
         model_client_factory=FakeModelClient,
         embedding_client_factory=FakeEmbeddingClient,
@@ -1066,7 +1066,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                 await rejected_coordinator.execute(configuration_scope, **apply_args)
             assert rejected.value.code == "TEST_CONTROL_REJECTED"
             assert (await agent_configuration.desired()).revision == current_configuration.revision
-            gateway = CleanManagementGateway(
+            gateway = ManagementGateway(
                 host,
                 ticket_authority=WebAuthorityTicketAuthority(
                     issuer_id="deployment/configuration-test",
@@ -1401,7 +1401,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
 
 
 @pytest.mark.postgres
-async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
+async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
@@ -1410,7 +1410,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    settings = CleanBotSettings(
+    settings = BotSettings(
         bot_id="bot-production-test",
         dsn=uri,
         model_base_url="http://127.0.0.1:8000/v1",
@@ -1443,7 +1443,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
         return client
 
     def create_host():
-        return CleanBotHost(
+        return BotHost(
             settings,
             model_client_factory=FakeModelClient,
             embedding_client_factory=FakeEmbeddingClient,
@@ -2750,7 +2750,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 stale_plan["relation_retraction_count"] + 1
             )
             forget_input["plan"] = current_plan
-            gateway = CleanManagementGateway(
+            gateway = ManagementGateway(
                 host,
                 ticket_authority=WebAuthorityTicketAuthority(
                     issuer_id="deployment/host-test",
@@ -3064,7 +3064,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     ):
                         pytest.fail(f"Shell selection replacement failed: {latest}")
                     await asyncio.sleep(0.1)
-            web_gateway = CleanManagementGateway(
+            web_gateway = ManagementGateway(
                 restarted, ticket_authority=gateway.ticket_authority,
             )
             stale_body = {**candidate, "plan_digest": preview["plan_digest"]}
@@ -3257,7 +3257,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    settings = CleanBotSettings(
+    settings = BotSettings(
         bot_id="bot-agent-recall-test", dsn=uri,
         model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
         model="test-model", model_deployment_id="provider.chat-completions/test",
@@ -3313,7 +3313,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
         clients.append(client)
         return client
 
-    host = CleanBotHost(
+    host = BotHost(
         settings,
         model_client_factory=RecordingModelClient,
         embedding_client_factory=None if real_transport else FakeEmbeddingClient,
@@ -3978,7 +3978,7 @@ async def test_real_vl_auto_archive_cross_group_recall_and_management_trial(tmp_
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(database)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + database, "", ""))
-    settings = CleanBotSettings(
+    settings = BotSettings(
         bot_id="bot-cross-vl-" + uuid4().hex[:16], dsn=uri,
         model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
         model="test-model", model_deployment_id="provider.chat-completions/test",
@@ -4009,7 +4009,7 @@ async def test_real_vl_auto_archive_cross_group_recall_and_management_trial(tmp_
         clients.append(client)
         return client
 
-    host = CleanBotHost(
+    host = BotHost(
         settings, model_client_factory=RecordingModelClient,
         media_client_factory=ValidPngMediaClient,
         websocket_client_factory=create_websocket,

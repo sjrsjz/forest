@@ -17,14 +17,14 @@ import pytest
 from psycopg import sql
 from psycopg.rows import dict_row
 from pymilvus import AsyncMilvusClient
-from test_clean_bot_host import (
+from test_bot_host import (
     FakeEmbeddingClient,
     FakeMediaClient,
     FakeModelClient,
     FakeWebSocketClient,
 )
 
-from forest.clean_bot_host import CleanBotHost, CleanBotSettings
+from forest.bot_host import BotHost, BotSettings
 from forest.embeddings import EmbeddingProfile
 from forest.packages import PackageCatalog, digest_json
 from forest.schema_bundles import module_schema_namespace
@@ -39,8 +39,8 @@ class CrashAfterMilvusUpsert(AsyncMilvusClient):
         os._exit(137)
 
 
-def settings_for(dsn: str, bot_id: str, milvus_uri: str) -> CleanBotSettings:
-    return CleanBotSettings(
+def settings_for(dsn: str, bot_id: str, milvus_uri: str) -> BotSettings:
+    return BotSettings(
         bot_id=bot_id,
         dsn=dsn,
         model_base_url="http://127.0.0.1:8000/v1",
@@ -77,7 +77,7 @@ async def _crash_child(spec_path: Path) -> None:
         sockets.append(socket)
         return socket
 
-    host = CleanBotHost(
+    host = BotHost(
         settings,
         model_client_factory=FakeModelClient,
         embedding_client_factory=FakeEmbeddingClient,
@@ -257,7 +257,7 @@ async def test_memory_vector_publish_recovers_after_process_crash(tmp_path):
         async def create_websocket(_url, _token, **_limits):
             return FakeWebSocketClient(settings.onebot_self_id)
 
-        host = CleanBotHost(
+        host = BotHost(
             settings,
             model_client_factory=FakeModelClient,
             embedding_client_factory=FakeEmbeddingClient,

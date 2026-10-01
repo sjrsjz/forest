@@ -12,7 +12,7 @@ from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
-from forest.core_runtime import bootstrap_clean_kernel
+from forest.core_runtime import bootstrap_kernel
 from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog, digest_json
@@ -109,7 +109,7 @@ def _owner_ref(owner):
 @pytest.mark.postgres
 async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_authority, tmp_path):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     conversation_package = await bootstrap_builtin_package(
         Path(str(files("forest").joinpath("builtin/conversation_scheduler"))),
         PackageCatalog(tmp_path / "conversation-packages"),

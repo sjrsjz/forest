@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from forest.clean_bot_host import CleanBotHost
+from forest.bot_host import BotHost
 from forest.errors import ForestError
 
 _ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
@@ -27,7 +27,7 @@ class _BotRunner:
     management_condition: asyncio.Condition = field(default_factory=asyncio.Condition)
 
 
-class CleanMultiBotSupervisor:
+class MultiBotSupervisor:
     """Reconcile catalog intent without owning module configuration or Bot facts."""
 
     def __init__(
@@ -36,7 +36,7 @@ class CleanMultiBotSupervisor:
         *,
         storage_profiles,
         settings_resolver,
-        host_factory=CleanBotHost,
+        host_factory=BotHost,
         host_id: str | None = None,
         incarnation: str | None = None,
         poll_seconds: float = 1.0,

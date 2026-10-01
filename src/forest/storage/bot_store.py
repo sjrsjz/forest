@@ -6,7 +6,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
 
-class CleanBotStore:
+class BotStore:
     """Own a Bot-bound pool without legacy schemas, migrations, or business methods."""
 
     def __init__(self, dsn: str, bot_id: str) -> None:

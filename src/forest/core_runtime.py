@@ -19,10 +19,6 @@ from forest.builtin_runtime_graph_snapshot import (
 )
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS, runtime_shell_service
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
-from forest.clean_management_contract import (
-    CleanAuditManagementContract,
-    CleanModuleConfigurationContract,
-)
 from forest.errors import ForestError
 from forest.kernel_audit_participant import KernelAuditUnitOfWorkParticipant
 from forest.kernel_authorization_participant import (
@@ -35,6 +31,10 @@ from forest.kernel_resource_admission import (
     KERNEL_RESOURCE_POLICY_SCHEMA,
     assess_worker_capacity,
     validate_kernel_resource_policy,
+)
+from forest.module_management_contract import (
+    AuditManagementContract,
+    ModuleConfigurationContract,
 )
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
@@ -152,11 +152,6 @@ _MODULES = {
             "runtime.component-candidate.preview",
             "deployment.package-registry.packages",
             "deployment.package-registry.artifact",
-            "kernel.uow.conversation.final-reply",
-            "kernel.uow.conversation.select-input",
-            "kernel.uow.conversation.session-handoff",
-            "kernel.uow.conversation.defer-approval",
-            "kernel.uow.agent.cancel-wake",
             "shell.core-runtime.execute",
             "agent.tool.runtime-status",
         ),
@@ -434,7 +429,7 @@ class PreparedAuditAuthorityModule(PreparedAuthorityModule):
             generation_authority,
         )
         self._shell_execute = audit_shell_service(service)
-        self.management_contract = CleanAuditManagementContract(
+        self.management_contract = AuditManagementContract(
             configuration,
             audit=service,
             schema=_KERNEL_CONFIGURATION_SCHEMA,
@@ -472,7 +467,7 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
             services,
             generation_authority,
         )
-        self.management_contract = CleanModuleConfigurationContract(
+        self.management_contract = ModuleConfigurationContract(
             configuration,
             schema=WEB_OPERATION_POLICY_SCHEMA,
             validator=validate_web_operation_policy,
@@ -489,7 +484,7 @@ class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
     def __init__(self, *args, runtime_host) -> None:
         super().__init__(*args)
         self.runtime_host = runtime_host
-        self.management_contract = CleanModuleConfigurationContract(
+        self.management_contract = ModuleConfigurationContract(
             self.module_configuration,
             schema=KERNEL_RESOURCE_POLICY_SCHEMA,
             validator=validate_kernel_resource_policy,
@@ -620,7 +615,7 @@ class PreparedPayloadAuthorityModule(PreparedAuthorityModule):
 
 
 @dataclass(frozen=True)
-class CleanKernelModules:
+class KernelModules:
     runtime: KernelRuntimeRepository
     payload: KernelPayloadRepository
     authorization: KernelAuthorizationRepository
@@ -631,7 +626,7 @@ class CleanKernelModules:
     grants: dict[str, GrantSetRef]
 
 
-async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
+async def bootstrap_kernel(store, installer) -> KernelModules:
     """Install and initialize the exact kernel authorities needed to publish a graph."""
 
     await installer.initialize_kernel()
@@ -923,7 +918,7 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         )
         for component_id, definition in _MODULES.items()
     )
-    return CleanKernelModules(
+    return KernelModules(
         runtime,
         payload,
         authorization,

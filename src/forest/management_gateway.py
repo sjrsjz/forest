@@ -7,8 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
-from forest.clean_management_contract import CleanModuleConfigurationContract
 from forest.errors import ForestError
+from forest.module_management_contract import ModuleConfigurationContract
 from forest.packages import digest_json
 from forest.storage.kernel_audit import AuditEnvelope
 from forest.storage.management_asset_authority import (
@@ -31,7 +31,7 @@ class ConfigurationApplyInput(BaseModel):
     expected_desired_revision: int
 
 
-class CleanManagementGateway:
+class ManagementGateway:
     def __init__(
         self, host, *, ticket_authority, scope_id: str | None = None
     ) -> None:
@@ -41,14 +41,14 @@ class CleanManagementGateway:
         self.ticket_authority = ticket_authority
         self.scope_id = scope_id or host.settings.bot_id
 
-    def contract(self, component_id: str) -> CleanModuleConfigurationContract:
+    def contract(self, component_id: str) -> ModuleConfigurationContract:
         registry = self.registry()
         try:
             module = registry.get(component_id)
         except KeyError:
             raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Runtime module does not exist", 404) from None
         contract = getattr(module, "management_contract", None)
-        if not isinstance(contract, CleanModuleConfigurationContract):
+        if not isinstance(contract, ModuleConfigurationContract):
             raise ForestError(
                 "MODULE_MANAGEMENT_UNAVAILABLE",
                 "Runtime module does not publish a configuration contract",

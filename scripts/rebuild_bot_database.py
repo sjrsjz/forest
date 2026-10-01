@@ -24,7 +24,6 @@ from psycopg.rows import dict_row
 from pymilvus import AsyncMilvusClient
 from pymilvus.exceptions import MilvusException
 
-from forest.clean_supervisor_host import CleanSupervisorSettings
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
     OFFICIAL_BOT_COMPONENT_IDS,
@@ -33,12 +32,13 @@ from forest.official_bot_provisioning import (
 )
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.schema_bundles import module_schema_namespace
-from forest.storage.clean_bot_store import CleanBotStore
-from forest.storage.clean_deployment_store import CleanDeploymentStore
+from forest.storage.bot_store import BotStore
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_store import DeploymentStore
+from forest.supervisor_host import SupervisorSettings
 from forest.vector_index_effect_driver import vector_collection_name
 
 
@@ -111,8 +111,8 @@ async def reset_vector_collection(settings, collection_name: str) -> bool:
 
 
 async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> dict:
-    settings = CleanSupervisorSettings.from_environment()
-    store = CleanDeploymentStore(settings.dsn, settings.deployment_id)
+    settings = SupervisorSettings.from_environment()
+    store = DeploymentStore(settings.dsn, settings.deployment_id)
     await store.open()
     try:
         secrets = DeploymentSecretAuthority(
@@ -240,7 +240,7 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                 profile=profile,
             )
 
-            target = CleanBotStore(storage.dsn, bot_id)
+            target = BotStore(storage.dsn, bot_id)
             await target.open()
             try:
                 runtime_namespace = module_schema_namespace("forest.kernel.runtime")

@@ -16,14 +16,14 @@ from urllib.request import urlopen
 
 from psycopg import sql
 
-from forest.clean_supervisor_host import CleanSupervisorSettings
 from forest.official_bot_provisioning import OFFICIAL_BOT_COMPONENT_IDS
 from forest.schema_bundles import module_schema_namespace
-from forest.storage.clean_bot_store import CleanBotStore
-from forest.storage.clean_deployment_store import CleanDeploymentStore
+from forest.storage.bot_store import BotStore
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_store import DeploymentStore
+from forest.supervisor_host import SupervisorSettings
 
 RUNTIME = module_schema_namespace("forest.kernel.runtime")
 CONVERSATION = module_schema_namespace("forest.conversation.scheduler")
@@ -70,7 +70,7 @@ async def _deployment_state(store, bot_id: str) -> dict:
     return dict(row)
 
 
-async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> dict:
+async def _bot_state(store: BotStore, bot_id: str, stale_seconds: int) -> dict:
     async with store.pool.connection() as connection:
         async with connection.transaction():
             await connection.execute(
@@ -258,8 +258,8 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
 
 
 async def observe(arguments: argparse.Namespace) -> int:
-    settings = CleanSupervisorSettings.from_environment()
-    deployment = CleanDeploymentStore(settings.dsn, settings.deployment_id)
+    settings = SupervisorSettings.from_environment()
+    deployment = DeploymentStore(settings.dsn, settings.deployment_id)
     await deployment.open()
     bot_store = None
     all_failures: set[str] = set()
@@ -280,7 +280,7 @@ async def observe(arguments: argparse.Namespace) -> int:
             expected_bot_id=arguments.bot_id,
             expected_storage_generation=bot["storage_generation"],
         )
-        bot_store = CleanBotStore(storage.dsn, arguments.bot_id)
+        bot_store = BotStore(storage.dsn, arguments.bot_id)
         await bot_store.open()
         while True:
             deployment_state, bot_state, health_status = await asyncio.gather(

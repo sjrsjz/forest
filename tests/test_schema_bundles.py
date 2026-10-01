@@ -19,6 +19,7 @@ import pytest_asyncio
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from forest.bot_host import BotGraphCandidate, BotHost
 from forest.builtin_packages import (
     _configuration_storage,
     bootstrap_builtin_package,
@@ -26,7 +27,6 @@ from forest.builtin_packages import (
     compile_installed_candidate_descriptor,
     inspect_installed_package,
 )
-from forest.clean_bot_host import BotGraphCandidate, CleanBotHost
 from forest.component_graph_preview import preview_selected_graph
 from forest.component_selection import (
     ComponentSelectionEntry,
@@ -35,7 +35,7 @@ from forest.component_selection import (
 )
 from forest.component_selection_commit import resolve_selection_commit_preflight
 from forest.core_runtime import (
-    bootstrap_clean_kernel,
+    bootstrap_kernel,
     runtime_graph_replacement_request_service,
 )
 from forest.errors import ForestError
@@ -72,7 +72,7 @@ from forest.storage.authorization_authority import (
     CapabilityGrant,
     KernelAuthorizationRepository,
 )
-from forest.storage.clean_bot_store import CleanBotStore
+from forest.storage.bot_store import BotStore
 from forest.storage.component_state import ComponentStateCommands, ComponentStateQueries
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import AuditEnvelope, KernelAuditRepository
@@ -155,7 +155,7 @@ async def clean_authority():
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
-    store = CleanBotStore(uri, "bot-bundle")
+    store = BotStore(uri, "bot-bundle")
     await store.open()
     installer = SchemaBundleInstaller(store)
     try:
@@ -1083,7 +1083,7 @@ async def test_runtime_graph_retains_unchanged_generations_without_republishing_
     clean_authority,
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     runtime = kernel.runtime
     lease = await runtime.claim_host("retain-host", "retain-incarnation")
     provider = runtime_binding("example.provider", marker="a")
@@ -1356,7 +1356,7 @@ async def test_component_state_separates_queries_from_revision_checked_commands(
     clean_authority,
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     lease = await kernel.runtime.claim_host("state-host", "state-incarnation")
     binding = runtime_binding("example.state", marker="a")
     graph = await kernel.runtime.prepare_graph(lease, [binding], str(uuid4()))
@@ -1422,7 +1422,7 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
     tmp_path,
 ):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     counter = await bootstrap_builtin_package(
         Path(str(files("forest").joinpath("builtin/counter"))),
         PackageCatalog(tmp_path / "packages"),
@@ -1736,7 +1736,7 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
 @pytest.mark.postgres
 async def test_delivery_builtin_owns_transactional_intent_creation(clean_authority, tmp_path):
     store, installer = clean_authority
-    kernel = await bootstrap_clean_kernel(store, installer)
+    kernel = await bootstrap_kernel(store, installer)
     delivery = await bootstrap_builtin_package(
         Path(str(files("forest").joinpath("builtin/delivery"))),
         PackageCatalog(tmp_path / "delivery-packages"),
@@ -2648,8 +2648,8 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
 @pytest.mark.postgres
 async def test_clean_kernel_bootstrap_publishes_all_required_authorities(clean_authority):
     store, installer = clean_authority
-    core = await bootstrap_clean_kernel(store, installer)
-    replay = await bootstrap_clean_kernel(store, installer)
+    core = await bootstrap_kernel(store, installer)
+    replay = await bootstrap_kernel(store, installer)
     assert {
         component_id: grant.grant_set_digest for component_id, grant in core.grants.items()
     } == {component_id: grant.grant_set_digest for component_id, grant in replay.grants.items()}
@@ -2733,7 +2733,7 @@ async def test_runtime_registry_transfers_unaffected_generations_without_restart
     clean_authority,
 ):
     store, installer = clean_authority
-    core = await bootstrap_clean_kernel(store, installer)
+    core = await bootstrap_kernel(store, installer)
     lease = await core.runtime.claim_host("host-local", "inc-local")
     host = SimpleNamespace(
         scope_kind="bot",
@@ -2819,7 +2819,7 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    core = await bootstrap_clean_kernel(store, installer)
+    core = await bootstrap_kernel(store, installer)
     lease = await core.runtime.claim_host("host-member-change", "inc-member-change")
     host = SimpleNamespace(
         scope_kind="bot",
@@ -2849,7 +2849,7 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     assert add_plan.replace == add_plan.remove == add_plan.drain == ()
     assert add_plan.retain == tuple(first.order)
     assert add_plan.add == add_plan.prepare == ("forest.counter",)
-    controller = object.__new__(CleanBotHost)
+    controller = object.__new__(BotHost)
     controller._replacement_lock = asyncio.Lock()
     controller._closing = False
     controller.registry = first
@@ -2913,7 +2913,7 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    core = await bootstrap_clean_kernel(store, installer)
+    core = await bootstrap_kernel(store, installer)
     package_root = tmp_path / "installed-source"
     copytree(Path(__file__).parent / "fixtures" / "routing_component", package_root)
     baseline = b"CREATE TABLE plugin_records (record_id text PRIMARY KEY);"
@@ -3172,7 +3172,7 @@ async def test_post_publication_activation_failure_retires_retained_generations(
     clean_authority,
 ):
     store, installer = clean_authority
-    core = await bootstrap_clean_kernel(store, installer)
+    core = await bootstrap_kernel(store, installer)
     lease = await core.runtime.claim_host("host-activation-failure", "inc-activation-failure")
     host = SimpleNamespace(
         scope_kind="bot",
@@ -3232,7 +3232,7 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
     clean_authority,
 ):
     store, installer = clean_authority
-    core = await bootstrap_clean_kernel(store, installer)
+    core = await bootstrap_kernel(store, installer)
     lease = await core.runtime.claim_host("host-reload", "inc-reload")
     host = SimpleNamespace(
         scope_kind="bot",
@@ -5090,7 +5090,7 @@ async def test_routing_builtin_owns_worker_storage_and_lifecycle(
     clean_authority, tmp_path
 ):
     store, installer = clean_authority
-    core = await bootstrap_clean_kernel(store, installer)
+    core = await bootstrap_kernel(store, installer)
     lease = await core.runtime.claim_host("host-routing-package", "inc-routing-package")
     host = SimpleNamespace(
         scope_kind="bot",
