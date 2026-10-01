@@ -495,6 +495,7 @@ CREATE TABLE tool_observations (
 CREATE INDEX model_request_state_idx ON model_requests(bot_id,state,updated_at);
 CREATE INDEX model_attempt_state_idx ON model_transport_attempts(bot_id,state,settled_at);
 CREATE INDEX tool_call_state_idx ON tool_calls(bot_id,state,updated_at);
+CREATE INDEX tool_call_run_idx ON tool_calls(bot_id,run_id);
 CREATE UNIQUE INDEX tool_call_approval_ref_idx ON tool_calls(bot_id,approval_ref)
     WHERE approval_ref IS NOT NULL;
 
@@ -4612,6 +4613,21 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','AGENT_RUN_NOT_ABANDONED',
                 'message','Run is not terminal and eligible for requeue','status',409));
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.tool_calls t
+        WHERE t.bot_id=context->>'bot_id' AND t.run_id=prior_value->>'run_ref'
+    ) OR EXISTS (
+        SELECT 1 FROM __forest_module_schema__.model_requests r
+        JOIN __forest_module_schema__.model_transport_attempts a
+          ON a.bot_id=r.bot_id AND a.request_id=r.request_id
+        WHERE r.bot_id=context->>'bot_id'
+          AND r.run_id=prior_value->>'run_ref'
+          AND a.state IN ('DISPATCHING','UNKNOWN')
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_REQUEUE_EFFECT_UNSAFE',
+                'message','Run has a tool or unresolved model attempt','status',409));
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
                               'value',prior_value);

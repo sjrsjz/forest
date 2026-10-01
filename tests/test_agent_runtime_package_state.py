@@ -281,6 +281,29 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         class _RollbackVerification(Exception):
             pass
 
+        async def verify_effect_requeue(conn, run_ref, session_ref, conversation_ref):
+            namespace = package.descriptor.storage.spec.namespace
+            proof = {
+                "protocol": "forest.uow-step/1",
+                "caller": {"component_id": "conversation.scheduler"},
+                "input": {"protocol": "forest.agent-requeue-verification/1",
+                          "prior_step_id": "conversation"},
+                "prior": {"conversation": {
+                    "protocol": "forest.conversation-run-requeued/1",
+                    "conversation_id": conversation_ref,
+                    "session_ref": session_ref,
+                    "run_ref": run_ref,
+                }},
+            }
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.agent_verify_requeue(%s::jsonb,%s::jsonb) "
+                            "AS result").format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb(proof)),
+                )
+            ).fetchone()
+            return row["result"]
+
         with pytest.raises(_RollbackVerification):
             async with store.pool.connection() as conn, conn.transaction():
                 namespace = package.descriptor.storage.spec.namespace
@@ -604,6 +627,31 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "result_payload_digest": None,
             "state": "DISPATCHING",
         }
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                namespace = package.descriptor.storage.spec.namespace
+                await conn.execute(
+                    sql.SQL("UPDATE {}.agent_runs SET state='FAILED',"
+                            "error_code='TEST_ABANDONED',terminal_at=clock_timestamp() "
+                            "WHERE bot_id=%s AND run_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, "run/agent-package/model-port"),
+                )
+                await conn.execute(
+                    sql.SQL("UPDATE {}.agent_sessions SET state='FAILED',"
+                            "active_run_id=NULL,terminal_reason_code='TEST_ABANDONED',"
+                            "closed_at=clock_timestamp() "
+                            "WHERE bot_id=%s AND session_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, "session/agent-package/model-port"),
+                )
+                rejected = await verify_effect_requeue(
+                    conn, "run/agent-package/model-port",
+                    "session/agent-package/model-port",
+                    "conversation/onebot/group/model-port",
+                )
+                assert rejected["error"]["code"] == "AGENT_REQUEUE_EFFECT_UNSAFE"
+                raise _RollbackVerification
         result_payload = await _payload(
             kernel,
             owner_component_id="provider.chat",
@@ -1258,6 +1306,31 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         )
         assert tool_recovery["state"] == "PREPARING_MODEL"
         assert tool_recovery["tool_call"] is None
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                namespace = package.descriptor.storage.spec.namespace
+                await conn.execute(
+                    sql.SQL("UPDATE {}.agent_runs SET state='FAILED',"
+                            "error_code='TEST_ABANDONED',terminal_at=clock_timestamp() "
+                            "WHERE bot_id=%s AND run_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, "run/agent-package/model-port"),
+                )
+                await conn.execute(
+                    sql.SQL("UPDATE {}.agent_sessions SET state='FAILED',"
+                            "active_run_id=NULL,terminal_reason_code='TEST_ABANDONED',"
+                            "closed_at=clock_timestamp() "
+                            "WHERE bot_id=%s AND session_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, "session/agent-package/model-port"),
+                )
+                rejected = await verify_effect_requeue(
+                    conn, "run/agent-package/model-port",
+                    "session/agent-package/model-port",
+                    "conversation/onebot/group/model-port",
+                )
+                assert rejected["error"]["code"] == "AGENT_REQUEUE_EFFECT_UNSAFE"
+                raise _RollbackVerification
         execution_history = await instance.invoke_management_query(
             history_declaration,
             {"run_id": "run/agent-package/model-port"},
