@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "const": "forest.shell.arguments/1"
+    },
+    "command_id": {
+      "const": "core.reload"
+    },
+    "arguments": {
+      "type": "object",
+      "properties": {
+        "expected_graph_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        }
+      },
+      "required": [
+        "expected_graph_revision"
+      ],
+      "additionalProperties": false
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "principal_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "conversation_ref": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "required": [
+    "protocol",
+    "command_id",
+    "arguments",
+    "request_id",
+    "principal_ref",
+    "conversation_ref"
+  ],
+  "additionalProperties": false
+}

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.18"
+version = "1.6.19"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -31,6 +31,7 @@ stop_timeout_s = 10
 requests = [
   "service.call:runtime.graph.snapshot",
   "service.call:runtime.status.snapshot",
+  "service.call:runtime.maintenance.set",
   "service.call:runtime.component-candidate.preview",
   "service.call:deployment.package-registry.packages",
   "service.call:deployment.package-registry.artifact",
@@ -75,6 +76,12 @@ name = "runtime.status.snapshot"
 contract = ">=1.0,<2.0"
 required = true
 startup_dependency = true
+
+[[components.requires]]
+name = "runtime.maintenance.set"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
 
 [[components.requires]]
 name = "runtime.component-candidate.preview"
@@ -178,6 +185,27 @@ input_schema = "schemas/shell-input.json"
 output_schema = "schemas/shell-output.json"
 
 [[components.provides]]
+name = "shell.component-host.core-status"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/shell-core-status-input.json"
+output_schema = "schemas/shell-output.json"
+
+[[components.provides]]
+name = "shell.component-host.core-reload"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/shell-core-reload-input.json"
+output_schema = "schemas/shell-output.json"
+
+[[components.provides]]
+name = "shell.component-host.core-maintenance"
+contract = "1.0"
+semantics = "at-most-once"
+input_schema = "schemas/shell-core-maintenance-input.json"
+output_schema = "schemas/shell-output.json"
+
+[[components.provides]]
 name = "shell.component-host.reload"
 contract = "1.0"
 semantics = "idempotent"
@@ -210,6 +238,61 @@ service_class = "P1"
 required_capabilities = ["runtime.status.read"]
 output_policy = "SHORT"
 timeout_s = 10
+
+[[components.shell_commands]]
+command_id = "core.status"
+command_version = 1
+service_id = "shell.component-host.core-status"
+service_version = 1
+argument_schema = "schemas/shell-core-status-arguments.json"
+management_operation_id = "runtime.status"
+target_scope = "BOT"
+service_class = "P0"
+required_capabilities = ["runtime.status.read"]
+output_policy = "SHORT"
+timeout_s = 10
+
+[[components.shell_commands]]
+command_id = "core.reload"
+command_version = 1
+service_id = "shell.component-host.core-reload"
+service_version = 1
+argument_schema = "schemas/shell-core-reload-arguments.json"
+management_operation_id = "runtime.graph.reload"
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["runtime.graph.reload"]
+option_aliases = [["expect-graph", "expected_graph_revision"]]
+output_policy = "SHORT"
+timeout_s = 20
+
+[[components.shell_commands]]
+command_id = "core.pause"
+command_version = 1
+service_id = "shell.component-host.core-maintenance"
+service_version = 1
+argument_schema = "schemas/shell-core-pause-arguments.json"
+management_operation_id = "runtime.maintenance"
+target_scope = "BOT"
+service_class = "P0"
+required_capabilities = ["runtime.maintenance"]
+option_aliases = [["expect-maintenance", "expected_maintenance_epoch"]]
+output_policy = "SHORT"
+timeout_s = 20
+
+[[components.shell_commands]]
+command_id = "core.resume"
+command_version = 1
+service_id = "shell.component-host.core-maintenance"
+service_version = 1
+argument_schema = "schemas/shell-core-resume-arguments.json"
+management_operation_id = "runtime.maintenance"
+target_scope = "BOT"
+service_class = "P0"
+required_capabilities = ["runtime.maintenance"]
+option_aliases = [["expect-maintenance", "expected_maintenance_epoch"]]
+output_policy = "SHORT"
+timeout_s = 20
 
 [[components.shell_commands]]
 command_id = "module.reload"

@@ -1511,6 +1511,51 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 for descriptor in host.registry.descriptors
                 if any(command.command_id == "module.list" for command in descriptor.shell_commands)
             ) == "component.worker-host"
+            assert {
+                command.command_id
+                for descriptor in host.registry.descriptors
+                if descriptor.component_id == "component.worker-host"
+                for command in descriptor.shell_commands
+            } >= {"core.status", "core.pause", "core.resume", "core.reload"}
+
+            async def core_command(command_id, arguments):
+                service_id = {
+                    "core.status": "shell.component-host.core-status",
+                    "core.pause": "shell.component-host.core-maintenance",
+                    "core.resume": "shell.component-host.core-maintenance",
+                    "core.reload": "shell.component-host.core-reload",
+                }[command_id]
+                handle = next(
+                    handle for key, handle in host.registry.contract_router._requests.items()
+                    if key[0] == "shell.command" and key[1] == service_id
+                )
+                request_id = "core-test:" + uuid4().hex
+                return await handle.invoke(
+                    ShellCommandExecutionRequest(
+                        command_id=command_id,
+                        command_version=1,
+                        arguments=arguments,
+                        request_id=request_id,
+                        principal_ref="qq:42",
+                        conversation_ref="onebot:group:933179609",
+                    ),
+                    operation_id=request_id,
+                    causal_root_kind="shell.request",
+                    causal_root_id=request_id,
+                    timeout_seconds=20,
+                )
+
+            assert "Graph r" in (await core_command("core.status", {})).text
+            maintenance_epoch = (await host._kernel.runtime.status())["maintenance_epoch"]
+            await core_command("core.pause", {"expected_maintenance_epoch": maintenance_epoch})
+            assert (await host._kernel.runtime.status())["data_admission"] is False
+            await core_command("core.resume", {"expected_maintenance_epoch": maintenance_epoch + 1})
+            assert (await host._kernel.runtime.status())["data_admission"] is True
+            with pytest.raises(ForestError) as core_reload_stale:
+                await core_command(
+                    "core.reload", {"expected_graph_revision": first_modules["graph_revision"] + 1}
+                )
+            assert core_reload_stale.value.code == "RUNTIME_GRAPH_REVISION_CONFLICT"
             async with host.store.pool.connection() as conn:
                 grants = await (
                     await conn.execute(

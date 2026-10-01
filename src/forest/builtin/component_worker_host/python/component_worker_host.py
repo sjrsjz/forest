@@ -118,6 +118,70 @@ class ComponentWorkerHost(Plugin):
             )
         }
 
+    @service("shell.component-host.core-status", semantics="read")
+    async def core_status(self, payload, ctx):
+        status = await ctx.services.call(
+            "runtime.status.snapshot",
+            {"protocol": "forest.runtime-status-snapshot-request/1"},
+            operation_id=ctx.operations.stable("core-status"),
+            timeout=10,
+        )
+        failures = [item for item in status["members"] if item["status"] != "ACTIVE"]
+        text = (
+            f"Forest {status['bot_id']}：{status['runtime_status']} / {status['graph_state']}；"
+            f"Graph r{status['graph_revision']}，{len(status['members'])} 个模块；"
+            f"DATA={'open' if status['data_admission'] else 'closed'}，"
+            f"CONTROL={'open' if status['control_admission'] else 'closed'}"
+        )
+        if failures:
+            text += f"；异常模块 {len(failures)} 个"
+        replacement = status["latest_replacement"]
+        if replacement is not None:
+            text += (
+                f"；最近重载={replacement['state']}"
+                f" operation={replacement['operation_id']}"
+            )
+            if replacement["error_code"]:
+                text += f" error={replacement['error_code']}"
+        return {"text": text}
+
+    @service("shell.component-host.core-reload", semantics="idempotent")
+    async def core_reload(self, payload, ctx):
+        saved = await ctx.services.call(
+            "runtime.graph-replacement.request",
+            {
+                "protocol": "forest.runtime-graph-replacement-request/2",
+                "operation_id": "shell-reload:" + payload["request_id"],
+                "expected_graph_revision": payload["arguments"]["expected_graph_revision"],
+                "requested_by": payload["principal_ref"],
+                "target_component_id": None,
+            },
+            operation_id=ctx.operations.stable("core-reload"),
+            timeout=10,
+        )
+        return {
+            "text": f"Forest RuntimeGraph reload {saved['state']}: "
+            f"operation={saved['operation_id']} activation={saved['activation_id']}"
+        }
+
+    @service("shell.component-host.core-maintenance", semantics="at-most-once")
+    async def core_maintenance(self, payload, ctx):
+        data_admission = payload["command_id"] == "core.resume"
+        saved = await ctx.services.call(
+            "runtime.maintenance.set",
+            {
+                "protocol": "forest.runtime-maintenance-set-request/1",
+                "expected_maintenance_epoch": payload["arguments"]["expected_maintenance_epoch"],
+                "data_admission": data_admission,
+            },
+            operation_id=ctx.operations.stable("core-maintenance"),
+            timeout=10,
+        )
+        return {
+            "text": f"Forest DATA admission 已{'恢复' if data_admission else '暂停'}；"
+            f"maintenance_epoch={saved['maintenance_epoch']}"
+        }
+
     @service("component.host.reload", semantics="read")
     async def reload_status(self, payload, ctx):
         saved = await ctx.queries.call("component.reload.read", payload)
@@ -298,7 +362,10 @@ class ComponentWorkerHost(Plugin):
                 "Kernel runtime status snapshot is invalid",
                 409,
             )
-        return {**status, "protocol": "forest.runtime-health-snapshot/1"}
+        return {
+            **{key: value for key, value in status.items() if key != "latest_replacement"},
+            "protocol": "forest.runtime-health-snapshot/1",
+        }
 
     @job("component.selection.submit")
     async def submit_selection(self, task, ctx):

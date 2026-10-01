@@ -62,6 +62,15 @@ def runtime_status_snapshot_service(context):
             "graph_state": status["graph_state"],
             "data_admission": status["data_admission"],
             "control_admission": status["control_admission"],
+            "latest_replacement": (
+                {
+                    "operation_id": status["latest_replacement"]["operation_id"],
+                    "state": status["latest_replacement"]["state"],
+                    "error_code": status["latest_replacement"]["error_code"],
+                }
+                if status["latest_replacement"] is not None
+                else None
+            ),
             "members": [
                 {
                     "component_id": item["component_id"],

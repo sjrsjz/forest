@@ -44,7 +44,7 @@ ShellGate 位于稳定内核边界，只做有界本地工作：确认完整前�
 #forest core reload --expect-graph <graph-revision>
 ```
 
-`status/cancel/disable` 可以声明 P0，`reload` 为 P1。首版 `core reload` 请求整个 RuntimeGraph 的代际替换，使用准确 graph revision CAS；单组件 reload 必须等 `component.worker-host` authority 落地后由组件生命周期动作提供，不能由 Shell 假装成局部替换。命令只写持久 replacement request 并返回，宿主监督循环在该 Shell operation 完成后领取请求，避免执行者同步排空自身造成死锁。`disable` 关闭当前 Bot 的 data admission 并保留 CONTROL，不等于卸载某个模块；模块停用使用模块自己的 lifecycle action。只有接纳时命中 `shell.command` 对当前 Binding/群生效的管理员策略，并通过 `kernel.authorization` 精确能力检查的主体才能保留 P0；否则命令拒绝或降为普通 P1 查询，不能仅凭文本或平台群角色取得保留槽。执行和回执前再次查询当前授权、Binding epoch、Host lease、目标 revision 和资源所有权。
+`status/cancel/disable` 可以声明 P0，`reload` 为 P1。`core.status/pause/resume/reload` 由 `component.worker-host` 包贡献，包内 Worker 通过受限 `kernel.runtime` 服务端口查询状态、以 maintenance epoch CAS 更改 DATA admission，或以 graph revision CAS 提交整图 replacement request；内核负责 HostLease 围栏与状态写入，不解析 Shell 命令。单组件 reload 由同包的 `module.reload` 生命周期动作提供，Shell 不把整图换代假装成局部替换。命令只写持久 replacement request 并返回，宿主监督循环在该 Shell operation 完成后领取请求，避免执行者同步排空自身造成死锁。`disable` 关闭当前 Bot 的 data admission 并保留 CONTROL，不等于卸载某个模块；模块停用使用模块自己的 lifecycle action。只有接纳时命中 `shell.command` 对当前 Binding/群生效的管理员策略，并通过 `kernel.authorization` 精确能力检查的主体才能保留 P0；否则命令拒绝或降为普通 P1 查询，不能仅凭文本或平台群角色取得保留槽。执行和回执前再次查询当前授权、Binding epoch、Host lease、目标 revision 和资源所有权。
 
 Core Gate 只规范化到既有 operation、Conversation Run 和 module lifecycle 权威。它不复制 Agent/Memory/Scheduler 状态机，不直接停止线程或改数据库行。正常模块不可用时，Core 命令仍能撤下路由、请求取消或读取最小健康信息。
 

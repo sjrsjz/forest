@@ -17,7 +17,6 @@ from forest.builtin_runtime_graph_snapshot import (
     runtime_graph_snapshot_service,
     runtime_status_snapshot_service,
 )
-from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS, runtime_shell_service
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
 from forest.errors import ForestError
 from forest.kernel_audit_participant import KernelAuditUnitOfWorkParticipant
@@ -149,10 +148,10 @@ _MODULES = {
             "runtime.graph-replacement.status",
             "runtime.graph.snapshot",
             "runtime.status.snapshot",
+            "runtime.maintenance.set",
             "runtime.component-candidate.preview",
             "deployment.package-registry.packages",
             "deployment.package-registry.artifact",
-            "shell.core-runtime.execute",
             "agent.tool.runtime-status",
         ),
         "capabilities": (
@@ -165,6 +164,7 @@ _MODULES = {
             "runtime.graph-replacement.status",
             "runtime.graph.snapshot",
             "runtime.status.snapshot",
+            "runtime.maintenance.set",
             "runtime.component-candidate.preview",
             "deployment.package-registry.packages",
             "deployment.package-registry.artifact",
@@ -329,10 +329,15 @@ def runtime_graph_replacement_request_service(context):
             or payload["expected_graph_revision"] <= 0
             or not isinstance(payload["requested_by"], str)
             or not 1 <= len(payload["requested_by"].encode()) <= 256
-            or not isinstance(payload["target_component_id"], str)
-            or re.fullmatch(
-                r"[a-z0-9][a-z0-9._-]{0,127}", payload["target_component_id"]
-            ) is None
+            or (
+                payload["target_component_id"] is not None
+                and (
+                    not isinstance(payload["target_component_id"], str)
+                    or re.fullmatch(
+                        r"[a-z0-9][a-z0-9._-]{0,127}", payload["target_component_id"]
+                    ) is None
+                )
+            )
             or (
                 frozen
                 and (
@@ -379,6 +384,37 @@ def runtime_graph_replacement_request_service(context):
         }
 
     return request
+
+
+def runtime_maintenance_set_service(context):
+    """Apply one fenced DATA admission transition; CONTROL remains available."""
+
+    runtime = context.participant("kernel.runtime").service
+
+    async def apply(payload):
+        if (
+            type(payload) is not dict
+            or set(payload) != {"protocol", "expected_maintenance_epoch", "data_admission"}
+            or payload["protocol"] != "forest.runtime-maintenance-set-request/1"
+            or type(payload["expected_maintenance_epoch"]) is not int
+            or payload["expected_maintenance_epoch"] <= 0
+            or type(payload["data_admission"]) is not bool
+        ):
+            raise ForestError(
+                "RUNTIME_MAINTENANCE_INPUT_INVALID", "Maintenance request is invalid", 422
+            )
+        saved = await runtime.set_data_admission(
+            context.host_lease,
+            expected_maintenance_epoch=payload["expected_maintenance_epoch"],
+            data_admission=payload["data_admission"],
+        )
+        return {
+            "protocol": "forest.runtime-maintenance-set-receipt/1",
+            "maintenance_epoch": saved["maintenance_epoch"],
+            "data_admission": saved["data_admission"],
+        }
+
+    return apply
 
 
 def runtime_graph_replacement_status_service(context):
@@ -847,12 +883,6 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                         runtime_status_tool_service,
                     ),
                     RuntimeKernelServiceSpec(
-                        "shell.core-runtime.execute",
-                        1,
-                        ("kernel.runtime",),
-                        runtime_shell_service,
-                    ),
-                    RuntimeKernelServiceSpec(
                         "runtime.graph.snapshot",
                         1,
                         ("kernel.runtime",),
@@ -863,6 +893,12 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                         1,
                         ("kernel.runtime",),
                         runtime_status_snapshot_service,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "runtime.maintenance.set",
+                        1,
+                        ("kernel.runtime",),
+                        runtime_maintenance_set_service,
                     ),
                     RuntimeKernelServiceSpec(
                         "runtime.component-candidate.preview",
@@ -903,9 +939,7 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
             ),
             agent_tools=((RUNTIME_STATUS_TOOL,) if component_id == "kernel.runtime" else ()),
             shell_commands=(
-                RUNTIME_SHELL_COMMANDS
-                if component_id == "kernel.runtime"
-                else AUDIT_SHELL_COMMANDS
+                AUDIT_SHELL_COMMANDS
                 if component_id == "kernel.audit"
                 else ()
             ),
