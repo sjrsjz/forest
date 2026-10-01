@@ -787,11 +787,21 @@ class AgentExecution:
                     and stored_request["state"] == "ATTEMPT_PREPARED"
                     else stable("model-attempt", request_id, attempt_no)
                 )
+                frozen_retry = (
+                    isinstance(stored_request, dict)
+                    and stored_request["state"] == "NOT_APPLIED"
+                )
+                is_repair = is_repair or (
+                    frozen_retry and stored_request["request_kind"] == "REPAIR"
+                )
                 repair = None
                 repair_of = None
                 memory_query_id = None
                 evidence_ref = None
-                if is_repair:
+                if frozen_retry:
+                    if is_repair:
+                        _, repair_of = await self.turns.repair_view(recovery)
+                elif is_repair:
                     repair, repair_of = await self.turns.repair_view(recovery)
                     snapshot = self._repair_snapshot(run, step_seq)
                     snapshot["bot_id"] = self.ctx.identity["bot_id"]
@@ -837,28 +847,36 @@ class AgentExecution:
                             request, owner, await self._run(run["run_id"]),
                             latest["state"], reload_operation,
                         )
-                invoked = await self.model.invoke(
-                    owner=owner,
-                    request_id=request_id,
-                    attempt_id=attempt_id,
-                    effect_operation_id=stable("model-effect", attempt_id),
-                    snapshot=snapshot,
-                    preset_context=[] if is_repair else preset_context,
-                    source_refs=source_refs,
-                    tools=declarations,
-                    evidence_ref=evidence_ref,
-                    memory_query_id=memory_query_id,
-                    repair=repair,
-                    output_tokens=self.config["output_tokens"],
-                    stream=self.config["stream"],
-                    request_kind=(
-                        "REPAIR"
-                        if is_repair
-                        else "PRIMARY"
-                        if step_seq == 1
-                        else "CONTINUATION"
-                    ),
-                )
+                if frozen_retry:
+                    invoked = await self.model.retry_frozen(
+                        owner=owner,
+                        request_id=request_id,
+                        attempt_id=attempt_id,
+                        effect_operation_id=stable("model-effect", attempt_id),
+                    )
+                else:
+                    invoked = await self.model.invoke(
+                        owner=owner,
+                        request_id=request_id,
+                        attempt_id=attempt_id,
+                        effect_operation_id=stable("model-effect", attempt_id),
+                        snapshot=snapshot,
+                        preset_context=[] if is_repair else preset_context,
+                        source_refs=source_refs,
+                        tools=declarations,
+                        evidence_ref=evidence_ref,
+                        memory_query_id=memory_query_id,
+                        repair=repair,
+                        output_tokens=self.config["output_tokens"],
+                        stream=self.config["stream"],
+                        request_kind=(
+                            "REPAIR"
+                            if is_repair
+                            else "PRIMARY"
+                            if step_seq == 1
+                            else "CONTINUATION"
+                        ),
+                    )
                 if invoked["status"] == "UNKNOWN":
                     return self._result(
                         request,

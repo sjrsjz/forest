@@ -3752,6 +3752,12 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                     assert failed == {
                         "state": "FAILED", "error_code": "AGENT_MODEL_TRANSPORT_FAILED"
                     }
+                    assert len(RecordingModelClient.requests) == 3
+                    assert len({item.payload_digest for item in RecordingModelClient.requests}) == 1
+                    assert all(
+                        item.body == prepared.body
+                        for item in RecordingModelClient.requests
+                    )
         if scenario == "cross-group":
             await clients[-1].handler(json.dumps({
                 "self_id": int(settings.onebot_self_id), "post_type": "message",

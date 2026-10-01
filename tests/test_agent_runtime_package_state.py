@@ -473,6 +473,13 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             owner_id="model-request/package/1",
             value=b'{"messages":[{"role":"user","content":"A"}]}',
         )
+        initial_wire = await _payload(
+            kernel,
+            owner_component_id="agent.runtime",
+            owner_kind="model.wire",
+            owner_id="model-attempt/package/1",
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
         request_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -492,6 +499,8 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "instruction_channel": "SYSTEM",
                     "capability_digest": digest_json({"capability": "text"}),
                     "projection": projection.canonical(),
+                    "first_attempt_id": "model-attempt/package/1",
+                    "initial_wire": initial_wire.canonical(),
                     "projected_content_digest": digest_json({"content": "A"}),
                     "source_manifest_digest": digest_json({"source": "context"}),
                     "learning_candidates": [],
@@ -815,6 +824,13 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             owner_id="model-request/package/repair",
             value=b'{"messages":[{"role":"user","content":"repair"}]}',
         )
+        repair_initial_wire = await _payload(
+            kernel,
+            owner_component_id="agent.runtime",
+            owner_kind="model.wire",
+            owner_id="model-attempt/package/repair",
+            value=b'{"model":"model/package-test","repair":true}',
+        )
         repair_request_envelope = {
             **request_envelope,
             "input": {
@@ -824,6 +840,8 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "request_id": "model-request/package/repair",
                     "request_kind": "REPAIR",
                     "projection": repair_projection.canonical(),
+                    "first_attempt_id": "model-attempt/package/repair",
+                    "initial_wire": repair_initial_wire.canonical(),
                     "projected_content_digest": digest_json({"content": "repair"}),
                 },
             },

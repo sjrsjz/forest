@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.17.1"
+version = "4.18.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -44,6 +44,7 @@ requests = [
   "domain.query:agent.run-snapshot",
   "domain.query:agent.run-recovery",
   "domain.query:agent.execution-history",
+  "domain.query:agent.frozen-model-retry",
   "uow.execute:agent.start-run",
   "uow.execute:agent.start-from-conversation",
   "uow.execute:agent.append-run-input",
@@ -157,9 +158,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.12.1"
+schema_version = "2.14.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "b1138b36f8e74ef44d43f68bdb9eab32b4eb29ea5dfda2b79438aa3f65a2a28a"
+baseline_sha256 = "0a062b3c7371dc32c15ffa972008c322fa78de71e4b60c63309d8211636e011f"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -191,6 +192,13 @@ contract = "1.0"
 function = "agent_replacement_guard"
 input_schema = "schemas/replacement-guard-input.json"
 output_schema = "schemas/replacement-guard-output.json"
+
+[[components.domain_queries]]
+name = "agent.frozen-model-retry"
+contract = "1.0"
+function = "agent_frozen_model_retry"
+input_schema = "schemas/frozen-model-retry-input.json"
+output_schema = "schemas/frozen-model-retry-output.json"
 
 [[components.unit_of_work_participants]]
 name = "agent.start-run-record"
@@ -357,6 +365,12 @@ path = "/input/request/projection"
 owner_component_path = "/input/request/projection/owner_component_id"
 owner_kind = "model.projection"
 owner_id_path = "/input/request/projection/owner_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/request/initial_wire"
+owner_component_path = "/input/request/initial_wire/owner_component_id"
+owner_kind = "model.wire"
+owner_id_path = "/input/request/first_attempt_id"
 
 [[components.unit_of_work_participants]]
 name = "agent.prepare-model-attempt-record"

@@ -42,12 +42,24 @@
       },
       "additionalProperties": false
     },
+    "wire_payload": {
+      "type": "object",
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"const": "agent.runtime"},
+        "owner_kind": {"const": "model.wire"},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
     "request": {
       "type": "object",
       "required": [
         "request_id", "request_kind", "provider_component_id", "provider_generation_id",
         "provider_profile_ref", "model_ref", "instruction_channel", "capability_digest",
-        "projection", "projected_content_digest", "source_manifest_digest",
+        "projection", "first_attempt_id", "initial_wire", "projected_content_digest", "source_manifest_digest",
         "learning_candidates", "output_token_budget"
       ],
       "properties": {
@@ -60,6 +72,8 @@
         "instruction_channel": {"enum": ["SYSTEM", "DEVELOPER", "INSTRUCTIONS", "DEGRADED_USER"]},
         "capability_digest": {"$ref": "#/$defs/digest"},
         "projection": {"$ref": "#/$defs/payload"},
+        "first_attempt_id": {"$ref": "#/$defs/id"},
+        "initial_wire": {"$ref": "#/$defs/wire_payload"},
         "projected_content_digest": {"$ref": "#/$defs/digest"},
         "source_manifest_digest": {"$ref": "#/$defs/digest"},
         "learning_candidates": {

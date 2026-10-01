@@ -144,6 +144,32 @@ class ModelExecution:
             )
         return graph_id, graph_revision, bot_id
 
+    async def _profile(self, request_id: str) -> tuple[dict, ModelCapabilities]:
+        profile = await self.ctx.services.call(
+            "provider.profile.bind",
+            {"protocol": "forest.provider-bind-request/1", "request_id": request_id},
+            operation_id=self.ctx.operations.stable(f"provider-bind:{request_id}"),
+            timeout=15,
+        )
+        if (
+            profile.get("protocol") != "forest.provider-profile/1"
+            or profile.get("request_id") != request_id
+            or profile.get("component_id") != "provider.chat-completions"
+        ):
+            raise ForestError(
+                "PROVIDER_PROFILE_FENCE_MISMATCH",
+                "Provider profile differs from the requested model step",
+                409,
+            )
+        target = ModelCapabilities(**profile["capabilities"])
+        if _digest(target.as_dict()) != profile["capability_digest"]:
+            raise ForestError(
+                "PROVIDER_PROFILE_FENCE_MISMATCH",
+                "Provider capabilities differ from their bound digest",
+                409,
+            )
+        return profile, target
+
     async def invoke(
         self,
         *,
@@ -163,30 +189,8 @@ class ModelExecution:
         request_kind: str,
     ) -> dict:
         graph_id, graph_revision, bot_id = self._identity()
-        profile = await self.ctx.services.call(
-            "provider.profile.bind",
-            {"protocol": "forest.provider-bind-request/1", "request_id": request_id},
-            operation_id=self.ctx.operations.stable(f"provider-bind:{request_id}"),
-            timeout=15,
-        )
-        if (
-            profile.get("protocol") != "forest.provider-profile/1"
-            or profile.get("request_id") != request_id
-            or profile.get("component_id") != "provider.chat-completions"
-        ):
-            raise ForestError(
-                "PROVIDER_PROFILE_FENCE_MISMATCH",
-                "Provider profile differs from the requested model step",
-                409,
-            )
+        profile, target = await self._profile(request_id)
         capabilities = profile["capabilities"]
-        target = ModelCapabilities(**capabilities)
-        if _digest(target.as_dict()) != profile["capability_digest"]:
-            raise ForestError(
-                "PROVIDER_PROFILE_FENCE_MISMATCH",
-                "Provider capabilities differ from their bound digest",
-                409,
-            )
         images = {}
         media_parents = []
         seen_media = set()
@@ -358,6 +362,8 @@ class ModelExecution:
                     }[capabilities["system_role"]],
                     "capability_digest": profile["capability_digest"],
                     "projection": materialized["projection"],
+                    "first_attempt_id": attempt_id,
+                    "initial_wire": materialized["wire"],
                     "projected_content_digest": materialized["projected_content_digest"],
                     "source_manifest_digest": materialized["source_manifest_digest"],
                     "learning_candidates": _learning_candidates(manifest),
@@ -367,6 +373,110 @@ class ModelExecution:
             operation_id=self.ctx.operations.stable(f"model-request:{request_id}"),
             timeout=15,
         )
+        return await self._dispatch_attempt(
+            graph_id=graph_id,
+            graph_revision=graph_revision,
+            bot_id=bot_id,
+            profile=profile,
+            materialized=materialized,
+            owner=owner,
+            request_id=request_id,
+            attempt_id=attempt_id,
+            effect_operation_id=effect_operation_id,
+        )
+
+    async def retry_frozen(
+        self, *, owner: dict, request_id: str, attempt_id: str,
+        effect_operation_id: str,
+    ) -> dict:
+        """Retry a proven unsent attempt with the original projected bytes."""
+
+        graph_id, graph_revision, bot_id = self._identity()
+        profile, target = await self._profile(request_id)
+        frozen = await self.ctx.queries.call(
+            "agent.frozen-model-retry",
+            {"run_id": owner["run_id"], "request_id": request_id},
+        )
+        if (
+            frozen["request_id"] != request_id
+            or frozen["provider_generation_id"] != profile["generation_id"]
+            or frozen["provider_profile_ref"] != profile["profile_ref"]
+            or frozen["capability_digest"] != profile["capability_digest"]
+            or frozen["model_ref"] != target.model
+            or frozen["projection"]["owner_id"] != request_id
+        ):
+            raise ForestError(
+                "MODEL_REQUEST_PROVIDER_REBIND_REQUIRED",
+                "Frozen request is bound to another Provider Generation or profile",
+                409,
+            )
+        projection_bytes = await self.ctx.payloads.read_bytes(frozen["projection"])
+        wire_bytes = await self.ctx.payloads.read_bytes(frozen["wire"])
+        try:
+            manifest = json.loads(projection_bytes)
+            body = json.loads(wire_bytes)
+        except (TypeError, ValueError) as exc:
+            raise ForestError(
+                "AGENT_FROZEN_MODEL_INVALID",
+                "Frozen model Payload is not valid JSON",
+                409,
+            ) from exc
+        if (
+            not isinstance(manifest, dict)
+            or not isinstance(body, dict)
+            or manifest.get("request_id") != request_id
+            or manifest.get("projected_content_digest")
+                != frozen["projected_content_digest"]
+            or _digest(manifest.get("source_manifest"))
+                != frozen["source_manifest_digest"]
+            or body.get("model") != target.model
+            or type(body.get("stream")) is not bool
+            or body.get(target.output_token_parameter)
+                != frozen["output_token_budget"]
+            or not isinstance(manifest.get("serializer_revision"), str)
+        ):
+            raise ForestError(
+                "AGENT_FROZEN_MODEL_INVALID",
+                "Frozen projection or wire differs from its request identity",
+                409,
+            )
+        wire = await self.ctx.payloads.put_bytes(
+            wire_bytes,
+            owner_kind="model.wire",
+            owner_id=attempt_id,
+            media_type="application/json",
+            parents=(frozen["projection"], frozen["wire"]),
+        )
+        if wire["digest"] != frozen["wire"]["digest"]:
+            raise ForestError(
+                "AGENT_FROZEN_MODEL_INVALID",
+                "Retried wire differs from the proven unsent attempt",
+                409,
+            )
+        materialized = {
+            "projection": frozen["projection"],
+            "wire": wire,
+            "max_output_tokens": frozen["output_token_budget"],
+            "stream": body["stream"],
+            "serializer_revision": manifest["serializer_revision"],
+        }
+        return await self._dispatch_attempt(
+            graph_id=graph_id,
+            graph_revision=graph_revision,
+            bot_id=bot_id,
+            profile=profile,
+            materialized=materialized,
+            owner=owner,
+            request_id=request_id,
+            attempt_id=attempt_id,
+            effect_operation_id=effect_operation_id,
+        )
+
+    async def _dispatch_attempt(
+        self, *, graph_id: str, graph_revision: int, bot_id: str,
+        profile: dict, materialized: dict, owner: dict, request_id: str,
+        attempt_id: str, effect_operation_id: str,
+    ) -> dict:
         input_digest = _digest(
             {
                 "profile_ref": profile["profile_ref"],

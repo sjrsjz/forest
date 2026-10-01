@@ -56,6 +56,8 @@ Context 快照正文不穿过 Worker 控制帧。Conversation Worker 以最多 3
 
 Agent 的恢复读取和模型写入都属于 `agent.runtime` 包内端口，不能由宿主 Repository 暴露表行。`agent.run-recovery/1` 只返回状态机继续执行所需的稳定事实。建立一次模型调用先以 `agent.prepare-model-request/1` 冻结 Provider Generation、投影和输入 fence，再以 `agent.prepare-model-effect/1` 在同一事务内签发准确 audience 的授权票据、建立 Kernel Effect permit 并写入 Agent Attempt；不存在可由 Worker 单独调用的 Attempt 准备端口。外部 HTTP 前必须提交 `agent.handoff-model-effect/1`，它在同一事务内把 Effect、Attempt、Request 和 Run 推进到 `DISPATCHING/DISPATCHING/DISPATCHING/MODEL_PENDING`；任一 participant 拒绝时全部回滚。Provider 返回后只允许提交 `agent.observe-model-effect/1`，Kernel Effect 与 Agent observation 必须具有相同 attempt、operation、状态和证据类别并原子收敛为 `PARSING`、`PREPARING_MODEL` 或 `BLOCKED_UNKNOWN`。一旦 handoff 提交，重启或热重载只能查询原 Effect，不能更换 operation 重发；`UNKNOWN` 只有带查询证据的 `RECONCILIATION` 可以收敛成成功或明确未发送。相同稳定身份与相同内容可重放原事实，任何字段变化都冲突；PayloadRef 由 manifest 声明的 provenance 规则在进入包 SQL 前验证。Provider 只验证冻结引用并执行网络效果，不选择上下文内容、不读取或裁决上下文预算。
 
+同一 Request 的 Attempt 若有明确 `NOT_APPLIED` 证据，下一次 Attempt 通过 `agent.frozen-model-retry` 只读端口取得该 Request 首次 `model.wire` 和 `model.projection` 的不可变 Agent PayloadRef。端口要求所有既有 Attempt 均为 `NOT_APPLIED`；Agent 将原 wire 字节原样复制为新 Attempt 的 `model.wire`，并建立到初始 wire 和投影的父链，不再执行记忆召回、Context 读取或模型投影。`model_requests` 固定首次 wire 引用；Attempt 表里的 `kernel.effect/effect.wire` 只表示内核副作用命令，不能充当 Provider 请求正文。此路径仍要求旧 Provider Generation 和 profile 可用，跨 Provider Generation 的继承另按下述协议处理。
+
 模型请求已冻结旧 Provider Generation 且尚未终结时，新 Agent 可以在保留该 Provider Generation 的定向替换后继续；若同一次 Graph 替换还要移除旧 Provider，Agent 包的 `agent.replacement-guard` 在旧图排空后拒绝发布，旧图恢复后继续原请求。不得让新代用新 Provider 身份重建同一个 request ID，或把 `MODEL_REQUEST_ID_CONFLICT` 当作调度暂时失败反复重试。要允许两者同时换代，必须完成下述请求继承协议；目前守卫仍拒绝该情形。
 
 ### 已确定未发送请求的跨 Provider Generation 继承（待实现）

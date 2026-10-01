@@ -239,6 +239,16 @@ CREATE TABLE model_requests (
         CHECK (octet_length(projection_owner_kind) BETWEEN 1 AND 128),
     projection_owner_id text NOT NULL
         CHECK (octet_length(projection_owner_id) BETWEEN 1 AND 512),
+    initial_wire_payload_id text NOT NULL
+        CHECK (octet_length(initial_wire_payload_id) BETWEEN 1 AND 256),
+    initial_wire_payload_digest text NOT NULL
+        CHECK (initial_wire_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    initial_wire_owner_component_id text NOT NULL
+        CHECK (initial_wire_owner_component_id='agent.runtime'),
+    initial_wire_owner_kind text NOT NULL
+        CHECK (initial_wire_owner_kind='model.wire'),
+    initial_wire_owner_id text NOT NULL
+        CHECK (octet_length(initial_wire_owner_id) BETWEEN 1 AND 512),
     projected_content_digest text NOT NULL
         CHECK (projected_content_digest ~ '^sha256:[a-f0-9]{64}$'),
     source_manifest_digest text NOT NULL CHECK (source_manifest_digest ~ '^sha256:[a-f0-9]{64}$'),
@@ -613,7 +623,10 @@ BEGIN
            NEW.provider_generation_id,NEW.provider_profile_ref,NEW.model_ref,
            NEW.instruction_channel,NEW.capability_digest,NEW.projection_payload_id,
            NEW.projection_payload_digest,NEW.projection_owner_component_id,
-           NEW.projection_owner_kind,NEW.projection_owner_id,NEW.projected_content_digest,
+           NEW.projection_owner_kind,NEW.projection_owner_id,
+           NEW.initial_wire_payload_id,NEW.initial_wire_payload_digest,
+           NEW.initial_wire_owner_component_id,NEW.initial_wire_owner_kind,
+           NEW.initial_wire_owner_id,NEW.projected_content_digest,
            NEW.source_manifest_digest,NEW.learning_candidates,
            NEW.output_token_budget,NEW.created_at)
        IS DISTINCT FROM
@@ -624,7 +637,10 @@ BEGIN
            OLD.provider_generation_id,OLD.provider_profile_ref,OLD.model_ref,
            OLD.instruction_channel,OLD.capability_digest,OLD.projection_payload_id,
            OLD.projection_payload_digest,OLD.projection_owner_component_id,
-           OLD.projection_owner_kind,OLD.projection_owner_id,OLD.projected_content_digest,
+           OLD.projection_owner_kind,OLD.projection_owner_id,
+           OLD.initial_wire_payload_id,OLD.initial_wire_payload_digest,
+           OLD.initial_wire_owner_component_id,OLD.initial_wire_owner_kind,
+           OLD.initial_wire_owner_id,OLD.projected_content_digest,
            OLD.source_manifest_digest,OLD.learning_candidates,
            OLD.output_token_budget,OLD.created_at) THEN
         RAISE EXCEPTION 'Model request identity is immutable' USING ERRCODE='55000';
@@ -1376,6 +1392,7 @@ DECLARE
     owner_value jsonb := body->'owner';
     request_value jsonb := body->'request';
     projection_value jsonb := request_value->'projection';
+    initial_wire_value jsonb := request_value->'initial_wire';
     requested_bot text := context->>'bot_id';
     requested_run text := owner_value->>'run_id';
     requested_owner text := owner_value->>'owner_id';
@@ -1392,6 +1409,9 @@ BEGIN
        OR projection_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
        OR projection_value->>'owner_kind' IS DISTINCT FROM 'model.projection'
        OR projection_value->>'owner_id' IS DISTINCT FROM requested_request
+       OR initial_wire_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR initial_wire_value->>'owner_kind' IS DISTINCT FROM 'model.wire'
+       OR initial_wire_value->>'owner_id' IS DISTINCT FROM request_value->>'first_attempt_id'
        OR jsonb_typeof(request_value->'learning_candidates') IS DISTINCT FROM 'array'
        OR jsonb_array_length(request_value->'learning_candidates')>64
        OR (request_value->>'request_kind'='REPAIR'
@@ -1439,6 +1459,12 @@ BEGIN
                 IS DISTINCT FROM projection_value->>'owner_component_id'
            OR existing.projection_owner_kind IS DISTINCT FROM projection_value->>'owner_kind'
            OR existing.projection_owner_id IS DISTINCT FROM projection_value->>'owner_id'
+           OR existing.initial_wire_payload_id IS DISTINCT FROM initial_wire_value->>'payload_id'
+           OR existing.initial_wire_payload_digest IS DISTINCT FROM initial_wire_value->>'digest'
+           OR existing.initial_wire_owner_component_id
+                IS DISTINCT FROM initial_wire_value->>'owner_component_id'
+           OR existing.initial_wire_owner_kind IS DISTINCT FROM initial_wire_value->>'owner_kind'
+           OR existing.initial_wire_owner_id IS DISTINCT FROM initial_wire_value->>'owner_id'
            OR existing.projected_content_digest
                 IS DISTINCT FROM request_value->>'projected_content_digest'
            OR existing.source_manifest_digest
@@ -1504,6 +1530,8 @@ BEGIN
         provider_generation_id,provider_profile_ref,model_ref,instruction_channel,
         capability_digest,projection_payload_id,projection_payload_digest,
         projection_owner_component_id,projection_owner_kind,projection_owner_id,
+        initial_wire_payload_id,initial_wire_payload_digest,
+        initial_wire_owner_component_id,initial_wire_owner_kind,initial_wire_owner_id,
         projected_content_digest,source_manifest_digest,learning_candidates,
         output_token_budget
     ) VALUES (
@@ -1516,7 +1544,10 @@ BEGIN
         request_value->>'instruction_channel',request_value->>'capability_digest',
         projection_value->>'payload_id',projection_value->>'digest',
         projection_value->>'owner_component_id',projection_value->>'owner_kind',
-        projection_value->>'owner_id',request_value->>'projected_content_digest',
+        projection_value->>'owner_id',
+        initial_wire_value->>'payload_id',initial_wire_value->>'digest',
+        initial_wire_value->>'owner_component_id',initial_wire_value->>'owner_kind',
+        initial_wire_value->>'owner_id',request_value->>'projected_content_digest',
         request_value->>'source_manifest_digest',
         request_value->'learning_candidates',
         (request_value->>'output_token_budget')::integer
@@ -4804,6 +4835,88 @@ BEGIN
         'value',jsonb_build_object(
             'protocol','forest.replacement-guard/1',
             'safe',blockers=0,'blocker_count',blockers
+        )
+    );
+END;
+$$;
+
+CREATE FUNCTION agent_frozen_model_retry(context jsonb, input jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+STABLE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    request_row record;
+    attempt_row record;
+BEGIN
+    SELECT request.* INTO request_row
+    FROM __forest_module_schema__.model_requests request
+    JOIN __forest_module_schema__.agent_runs run
+      ON run.bot_id=request.bot_id AND run.run_id=request.run_id
+    WHERE request.bot_id=context->>'bot_id'
+      AND request.run_id=input->>'run_id'
+      AND request.request_id=input->>'request_id'
+      AND request.state='NOT_APPLIED'
+      AND run.state='PREPARING_MODEL'
+      AND run.current_model_request_id=request.request_id;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_FROZEN_RETRY_UNAVAILABLE',
+                'message','Model request is not at a frozen retry boundary','status',409
+            )
+        );
+    END IF;
+    SELECT * INTO attempt_row
+    FROM __forest_module_schema__.model_transport_attempts
+    WHERE bot_id=context->>'bot_id'
+      AND attempt_id=request_row.current_attempt_id
+      AND request_id=request_row.request_id
+      AND attempt_no=request_row.attempt_count
+      AND state='NOT_APPLIED'
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.model_transport_attempts prior
+          WHERE prior.bot_id=request_row.bot_id
+            AND prior.request_id=request_row.request_id
+            AND prior.state<>'NOT_APPLIED'
+      );
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_FROZEN_RETRY_UNAVAILABLE',
+                    'message','Model attempt has no unsent evidence','status',409
+            )
+        );
+    END IF;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.agent-frozen-model-retry/1',
+            'request_id',request_row.request_id,
+            'provider_generation_id',request_row.provider_generation_id,
+            'provider_profile_ref',request_row.provider_profile_ref,
+            'model_ref',request_row.model_ref,
+            'capability_digest',request_row.capability_digest,
+            'projection',jsonb_build_object(
+                'payload_id',request_row.projection_payload_id,
+                'digest',request_row.projection_payload_digest,
+                'owner_component_id',request_row.projection_owner_component_id,
+                'owner_kind',request_row.projection_owner_kind,
+                'owner_id',request_row.projection_owner_id
+            ),
+            'wire',jsonb_build_object(
+                'payload_id',request_row.initial_wire_payload_id,
+                'digest',request_row.initial_wire_payload_digest,
+                'owner_component_id',request_row.initial_wire_owner_component_id,
+                'owner_kind',request_row.initial_wire_owner_kind,
+                'owner_id',request_row.initial_wire_owner_id
+            ),
+            'output_token_budget',request_row.output_token_budget,
+            'projected_content_digest',request_row.projected_content_digest,
+            'source_manifest_digest',request_row.source_manifest_digest
         )
     );
 END;
