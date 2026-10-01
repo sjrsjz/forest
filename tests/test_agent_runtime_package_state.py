@@ -753,7 +753,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         }
         effect_participant = registry.get("kernel.effect").unit_of_work_participant()
 
-        async def inherit_in(conn, label):
+        async def inherit_in(conn, label, operation_id):
             proof = await effect_participant.invoke_in(
                 conn, "effect.prove-not-applied",
                 {"protocol": "forest.uow-step/1", "caller": caller,
@@ -766,46 +766,55 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             return await participant.invoke_in(
                 conn, "agent.inherit-model-request-record",
                 {**concurrent_inheritance, "prior": {"effect": proof}},
-                operation_id="agent-inherit/package/inheritance-race",
+                operation_id=operation_id,
                 causal_root_kind="agent.execute", causal_root_id=concurrent_run_id,
                 parent_call_id="call:agent-package/inheritance-race/" + label,
                 timeout_seconds=10,
             )
 
-        async def blocked_inheritor():
+        async def blocked_inheritor(label, operation_id):
             async with store.pool.connection() as conn, conn.transaction():
                 await conn.execute("SET LOCAL application_name = 'forest-inheritance-race'")
-                return await inherit_in(conn, "second")
+                return await inherit_in(conn, label, operation_id)
 
         namespace = package.descriptor.storage.spec.namespace
+        shared_operation = "agent-inherit/package/inheritance-race"
         async with store.pool.connection() as first_conn, first_conn.transaction():
             await first_conn.execute(
                 sql.SQL("SELECT run_id FROM {}.agent_runs WHERE bot_id=%s "
                         "AND run_id=%s FOR UPDATE").format(sql.Identifier(namespace)),
                 (store.bot_id, concurrent_run_id),
             )
-            second_task = asyncio.create_task(blocked_inheritor())
+            second_task = asyncio.create_task(blocked_inheritor("second", shared_operation))
+            competing_task = asyncio.create_task(blocked_inheritor(
+                "competing", "agent-inherit/package/inheritance-race-competing",
+            ))
             try:
                 async def wait_for_run_lock():
                     while True:
                         async with store.pool.connection() as observer:
                             row = await (await observer.execute(
-                                "SELECT wait_event_type FROM pg_stat_activity "
-                                "WHERE application_name='forest-inheritance-race'"
+                                "SELECT count(*) AS waiting FROM pg_stat_activity "
+                                "WHERE application_name='forest-inheritance-race' "
+                                "AND wait_event_type='Lock'"
                             )).fetchone()
-                        if row is not None and row["wait_event_type"] == "Lock":
+                        if row["waiting"] == 2:
                             return
                         await asyncio.sleep(0.05)
 
                 await asyncio.wait_for(wait_for_run_lock(), timeout=8)
-                first_result = await inherit_in(first_conn, "first")
+                first_result = await inherit_in(first_conn, "first", shared_operation)
                 assert first_result["request_id"] == concurrent_successor_id
             except BaseException:
                 second_task.cancel()
-                await asyncio.gather(second_task, return_exceptions=True)
+                competing_task.cancel()
+                await asyncio.gather(second_task, competing_task, return_exceptions=True)
                 raise
         second_result = await second_task
         assert second_result == first_result
+        with pytest.raises(ForestError) as competing:
+            await competing_task
+        assert competing.value.code == "AGENT_MODEL_INHERITANCE_BOUNDARY_CLOSED"
         async with store.pool.connection() as conn:
             rows = await (await conn.execute(
                 sql.SQL("SELECT request_id,state FROM {}.model_requests "

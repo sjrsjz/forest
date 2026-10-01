@@ -55,9 +55,9 @@
 | OneBot adapter | `adapter_onebot` | Binding、入站投影与发送语义在 Worker；WebSocket 在 Generation Driver |
 | Agent | `agent_runtime` | CorePrompt、模型/工具循环、审批与 reload 恢复均在隔离 Worker 和包私有 SQL 内 |
 | Conversation | `conversation_scheduler` | 同群串行、跨群并发、安全边界合流、静默归档和上下文裁剪 |
-| Memory | `memory_graph` | 多主干来源、图文嵌入、精确召回、固定匹配、按需图区域读取及检索区域冻结；规范图文证据物化已接入；Agent 语义接入待补齐 |
+| Memory | `memory_graph` | 多主干来源、图文 DOCUMENT/QUERY 嵌入、独立 ref 向量索引、精确/语义召回、有界图扩散、检索区域冻结及图文证据已接入 Agent；剩余实网与长期验收见下表 |
 
-向量索引的 `upsert/search` 契约现为 major 2：Milvus 只保存 `ref_id`、Bot/空间/用途路由字段和向量，ANN 只返回 ref 与分数；群来源、修订、作者和模态均由 Memory 按 ref 在 PostgreSQL 权威表复核。collection 名称按新布局分代，避免旧列布局在热重载或重建时被误用。此收敛移除了管理试验查询必须伪造来源才能写入索引的协议障碍；试验的嵌入 claim、Provider 输入、发布资格和 owned-work 尚未接通。
+向量索引的 `upsert/search` 契约现为 major 2：Milvus 只保存 `ref_id`、Bot/空间/用途路由字段和向量，ANN 只返回 ref 与分数；群来源、修订、作者和模态均由 Memory 按 ref 在 PostgreSQL 权威表复核。collection 名称按新布局分代，避免旧列布局在热重载或重建时被误用。管理试验已改用独立临时输入，经同一 QUERY facet 嵌入、索引、召回、冻结和证据链；真实 VL 供应商加 Milvus 的隔离验证已通过，浏览器授权与长期负载仍需验收。
 
 内核的 Runtime、Payload、Authorization、Effect 与 Audit Authority 仍是可信微内核组件。它们不是可卸载业务插件，也不应迁入 `builtin`。
 
@@ -507,7 +507,7 @@ Official builtin bootstrap declaration (2026-10-01): provider_chat_completions, 
 
 冻结模型请求的持久阻断（2026-10-01）：Agent Worker 在发布后恢复冻结请求时，仅对确定性的 Provider profile 不兼容或冻结载荷损坏，通过包声明的 `agent.block-frozen-model` UnitOfWork 写入 `BLOCKED_UNKNOWN` checkpoint、请求头与明确错误码；后续领取返回同一诊断，不盲目重建请求或派发 Effect。暂时性 I/O 与事务失败继续沿原 operation 重试或对账。隔离 PostgreSQL 的包状态/幂等回放用例 `1 passed`，完整 21 组件 Graph 热替换回归 `1 passed`，包工件构建与 Ruff 通过。并发继承合流、回执丢失重放、首个新 Effect 失败和多次 Provider 换代仍待验收；在线 Supervisor 未切换。
 
-继承并发合流（2026-10-02）：`agent_inherit_model_request` 现先锁当前 Run 再读取继承操作账本，避免第二个事务在等锁前读到“操作不存在”、等首笔提交后把同一操作误判为边界关闭。真实 PostgreSQL 双连接用例强制第二个调用等待 Run 锁，确认两者返回同一后继且只留下一个继承事实、旧请求 `ABANDONED` 和新请求 `READY`；Agent 包状态用例 `1 passed`，完整 Graph 热替换回归 `1 passed`（117.96 秒），包工件检查及 Ruff 通过。不同 operation 竞争、丢失回执重放和多次 Provider 换代仍待验收，在线 Supervisor 未切换。
+继承并发合流（2026-10-02）：`agent_inherit_model_request` 先锁当前 Run 再读取继承操作账本，避免等待锁的事务在首笔提交后将同一操作误判为边界关闭。真实 PostgreSQL 三连接用例强制两笔继承同时等待 Run 锁：同 operation 返回同一后继，不同 operation 收到 `AGENT_MODEL_INHERITANCE_BOUNDARY_CLOSED`，最终只有一个继承事实、旧请求 `ABANDONED` 和新请求 `READY`（Agent 包状态用例 `1 passed`，33.38 秒）。完整 Graph 热替换回归此前通过（`1 passed`，117.96 秒）；丢失回执重放和多次 Provider 换代仍待验收。22 组件候选版本已在线，实网群触发到回复尚未验收。
 
 官方 builtin 自动装配第一段（2026-10-02）：包 manifest 新增 `components.auto_install=true`；当时仅用于带包内首次配置、Bot 范围且没有宿主 Effect 服务的官方包。组合根按包声明发现并安装 `routing.graph`、`codec.onebot`、`conversation.scheduler`，三个包的首次配置移入各自 `bootstrap.json`，对应逐包安装代码已删除。包目录回归 `89 passed`，完整隔离 PostgreSQL Bot Graph 热替换与消息链路 `1 passed`（117.27 秒），Ruff 通过。Effect 服务的自动安装见下段；Worker Host 选择账本仍须先引导，在线 Supervisor 未切换。
 
