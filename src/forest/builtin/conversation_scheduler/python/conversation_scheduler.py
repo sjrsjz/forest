@@ -86,7 +86,7 @@ class ConversationScheduler(Plugin):
             timeout=30,
         )
         if result["status"] == "BATCH":
-            if result["kind"] != "CONTEXT_PREFILL" or len(result["event_ids"]) > 64:
+            if result["kind"] not in {"CONTEXT_PREFILL", "RECOVERY_PREFILL"} or len(result["event_ids"]) > 64:
                 raise ForestError(
                     "CONVERSATION_PREFILL_RESULT_INVALID",
                     "Context prefill returned an invalid batch",

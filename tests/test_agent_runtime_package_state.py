@@ -1,6 +1,6 @@
 import asyncio
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 from psycopg import sql
+from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
@@ -203,15 +204,25 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
-    registry = RuntimeModuleRegistry(
-        host,
-        (
-            *kernel.descriptors,
-            conversation_package.descriptor,
-            memory_package.descriptor,
-            package.descriptor,
-        ),
+    descriptors = (
+        *kernel.descriptors,
+        conversation_package.descriptor,
+        memory_package.descriptor,
+        package.descriptor,
     )
+    # This fixture omits other official packages; retain only dependencies
+    # whose Generations are actually assembled here.
+    available = {descriptor.component_id for descriptor in descriptors}
+    isolated_descriptors = tuple(
+            replace(
+                descriptor,
+                retention_requires=tuple(
+                    component_id for component_id in descriptor.retention_requires
+                    if component_id in available
+                ),
+            ) for descriptor in descriptors
+    )
+    registry = RuntimeModuleRegistry(host, isolated_descriptors)
     await registry.start()
     try:
         instance = registry.get("agent.runtime")
@@ -266,6 +277,59 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 timeout_seconds=10,
             )
         assert started["state"] == "PREPARING_MODEL"
+
+        class _RollbackVerification(Exception):
+            pass
+
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                namespace = package.descriptor.storage.spec.namespace
+                proof = {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {"component_id": "conversation.scheduler"},
+                    "input": {"protocol": "forest.agent-requeue-verification/1",
+                              "prior_step_id": "conversation"},
+                    "prior": {"conversation": {
+                        "protocol": "forest.conversation-run-requeued/1",
+                        "conversation_id": "conversation/onebot/group/933179609",
+                        "session_ref": "session/agent-package/1",
+                        "run_ref": "run/agent-package/1",
+                        "claim_ref": "claim:" + "1" * 64,
+                        "trigger_count": 1,
+                    }},
+                }
+
+                async def verify():
+                    row = await (
+                        await conn.execute(
+                            sql.SQL("SELECT {}.agent_verify_requeue(%s::jsonb,%s::jsonb) "
+                                    "AS result").format(sql.Identifier(namespace)),
+                            (Jsonb({"bot_id": store.bot_id}), Jsonb(proof)),
+                        )
+                    ).fetchone()
+                    return row["result"]
+
+                assert (await verify())["error"]["code"] == "AGENT_RUN_NOT_ABANDONED"
+                await conn.execute(
+                    sql.SQL("UPDATE {}.agent_runs SET state='FAILED',"
+                            "error_code='TEST_ABANDONED',terminal_at=clock_timestamp() "
+                            "WHERE bot_id=%s AND run_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, "run/agent-package/1"),
+                )
+                assert (await verify())["error"]["code"] == "AGENT_RUN_NOT_ABANDONED"
+                await conn.execute(
+                    sql.SQL("UPDATE {}.agent_sessions SET state='FAILED',"
+                            "active_run_id=NULL,terminal_reason_code='TEST_ABANDONED',"
+                            "closed_at=clock_timestamp() "
+                            "WHERE bot_id=%s AND session_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, "session/agent-package/1"),
+                )
+                verified = await verify()
+                assert verified["ok"] is True
+                assert verified["value"] == proof["prior"]["conversation"]
+                raise _RollbackVerification
 
         endpoint = instance.runtime_service_handlers()[("agent.run.query", 1)]
         route = FrozenServiceRoute(
@@ -1666,15 +1730,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 )
         assert stale.value.code == "STALE_AGENT_RUN_OWNER"
 
-        candidate = RuntimeModuleRegistry(
-            host,
-            (
-                *kernel.descriptors,
-                conversation_package.descriptor,
-                memory_package.descriptor,
-                package.descriptor,
-            ),
-        )
+        candidate = RuntimeModuleRegistry(host, isolated_descriptors)
         await candidate.prewarm()
         await registry.drain_owned_work_for_replacement(candidate.activation_id)
         await candidate.start()

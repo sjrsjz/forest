@@ -1478,6 +1478,136 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         assert [(row["segment_index"], row["trigger_count"]) for row in segments] == [
             (0, 64), (1, 64), (2, 2)
         ]
+        # An abandoned Run may return an already committed Context prefix to
+        # PENDING. Its old claim settles in bounded pieces, and the new Run
+        # claims that same prefix without duplicating Context units.
+        class _RollbackRequeue(Exception):
+            pass
+
+        with pytest.raises(_RollbackRequeue):
+            async with store.pool.connection() as conn, conn.transaction():
+                async def call(function, context, body):
+                    row = await (
+                        await conn.execute(
+                            sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result")
+                            .format(sql.Identifier(namespace), sql.Identifier(function)),
+                            (Jsonb(context), Jsonb(body)),
+                        )
+                    ).fetchone()
+                    return row["result"]
+
+                requeue_context = {
+                    "bot_id": store.bot_id,
+                    "operation_id": "prefill-requeue/one",
+                    "participant_input_digest": digest,
+                }
+                requeue_envelope = {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "conversation.scheduler",
+                        "generation_id": participant.generation_id,
+                    },
+                    "input": {
+                        "protocol": "forest.conversation-run-requeue/1",
+                        "actor": prefill_actor,
+                        "session_ref": "prefill-session",
+                        "run_ref": "prefill-run",
+                        "claim_ref": claim_ref,
+                        "claim_digest": final["trigger_claim"]["digest"],
+                        "reason_code": "TEST_ABANDONED_RUN",
+                    },
+                    "prior": {},
+                }
+                requeued = await call(
+                    "conversation_requeue_run", requeue_context, requeue_envelope
+                )
+                assert requeued["ok"] is True
+                assert requeued["value"]["trigger_count"] == 130
+                assert await call(
+                    "conversation_requeue_run", requeue_context, requeue_envelope
+                ) == requeued
+                effective = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.conversation_trigger_effective_status(%s,%s) "
+                                "AS status").format(sql.Identifier(namespace)),
+                        (store.bot_id, "prefill-trigger/1"),
+                    )
+                ).fetchone()
+                assert effective["status"] == "PENDING"
+                blocked = await call(
+                    "conversation_select_input",
+                    {"bot_id": store.bot_id, "operation_id": "requeue-before-settlement",
+                     "participant_input_digest": digest},
+                    {"protocol": "forest.uow-step/1", "input": {
+                        "actor": prefill_actor, "boundary": "IDLE",
+                        "selection_mode": "PREFILL_ONLY",
+                        "session_ref": "replacement-session",
+                        "run_ref": "replacement-run", "next_run_ref": None,
+                    }},
+                )
+                assert blocked["error"]["code"] == "CONVERSATION_REQUEUE_SETTLEMENT_PENDING"
+                for index, expected in enumerate((64, 64, 2)):
+                    token = f"requeue-settlement/{index}"
+                    claimed = await call(
+                        "conversation_claim_trigger_settlement",
+                        {"bot_id": store.bot_id},
+                        {"protocol": "forest.owned-work-claim-request/1",
+                         "claim_token": token, "lease_seconds": 30},
+                    )
+                    assert claimed["ok"] is True
+                    payload = claimed["value"]["payload"]
+                    assert payload["segment_index"] == index
+                    settled = await call(
+                        "conversation_settle_trigger_segment",
+                        {"bot_id": store.bot_id},
+                        {"protocol": "forest.uow-step/1",
+                         "caller": {"component_id": "conversation.scheduler"},
+                         "input": payload},
+                    )
+                    assert settled["ok"] is True
+                    assert settled["value"]["settled_count"] == expected
+                status_row = await (
+                    await conn.execute(
+                        sql.SQL("SELECT count(*) FILTER (WHERE status='PENDING') AS pending,"
+                                "count(*) AS total FROM {}.conversation_triggers "
+                                "WHERE bot_id=%s AND conversation_id=%s")
+                        .format(sql.Identifier(namespace)),
+                        (store.bot_id, prefill_conversation),
+                    )
+                ).fetchone()
+                assert (status_row["pending"], status_row["total"]) == (130, 130)
+                for index, expected_count in enumerate((64, 128)):
+                    selected = await call(
+                        "conversation_select_input",
+                        {"bot_id": store.bot_id,
+                         "operation_id": f"recovery-prefill/{index}",
+                         "participant_input_digest": digest},
+                        {"protocol": "forest.uow-step/1", "input": {
+                            "actor": prefill_actor, "boundary": "IDLE",
+                            "selection_mode": "PREFILL_ONLY",
+                            "session_ref": "replacement-session",
+                            "run_ref": "replacement-run", "next_run_ref": None,
+                        }},
+                    )
+                    assert selected["ok"] is True
+                    assert selected["value"]["kind"] == "RECOVERY_PREFILL"
+                    assert selected["value"]["event_ids"] == []
+                    assert selected["value"]["trigger_claim"]["count"] == expected_count
+                recovered = await call(
+                    "conversation_select_input",
+                    {"bot_id": store.bot_id, "operation_id": "recovery-final",
+                     "participant_input_digest": digest},
+                    {"protocol": "forest.uow-step/1", "input": {
+                        "actor": prefill_actor, "boundary": "IDLE",
+                        "selection_mode": "ANY",
+                        "session_ref": "replacement-session",
+                        "run_ref": "replacement-run", "next_run_ref": None,
+                    }},
+                )
+                assert recovered["ok"] is True
+                assert recovered["value"]["kind"] == "RECOVERY_CLAIM"
+                assert recovered["value"]["trigger_claim"]["count"] == 130
+                raise _RollbackRequeue
         reply_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": {

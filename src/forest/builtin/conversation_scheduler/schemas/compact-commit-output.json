@@ -122,7 +122,8 @@
                     "TRIGGER_INPUT",
                     "CONTEXT_PREFILL",
                     "SILENT_DRAIN",
-                    "RECOVERY_CLAIM"
+                    "RECOVERY_CLAIM",
+                    "RECOVERY_PREFILL"
                   ]
                 },
                 "start_seq": {

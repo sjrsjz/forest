@@ -172,7 +172,9 @@ class AgentExecution:
             )
             if selected["status"] == "CONTINUE":
                 return True
-            if selected["status"] != "BATCH" or selected["kind"] != "CONTEXT_PREFILL":
+            if selected["status"] != "BATCH" or selected["kind"] not in {
+                "CONTEXT_PREFILL", "RECOVERY_PREFILL"
+            }:
                 raise ForestError(
                     "AGENT_PREFILL_RESULT_INVALID", "Conversation prefill was invalid", 409
                 )

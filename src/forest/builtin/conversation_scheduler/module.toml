@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.17.1"
+version = "4.18.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -39,6 +39,7 @@ requests = [
   "uow.execute:conversation.commit-final-reply",
   "uow.execute:conversation.session-handoff",
   "uow.execute:conversation.commit-terminal-run",
+  "uow.execute:conversation.requeue-run",
   "uow.execute:conversation.settle-trigger-segment"
 ]
 
@@ -70,9 +71,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.13.1"
+schema_version = "4.14.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "cf5f61182bfea91cdd1f76aae80b14285b804bc5a4c4b6c6ee704e32c3e6c89a"
+baseline_sha256 = "74288c47262a0dc7164cc1865c65f31a98e5fd343a7c941f0d33e713dea03c94"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -166,6 +167,13 @@ input_schema = "schemas/terminalize-run-envelope.json"
 output_schema = "schemas/terminalize-run-output.json"
 
 [[components.unit_of_work_participants]]
+name = "conversation.requeue-run-record"
+contract = "1.0"
+function = "conversation_requeue_run"
+input_schema = "schemas/requeue-run-envelope.json"
+output_schema = "schemas/requeue-run-output.json"
+
+[[components.unit_of_work_participants]]
 name = "conversation.settle-trigger-segment-record"
 contract = "1.0"
 function = "conversation_settle_trigger_segment"
@@ -252,6 +260,17 @@ output_schema = "schemas/terminalize-run-output.json"
 timeout_s = 20
 steps = [
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.terminalize-run", input_path = "/conversation" }
+]
+
+[[components.unit_of_work_plans]]
+name = "conversation.requeue-run"
+contract = "1.0"
+input_schema = "schemas/requeue-run-plan.json"
+output_schema = "schemas/requeue-run-output.json"
+timeout_s = 20
+steps = [
+  { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.requeue-run-record", input_path = "/conversation" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.verify-requeue", input_path = "/agent" }
 ]
 
 [[components.unit_of_work_plans]]

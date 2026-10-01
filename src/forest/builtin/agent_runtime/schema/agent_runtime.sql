@@ -4575,3 +4575,45 @@ BEGIN
     );
 END;
 $$;
+CREATE FUNCTION agent_verify_requeue(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    prior_value jsonb := envelope->'prior'->(body->>'prior_step_id');
+    run_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.agent-requeue-verification/1'
+       OR body->>'prior_step_id' IS DISTINCT FROM 'conversation'
+       OR prior_value->>'protocol' IS DISTINCT FROM 'forest.conversation-run-requeued/1'
+       OR prior_value->>'session_ref' IS NULL
+       OR prior_value->>'run_ref' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_REQUEUE_VERIFICATION_INVALID',
+                'message','Requeue verification input is invalid','status',422));
+    END IF;
+    SELECT r.session_id,r.state,r.terminal_at,s.conversation_ref,
+           s.state AS session_state,s.active_run_id,s.closed_at INTO run_row
+    FROM __forest_module_schema__.agent_runs r
+    JOIN __forest_module_schema__.agent_sessions s
+      ON s.bot_id=r.bot_id AND s.session_id=r.session_id
+    WHERE r.bot_id=context->>'bot_id'
+      AND r.run_id=prior_value->>'run_ref'
+    FOR SHARE;
+    IF run_row IS NULL
+       OR run_row.session_id IS DISTINCT FROM prior_value->>'session_ref'
+       OR run_row.conversation_ref IS DISTINCT FROM prior_value->>'conversation_id'
+       OR run_row.state NOT IN ('FAILED','CANCELLED')
+       OR run_row.terminal_at IS NULL
+       OR run_row.session_state NOT IN ('FAILED','CANCELLED')
+       OR run_row.active_run_id IS NOT NULL
+       OR run_row.closed_at IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_RUN_NOT_ABANDONED',
+                'message','Run is not terminal and eligible for requeue','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+                              'value',prior_value);
+END;
+$$;

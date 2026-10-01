@@ -203,7 +203,10 @@ CREATE TABLE input_batches (
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     boundary text NOT NULL CHECK (boundary IN ('IDLE','MODEL_SAFE_POINT','SESSION_END')),
-    kind text NOT NULL CHECK (kind IN ('TRIGGER_INPUT','CONTEXT_PREFILL','SILENT_DRAIN','RECOVERY_CLAIM')),
+    kind text NOT NULL CHECK (kind IN (
+        'TRIGGER_INPUT','CONTEXT_PREFILL','SILENT_DRAIN',
+        'RECOVERY_CLAIM','RECOVERY_PREFILL'
+    )),
     start_seq bigint CHECK (start_seq IS NULL OR start_seq > 0),
     end_seq bigint CHECK (end_seq IS NULL OR end_seq > 0),
     trigger_cut_seq bigint CHECK (trigger_cut_seq IS NULL OR trigger_cut_seq > 0),
@@ -234,7 +237,7 @@ CREATE TABLE input_batches (
         REFERENCES conversation_lanes(bot_id, conversation_id),
     CHECK ((session_ref IS NULL) = (run_ref IS NULL)),
     CHECK (
-        (kind IN ('TRIGGER_INPUT','RECOVERY_CLAIM')
+        (kind IN ('TRIGGER_INPUT','RECOVERY_CLAIM','RECOVERY_PREFILL')
             AND trigger_count IS NOT NULL AND last_trigger_ref IS NOT NULL
             AND last_trigger_ingress_seq IS NOT NULL
             AND last_trigger_ingress_seq<=trigger_cut_seq
@@ -264,7 +267,8 @@ CREATE TABLE input_batches (
         OR (kind='SILENT_DRAIN' AND start_seq IS NOT NULL AND end_seq IS NOT NULL
             AND start_seq <= end_seq AND trigger_cut_seq IS NULL
             AND selected_input_end_seq=end_seq AND session_ref IS NULL)
-        OR (kind='RECOVERY_CLAIM' AND start_seq IS NULL AND end_seq IS NULL
+        OR (kind IN ('RECOVERY_CLAIM','RECOVERY_PREFILL')
+            AND start_seq IS NULL AND end_seq IS NULL
             AND trigger_cut_seq IS NOT NULL AND selected_input_end_seq >= trigger_cut_seq
             AND session_ref IS NOT NULL)
     )
@@ -341,7 +345,9 @@ CREATE TABLE trigger_claim_groups (
         terminal_operation_id IS NULL OR octet_length(terminal_operation_id) BETWEEN 1 AND 256
     ),
     terminal_status text CHECK (
-        terminal_status IS NULL OR terminal_status IN ('ANSWERED','FAILED','CANCELLED')
+        terminal_status IS NULL OR terminal_status IN (
+            'ANSWERED','FAILED','CANCELLED','REQUEUED'
+        )
     ),
     PRIMARY KEY (bot_id,claim_ref),
     UNIQUE (bot_id,conversation_id,session_ref,run_ref),
@@ -527,6 +533,9 @@ CREATE INDEX trigger_pending_idx
 CREATE INDEX active_trigger_claim_group_idx
     ON trigger_claim_groups(bot_id,conversation_id,claim_ref)
     WHERE claim_state='ACTIVE';
+CREATE INDEX unsettled_requeue_group_idx
+    ON trigger_claim_groups(bot_id,conversation_id,claim_ref)
+    WHERE terminal_status='REQUEUED';
 CREATE INDEX context_order_idx
     ON context_units(bot_id, conversation_id, context_revision, unit_index);
 CREATE INDEX context_compaction_order_idx
@@ -555,6 +564,29 @@ CREATE TABLE trigger_terminal_operations (
     PRIMARY KEY (bot_id, operation_id),
     FOREIGN KEY (bot_id, conversation_id)
         REFERENCES conversation_lanes(bot_id, conversation_id)
+);
+
+CREATE TABLE trigger_requeue_operations (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    conversation_id text NOT NULL,
+    claim_ref text NOT NULL CHECK (claim_ref ~ '^claim:[a-f0-9]{64}$'),
+    claim_digest text NOT NULL CHECK (claim_digest ~ '^sha256:[a-f0-9]{64}$'),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    abandoned_session_ref text NOT NULL
+        CHECK (octet_length(abandoned_session_ref) BETWEEN 1 AND 256),
+    abandoned_run_ref text NOT NULL
+        CHECK (octet_length(abandoned_run_ref) BETWEEN 1 AND 256),
+    reason_code text NOT NULL CHECK (octet_length(reason_code) BETWEEN 1 AND 128),
+    actor_owner_id text NOT NULL CHECK (octet_length(actor_owner_id) BETWEEN 1 AND 256),
+    actor_epoch bigint NOT NULL CHECK (actor_epoch > 0),
+    trigger_count integer NOT NULL CHECK (trigger_count > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id),
+    UNIQUE (bot_id,claim_ref),
+    FOREIGN KEY (bot_id,claim_ref) REFERENCES trigger_claim_groups(bot_id,claim_ref),
+    FOREIGN KEY (bot_id,conversation_id)
+        REFERENCES conversation_lanes(bot_id,conversation_id)
 );
 
 CREATE TABLE trigger_settlement_progress (
@@ -644,6 +676,28 @@ BEGIN
         RAISE EXCEPTION 'Trigger identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.status='PENDING' AND NEW.status='CLAIMED' THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.status='CLAIMED' AND NEW.status='PENDING'
+       AND NEW.claimed_session_ref IS NULL AND NEW.claimed_run_ref IS NULL
+       AND NEW.input_batch_id IS NULL
+       AND NEW.answered_reply_ref IS NULL AND NEW.terminal_reason_code IS NULL
+       AND EXISTS (
+           SELECT 1 FROM trigger_claim_groups g
+           JOIN trigger_claim_segments s
+             ON s.bot_id=g.bot_id AND s.claim_ref=g.claim_ref
+            AND s.input_batch_id=OLD.input_batch_id
+           JOIN input_batch_triggers m
+             ON m.bot_id=s.bot_id AND m.input_batch_id=s.input_batch_id
+            AND m.trigger_id=OLD.trigger_id
+           JOIN trigger_requeue_operations r
+             ON r.bot_id=g.bot_id AND r.claim_ref=g.claim_ref
+            AND r.operation_id=g.terminal_operation_id
+           WHERE g.bot_id=OLD.bot_id AND g.conversation_id=OLD.conversation_id
+             AND g.session_ref=OLD.claimed_session_ref
+             AND g.run_ref=OLD.claimed_run_ref
+             AND g.claim_state='TERMINAL' AND g.terminal_status='REQUEUED'
+       ) THEN
         RETURN NEW;
     END IF;
     IF OLD.status='CLAIMED' AND NEW.status IN ('ANSWERED','FAILED','CANCELLED')
@@ -785,6 +839,15 @@ BEGIN
                  AND t.terminal_session_ref=NEW.session_ref
                  AND t.terminal_run_ref=NEW.run_ref
                  AND t.resulting_status=NEW.terminal_status
+           )) OR (NEW.terminal_status='REQUEUED' AND EXISTS (
+               SELECT 1 FROM trigger_requeue_operations r
+               WHERE r.bot_id=NEW.bot_id
+                 AND r.operation_id=NEW.terminal_operation_id
+                 AND r.claim_ref=NEW.claim_ref
+                 AND r.claim_digest=NEW.claim_digest
+                 AND r.conversation_id=NEW.conversation_id
+                 AND r.abandoned_session_ref=NEW.session_ref
+                 AND r.abandoned_run_ref=NEW.run_ref
            ))
        ) THEN
         RETURN NEW;
@@ -795,6 +858,8 @@ $$;
 CREATE TRIGGER trigger_claim_group_one_way BEFORE UPDATE OR DELETE ON trigger_claim_groups
     FOR EACH ROW EXECUTE FUNCTION guard_trigger_claim_group();
 CREATE TRIGGER trigger_terminal_operations_immutable BEFORE UPDATE OR DELETE ON trigger_terminal_operations
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+CREATE TRIGGER trigger_requeue_operations_immutable BEFORE UPDATE OR DELETE ON trigger_requeue_operations
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER trigger_segment_settlements_immutable
     BEFORE UPDATE OR DELETE ON trigger_segment_settlements
@@ -1277,7 +1342,9 @@ $$;
 CREATE FUNCTION conversation_trigger_effective_status(
     requested_bot text, requested_trigger text
 ) RETURNS text LANGUAGE sql STABLE SET search_path=pg_catalog AS $$
-    SELECT CASE WHEN t.status='CLAIMED' AND g.claim_state='TERMINAL'
+    SELECT CASE WHEN t.status='CLAIMED' AND g.terminal_status='REQUEUED'
+                THEN 'PENDING'
+                WHEN t.status='CLAIMED' AND g.claim_state='TERMINAL'
                 THEN g.terminal_status ELSE t.status END
     FROM __forest_module_schema__.conversation_triggers t
     LEFT JOIN __forest_module_schema__.trigger_claim_groups g
@@ -1417,6 +1484,8 @@ DECLARE
     lane record;
     replay record;
     trigger_cut bigint;
+    recovery_cut bigint;
+    pending_window_count integer;
     has_gap boolean;
     selection_status text;
     selection_mailbox_revision bigint;
@@ -1534,6 +1603,22 @@ BEGIN
             )
         );
     END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.trigger_claim_groups g
+        JOIN __forest_module_schema__.trigger_settlement_progress p
+          ON p.bot_id=g.bot_id AND p.claim_ref=g.claim_ref
+        WHERE g.bot_id=requested_bot
+          AND g.conversation_id=requested_conversation
+          AND g.terminal_status='REQUEUED' AND p.completed_at IS NULL
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_REQUEUE_SETTLEMENT_PENDING',
+                'message','Requeued trigger segments have not settled','status',409
+            )
+        );
+    END IF;
     -- Classification and every trigger-state transition hold this lane row
     -- first. The lane fence stabilizes the pending set without locking an
     -- arbitrarily large trigger backlog during each 64-event prefill.
@@ -1542,9 +1627,47 @@ BEGIN
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
       AND status='PENDING' AND ingress_seq<=lane.classified_through_seq
     ORDER BY ingress_seq DESC,trigger_id DESC LIMIT 1;
+    SELECT count(*)::integer INTO pending_window_count FROM (
+        SELECT 1 FROM __forest_module_schema__.conversation_triggers
+        WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+          AND status='PENDING' AND ingress_seq<=lane.classified_through_seq
+        LIMIT 65
+    ) bounded_pending;
     has_gap := lane.classified_through_seq < lane.next_ingress_seq - 1;
     IF requested_mode='PREFILL_ONLY' THEN
-        IF trigger_cut IS NOT NULL AND trigger_cut-lane.context_applied_seq > 64 THEN
+        IF pending_window_count>64 THEN
+            SELECT max(ingress_seq) INTO recovery_cut FROM (
+                SELECT ingress_seq
+                FROM __forest_module_schema__.conversation_triggers
+                WHERE bot_id=requested_bot
+                  AND conversation_id=requested_conversation
+                  AND status='PENDING'
+                  AND ingress_seq<=lane.context_applied_seq
+                ORDER BY ingress_seq,trigger_id LIMIT 64
+            ) bounded_recovery;
+        END IF;
+        IF recovery_cut IS NOT NULL THEN
+            -- Previously committed Context may still contain pending triggers
+            -- after an explicit recovery. Claim at most 64 old triggers without
+            -- appending duplicate Context units; leave the last pending trigger
+            -- for the final input selection.
+            selection_kind := 'RECOVERY_PREFILL';
+            selection_start := NULL;
+            selection_end := NULL;
+            selection_trigger_cut := recovery_cut;
+            selected_session := requested_session;
+            selected_run := CASE WHEN requested_boundary='SESSION_END'
+                THEN requested_next_run ELSE requested_run END;
+            IF selected_session IS NULL OR selected_run IS NULL THEN
+                RETURN jsonb_build_object(
+                    'protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object(
+                        'code','CONVERSATION_SESSION_REQUIRED',
+                        'message','Recovery prefill requires its target Run','status',409
+                    )
+                );
+            END IF;
+        ELSIF trigger_cut IS NOT NULL AND trigger_cut-lane.context_applied_seq > 64 THEN
             -- Retain the last trigger in the final Agent InputBatch. Claim
             -- earlier triggers for the target Run as each Context prefix lands.
             selection_kind := 'CONTEXT_PREFILL';
@@ -1590,7 +1713,8 @@ BEGIN
                 )
             );
         END IF;
-        IF trigger_cut-lane.context_applied_seq > 64 THEN
+        IF trigger_cut-lane.context_applied_seq > 64
+           OR pending_window_count>64 THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object(
@@ -1721,11 +1845,14 @@ BEGIN
     batch_id := 'batch:' || encode(sha256(convert_to(
         jsonb_build_array(requested_bot,requested_operation)::text,'UTF8'
     )),'hex');
-    IF selection_kind IN ('TRIGGER_INPUT','RECOVERY_CLAIM','CONTEXT_PREFILL') THEN
+    IF selection_kind IN (
+        'TRIGGER_INPUT','RECOVERY_CLAIM','CONTEXT_PREFILL','RECOVERY_PREFILL'
+    ) THEN
         segment_summary := __forest_module_schema__.conversation_pending_trigger_summary(
             requested_bot,requested_conversation,
             CASE WHEN selection_kind='CONTEXT_PREFILL' THEN selection_start ELSE NULL END,
             CASE WHEN selection_kind='CONTEXT_PREFILL' THEN selection_end
+                 WHEN selection_kind='RECOVERY_PREFILL' THEN selection_trigger_cut
                  ELSE lane.classified_through_seq END
         );
         IF segment_summary IS NULL AND selection_kind<>'CONTEXT_PREFILL' THEN
@@ -1842,7 +1969,10 @@ BEGIN
           AND status='PENDING'
           AND ((selection_kind='CONTEXT_PREFILL'
                 AND ingress_seq BETWEEN selection_start AND selection_end)
+               OR (selection_kind='RECOVERY_PREFILL'
+                   AND ingress_seq<=selection_trigger_cut)
                OR (selection_kind<>'CONTEXT_PREFILL'
+                   AND selection_kind<>'RECOVERY_PREFILL'
                    AND ingress_seq<=lane.classified_through_seq));
         GET DIAGNOSTICS claimed_count = ROW_COUNT;
         IF claimed_count<>(segment_summary->>'count')::integer THEN
@@ -1893,13 +2023,15 @@ BEGIN
         active_session_ref=CASE
             WHEN requested_boundary='SESSION_END' AND selection_kind='SILENT_DRAIN'
                 THEN NULL
-            WHEN selection_kind='CONTEXT_PREFILL' THEN active_session_ref
+            WHEN selection_kind IN ('CONTEXT_PREFILL','RECOVERY_PREFILL')
+                THEN active_session_ref
             ELSE COALESCE(selected_session,active_session_ref)
         END,
         active_run_ref=CASE
             WHEN requested_boundary='SESSION_END' AND selection_kind='SILENT_DRAIN'
                 THEN NULL
-            WHEN selection_kind='CONTEXT_PREFILL' THEN active_run_ref
+            WHEN selection_kind IN ('CONTEXT_PREFILL','RECOVERY_PREFILL')
+                THEN active_run_ref
             ELSE COALESCE(selected_run,active_run_ref)
         END,
         mailbox_revision=mailbox_revision+1,
@@ -3259,6 +3391,121 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION conversation_requeue_run(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    actor jsonb := body->'actor';
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    requested_conversation text := actor->>'conversation_id';
+    requested_owner text := actor->>'owner_id';
+    requested_epoch bigint := (actor->>'epoch')::bigint;
+    requested_session text := body->>'session_ref';
+    requested_run text := body->>'run_ref';
+    requested_ref text := body->>'claim_ref';
+    requested_claim_digest text := body->>'claim_digest';
+    requested_reason text := body->>'reason_code';
+    lane record;
+    claim_group record;
+    replay record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.conversation-run-requeue/1'
+       OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_conversation IS NULL OR requested_owner IS NULL
+       OR requested_epoch IS NULL OR requested_epoch<1
+       OR requested_session IS NULL OR requested_run IS NULL
+       OR requested_ref IS NULL OR requested_ref !~ '^claim:[a-f0-9]{64}$'
+       OR requested_claim_digest IS NULL
+       OR requested_claim_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_reason IS NULL
+       OR octet_length(requested_reason) NOT BETWEEN 1 AND 128 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONVERSATION_REQUEUE_INPUT_INVALID',
+                'message','Run requeue input is invalid','status',422));
+    END IF;
+    SELECT * INTO replay
+    FROM __forest_module_schema__.trigger_requeue_operations
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF replay IS NOT NULL THEN
+        IF ROW(replay.input_digest,replay.conversation_id,replay.claim_ref,
+               replay.claim_digest,replay.abandoned_session_ref,
+               replay.abandoned_run_ref,replay.reason_code,replay.actor_owner_id,
+               replay.actor_epoch)
+           IS DISTINCT FROM ROW(requested_digest,requested_conversation,
+               requested_ref,requested_claim_digest,requested_session,
+               requested_run,requested_reason,requested_owner,requested_epoch) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','CONVERSATION_REQUEUE_OPERATION_CONFLICT',
+                    'message','Run requeue operation differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.conversation-run-requeued/1',
+                'conversation_id',requested_conversation,
+                'session_ref',requested_session,'run_ref',requested_run,
+                'claim_ref',requested_ref,'trigger_count',replay.trigger_count
+            ));
+    END IF;
+    SELECT * INTO lane
+    FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+    FOR UPDATE;
+    IF lane IS NULL OR lane.actor_owner_id IS DISTINCT FROM requested_owner
+       OR lane.actor_epoch IS DISTINCT FROM requested_epoch
+       OR lane.actor_expires_at IS NULL
+       OR lane.actor_expires_at<=clock_timestamp()
+       OR lane.active_session_ref IS DISTINCT FROM requested_session
+       OR lane.active_run_ref IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','STALE_CONVERSATION_ACTOR',
+                'message','Actor no longer owns the requeued Run','status',409));
+    END IF;
+    SELECT * INTO claim_group
+    FROM __forest_module_schema__.trigger_claim_groups
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND session_ref=requested_session AND run_ref=requested_run FOR UPDATE;
+    IF claim_group IS NULL OR claim_group.claim_state<>'ACTIVE'
+       OR claim_group.claim_ref IS DISTINCT FROM requested_ref
+       OR claim_group.claim_digest IS DISTINCT FROM requested_claim_digest THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','TRIGGER_CLAIM_GROUP_CONFLICT',
+                'message','Run requeue claim differs from the active group','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.trigger_requeue_operations(
+        bot_id,operation_id,conversation_id,claim_ref,claim_digest,input_digest,
+        abandoned_session_ref,abandoned_run_ref,reason_code,actor_owner_id,
+        actor_epoch,trigger_count
+    ) VALUES (
+        requested_bot,requested_operation,requested_conversation,requested_ref,
+        requested_claim_digest,requested_digest,requested_session,requested_run,
+        requested_reason,requested_owner,requested_epoch,claim_group.trigger_count
+    );
+    UPDATE __forest_module_schema__.trigger_claim_groups
+    SET claim_state='TERMINAL',terminal_operation_id=requested_operation,
+        terminal_status='REQUEUED'
+    WHERE bot_id=requested_bot AND claim_ref=requested_ref;
+    INSERT INTO __forest_module_schema__.trigger_settlement_progress(bot_id,claim_ref)
+    VALUES(requested_bot,requested_ref);
+    UPDATE __forest_module_schema__.conversation_lanes
+    SET active_session_ref=NULL,active_run_ref=NULL,resume_not_before=NULL,
+        resume_reason_code=NULL,resume_reason_ref=NULL,
+        mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.conversation-run-requeued/1',
+            'conversation_id',requested_conversation,
+            'session_ref',requested_session,'run_ref',requested_run,
+            'claim_ref',requested_ref,'trigger_count',claim_group.trigger_count
+        ));
+END;
+$$;
+
 CREATE FUNCTION conversation_settle_trigger_segment(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE
@@ -3347,7 +3594,7 @@ BEGIN
             RAISE EXCEPTION 'Answered trigger group has no final reply fact'
                 USING ERRCODE='55000';
         END IF;
-    ELSE
+    ELSIF claim_group.terminal_status IN ('FAILED','CANCELLED') THEN
         SELECT reason_code INTO reason_value
         FROM __forest_module_schema__.trigger_terminal_operations
         WHERE bot_id=requested_bot
@@ -3357,9 +3604,29 @@ BEGIN
             RAISE EXCEPTION 'Terminal trigger group has no reason fact'
                 USING ERRCODE='55000';
         END IF;
+    ELSIF claim_group.terminal_status='REQUEUED' THEN
+        PERFORM 1 FROM __forest_module_schema__.trigger_requeue_operations r
+        WHERE r.bot_id=requested_bot
+          AND r.claim_ref=requested_ref
+          AND r.operation_id=claim_group.terminal_operation_id
+          AND r.claim_digest=claim_group.claim_digest;
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Requeued trigger group has no disposition fact'
+                USING ERRCODE='55000';
+        END IF;
+    ELSE
+        RAISE EXCEPTION 'Trigger group has an unknown terminal status'
+            USING ERRCODE='55000';
     END IF;
     UPDATE __forest_module_schema__.conversation_triggers t
-    SET status=claim_group.terminal_status,
+    SET status=CASE WHEN claim_group.terminal_status='REQUEUED'
+                    THEN 'PENDING' ELSE claim_group.terminal_status END,
+        claimed_session_ref=CASE WHEN claim_group.terminal_status='REQUEUED'
+                    THEN NULL ELSE t.claimed_session_ref END,
+        claimed_run_ref=CASE WHEN claim_group.terminal_status='REQUEUED'
+                    THEN NULL ELSE t.claimed_run_ref END,
+        input_batch_id=CASE WHEN claim_group.terminal_status='REQUEUED'
+                    THEN NULL ELSE t.input_batch_id END,
         answered_reply_ref=reply_ref_value,terminal_reason_code=reason_value,
         updated_at=clock_timestamp()
     FROM __forest_module_schema__.input_batch_triggers m
@@ -3598,6 +3865,13 @@ BEGIN
           AND l.channel_kind IN ('GROUP','PRIVATE')
           AND (l.actor_owner_id IS NULL OR l.actor_expires_at<=clock_timestamp())
           AND (l.resume_not_before IS NULL OR l.resume_not_before<=clock_timestamp())
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.trigger_claim_groups g
+              JOIN __forest_module_schema__.trigger_settlement_progress p
+                ON p.bot_id=g.bot_id AND p.claim_ref=g.claim_ref
+              WHERE g.bot_id=l.bot_id AND g.conversation_id=l.conversation_id
+                AND g.terminal_status='REQUEUED' AND p.completed_at IS NULL
+          )
           AND (
               (l.active_session_ref IS NOT NULL AND l.active_run_ref IS NOT NULL)
               OR (

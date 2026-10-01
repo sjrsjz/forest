@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.13.0"
+version = "4.14.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -155,9 +155,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.8.0"
+schema_version = "2.9.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "d027fc193aed608d4c03dea964d5e9952dabe50679a1e828fcdc5c5f6a05f608"
+baseline_sha256 = "c81f44ead2c297edc0883f164d1bb69d20eca9499fe3cf604362457a6e75a7de"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -467,6 +467,13 @@ path = "/input/source_candidate"
 owner_component = "agent.runtime"
 owner_kind = "assistant.candidate"
 owner_id_path = "/input/turn_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.verify-requeue"
+contract = "1.0"
+function = "agent_verify_requeue"
+input_schema = "schemas/requeue-verification-envelope.json"
+output_schema = "schemas/requeue-verification-output.json"
 
 [[components.unit_of_work_plans]]
 name = "agent.start-run"
