@@ -80,7 +80,7 @@ def validate_vector_index_configuration(value: object) -> dict:
 
 OFFICIAL_BOT_COMPONENT_IDS = frozenset({
     "kernel.runtime", "kernel.payload", "kernel.authorization", "kernel.effect",
-    "kernel.audit", "component.worker-host", "provider.chat-completions",
+    "kernel.audit", "component.worker-host", "audit.console", "provider.chat-completions",
     "embedding.multimodal", "vector.index", "memory.graph", "media.capture",
     "agent.runtime", "routing.graph", "conversation.trigger-policy",
     "codec.onebot", "conversation.scheduler", "adapter.onebot", "delivery",

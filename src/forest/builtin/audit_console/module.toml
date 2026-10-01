@@ -1,0 +1,59 @@
+manifest_version = 1
+package_id = "forest.audit-console"
+version = "1.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "audit_console:AuditConsole"
+
+[[components]]
+id = "audit.console"
+scope = "bot"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+bootstrap_config = "bootstrap.json"
+auto_install = true
+configuration_apply = "worker-host/1"
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 8
+max_queue_items = 32
+max_state_inflight = 4
+max_owned_tasks = 2
+max_owned_resources = 2
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 30
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = ["service.call:audit.page.snapshot"]
+
+[[components.requires]]
+name = "audit.page.snapshot"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.provides]]
+name = "shell.audit-console.execute"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/shell-input.json"
+output_schema = "schemas/shell-output.json"
+
+[[components.shell_commands]]
+command_id = "audit.tail"
+command_version = 1
+service_id = "shell.audit-console.execute"
+service_version = 1
+argument_schema = "schemas/shell-tail.json"
+management_operation_id = "audit.query"
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["audit.query"]
+output_policy = "SHORT"
+timeout_s = 15

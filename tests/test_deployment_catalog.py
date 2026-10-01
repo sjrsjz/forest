@@ -759,7 +759,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 bundles = await (
                     await conn.execute("SELECT count(*) AS count FROM forest_kernel.schema_bundles")
                 ).fetchone()
-                assert bundles["count"] == 21
+                assert bundles["count"] == 22
                 runtime_namespace = module_schema_namespace("forest.kernel.runtime")
                 graph = await (
                     await conn.execute(

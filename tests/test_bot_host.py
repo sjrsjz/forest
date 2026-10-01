@@ -1517,9 +1517,16 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 if descriptor.component_id == "component.worker-host"
                 for command in descriptor.shell_commands
             } >= {"core.status", "core.pause", "core.resume", "core.reload"}
+            assert {
+                command.command_id
+                for descriptor in host.registry.descriptors
+                if descriptor.component_id == "audit.console"
+                for command in descriptor.shell_commands
+            } == {"audit.tail"}
 
             async def core_command(command_id, arguments):
                 service_id = {
+                    "audit.tail": "shell.audit-console.execute",
                     "core.status": "shell.component-host.core-status",
                     "core.pause": "shell.component-host.core-maintenance",
                     "core.resume": "shell.component-host.core-maintenance",
@@ -1546,6 +1553,9 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 )
 
             assert "Graph r" in (await core_command("core.status", {})).text
+            assert "Forest audit:" in (
+                await core_command("audit.tail", {"limit": 1})
+            ).text
             maintenance_epoch = (await host._kernel.runtime.status())["maintenance_epoch"]
             await core_command("core.pause", {"expected_maintenance_epoch": maintenance_epoch})
             assert (await host._kernel.runtime.status())["data_admission"] is False

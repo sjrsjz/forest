@@ -7,7 +7,6 @@ import re
 from dataclasses import dataclass
 from uuid import uuid4
 
-from forest.builtin_audit_shell import AUDIT_SHELL_COMMANDS, audit_shell_service
 from forest.builtin_component_candidate_preview import component_candidate_preview_service
 from forest.builtin_package_catalog_snapshot import (
     package_catalog_artifact_service,
@@ -125,7 +124,7 @@ _MODULES = {
         "repository_contract": "forest.kernel-audit.repository/1",
         "resource": "storage/official/kernel_audit.sql",
         "requires": ("kernel.payload",),
-        "services": ("audit.append", "audit.query", "shell.audit.execute"),
+        "services": ("audit.append", "audit.query", "audit.page.snapshot"),
         "capabilities": ("audit.append", "audit.query"),
     },
     "kernel.runtime": {
@@ -445,7 +444,7 @@ def runtime_graph_replacement_status_service(context):
 
 
 class PreparedAuditAuthorityModule(PreparedAuthorityModule):
-    """Expose the audit Repository and its Shell projection from its own Generation."""
+    """Expose audit storage and a bounded page through its own Generation."""
 
     def __init__(
         self,
@@ -464,7 +463,6 @@ class PreparedAuditAuthorityModule(PreparedAuthorityModule):
             services,
             generation_authority,
         )
-        self._shell_execute = audit_shell_service(service)
         self.management_contract = AuditManagementContract(
             configuration,
             audit=service,
@@ -476,7 +474,23 @@ class PreparedAuditAuthorityModule(PreparedAuthorityModule):
         return {
             ("audit.append", 1): self.service.append,
             ("audit.query", 1): self.service.scan,
-            ("shell.audit.execute", 1): self._shell_execute,
+            ("audit.page.snapshot", 1): self._page,
+        }
+
+    async def _page(self, payload):
+        fields = {
+            "action", "producer_component_id", "origin_kind", "resource_kind",
+            "resource_id", "operation_kind", "operation_id", "before", "limit",
+        }
+        if (
+            type(payload) is not dict
+            or payload.get("protocol") != "forest.audit-page-request/1"
+            or set(payload) - fields - {"protocol"}
+        ):
+            raise ForestError("AUDIT_QUERY_INVALID", "Audit page request is invalid", 422)
+        return {
+            "protocol": "forest.audit-page/1",
+            **await self.service.scan(**{key: value for key, value in payload.items() if key in fields}),
         }
 
     def unit_of_work_participant(self):
@@ -938,11 +952,7 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                 (service_id, "1.0") for service_id in definition["services"]
             ),
             agent_tools=((RUNTIME_STATUS_TOOL,) if component_id == "kernel.runtime" else ()),
-            shell_commands=(
-                AUDIT_SHELL_COMMANDS
-                if component_id == "kernel.audit"
-                else ()
-            ),
+            shell_commands=(),
             job_types=(),
             retention_requires=(
                 ("component.worker-host",)
