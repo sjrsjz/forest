@@ -543,3 +543,6 @@ Validation (2026-10-02): The isolated PostgreSQL complete 21-component Graph sta
 
 
 管理 Web 壳资源命名清理（2026-10-02）：剩余 `clean_management_static` 目录改为 `management_static`；旧 `clean-audit`、`clean-authorization-policy`、`clean-runtime-capacity`、`clean-configuration` 的 HTML/CSS/JS 资源和路由声明分别改为 `kernel-*` 与 `module-configuration`，不保留旧 URL。页面仍是部署/内核管理壳，业务配置界面继续由对应包 Generation 提供。资源目录 30 个文件均保留；管理相关快速回归 10 passed、10 skipped，完整本地回归 474 passed、110 skipped，Ruff 与全部管理脚本语法通过；本地 ASGI HTTP 实际读取 9 个新的首页和内核/模块资源均返回 200。尚未切换在线 Supervisor，本次为源码及本地 HTTP 验证。
+
+
+活动领取组只读对齐诊断（2026-10-02）：在线观察脚本现在按活动 `trigger_claim_groups` 与准确群 lane 的 Session/Run 做有界组级汇总。恰好一个领取组且 lane 尚无 active Session/Run 的正常预填状态单独计数；多个活动组或与 lane 不对齐返回 `CONVERSATION_CLAIM_ALIGNMENT_INVALID`，不会误判为普通可重排候选，也不会擅自改写 Trigger。Ruff、语法和现行在线库只读执行通过；在线样本有 0 个活动领取会话、0 个异常组，6 条 Memory 来源和 2 个群主干，最新两个会话决策均为非白名单群 `NO_TRIGGER/group_not_allowed`。当前仅建立异常检测入口，尚无对已损坏多组或悬挂领取消歧的自动恢复协议；获准群的真实 @ 与完整 Agent 回复仍未验收。

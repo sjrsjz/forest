@@ -187,6 +187,30 @@ async def _bot_state(store: BotStore, bot_id: str, stale_seconds: int) -> dict:
                     (bot_id,),
                 )
             ).fetchone()
+            claims = await (
+                await connection.execute(
+                    sql.SQL(
+                        "WITH active AS ("
+                        "SELECT lane.conversation_id,lane.active_session_ref,lane.active_run_ref,"
+                        "count(*) AS group_count,"
+                        "bool_or(g.session_ref=lane.active_session_ref "
+                        "AND g.run_ref=lane.active_run_ref) AS run_match "
+                        "FROM {c}.trigger_claim_groups g "
+                        "JOIN {c}.conversation_lanes lane "
+                        "ON lane.bot_id=g.bot_id AND lane.conversation_id=g.conversation_id "
+                        "WHERE g.bot_id=%s AND g.claim_state='ACTIVE' "
+                        "GROUP BY lane.conversation_id,lane.active_session_ref,lane.active_run_ref"
+                        ") SELECT count(*) AS active_conversations,"
+                        "count(*) FILTER (WHERE group_count=1 AND active_session_ref IS NULL "
+                        "AND active_run_ref IS NULL) AS valid_prefill_conversations,"
+                        "count(*) FILTER (WHERE group_count<>1 OR "
+                        "((active_session_ref IS NULL AND active_run_ref IS NULL) "
+                        "OR run_match) IS NOT TRUE) AS misaligned_conversations "
+                        "FROM active"
+                    ).format(c=sql.Identifier(CONVERSATION)),
+                    (bot_id,),
+                )
+            ).fetchone()
             work = await (
                 await connection.execute(
                     sql.SQL(
@@ -217,6 +241,7 @@ async def _bot_state(store: BotStore, bot_id: str, stale_seconds: int) -> dict:
             },
         },
         "concurrency": dict(concurrency),
+        "conversation_claims": dict(claims),
         "latest_ingress_decisions": [
             {
                 "decision": row["trigger_decision"],
@@ -252,6 +277,8 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
         failures.append("DOCUMENT_EMBEDDING_FAILED")
     if bot["concurrency"]["overlapping_sessions"]:
         failures.append("AGENT_SESSION_CONCURRENCY_INVALID")
+    if bot["conversation_claims"]["misaligned_conversations"]:
+        failures.append("CONVERSATION_CLAIM_ALIGNMENT_INVALID")
     if health_status != 200:
         failures.append("MANAGEMENT_HTTP_INVALID")
     return failures
