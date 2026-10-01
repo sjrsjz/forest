@@ -30,7 +30,6 @@ from forest.clean_bot_host import BotGraphCandidate, CleanBotHost, CleanBotSetti
 from forest.clean_management_app import CleanManagementGateway, ConfigurationApplyInput
 from forest.component_selection import ComponentSelectionSnapshot
 from forest.deployment_management_app import create_deployment_management_app
-from forest.drivers.python_worker import WorkerLimits
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
 from forest.media_capture_io import CapturedImage
@@ -51,6 +50,7 @@ from forest.unit_of_work import (
 )
 from forest.vector_index_effect_driver import vector_collection_name
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
+from forest.worker_limits import WorkerLimits
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/component_worker_host/python"))

@@ -13,7 +13,6 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from psycopg.errors import InvalidSchemaName, SerializationFailure, UndefinedTable
 
-from forest.drivers.python_worker import WorkerLimits
 from forest.errors import ForestError
 from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.package_effects import (
@@ -52,6 +51,7 @@ from forest.unit_of_work import (
     PostgresComponentConfigurationApplyCoordinator,
     package_uow_coordinator_factory,
 )
+from forest.worker_limits import WorkerLimits
 
 
 @dataclass(frozen=True)

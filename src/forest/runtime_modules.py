@@ -37,6 +37,7 @@ from forest.schema_bundles import (
     validate_official_storage_baseline,
     validate_storage_baseline,
 )
+from forest.worker_limits import WorkerLimits
 
 
 @dataclass(frozen=True)
@@ -689,12 +690,17 @@ class RuntimeModuleDescriptor:
     startup_service_requires: tuple[tuple[str, str], ...] = ()
     retention_requires: tuple[str, ...] = ()
     retention_service_requires: tuple[tuple[str, str], ...] = ()
+    worker_limits: WorkerLimits | None = None
 
     def __post_init__(self) -> None:
         if self.factory is None and self.artifact.driver != "forest.python-worker/1":
             raise ValueError("Only Python package plans may omit a runtime factory")
         if self.factory is not None and not callable(self.factory):
             raise ValueError("Runtime module factory must be callable")
+        if (self.artifact.driver == "forest.python-worker/1") != isinstance(
+            self.worker_limits, WorkerLimits
+        ):
+            raise ValueError("Python Worker descriptors require exact Worker limits")
         identities = [item.contribution_id for item in self.management]
         if len(identities) != len(set(identities)):
             raise ValueError("Runtime management contribution identities must be unique")
@@ -748,6 +754,18 @@ class RuntimeModuleDescriptor:
 
 
 @dataclass(frozen=True)
+class RuntimeWorkerCapacity:
+    """Worker claims live during Graph prewarm; old Workers drain only later."""
+
+    active: tuple[tuple[str, WorkerLimits], ...]
+    preparing: tuple[tuple[str, WorkerLimits], ...]
+
+    @property
+    def peak(self) -> tuple[tuple[str, WorkerLimits], ...]:
+        return self.active + self.preparing
+
+
+@dataclass(frozen=True)
 class RuntimeGraphTransitionPlan:
     """Read-only member impact calculated by the production Graph planner."""
 
@@ -757,6 +775,7 @@ class RuntimeGraphTransitionPlan:
     add: tuple[str, ...]
     drain: tuple[str, ...]
     prepare: tuple[str, ...]
+    worker_capacity: RuntimeWorkerCapacity
 
 
 class ModuleLifecycleState(StrEnum):
@@ -1053,13 +1072,26 @@ class RuntimeModuleRegistry:
         common = set(previous.states) & set(self.states)
         replaced = common & changed
         retained = common - changed
+        preparing = tuple(item for item in self.order if item in changed)
         return RuntimeGraphTransitionPlan(
             replace=tuple(item for item in previous.order if item in replaced),
             retain=tuple(item for item in previous.order if item in retained),
             remove=tuple(item for item in previous.order if item not in self.states),
             add=tuple(item for item in self.order if item not in previous.states),
             drain=tuple(item for item in previous.order if item in changed),
-            prepare=tuple(item for item in self.order if item in changed),
+            prepare=preparing,
+            worker_capacity=RuntimeWorkerCapacity(
+                active=tuple(
+                    (item.component_id, item.worker_limits)
+                    for item in previous.descriptors
+                    if item.worker_limits is not None
+                ),
+                preparing=tuple(
+                    (item.component_id, item.worker_limits)
+                    for item in self.descriptors
+                    if item.component_id in preparing and item.worker_limits is not None
+                ),
+            ),
         )
 
     def accept_retained_ownership(self) -> None:
@@ -1140,6 +1172,10 @@ class RuntimeModuleRegistry:
                 else descriptor.factory.__module__ + ":" + descriptor.factory.__qualname__
             ),
             "artifact": descriptor.artifact.as_fact(),
+            "worker_limits": (
+                descriptor.worker_limits.as_fact()
+                if descriptor.worker_limits is not None else None
+            ),
             "management_contributions": [
                 contribution.as_fact() for contribution in descriptor.management
             ],

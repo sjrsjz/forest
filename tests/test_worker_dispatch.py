@@ -5,8 +5,9 @@ import asyncio
 import pytest
 from test_worker import active_worker, identity, package
 
-from forest.drivers.python_worker import PythonWorker, WorkerLimits
+from forest.drivers.python_worker import PythonWorker
 from forest.errors import ForestError
+from forest.worker_limits import WorkerLimits
 
 
 async def test_before_send_waits_for_real_slot_and_rejection_never_dispatches(tmp_path):

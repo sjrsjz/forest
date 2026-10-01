@@ -15,7 +15,7 @@ from uuid import uuid4
 
 from forest.command_contract import schema_digest
 from forest.drivers.protocol import MAX_FRAME_BYTES, FrameWriter, read_frame, validate_json
-from forest.drivers.python_worker import WorkerLimits, _error_details, _error_envelope
+from forest.drivers.python_worker import _error_details, _error_envelope
 from forest.errors import ForestError
 from forest.sdk import (
     CallScope,
@@ -31,6 +31,7 @@ from forest.sdk import (
     declared_services,
     declared_subscriptions,
 )
+from forest.worker_limits import WorkerLimits
 
 
 def _plain(value):

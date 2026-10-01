@@ -14,6 +14,7 @@ from forest.runtime_modules import (
     RuntimeModuleRegistry,
     RuntimeShellCommandContribution,
 )
+from forest.worker_limits import WorkerLimits
 
 _ARTIFACT = RuntimeArtifactIdentity(
     "test.tools",
@@ -114,6 +115,66 @@ def test_replacement_closure_includes_service_and_transaction_references():
     with pytest.raises(ForestError) as error:
         registry.replacement_closure("module.missing")
     assert error.value.code == "RUNTIME_MODULE_NOT_FOUND"
+
+
+def test_worker_claims_cover_old_and_new_generations_during_graph_prewarm():
+    worker_artifact = RuntimeArtifactIdentity(
+        "test.worker", "1.0.0", "sha256:" + "b" * 64,
+        "bot", "forest.python-worker/1", "installed",
+    )
+    old_limits = WorkerLimits(max_inflight=4)
+    new_limits = WorkerLimits(max_inflight=8)
+
+    def worker(component_id, limits):
+        return RuntimeModuleDescriptor(
+            component_id, (), None, worker_artifact, worker_limits=limits,
+        )
+
+    previous = RuntimeModuleRegistry(
+        _runtime(), (worker("module.changed", old_limits),
+                     worker("module.retained", old_limits)),
+    )
+    previous.graph_identity = object()
+    previous.instances = {item: object() for item in previous.order}
+    previous.states = {item: ModuleLifecycleState.ACTIVE for item in previous.order}
+    previous.generation_bindings = {
+        item.component_id: SimpleNamespace(
+            descriptor_digest=previous._descriptor_fact(item)["descriptor_digest"]
+        )
+        for item in previous.descriptors
+    }
+    candidate = RuntimeModuleRegistry(
+        _runtime(), (worker("module.changed", new_limits),
+                     worker("module.retained", old_limits),
+                     worker("module.added", old_limits)),
+    )
+
+    impact = candidate.preview_graph_transition(previous)
+
+    assert impact.replace == ("module.changed",)
+    assert impact.retain == ("module.retained",)
+    assert impact.add == ("module.added",)
+    assert impact.worker_capacity.active == (
+        ("module.changed", old_limits), ("module.retained", old_limits),
+    )
+    assert impact.worker_capacity.preparing == (
+        ("module.changed", new_limits), ("module.added", old_limits),
+    )
+    assert len(impact.worker_capacity.peak) == 4
+
+
+def test_worker_resource_claim_is_required_only_for_worker_driver():
+    worker_artifact = RuntimeArtifactIdentity(
+        "test.worker", "1.0.0", "sha256:" + "b" * 64,
+        "bot", "forest.python-worker/1", "installed",
+    )
+    with pytest.raises(ValueError, match="exact Worker limits"):
+        RuntimeModuleDescriptor("module.worker", (), None, worker_artifact)
+    with pytest.raises(ValueError, match="exact Worker limits"):
+        RuntimeModuleDescriptor(
+            "module.native", (), lambda *_: object(), _ARTIFACT,
+            worker_limits=WorkerLimits(),
+        )
 
 
 def test_explicit_retention_dependency_must_be_in_candidate_graph():

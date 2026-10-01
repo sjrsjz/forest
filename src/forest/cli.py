@@ -101,8 +101,9 @@ def main() -> None:
 async def run_plugin_command(args: argparse.Namespace) -> None:
     from jsonschema import Draft202012Validator
 
-    from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLimits
+    from forest.drivers.python_worker import PythonWorker, WorkerIdentity
     from forest.packages import PackageCatalog
+    from forest.worker_limits import WorkerLimits
 
     if args.plugin_command == "init":
         from forest.plugin_scaffold import initialize_plugin

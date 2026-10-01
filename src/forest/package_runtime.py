@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from jsonschema import Draft202012Validator
 
-from forest.drivers.python_worker import PythonWorker, WorkerIdentity, WorkerLimits
+from forest.drivers.python_worker import PythonWorker, WorkerIdentity
 from forest.errors import ForestError
 from forest.job_protocol import DurableJobExecutionRequest
 from forest.package_capabilities import (
@@ -73,6 +73,7 @@ from forest.shell_command_protocol import (
     ShellCommandExecutionResult,
 )
 from forest.unit_of_work import ComponentConfigurationApplyScope
+from forest.worker_limits import WorkerLimits
 
 
 class PackageGenerationState(StrEnum):
@@ -2966,6 +2967,7 @@ def package_runtime_descriptor(
             driver="forest.python-worker/1",
             trust_level=trust_level,
         ),
+        worker_limits=WorkerLimits.from_component(component),
         management=tuple(management),
         storage=storage,
         event_publications=event_publications,

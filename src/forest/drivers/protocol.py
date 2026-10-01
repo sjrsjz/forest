@@ -9,9 +9,9 @@ import struct
 from typing import Any
 
 from forest.errors import ForestError
+from forest.worker_limits import MAX_FRAME_BYTES
 
 WIRE_VERSION = 1
-MAX_FRAME_BYTES = 256 * 1024
 MAX_DEPTH = 32
 MAX_ITEMS = 16384
 

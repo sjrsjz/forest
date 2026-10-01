@@ -143,7 +143,7 @@ Worker Host 包的选择写端口拒绝停用自身；宿主成员选择不按�
 
 `component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主在图替换锁内取得选择共享围栏、读取当前选择快照，再通过 Worker Host 包内 SQL 端口投影拟议写入，并从同一 `REPEATABLE READ` 事务快照读取候选中全部包的配置事实，编译不可执行候选。选择围栏先于配置快照建立，避免等待锁时冻结过时选择；两者使用两个连接，围栏持续至预览结束。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。资源预算、授权提交事务中的计划事实复核及 Web/Shell 启停动作仍未完成。
 
-候选包事实现在还包含规范化的 `worker_limits`：帧、并发、队列、状态并发、持有任务及持有资源六项都从同一个不可变包声明和 `WorkerLimits` 默认值生成，Worker 启动也使用该构造器。它们进入 `plan_digest`，管理预览展示目标包的值；这只是 Worker 内 IPC/并发容量声明，不是 CPU/内存隔离承诺。Bot 级资源策略、启停时的总量 admission 与操作系统级 CPU/内存限制仍须分别设计和复核，不能把已经存在的队列上限冒充完成的资源预算。
+候选包事实现在还包含规范化的 `worker_limits`：帧、并发、队列、状态并发、持有任务及持有资源六项都从同一个不可变包声明和 `WorkerLimits` 默认值生成，Worker 启动也使用该构造器。它们进入 `plan_digest`，管理预览展示目标包的值。相同声明也固定在通用 RuntimeModuleDescriptor 的 Graph 事实中；Worker SDK 的隔离快照包含该限额模型。正式 Graph 规划器以当前全部活动 Worker 加上候选 `prepare` 集中的 Worker 组成 `worker_capacity.peak`，因此被替换的旧 Worker 与新 Worker 会同时占用容量，保留的 Worker 只计算一次。这只是 Worker 内 IPC/并发容量声明，不是 CPU/内存隔离承诺。Bot 级资源策略、启停时的总量 admission 与操作系统级 CPU/内存限制仍须分别设计和复核，不能把已经存在的队列上限冒充完成的资源预算。
 
 Graph 规划需要管理契约的 schema 描述，但这些 schema 已在 Generation 构造时从经校验的不可变包快照编译。`PackageManagementContract.describe()` 读取隔离的已编译副本，不在每次描述符比较时重复扫描工件；包工件及当前配置本身仍在预览时按精确摘要和修订检查。
 
