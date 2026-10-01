@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "query_id", "bundle_id", "evidence_ref", "items"],
+  "properties": {
+    "protocol": {"const": "forest.memory-trial-visibility/1"},
+    "query_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "bundle_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "evidence_ref": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_component_id": {"const": "memory.graph"},
+        "owner_kind": {"const": "retrieval.evidence"},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    "items": {
+      "type": "array", "maxItems": 64,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["evidence_index", "item_index", "source_unit_id", "visible"],
+        "properties": {
+          "evidence_index": {"type": "integer", "minimum": 0, "maximum": 63},
+          "item_index": {"type": "integer", "minimum": 0, "maximum": 63},
+          "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
+          "visible": {"type": "boolean"}
+        }
+      }
+    }
+  }
+}

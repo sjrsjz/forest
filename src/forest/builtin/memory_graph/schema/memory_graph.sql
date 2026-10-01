@@ -1493,6 +1493,8 @@ RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
     query_row __forest_module_schema__.memory_queries%ROWTYPE;
     trial_row __forest_module_schema__.memory_trial_inputs%ROWTYPE;
+    work_row __forest_module_schema__.query_recall_work%ROWTYPE;
+    evidence_reference jsonb;
     work_value jsonb;
 BEGIN
     SELECT * INTO query_row FROM __forest_module_schema__.memory_queries
@@ -1516,8 +1518,33 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
                 'message','Trial input has expired or its Generation was replaced','status',410));
     END IF;
-    work_value := __forest_module_schema__.memory_read_recall_work(context,input);
-    IF work_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN work_value; END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.query_recall_work
+    WHERE bot_id=query_row.bot_id AND query_id=query_row.query_id;
+    IF FOUND AND work_row.state='READY' THEN
+        -- Management pages revalidate each displayed item. The Agent's
+        -- all-or-nothing evidence gate remains in memory_read_recall_work.
+        IF query_row.state<>'FROZEN' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EVIDENCE_UNAVAILABLE',
+                    'message','Trial evidence is not frozen','status',409));
+        END IF;
+        SELECT m.evidence_ref INTO evidence_reference
+        FROM __forest_module_schema__.retrieval_bundles b
+        JOIN __forest_module_schema__.retrieval_materializations m
+          ON m.bot_id=b.bot_id AND m.bundle_id=b.bundle_id
+        WHERE b.bot_id=query_row.bot_id AND b.query_id=query_row.query_id;
+        IF NOT FOUND THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EVIDENCE_UNAVAILABLE',
+                    'message','Trial evidence is not published','status',409));
+        END IF;
+        work_value := jsonb_build_object('value',jsonb_build_object(
+            'state','READY','deadline_at',work_row.deadline_at,
+            'error_code',NULL,'evidence_ref',evidence_reference));
+    ELSE
+        work_value := __forest_module_schema__.memory_read_recall_work(context,input);
+        IF work_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN work_value; END IF;
+    END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('protocol','forest.memory-trial/1',
             'query_id',query_row.query_id,'query_mode',query_row.query_mode,
@@ -2624,6 +2651,67 @@ BEGIN
         'value',jsonb_build_object('query_id',requested_query,'bundle_id',bundle_row.bundle_id,
             'item_index',requested_index,'result_count',bundle_row.result_count,'node',node_value,
             'parts',parts_value,'last_part_index',last_index,'has_more',more_value));
+END;
+$$;
+
+CREATE FUNCTION memory_read_management_trial_visibility(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    access_value jsonb;
+    bundle_row __forest_module_schema__.retrieval_bundles%ROWTYPE;
+    projection_row __forest_module_schema__.retrieval_materializations%ROWTYPE;
+    requested_source text := input->>'source_unit_id';
+    item_index_value integer;
+    evidence_index_value integer := -1;
+    source_unit_value text;
+    check_value jsonb;
+    visible_items jsonb := '[]'::jsonb;
+BEGIN
+    access_value := __forest_module_schema__.memory_read_management_trial(context,input);
+    IF access_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN access_value; END IF;
+    IF access_value#>>'{value,state}' IS DISTINCT FROM 'READY' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_NOT_READY',
+                'message','Trial evidence is not ready','status',409));
+    END IF;
+    SELECT * INTO bundle_row FROM __forest_module_schema__.retrieval_bundles
+    WHERE bot_id=context->>'bot_id' AND query_id=input->>'query_id';
+    SELECT * INTO projection_row FROM __forest_module_schema__.retrieval_materializations
+    WHERE bot_id=bundle_row.bot_id AND bundle_id=bundle_row.bundle_id;
+    IF NOT FOUND OR projection_row.evidence_ref IS DISTINCT FROM
+       access_value#>'{value,evidence_ref}' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EVIDENCE_UNAVAILABLE',
+                'message','Trial evidence changed','status',409));
+    END IF;
+    FOREACH item_index_value IN ARRAY projection_row.item_indexes LOOP
+        evidence_index_value := evidence_index_value+1;
+        SELECT source_unit_id INTO source_unit_value
+        FROM __forest_module_schema__.retrieval_items
+        WHERE bot_id=bundle_row.bot_id AND bundle_id=bundle_row.bundle_id
+          AND item_index=item_index_value;
+        IF NOT FOUND THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_EVIDENCE_INVALID',
+                    'message','Trial evidence item is missing','status',409));
+        END IF;
+        IF requested_source IS NOT NULL AND source_unit_value<>requested_source THEN
+            CONTINUE;
+        END IF;
+        check_value := __forest_module_schema__.memory_read_retrieval_parts(context,
+            jsonb_build_object('query_id',bundle_row.query_id,
+                'item_index',item_index_value,'after_part_index',-1,'limit',1));
+        IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+        visible_items := visible_items||jsonb_build_array(jsonb_build_object(
+            'evidence_index',evidence_index_value,'item_index',item_index_value,
+            'source_unit_id',source_unit_value,
+            'visible',COALESCE(
+                check_value#>>'{value,node,source_unit_id}'=source_unit_value,false)));
+    END LOOP;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-trial-visibility/1',
+            'query_id',bundle_row.query_id,'bundle_id',bundle_row.bundle_id,
+            'evidence_ref',projection_row.evidence_ref,'items',visible_items));
 END;
 $$;
 

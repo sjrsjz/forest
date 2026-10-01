@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.69.0"
+version = "1.70.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -47,6 +47,7 @@ requests = [
   "domain.query:memory.read-query-progress",
   "domain.query:memory.read-recall-work",
   "domain.query:memory.read-management-trial",
+  "domain.query:memory.read-management-trial-visibility",
   "domain.query:memory.assert-public-query",
   "domain.query:memory.read-query-vectors",
   "domain.query:memory.read-match-preparation",
@@ -270,9 +271,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.60.0"
+schema_version = "3.61.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "25451222b88830ed2811d094664a660e930af5531670d170e86722505d37a185"
+baseline_sha256 = "10ed91c3a522ee1727c6489821da8b2cf29d0db8634451ad812acb3c3fd16a0a"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -367,6 +368,13 @@ contract = "1.0"
 function = "memory_read_management_trial"
 input_schema = "schemas/trial-get-input.json"
 output_schema = "schemas/trial-get-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-management-trial-visibility"
+contract = "1.0"
+function = "memory_read_management_trial_visibility"
+input_schema = "schemas/trial-visibility-input.json"
+output_schema = "schemas/trial-visibility-output.json"
 
 [[components.domain_queries]]
 name = "memory.assert-public-query"

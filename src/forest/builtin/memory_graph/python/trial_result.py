@@ -27,29 +27,67 @@ async def _authorized_evidence(ctx, payload):
         or evidence.get("current_source") is not None
         or evidence.get("bot_id") != ctx.identity["bot_id"]
         or evidence.get("query_id") != query_id
-        or not isinstance(evidence.get("evidence"), list)
-        or len(evidence["evidence"]) > 64
+        or not isinstance(evidence.get("evidence_refs"), list)
+        or not isinstance(evidence.get("item_indexes"), list)
+        or len(evidence["evidence_refs"]) != len(evidence["item_indexes"])
+        or len(evidence["evidence_refs"]) > 64
     ):
         raise ForestError("MEMORY_EVIDENCE_INVALID", "Trial evidence identity differs", 409)
-    current = await ctx.queries.call(
-        "memory.read-management-trial", authority_input, timeout=10
+    visibility = await _read_visibility(ctx, payload, reference, evidence)
+    return evidence, reference, visibility
+
+
+async def _read_visibility(ctx, payload, reference, evidence):
+    request = {"query_id": payload["query_id"], "requested_by": payload["requested_by"]}
+    if "source_unit_id" in payload:
+        request["source_unit_id"] = payload["source_unit_id"]
+    result = await ctx.queries.call(
+        "memory.read-management-trial-visibility", request, timeout=10
     )
-    if current["state"] != "READY" or current["evidence_ref"] != reference:
+    if (result.get("evidence_ref") != reference
+            or result.get("bundle_id") != evidence.get("bundle_id")
+            or not isinstance(result.get("items"), list)):
         raise ForestError("MEMORY_EVIDENCE_UNAVAILABLE", "Trial evidence changed", 409)
-    return evidence, reference
+    gates = result["items"]
+    if "source_unit_id" not in payload and len(gates) != len(evidence["evidence_refs"]):
+        raise ForestError("MEMORY_EVIDENCE_INVALID", "Trial evidence items differ", 409)
+    if "source_unit_id" in payload and len(gates) > 1:
+        raise ForestError("MEMORY_EVIDENCE_INVALID", "Trial image identity differs", 409)
+    for position, gate in enumerate(gates):
+        index = gate.get("evidence_index")
+        if (type(index) is not int or not 0 <= index < len(evidence["evidence_refs"])
+                or ("source_unit_id" not in payload and index != position)
+                or gate.get("item_index") != evidence["item_indexes"][index]
+                or ("source_unit_id" in payload
+                    and gate.get("source_unit_id") != payload["source_unit_id"])):
+            raise ForestError("MEMORY_EVIDENCE_INVALID", "Trial evidence order differs", 409)
+    return gates
+
+
+async def _read_unit(ctx, evidence, gate):
+    raw = await ctx.payloads.read_bytes(evidence["evidence_refs"][gate["evidence_index"]])
+    try:
+        unit = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ForestError("MEMORY_EVIDENCE_INVALID", "Trial evidence item is not JSON", 409) from exc
+    if (not isinstance(unit, dict)
+            or unit.get("source_unit_id") != gate["source_unit_id"]
+            or not isinstance(unit.get("parts"), list)):
+        raise ForestError("MEMORY_EVIDENCE_INVALID", "Trial evidence item differs", 409)
+    return unit
 
 
 async def read_page(ctx, payload):
-    evidence, _reference = await _authorized_evidence(ctx, payload)
+    evidence, _reference, gates = await _authorized_evidence(ctx, payload)
     query_id = payload["query_id"]
     after = payload.get("after_index", -1)
     limit = payload.get("limit", 4)
-    values = evidence["evidence"]
-    selected = values[after + 1:after + 1 + limit]
+    values = [gate for gate in gates if gate["visible"]]
+    selected = [gate for gate in values if gate["evidence_index"] > after][:limit]
     items = []
-    for offset, row in enumerate(selected, start=after + 1):
-        if not isinstance(row, dict) or not isinstance(row.get("parts"), list):
-            raise ForestError("MEMORY_EVIDENCE_INVALID", "Trial evidence item is invalid", 409)
+    for gate in selected:
+        offset = gate["evidence_index"]
+        row = await _read_unit(ctx, evidence, gate)
         text = "\n".join(
             part.get("text", "") for part in row["parts"]
             if isinstance(part, dict) and part.get("kind") == "text"
@@ -80,7 +118,10 @@ async def read_page(ctx, payload):
             "images": images[:8],
             "image_count": len(images),
         })
-    end = after + len(items)
+    if await _read_visibility(ctx, payload, _reference, evidence) != gates:
+        raise ForestError("MEMORY_EVIDENCE_UNAVAILABLE", "Trial visibility changed", 409)
+    last_index = selected[-1]["evidence_index"] if selected else after
+    has_more = any(gate["evidence_index"] > last_index for gate in values)
     return {
         "protocol": "forest.memory-trial-result-page/1",
         "query_id": query_id,
@@ -92,21 +133,20 @@ async def read_page(ctx, payload):
         "truncated": evidence["truncated"],
         "association_sampled": evidence["association_sampled"],
         "items": items,
-        "next_index": end if end + 1 < len(values) else None,
-        "has_more": end + 1 < len(values),
+        "next_index": last_index if has_more else None,
+        "has_more": has_more,
     }
 
 
 async def read_image(ctx, payload):
     """Return one exact bounded image chunk from this actor's live evidence."""
 
-    evidence, evidence_ref = await _authorized_evidence(ctx, payload)
+    evidence, evidence_ref, gates = await _authorized_evidence(ctx, payload)
+    if not gates or not gates[0]["visible"]:
+        raise ForestError("MEMORY_TRIAL_IMAGE_NOT_FOUND", "Image is not in trial evidence", 404)
+    row = await _read_unit(ctx, evidence, gates[0])
     image_part = next((
         part
-        for row in evidence["evidence"]
-        if isinstance(row, dict)
-        and row.get("source_unit_id") == payload["source_unit_id"]
-        and isinstance(row.get("parts"), list)
         for part in row["parts"]
         if isinstance(part, dict)
         and part.get("kind") == "image"
@@ -126,12 +166,8 @@ async def read_image(ctx, payload):
         raise ForestError("MEMORY_TRIAL_IMAGE_TOO_LARGE", "Image exceeds display bound", 413)
     if offset >= chunk["byte_length"]:
         raise ForestError("PAYLOAD_RANGE_INVALID", "Image offset exceeds its bytes", 416)
-    current = await ctx.queries.call(
-        "memory.read-management-trial",
-        {"query_id": payload["query_id"], "requested_by": payload["requested_by"]},
-        timeout=10,
-    )
-    if current["state"] != "READY" or current["evidence_ref"] != evidence_ref:
+    latest = await _read_visibility(ctx, payload, evidence_ref, evidence)
+    if not latest or not latest[0]["visible"]:
         raise ForestError("MEMORY_EVIDENCE_UNAVAILABLE", "Trial evidence changed", 409)
     return {
         "protocol": "forest.memory-trial-image-chunk/1",

@@ -2876,6 +2876,30 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     await asyncio.sleep(0.2)
             assert work["state"] == "SUCCEEDED", work
             forget = work["result"]
+            trial_authorization = SimpleNamespace(
+                actor_ref=trial_actor, web_subject_ref=trial_actor,
+            )
+            trial_after_forget = await memory_instance.management_contract.query_authorized(
+                "memory.trial.get", {"query_id": trial_id},
+                authorization=trial_authorization,
+            )
+            assert trial_after_forget["state"] == "READY"
+            trial_page_after_forget = await memory_instance.management_contract.query_authorized(
+                "memory.trial.result", {"query_id": trial_id},
+                authorization=trial_authorization,
+            )
+            assert trial_page_after_forget["total_count"] == 0
+            assert trial_page_after_forget["items"] == []
+            with pytest.raises(ForestError) as forgotten_trial_image:
+                await memory_instance.management_contract.query_authorized(
+                    "memory.trial.image", {
+                        "query_id": trial_id,
+                        "source_unit_id": unit_evidence["source_unit_id"],
+                        "part_id": picture["part_id"], "offset": 0,
+                    },
+                    authorization=trial_authorization,
+                )
+            assert forgotten_trial_image.value.code == "MEMORY_TRIAL_IMAGE_NOT_FOUND"
             forget_input["operation_id"] = request_id
             assert forget["deletion_epoch"] == previous_epoch + 1
             assert forget["suppressed_source_units"] == 1

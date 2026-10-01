@@ -89,14 +89,19 @@ async def test_evidence_cuts_unicode_text_and_keeps_images_with_source_dependenc
 
 
 @pytest.mark.asyncio
-async def test_management_trial_evidence_has_no_fabricated_current_source():
-    ctx, documents, _ancestry, _published = _context(input_kind="ADMIN_TRIAL")
+async def test_management_trial_evidence_has_independent_revocable_items():
+    ctx, documents, ancestry, _published = _context(input_kind="ADMIN_TRIAL")
     result = await materialize(ctx, "query/test", digest_json)
     document = documents[result["evidence_ref"]["payload_id"]]
     assert document["protocol"] == "forest.memory-trial-evidence/1"
     assert document["input_kind"] == "ADMIN_TRIAL"
     assert document["current_source"] is None
-    assert document["evidence"][0]["source_unit_id"] == "unit/test"
+    assert "evidence" not in document
+    assert document["item_indexes"] == [0]
+    unit_ref = document["evidence_refs"][0]
+    assert documents[unit_ref["payload_id"]]["source_unit_id"] == "unit/test"
+    assert unit_ref["payload_id"] not in ancestry[result["evidence_ref"]["payload_id"]]
+    assert "query/0" in {parent for group in ancestry.values() for parent in group}
 
 
 @pytest.mark.asyncio
