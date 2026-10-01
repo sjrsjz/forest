@@ -1,0 +1,23 @@
+{
+  "protocol": "forest.provider.chat-completions/1",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "credential_ref": "secret://provider.chat-completions/default",
+  "timeout_seconds": 120,
+  "max_connections": 8,
+  "capabilities": {
+    "deployment_id": "provider.chat-completions/default",
+    "model": "unconfigured",
+    "capability_revision": "configuration/1",
+    "model_revision": "configured",
+    "input_modalities": ["text"],
+    "supports_tools": true,
+    "supports_streaming": true,
+    "stream_usage": true,
+    "max_output_tokens": 4096,
+    "image_roles": ["user"],
+    "image_detail": "auto",
+    "system_role": "system",
+    "output_token_parameter": "max_completion_tokens",
+    "tool_image_mapping": "omit"
+  }
+}

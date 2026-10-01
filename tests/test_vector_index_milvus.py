@@ -10,12 +10,12 @@ from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
-from forest.embedding_builtin import default_embedding_configuration
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog, digest_json
-from forest.vector_index_builtin import (
+from forest.official_bot_provisioning import (
+    default_embedding_configuration,
     default_vector_index_configuration,
     validate_vector_index_configuration,
 )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.resources import files
@@ -98,6 +99,33 @@ class _InstalledPackageLayout:
     schema_digest: str
     configuration_storage: RuntimeStorageBundle
     storage: RuntimeStorageBundle | None
+
+
+_BOOTSTRAP_BUILTIN_PACKAGES = frozenset({
+    "provider_chat_completions", "embedding_multimodal", "vector_index_milvus",
+})
+
+
+def _official_bootstrap_source(package_name: str):
+    if package_name not in _BOOTSTRAP_BUILTIN_PACKAGES:
+        raise ValueError("Unknown official bootstrap package")
+    return files("forest").joinpath("builtin", package_name)
+
+
+def official_builtin_configuration(package_name: str, *, overrides: dict | None = None) -> dict:
+    """Read an official package's declarative bootstrap seed, before Bot assembly."""
+
+    source = _official_bootstrap_source(package_name)
+    value = json.loads(source.joinpath("bootstrap.json").read_text(encoding="utf-8"))
+    value.update(overrides or {})
+    return value
+
+
+def official_builtin_configuration_schema(package_name: str) -> dict:
+    """Read the same package schema used for its frozen Generation."""
+
+    source = _official_bootstrap_source(package_name)
+    return json.loads(source.joinpath("schemas/config.json").read_text(encoding="utf-8"))
 
 
 def _required_service_contracts(

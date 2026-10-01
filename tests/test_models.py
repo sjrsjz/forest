@@ -15,7 +15,7 @@ import pytest
 from forest.errors import ForestError
 from forest.model_contract import MediaSnapshot, ModelCapabilities
 from forest.model_transport import ChatCompletionsClient
-from forest.provider_builtin import validate_provider_configuration
+from forest.official_bot_provisioning import validate_provider_configuration
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 from agent_protocol import ProtocolRepairView

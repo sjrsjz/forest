@@ -19,7 +19,6 @@ from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.vector_index_authority import VectorIndexRefRepository
-from forest.vector_index_builtin import validate_vector_index_configuration
 
 _REF = re.compile(r"[^\x00]{1,256}\Z")
 _LOG = logging.getLogger(__name__)
@@ -68,7 +67,8 @@ class MilvusVectorIndexEffectDriver:
                 "Milvus driver received another effect service",
                 500,
             )
-        self.configuration = validate_vector_index_configuration(configuration)
+        # The package Generation validates configuration before effect binding.
+        self.configuration = configuration
         self.configuration_revision = configuration_revision
         self.identity = identity
         self.service_id = declaration["name"]

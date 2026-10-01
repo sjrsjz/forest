@@ -39,7 +39,7 @@ from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
-from forest.vector_index_builtin import default_vector_index_configuration
+from forest.official_bot_provisioning import default_vector_index_configuration
 
 
 @pytest_asyncio.fixture

@@ -13,7 +13,11 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
-from forest.builtin_packages import bootstrap_builtin_package, bootstrap_installed_package
+from forest.builtin_packages import (
+    bootstrap_builtin_package,
+    bootstrap_installed_package,
+    official_builtin_configuration,
+)
 from forest.chat_completions_effect_driver import (
     chat_completions_effect_driver_factory,
 )
@@ -52,7 +56,6 @@ from forest.shell_management_authority import ShellManagementAuthorization
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.schema_bundles import SchemaBundleInstaller
-from forest.vector_index_builtin import default_vector_index_configuration
 from forest.vector_index_effect_driver import milvus_vector_index_effect_driver_factory
 
 _HOST_LEASE_TTL = timedelta(minutes=2)
@@ -535,9 +538,12 @@ class CleanBotHost:
             self.schema_bundle_installer,
             kernel=self._kernel,
             initial_configuration={
-                **default_vector_index_configuration(
-                    space_id=EmbeddingProfile(**embedding_profile).space_id,
-                    dimensions=self.settings.embedding_dimensions,
+                **official_builtin_configuration(
+                    "vector_index_milvus",
+                    overrides={
+                        "space_id": EmbeddingProfile(**embedding_profile).space_id,
+                        "dimensions": self.settings.embedding_dimensions,
+                    },
                 ),
                 "endpoint": self.settings.vector_index_endpoint,
                 "credential_ref": self.settings.vector_index_credential_ref,

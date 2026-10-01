@@ -1,0 +1,13 @@
+{
+  "protocol": "forest.embedding.multimodal/1",
+  "endpoint": "https://api.siliconflow.cn/v1/embeddings",
+  "credential_ref": "secret://embedding.multimodal/default",
+  "timeout_seconds": 60,
+  "max_connections": 4,
+  "profile": {
+    "deployment_id": "embedding.multimodal/qiyu-vl/default",
+    "model_revision": "operator-declared/1",
+    "model": "Qwen/Qwen3-VL-Embedding-8B",
+    "dimensions": 4096
+  }
+}

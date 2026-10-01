@@ -7,23 +7,76 @@ from urllib.parse import urlsplit
 from jsonschema import Draft202012Validator
 
 from forest.bootstrap_contributions import BootstrapConfigurationContribution
-from forest.clean_bot_host import CleanBotHost, CleanBotSettings
-from forest.embedding_builtin import (
-    default_embedding_configuration,
-    validate_embedding_configuration,
+from forest.builtin_packages import (
+    official_builtin_configuration,
+    official_builtin_configuration_schema,
 )
+from forest.clean_bot_host import CleanBotHost, CleanBotSettings
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
-from forest.provider_builtin import (
-    default_provider_configuration,
-    validate_provider_configuration,
-)
+from forest.model_contract import ModelCapabilities
 from forest.runtime_modules import RuntimeManagementContribution
-from forest.vector_index_builtin import (
-    VECTOR_INDEX_CONFIGURATION_SCHEMA,
-    default_vector_index_configuration,
-    validate_vector_index_configuration,
-)
+
+PROVIDER_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("provider_chat_completions")
+EMBEDDING_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("embedding_multimodal")
+VECTOR_INDEX_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("vector_index_milvus")
+
+
+def default_provider_configuration() -> dict:
+    return official_builtin_configuration("provider_chat_completions")
+
+
+def default_embedding_configuration() -> dict:
+    return official_builtin_configuration("embedding_multimodal")
+
+
+def default_vector_index_configuration(*, space_id: str, dimensions: int) -> dict:
+    return official_builtin_configuration(
+        "vector_index_milvus", overrides={"space_id": space_id, "dimensions": dimensions}
+    )
+
+
+def _validated_package_configuration(
+    schema: dict, value: object, code: str, message: str
+) -> dict:
+    if not Draft202012Validator(schema).is_valid(value):
+        raise ForestError(code, message, 422)
+    return value
+
+
+def validate_provider_configuration(value: object) -> tuple[dict, ModelCapabilities]:
+    configuration = _validated_package_configuration(
+        PROVIDER_CONFIGURATION_SCHEMA, value,
+        "PROVIDER_CONFIGURATION_INVALID", "Provider configuration is invalid",
+    )
+    try:
+        capabilities = ModelCapabilities(**configuration["capabilities"])
+    except (KeyError, TypeError, ForestError) as exc:
+        raise ForestError(
+            "PROVIDER_CONFIGURATION_INVALID", "Provider capabilities are invalid", 422
+        ) from exc
+    return {**configuration, "capabilities": capabilities.as_dict()}, capabilities
+
+
+def validate_embedding_configuration(value: object) -> tuple[dict, EmbeddingProfile]:
+    configuration = _validated_package_configuration(
+        EMBEDDING_CONFIGURATION_SCHEMA, value,
+        "EMBEDDING_CONFIGURATION_INVALID", "Embedding configuration is invalid",
+    )
+    try:
+        profile = EmbeddingProfile(**configuration["profile"])
+    except (KeyError, TypeError, ValueError, ForestError) as exc:
+        raise ForestError(
+            "EMBEDDING_CONFIGURATION_INVALID", "Embedding profile is invalid", 422
+        ) from exc
+    return configuration, profile
+
+
+def validate_vector_index_configuration(value: object) -> dict:
+    return _validated_package_configuration(
+        VECTOR_INDEX_CONFIGURATION_SCHEMA, value,
+        "VECTOR_INDEX_CONFIGURATION_INVALID", "Vector index configuration is invalid",
+    )
 
 OFFICIAL_BOT_COMPONENT_IDS = frozenset({
     "kernel.runtime", "kernel.payload", "kernel.authorization", "kernel.effect",
