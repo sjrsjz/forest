@@ -217,7 +217,24 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
         execution_profile="official",
     )
 
-    async def call(function, operation_id, payload, *, port_kind="management_action"):
+    def command_payload(function, payload):
+        return {
+            **payload,
+            "desired_enabled": function == "enable",
+            "plan_digest": "sha256:" + "0" * 64,
+            "expected_configuration_revision": (
+                1 if payload["source_kind"] == "installed" and function == "enable"
+                else None
+            ),
+        }
+
+    async def call(
+        function, operation_id, payload, *, port_kind="management_action",
+        desired_enabled=None,
+    ):
+        payload = command_payload(function, payload)
+        if desired_enabled is not None:
+            payload["desired_enabled"] = desired_enabled
         name = "component.selection." + function
         context = {
             "bot_id": store.bot_id, "port_kind": port_kind, "port_name": name,
@@ -240,6 +257,10 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     }
     bypass = await call("enable", "selection/bypass", source, port_kind="command")
     assert bypass["error"]["code"] == "COMPONENT_SELECTION_INVALID"
+    misbound = await call(
+        "enable", "selection/misbound", source, desired_enabled=False
+    )
+    assert misbound["error"]["code"] == "COMPONENT_SELECTION_INVALID"
     first, rival = await asyncio.gather(
         call("enable", "selection/first", source),
         call("disable", "selection/rival", source),
@@ -282,6 +303,7 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     assert current.revision == frozen["revision"]
     assert [entry.as_dict() for entry in current.entries] == frozen["entries"]
     winning_operation = "selection/first" if first["ok"] else "selection/rival"
+    winning_function = "enable" if first["ok"] else "disable"
     async with store.pool.connection() as conn, conn.transaction():
         await conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
@@ -292,12 +314,14 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
             desired_enabled=True,
         ) is None
         assert await reader.operation_replay_in(
-            conn, operation_id=winning_operation, input_digest=digest_json(source),
+            conn, operation_id=winning_operation,
+            input_digest=digest_json(command_payload(winning_function, source)),
             desired_enabled=winner["value"]["desired_enabled"],
         ) == winner["value"]
         with pytest.raises(ForestError) as replay_conflict:
             await reader.operation_replay_in(
-                conn, operation_id=winning_operation, input_digest=digest_json(changed),
+                conn, operation_id=winning_operation,
+                input_digest=digest_json(command_payload(winning_function, changed)),
                 desired_enabled=winner["value"]["desired_enabled"],
             )
         assert replay_conflict.value.code == "COMPONENT_SELECTION_OPERATION_CONFLICT"

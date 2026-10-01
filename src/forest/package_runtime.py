@@ -2838,6 +2838,7 @@ def package_runtime_descriptor(
                 preflight_id,
                 component_id=component["id"],
                 package_digest=snapshot.digest,
+                trust_level=trust_level,
             )
             if not callable(preflight):
                 raise ForestError(

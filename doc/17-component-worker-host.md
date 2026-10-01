@@ -163,7 +163,9 @@ Web 的 `module.enable` 与 `module.disable` 必须是两个 action ID、两个�
 
 宿主锁必须先于 Domain Command 事务取得：当前通用入口在 `before_write` 之前已经验证活动 Generation 并进入内核 Graph 数据库围栏，而图替换按“宿主锁→数据库围栏”执行。反过来在 `before_write` 中才等待宿主锁会制造锁序环。提交前置检查必须由 manifest 明确声明且在缺失绑定时拒绝启动或拒绝 action，不允许退化为普通 Domain Command。它可以使用宿主提供的只读候选编译能力和调用方事务连接，但 Worker Host 仍拥有 action、选择 SQL、幂等和结果语义；通用包运行时只编排声明的检查，不硬编码 `component.worker-host` 的策略。
 
-通用包运行时已接受管理 action 的 `transaction_preflight` 声明：装配 Generation 时从宿主解析对应能力，缺失则拒绝装配；action ID 必须与声明的 Domain Command 端口一致，声明了检查却丢失绑定时拒绝调用。宿主检查作用域先于数据库事务进入并一直保持至提交/回滚，Web 票据验证与检查回调在 Domain Command 写入前于同一连接执行；等待锁、校验和事务执行共用 action 超时。管理 action 的输出 schema 现于事务提交前验证，错误输出导致整笔写入回滚。当前只接通这条通用机制，`module.enable`/`module.disable` 尚未发布，也没有注册组件选择的具体检查能力。
+通用包运行时已接受管理 action 的 `transaction_preflight` 声明：装配 Generation 时从宿主解析对应能力，缺失则拒绝装配；action ID 必须与声明的 Domain Command 端口一致，声明了检查却丢失绑定时拒绝调用。宿主检查作用域先于数据库事务进入并一直保持至提交/回滚，Web 票据验证与检查回调在 Domain Command 写入前于同一连接执行；等待锁、校验和事务执行共用 action 超时。管理 action 的输出 schema 现于事务提交前验证，错误输出导致整笔写入回滚。具体选择检查能力已实现如下，但 `module.enable`/`module.disable` 仍未发布。
+
+宿主现在实现 `runtime.selection-commit` Graph 选择检查能力，只向当前官方包绑定；它仍未被 Worker Host 的公开 action 声明。启停方向是命令输入的一部分，包内 SQL 验证该值与实际 `enable`/`disable` 端口一致，避免检查能力与写命令错绑。检查作用域先取得 Graph 替换锁，事务内取得选择独占围栏，先用包内操作探针区分准确重放；新操作读取当前选择修订，再复用同一包内选择投影与正式 Registry 规划器，按组件 ID 顺序读取并锁定全部启用包的配置头，最后比较冻结的 `plan_digest`。目标工件与当前配置由同一候选检查路径重新校验。隔离 PostgreSQL 的完整宿主用例验证现有只读预览摘要可在同一 Graph 下复核，伪造摘要被拒绝且选择账本不变。资源预算策略和公开 Web/Shell action 仍缺失；现阶段不能把这个内部检查能力当作可提交启停的完整入口。
 
 同一事务内输出校验也覆盖普通 Domain Command、启动时的目录同步 Command 和清理时的目录释放 Command；这些写命令返回无效结果时，不提交包内部分写入。只读 Domain Query 保持读后输出校验。
 

@@ -12,6 +12,7 @@ from forest.builtin_packages import (
     inspect_official_candidate_descriptor,
 )
 from forest.component_selection import (
+    ComponentSelectionReader,
     ComponentSelectionSnapshot,
     select_package_members,
 )
@@ -35,6 +36,52 @@ class SelectionGraphPreview:
     plan_digest: str
 
 
+async def project_selection_graph_in(
+    current: RuntimeModuleRegistry,
+    reader: ComponentSelectionReader,
+    official_descriptors: tuple[RuntimeModuleDescriptor, ...],
+    catalog: PackageCatalog,
+    store,
+    *,
+    kernel,
+    conn,
+    component_id: str,
+    source_kind: str,
+    package_digest: str | None,
+    manifest_digest: str | None,
+    approved_capabilities: tuple[str, ...],
+    desired_enabled: bool,
+    expected_selection_revision: int,
+    expected_graph_revision: int,
+    expected_configuration_revision: int | None,
+    ordered_configuration_locks: bool = False,
+) -> SelectionGraphPreview:
+    """Use the package projection and formal Graph planner on one caller transaction."""
+
+    selection = await reader.project_in(
+        conn,
+        component_id=component_id,
+        source_kind=source_kind,
+        package_digest=package_digest,
+        manifest_digest=manifest_digest,
+        approved_capabilities=approved_capabilities,
+        desired_enabled=desired_enabled,
+        expected_selection_revision=expected_selection_revision,
+    )
+    return await preview_selected_graph(
+        current, selection, official_descriptors, catalog, store,
+        kernel=kernel,
+        target_component_id=component_id,
+        expected_graph_revision=expected_graph_revision,
+        expected_configuration_revisions=(
+            {component_id: expected_configuration_revision}
+            if expected_configuration_revision is not None else None
+        ),
+        conn=conn,
+        ordered_configuration_locks=ordered_configuration_locks,
+    )
+
+
 async def preview_selected_graph(
     current: RuntimeModuleRegistry,
     selection: ComponentSelectionSnapshot,
@@ -47,8 +94,9 @@ async def preview_selected_graph(
     expected_graph_revision: int,
     expected_configuration_revisions: Mapping[str, int] | None = None,
     conn=None,
+    ordered_configuration_locks: bool = False,
 ) -> SelectionGraphPreview:
-    """Compile read-only package facts; a supplied connection must be REPEATABLE READ."""
+    """Compile package facts under the caller's snapshot or ordered lock policy."""
 
     if conn is None:
         async with store.pool.connection() as owned_conn, owned_conn.transaction():
@@ -59,6 +107,7 @@ async def preview_selected_graph(
                 expected_graph_revision=expected_graph_revision,
                 expected_configuration_revisions=expected_configuration_revisions,
                 conn=owned_conn,
+                ordered_configuration_locks=ordered_configuration_locks,
             )
     return await _preview_selected_graph_in(
         current, selection, official_descriptors, catalog, store,
@@ -66,6 +115,7 @@ async def preview_selected_graph(
         expected_graph_revision=expected_graph_revision,
         expected_configuration_revisions=expected_configuration_revisions,
         conn=conn,
+        ordered_configuration_locks=ordered_configuration_locks,
     )
 
 
@@ -81,8 +131,9 @@ async def _preview_selected_graph_in(
     expected_graph_revision: int,
     expected_configuration_revisions: Mapping[str, int] | None,
     conn,
+    ordered_configuration_locks: bool,
 ) -> SelectionGraphPreview:
-    """Use one transaction snapshot for every package configuration fact."""
+    """Read every package fact on one transaction; order locks for commit checks."""
 
     graph = current.graph_identity
     if graph is None or graph.graph_revision != expected_graph_revision:
@@ -115,11 +166,7 @@ async def _preview_selected_graph_in(
                 descriptor, catalog, store, kernel=kernel, conn=conn
             )
 
-    inspected = list(await asyncio.gather(*(
-        inspect_official(descriptor) for descriptor in selected.official
-    )))
-    descriptors = []
-    for entry in selected.installed:
+    async def inspect_installed(entry):
         fact, descriptor = await compile_installed_candidate_descriptor(
             entry.package_digest,
             catalog,
@@ -136,8 +183,33 @@ async def _preview_selected_graph_in(
                 "Resolved package component differs from its selection",
                 409,
             )
-        inspected.append(fact)
-        descriptors.append(descriptor)
+        return fact, descriptor
+
+    inspected = []
+    descriptors = []
+    if ordered_configuration_locks:
+        members = sorted(
+            [(item.component_id, "official", item) for item in selected.official]
+            + [(item.component_id, "installed", item) for item in selected.installed],
+            key=lambda item: item[0],
+        )
+        for _, kind, item in members:
+            if kind == "official":
+                inspected.append(await inspect_official_candidate_descriptor(
+                    item, catalog, store, kernel=kernel, conn=conn
+                ))
+            else:
+                fact, descriptor = await inspect_installed(item)
+                inspected.append(fact)
+                descriptors.append(descriptor)
+    else:
+        inspected.extend(await asyncio.gather(*(
+            inspect_official(descriptor) for descriptor in selected.official
+        )))
+        for entry in selected.installed:
+            fact, descriptor = await inspect_installed(entry)
+            inspected.append(fact)
+            descriptors.append(descriptor)
     candidate = RuntimeModuleRegistry(
         current.runtime, kernel.descriptors + selected.official + tuple(descriptors)
     )

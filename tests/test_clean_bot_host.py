@@ -798,6 +798,34 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                 selection_before_preview
             )
             assert host.registry.graph_identity == previous
+            selection_preflight = host.resolve_management_action_preflight(
+                "runtime.selection-commit",
+                component_id="component.worker-host",
+                package_digest=worker_host_artifact.digest,
+                trust_level="official",
+            )
+            assert selection_preflight is not None
+            command_input = dict(validation_input)
+            command_input.update({
+                "plan_digest": preview["plan_digest"],
+                "requested_by": "subject/host-admin",
+            })
+            async with selection_preflight(
+                command_input, operation_id="selection/preflight"
+            ) as verify_in:
+                async with host.store.pool.connection() as conn, conn.transaction():
+                    await verify_in(conn)
+            async with selection_preflight(
+                {**command_input, "plan_digest": "sha256:" + "0" * 64},
+                operation_id="selection/stale-plan",
+            ) as verify_in:
+                async with host.store.pool.connection() as conn, conn.transaction():
+                    with pytest.raises(ForestError) as stale_plan:
+                        await verify_in(conn)
+            assert stale_plan.value.code == "COMPONENT_SELECTION_PLAN_CHANGED"
+            assert (await worker_host.management_contract.query("selection", {})) == (
+                selection_before_preview
+            )
             web_request = await worker_host.management_contract.action(
                 "module.reload",
                 operation_id="web:reload-missing",
@@ -1095,6 +1123,11 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                     "package_digest": counter.digest,
                     "manifest_digest": digest_json(counter.manifest),
                     "approved_capabilities": ["state.read", "state.write"],
+                    "desired_enabled": function == "enable",
+                    "plan_digest": "sha256:" + "0" * 64,
+                    "expected_configuration_revision": (
+                        1 if function == "enable" else None
+                    ),
                     "expected_selection_revision": selection_revision,
                     "expected_graph_revision": graph_revision,
                     "requested_by": "subject/host-admin",

@@ -426,3 +426,5 @@ Embedding 和 Milvus 的 Bot 生命周期身份现由各自包清单的 `config_
 Memory 包新增全局 `memory.relations.search` 管理查询及 UI 入口，不再要求管理员预先知道节点 ID；关系类型、来源类型、跨主干，以及同一证据的群号/主干/作者可组合过滤。复用原有来源删除与资格复核、固定 PostgreSQL 快照和筛选绑定的键集游标；有向边在全局视图明确标为 `CANONICAL`。活动关系顺序及证据来源加索引，包版本升至 `1.65.0`、私有 schema 升至 `3.56.0`。隔离 PostgreSQL 验证全局/一跳查询的快照、证据过滤、翻页和游标冲突，以及真实 Generation 管理端口（共 `3 passed`）；UI 脚本 Node 语法与包构建通过。它仍是权威关系事实浏览；人工审核、发布图投影和百万级性能验收尚未完成。
 
 组件选择读取器已从已验证的 Worker Host 包快照绑定私有 schema 和三个 Domain Query 函数，宿主不再写死这些包内函数名。候选替换沿用当前读取器取得选择围栏，在发布前核对候选包查询同一账本、同一快照；新绑定只在 Graph 成功发布后切换，schema 身份变化拒绝热替换。选择账本 PostgreSQL 用例与完整宿主启动/重建用例 `2 passed`，新增一致性复验后的完整宿主用例 `1 passed`；本地宿主与 schema 非数据库用例 `19 passed`，Ruff 通过。授权启停的事务 preflight、资源预算和 Web/Shell 写入口仍未完成。
+
+Graph 选择的通用管理事务 preflight 现有 `runtime.selection-commit` 能力，生产绑定仅接受当前官方包摘要。命令输入显式携带启停方向，包内 SQL 验证它与实际写端口一致；Worker Host 包版本升至 `1.6.9`，私有 schema 升至 `1.7.0`。检查在宿主 Graph 锁与调用方事务内取得选择独占围栏，包内操作探针先识别准确重放；新操作用包内投影和正式 Graph 规划器重算 `plan_digest`，配置头在提交模式按组件 ID 顺序锁定。只读预览与提交检查共用投影/规划入口。隔离 PostgreSQL 的选择 CAS/错绑拒绝与完整 Worker Host 热重载用例 `2 passed`（199.31 秒）；完整宿主用例核对正确摘要通过、篡改摘要拒绝且选择账本未写。本地包/宿主检查 `16 passed`，Ruff 通过。Worker Host 尚未声明公开启停 action；资源预算和真实 Web/Shell 授权提交仍待接通。

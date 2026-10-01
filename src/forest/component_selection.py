@@ -212,6 +212,14 @@ class ComponentSelectionReader:
         self.namespace = module_schema_namespace(storage["schema_id"])
         self.functions = queries
 
+    async def exclusive_fence_in(self, conn) -> None:
+        """Serialize a caller-owned selection write transaction with publication."""
+
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            ("forest.component.selection/" + self.store.bot_id,),
+        )
+
     @asynccontextmanager
     async def publication_fence(
         self, *, expected_revision: int | None = None, expected_digest: str | None = None

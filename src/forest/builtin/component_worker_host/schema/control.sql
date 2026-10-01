@@ -205,6 +205,7 @@ BEGIN
   IF context->>'port_kind' IS DISTINCT FROM 'management_action'
      OR (enabled AND context->>'port_name' IS DISTINCT FROM 'component.selection.enable')
      OR (NOT enabled AND context->>'port_name' IS DISTINCT FROM 'component.selection.disable')
+     OR input->'desired_enabled' IS DISTINCT FROM to_jsonb(enabled)
      OR op IS NULL OR octet_length(op) NOT BETWEEN 1 AND 256
      OR target IS NULL OR target !~ '^[a-z0-9][a-z0-9._-]{0,127}$'
      OR (NOT enabled AND target='component.worker-host')

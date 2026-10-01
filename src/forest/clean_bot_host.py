@@ -17,12 +17,16 @@ from forest.builtin_packages import bootstrap_builtin_package, bootstrap_install
 from forest.chat_completions_effect_driver import (
     chat_completions_effect_driver_factory,
 )
-from forest.component_graph_preview import SelectionGraphPreview, preview_selected_graph
+from forest.component_graph_preview import (
+    SelectionGraphPreview,
+    project_selection_graph_in,
+)
 from forest.component_selection import (
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
     select_package_members,
 )
+from forest.component_selection_commit import resolve_selection_commit_preflight
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.embeddings import EmbeddingProfile
@@ -356,6 +360,17 @@ class CleanBotHost:
     def notify(self) -> None:
         if self.registry is not None:
             self.registry.notify_work()
+
+    def resolve_management_action_preflight(
+        self, identifier: str, *, component_id: str, package_digest: str,
+        trust_level: str,
+    ):
+        if trust_level != "official":
+            return None
+        return resolve_selection_commit_preflight(
+            self, identifier, component_id=component_id,
+            package_digest=package_digest,
+        )
 
     async def _assemble_candidate(
         self, activation_id: str | None = None
@@ -935,8 +950,14 @@ class CleanBotHost:
                     )
                 async with self.store.pool.connection() as conn, conn.transaction():
                     await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                    selection = await self.selection_reader.project_in(
-                        conn,
+                    return await project_selection_graph_in(
+                        self.registry,
+                        self.selection_reader,
+                        self._official_descriptors,
+                        self.package_catalog,
+                        self.store,
+                        kernel=self._kernel,
+                        conn=conn,
                         component_id=component_id,
                         source_kind=source_kind,
                         package_digest=package_digest,
@@ -944,21 +965,8 @@ class CleanBotHost:
                         approved_capabilities=approved_capabilities,
                         desired_enabled=desired_enabled,
                         expected_selection_revision=current.revision,
-                    )
-                    return await preview_selected_graph(
-                        self.registry,
-                        selection,
-                        self._official_descriptors,
-                        self.package_catalog,
-                        self.store,
-                        kernel=self._kernel,
-                        target_component_id=component_id,
                         expected_graph_revision=expected_graph_revision,
-                        expected_configuration_revisions=(
-                            {component_id: expected_configuration_revision}
-                            if expected_configuration_revision is not None else None
-                        ),
-                        conn=conn,
+                        expected_configuration_revision=expected_configuration_revision,
                     )
 
     async def replace_runtime_graph(
