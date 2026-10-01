@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。当前生产装配已切为微内核包图；Memory 完整主链和长期运行验收尚未完成，因此 Forest 仍不可发布。
+> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。当前生产装配已切为微内核包图；图文记忆主链已在隔离 Bot、假供应商和 PostgreSQL 中贯通，但真实 QQ、真实供应商完整召回、数十万条负载和长期运行仍未验收，因此 Forest 仍不可发布。
 
 本页保留按实施先后写下的阶段记录；早期段落中的“尚未”只描述当时状态，当前结论以第 8 节的切换清单和末尾最新验收记录为准。
 
@@ -464,3 +464,5 @@ Shell 启停入口审计：现有 Shell 仅贡献 `module.list/reload`；`module
 浏览器到模块控制面的验收发现控制台 iframe 消息限流将 `resize` 与 query/action 共用窗口：Worker Host UI 完成启用提交后，紧接着的状态查询可能被静默丢弃，页面停在“已提交”却没有结算状态。现按高度上报、资产分块和普通操作分别计数，并对带 request ID 的超限操作返回明确错误；Worker Host UI 同时移除“启停尚未开放”的过期提示，包版本升至 `1.6.17`。系统 Edge 中的真实浏览器用例经认证 HTTP、隔离 iframe、只读预检、`module.enable` action 和后续状态查询走通，并继续覆盖 Memory UI 的遗忘批次操作（`5 passed`）；Ruff、控制台脚本语法及包工件构建通过。此验收使用假模块契约，仍不能代替真实部署会话与 Bot 选择事务的端到端验收。
 
 真实部署账号会话到 Bot 选择事务的隔离 PostgreSQL 验收现已打通：初始化独立部署库和首位管理员、通过 HTTP 登录并携带 Origin/CSRF，调用当前 Worker Host 的 `validate` 与 `module.enable`，轮询持久选择任务直到内核 Graph 发布 `SUCCEEDED`，并核对目标组件进入当前 Graph；同一完整假 Bot 用例保留 Shell 启用/停用及 Web 旧计划冲突验证（`1 passed`，296.45 秒）。验收中还发现 OneBot Adapter 声明 16 个并发输入却只允许 1 个宿主 RPC，第二条群事件短暂重叠时会在接入前报 `OVERLOADED`；现将 `max_state_inflight` 调至 16，包版本升至 `2.1.2`。仍使用假 OneBot/模型客户端，没有向真实 QQ 发消息；候选版本尚未部署到真实 Supervisor。
+
+开发实例切换（2026-10-01）：树莓派 `alicebot.service` 为 inactive。旧 Bot 库的 `shell.command` schema 为 `2.1.0`、`component.worker-host` 为 `1.7.0`，不能直接与当前 `2.2.0`、`1.8.0` 基线装配。先对旧库执行一致 `pg_dump -Fc`，本地备份在忽略目录 `.local/backups/forest_bot_pre_candidate_20261001.dump`（85,795,823 字节，SHA-256 `B7DA977CFDBAF12CC6F25F4F6865CE0050B4BB6D4ECDBBBF3996CE74ABAEAA28`）；旧镜像保留为 `forest:pre-candidate-20261001`。随后优雅停止 Supervisor、确认租约已释放，并用 [开发期重建脚本](../scripts/rebuild_bot_database.py) 在派生库名及 owner 校验后重建 `forest-main` 的 Bot 库，保留 deployment catalog、加密 Secret 和冻结 Bootstrap profile。脚本返回 21 个当前 schema bundle、0 个旧 RuntimeGraph head。`forest:candidate-ec119ec`（镜像 ID `sha256:33c4c85d962222de6282c02126f09964fd06cb426e40ab8cfd03ec2bbab2799c`）已切为 `forest:local` 并重启真实 Supervisor；新库实际安装 `shell.command 2.2.0`、`component.worker-host 1.8.0`。只读探针连续 3 次确认 21 个活动成员、21 条生命周期记录、ONLINE、管理 HTTP 200、无重叠 Agent Run 或过期 Embedding 任务；容器网络表显示与树莓派 OneBot 有 1 条 ESTABLISHED 连接。重建清除了旧 Bot 运行数据；这些检查尚不能证明真实模型回复与 QQ 发送，也不是长期负载验收。本次未向 QQ 发送消息。
