@@ -42,11 +42,10 @@ from forest.model_contract import ModelCapabilities
 from forest.onebot_transport_effect_driver import onebot_transport_effect_driver_factory
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog
-from forest.process_executor_builtin import (
-    default_process_executor_configuration,
+from forest.process_executor_effect_driver import (
+    native_process_effect_driver_factory,
     process_executor_configuration_validator_factory,
 )
-from forest.process_executor_effect_driver import native_process_effect_driver_factory
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
     RuntimeModuleRegistry,
@@ -713,7 +712,7 @@ class CleanBotHost:
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            initial_configuration=default_process_executor_configuration(),
+            initial_configuration=official_builtin_configuration("process_executor"),
             effect_driver_registry=PackageEffectDriverRegistry(
                 {
                     "process.native": native_process_effect_driver_factory(
@@ -722,9 +721,7 @@ class CleanBotHost:
                     )
                 }
             ),
-            configuration_validator_factory=(
-                process_executor_configuration_validator_factory(self.store)
-            ),
+            configuration_validator_factory=process_executor_configuration_validator_factory(),
         )
 
         async def resolve_onebot_secret(secret_ref, _configuration_revision):

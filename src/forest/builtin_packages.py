@@ -103,6 +103,7 @@ class _InstalledPackageLayout:
 
 _BOOTSTRAP_BUILTIN_PACKAGES = frozenset({
     "provider_chat_completions", "embedding_multimodal", "vector_index_milvus",
+    "process_executor",
 })
 
 

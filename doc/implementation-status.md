@@ -73,7 +73,7 @@
 
 OneBot Adapter 现在按消息形态调用 manifest 声明的四条入站 UnitOfWork 计划。Conversation、Memory/Media、Shell 与分类 participant 在同一事务计划内提交；Host 不再提供 `kernel.uow.onebot.ingress` 业务服务。
 
-`clean_*` 是重构期间遗留的名称，不代表同一类代码。`clean_bot_host`、`clean_multi_bot_supervisor`、`clean_management_app` 和 storage 中的 Bot/Deployment Store 当前仍承载装配、部署与管理入口，不能按文件名前缀当作旧业务栈删除；应在拆清内核/宿主边界后改名并移走旧路径，不保留兼容转发。Provider、Embedding、Vector Index 的默认配置已归入各自 builtin 包，根目录配置 sidecar 已删除；启动目录读取包内声明，实际 Generation 继续以冻结包 schema 校验。Process Executor 的配置解析 sidecar 尚需拆除。业务状态和执行循环必须留在可热替换 builtin 包内，不能靠宿主 Python import 重新固定扩展点。
+`clean_*` 是重构期间遗留的名称，不代表同一类代码。`clean_bot_host`、`clean_multi_bot_supervisor`、`clean_management_app` 和 storage 中的 Bot/Deployment Store 当前仍承载装配、部署与管理入口，不能按文件名前缀当作旧业务栈删除；应在拆清内核/宿主边界后改名并移走旧路径，不保留兼容转发。Provider、Embedding、Vector Index、Process Executor 的默认配置已归入各自 builtin 包，根目录配置 sidecar 已删除；启动目录读取包内声明，实际 Generation 继续以冻结包 schema 校验。Process Executor 的执行安全约束由宿主原生 effect driver 独立执行，不能交给 Worker 决定。业务状态和执行循环必须留在可热替换 builtin 包内，不能靠宿主 Python import 重新固定扩展点。
 
 ## 5. Agent 生产包已经拥有的部分
 

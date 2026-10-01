@@ -10,8 +10,10 @@ import pytest
 from forest.errors import ForestError
 from forest.native_exec_helper import seccomp_available
 from forest.package_capabilities import PackageJobCallScope
-from forest.process_executor_builtin import parse_process_executor_configuration
-from forest.process_executor_effect_driver import NativeProcessEffectDriver
+from forest.process_executor_effect_driver import (
+    NativeProcessEffectDriver,
+    parse_process_executor_configuration,
+)
 from forest.runtime_contracts import RuntimeServiceInvocation
 
 
