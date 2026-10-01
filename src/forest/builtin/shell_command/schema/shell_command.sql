@@ -279,6 +279,55 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION shell_verify_management_claim(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE item __forest_module_schema__.shell_requests%ROWTYPE;
+        route __forest_module_schema__.shell_command_catalog%ROWTYPE;
+BEGIN
+  IF input->>'protocol' IS DISTINCT FROM 'forest.shell-management-claim/1'
+     OR input->>'shell_generation_id' IS DISTINCT FROM context->>'generation_id' THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','SHELL_MANAGEMENT_CLAIM_INVALID','message','Shell management claim is invalid','status',403));
+  END IF;
+  SELECT * INTO item FROM __forest_module_schema__.shell_requests
+   WHERE bot_id=context->>'bot_id' AND request_id=input->>'request_id'
+   FOR SHARE;
+  IF NOT FOUND OR item.state!='EXECUTING' OR item.claim_token IS DISTINCT FROM input->>'claim_token'
+     OR item.lease_until IS NULL OR item.lease_until<=clock_timestamp()
+     OR item.authorization_ticket_id IS NULL OR item.authorization_operation_id IS NULL
+     OR item.shell_generation_id IS DISTINCT FROM input->>'shell_generation_id'
+     OR item.principal_ref IS DISTINCT FROM input->>'principal_ref'
+     OR item.conversation_ref IS DISTINCT FROM input->>'conversation_ref'
+     OR item.command_id IS DISTINCT FROM input->>'command_id'
+     OR item.command_version IS DISTINCT FROM (input->>'command_version')::integer
+     OR item.arguments IS DISTINCT FROM input->'arguments'
+     OR item.owner_component_id IS DISTINCT FROM input->>'target_component_id'
+     OR item.target_generation_id IS DISTINCT FROM input->>'target_generation_id'
+     OR item.target_service_id IS DISTINCT FROM input->>'target_service_id'
+     OR item.target_service_version IS DISTINCT FROM (input->>'target_service_version')::integer THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','SHELL_MANAGEMENT_CLAIM_STALE','message','Shell management claim is stale','status',409));
+  END IF;
+  SELECT * INTO route FROM __forest_module_schema__.shell_command_catalog
+   WHERE shell_generation_id=item.shell_generation_id AND command_id=item.command_id
+     AND command_version=item.command_version;
+  IF NOT FOUND OR route.management_operation_id IS DISTINCT FROM input->>'management_operation_id'
+     OR route.owner_component_id IS DISTINCT FROM item.owner_component_id
+     OR route.target_generation_id IS DISTINCT FROM item.target_generation_id
+     OR route.target_service_id IS DISTINCT FROM item.target_service_id
+     OR route.target_service_version IS DISTINCT FROM item.target_service_version
+     OR NOT EXISTS(SELECT 1 FROM __forest_module_schema__.shell_administrators a
+       WHERE a.shell_generation_id=item.shell_generation_id AND a.principal_ref=item.principal_ref) THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','SHELL_MANAGEMENT_AUTHORITY_REVOKED','message','Shell management authority is unavailable','status',403));
+  END IF;
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('protocol','forest.shell-management-claim-verified/1',
+      'request_id',item.request_id,'principal_ref',item.principal_ref,
+      'ticket_id',item.authorization_ticket_id));
+END;
+$$;
+
 CREATE FUNCTION shell_complete_claim(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE input jsonb:=envelope->'input'; item __forest_module_schema__.shell_requests%ROWTYPE;

@@ -68,7 +68,7 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
                         "job_type": "runtime.health-snapshot",
                         "source_conversation_ref": None, "input": {},
                     },
-                    authorization=SimpleNamespace(web_subject_ref="test-admin"),
+                    authorization=SimpleNamespace(actor_ref="test-admin", web_subject_ref="test-admin"),
                     authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
                 )
             assert rejected.value.code == "MODULE_MANAGEMENT_OUTPUT_INVALID"
@@ -129,7 +129,7 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
                 "source_conversation_ref": None,
                 "input": {},
             },
-            authorization=SimpleNamespace(web_subject_ref="test-admin"),
+            authorization=SimpleNamespace(actor_ref="test-admin", web_subject_ref="test-admin"),
             authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
         )
         for _ in range(200):

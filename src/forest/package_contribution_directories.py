@@ -861,6 +861,12 @@ class FrozenContributionDirectories:
         parent_call_id: str,
         remaining_timeout: Callable[[float], float],
     ) -> dict:
+        if scope.component_id != "shell.command":
+            raise ForestError(
+                "SHELL_EXECUTION_AUTHORITY_INVALID",
+                "Only the Shell dispatcher may execute a Shell command route",
+                403,
+            )
         expected = {
             "kind",
             "action",
@@ -870,6 +876,7 @@ class FrozenContributionDirectories:
             "request_id",
             "principal_ref",
             "conversation_ref",
+            "claim_token",
             "target_component_id",
             "target_generation_id",
             "target_service_id",
@@ -888,6 +895,7 @@ class FrozenContributionDirectories:
             request["request_id"],
             request["principal_ref"],
             request["conversation_ref"],
+            request["claim_token"],
             request["target_component_id"],
             request["target_generation_id"],
             request["target_service_id"],
@@ -958,6 +966,8 @@ class FrozenContributionDirectories:
                 request["request_id"],
                 request["principal_ref"],
                 request["conversation_ref"],
+                request["claim_token"],
+                scope.generation_id,
             ),
             operation_id=request["operation_id"],
             causal_root_kind=scope.causal_root_kind,

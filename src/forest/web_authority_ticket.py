@@ -59,6 +59,10 @@ class WebAuthorityTicket:
     expires_at: datetime
     signature: str = field(repr=False)
 
+    @property
+    def actor_ref(self) -> str:
+        return self.web_subject_ref
+
     def payload(self) -> dict:
         value = asdict(self)
         value.pop("signature")

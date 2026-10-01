@@ -7,12 +7,12 @@
     "items":{"type":"array","maxItems":256,"items":{"type":"object","properties":{
       "protocol":{"const":"forest.shell-command-contribution/1"},"command_id":{"type":"string"},"command_version":{"type":"integer","minimum":1},
       "service_id":{"type":"string"},"service_version":{"type":"integer","minimum":1},"argument_schema":{"type":"object"},
-      "argument_schema_digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"management_operation_id":{"type":"string"},
+      "argument_schema_digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"management_operation_id":{"type":"string"},"management_action":{"type":"boolean"},
       "target_scope":{"enum":["CONVERSATION","BINDING","BOT","DEPLOYMENT"]},"service_class":{"enum":["P0","P1"]},
       "required_capabilities":{"type":"array","minItems":1,"items":{"type":"string"}},"required_capabilities_digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},
       "option_aliases":{"type":"array"},"output_policy":{"enum":["SHORT","ARTIFACT","SILENT"]},"timeout_seconds":{"type":"integer","minimum":1,"maximum":900},
       "owner_component_id":{"type":"string"},"target_generation_id":{"type":"string"}
-    },"required":["protocol","command_id","command_version","service_id","service_version","argument_schema","argument_schema_digest","management_operation_id","target_scope","service_class","required_capabilities","required_capabilities_digest","option_aliases","output_policy","timeout_seconds","owner_component_id","target_generation_id"],"additionalProperties":false}}
+    },"required":["protocol","command_id","command_version","service_id","service_version","argument_schema","argument_schema_digest","management_operation_id","management_action","target_scope","service_class","required_capabilities","required_capabilities_digest","option_aliases","output_policy","timeout_seconds","owner_component_id","target_generation_id"],"additionalProperties":false}}
   },
   "required":["protocol","kind","graph_id","graph_revision","consumer_configuration","items"],"additionalProperties":false
 }

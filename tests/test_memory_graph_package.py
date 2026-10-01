@@ -798,7 +798,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
             "memory.forget.batch.preview",
             {"selection_id": "selection/target", "after_ordinal": 0,
              "batch_size": 2},
-            authorization=SimpleNamespace(web_subject_ref="admin/one"),
+            authorization=SimpleNamespace(actor_ref="admin/one", web_subject_ref="admin/one"),
         )
         assert actual["plan_digest"] == planned["value"]["plan_digest"]
         with pytest.raises(ForestError) as forbidden:
@@ -806,7 +806,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
                 "memory.forget.batch.preview",
                 {"selection_id": "selection/target", "after_ordinal": 0,
                  "batch_size": 2},
-                authorization=SimpleNamespace(web_subject_ref="admin/two"),
+                authorization=SimpleNamespace(actor_ref="admin/two", web_subject_ref="admin/two"),
             )
         assert forbidden.value.code == "MEMORY_FORGET_SELECTION_NOT_FOUND"
         with pytest.raises(ForestError) as forbidden_action:
@@ -815,7 +815,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
                 operation_id="batch/foreign-actor",
                 payload={"selection_id": "selection/target", "after_ordinal": 0,
                          "batch_size": 2, "plan": planned["value"]},
-                authorization=SimpleNamespace(web_subject_ref="admin/two"),
+                authorization=SimpleNamespace(actor_ref="admin/two", web_subject_ref="admin/two"),
                 authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
             )
         assert forbidden_action.value.code == "MEMORY_FORGET_SELECTION_NOT_FOUND"
@@ -989,7 +989,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
             "memory.forget.batch.preview",
             {"selection_id": "selection/late", "after_ordinal": 0,
              "batch_size": 1},
-            authorization=SimpleNamespace(web_subject_ref="admin/one"),
+            authorization=SimpleNamespace(actor_ref="admin/one", web_subject_ref="admin/one"),
         )
         signer = WebAuthorityTicketAuthority(
             issuer_id="deployment/batch-test", active_key_id="batch-key/1",
@@ -1023,7 +1023,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
             while True:
                 work = await memory.management_contract.query_authorized(
                     "memory.forget.batch.status", {"request_id": operation_id},
-                    authorization=SimpleNamespace(web_subject_ref="admin/one"),
+                    authorization=SimpleNamespace(actor_ref="admin/one", web_subject_ref="admin/one"),
                 )
                 if work["state"] in {"SUCCEEDED", "FAILED", "UNKNOWN"}:
                     break
@@ -1032,7 +1032,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         assert work["result"]["suppressed_source_units"] == 1
         progress = await memory.management_contract.query_authorized(
             "memory.forget.selection", {"selection_id": "selection/late"},
-            authorization=SimpleNamespace(web_subject_ref="admin/one"),
+            authorization=SimpleNamespace(actor_ref="admin/one", web_subject_ref="admin/one"),
         )
         assert progress["progress_state"] == "COMPLETE"
         if os.environ.get("FOREST_BROWSER_SMOKE") == "1":
@@ -1050,13 +1050,13 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
             )
             browser_work = await memory.management_contract.query_authorized(
                 "memory.forget.batch.status", {"request_id": browser_request},
-                authorization=SimpleNamespace(web_subject_ref="admin/one"),
+                authorization=SimpleNamespace(actor_ref="admin/one", web_subject_ref="admin/one"),
             )
             assert browser_work["state"] == "SUCCEEDED"
             assert browser_work["result"]["suppressed_source_units"] == 1
             browser_progress = await memory.management_contract.query_authorized(
                 "memory.forget.selection", {"selection_id": "selection/browser-real"},
-                authorization=SimpleNamespace(web_subject_ref="admin/one"),
+                authorization=SimpleNamespace(actor_ref="admin/one", web_subject_ref="admin/one"),
             )
             assert browser_progress["progress_state"] == "COMPLETE"
     finally:
@@ -1295,7 +1295,8 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
             ).format(namespace), (store.bot_id, digest, digest, digest))
         generation_id = registry.graph_identity.generations["memory.graph"]
         web_actor = SimpleNamespace(
-            web_subject_ref="admin-1", target_generation_id=generation_id,
+            actor_ref="admin-1", web_subject_ref="admin-1",
+            target_generation_id=generation_id,
         )
         async def accept_fixture_ticket(_conn, *, ticket, **_kwargs):
             assert ticket is not None
@@ -1365,7 +1366,8 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
                 "memory.trial.start", operation_id="web:trial-other-actor",
                 payload=body,
                 authorization=SimpleNamespace(
-                    web_subject_ref="admin-2", target_generation_id=generation_id,
+                    actor_ref="admin-2", web_subject_ref="admin-2",
+                    target_generation_id=generation_id,
                 ),
                 authorization_guard=accept_fixture_ticket,
             )

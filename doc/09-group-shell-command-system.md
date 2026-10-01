@@ -84,6 +84,8 @@ Shell claim 由 Shell 组件提供事务内验证契约，证明 `bot_id`、原�
 
 Shell 回执只报告持久 `request_id` 和状态；Graph 替换仍由 Worker Host 的独立任务提出并由宿主执行，不在群命令栈内同步排空自身。准确重放沿用原 operation ID 与输入摘要；同一 ID 改输入冲突。Web 与 Shell 对同一选择修订竞争时，最多一笔提交成功。命令执行结果未知时按 operation ID 查询，而不是重新生成选择请求。Shell claim 过期、管理员撤销、路由换代或计划变更都拒绝新写入，已经提交的请求保持真实状态。验证器属于 `shell.command` 包边界，内核只编排版本化验证契约与事务，不读取 Shell 私表。
 
+当前实现中，`component.worker-host` 贡献 `module.validate/enable/disable`，Shell 包解析命令并把 claim token 及其自身 Generation 送至冻结的目录路由。启停命令的 manifest 显式标记 `management_action`，通用包适配器据此直接调用同一管理 action，而不调用一个拥有选择写权限的 Shell 服务；未标记的命令不能获得这条入口。`shell.command` 的私有 UnitOfWork 验证器在 action 写事务内检查 claim、已消费的授权 ticket、租约、发言者与群、原命令/参数、目标服务及 Generation，并复核当前管理员资格。目标 Graph 控制准入、选择计划预检、Worker Host 选择写入和来源明确的审计在同一事务完成。Shell `module.validate` 只返回短预览，启停命令只返回持久请求 ID；完整事实仍由模块管理查询查看。
+
 命令贡献还会形成生命周期依赖：`shell.command` 必须在所有命令提供者之后启动，并在它们之前停止接纳和排空；Agent 工具目录同理使 `agent.runtime` 依赖工具提供者。该依赖进入 Generation 描述事实与拓扑排序，贡献者反向依赖 Shell 时会作为环在图构建期拒绝。这样旧图热替换时，Shell 已领取的命令不会遇到先被 quiesce 的提供者。
 
 ## 4. 解析规则

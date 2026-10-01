@@ -222,6 +222,31 @@ class ComponentWorkerHost(Plugin):
             "replaced; unaffected Generations retain their identity."
         }
 
+    @service("shell.component-host.validate", semantics="read")
+    async def shell_validate(self, payload, ctx):
+        proposal = await self.validate(payload["arguments"], ctx)
+        impact = proposal["impact"]
+        return {
+            "text": (
+                f"{proposal['target_component_id']} "
+                f"{'enable' if proposal['desired_enabled'] else 'disable'}: "
+                f"plan {proposal['plan_digest']}\n"
+                f"Graph r{proposal['source_graph_revision']}, "
+                f"selection r{payload['arguments']['expected_selection_revision']}"
+                f" -> r{proposal['selection_revision']}; "
+                f"replace {len(impact['replace'])}, add {len(impact['add'])}, "
+                f"remove {len(impact['remove'])}."
+            )
+        }
+
+    @service("shell.component-host.selection", semantics="idempotent")
+    async def shell_selection_route(self, payload, ctx):
+        raise ForestError(
+            "SHELL_MANAGEMENT_ROUTE_REQUIRED",
+            "Selection actions require the Generation-bound management route",
+            403,
+        )
+
     @job("component.reload.submit")
     async def submit_reload(self, task, ctx):
         work = task["payload"]

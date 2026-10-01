@@ -13,6 +13,8 @@ class ShellCommandExecutionRequest:
     request_id: str
     principal_ref: str
     conversation_ref: str
+    claim_token: str | None = None
+    shell_generation_id: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -23,6 +25,8 @@ class ShellCommandExecutionRequest:
             or not self.request_id
             or not self.principal_ref
             or not self.conversation_ref
+            or (self.claim_token is not None and not self.claim_token)
+            or (self.shell_generation_id is not None and not self.shell_generation_id)
         ):
             raise ValueError("Shell command execution request is invalid")
 

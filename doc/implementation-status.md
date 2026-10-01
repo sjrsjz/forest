@@ -456,3 +456,7 @@ Worker Host 包现声明独立的 `module.enable` 与 `module.disable` 管理 ac
 配置恢复协议现在允许 `desired_revision` 领先于 `effective_revision` 时，以最新 desired 为 CAS 前提继续计划和应用修复修订；Graph 发布仍须绑定最新 desired 与准确 Payload，并可从任意较早 effective 原子推进。隔离 PostgreSQL 用例验证修订 3 的候选发布失败后，旧生效修订 2 继续服务，管理员创建修订 4 并成功发布；完整模块/schema 测试 `47 passed`，完整假 Bot 的 Worker Host 热重载、配置重建与组件启停回归 `1 passed`（284.95 秒）。简化 Registry 夹具只去掉未装配 Worker Host 的保留边，正式 Graph 依赖约束未放松。Ruff、编译和差异检查通过。Shell 启停、真实 Web 会话、硬资源隔离及候选镜像的真实实例验收仍待完成。
 
 Shell 启停入口审计：现有 Shell 仅贡献 `module.list/reload`；`module.enable/disable` 是 Web 管理 action，选择写端口要求 `management_action` 身份并在事务内运行 `runtime.selection-commit` 预检。直接从 Shell 服务调用包 Domain Command 会绕过此边界，因此不能把它视为已有 Shell 启停。 [09 的 3.1 节](09-group-shell-command-system.md#31-shell-与-web-的同一控制动作) 已固定 Shell claim、准确 action 绑定、Graph 锁序、事务内授权/预检和幂等回执协议；代码仍需实现 Shell 包的事务内 claim 验证与通用控制入口，再进行 Web/Shell 竞争及真实群命令验收。
+
+2026-10-01：Shell `module.validate/enable/disable` 已由 Worker Host 包贡献；`enable/disable` 通过显式 `management_action` 声明进入通用管理 action，不把选择写端口降成普通服务。Shell 私有 SQL 在同一写事务内复核单次 claim、已消费授权 ticket、租约、准确发言者/群/命令/参数/目标路由和当前管理员资格；宿主随后复核目标 Generation、运行相同的选择计划 preflight，并写入 Shell 来源审计。完整假 Bot PostgreSQL 用例在假 OneBot 接入下验证群消息启用与停用 `process.executor` 后的 Graph 换代、无权发言者拒绝，以及 Shell 先写后旧 Web 计划的修订冲突（`1 passed`，237.25 秒）；Shell/schema PostgreSQL 回归 `47 passed`，Ruff 和本地非数据库相关用例 `32 passed`。这些用例没有向真实 QQ 发消息；真实 Web 会话、真实群命令、硬资源隔离及长期运行仍未验收。
+
+同一候选镜像的 Worker Host 局部重载回归也通过（`1 passed`，289.63 秒）：Shell 重载后不受影响的 Generation 仍保持原实例。这是隔离 PostgreSQL 与假 OneBot 验证；真实实例仍运行旧镜像。

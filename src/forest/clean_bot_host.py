@@ -48,6 +48,7 @@ from forest.runtime_modules import (
     RuntimeModuleRegistry,
     RuntimeWorkerCapacity,
 )
+from forest.shell_management_authority import ShellManagementAuthorization
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.schema_bundles import SchemaBundleInstaller
@@ -375,6 +376,16 @@ class CleanBotHost:
         return resolve_selection_commit_preflight(
             self, identifier, component_id=component_id,
             package_digest=package_digest,
+        )
+
+    def resolve_shell_management_authorization(
+        self, *, request, component_id: str, generation_id: str,
+        service_id: str, service_version: int, action_id: str,
+        operation_id: str, input_digest: str, plan_digest: str | None,
+    ) -> ShellManagementAuthorization:
+        return ShellManagementAuthorization(
+            self, request, component_id, generation_id, service_id,
+            service_version, action_id, operation_id, input_digest, plan_digest,
         )
 
     async def _admit_worker_capacity(self, capacity: RuntimeWorkerCapacity):

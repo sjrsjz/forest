@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol": {"const": "forest.shell-management-claim-verified/1"},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "principal_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "ticket_id": {"type": "string", "minLength": 1, "maxLength": 256}
+  },
+  "required": ["protocol", "request_id", "principal_ref", "ticket_id"],
+  "additionalProperties": false
+}

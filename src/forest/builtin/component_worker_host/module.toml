@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.15"
+version = "1.6.16"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -177,6 +177,20 @@ semantics = "idempotent"
 input_schema = "schemas/shell-reload-input.json"
 output_schema = "schemas/shell-output.json"
 
+[[components.provides]]
+name = "shell.component-host.validate"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/shell-selection-validate-input.json"
+output_schema = "schemas/shell-output.json"
+
+[[components.provides]]
+name = "shell.component-host.selection"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/shell-selection-input.json"
+output_schema = "schemas/shell-output.json"
+
 [[components.shell_commands]]
 command_id = "module.list"
 command_version = 1
@@ -203,6 +217,47 @@ required_capabilities = ["runtime.graph.reload"]
 option_aliases = [["expect-graph", "expected_graph_revision"]]
 output_policy = "SHORT"
 timeout_s = 20
+
+[[components.shell_commands]]
+command_id = "module.validate"
+command_version = 1
+service_id = "shell.component-host.validate"
+service_version = 1
+argument_schema = "schemas/shell-selection-validate-arguments.json"
+management_operation_id = "module.validate"
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["runtime.status.read"]
+output_policy = "SHORT"
+timeout_s = 60
+
+[[components.shell_commands]]
+command_id = "module.enable"
+command_version = 1
+service_id = "shell.component-host.selection"
+service_version = 1
+argument_schema = "schemas/shell-selection-enable-arguments.json"
+management_operation_id = "module.enable"
+management_action = true
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["runtime.graph.reload"]
+output_policy = "SHORT"
+timeout_s = 60
+
+[[components.shell_commands]]
+command_id = "module.disable"
+command_version = 1
+service_id = "shell.component-host.selection"
+service_version = 1
+argument_schema = "schemas/shell-selection-disable-arguments.json"
+management_operation_id = "module.disable"
+management_action = true
+target_scope = "BOT"
+service_class = "P1"
+required_capabilities = ["runtime.graph.reload"]
+output_policy = "SHORT"
+timeout_s = 60
 
 [[components.management_queries]]
 id = "modules"

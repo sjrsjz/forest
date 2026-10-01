@@ -468,6 +468,7 @@ MANIFEST_SCHEMA = {
                                 },
                                 "argument_schema": {"type": "string"},
                                 "management_operation_id": {"type": "string"},
+                                "management_action": {"type": "boolean"},
                                 "target_scope": {
                                     "enum": ["CONVERSATION", "BINDING", "BOT", "DEPLOYMENT"]
                                 },
@@ -1628,6 +1629,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         for item in services
     }
     shell_command_keys = set()
+    management_action_by_id = {item["id"]: item for item in management_actions}
     for declaration in shell_commands:
         key = (declaration.get("command_id"), declaration.get("command_version"))
         target = (
@@ -1646,6 +1648,10 @@ def _manifest(files: dict[str, bytes]) -> dict:
             or not re.fullmatch(
                 r"[a-z0-9][a-z0-9._-]{0,255}",
                 declaration.get("management_operation_id", ""),
+            )
+            or (
+                declaration.get("management_action", False)
+                and declaration["management_operation_id"] not in management_action_by_id
             )
             or properties.get("protocol", {}).get("const")
             != "forest.shell.arguments/1"
@@ -1666,6 +1672,21 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_SHELL_COMMAND",
                 "Shell command must bind one declared service and matching argument schema",
             )
+        if declaration.get("management_action", False):
+            action = management_action_by_id[declaration["management_operation_id"]]
+            port = next(
+                item for item in domain_commands if item["name"] == action["port"]
+            )
+            receipt_schema = _schema(files, port["output_schema"])
+            if (
+                "request_id" not in receipt_schema.get("required", ())
+                or receipt_schema.get("properties", {}).get("request_id", {}).get("type")
+                != "string"
+            ):
+                _fail(
+                    "INVALID_SHELL_COMMAND",
+                    "Shell management actions require a durable request_id receipt",
+                )
         shell_command_keys.add(key)
     agent_tool_names = set()
     agent_tool_services = set()

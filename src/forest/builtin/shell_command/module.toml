@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.shell-command"
-version = "1.1.1"
+version = "1.2.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "shell_command:ShellCommand"
@@ -59,9 +59,9 @@ output_schema = "schemas/payload-write-output.json"
 
 [components.storage]
 schema_id = "forest.shell.command"
-schema_version = "2.1.0"
+schema_version = "2.2.0"
 baseline = "schema/shell_command.sql"
-baseline_sha256 = "c5b9faa2eebc8bc846add801ed435d18254649972a7e5538753e913406467905"
+baseline_sha256 = "02ee7b16b128aef55d0e1d459f31d8c20c54ce53dad4bf26dd960e13de4330d5"
 scope = "bot"
 repository_contract = "forest.shell-command.repository/2"
 execution_profile = "official"
@@ -93,6 +93,13 @@ contract = "1.0"
 function = "shell_authorize_claim"
 input_schema = "schemas/authorize-envelope.json"
 output_schema = "schemas/authorize-output.json"
+
+[[components.unit_of_work_participants]]
+name = "shell.verify-management-claim"
+contract = "1.0"
+function = "shell_verify_management_claim"
+input_schema = "schemas/management-claim-input.json"
+output_schema = "schemas/management-claim-output.json"
 
 [[components.unit_of_work_participants]]
 name = "shell.complete-claim"

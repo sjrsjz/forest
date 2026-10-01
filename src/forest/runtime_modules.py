@@ -314,6 +314,7 @@ class RuntimeShellCommandContribution:
     option_aliases: tuple[tuple[str, str], ...] = ()
     output_policy: str = "SHORT"
     timeout_seconds: int = 10
+    management_action: bool = False
 
     def __post_init__(self) -> None:
         properties = (
@@ -339,6 +340,7 @@ class RuntimeShellCommandContribution:
             or self.service_class not in {"P0", "P1"}
             or not self.required_capabilities
             or len(self.required_capabilities) != len(set(self.required_capabilities))
+            or type(self.management_action) is not bool
             or any(
                 not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,199}", item)
                 for item in self.required_capabilities
@@ -379,6 +381,7 @@ class RuntimeShellCommandContribution:
             "argument_schema": self.argument_schema,
             "argument_schema_digest": self.argument_schema_digest,
             "management_operation_id": self.management_operation_id,
+            "management_action": self.management_action,
             "target_scope": self.target_scope,
             "service_class": self.service_class,
             "required_capabilities": list(self.required_capabilities),

@@ -1585,6 +1585,7 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
             raise ForestError("WEB_POLICY_DENIED", "denied", 403)
 
         authorization = SimpleNamespace(
+            actor_ref="web:test",
             web_subject_ref="web:test",
             target_generation_id=instance.generation_identity.generation_id,
         )

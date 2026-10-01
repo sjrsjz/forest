@@ -270,7 +270,7 @@ class PostgresPackageDomainAuthority:
         management_authorization=None,
         result_validator=None,
     ) -> Any:
-        """Run one package Command behind the current CONTROL route and Web fence."""
+        """Run one package Command behind the current CONTROL route and authority fence."""
 
         return await self._invoke(
             "management_action",

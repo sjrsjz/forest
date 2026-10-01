@@ -49,7 +49,7 @@ from forest.package_effects import (
     PackageServiceEffectDriver,
 )
 from forest.package_owned_work import PackageOwnedWorkSupervisor
-from forest.packages import PackageSnapshot, contract_range
+from forest.packages import PackageSnapshot, contract_range, digest_json
 from forest.routing_protocol import DurableComponentJobRequest, DurableEventDeliveryRequest
 from forest.runtime_contracts import (
     FrozenServiceRoute,
@@ -223,6 +223,7 @@ class PackageGenerationAdapter:
         unit_of_work_coordinator: PackageUnitOfWorkCoordinator | None = None,
         configuration_apply_coordinator=None,
         management_action_preflights: Mapping[str, Callable] | None = None,
+        shell_management_authorizer: Callable | None = None,
         owned_work_authority: PackageOwnedWorkAuthority | None = None,
         service_operation_ledger: PackageServiceOperationLedger,
         configuration_validator: Callable[[object], Any] | None = None,
@@ -255,6 +256,7 @@ class PackageGenerationAdapter:
         self._unit_of_work_coordinator = unit_of_work_coordinator
         self._configuration_apply_coordinator = configuration_apply_coordinator
         self._management_action_preflights = dict(management_action_preflights or {})
+        self._shell_management_authorizer = shell_management_authorizer
         self._management_actions = {
             item["id"]: item
             for item in self.component.get("management_actions", ())
@@ -1090,6 +1092,58 @@ class PackageGenerationAdapter:
                     422,
                 )
 
+            if declaration.get("management_action", False):
+                await self._verify_dispatch(route)
+                if not request.claim_token or not request.shell_generation_id:
+                    raise ForestError(
+                        "SHELL_MANAGEMENT_CLAIM_REQUIRED",
+                        "Shell management action requires an execution claim",
+                        403,
+                    )
+                authorizer = self._shell_management_authorizer
+                contract = getattr(self, "management_contract", None)
+                if not callable(authorizer) or contract is None:
+                    raise ForestError(
+                        "SHELL_MANAGEMENT_AUTHORITY_UNAVAILABLE",
+                        "Shell management action authority is unavailable",
+                        503,
+                    )
+                action_id = declaration["management_operation_id"]
+                operation_id = "shell:action:" + hashlib.sha256(
+                    (self.bot_id + "\0" + request.request_id + "\0" + action_id).encode()
+                ).hexdigest()
+                plan_digest = contract.authorization_plan_digest(
+                    action_id, request.arguments
+                )
+                authorization = authorizer(
+                    request=request,
+                    component_id=self.component_id,
+                    generation_id=route.provider_generation_id,
+                    service_id=service_id,
+                    service_version=route.version,
+                    action_id=action_id,
+                    operation_id=operation_id,
+                    input_digest=digest_json(request.arguments),
+                    plan_digest=plan_digest,
+                )
+                result = await contract.action(
+                    action_id,
+                    operation_id=operation_id,
+                    payload=request.arguments,
+                    authorization=authorization,
+                    authorization_guard=authorization.verify_in,
+                )
+                request_ref = result.get("request_id") if isinstance(result, dict) else None
+                if not isinstance(request_ref, str) or not request_ref:
+                    raise ForestError(
+                        "SHELL_MANAGEMENT_RECEIPT_INVALID",
+                        "Management action returned no durable request reference",
+                        502,
+                    )
+                return ShellCommandExecutionResult(
+                    f"{action_id}: {request_ref} 已提交；请查询发布状态。"
+                )
+
             result = await self._run_service_operation(
                 route=route,
                 invocation=invocation,
@@ -1548,7 +1602,10 @@ class PackageGenerationAdapter:
                 result_validator=output_validator.is_valid,
             )
 
-    def _management_scope(self, operation_id: str) -> tuple[PackageCallScope, str]:
+    def _management_scope(
+        self, operation_id: str, *, causal_root_kind: str = "web.management",
+        causal_root_id: str | None = None,
+    ) -> tuple[PackageCallScope, str]:
         identity = self.generation_identity
         prepared = self._prepared_binding
         if (
@@ -1571,8 +1628,8 @@ class PackageGenerationAdapter:
                 worker_incarnation=prepared.worker_incarnation,
                 call_id="call:" + uuid4().hex,
                 call_operation_id=operation_id,
-                causal_root_kind="web.management",
-                causal_root_id=operation_id,
+                causal_root_kind=causal_root_kind,
+                causal_root_id=causal_root_id or operation_id,
             ),
             parent_call_id,
         )
@@ -1667,8 +1724,8 @@ class PackageGenerationAdapter:
     ) -> Any:
         if authorization is None or not callable(authorization_guard):
             raise ForestError(
-                "WEB_AUTHORITY_TICKET_REQUIRED",
-                "Management action requires a transactional Web authority guard",
+                "MANAGEMENT_AUTHORITY_REQUIRED",
+                "Management action requires a transactional authority guard",
                 403,
             )
         if declaration not in self.component.get("domain_commands", ()):
@@ -1696,7 +1753,11 @@ class PackageGenerationAdapter:
                 "Management action input violates its immutable package schema",
                 422,
             )
-        scope, parent_call_id = self._management_scope(operation_id)
+        scope, parent_call_id = self._management_scope(
+            operation_id,
+            causal_root_kind=getattr(authorization, "causal_root_kind", "web.management"),
+            causal_root_id=getattr(authorization, "causal_root_id", operation_id),
+        )
 
         preflight = self._management_action_preflights.get(action_id)
         if action.get("transaction_preflight") is not None and preflight is None:
@@ -2782,6 +2843,7 @@ def package_runtime_descriptor(
             service_version=item["service_version"],
             argument_schema=compiled_schemas[item["argument_schema"]],
             management_operation_id=item["management_operation_id"],
+            management_action=item.get("management_action", False),
             target_scope=item["target_scope"],
             service_class=item["service_class"],
             required_capabilities=tuple(item["required_capabilities"]),
@@ -2831,6 +2893,18 @@ def package_runtime_descriptor(
                     503,
                 )
             preflights[action["id"]] = preflight
+        shell_management_authorizer = getattr(
+            _runtime, "resolve_shell_management_authorization", None
+        )
+        if any(
+            item.get("management_action", False)
+            for item in component.get("shell_commands", ())
+        ) and not callable(shell_management_authorizer):
+            raise ForestError(
+                "SHELL_MANAGEMENT_AUTHORITY_UNAVAILABLE",
+                "Declared Shell management action has no authority binding",
+                503,
+            )
         routes = {
             name: contracts.service(
                 name,
@@ -2918,6 +2992,7 @@ def package_runtime_descriptor(
             unit_of_work_coordinator=unit_of_work_coordinator,
             configuration_apply_coordinator=configuration_apply_coordinator,
             management_action_preflights=preflights,
+            shell_management_authorizer=shell_management_authorizer,
             owned_work_authority=owned_work_authority,
             service_operation_ledger=service_operation_ledger,
             configuration_validator=configuration_validator,

@@ -1,5 +1,6 @@
 import hashlib
 import json
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 from forest.errors import ForestError
@@ -97,8 +98,19 @@ def _tokenize(value):
     return tokens
 
 
+def _reject_json_constant(_value):
+    raise ValueError
+
+
 def _coerce(raw, schema):
     kind = schema.get("type")
+    if isinstance(kind, list):
+        if raw == "null" and "null" in kind:
+            return None
+        kinds = [item for item in kind if item != "null"]
+        if len(kinds) != 1:
+            raise ValueError
+        kind = kinds[0]
     if kind is None and isinstance(schema.get("enum"), list):
         kind = "string"
     if kind == "boolean":
@@ -115,6 +127,15 @@ def _coerce(raw, schema):
         return int(raw)
     if kind == "string":
         return raw
+    if kind in {"array", "object"}:
+        try:
+            value = json.loads(raw, parse_constant=_reject_json_constant)
+        except (TypeError, ValueError) as exc:
+            raise ValueError from exc
+        if (kind == "array" and type(value) is list) or (
+            kind == "object" and type(value) is dict
+        ):
+            return value
     raise ValueError
 
 
@@ -151,6 +172,9 @@ def _parse(command_text, directory):
                     raise ValueError
                 raw = remaining.pop(0)
             arguments[name] = _coerce(raw if separator or raw else None, properties[name])
+        for name, property_schema in properties.items():
+            if name not in arguments and "default" in property_schema:
+                arguments[name] = deepcopy(property_schema["default"])
         required = set(argument_schema.get("required", []))
         if required - set(arguments):
             raise ValueError
@@ -254,6 +278,7 @@ class ShellCommand(Plugin):
                 request_id=work["request_id"],
                 principal_ref=work["principal_ref"],
                 conversation_ref=work["conversation_ref"],
+                claim_token=work["claim_token"],
                 target_component_id=work["target_component_id"],
                 target_generation_id=work["target_generation_id"],
                 target_service_id=work["target_service_id"],

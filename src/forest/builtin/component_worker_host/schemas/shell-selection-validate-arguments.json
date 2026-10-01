@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "command_id", "arguments"],
+  "properties": {
+    "protocol": {"const": "forest.shell.arguments/1"},
+    "command_id": {"const": "module.validate"},
+    "arguments": {
+      "type": "object", "additionalProperties": false,
+      "required": ["component_id", "source_kind", "package_digest", "manifest_digest", "approved_capabilities", "desired_enabled", "expected_configuration_revision", "expected_selection_revision", "expected_graph_revision"],
+      "properties": {
+        "component_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+        "source_kind": {"enum": ["builtin", "installed"], "default": "builtin"},
+        "package_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$", "default": null},
+        "manifest_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$", "default": null},
+        "approved_capabilities": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256}, "default": []},
+        "desired_enabled": {"type": "boolean"},
+        "expected_configuration_revision": {"type": ["integer", "null"], "minimum": 1, "default": null},
+        "expected_selection_revision": {"type": "integer", "minimum": 0},
+        "expected_graph_revision": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

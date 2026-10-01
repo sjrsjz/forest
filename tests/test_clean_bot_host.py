@@ -872,7 +872,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                     "component_id": "module.missing",
                     "expected_graph_revision": previous.graph_revision,
                 },
-                authorization=SimpleNamespace(web_subject_ref="subject/host-admin"),
+                authorization=SimpleNamespace(actor_ref="subject/host-admin"),
                 authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
             )
             assert web_request["state"] == "QUEUED"
@@ -1174,7 +1174,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                     "module." + function,
                     operation_id=operation_id,
                     payload=payload,
-                    authorization=SimpleNamespace(web_subject_ref="subject/host-admin"),
+                    authorization=SimpleNamespace(actor_ref="subject/host-admin"),
                     authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
                 )
                 assert result["desired_enabled"] is (function == "enable")
@@ -2527,7 +2527,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             with pytest.raises(ForestError) as foreign_trial:
                 await memory_instance.management_contract.query_authorized(
                     "memory.trial.result", {"query_id": trial_id},
-                    authorization=SimpleNamespace(web_subject_ref="subject/other-admin"),
+                    authorization=SimpleNamespace(actor_ref="subject/other-admin", web_subject_ref="subject/other-admin"),
                 )
             assert foreign_trial.value.code == "MEMORY_TRIAL_NOT_FOUND"
 
@@ -2660,7 +2660,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 operation_id="web:memory-forget-stale-queued",
                 payload={"source_unit_id": forget_input["source_unit_id"],
                          "plan": stale_plan},
-                authorization=SimpleNamespace(web_subject_ref="subject/host-admin"),
+                authorization=SimpleNamespace(actor_ref="subject/host-admin"),
                 authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
             )
             async with asyncio.timeout(20):
@@ -2901,6 +2901,151 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             )
             assert restarted_work["state"] == "SUCCEEDED"
             assert restarted_work["result"] == forget
+            selection_contract = restarted.registry.get(
+                "component.worker-host"
+            ).management_contract
+            selection = await selection_contract.query("selection", {})
+            graph_revision = restarted.registry.graph_identity.graph_revision
+            candidate = {
+                "component_id": "process.executor",
+                "source_kind": "builtin",
+                "package_digest": None,
+                "manifest_digest": None,
+                "approved_capabilities": [],
+                "desired_enabled": True,
+                "expected_configuration_revision": None,
+                "expected_selection_revision": selection["revision"],
+                "expected_graph_revision": graph_revision,
+            }
+            preview = await selection_contract.query("validate", candidate)
+
+            async def send_shell(message_id, user_id, command):
+                await clients[-1].handler(json.dumps({
+                    "self_id": int(settings.onebot_self_id),
+                    "post_type": "message", "message_type": "group",
+                    "sub_type": "normal", "time": 1_720_000_000 + message_id,
+                    "message_id": message_id, "user_id": user_id,
+                    "group_id": 933179609,
+                    "sender": {"user_id": user_id, "nickname": "Operator", "card": "",
+                               "role": "admin" if user_id == 42 else "member"},
+                    "message": [{"type": "text", "data": {"text": command}}],
+                }, separators=(",", ":")).encode())
+
+            shell_command = (
+                "#forest module enable --component-id process.executor "
+                f"--plan-digest {preview['plan_digest']} "
+                f"--expected-selection-revision {selection['revision']} "
+                f"--expected-graph-revision {graph_revision}"
+            )
+            await send_shell(81001, 42, shell_command)
+            async with asyncio.timeout(90):
+                while True:
+                    selected = await restarted.registry.get(
+                        "component.worker-host"
+                    ).management_contract.query("selection", {})
+                    if selected["revision"] == selection["revision"] + 1:
+                        break
+                    await asyncio.sleep(0.1)
+            assert selected["entries"][-1]["component_id"] == "process.executor"
+            assert selected["entries"][-1]["desired_enabled"] is True
+            async with asyncio.timeout(90):
+                while True:
+                    latest = (await restarted._kernel.runtime.status())["latest_replacement"]
+                    if (
+                        latest is not None and latest["state"] == "SUCCEEDED"
+                        and (latest.get("result_graph_revision") or 0) > graph_revision
+                    ):
+                        break
+                    if (
+                        latest is not None and latest["state"] == "FAILED"
+                        and latest.get("expected_graph_revision") == graph_revision
+                    ):
+                        pytest.fail(f"Shell selection replacement failed: {latest}")
+                    await asyncio.sleep(0.1)
+            web_gateway = CleanManagementGateway(
+                restarted, ticket_authority=gateway.ticket_authority,
+            )
+            stale_body = {**candidate, "plan_digest": preview["plan_digest"]}
+            stale_operation = web_gateway.operation_id(
+                "component.worker-host", "module.enable", "after-shell-selection"
+            )
+            current_graph = restarted.registry.graph_identity
+            stale_ticket = await web_gateway.ticket_authority.issue(
+                session=AuthenticatedWebSession(
+                    "token-digest", "session/shell-race", 1, "csrf-digest",
+                    WebSubject("subject/host-admin", "admin", "Administrator", "ADMIN", True, 1),
+                    datetime.now(timezone.utc) + timedelta(hours=1),
+                ),
+                target_scope_kind="bot", target_scope_id=settings.bot_id,
+                target_component_id="component.worker-host",
+                target_generation_id=current_graph.generations["component.worker-host"],
+                target_graph_revision=current_graph.graph_revision,
+                target_operation_ref=stale_operation, action_key="module.enable",
+                input_digest=digest_json(stale_body),
+                plan_digest=web_gateway.action_plan_digest(
+                    "component.worker-host", "module.enable", stale_body
+                ),
+            )
+            with pytest.raises(ForestError) as stale_web:
+                await web_gateway.module_action(
+                    "component.worker-host", "module.enable", body=stale_body,
+                    idempotency_key="after-shell-selection",
+                    authorization=stale_ticket, operation_id=stale_operation,
+                )
+            assert stale_web.value.code == "COMPONENT_SELECTION_REVISION_CONFLICT"
+            assert (await restarted.registry.get(
+                "component.worker-host"
+            ).management_contract.query("selection", {}))["revision"] == selected["revision"]
+            await send_shell(81002, 43, shell_command)
+            shell_namespace = next(
+                item.storage.spec.namespace for item in restarted.registry.descriptors
+                if item.component_id == "shell.command"
+            )
+            async with asyncio.timeout(20):
+                while True:
+                    async with restarted.store.pool.connection() as conn:
+                        rejected = await (await conn.execute(
+                            sql.SQL("SELECT state,rejection_code FROM {}.shell_requests "
+                                    "WHERE bot_id=%s AND principal_ref=%s "
+                                    "AND command_id=%s").format(sql.Identifier(shell_namespace)),
+                            (settings.bot_id, "qq:43", "module.enable"),
+                        )).fetchone()
+                    if rejected is not None and rejected["state"] == "REJECTED":
+                        break
+                    await asyncio.sleep(0.1)
+            assert rejected["rejection_code"] == "SHELL_PRINCIPAL_DENIED"
+            disable_graph_revision = restarted.registry.graph_identity.graph_revision
+            disable_input = {
+                **candidate,
+                "desired_enabled": False,
+                "expected_selection_revision": selected["revision"],
+                "expected_graph_revision": disable_graph_revision,
+            }
+            disable_preview = await restarted.registry.get(
+                "component.worker-host"
+            ).management_contract.query("validate", disable_input)
+            await send_shell(
+                81003, 42,
+                "#forest module disable --component-id process.executor "
+                f"--plan-digest {disable_preview['plan_digest']} "
+                f"--expected-selection-revision {selected['revision']} "
+                f"--expected-graph-revision {disable_graph_revision}",
+            )
+            async with asyncio.timeout(90):
+                while True:
+                    disabled = await restarted.registry.get(
+                        "component.worker-host"
+                    ).management_contract.query("selection", {})
+                    if disabled["revision"] == selected["revision"] + 1:
+                        break
+                    await asyncio.sleep(0.1)
+            assert disabled["entries"][-1]["desired_enabled"] is False
+            async with asyncio.timeout(90):
+                while "process.executor" in restarted.registry.graph_identity.generations:
+                    latest = (await restarted._kernel.runtime.status())["latest_replacement"]
+                    if latest is not None and latest["state"] == "FAILED":
+                        pytest.fail(f"Shell disable replacement failed: {latest}")
+                    await asyncio.sleep(0.1)
         finally:
             await restarted.close()
         assert clients[-1].closed is True
@@ -3457,7 +3602,8 @@ async def test_real_vl_auto_archive_cross_group_recall_and_management_trial(tmp_
             ),
         ]
         trial_authorization = SimpleNamespace(
-            web_subject_ref=trial_actor, target_generation_id=generation_id,
+            actor_ref=trial_actor, web_subject_ref=trial_actor,
+            target_generation_id=generation_id,
         )
 
         async def accept_trial_ticket(_conn, *, ticket, **_kwargs):
