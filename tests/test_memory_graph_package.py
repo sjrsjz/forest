@@ -334,6 +334,9 @@ async def test_graph_snapshot_excludes_facts_committed_after_registration(
                 )
             ).fetchone()
             assert row["result"]["ok"] is True
+            Draft202012Validator(package.snapshot.schema(
+                "schemas/query-relations-output.json"
+            )).validate(row["result"]["value"])
             return row["result"]["value"]
 
         assert (await browse({"snapshot_xid": boundary["snapshot"]}))["items"] == []
@@ -344,6 +347,38 @@ async def test_graph_snapshot_excludes_facts_committed_after_registration(
         assert current["items"][0]["cross_trunk"] is False
         assert (await browse({"snapshot_xid": current["snapshot_xid"],
                              "relation_kinds": ["CONTRADICTS"]}))["items"] == []
+        async def global_browse(values):
+            row = await (
+                await reader.execute(
+                    sql.SQL("SELECT {}.memory_search_relations(%s,%s) AS result").format(namespace),
+                    (context, Jsonb(values)),
+                )
+            ).fetchone()
+            assert row["result"]["ok"] is True
+            Draft202012Validator(package.snapshot.schema(
+                "schemas/query-relations-output.json"
+            )).validate(row["result"]["value"])
+            return row["result"]["value"]
+
+        assert (await global_browse({"snapshot_xid": boundary["snapshot"]}))["items"] == []
+        async with writer.transaction():
+            await writer.execute(
+                sql.SQL(
+                    "INSERT INTO {}.relation_contributions "
+                    "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
+                    "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
+                    "weight_micros,admitted_deletion_epoch) VALUES "
+                    "(%s,'directed-contribution','directed-operation',%s,'directed-relation',"
+                    "'CONTRADICTS','ENTITY','left','ENTITY','right','MANUAL',500000,0)"
+                ).format(namespace),
+                (store.bot_id, "sha256:" + "b" * 64),
+            )
+        assert (await global_browse({
+            "snapshot_xid": current["snapshot_xid"],
+            "relation_kinds": ["CONTRADICTS"],
+        }))["items"] == []
+        directed = await global_browse({"relation_kinds": ["CONTRADICTS"]})
+        assert [item["direction"] for item in directed["items"]] == ["CANONICAL"]
 
 
 @pytest.mark.postgres
@@ -1231,6 +1266,10 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
     await registry.start()
     try:
         instance = registry.get("memory.graph")
+        relation_search = await instance.management_contract.query(
+            "memory.relations.search", {"limit": 5}
+        )
+        assert relation_search["items"] == []
         digest = "sha256:" + "a" * 64
         namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
         async with store.pool.connection() as conn, conn.transaction():

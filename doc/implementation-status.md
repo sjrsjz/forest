@@ -422,3 +422,5 @@ Worker Host 包内管理页现有折叠式候选图预检，按实时选择修�
 Worker Host 包内新增只读 `component.selection.operation-probe`：在选择独占围栏下可先判定操作不存在、相同输入的重放或同 ID 不同输入冲突，返回旧操作的准确回执而不依赖已变化的当前选择。包版本升至 `1.6.8`，私有 SQL schema 升至 `1.6.0`；隔离 PostgreSQL 的选择账本用例验证三种结果并继续覆盖 CAS、快照和发布围栏（`1 passed`）。它尚未接入授权启停 action，不能单独构成提交复核。
 
 Embedding 和 Milvus 的 Bot 生命周期身份现由各自包清单的 `config_immutable_paths` 声明并交给通用配置账本执行，分别冻结 `/profile` 与 `/space_id`、`/dimensions`、`/metric`；endpoint、凭据和传输限制仍可计划换代。已删除宿主导入的两份专用配置身份校验器、Embedding 私有身份表/仓库和 Milvus 私有身份表/仓库；Milvus 私有 schema 只保留 ref tombstone。官方包初始配置现在统一在写入前按工件 schema 校验。包构建与本地包/模型测试 `123 passed, 1 skipped`；隔离 PostgreSQL 的配置可变/不可变行为、并发配置快照、外部包热重载各 `1 passed`，完整假 Bot Worker Host 重载链 `1 passed`（177.06 秒），Ruff 通过。包持久布局发生破坏性变化，未实现旧身份表迁移；当前未上线部署按清库重建处理。组件选择授权提交、资源预算和长期真实实例验收仍未完成。
+
+Memory 包新增全局 `memory.relations.search` 管理查询及 UI 入口，不再要求管理员预先知道节点 ID；关系类型、来源类型、跨主干，以及同一证据的群号/主干/作者可组合过滤。复用原有来源删除与资格复核、固定 PostgreSQL 快照和筛选绑定的键集游标；有向边在全局视图明确标为 `CANONICAL`。活动关系顺序及证据来源加索引，包版本升至 `1.65.0`、私有 schema 升至 `3.56.0`。隔离 PostgreSQL 验证全局/一跳查询的快照、证据过滤、翻页和游标冲突，以及真实 Generation 管理端口（共 `3 passed`）；UI 脚本 Node 语法与包构建通过。它仍是权威关系事实浏览；人工审核、发布图投影和百万级性能验收尚未完成。

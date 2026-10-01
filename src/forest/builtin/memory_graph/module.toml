@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.64.0"
+version = "1.65.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -58,6 +58,7 @@ requests = [
   "domain.query:memory.list-trunks",
   "domain.query:memory.query-sources",
   "domain.query:memory.query-relations",
+  "domain.query:memory.search-relations",
   "domain.query:memory.forget-work-status",
   "uow.execute:memory.capture-source",
   "uow.execute:memory.forget-source",
@@ -267,9 +268,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.55.0"
+schema_version = "3.56.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "dad7bb7b9fdca6958cf32cb35dabe490aa1585c71ff6a9bbc30eb1abb5eac2c8"
+baseline_sha256 = "7ce530772b89bfcb7d15fe6fce43b0acc49ebaf33ed6dbe59a6b4a3fe76b26ab"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -328,6 +329,13 @@ name = "memory.query-relations"
 contract = "1.0"
 function = "memory_query_relations"
 input_schema = "schemas/query-relations-input.json"
+output_schema = "schemas/query-relations-output.json"
+
+[[components.domain_queries]]
+name = "memory.search-relations"
+contract = "1.0"
+function = "memory_search_relations"
+input_schema = "schemas/search-relations-input.json"
 output_schema = "schemas/query-relations-output.json"
 
 [[components.domain_queries]]
@@ -445,6 +453,13 @@ timeout_s = 30
 [[components.management_queries]]
 id = "memory.relations.query"
 port = "memory.query-relations"
+default_limit = 10
+max_limit = 20
+timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.relations.search"
+port = "memory.search-relations"
 default_limit = 10
 max_limit = 20
 timeout_s = 10

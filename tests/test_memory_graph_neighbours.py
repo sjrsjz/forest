@@ -163,6 +163,43 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         assert (await browse_relations({
             "cross_trunk": False, "limit": 5, **cursor,
         }))["error"]["code"] == "MEMORY_QUERY_INVALID"
+        async def search_relations(values):
+            row = await (
+                await execute(
+                    "SELECT {}.memory_search_relations(%s::jsonb,%s::jsonb) AS result",
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb(values)),
+                )
+            ).fetchone()
+            return row["result"]
+
+        evidence_filter = {
+            "evidence_trunk_id": "trunk/a",
+            "evidence_external_group_id": "group/a",
+            "evidence_author_subject_ref": "qq:author/a",
+            "limit": 5,
+        }
+        global_first = (await search_relations(evidence_filter))["value"]
+        assert len(global_first["items"]) == 5 and global_first["has_more"]
+        assert all(item["cross_trunk"] for item in global_first["items"])
+        assert (await search_relations({
+            **evidence_filter, "evidence_external_group_id": "group/b",
+        }))["value"]["items"] == []
+        global_cursor = {
+            "snapshot_xid": global_first["snapshot_xid"],
+            "after_relation_id": global_first["next_cursor"]["relation_id"],
+            "after_contribution_id": global_first["next_cursor"]["contribution_id"],
+            "cursor_filter_digest": global_first["filter_digest"],
+        }
+        global_second = (await search_relations({
+            **evidence_filter, **global_cursor,
+        }))["value"]
+        assert len(global_second["items"]) == 5
+        assert not ({item["contribution_id"] for item in global_first["items"]}
+                    & {item["contribution_id"] for item in global_second["items"]})
+        assert (await search_relations({
+            **evidence_filter, **global_cursor,
+            "evidence_author_subject_ref": "qq:author/b",
+        }))["error"]["code"] == "MEMORY_QUERY_INVALID"
         with pytest.raises(ForeignKeyViolation):
             await contribution("invalid/evidence", "n00", missing_part=True)
         with pytest.raises(ForeignKeyViolation):

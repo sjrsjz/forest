@@ -18,7 +18,7 @@
         "origin_kind": {"enum": ["MANUAL", "VECTOR", "RULE", "MODEL"]},
         "created_at": {"type": "string", "format": "date-time"},
         "cross_trunk": {"type": "boolean"},
-        "direction": {"enum": ["OUTBOUND", "INBOUND", "UNDIRECTED"]},
+        "direction": {"enum": ["OUTBOUND", "INBOUND", "UNDIRECTED", "CANONICAL"]},
         "evidence_count": {"type": "integer", "minimum": 0},
         "evidence": {"type": "array", "maxItems": 16, "items": {
           "type": "object", "additionalProperties": false,

@@ -1136,6 +1136,9 @@ CREATE INDEX association_journal_pending_trigger_idx ON association_journal(
 CREATE INDEX sources_external_group_idx ON memory_sources(
     bot_id,platform,realm_id,external_group_id,identity_incarnation
 );
+CREATE INDEX sources_group_browse_idx ON memory_sources(
+    bot_id,external_group_id,source_id
+) WHERE external_group_id IS NOT NULL;
 CREATE UNIQUE INDEX sources_group_identity_uniq ON memory_sources(
     bot_id,platform,realm_id,external_group_id,identity_incarnation
 ) WHERE source_kind='GROUP';
@@ -1222,6 +1225,12 @@ CREATE INDEX relation_left_idx ON relation_contributions(
 );
 CREATE INDEX relation_right_idx ON relation_contributions(
     bot_id,right_kind,right_id,active,relation_id,contribution_id
+);
+CREATE INDEX relation_browse_idx ON relation_contributions(
+    bot_id,relation_id,contribution_id
+) WHERE active;
+CREATE INDEX relation_evidence_source_idx ON relation_evidence(
+    bot_id,source_unit_id,contribution_id
 );
 CREATE INDEX relation_association_left_sample_idx ON relation_contributions(
     bot_id,left_id,sample_key,contribution_id
@@ -8860,6 +8869,9 @@ $$;
 CREATE FUNCTION memory_query_relations(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
+    endpoint_kind text := input->>'endpoint_kind';
+    endpoint_id text := input->>'endpoint_id';
+    has_endpoint boolean := input ? 'endpoint_kind' AND input ? 'endpoint_id';
     page_limit integer := COALESCE((input->>'limit')::integer,10);
     snapshot_value pg_snapshot := COALESCE((input->>'snapshot_xid')::pg_snapshot,
         pg_current_snapshot());
@@ -8872,6 +8884,8 @@ DECLARE
     cursor_value jsonb;
 BEGIN
     IF page_limit NOT BETWEEN 1 AND 20 OR
+       ((input ? 'endpoint_kind') <> (input ? 'endpoint_id')) OR
+       (NOT has_endpoint AND input ? 'direction') OR
        ((input ? 'after_relation_id') <> (input ? 'after_contribution_id')) OR
        (input ? 'after_relation_id' AND (NOT (input ? 'snapshot_xid') OR
           input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) THEN
@@ -8884,7 +8898,8 @@ BEGIN
             c.left_kind,c.left_id,c.right_kind,c.right_id,c.weight_micros,
             c.origin_kind,c.created_at,trunks.cross_trunk,
             CASE WHEN c.relation_kind='ASSOCIATES_WITH' THEN 'UNDIRECTED'
-                 WHEN c.left_kind=input->>'endpoint_kind' AND c.left_id=input->>'endpoint_id'
+                 WHEN NOT has_endpoint THEN 'CANONICAL'
+                 WHEN c.left_kind=endpoint_kind AND c.left_id=endpoint_id
                     THEN 'OUTBOUND' ELSE 'INBOUND' END AS direction
         FROM __forest_module_schema__.relation_contributions c
         CROSS JOIN LATERAL (
@@ -8902,23 +8917,41 @@ BEGIN
         ) trunks
         WHERE c.bot_id=context->>'bot_id' AND c.active
           AND pg_visible_in_snapshot(c.created_xid,snapshot_value)
-          AND ((c.left_kind=input->>'endpoint_kind' AND c.left_id=input->>'endpoint_id')
-            OR (c.right_kind=input->>'endpoint_kind' AND c.right_id=input->>'endpoint_id'))
+          AND (NOT has_endpoint OR
+              (c.left_kind=endpoint_kind AND c.left_id=endpoint_id) OR
+              (c.right_kind=endpoint_kind AND c.right_id=endpoint_id))
           AND (NOT (input ? 'relation_kinds') OR c.relation_kind IN (
               SELECT value FROM jsonb_array_elements_text(input->'relation_kinds')))
           AND (NOT (input ? 'origin_kinds') OR c.origin_kind IN (
               SELECT value FROM jsonb_array_elements_text(input->'origin_kinds')))
           AND (NOT (input ? 'cross_trunk') OR
                trunks.cross_trunk=(input->>'cross_trunk')::boolean)
+          AND (NOT (input ? 'evidence_trunk_id') AND
+               NOT (input ? 'evidence_external_group_id') AND
+               NOT (input ? 'evidence_author_subject_ref') OR
+               c.contribution_id IN (
+            SELECT ef.contribution_id FROM __forest_module_schema__.source_units uf
+            JOIN __forest_module_schema__.relation_evidence ef
+              ON ef.bot_id=uf.bot_id AND ef.source_unit_id=uf.source_unit_id
+            JOIN __forest_module_schema__.memory_sources sf
+              ON sf.bot_id=uf.bot_id AND sf.source_id=uf.source_id
+            WHERE uf.bot_id=context->>'bot_id'
+              AND (input->>'evidence_trunk_id' IS NULL OR
+                   uf.trunk_id=input->>'evidence_trunk_id')
+              AND (input->>'evidence_external_group_id' IS NULL OR
+                   sf.external_group_id=input->>'evidence_external_group_id')
+              AND (input->>'evidence_author_subject_ref' IS NULL OR
+                   uf.author_subject_ref=input->>'evidence_author_subject_ref')
+          ))
           AND (input->>'direction' IS NULL OR
               (CASE WHEN c.relation_kind='ASSOCIATES_WITH' THEN 'UNDIRECTED'
-                    WHEN c.left_kind=input->>'endpoint_kind' AND c.left_id=input->>'endpoint_id'
+                    WHEN c.left_kind=endpoint_kind AND c.left_id=endpoint_id
                          THEN 'OUTBOUND' ELSE 'INBOUND' END)=input->>'direction')
-          AND (input->>'endpoint_kind'<>'SOURCE_UNIT' OR EXISTS (
+          AND (NOT has_endpoint OR endpoint_kind<>'SOURCE_UNIT' OR EXISTS (
             SELECT 1 FROM __forest_module_schema__.source_units ue
             JOIN __forest_module_schema__.memory_sources se
               ON se.bot_id=ue.bot_id AND se.source_id=ue.source_id
-            WHERE ue.bot_id=c.bot_id AND ue.source_unit_id=input->>'endpoint_id'
+            WHERE ue.bot_id=c.bot_id AND ue.source_unit_id=endpoint_id
               AND ue.eligibility_state='ELIGIBLE' AND se.status='ACTIVE'
               AND pg_visible_in_snapshot(ue.eligible_xid,snapshot_value)
           ))
@@ -8990,6 +9023,11 @@ EXCEPTION WHEN invalid_text_representation THEN
         'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
             'message','Relation snapshot is invalid','status',422));
 END;
+$$;
+
+CREATE FUNCTION memory_search_relations(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT __forest_module_schema__.memory_query_relations(context,input)
 $$;
 
 CREATE FUNCTION memory_query_neighbourhood(context jsonb, input jsonb)
