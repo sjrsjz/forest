@@ -8225,7 +8225,10 @@ RETURNS TABLE (
     eligibility_state text, source_status text, source_revision bigint,
     author_payload_id text, document_facet_count integer,
     ready_document_facet_count integer, index_coverage text)
-LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+-- Keep this function inlineable: source pagination must push ORDER BY/LIMIT
+-- into the indexed source scan before calculating facet coverage.
+-- All relation names are schema-qualified; builtins below use pg_catalog.
+LANGUAGE sql STABLE AS $$
     SELECT u.source_unit_id,u.source_id,u.trunk_id,s.source_kind,
         s.platform,s.realm_id,s.external_group_id,u.author_subject_ref,
         u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
@@ -8235,12 +8238,12 @@ LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     JOIN __forest_module_schema__.memory_sources s
       ON s.bot_id=u.bot_id AND s.source_id=u.source_id
     CROSS JOIN LATERAL (
-        SELECT count(*)::integer AS facet_count,
-               count(*) FILTER (WHERE f.state='READY')::integer AS ready_count,
-               CASE WHEN count(*)=0 THEN 'NO_FACETS'
-                    WHEN count(*) FILTER (WHERE f.state='READY')=count(*)
+        SELECT pg_catalog.count(*)::integer AS facet_count,
+               pg_catalog.count(*) FILTER (WHERE f.state='READY')::integer AS ready_count,
+               CASE WHEN pg_catalog.count(*)=0 THEN 'NO_FACETS'
+                    WHEN pg_catalog.count(*) FILTER (WHERE f.state='READY')=pg_catalog.count(*)
                         THEN 'COMPLETE'
-                    WHEN count(*) FILTER (WHERE f.state='READY')=0
+                    WHEN pg_catalog.count(*) FILTER (WHERE f.state='READY')=0
                         THEN 'NOT_READY'
                     ELSE 'PARTIAL' END AS index_coverage
         FROM __forest_module_schema__.embedding_facets f
@@ -8251,16 +8254,16 @@ LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
       AND u.eligibility_state=COALESCE(filters->>'eligibility_state','ELIGIBLE')
       AND s.status=COALESCE(filters->>'source_status','ACTIVE')
       AND u.accepted_at<=snapshot_time
-      AND pg_visible_in_snapshot(u.accepted_xid,snapshot_value)
+      AND pg_catalog.pg_visible_in_snapshot(u.accepted_xid,snapshot_value)
       AND (u.eligible_at IS NULL OR u.eligible_at<=snapshot_time)
       AND (COALESCE(filters->>'eligibility_state','ELIGIBLE')<>'ELIGIBLE' OR
            (u.eligible_xid IS NOT NULL AND
-            pg_visible_in_snapshot(u.eligible_xid,snapshot_value)))
+            pg_catalog.pg_visible_in_snapshot(u.eligible_xid,snapshot_value)))
       AND (filters->>'trunk_id' IS NULL OR u.trunk_id=filters->>'trunk_id')
       AND (filters->>'source_id' IS NULL OR u.source_id=filters->>'source_id')
       AND (NOT filters ? 'group_source_ids' OR
            (s.source_kind='GROUP' AND u.source_id IN (
-              SELECT value FROM jsonb_array_elements_text(filters->'group_source_ids'))))
+              SELECT value FROM pg_catalog.jsonb_array_elements_text(filters->'group_source_ids'))))
       AND (filters->>'source_kind' IS NULL OR s.source_kind=filters->>'source_kind')
       AND (filters->>'platform' IS NULL OR s.platform=filters->>'platform')
       AND (filters->>'realm_id' IS NULL OR s.realm_id=filters->>'realm_id')
