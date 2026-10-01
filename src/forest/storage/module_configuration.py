@@ -258,6 +258,7 @@ class ModuleConfigurationRepository:
         expected_desired_revision: int,
         authorization=None,
         authorization_guard=None,
+        pre_commit_validator=None,
     ) -> EffectiveModuleConfiguration:
         """Commit desired in the caller's transaction for composed UnitOfWork plans."""
 
@@ -314,6 +315,13 @@ class ModuleConfigurationRepository:
                 409,
             )
         await self._verify_payload_in(conn, plan, f"plan:{plan_id}")
+        if pre_commit_validator is not None:
+            body = await self.payloads.read_bytes_in(conn, plan["config_payload_id"])
+            await pre_commit_validator(
+                self._decode_value(body),
+                expected_desired_revision + 1,
+                plan["config_payload_digest"],
+            )
         if self.immutable_paths:
             body = await self.payloads.read_bytes_in(
                 conn,

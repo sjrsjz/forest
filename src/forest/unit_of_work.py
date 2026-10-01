@@ -49,12 +49,16 @@ class ComponentConfigurationApplyScope:
 class PostgresComponentConfigurationApplyCoordinator:
     """Commit one Generation's desired configuration with Worker Host control intent."""
 
-    def __init__(self, store, runtime, *, component_id: str, configuration, control_handle) -> None:
+    def __init__(
+        self, store, runtime, *, component_id: str, configuration, control_handle,
+        pre_commit_validator=None,
+    ) -> None:
         self.store = store
         self.runtime = runtime
         self.component_id = component_id
         self.configuration = configuration
         self.control_handle = control_handle
+        self.pre_commit_validator = pre_commit_validator
 
     async def execute(
         self,
@@ -148,6 +152,7 @@ class PostgresComponentConfigurationApplyCoordinator:
                     expected_desired_revision=expected_desired_revision,
                     authorization=authorization,
                     authorization_guard=authorization_guard,
+                    pre_commit_validator=self.pre_commit_validator,
                 )
             else:
                 if authorization_replay_guard is None:

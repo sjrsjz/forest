@@ -32,6 +32,7 @@ from forest.embedding_effect_driver import multimodal_embedding_effect_driver_fa
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
+from forest.kernel_resource_admission import assess_worker_capacity_in
 from forest.media_capture_effect_driver import media_image_fetch_effect_driver_factory
 from forest.model_contract import ModelCapabilities
 from forest.onebot_transport_effect_driver import onebot_transport_effect_driver_factory
@@ -42,7 +43,11 @@ from forest.process_executor_builtin import (
     process_executor_configuration_validator_factory,
 )
 from forest.process_executor_effect_driver import native_process_effect_driver_factory
-from forest.runtime_modules import RuntimeModuleDescriptor, RuntimeModuleRegistry
+from forest.runtime_modules import (
+    RuntimeModuleDescriptor,
+    RuntimeModuleRegistry,
+    RuntimeWorkerCapacity,
+)
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.clean_bot_store import CleanBotStore
 from forest.storage.schema_bundles import SchemaBundleInstaller
@@ -371,6 +376,12 @@ class CleanBotHost:
             self, identifier, component_id=component_id,
             package_digest=package_digest,
         )
+
+    async def _admit_worker_capacity(self, capacity: RuntimeWorkerCapacity):
+        """Check the runtime-owned desired policy before any Worker preparation."""
+
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await assess_worker_capacity_in(self._kernel, conn, capacity)
 
     async def _assemble_candidate(
         self, activation_id: str | None = None
@@ -880,6 +891,14 @@ class CleanBotHost:
                 expected_revision=assembled.selection.revision,
                 expected_digest=assembled.selection.digest,
             ):
+                await self._admit_worker_capacity(RuntimeWorkerCapacity(
+                    active=(),
+                    preparing=tuple(
+                        (item.component_id, item.worker_limits)
+                        for item in registry.descriptors
+                        if item.worker_limits is not None
+                    ),
+                ))
                 await registry.start()
             self.registry = registry
             self._official_descriptors = assembled.official_descriptors
@@ -1015,6 +1034,23 @@ class CleanBotHost:
                 )
             candidate = assembled.registry
             membership_changed = set(candidate.states) != set(previous.states)
+            if membership_changed or target_component_id is not None:
+                capacity = candidate.preview_graph_transition(
+                    previous, target_component_id=target_component_id
+                ).worker_capacity
+            else:
+                capacity = RuntimeWorkerCapacity(
+                    active=tuple(
+                        (item.component_id, item.worker_limits)
+                        for item in previous.descriptors
+                        if item.worker_limits is not None
+                    ),
+                    preparing=tuple(
+                        (item.component_id, item.worker_limits)
+                        for item in candidate.descriptors
+                        if item.worker_limits is not None
+                    ),
+                )
             affected = (
                 candidate.plan_graph_transition(
                     previous, target_component_id=target_component_id
@@ -1028,6 +1064,7 @@ class CleanBotHost:
             )
             previous_drained = False
             try:
+                await self._admit_worker_capacity(capacity)
                 await candidate.prewarm()
                 if affected is None or affected:
                     await previous.drain_owned_work_for_replacement(
@@ -1043,6 +1080,7 @@ class CleanBotHost:
                     expected_revision=assembled.selection.revision,
                     expected_digest=assembled.selection.digest,
                 ):
+                    await self._admit_worker_capacity(capacity)
                     await candidate.start()
                     candidate.accept_retained_ownership()
             except BaseException as replacement_error:

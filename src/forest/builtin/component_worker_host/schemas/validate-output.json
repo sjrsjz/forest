@@ -5,7 +5,7 @@
   "required": [
     "protocol", "bot_id", "source_graph_id", "source_graph_revision",
     "selection_revision", "selection_digest", "target_component_id",
-    "desired_enabled", "plan_digest", "impact", "worker_capacity", "packages"
+    "desired_enabled", "plan_digest", "impact", "worker_capacity", "admission", "packages"
   ],
   "properties": {
     "protocol": {"const": "forest.component-candidate-preview/1"},
@@ -37,6 +37,17 @@
         "preparing": {"$ref": "#/$defs/workerClaims"}
       }
     },
+    "admission": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "policy_revision", "policy_payload_digest", "budget", "peak"],
+      "properties": {
+        "protocol": {"const": "forest.worker-capacity-admission/1"},
+        "policy_revision": {"type": "integer", "minimum": 1},
+        "policy_payload_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "budget": {"$ref": "#/$defs/workerTotals"},
+        "peak": {"$ref": "#/$defs/workerTotals"}
+      }
+    },
     "packages": {
       "type": "array", "maxItems": 256,
       "items": {
@@ -59,6 +70,20 @@
     }
   },
   "$defs": {
+    "workerTotals": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_workers", "max_frame_bytes", "max_inflight", "max_queue_items",
+        "max_state_inflight", "max_owned_tasks", "max_owned_resources"],
+      "properties": {
+        "max_workers": {"type": "integer", "minimum": 0},
+        "max_frame_bytes": {"type": "integer", "minimum": 0},
+        "max_inflight": {"type": "integer", "minimum": 0},
+        "max_queue_items": {"type": "integer", "minimum": 0},
+        "max_state_inflight": {"type": "integer", "minimum": 0},
+        "max_owned_tasks": {"type": "integer", "minimum": 0},
+        "max_owned_resources": {"type": "integer", "minimum": 0}
+      }
+    },
     "workerClaims": {
       "type": "array", "maxItems": 256,
       "items": {

@@ -79,13 +79,14 @@
         </div>
         <label>批准能力（每行一项；留空表示不批准额外能力）<textarea id="preview-capabilities" spellcheck="false"></textarea></label>
       </div>
-      <div class="row"><button id="run-preview" type="button">只读预检</button><span id="preview-note"></span></div>
+      <div class="row"><button id="run-preview" type="button">只读预检</button><button id="submit-selection" type="button" hidden>提交启停</button><span id="preview-note"></span></div>
       <div id="preview-result" hidden>
         <dl>
           <div><dt>来源 Graph / 选择</dt><dd id="preview-source"></dd></div>
           <div><dt>计划摘要</dt><dd id="preview-digest"></dd></div>
           <div><dt>目标工件与配置</dt><dd id="preview-target"></dd></div>
           <div><dt>目标 Worker 限额</dt><dd id="preview-worker-limits"></dd></div>
+          <div><dt>Bot 容量准入</dt><dd id="preview-admission"></dd></div>
           <div><dt>影响概况</dt><dd id="preview-summary"></dd></div>
         </dl>
         <div id="preview-impact"></div>
@@ -200,6 +201,7 @@
     }
     async function previewCandidate(){
       const button=byId('run-preview');button.disabled=true;
+      byId('submit-selection').hidden=true;
       byId('preview-result').hidden=true;byId('preview-note').textContent='正在检查候选图…';resize();
       try{
         const component_id=byId('preview-component-id').value.trim();
@@ -215,14 +217,16 @@
         const config=byId('preview-config-revision').value.trim();
         if(installed&&desired_enabled&&!/^[1-9][0-9]*$/.test(config))throw new Error('启用外部包需要目标配置修订');
         if(installed&&desired_enabled&&!Number.isSafeInteger(Number(config)))throw new Error('目标配置修订超出可精确表示范围');
-        if(!graphRevision)await list();
+        const graph=await call('query','modules',{limit:1});
+        graphRevision=graph.graph_revision;
         const selection=await selectionSnapshot();
-        const value=await call('query','validate',{
+        const proposal={
           component_id,source_kind,package_digest,manifest_digest,approved_capabilities,
           desired_enabled,expected_selection_revision:selection.revision,
           expected_graph_revision:graphRevision,
           expected_configuration_revision:installed&&desired_enabled?Number(config):null
-        });
+        };
+        const value=await call('query','validate',proposal);
         byId('preview-source').textContent=`${value.bot_id} / Graph r${value.source_graph_revision} / 选择 r${value.selection_revision}`;
         byId('preview-digest').textContent=value.plan_digest;
         const target=value.packages.find(item=>item.component_id===component_id);
@@ -235,6 +239,10 @@
         const capacity=value.worker_capacity;
         byId('preview-summary').textContent=Object.entries(labels).map(([key,label])=>`${label} ${value.impact[key].length}`).join(' · ')+
           ` · 峰值 Worker ${capacity.active.length+capacity.preparing.length}（当前 ${capacity.active.length} + 预热 ${capacity.preparing.length}）`;
+        const admission=value.admission;
+        const budgetLabels={max_workers:'Worker',max_frame_bytes:'帧字节',max_inflight:'在途',max_queue_items:'队列',max_state_inflight:'状态在途',max_owned_tasks:'任务',max_owned_resources:'资源'};
+        byId('preview-admission').textContent=`策略 r${admission.policy_revision} · `+
+          Object.entries(budgetLabels).map(([key,label])=>`${label} ${admission.peak[key]}/${admission.budget[key]}`).join(' · ');
         const impact=byId('preview-impact');impact.replaceChildren();
         for(const [key,label] of Object.entries(labels)){
           const line=document.createElement('div');
@@ -242,7 +250,23 @@
           impact.append(line);
         }
         byId('preview-result').hidden=false;
-        byId('preview-note').textContent='只读预检完成；启停提交尚未开放。';
+        byId('submit-selection').textContent=desired_enabled?'提交启用':'提交停用';
+        byId('submit-selection').hidden=false;
+        byId('preview-note').textContent='预检完成；提交前会重新核对选择、Graph、配置及容量。';
+        return {...proposal,plan_digest:value.plan_digest};
+      }finally{button.disabled=false;resize();}
+    }
+    async function submitSelection(){
+      const button=byId('submit-selection');button.disabled=true;
+      try{
+        const proposal=await previewCandidate();
+        const action=proposal.desired_enabled?'module.enable':'module.disable';
+        const saved=await call('action',action,proposal);
+        byId('selection-request-id').value=saved.request_id;
+        byId('preview-note').textContent=`启停请求 ${saved.request_id} 已提交；请查询发布状态。`;
+        button.hidden=true;
+        await selectionStatus();
+        await selectionSnapshot();
       }finally{button.disabled=false;resize();}
     }
     async function reload(){
@@ -306,6 +330,7 @@
     byId('refresh-selection').onclick=()=>selectionStatus().catch(error=>notice(error.message));
     byId('refresh-selection-snapshot').onclick=()=>selectionSnapshot().catch(error=>notice(error.message));
     byId('run-preview').onclick=()=>previewCandidate().catch(error=>{byId('preview-note').textContent='预检失败';notice(error.message);});
+    byId('submit-selection').onclick=()=>submitSelection().catch(error=>notice(error.message));
     byId('preview-source-kind').onchange=()=>{byId('preview-installed').hidden=byId('preview-source-kind').value!=='installed';resize();};
     byId('more').onclick=()=>list(nextAfter).catch(error=>notice(error.message));
     byId('load-packages').onclick=()=>listPackages().catch(error=>notice(error.message));

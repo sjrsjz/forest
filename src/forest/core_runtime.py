@@ -31,12 +31,19 @@ from forest.kernel_authorization_participant import (
 )
 from forest.kernel_effect_participant import KernelEffectUnitOfWorkParticipant
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
+from forest.kernel_resource_admission import (
+    KERNEL_RESOURCE_POLICY_DEFAULT,
+    KERNEL_RESOURCE_POLICY_SCHEMA,
+    assess_worker_capacity,
+    validate_kernel_resource_policy,
+)
 from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeKernelServiceSpec
 from forest.runtime_generation import PreparedGenerationBinding
 from forest.runtime_modules import (
     RuntimeManagementContribution,
     RuntimeModuleDescriptor,
+    RuntimeWorkerCapacity,
     official_artifact,
     official_storage_bundle,
 )
@@ -476,6 +483,55 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
         return KernelAuthorizationUnitOfWorkParticipant(self, self.service)
 
 
+class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
+    """Publish the Bot-wide Worker admission policy from kernel.runtime."""
+
+    def __init__(self, *args, runtime_host) -> None:
+        super().__init__(*args)
+        self.runtime_host = runtime_host
+        self.management_contract = CleanModuleConfigurationContract(
+            self.module_configuration,
+            schema=KERNEL_RESOURCE_POLICY_SCHEMA,
+            validator=validate_kernel_resource_policy,
+            apply_callback=self.apply_configuration,
+        )
+
+    async def apply_configuration(self, **kwargs) -> dict:
+        lock = self.runtime_host._replacement_lock
+        if lock is None or self.runtime_host.registry is None:
+            raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
+        async with lock:
+            return await super().apply_configuration(**kwargs)
+
+    async def validate_capacity_apply(
+        self, value: object, revision: int, payload_digest: str
+    ) -> None:
+        """Reject a policy unable to rebuild the currently active runtime."""
+
+        registry = self.runtime_host.registry
+        if registry is None:
+            raise ForestError("KERNEL_UNAVAILABLE", "Bot host is not active", 503)
+        workers = tuple(
+            (item.component_id, item.worker_limits)
+            for item in registry.descriptors
+            if item.worker_limits is not None
+        )
+        replacement = set(registry.replacement_closure("kernel.runtime"))
+        assess_worker_capacity(
+            RuntimeWorkerCapacity(
+                active=workers,
+                preparing=tuple(
+                    (component_id, limits)
+                    for component_id, limits in workers
+                    if component_id in replacement
+                ),
+            ),
+            policy_revision=revision,
+            policy_payload_digest=payload_digest,
+            policy=value,
+        )
+
+
 class PreparedEffectAuthorityModule(PreparedAuthorityModule):
     """Publish only the typed Kernel Effect UnitOfWork participant ABI."""
 
@@ -662,11 +718,15 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
         value = (
             WEB_OPERATION_POLICY_DEFAULT
             if component_id == "kernel.authorization"
+            else KERNEL_RESOURCE_POLICY_DEFAULT
+            if component_id == "kernel.runtime"
             else {"protocol": "forest.kernel-module/1"}
         )
         schema = (
             WEB_OPERATION_POLICY_SCHEMA
             if component_id == "kernel.authorization"
+            else KERNEL_RESOURCE_POLICY_SCHEMA
+            if component_id == "kernel.runtime"
             else _KERNEL_CONFIGURATION_SCHEMA
         )
         await configuration.initialize(
@@ -695,6 +755,7 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
             "kernel.audit": PreparedAuditAuthorityModule,
             "kernel.authorization": PreparedAuthorizationAuthorityModule,
             "kernel.payload": PreparedPayloadAuthorityModule,
+            "kernel.runtime": PreparedRuntimeAuthorityModule,
         }.get(component_id, PreparedAuthorityModule)
 
         def create(_runtime, _modules):
@@ -708,8 +769,12 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
             )
             if component_id == "kernel.effect":
                 return PreparedEffectAuthorityModule(*arguments, payload)
-            module = prepared_type(*arguments)
-            if component_id in {"kernel.audit", "kernel.authorization"}:
+            module = (
+                prepared_type(*arguments, runtime_host=_runtime)
+                if component_id == "kernel.runtime"
+                else prepared_type(*arguments)
+            )
+            if component_id in {"kernel.audit", "kernel.authorization", "kernel.runtime"}:
                 module._configuration_apply_coordinator = (
                     PostgresComponentConfigurationApplyCoordinator(
                         store,
@@ -718,6 +783,10 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                         configuration=configurations[component_id],
                         control_handle=_modules.unit_of_work_participant(
                             "component.worker-host"
+                        ),
+                        pre_commit_validator=(
+                            module.validate_capacity_apply
+                            if component_id == "kernel.runtime" else None
                         ),
                     )
                 )
@@ -758,6 +827,19 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                     ),
                 )
                 if component_id == "kernel.authorization"
+                else (
+                    RuntimeManagementContribution(
+                        "worker-capacity",
+                        "Bot Worker 容量",
+                        ("bot",),
+                        "/static/modules/clean-runtime-capacity.html",
+                        "/static/clean-runtime-capacity.js",
+                        style="/static/modules/clean-runtime-capacity.css",
+                        group="runtime",
+                        order=2,
+                    ),
+                )
+                if component_id == "kernel.runtime"
                 else ()
             ),
             storage=bundles[component_id],

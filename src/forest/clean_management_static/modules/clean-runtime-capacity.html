@@ -1,0 +1,16 @@
+<div class="contribution-view runtime-capacity">
+  <header class="runtime-capacity-header">
+    <div><strong>Bot Worker 容量准入</strong><span id="runtime-capacity-revision"></span></div>
+    <button id="runtime-capacity-save" type="button">保存并重建 RuntimeGraph</button>
+  </header>
+  <p>以下是同时存活的旧 Worker 与预热 Worker 的声明总量上限。它限制进程数和 IPC、并发配额，不代表 CPU 或物理内存硬隔离。</p>
+  <form id="runtime-capacity-form" class="runtime-capacity-grid">
+    <label>Worker 数 <input name="max_workers" type="number" min="1" max="1000000000" required></label>
+    <label>帧字节总量 <input name="max_frame_bytes" type="number" min="1" max="1000000000" required></label>
+    <label>在途调用总量 <input name="max_inflight" type="number" min="1" max="1000000000" required></label>
+    <label>排队项总量 <input name="max_queue_items" type="number" min="1" max="1000000000" required></label>
+    <label>在途状态请求总量 <input name="max_state_inflight" type="number" min="1" max="1000000000" required></label>
+    <label>持有任务总量 <input name="max_owned_tasks" type="number" min="1" max="1000000000" required></label>
+    <label>持有资源总量 <input name="max_owned_resources" type="number" min="1" max="1000000000" required></label>
+  </form>
+</div>

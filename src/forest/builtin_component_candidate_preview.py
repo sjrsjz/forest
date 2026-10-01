@@ -95,6 +95,7 @@ def component_candidate_preview_service(context):
                 for field in ("replace", "retain", "remove", "add", "drain", "prepare")
             },
             "worker_capacity": preview.impact.worker_capacity.as_fact(),
+            "admission": preview.admission.as_fact(),
             "packages": [
                 {
                     "component_id": item.component_id,

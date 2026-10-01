@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -31,6 +32,7 @@ from forest.component_selection import ComponentSelectionSnapshot
 from forest.deployment_management_app import create_deployment_management_app
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
+from forest.kernel_resource_admission import KERNEL_RESOURCE_POLICY_SCHEMA
 from forest.media_capture_io import CapturedImage
 from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
 from forest.packages import PackageCatalog, digest_json
@@ -445,6 +447,7 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
 
     class Previous:
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
+        descriptors = ()
 
         async def drain_owned_work_for_replacement(self, operation_id, *, components):
             assert operation_id == "replacement/one"
@@ -458,6 +461,7 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
     class Candidate:
         activation_id = "replacement/one"
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
+        descriptors = ()
 
         async def prewarm(self):
             events.append("prewarm-candidate")
@@ -491,6 +495,7 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
     host._closing = False
     host.registry = previous
     host.selection_reader = FakeSelectionReader()
+    host._admit_worker_capacity = AsyncMock()
 
     async def assemble():
         events.append("assemble-candidate")
@@ -583,6 +588,7 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
 
     class Previous:
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
+        descriptors = ()
 
         async def drain_owned_work_for_replacement(self, operation_id, *, components):
             assert operation_id == "replacement/failing"
@@ -595,6 +601,7 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
     class Candidate:
         activation_id = "replacement/failing"
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
+        descriptors = ()
 
         async def prewarm(self):
             events.append("prewarm-candidate")
@@ -614,6 +621,7 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
     host._closing = False
     host.registry = previous
     host.selection_reader = FakeSelectionReader()
+    host._admit_worker_capacity = AsyncMock()
 
     async def assemble():
         return BotGraphCandidate(candidate, _TEST_SELECTION, (), host.selection_reader)
@@ -638,6 +646,7 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
 
     class Previous:
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
+        descriptors = ()
 
         async def drain_owned_work_for_replacement(self, _operation_id, *, components):
             assert components is None
@@ -650,6 +659,7 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
         activation_id = "replacement/activation-failure"
         publication_committed = False
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
+        descriptors = ()
 
         async def prewarm(self):
             events.append("prewarm-candidate")
@@ -669,6 +679,7 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
     host._fatal_replacement_error = None
     host.registry = Previous()
     host.selection_reader = FakeSelectionReader()
+    host._admit_worker_capacity = AsyncMock()
     candidate = Candidate()
 
     async def assemble():
@@ -801,6 +812,16 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                 host.package_catalog.get(agent_package["package_digest"]).component
             ).as_fact()
             capacity = preview["worker_capacity"]
+            admission = preview["admission"]
+            assert admission["protocol"] == "forest.worker-capacity-admission/1"
+            assert admission["policy_revision"] == 1
+            assert admission["peak"]["max_workers"] == (
+                len(capacity["active"]) + len(capacity["preparing"])
+            )
+            assert all(
+                admission["peak"][key] <= limit
+                for key, limit in admission["budget"].items()
+            )
             assert len(capacity["active"]) == sum(
                 item.worker_limits is not None for item in host.registry.descriptors
             )
@@ -1221,6 +1242,91 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                 without_counter.generations[component_id] == generation_id
                 for component_id, generation_id in before_add.generations.items()
             )
+            worker_host = host.registry.get("component.worker-host")
+            selection = await worker_host.management_contract.query("selection", {})
+            proposal = {
+                "component_id": "agent.runtime",
+                "source_kind": "builtin",
+                "package_digest": None,
+                "manifest_digest": None,
+                "approved_capabilities": [],
+                "desired_enabled": True,
+                "expected_selection_revision": selection["revision"],
+                "expected_graph_revision": without_counter.graph_revision,
+                "expected_configuration_revision": None,
+            }
+            accepted = await worker_host.management_contract.query("validate", proposal)
+            runtime_config = host._kernel.configurations["kernel.runtime"]
+            current_policy = await runtime_config.desired(include_value=True)
+            low_policy = deepcopy(current_policy.value)
+            low_policy["worker_budget"]["max_workers"] = len(
+                accepted["worker_capacity"]["active"]
+            )
+            runtime_authority = host.registry.get("kernel.runtime")
+            invalid_plan = await runtime_authority.management_contract.plan(
+                operation_id="web:capacity-plan-invalid",
+                expected_desired_revision=current_policy.revision,
+                value=low_policy,
+            )
+            invalid_body = ConfigurationApplyInput(
+                plan_id=invalid_plan["plan_id"],
+                expected_desired_revision=current_policy.revision,
+            )
+            invalid_ticket = await gateway.ticket_authority.issue(
+                session=AuthenticatedWebSession(
+                    "token-digest", "session/capacity-test", 1, "csrf-digest",
+                    WebSubject("subject/host-admin", "admin", "Administrator", "ADMIN", True, 1),
+                    datetime.now(timezone.utc) + timedelta(hours=1),
+                ),
+                target_scope_kind="bot",
+                target_scope_id=settings.bot_id,
+                target_component_id="kernel.runtime",
+                target_generation_id=without_counter.generations["kernel.runtime"],
+                target_graph_revision=without_counter.graph_revision,
+                target_operation_ref="web:capacity-apply-invalid",
+                action_key="configuration.apply",
+                input_digest=digest_json(invalid_body.model_dump(mode="json")),
+                plan_digest=digest_json({"plan_id": invalid_body.plan_id}),
+            )
+            with pytest.raises(ForestError) as rejected_policy_apply:
+                await gateway.apply_configuration(
+                    "kernel.runtime",
+                    body=invalid_body,
+                    idempotency_key="capacity-invalid",
+                    authorization=invalid_ticket,
+                    operation_id="web:capacity-apply-invalid",
+                )
+            assert rejected_policy_apply.value.code == "KERNEL_WORKER_CAPACITY_EXCEEDED"
+            assert (await runtime_config.desired()).revision == current_policy.revision
+            policy_plan = await runtime_config.plan(
+                operation_id="fixture:capacity-plan",
+                expected_desired_revision=current_policy.revision,
+                value=low_policy,
+                validation_digest=digest_json(KERNEL_RESOURCE_POLICY_SCHEMA),
+            )
+            await runtime_config.apply(
+                operation_id="fixture:capacity-apply",
+                plan_id=policy_plan["plan_id"],
+                expected_desired_revision=current_policy.revision,
+            )
+            with pytest.raises(ForestError) as rejected_preview:
+                await worker_host.management_contract.query("validate", proposal)
+            assert rejected_preview.value.code == "KERNEL_WORKER_CAPACITY_EXCEEDED"
+            preflight = host.resolve_management_action_preflight(
+                "runtime.selection-commit",
+                component_id="component.worker-host",
+                package_digest=worker_host.snapshot.digest,
+                trust_level="official",
+            )
+            async with preflight(
+                {**proposal, "plan_digest": accepted["plan_digest"]},
+                operation_id="selection/capacity-rejected",
+            ) as verify_in:
+                async with host.store.pool.connection() as conn, conn.transaction():
+                    with pytest.raises(ForestError) as rejected_commit:
+                        await verify_in(conn)
+            assert rejected_commit.value.code == "KERNEL_WORKER_CAPACITY_EXCEEDED"
+            assert await worker_host.management_contract.query("selection", {}) == selection
         finally:
             await host.close()
     finally:

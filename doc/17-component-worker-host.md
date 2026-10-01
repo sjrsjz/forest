@@ -139,27 +139,27 @@ Worker Host 包的选择写端口拒绝停用自身；宿主成员选择不按�
 
 宿主冷启动的选择读取器从已验证、内容寻址的 Worker Host 包快照取得私有 `schema_id` 和三个只读 Domain Query 的函数绑定，不再写死包内 SQL 函数名。候选热替换继续用当前已发布代的读取绑定持有选择围栏，并在同一围栏内核对新包快照查询得到相同选择事实；新包绑定只在新 Graph 发布成功后成为活动读取器。私有 schema 身份在同一 Bot 的热替换中必须稳定，变更需按未上线部署的显式清库重建处理，不能静默切换到另一份选择账本。
 
-宿主可信进程的 `preview_component_change()` 在当前 Graph 替换锁和选择共享围栏内冻结选择，再交给 `preview_selected_graph()` 使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；只读 `module.validate` 已接入 Web 管理查询，但没有资源预算、授权提交事务或 Shell 入口。
+宿主可信进程的 `preview_component_change()` 在当前 Graph 替换锁和选择共享围栏内冻结选择，再交给 `preview_selected_graph()` 使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；`module.validate` 已接入 Web 管理查询，`module.enable/disable` 已接入同事务授权提交；Shell 启停入口仍待接通。
 
-`component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主在图替换锁内取得选择共享围栏、读取当前选择快照，再通过 Worker Host 包内 SQL 端口投影拟议写入，并从同一 `REPEATABLE READ` 事务快照读取候选中全部包的配置事实，编译不可执行候选。选择围栏先于配置快照建立，避免等待锁时冻结过时选择；两者使用两个连接，围栏持续至预览结束。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。授权提交事务中的计划事实复核已接入；资源预算、包内 UI 与 Shell 启停入口仍未完成。
+`component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主在图替换锁内取得选择共享围栏、读取当前选择快照，再通过 Worker Host 包内 SQL 端口投影拟议写入，并从同一 `REPEATABLE READ` 事务快照读取候选中全部包的配置事实，编译不可执行候选。选择围栏先于配置快照建立，避免等待锁时冻结过时选择；两者使用两个连接，围栏持续至预览结束。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实、`kernel.runtime` 容量准入及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。授权提交事务中的计划事实复核已接入；启停管理页和 Shell 启停入口仍未完成。
 
-候选包事实现在还包含规范化的 `worker_limits`：帧、并发、队列、状态并发、持有任务及持有资源六项都从同一个不可变包声明和 `WorkerLimits` 默认值生成，Worker 启动也使用该构造器。相同声明也固定在通用 RuntimeModuleDescriptor 的 Graph 事实中；Worker SDK 的隔离快照包含该限额模型。正式 Graph 规划器以当前全部活动 Worker 加上候选 `prepare` 集中的 Worker 组成 `worker_capacity.peak`，因此被替换的旧 Worker 与新 Worker 会同时占用容量，保留的 Worker 只计算一次。只读预览协议现返回 `worker_capacity.active/preparing` 的逐组件限额，计划摘要绑定相同事实；管理页显示当前、预热与峰值 Worker 数，供后续包策略核对。这只是 Worker 内 IPC/并发容量声明，不是 CPU/内存隔离承诺。Bot 级资源策略、启停时的总量 admission 与操作系统级 CPU/内存限制仍须分别设计和复核，不能把已经存在的队列上限冒充完成的资源预算。
+候选包事实现在还包含规范化的 `worker_limits`：帧、并发、队列、状态并发、持有任务及持有资源六项都从同一个不可变包声明和 `WorkerLimits` 默认值生成，Worker 启动也使用该构造器。相同声明也固定在通用 RuntimeModuleDescriptor 的 Graph 事实中；Worker SDK 的隔离快照包含该限额模型。正式 Graph 规划器以当前全部活动 Worker 加上候选 `prepare` 集中的 Worker 组成 `worker_capacity.peak`，因此被替换的旧 Worker 与新 Worker 会同时占用容量，保留的 Worker 只计算一次。`kernel.runtime` 的版本化 Bot 配置拥有七个总量阈值：Worker 数以及六项 Worker 声明的合计；只读预览在同一配置快照内核对阈值，返回 `admission` 的配置修订、Payload 摘要、上限与峰值，计划摘要绑定这些事实。Worker Host 的选择提交在同一事务重算准入；宿主冷启动、热替换预热前和发布前再核对当前 desired 策略。运行时配置可通过该内核模块自己的管理页提交并请求 Graph 重建；配置提交先以当前 Graph 的 `kernel.runtime` 换代闭包检查峰值，不能把无法重建的策略写成 desired。此准入约束的是 Worker IPC/并发声明，不是实测内存或 CPU；操作系统级 CPU/内存硬隔离仍未实现。
 
 Graph 规划需要管理契约的 schema 描述，但这些 schema 已在 Generation 构造时从经校验的不可变包快照编译。`PackageManagementContract.describe()` 读取隔离的已编译副本，不在每次描述符比较时重复扫描工件；包工件及当前配置本身仍在预览时按精确摘要和修订检查。
 
-Worker Host 自带的隔离管理页现提供折叠式只读候选预检。页面在提交前读取最新选择修订，并携带当前 Graph revision；外部包需要手填精确工件、manifest、批准能力与目标配置修订。结果按换代、保留、移除、新增、排空、预热显示完整组件 ID 列表及计划摘要，未提供绕过授权提交围栏的启停按钮。预检运行中禁用重复提交，结果失效或失败时不显示旧预览。
+Worker Host 自带的隔离管理页提供折叠式候选预检与启停提交。页面在预检和提交前读取最新选择及 Graph 修订；外部包需要手填精确工件、manifest、批准能力与目标配置修订。结果按换代、保留、移除、新增、排空、预热显示完整组件 ID 列表、Bot 容量上限/峰值及计划摘要；提交前重新预检，调用包自己的 `module.enable/disable` action，并用返回的确定性请求 ID 查询发布状态。预检运行中禁用重复提交，结果失效或失败时不显示旧预览。
 
 ### 候选事实摘要与提交复核边界
 
-`SelectionGraphPreview.plan_digest` 使用规范化事实计算：Bot 身份、来源 Graph ID/revision、目标组件、冻结选择 revision/digest、正式 Registry 的全部候选成员描述符摘要、候选包的配置 revision/Payload 身份/schema/存储摘要，以及换代影响集合。官方包与已安装包均读取各自私有配置账本的 desired 值并校验当前工件 schema；官方包按最近一次真实装配的精确工件读取，预览本身不 provision。选择快照类型自身保证排序、条目修订与摘要一致。相同事实重复预览得到相同摘要；工件或配置事实改变必须得到新摘要。
+`SelectionGraphPreview.plan_digest` 使用规范化事实计算：Bot 身份、来源 Graph ID/revision、目标组件、冻结选择 revision/digest、正式 Registry 的全部候选成员描述符摘要、候选包的配置 revision/Payload 身份/schema/存储摘要、`kernel.runtime` 策略 revision/Payload 摘要及容量上限和峰值，以及换代影响集合。官方包与已安装包均读取各自私有配置账本的 desired 值并校验当前工件 schema；官方包按最近一次真实装配的精确工件读取，预览本身不 provision。选择快照类型自身保证排序、条目修订与摘要一致。相同事实重复预览得到相同摘要；工件或配置事实改变必须得到新摘要。
 
 全部配置事实必须来自同一数据库快照。配置头上的短暂共享锁在预览结束前持有，若另一个事务在快照建立后先改写尚未读取的配置头，预览以序列化冲突失败并要求重试，不得合成旧配置与新配置混用的摘要。工件目录按内容摘要校验且不由数据库快照保护；安装包目录需要继续保持内容不可变，提交时还须重新校验精确工件。
 
-这个摘要只证明一次只读预览的输入身份。Worker Host 的授权提交还必须在选择写入事务中复核来源 Graph、当前选择、精确工件与全部配置事实，并核对资源预算及管理票据；宿主实际装配和发布还须验证新候选与摘要相符。未完成这些围栏之前，不得把 `plan_digest` 当作已授权启停凭据或向 Web/Shell 开放选择动作。
+这个摘要只证明一次只读预览的输入身份。Worker Host 的授权提交在选择写入事务中复核来源 Graph、当前选择、精确工件、全部配置事实、Bot 容量和管理票据；宿主实际预热和发布还须重新核对 desired 容量策略。`plan_digest` 本身不是已授权启停凭据。
 
 ### 启停提交的锁序和原子复核
 
-Web 的 `module.enable` 与 `module.disable` 必须是两个 action ID、两个独立授权键，但共享 Worker Host 私有选择账本。输入固定包含只读预检返回的 `plan_digest`、目标配置修订、预期 Graph 与选择修订，以及与预检完全相同的目标工件和能力批准；action 的签票正文绑定这些字段。包内 SQL 端口不自行装配 RuntimeGraph，内核也不解释包依赖、能力或资源策略。当前 manifest 已分别声明两个 action，并绑定事务内提交复核；Bot 级资源准入阈值尚未确定，因此当前版本不作为生产启停验收。
+Web 的 `module.enable` 与 `module.disable` 必须是两个 action ID、两个独立授权键，但共享 Worker Host 私有选择账本。输入固定包含只读预检返回的 `plan_digest`、目标配置修订、预期 Graph 与选择修订，以及与预检完全相同的目标工件和能力批准；action 的签票正文绑定这些字段。包内 SQL 端口不自行装配 RuntimeGraph，`kernel.runtime` 核对自己的总量策略，Worker Host 保持选择和包授权策略。当前 manifest 已分别声明两个 action，并绑定事务内提交复核；真正的管理页/Shell 启停与 CPU/内存硬隔离仍未验收。
 
 管理 action 的执行顺序是：先由 Worker Host 的 Generation 绑定一个**必需**的提交前置检查，再在进入 Domain Command 事务之前取得宿主 Graph 替换锁；事务内先核对当前 Graph/Generation、Web 票据、Bot 策略和审计，再取得该 Bot 的选择独占 advisory 围栏，读取同一连接上的当前选择快照，并按组件 ID 顺序对候选中全部启用包的目标配置头取得共享锁。配置值、不可变字段和 Payload 身份也从同一连接验证。随后用正式的选择投影、内容寻址工件校验和 Registry 预览重新计算计划摘要；任何来源 Graph、选择、工件、配置或预算事实不符，都在调用选择写入函数前返回冲突，事务回滚。选择 SQL 在同一连接上重入该选择围栏，写不可变操作回执、操作后快照与持久执行任务；授权接受、审计和选择写入一同提交。
 

@@ -17,6 +17,10 @@ from forest.component_selection import (
     select_package_members,
 )
 from forest.errors import ForestError
+from forest.kernel_resource_admission import (
+    WorkerCapacityAdmission,
+    assess_worker_capacity_in,
+)
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_modules import (
     RuntimeGraphTransitionPlan,
@@ -32,6 +36,7 @@ class SelectionGraphPreview:
     source_graph_revision: int
     target_component_id: str
     impact: RuntimeGraphTransitionPlan
+    admission: WorkerCapacityAdmission
     packages: tuple[PackageCandidateInspection, ...]
     plan_digest: str
 
@@ -216,6 +221,7 @@ async def _preview_selected_graph_in(
     impact = candidate.preview_graph_transition(
         current, target_component_id=target_component_id
     )
+    admission = await assess_worker_capacity_in(kernel, conn, impact.worker_capacity)
     packages = tuple(sorted(inspected, key=lambda item: item.component_id))
     plan_digest = digest_json({
         "protocol": "forest.component-selection-plan/1",
@@ -235,8 +241,9 @@ async def _preview_selected_graph_in(
             for field in ("replace", "retain", "remove", "add", "drain", "prepare")
         },
         "worker_capacity": impact.worker_capacity.as_fact(),
+        "admission": admission.as_fact(),
     })
     return SelectionGraphPreview(
         selection, graph.graph_id, expected_graph_revision, target_component_id,
-        impact, packages, plan_digest,
+        impact, admission, packages, plan_digest,
     )
