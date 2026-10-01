@@ -9,7 +9,7 @@
     "agent_status": {
       "enum": [
         "IDLE", "WAIT_INPUT", "WAIT_MEMORY", "WAIT_TOOL", "WAIT_APPROVAL", "BLOCKED_UNKNOWN",
-        "RELOAD_WAIT", "COMPLETED", "FAILED", "CANCELLED"
+        "RELOAD_WAIT", "COMPLETED", "FAILED", "CANCELLED", "REQUEUED"
       ]
     },
     "reason_code": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},

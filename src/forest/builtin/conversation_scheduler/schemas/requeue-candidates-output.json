@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "items", "has_more", "next_cursor"],
+  "properties": {
+    "protocol": {"const": "forest.conversation-requeue-candidates/1"},
+    "items": {"type": "array", "maxItems": 50, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["conversation_id", "channel_kind", "channel_ref",
+        "session_ref", "run_ref", "claim_ref", "trigger_count",
+        "request_id", "request_state", "disposition_code"],
+      "properties": {
+        "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "channel_kind": {"enum": ["GROUP", "PRIVATE"]},
+        "channel_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "session_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "run_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "claim_ref": {"type": "string", "pattern": "^claim:[a-f0-9]{64}$"},
+        "trigger_count": {"type": "integer", "minimum": 1},
+        "request_id": {"type": ["string", "null"], "maxLength": 256},
+        "request_state": {"enum": [null, "PENDING", "APPLIED", "REJECTED"]},
+        "disposition_code": {"type": ["string", "null"], "maxLength": 128}
+      }
+    }},
+    "has_more": {"type": "boolean"},
+    "next_cursor": {"type": ["string", "null"], "maxLength": 256}
+  }
+}

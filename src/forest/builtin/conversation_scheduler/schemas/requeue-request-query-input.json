@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["conversation_id", "run_ref"],
+  "properties": {
+    "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "run_ref": {"type": "string", "minLength": 1, "maxLength": 256}
+  }
+}

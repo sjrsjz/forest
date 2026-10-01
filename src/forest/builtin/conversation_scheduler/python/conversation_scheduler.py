@@ -536,6 +536,50 @@ class ConversationScheduler(Plugin):
             timeout=25,
         )
 
+    async def _requeue_terminal(self, task, execution, ctx):
+        request = await ctx.queries.call(
+            "conversation.read-requeue-request",
+            {"conversation_id": task["conversation_id"],
+             "run_ref": execution["run_ref"]},
+            timeout=10,
+        )
+        if request["state"] != "PENDING":
+            return False
+        if (request["session_ref"] != execution["session_ref"]
+                or request["conversation_id"] != task["conversation_id"]):
+            raise ForestError(
+                "CONVERSATION_REQUEUE_REQUEST_INVALID",
+                "Pending requeue request differs from the terminal Run",
+                409,
+            )
+        try:
+            await ctx.uow.call(
+                "conversation.requeue-run",
+                {
+                    "conversation": {
+                        "protocol": "forest.conversation-run-requeue/1",
+                        "actor": task["actor"],
+                        "request_id": request["request_id"],
+                        "session_ref": request["session_ref"],
+                        "run_ref": execution["run_ref"],
+                        "claim_ref": request["claim_ref"],
+                        "claim_digest": request["claim_digest"],
+                        "reason_code": request["reason_code"],
+                    },
+                    "agent": {"protocol": "forest.agent-requeue-verification/1",
+                              "prior_step_id": "conversation"},
+                },
+                operation_id=ctx.operations.stable(
+                    f"requeue:{request['request_id']}:{task['actor']['epoch']}"
+                ),
+                timeout=25,
+            )
+        except ForestError as exc:
+            if exc.code != "AGENT_REQUEUE_EFFECT_UNSAFE":
+                raise
+            return False
+        return True
+
     @job("conversation.agent-run")
     async def agent_run(self, task, ctx):
         work = task["payload"]
@@ -627,6 +671,8 @@ class ConversationScheduler(Plugin):
             if status in {"WAIT_TOOL", "BLOCKED_UNKNOWN"}:
                 return self._defer(status, "agent_reconciliation_pending", 30.0)
             if status in {"FAILED", "CANCELLED"}:
+                if await self._requeue_terminal(work, execution, ctx):
+                    return self._release("REQUEUED")
                 await self._commit_terminal(work, execution, ctx)
                 return self._release(status)
             raise ForestError(

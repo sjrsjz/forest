@@ -474,6 +474,19 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             },
             "prior": {},
         }
+        async with store.pool.connection() as conn, conn.transaction():
+            requested = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_request_requeue(%s::jsonb,%s::jsonb) "
+                            "AS result").format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id,
+                            "operation_id": "requeue-request/terminal-probe"}),
+                     Jsonb({"conversation_id": actor["conversation_id"],
+                            "run_ref": "run/1", "reason_code": "TEST_RETRY",
+                            "requested_by": "management:package-test"})),
+                )
+            ).fetchone()
+        assert requested["result"]["value"]["request_id"] == "requeue-request/terminal-probe"
         with pytest.raises(RollbackProbe):
             async with store.pool.connection() as conn, conn.transaction():
                 await conn.execute(
@@ -549,6 +562,18 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "reason_code": "AGENT_PROTOCOL_FAILED",
             "trigger_count": 1,
         }
+        async with store.pool.connection() as conn:
+            request_state = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_read_requeue_request(%s::jsonb,%s::jsonb) "
+                            "AS result").format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}),
+                     Jsonb({"conversation_id": actor["conversation_id"],
+                            "run_ref": "run/1"})),
+                )
+            ).fetchone()
+        assert request_state["result"]["value"]["state"] == "REJECTED"
+        assert request_state["result"]["value"]["disposition_code"] == "RUN_TERMINALIZED"
         async with store.pool.connection() as conn:
             terminal_state = await (
                 await conn.execute(
@@ -1478,6 +1503,18 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         assert [(row["segment_index"], row["trigger_count"]) for row in segments] == [
             (0, 64), (1, 64), (2, 2)
         ]
+        async with store.pool.connection() as conn:
+            candidates = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_list_requeue_candidates("
+                            "%s::jsonb,%s::jsonb) AS result")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}),
+                     Jsonb({"conversation_id": prefill_conversation, "limit": 1})),
+                )
+            ).fetchone()
+        assert candidates["result"]["value"]["items"][0]["run_ref"] == "prefill-run"
+        assert candidates["result"]["value"]["has_more"] is False
         # An abandoned Run may return an already committed Context prefix to
         # PENDING. Its old claim settles in bounded pieces, and the new Run
         # claims that same prefix without duplicating Context units.
@@ -1501,6 +1538,16 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "operation_id": "prefill-requeue/one",
                     "participant_input_digest": digest,
                 }
+                requested = await call(
+                    "conversation_request_requeue",
+                    {"bot_id": store.bot_id,
+                     "operation_id": "prefill-requeue-request/one"},
+                    {"conversation_id": prefill_conversation,
+                     "run_ref": "prefill-run",
+                     "reason_code": "TEST_ABANDONED_RUN",
+                     "requested_by": "management:package-test"},
+                )
+                assert requested["value"]["request_id"] == "prefill-requeue-request/one"
                 requeue_envelope = {
                     "protocol": "forest.uow-step/1",
                     "caller": {
@@ -1510,6 +1557,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "input": {
                         "protocol": "forest.conversation-run-requeue/1",
                         "actor": prefill_actor,
+                        "request_id": "prefill-requeue-request/one",
                         "session_ref": "prefill-session",
                         "run_ref": "prefill-run",
                         "claim_ref": claim_ref,
@@ -1523,6 +1571,13 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 )
                 assert requeued["ok"] is True
                 assert requeued["value"]["trigger_count"] == 130
+                requeue_status = await call(
+                    "conversation_read_requeue_request",
+                    {"bot_id": store.bot_id},
+                    {"conversation_id": prefill_conversation,
+                     "run_ref": "prefill-run"},
+                )
+                assert requeue_status["value"]["state"] == "APPLIED"
                 assert await call(
                     "conversation_requeue_run", requeue_context, requeue_envelope
                 ) == requeued

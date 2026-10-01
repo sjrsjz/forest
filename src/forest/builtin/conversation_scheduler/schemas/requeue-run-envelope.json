@@ -22,9 +22,10 @@
     "requeue": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["protocol", "actor", "session_ref", "run_ref", "claim_ref", "claim_digest", "reason_code"],
+      "required": ["protocol", "actor", "request_id", "session_ref", "run_ref", "claim_ref", "claim_digest", "reason_code"],
       "properties": {
         "protocol": {"const": "forest.conversation-run-requeue/1"},
+        "request_id": {"$ref": "#/$defs/id"},
         "actor": {
           "type": "object",
           "additionalProperties": false,

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>群会话调度</title>
+  <style>
+    :root{color-scheme:dark;font:13px/1.45 system-ui,sans-serif;background:#0b1813;color:#dcebe3}
+    *{box-sizing:border-box}body{margin:0;padding:10px;height:480px}.app{height:100%;display:grid;grid-template-rows:auto minmax(0,1fr) auto;gap:8px}
+    header,.toolbar,.pager,.field-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}header{justify-content:space-between}nav{display:flex;gap:5px}
+    button,input{font:inherit;border:1px solid #355443;border-radius:6px;background:#10231b;color:inherit;padding:6px 9px}button{cursor:pointer;background:#22543e}button:disabled{opacity:.48;cursor:default}nav button.active{background:#73c99b;color:#0b2116}
+    section{min-height:0;overflow:auto;border:1px solid #2a4838;border-radius:8px;background:#102019;padding:10px}.hidden{display:none}.muted{color:#93ad9e}.status{min-height:19px;color:#91dab1}
+    .toolbar{margin-bottom:9px}.toolbar input{min-width:12rem}.toolbar input.flex{flex:1}table{width:100%;border-collapse:collapse;table-layout:fixed}th,td{padding:7px;border-bottom:1px solid #2a4437;text-align:left;vertical-align:top;overflow-wrap:anywhere}th{color:#a4bdae;font-weight:600}.run{font-family:ui-monospace,monospace;font-size:12px}.hint{margin:0 0 10px}.pager{margin-top:8px}
+    .field-row{margin:12px 0}.field-row label{display:grid;gap:4px;min-width:170px;color:#a4bdae}.field-row input{width:100%}@media(max-width:760px){th:nth-child(3),td:nth-child(3){display:none}body{height:520px}}
+  </style>
+</head>
+<body>
+<div class="app">
+  <header><div><strong>群会话调度</strong> <span id="revision" class="muted"></span></div><nav><button data-tab="runs" class="active">运行中的 Run</button><button data-tab="settings">上下文窗口</button></nav></header>
+  <section id="runs">
+    <p class="hint muted">重排请求只在目标 Run 失败或取消后执行。旧 Run 的工具调用和状态不明的模型请求会阻止重排；活动中的 Run 不会被强制停止。</p>
+    <div class="toolbar"><input id="conversation-filter" class="flex" placeholder="精确 Conversation ID，可留空"><input id="reason" value="OPERATOR_REQUEUE" maxlength="128" aria-label="重排原因代码"><button id="search">查询</button><button id="refresh">刷新</button></div>
+    <table><thead><tr><th style="width:24%">会话</th><th style="width:34%">Run</th><th style="width:14%">触发数</th><th style="width:18%">请求状态</th><th style="width:10%">操作</th></tr></thead><tbody id="rows"></tbody></table>
+    <div class="pager"><span id="count" class="muted"></span><button id="next" disabled>下一页</button></div>
+    <div class="toolbar" style="margin-top:12px"><input id="check-conversation" placeholder="请求的 Conversation ID"><input id="check-run" class="flex" placeholder="请求的 Run ID"><button id="check">查询请求结果</button><span id="request-result" class="muted"></span></div>
+  </section>
+  <section id="settings" class="hidden">
+    <p class="hint muted">窗口阈值由 Conversation Context 自行执行；更改草稿后通过宿主计划检查并应用。</p>
+    <div class="field-row"><label>高水位单元数<input id="high" type="number" min="2" max="1000000"></label><label>裁剪后保留单元数<input id="retain" type="number" min="1" max="999999"></label><button id="plan" disabled>检查配置计划</button></div>
+  </section>
+  <div id="status" class="status" role="status"></div>
+</div>
+<script>
+(()=>{'use strict';
+  let port,nonce='',seq=0,draft,page=null;
+  const pending=new Map(),keys=new Map(),$=id=>document.getElementById(id);
+  const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',type,nonce,...payload});
+  const request=(type,operation_id,value,idempotency_key)=>new Promise((resolve,reject)=>{const request_id=`conversation-ui:${++seq}`;pending.set(request_id,{resolve,reject});send(type,{request_id,operation_id,value,...(idempotency_key?{idempotency_key}:{})});});
+  const query=(id,value)=>request('query',id,value);
+  const action=(id,value,key)=>request('action',id,value,key);
+  const status=value=>{$('status').textContent=value||'';};
+  const cell=(row,value)=>{const node=row.insertCell();node.textContent=value??'—';return node;};
+  function show(tab){for(const id of ['runs','settings'])$(id).classList.toggle('hidden',id!==tab);document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
+  function renderSettings(){if(!draft)return;$('high').value=draft.context_view.high_watermark_units;$('retain').value=draft.context_view.retain_units;}
+  function updateDraft(){const high=Number($('high').value),retain=Number($('retain').value);if(!Number.isSafeInteger(high)||!Number.isSafeInteger(retain)||retain<1||high>1000000||retain>=high)throw Error('窗口阈值必须是整数，且保留数小于高水位');draft.context_view.high_watermark_units=high;draft.context_view.retain_units=retain;send('set-draft',{value:draft});}
+  async function load(next=false){const input={limit:20};const exact=$('conversation-filter').value.trim();if(exact)input.conversation_id=exact;if(next&&page?.next_cursor)input.after_conversation_id=page.next_cursor;page=await query('conversation.requeue.candidates',input);const rows=$('rows');rows.replaceChildren();for(const item of page.items){const row=rows.insertRow();cell(row,`${item.channel_kind} ${item.channel_ref}\n${item.conversation_id}`);const run=cell(row,`${item.run_ref}\n${item.session_ref}`);run.className='run';cell(row,item.trigger_count);cell(row,item.request_state?`${item.request_state}${item.disposition_code?` · ${item.disposition_code}`:''}`:'未请求');const button=document.createElement('button');button.textContent='请求重排';button.disabled=Boolean(item.request_state);button.onclick=async()=>{const reason=$('reason').value.trim();if(!reason||reason.length>128){status('请填写有效的原因代码');return;}const keyRef=`${item.run_ref}\0${reason}`;const key=keys.get(keyRef)||`requeue:${Date.now().toString(36)}:${Math.random().toString(36).slice(2)}`;keys.set(keyRef,key);button.disabled=true;try{const result=await action('conversation.requeue.request',{conversation_id:item.conversation_id,run_ref:item.run_ref,reason_code:reason},key);$('check-conversation').value=item.conversation_id;$('check-run').value=item.run_ref;status(`请求 ${result.request_id} 已登记；Run 终结后复核`);await load();}catch(error){button.disabled=false;status(error.message);}};row.insertCell().append(button);}if(!page.items.length)rows.insertRow().insertCell().textContent='当前没有匹配的活跃领取组';$('count').textContent=`本页 ${page.items.length} 条`;$('next').disabled=!page.has_more;}
+  async function loadRequestStatus(){const conversation_id=$('check-conversation').value.trim(),run_ref=$('check-run').value.trim();if(!conversation_id||!run_ref)throw Error('请填写 Conversation ID 和 Run ID');const result=await query('conversation.requeue.status',{conversation_id,run_ref});$('request-result').textContent=result.state==='NONE'?'没有重排请求':`${result.state} · ${result.request_id}${result.disposition_code?` · ${result.disposition_code}`:''}`;}
+  document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>show(button.dataset.tab));
+  $('search').onclick=()=>load().catch(error=>status(error.message));$('refresh').onclick=()=>load().catch(error=>status(error.message));$('next').onclick=()=>load(true).catch(error=>status(error.message));$('check').onclick=()=>loadRequestStatus().catch(error=>status(error.message));
+  $('plan').onclick=()=>{try{updateDraft();send('request-plan');status('正在检查配置计划');}catch(error){status(error.message);}};
+  addEventListener('message',event=>{const message=event.data||{};if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect')return;port=event.ports[0];nonce=message.nonce;port.onmessage=event=>{const data=event.data||{};if(data.protocol!=='forest.management-ui-channel/1'||data.nonce!==nonce)return;if(data.type==='initialize'){draft=structuredClone(data.configuration.desired.value);$('revision').textContent=`期望 r${data.configuration.desired.revision} · 生效 r${data.configuration.effective.revision}`;renderSettings();$('plan').disabled=false;load().catch(error=>status(error.message));send('resize',{height:480});return;}if(data.type==='reset'){draft=structuredClone(data.value);renderSettings();status('配置草稿已重置');return;}if(data.type==='plan-ready'){status('计划已生成，请在宿主栏确认应用');return;}if(data.type==='desired-committed'){status(`配置 r${data.revision} 已提交`);return;}const waiter=pending.get(data.request_id);if(waiter){pending.delete(data.request_id);if(data.type==='operation-error')waiter.reject(new Error(data.message||'操作失败'));else waiter.resolve(data.value);}else if(data.type==='error')status(data.message||'操作失败');};port.start();send('ready');},{once:true});
+})();
+</script>
+</body>
+</html>
