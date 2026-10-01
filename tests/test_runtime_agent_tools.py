@@ -116,6 +116,20 @@ def test_replacement_closure_includes_service_and_transaction_references():
     assert error.value.code == "RUNTIME_MODULE_NOT_FOUND"
 
 
+def test_explicit_retention_dependency_must_be_in_candidate_graph():
+    consumer = RuntimeModuleDescriptor(
+        "module.consumer", (), lambda *_: object(), _ARTIFACT,
+        retention_requires=("module.transaction",),
+    )
+    with pytest.raises(ForestError) as error:
+        RuntimeModuleRegistry(_runtime(), (consumer,))
+    assert error.value.code == "RUNTIME_MODULE_RETENTION_DEPENDENCY_MISSING"
+    assert error.value.details == {
+        "component_id": "module.consumer",
+        "missing": ["module.transaction"],
+    }
+
+
 def _command(service_id: str) -> RuntimeShellCommandContribution:
     return RuntimeShellCommandContribution(
         "module.inspect",

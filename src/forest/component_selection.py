@@ -148,9 +148,7 @@ def select_package_members(
                 409,
             )
         if entry.source_kind == "builtin":
-            if entry.component_id not in official_ids or (
-                entry.component_id == "component.worker-host" and not entry.desired_enabled
-            ):
+            if entry.component_id not in official_ids:
                 raise ForestError(
                     "COMPONENT_SELECTION_INVALID",
                     "Builtin component selection is invalid",

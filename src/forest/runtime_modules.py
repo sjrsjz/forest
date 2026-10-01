@@ -1343,6 +1343,17 @@ class RuntimeModuleRegistry:
             raise ForestError(
                 "DUPLICATE_RUNTIME_MODULE", "Runtime module identities must be unique"
             )
+        for descriptor in self.descriptors:
+            missing = set(descriptor.retention_requires) - remaining.keys()
+            if missing:
+                raise ForestError(
+                    "RUNTIME_MODULE_RETENTION_DEPENDENCY_MISSING",
+                    "Runtime module retention dependencies are missing",
+                    details={
+                        "component_id": descriptor.component_id,
+                        "missing": sorted(missing),
+                    },
+                )
         tool_names = [
             tool.name for descriptor in self.descriptors for tool in descriptor.agent_tools
         ]
