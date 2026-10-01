@@ -173,4 +173,4 @@ Web 的 `module.enable` 与 `module.disable` 必须是两个 action ID、两个�
 
 同 operation ID 的准确重放需要在选择独占围栏内先查包私有不可变操作账本。若签票目标 Generation/Graph 仍然有效，输入摘要与启停方向相同就返回旧回执，不再以变化的选择或配置事实否定已经接受的操作；同 ID 不同输入仍冲突。换代后的旧 Web 票据不再有效，调用方通过持久状态查询追踪原操作。新的操作必须完成全部实时复核。事务提交后，现有 owned-work 只依冻结选择 revision/digest 请求内核 `/3`；它不能把预检时的 Graph 当作已发布事实。实际发布继续在选择共享围栏下核对准确快照。目标资源预算必须来自明确的 Bot 策略及包声明，不得把已有 IPC/队列上限伪称为 CPU 或内存保证。
 
-Worker Host 包已提供只读 `component.selection.operation-probe` 端口，从其不可变操作账本按 Bot/operation ID 返回 `ABSENT` 或原始回执 `REPLAY`；同 ID 不同输入摘要或启停方向直接返回冲突。宿主读取器只在调用方持有该 Bot 选择独占围栏的事务中把此结果用于提交前检查。探针不重新提交旧操作，也不绕过实际写端口的幂等复核；当前还未把它接到管理 action 的前置检查。
+Worker Host 包已提供只读 `component.selection.operation-probe` 端口，从其不可变操作账本按 Bot/operation ID 返回 `ABSENT` 或原始回执 `REPLAY`；同 ID 不同输入摘要或启停方向直接返回冲突。宿主提交检查在持有该 Bot 选择独占围栏的事务中先调用探针，准确重放不重新规划已变化的选择或配置，新操作才进入计划复核。探针不重新提交旧操作，也不绕过实际写端口的幂等复核；公开管理 action 尚未声明。

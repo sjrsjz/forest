@@ -33,6 +33,7 @@ from forest.component_selection import (
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
 )
+from forest.component_selection_commit import resolve_selection_commit_preflight
 from forest.core_runtime import (
     bootstrap_clean_kernel,
     runtime_graph_replacement_request_service,
@@ -348,6 +349,31 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     next_result = await asyncio.wait_for(pending, timeout=5)
     assert next_result["value"]["selection_revision"] == 2
     assert projected == await reader.snapshot()
+    replay_host = SimpleNamespace(
+        _replacement_lock=asyncio.Lock(), registry=object(), _closing=False,
+        selection_reader=reader,
+        _official_descriptors=(SimpleNamespace(
+            component_id="component.worker-host",
+            artifact=SimpleNamespace(package_digest=snapshot.digest),
+        ),),
+    )
+    preflight = resolve_selection_commit_preflight(
+        replay_host, "runtime.selection-commit",
+        component_id="component.worker-host", package_digest=snapshot.digest,
+    )
+    assert preflight is not None
+    async with preflight(
+        command_payload(winning_function, source), operation_id=winning_operation
+    ) as verify_in:
+        async with store.pool.connection() as conn, conn.transaction():
+            await verify_in(conn)
+    async with preflight(
+        command_payload(winning_function, changed), operation_id=winning_operation
+    ) as verify_in:
+        async with store.pool.connection() as conn, conn.transaction():
+            with pytest.raises(ForestError) as changed_replay:
+                await verify_in(conn)
+    assert changed_replay.value.code == "COMPONENT_SELECTION_OPERATION_CONFLICT"
     with pytest.raises(psycopg.Error) as immutable_operation:
         async with store.pool.connection() as conn:
             await conn.execute(
