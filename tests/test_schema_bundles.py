@@ -270,6 +270,10 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     winner = first if first["ok"] else rival
     loser = rival if first["ok"] else first
     assert winner["value"]["selection_revision"] == 1
+    winning_operation = "selection/first" if first["ok"] else "selection/rival"
+    assert winner["value"]["request_id"] == "selection:" + hashlib.md5(
+        (store.bot_id + "\x1f" + winning_operation).encode(), usedforsecurity=False
+    ).hexdigest()
     assert loser["error"]["code"] == "COMPONENT_SELECTION_REVISION_CONFLICT"
     replay = await call(
         "enable" if first["ok"] else "disable",
@@ -303,7 +307,6 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     current = await reader.snapshot()
     assert current.revision == frozen["revision"]
     assert [entry.as_dict() for entry in current.entries] == frozen["entries"]
-    winning_operation = "selection/first" if first["ok"] else "selection/rival"
     winning_function = "enable" if first["ok"] else "disable"
     async with store.pool.connection() as conn, conn.transaction():
         await conn.execute(

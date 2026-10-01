@@ -184,8 +184,9 @@ BEGIN
       jsonb_build_object('code','COMPONENT_SELECTION_OPERATION_CONFLICT',
         'message','Selection operation input differs','status',409));
   END IF;
-  receipt:=jsonb_build_object('protocol','forest.component-selection-operation/1',
+  receipt:=jsonb_build_object('protocol','forest.component-selection-operation/2',
     'operation_id',requested_operation_id,
+    'request_id','selection:'||md5((context->>'bot_id')||chr(31)||requested_operation_id),
     'component_id',existing.input_payload->>'component_id',
     'desired_enabled',enabled,'selection_revision',existing.resulting_revision,
     'expected_graph_revision',existing.expected_graph_revision);
@@ -198,6 +199,7 @@ $$;
 CREATE FUNCTION component_selection_set(context jsonb, input jsonb, enabled boolean)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE bot text:=context->>'bot_id'; op text:=context->>'operation_id';
+        request_ref text:='selection:'||md5(bot||chr(31)||op);
         source text:=input->>'source_kind'; target text:=input->>'component_id';
         head_revision bigint; existing __forest_module_schema__.selection_operations%ROWTYPE;
         new_revision bigint; result jsonb; frozen jsonb;
@@ -240,8 +242,9 @@ BEGIN
         jsonb_build_object('code','COMPONENT_SELECTION_OPERATION_CONFLICT',
           'message','Selection operation input differs','status',409));
     END IF;
-    result:=jsonb_build_object('protocol','forest.component-selection-operation/1',
-      'operation_id',op,'component_id',existing.input_payload->>'component_id',
+    result:=jsonb_build_object('protocol','forest.component-selection-operation/2',
+      'operation_id',op,'request_id',request_ref,
+      'component_id',existing.input_payload->>'component_id',
       'desired_enabled',enabled,'selection_revision',existing.resulting_revision,
       'expected_graph_revision',existing.expected_graph_revision);
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',result);
@@ -283,9 +286,10 @@ BEGIN
     VALUES(bot,op,context->>'input_digest',input,frozen,enabled,new_revision,
       (input->>'expected_graph_revision')::bigint,input->>'requested_by');
   INSERT INTO __forest_module_schema__.selection_applications(bot_id,operation_id,request_id)
-    VALUES(bot,op,'selection:'||md5(bot||chr(31)||op));
-  result:=jsonb_build_object('protocol','forest.component-selection-operation/1',
-    'operation_id',op,'component_id',target,'desired_enabled',enabled,
+    VALUES(bot,op,request_ref);
+  result:=jsonb_build_object('protocol','forest.component-selection-operation/2',
+    'operation_id',op,'request_id',request_ref,
+    'component_id',target,'desired_enabled',enabled,
     'selection_revision',new_revision,
     'expected_graph_revision',(input->>'expected_graph_revision')::bigint);
   RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',result);

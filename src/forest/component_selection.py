@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -353,11 +354,13 @@ class ComponentSelectionReader:
             value["disposition"] != "REPLAY"
             or not isinstance(receipt, dict)
             or set(receipt) != {
-                "protocol", "operation_id", "component_id", "desired_enabled",
+                "protocol", "operation_id", "request_id", "component_id", "desired_enabled",
                 "selection_revision", "expected_graph_revision",
             }
-            or receipt["protocol"] != "forest.component-selection-operation/1"
+            or receipt["protocol"] != "forest.component-selection-operation/2"
             or receipt["operation_id"] != operation_id
+            or not isinstance(receipt["request_id"], str)
+            or not re.fullmatch(r"selection:[0-9a-f]{32}", receipt["request_id"])
             or not isinstance(receipt["component_id"], str)
             or receipt["desired_enabled"] is not desired_enabled
             or type(receipt["selection_revision"]) is not int

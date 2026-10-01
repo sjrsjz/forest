@@ -39,7 +39,6 @@ from forest.runtime_contracts import (
     RuntimeServiceInvocation,
 )
 from forest.runtime_modules import ModuleLifecycleState
-from forest.schema_bundles import module_schema_namespace
 from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
 from forest.storage.management_asset_authority import ManagementAssetAuthority
@@ -1134,8 +1133,6 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                 initial_configuration={},
                 approved_capabilities=("state.read", "state.write"),
             )
-            selection_namespace = module_schema_namespace("forest.component.worker-host")
-
             async def select(function, operation_id, selection_revision, graph_revision):
                 payload = {
                     "component_id": "example.counter", "source_kind": "installed",
@@ -1160,6 +1157,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                     authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
                 )
                 assert result["desired_enabled"] is (function == "enable")
+                assert result["request_id"].startswith("selection:")
                 return result
 
             before_add = host.registry.graph_identity
@@ -1187,22 +1185,11 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
             assert selected["revision"] == 1
             assert selected["entries"][0]["component_id"] == "example.counter"
             assert selected["entries"][0]["desired_enabled"] is True
-            async def await_selection_settled(operation_id):
-                async with host.store.pool.connection() as conn:
-                    row = await (
-                        await conn.execute(
-                            sql.SQL(
-                                "SELECT request_id FROM {} WHERE bot_id=%s AND operation_id=%s"
-                            ).format(
-                                sql.Identifier(selection_namespace, "selection_applications")
-                            ),
-                            (host.store.bot_id, operation_id),
-                        )
-                    ).fetchone()
+            async def await_selection_settled(receipt):
                 async with asyncio.timeout(20):
                     while True:
                         application = await worker_host.management_contract.query(
-                            "selection-application", {"request_id": row["request_id"]}
+                            "selection-application", {"request_id": receipt["request_id"]}
                         )
                         if application["kernel"] is not None and application["kernel"][
                             "state"
@@ -1210,7 +1197,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                             return application
                         await asyncio.sleep(0.1)
 
-            application = await await_selection_settled("selection/enable-counter")
+            application = await await_selection_settled(enabled)
             assert application["state"] == "SUBMITTED"
             assert application["kernel"]["graph_revision"] == with_counter.graph_revision
             assert all(
@@ -1223,7 +1210,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
             )
             assert disabled["selection_revision"] == 2
             without_counter = await await_counter_membership(False)
-            application = await await_selection_settled("selection/disable-counter")
+            application = await await_selection_settled(disabled)
             assert application["kernel"]["graph_revision"] == without_counter.graph_revision
             selected = await worker_host.management_contract.query("selection", {})
             assert selected["revision"] == 2
