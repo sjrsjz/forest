@@ -1,4 +1,5 @@
 import hashlib
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -595,6 +596,42 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         await register_query("query/new")
         new = selected(await neighbours("query/new", limit=128))
         assert len(new) == 42 and {"late/unit", "late/relation", "edge/0"} <= new
+
+        async with conn.transaction():
+            await execute(
+                "INSERT INTO {}.relation_contributions (bot_id,contribution_id,operation_id,"
+                "input_digest,relation_id,relation_kind,left_kind,left_id,right_kind,right_id,"
+                "origin_kind,weight_micros,admitted_deletion_epoch,cross_trunk) "
+                "SELECT %s,'fanout/'||n,'fanout-op/'||n,%s,'fanout-rel/'||n,"
+                "'ASSOCIATES_WITH','SOURCE_UNIT','seed','SOURCE_UNIT',"
+                "'n'||lpad((n %% 40)::text,2,'0'),'RULE',500000,0,true "
+                "FROM generate_series(1,20000) n",
+                (store.bot_id, digest),
+            )
+            await execute(
+                "INSERT INTO {}.relation_evidence (bot_id,contribution_id,evidence_index,"
+                "source_unit_id,source_revision,part_id) "
+                "SELECT %s,'fanout/'||n,0,'seed',1,'text' "
+                "FROM generate_series(1,20000) n",
+                (store.bot_id,),
+            )
+        await register_query("query/fanout-a")
+        await register_query("query/fanout-b")
+        started = time.perf_counter()
+        fanout_a = await neighbours("query/fanout-a", limit=5)
+        elapsed = time.perf_counter() - started
+        fanout_b = await neighbours("query/fanout-b", limit=5)
+        sampled_a = [edge["edge_id"] for edge in fanout_a["edges"]
+                     if edge["relation"] == "ASSOCIATED"]
+        sampled_b = [edge["edge_id"] for edge in fanout_b["edges"]
+                     if edge["relation"] == "ASSOCIATED"]
+        assert fanout_a["association_sampled"] and fanout_b["association_sampled"]
+        assert len(sampled_a) == len(sampled_b) == 5
+        assert sampled_a == [edge["edge_id"] for edge in
+                             (await neighbours("query/fanout-a", limit=5))["edges"]
+                             if edge["relation"] == "ASSOCIATED"]
+        assert sampled_a != sampled_b
+        print(f"20k-edge neighbour sample: {elapsed:.3f}s")
 
         await execute(
             "UPDATE {}.source_units SET eligibility_state='SUPPRESSED',"

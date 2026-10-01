@@ -528,3 +528,5 @@ Validation (2026-10-02): The isolated PostgreSQL complete 21-component Graph sta
 开发期重建向量预检（2026-10-02）：`rebuild_bot_database.py` 取得独占 Supervisor lease 后、删除 Bot 库前，先探测同 Bot 与冻结空间派生的 Milvus 集合；端点不可用时返回 `BOT_REBUILD_VECTOR_PREFLIGHT_FAILED` 和 `database_rebuilt=false`。数据库基线验证后的精确集合重置仍单独执行，其失败返回 `database_rebuilt=true`。隔离 PostgreSQL 测试模拟预检失败，验证旧库标记表仍存在，再恢复向量端点完成重建（1 passed，56.05 秒）；Ruff 通过。该预检不保证两种存储具备跨系统原子事务，维护失败仍需依据错误状态处理。
 
 在线触发边界只读复核（2026-10-02）：当前 `forest-main` Supervisor 仍运行候选 `5acacf0`，0 次重启；只读探针显示 21 个 ACTIVE 成员、0 个并发重叠 Run、0 个过期嵌入工作和 0 个违反项。逐项排障发现 57 条已分类群事件的最终决策均为 `NO_TRIGGER/group_not_allowed`，来自三个非白名单群；冻结和有效 TriggerPolicy 均只允许群 `933179609` 的 `MENTION`，当前新库没有来自该群的事件，也没有 Agent Run 或发送意图。因此当前无回复不能归因于模型或 RAG 执行，批准群的 OneBot 入站和真实回复仍待低频验证。只读探针现按每个会话的最新入站索引项汇总决策/原因码，避免长时间采样扫描全部历史；该快照不统计累计事件数。脚本在线冒烟与 Ruff 通过。
+
+记忆关系规模复核（2026-10-02）：隔离 PostgreSQL 中，10 万条合成关系事实的管理键集分页、后段游标及跨主干过滤用例通过（1 passed，25.84 秒），四次页查询分别约 4/2/2/1 ms。图邻居场景在已有跨群来源、证据复核与快照测试中加入同一源节点 2 万条带证据联想边；限制为 5 条时返回恰好 5 条并标记已抽样，同一查询重放一致、不同查询抽样不同，单次读取约 19 ms（整项 1 passed，48.34 秒）。贡献与证据必须同一事务写入，以满足 `created_xid` 引用围栏；第一次分事务写入被外键正确拒绝，修正夹具后通过。Ruff 通过。以上是合成关系与邻居读取的隔离库结果，尚非数月真实群消息、媒体 Payload 和多 Bot 并行负载验收。
