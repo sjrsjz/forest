@@ -11,6 +11,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+import scripts.rebuild_bot_database as rebuild_module
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
     OFFICIAL_BOT_COMPONENT_IDS,
@@ -23,6 +24,7 @@ from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProf
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.vector_index_effect_driver import vector_collection_name
 from scripts.rebuild_bot_database import rebuild
 
 
@@ -188,6 +190,27 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
         await target.close()
         monkeypatch.setenv("FOREST_PACKAGE_CATALOG_ROOT", str(tmp_path / "packages"))
 
+        expected_collection = vector_collection_name(
+            bot_id, components["vector.index"]["space_id"]
+        )
+        vector_calls = []
+
+        class FakeVectorClient:
+            def __init__(self, *, uri, token, timeout):
+                vector_calls.append(("connect", uri, token, timeout))
+
+            async def has_collection(self, *, collection_name):
+                vector_calls.append(("has", collection_name))
+                return True
+
+            async def drop_collection(self, *, collection_name):
+                vector_calls.append(("drop", collection_name))
+
+            async def close(self):
+                vector_calls.append(("close",))
+
+        monkeypatch.setattr(rebuild_module, "AsyncMilvusClient", FakeVectorClient)
+
         result = await rebuild(
             bot_id=bot_id,
             execute=True,
@@ -195,6 +218,10 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
         )
         assert result["schema_bundles"] == len(OFFICIAL_BOT_COMPONENT_IDS)
         assert result["runtime_graph_heads"] == 0
+        assert result["vector_collection_name"] == expected_collection
+        assert result["vector_collection_reset"] is True
+        assert ("has", expected_collection) in vector_calls
+        assert ("drop", expected_collection) in vector_calls
         target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
         marker = await (
             await target.execute("SELECT to_regclass('public.pre_rebuild_marker') AS marker")

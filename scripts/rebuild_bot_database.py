@@ -21,6 +21,8 @@ from uuid import uuid4
 import psycopg
 from psycopg import sql
 from psycopg.rows import dict_row
+from pymilvus import AsyncMilvusClient
+from pymilvus.exceptions import MilvusException
 
 from forest.clean_supervisor_host import CleanSupervisorSettings
 from forest.errors import ForestError
@@ -37,6 +39,7 @@ from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProf
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.vector_index_effect_driver import vector_collection_name
 
 
 def parser() -> argparse.ArgumentParser:
@@ -107,7 +110,12 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                 409,
             )
         resolver = OfficialBotSettingsResolver(secrets=secrets)
-        await resolver.resolve(profile=profile, storage=storage)
+        bot_settings = await resolver.resolve(profile=profile, storage=storage)
+        vector_space = next(
+            item.config["space_id"] for item in profile.components
+            if item.component_id == "vector.index"
+        )
+        collection_name = vector_collection_name(bot_id, vector_space)
         allocator = LocalPostgresDatabaseAllocator(settings.dsn)
         allocator.validate_target(bot_id, storage.dsn)
         database_name = allocator.database_name(bot_id)
@@ -129,6 +137,7 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
             "bootstrap_profile_ref": profile.profile_ref,
             "bootstrap_manifest_digest": profile.manifest_digest,
             "supervisor_lease_expired": bool(lease["expired"]),
+            "vector_collection_name": collection_name,
         }
         if not execute:
             return result
@@ -218,7 +227,32 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                     "Rebuilt Bot database does not contain the expected clean baseline",
                     500,
                 )
-            result.update(schema_bundles=bundles["count"], runtime_graph_heads=0)
+            try:
+                vector_client = AsyncMilvusClient(
+                    uri=bot_settings.vector_index_endpoint,
+                    token=bot_settings.vector_index_token,
+                    timeout=bot_settings.vector_index_timeout_seconds,
+                )
+                try:
+                    async with asyncio.timeout(bot_settings.vector_index_timeout_seconds):
+                        collection_existed = await vector_client.has_collection(
+                            collection_name=collection_name
+                        )
+                        if collection_existed:
+                            await vector_client.drop_collection(collection_name=collection_name)
+                finally:
+                    await vector_client.close()
+            except (TimeoutError, MilvusException, OSError) as exc:
+                raise ForestError(
+                    "BOT_REBUILD_VECTOR_RESET_FAILED",
+                    "Bot database was rebuilt, but its derived vector collection was not reset",
+                    503,
+                    details={"database_rebuilt": True, "collection_name": collection_name},
+                ) from exc
+            result.update(
+                schema_bundles=bundles["count"], runtime_graph_heads=0,
+                vector_collection_reset=collection_existed,
+            )
             return result
         finally:
             guard_stop.set()

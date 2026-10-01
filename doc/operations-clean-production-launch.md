@@ -66,7 +66,7 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 `FOREST_AGENT_SYSTEM_PROMPT` 是 Agent 模块拥有的 PresetContext。不可修改的核心协议仍来自 `agent_protocol.CORE_PROMPT`，包含单 Agent 身份、作者隔离、工具调用和输出语法约束。
 
-`memory.graph` 拥有 VL facet、来源投影、claim 和批次 handoff；`embedding.multimodal` 是带 manifest、schema、隔离 Worker 与同代 Effect Driver 的 builtin 包，只公开 `embedding.profile.bind/1` 和 `embedding.encode/2`。Memory 在一个事务中消费准确授权票据、提交 `kernel.effect` transport handoff 与自身 batch handoff；驱动复核当前 RuntimeGraph、Embedding Generation、wire 摘要和 profile 后才读取凭据并执行 HTTP。外部 attempt 与观察由通用 Effect authority 保存，不再存在第二套 Embedding transport 表。Embedding 的 deployment、模型版本、模型种类、维度与派生 space 在 Bot 首次初始化时冻结；配置 plan/apply 可以替换 endpoint、凭据引用、超时和连接数，新 Generation 会采用新传输配置。候选代会重新验证实际 desired revision，改变冻结 profile 会以 `EMBEDDING_PROFILE_IMMUTABLE` 拒绝启动。
+`memory.graph` 拥有 VL facet、来源投影、claim 和批次 handoff；`embedding.multimodal` 是带 manifest、schema、隔离 Worker 与同代 Effect Driver 的 builtin 包，只公开 `embedding.profile.bind/2` 和 `embedding.encode/2`。绑定契约还声明可准确归因的最大批次项数；Memory 在 Bot 域保存该上限，SQL claim 与 Embedding 发送前都复核它。Memory 在一个事务中消费准确授权票据、提交 `kernel.effect` transport handoff 与自身 batch handoff；驱动复核当前 RuntimeGraph、Embedding Generation、wire 摘要和 profile 后才读取凭据并执行 HTTP。外部 attempt 与观察由通用 Effect authority 保存，不再存在第二套 Embedding transport 表。Embedding 的 deployment、模型版本、模型种类、维度与派生 space 在 Bot 首次初始化时冻结；配置 plan/apply 可以替换 endpoint、凭据引用、超时和连接数，新 Generation 会采用新传输配置。候选代会重新验证实际 desired revision，改变冻结 profile 会以 `EMBEDDING_PROFILE_IMMUTABLE` 拒绝启动。
 
 `vector.index` 独占 Milvus client 和 Bot collection，提供 `upsert/search/delete` 三个冻结服务。PostgreSQL 不再保存可查询向量列或执行全量余弦扫描，只保存稳定 `index_ref_id` 与权威内容、来源和关系；Milvus 命中必须回 PostgreSQL 复核后才能进入 EvidenceBundle。`space_id`、维度和度量与 Bot 生命周期绑定，配置只允许替换兼容 endpoint、凭据引用和超时。
 
@@ -84,7 +84,7 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supervisor`，镜像默认命令也是 `forest supervisor`。PostgreSQL 首次初始化只创建 `forest_deployment`；供应器为每个 Bot 按 Bot ID 派生稳定库名和无特权 login role，为该 role 生成随机口令，只允许在同一批准集群创建，并复核 role flags 与数据库 owner。Bot 运行时不持有 deployment 超级用户凭据。Supervisor 的健康检查只探测 loopback 管理监听，不读取 Web 凭据。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
 
-若 deployment catalog、加密 Secret 与冻结 Bootstrap profile 已经有效，只需要重建某个开发期 Bot 库，则先正常停止 Supervisor 并等待其 lease 过期，再在候选镜像中挂载只读 Secret 卷、可写 package catalog 卷和 `scripts/rebuild_bot_database.py`，并设置 `FOREST_PACKAGE_CATALOG_ROOT=/var/lib/forest-packages`。执行模式会在删库前验证 package catalog 可写。脚本默认只输出派生库名、role、profile 摘要和 lease 状态；真正执行必须同时给出 `--execute` 和与派生结果逐字相同的 `--confirm-database`。它只允许删除由 Bot ID 派生、owner 也准确匹配的数据库，然后直接从现有 authority 安装当前 21 个 baseline；不修改 READY catalog、已完成 Provisioning Job、Secret 或 Bootstrap profile，不包含列迁移、双写或兼容读取。重建后必须得到 21 个 schema bundle 且没有 RuntimeGraph head，之后才可重启 Supervisor 发布新图。
+若 deployment catalog、加密 Secret 与冻结 Bootstrap profile 已经有效，只需要重建某个开发期 Bot 库，则先正常停止 Supervisor 并等待其 lease 过期，再在候选镜像中挂载只读 Secret 卷、可写 package catalog 卷和 `scripts/rebuild_bot_database.py`，并设置 `FOREST_PACKAGE_CATALOG_ROOT=/var/lib/forest-packages`。执行模式会在删库前验证 package catalog 可写。脚本默认只输出派生库名、role、profile 摘要、精确的向量集合名和 lease 状态；真正执行必须同时给出 `--execute` 和与派生结果逐字相同的 `--confirm-database`。它只允许删除由 Bot ID 派生、owner 也准确匹配的数据库，然后直接从现有 authority 安装当前 21 个 baseline；数据库验证通过后，删除同一 Bot 与冻结 `space_id` 派生的 Milvus 集合，避免无权威引用的旧向量占据召回候选。向量清理失败会明确报告数据库已重建，必须排除故障后重试或清理精确集合，再启动 Supervisor。不修改 READY catalog、已完成 Provisioning Job、Secret 或 Bootstrap profile，不包含列迁移、双写或兼容读取。重建后必须得到 21 个 schema bundle 且没有 RuntimeGraph head，之后才可重启 Supervisor 发布新图。
 
 重建 sidecar 使用以下卷和环境；先省略末尾两个执行参数做 dry-run，核对派生库名和 lease，再将 dry-run 返回的 `database_name` 赋给 `$databaseName` 后提交执行。`forest-clean` 是本地 Compose 项目名，换环境时应替换成实际项目名。
 
