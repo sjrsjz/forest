@@ -74,6 +74,16 @@ RuntimeShellCommandContribution {
 
 模块命令 registry 是 RouteGraph 的一部分。发布事务把命令 schema 摘要、能力摘要、operation、服务等级和准确 owner Generation 写入权威 route。新 Generation 发布时一次切换，之后接纳的命令使用新 schema；已接纳请求继续绑定原 Generation 和参数载荷，执行时同时复核冻结 owner 和服务句柄 provider，除非该模块明确声明、宿主验证且管理员允许兼容 takeover。Forest 未发布基线不保留开发期 `shell-gate-v2…v12`、版本专用 Python registry 或旧 writer-generation 分派器。
 
+### 3.1 Shell 与 Web 的同一控制动作
+
+`module.enable/disable` 是 `component.worker-host` 的管理 action，Shell 命令只能把经过解析的参数交给该 action；Shell 服务不直接调用选择写端口，也不复制选择账本 SQL。控制入口使用同一不可变 action 声明、输入 schema、actor 字段、operation ID、计划摘要和 `runtime.selection-commit` 事务预检。两种入口的凭据不同：Web 使用 Web authority ticket；Shell 使用当前 `shell.command` 已授权的执行 claim。不能把 Shell principal 填进 Web ticket 字段，或把 `management_action` 写端口降成普通 Domain Command 来迁就 Shell。
+
+Shell claim 由 Shell 组件提供事务内验证契约，证明 `bot_id`、原群、`request_id`、`claim_token`、principal、命令及版本、冻结的目标 component/Generation、已消费的 `kernel.authorization` ticket、有效 lease 和当前管理员资格。Shell Worker 给控制入口的是这个 claim 的引用与规范化 action 输入，不是数据库句柄或私表名。控制入口从已冻结的 Shell 路由与 `management_operation_id` 核对 action，不能由 Worker 任意指定另一个管理操作；action 的 `requested_by` 始终由验证后的 principal 注入，群文本不能覆盖。
+
+提交顺序为：取得 RuntimeGraph 操作锁 → 在目标 Bot 数据库开启事务 → 经 Shell 包验证 claim（Web 则验 Web ticket、Bot policy 与审计）→ 运行同一个 `runtime.selection-commit` 预检，按组件 ID 顺序锁定选择/配置头并核对准确 action 输入、目标 Generation、选择修订、Graph 修订、配置修订与计划摘要 → 调用包内 `management_action` 写端口 → 同事务记录来源明确的审计与操作回执。Shell 的管理员资格与 lease 必须在这笔事务里重验；预检不得只在 Shell 接纳时进行。任一步失败整笔回滚，不能出现“Shell 已获准、选择账本却采用过期图”的部分提交。
+
+Shell 回执只报告持久 `request_id` 和状态；Graph 替换仍由 Worker Host 的独立任务提出并由宿主执行，不在群命令栈内同步排空自身。准确重放沿用原 operation ID 与输入摘要；同一 ID 改输入冲突。Web 与 Shell 对同一选择修订竞争时，最多一笔提交成功。命令执行结果未知时按 operation ID 查询，而不是重新生成选择请求。Shell claim 过期、管理员撤销、路由换代或计划变更都拒绝新写入，已经提交的请求保持真实状态。验证器属于 `shell.command` 包边界，内核只编排版本化验证契约与事务，不读取 Shell 私表。
+
 命令贡献还会形成生命周期依赖：`shell.command` 必须在所有命令提供者之后启动，并在它们之前停止接纳和排空；Agent 工具目录同理使 `agent.runtime` 依赖工具提供者。该依赖进入 Generation 描述事实与拓扑排序，贡献者反向依赖 Shell 时会作为环在图构建期拒绝。这样旧图热替换时，Shell 已领取的命令不会遇到先被 quiesce 的提供者。
 
 ## 4. 解析规则

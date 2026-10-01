@@ -89,7 +89,7 @@ Worker Host 提交内核替换请求时，冻结所接受选择操作的全局�
 
 群 Shell 的 `module.reload` 由 Worker Host 包提供，例如 `#forest module reload --component-id agent.runtime --expect-graph 7`。它先按冻结 Graph 核对目标组件，再向 Worker Host 私有控制账本提交带 expected Graph revision 的持久请求。包内 owned-work 领取请求后，通过声明的 `runtime.graph-replacement.request/2` 内核服务提交带 Host lease 围栏的图替换请求。Web 管理 action `module.reload` 也写入同一账本；`reload` query 将包内状态与内核替换结算状态分别展示。命令回执说明目标及其依赖闭包会换代；实际成员变化以发布后的 Graph 为准；同一 Shell 操作跨新代重放只返回原持久请求，不再排队第二次。配置 apply 现有标准两方事务，但 enable/disable 与工件选择控制仍待完成。
 
-当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录与精确摘要 `artifact` 投影、持久重载账本及标准配置控制意图。私有 schema 还具备选择修订头、组件条目、幂等操作回执、内部启用/停用 SQL 端口和只读快照；宿主在构造候选图时读取快照，过滤已停用的 builtin，并从精确工件摘要装配已启用的外部包。外部包必须先有目标私有配置账本；装配时复核当前 desired 值的配置 schema 摘要与内容，未初始化或失配则拒绝。选择操作在同一私有事务内冻结操作后快照并生成独立的持久执行任务；操作事实不可改写，任务由包内 owned-work 领取、对照当前快照与 Graph revision，再向内核提交携带选择修订和摘要的 `/3` 请求。较新选择覆盖旧任务时，旧任务结算为 `SUPERSEDED`；内核请求与目标快照不符时，宿主拒绝发布。宿主在 Graph 发布期间持有与选择写入互斥的数据库围栏，旧候选不能在新的选择修订之后发布。只有冻结选择请求允许目标为旧图之外的新成员，普通重载仍要求目标属于旧图。当前选择端口已能自动驱动成员热加入和停用，Web 管理 action 已声明并在隔离库验证；包内 UI 与 Shell 启停入口尚未开放，真实实例也未部署此候选版本。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须建立部署工件的安装权威和 Bot 级资源准入，再完成包内 UI、Shell/CLI 选择入口及真实授权会话验收；提交前须拒绝不满足目标配置和依赖约束的选择。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
+当前已有 Worker Host 私有 schema、真实包 manifest、Graph 成员查询、只读 `packages` 目录与精确摘要 `artifact` 投影、持久重载账本及标准配置控制意图。私有 schema 还具备选择修订头、组件条目、幂等操作回执、内部启用/停用 SQL 端口和只读快照；宿主在构造候选图时读取快照，过滤已停用的 builtin，并从精确工件摘要装配已启用的外部包。外部包必须先有目标私有配置账本；装配时复核当前 desired 值的配置 schema 摘要与内容，未初始化或失配则拒绝。选择操作在同一私有事务内冻结操作后快照并生成独立的持久执行任务；操作事实不可改写，任务由包内 owned-work 领取、对照当前快照与 Graph revision，再向内核提交携带选择修订和摘要的 `/3` 请求。较新选择覆盖旧任务时，旧任务结算为 `SUPERSEDED`；内核请求与目标快照不符时，宿主拒绝发布。宿主在 Graph 发布期间持有与选择写入互斥的数据库围栏，旧候选不能在新的选择修订之后发布。只有冻结选择请求允许目标为旧图之外的新成员，普通重载仍要求目标属于旧图。当前选择端口已能自动驱动成员热加入和停用，Web 管理 action 已声明并在隔离库验证；包内 UI 已接通预检、启停和状态查询；Shell 启停入口尚未开放，真实实例也未部署此候选版本。目录由受限内核服务桥接宿主共用的内容寻址工件库；它不接受上传、不决定 Bot 选择，也不将 ZIP 或本地路径交给 Worker。下一步须完成 Shell/CLI 选择入口、部署工件安装权威和真实授权会话验收；提交前须拒绝不满足目标配置和依赖约束的选择。每一步都要证明该包热替换后控制回执、请求和 UI 所有权不丢失；旧路由应直接删除，不建兼容别名。未完成这些步骤前，组件控制面仍标记为未完成。
 
 ### 管理入口的预验证与提交边界
 
@@ -101,7 +101,7 @@ Worker Host 提交内核替换请求时，冻结所接受选择操作的全局�
 
 正式 Registry 现提供只读 `preview_graph_transition()`，从同一份候选与来源描述符计算 `replace/retain/remove/add`、旧图排空集合与新图预热集合；实际 `plan_graph_transition()` 消费该结果后才绑定保留实例的所有权。预览不准备 Generation、不安装 schema、不更改 Registry 实例表。它只是候选拓扑规划，不会自行读取或验证 Bot 选择账本、精确工件、目标配置 revision 和批准能力，也不产生可授权的计划摘要；`module.validate` 必须把这些冻结事实与预览结果一并核对，不能把这个底层方法单独暴露为管理入口。
 
-已安装包现有共享的无持久写入检查：`inspect_installed_package()` 按精确工件与 manifest 摘要核对 Bot scope、Python Worker、批准能力和受限 SQL/Effect 声明，再从目标包私有配置账本读取指定 desired revision、schema 摘要、实际值及 Bot 生命周期不可变字段。检查结果只保留内容寻址工件/manifest/存储摘要及配置 revision、Payload 身份/摘要，不把配置正文、SQL 字节、工件路径或可写 Repository 交给控制端口。配置头、正文 Payload 和 effective 基线在同一 `REPEATABLE READ` 事务中验证；为了与 Payload 删除纪元围栏协作，该事务保留短暂的 `FOR SHARE`，但不安装 schema、不创建 grant、不写配置或选择。并发配置变更引起的序列化失败按 revision 冲突返回，要求重新规划。生产装配在 `initial_configuration=None` 时先执行同一检查，缺失或不兼容配置不能先留下安装副作用。预检结果可进入只读候选 Graph 编译；选择修订围栏、计划摘要与 Web/Shell 授权提交复核尚未合成完整 `module.validate`，因此不可作为单独的启停授权。
+已安装包现有共享的无持久写入检查：`inspect_installed_package()` 按精确工件与 manifest 摘要核对 Bot scope、Python Worker、批准能力和受限 SQL/Effect 声明，再从目标包私有配置账本读取指定 desired revision、schema 摘要、实际值及 Bot 生命周期不可变字段。检查结果只保留内容寻址工件/manifest/存储摘要及配置 revision、Payload 身份/摘要，不把配置正文、SQL 字节、工件路径或可写 Repository 交给控制端口。配置头、正文 Payload 和 effective 基线在同一 `REPEATABLE READ` 事务中验证；为了与 Payload 删除纪元围栏协作，该事务保留短暂的 `FOR SHARE`，但不安装 schema、不创建 grant、不写配置或选择。并发配置变更引起的序列化失败按 revision 冲突返回，要求重新规划。生产装配在 `initial_configuration=None` 时先执行同一检查，缺失或不兼容配置不能先留下安装副作用。预检结果可进入只读候选 Graph 编译；选择修订围栏、计划摘要和 Web 授权提交复核已由 Worker Host action 串接；此底层只读检查单独调用时仍不授予启停权限。
 
 ### 局部换代的内核边界
 
@@ -141,7 +141,7 @@ Worker Host 包的选择写端口拒绝停用自身；宿主成员选择不按�
 
 宿主可信进程的 `preview_component_change()` 在当前 Graph 替换锁和选择共享围栏内冻结选择，再交给 `preview_selected_graph()` 使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；`module.validate` 已接入 Web 管理查询，`module.enable/disable` 已接入同事务授权提交；Shell 启停入口仍待接通。
 
-`component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主在图替换锁内取得选择共享围栏、读取当前选择快照，再通过 Worker Host 包内 SQL 端口投影拟议写入，并从同一 `REPEATABLE READ` 事务快照读取候选中全部包的配置事实，编译不可执行候选。选择围栏先于配置快照建立，避免等待锁时冻结过时选择；两者使用两个连接，围栏持续至预览结束。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实、`kernel.runtime` 容量准入及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。授权提交事务中的计划事实复核已接入；启停管理页和 Shell 启停入口仍未完成。
+`component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主在图替换锁内取得选择共享围栏、读取当前选择快照，再通过 Worker Host 包内 SQL 端口投影拟议写入，并从同一 `REPEATABLE READ` 事务快照读取候选中全部包的配置事实，编译不可执行候选。选择围栏先于配置快照建立，避免等待锁时冻结过时选择；两者使用两个连接，围栏持续至预览结束。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实、`kernel.runtime` 容量准入及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。授权提交事务中的计划事实复核已接入；启停管理页已接通，Shell 启停入口仍未完成。
 
 候选包事实现在还包含规范化的 `worker_limits`：帧、并发、队列、状态并发、持有任务及持有资源六项都从同一个不可变包声明和 `WorkerLimits` 默认值生成，Worker 启动也使用该构造器。相同声明也固定在通用 RuntimeModuleDescriptor 的 Graph 事实中；Worker SDK 的隔离快照包含该限额模型。正式 Graph 规划器以当前全部活动 Worker 加上候选 `prepare` 集中的 Worker 组成 `worker_capacity.peak`，因此被替换的旧 Worker 与新 Worker 会同时占用容量，保留的 Worker 只计算一次。`kernel.runtime` 的版本化 Bot 配置拥有七个总量阈值：Worker 数以及六项 Worker 声明的合计；只读预览在同一配置快照内核对阈值，返回 `admission` 的配置修订、Payload 摘要、上限与峰值，计划摘要绑定这些事实。Worker Host 的选择提交在同一事务重算准入；宿主冷启动、热替换预热前和发布前再核对当前 desired 策略。运行时配置可通过该内核模块自己的管理页提交并请求 Graph 重建；配置提交先以当前 Graph 的 `kernel.runtime` 换代闭包检查峰值，不能把无法重建的策略写成 desired。此准入约束的是 Worker IPC/并发声明，不是实测内存或 CPU；操作系统级 CPU/内存硬隔离仍未实现。
 
@@ -159,20 +159,20 @@ Worker Host 自带的隔离管理页提供折叠式候选预检与启停提交�
 
 ### 启停提交的锁序和原子复核
 
-Web 的 `module.enable` 与 `module.disable` 必须是两个 action ID、两个独立授权键，但共享 Worker Host 私有选择账本。输入固定包含只读预检返回的 `plan_digest`、目标配置修订、预期 Graph 与选择修订，以及与预检完全相同的目标工件和能力批准；action 的签票正文绑定这些字段。包内 SQL 端口不自行装配 RuntimeGraph，`kernel.runtime` 核对自己的总量策略，Worker Host 保持选择和包授权策略。当前 manifest 已分别声明两个 action，并绑定事务内提交复核；真正的管理页/Shell 启停与 CPU/内存硬隔离仍未验收。
+Web 的 `module.enable` 与 `module.disable` 是两个 action ID、两个独立授权键，但共享 Worker Host 私有选择账本。输入固定包含只读预检返回的 `plan_digest`、目标配置修订、预期 Graph 与选择修订，以及与预检完全相同的目标工件和能力批准；action 的签票正文绑定这些字段。包内 SQL 端口不自行装配 RuntimeGraph，`kernel.runtime` 核对自己的总量策略，Worker Host 保持选择和包授权策略。当前 manifest 已分别声明两个 action 并绑定事务内提交复核，包内管理页已接通预检与公开 action；Shell 凭据入口、真实 Web 会话及 CPU/内存硬隔离仍未验收。
 
 管理 action 的执行顺序是：先由 Worker Host 的 Generation 绑定一个**必需**的提交前置检查，再在进入 Domain Command 事务之前取得宿主 Graph 替换锁；事务内先核对当前 Graph/Generation、Web 票据、Bot 策略和审计，再取得该 Bot 的选择独占 advisory 围栏，读取同一连接上的当前选择快照，并按组件 ID 顺序对候选中全部启用包的目标配置头取得共享锁。配置值、不可变字段和 Payload 身份也从同一连接验证。随后用正式的选择投影、内容寻址工件校验和 Registry 预览重新计算计划摘要；任何来源 Graph、选择、工件、配置或预算事实不符，都在调用选择写入函数前返回冲突，事务回滚。选择 SQL 在同一连接上重入该选择围栏，写不可变操作回执、操作后快照与持久执行任务；授权接受、审计和选择写入一同提交。
 
 宿主锁必须先于 Domain Command 事务取得：当前通用入口在 `before_write` 之前已经验证活动 Generation 并进入内核 Graph 数据库围栏，而图替换按“宿主锁→数据库围栏”执行。反过来在 `before_write` 中才等待宿主锁会制造锁序环。提交前置检查必须由 manifest 明确声明且在缺失绑定时拒绝启动或拒绝 action，不允许退化为普通 Domain Command。它可以使用宿主提供的只读候选编译能力和调用方事务连接，但 Worker Host 仍拥有 action、选择 SQL、幂等和结果语义；通用包运行时只编排声明的检查，不硬编码 `component.worker-host` 的策略。
 
-通用包运行时已接受管理 action 的 `transaction_preflight` 声明：装配 Generation 时从宿主解析对应能力，缺失则拒绝装配；action ID 必须与声明的 Domain Command 端口一致，声明了检查却丢失绑定时拒绝调用。宿主检查作用域先于数据库事务进入并一直保持至提交/回滚，Web 票据验证与检查回调在 Domain Command 写入前于同一连接执行；等待锁、校验和事务执行共用 action 超时。管理 action 的输出 schema 现于事务提交前验证，错误输出导致整笔写入回滚。具体选择检查能力已实现如下，但 `module.enable`/`module.disable` 仍未发布。
+通用包运行时已接受管理 action 的 `transaction_preflight` 声明：装配 Generation 时从宿主解析对应能力，缺失则拒绝装配；action ID 必须与声明的 Domain Command 端口一致，声明了检查却丢失绑定时拒绝调用。宿主检查作用域先于数据库事务进入并一直保持至提交/回滚，当前 Web 票据验证与检查回调在 Domain Command 写入前于同一连接执行；等待锁、校验和事务执行共用 action 超时。管理 action 的输出 schema 于事务提交前验证，错误输出导致整笔写入回滚。
 
-宿主现在实现 `runtime.selection-commit` Graph 选择检查能力，只向当前官方包绑定；它仍未被 Worker Host 的公开 action 声明。启停方向是命令输入的一部分，包内 SQL 验证该值与实际 `enable`/`disable` 端口一致，避免检查能力与写命令错绑。检查作用域先取得 Graph 替换锁，事务内取得选择独占围栏，先用包内操作探针区分准确重放；新操作读取当前选择修订，再复用同一包内选择投影与正式 Registry 规划器，按组件 ID 顺序读取并锁定全部启用包的配置头，最后比较冻结的 `plan_digest`。目标工件与当前配置由同一候选检查路径重新校验。隔离 PostgreSQL 的完整宿主用例验证现有只读预览摘要可在同一 Graph 下复核，伪造摘要被拒绝且选择账本不变。资源预算策略和公开 Web/Shell action 仍缺失；现阶段不能把这个内部检查能力当作可提交启停的完整入口。
+宿主的 `runtime.selection-commit` Graph 选择检查能力只向当前官方包绑定，Worker Host 的两个公开 action 已声明该检查。启停方向是命令输入的一部分，包内 SQL 验证该值与实际 `enable`/`disable` 端口一致，避免检查能力与写命令错绑。检查作用域先取得 Graph 替换锁，事务内取得选择独占围栏，先用包内操作探针区分准确重放；新操作读取当前选择修订，再复用同一包内选择投影与正式 Registry 规划器，按组件 ID 顺序读取并锁定全部启用包的配置头，最后比较冻结的 `plan_digest`。目标工件与当前配置由同一候选检查路径重新校验。隔离 PostgreSQL 的完整宿主用例已验证只读预览摘要可在同一 Graph 下复核，伪造摘要、超出 Bot 容量策略的提交均被拒绝且选择账本不变。Shell 尚无管理 action 凭据入口；不能从普通 Shell 服务调用选择 SQL 冒充公开启停。
 
 同一事务内输出校验也覆盖普通 Domain Command、启动时的目录同步 Command 和清理时的目录释放 Command；这些写命令返回无效结果时，不提交包内部分写入。只读 Domain Query 保持读后输出校验。
 
-管理 action 的 `port_kind` 由内核标记为 `management_action`，不再降格为普通 `command`；Worker Host 的 `component.selection.enable/disable` SQL 只接受该标记。这样即使包持有同名 Domain Command 能力，也不能经普通命令绕过未来的 Web 票据和前置检查。包私有 SQL 仍只维护选择账本，不能代替宿主的 Graph 与候选计划复核。
+管理 action 的 `port_kind` 由内核标记为 `management_action`，不降格为普通 `command`；Worker Host 的 `component.selection.enable/disable` SQL 只接受该标记。这样即使包持有同名 Domain Command 能力，也不能经普通命令绕过授权凭据和前置检查。包私有 SQL 仍只维护选择账本，不能代替宿主的 Graph 与候选计划复核。
 
 同 operation ID 的准确重放需要在选择独占围栏内先查包私有不可变操作账本。若签票目标 Generation/Graph 仍然有效，输入摘要与启停方向相同就返回旧回执，不再以变化的选择或配置事实否定已经接受的操作；同 ID 不同输入仍冲突。换代后的旧 Web 票据不再有效，调用方通过持久状态查询追踪原操作。新的操作必须完成全部实时复核。事务提交后，现有 owned-work 只依冻结选择 revision/digest 请求内核 `/3`；它不能把预检时的 Graph 当作已发布事实。实际发布继续在选择共享围栏下核对准确快照。目标资源预算必须来自明确的 Bot 策略及包声明，不得把已有 IPC/队列上限伪称为 CPU 或内存保证。
 
-Worker Host 包已提供只读 `component.selection.operation-probe` 端口，从其不可变操作账本按 Bot/operation ID 返回 `ABSENT` 或原始回执 `REPLAY`；同 ID 不同输入摘要或启停方向直接返回冲突。宿主提交检查在持有该 Bot 选择独占围栏的事务中先调用探针，准确重放不重新规划已变化的选择或配置，新操作才进入计划复核。探针不重新提交旧操作，也不绕过实际写端口的幂等复核；公开管理 action 尚未声明。
+Worker Host 包已提供只读 `component.selection.operation-probe` 端口，从其不可变操作账本按 Bot/operation ID 返回 `ABSENT` 或原始回执 `REPLAY`；同 ID 不同输入摘要或启停方向直接返回冲突。宿主提交检查在持有该 Bot 选择独占围栏的事务中先调用探针，准确重放不重新规划已变化的选择或配置，新操作才进入计划复核。探针不重新提交旧操作，也不绕过实际写端口的幂等复核。
