@@ -94,6 +94,62 @@ SELECT jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
         WHERE bot_id=context->>'bot_id'),'[]'::jsonb)))
 $$;
 
+CREATE FUNCTION component_selection_project(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE source text:=input->>'source_kind'; target text:=input->>'component_id';
+        current jsonb; projected jsonb; new_revision bigint;
+BEGIN
+  IF context->>'port_kind' IS DISTINCT FROM 'query'
+     OR context->>'port_name' IS DISTINCT FROM 'component.selection.project'
+     OR target IS NULL OR target !~ '^[a-z0-9][a-z0-9._-]{0,127}$'
+     OR source IS NULL OR source NOT IN ('builtin','installed')
+     OR jsonb_typeof(input->'desired_enabled') IS DISTINCT FROM 'boolean'
+     OR jsonb_typeof(input->'expected_selection_revision') IS DISTINCT FROM 'number'
+     OR jsonb_typeof(input->'approved_capabilities') IS DISTINCT FROM 'array'
+     OR (source='builtin' AND (input->'package_digest' IS DISTINCT FROM 'null'::jsonb
+         OR input->'manifest_digest' IS DISTINCT FROM 'null'::jsonb
+         OR input->'approved_capabilities' IS DISTINCT FROM '[]'::jsonb))
+     OR (source='installed' AND (input->>'package_digest' IS NULL
+         OR input->>'manifest_digest' IS NULL
+         OR input->>'package_digest' !~ '^sha256:[a-f0-9]{64}$'
+         OR input->>'manifest_digest' !~ '^sha256:[a-f0-9]{64}$'))
+  THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_INVALID',
+        'message','Component selection projection input is invalid','status',422));
+  END IF;
+  current:=__forest_module_schema__.component_selection_snapshot(context,'{}'::jsonb);
+  IF current->'value'->'revision' IS DISTINCT FROM input->'expected_selection_revision' THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_REVISION_CONFLICT',
+        'message','Component selection revision changed','status',409));
+  END IF;
+  new_revision:=(current->'value'->>'revision')::bigint+1;
+  SELECT COALESCE(jsonb_agg(entry ORDER BY entry->>'component_id'),'[]'::jsonb)
+    INTO projected FROM (
+      SELECT value AS entry
+        FROM jsonb_array_elements(current->'value'->'entries') AS old(value)
+        WHERE value->>'component_id' IS DISTINCT FROM target
+      UNION ALL
+      SELECT jsonb_build_object(
+        'component_id',target,'source_kind',source,
+        'package_digest',input->'package_digest',
+        'manifest_digest',input->'manifest_digest',
+        'approved_capabilities',input->'approved_capabilities',
+        'desired_enabled',input->'desired_enabled',
+        'desired_revision',new_revision)
+    ) AS members;
+  IF jsonb_array_length(projected)>128 THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_LIMIT',
+        'message','Bot component selection limit reached','status',422));
+  END IF;
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('protocol','forest.component-selection-snapshot/1',
+      'revision',new_revision,'entries',projected));
+END;
+$$;
+
 CREATE FUNCTION component_selection_set(context jsonb, input jsonb, enabled boolean)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE bot text:=context->>'bot_id'; op text:=context->>'operation_id';

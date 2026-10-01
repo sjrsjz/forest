@@ -133,11 +133,11 @@ Registry 的替换排空现接受与内核围栏相同的成员集合：只冻�
 这只解决了精确候选的静态编译和正式 Graph 规划复用。随后已接入完整冻结选择快照的成员编译及 Graph/选择/配置事实摘要；完整 `module.validate` 仍需核对资源预算，并在授权提交事务中复核。预览不是启停授权，也不是对后续发布的无条件保证。
 ### 冻结选择快照的只读 Graph 预览
 
-生产装配与候选预览现在共用 `select_package_members()`：相同的 builtin 启停、内核目标禁选、官方身份冲突、精确已安装工件及 manifest 核对规则决定候选成员。`project_component_selection()` 以当前快照和一笔拟议写入生成下一修订的规范化快照，其排序与摘要已和 Worker Host 的 PostgreSQL 账本对照。候选编译为每个启用的外部包读取并记录配置 revision、Payload 身份、schema 与存储摘要；拟启用或换代的目标外部包必须显式指定配置 revision。禁用包仍核对工件身份，但不创建 Worker。
+生产装配与候选预览现在共用 `select_package_members()`：相同的 builtin 启停、内核目标禁选、官方身份冲突、精确已安装工件及 manifest 核对规则决定候选成员。拟议写入的下一修订由 Worker Host 包内只读 `component.selection.project` SQL 端口生成规范快照，宿主不再另写一份选择投影；该端口可在选择共享围栏和配置快照事务内调用。候选编译为每个启用的外部包读取并记录配置 revision、Payload 身份、schema 与存储摘要；拟启用或换代的目标外部包必须显式指定配置 revision。禁用包仍核对工件身份，但不创建 Worker。
 
 宿主可信进程的 `preview_component_change()` 在当前 Graph 替换锁和选择共享围栏内冻结选择，再交给 `preview_selected_graph()` 使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；只读 `module.validate` 已接入 Web 管理查询，但没有资源预算、授权提交事务或 Shell 入口。
 
-`component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主在图替换锁内取得选择共享围栏、读取当前选择快照并投影拟议写入，然后从同一 `REPEATABLE READ` 事务快照读取候选中全部包的配置事实，编译不可执行候选。选择围栏先于配置快照建立，避免等待锁时冻结过时选择；两者使用两个连接，围栏持续至预览结束。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。资源预算、授权提交事务中的计划事实复核及 Web/Shell 启停动作仍未完成。
+`component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主在图替换锁内取得选择共享围栏、读取当前选择快照，再通过 Worker Host 包内 SQL 端口投影拟议写入，并从同一 `REPEATABLE READ` 事务快照读取候选中全部包的配置事实，编译不可执行候选。选择围栏先于配置快照建立，避免等待锁时冻结过时选择；两者使用两个连接，围栏持续至预览结束。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。资源预算、授权提交事务中的计划事实复核及 Web/Shell 启停动作仍未完成。
 
 Graph 规划需要管理契约的 schema 描述，但这些 schema 已在 Generation 构造时从经校验的不可变包快照编译。`PackageManagementContract.describe()` 读取隔离的已编译副本，不在每次描述符比较时重复扫描工件；包工件及当前配置本身仍在预览时按精确摘要和修订检查。
 
@@ -160,6 +160,8 @@ Web 的 `module.enable` 与 `module.disable` 必须是两个 action ID、两个�
 宿主锁必须先于 Domain Command 事务取得：当前通用入口在 `before_write` 之前已经验证活动 Generation 并进入内核 Graph 数据库围栏，而图替换按“宿主锁→数据库围栏”执行。反过来在 `before_write` 中才等待宿主锁会制造锁序环。提交前置检查必须由 manifest 明确声明且在缺失绑定时拒绝启动或拒绝 action，不允许退化为普通 Domain Command。它可以使用宿主提供的只读候选编译能力和调用方事务连接，但 Worker Host 仍拥有 action、选择 SQL、幂等和结果语义；通用包运行时只编排声明的检查，不硬编码 `component.worker-host` 的策略。
 
 通用包运行时已接受管理 action 的 `transaction_preflight` 声明：装配 Generation 时从宿主解析对应能力，缺失则拒绝装配；action ID 必须与声明的 Domain Command 端口一致，声明了检查却丢失绑定时拒绝调用。宿主检查作用域先于数据库事务进入并一直保持至提交/回滚，Web 票据验证与检查回调在 Domain Command 写入前于同一连接执行；等待锁、校验和事务执行共用 action 超时。管理 action 的输出 schema 现于事务提交前验证，错误输出导致整笔写入回滚。当前只接通这条通用机制，`module.enable`/`module.disable` 尚未发布，也没有注册组件选择的具体检查能力。
+
+同一事务内输出校验也覆盖普通 Domain Command、启动时的目录同步 Command 和清理时的目录释放 Command；这些写命令返回无效结果时，不提交包内部分写入。只读 Domain Query 保持读后输出校验。
 
 管理 action 的 `port_kind` 由内核标记为 `management_action`，不再降格为普通 `command`；Worker Host 的 `component.selection.enable/disable` SQL 只接受该标记。这样即使包持有同名 Domain Command 能力，也不能经普通命令绕过未来的 Web 票据和前置检查。包私有 SQL 仍只维护选择账本，不能代替宿主的 Graph 与候选计划复核。
 

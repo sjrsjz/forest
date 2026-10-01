@@ -29,9 +29,9 @@ from forest.builtin_packages import (
 from forest.clean_bot_host import BotGraphCandidate, CleanBotHost
 from forest.component_graph_preview import preview_selected_graph
 from forest.component_selection import (
+    ComponentSelectionEntry,
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
-    project_component_selection,
 )
 from forest.core_runtime import (
     bootstrap_clean_kernel,
@@ -282,18 +282,20 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     assert current.revision == frozen["revision"]
     assert [entry.as_dict() for entry in current.entries] == frozen["entries"]
     next_action = "disable" if winner["value"]["desired_enabled"] else "enable"
-    projected = project_component_selection(
-        current,
-        component_id=source["component_id"],
-        source_kind=source["source_kind"],
-        package_digest=None,
-        manifest_digest=None,
-        approved_capabilities=(),
-        desired_enabled=next_action == "enable",
-    )
     async with reader.publication_fence(
         expected_revision=current.revision, expected_digest=current.digest
     ):
+        async with store.pool.connection() as conn, conn.transaction():
+            projected = await reader.project_in(
+                conn,
+                component_id=source["component_id"],
+                source_kind=source["source_kind"],
+                package_digest=None,
+                manifest_digest=None,
+                approved_capabilities=(),
+                desired_enabled=next_action == "enable",
+                expected_selection_revision=current.revision,
+            )
         pending = asyncio.create_task(
             call(next_action, "selection/next", changed)
         )
@@ -357,6 +359,27 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
         ):
             pass
     assert stale.value.code == "COMPONENT_SELECTION_CHANGED"
+
+    installed = {
+        "component_id": "example.installed", "source_kind": "installed",
+        "package_digest": "sha256:" + "a" * 64,
+        "manifest_digest": "sha256:" + "b" * 64,
+        "approved_capabilities": ["state.read"],
+        "expected_selection_revision": 2, "expected_graph_revision": 1,
+        "requested_by": "subject/admin",
+    }
+    async with reader.publication_fence(expected_revision=2):
+        async with store.pool.connection() as conn, conn.transaction():
+            projected_installed = await reader.project_in(
+                conn, component_id=installed["component_id"],
+                source_kind="installed",
+                package_digest=installed["package_digest"],
+                manifest_digest=installed["manifest_digest"],
+                approved_capabilities=("state.read",), desired_enabled=True,
+                expected_selection_revision=2,
+            )
+    assert (await call("enable", "selection/installed", installed))["ok"]
+    assert projected_installed == await reader.snapshot()
 
 
 @pytest.mark.postgres
@@ -2931,20 +2954,19 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     planned_impact = planned_registry.preview_graph_transition(
         first, target_component_id="tests.routing-component"
     )
-    empty_selection = {
-        "protocol": "forest.component-selection-snapshot/1",
-        "revision": 0,
-        "entries": [],
-    }
-    selection = project_component_selection(
-        ComponentSelectionSnapshot(0, (), digest_json(empty_selection)),
-        component_id="tests.routing-component",
-        source_kind="installed",
-        package_digest=updated_snapshot.digest,
-        manifest_digest=digest_json(updated_snapshot.manifest),
-        approved_capabilities=approved,
-        desired_enabled=True,
-    )
+    def pinned_selection(snapshot):
+        entry = ComponentSelectionEntry(
+            "tests.routing-component", "installed", snapshot.digest,
+            digest_json(snapshot.manifest), approved, True, 1,
+        )
+        frozen = {
+            "protocol": "forest.component-selection-snapshot/1",
+            "revision": 1,
+            "entries": [entry.as_dict()],
+        }
+        return ComponentSelectionSnapshot(1, (entry,), digest_json(frozen))
+
+    selection = pinned_selection(updated_snapshot)
     selected_preview = await preview_selected_graph(
         first, selection, (routing.descriptor,), catalog, store,
         kernel=core,
@@ -2963,15 +2985,7 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
         expected_configuration_revisions={"tests.routing-component": 1},
     )
     assert repeated_preview.plan_digest == selected_preview.plan_digest
-    prior_selection = project_component_selection(
-        ComponentSelectionSnapshot(0, (), digest_json(empty_selection)),
-        component_id="tests.routing-component",
-        source_kind="installed",
-        package_digest=installed_snapshot.digest,
-        manifest_digest=digest_json(installed_snapshot.manifest),
-        approved_capabilities=approved,
-        desired_enabled=True,
-    )
+    prior_selection = pinned_selection(installed_snapshot)
     prior_preview = await preview_selected_graph(
         first, prior_selection, (routing.descriptor,), catalog, store,
         kernel=core,

@@ -246,6 +246,7 @@ class PostgresPackageDomainAuthority:
         *,
         parent_call_id: str,
         timeout_seconds: float,
+        result_validator=None,
     ) -> Any:
         return await self._invoke(
             "command",
@@ -254,6 +255,7 @@ class PostgresPackageDomainAuthority:
             payload,
             parent_call_id=parent_call_id,
             timeout_seconds=timeout_seconds,
+            result_validator=result_validator,
         )
 
     async def invoke_management_action(
@@ -290,6 +292,7 @@ class PostgresPackageDomainAuthority:
         *,
         parent_call_id: str,
         timeout_seconds: float,
+        result_validator=None,
     ) -> Any:
         return await self._invoke(
             "preparation_command",
@@ -298,6 +301,7 @@ class PostgresPackageDomainAuthority:
             payload,
             parent_call_id=parent_call_id,
             timeout_seconds=timeout_seconds,
+            result_validator=result_validator,
         )
 
     async def invoke_cleanup_command(
@@ -308,6 +312,7 @@ class PostgresPackageDomainAuthority:
         *,
         parent_call_id: str,
         timeout_seconds: float,
+        result_validator=None,
     ) -> Any:
         return await self._invoke(
             "cleanup_command",
@@ -316,6 +321,7 @@ class PostgresPackageDomainAuthority:
             payload,
             parent_call_id=parent_call_id,
             timeout_seconds=timeout_seconds,
+            result_validator=result_validator,
         )
 
     async def invoke_participant_in(
@@ -452,10 +458,25 @@ class PostgresPackageDomainAuthority:
                         management_authorization=management_authorization,
                     )
                     if result_validator is not None and not result_validator(result):
+                        code, message = {
+                            "management_action": (
+                                "MODULE_MANAGEMENT_OUTPUT_INVALID",
+                                "Management action result violates its immutable package schema",
+                            ),
+                            "preparation_command": (
+                                "CONTRIBUTION_DIRECTORY_SYNCHRONIZATION_INVALID",
+                                "Contribution directory synchronization returned an invalid result",
+                            ),
+                            "cleanup_command": (
+                                "CONTRIBUTION_DIRECTORY_CLEANUP_INVALID",
+                                "Contribution directory cleanup returned an invalid result",
+                            ),
+                        }.get(kind, (
+                            "DOMAIN_OUTPUT_INVALID",
+                            "Domain authority result violates its immutable schema",
+                        ))
                         raise ForestError(
-                            "MODULE_MANAGEMENT_OUTPUT_INVALID",
-                            "Management action result violates its immutable package schema",
-                            502,
+                            code, message, 502,
                         )
                     return result
         except ForestError:

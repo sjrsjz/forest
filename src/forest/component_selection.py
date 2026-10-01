@@ -130,45 +130,6 @@ class SelectedPackageMembers:
     installed: tuple[ComponentSelectionEntry, ...]
 
 
-def project_component_selection(
-    current: ComponentSelectionSnapshot,
-    *,
-    component_id: str,
-    source_kind: str,
-    package_digest: str | None,
-    manifest_digest: str | None,
-    approved_capabilities: tuple[str, ...],
-    desired_enabled: bool,
-) -> ComponentSelectionSnapshot:
-    """Project one selection write using the SQL ledger's revision and ordering."""
-
-    revision = current.revision + 1
-    changed = ComponentSelectionEntry.from_dict({
-        "component_id": component_id,
-        "source_kind": source_kind,
-        "package_digest": package_digest,
-        "manifest_digest": manifest_digest,
-        "approved_capabilities": list(approved_capabilities),
-        "desired_enabled": desired_enabled,
-        "desired_revision": revision,
-    })
-    entries = tuple(sorted(
-        [item for item in current.entries if item.component_id != component_id]
-        + [changed],
-        key=lambda item: item.component_id,
-    ))
-    if len(entries) > 128:
-        raise ForestError(
-            "COMPONENT_SELECTION_LIMIT", "Bot component selection limit reached", 422
-        )
-    frozen = {
-        "protocol": "forest.component-selection-snapshot/1",
-        "revision": revision,
-        "entries": [item.as_dict() for item in entries],
-    }
-    return ComponentSelectionSnapshot(revision, entries, digest_json(frozen))
-
-
 def select_package_members(
     selection: ComponentSelectionSnapshot,
     official_descriptors: tuple[RuntimeModuleDescriptor, ...],
@@ -260,6 +221,61 @@ class ComponentSelectionReader:
             (Jsonb({"bot_id": self.store.bot_id}), Jsonb({})),
         )
         envelope = (await result.fetchone())["result"]
+        return self._decode_snapshot(envelope)
+
+    async def project_in(
+        self,
+        conn,
+        *,
+        component_id: str,
+        source_kind: str,
+        package_digest: str | None,
+        manifest_digest: str | None,
+        approved_capabilities: tuple[str, ...],
+        desired_enabled: bool,
+        expected_selection_revision: int,
+    ) -> ComponentSelectionSnapshot:
+        """Ask Worker Host SQL for a hypothetical selection on a fenced transaction."""
+
+        result = await conn.execute(
+            sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
+                sql.Identifier(self.namespace, "component_selection_project")
+            ),
+            (
+                Jsonb({
+                    "bot_id": self.store.bot_id,
+                    "port_kind": "query",
+                    "port_name": "component.selection.project",
+                }),
+                Jsonb({
+                    "component_id": component_id,
+                    "source_kind": source_kind,
+                    "package_digest": package_digest,
+                    "manifest_digest": manifest_digest,
+                    "approved_capabilities": list(approved_capabilities),
+                    "desired_enabled": desired_enabled,
+                    "expected_selection_revision": expected_selection_revision,
+                }),
+            ),
+        )
+        return self._decode_snapshot((await result.fetchone())["result"], allow_error=True)
+
+    @staticmethod
+    def _decode_snapshot(envelope, *, allow_error: bool = False) -> ComponentSelectionSnapshot:
+        if allow_error and isinstance(envelope, dict) and envelope.get("ok") is False:
+            error = envelope.get("error")
+            if (
+                envelope.get("protocol") == "forest.domain-result/1"
+                and isinstance(error, dict)
+                and error.get("code") in {
+                    "COMPONENT_SELECTION_INVALID",
+                    "COMPONENT_SELECTION_REVISION_CONFLICT",
+                    "COMPONENT_SELECTION_LIMIT",
+                }
+                and isinstance(error.get("message"), str)
+                and type(error.get("status")) is int
+            ):
+                raise ForestError(error["code"], error["message"], error["status"])
         if (
             not isinstance(envelope, dict)
             or envelope.get("protocol") != "forest.domain-result/1"

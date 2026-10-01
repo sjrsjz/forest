@@ -412,3 +412,9 @@ Worker Host 包内管理页现有折叠式候选图预检，按实时选择修�
 组件选择 SQL 已限定只接受内核标记的 `management_action` 端口种类，普通 Domain Command 不能绕过管理事务调用选择写入。Worker Host 包版本升至 `1.6.6`、私有 SQL schema 版本升至 `1.4.0`；隔离 PostgreSQL 的选择 CAS/幂等重放用例验证普通命令被拒绝，管理端口的选择操作与发布围栏仍通过（`1 passed`）。这是对未来启停提交的必要封口，启停 action 当前仍未开放。
 
 包清单与运行时非数据库回归 `92 passed, 1 skipped`，Job Scheduler 管理 action 的 PostgreSQL 回滚与正常热重载用例最终复跑 `1 passed`；Ruff 和差异检查通过。
+
+事务内输出契约扩展到普通 Domain Command、Generation 启动目录同步和清理目录释放，不再只有管理 action 享有回滚保证。Job Scheduler 的隔离 PostgreSQL 用例对普通命令强制无效输出，确认 `DOMAIN_OUTPUT_INVALID` 且 enqueue 操作账本没有提交；同用例正常管理动作与热重载继续通过（`1 passed`）。
+
+选择预检的下一修订投影现由 Worker Host 包内只读 `component.selection.project` SQL 端口生成；宿主在 Graph 锁、选择共享围栏与配置 `REPEATABLE READ` 快照内读取包返回的规范快照，不再保留平行的 Python 投影实现。包版本升至 `1.6.7`、私有 SQL schema 升至 `1.5.0`。隔离 PostgreSQL 验证 builtin 与已安装包的预检快照均等于相同输入的实际选择写入后快照（`1 passed`），外部包 Graph 预览仍通过（`1 passed`）。完整宿主管理查询和热重载复验见后续记录；具体启停 action 与资源预算仍未接通。
+
+完整 Worker Host 宿主 PostgreSQL 用例最终通过（`1 passed`，176.15 秒）：包内 `validate` 查询取得只读计划，后续 shell 重载、两次配置重建、选择任务驱动的已安装包热加入和停用均完成。此前一次运行在等待 Graph 替换时超时，复验确认该替换实际可成功；另一次复验暴露测试夹具仍把直调选择 SQL 标为普通 `command`，新围栏正确拒绝，夹具改用 `management_action` 后全链通过。此用例使用假 Bot 客户端，未向 QQ 发消息；Web 授权启停与资源预算仍未验收。

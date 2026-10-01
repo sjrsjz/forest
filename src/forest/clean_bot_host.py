@@ -21,7 +21,6 @@ from forest.component_graph_preview import SelectionGraphPreview, preview_select
 from forest.component_selection import (
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
-    project_component_selection,
     select_package_members,
 )
 from forest.core_runtime import bootstrap_clean_kernel
@@ -924,17 +923,18 @@ class CleanBotHost:
                         "Component selection changed before preview",
                         409,
                     )
-                selection = project_component_selection(
-                    current,
-                    component_id=component_id,
-                    source_kind=source_kind,
-                    package_digest=package_digest,
-                    manifest_digest=manifest_digest,
-                    approved_capabilities=approved_capabilities,
-                    desired_enabled=desired_enabled,
-                )
                 async with self.store.pool.connection() as conn, conn.transaction():
                     await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    selection = await self.selection_reader.project_in(
+                        conn,
+                        component_id=component_id,
+                        source_kind=source_kind,
+                        package_digest=package_digest,
+                        manifest_digest=manifest_digest,
+                        approved_capabilities=approved_capabilities,
+                        desired_enabled=desired_enabled,
+                        expected_selection_revision=current.revision,
+                    )
                     return await preview_selected_graph(
                         self.registry,
                         selection,

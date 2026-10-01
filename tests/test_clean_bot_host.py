@@ -854,6 +854,9 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
             assert "agent.runtime" in result.text
             async with asyncio.timeout(180):
                 while host.registry.graph_identity.graph_id == previous.graph_id:
+                    latest = (await host._kernel.runtime.status())["latest_replacement"]
+                    if latest is not None and latest["state"] == "FAILED":
+                        pytest.fail(f"Graph replacement failed: {latest}")
                     await asyncio.sleep(0.1)
                 while (await host._kernel.runtime.status())["latest_replacement"]["state"] != "SUCCEEDED":
                     await asyncio.sleep(0.1)
@@ -1097,7 +1100,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                     "requested_by": "subject/host-admin",
                 }
                 context = {
-                    "bot_id": host.store.bot_id, "port_kind": "command",
+                    "bot_id": host.store.bot_id, "port_kind": "management_action",
                     "port_name": "component.selection." + function,
                     "operation_id": operation_id, "input_digest": digest_json(payload),
                 }

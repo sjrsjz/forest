@@ -125,6 +125,7 @@ class PackageDomainCommands(Protocol):
         *,
         parent_call_id: str,
         timeout_seconds: float,
+        result_validator=None,
     ) -> Any: ...
 
     async def invoke_management_action(
@@ -148,6 +149,7 @@ class PackageDomainCommands(Protocol):
         *,
         parent_call_id: str,
         timeout_seconds: float,
+        result_validator=None,
     ) -> Any: ...
 
     async def invoke_cleanup_command(
@@ -158,6 +160,7 @@ class PackageDomainCommands(Protocol):
         *,
         parent_call_id: str,
         timeout_seconds: float,
+        result_validator=None,
     ) -> Any: ...
 
 

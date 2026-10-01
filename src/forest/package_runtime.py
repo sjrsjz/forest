@@ -787,7 +787,7 @@ class PackageGenerationAdapter:
                 f"{identity.generation_id}\0{payload['kind']}".encode("utf-8")
             ).hexdigest()
             call_id = "call:" + uuid4().hex
-            result = await self._domain_commands.invoke_preparation_command(
+            await self._domain_commands.invoke_preparation_command(
                 PackageCallScope(
                     bot_id=self.bot_id,
                     component_id=self.component_id,
@@ -803,13 +803,8 @@ class PackageGenerationAdapter:
                 payload,
                 parent_call_id=call_id,
                 timeout_seconds=_timeout(self.component, "start_timeout_s", 10),
+                result_validator=output_validator.is_valid,
             )
-            if not output_validator.is_valid(result):
-                raise ForestError(
-                    "CONTRIBUTION_DIRECTORY_SYNCHRONIZATION_INVALID",
-                    "Contribution directory synchronization returned an invalid result",
-                    502,
-                )
 
     async def _release_contribution_directories(self) -> None:
         identity = self.generation_identity
@@ -848,7 +843,7 @@ class PackageGenerationAdapter:
                 f"{identity.generation_id}\0{payload['kind']}".encode("utf-8")
             ).hexdigest()
             call_id = "call:" + uuid4().hex
-            result = await self._domain_commands.invoke_cleanup_command(
+            await self._domain_commands.invoke_cleanup_command(
                 PackageCallScope(
                     bot_id=self.bot_id,
                     component_id=self.component_id,
@@ -864,13 +859,8 @@ class PackageGenerationAdapter:
                 payload,
                 parent_call_id=call_id,
                 timeout_seconds=_timeout(self.component, "stop_timeout_s", 5),
+                result_validator=output_validator.is_valid,
             )
-            if not output_validator.is_valid(result):
-                raise ForestError(
-                    "CONTRIBUTION_DIRECTORY_CLEANUP_INVALID",
-                    "Contribution directory cleanup returned an invalid result",
-                    502,
-                )
 
     def notify(self) -> None:
         if self._owned_work is not None:
@@ -1557,21 +1547,22 @@ class PackageGenerationAdapter:
                 parent_call_id=parent_call_id,
                 timeout_seconds=timeout,
             )
+            if not output_validator.is_valid(result):
+                raise ForestError(
+                    "DOMAIN_OUTPUT_INVALID",
+                    "Domain authority result violates its immutable schema",
+                    502,
+                )
+            return result
         else:
-            result = await authority.invoke_command(
+            return await authority.invoke_command(
                 scope,
                 declaration,
                 payload,
                 parent_call_id=parent_call_id,
                 timeout_seconds=timeout,
+                result_validator=output_validator.is_valid,
             )
-        if not output_validator.is_valid(result):
-            raise ForestError(
-                "DOMAIN_OUTPUT_INVALID",
-                "Domain authority result violates its immutable schema",
-                502,
-            )
-        return result
 
     def _management_scope(self, operation_id: str) -> tuple[PackageCallScope, str]:
         identity = self.generation_identity

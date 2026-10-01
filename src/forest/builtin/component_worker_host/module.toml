@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.6"
+version = "1.6.7"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -38,6 +38,7 @@ requests = [
   "domain.query:component.reload.read",
   "domain.query:component.configuration-rebuild.read",
   "domain.query:component.selection.snapshot",
+  "domain.query:component.selection.project",
   "domain.query:component.selection-application.read",
   "domain.command:component.reload.enqueue",
   "domain.command:component.selection.enable",
@@ -54,9 +55,9 @@ order = 2
 
 [components.storage]
 schema_id = "forest.component.worker-host"
-schema_version = "1.4.0"
+schema_version = "1.5.0"
 baseline = "schema/control.sql"
-baseline_sha256 = "4d5cb43b8c364f54c8ecc1890fda3097d0e821da85817a9ab5a5d5de3214066e"
+baseline_sha256 = "3cf88c9d51cce90871c17409ab709639c0ed8fef22a5f9e198f10ec803beb17e"
 scope = "bot"
 repository_contract = "forest.component-worker-host.repository/1"
 execution_profile = "official"
@@ -248,6 +249,13 @@ name = "component.selection.snapshot"
 contract = "1.0"
 function = "component_selection_snapshot"
 input_schema = "schemas/selection-snapshot-input.json"
+output_schema = "schemas/selection-snapshot-output.json"
+
+[[components.domain_queries]]
+name = "component.selection.project"
+contract = "1.0"
+function = "component_selection_project"
+input_schema = "schemas/selection-project-input.json"
 output_schema = "schemas/selection-snapshot-output.json"
 
 [[components.domain_queries]]

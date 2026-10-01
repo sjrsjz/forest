@@ -12,6 +12,7 @@ from test_schema_bundles import clean_authority as clean_authority
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_clean_kernel
 from forest.errors import ForestError
+from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
 from forest.storage.authorization_authority import CapabilityGrant
@@ -80,6 +81,43 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
                     sql.Identifier(package.descriptor.storage.spec.namespace)
                 ),
                 (store.bot_id, "test:job-package:invalid-output"),
+            )
+            assert (await rows.fetchone())["n"] == 0
+
+        identity = runtime.generation_identity
+        binding = runtime._prepared_binding
+        direct_operation = "test:job-package:invalid-domain-output"
+        command = next(
+            item for item in runtime.component["domain_commands"]
+            if item["name"] == "jobs.enqueue"
+        )
+        with pytest.raises(ForestError) as rejected_command:
+            await runtime._domain_commands.invoke_command(
+                PackageCallScope(
+                    bot_id=store.bot_id, component_id="job.scheduler",
+                    generation_id=identity.generation_id,
+                    instance_id=binding.instance_id,
+                    worker_incarnation=binding.worker_incarnation,
+                    call_id="call:invalid-output",
+                    call_operation_id=direct_operation,
+                    causal_root_kind="test", causal_root_id=direct_operation,
+                ),
+                command,
+                {
+                    "job_type": "runtime.health-snapshot",
+                    "requested_by": "test-admin", "input": {},
+                },
+                parent_call_id="test:invalid-output", timeout_seconds=10,
+                result_validator=lambda _result: False,
+            )
+        assert rejected_command.value.code == "DOMAIN_OUTPUT_INVALID"
+        async with store.pool.connection() as conn:
+            rows = await conn.execute(
+                sql.SQL("SELECT count(*) AS n FROM {}.enqueue_operations "
+                        "WHERE bot_id=%s AND operation_id=%s").format(
+                    sql.Identifier(package.descriptor.storage.spec.namespace)
+                ),
+                (store.bot_id, direct_operation),
             )
             assert (await rows.fetchone())["n"] == 0
 
