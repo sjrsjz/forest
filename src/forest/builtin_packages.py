@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
+import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.resources import files
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from jsonschema import Draft202012Validator
@@ -101,32 +103,50 @@ class _InstalledPackageLayout:
     storage: RuntimeStorageBundle | None
 
 
-_BOOTSTRAP_BUILTIN_PACKAGES = frozenset({
-    "provider_chat_completions", "embedding_multimodal", "vector_index_milvus",
-    "process_executor",
-})
+def _package_json_reference(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not re.fullmatch(r"[a-zA-Z0-9_./-]+\.json", value)
+        or PurePosixPath(value).is_absolute()
+        or ".." in PurePosixPath(value).parts
+    ):
+        raise ValueError("Official package JSON reference is invalid")
+    return value
 
 
 def _official_bootstrap_source(package_name: str):
-    if package_name not in _BOOTSTRAP_BUILTIN_PACKAGES:
-        raise ValueError("Unknown official bootstrap package")
-    return files("forest").joinpath("builtin", package_name)
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", package_name):
+        raise ValueError("Invalid official package name")
+    source = files("forest").joinpath("builtin", package_name)
+    manifest = tomllib.loads(source.joinpath("module.toml").read_text(encoding="utf-8"))
+    component = manifest["components"][0]
+    return (
+        source,
+        _package_json_reference(component.get("bootstrap_config")),
+        _package_json_reference(component.get("config_schema")),
+    )
 
 
 def official_builtin_configuration(package_name: str, *, overrides: dict | None = None) -> dict:
     """Read an official package's declarative bootstrap seed, before Bot assembly."""
 
-    source = _official_bootstrap_source(package_name)
-    value = json.loads(source.joinpath("bootstrap.json").read_text(encoding="utf-8"))
+    source, reference, config_schema = _official_bootstrap_source(package_name)
+    value = json.loads(source.joinpath(reference).read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise ValueError("Official bootstrap configuration must be a JSON object")
     value.update(overrides or {})
+    json.dumps(value, allow_nan=False)
+    schema = json.loads(source.joinpath(config_schema).read_text(encoding="utf-8"))
+    if not Draft202012Validator(schema).is_valid(value):
+        raise ValueError("Official bootstrap configuration violates its package schema")
     return value
 
 
 def official_builtin_configuration_schema(package_name: str) -> dict:
     """Read the same package schema used for its frozen Generation."""
 
-    source = _official_bootstrap_source(package_name)
-    return json.loads(source.joinpath("schemas/config.json").read_text(encoding="utf-8"))
+    source, _reference, config_schema = _official_bootstrap_source(package_name)
+    return json.loads(source.joinpath(config_schema).read_text(encoding="utf-8"))
 
 
 def _required_service_contracts(

@@ -224,6 +224,30 @@ def test_invalid_schema_errors_are_normalized_without_resolving_references(tmp_p
     assert caught.value.code == "INVALID_SCHEMA"
 
 
+@pytest.mark.parametrize("reference,body", [
+    ("../outside.json", "{}"),
+    ("missing.json", None),
+    ("bootstrap.json", "[]"),
+    ("bootstrap.json", '{"value":NaN}'),
+])
+def test_bootstrap_seed_must_be_a_bounded_package_json_object(tmp_path, reference, body):
+    root = source(tmp_path)
+    manifest = root / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'config_schema = "schemas/config.json"',
+            f'config_schema = "schemas/config.json"\nbootstrap_config = "{reference}"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    if body is not None:
+        (root / "bootstrap.json").write_text(body, encoding="utf-8")
+    with pytest.raises(ForestError) as rejected:
+        PackageCatalog(tmp_path / "catalog").build(root)
+    assert rejected.value.code == "INVALID_BOOTSTRAP_CONFIGURATION"
+
+
 @pytest.mark.parametrize("section,setting", [
     ("resources", "max_frame_bytes = 1023"),
     ("resources", "max_frame_bytes = 262145"),

@@ -115,6 +115,7 @@ MANIFEST_SCHEMA = {
                         for key in ("id", "scope", "reload_mode", "config_schema")
                     },
                     "configuration_apply": {"const": "worker-host/1"},
+                    "bootstrap_config": {"type": "string"},
                     "state_schema": {"type": "integer", "minimum": 1, "maximum": 2147483647},
                     "config_immutable_paths": {
                         "type": "array",
@@ -1251,6 +1252,28 @@ def _manifest(files: dict[str, bytes]) -> dict:
             "Service call grants must name a declared dependency or local effect",
         )
     _schema(files, component.get("config_schema"))
+    bootstrap_config = component.get("bootstrap_config")
+    if bootstrap_config is not None:
+        parts = PurePosixPath(bootstrap_config)
+        if (parts.is_absolute() or ".." in parts.parts or not bootstrap_config.endswith(".json")
+                or bootstrap_config not in files):
+            _fail(
+                "INVALID_BOOTSTRAP_CONFIGURATION",
+                "Bootstrap configuration must name a package JSON file",
+            )
+        try:
+            seed = json.loads(files[bootstrap_config])
+            json.dumps(seed, allow_nan=False)
+        except (ValueError, UnicodeError, TypeError):
+            _fail(
+                "INVALID_BOOTSTRAP_CONFIGURATION",
+                "Bootstrap configuration must contain JSON",
+            )
+        if not isinstance(seed, dict):
+            _fail(
+                "INVALID_BOOTSTRAP_CONFIGURATION",
+                "Bootstrap configuration must be a JSON object",
+            )
     replacement_facts_schema = component.get("lifecycle", {}).get(
         "replacement_facts_schema"
     )
