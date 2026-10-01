@@ -390,7 +390,7 @@ class PackageGenerationAdapter:
                 call_finished=self._owned_work_calls.discard,
             )
             self.freeze_owned_admission = self._owned_work.freeze_admission
-            self.drain_owned_work = self._owned_work.drain
+            self.drain_owned_work = self._drain_owned_work
             self.open_owned_admission = self._owned_work.open_admission
         self._granted_capabilities = frozenset(
             item.capability
@@ -727,6 +727,19 @@ class PackageGenerationAdapter:
 
     def _owned_work_failed(self, code: str) -> None:
         self.failure = code
+
+    async def _drain_owned_work(self) -> None:
+        assert self._owned_work is not None
+        try:
+            async with asyncio.timeout(_timeout(self.component, "drain_timeout_s", 10)):
+                await self._owned_work.drain()
+        except TimeoutError as error:
+            raise ForestError(
+                "RUNTIME_OWNED_DRAIN_TIMEOUT",
+                "Package owned work exceeded its declared drain deadline",
+                504,
+                details={"component_id": self.component_id},
+            ) from error
 
     async def _synchronize_contribution_directories(self) -> None:
         identity = self.generation_identity

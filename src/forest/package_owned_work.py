@@ -69,6 +69,7 @@ class PackageOwnedWorkSupervisor:
         self._next_claim_at = {declaration["name"]: 0.0 for declaration in declarations}
         self._drain_empty: set[str] = set()
         self._drained = asyncio.Event()
+        self._terminated = asyncio.Event()
         self.draining = False
         self.inflight = 0
         self.idle = asyncio.Event()
@@ -96,12 +97,33 @@ class PackageOwnedWorkSupervisor:
         self.wake.set()
 
     async def drain(self) -> None:
-        if self.drain_policy == "inflight":
+        if not self.tasks or self.closing or self._terminated.is_set():
+            raise ForestError(
+                "RUNTIME_OWNED_DRAIN_FAILED",
+                "Package owned work stopped before drain completed",
+                503,
+                details={"component_id": self.component_id, "failure": self.failure},
+            )
+        target = self.idle if self.drain_policy == "inflight" else self._drained
+        if not target.is_set():
+            drained = asyncio.create_task(target.wait())
+            terminated = asyncio.create_task(self._terminated.wait())
+            try:
+                await asyncio.wait((drained, terminated), return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                drained.cancel()
+                terminated.cancel()
+                await asyncio.gather(drained, terminated, return_exceptions=True)
+        if self.failure is not None or self._terminated.is_set():
+            raise ForestError(
+                "RUNTIME_OWNED_DRAIN_FAILED",
+                "Package owned work stopped before drain completed",
+                503,
+                details={"component_id": self.component_id, "failure": self.failure},
+            )
+        if self.drain_policy == "backlog":
+            self.admission.clear()
             await self.idle.wait()
-            return
-        await self._drained.wait()
-        self.admission.clear()
-        await self.idle.wait()
 
     def open_admission(self) -> None:
         if not self.active() or self.failure is not None:
@@ -392,14 +414,21 @@ class PackageOwnedWorkSupervisor:
                 self.inflight += 1
                 self.idle.clear()
                 claim = None
+                probe_completed = False
                 try:
                     claim = await self._claim_when_due(declaration)
+                    probe_completed = True
                     if claim is not None:
                         if self.draining:
                             self._drain_empty.discard(declaration["name"])
                         await self._execute(declaration, claim)
                 except ForestError as error:
-                    if error.code == "RUNTIME_GENERATION_NOT_ACTIVE" and not self.admission.is_set():
+                    if error.code == "DOMAIN_AUTHORITY_TIMEOUT" and not probe_completed:
+                        self._next_claim_at[declaration["name"]] = (
+                            asyncio.get_running_loop().time()
+                            + declaration["poll_interval_ms"] / 1000
+                        )
+                    elif error.code == "RUNTIME_GENERATION_NOT_ACTIVE" and not self.admission.is_set():
                         pass
                     else:
                         self.failure = error.code
@@ -412,7 +441,9 @@ class PackageOwnedWorkSupervisor:
                     if self.inflight == 0:
                         self.idle.set()
                     if self.draining and self.drain_policy == "backlog":
-                        if claim is None:
+                        if not probe_completed:
+                            self._drain_empty.discard(declaration["name"])
+                        elif claim is None:
                             self._drain_empty.add(declaration["name"])
                         else:
                             self._drain_empty.discard(declaration["name"])
@@ -432,6 +463,8 @@ class PackageOwnedWorkSupervisor:
             self.admission.clear()
             self.wake.set()
             raise
+        finally:
+            self._terminated.set()
 
     def start(self) -> None:
         for declaration in self.declarations:

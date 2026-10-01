@@ -1992,6 +1992,11 @@ class RuntimeModuleRegistry:
                                 if isinstance(drain_error, ForestError)
                                 else type(drain_error).__name__
                             ),
+                            "drain_details": (
+                                drain_error.details
+                                if isinstance(drain_error, ForestError)
+                                else None
+                            ),
                             "resume_error": (
                                 resume_error.code
                                 if isinstance(resume_error, ForestError)
@@ -2029,11 +2034,6 @@ class RuntimeModuleRegistry:
                 503,
             )
         selected = self._replacement_components
-        agent = (
-            self.instances.get("agent.runtime")
-            if selected is None or "agent.runtime" in selected
-            else None
-        )
         pending = set(quiesced)
         for component_id in self.order:
             if component_id not in pending:
@@ -2060,17 +2060,6 @@ class RuntimeModuleRegistry:
             )
         if selected is None:
             self.contract_router.activate()
-        resumed_runs = ()
-        if agent is not None:
-            resumed_runs = await agent.resume_reload_wait(operation_id)
-        conversation = self.instances.get("conversation.scheduler")
-        if conversation is not None:
-            for run in resumed_runs:
-                await conversation.resume_deferred(
-                    run["conversation_ref"],
-                    reason_code="AGENT_RELOAD_WAIT",
-                    reason_ref=operation_id,
-                )
         self._open_owned_admission(self._replacement_owned_frozen)
         await self.generation_authority.resume_graph_admission(
             lease,
@@ -2079,8 +2068,6 @@ class RuntimeModuleRegistry:
         )
         self._replacement_operation_id = None
         self._replacement_components = None
-        if resumed_runs:
-            self.notify_work()
 
     def _owned_work_components(self) -> tuple[str, ...]:
         return tuple(

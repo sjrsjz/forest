@@ -2897,6 +2897,17 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 replacement_graph = await asyncio.wait_for(
                     asyncio.shield(replacement_task), timeout=180,
                 )
+            except ForestError as error:
+                failures = {
+                    component_id: work.failure
+                    for component_id, instance in host.registry.instances.items()
+                    if (work := getattr(instance, "_owned_work", None)) is not None
+                    and work.failure is not None
+                }
+                raise AssertionError(
+                    f"Graph replacement failed: {error.code} {error.details}; "
+                    f"owned_failures={failures}"
+                ) from error
             except TimeoutError as error:
                 owned = {}
                 for component_id, instance in host.registry.instances.items():

@@ -280,6 +280,9 @@ snapshot 至少包括 `bot_id, component_id, generation_id, state_schema, source
 
 Bot 宿主必须持续监督当前 RuntimeGraph 报告的全部 owned task、HostLease 续租任务和图替换任务。任一仍属于当前图的任务取消、异常或无异常提前返回，都使该 Bot 宿主失败；多 Bot Supervisor 将准确错误码写入该 Bot 的 `FAILED` 观测并关闭其管理准入，不影响其他 Bot。热替换期间只在 replacement lock 两侧比较任务所有权：已经属于旧图的完成任务不得误伤新图，候选发布后新图任务立即进入监督集合。宿主关闭会先撤销监督，再按反向依赖排空模块，避免把预期取消误报为运行故障。
 
+包自有工作排空以领取循环存活为前提。若任一被排空的循环提前终止，无论是否已观察到队列暂空，都必须使本次排空以明确错误结束，触发发布前回滚；不能无限等待只会由存活循环发出的排空信号，也不能把失败循环视为已成功排空。
+领取事务的超时不构成“队列为空”的证据：事务回滚后按原队列租约语义重试，只有已完成的空领取才能推进 backlog 排空。重试总时长仍受组件声明的 `drain_timeout_s` 约束；无法在期限内排空应返回有类型的失败。内核回滚只调用通用 Generation 生命周期端口，不按组件 ID 调用 Agent、Conversation 或 Shell 的私有方法。
+
 Python 的 TaskGroup 在退出上下文时等待组内任务，裸 create_task 也需要保留强引用；SDK 在此基础上增加持久所有者与卸载协议，不能把 TaskGroup 本身当成崩溃恢复机制。基础行为见[Python asyncio 官方文档](https://docs.python.org/3.11/library/asyncio-task.html#task-groups)。
 
 关闭顺序：禁止新增资源 → 取消/排空子任务 → 停止订阅和计时器 → 关闭流和客户端 → 终止子进程 → 删除临时文件 → 释放句柄与租约。关闭每项有上限；超时仍需回收进程并报告未清理资源。

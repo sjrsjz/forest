@@ -412,7 +412,7 @@ async def test_replacement_drain_preserves_unselected_owned_work_and_router():
             _ARTIFACT,
             owned_work_lifecycle=OwnedWorkLifecycle.FREEZE_DRAIN,
         )
-        for name in ("module.changed", "module.retained")
+        for name in ("agent.runtime", "module.retained")
     )
     runtime = SimpleNamespace(
         scope_kind="bot",
@@ -427,14 +427,14 @@ async def test_replacement_drain_preserves_unselected_owned_work_and_router():
     registry.contract_router.activate()
 
     await registry.drain_owned_work_for_replacement(
-        "reload/changed", components=("module.changed",)
+        "reload/changed", components=("agent.runtime",)
     )
     assert registry.contract_router.graph_admission.is_set()
     assert events == [
-        ("freeze-routes", ("module.changed",)),
-        ("freeze-work", "module.changed"),
-        ("drain-work", "module.changed"),
-        ("quiesce", "module.changed"),
+        ("freeze-routes", ("agent.runtime",)),
+        ("freeze-work", "agent.runtime"),
+        ("drain-work", "agent.runtime"),
+        ("quiesce", "agent.runtime"),
     ]
     with pytest.raises(ForestError) as conflict:
         await registry.drain_owned_work_for_replacement(
@@ -445,8 +445,8 @@ async def test_replacement_drain_preserves_unselected_owned_work_and_router():
     await registry.resume_owned_work_after_failed_replacement()
     assert registry.contract_router.graph_admission.is_set()
     assert events[-4:] == [
-        ("resume", "module.changed"),
-        ("activate", "module.changed"),
-        ("open-work", "module.changed"),
-        ("resume-routes", ("module.changed",)),
+        ("resume", "agent.runtime"),
+        ("activate", "agent.runtime"),
+        ("open-work", "agent.runtime"),
+        ("resume-routes", ("agent.runtime",)),
     ]
