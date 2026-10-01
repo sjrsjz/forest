@@ -611,7 +611,7 @@ BEGIN
     END IF;
     IF NEW.state=OLD.state OR
        (OLD.state='WAIT_INPUT' AND NEW.state IN ('PREPARING_MODEL','FAILED','CANCELLED')) OR
-       (OLD.state='PREPARING_MODEL' AND NEW.state IN ('MODEL_PENDING','FAILED','CANCELLED','RELOAD_WAIT')) OR
+       (OLD.state='PREPARING_MODEL' AND NEW.state IN ('MODEL_PENDING','BLOCKED_UNKNOWN','FAILED','CANCELLED','RELOAD_WAIT')) OR
        (OLD.state='MODEL_PENDING' AND NEW.state IN ('PARSING','PREPARING_MODEL','BLOCKED_UNKNOWN','FAILED','CANCELLED')) OR
        (OLD.state='PARSING' AND NEW.state IN ('PREPARING_MODEL','REPAIR_READY','WAIT_TOOL','SAFE_BOUNDARY','FAILED','CANCELLED')) OR
        (OLD.state='REPAIR_READY' AND NEW.state IN ('PREPARING_MODEL','FAILED','CANCELLED','RELOAD_WAIT')) OR
@@ -1657,6 +1657,121 @@ BEGIN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('run_id',requested_run,'state','FAILED',
             'error_code','AGENT_MODEL_TRANSPORT_FAILED'));
+END;
+$$;
+
+CREATE FUNCTION agent_block_frozen_model(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    state_value jsonb := body->'state';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_request text := body->>'request_id';
+    requested_reason text := body->>'reason_code';
+    requested_checkpoint text := body->>'checkpoint_id';
+    input_digest_value text := context->>'participant_input_digest';
+    run_row record;
+    request_row record;
+    checkpoint_row record;
+    sequence_value bigint;
+    checkpoint_digest_value text;
+    checksum_value text;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR input_digest_value !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_reason NOT IN (
+           'AGENT_FROZEN_PROVIDER_INCOMPATIBLE','AGENT_FROZEN_PAYLOAD_INVALID'
+       )
+       OR requested_checkpoint IS NULL
+       OR state_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR state_value->>'owner_kind' IS DISTINCT FROM 'checkpoint.state'
+       OR state_value->>'owner_id' IS DISTINCT FROM requested_checkpoint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_FROZEN_BLOCK_INPUT_INVALID',
+                'message','Frozen model block input is invalid','status',422));
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','STALE_AGENT_RUN_OWNER',
+                'message','Agent Run owner is stale','status',409));
+    END IF;
+    SELECT * INTO checkpoint_row
+    FROM __forest_module_schema__.run_checkpoints
+    WHERE bot_id=requested_bot AND checkpoint_id=requested_checkpoint;
+    IF checkpoint_row IS NOT NULL THEN
+        IF checkpoint_row.run_id=requested_run
+           AND checkpoint_row.phase='BLOCKED_UNKNOWN'
+           AND checkpoint_row.state_payload_id=state_value->>'payload_id'
+           AND checkpoint_row.state_payload_digest=state_value->>'digest'
+           AND run_row.current_model_request_id=requested_request
+           AND run_row.state='BLOCKED_UNKNOWN'
+           AND run_row.error_code=requested_reason THEN
+            RETURN __forest_module_schema__.agent_run_snapshot(
+                context,jsonb_build_object('run_id',requested_run));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_FROZEN_BLOCK_CONFLICT',
+                'message','Frozen block checkpoint identity differs','status',409));
+    END IF;
+    SELECT * INTO request_row
+    FROM __forest_module_schema__.model_requests
+    WHERE bot_id=requested_bot AND request_id=requested_request FOR SHARE;
+    IF run_row.state IS DISTINCT FROM 'PREPARING_MODEL'
+       OR (run_row.current_model_request_id IS DISTINCT FROM requested_request
+           AND NOT (request_row.state='READY'
+                    AND run_row.current_model_request_id IS NULL))
+       OR request_row IS NULL
+       OR request_row.run_id IS DISTINCT FROM requested_run
+       OR request_row.step_seq IS DISTINCT FROM run_row.next_step_seq
+       OR request_row.state NOT IN ('READY','NOT_APPLIED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_FROZEN_BLOCK_BOUNDARY_CLOSED',
+                'message','Frozen request is no longer an unissued model head','status',409));
+    END IF;
+    sequence_value := run_row.checkpoint_seq+1;
+    checkpoint_digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
+        'run_id',requested_run,'request_id',requested_request,'phase','BLOCKED_UNKNOWN',
+        'reason_code',requested_reason,'state',state_value,
+        'input_revision',run_row.input_revision,'next_step_seq',run_row.next_step_seq,
+        'owner_epoch',requested_epoch
+    )::text,'UTF8')),'hex');
+    checksum_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_array(
+        requested_run,sequence_value,'BLOCKED_UNKNOWN',run_row.input_revision,
+        run_row.next_step_seq,state_value->>'digest',requested_epoch
+    )::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.run_checkpoints(
+        bot_id,run_id,checkpoint_seq,checkpoint_id,input_digest,phase,input_revision,
+        next_step_seq,state_payload_id,state_payload_digest,state_owner_component_id,
+        state_owner_kind,state_owner_id,checkpoint_checksum,owner_epoch
+    ) VALUES (
+        requested_bot,requested_run,sequence_value,requested_checkpoint,
+        checkpoint_digest_value,'BLOCKED_UNKNOWN',run_row.input_revision,
+        run_row.next_step_seq,state_value->>'payload_id',state_value->>'digest',
+        state_value->>'owner_component_id',state_value->>'owner_kind',
+        state_value->>'owner_id',checksum_value,requested_epoch
+    );
+    UPDATE __forest_module_schema__.agent_runs
+    SET state='BLOCKED_UNKNOWN',checkpoint_seq=sequence_value,
+        current_model_request_id=requested_request,error_code=requested_reason,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN __forest_module_schema__.agent_run_snapshot(
+        context,jsonb_build_object('run_id',requested_run));
 END;
 $$;
 

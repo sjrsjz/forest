@@ -633,6 +633,57 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 ]
                 assert rows[1]["predecessor_request_id"] == rows[0]["request_id"]
                 raise _RollbackInheritance
+        blocked_state = await _payload(
+            kernel,
+            owner_component_id="agent.runtime",
+            owner_kind="checkpoint.state",
+            owner_id="checkpoint/package/frozen-block",
+            value=b'{"phase":"BLOCKED_UNKNOWN","reason_code":"AGENT_FROZEN_PROVIDER_INCOMPATIBLE"}',
+        )
+
+        class _RollbackFrozenBlock(Exception):
+            pass
+
+        with pytest.raises(_RollbackFrozenBlock):
+            async with store.pool.connection() as conn, conn.transaction():
+                block_envelope = {
+                    "protocol": "forest.uow-step/1",
+                    "caller": caller,
+                    "input": {
+                        "owner": request_envelope["input"]["owner"],
+                        "request_id": "model-request/package/1",
+                        "reason_code": "AGENT_FROZEN_PROVIDER_INCOMPATIBLE",
+                        "checkpoint_id": "checkpoint/package/frozen-block",
+                        "state": blocked_state.canonical(),
+                    },
+                    "prior": {},
+                }
+                blocked = await participant.invoke_in(
+                    conn,
+                    "agent.block-frozen-model-record",
+                    block_envelope,
+                    operation_id="agent-block/package/1",
+                    causal_root_kind="agent.execute",
+                    causal_root_id=model_owner["run_id"],
+                    parent_call_id="call:agent-package/frozen-block",
+                    timeout_seconds=10,
+                )
+                assert blocked["state"] == "BLOCKED_UNKNOWN"
+                assert blocked["error_code"] == "AGENT_FROZEN_PROVIDER_INCOMPATIBLE"
+                assert blocked["current"]["model_request_id"] == "model-request/package/1"
+                assert blocked["progress"]["checkpoint_seq"] == 1
+                replay = await participant.invoke_in(
+                    conn,
+                    "agent.block-frozen-model-record",
+                    block_envelope,
+                    operation_id="agent-block/package/replay",
+                    causal_root_kind="agent.execute",
+                    causal_root_id=model_owner["run_id"],
+                    parent_call_id="call:agent-package/frozen-block-replay",
+                    timeout_seconds=10,
+                )
+                assert replay["progress"]["checkpoint_seq"] == 1
+                raise _RollbackFrozenBlock
         wire = await _payload(
             kernel,
             owner_component_id="kernel.effect",

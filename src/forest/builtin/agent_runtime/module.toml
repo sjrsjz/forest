@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.21.0"
+version = "4.22.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -55,6 +55,7 @@ requests = [
   "uow.execute:agent.renew-run-lease",
   "uow.execute:agent.release-run-lease",
   "uow.execute:agent.fail-exhausted-model",
+  "uow.execute:agent.block-frozen-model",
   "uow.execute:agent.prepare-model-request",
   "uow.execute:agent.inherit-model-request",
   "uow.execute:agent.prepare-model-effect",
@@ -159,9 +160,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.17.0"
+schema_version = "2.18.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "427d6fd61139033f6509e0445d2d49a2966c9ed651303c9af663537c0fa9c620"
+baseline_sha256 = "821e68ede279da23ca2bac82da5e1aa0d3fc68825fcf65a940547495b72c8587"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -350,6 +351,19 @@ output_schema = "schemas/fail-exhausted-model-output.json"
 
 [[components.unit_of_work_participants.payload_refs]]
 path = "/input/checkpoint_state"
+owner_component = "agent.runtime"
+owner_kind = "checkpoint.state"
+owner_id_path = "/input/checkpoint_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.block-frozen-model-record"
+contract = "1.0"
+function = "agent_block_frozen_model"
+input_schema = "schemas/block-frozen-model-envelope.json"
+output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/state"
 owner_component = "agent.runtime"
 owner_kind = "checkpoint.state"
 owner_id_path = "/input/checkpoint_id"
@@ -636,6 +650,16 @@ timeout_s = 10
 steps = [
   { id = "effect", component_id = "kernel.effect", participant = "effect.prove-not-applied", input_path = "/effect" },
   { id = "agent", component_id = "agent.runtime", participant = "agent.fail-exhausted-model-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.block-frozen-model"
+contract = "1.0"
+input_schema = "schemas/block-frozen-model-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.block-frozen-model-record" }
 ]
 
 [[components.unit_of_work_plans]]

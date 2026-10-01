@@ -213,6 +213,55 @@ class AgentExecution:
             request, "FAILED", run, error_code="AGENT_MODEL_TRANSPORT_FAILED"
         )
 
+    async def _block_frozen_model(self, request, owner, reason_code):
+        run = await self._run(owner["run_id"])
+        recovery = await self._recovery(owner["run_id"])
+        head = recovery.get("model_request")
+        if (
+            run["state"] != "PREPARING_MODEL"
+            or not isinstance(head, dict)
+            or head["state"] not in {"READY", "NOT_APPLIED"}
+            or (
+                run["current"]["model_request_id"] != head["request_id"]
+                and not (
+                    head["state"] == "READY"
+                    and run["current"]["model_request_id"] is None
+                )
+            )
+        ):
+            return None
+        checkpoint_id = stable(
+            "checkpoint-frozen-block", run["run_id"], head["request_id"],
+            reason_code, owner["epoch"], self.ctx.identity["graph_id"],
+        )
+        state = await self.ctx.payloads.put_json(
+            {
+                "phase": "BLOCKED_UNKNOWN",
+                "run_id": run["run_id"],
+                "request_id": head["request_id"],
+                "reason_code": reason_code,
+                "graph_id": self.ctx.identity["graph_id"],
+                "graph_revision": self.ctx.identity["graph_revision"],
+            },
+            owner_kind="checkpoint.state", owner_id=checkpoint_id,
+            parents=(self._preset_ref(),),
+        )
+        blocked = await self.ctx.uow.call(
+            "agent.block-frozen-model",
+            {
+                "owner": owner,
+                "request_id": head["request_id"],
+                "reason_code": reason_code,
+                "checkpoint_id": checkpoint_id,
+                "state": state,
+            },
+            operation_id=stable("block-frozen-model", checkpoint_id),
+            timeout=15,
+        )
+        return self._result(
+            request, "BLOCKED_UNKNOWN", blocked, error_code=reason_code
+        )
+
     async def _start(self, request: dict) -> dict | None:
         started = await self.ctx.uow.call(
             "agent.start-from-conversation",
@@ -688,7 +737,7 @@ class AgentExecution:
                         request,
                         "BLOCKED_UNKNOWN",
                         run,
-                        error_code="AGENT_MODEL_RESULT_UNKNOWN",
+                        error_code=run.get("error_code") or "AGENT_MODEL_RESULT_UNKNOWN",
                     )
                 if state == "RELOAD_WAIT":
                     return self._result(request, "RELOAD_WAIT", run)
@@ -868,12 +917,30 @@ class AgentExecution:
                             latest["state"], reload_operation,
                         )
                 if frozen_resume:
-                    invoked = await self.model.resume_frozen(
-                        owner=owner,
-                        request_id=request_id,
-                        attempt_id=attempt_id,
-                        effect_operation_id=stable("model-effect", attempt_id),
-                    )
+                    try:
+                        invoked = await self.model.resume_frozen(
+                            owner=owner,
+                            request_id=request_id,
+                            attempt_id=attempt_id,
+                            effect_operation_id=stable("model-effect", attempt_id),
+                        )
+                    except ForestError as exc:
+                        reason_code = {
+                            "MODEL_REQUEST_PROVIDER_REBIND_REQUIRED":
+                                "AGENT_FROZEN_PROVIDER_INCOMPATIBLE",
+                            "PROVIDER_PROFILE_FENCE_MISMATCH":
+                                "AGENT_FROZEN_PROVIDER_INCOMPATIBLE",
+                            "AGENT_FROZEN_MODEL_INVALID":
+                                "AGENT_FROZEN_PAYLOAD_INVALID",
+                        }.get(exc.code)
+                        if reason_code is None:
+                            raise
+                        blocked = await self._block_frozen_model(
+                            request, owner, reason_code
+                        )
+                        if blocked is None:
+                            raise
+                        return blocked
                 else:
                     invoked = await self.model.invoke(
                         owner=owner,
