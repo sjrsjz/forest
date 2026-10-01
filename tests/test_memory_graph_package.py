@@ -384,6 +384,173 @@ async def test_direct_source_identity_collision_is_rejected_before_capture_write
 
 
 @pytest.mark.postgres
+async def test_pending_archive_and_late_capture_preserve_batch_identity(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "late-capture-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
+    )
+    namespace = package.descriptor.storage.spec.namespace
+    conversation = "conversation/late-capture"
+    digest = "sha256:" + "a" * 64
+
+    async def archive(conn, event, batch):
+        envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": {"component_id": "conversation.scheduler"},
+            "input": {},
+            "prior": {
+                "prepare": {
+                    "status": "WRITE",
+                    "commit": {
+                        "conversation_id": conversation,
+                        "compaction_id": "compaction/" + event,
+                        "archived_unit_count": 1,
+                        "units": [{
+                            "event_id": event,
+                            "input_batch_id": batch,
+                            "context_revision": 1,
+                        }],
+                    },
+                },
+                "commit": {
+                    "conversation_id": conversation,
+                    "memory_archive": {
+                        "compaction_ref": "compaction/" + event,
+                        "event_refs": [event],
+                    },
+                },
+                "payload_epoch": {
+                    "protocol": "forest.payload-epoch/1",
+                    "deletion_epoch": 0,
+                },
+            },
+        }
+        return (await (await conn.execute(
+            sql.SQL("SELECT {}.memory_qualify_archive(%s::jsonb,%s::jsonb) AS result")
+            .format(sql.Identifier(namespace)),
+            (Jsonb({
+                "bot_id": store.bot_id,
+                "operation_id": "archive/" + event,
+                "participant_input_digest": digest,
+            }), Jsonb(envelope)),
+        )).fetchone())["result"]
+
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.pending_input_events("
+                    "bot_id,conversation_ref,event_ref,operation_id,input_digest,"
+                    "input_batch_ref,context_revision,accepted_deletion_epoch) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,1,0)")
+            .format(sql.Identifier(namespace)),
+            (store.bot_id, conversation, "event/conflict", "input/conflict",
+             digest, "batch/selected"),
+        )
+        rejected = await archive(conn, "event/conflict", "batch/different")
+        assert rejected["error"]["code"] == "MEMORY_ARCHIVE_CONFLICT"
+        conflict_pending = await (await conn.execute(
+            sql.SQL("SELECT count(*) AS count FROM {}.pending_archive_events "
+                    "WHERE bot_id=%s AND event_ref=%s")
+            .format(sql.Identifier(namespace)),
+            (store.bot_id, "event/conflict"),
+        )).fetchone()
+        assert conflict_pending["count"] == 0
+
+        pending = await archive(conn, "event/late", "batch/late")
+        assert pending["ok"] is True
+        before = await (await conn.execute(
+            sql.SQL("SELECT state FROM {}.pending_archive_events "
+                    "WHERE bot_id=%s AND event_ref=%s")
+            .format(sql.Identifier(namespace)),
+            (store.bot_id, "event/late"),
+        )).fetchone()
+        assert before["state"] == "PENDING_CAPTURE"
+
+        capture_body = {
+            "deletion_epoch_step_id": "epoch",
+            "capture": {
+                "identity": {
+                    "source_id": "source/direct/late",
+                    "source_kind": "DIRECT",
+                    "platform": "onebot-v11",
+                    "realm_id": "qq",
+                    "external_group_id": None,
+                    "identity_incarnation": 1,
+                    "trunk_id": None,
+                },
+                "source_unit_id": "unit/direct/late",
+                "source_revision": 1,
+                "unit_kind": "MESSAGE",
+                "author_subject_ref": "qq:42",
+                "author": {
+                    "payload_id": "payload/author/late",
+                    "digest": digest,
+                    "owner_component_id": "adapter.onebot",
+                    "owner_kind": "message.author",
+                    "owner_id": "event/late",
+                },
+                "parts": [{
+                    "part_id": "part/late/text",
+                    "part_index": 0,
+                    "part_kind": "TEXT",
+                    "media_type": "text/plain",
+                    "payload": {
+                        "payload_id": "payload/text/late",
+                        "digest": digest,
+                        "owner_component_id": "adapter.onebot",
+                        "owner_kind": "context.input",
+                        "owner_id": "unit/direct/late:text",
+                    },
+                    "byte_length": 4,
+                }],
+                "occurrence": {
+                    "occurrence_id": "occurrence/late",
+                    "binding_ref": "binding/main",
+                    "conversation_ref": conversation,
+                    "event_ref": "event/late",
+                    "ingress_seq": 1,
+                    "observed_at": "2026-10-01T00:00:00+00:00",
+                },
+                "occurred_at": "2026-10-01T00:00:00+00:00",
+            },
+        }
+        captured = (await (await conn.execute(
+            sql.SQL("SELECT {}.memory_capture_source(%s::jsonb,%s::jsonb) AS result")
+            .format(sql.Identifier(namespace)),
+            (Jsonb({
+                "bot_id": store.bot_id,
+                "operation_id": "capture/late",
+                "participant_input_digest": digest_json(capture_body),
+            }), Jsonb({
+                "protocol": "forest.uow-step/1",
+                "caller": {"component_id": "memory.graph"},
+                "input": capture_body,
+                "prior": {"epoch": {
+                    "protocol": "forest.payload-epoch/1",
+                    "deletion_epoch": 0,
+                }},
+            })),
+        )).fetchone())["result"]
+        assert captured["value"]["eligibility_state"] == "ELIGIBLE"
+        after = await (await conn.execute(
+            sql.SQL("SELECT state,input_batch_ref,source_unit_id FROM "
+                    "{}.pending_archive_events WHERE bot_id=%s AND event_ref=%s")
+            .format(sql.Identifier(namespace)),
+            (store.bot_id, "event/late"),
+        )).fetchone()
+        assert after == {
+            "state": "RESOLVED",
+            "input_batch_ref": "batch/late",
+            "source_unit_id": "unit/direct/late",
+        }
+
+
+@pytest.mark.postgres
 async def test_graph_snapshot_excludes_facts_committed_after_registration(
     clean_authority, tmp_path
 ):

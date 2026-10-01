@@ -6309,7 +6309,7 @@ BEGIN
     SELECT * INTO archive_pending_row FROM __forest_module_schema__.pending_archive_events
     WHERE bot_id=requested_bot AND conversation_ref=occurrence_value->>'conversation_ref'
       AND event_ref=occurrence_value->>'event_ref' FOR UPDATE;
-    IF archive_pending_row IS NOT NULL AND archive_pending_row.state='PENDING_CAPTURE' THEN
+    IF archive_pending_row.event_ref IS NOT NULL AND archive_pending_row.state='PENDING_CAPTURE' THEN
         SELECT * INTO occurrence_row FROM __forest_module_schema__.source_occurrences
         WHERE bot_id=requested_bot AND occurrence_id=occurrence_id_value FOR UPDATE;
         IF occurrence_row.eligibility_state='SUPPRESSED' OR
@@ -7451,7 +7451,7 @@ BEGIN
             SELECT * INTO pending_row FROM __forest_module_schema__.pending_input_events
             WHERE bot_id=requested_bot AND conversation_ref=conversation_ref_value
               AND event_ref=event_ref_value FOR UPDATE;
-            IF pending_row IS NOT NULL AND (
+            IF pending_row.event_ref IS NOT NULL AND (
                 pending_row.input_batch_ref IS DISTINCT FROM batch_ref_value OR
                 pending_row.context_revision IS DISTINCT FROM context_revision_value
             ) THEN
