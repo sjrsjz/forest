@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +33,18 @@ from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.payload_authority import PayloadSource
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
+
+
+def _isolated_memory_descriptors(kernel, package):
+    # These focused fixtures omit Worker Host; the full Bot Host fixture
+    # exercises its management and configuration retention edges.
+    return tuple(
+        replace(descriptor, retention_requires=tuple(
+            component_id for component_id in descriptor.retention_requires
+            if component_id != "component.worker-host"
+        ))
+        for descriptor in (*kernel.descriptors, package.descriptor)
+    )
 
 
 def _trial_owner_id(query_id: str, part_id: str) -> str:
@@ -298,9 +311,9 @@ async def test_graph_snapshot_excludes_facts_committed_after_registration(
                     "INSERT INTO {}.relation_contributions "
                     "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
                     "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
-                    "weight_micros,admitted_deletion_epoch) VALUES "
+                    "weight_micros,admitted_deletion_epoch,cross_trunk) VALUES "
                     "(%s,'late-contribution','late-operation',%s,'late-relation',"
-                    "'ASSOCIATES_WITH','ENTITY','left','ENTITY','right','RULE',500000,0)"
+                    "'ASSOCIATES_WITH','ENTITY','left','ENTITY','right','RULE',500000,0,false)"
                 ).format(namespace),
                 (store.bot_id, "sha256:" + "a" * 64),
             )
@@ -367,9 +380,9 @@ async def test_graph_snapshot_excludes_facts_committed_after_registration(
                     "INSERT INTO {}.relation_contributions "
                     "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
                     "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
-                    "weight_micros,admitted_deletion_epoch) VALUES "
+                    "weight_micros,admitted_deletion_epoch,cross_trunk) VALUES "
                     "(%s,'directed-contribution','directed-operation',%s,'directed-relation',"
-                    "'CONTRADICTS','ENTITY','left','ENTITY','right','MANUAL',500000,0)"
+                    "'CONTRADICTS','ENTITY','left','ENTITY','right','MANUAL',500000,0,false)"
                 ).format(namespace),
                 (store.bot_id, "sha256:" + "b" * 64),
             )
@@ -401,9 +414,9 @@ async def test_memory_neighbourhood_browses_two_hops_with_shared_snapshot_and_bo
                     "INSERT INTO {}.relation_contributions "
                     "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
                     "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
-                    "weight_micros,admitted_deletion_epoch) VALUES "
+                    "weight_micros,admitted_deletion_epoch,cross_trunk) VALUES "
                     "(%s,%s,%s,%s,%s,'ASSOCIATES_WITH','ENTITY',%s,'ENTITY',%s,"
-                    "'RULE',500000,0)"
+                    "'RULE',500000,0,false)"
                 ).format(namespace),
                 (
                     store.bot_id, f"edge/{left}-{right}", f"operation/{left}-{right}",
@@ -778,7 +791,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
         schema_bundle_installer=installer, generation_authority=kernel.runtime,
     )
-    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+    registry = RuntimeModuleRegistry(host, _isolated_memory_descriptors(kernel, package))
     await registry.start()
     try:
         actual = await registry.get("memory.graph").management_contract.query_authorized(
@@ -967,7 +980,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
     assert late_selection["value"]["member_count"] == 1
     host.settings = SimpleNamespace(bot_id=store.bot_id)
     host._kernel = kernel
-    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+    registry = RuntimeModuleRegistry(host, _isolated_memory_descriptors(kernel, package))
     await registry.start()
     host.registry = registry
     try:
@@ -1262,7 +1275,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
         schema_bundle_installer=installer, generation_authority=kernel.runtime,
     )
-    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+    registry = RuntimeModuleRegistry(host, _isolated_memory_descriptors(kernel, package))
     await registry.start()
     try:
         instance = registry.get("memory.graph")
@@ -2515,7 +2528,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
-    registry = RuntimeModuleRegistry(host, (*kernel.descriptors, package.descriptor))
+    registry = RuntimeModuleRegistry(host, _isolated_memory_descriptors(kernel, package))
     await registry.start()
     try:
         instance = registry.get("memory.graph")
@@ -3756,8 +3769,8 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                     "INSERT INTO {}.relation_contributions "
                     "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
                     "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
-                    "weight_micros,admitted_deletion_epoch) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)"
+                    "weight_micros,admitted_deletion_epoch,cross_trunk) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,false)"
                 ).format(sql.Identifier(namespace)),
                 (
                     store.bot_id, "contribution/test", "relation/test",

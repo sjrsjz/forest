@@ -2503,10 +2503,10 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                         "INSERT INTO {}.relation_contributions("
                         "bot_id,contribution_id,operation_id,input_digest,relation_id,"
                         "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
-                        "weight_micros,admitted_deletion_epoch) "
+                        "weight_micros,admitted_deletion_epoch,cross_trunk) "
                         "VALUES(%s,'forget/evidence','forget/evidence',%s,'forget/relation',"
                         "'ASSOCIATES_WITH','ENTITY','entity/a','ENTITY','entity/b','RULE',"
-                        "500000,%s)"
+                        "500000,%s,false)"
                     ).format(sql.Identifier(memory_namespace)),
                     (settings.bot_id, "sha256:" + "1" * 64, previous_epoch),
                 )

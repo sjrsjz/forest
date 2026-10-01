@@ -94,8 +94,8 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
                 await execute(
                     "INSERT INTO {}.relation_contributions (bot_id,contribution_id,operation_id,"
                     "input_digest,relation_id,relation_kind,left_kind,left_id,right_kind,right_id,"
-                    "origin_kind,weight_micros,admitted_deletion_epoch) VALUES "
-                    "(%s,%s,%s,%s,%s,'ASSOCIATES_WITH','SOURCE_UNIT',%s,'SOURCE_UNIT',%s,'RULE',500000,0)",
+                    "origin_kind,weight_micros,admitted_deletion_epoch,cross_trunk) VALUES "
+                    "(%s,%s,%s,%s,%s,'ASSOCIATES_WITH','SOURCE_UNIT',%s,'SOURCE_UNIT',%s,'RULE',500000,0,true)",
                     (store.bot_id, name, "op/" + name, digest, "relation/" + name,
                      target if reverse else "seed", "seed" if reverse else target),
                 )

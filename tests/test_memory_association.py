@@ -188,10 +188,12 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
         assert promoted["promoted"] is True
         second = await commit("reply/two", "reply/two")
         assert second["ok"] and second["value"]["promoted"] == 1
-        assert (await (await execute(
-            "SELECT count(*) AS count FROM {}.relation_contributions WHERE bot_id=%s",
+        relation = await (await execute(
+            "SELECT count(*) AS count,bool_and(cross_trunk) AS cross_trunk "
+            "FROM {}.relation_contributions WHERE bot_id=%s",
             (bot,),
-        )).fetchone())["count"] == 1
+        )).fetchone()
+        assert relation == {"count": 1, "cross_trunk": True}
         assert (await (await execute(
             "SELECT count(*) AS count FROM {}.relation_evidence WHERE bot_id=%s",
             (bot,),

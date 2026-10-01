@@ -468,6 +468,7 @@ CREATE TABLE relation_contributions (
     weight_micros bigint NOT NULL CHECK (weight_micros BETWEEN 0 AND 1000000000000),
     admitted_deletion_epoch bigint NOT NULL CHECK (admitted_deletion_epoch >= 0),
     active boolean NOT NULL DEFAULT true,
+    cross_trunk boolean NOT NULL,
     sample_key text COLLATE "C" GENERATED ALWAYS AS (md5(contribution_id)) STORED,
     created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -1228,6 +1229,9 @@ CREATE INDEX relation_right_idx ON relation_contributions(
 );
 CREATE INDEX relation_browse_idx ON relation_contributions(
     bot_id,relation_id,contribution_id
+) WHERE active;
+CREATE INDEX relation_cross_trunk_browse_idx ON relation_contributions(
+    bot_id,cross_trunk,relation_id,contribution_id
 ) WHERE active;
 CREATE INDEX relation_evidence_source_idx ON relation_evidence(
     bot_id,source_unit_id,contribution_id
@@ -5900,12 +5904,13 @@ BEGIN
     INSERT INTO __forest_module_schema__.relation_contributions(
         bot_id,contribution_id,operation_id,input_digest,relation_id,relation_kind,
         left_kind,left_id,right_kind,right_id,origin_kind,weight_micros,
-        admitted_deletion_epoch
+        admitted_deletion_epoch,cross_trunk
     )
     SELECT requested_bot,contribution_ref,contribution_ref,
         'sha256:' || pair_digest,'association:' || pair_digest,'ASSOCIATES_WITH',
         'SOURCE_UNIT',left_ref,'SOURCE_UNIT',right_ref,'MODEL',900000,
-        GREATEST(trigger_unit.accepted_deletion_epoch,seed_unit.accepted_deletion_epoch)
+        GREATEST(trigger_unit.accepted_deletion_epoch,seed_unit.accepted_deletion_epoch),
+        trigger_unit.trunk_id<>seed_unit.trunk_id
     FROM __forest_module_schema__.source_units trigger_unit
     CROSS JOIN __forest_module_schema__.source_units seed_unit
     WHERE trigger_unit.bot_id=requested_bot
@@ -8866,24 +8871,6 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION memory_relation_cross_trunk(
-    requested_bot text, requested_contribution text,
-    left_endpoint_kind text, left_endpoint_id text,
-    right_endpoint_kind text, right_endpoint_id text)
-RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
-    SELECT count(DISTINCT origins.trunk_id)>1 FROM (
-        SELECT u.trunk_id FROM __forest_module_schema__.source_units u
-        WHERE u.bot_id=requested_bot AND (
-            (left_endpoint_kind='SOURCE_UNIT' AND u.source_unit_id=left_endpoint_id) OR
-            (right_endpoint_kind='SOURCE_UNIT' AND u.source_unit_id=right_endpoint_id))
-        UNION ALL
-        SELECT u.trunk_id FROM __forest_module_schema__.relation_evidence e
-        JOIN __forest_module_schema__.source_units u
-          ON u.bot_id=e.bot_id AND u.source_unit_id=e.source_unit_id
-        WHERE e.bot_id=requested_bot AND e.contribution_id=requested_contribution
-    ) origins WHERE origins.trunk_id IS NOT NULL
-$$;
-
 CREATE FUNCTION memory_query_relations(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
@@ -8914,7 +8901,7 @@ BEGIN
     WITH page AS (
         SELECT c.contribution_id,c.relation_id,c.relation_kind,c.relation_key,
             c.left_kind,c.left_id,c.right_kind,c.right_id,c.weight_micros,
-            c.origin_kind,c.created_at,
+            c.origin_kind,c.created_at,c.cross_trunk,
             CASE WHEN c.relation_kind='ASSOCIATES_WITH' THEN 'UNDIRECTED'
                  WHEN NOT has_endpoint THEN 'CANONICAL'
                  WHEN c.left_kind=endpoint_kind AND c.left_id=endpoint_id
@@ -8929,11 +8916,8 @@ BEGIN
               SELECT value FROM jsonb_array_elements_text(input->'relation_kinds')))
           AND (NOT (input ? 'origin_kinds') OR c.origin_kind IN (
               SELECT value FROM jsonb_array_elements_text(input->'origin_kinds')))
-          AND CASE WHEN input ? 'cross_trunk' THEN
-              __forest_module_schema__.memory_relation_cross_trunk(
-                  c.bot_id,c.contribution_id,c.left_kind,c.left_id,
-                  c.right_kind,c.right_id)=(input->>'cross_trunk')::boolean
-              ELSE true END
+          AND (NOT input ? 'cross_trunk' OR
+               c.cross_trunk=(input->>'cross_trunk')::boolean)
           AND (NOT (input ? 'evidence_trunk_id') AND
                NOT (input ? 'evidence_external_group_id') AND
                NOT (input ? 'evidence_author_subject_ref') OR
@@ -8993,10 +8977,7 @@ BEGIN
           )
         ORDER BY c.relation_id,c.contribution_id LIMIT page_limit+1
     ), visible AS (
-        SELECT p.*,__forest_module_schema__.memory_relation_cross_trunk(
-            context->>'bot_id',p.contribution_id,p.left_kind,p.left_id,
-            p.right_kind,p.right_id) AS cross_trunk
-        FROM (SELECT * FROM page ORDER BY relation_id,contribution_id
+        SELECT p.* FROM (SELECT * FROM page ORDER BY relation_id,contribution_id
               LIMIT page_limit) p
     )
     SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v)||jsonb_build_object(
