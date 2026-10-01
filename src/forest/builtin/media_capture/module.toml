@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.media-capture"
-version = "2.1.1"
+version = "2.1.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "media_capture:MediaCapture"
@@ -11,6 +11,8 @@ scope = "bot"
 state_schema = 1
 reload_mode = "drain"
 config_schema = "schemas/config.json"
+bootstrap_config = "bootstrap.json"
+auto_install = true
 configuration_apply = "worker-host/1"
 
 [components.resources]

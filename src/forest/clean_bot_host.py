@@ -426,26 +426,6 @@ class CleanBotHost:
             credential_resolver=resolve_provider_secret,
             **provider_driver_options,
         )
-        provider = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/provider_chat_completions"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.provider.chat-completions/1",
-                "base_url": self.settings.model_base_url,
-                "credential_ref": self.settings.model_credential_ref,
-                "timeout_seconds": self.settings.model_timeout_seconds,
-                "max_connections": self.settings.model_max_connections,
-                "capabilities": capabilities.as_dict(),
-            },
-            effect_driver_registry=PackageEffectDriverRegistry(
-                {
-                    "chat-completions.http": provider_effect_factory,
-                }
-            ),
-        )
         worker_host = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/component_worker_host"))),
             self.package_catalog,
@@ -490,33 +470,12 @@ class CleanBotHost:
         embedding_driver_options = {}
         if self._embedding_client_factory is not None:
             embedding_driver_options["client_factory"] = self._embedding_client_factory
-        embedding = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/embedding_multimodal"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.embedding.multimodal/1",
-                "endpoint": self.settings.embedding_endpoint,
-                "credential_ref": self.settings.embedding_credential_ref,
-                "timeout_seconds": self.settings.embedding_timeout_seconds,
-                "max_connections": self.settings.embedding_max_connections,
-                "profile": embedding_profile,
-            },
-            effect_driver_registry=PackageEffectDriverRegistry(
-                {
-                    "embedding.multimodal.http": (
-                        multimodal_embedding_effect_driver_factory(
-                            effects=self._kernel.effect,
-                            payloads=self._kernel.payload,
-                            runtime=self._kernel.runtime,
-                            credential_resolver=resolve_embedding_secret,
-                            **embedding_driver_options,
-                        )
-                    )
-                }
-            ),
+        embedding_effect_factory = multimodal_embedding_effect_driver_factory(
+            effects=self._kernel.effect,
+            payloads=self._kernel.payload,
+            runtime=self._kernel.runtime,
+            credential_resolver=resolve_embedding_secret,
+            **embedding_driver_options,
         )
 
         async def resolve_vector_index_token(secret_ref, _revision):
@@ -531,35 +490,12 @@ class CleanBotHost:
         vector_index_driver_options = {}
         if self._vector_index_client_factory is not None:
             vector_index_driver_options["client_factory"] = self._vector_index_client_factory
-        vector_index = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/vector_index_milvus"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                **official_builtin_configuration(
-                    "vector_index_milvus",
-                    overrides={
-                        "space_id": EmbeddingProfile(**embedding_profile).space_id,
-                        "dimensions": self.settings.embedding_dimensions,
-                    },
-                ),
-                "endpoint": self.settings.vector_index_endpoint,
-                "credential_ref": self.settings.vector_index_credential_ref,
-                "timeout_seconds": self.settings.vector_index_timeout_seconds,
-            },
-            effect_driver_registry=PackageEffectDriverRegistry(
-                {
-                    "vector-index.milvus": milvus_vector_index_effect_driver_factory(
-                        bot_id=self.store.bot_id,
-                        store=self.store,
-                        runtime=self._kernel.runtime,
-                        token_resolver=resolve_vector_index_token,
-                        **vector_index_driver_options,
-                    )
-                }
-            ),
+        vector_index_effect_factory = milvus_vector_index_effect_driver_factory(
+            bot_id=self.store.bot_id,
+            store=self.store,
+            runtime=self._kernel.runtime,
+            token_resolver=resolve_vector_index_token,
+            **vector_index_driver_options,
         )
         memory = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/memory_graph"))),
@@ -601,28 +537,10 @@ class CleanBotHost:
         media_driver_options = {}
         if self._media_client_factory is not None:
             media_driver_options["client_factory"] = self._media_client_factory
-        media = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/media_capture"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.media.capture/1",
-                "timeout_seconds": 15,
-                "max_connections": 4,
-                "max_attempts": 3,
-                "context_wait_seconds": 3,
-            },
-            effect_driver_registry=PackageEffectDriverRegistry(
-                {
-                    "media.public-image": media_image_fetch_effect_driver_factory(
-                        runtime=self._kernel.runtime,
-                        payloads=self._kernel.payload,
-                        **media_driver_options,
-                    )
-                }
-            ),
+        media_effect_factory = media_image_fetch_effect_driver_factory(
+            runtime=self._kernel.runtime,
+            payloads=self._kernel.payload,
+            **media_driver_options,
         )
         preset_system = self.settings.agent_preset_system or (
             (self.settings.agent_system_prompt,) if self.settings.agent_system_prompt else ()
@@ -664,19 +582,6 @@ class CleanBotHost:
             additional_grants=(
                 CapabilityGrant("provider.invoke", "bot", self.store.bot_id, delegable=True),
             ),
-        )
-        trigger = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/trigger_policy"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.conversation.trigger-policy/1",
-                "allowed_group_ids": list(self.settings.allowed_group_ids),
-                "group_trigger_mode": self.settings.group_trigger_mode,
-                "private_enabled": self.settings.private_enabled,
-            },
         )
         jobs = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/job_scheduler"))),
@@ -770,14 +675,40 @@ class CleanBotHost:
         adapter_driver_options = {}
         if self._websocket_client_factory is not None:
             adapter_driver_options["client_factory"] = self._websocket_client_factory
-        adapter = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/adapter_onebot"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.adapter.onebot/2",
+        onebot_effect_factory = onebot_transport_effect_driver_factory(
+            effects=self._kernel.effect,
+            runtime=self._kernel.runtime,
+            credential_resolver=resolve_onebot_secret,
+            **adapter_driver_options,
+        )
+        bootstrap_overrides = {
+            "provider_chat_completions": {
+                "base_url": self.settings.model_base_url,
+                "credential_ref": self.settings.model_credential_ref,
+                "timeout_seconds": self.settings.model_timeout_seconds,
+                "max_connections": self.settings.model_max_connections,
+                "capabilities": capabilities.as_dict(),
+            },
+            "embedding_multimodal": {
+                "endpoint": self.settings.embedding_endpoint,
+                "credential_ref": self.settings.embedding_credential_ref,
+                "timeout_seconds": self.settings.embedding_timeout_seconds,
+                "max_connections": self.settings.embedding_max_connections,
+                "profile": embedding_profile,
+            },
+            "vector_index_milvus": {
+                "space_id": EmbeddingProfile(**embedding_profile).space_id,
+                "dimensions": self.settings.embedding_dimensions,
+                "endpoint": self.settings.vector_index_endpoint,
+                "credential_ref": self.settings.vector_index_credential_ref,
+                "timeout_seconds": self.settings.vector_index_timeout_seconds,
+            },
+            "trigger_policy": {
+                "allowed_group_ids": list(self.settings.allowed_group_ids),
+                "group_trigger_mode": self.settings.group_trigger_mode,
+                "private_enabled": self.settings.private_enabled,
+            },
+            "adapter_onebot": {
                 "bindings": [
                     {
                         "binding_ref": "binding/main",
@@ -792,21 +723,18 @@ class CleanBotHost:
                     }
                 ],
             },
-            effect_driver_registry=PackageEffectDriverRegistry(
-                {
-                    "onebot.websocket-v11": onebot_transport_effect_driver_factory(
-                        effects=self._kernel.effect,
-                        runtime=self._kernel.runtime,
-                        credential_resolver=resolve_onebot_secret,
-                        **adapter_driver_options,
-                    ),
-                    "kernel.payload-bytes": kernel_payload_json_effect_driver_factory(
-                        runtime=self._kernel.runtime,
-                        payloads=self._kernel.payload,
-                    ),
-                }
+        }
+        automatic_effect_drivers = PackageEffectDriverRegistry({
+            "chat-completions.http": provider_effect_factory,
+            "embedding.multimodal.http": embedding_effect_factory,
+            "vector-index.milvus": vector_index_effect_factory,
+            "media.public-image": media_effect_factory,
+            "onebot.websocket-v11": onebot_effect_factory,
+            "kernel.payload-bytes": kernel_payload_json_effect_driver_factory(
+                runtime=self._kernel.runtime,
+                payloads=self._kernel.payload,
             ),
-        )
+        })
         automatic = []
         for source in auto_install_builtin_sources():
             provisioned = await bootstrap_builtin_package(
@@ -815,22 +743,19 @@ class CleanBotHost:
                 self.store,
                 self.schema_bundle_installer,
                 kernel=self._kernel,
-                initial_configuration=official_builtin_configuration(source.name),
+                initial_configuration=official_builtin_configuration(
+                    source.name, overrides=bootstrap_overrides.get(source.name)
+                ),
+                effect_driver_registry=automatic_effect_drivers,
             )
             automatic.append(provisioned.descriptor)
         official_descriptors = (
-                provider.descriptor,
                 worker_host.descriptor,
-                embedding.descriptor,
-                vector_index.descriptor,
                 memory.descriptor,
-                media.descriptor,
                 agent.descriptor,
-                trigger.descriptor,
                 process_executor.descriptor,
                 jobs.descriptor,
                 shell.descriptor,
-                adapter.descriptor,
                 delivery.descriptor,
                 *automatic,
         )

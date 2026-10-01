@@ -128,7 +128,7 @@ def _official_bootstrap_source(package_name: str):
 
 
 def auto_install_builtin_sources() -> tuple[Path, ...]:
-    """Discover official packages whose manifest needs no host-specific binding."""
+    """Discover official packages admitted to manifest-driven Bot assembly."""
 
     root = files("forest").joinpath("builtin")
     selected = []

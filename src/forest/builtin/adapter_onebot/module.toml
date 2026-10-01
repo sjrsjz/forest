@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.1.2"
+version = "2.1.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -11,6 +11,8 @@ scope = "bot"
 state_schema = 1
 reload_mode = "drain"
 config_schema = "schemas/config.json"
+bootstrap_config = "bootstrap.json"
+auto_install = true
 configuration_apply = "worker-host/1"
 
 [components.resources]

@@ -1,0 +1,1 @@
+{"protocol":"forest.adapter.onebot/2","bindings":[{"binding_ref":"binding/main","binding_epoch":1,"self_id":"1","credential_ref":"secret://adapter.onebot/default","websocket_url":"ws://127.0.0.1:8080","timeout_seconds":30,"event_capacity":512,"pending_capacity":64,"enabled":false}]}
