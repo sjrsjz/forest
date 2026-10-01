@@ -1,10 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["protocol", "request_id", "state", "attempts", "provider_generation_id", "provider_profile_ref", "model_ref", "capability_digest", "projection", "wire", "output_token_budget", "projected_content_digest", "source_manifest_digest"],
+  "required": ["protocol", "request_id", "request_revision", "request_kind", "state", "attempts", "provider_generation_id", "provider_profile_ref", "model_ref", "capability_digest", "projection", "wire", "output_token_budget", "projected_content_digest", "source_manifest_digest"],
   "properties": {
     "protocol": {"const": "forest.agent-frozen-model-resume/1"},
     "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "request_revision": {"type": "integer", "minimum": 1},
+    "request_kind": {"enum": ["PRIMARY", "CONTINUATION", "REPAIR"]},
     "state": {"enum": ["READY", "NOT_APPLIED"]},
     "attempts": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/attempt"}},
     "provider_generation_id": {"type": "string", "minLength": 1, "maxLength": 256},

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.20.0"
+version = "4.21.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -56,6 +56,7 @@ requests = [
   "uow.execute:agent.release-run-lease",
   "uow.execute:agent.fail-exhausted-model",
   "uow.execute:agent.prepare-model-request",
+  "uow.execute:agent.inherit-model-request",
   "uow.execute:agent.prepare-model-effect",
   "uow.execute:agent.handoff-model-effect",
   "uow.execute:agent.observe-model-effect",
@@ -158,9 +159,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.16.0"
+schema_version = "2.17.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "2c9d3b425aa4e4ce13f96170a887f56e1f90ae7f519b1639f15e2ca5d0572f11"
+baseline_sha256 = "427d6fd61139033f6509e0445d2d49a2966c9ed651303c9af663537c0fa9c620"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -371,6 +372,25 @@ path = "/input/request/initial_wire"
 owner_component_path = "/input/request/initial_wire/owner_component_id"
 owner_kind = "model.wire"
 owner_id_path = "/input/request/first_attempt_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.inherit-model-request-record"
+contract = "1.0"
+function = "agent_inherit_model_request"
+input_schema = "schemas/inherit-model-request-envelope.json"
+output_schema = "schemas/model-request-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/successor/projection"
+owner_component_path = "/input/successor/projection/owner_component_id"
+owner_kind = "model.projection"
+owner_id_path = "/input/successor/request_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/successor/initial_wire"
+owner_component_path = "/input/successor/initial_wire/owner_component_id"
+owner_kind = "model.wire"
+owner_id_path = "/input/successor/first_attempt_id"
 
 [[components.unit_of_work_participants]]
 name = "agent.prepare-model-attempt-record"
@@ -626,6 +646,17 @@ output_schema = "schemas/model-request-output.json"
 timeout_s = 10
 steps = [
   { id = "agent", component_id = "agent.runtime", participant = "agent.prepare-model-request-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.inherit-model-request"
+contract = "1.0"
+input_schema = "schemas/inherit-model-request-input.json"
+output_schema = "schemas/model-request-output.json"
+timeout_s = 10
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.prove-not-applied", input_path = "/effect" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.inherit-model-request-record" }
 ]
 
 [[components.unit_of_work_plans]]

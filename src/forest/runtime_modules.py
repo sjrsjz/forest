@@ -1883,6 +1883,7 @@ class RuntimeModuleRegistry:
         operation_id: str,
         *,
         components: tuple[str, ...] | None = None,
+        candidate_components: dict[str, dict] | None = None,
     ) -> None:
         """Freeze and drain only the Generations selected for replacement."""
 
@@ -1975,7 +1976,9 @@ class RuntimeModuleRegistry:
                         self.instances[component_id], "validate_replacement", None
                     )
                     if validate_replacement is not None:
-                        result = validate_replacement(replaced_components)
+                        result = validate_replacement(
+                            replaced_components, candidate_components or {}
+                        )
                         if inspect.isawaitable(result):
                             await result
                 for component_id in reversed(self.order):
@@ -2023,6 +2026,16 @@ class RuntimeModuleRegistry:
                         },
                     ) from resume_error
                 raise
+
+    def prepared_replacement_facts(self) -> dict[str, dict]:
+        facts = {}
+        for component_id in self.order:
+            candidate_fact = getattr(
+                self.instances[component_id], "replacement_candidate_fact", None
+            )
+            if candidate_fact is not None:
+                facts[component_id] = candidate_fact()
+        return facts
 
     async def resume_owned_work_after_failed_replacement(self) -> None:
         """Resume a frozen graph when its prepared successor did not publish."""

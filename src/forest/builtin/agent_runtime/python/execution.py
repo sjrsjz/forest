@@ -906,6 +906,8 @@ class AgentExecution:
                     )
                 if invoked["status"] == "NOT_SENT":
                     continue
+                request_id = invoked["request_id"]
+                attempt_id = invoked["attempt_id"]
                 await self.turns.record(
                     owner=owner,
                     request_id=request_id,

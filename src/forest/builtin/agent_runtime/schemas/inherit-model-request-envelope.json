@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "protocol",
+    "caller",
+    "input",
+    "prior"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.uow-step/1"
+    },
+    "caller": {
+      "type": "object",
+      "required": [
+        "component_id",
+        "generation_id"
+      ],
+      "properties": {
+        "component_id": {
+          "const": "agent.runtime"
+        },
+        "generation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "effect",
+        "owner",
+        "predecessor_request_id",
+        "successor"
+      ],
+      "properties": {
+        "effect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "protocol",
+            "attempts"
+          ],
+          "properties": {
+            "protocol": {
+              "const": "forest.effect-unsent-proof-request/1"
+            },
+            "attempts": {
+              "type": "array",
+              "maxItems": 3,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "effect_operation_id",
+                  "attempt_id"
+                ],
+                "properties": {
+                  "effect_operation_id": {
+                    "$ref": "#/$defs/id"
+                  },
+                  "attempt_id": {
+                    "$ref": "#/$defs/id"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "owner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "owner_id",
+            "epoch"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/id"
+            },
+            "owner_id": {
+              "$ref": "#/$defs/id"
+            },
+            "epoch": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "predecessor_request_id": {
+          "$ref": "#/$defs/id"
+        },
+        "successor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "first_attempt_id",
+            "provider_component_id",
+            "provider_generation_id",
+            "provider_profile_ref",
+            "model_ref",
+            "instruction_channel",
+            "capability_digest",
+            "projection",
+            "initial_wire",
+            "projected_content_digest",
+            "source_manifest_digest",
+            "output_token_budget"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/id"
+            },
+            "first_attempt_id": {
+              "$ref": "#/$defs/id"
+            },
+            "provider_component_id": {
+              "$ref": "#/$defs/id"
+            },
+            "provider_generation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "provider_profile_ref": {
+              "$ref": "#/$defs/id"
+            },
+            "model_ref": {
+              "$ref": "#/$defs/id"
+            },
+            "instruction_channel": {
+              "enum": [
+                "SYSTEM",
+                "DEVELOPER",
+                "INSTRUCTIONS",
+                "DEGRADED_USER"
+              ]
+            },
+            "capability_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "projection": {
+              "$ref": "#/$defs/projection"
+            },
+            "initial_wire": {
+              "$ref": "#/$defs/wire"
+            },
+            "projected_content_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "source_manifest_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "output_token_budget": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "prior": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload_id",
+        "digest",
+        "owner_component_id",
+        "owner_kind",
+        "owner_id"
+      ],
+      "properties": {
+        "payload_id": {
+          "$ref": "#/$defs/id"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "owner_component_id": {
+          "const": "agent.runtime"
+        },
+        "owner_kind": {
+          "const": "model.projection"
+        },
+        "owner_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "wire": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload_id",
+        "digest",
+        "owner_component_id",
+        "owner_kind",
+        "owner_id"
+      ],
+      "properties": {
+        "payload_id": {
+          "$ref": "#/$defs/id"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "owner_component_id": {
+          "const": "agent.runtime"
+        },
+        "owner_kind": {
+          "const": "model.wire"
+        },
+        "owner_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    }
+  }
+}

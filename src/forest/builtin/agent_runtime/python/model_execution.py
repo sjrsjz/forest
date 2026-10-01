@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 from agent_protocol import ProtocolRepairView
 from model_projection import prepare_model_request
+from turn_recording import stable
 
 from forest.errors import ForestError
 from forest.model_contract import MediaSnapshot, ModelCapabilities
@@ -399,7 +400,6 @@ class ModelExecution:
         )
         if (
             frozen["request_id"] != request_id
-            or frozen["provider_generation_id"] != profile["generation_id"]
             or frozen["provider_profile_ref"] != profile["profile_ref"]
             or frozen["capability_digest"] != profile["capability_digest"]
             or frozen["model_ref"] != target.model
@@ -407,7 +407,7 @@ class ModelExecution:
         ):
             raise ForestError(
                 "MODEL_REQUEST_PROVIDER_REBIND_REQUIRED",
-                "Frozen request is bound to another Provider Generation or profile",
+                "Frozen request is bound to an incompatible Provider profile",
                 409,
             )
         projection_bytes = await self.ctx.payloads.read_bytes(frozen["projection"])
@@ -439,6 +439,22 @@ class ModelExecution:
                 "AGENT_FROZEN_MODEL_INVALID",
                 "Frozen projection or wire differs from its request identity",
                 409,
+            )
+        if frozen["provider_generation_id"] != profile["generation_id"]:
+            successor_id = await self._inherit_frozen(
+                owner=owner,
+                frozen=frozen,
+                profile=profile,
+                target=target,
+                manifest=manifest,
+                wire_bytes=wire_bytes,
+            )
+            successor_attempt_id = stable("model-attempt", successor_id, 1)
+            return await self.resume_frozen(
+                owner=owner,
+                request_id=successor_id,
+                attempt_id=successor_attempt_id,
+                effect_operation_id=stable("model-effect", successor_attempt_id),
             )
         if frozen["state"] == "READY":
             if frozen["wire"]["owner_id"] != attempt_id:
@@ -480,6 +496,71 @@ class ModelExecution:
             attempt_id=attempt_id,
             effect_operation_id=effect_operation_id,
         )
+
+    async def _inherit_frozen(
+        self, *, owner: dict, frozen: dict, profile: dict,
+        target: ModelCapabilities, manifest: dict, wire_bytes: bytes,
+    ) -> str:
+        predecessor_id = frozen["request_id"]
+        successor_id = stable(
+            "model-request-inherited", predecessor_id, profile["generation_id"]
+        )
+        successor_attempt_id = stable("model-attempt", successor_id, 1)
+        successor_manifest = {**manifest, "request_id": successor_id}
+        projection = await self.ctx.payloads.put_bytes(
+            json.dumps(
+                successor_manifest, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False,
+            ).encode("utf-8"),
+            owner_kind="model.projection", owner_id=successor_id,
+            media_type="application/json", parents=(frozen["projection"],),
+        )
+        wire = await self.ctx.payloads.put_bytes(
+            wire_bytes,
+            owner_kind="model.wire", owner_id=successor_attempt_id,
+            media_type="application/json", parents=(frozen["wire"], projection),
+        )
+        if wire["digest"] != frozen["wire"]["digest"]:
+            raise ForestError(
+                "AGENT_FROZEN_MODEL_INVALID",
+                "Inherited wire differs from the frozen predecessor", 409,
+            )
+        await self.ctx.uow.call(
+            "agent.inherit-model-request",
+            {
+                "effect": {
+                    "protocol": "forest.effect-unsent-proof-request/1",
+                    "attempts": [{
+                        "effect_operation_id": item["effect_operation_id"],
+                        "attempt_id": item["attempt_id"],
+                    } for item in frozen["attempts"]],
+                },
+                "owner": owner,
+                "predecessor_request_id": predecessor_id,
+                "successor": {
+                    "request_id": successor_id,
+                    "first_attempt_id": successor_attempt_id,
+                    "provider_component_id": profile["component_id"],
+                    "provider_generation_id": profile["generation_id"],
+                    "provider_profile_ref": profile["profile_ref"],
+                    "model_ref": target.model,
+                    "instruction_channel": {
+                        "system": "SYSTEM", "developer": "DEVELOPER",
+                    }[target.system_role],
+                    "capability_digest": profile["capability_digest"],
+                    "projection": projection,
+                    "initial_wire": wire,
+                    "projected_content_digest": frozen["projected_content_digest"],
+                    "source_manifest_digest": frozen["source_manifest_digest"],
+                    "output_token_budget": frozen["output_token_budget"],
+                },
+            },
+            operation_id=stable(
+                "inherit-model-request", predecessor_id, profile["generation_id"]
+            ),
+            timeout=15,
+        )
+        return successor_id
 
     async def _dispatch_attempt(
         self, *, graph_id: str, graph_revision: int, bot_id: str,

@@ -34,6 +34,15 @@ class ChatCompletionsProvider(Plugin):
         self.capability_digest = _digest(self.capabilities)
         self.profile_ref = "profile:" + _digest(plain_config)[7:]
 
+    def replacement_facts(self):
+        return {
+            "forest.provider-profile/1": {
+                "profile_ref": self.profile_ref,
+                "capability_digest": self.capability_digest,
+                "model_ref": self.capabilities["model"],
+            }
+        }
+
     @service(
         "provider.profile.bind",
         semantics="read",

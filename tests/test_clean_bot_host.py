@@ -496,9 +496,12 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
         descriptors = ()
 
-        async def drain_owned_work_for_replacement(self, operation_id, *, components):
+        async def drain_owned_work_for_replacement(
+            self, operation_id, *, components, candidate_components
+        ):
             assert operation_id == "replacement/one"
             assert components is None
+            assert candidate_components == {}
             events.append("drain-previous")
 
         async def close(self):
@@ -509,6 +512,9 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
         activation_id = "replacement/one"
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
         descriptors = ()
+
+        def prepared_replacement_facts(self):
+            return {}
 
         async def prewarm(self):
             events.append("prewarm-candidate")
@@ -637,9 +643,12 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
         descriptors = ()
 
-        async def drain_owned_work_for_replacement(self, operation_id, *, components):
+        async def drain_owned_work_for_replacement(
+            self, operation_id, *, components, candidate_components
+        ):
             assert operation_id == "replacement/failing"
             assert components is None
+            assert candidate_components == {}
             events.append("drain-previous")
 
         async def resume_owned_work_after_failed_replacement(self):
@@ -649,6 +658,9 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
         activation_id = "replacement/failing"
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
         descriptors = ()
+
+        def prepared_replacement_facts(self):
+            return {}
 
         async def prewarm(self):
             events.append("prewarm-candidate")
@@ -695,8 +707,11 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
         descriptors = ()
 
-        async def drain_owned_work_for_replacement(self, _operation_id, *, components):
+        async def drain_owned_work_for_replacement(
+            self, _operation_id, *, components, candidate_components
+        ):
             assert components is None
+            assert candidate_components == {}
             events.append("drain-previous")
 
         async def resume_owned_work_after_failed_replacement(self):
@@ -707,6 +722,9 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
         publication_committed = False
         states = {"kernel.runtime": ModuleLifecycleState.ACTIVE}
         descriptors = ()
+
+        def prepared_replacement_facts(self):
+            return {}
 
         async def prewarm(self):
             events.append("prewarm-candidate")
@@ -3225,7 +3243,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish")
+    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish", "reload-full")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -3274,10 +3292,11 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
     clients = []
     RecordingModelClient.requests = []
     RecordingModelClient.first_gate = (
-        asyncio.Event() if scenario in {"cross-group", "requeue", "reload", "reload-publish"} else None
+        asyncio.Event() if scenario in {"cross-group", "requeue", "reload", "reload-publish", "reload-full"} else None
     )
     RecordingModelClient.not_sent_attempts = (
-        3 if scenario == "requeue" else 1 if scenario in {"reload", "reload-publish"} else 0
+        3 if scenario == "requeue" else 2 if scenario == "reload-full"
+        else 1 if scenario in {"reload", "reload-publish"} else 0
     )
     RecordingModelClient.reply_text = (
         '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
@@ -3442,7 +3461,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                 await begin_replacement(operation_id)
                 signalled.set()
 
-            async def tracked_validation(replaced_components):
+            async def tracked_validation(replaced_components, candidate_components):
                 async with host.store.pool.connection() as conn:
                     parked = await (await conn.execute(
                         sql.SQL(
@@ -3458,7 +3477,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                 }
                 assert len(RecordingModelClient.requests) == 1
                 guard_observed.set()
-                await validate_replacement(replaced_components)
+                await validate_replacement(replaced_components, candidate_components)
 
             agent.begin_replacement = tracked_replacement
             agent.validate_replacement = tracked_validation
@@ -3467,7 +3486,19 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
             try:
                 drain = asyncio.create_task(
                     old_graph.drain_owned_work_for_replacement(
-                        reload_operation_id
+                        reload_operation_id,
+                        candidate_components={
+                            "provider.chat-completions": {
+                                "generation_id": "generation/provider/incompatible",
+                                "facts": {
+                                    "forest.provider-profile/1": {
+                                        "profile_ref": "profile:" + "0" * 64,
+                                        "capability_digest": "sha256:" + "0" * 64,
+                                        "model_ref": "incompatible",
+                                    },
+                                },
+                            }
+                        },
                     )
                 )
                 async with asyncio.timeout(30):
@@ -3500,9 +3531,12 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                     (settings.bot_id,),
                 )).fetchone()
             assert resumed["reload_operation_id"] is None
-        if scenario == "reload-publish":
+        if scenario in {"reload-publish", "reload-full"}:
             old_graph = host.registry
             old_agent = old_graph.get("agent.runtime")
+            old_provider_generation = old_graph.get(
+                "provider.chat-completions"
+            ).generation_identity.generation_id
             signalled = asyncio.Event()
             drained = asyncio.Event()
             publish_gate = asyncio.Event()
@@ -3521,7 +3555,11 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
             old_agent.begin_replacement = tracked_replacement
             old_graph.drain_owned_work_for_replacement = tracked_drain
             replacement_task = asyncio.create_task(
-                host.replace_runtime_graph(target_component_id="agent.runtime")
+                host.replace_runtime_graph(
+                    target_component_id=(
+                        "agent.runtime" if scenario == "reload-publish" else None
+                    )
+                )
             )
             try:
                 async with asyncio.timeout(90):
@@ -3560,6 +3598,10 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                 assert replacement.get("agent.runtime").generation_identity.generation_id != (
                     parked["reload_generation_id"]
                 )
+                if scenario == "reload-full":
+                    assert replacement.get(
+                        "provider.chat-completions"
+                    ).generation_identity.generation_id != old_provider_generation
                 try:
                     async with asyncio.timeout(45):
                         while len(RecordingModelClient.requests) < 2:
@@ -3611,6 +3653,30 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                         (settings.bot_id,),
                     )).fetchone()
                 assert resumed["reload_operation_id"] is None
+                if scenario == "reload-full":
+                    async with asyncio.timeout(45):
+                        while len(RecordingModelClient.requests) < 3:
+                            await asyncio.sleep(0.1)
+                    first, second = RecordingModelClient.requests[:2]
+                    third = RecordingModelClient.requests[2]
+                    assert first.request_id != second.request_id
+                    assert second.request_id == third.request_id
+                    assert first.body == second.body
+                    assert second.body == third.body
+                    assert first.payload_digest == second.payload_digest
+                    async with host.store.pool.connection() as conn:
+                        lineage = await (await conn.execute(
+                            sql.SQL(
+                                "SELECT request_id,request_revision,state "
+                                "FROM {}.model_requests WHERE bot_id=%s "
+                                "ORDER BY request_revision"
+                            ).format(sql.Identifier(agent_schema)),
+                            (settings.bot_id,),
+                        )).fetchall()
+                    assert [(row["request_revision"], row["state"]) for row in lineage][:1] == [
+                        (1, "ABANDONED")
+                    ]
+                    assert lineage[1]["request_id"] == second.request_id
             finally:
                 RecordingModelClient.first_gate.set()
                 publish_gate.set()

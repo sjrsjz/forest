@@ -541,6 +541,98 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert ready_recovery["model_request"]["request_id"] == (
             "model-request/package/1"
         )
+        successor_projection = await _payload(
+            kernel,
+            owner_component_id="agent.runtime",
+            owner_kind="model.projection",
+            owner_id="model-request/package/inherited",
+            value=b'{"messages":[{"role":"user","content":"A"}]}',
+        )
+        successor_wire = await _payload(
+            kernel,
+            owner_component_id="agent.runtime",
+            owner_kind="model.wire",
+            owner_id="model-attempt/package/inherited",
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+
+        class _RollbackInheritance(Exception):
+            pass
+
+        with pytest.raises(_RollbackInheritance):
+            async with store.pool.connection() as conn, conn.transaction():
+                proof = await registry.get("kernel.effect").unit_of_work_participant().invoke_in(
+                    conn,
+                    "effect.prove-not-applied",
+                    {
+                        "protocol": "forest.uow-step/1",
+                        "caller": caller,
+                        "input": {
+                            "protocol": "forest.effect-unsent-proof-request/1",
+                            "attempts": [],
+                        },
+                        "prior": {},
+                    },
+                    operation_id="effect-proof/package/inheritance",
+                    causal_root_kind="agent.execute",
+                    causal_root_id=model_owner["run_id"],
+                    parent_call_id="call:agent-package/inheritance/proof",
+                    timeout_seconds=10,
+                )
+                inherited = await participant.invoke_in(
+                    conn,
+                    "agent.inherit-model-request-record",
+                    {
+                        "protocol": "forest.uow-step/1",
+                        "caller": caller,
+                        "input": {
+                            "effect": {
+                                "protocol": "forest.effect-unsent-proof-request/1",
+                                "attempts": [],
+                            },
+                            "owner": request_envelope["input"]["owner"],
+                            "predecessor_request_id": "model-request/package/1",
+                            "successor": {
+                                **{
+                                    key: request_envelope["input"]["request"][key]
+                                    for key in (
+                                        "provider_component_id", "provider_profile_ref",
+                                        "model_ref", "instruction_channel",
+                                        "capability_digest", "projected_content_digest",
+                                        "source_manifest_digest", "output_token_budget",
+                                    )
+                                },
+                                "request_id": "model-request/package/inherited",
+                                "first_attempt_id": "model-attempt/package/inherited",
+                                "provider_generation_id": "generation/provider/package-next",
+                                "projection": successor_projection.canonical(),
+                                "initial_wire": successor_wire.canonical(),
+                            },
+                        },
+                        "prior": {"effect": proof},
+                    },
+                    operation_id="agent-inherit/package/1",
+                    causal_root_kind="agent.execute",
+                    causal_root_id=model_owner["run_id"],
+                    parent_call_id="call:agent-package/inheritance/record",
+                    timeout_seconds=10,
+                )
+                assert inherited["request_id"] == "model-request/package/inherited"
+                await conn.execute("SET CONSTRAINTS ALL IMMEDIATE")
+                namespace = package.descriptor.storage.spec.namespace
+                rows = await (await conn.execute(
+                    sql.SQL(
+                        "SELECT request_id,request_revision,predecessor_request_id,state "
+                        "FROM {}.model_requests WHERE bot_id=%s AND run_id=%s "
+                        "ORDER BY request_revision"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, model_owner["run_id"]),
+                )).fetchall()
+                assert [(row["request_revision"], row["state"]) for row in rows] == [
+                    (1, "ABANDONED"), (2, "READY")
+                ]
+                assert rows[1]["predecessor_request_id"] == rows[0]["request_id"]
+                raise _RollbackInheritance
         wire = await _payload(
             kernel,
             owner_component_id="kernel.effect",

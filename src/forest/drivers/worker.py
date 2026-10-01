@@ -355,8 +355,18 @@ class WorkerRuntime:
             if command == "start":
                 self.require("PREPARED")
                 await self.plugin.start()
+                replacement_facts = self.plugin.replacement_facts()
+                if not isinstance(replacement_facts, dict) or any(
+                    not isinstance(key, str) or not key
+                    for key in replacement_facts
+                ):
+                    raise ForestError(
+                        "REPLACEMENT_FACTS_INVALID",
+                        "Prepared plugin must declare replacement facts as an object",
+                        422,
+                    )
                 self.state = "READY"
-                return {"state": self.state}
+                return {"state": self.state, "replacement_facts": replacement_facts}
             if command == "health":
                 self.require("PREPARED", "READY", "ACTIVE", "QUIESCENT")
                 health = await self.plugin.health()

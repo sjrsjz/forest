@@ -291,6 +291,7 @@ class PackageGenerationAdapter:
         self._configuration: dict[str, Any] | None = None
         self._configuration_revision: int | None = None
         self._prepared_binding: PreparedGenerationBinding | None = None
+        self._replacement_facts: dict = {}
         self.generation_identity: BoundGenerationIdentity | None = None
         self.state = PackageGenerationState.NEW
         self._service_schemas = {
@@ -766,7 +767,21 @@ class PackageGenerationAdapter:
         self._replacement_operation_id = None
         self._recovered_generation = True
 
-    async def validate_replacement(self, replaced_components: tuple[str, ...]) -> None:
+    def replacement_candidate_fact(self) -> dict:
+        identity = self.generation_identity
+        if self._prepared_binding is None or identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_BOUND",
+                "Candidate replacement fact requires a prepared Generation", 409,
+            )
+        return {
+            "generation_id": identity.generation_id,
+            "facts": deepcopy(self._replacement_facts),
+        }
+
+    async def validate_replacement(
+        self, replaced_components: tuple[str, ...], candidate_components: dict
+    ) -> None:
         query_name = self.component.get("lifecycle", {}).get(
             "replacement_guard_query"
         )
@@ -778,7 +793,10 @@ class PackageGenerationAdapter:
         )
         result = await self.invoke_management_query(
             declaration,
-            {"replaced_components": list(replaced_components)},
+            {
+                "replaced_components": list(replaced_components),
+                "candidate_components": candidate_components,
+            },
             timeout_seconds=10,
         )
         if result["safe"] is not True:
@@ -2561,7 +2579,15 @@ class PackageGenerationAdapter:
                 self._configuration,
                 timeout=_timeout(self.component, "prepare_timeout_s", 10),
             )
-            await worker.start(_timeout(self.component, "start_timeout_s", 10))
+            started = await worker.start(_timeout(self.component, "start_timeout_s", 10))
+            replacement_facts = started.get("replacement_facts", {}) if isinstance(started, dict) else {}
+            if not isinstance(replacement_facts, dict):
+                raise ForestError(
+                    "REPLACEMENT_FACTS_INVALID",
+                    "Prepared Worker returned invalid replacement facts",
+                    422,
+                )
+            self._replacement_facts = deepcopy(replacement_facts)
             health = await worker.health(_timeout(self.component, "start_timeout_s", 10))
             if health.get("healthy") is not True:
                 raise ForestError(

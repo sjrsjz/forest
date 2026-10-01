@@ -1506,6 +1506,10 @@ class Plugin:
     async def start(self) -> None:
         pass
 
+    def replacement_facts(self) -> dict:
+        """Immutable compatibility facts published by a prepared Generation."""
+        return {}
+
     async def health(self) -> dict:
         return {"healthy": True}
 

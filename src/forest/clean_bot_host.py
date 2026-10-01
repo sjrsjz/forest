@@ -1088,6 +1088,7 @@ class CleanBotHost:
                             if affected is not None and len(affected) < len(previous.order)
                             else None
                         ),
+                        candidate_components=candidate.prepared_replacement_facts(),
                     )
                     previous_drained = True
                 async with self.selection_reader.publication_fence(
