@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timezone
 from urllib.request import urlopen
@@ -41,6 +42,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--interval-seconds", type=float, default=30.0)
     value.add_argument("--stale-seconds", type=int, default=300)
     value.add_argument("--health-url", default="http://supervisor:8081/")
+    value.add_argument("--group-id", help="Inspect one OneBot group lane without reading message content.")
     return value
 
 
@@ -51,6 +53,8 @@ def _validate(arguments: argparse.Namespace) -> None:
         raise SystemExit("--interval-seconds must be between 0.25 and 3600")
     if not 1 <= arguments.stale_seconds <= 86400:
         raise SystemExit("--stale-seconds must be between 1 and 86400")
+    if arguments.group_id is not None and re.fullmatch(r"[1-9][0-9]{0,19}", arguments.group_id) is None:
+        raise SystemExit("--group-id must be a positive decimal OneBot group ID")
 
 
 async def _deployment_state(store, bot_id: str) -> dict:
@@ -70,7 +74,9 @@ async def _deployment_state(store, bot_id: str) -> dict:
     return dict(row)
 
 
-async def _bot_state(store: BotStore, bot_id: str, stale_seconds: int) -> dict:
+async def _bot_state(
+    store: BotStore, bot_id: str, stale_seconds: int, group_id: str | None = None
+) -> dict:
     async with store.pool.connection() as connection:
         async with connection.transaction():
             await connection.execute(
@@ -177,6 +183,59 @@ async def _bot_state(store: BotStore, bot_id: str, stale_seconds: int) -> dict:
                     (bot_id,),
                 )
             ).fetchall()
+            group_state = None
+            if group_id is not None:
+                group = await (
+                    await connection.execute(
+                        sql.SQL(
+                            "SELECT lane.next_ingress_seq,lane.classified_through_seq,"
+                            "lane.context_applied_seq,lane.active_run_ref IS NOT NULL AS active_run,"
+                            "latest.ingress_seq,latest.received_at,latest.classification_state,"
+                            "latest.trigger_decision,latest.reason_code,latest.classified_at,"
+                            "trigger.status AS trigger_status "
+                            "FROM {c}.conversation_lanes lane "
+                            "LEFT JOIN LATERAL ("
+                            "SELECT event_id,ingress_seq,received_at,classification_state,"
+                            "trigger_decision,reason_code,classified_at FROM {c}.inbox_messages "
+                            "WHERE bot_id=lane.bot_id AND conversation_id=lane.conversation_id "
+                            "ORDER BY ingress_seq DESC LIMIT 1"
+                            ") latest ON true "
+                            "LEFT JOIN LATERAL ("
+                            "SELECT status FROM {c}.conversation_triggers "
+                            "WHERE bot_id=lane.bot_id AND conversation_id=lane.conversation_id "
+                            "AND event_id=latest.event_id"
+                            ") trigger ON true "
+                            "WHERE lane.bot_id=%s AND lane.conversation_id=%s"
+                        ).format(c=sql.Identifier(CONVERSATION)),
+                        (bot_id, f"onebot:group:{group_id}"),
+                    )
+                ).fetchone()
+                group_state = {
+                    "group_id": group_id,
+                    "observed": group is not None,
+                }
+                if group is not None:
+                    group_state.update(
+                        next_ingress_seq=group["next_ingress_seq"],
+                        classified_through_seq=group["classified_through_seq"],
+                        context_applied_seq=group["context_applied_seq"],
+                        active_run=group["active_run"],
+                        latest_ingress_seq=group["ingress_seq"],
+                        latest_received_at=(
+                            group["received_at"].isoformat()
+                            if group["received_at"] is not None
+                            else None
+                        ),
+                        latest_classification_state=group["classification_state"],
+                        latest_trigger_decision=group["trigger_decision"],
+                        latest_reason_code=group["reason_code"],
+                        latest_classified_at=(
+                            group["classified_at"].isoformat()
+                            if group["classified_at"] is not None
+                            else None
+                        ),
+                        latest_message_trigger_status=group["trigger_status"],
+                    )
             concurrency = await (
                 await connection.execute(
                     sql.SQL(
@@ -222,7 +281,7 @@ async def _bot_state(store: BotStore, bot_id: str, stale_seconds: int) -> dict:
                     (bot_id, bot_id, bot_id),
                 )
             ).fetchone()
-    return {
+    result = {
         "schema_bundles": bundles["count"],
         "graph_id": graph["graph_id"],
         "graph_revision": graph["graph_revision"],
@@ -252,6 +311,9 @@ async def _bot_state(store: BotStore, bot_id: str, stale_seconds: int) -> dict:
         ],
         "work": dict(work),
     }
+    if group_state is not None:
+        result["target_group"] = group_state
+    return result
 
 
 def _health(url: str) -> int:
@@ -312,7 +374,9 @@ async def observe(arguments: argparse.Namespace) -> int:
         while True:
             deployment_state, bot_state, health_status = await asyncio.gather(
                 _deployment_state(deployment, arguments.bot_id),
-                _bot_state(bot_store, arguments.bot_id, arguments.stale_seconds),
+                _bot_state(
+                    bot_store, arguments.bot_id, arguments.stale_seconds, arguments.group_id
+                ),
                 asyncio.to_thread(_health, arguments.health_url),
             )
             failures = _violations(deployment_state, bot_state, health_status)
