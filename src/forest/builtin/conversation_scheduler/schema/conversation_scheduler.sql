@@ -1240,8 +1240,14 @@ BEGIN
     SELECT t.conversation_id,t.claimed_session_ref,t.principal_ref
     INTO match_row
     FROM __forest_module_schema__.conversation_triggers t
+    JOIN __forest_module_schema__.input_batch_triggers m
+      ON m.bot_id=t.bot_id AND m.input_batch_id=t.input_batch_id
+     AND m.trigger_id=t.trigger_id
+    JOIN __forest_module_schema__.trigger_claim_segments s
+      ON s.bot_id=m.bot_id AND s.input_batch_id=m.input_batch_id
     JOIN __forest_module_schema__.trigger_claim_groups g
-      ON g.bot_id=t.bot_id AND g.conversation_id=t.conversation_id
+      ON g.bot_id=s.bot_id AND g.claim_ref=s.claim_ref
+     AND g.conversation_id=t.conversation_id
      AND g.session_ref=t.claimed_session_ref AND g.run_ref=t.claimed_run_ref
     WHERE t.bot_id=requested_bot AND t.trigger_id=requested_trigger
       AND t.status='CLAIMED' AND t.claimed_run_ref=requested_run

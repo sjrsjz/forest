@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.17.0"
+version = "4.17.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -70,9 +70,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.13.0"
+schema_version = "4.13.1"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "e08b0e8d2cf36441fce3c9d898da87782664d1d95ceab1d5a1d7aec2e2b05523"
+baseline_sha256 = "cf5f61182bfea91cdd1f76aae80b14285b804bc5a4c4b6c6ee704e32c3e6c89a"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"

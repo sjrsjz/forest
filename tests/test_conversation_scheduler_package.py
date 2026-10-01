@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
 from pathlib import Path
@@ -107,9 +108,17 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
-    registry = RuntimeModuleRegistry(
-        host, (*kernel.descriptors, memory.descriptor, package.descriptor)
+    # This focused fixture omits Worker Host, Agent and Delivery; the full Bot
+    # Host verifies their retention edges and component lifecycles.
+    omitted = {"component.worker-host", "agent.runtime", "delivery"}
+    descriptors = tuple(
+        replace(descriptor, retention_requires=tuple(
+            component_id for component_id in descriptor.retention_requires
+            if component_id not in omitted
+        ))
+        for descriptor in (*kernel.descriptors, memory.descriptor, package.descriptor)
     )
+    registry = RuntimeModuleRegistry(host, descriptors)
     await registry.start()
     try:
         instance = registry.get("conversation.scheduler")
@@ -407,6 +416,49 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         }
         assert rejected["result"]["error"]["code"] == "AGENT_TOOL_AUTHORITY_INVALID"
 
+        class RollbackProbe(Exception):
+            pass
+
+        with pytest.raises(RollbackProbe):
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.inbox_messages SELECT "
+                        "(jsonb_populate_record(NULL::{}.inbox_messages,to_jsonb(m)||"
+                        "jsonb_build_object('event_id','event/forged-member',"
+                        "'ingress_seq',3,'admission_operation_id','admit/forged-member',"
+                        "'classification_operation_id','classify/forged-member'))).* "
+                        "FROM {}.inbox_messages m WHERE m.bot_id=%s AND m.event_id=%s"
+                    ).format(*(sql.Identifier(namespace) for _ in range(3))),
+                    (store.bot_id, event_id),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.conversation_triggers("
+                        "bot_id,conversation_id,trigger_id,event_id,ingress_seq,"
+                        "principal_ref,input_digest,status,claimed_session_ref,"
+                        "claimed_run_ref,input_batch_id) VALUES "
+                        "(%s,%s,'trigger/forged-member','event/forged-member',"
+                        "3,'qq:forged',%s,'CLAIMED','session/1','run/1',%s)"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, actor["conversation_id"],
+                     "sha256:" + "0" * 64, selected["input_batch_id"]),
+                )
+                forged = copy.deepcopy(authority_envelope)
+                forged["input"]["trigger_ref"] = "trigger/forged-member"
+                forged_authority = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.conversation_authorize_run_trigger("
+                                "%s::jsonb,%s::jsonb) AS result")
+                        .format(sql.Identifier(namespace)),
+                        (Jsonb({"bot_id": store.bot_id}), Jsonb(forged)),
+                    )
+                ).fetchone()
+                assert forged_authority["result"]["error"]["code"] == (
+                    "AGENT_TOOL_AUTHORITY_INVALID"
+                )
+                raise RollbackProbe
+
         terminal = {
             "protocol": "forest.uow-step/1",
             "caller": {
@@ -422,9 +474,6 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             },
             "prior": {},
         }
-        class RollbackProbe(Exception):
-            pass
-
         with pytest.raises(RollbackProbe):
             async with store.pool.connection() as conn, conn.transaction():
                 await conn.execute(
