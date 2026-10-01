@@ -8866,6 +8866,24 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_relation_cross_trunk(
+    requested_bot text, requested_contribution text,
+    left_endpoint_kind text, left_endpoint_id text,
+    right_endpoint_kind text, right_endpoint_id text)
+RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT count(DISTINCT origins.trunk_id)>1 FROM (
+        SELECT u.trunk_id FROM __forest_module_schema__.source_units u
+        WHERE u.bot_id=requested_bot AND (
+            (left_endpoint_kind='SOURCE_UNIT' AND u.source_unit_id=left_endpoint_id) OR
+            (right_endpoint_kind='SOURCE_UNIT' AND u.source_unit_id=right_endpoint_id))
+        UNION ALL
+        SELECT u.trunk_id FROM __forest_module_schema__.relation_evidence e
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=e.bot_id AND u.source_unit_id=e.source_unit_id
+        WHERE e.bot_id=requested_bot AND e.contribution_id=requested_contribution
+    ) origins WHERE origins.trunk_id IS NOT NULL
+$$;
+
 CREATE FUNCTION memory_query_relations(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
@@ -8896,25 +8914,12 @@ BEGIN
     WITH page AS (
         SELECT c.contribution_id,c.relation_id,c.relation_kind,c.relation_key,
             c.left_kind,c.left_id,c.right_kind,c.right_id,c.weight_micros,
-            c.origin_kind,c.created_at,trunks.cross_trunk,
+            c.origin_kind,c.created_at,
             CASE WHEN c.relation_kind='ASSOCIATES_WITH' THEN 'UNDIRECTED'
                  WHEN NOT has_endpoint THEN 'CANONICAL'
                  WHEN c.left_kind=endpoint_kind AND c.left_id=endpoint_id
                     THEN 'OUTBOUND' ELSE 'INBOUND' END AS direction
         FROM __forest_module_schema__.relation_contributions c
-        CROSS JOIN LATERAL (
-            SELECT count(DISTINCT origins.trunk_id)>1 AS cross_trunk FROM (
-                SELECT u.trunk_id FROM __forest_module_schema__.source_units u
-                WHERE u.bot_id=c.bot_id AND (
-                    (c.left_kind='SOURCE_UNIT' AND u.source_unit_id=c.left_id) OR
-                    (c.right_kind='SOURCE_UNIT' AND u.source_unit_id=c.right_id))
-                UNION ALL
-                SELECT u.trunk_id FROM __forest_module_schema__.relation_evidence e
-                JOIN __forest_module_schema__.source_units u
-                  ON u.bot_id=e.bot_id AND u.source_unit_id=e.source_unit_id
-                WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
-            ) origins WHERE origins.trunk_id IS NOT NULL
-        ) trunks
         WHERE c.bot_id=context->>'bot_id' AND c.active
           AND pg_visible_in_snapshot(c.created_xid,snapshot_value)
           AND (NOT has_endpoint OR
@@ -8924,8 +8929,11 @@ BEGIN
               SELECT value FROM jsonb_array_elements_text(input->'relation_kinds')))
           AND (NOT (input ? 'origin_kinds') OR c.origin_kind IN (
               SELECT value FROM jsonb_array_elements_text(input->'origin_kinds')))
-          AND (NOT (input ? 'cross_trunk') OR
-               trunks.cross_trunk=(input->>'cross_trunk')::boolean)
+          AND CASE WHEN input ? 'cross_trunk' THEN
+              __forest_module_schema__.memory_relation_cross_trunk(
+                  c.bot_id,c.contribution_id,c.left_kind,c.left_id,
+                  c.right_kind,c.right_id)=(input->>'cross_trunk')::boolean
+              ELSE true END
           AND (NOT (input ? 'evidence_trunk_id') AND
                NOT (input ? 'evidence_external_group_id') AND
                NOT (input ? 'evidence_author_subject_ref') OR
@@ -8985,7 +8993,11 @@ BEGIN
           )
         ORDER BY c.relation_id,c.contribution_id LIMIT page_limit+1
     ), visible AS (
-        SELECT * FROM page ORDER BY relation_id,contribution_id LIMIT page_limit
+        SELECT p.*,__forest_module_schema__.memory_relation_cross_trunk(
+            context->>'bot_id',p.contribution_id,p.left_kind,p.left_id,
+            p.right_kind,p.right_id) AS cross_trunk
+        FROM (SELECT * FROM page ORDER BY relation_id,contribution_id
+              LIMIT page_limit) p
     )
     SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v)||jsonb_build_object(
         'evidence_count',(
