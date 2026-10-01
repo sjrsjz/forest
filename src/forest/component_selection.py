@@ -260,6 +260,86 @@ class ComponentSelectionReader:
         )
         return self._decode_snapshot((await result.fetchone())["result"], allow_error=True)
 
+    async def operation_replay_in(
+        self,
+        conn,
+        *,
+        operation_id: str,
+        input_digest: str,
+        desired_enabled: bool,
+    ) -> dict | None:
+        """Probe package-owned replay facts under the caller's exclusive selection fence."""
+
+        result = await conn.execute(
+            sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
+                sql.Identifier(self.namespace, "component_selection_operation_probe")
+            ),
+            (
+                Jsonb({
+                    "bot_id": self.store.bot_id,
+                    "port_kind": "query",
+                    "port_name": "component.selection.operation-probe",
+                }),
+                Jsonb({
+                    "operation_id": operation_id,
+                    "input_digest": input_digest,
+                    "desired_enabled": desired_enabled,
+                }),
+            ),
+        )
+        envelope = (await result.fetchone())["result"]
+        if not isinstance(envelope, dict) or envelope.get("protocol") != "forest.domain-result/1":
+            raise ForestError(
+                "COMPONENT_SELECTION_OPERATION_INVALID",
+                "Worker Host selection operation probe is invalid",
+                503,
+            )
+        if envelope.get("ok") is False:
+            error = envelope.get("error")
+            if (
+                isinstance(error, dict)
+                and error.get("code") in {
+                    "COMPONENT_SELECTION_INVALID", "COMPONENT_SELECTION_OPERATION_CONFLICT"
+                }
+                and isinstance(error.get("message"), str)
+                and type(error.get("status")) is int
+            ):
+                raise ForestError(error["code"], error["message"], error["status"])
+        value = envelope.get("value")
+        if envelope.get("ok") is not True or not isinstance(value, dict) or set(value) != {
+            "protocol", "disposition", "receipt"
+        } or value.get("protocol") != "forest.component-selection-operation-probe/1":
+            raise ForestError(
+                "COMPONENT_SELECTION_OPERATION_INVALID",
+                "Worker Host selection operation probe is invalid",
+                503,
+            )
+        if value["disposition"] == "ABSENT" and value["receipt"] is None:
+            return None
+        receipt = value["receipt"]
+        if (
+            value["disposition"] != "REPLAY"
+            or not isinstance(receipt, dict)
+            or set(receipt) != {
+                "protocol", "operation_id", "component_id", "desired_enabled",
+                "selection_revision", "expected_graph_revision",
+            }
+            or receipt["protocol"] != "forest.component-selection-operation/1"
+            or receipt["operation_id"] != operation_id
+            or not isinstance(receipt["component_id"], str)
+            or receipt["desired_enabled"] is not desired_enabled
+            or type(receipt["selection_revision"]) is not int
+            or receipt["selection_revision"] < 1
+            or type(receipt["expected_graph_revision"]) is not int
+            or receipt["expected_graph_revision"] < 1
+        ):
+            raise ForestError(
+                "COMPONENT_SELECTION_OPERATION_INVALID",
+                "Worker Host selection operation probe is invalid",
+                503,
+            )
+        return receipt
+
     @staticmethod
     def _decode_snapshot(envelope, *, allow_error: bool = False) -> ComponentSelectionSnapshot:
         if allow_error and isinstance(envelope, dict) and envelope.get("ok") is False:

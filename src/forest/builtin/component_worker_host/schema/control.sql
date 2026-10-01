@@ -150,6 +150,51 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION component_selection_operation_probe(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE existing __forest_module_schema__.selection_operations%ROWTYPE;
+        requested_operation_id text:=input->>'operation_id';
+        input_digest text:=input->>'input_digest';
+        enabled boolean;
+        receipt jsonb;
+BEGIN
+  IF context->>'port_kind' IS DISTINCT FROM 'query'
+     OR context->>'port_name' IS DISTINCT FROM 'component.selection.operation-probe'
+     OR requested_operation_id IS NULL
+     OR octet_length(requested_operation_id) NOT BETWEEN 1 AND 256
+     OR input_digest IS NULL OR input_digest !~ '^sha256:[a-f0-9]{64}$'
+     OR jsonb_typeof(input->'desired_enabled') IS DISTINCT FROM 'boolean'
+  THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_INVALID',
+        'message','Component selection operation probe is invalid','status',422));
+  END IF;
+  enabled:=(input->>'desired_enabled')::boolean;
+  SELECT * INTO existing FROM __forest_module_schema__.selection_operations AS operations
+    WHERE operations.bot_id=context->>'bot_id'
+      AND operations.operation_id=requested_operation_id;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+      jsonb_build_object('protocol','forest.component-selection-operation-probe/1',
+        'disposition','ABSENT','receipt',null));
+  END IF;
+  IF existing.input_digest IS DISTINCT FROM input_digest
+     OR existing.desired_enabled IS DISTINCT FROM enabled THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','COMPONENT_SELECTION_OPERATION_CONFLICT',
+        'message','Selection operation input differs','status',409));
+  END IF;
+  receipt:=jsonb_build_object('protocol','forest.component-selection-operation/1',
+    'operation_id',requested_operation_id,
+    'component_id',existing.input_payload->>'component_id',
+    'desired_enabled',enabled,'selection_revision',existing.resulting_revision,
+    'expected_graph_revision',existing.expected_graph_revision);
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('protocol','forest.component-selection-operation-probe/1',
+      'disposition','REPLAY','receipt',receipt));
+END;
+$$;
+
 CREATE FUNCTION component_selection_set(context jsonb, input jsonb, enabled boolean)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE bot text:=context->>'bot_id'; op text:=context->>'operation_id';

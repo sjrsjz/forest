@@ -418,3 +418,5 @@ Worker Host 包内管理页现有折叠式候选图预检，按实时选择修�
 选择预检的下一修订投影现由 Worker Host 包内只读 `component.selection.project` SQL 端口生成；宿主在 Graph 锁、选择共享围栏与配置 `REPEATABLE READ` 快照内读取包返回的规范快照，不再保留平行的 Python 投影实现。包版本升至 `1.6.7`、私有 SQL schema 升至 `1.5.0`。隔离 PostgreSQL 验证 builtin 与已安装包的预检快照均等于相同输入的实际选择写入后快照（`1 passed`），外部包 Graph 预览仍通过（`1 passed`）。完整宿主管理查询和热重载复验见后续记录；具体启停 action 与资源预算仍未接通。
 
 完整 Worker Host 宿主 PostgreSQL 用例最终通过（`1 passed`，176.15 秒）：包内 `validate` 查询取得只读计划，后续 shell 重载、两次配置重建、选择任务驱动的已安装包热加入和停用均完成。此前一次运行在等待 Graph 替换时超时，复验确认该替换实际可成功；另一次复验暴露测试夹具仍把直调选择 SQL 标为普通 `command`，新围栏正确拒绝，夹具改用 `management_action` 后全链通过。此用例使用假 Bot 客户端，未向 QQ 发消息；Web 授权启停与资源预算仍未验收。
+
+Worker Host 包内新增只读 `component.selection.operation-probe`：在选择独占围栏下可先判定操作不存在、相同输入的重放或同 ID 不同输入冲突，返回旧操作的准确回执而不依赖已变化的当前选择。包版本升至 `1.6.8`，私有 SQL schema 升至 `1.6.0`；隔离 PostgreSQL 的选择账本用例验证三种结果并继续覆盖 CAS、快照和发布围栏（`1 passed`）。它尚未接入授权启停 action，不能单独构成提交复核。

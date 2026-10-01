@@ -281,6 +281,26 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     current = await reader.snapshot()
     assert current.revision == frozen["revision"]
     assert [entry.as_dict() for entry in current.entries] == frozen["entries"]
+    winning_operation = "selection/first" if first["ok"] else "selection/rival"
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            ("forest.component.selection/" + store.bot_id,),
+        )
+        assert await reader.operation_replay_in(
+            conn, operation_id="selection/missing", input_digest=digest_json(source),
+            desired_enabled=True,
+        ) is None
+        assert await reader.operation_replay_in(
+            conn, operation_id=winning_operation, input_digest=digest_json(source),
+            desired_enabled=winner["value"]["desired_enabled"],
+        ) == winner["value"]
+        with pytest.raises(ForestError) as replay_conflict:
+            await reader.operation_replay_in(
+                conn, operation_id=winning_operation, input_digest=digest_json(changed),
+                desired_enabled=winner["value"]["desired_enabled"],
+            )
+        assert replay_conflict.value.code == "COMPONENT_SELECTION_OPERATION_CONFLICT"
     next_action = "disable" if winner["value"]["desired_enabled"] else "enable"
     async with reader.publication_fence(
         expected_revision=current.revision, expected_digest=current.digest
