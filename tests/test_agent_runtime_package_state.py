@@ -753,11 +753,12 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         }
         effect_participant = registry.get("kernel.effect").unit_of_work_participant()
 
-        async def inherit_in(conn, label, operation_id):
+        async def inherit_in(conn, label, operation_id, inheritance=None):
+            payload = concurrent_inheritance if inheritance is None else inheritance
             proof = await effect_participant.invoke_in(
                 conn, "effect.prove-not-applied",
                 {"protocol": "forest.uow-step/1", "caller": caller,
-                 "input": concurrent_inheritance["input"]["effect"], "prior": {}},
+                 "input": payload["input"]["effect"], "prior": {}},
                 operation_id="effect-proof/package/inheritance-race/" + label,
                 causal_root_kind="agent.execute", causal_root_id=concurrent_run_id,
                 parent_call_id="call:agent-package/inheritance-race/proof/" + label,
@@ -765,7 +766,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             )
             return await participant.invoke_in(
                 conn, "agent.inherit-model-request-record",
-                {**concurrent_inheritance, "prior": {"effect": proof}},
+                {**payload, "prior": {"effect": proof}},
                 operation_id=operation_id,
                 causal_root_kind="agent.execute", causal_root_id=concurrent_run_id,
                 parent_call_id="call:agent-package/inheritance-race/" + label,
@@ -833,6 +834,56 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 (store.bot_id, concurrent_request_id),
             )).fetchone()
             assert inherited_count["n"] == 1
+        third_request_id = "model-request/package/inheritance-race-third"
+        third_projection = await _payload(
+            kernel, owner_kind="model.projection", owner_id=third_request_id,
+            value=b'{"messages":[{"role":"user","content":"race"}]}',
+        )
+        third_wire = await _payload(
+            kernel, owner_kind="model.wire",
+            owner_id="model-attempt/package/inheritance-race-third",
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        third_inheritance = {
+            **concurrent_inheritance,
+            "input": {
+                **concurrent_inheritance["input"],
+                "predecessor_request_id": concurrent_successor_id,
+                "successor": {
+                    **concurrent_inheritance["input"]["successor"],
+                    "request_id": third_request_id,
+                    "first_attempt_id": "model-attempt/package/inheritance-race-third",
+                    "provider_generation_id": "generation/provider/package-third",
+                    "projection": third_projection.canonical(),
+                    "initial_wire": third_wire.canonical(),
+                },
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            third_result = await inherit_in(
+                conn, "third", "agent-inherit/package/inheritance-race-third",
+                third_inheritance,
+            )
+        assert third_result == {
+            **first_result, "request_id": third_request_id,
+        }
+        # A lost receipt can be retried after the successor has itself been
+        # inherited. The old operation must return its original receipt.
+        async with store.pool.connection() as conn, conn.transaction():
+            replayed_first = await inherit_in(conn, "late-replay", shared_operation)
+        assert replayed_first == first_result
+        async with store.pool.connection() as conn:
+            rows = await (await conn.execute(
+                sql.SQL("SELECT request_id,state FROM {}.model_requests "
+                        "WHERE bot_id=%s AND run_id=%s ORDER BY request_revision")
+                .format(sql.Identifier(namespace)),
+                (store.bot_id, concurrent_run_id),
+            )).fetchall()
+            assert [(row["request_id"], row["state"]) for row in rows] == [
+                (concurrent_request_id, "ABANDONED"),
+                (concurrent_successor_id, "ABANDONED"),
+                (third_request_id, "READY"),
+            ]
         blocked_state = await _payload(
             kernel,
             owner_component_id="agent.runtime",

@@ -1138,10 +1138,7 @@ BEGIN
                             WHERE bot_id=requested_bot AND request_id=successor_id),
                 'request_kind',(SELECT request_kind FROM __forest_module_schema__.model_requests
                                 WHERE bot_id=requested_bot AND request_id=successor_id),
-                'state',(SELECT state FROM __forest_module_schema__.model_requests
-                         WHERE bot_id=requested_bot AND request_id=successor_id),
-                'attempt_count',(SELECT attempt_count FROM __forest_module_schema__.model_requests
-                                 WHERE bot_id=requested_bot AND request_id=successor_id)));
+                'state','READY','attempt_count',0));
     END IF;
     IF run_row.run_id IS NULL OR run_row.owner_id IS DISTINCT FROM owner_value->>'owner_id'
        OR run_row.owner_epoch IS DISTINCT FROM (owner_value->>'epoch')::bigint
