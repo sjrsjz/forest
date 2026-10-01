@@ -139,6 +139,26 @@ async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> d
                     (bot_id, bot_id, bot_id, bot_id, bot_id, stale_seconds, bot_id, stale_seconds),
                 )
             ).fetchone()
+            facet_states = await (
+                await connection.execute(
+                    sql.SQL(
+                        "SELECT purpose,state,count(*) AS count FROM {}.embedding_facets "
+                        "WHERE bot_id=%s GROUP BY purpose,state ORDER BY purpose,state"
+                    ).format(sql.Identifier(MEMORY)),
+                    (bot_id,),
+                )
+            ).fetchall()
+            attempt_failures = await (
+                await connection.execute(
+                    sql.SQL(
+                        "SELECT state,error_code,count(*) AS count "
+                        "FROM {}.embedding_batch_attempts WHERE bot_id=%s "
+                        "AND state IN ('UNKNOWN','FAILED') "
+                        "GROUP BY state,error_code ORDER BY state,error_code"
+                    ).format(sql.Identifier(MEMORY)),
+                    (bot_id,),
+                )
+            ).fetchall()
             concurrency = await (
                 await connection.execute(
                     sql.SQL(
@@ -167,7 +187,17 @@ async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> d
         "members": members["members"],
         "lifecycle_recorded": lifecycle["recorded"],
         "active_members": lifecycle["active"],
-        "memory": dict(memory),
+        "memory": {
+            **dict(memory),
+            "facet_states": {
+                f"{row['purpose']}.{row['state']}": row["count"]
+                for row in facet_states
+            },
+            "attempt_failures": {
+                f"{row['state']}.{row['error_code'] or 'NONE'}": row["count"]
+                for row in attempt_failures
+            },
+        },
         "concurrency": dict(concurrency),
         "work": dict(work),
     }
@@ -190,6 +220,10 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
         failures.append("RUNTIME_LIFECYCLE_INVALID")
     if bot["memory"]["stale_attempts"] or bot["memory"]["stale_reservations"]:
         failures.append("EMBEDDING_CONVERGENCE_STALE")
+    if bot["memory"]["facet_states"].get("DOCUMENT.UNKNOWN", 0):
+        failures.append("DOCUMENT_EMBEDDING_UNKNOWN")
+    if bot["memory"]["facet_states"].get("DOCUMENT.FAILED", 0):
+        failures.append("DOCUMENT_EMBEDDING_FAILED")
     if bot["concurrency"]["overlapping_sessions"]:
         failures.append("AGENT_SESSION_CONCURRENCY_INVALID")
     if health_status != 200:

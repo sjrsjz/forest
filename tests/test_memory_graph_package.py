@@ -191,6 +191,7 @@ async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
         "embedding_model_kind": "TEXT_IMAGE",
         "model_revision_digest": "sha256:" + "b" * 64,
         "dimensions": 4096,
+        "max_batch_items": 8,
         "normalization": "L2",
         "fusion_policy_revision": "independent-facets/1",
     })
@@ -1548,9 +1549,9 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
             await conn.execute(sql.SQL(
                 "INSERT INTO {}.memory_domains "
                 "(bot_id,initialization_operation_id,input_digest,space_id,"
-                "embedding_model_kind,model_revision_digest,dimensions,normalization,"
+                "embedding_model_kind,model_revision_digest,dimensions,max_batch_items,normalization,"
                 "fusion_policy_revision) VALUES (%s,'trial-domain',%s,%s,'TEXT_IMAGE',%s,"
-                "4096,'L2','fusion/1') ON CONFLICT (bot_id) DO NOTHING"
+                "4096,8,'L2','fusion/1') ON CONFLICT (bot_id) DO NOTHING"
             ).format(namespace), (store.bot_id, digest, digest, digest))
         generation_id = registry.graph_identity.generations["memory.graph"]
         web_actor = SimpleNamespace(
@@ -1679,9 +1680,9 @@ async def test_management_trial_registers_mixed_input_and_separate_cancellation(
         await conn.execute(sql.SQL(
             "INSERT INTO {}.memory_domains "
             "(bot_id,initialization_operation_id,input_digest,space_id,"
-            "embedding_model_kind,model_revision_digest,dimensions,normalization,"
+                "embedding_model_kind,model_revision_digest,dimensions,max_batch_items,normalization,"
             "fusion_policy_revision) VALUES (%s,'trial-domain',%s,%s,'TEXT_IMAGE',%s,"
-            "4096,'L2','fusion/1')"
+                "4096,8,'L2','fusion/1')"
         ).format(namespace), (store.bot_id, digest, digest, digest))
 
     def part(index, modality, media_type):
@@ -1881,9 +1882,9 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
         await conn.execute(sql.SQL(
             "INSERT INTO {}.memory_domains "
             "(bot_id,initialization_operation_id,input_digest,space_id,"
-            "embedding_model_kind,model_revision_digest,dimensions,normalization,"
+                "embedding_model_kind,model_revision_digest,dimensions,max_batch_items,normalization,"
             "fusion_policy_revision) VALUES (%s,'trial-domain',%s,%s,'TEXT_IMAGE',%s,"
-            "4096,'L2','fusion/1')"
+                "4096,8,'L2','fusion/1')"
         ).format(namespace), (store.bot_id, digest, digest, digest))
         await conn.execute(sql.SQL(
             "INSERT INTO {}.memory_queries "
@@ -2346,9 +2347,9 @@ async def test_expired_trial_vectors_are_suppressed_and_deleted(clean_authority,
         await conn.execute(sql.SQL(
             "INSERT INTO {}.memory_domains "
             "(bot_id,initialization_operation_id,input_digest,space_id,"
-            "embedding_model_kind,model_revision_digest,dimensions,normalization,"
+                "embedding_model_kind,model_revision_digest,dimensions,max_batch_items,normalization,"
             "fusion_policy_revision) VALUES "
-            "(%s,'expired-domain',%s,%s,'TEXT_IMAGE',%s,4096,'L2','fusion/1')"
+                "(%s,'expired-domain',%s,%s,'TEXT_IMAGE',%s,4096,8,'L2','fusion/1')"
         ).format(namespace), (store.bot_id, digest, digest, digest))
         await conn.execute(sql.SQL(
             "INSERT INTO {}.memory_queries "
@@ -2802,6 +2803,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
             "embedding_model_kind": "TEXT_IMAGE",
             "model_revision_digest": "sha256:" + "b" * 64,
             "dimensions": 4096,
+            "max_batch_items": 8,
             "normalization": "L2",
             "fusion_policy_revision": "independent-facets/1",
         }
@@ -3349,6 +3351,11 @@ async def test_memory_package_qualifies_exact_conversation_batch(
             claim_batch("embedding/claim/one"), claim_batch("embedding/claim/two")
         )
         assert first_claim["ok"] and second_claim["ok"]
+        async with store.pool.connection() as conn:
+            claim_limits = (await (await conn.execute(sql.SQL(
+                "SELECT item_limit FROM {}.embedding_claims WHERE bot_id=%s"
+            ).format(sql.Identifier(namespace)), (store.bot_id,))).fetchall())
+        assert claim_limits and {row["item_limit"] for row in claim_limits} == {8}
         claimed = [
             claim["value"] for claim in (first_claim, second_claim)
             if claim["value"] is not None

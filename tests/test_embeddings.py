@@ -209,6 +209,17 @@ def test_siliconflow_vl_request_uses_managed_image_data_uri_and_one_space():
     assert request.space_id != prepared().space_id
 
 
+def test_siliconflow_batch_stops_before_provider_index_reset():
+    inputs = tuple(EmbeddingInput(f"facet/{index}", text=f"probe {index}")
+                   for index in range(9))
+    accepted = prepared(*inputs[:8], configuration=siliconflow_profile())
+    accepted.verify()
+    assert accepted.input_count == 8
+    with pytest.raises(ForestError) as rejected:
+        prepared(*inputs, configuration=siliconflow_profile())
+    assert rejected.value.code == "EMBEDDING_BATCH_INVALID"
+
+
 async def test_siliconflow_vl_response_is_l2_normalized_and_keeps_usage():
     configuration = siliconflow_profile(dimensions=64)
 

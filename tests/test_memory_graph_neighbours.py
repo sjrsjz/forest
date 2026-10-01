@@ -238,8 +238,8 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
 
         await execute(
             "INSERT INTO {}.memory_domains (bot_id,initialization_operation_id,input_digest,"
-            "space_id,embedding_model_kind,model_revision_digest,dimensions,normalization,"
-            "fusion_policy_revision) VALUES (%s,'bind/test',%s,'space/test','TEXT_IMAGE',%s,4,'L2','independent-facets/1')",
+            "space_id,embedding_model_kind,model_revision_digest,dimensions,max_batch_items,normalization,"
+            "fusion_policy_revision) VALUES (%s,'bind/test',%s,'space/test','TEXT_IMAGE',%s,4,8,'L2','independent-facets/1')",
             (store.bot_id, digest, digest),
         )
 

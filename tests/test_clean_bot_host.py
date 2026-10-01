@@ -1552,7 +1552,8 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                             saved_domain = await (
                                 await conn.execute(
                                     sql.SQL(
-                                        "SELECT d.space_id,d.dimensions,w.state FROM {}.memory_domains d "
+                                        "SELECT d.space_id,d.dimensions,d.max_batch_items,w.state "
+                                        "FROM {}.memory_domains d "
                                         "JOIN {}.memory_domain_bind_work w USING(bot_id)"
                                     ).format(
                                         sql.Identifier(memory_schema),
@@ -1602,14 +1603,15 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             )
             assert domain["space_id"] == saved_domain["space_id"]
             assert domain["dimensions"] == saved_domain["dimensions"] == 4096
+            assert saved_domain["max_batch_items"] == 8
             embedding_instance = host.registry.get("embedding.multimodal")
             embedding_identity = embedding_instance.generation_identity
             embedding_profile = await embedding_instance.runtime_service_handlers()[
-                ("embedding.profile.bind", 1)
+                ("embedding.profile.bind", 2)
             ].invoke_routed(
                 FrozenServiceRoute(
                     service_id="embedding.profile.bind",
-                    version=1,
+                    version=2,
                     caller_component_id="memory.graph",
                     provider_component_id="embedding.multimodal",
                     provider_generation_id=embedding_identity.generation_id,
@@ -1628,6 +1630,7 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     "request_id": "embedding-materialize-host-test",
                 },
             )
+            assert embedding_profile["max_batch_items"] == 8
             source_bytes = "跨群记忆".encode("utf-8")
             source_payload = await host._kernel.payload.put_bytes(
                 owner_component_id="memory.graph",

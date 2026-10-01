@@ -56,6 +56,12 @@ def _profile_snapshot(profile):
     }
 
 
+def _max_batch_items(model):
+    # SiliconFlow resets result indexes after each group of eight. The wire
+    # contract cannot attribute a larger response to its frozen facet list.
+    return 8 if model == "Qwen/Qwen3-VL-Embedding-8B" else 32
+
+
 def _facet_source(facet, bot_id):
     if facet.get("input_kind") == "ADMIN_TRIAL":
         source = {
@@ -178,7 +184,8 @@ async def _embedding_input(facet, payloads, bot_id):
 
 async def _prepare_request(request, profile, space_id, payloads, bot_id):
     facets = request["facets"]
-    if not 1 <= len(facets) <= 32 or len({f["facet_id"] for f in facets}) != len(facets):
+    if (not 1 <= len(facets) <= _max_batch_items(profile["model"])
+            or len({f["facet_id"] for f in facets}) != len(facets)):
         raise ForestError(
             "EMBEDDING_BATCH_INVALID", "Embedding batch has invalid facet identities", 422
         )
@@ -254,19 +261,20 @@ class MultimodalEmbeddingProvider(Plugin):
     @service(
         "embedding.profile.bind",
         semantics="read",
-        contract="1.0",
+        contract="2.0",
         input_schema="schemas/bind-input.json",
         output_schema="schemas/bind-output.json",
     )
     async def bind(self, payload, ctx):
         return {
-            "protocol": "forest.embedding-profile/1",
+            "protocol": "forest.embedding-profile/2",
             "request_id": payload["request_id"],
             "component_id": "embedding.multimodal",
             "generation_id": ctx.identity["generation_id"],
             "profile_ref": self.profile_ref,
             "space_id": self.space_id,
             "profile": self.profile,
+            "max_batch_items": _max_batch_items(self.profile["model"]),
         }
 
     @service(

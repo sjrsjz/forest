@@ -86,9 +86,9 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
             )
         await execute(
             "INSERT INTO {}.memory_domains(bot_id,initialization_operation_id,input_digest,"
-            "space_id,embedding_model_kind,model_revision_digest,dimensions,normalization,"
+            "space_id,embedding_model_kind,model_revision_digest,dimensions,max_batch_items,normalization,"
             "fusion_policy_revision) VALUES "
-            "(%s,'bind/test',%s,'space/test','TEXT_IMAGE',%s,4,'L2','independent-facets/1')",
+            "(%s,'bind/test',%s,'space/test','TEXT_IMAGE',%s,4,8,'L2','independent-facets/1')",
             (bot, digest, digest),
         )
         await execute(

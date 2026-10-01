@@ -49,13 +49,14 @@ async def test_embedding_worker_handoffs_before_http_and_observes_claim_order():
         events.append(name)
         if name == "embedding.profile.bind":
             return {
-                "protocol": "forest.embedding-profile/1",
+                "protocol": "forest.embedding-profile/2",
                 "request_id": request_id,
                 "component_id": "embedding.multimodal",
                 "generation_id": "generation/one",
                 "profile_ref": "profile:" + "c" * 64,
                 "space_id": space,
                 "profile": profile_snapshot,
+                "max_batch_items": 8,
             }
         if name == "embedding.request.materialize":
             assert payload["purpose"] == "DOCUMENT"

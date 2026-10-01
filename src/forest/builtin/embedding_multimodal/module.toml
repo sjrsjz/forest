@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.embedding.multimodal"
-version = "2.4.3"
+version = "2.5.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "embedding_provider:MultimodalEmbeddingProvider"
@@ -35,7 +35,7 @@ stop_timeout_s = 10
 
 [[components.provides]]
 name = "embedding.profile.bind"
-contract = "1.0"
+contract = "2.0"
 semantics = "read"
 input_schema = "schemas/bind-input.json"
 output_schema = "schemas/bind-output.json"

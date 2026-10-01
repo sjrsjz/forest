@@ -436,6 +436,11 @@ def _prepare(profile, inputs, request_id, transport_attempt_id, purpose):
     _identifier(request_id)
     _identifier(transport_attempt_id)
     encoded, facets = _materialize(inputs)
+    if profile.model == SILICONFLOW_VL_MODEL and len(facets) > 8:
+        raise _error(
+            "EMBEDDING_BATCH_INVALID",
+            "SiliconFlow VL batches cannot exceed eight facets with attributable indexes",
+        )
     if profile.model == JINA_MODEL:
         body = {
             "model": profile.model,

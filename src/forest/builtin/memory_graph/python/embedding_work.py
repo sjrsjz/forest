@@ -201,6 +201,7 @@ async def dispatch(ctx, task, profile):
         "embedding.profile.bind",
         {"protocol": "forest.embedding-bind-request/1", "request_id": request_id},
         operation_id=ctx.operations.stable("embedding-profile:" + claim_id),
+        contract_major=2,
         timeout=10,
     )
     expected = {
@@ -208,11 +209,12 @@ async def dispatch(ctx, task, profile):
         for key in ("deployment_id", "model_revision", "model", "dimensions")
     }
     if (
-        bound.get("protocol") != "forest.embedding-profile/1"
+        bound.get("protocol") != "forest.embedding-profile/2"
         or bound.get("request_id") != request_id
         or bound.get("component_id") != "embedding.multimodal"
         or _plain(bound.get("profile")) != expected
         or bound.get("space_id") != claim["space_id"]
+        or len(claim["facets"]) > bound.get("max_batch_items", 0)
     ):
         raise ForestError(
             "MEMORY_EMBEDDING_PROFILE_MISMATCH",

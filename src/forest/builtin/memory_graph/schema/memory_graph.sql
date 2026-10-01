@@ -10,6 +10,7 @@ CREATE TABLE memory_domains (
         model_revision_digest ~ '^sha256:[a-f0-9]{64}$'
     ),
     dimensions integer NOT NULL CHECK (dimensions BETWEEN 1 AND 4096),
+    max_batch_items integer NOT NULL CHECK (max_batch_items BETWEEN 1 AND 32),
     normalization text NOT NULL CHECK (normalization IN ('L2','NONE')),
     fusion_policy_revision text NOT NULL
         CHECK (octet_length(fusion_policy_revision) BETWEEN 1 AND 256),
@@ -4691,6 +4692,8 @@ BEGIN
        OR body->>'model_revision_digest' !~ '^sha256:[a-f0-9]{64}$'
        OR body->>'dimensions' !~ '^[1-9][0-9]*$'
        OR (body->>'dimensions')::integer NOT BETWEEN 1 AND 4096
+       OR body->>'max_batch_items' !~ '^[1-9][0-9]*$'
+       OR (body->>'max_batch_items')::integer NOT BETWEEN 1 AND 32
        OR body->>'normalization' IS DISTINCT FROM 'L2'
        OR body->>'fusion_policy_revision' IS DISTINCT FROM 'independent-facets/1' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
@@ -4699,10 +4702,11 @@ BEGIN
     END IF;
     INSERT INTO __forest_module_schema__.memory_domains(
         bot_id,initialization_operation_id,input_digest,space_id,embedding_model_kind,
-        model_revision_digest,dimensions,normalization,fusion_policy_revision)
+        model_revision_digest,dimensions,max_batch_items,normalization,fusion_policy_revision)
     VALUES(requested_bot,requested_operation,requested_digest,body->>'space_id',
         body->>'embedding_model_kind',body->>'model_revision_digest',
-        (body->>'dimensions')::integer,body->>'normalization',
+        (body->>'dimensions')::integer,(body->>'max_batch_items')::integer,
+        body->>'normalization',
         body->>'fusion_policy_revision')
     ON CONFLICT (bot_id) DO NOTHING;
     SELECT * INTO domain_row FROM __forest_module_schema__.memory_domains
@@ -4712,6 +4716,7 @@ BEGIN
        OR domain_row.embedding_model_kind IS DISTINCT FROM body->>'embedding_model_kind'
        OR domain_row.model_revision_digest IS DISTINCT FROM body->>'model_revision_digest'
        OR domain_row.dimensions IS DISTINCT FROM (body->>'dimensions')::integer
+       OR domain_row.max_batch_items IS DISTINCT FROM (body->>'max_batch_items')::integer
        OR domain_row.normalization IS DISTINCT FROM body->>'normalization'
        OR domain_row.fusion_policy_revision IS DISTINCT FROM body->>'fusion_policy_revision'
        OR (domain_row.initialization_operation_id=requested_operation
@@ -7608,6 +7613,7 @@ DECLARE
     requested_lease integer := (input->>'lease_seconds')::integer;
     prior_claim __forest_module_schema__.embedding_claims%ROWTYPE;
     domain_space text;
+    domain_batch_limit integer;
     deletion_epoch_value bigint;
     selected_facets jsonb;
     selected_purpose text;
@@ -7636,7 +7642,8 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
             'value',prior_claim.claim_payload);
     END IF;
-    SELECT space_id INTO domain_space FROM __forest_module_schema__.memory_domains
+    SELECT space_id,max_batch_items INTO domain_space,domain_batch_limit
+    FROM __forest_module_schema__.memory_domains
     WHERE bot_id=requested_bot;
     IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
@@ -7722,7 +7729,7 @@ BEGIN
                 AND c.state='CLAIMED' AND c.lease_deadline>clock_timestamp()
           )
         ORDER BY CASE f.purpose WHEN 'QUERY' THEN 0 ELSE 1 END,
-                 f.created_at,f.facet_id LIMIT 32
+                 f.created_at,f.facet_id LIMIT domain_batch_limit
         FOR UPDATE OF f SKIP LOCKED
     ), focus AS (
         SELECT purpose,query_id FROM candidates
@@ -7774,7 +7781,7 @@ BEGIN
         lease_seconds,lease_deadline,item_limit,item_count,claim_payload)
     VALUES(requested_bot,requested_token,selected_purpose,domain_space,deletion_epoch_value,
         requested_lease,clock_timestamp()+(requested_lease*interval '1 second'),
-        32,jsonb_array_length(selected_facets),claim_value);
+        domain_batch_limit,jsonb_array_length(selected_facets),claim_value);
     INSERT INTO __forest_module_schema__.embedding_claim_items(
         bot_id,claim_id,item_index,facet_id)
     SELECT requested_bot,requested_token,ordinality-1,facet->>'facet_id'
