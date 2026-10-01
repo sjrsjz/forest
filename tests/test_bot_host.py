@@ -1566,6 +1566,25 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     "core.reload", {"expected_graph_revision": first_modules["graph_revision"] + 1}
                 )
             assert core_reload_stale.value.code == "RUNTIME_GRAPH_REVISION_CONFLICT"
+            audit_before = host.registry.graph_identity
+            affected = set(host.registry.replacement_closure("audit.console"))
+            assert "audit.console" in affected
+            assert "kernel.audit" not in affected
+            await host.replace_runtime_graph(
+                target_component_id="audit.console",
+                expected_graph_revision=audit_before.graph_revision,
+            )
+            audit_after = host.registry.graph_identity
+            assert audit_after.graph_revision == audit_before.graph_revision + 1
+            assert set(audit_after.generations) == set(audit_before.generations)
+            assert all(
+                (audit_after.generations[component_id] != audit_before.generations[component_id])
+                == (component_id in affected)
+                for component_id in audit_before.generations
+            )
+            assert "Forest audit:" in (
+                await core_command("audit.tail", {"limit": 1})
+            ).text
             async with host.store.pool.connection() as conn:
                 grants = await (
                     await conn.execute(
@@ -2819,6 +2838,9 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             management_operation = gateway.operation_id(
                 "memory.graph", "memory.forget.enqueue", "host-forget"
             )
+            target_generation_id, target_graph_revision = gateway.authorization_target(
+                "memory.graph"
+            )
             management_ticket = await gateway.ticket_authority.issue(
                 session=AuthenticatedWebSession(
                     "token-digest", "session/host-test", 1, "csrf-digest",
@@ -2828,8 +2850,8 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 target_scope_kind="bot",
                 target_scope_id=settings.bot_id,
                 target_component_id="memory.graph",
-                target_generation_id=memory_identity.generation_id,
-                target_graph_revision=memory_identity.graph_revision,
+                target_generation_id=target_generation_id,
+                target_graph_revision=target_graph_revision,
                 target_operation_ref=management_operation,
                 action_key="memory.forget.enqueue",
                 input_digest=digest_json(management_body),

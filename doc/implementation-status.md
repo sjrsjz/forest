@@ -560,3 +560,5 @@ Core Shell 包化（2026-10-02）：`core.status/pause/resume/reload` 的命令�
 热替换长用例复核（2026-10-02）：以仅存在于一次性测试镜像的 30 秒协程位置采样重跑同一 PostgreSQL 用例，依次观察到预览、重载、配置重建、组件启停及末段 `verify_in(conn)`，最终 `1 passed in 310.43s`；临时诊断代码已撤回，工作树测试文件无内容差异。首次等待超过 20 分钟与这次通过之间存在不可解释的时序差异，不能将其当成已修复；下一次若复现，应在 `verify_in` 内记录更深的 await 链与锁拥有者，而不是增加无来源的通用重试。
 
 审计 Shell 包化（2026-10-02）：新增自动安装的 `audit.console` Worker 包，独立声明和执行 `audit.tail`；`kernel.audit` 只暴露审计存储与有界的 `audit.page.snapshot` 查询端口。宿主 `builtin_audit_shell.py`、内核 `shell.audit.execute` 路由及命令声明已移除；审计结果的格式化由可换代 Worker 完成。官方 Bot 图因此为 22 个组件。包工件校验、Ruff 和本地回归 `474 passed, 110 skipped` 均通过；隔离 PostgreSQL 的完整 22 组件图启动、真实 Worker Shell 路由调用、退役与重启用例 `1 passed in 314.93s`。此测试验证包进入通用 Generation 生命周期，但未单独请求替换 `audit.console` Generation；线上实例尚未切换此源码。
+
+审计包局部换代复核（2026-10-02）：同一完整 PostgreSQL 图用例增加 `audit.console` 目标换代，核对实际影响闭包内的 Generation 改变、`kernel.audit` 等无关 Generation 保留，且换代前后 `audit.tail` 均经新旧对应 Worker 正常执行。首次运行通过这些断言后，在后续 Memory Web 动作的测试票据上出现 `WEB_AUTHORITY_TICKET_TARGET_MISMATCH`：测试原按模块自身的代身份修订签票，局部换代后票据应绑定当前 RuntimeGraph 修订。夹具改用管理网关的 `authorization_target` 后，从头重跑 `1 passed in 346.77s`。运行时代码未为此增加兼容分支；本次证据覆盖局部换代与后续 Web 操作，但未覆盖长时间实网负载。当前在线 Supervisor 仍是旧镜像。
