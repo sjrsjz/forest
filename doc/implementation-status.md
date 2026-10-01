@@ -546,3 +546,5 @@ Validation (2026-10-02): The isolated PostgreSQL complete 21-component Graph sta
 
 
 活动领取组只读对齐诊断（2026-10-02）：在线观察脚本现在按活动 `trigger_claim_groups` 与准确群 lane 的 Session/Run 做有界组级汇总。恰好一个领取组且 lane 尚无 active Session/Run 的正常预填状态单独计数；多个活动组或与 lane 不对齐返回 `CONVERSATION_CLAIM_ALIGNMENT_INVALID`，不会误判为普通可重排候选，也不会擅自改写 Trigger。Ruff、语法和现行在线库只读执行通过；在线样本有 0 个活动领取会话、0 个异常组，6 条 Memory 来源和 2 个群主干，最新两个会话决策均为非白名单群 `NO_TRIGGER/group_not_allowed`。当前仅建立异常检测入口，尚无对已损坏多组或悬挂领取消歧的自动恢复协议；获准群的真实 @ 与完整 Agent 回复仍未验收。
+
+OneBot 账号和触发配置只读核对（2026-10-02）：树莓派上的旧 `alicebot.service` 为 inactive，Napcat 的 OneBot WebSocket 仍监听 8080，Forest 主机到该端点有已建立连接。通过 OneBot 只读 `get_group_list` 确认当前账号属于获准群 `933179609`；`get_login_info` 返回登录 QQ `3605196653`。在线 `forest-main` 冻结 Bootstrap Profile 的 `adapter.onebot.self_id` 同为 `3605196653`，WebSocket 指向树莓派 8080，`conversation.trigger-policy` 仅允许群 `933179609` 且模式为 `MENTION`。没有读取或输出群消息内容、令牌及密钥，也没有发送 QQ 消息。随后两次在线只读观测均为 21 个 ACTIVE 组件、0 个 active Run、0 个待发送、0 个活动领取组和 0 个违规项；当前最新入站仍仅来自两个非白名单群。因此账号身份、群成员资格和冻结触发配置相互吻合，但尚不能据此证明获准群的新 @ 事件被接收并完成真实回复。
