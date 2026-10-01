@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.1.1"
+version = "2.1.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -17,7 +17,7 @@ configuration_apply = "worker-host/1"
 max_frame_bytes = 262144
 max_inflight = 16
 max_queue_items = 256
-max_state_inflight = 1
+max_state_inflight = 16
 max_owned_tasks = 4
 max_owned_resources = 4
 

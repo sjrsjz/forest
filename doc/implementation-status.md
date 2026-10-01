@@ -462,3 +462,5 @@ Shell 启停入口审计：现有 Shell 仅贡献 `module.list/reload`；`module
 同一候选镜像的 Worker Host 局部重载回归也通过（`1 passed`，289.63 秒）：Shell 重载后不受影响的 Generation 仍保持原实例。这是隔离 PostgreSQL 与假 OneBot 验证；真实实例仍运行旧镜像。
 
 浏览器到模块控制面的验收发现控制台 iframe 消息限流将 `resize` 与 query/action 共用窗口：Worker Host UI 完成启用提交后，紧接着的状态查询可能被静默丢弃，页面停在“已提交”却没有结算状态。现按高度上报、资产分块和普通操作分别计数，并对带 request ID 的超限操作返回明确错误；Worker Host UI 同时移除“启停尚未开放”的过期提示，包版本升至 `1.6.17`。系统 Edge 中的真实浏览器用例经认证 HTTP、隔离 iframe、只读预检、`module.enable` action 和后续状态查询走通，并继续覆盖 Memory UI 的遗忘批次操作（`5 passed`）；Ruff、控制台脚本语法及包工件构建通过。此验收使用假模块契约，仍不能代替真实部署会话与 Bot 选择事务的端到端验收。
+
+真实部署账号会话到 Bot 选择事务的隔离 PostgreSQL 验收现已打通：初始化独立部署库和首位管理员、通过 HTTP 登录并携带 Origin/CSRF，调用当前 Worker Host 的 `validate` 与 `module.enable`，轮询持久选择任务直到内核 Graph 发布 `SUCCEEDED`，并核对目标组件进入当前 Graph；同一完整假 Bot 用例保留 Shell 启用/停用及 Web 旧计划冲突验证（`1 passed`，296.45 秒）。验收中还发现 OneBot Adapter 声明 16 个并发输入却只允许 1 个宿主 RPC，第二条群事件短暂重叠时会在接入前报 `OVERLOADED`；现将 `max_state_inflight` 调至 16，包版本升至 `2.1.2`。仍使用假 OneBot/模型客户端，没有向真实 QQ 发消息；候选版本尚未部署到真实 Supervisor。

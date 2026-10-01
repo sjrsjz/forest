@@ -42,7 +42,14 @@ from forest.runtime_contracts import (
 )
 from forest.runtime_modules import ModuleLifecycleState
 from forest.shell_command_protocol import ShellCommandExecutionRequest
-from forest.storage.deployment_web_identity import AuthenticatedWebSession, WebSession, WebSubject
+from forest.storage.clean_deployment_store import CleanDeploymentStore
+from forest.storage.deployment_catalog import DeploymentCatalogRepository
+from forest.storage.deployment_web_identity import (
+    AuthenticatedWebSession,
+    DeploymentWebIdentityAuthority,
+    WebSession,
+    WebSubject,
+)
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.unit_of_work import (
     ComponentConfigurationApplyScope,
@@ -62,6 +69,40 @@ _TEST_SELECTION = ComponentSelectionSnapshot(0, (), digest_json({
     "revision": 0,
     "entries": [],
 }))
+
+
+@asynccontextmanager
+async def _real_web_identity_for_bot_test(dsn):
+    name = "forest_host_web_" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    parsed = urlsplit(dsn)
+    uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
+    store = CleanDeploymentStore(uri, "deployment/host-web-test")
+    try:
+        await store.open()
+        await DeploymentCatalogRepository(store).initialize()
+        secret = bytes(range(32))
+        identity = DeploymentWebIdentityAuthority(
+            store, active_key_id="master/host-test/1",
+            key_resolver=lambda key_id: secret if key_id == "master/host-test/1" else None,
+        )
+        issued_at = datetime.now(timezone.utc)
+        credential = SimpleNamespace(
+            setup_id="setup/0123456789abcdef", pairing_code="p" * 48,
+            issued_at=issued_at, expires_at=issued_at + timedelta(hours=1),
+        )
+        await identity.initialize_setup(credential)
+        await identity.complete_setup(
+            pairing_code=credential.pairing_code,
+            username="admin", display_name="Host administrator",
+            password="host-web-password-1",
+        )
+        yield identity
+    finally:
+        await store.close()
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        await admin.close()
 
 
 class FakeSelectionReader:
@@ -3046,6 +3087,76 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     if latest is not None and latest["state"] == "FAILED":
                         pytest.fail(f"Shell disable replacement failed: {latest}")
                     await asyncio.sleep(0.1)
+
+            class SelectionWebSupervisor:
+                async def management_scopes(self):
+                    return ({"scope_kind": "bot", "scope_id": settings.bot_id},)
+
+                @asynccontextmanager
+                async def management_host(self, scope_id):
+                    assert scope_id == settings.bot_id
+                    yield restarted
+
+            async with _real_web_identity_for_bot_test(dsn) as identity:
+                web_app = create_deployment_management_app(
+                    deployment_id="deployment/host-web-test", components=(),
+                    identity_authority=identity, allowed_origin="http://forest.test",
+                    bot_supervisor=SelectionWebSupervisor(),
+                )
+                base = (
+                    f"/management/v1/scopes/bot/{settings.bot_id}/"
+                    "modules/component.worker-host"
+                )
+                async with AsyncClient(
+                    transport=ASGITransport(app=web_app), base_url="http://forest.test",
+                ) as web:
+                    login = await web.post(
+                        "/management/v1/auth/login",
+                        headers={"origin": "http://forest.test"},
+                        json={"username": "admin", "password": "host-web-password-1"},
+                    )
+                    assert login.status_code == 200, login.text
+                    headers = {
+                        "origin": "http://forest.test",
+                        "x-forest-csrf": web.cookies["forest_management_csrf"],
+                    }
+                    current_selection = await restarted.registry.get(
+                        "component.worker-host"
+                    ).management_contract.query("selection", {})
+                    web_candidate = {
+                        **candidate,
+                        "expected_selection_revision": current_selection["revision"],
+                        "expected_graph_revision": (
+                            restarted.registry.graph_identity.graph_revision
+                        ),
+                    }
+                    checked = await web.post(
+                        f"{base}/queries/validate", headers=headers, json=web_candidate,
+                    )
+                    assert checked.status_code == 200, checked.text
+                    web_preview = checked.json()
+                    assert web_preview["target_component_id"] == "process.executor"
+                    accepted = await web.post(
+                        f"{base}/actions/module.enable",
+                        headers={**headers, "idempotency-key": "web-after-shell-disable"},
+                        json={**web_candidate, "plan_digest": web_preview["plan_digest"]},
+                    )
+                    assert accepted.status_code == 200, accepted.text
+                    web_request_id = accepted.json()["request_id"]
+                    async with asyncio.timeout(90):
+                        while True:
+                            response = await web.post(
+                                f"{base}/queries/selection-application",
+                                headers=headers, json={"request_id": web_request_id},
+                            )
+                            assert response.status_code == 200, response.text
+                            web_state = response.json()
+                            kernel_state = (web_state.get("kernel") or {}).get("state")
+                            if kernel_state == "SUCCEEDED":
+                                break
+                            assert kernel_state != "FAILED", web_state
+                            await asyncio.sleep(0.2)
+                    assert "process.executor" in restarted.registry.graph_identity.generations
         finally:
             await restarted.close()
         assert clients[-1].closed is True

@@ -115,6 +115,8 @@ Agent 结束且没有待处理触发时，剩余消息按有限批次静默写�
 
 接入顺序为 `trusted normalize → (Inbox + ShellGate route 同事务持久化) → business filter/command/agent selection → observe`。ShellGate 是稳定内核中的有界确定性检查，在任意插件代码之前认领 `#forest` 保留命名空间；完整解析和管理实现可由热替换模块承担。识别控制命名空间后即固定 `command_route=CONTROL, trigger_decision=CONTROL_COMMAND`；未知命令、参数错误、无权请求或解析模块离线都不回落 Agent。核心救援子命令不依赖该模块。控制路由与历史消费是两个决策：控制已执行也不跳过更早的 ingress_seq，连续水位只约束历史管线。
 
+接收平台帧的 Adapter 若每个在途帧都可能调用宿主服务，其 Worker `max_state_inflight` 至少要覆盖 `max_inflight`；否则内部 RPC 配额会在接入前直接拒绝第二条消息，即使输入队列尚有空间。官方 OneBot Adapter 两者均声明为 16。要采用更窄的宿主 RPC 容量时，必须先在接入边界建立有界等待和可靠重投，而不是把 `OVERLOADED` 抛回无回放保证的实时连接。
+
 普通 Pipeline 的纯处理器输出新的不可变 DTO/决策，禁止修改共享消息。每个允许阶段内按 `handler.priority` 高值优先、同值 component_id 字典序执行，部署时固定排序快照；插件不能凭任意高值覆盖保留前缀或提升级别。普通命令冲突默认拒绝启用，显式配置选择策略后才可共存。旁路 observer 不享有前台自动回复权，另行发送必须申请独立受控意图。命令注册、鉴权、错误回执及历史安全投影见[09](09-group-shell-command-system.md)。
 
 同会话并不等于整个 Bot 加锁：Actor 的局部单写者只约束该会话 Context，不限制群乙读取或追加同一个 Bot 的长期记忆。
