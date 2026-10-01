@@ -14,6 +14,7 @@ from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
 from forest.builtin_packages import (
+    auto_install_builtin_sources,
     bootstrap_builtin_package,
     bootstrap_installed_package,
     official_builtin_configuration,
@@ -664,14 +665,6 @@ class CleanBotHost:
                 CapabilityGrant("provider.invoke", "bot", self.store.bot_id, delegable=True),
             ),
         )
-        routing = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/routing_graph"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={"protocol": "forest.routing.graph/2"},
-        )
         trigger = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/trigger_policy"))),
             self.package_catalog,
@@ -684,14 +677,6 @@ class CleanBotHost:
                 "group_trigger_mode": self.settings.group_trigger_mode,
                 "private_enabled": self.settings.private_enabled,
             },
-        )
-        onebot_codec = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/onebot_codec"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={},
         )
         jobs = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/job_scheduler"))),
@@ -733,21 +718,6 @@ class CleanBotHost:
                 )
             return self.settings.onebot_access_token
 
-        conversation = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/conversation_scheduler"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.conversation.scheduler/2",
-                "context_view": {
-                    "high_watermark_units": 512,
-                    "retain_units": 256,
-                    "policy_revision": "context-view-unit-window-v1",
-                },
-            },
-        )
         delivery = await bootstrap_builtin_package(
             Path(str(files("forest").joinpath("builtin/delivery"))),
             self.package_catalog,
@@ -837,6 +807,17 @@ class CleanBotHost:
                 }
             ),
         )
+        automatic = []
+        for source in auto_install_builtin_sources():
+            provisioned = await bootstrap_builtin_package(
+                source,
+                self.package_catalog,
+                self.store,
+                self.schema_bundle_installer,
+                kernel=self._kernel,
+                initial_configuration=official_builtin_configuration(source.name),
+            )
+            automatic.append(provisioned.descriptor)
         official_descriptors = (
                 provider.descriptor,
                 worker_host.descriptor,
@@ -845,15 +826,13 @@ class CleanBotHost:
                 memory.descriptor,
                 media.descriptor,
                 agent.descriptor,
-                routing.descriptor,
                 trigger.descriptor,
-                onebot_codec.descriptor,
                 process_executor.descriptor,
                 jobs.descriptor,
                 shell.descriptor,
                 adapter.descriptor,
-                conversation.descriptor,
                 delivery.descriptor,
+                *automatic,
         )
         selected = select_package_members(
             selection, official_descriptors, self.package_catalog

@@ -116,6 +116,7 @@ MANIFEST_SCHEMA = {
                     },
                     "configuration_apply": {"const": "worker-host/1"},
                     "bootstrap_config": {"type": "string"},
+                    "auto_install": {"type": "boolean"},
                     "state_schema": {"type": "integer", "minimum": 1, "maximum": 2147483647},
                     "config_immutable_paths": {
                         "type": "array",
@@ -1253,6 +1254,14 @@ def _manifest(files: dict[str, bytes]) -> dict:
         )
     _schema(files, component.get("config_schema"))
     bootstrap_config = component.get("bootstrap_config")
+    if component.get("auto_install") and (
+        bootstrap_config is None or component["scope"] != "bot"
+        or component.get("effect_services")
+    ):
+        _fail(
+            "INVALID_BOOTSTRAP_CONFIGURATION",
+            "Automatically installed builtins need a seed, Bot scope and no host effect driver",
+        )
     if bootstrap_config is not None:
         parts = PurePosixPath(bootstrap_config)
         if (parts.is_absolute() or ".." in parts.parts or not bootstrap_config.endswith(".json")
