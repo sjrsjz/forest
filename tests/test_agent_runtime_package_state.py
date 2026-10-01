@@ -633,6 +633,177 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 ]
                 assert rows[1]["predecessor_request_id"] == rows[0]["request_id"]
                 raise _RollbackInheritance
+        concurrent_run_id = "run/agent-package/inheritance-race"
+        concurrent_request_id = "model-request/package/inheritance-race"
+        concurrent_successor_id = "model-request/package/inheritance-race-next"
+        concurrent_start = {
+            **model_start,
+            "input": {
+                **model_start["input"],
+                "conversation_ref": "conversation/onebot/group/inheritance-race",
+                "session_id": "session/agent-package/inheritance-race",
+                "run_id": concurrent_run_id,
+                "input_batch": {
+                    **model_start["input"]["input_batch"],
+                    "input_batch_ref": "input-batch/agent-package/inheritance-race",
+                    "trigger_claim": {
+                        **model_start["input"]["input_batch"]["trigger_claim"],
+                        "ref": "claim:" + "4" * 64,
+                        "last_trigger_ref": "trigger/inheritance-race",
+                    },
+                },
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn, "agent.start-run-record", concurrent_start,
+                operation_id="agent-run-start/package/inheritance-race",
+                causal_root_kind="conversation.run", causal_root_id=concurrent_run_id,
+                parent_call_id="call:agent-package/inheritance-race/start",
+                timeout_seconds=10,
+            )
+        concurrent_owner = await _lease_operation(
+            store, participant, generation_id, "agent.acquire-run-record",
+            {"run_id": concurrent_run_id, "owner_id": "agent-worker/inheritance-race",
+             "lease_seconds": 120},
+            "agent-acquire/package/inheritance-race",
+        )
+        concurrent_projection = await _payload(
+            kernel, owner_kind="model.projection", owner_id=concurrent_request_id,
+            value=b'{"messages":[{"role":"user","content":"race"}]}',
+        )
+        concurrent_wire = await _payload(
+            kernel, owner_kind="model.wire",
+            owner_id="model-attempt/package/inheritance-race",
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        concurrent_request = {
+            **request_envelope,
+            "input": {
+                "owner": _owner_ref(concurrent_owner),
+                "request": {
+                    **request_envelope["input"]["request"],
+                    "request_id": concurrent_request_id,
+                    "projection": concurrent_projection.canonical(),
+                    "first_attempt_id": "model-attempt/package/inheritance-race",
+                    "initial_wire": concurrent_wire.canonical(),
+                },
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            assert (await participant.invoke_in(
+                conn, "agent.prepare-model-request-record", concurrent_request,
+                operation_id="agent-model-request/package/inheritance-race",
+                causal_root_kind="agent.execute", causal_root_id=concurrent_run_id,
+                parent_call_id="call:agent-package/inheritance-race/request",
+                timeout_seconds=10,
+            ))["state"] == "READY"
+        successor_projection = await _payload(
+            kernel, owner_kind="model.projection", owner_id=concurrent_successor_id,
+            value=b'{"messages":[{"role":"user","content":"race"}]}',
+        )
+        successor_wire = await _payload(
+            kernel, owner_kind="model.wire",
+            owner_id="model-attempt/package/inheritance-race-next",
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        concurrent_inheritance = {
+            "protocol": "forest.uow-step/1", "caller": caller,
+            "input": {
+                "effect": {"protocol": "forest.effect-unsent-proof-request/1", "attempts": []},
+                "owner": _owner_ref(concurrent_owner),
+                "predecessor_request_id": concurrent_request_id,
+                "successor": {
+                    **{
+                        key: concurrent_request["input"]["request"][key]
+                        for key in (
+                            "provider_component_id", "provider_profile_ref", "model_ref",
+                            "instruction_channel", "capability_digest",
+                            "projected_content_digest", "source_manifest_digest",
+                            "output_token_budget",
+                        )
+                    },
+                    "request_id": concurrent_successor_id,
+                    "first_attempt_id": "model-attempt/package/inheritance-race-next",
+                    "provider_generation_id": "generation/provider/package-next",
+                    "projection": successor_projection.canonical(),
+                    "initial_wire": successor_wire.canonical(),
+                },
+            },
+        }
+        effect_participant = registry.get("kernel.effect").unit_of_work_participant()
+
+        async def inherit_in(conn, label):
+            proof = await effect_participant.invoke_in(
+                conn, "effect.prove-not-applied",
+                {"protocol": "forest.uow-step/1", "caller": caller,
+                 "input": concurrent_inheritance["input"]["effect"], "prior": {}},
+                operation_id="effect-proof/package/inheritance-race/" + label,
+                causal_root_kind="agent.execute", causal_root_id=concurrent_run_id,
+                parent_call_id="call:agent-package/inheritance-race/proof/" + label,
+                timeout_seconds=10,
+            )
+            return await participant.invoke_in(
+                conn, "agent.inherit-model-request-record",
+                {**concurrent_inheritance, "prior": {"effect": proof}},
+                operation_id="agent-inherit/package/inheritance-race",
+                causal_root_kind="agent.execute", causal_root_id=concurrent_run_id,
+                parent_call_id="call:agent-package/inheritance-race/" + label,
+                timeout_seconds=10,
+            )
+
+        async def blocked_inheritor():
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute("SET LOCAL application_name = 'forest-inheritance-race'")
+                return await inherit_in(conn, "second")
+
+        namespace = package.descriptor.storage.spec.namespace
+        async with store.pool.connection() as first_conn, first_conn.transaction():
+            await first_conn.execute(
+                sql.SQL("SELECT run_id FROM {}.agent_runs WHERE bot_id=%s "
+                        "AND run_id=%s FOR UPDATE").format(sql.Identifier(namespace)),
+                (store.bot_id, concurrent_run_id),
+            )
+            second_task = asyncio.create_task(blocked_inheritor())
+            try:
+                async def wait_for_run_lock():
+                    while True:
+                        async with store.pool.connection() as observer:
+                            row = await (await observer.execute(
+                                "SELECT wait_event_type FROM pg_stat_activity "
+                                "WHERE application_name='forest-inheritance-race'"
+                            )).fetchone()
+                        if row is not None and row["wait_event_type"] == "Lock":
+                            return
+                        await asyncio.sleep(0.05)
+
+                await asyncio.wait_for(wait_for_run_lock(), timeout=8)
+                first_result = await inherit_in(first_conn, "first")
+                assert first_result["request_id"] == concurrent_successor_id
+            except BaseException:
+                second_task.cancel()
+                await asyncio.gather(second_task, return_exceptions=True)
+                raise
+        second_result = await second_task
+        assert second_result == first_result
+        async with store.pool.connection() as conn:
+            rows = await (await conn.execute(
+                sql.SQL("SELECT request_id,state FROM {}.model_requests "
+                        "WHERE bot_id=%s AND run_id=%s ORDER BY request_revision")
+                .format(sql.Identifier(namespace)),
+                (store.bot_id, concurrent_run_id),
+            )).fetchall()
+            assert [(row["request_id"], row["state"]) for row in rows] == [
+                (concurrent_request_id, "ABANDONED"),
+                (concurrent_successor_id, "READY"),
+            ]
+            inherited_count = await (await conn.execute(
+                sql.SQL("SELECT count(*) AS n FROM {}.model_request_inheritances "
+                        "WHERE bot_id=%s AND predecessor_request_id=%s")
+                .format(sql.Identifier(namespace)),
+                (store.bot_id, concurrent_request_id),
+            )).fetchone()
+            assert inherited_count["n"] == 1
         blocked_state = await _payload(
             kernel,
             owner_component_id="agent.runtime",

@@ -1117,6 +1117,11 @@ BEGIN
             'error',jsonb_build_object('code','AGENT_MODEL_INHERITANCE_INPUT_INVALID',
                 'message','Model inheritance input is invalid','status',422));
     END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    -- The Run lock serializes inheritors. Read the operation ledger only after
+    -- acquiring it so a concurrent commit is visible to this statement.
     SELECT * INTO existing FROM __forest_module_schema__.model_request_inheritances
     WHERE bot_id=requested_bot AND operation_id=requested_operation;
     IF FOUND THEN
@@ -1138,10 +1143,7 @@ BEGIN
                 'attempt_count',(SELECT attempt_count FROM __forest_module_schema__.model_requests
                                  WHERE bot_id=requested_bot AND request_id=successor_id)));
     END IF;
-    SELECT *,clock_timestamp() AS database_now INTO run_row
-    FROM __forest_module_schema__.agent_runs
-    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
-    IF NOT FOUND OR run_row.owner_id IS DISTINCT FROM owner_value->>'owner_id'
+    IF run_row.run_id IS NULL OR run_row.owner_id IS DISTINCT FROM owner_value->>'owner_id'
        OR run_row.owner_epoch IS DISTINCT FROM (owner_value->>'epoch')::bigint
        OR run_row.owner_expires_at IS NULL
        OR run_row.owner_expires_at<=run_row.database_now THEN
