@@ -2892,7 +2892,30 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert FakeMilvusClient.delete_failures == previous_delete_failures + 1
 
             previous = host.registry.graph_identity
-            replacement_graph = await host.replace_runtime_graph()
+            replacement_task = asyncio.create_task(host.replace_runtime_graph())
+            try:
+                replacement_graph = await asyncio.wait_for(
+                    asyncio.shield(replacement_task), timeout=180,
+                )
+            except TimeoutError as error:
+                owned = {}
+                for component_id, instance in host.registry.instances.items():
+                    work = getattr(instance, "_owned_work", None)
+                    if work is None:
+                        continue
+                    owned[component_id] = {
+                        "inflight": work.inflight,
+                        "draining": work.draining,
+                        "admission": work.admission.is_set(),
+                        "tasks": [
+                            (task.done(), [
+                                (frame.f_code.co_name, frame.f_lineno)
+                                for frame in task.get_stack()
+                            ]) for task in work.owned_tasks()
+                        ],
+                    }
+                replacement_task.cancel()
+                raise AssertionError(f"Graph replacement stalled: {owned}") from error
             assert replacement_graph.graph_identity.graph_id != previous.graph_id
             assert set(replacement_graph.states.values()) == {ModuleLifecycleState.ACTIVE}
             current_worker_host = host.registry.get("component.worker-host")
@@ -3087,12 +3110,28 @@ async def test_clean_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                         break
                     await asyncio.sleep(0.1)
             assert disabled["entries"][-1]["desired_enabled"] is False
-            async with asyncio.timeout(90):
-                while "process.executor" in restarted.registry.graph_identity.generations:
-                    latest = (await restarted._kernel.runtime.status())["latest_replacement"]
-                    if latest is not None and latest["state"] == "FAILED":
-                        pytest.fail(f"Shell disable replacement failed: {latest}")
-                    await asyncio.sleep(0.1)
+            try:
+                async with asyncio.timeout(90):
+                    while "process.executor" in restarted.registry.graph_identity.generations:
+                        latest = (await restarted._kernel.runtime.status())["latest_replacement"]
+                        if latest is not None and latest["state"] == "FAILED":
+                            pytest.fail(f"Shell disable replacement failed: {latest}")
+                        await asyncio.sleep(0.1)
+            except TimeoutError:
+                latest = (await restarted._kernel.runtime.status())["latest_replacement"]
+                replacement_task = restarted._replacement_task
+                task_error = None
+                if replacement_task is not None and replacement_task.done():
+                    task_error = (
+                        "cancelled" if replacement_task.cancelled()
+                        else replacement_task.exception()
+                    )
+                pytest.fail(
+                    "Shell disable replacement timed out: "
+                    f"request={latest}, "
+                    f"task_done={replacement_task.done() if replacement_task else None}, "
+                    f"task_error={task_error}"
+                )
 
             class SelectionWebSupervisor:
                 async def management_scopes(self):
