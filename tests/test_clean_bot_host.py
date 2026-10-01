@@ -495,7 +495,7 @@ async def test_runtime_replacement_prewarms_then_drains_before_publication():
 
     async def assemble():
         events.append("assemble-candidate")
-        return BotGraphCandidate(candidate, _TEST_SELECTION)
+        return BotGraphCandidate(candidate, _TEST_SELECTION, (), host.selection_reader)
 
     host._assemble_candidate = assemble
     with pytest.raises(ForestError) as stale_selection:
@@ -617,7 +617,7 @@ async def test_runtime_replacement_resumes_previous_graph_when_publication_fails
     host.selection_reader = FakeSelectionReader()
 
     async def assemble():
-        return BotGraphCandidate(candidate, _TEST_SELECTION)
+        return BotGraphCandidate(candidate, _TEST_SELECTION, (), host.selection_reader)
 
     host._assemble_candidate = assemble
     with pytest.raises(RuntimeError, match="publication failed"):
@@ -673,7 +673,7 @@ async def test_runtime_replacement_fails_host_after_publication_and_never_resume
     candidate = Candidate()
 
     async def assemble():
-        return BotGraphCandidate(candidate, _TEST_SELECTION)
+        return BotGraphCandidate(candidate, _TEST_SELECTION, (), host.selection_reader)
 
     host._assemble_candidate = assemble
     with pytest.raises(ForestError) as raised:

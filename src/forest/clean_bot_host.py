@@ -52,7 +52,8 @@ _HOST_LEASE_TTL = timedelta(minutes=2)
 class BotGraphCandidate:
     registry: RuntimeModuleRegistry
     selection: ComponentSelectionSnapshot
-    official_descriptors: tuple[RuntimeModuleDescriptor, ...] = ()
+    official_descriptors: tuple[RuntimeModuleDescriptor, ...]
+    selection_reader: ComponentSelectionReader
 
 
 def _required(name: str) -> str:
@@ -334,7 +335,7 @@ class CleanBotHost:
         self.package_catalog = package_catalog or PackageCatalog(
             Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
         )
-        self.selection_reader = ComponentSelectionReader(self.store)
+        self.selection_reader: ComponentSelectionReader | None = None
 
     @property
     def bot(self):
@@ -413,7 +414,24 @@ class CleanBotHost:
             kernel=self._kernel,
             initial_configuration={"protocol": "forest.component-worker-host/1"},
         )
-        selection = await self.selection_reader.snapshot()
+        candidate_reader = ComponentSelectionReader(self.store, worker_host.snapshot)
+        active_reader = self.selection_reader or candidate_reader
+        if active_reader.namespace != candidate_reader.namespace:
+            raise ForestError(
+                "COMPONENT_SELECTION_BINDING_CHANGED",
+                "Selection storage identity cannot change during Graph replacement",
+                409,
+            )
+        if active_reader is candidate_reader:
+            selection = await candidate_reader.snapshot()
+        else:
+            async with active_reader.publication_fence() as selection:
+                if await candidate_reader.snapshot() != selection:
+                    raise ForestError(
+                        "COMPONENT_SELECTION_BINDING_CHANGED",
+                        "Candidate selection query differs from the active selection ledger",
+                        409,
+                    )
         embedding_profile = {
             "deployment_id": self.settings.embedding_deployment_id,
             "model_revision": self.settings.embedding_model_revision,
@@ -823,6 +841,7 @@ class CleanBotHost:
             RuntimeModuleRegistry(self, descriptors, activation_id=activation_id),
             selection,
             official_descriptors,
+            candidate_reader,
         )
 
     async def start(self) -> None:
@@ -842,13 +861,14 @@ class CleanBotHost:
             self._renewal_task = asyncio.create_task(
                 self._renew_lease(), name=f"bot-host-lease:{self.settings.bot_id}"
             )
-            async with self.selection_reader.publication_fence(
+            async with assembled.selection_reader.publication_fence(
                 expected_revision=assembled.selection.revision,
                 expected_digest=assembled.selection.digest,
             ):
                 await registry.start()
             self.registry = registry
             self._official_descriptors = assembled.official_descriptors
+            self.selection_reader = assembled.selection_reader
             self._replacement_task = asyncio.create_task(
                 self._run_graph_replacements(),
                 name=f"bot-graph-replacement:{self.settings.bot_id}",
@@ -1091,6 +1111,7 @@ class CleanBotHost:
                 raise replacement_error
             self.registry = candidate
             self._official_descriptors = assembled.official_descriptors
+            self.selection_reader = assembled.selection_reader
             errors = await previous.close()
             if errors:
                 failure = ForestError(

@@ -137,6 +137,8 @@ Registry 的替换排空现接受与内核围栏相同的成员集合：只冻�
 
 Worker Host 包的选择写端口拒绝停用自身；宿主成员选择不按该组件 ID 再写一份业务规则。Registry 对每个描述符显式声明的 `retention_requires` 检查候选图成员完整性，缺失即拒绝预规划或装配；内核发布时还会核对冻结 Generation 的同一依赖。这使损坏的选择快照不能通过移除配置控制所依赖的 Worker Host 形成残缺图，也不会把包的选择策略复制到宿主。
 
+宿主冷启动的选择读取器从已验证、内容寻址的 Worker Host 包快照取得私有 `schema_id` 和三个只读 Domain Query 的函数绑定，不再写死包内 SQL 函数名。候选热替换继续用当前已发布代的读取绑定持有选择围栏，并在同一围栏内核对新包快照查询得到相同选择事实；新包绑定只在新 Graph 发布成功后成为活动读取器。私有 schema 身份在同一 Bot 的热替换中必须稳定，变更需按未上线部署的显式清库重建处理，不能静默切换到另一份选择账本。
+
 宿主可信进程的 `preview_component_change()` 在当前 Graph 替换锁和选择共享围栏内冻结选择，再交给 `preview_selected_graph()` 使用正式 Registry 依赖和换代规则返回影响集合，不安装 schema、创建 grant、准备 Generation 或启动 Worker。Worker Host 仍拥有选择和授权策略；宿主只负责不可执行描述符编译与图规划。官方包描述符来自最近一次真实装配，计划提交前必须重新装配并比对工件、配置、Graph 与选择身份；只读 `module.validate` 已接入 Web 管理查询，但没有资源预算、授权提交事务或 Shell 入口。
 
 `component.host.validate/1` 现作为包内只读管理查询接入。Worker Host 接收目标组件、精确工件/manifest 摘要、批准能力、启停意图以及预期选择、Graph、目标配置修订，经受限 `runtime.component-candidate.preview/1` 服务请求宿主预览；宿主在图替换锁内取得选择共享围栏、读取当前选择快照，再通过 Worker Host 包内 SQL 端口投影拟议写入，并从同一 `REPEATABLE READ` 事务快照读取候选中全部包的配置事实，编译不可执行候选。选择围栏先于配置快照建立，避免等待锁时冻结过时选择；两者使用两个连接，围栏持续至预览结束。返回选择与来源 Graph 身份、目标、`replace/retain/remove/add/drain/prepare` 影响集合、各包工件与配置事实及 `plan_digest`，不返回配置正文或工件路径。官方包的内容校验与配置读取按最多四个并发只读操作执行，阻塞式目录校验移到线程执行，避免 Worker 调用期限被事件循环阻塞耗尽。此查询本身不写选择账本、安装包、准备 Generation，也不授权启停。资源预算、授权提交事务中的计划事实复核及 Web/Shell 启停动作仍未完成。

@@ -9,7 +9,7 @@ from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
-from forest.packages import PackageCatalog, digest_json
+from forest.packages import PackageCatalog, PackageSnapshot, digest_json
 from forest.runtime_modules import RuntimeModuleDescriptor
 from forest.schema_bundles import module_schema_namespace
 
@@ -184,9 +184,33 @@ def select_package_members(
 class ComponentSelectionReader:
     """Read the package-owned projection without a Worker process at cold start."""
 
-    def __init__(self, store) -> None:
+    def __init__(self, store, snapshot: PackageSnapshot) -> None:
+        snapshot.verify()
         self.store = store
-        self.namespace = module_schema_namespace("forest.component.worker-host")
+        component = snapshot.component
+        storage = component.get("storage")
+        queries = {
+            item["name"]: item["function"]
+            for item in component.get("domain_queries", ())
+        }
+        required = (
+            "component.selection.snapshot",
+            "component.selection.project",
+            "component.selection.operation-probe",
+        )
+        if (
+            component.get("scope") != "bot"
+            or not isinstance(storage, dict)
+            or storage.get("scope") != "bot"
+            or not all(name in queries for name in required)
+        ):
+            raise ForestError(
+                "COMPONENT_SELECTION_BINDING_INVALID",
+                "Selection authority package has no complete Bot-scoped read binding",
+                503,
+            )
+        self.namespace = module_schema_namespace(storage["schema_id"])
+        self.functions = queries
 
     @asynccontextmanager
     async def publication_fence(
@@ -214,7 +238,7 @@ class ComponentSelectionReader:
 
         result = await conn.execute(
             sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
-                sql.Identifier(self.namespace, "component_selection_snapshot")
+                sql.Identifier(self.namespace, self.functions["component.selection.snapshot"])
             ),
             (Jsonb({"bot_id": self.store.bot_id}), Jsonb({})),
         )
@@ -237,7 +261,7 @@ class ComponentSelectionReader:
 
         result = await conn.execute(
             sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
-                sql.Identifier(self.namespace, "component_selection_project")
+                sql.Identifier(self.namespace, self.functions["component.selection.project"])
             ),
             (
                 Jsonb({
@@ -270,7 +294,9 @@ class ComponentSelectionReader:
 
         result = await conn.execute(
             sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
-                sql.Identifier(self.namespace, "component_selection_operation_probe")
+                sql.Identifier(
+                    self.namespace, self.functions["component.selection.operation-probe"]
+                )
             ),
             (
                 Jsonb({

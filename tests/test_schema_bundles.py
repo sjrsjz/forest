@@ -277,7 +277,7 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
         "approved_capabilities": [], "desired_enabled": winner["value"]["desired_enabled"],
         "desired_revision": 1,
     }]
-    reader = ComponentSelectionReader(store)
+    reader = ComponentSelectionReader(store, snapshot)
     current = await reader.snapshot()
     assert current.revision == frozen["revision"]
     assert [entry.as_dict() for entry in current.entries] == frozen["entries"]
@@ -2764,7 +2764,7 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     controller.selection_reader = SimpleNamespace(publication_fence=publication_fence)
 
     async def assemble_added(_activation_id=None):
-        return BotGraphCandidate(added, selection)
+        return BotGraphCandidate(added, selection, (), controller.selection_reader)
 
     controller._assemble_candidate = assemble_added
     assert await controller.replace_runtime_graph(
@@ -2783,7 +2783,7 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     assert remove_plan.remove == remove_plan.drain == ("forest.counter",)
 
     async def assemble_removed(_activation_id=None):
-        return BotGraphCandidate(removed, selection)
+        return BotGraphCandidate(removed, selection, (), controller.selection_reader)
 
     controller._assemble_candidate = assemble_removed
     assert await controller.replace_runtime_graph(
