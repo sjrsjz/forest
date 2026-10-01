@@ -192,13 +192,10 @@ class ModuleConfigurationRepository:
                     validation_digest,
                 )
                 return dict(existing)
-            if (
-                head["desired_revision"] != expected_desired_revision
-                or head["effective_revision"] != expected_desired_revision
-            ):
+            if head["desired_revision"] != expected_desired_revision:
                 raise ForestError(
                     "MODULE_CONFIGURATION_CONFLICT",
-                    "Configuration head changed or still awaits Generation activation",
+                    "Configuration desired head changed before planning",
                     409,
                 )
             await self._assert_immutable_in(conn, value)
@@ -307,7 +304,6 @@ class ModuleConfigurationRepository:
             or plan["state"] != "PLANNED"
             or plan["expected_desired_revision"] != expected_desired_revision
             or head["desired_revision"] != expected_desired_revision
-            or head["effective_revision"] != expected_desired_revision
         ):
             raise ForestError(
                 "MODULE_CONFIGURATION_CONFLICT",
@@ -438,10 +434,10 @@ class ModuleConfigurationRepository:
                     409,
                 )
             return await self._revision_in(conn, revision, verify=True)
-        if head["desired_revision"] != revision or observed_effective_revision not in {
-            revision,
-            revision - 1,
-        }:
+        if (
+            head["desired_revision"] != revision
+            or not 1 <= observed_effective_revision <= revision
+        ):
             raise ForestError(
                 "MODULE_CONFIGURATION_CONFLICT",
                 "Configuration cannot become effective from the current head",

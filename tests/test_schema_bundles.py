@@ -167,6 +167,18 @@ async def clean_authority():
         await admin.close()
 
 
+def _isolated_runtime_descriptors(*descriptors):
+    """Omit the absent Worker Host edge in focused lower-layer fixtures."""
+
+    return tuple(
+        replace(descriptor, retention_requires=tuple(
+            component_id for component_id in descriptor.retention_requires
+            if component_id != "component.worker-host"
+        ))
+        for descriptor in descriptors
+    )
+
+
 async def test_kernel_replacement_service_preserves_frozen_selection_credentials():
     calls = []
 
@@ -1429,7 +1441,7 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
     )
     registry = RuntimeModuleRegistry(
         host,
-        (*kernel.descriptors, counter.descriptor),
+        _isolated_runtime_descriptors(*kernel.descriptors, counter.descriptor),
     )
     await registry.start()
     try:
@@ -2414,14 +2426,13 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
     assert (await configuration.effective(include_value=True)).value == {"label": "one"}
     desired = await configuration.desired(include_value=True)
     assert desired.revision == 2 and desired.value == {"label": "two"}
-    with pytest.raises(ForestError) as caught:
-        await configuration.plan(
-            operation_id="configuration.plan.while-pending",
-            expected_desired_revision=2,
-            value={"label": "three"},
-            validation_digest=validation_digest,
-        )
-    assert caught.value.code == "MODULE_CONFIGURATION_CONFLICT"
+    pending_plan = await configuration.plan(
+        operation_id="configuration.plan.while-pending",
+        expected_desired_revision=2,
+        value={"label": "three"},
+        validation_digest=validation_digest,
+    )
+    assert pending_plan["expected_desired_revision"] == 2
 
     runtime = KernelRuntimeRepository(store, runtime_storage.spec.namespace)
     lease = await runtime.claim_host("host-a", "inc-a")
@@ -2535,19 +2546,17 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
         ),
         authorization_guard=authorize_configuration,
     )
-    rejected_body = {"expected_desired_revision": 3, "value": {"label": "rejected"}}
-    with pytest.raises(ForestError) as rejected:
-        await configuration.plan(
-            operation_id="configuration.plan.rejected",
-            expected_desired_revision=3,
-            value={"label": "rejected"},
-            validation_digest=validation_digest,
-            authorization=await ticket(
-                "configuration.plan.rejected", "configuration.plan", rejected_body
-            ),
-            authorization_guard=authorize_configuration,
-        )
-    assert rejected.value.code == "MODULE_CONFIGURATION_CONFLICT"
+    recovery_body = {"expected_desired_revision": 3, "value": {"label": "two"}}
+    recovery_plan = await configuration.plan(
+        operation_id="configuration.plan.recovery",
+        expected_desired_revision=3,
+        value={"label": "two"},
+        validation_digest=validation_digest,
+        authorization=await ticket(
+            "configuration.plan.recovery", "configuration.plan", recovery_body
+        ),
+        authorization_guard=authorize_configuration,
+    )
     async with store.pool.connection() as conn:
         receipt_operations = await (
             await conn.execute(
@@ -2560,6 +2569,7 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
     assert [row["target_operation_ref"] for row in receipt_operations] == [
         "configuration.apply.3",
         "configuration.plan.3",
+        "configuration.plan.recovery",
     ]
     candidate_v3 = replace(
         runtime_binding("kernel.runtime", marker="8", storage=storage_binding),
@@ -2601,6 +2611,37 @@ async def test_module_configuration_and_runtime_publication_are_one_transaction(
         ).fetchone()
     assert head["graph_id"] == graph.graph_id
     assert failed_candidate["state"] == "PREPARED"
+    recovery_apply = {
+        "plan_id": recovery_plan["plan_id"],
+        "expected_desired_revision": 3,
+    }
+    recovered = await configuration.apply(
+        operation_id="configuration.apply.recovery",
+        plan_id=recovery_plan["plan_id"],
+        expected_desired_revision=3,
+        authorization=await ticket(
+            "configuration.apply.recovery", "configuration.apply", recovery_apply,
+            digest_json({"plan_id": recovery_plan["plan_id"]}),
+        ),
+        authorization_guard=authorize_configuration,
+    )
+    assert recovered.revision == 4
+    assert (await configuration.effective()).revision == 2
+    candidate_v4 = replace(
+        runtime_binding("kernel.runtime", marker="9", storage=storage_binding),
+        package_digest=runtime_storage.package_digest,
+        config_revision=recovered.revision,
+        config_payload_id=recovered.payload_id,
+        config_payload_digest=recovered.payload_digest,
+    )
+    graph_v4 = await runtime.prepare_graph(lease, [candidate_v4], str(uuid4()))
+    await runtime.publish_graph(
+        lease, graph_v4,
+        configuration_activators={"kernel.runtime": configuration},
+    )
+    assert (await configuration.desired()).revision == 4
+    assert (await configuration.effective(include_value=True)).value == {"label": "two"}
+    assert (await configuration.effective()).revision == 4
 
 
 @pytest.mark.postgres
@@ -2626,7 +2667,10 @@ async def test_clean_kernel_bootstrap_publishes_all_required_authorities(clean_a
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
-    registry = RuntimeModuleRegistry(host, core.descriptors)
+    with pytest.raises(ForestError) as missing_control:
+        RuntimeModuleRegistry(host, core.descriptors)
+    assert missing_control.value.code == "RUNTIME_MODULE_RETENTION_DEPENDENCY_MISSING"
+    registry = RuntimeModuleRegistry(host, _isolated_runtime_descriptors(*core.descriptors))
     await registry.start()
     assert set(registry.states.values()) == {ModuleLifecycleState.ACTIVE}
     authorization_module = registry.get("kernel.authorization")
@@ -2697,7 +2741,8 @@ async def test_runtime_registry_transfers_unaffected_generations_without_restart
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
-    previous = RuntimeModuleRegistry(host, core.descriptors)
+    descriptors = _isolated_runtime_descriptors(*core.descriptors)
+    previous = RuntimeModuleRegistry(host, descriptors)
     await previous.start()
     original_graph = previous.graph_identity
     original_instances = dict(previous.instances)
@@ -2721,7 +2766,7 @@ async def test_runtime_registry_transfers_unaffected_generations_without_restart
             replace(item, factory=fail_target)
             if item.component_id == "kernel.runtime"
             else item
-            for item in core.descriptors
+            for item in descriptors
         ),
     )
     assert failed.plan_retained_generations(previous, "kernel.runtime") == (
@@ -2733,7 +2778,7 @@ async def test_runtime_registry_transfers_unaffected_generations_without_restart
     assert (await core.runtime.status())["graph_id"] == original_graph.graph_id
     assert previous.instances == original_instances
 
-    candidate = RuntimeModuleRegistry(host, core.descriptors)
+    candidate = RuntimeModuleRegistry(host, descriptors)
     preview = candidate.preview_graph_transition(previous, target_component_id="kernel.runtime")
     assert preview.replace == ("kernel.runtime",)
     assert preview.retain == tuple(
@@ -2782,7 +2827,8 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
-    first = RuntimeModuleRegistry(host, core.descriptors)
+    descriptors = _isolated_runtime_descriptors(*core.descriptors)
+    first = RuntimeModuleRegistry(host, descriptors)
     await first.start()
     original_instances = dict(first.instances)
     original_generations = dict(first.graph_identity.generations)
@@ -2795,7 +2841,9 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
         initial_configuration={"label": "optional", "multiplier": 1},
     )
 
-    added = RuntimeModuleRegistry(host, core.descriptors + (counter.descriptor,))
+    added = RuntimeModuleRegistry(
+        host, descriptors + _isolated_runtime_descriptors(counter.descriptor)
+    )
     add_plan = added.preview_graph_transition(first, target_component_id="forest.counter")
     assert add_plan.replace == add_plan.remove == add_plan.drain == ()
     assert add_plan.retain == tuple(first.order)
@@ -2804,6 +2852,9 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     controller._replacement_lock = asyncio.Lock()
     controller._closing = False
     controller.registry = first
+    async def admit_capacity(_capacity):
+        return None
+    controller._admit_worker_capacity = admit_capacity
     selection = ComponentSelectionSnapshot(0, (), digest_json({
         "protocol": "forest.component-selection-snapshot/1",
         "revision": 0,
@@ -2829,7 +2880,7 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
         assert added.graph_identity.generations[component_id] == generation_id
     counter_instance = added.get("forest.counter")
 
-    removed = RuntimeModuleRegistry(host, core.descriptors)
+    removed = RuntimeModuleRegistry(host, descriptors)
     remove_plan = removed.preview_graph_transition(added, target_component_id="forest.counter")
     assert remove_plan.replace == remove_plan.add == remove_plan.prepare == ()
     assert remove_plan.retain == tuple(removed.order)
@@ -2989,7 +3040,11 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
-    descriptors = core.descriptors + (routing.descriptor, installed.descriptor)
+    isolated_core = replace(
+        core, descriptors=_isolated_runtime_descriptors(*core.descriptors)
+    )
+    routing_descriptor = _isolated_runtime_descriptors(routing.descriptor)[0]
+    descriptors = isolated_core.descriptors + (routing_descriptor, installed.descriptor)
     first = RuntimeModuleRegistry(host, descriptors)
     await first.start()
     first_graph = first.graph_identity
@@ -3022,7 +3077,7 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     assert planned_artifact.package_digest == updated_snapshot.digest
     assert planned_descriptor.factory is None
     planned_registry = RuntimeModuleRegistry(
-        host, core.descriptors + (routing.descriptor, planned_descriptor)
+        host, isolated_core.descriptors + (routing_descriptor, planned_descriptor)
     )
     planned_impact = planned_registry.preview_graph_transition(
         first, target_component_id="tests.routing-component"
@@ -3041,8 +3096,8 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
 
     selection = pinned_selection(updated_snapshot)
     selected_preview = await preview_selected_graph(
-        first, selection, (routing.descriptor,), catalog, store,
-        kernel=core,
+        first, selection, (routing_descriptor,), catalog, store,
+        kernel=isolated_core,
         target_component_id="tests.routing-component",
         expected_graph_revision=first_graph.graph_revision,
         expected_configuration_revisions={"tests.routing-component": 1},
@@ -3051,8 +3106,8 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     assert planned_artifact in selected_preview.packages
     assert selected_preview.plan_digest.startswith("sha256:")
     repeated_preview = await preview_selected_graph(
-        first, selection, (routing.descriptor,), catalog, store,
-        kernel=core,
+        first, selection, (routing_descriptor,), catalog, store,
+        kernel=isolated_core,
         target_component_id="tests.routing-component",
         expected_graph_revision=first_graph.graph_revision,
         expected_configuration_revisions={"tests.routing-component": 1},
@@ -3060,8 +3115,8 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     assert repeated_preview.plan_digest == selected_preview.plan_digest
     prior_selection = pinned_selection(installed_snapshot)
     prior_preview = await preview_selected_graph(
-        first, prior_selection, (routing.descriptor,), catalog, store,
-        kernel=core,
+        first, prior_selection, (routing_descriptor,), catalog, store,
+        kernel=isolated_core,
         target_component_id="tests.routing-component",
         expected_graph_revision=first_graph.graph_revision,
         expected_configuration_revisions={"tests.routing-component": 1},
@@ -3087,7 +3142,7 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
     assert (await updated.configuration.desired(include_value=True)).value == {}
     assert updated.descriptor.storage.package_digest == installed.descriptor.storage.package_digest
     candidate = RuntimeModuleRegistry(
-        host, core.descriptors + (routing.descriptor, updated.descriptor)
+        host, isolated_core.descriptors + (routing_descriptor, updated.descriptor)
     )
     assert candidate.preview_graph_transition(
         first, target_component_id="tests.routing-component"
@@ -3125,7 +3180,8 @@ async def test_post_publication_activation_failure_retires_retained_generations(
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
-    previous = RuntimeModuleRegistry(host, core.descriptors)
+    descriptors = _isolated_runtime_descriptors(*core.descriptors)
+    previous = RuntimeModuleRegistry(host, descriptors)
     await previous.start()
     source_graph = previous.graph_identity
     runtime_descriptor = next(
@@ -3147,7 +3203,7 @@ async def test_post_publication_activation_failure_retires_retained_generations(
             replace(item, factory=fail_activation)
             if item.component_id == "kernel.runtime"
             else item
-            for item in core.descriptors
+            for item in descriptors
         ),
     )
     affected = candidate.plan_retained_generations(previous, "kernel.runtime")
@@ -3184,7 +3240,8 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
-    current = RuntimeModuleRegistry(host, core.descriptors)
+    descriptors = _isolated_runtime_descriptors(*core.descriptors)
+    current = RuntimeModuleRegistry(host, descriptors)
     await current.start()
     graph = current.graph_identity
 
@@ -3231,7 +3288,7 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
 
     candidate = RuntimeModuleRegistry(
         host,
-        core.descriptors,
+        descriptors,
         activation_id=claim["activation_id"],
     )
     await candidate.start()
@@ -5058,7 +5115,9 @@ async def test_routing_builtin_owns_worker_storage_and_lifecycle(
         initial_configuration={},
     )
     registry = RuntimeModuleRegistry(
-        host, core.descriptors + (routing.descriptor, component.descriptor)
+        host, _isolated_runtime_descriptors(
+            *core.descriptors, routing.descriptor, component.descriptor
+        )
     )
     await registry.start()
     instance = registry.get("routing.graph")
