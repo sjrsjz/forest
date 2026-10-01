@@ -1,10 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
-  "required": ["protocol", "request_id", "provider_generation_id", "provider_profile_ref", "model_ref", "capability_digest", "projection", "wire", "output_token_budget", "projected_content_digest", "source_manifest_digest"],
+  "required": ["protocol", "request_id", "state", "provider_generation_id", "provider_profile_ref", "model_ref", "capability_digest", "projection", "wire", "output_token_budget", "projected_content_digest", "source_manifest_digest"],
   "properties": {
-    "protocol": {"const": "forest.agent-frozen-model-retry/1"},
+    "protocol": {"const": "forest.agent-frozen-model-resume/1"},
     "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "state": {"enum": ["READY", "NOT_APPLIED"]},
     "provider_generation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "provider_profile_ref": {"type": "string", "minLength": 1, "maxLength": 256},
     "model_ref": {"type": "string", "minLength": 1, "maxLength": 256},

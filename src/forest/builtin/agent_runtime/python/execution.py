@@ -755,8 +755,12 @@ class AgentExecution:
                     run = await self._run(run["run_id"])
                     recovery = await self._recovery(run["run_id"])
                 step_seq = recovery["next_step_seq"]
-                request_id = stable("model-request", run["run_id"], step_seq)
                 stored_request = recovery.get("model_request")
+                request_id = (
+                    stored_request["request_id"]
+                    if isinstance(stored_request, dict)
+                    else stable("model-request", run["run_id"], step_seq)
+                )
                 attempt_no = 1
                 if isinstance(stored_request, dict):
                     if stored_request["state"] == "UNKNOWN":
@@ -787,18 +791,18 @@ class AgentExecution:
                     and stored_request["state"] == "ATTEMPT_PREPARED"
                     else stable("model-attempt", request_id, attempt_no)
                 )
-                frozen_retry = (
+                frozen_resume = (
                     isinstance(stored_request, dict)
-                    and stored_request["state"] == "NOT_APPLIED"
+                    and stored_request["state"] in {"READY", "NOT_APPLIED"}
                 )
                 is_repair = is_repair or (
-                    frozen_retry and stored_request["request_kind"] == "REPAIR"
+                    frozen_resume and stored_request["request_kind"] == "REPAIR"
                 )
                 repair = None
                 repair_of = None
                 memory_query_id = None
                 evidence_ref = None
-                if frozen_retry:
+                if frozen_resume:
                     if is_repair:
                         _, repair_of = await self.turns.repair_view(recovery)
                 elif is_repair:
@@ -847,8 +851,8 @@ class AgentExecution:
                             request, owner, await self._run(run["run_id"]),
                             latest["state"], reload_operation,
                         )
-                if frozen_retry:
-                    invoked = await self.model.retry_frozen(
+                if frozen_resume:
+                    invoked = await self.model.resume_frozen(
                         owner=owner,
                         request_id=request_id,
                         attempt_id=attempt_id,

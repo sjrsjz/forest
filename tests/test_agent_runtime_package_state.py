@@ -521,6 +521,26 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 timeout_seconds=10,
             )
         assert prepared_request["state"] == "READY"
+        frozen_declaration = next(
+            item for item in instance.component["domain_queries"]
+            if item["name"] == "agent.frozen-model-resume"
+        )
+        frozen_ready = await instance.invoke_management_query(
+            frozen_declaration,
+            {"run_id": model_owner["run_id"], "request_id": "model-request/package/1"},
+            timeout_seconds=10,
+        )
+        assert frozen_ready["state"] == "READY"
+        assert frozen_ready["projection"] == projection.canonical()
+        assert frozen_ready["wire"] == initial_wire.canonical()
+        ready_recovery = await instance.invoke_management_query(
+            recovery_declaration,
+            {"run_id": model_owner["run_id"]},
+            timeout_seconds=10,
+        )
+        assert ready_recovery["model_request"]["request_id"] == (
+            "model-request/package/1"
+        )
         wire = await _payload(
             kernel,
             owner_component_id="kernel.effect",

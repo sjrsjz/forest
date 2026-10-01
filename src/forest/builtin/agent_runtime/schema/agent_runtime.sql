@@ -934,7 +934,8 @@ BEGIN
             AND m.request_id=run_row.current_model_request_id)
         OR
         (run_row.current_model_request_id IS NULL AND run_row.state='PREPARING_MODEL'
-            AND m.run_id=requested_run AND m.step_seq=run_row.next_step_seq)
+            AND m.run_id=requested_run AND m.step_seq=run_row.next_step_seq
+            AND m.state='READY')
     )
     ORDER BY
         CASE WHEN m.request_id=run_row.current_model_request_id THEN 0 ELSE 1 END,
@@ -4840,7 +4841,7 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION agent_frozen_model_retry(context jsonb, input jsonb)
+CREATE FUNCTION agent_frozen_model_resume(context jsonb, input jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
 STABLE
@@ -4848,7 +4849,6 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
     request_row record;
-    attempt_row record;
 BEGIN
     SELECT request.* INTO request_row
     FROM __forest_module_schema__.model_requests request
@@ -4857,45 +4857,57 @@ BEGIN
     WHERE request.bot_id=context->>'bot_id'
       AND request.run_id=input->>'run_id'
       AND request.request_id=input->>'request_id'
-      AND request.state='NOT_APPLIED'
+      AND request.state IN ('READY','NOT_APPLIED')
       AND run.state='PREPARING_MODEL'
-      AND run.current_model_request_id=request.request_id;
-    IF NOT FOUND THEN
-        RETURN jsonb_build_object(
-            'protocol','forest.domain-result/1','ok',false,
-            'error',jsonb_build_object(
-                'code','AGENT_FROZEN_RETRY_UNAVAILABLE',
-                'message','Model request is not at a frozen retry boundary','status',409
-            )
-        );
-    END IF;
-    SELECT * INTO attempt_row
-    FROM __forest_module_schema__.model_transport_attempts
-    WHERE bot_id=context->>'bot_id'
-      AND attempt_id=request_row.current_attempt_id
-      AND request_id=request_row.request_id
-      AND attempt_no=request_row.attempt_count
-      AND state='NOT_APPLIED'
-      AND NOT EXISTS (
-          SELECT 1 FROM __forest_module_schema__.model_transport_attempts prior
-          WHERE prior.bot_id=request_row.bot_id
-            AND prior.request_id=request_row.request_id
-            AND prior.state<>'NOT_APPLIED'
+      AND (
+          run.current_model_request_id=request.request_id
+          OR (request.state='READY' AND run.current_model_request_id IS NULL
+              AND request.step_seq=run.next_step_seq)
       );
     IF NOT FOUND THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
-                'code','AGENT_FROZEN_RETRY_UNAVAILABLE',
-                    'message','Model attempt has no unsent evidence','status',409
+                'code','AGENT_FROZEN_RESUME_UNAVAILABLE',
+                'message','Model request is not at a frozen resume boundary','status',409
+            )
+        );
+    END IF;
+    IF (request_row.state='READY' AND (
+        request_row.attempt_count<>0 OR request_row.current_attempt_id IS NOT NULL
+        OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.model_transport_attempts prior
+            WHERE prior.bot_id=request_row.bot_id
+              AND prior.request_id=request_row.request_id
+        )
+    )) OR (request_row.state='NOT_APPLIED' AND NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.model_transport_attempts current_attempt
+        WHERE current_attempt.bot_id=request_row.bot_id
+          AND current_attempt.request_id=request_row.request_id
+          AND current_attempt.attempt_id=request_row.current_attempt_id
+          AND current_attempt.attempt_no=request_row.attempt_count
+          AND current_attempt.state='NOT_APPLIED'
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.model_transport_attempts prior
+              WHERE prior.bot_id=request_row.bot_id
+                AND prior.request_id=request_row.request_id
+                AND prior.state<>'NOT_APPLIED'
+          )
+    )) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_FROZEN_RESUME_UNAVAILABLE',
+                'message','Model attempts are not all proven unsent','status',409
             )
         );
     END IF;
     RETURN jsonb_build_object(
         'protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object(
-            'protocol','forest.agent-frozen-model-retry/1',
+            'protocol','forest.agent-frozen-model-resume/1',
             'request_id',request_row.request_id,
+            'state',request_row.state,
             'provider_generation_id',request_row.provider_generation_id,
             'provider_profile_ref',request_row.provider_profile_ref,
             'model_ref',request_row.model_ref,

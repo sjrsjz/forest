@@ -385,16 +385,16 @@ class ModelExecution:
             effect_operation_id=effect_operation_id,
         )
 
-    async def retry_frozen(
+    async def resume_frozen(
         self, *, owner: dict, request_id: str, attempt_id: str,
         effect_operation_id: str,
     ) -> dict:
-        """Retry a proven unsent attempt with the original projected bytes."""
+        """Dispatch an unstarted or proven-unsent request from frozen bytes."""
 
         graph_id, graph_revision, bot_id = self._identity()
         profile, target = await self._profile(request_id)
         frozen = await self.ctx.queries.call(
-            "agent.frozen-model-retry",
+            "agent.frozen-model-resume",
             {"run_id": owner["run_id"], "request_id": request_id},
         )
         if (
@@ -440,13 +440,22 @@ class ModelExecution:
                 "Frozen projection or wire differs from its request identity",
                 409,
             )
-        wire = await self.ctx.payloads.put_bytes(
-            wire_bytes,
-            owner_kind="model.wire",
-            owner_id=attempt_id,
-            media_type="application/json",
-            parents=(frozen["projection"], frozen["wire"]),
-        )
+        if frozen["state"] == "READY":
+            if frozen["wire"]["owner_id"] != attempt_id:
+                raise ForestError(
+                    "AGENT_FROZEN_MODEL_INVALID",
+                    "Initial wire belongs to another transport attempt",
+                    409,
+                )
+            wire = frozen["wire"]
+        else:
+            wire = await self.ctx.payloads.put_bytes(
+                wire_bytes,
+                owner_kind="model.wire",
+                owner_id=attempt_id,
+                media_type="application/json",
+                parents=(frozen["projection"], frozen["wire"]),
+            )
         if wire["digest"] != frozen["wire"]["digest"]:
             raise ForestError(
                 "AGENT_FROZEN_MODEL_INVALID",
