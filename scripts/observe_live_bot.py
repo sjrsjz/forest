@@ -26,6 +26,7 @@ from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 
 RUNTIME = module_schema_namespace("forest.kernel.runtime")
+CONVERSATION = module_schema_namespace("forest.conversation.scheduler")
 MEMORY = module_schema_namespace("forest.memory.graph")
 AGENT = module_schema_namespace("forest.agent.runtime")
 DELIVERY = module_schema_namespace("forest.delivery")
@@ -159,6 +160,23 @@ async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> d
                     (bot_id,),
                 )
             ).fetchall()
+            latest_decisions = await (
+                await connection.execute(
+                    sql.SQL(
+                        "SELECT latest.trigger_decision,latest.reason_code,count(*) AS conversations "
+                        "FROM {}.conversation_lanes lane "
+                        "JOIN LATERAL ("
+                        "SELECT trigger_decision,reason_code FROM {}.inbox_messages "
+                        "WHERE bot_id=lane.bot_id AND conversation_id=lane.conversation_id "
+                        "ORDER BY ingress_seq DESC LIMIT 1"
+                        ") latest ON true "
+                        "WHERE lane.bot_id=%s "
+                        "GROUP BY latest.trigger_decision,latest.reason_code "
+                        "ORDER BY latest.trigger_decision,latest.reason_code"
+                    ).format(sql.Identifier(CONVERSATION), sql.Identifier(CONVERSATION)),
+                    (bot_id,),
+                )
+            ).fetchall()
             concurrency = await (
                 await connection.execute(
                     sql.SQL(
@@ -199,6 +217,14 @@ async def _bot_state(store: CleanBotStore, bot_id: str, stale_seconds: int) -> d
             },
         },
         "concurrency": dict(concurrency),
+        "latest_ingress_decisions": [
+            {
+                "decision": row["trigger_decision"],
+                "reason_code": row["reason_code"],
+                "conversations": row["conversations"],
+            }
+            for row in latest_decisions
+        ],
         "work": dict(work),
     }
 

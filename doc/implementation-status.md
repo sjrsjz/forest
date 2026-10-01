@@ -526,3 +526,5 @@ Validation (2026-10-02): The isolated PostgreSQL complete 21-component Graph sta
 同群排队与跨群并发的后继模型调用验收（2026-10-02）：完整 Bot 隔离 PostgreSQL 场景现让假聊天模型返回有效结果，首群的第一个请求在门闩处等待时，同群新的触发保持 PENDING，另一群可以独立形成第二个模型请求；释放首群门闩后，第三个请求取走同群排队触发，模型输入包含排队消息，并在 source_manifest 中保留作者 qq:20003。强化后的 cross-group 用例 1 passed（91.15 秒），原有 operator requeue 与旧跨群路径合计 2 passed（165.83 秒）；临时失败诊断未保留。测试使用假 OneBot、假聊天模型和隔离数据库，只证明该模块链路及归因，不替代真实 QQ 并发验收。
 
 开发期重建向量预检（2026-10-02）：`rebuild_bot_database.py` 取得独占 Supervisor lease 后、删除 Bot 库前，先探测同 Bot 与冻结空间派生的 Milvus 集合；端点不可用时返回 `BOT_REBUILD_VECTOR_PREFLIGHT_FAILED` 和 `database_rebuilt=false`。数据库基线验证后的精确集合重置仍单独执行，其失败返回 `database_rebuilt=true`。隔离 PostgreSQL 测试模拟预检失败，验证旧库标记表仍存在，再恢复向量端点完成重建（1 passed，56.05 秒）；Ruff 通过。该预检不保证两种存储具备跨系统原子事务，维护失败仍需依据错误状态处理。
+
+在线触发边界只读复核（2026-10-02）：当前 `forest-main` Supervisor 仍运行候选 `5acacf0`，0 次重启；只读探针显示 21 个 ACTIVE 成员、0 个并发重叠 Run、0 个过期嵌入工作和 0 个违反项。逐项排障发现 57 条已分类群事件的最终决策均为 `NO_TRIGGER/group_not_allowed`，来自三个非白名单群；冻结和有效 TriggerPolicy 均只允许群 `933179609` 的 `MENTION`，当前新库没有来自该群的事件，也没有 Agent Run 或发送意图。因此当前无回复不能归因于模型或 RAG 执行，批准群的 OneBot 入站和真实回复仍待低频验证。只读探针现按每个会话的最新入站索引项汇总决策/原因码，避免长时间采样扫描全部历史；该快照不统计累计事件数。脚本在线冒烟与 Ruff 通过。
