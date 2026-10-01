@@ -6176,15 +6176,15 @@ BEGIN
     WHERE bot_id=requested_bot AND source_id=source_id_value FOR UPDATE;
     SELECT * INTO identity_row FROM __forest_module_schema__.memory_sources
     WHERE bot_id=requested_bot AND identity_digest=identity_digest_value FOR UPDATE;
-    IF source_row IS NOT NULL AND identity_row IS NOT NULL
+    IF source_row.source_id IS NOT NULL AND identity_row.source_id IS NOT NULL
        AND source_row.source_id IS DISTINCT FROM identity_row.source_id THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
             'code','MEMORY_SOURCE_IDENTITY_CONFLICT','message','Memory source id and identity refer to different sources','status',409));
     END IF;
-    IF source_row IS NULL THEN
+    IF source_row.source_id IS NULL THEN
         source_row := identity_row;
     END IF;
-    IF source_row IS NOT NULL THEN
+    IF source_row.source_id IS NOT NULL THEN
         IF source_row.source_id IS DISTINCT FROM source_id_value
            OR source_row.source_kind IS DISTINCT FROM source_value->>'source_kind'
            OR source_row.platform IS DISTINCT FROM source_value->>'platform'

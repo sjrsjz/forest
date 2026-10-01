@@ -292,6 +292,98 @@ async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
 
 
 @pytest.mark.postgres
+async def test_direct_source_identity_collision_is_rejected_before_capture_writes(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_clean_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "source-identity-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
+    )
+    namespace = package.descriptor.storage.spec.namespace
+    identity = {
+        "source_id": "source/direct/one",
+        "source_kind": "DIRECT",
+        "platform": "onebot-v11",
+        "realm_id": "qq",
+        "external_group_id": None,
+        "identity_incarnation": 1,
+        "trunk_id": None,
+    }
+    async with store.pool.connection() as conn, conn.transaction():
+        digest_row = await (
+            await conn.execute(
+                "SELECT 'sha256:'||encode(sha256(convert_to(%s::jsonb::text,'UTF8')),'hex') "
+                "AS digest",
+                (Jsonb(identity),),
+            )
+        ).fetchone()
+        for source_id, identity_digest in (
+            (identity["source_id"], "sha256:" + "a" * 64),
+            ("source/direct/two", digest_row["digest"]),
+        ):
+            await conn.execute(
+                sql.SQL("INSERT INTO {}.memory_sources("
+                        "bot_id,source_id,registration_operation_id,input_digest,"
+                        "source_kind,platform,realm_id,identity_incarnation,identity_digest) "
+                        "VALUES(%s,%s,%s,%s,'DIRECT','onebot-v11','qq',1,%s)")
+                .format(sql.Identifier(namespace)),
+                (store.bot_id, source_id, "register:" + source_id,
+                 "sha256:" + "b" * 64, identity_digest),
+            )
+        body = {
+            "deletion_epoch_step_id": "epoch",
+            "capture": {
+                "identity": identity,
+                "source_unit_id": "unit/direct/one",
+                "occurrence": {
+                    "conversation_ref": "conversation/direct/one",
+                    "event_ref": "event/direct/one",
+                    "ingress_seq": 1,
+                },
+                "author": {},
+                "parts": [{}],
+            },
+        }
+        result = await (
+            await conn.execute(
+                sql.SQL("SELECT {}.memory_capture_source(%s::jsonb,%s::jsonb) AS result")
+                .format(sql.Identifier(namespace)),
+                (
+                    Jsonb({
+                        "bot_id": store.bot_id,
+                        "operation_id": "capture/direct/collision",
+                        "participant_input_digest": digest_json(body),
+                    }),
+                    Jsonb({
+                        "protocol": "forest.uow-step/1",
+                        "caller": {"component_id": "memory.graph"},
+                        "input": body,
+                        "prior": {
+                            "epoch": {
+                                "protocol": "forest.payload-epoch/1",
+                                "deletion_epoch": 0,
+                            },
+                        },
+                    }),
+                ),
+            )
+        ).fetchone()
+        sources = await (
+            await conn.execute(
+                sql.SQL("SELECT count(*) AS count FROM {}.memory_sources WHERE bot_id=%s")
+                .format(sql.Identifier(namespace)),
+                (store.bot_id,),
+            )
+        ).fetchone()
+    assert result["result"]["error"]["code"] == "MEMORY_SOURCE_IDENTITY_CONFLICT"
+    assert sources["count"] == 2
+
+
+@pytest.mark.postgres
 async def test_graph_snapshot_excludes_facts_committed_after_registration(
     clean_authority, tmp_path
 ):
