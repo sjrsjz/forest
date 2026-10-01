@@ -136,7 +136,7 @@
         "reload_operation_id": {"$ref": "#/$defs/nullable_string"},
         "reload_resume_phase": {
           "type": ["string", "null"],
-          "enum": [null, "PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"]
+          "enum": [null, "PREPARING_MODEL", "REPAIR_READY", "WAIT_TOOL", "WAIT_APPROVAL", "SAFE_BOUNDARY"]
         },
         "reload_generation_id": {"$ref": "#/$defs/nullable_string"}
       },

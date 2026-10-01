@@ -8,7 +8,7 @@
   "properties": {
     "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "reload_operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
-    "resumed_phase": {"enum": ["PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"]},
+    "resumed_phase": {"enum": ["PREPARING_MODEL", "REPAIR_READY", "WAIT_TOOL", "WAIT_APPROVAL", "SAFE_BOUNDARY"]},
     "parked_generation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "resuming_generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
   },

@@ -1136,11 +1136,41 @@ class PythonWorker:
         if task is not asyncio.current_task():
             await asyncio.gather(task, return_exceptions=True)
 
-    async def quiesce(self, reason: str = "reload", timeout: float = 10) -> Any:
+    async def prepare_replacement(self, operation_id: str, timeout: float = 10) -> None:
+        if (
+            self.state != "ACTIVE"
+            or not isinstance(operation_id, str)
+            or not 1 <= len(operation_id.encode("utf-8")) <= 256
+        ):
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_OPERATION_INVALID",
+                "Replacement requires an active Worker and valid operation identity",
+                409,
+            )
+        await self._lifecycle(
+            "prepare_replacement", {"operation_id": operation_id}, timeout=timeout
+        )
+
+    async def abort_replacement(self, operation_id: str, timeout: float = 10) -> None:
+        if self.state != "ACTIVE":
+            raise ForestError("LIFECYCLE_INVALID", "Only an active Worker can abort replacement", 409)
+        await self._lifecycle(
+            "abort_replacement", {"operation_id": operation_id}, timeout=timeout
+        )
+
+    async def quiesce(
+        self,
+        reason: str = "reload",
+        timeout: float = 10,
+    ) -> Any:
         if self.state != "ACTIVE":
             raise ForestError("LIFECYCLE_INVALID", "Only an active worker can quiesce")
         self.state = "QUIESCING"
-        result = await self._lifecycle("quiesce", {"reason": reason}, timeout=timeout)
+        result = await self._lifecycle(
+            "quiesce",
+            {"reason": reason},
+            timeout=timeout,
+        )
         self.state = "QUIESCENT"
         return result
 

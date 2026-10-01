@@ -381,10 +381,21 @@ class WorkerRuntime:
                 self.require("READY")
                 self.state = "ACTIVE"
                 return {"state": self.state}
+            if command == "prepare_replacement":
+                self.require("ACTIVE")
+                await self.plugin.prepare_replacement(payload["operation_id"])
+                return {"state": self.state}
+            if command == "abort_replacement":
+                self.require("ACTIVE")
+                await self.plugin.abort_replacement(payload["operation_id"])
+                return {"state": self.state}
             if command == "quiesce":
                 self.require("ACTIVE")
                 self.state = "QUIESCING"
-                await self.plugin.quiesce(str(payload.get("reason", "reload")), deadline)
+                await self.plugin.quiesce(
+                    str(payload.get("reason", "reload")),
+                    deadline,
+                )
                 while self.calls:
                     await asyncio.gather(*list(self.calls.values()), return_exceptions=True)
                 self.state = "QUIESCENT"

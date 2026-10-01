@@ -35,6 +35,7 @@ class PackageOwnedWorkSupervisor:
         binding: Callable[[], tuple[Any, Any, Any]],
         generation_member_verifier: Callable[..., Any],
         active: Callable[[], bool],
+        recovered: Callable[[], bool],
         failed: Callable[[str], None],
         call_started: Callable[[str], None],
         call_finished: Callable[[str], None],
@@ -48,6 +49,7 @@ class PackageOwnedWorkSupervisor:
         self.binding = binding
         self.generation_member_verifier = generation_member_verifier
         self.active = active
+        self.recovered = recovered
         self.failed = failed
         self.call_started = call_started
         self.call_finished = call_finished
@@ -156,6 +158,7 @@ class PackageOwnedWorkSupervisor:
             call_operation_id=operation_id,
             causal_root_kind=causal_root_kind,
             causal_root_id=causal_root_id or operation_id,
+            recovered_generation=self.recovered(),
         )
 
     @staticmethod

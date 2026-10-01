@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
@@ -18,6 +18,7 @@ class PackageCallScope:
     call_operation_id: str
     causal_root_kind: str
     causal_root_id: str
+    recovered_generation: bool = field(default=False, kw_only=True)
 
 
 @dataclass(frozen=True)

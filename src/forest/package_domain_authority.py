@@ -551,6 +551,7 @@ class PostgresPackageDomainAuthority:
             "operation_id": scope.call_operation_id,
             "causal_root_kind": scope.causal_root_kind,
             "causal_root_id": scope.causal_root_id,
+            "recovered_generation": scope.recovered_generation,
             "timeout_seconds": timeout_seconds,
             "input_digest": digest_json(payload),
             "participant_input_digest": (

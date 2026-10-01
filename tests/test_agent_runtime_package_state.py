@@ -1803,6 +1803,65 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 )
         assert stale.value.code == "STALE_AGENT_RUN_OWNER"
 
+        # A failed publication restores the old Graph. Its original Agent
+        # Generation must claim its own parked Run only after that recovery.
+        await registry.drain_owned_work_for_replacement(
+            "runtime-reload/agent-package/rollback"
+        )
+        await registry.resume_owned_work_after_failed_replacement()
+        for poll in range(200):
+            rolled_back = await endpoint.invoke_routed(
+                route,
+                RuntimeServiceInvocation(
+                    f"agent-run-query/package/rollback/{poll}",
+                    10,
+                    "test.agent-runtime-package",
+                    "run/agent-package/1",
+                ),
+                ({"run_id": "run/agent-package/1"},),
+                {},
+            )
+            if rolled_back["state"] == "PREPARING_MODEL" and rolled_back["owner"] is None:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            pytest.fail("restored Agent Generation did not resume its parked Run")
+        assert rolled_back["current"]["reload_operation_id"] is None
+
+        owner = await _lease_operation(
+            store, participant, generation_id,
+            "agent.acquire-run-record",
+            {"run_id": "run/agent-package/1", "owner_id": "agent-worker/repark/1",
+             "lease_seconds": 120},
+            "agent-acquire/package/repark",
+        )
+        checkpoint = await _payload(
+            kernel,
+            owner_kind="checkpoint.state",
+            owner_id="checkpoint/reload/agent-package/repark",
+            value=b'{"phase":"RELOAD_WAIT","resume_phase":"PREPARING_MODEL"}',
+        )
+        reparking = await _lease_operation(
+            store, participant, generation_id,
+            "agent.park-reload-record",
+            {
+                "owner": _owner_ref(owner),
+                "checkpoint_id": checkpoint.owner_id,
+                "state": checkpoint.canonical(),
+                "reload_operation_id": "runtime-reload/agent-package/repark",
+                "resume_phase": "PREPARING_MODEL",
+            },
+            "agent-run-park-reload/package/repark",
+        )
+        assert reparking["state"] == "RELOAD_WAIT"
+        assert reparking["progress"]["checkpoint_seq"] == 2
+        assert await _lease_operation(
+            store, participant, generation_id,
+            "agent.release-run-record",
+            {"owner": _owner_ref(owner)},
+            "agent-run-release/package/repark",
+        ) == {"run_id": "run/agent-package/1", "released": True}
+
         candidate = RuntimeModuleRegistry(host, isolated_descriptors)
         await candidate.prewarm()
         await registry.drain_owned_work_for_replacement(candidate.activation_id)

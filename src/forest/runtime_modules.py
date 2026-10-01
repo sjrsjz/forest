@@ -856,6 +856,7 @@ class RuntimeModuleRegistry:
         self._publication_committed = False
         self._contract_routes_sealed = False
         self._replacement_quiesced: tuple[str, ...] = ()
+        self._replacement_prepared: tuple[str, ...] = ()
         self._replacement_owned_frozen: tuple[str, ...] = ()
         self._replacement_operation_id: str | None = None
         self._replacement_components: tuple[str, ...] | None = None
@@ -1948,6 +1949,23 @@ class RuntimeModuleRegistry:
                 self._replacement_owned_frozen = self._freeze_owned_admission(
                     components=selected
                 )
+                for component_id in reversed(self.order):
+                    if (
+                        component_id == "adapter.onebot"
+                        or (selected is not None and component_id not in selected)
+                    ):
+                        continue
+                    begin_replacement = getattr(
+                        self.instances[component_id], "begin_replacement", None
+                    )
+                    if begin_replacement is None:
+                        continue
+                    self._replacement_prepared = (
+                        *self._replacement_prepared, component_id
+                    )
+                    result = begin_replacement(operation_id)
+                    if inspect.isawaitable(result):
+                        await result
                 await self._drain_frozen_owned_work(
                     self._replacement_owned_frozen
                 )
@@ -1965,15 +1983,6 @@ class RuntimeModuleRegistry:
                         False,
                     ):
                         continue
-                    begin_replacement = getattr(
-                        self.instances[component_id],
-                        "begin_replacement",
-                        None,
-                    )
-                    if begin_replacement is not None:
-                        result = begin_replacement(operation_id)
-                        if inspect.isawaitable(result):
-                            await result
                     await self._quiesce_only(component_id)
                     drained.append(component_id)
                 self._replacement_quiesced = tuple(drained)
@@ -2058,6 +2067,15 @@ class RuntimeModuleRegistry:
             self._replacement_quiesced = tuple(
                 item for item in self._replacement_quiesced if item != component_id
             )
+        for component_id in reversed(self._replacement_prepared):
+            if component_id in quiesced:
+                continue
+            abort = getattr(self.instances[component_id], "abort_replacement", None)
+            if abort is not None:
+                result = abort(operation_id)
+                if inspect.isawaitable(result):
+                    await result
+        self._replacement_prepared = ()
         if selected is None:
             self.contract_router.activate()
         self._open_owned_admission(self._replacement_owned_frozen)

@@ -82,7 +82,9 @@ CREATE TABLE agent_runs (
     ),
     reload_resume_phase text CHECK (
         reload_resume_phase IS NULL
-        OR reload_resume_phase IN ('PREPARING_MODEL','WAIT_TOOL','WAIT_APPROVAL')
+        OR reload_resume_phase IN (
+            'PREPARING_MODEL','REPAIR_READY','WAIT_TOOL','WAIT_APPROVAL','SAFE_BOUNDARY'
+        )
     ),
     reload_generation_id text CHECK (
         reload_generation_id IS NULL OR octet_length(reload_generation_id) BETWEEN 1 AND 256
@@ -555,13 +557,16 @@ BEGIN
        (OLD.state='PREPARING_MODEL' AND NEW.state IN ('MODEL_PENDING','FAILED','CANCELLED','RELOAD_WAIT')) OR
        (OLD.state='MODEL_PENDING' AND NEW.state IN ('PARSING','PREPARING_MODEL','BLOCKED_UNKNOWN','FAILED','CANCELLED')) OR
        (OLD.state='PARSING' AND NEW.state IN ('PREPARING_MODEL','REPAIR_READY','WAIT_TOOL','SAFE_BOUNDARY','FAILED','CANCELLED')) OR
-       (OLD.state='REPAIR_READY' AND NEW.state IN ('PREPARING_MODEL','FAILED','CANCELLED')) OR
+       (OLD.state='REPAIR_READY' AND NEW.state IN ('PREPARING_MODEL','FAILED','CANCELLED','RELOAD_WAIT')) OR
        (OLD.state='WAIT_TOOL' AND NEW.state IN ('PREPARING_MODEL','WAIT_APPROVAL','BLOCKED_UNKNOWN','FAILED','CANCELLED','RELOAD_WAIT')) OR
        (OLD.state='WAIT_APPROVAL' AND NEW.state IN ('PREPARING_MODEL','WAIT_TOOL','FAILED','CANCELLED','RELOAD_WAIT')) OR
        (OLD.state='BLOCKED_UNKNOWN' AND NEW.state IN ('MODEL_PENDING','PARSING','PREPARING_MODEL','WAIT_TOOL','FAILED','CANCELLED')) OR
-       (OLD.state='SAFE_BOUNDARY' AND NEW.state IN ('PREPARING_MODEL','FINAL_READY','FAILED','CANCELLED')) OR
+       (OLD.state='SAFE_BOUNDARY' AND NEW.state IN ('PREPARING_MODEL','FINAL_READY','FAILED','CANCELLED','RELOAD_WAIT')) OR
        (OLD.state='FINAL_READY' AND NEW.state IN ('COMPLETED','PREPARING_MODEL','FAILED','CANCELLED')) OR
-       (OLD.state='RELOAD_WAIT' AND NEW.state IN ('PREPARING_MODEL','WAIT_TOOL','WAIT_APPROVAL','FAILED','CANCELLED')) THEN
+       (OLD.state='RELOAD_WAIT' AND NEW.state IN (
+           'PREPARING_MODEL','REPAIR_READY','WAIT_TOOL','WAIT_APPROVAL','SAFE_BOUNDARY',
+           'FAILED','CANCELLED'
+       )) THEN
         RETURN NEW;
     END IF;
     RAISE EXCEPTION 'Illegal Agent Run transition' USING ERRCODE='55000';
@@ -3751,7 +3756,9 @@ BEGIN
        OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
        OR state_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
        OR state_value->>'owner_kind' IS DISTINCT FROM 'checkpoint.state'
-       OR requested_resume NOT IN ('PREPARING_MODEL','WAIT_TOOL','WAIT_APPROVAL') THEN
+       OR requested_resume NOT IN (
+           'PREPARING_MODEL','REPAIR_READY','WAIT_TOOL','WAIT_APPROVAL','SAFE_BOUNDARY'
+       ) THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -3863,9 +3870,14 @@ DECLARE
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
-       OR requested_resume NOT IN ('PREPARING_MODEL','WAIT_TOOL','WAIT_APPROVAL')
+       OR requested_resume NOT IN (
+           'PREPARING_MODEL','REPAIR_READY','WAIT_TOOL','WAIT_APPROVAL','SAFE_BOUNDARY'
+       )
        OR resuming_generation IS NULL
-       OR resuming_generation IS NOT DISTINCT FROM parked_generation THEN
+       OR (
+           resuming_generation IS NOT DISTINCT FROM parked_generation
+           AND context->>'recovered_generation' IS DISTINCT FROM 'true'
+       ) THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -3948,14 +3960,20 @@ BEGIN
     SELECT * INTO run_row
     FROM __forest_module_schema__.agent_runs
     WHERE bot_id=requested_bot AND state='RELOAD_WAIT'
-      AND reload_generation_id IS DISTINCT FROM requested_generation
+      AND (
+          reload_generation_id IS DISTINCT FROM requested_generation
+          OR context->>'recovered_generation'='true'
+      )
       AND owner_id=requested_token AND owner_expires_at>clock_timestamp()
     FOR UPDATE;
     IF run_row IS NULL THEN
         SELECT candidate.* INTO run_row
         FROM __forest_module_schema__.agent_runs candidate
         WHERE candidate.bot_id=requested_bot AND candidate.state='RELOAD_WAIT'
-          AND candidate.reload_generation_id IS DISTINCT FROM requested_generation
+          AND (
+              candidate.reload_generation_id IS DISTINCT FROM requested_generation
+              OR context->>'recovered_generation'='true'
+          )
           AND (candidate.owner_id IS NULL OR candidate.owner_expires_at<=clock_timestamp())
         ORDER BY candidate.updated_at,candidate.run_id
         FOR UPDATE SKIP LOCKED

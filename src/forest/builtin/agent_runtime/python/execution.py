@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -53,9 +54,12 @@ def _candidate(value: object, *, request_id: str, attempt_id: str) -> str:
 class AgentExecution:
     """Drive the QiYu-style single Agent using only package capability handles."""
 
-    def __init__(self, ctx, config: dict) -> None:
+    def __init__(
+        self, ctx, config: dict, reload_operation: Callable[[], str | None]
+    ) -> None:
         self.ctx = ctx
         self.config = config
+        self.reload_operation = reload_operation
         self.model = ModelExecution(ctx)
         self.tools = ToolExecution(ctx)
         self.turns = TurnRecorder(ctx)
@@ -114,6 +118,40 @@ class AgentExecution:
 
     async def _recovery(self, run_id: str) -> dict:
         return await self.ctx.queries.call("agent.run-recovery", {"run_id": run_id})
+
+    async def _park_reload(
+        self, request: dict, owner: dict, run: dict, phase: str, operation_id: str
+    ) -> dict:
+        checkpoint_id = stable(
+            "checkpoint-reload", run["run_id"], operation_id,
+            run["progress"]["checkpoint_seq"] + 1,
+        )
+        state = await self.ctx.payloads.put_json(
+            {
+                "phase": "RELOAD_WAIT",
+                "run_id": run["run_id"],
+                "reload_operation_id": operation_id,
+                "resume_phase": phase,
+                "input_revision": run["progress"]["input_revision"],
+                "next_step_seq": run["progress"]["next_step_seq"],
+            },
+            owner_kind="checkpoint.state",
+            owner_id=checkpoint_id,
+            parents=(self._preset_ref(),),
+        )
+        parked = await self.ctx.uow.call(
+            "agent.park-reload",
+            {
+                "owner": owner,
+                "checkpoint_id": checkpoint_id,
+                "state": state,
+                "reload_operation_id": operation_id,
+                "resume_phase": phase,
+            },
+            operation_id=self.ctx.operations.stable(f"park-reload:{checkpoint_id}"),
+            timeout=15,
+        )
+        return self._result(request, "RELOAD_WAIT", parked)
 
     async def _history(self, run_id: str) -> dict:
         return await self.ctx.queries.call("agent.execution-history", {"run_id": run_id})
@@ -537,6 +575,14 @@ class AgentExecution:
                     return self._result(
                         request, state, run, error_code=run.get("error_code")
                     )
+                reload_operation = self.reload_operation()
+                if reload_operation is not None and state in {
+                    "PREPARING_MODEL", "REPAIR_READY", "WAIT_TOOL",
+                    "WAIT_APPROVAL", "SAFE_BOUNDARY",
+                }:
+                    return await self._park_reload(
+                        request, owner, run, state, reload_operation
+                    )
                 if state == "FINAL_READY":
                     return self._result(request, "FINAL_READY", run)
                 if state == "WAIT_INPUT":
@@ -777,6 +823,20 @@ class AgentExecution:
                             continue
                     snapshot = await self._model_snapshot(request, run, step_seq)
                     source_refs = [self._preset_ref()]
+                # Recall and Context projection can take time. Recheck just
+                # before dispatch so a replacement signalled during either
+                # operation does not start another model effect.
+                reload_operation = self.reload_operation()
+                if reload_operation is not None:
+                    latest = await self._recovery(run["run_id"])
+                    if latest["state"] in {
+                        "PREPARING_MODEL", "REPAIR_READY", "WAIT_TOOL",
+                        "WAIT_APPROVAL", "SAFE_BOUNDARY",
+                    }:
+                        return await self._park_reload(
+                            request, owner, await self._run(run["run_id"]),
+                            latest["state"], reload_operation,
+                        )
                 invoked = await self.model.invoke(
                     owner=owner,
                     request_id=request_id,

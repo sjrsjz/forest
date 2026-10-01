@@ -29,6 +29,7 @@ def _supervisor(drain_policy, authority, failures):
         ),
         generation_member_verifier=lambda **_kwargs: None,
         active=lambda: True,
+        recovered=lambda: False,
         failed=failures.append,
         call_started=lambda _call_id: None,
         call_finished=lambda _call_id: None,

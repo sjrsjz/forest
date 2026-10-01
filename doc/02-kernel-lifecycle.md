@@ -188,7 +188,7 @@ stateDiagram-v2
 1. **PLAN**：写 `lifecycle_operations`，锁定目标包摘要、旧 Generation、候选 Generation、受影响路由、状态版本、预计资源和回滚条件。对相交的 route/state/binding 资源集合按规范顺序取得持久 operation lease 与 `op_epoch`；相交操作必须排队。FREEZE、RESUME、COMMIT 都校验操作所有权，过期协调器不能解冻另一操作的队列。
 2. **PREPARE**：建立候选 Worker，加载完整代码和当前 baseline contract，解析依赖、恢复可用的只读快照、执行无副作用健康检查。旧代继续服务。首发前若模块数据库 schema 已变化，本次热重载不负责升级旧库，开发环境必须先重建。
 3. **FREEZE**：在该 Bot 的协调账本冻结受影响路由的顶层 admission。相关业务命令保留在有界持久队列，查询按策略返回 `SERVICE_RELOADING` 或等待至 deadline。独立核心控制入口继续接收取消、状态与维护意图；若其具体目标正被升级占有，目标操作等待资源协调，不能直接调用已冻结 Worker。
-4. **DRAIN**：旧代停止计时器和新消息领取，完成已入场调用树；长 Agent 在模型/工具步骤之间写 checkpoint，进入绑定本次 operation_id 的 `RELOAD_WAIT` 后释放执行租约。内核在准入锁下确认在途计数归零，再签发排空证据并关闭全部旧调用入口；QUIESCENT 后不能新增子调用。仍可能调用目标的外部调用方必须完成原调用树或暂停于可重试边界。外部结果未知的调用转交账本，不能谎报已取消。
+4. **DRAIN**：旧代停止计时器和新消息领取。在冻结新任务入口后、等待在途任务排空前，协调器先把本次 operation_id 通知受影响 Worker；长 Agent 才能在下一模型/工具安全边界写 checkpoint、进入 `RELOAD_WAIT` 并释放执行租约。内核随后等待已入场调用树和自有任务归零，再签发排空证据并关闭全部旧调用入口；QUIESCENT 后不能新增子调用。若候选发布前失败，旧代先撤销替换信号或恢复已 quiesce 的 Worker，再开放任务入口；只有获得该恢复身份的原代才可领取自己停驻的 Run。仍可能调用目标的外部调用方必须完成原调用树或暂停于可重试边界。外部结果未知的调用转交账本，不能谎报已取消。
 5. **SNAPSHOT**：确认旧代没有可提交的用户任务，按模块明确声明的 handoff contract 导出带 state schema、revision、checksum 的有界组件状态；候选执行纯确定性状态转换并验证不变量，输出只写候选 shadow 状态。没有明确需求的模块跳过此步并从权威事实恢复。这一步不执行 SQL、不安装或修改业务 schema；首发前只允许在空 namespace 安装完整 baseline。
 6. **COMMIT**：一个 Bot 数据库事务锁定相关 `component_routes`，确认操作所有权、旧 epoch/代际、源 revision 及排空证据，递增 epoch，替换候选路由和已验证的 handoff 状态指针，写 `route_committed` 日志。任何旧写事务也必须锁定/验证这些 fence 行，二者形成确定先后顺序。
 7. **PUBLISH**：宿主从已提交账本更新不可变路由快照，按当前 Bot 维护策略发放新 admission token，解冻允许执行的队列。COMMIT、PUBLISH 和失败后的 RESUME 均复核最新 `maintenance_epoch/data_admission`，不凭 PLAN 时的旧快照重新开放已被管理员暂停的业务。即使内存缓存仍暂存旧路由，Worker/写网关也会因旧 epoch 拒绝请求并触发重解析。

@@ -1509,6 +1509,12 @@ class Plugin:
     async def health(self) -> dict:
         return {"healthy": True}
 
+    async def prepare_replacement(self, operation_id: str) -> None:
+        pass
+
+    async def abort_replacement(self, operation_id: str) -> None:
+        pass
+
     async def quiesce(self, reason: str, deadline: float) -> None:
         pass
 

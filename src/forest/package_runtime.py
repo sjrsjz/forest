@@ -367,6 +367,8 @@ class PackageGenerationAdapter:
         self._services_drained = asyncio.Event()
         self._services_drained.set()
         self.failure: str | None = None
+        self._replacement_operation_id: str | None = None
+        self._recovered_generation = False
         self._owned_work: PackageOwnedWorkSupervisor | None = None
         if self._owned_work_declarations:
             if owned_work_authority is None:
@@ -385,6 +387,7 @@ class PackageGenerationAdapter:
                 binding=self._owned_work_binding,
                 generation_member_verifier=self._generation_member_verifier,
                 active=lambda: self.state is PackageGenerationState.ACTIVE,
+                recovered=lambda: self._recovered_generation,
                 failed=self._owned_work_failed,
                 call_started=self._owned_work_calls.add,
                 call_finished=self._owned_work_calls.discard,
@@ -689,6 +692,7 @@ class PackageGenerationAdapter:
             call_operation_id=invocation.operation_id,
             causal_root_kind=invocation.causal_root_kind,
             causal_root_id=invocation.causal_root_id,
+            recovered_generation=self._recovered_generation,
         )
         self._service_inflight += 1
         self._services_drained.clear()
@@ -727,6 +731,40 @@ class PackageGenerationAdapter:
 
     def _owned_work_failed(self, code: str) -> None:
         self.failure = code
+
+    async def begin_replacement(self, operation_id: str) -> None:
+        if self._replacement_operation_id not in (None, operation_id):
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_OPERATION_CONFLICT",
+                "Package Generation is already draining for another replacement",
+                409,
+            )
+        self._replacement_operation_id = operation_id
+        self._recovered_generation = False
+        if self._worker is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_BOUND",
+                "Replacement requires a bound Package Worker",
+                409,
+            )
+        await self._worker.prepare_replacement(
+            operation_id, timeout=_timeout(self.component, "drain_timeout_s", 10)
+        )
+
+    async def abort_replacement(self, operation_id: str) -> None:
+        if self._replacement_operation_id != operation_id:
+            return
+        if self._worker is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_BOUND",
+                "Replacement requires a bound Package Worker",
+                409,
+            )
+        await self._worker.abort_replacement(
+            operation_id, timeout=_timeout(self.component, "drain_timeout_s", 10)
+        )
+        self._replacement_operation_id = None
+        self._recovered_generation = True
 
     async def _drain_owned_work(self) -> None:
         assert self._owned_work is not None
@@ -1509,6 +1547,7 @@ class PackageGenerationAdapter:
             call_operation_id=request["operation_id"],
             causal_root_kind=outer.causal_root_kind,
             causal_root_id=outer.causal_root_id,
+            recovered_generation=outer.recovered_generation,
         )
         scope = (
             PackageJobCallScope(
@@ -2010,6 +2049,7 @@ class PackageGenerationAdapter:
             call_operation_id=worker.call_operation_id(call_id),
             causal_root_kind=causal_root_kind,
             causal_root_id=causal_root_id,
+            recovered_generation=self._recovered_generation,
         )
         cancellation = self._job_cancellations.get(call_id)
         return (
@@ -2630,6 +2670,8 @@ class PackageGenerationAdapter:
             self.state = PackageGenerationState.FAILED
             raise
         self.state = PackageGenerationState.WORKER_READY
+        self._replacement_operation_id = None
+        self._recovered_generation = True
 
     async def close(self) -> None:
         if self.state is PackageGenerationState.STOPPED:

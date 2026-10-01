@@ -110,6 +110,8 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 
 Context 只在当前调用及其受监督子调用中有效，不能存入 `self` 后交给下一条消息使用。跨服务只声明契约，不 `import other_plugin`；同包 `helpers.py` 可正常相对 import，因为它随整个包一起形成同一不可变版本。
 
+热替换时，内核冻结新任务入口后调用 `Plugin.prepare_replacement(operation_id)`；这个短生命周期钩子只通知现有调用在自己的安全边界停驻，不能等待这些调用结束。随后内核排空自有工作并调用 `quiesce`。候选发布前失败时，已 quiesce 的代际走 `resume`，其余收到通知的代际走 `abort_replacement(operation_id)`，两条路径都须清除停驻信号。需要跨代接续的业务工作必须先写入包自己的持久 checkpoint，并由新代或已恢复的旧代在围栏下领取；不能把进程内标志当作持久状态。
+
 持久事件的 payload 正文进入受来源与删除 epoch 约束的内容存储。消费 envelope 明确携带发布组件、原契约与 event ID；同一订阅串行、不同订阅可并行。发布幂等、ACK 丢失恢复、热重载接续和死信边界由[03 的持久事件协议](03-communication-scheduling.md#7-持久事件与消费者)、[02 的 Generation 生命周期](02-kernel-lifecycle.md)和[14 的载荷所有权](14-clean-schema-and-payload-provenance.md)共同裁决。
 
 组件持久任务通过 manifest `jobs` 和代码 `@job(handler_id)` 成对声明；调用内使用 `ctx.jobs.schedule(handler_id, payload, operation_id=..., delay_seconds=...)`。它只调用同一组件当前代际的处理器，不创建 Agent、不读取群上下文，也不继承用户或管理员权限。claim、预算、重试与热重载服从[02 生命周期](02-kernel-lifecycle.md)、[03 调度](03-communication-scheduling.md)和[06 合流](06-concurrent-convergence.md)。面向群会话唯一 Agent 的 interval/cron 任务必须通过 `conversation.scheduler` 产生 trigger，并按[04 Agent](04-bot-agent-memory.md)与[08 群聊交互](08-group-context-interaction.md)进入同一条响应链。

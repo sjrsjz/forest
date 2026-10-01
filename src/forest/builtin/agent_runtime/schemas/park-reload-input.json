@@ -7,7 +7,7 @@
     "checkpoint_id": {"$ref": "#/$defs/id"},
     "state": {"$ref": "#/$defs/state"},
     "reload_operation_id": {"$ref": "#/$defs/id"},
-    "resume_phase": {"enum": ["PREPARING_MODEL", "WAIT_TOOL", "WAIT_APPROVAL"]}
+    "resume_phase": {"enum": ["PREPARING_MODEL", "REPAIR_READY", "WAIT_TOOL", "WAIT_APPROVAL", "SAFE_BOUNDARY"]}
   },
   "additionalProperties": false,
   "$defs": {

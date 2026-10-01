@@ -70,6 +70,7 @@ async def test_recall_waits_for_capture_then_replays_one_frozen_query():
         SimpleNamespace(services=services,
                         operations=SimpleNamespace(stable=lambda value: value)),
         {},
+        lambda: None,
     )
     services.capture_pending = True
     waiting = await agent._recall(durable, 3)
@@ -92,3 +93,98 @@ async def test_recall_waits_for_capture_then_replays_one_frozen_query():
     assert services.calls[-1] == (
         "memory.query.cancel", {"query_id": waiting[1], "reason_code": "SUPERSEDED"}
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signal_during_recall", [False, True])
+async def test_replacement_parks_before_next_model_call(
+    monkeypatch, signal_during_recall
+):
+    durable = run()
+    durable["state"] = "PREPARING_MODEL"
+    durable["progress"].update(checkpoint_seq=0, next_step_seq=1)
+    operation_id = "runtime-reload/agent/1"
+    signal = [not signal_during_recall]
+    calls = []
+    payloads = []
+
+    async def uow_call(name, body, **_kwargs):
+        calls.append(name)
+        if name == "agent.acquire-run-lease":
+            return {"run_id": durable["run_id"], "owner_id": body["owner_id"],
+                    "epoch": 1}
+        if name == "agent.park-reload":
+            assert body["reload_operation_id"] == operation_id
+            assert body["resume_phase"] == "PREPARING_MODEL"
+            return durable
+        assert name == "agent.release-run-lease"
+
+    async def put_json(body, **_kwargs):
+        payloads.append(body)
+        return {"payload_id": "checkpoint", "digest": "sha256:" + "0" * 64,
+                "owner_component_id": "agent.runtime", "owner_kind": "checkpoint.state",
+                "owner_id": "checkpoint"}
+
+    async def read_json(_ref):
+        return {"system": ["You are an Agent."]}
+
+    async def tools_list():
+        return {"protocol": "forest.contribution-directory/1", "kind": "agent-tools",
+                "graph_id": "graph/1", "graph_revision": 1, "items": []}
+
+    context = SimpleNamespace(
+        uow=SimpleNamespace(call=uow_call),
+        payloads=SimpleNamespace(put_json=put_json, read_json=read_json),
+        agent_tools=SimpleNamespace(list=tools_list),
+        identity={"graph_id": "graph/1", "graph_revision": 1},
+        operations=SimpleNamespace(stable=lambda value: value),
+    )
+    agent = AgentExecution(
+        context,
+        {"preset": {"payload_id": "preset", "digest": "sha256:" + "0" * 64,
+                    "owner_id": "preset/1"}, "max_steps": 32},
+        lambda: operation_id if signal[0] else None,
+    )
+
+    async def load_or_start(_request):
+        return durable
+
+    async def recovery(_run_id):
+        return {"state": "PREPARING_MODEL", "next_step_seq": 1}
+
+    async def current_run(_run_id):
+        return durable
+
+    async def forbidden_model_call(**_kwargs):
+        raise AssertionError("replacement must park before dispatching another model call")
+
+    monkeypatch.setattr(agent, "_load_or_start", load_or_start)
+    monkeypatch.setattr(agent, "_recovery", recovery)
+    monkeypatch.setattr(agent, "_run", current_run)
+    monkeypatch.setattr(agent.model, "invoke", forbidden_model_call)
+    if signal_during_recall:
+        async def acquire_input(*_args):
+            return {"status": "READY"}
+
+        async def recall(*_args):
+            signal[0] = True
+            return "READY", "query/1", None
+
+        async def model_snapshot(*_args):
+            return {}
+
+        monkeypatch.setattr(agent, "_acquire_input", acquire_input)
+        monkeypatch.setattr(agent, "_recall", recall)
+        monkeypatch.setattr(agent, "_model_snapshot", model_snapshot)
+    result = await agent.execute({
+        "actor": {"conversation_id": durable["conversation_ref"]},
+        "conversation_id": durable["conversation_ref"],
+        "absolute_deadline": None,
+        "resume": True,
+        "session_ref": "session/1",
+        "run_ref": durable["run_id"],
+    })
+    assert result["status"] == "RELOAD_WAIT"
+    assert payloads[0]["reload_operation_id"] == operation_id
+    assert calls == ["agent.acquire-run-lease", "agent.park-reload",
+                     "agent.release-run-lease"]

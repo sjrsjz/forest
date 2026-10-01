@@ -26,6 +26,17 @@ class AgentRuntime(Plugin):
             )
             for key, value in config.items()
         }
+        self._reload_operation_id = None
+
+    async def prepare_replacement(self, operation_id):
+        self._reload_operation_id = operation_id
+
+    async def abort_replacement(self, operation_id):
+        if self._reload_operation_id == operation_id:
+            self._reload_operation_id = None
+
+    async def resume(self):
+        self._reload_operation_id = None
 
     @service(
         "agent.execute",
@@ -35,7 +46,9 @@ class AgentRuntime(Plugin):
         output_schema="schemas/execute-output.json",
     )
     async def execute(self, payload, ctx):
-        return await AgentExecution(ctx, self._config).execute(payload)
+        return await AgentExecution(
+            ctx, self._config, lambda: self._reload_operation_id
+        ).execute(payload)
 
     @service(
         "agent.execution.policy",
