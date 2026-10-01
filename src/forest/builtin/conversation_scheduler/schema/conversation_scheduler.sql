@@ -3496,9 +3496,20 @@ BEGIN
     SELECT * INTO claim_group FROM __forest_module_schema__.trigger_claim_groups
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
       AND run_ref=requested_run FOR SHARE;
-    IF lane IS NULL OR lane.active_run_ref IS DISTINCT FROM requested_run
-       OR lane.active_session_ref IS DISTINCT FROM claim_group.session_ref
-       OR claim_group IS NULL OR claim_group.claim_state<>'ACTIVE' THEN
+    IF lane.conversation_id IS NULL OR claim_group.claim_ref IS NULL
+       OR claim_group.claim_state<>'ACTIVE'
+       OR (
+           (lane.active_run_ref=requested_run
+            AND lane.active_session_ref=claim_group.session_ref)
+           OR (lane.active_run_ref IS NULL AND lane.active_session_ref IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM __forest_module_schema__.trigger_claim_groups other
+                   WHERE other.bot_id=requested_bot
+                     AND other.conversation_id=requested_conversation
+                     AND other.claim_state='ACTIVE'
+                     AND other.claim_ref<>claim_group.claim_ref
+               ))
+       ) IS NOT TRUE THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','CONVERSATION_REQUEUE_TARGET_STALE',
                 'message','Run has no active Conversation claim','status',409));
@@ -3597,8 +3608,16 @@ BEGIN
         FROM __forest_module_schema__.conversation_lanes l
         JOIN __forest_module_schema__.trigger_claim_groups g
           ON g.bot_id=l.bot_id AND g.conversation_id=l.conversation_id
-         AND g.session_ref=l.active_session_ref AND g.run_ref=l.active_run_ref
          AND g.claim_state='ACTIVE'
+         AND (
+             (g.session_ref=l.active_session_ref AND g.run_ref=l.active_run_ref)
+             OR (l.active_session_ref IS NULL AND l.active_run_ref IS NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM __forest_module_schema__.trigger_claim_groups other
+                     WHERE other.bot_id=g.bot_id AND other.conversation_id=g.conversation_id
+                       AND other.claim_state='ACTIVE' AND other.claim_ref<>g.claim_ref
+                 ))
+         )
         LEFT JOIN __forest_module_schema__.conversation_requeue_requests r
           ON r.bot_id=g.bot_id AND r.claim_ref=g.claim_ref
         WHERE l.bot_id=requested_bot
@@ -3692,12 +3711,22 @@ BEGIN
     FROM __forest_module_schema__.conversation_lanes
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
     FOR UPDATE;
-    IF lane IS NULL OR lane.actor_owner_id IS DISTINCT FROM requested_owner
+    IF lane.conversation_id IS NULL OR lane.actor_owner_id IS DISTINCT FROM requested_owner
        OR lane.actor_epoch IS DISTINCT FROM requested_epoch
        OR lane.actor_expires_at IS NULL
        OR lane.actor_expires_at<=clock_timestamp()
-       OR lane.active_session_ref IS DISTINCT FROM requested_session
-       OR lane.active_run_ref IS DISTINCT FROM requested_run THEN
+       OR (
+           (lane.active_session_ref=requested_session
+            AND lane.active_run_ref=requested_run)
+           OR (lane.active_session_ref IS NULL AND lane.active_run_ref IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM __forest_module_schema__.trigger_claim_groups other
+                   WHERE other.bot_id=requested_bot
+                     AND other.conversation_id=requested_conversation
+                     AND other.claim_state='ACTIVE'
+                     AND other.claim_ref<>requested_ref
+               ))
+       ) IS NOT TRUE THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','STALE_CONVERSATION_ACTOR',
                 'message','Actor no longer owns the requeued Run','status',409));
@@ -3706,7 +3735,7 @@ BEGIN
     FROM __forest_module_schema__.trigger_claim_groups
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
       AND session_ref=requested_session AND run_ref=requested_run FOR UPDATE;
-    IF claim_group IS NULL OR claim_group.claim_state<>'ACTIVE'
+    IF claim_group.claim_ref IS NULL OR claim_group.claim_state<>'ACTIVE'
        OR claim_group.claim_ref IS DISTINCT FROM requested_ref
        OR claim_group.claim_digest IS DISTINCT FROM requested_claim_digest THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,

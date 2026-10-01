@@ -281,13 +281,16 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         class _RollbackVerification(Exception):
             pass
 
-        async def verify_effect_requeue(conn, run_ref, session_ref, conversation_ref):
+        async def verify_effect_requeue(
+            conn, run_ref, session_ref, conversation_ref, *, allow_absent_run=False
+        ):
             namespace = package.descriptor.storage.spec.namespace
             proof = {
                 "protocol": "forest.uow-step/1",
                 "caller": {"component_id": "conversation.scheduler"},
                 "input": {"protocol": "forest.agent-requeue-verification/1",
-                          "prior_step_id": "conversation"},
+                          "prior_step_id": "conversation",
+                          "allow_absent_run": allow_absent_run},
                 "prior": {"conversation": {
                     "protocol": "forest.conversation-run-requeued/1",
                     "conversation_id": conversation_ref,
@@ -303,6 +306,23 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 )
             ).fetchone()
             return row["result"]
+
+        async with store.pool.connection() as conn, conn.transaction():
+            absent = await verify_effect_requeue(
+                conn, "orphan-run", "orphan-session", "orphan-conversation",
+                allow_absent_run=True,
+            )
+            assert absent["ok"] is True
+            existing_conversation = await verify_effect_requeue(
+                conn, "orphan-run", "orphan-session",
+                "conversation/onebot/group/933179609", allow_absent_run=True,
+            )
+            assert existing_conversation["error"]["code"] == "AGENT_RUN_NOT_ABANDONED"
+            active_run = await verify_effect_requeue(
+                conn, "run/agent-package/1", "session/agent-package/1",
+                "conversation/onebot/group/933179609", allow_absent_run=True,
+            )
+            assert active_run["error"]["code"] == "AGENT_RUN_NOT_ABANDONED"
 
         with pytest.raises(_RollbackVerification):
             async with store.pool.connection() as conn, conn.transaction():

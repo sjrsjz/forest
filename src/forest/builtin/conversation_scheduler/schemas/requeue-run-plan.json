@@ -11,7 +11,8 @@
       "required": ["protocol", "prior_step_id"],
       "properties": {
         "protocol": {"const": "forest.agent-requeue-verification/1"},
-        "prior_step_id": {"const": "conversation"}
+        "prior_step_id": {"const": "conversation"},
+        "allow_absent_run": {"type": "boolean"}
       }
     }
   },

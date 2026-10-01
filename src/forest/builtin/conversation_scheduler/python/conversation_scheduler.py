@@ -536,16 +536,16 @@ class ConversationScheduler(Plugin):
             timeout=25,
         )
 
-    async def _requeue_terminal(self, task, execution, ctx):
+    async def _requeue_pending(self, task, session_ref, run_ref, ctx, *, allow_absent_run):
         request = await ctx.queries.call(
             "conversation.read-requeue-request",
             {"conversation_id": task["conversation_id"],
-             "run_ref": execution["run_ref"]},
+             "run_ref": run_ref},
             timeout=10,
         )
         if request["state"] != "PENDING":
             return False
-        if (request["session_ref"] != execution["session_ref"]
+        if (request["session_ref"] != session_ref
                 or request["conversation_id"] != task["conversation_id"]):
             raise ForestError(
                 "CONVERSATION_REQUEUE_REQUEST_INVALID",
@@ -561,13 +561,14 @@ class ConversationScheduler(Plugin):
                         "actor": task["actor"],
                         "request_id": request["request_id"],
                         "session_ref": request["session_ref"],
-                        "run_ref": execution["run_ref"],
+                        "run_ref": run_ref,
                         "claim_ref": request["claim_ref"],
                         "claim_digest": request["claim_digest"],
                         "reason_code": request["reason_code"],
                     },
                     "agent": {"protocol": "forest.agent-requeue-verification/1",
-                              "prior_step_id": "conversation"},
+                              "prior_step_id": "conversation",
+                              "allow_absent_run": allow_absent_run},
                 },
                 operation_id=ctx.operations.stable(
                     f"requeue:{request['request_id']}:{task['actor']['epoch']}"
@@ -575,7 +576,9 @@ class ConversationScheduler(Plugin):
                 timeout=25,
             )
         except ForestError as exc:
-            if exc.code != "AGENT_REQUEUE_EFFECT_UNSAFE":
+            if exc.code != "AGENT_REQUEUE_EFFECT_UNSAFE" and not (
+                allow_absent_run and exc.code == "AGENT_RUN_NOT_ABANDONED"
+            ):
                 raise
             return False
         return True
@@ -602,6 +605,10 @@ class ConversationScheduler(Plugin):
         ).isoformat()
         run_ref = work["run_ref"]
         resume = work["resume"]
+        if await self._requeue_pending(
+            work, work["session_ref"], run_ref, ctx, allow_absent_run=True
+        ):
+            return self._release("REQUEUED")
         if not resume:
             await ctx.uow.call(
                 "conversation.compact-before-run",
@@ -671,7 +678,10 @@ class ConversationScheduler(Plugin):
             if status in {"WAIT_TOOL", "BLOCKED_UNKNOWN"}:
                 return self._defer(status, "agent_reconciliation_pending", 30.0)
             if status in {"FAILED", "CANCELLED"}:
-                if await self._requeue_terminal(work, execution, ctx):
+                if await self._requeue_pending(
+                    work, execution["session_ref"], execution["run_ref"], ctx,
+                    allow_absent_run=False,
+                ):
                     return self._release("REQUEUED")
                 await self._commit_terminal(work, execution, ctx)
                 return self._release(status)

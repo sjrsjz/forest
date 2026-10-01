@@ -1469,6 +1469,65 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 assert prefilled["trigger_claim"]["count"] == 64
                 assert prefilled["trigger_claim"]["last_trigger_ref"] == "prefill-trigger/64"
                 claim_ref = prefilled["trigger_claim"]["ref"]
+                class _RollbackOrphan(Exception):
+                    pass
+
+                with pytest.raises(_RollbackOrphan):
+                    async with store.pool.connection() as conn, conn.transaction():
+                        async def orphan_call(function, context, body):
+                            row = await (
+                                await conn.execute(
+                                    sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result")
+                                    .format(sql.Identifier(namespace), sql.Identifier(function)),
+                                    (Jsonb(context), Jsonb(body)),
+                                )
+                            ).fetchone()
+                            return row["result"]
+
+                        candidates = await orphan_call(
+                            "conversation_list_requeue_candidates",
+                            {"bot_id": store.bot_id},
+                            {"conversation_id": prefill_conversation, "limit": 1},
+                        )
+                        assert candidates["value"]["items"][0]["run_ref"] == "prefill-run"
+                        requested = await orphan_call(
+                            "conversation_request_requeue",
+                            {"bot_id": store.bot_id,
+                             "operation_id": "prefill-orphan-request"},
+                            {"conversation_id": prefill_conversation,
+                             "run_ref": "prefill-run",
+                             "reason_code": "TEST_PREFILL_ABANDONED",
+                             "requested_by": "subject/package-admin"},
+                        )
+                        assert requested["ok"] is True
+                        requeued = await orphan_call(
+                            "conversation_requeue_run",
+                            {"bot_id": store.bot_id,
+                             "operation_id": "prefill-orphan-requeue",
+                             "participant_input_digest": digest},
+                            {"protocol": "forest.uow-step/1",
+                             "caller": {"component_id": "conversation.scheduler",
+                                        "generation_id": participant.generation_id},
+                             "input": {
+                                 "protocol": "forest.conversation-run-requeue/1",
+                                 "actor": prefill_actor,
+                                 "request_id": "prefill-orphan-request",
+                                 "session_ref": "prefill-session",
+                                 "run_ref": "prefill-run",
+                                 "claim_ref": claim_ref,
+                                 "claim_digest": prefilled["trigger_claim"]["digest"],
+                                 "reason_code": "TEST_PREFILL_ABANDONED",
+                             }, "prior": {}},
+                        )
+                        assert requeued["ok"] is True
+                        assert requeued["value"]["trigger_count"] == 64
+                        assert (await orphan_call(
+                            "conversation_read_requeue_request",
+                            {"bot_id": store.bot_id},
+                            {"conversation_id": prefill_conversation,
+                             "run_ref": "prefill-run"},
+                        ))["value"]["state"] == "APPLIED"
+                        raise _RollbackOrphan
             else:
                 assert prefilled["trigger_claim"]["count"] == 128
                 assert prefilled["trigger_claim"]["last_trigger_ref"] == "prefill-trigger/128"

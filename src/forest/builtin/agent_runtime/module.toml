@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.22.2"
+version = "4.23.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -47,7 +47,6 @@ requests = [
   "domain.query:agent.run-recovery",
   "domain.query:agent.execution-history",
   "domain.query:agent.frozen-model-resume",
-  "uow.execute:agent.start-run",
   "uow.execute:agent.start-from-conversation",
   "uow.execute:agent.append-run-input",
   "uow.execute:agent.acquire-model-input",
@@ -162,9 +161,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.18.1"
+schema_version = "2.19.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "58d56fd877be7e1fbc066e6afcda30578b87f6adeed10ece30028d39f96a8b01"
+baseline_sha256 = "b92ceb04012e2d5a90ae22490e32cb9398b3b6f3eb04fc07ee24a1c4807e383b"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -546,16 +545,6 @@ contract = "1.0"
 function = "agent_verify_requeue"
 input_schema = "schemas/requeue-verification-envelope.json"
 output_schema = "schemas/requeue-verification-output.json"
-
-[[components.unit_of_work_plans]]
-name = "agent.start-run"
-contract = "1.0"
-input_schema = "schemas/start-run-input.json"
-output_schema = "schemas/run-snapshot-output.json"
-timeout_s = 10
-steps = [
-  { id = "agent", component_id = "agent.runtime", participant = "agent.start-run-record" }
-]
 
 [[components.unit_of_work_plans]]
 name = "agent.start-from-conversation"

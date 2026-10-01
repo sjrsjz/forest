@@ -127,6 +127,14 @@ PENDING ------------> FAILED / CANCELLED
 
 完成回复、失败和取消只提交组级终结事实及有界回执，不能把几十万项 `answered_trigger_ids` 或 `answered_events` 放进 UnitOfWork/Worker/模型帧。Memory 的回复联想仅对有界提案中的触发与事件逐项核验，不要求传输整组回答成员。逐触发物理结算由单调游标分段完成；它必须能在进程崩溃和热替换后重领，旧领取不能结算新分段。终态提交使用领取时已经核验的组头计数，不扫描整组触发行；每条物理终态转换须对应不可变分段成员和组级终结事实。`PENDING`、`CLAIMED`、`ANSWERED` 等对外有效状态由领取组与终结事实共同决定，在物理结算未完成时仍保持正确。当前实现已有累计领取组、最多 64 项的领取与终态结算分段、失租约后 IDLE 预填原 Run 重领，以及跨租约稳定的 `SESSION_END` 后继 Run 身份。显式重排的内部 UnitOfWork 现要求同事务核验旧 Agent Run 与 Session 均已终结，并使旧领取组按最多 64 项的分段返回 PENDING；物理结算前同群新 Run 不得越过该组。来源已经进入 Context 的积压由 `RECOVERY_PREFILL` 只领取、不重复追加，最终仍保留最后一个触发进入 `RECOVERY_CLAIM`。Agent 事务核验还拒绝旧 Run 中已登记任何 ToolCall，或存在 DISPATCHING、UNKNOWN 模型传输尝试的重排；此类 Run 的外部效果不能通过开启新 Run 来推定安全。管理动作 conversation.requeue.request 只写入绑定 Conversation、Session、Run 和领取组摘要的持久请求，不自行取得 actor 租约，也不跨 schema 改写 Agent。Scheduler 在旧 Run 返回 FAILED/CANCELLED 后读取请求，持有同群 actor 时调用重排 UnitOfWork；Agent 拒绝不安全重排时改走原终结路径并记录请求为 REJECTED，正常回答也会使待处理请求失效。候选列表按 Conversation ID 游标有界分页，模块自带管理 UI 展示活跃领取组和请求结果。异常孤儿组处置、真实管理会话与长期规模验收仍待完成，具体差距以[实现状态](implementation-status.md)为准。
 
+### 2.5 未创建 Run 的预填领取组恢复
+
+正常预填中，领取组已经存在而 Agent Run 尚未创建；actor 失租约后，新 actor 应复用组头冻结的 Session/Run 引用继续预填，不能仅凭“Run 不存在”判为孤儿。异常退出仅由管理员对准确的活动领取组提交受控重排请求触发，且必须在取得当前 actor 围栏后判定。候选查询和请求动作需要识别 `lane.active_session_ref/active_run_ref` 均为空、但同一会话恰有一个 `ACTIVE` 领取组的预填状态；请求冻结组的 `claim_ref`、`claim_digest`、Session/Run 与操作身份。它不能直接改动触发状态。
+
+结算继续使用跨 Conversation/Agent 的单笔 UnitOfWork。Conversation 先锁 lane 与该组，复核 actor epoch、管理请求和组摘要；Agent 在同一事务内对准确 Session/Run 证明二者均未创建，或者按现有规则证明 Run 与 Session 已终结且外部效果安全。合法 Run 创建必须先经过同一 lane 锁的输入选择，故并发创建不能越过该核验；Agent 还在会话级 advisory lock 下复核缺失身份，封住直接启动与恢复检查之间的竞态。若存在活动 Run、已有 Session、未知模型传输或工具效果，整笔事务拒绝且领取组保持原样。证明缺失 Run 不可由查询超时、任务失败、租约过期或“未观察到日志”代替。独立 `agent.start-run` 计划及其能力已删除；包内启动 participant 只供带 Conversation 选择步骤的组合计划使用。
+
+核验成功后，组头原子转为 `TERMINAL/REQUEUED`，登记不可变操作和分段结算游标，管理员请求转 `APPLIED`。未结算完以前，同群领取与输入选择均不能越过该组；结算每段最多 64 条，再由 `RECOVERY_PREFILL/RECOVERY_CLAIM` 读取已经提交的 Context 来源，不重复追加消息。重复提交返回同一回执，不同摘要复用同一操作被拒绝。若没有显式请求，预填继续遵循原 Run 引用的重领路径；恢复器不得按时间阈值自动重排，因为这会丢弃仍可继续的合法预填。预填选择始终保留最后一条 `PENDING` 触发，触发守卫禁止它不经领取直接变成终态；因此正常预填组即使失租约也仍能被领取器发现。库外破坏约束造成的待领取触发缺失属于数据损坏诊断，不应隐式“修复”为一次新 Run。
+
 ## 3. 上下文消息与用户身份
 
 ### 3.1 规范化消息 DTO

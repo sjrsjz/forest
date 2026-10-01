@@ -5155,6 +5155,10 @@ BEGIN
             'error',jsonb_build_object('code','AGENT_REQUEUE_VERIFICATION_INVALID',
                 'message','Requeue verification input is invalid','status',422));
     END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.agent.runtime/conversation/' || (context->>'bot_id') || '/' ||
+        (prior_value->>'conversation_id'),0
+    ));
     SELECT r.session_id,r.state,r.terminal_at,s.conversation_ref,
            s.state AS session_state,s.active_run_id,s.closed_at INTO run_row
     FROM __forest_module_schema__.agent_runs r
@@ -5163,8 +5167,26 @@ BEGIN
     WHERE r.bot_id=context->>'bot_id'
       AND r.run_id=prior_value->>'run_ref'
     FOR SHARE;
-    IF run_row IS NULL
-       OR run_row.session_id IS DISTINCT FROM prior_value->>'session_ref'
+    IF run_row.session_id IS NULL THEN
+        IF body->>'allow_absent_run'='true'
+           AND NOT EXISTS (
+               SELECT 1 FROM __forest_module_schema__.agent_runs r
+               WHERE r.bot_id=context->>'bot_id' AND r.run_id=prior_value->>'run_ref'
+           ) AND NOT EXISTS (
+               SELECT 1 FROM __forest_module_schema__.agent_sessions s
+               WHERE s.bot_id=context->>'bot_id'
+                 AND (s.session_id=prior_value->>'session_ref'
+                      OR (s.conversation_ref=prior_value->>'conversation_id'
+                          AND s.state='ACTIVE'))
+           ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+                                      'value',prior_value);
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_RUN_NOT_ABANDONED',
+                'message','Run is not terminal and eligible for requeue','status',409));
+    END IF;
+    IF run_row.session_id IS DISTINCT FROM prior_value->>'session_ref'
        OR run_row.conversation_ref IS DISTINCT FROM prior_value->>'conversation_id'
        OR run_row.state NOT IN ('FAILED','CANCELLED')
        OR run_row.terminal_at IS NULL
