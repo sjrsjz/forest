@@ -1260,6 +1260,10 @@ class PackageGenerationAdapter:
             async def dispatch(worker, _scope, call_id):
                 self._job_cancellations[call_id] = request.cancellation_requested
                 try:
+                    if await request.cancellation_requested():
+                        raise ForestError(
+                            "JOB_CANCELLED", "Job was cancelled before execution", 409
+                        )
                     return await worker.deliver_job(
                         declaration["handler"],
                         operation_input,

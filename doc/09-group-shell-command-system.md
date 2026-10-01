@@ -190,3 +190,9 @@ WebUI 的模块页从描述符展示命令目录、参数 schema、权限和最�
 - 业务命令拒绝不 fallback Agent，普通 Handler 全部 Pass 才采用冻结 trigger decision；
 - 原生执行 profile 的路径、环境、资源、输出和取消边界均有实际隔离测试；
 - 源码、数据库和测试不包含开发期 gate registry 兼容链或 writer-generation 升级夹具。
+
+## 13. 健康 Job 的组件归属
+
+`runtime.health-snapshot` 是由 `component.worker-host` builtin 包声明、执行和热替换的只读 JobType，不再由 `kernel.runtime` 直接注册 Job handler。内核只拥有 `runtime.status.snapshot/1` 只读端口，返回当前 Graph、接纳状态与成员生命周期的有界状态投影；包通过冻结的服务路由消费该端口，并发布 `forest.runtime-health-snapshot/1` 结果。JobScheduler 仍只拥有排队、领取、取消和结算，不知道健康检查字段。
+
+取消意图在 Scheduler 派发前以及目标包 Job handler 入队前复核；已开始的只读状态读取可完成，不能把已产生的结果重写成“未执行”。换代时 JobType 的 provider Generation 随 `component.worker-host` 一起冻结或替换，旧队列项必须按原 Generation 身份结算或获得明确失败，不能临时改路由到新包。

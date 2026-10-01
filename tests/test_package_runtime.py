@@ -852,6 +852,26 @@ async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_p
     async def not_cancelled():
         return False
 
+    async def cancelled():
+        return True
+
+    with pytest.raises(ForestError) as rejected:
+        await endpoint.invoke_routed(
+            route,
+            RuntimeServiceInvocation(
+                "job.execute:fixture:cancelled", 3660, "job.scheduler", "job-fixture"
+            ),
+            (
+                DurableJobExecutionRequest(
+                    "job-fixture", "native.execute", 1, 1, "admin:test",
+                    {"profile_id": "fixture.echo", "arguments": {}}, cancelled,
+                ),
+            ),
+            {},
+        )
+    assert rejected.value.code == "JOB_CANCELLED"
+    assert events == ["start"]
+
     result = await endpoint.invoke_routed(
         route,
         invocation,

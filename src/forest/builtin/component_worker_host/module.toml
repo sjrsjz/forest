@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.17"
+version = "1.6.18"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -30,6 +30,7 @@ stop_timeout_s = 10
 [components.capabilities]
 requests = [
   "service.call:runtime.graph.snapshot",
+  "service.call:runtime.status.snapshot",
   "service.call:runtime.component-candidate.preview",
   "service.call:deployment.package-registry.packages",
   "service.call:deployment.package-registry.artifact",
@@ -65,6 +66,12 @@ execution_profile = "official"
 
 [[components.requires]]
 name = "runtime.graph.snapshot"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "runtime.status.snapshot"
 contract = ">=1.0,<2.0"
 required = true
 startup_dependency = true
@@ -258,6 +265,18 @@ service_class = "P1"
 required_capabilities = ["runtime.graph.reload"]
 output_policy = "SHORT"
 timeout_s = 60
+
+[[components.job_types]]
+job_type = "runtime.health-snapshot"
+job_version = 1
+name = "job.runtime.health-snapshot"
+contract = "1.0"
+handler = "runtime.health-snapshot"
+input_schema = "schemas/runtime-health-input.json"
+output_schema = "schemas/runtime-health-output.json"
+max_attempts = 3
+timeout_s = 30
+max_concurrency = 1
 
 [[components.management_queries]]
 id = "modules"

@@ -13,10 +13,9 @@ from forest.builtin_package_catalog_snapshot import (
     package_catalog_artifact_service,
     package_catalog_page_service,
 )
-from forest.builtin_runtime_graph_snapshot import runtime_graph_snapshot_service
-from forest.builtin_runtime_job import (
-    RUNTIME_HEALTH_SNAPSHOT_JOB,
-    runtime_health_snapshot_service,
+from forest.builtin_runtime_graph_snapshot import (
+    runtime_graph_snapshot_service,
+    runtime_status_snapshot_service,
 )
 from forest.builtin_runtime_shell import RUNTIME_SHELL_COMMANDS, runtime_shell_service
 from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
@@ -149,6 +148,7 @@ _MODULES = {
             "runtime.graph-replacement.request",
             "runtime.graph-replacement.status",
             "runtime.graph.snapshot",
+            "runtime.status.snapshot",
             "runtime.component-candidate.preview",
             "deployment.package-registry.packages",
             "deployment.package-registry.artifact",
@@ -159,7 +159,6 @@ _MODULES = {
             "kernel.uow.agent.cancel-wake",
             "shell.core-runtime.execute",
             "agent.tool.runtime-status",
-            "job.runtime.health-snapshot",
         ),
         "capabilities": (
             "runtime.graph.publish",
@@ -170,6 +169,7 @@ _MODULES = {
             "runtime.graph-replacement.request",
             "runtime.graph-replacement.status",
             "runtime.graph.snapshot",
+            "runtime.status.snapshot",
             "runtime.component-candidate.preview",
             "deployment.package-registry.packages",
             "deployment.package-registry.artifact",
@@ -864,6 +864,12 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                         runtime_graph_snapshot_service,
                     ),
                     RuntimeKernelServiceSpec(
+                        "runtime.status.snapshot",
+                        1,
+                        ("kernel.runtime",),
+                        runtime_status_snapshot_service,
+                    ),
+                    RuntimeKernelServiceSpec(
                         "runtime.component-candidate.preview",
                         1,
                         ("kernel.runtime",),
@@ -893,12 +899,6 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                         ("kernel.runtime",),
                         runtime_graph_replacement_status_service,
                     ),
-                    RuntimeKernelServiceSpec(
-                        RUNTIME_HEALTH_SNAPSHOT_JOB.service_id,
-                        RUNTIME_HEALTH_SNAPSHOT_JOB.service_version,
-                        ("kernel.runtime",),
-                        runtime_health_snapshot_service,
-                    ),
                 )
                 if component_id == "kernel.runtime"
                 else ()
@@ -914,7 +914,7 @@ async def bootstrap_clean_kernel(store, installer) -> CleanKernelModules:
                 if component_id == "kernel.audit"
                 else ()
             ),
-            job_types=((RUNTIME_HEALTH_SNAPSHOT_JOB,) if component_id == "kernel.runtime" else ()),
+            job_types=(),
             retention_requires=(
                 ("component.worker-host",)
                 if component_id in {"kernel.audit", "kernel.authorization"}

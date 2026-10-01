@@ -281,6 +281,25 @@ class ComponentWorkerHost(Plugin):
                 "error_code": error.code,
             }
 
+    @job("runtime.health-snapshot", input_schema="schemas/runtime-health-input.json",
+         max_attempts=3, timeout_s=30, max_concurrency=1)
+    async def runtime_health_snapshot(self, task, ctx):
+        if not isinstance(task, dict) or task.get("input") != {}:
+            raise ForestError("JOB_EXECUTION_INPUT_INVALID", "Job input is invalid", 422)
+        status = await ctx.services.call(
+            "runtime.status.snapshot",
+            {"protocol": "forest.runtime-status-snapshot-request/1"},
+            operation_id=ctx.operations.stable("runtime-status-snapshot"),
+            timeout=10,
+        )
+        if status.get("protocol") != "forest.runtime-status-snapshot/1":
+            raise ForestError(
+                "RUNTIME_STATUS_SNAPSHOT_INVALID",
+                "Kernel runtime status snapshot is invalid",
+                409,
+            )
+        return {**status, "protocol": "forest.runtime-health-snapshot/1"}
+
     @job("component.selection.submit")
     async def submit_selection(self, task, ctx):
         work = task["payload"]

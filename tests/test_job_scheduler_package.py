@@ -38,15 +38,32 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
             CapabilityGrant("job.cancel", "bot", store.bot_id),
         ),
     )
+    observer = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/component_worker_host",
+        catalog,
+        store,
+        installer,
+        kernel=kernel,
+        initial_configuration={"protocol": "forest.component-worker-host/1"},
+    )
     lease = await kernel.runtime.claim_host("host/job-package", "inc/job-package")
+
+    def unrelated_management_action(*_args, **_kwargs):
+        raise AssertionError("Worker Host management is outside this Job test")
+
     host = SimpleNamespace(
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
+        resolve_management_action_preflight=(
+            lambda *_args, **_kwargs: unrelated_management_action
+        ),
+        resolve_shell_management_authorization=unrelated_management_action,
     )
-    registry = RuntimeModuleRegistry(host, kernel.descriptors + (package.descriptor,))
+    descriptors = kernel.descriptors + (package.descriptor, observer.descriptor)
+    registry = RuntimeModuleRegistry(host, descriptors)
     await registry.start()
     try:
         assert registry.states["job.scheduler"] is ModuleLifecycleState.ACTIVE
@@ -54,6 +71,22 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
         types = await runtime.management_contract.query("jobs.types", {})
         assert [item["job_type"] for item in types["items"]] == [
             "runtime.health-snapshot"
+        ]
+        async with store.pool.connection() as conn:
+            routes = await conn.execute(
+                sql.SQL("SELECT owner_component_id, target_generation_id FROM {}.job_type_catalog "
+                        "WHERE scheduler_generation_id=%s AND job_type=%s").format(
+                    sql.Identifier(package.descriptor.storage.spec.namespace)
+                ),
+                (
+                    registry.graph_identity.generations["job.scheduler"],
+                    "runtime.health-snapshot",
+                ),
+            )
+            route = await routes.fetchone()
+        assert route["owner_component_id"] == "component.worker-host"
+        assert route["target_generation_id"] == registry.graph_identity.generations[
+            "component.worker-host"
         ]
 
         input_validator, output_validator = runtime._service_schemas["jobs.enqueue"]
@@ -160,7 +193,7 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
 
         previous_generation = registry.graph_identity.generations["job.scheduler"]
         candidate = RuntimeModuleRegistry(
-            host, kernel.descriptors + (package.descriptor,)
+            host, descriptors
         )
         await candidate.prewarm()
         assert (
