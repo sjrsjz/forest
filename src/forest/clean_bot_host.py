@@ -497,43 +497,6 @@ class CleanBotHost:
             token_resolver=resolve_vector_index_token,
             **vector_index_driver_options,
         )
-        memory = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/memory_graph"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.memory.graph/2",
-                "embedding": {
-                    "model_kind": "TEXT_IMAGE",
-                    **embedding_profile,
-                    "normalization": "L2",
-                },
-                "fusion_policy_revision": "independent-facets/1",
-                "retrieval": {
-                    "policy_revision": "qiyu-graph-region/1",
-                    "seed_limit": 4,
-                    "candidate_limit_per_facet": 64,
-                    "min_similarity": 0.35,
-                    "min_graph_relevance": 0.05,
-                    "max_graph_nodes": 32,
-                    "max_association_edges_per_node": 32,
-                    "max_retrieval_chars": 24000,
-                    "sequence_weight": 0.55,
-                    "association_weight": 0.90,
-                },
-                "embedding_budget": {
-                    "policy_revision": "daily-cost-cap/1",
-                    "daily_request_limit": 1000,
-                    "daily_token_limit": 10000000,
-                    "reservation_tokens": 32768,
-                },
-            },
-            additional_grants=(
-                CapabilityGrant("embedding.invoke", "bot", self.store.bot_id, delegable=True),
-            ),
-        )
         media_driver_options = {}
         if self._media_client_factory is not None:
             media_driver_options["client_factory"] = self._media_client_factory
@@ -559,61 +522,6 @@ class CleanBotHost:
             ).encode("utf-8"),
             expected_deletion_epoch=await self._kernel.payload.epoch(),
         )
-        agent = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/agent_runtime"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.agent.runtime/1",
-                "agent_spec_revision": "agentlib-aligned/1",
-                "preset_revision": "preset/default/1",
-                "preset": {
-                    "payload_id": preset_payload.payload_id,
-                    "digest": preset_payload.content_digest,
-                    "owner_id": preset_owner_id,
-                },
-                "run_timeout_seconds": 600,
-                "max_steps": 64,
-                "output_tokens": self.settings.model_max_output_tokens,
-                "stream": True,
-            },
-            additional_grants=(
-                CapabilityGrant("provider.invoke", "bot", self.store.bot_id, delegable=True),
-            ),
-        )
-        jobs = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/job_scheduler"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={"protocol": "forest.job.scheduler/1"},
-            additional_grants=(
-                CapabilityGrant("job.read", "bot", self.store.bot_id),
-                CapabilityGrant("job.run", "bot", self.store.bot_id),
-                CapabilityGrant("job.cancel", "bot", self.store.bot_id),
-            ),
-        )
-        process_executor = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/process_executor"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration=official_builtin_configuration("process_executor"),
-            effect_driver_registry=PackageEffectDriverRegistry(
-                {
-                    "process.native": native_process_effect_driver_factory(
-                        runtime=self._kernel.runtime,
-                        payloads=self._kernel.payload,
-                    )
-                }
-            ),
-            configuration_validator_factory=process_executor_configuration_validator_factory(),
-        )
-
         async def resolve_onebot_secret(secret_ref, _configuration_revision):
             if secret_ref != self.settings.onebot_secret_ref:
                 raise ForestError(
@@ -623,55 +531,6 @@ class CleanBotHost:
                 )
             return self.settings.onebot_access_token
 
-        delivery = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/delivery"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={"protocol": "forest.delivery/1"},
-            effect_driver_registry=PackageEffectDriverRegistry(
-                {
-                    "kernel.payload-json": kernel_payload_json_effect_driver_factory(
-                        runtime=self._kernel.runtime,
-                        payloads=self._kernel.payload,
-                    )
-                }
-            ),
-            additional_grants=(
-                CapabilityGrant("delivery.intent", "bot", self.store.bot_id),
-                CapabilityGrant(
-                    "delivery.send", "bot", self.store.bot_id, delegable=True
-                ),
-            ),
-        )
-        shell = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/shell_command"))),
-            self.package_catalog,
-            self.store,
-            self.schema_bundle_installer,
-            kernel=self._kernel,
-            initial_configuration={
-                "protocol": "forest.shell.command/2",
-                "binding_ref": "binding/main",
-                "administrator_principals": [
-                    "qq:" + value for value in self.settings.shell_administrator_ids
-                ],
-            },
-            effect_driver_registry=PackageEffectDriverRegistry(
-                {
-                    "kernel.payload-json": kernel_payload_json_effect_driver_factory(
-                        runtime=self._kernel.runtime,
-                        payloads=self._kernel.payload,
-                    )
-                }
-            ),
-            additional_grants=(
-                CapabilityGrant(
-                    "management.invoke", "bot", self.store.bot_id, delegable=True
-                ),
-            ),
-        )
         adapter_driver_options = {}
         if self._websocket_client_factory is not None:
             adapter_driver_options["client_factory"] = self._websocket_client_factory
@@ -723,6 +582,49 @@ class CleanBotHost:
                     }
                 ],
             },
+            "memory_graph": {
+                "embedding": {
+                    "model_kind": "TEXT_IMAGE",
+                    **embedding_profile,
+                    "normalization": "L2",
+                },
+            },
+            "agent_runtime": {
+                "preset": {
+                    "payload_id": preset_payload.payload_id,
+                    "digest": preset_payload.content_digest,
+                    "owner_id": preset_owner_id,
+                },
+                "output_tokens": self.settings.model_max_output_tokens,
+            },
+            "shell_command": {
+                "administrator_principals": [
+                    "qq:" + value for value in self.settings.shell_administrator_ids
+                ],
+            },
+        }
+        bootstrap_grants = {
+            "memory_graph": (
+                CapabilityGrant("embedding.invoke", "bot", self.store.bot_id, delegable=True),
+            ),
+            "agent_runtime": (
+                CapabilityGrant("provider.invoke", "bot", self.store.bot_id, delegable=True),
+            ),
+            "job_scheduler": (
+                CapabilityGrant("job.read", "bot", self.store.bot_id),
+                CapabilityGrant("job.run", "bot", self.store.bot_id),
+                CapabilityGrant("job.cancel", "bot", self.store.bot_id),
+            ),
+            "delivery": (
+                CapabilityGrant("delivery.intent", "bot", self.store.bot_id),
+                CapabilityGrant("delivery.send", "bot", self.store.bot_id, delegable=True),
+            ),
+            "shell_command": (
+                CapabilityGrant("management.invoke", "bot", self.store.bot_id, delegable=True),
+            ),
+        }
+        configuration_validators = {
+            "process_executor": process_executor_configuration_validator_factory(),
         }
         automatic_effect_drivers = PackageEffectDriverRegistry({
             "chat-completions.http": provider_effect_factory,
@@ -731,6 +633,14 @@ class CleanBotHost:
             "media.public-image": media_effect_factory,
             "onebot.websocket-v11": onebot_effect_factory,
             "kernel.payload-bytes": kernel_payload_json_effect_driver_factory(
+                runtime=self._kernel.runtime,
+                payloads=self._kernel.payload,
+            ),
+            "kernel.payload-json": kernel_payload_json_effect_driver_factory(
+                runtime=self._kernel.runtime,
+                payloads=self._kernel.payload,
+            ),
+            "process.native": native_process_effect_driver_factory(
                 runtime=self._kernel.runtime,
                 payloads=self._kernel.payload,
             ),
@@ -747,17 +657,13 @@ class CleanBotHost:
                     source.name, overrides=bootstrap_overrides.get(source.name)
                 ),
                 effect_driver_registry=automatic_effect_drivers,
+                configuration_validator_factory=configuration_validators.get(source.name),
+                additional_grants=bootstrap_grants.get(source.name, ()),
             )
             automatic.append(provisioned.descriptor)
         official_descriptors = (
-                worker_host.descriptor,
-                memory.descriptor,
-                agent.descriptor,
-                process_executor.descriptor,
-                jobs.descriptor,
-                shell.descriptor,
-                delivery.descriptor,
-                *automatic,
+            worker_host.descriptor,
+            *automatic,
         )
         selected = select_package_members(
             selection, official_descriptors, self.package_catalog

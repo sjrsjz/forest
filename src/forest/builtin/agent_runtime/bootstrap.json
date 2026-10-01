@@ -1,0 +1,1 @@
+{"protocol":"forest.agent.runtime/1","agent_spec_revision":"agentlib-aligned/1","preset_revision":"preset/default/1","run_timeout_seconds":600,"max_steps":64,"stream":true}
