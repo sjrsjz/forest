@@ -21,7 +21,6 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from PIL import Image
 from psycopg import sql
-from psycopg.types.json import Jsonb
 from pymilvus import AsyncMilvusClient
 
 from forest.adapters.onebot import SendResult
@@ -1144,31 +1143,24 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
                     "manifest_digest": digest_json(counter.manifest),
                     "approved_capabilities": ["state.read", "state.write"],
                     "desired_enabled": function == "enable",
-                    "plan_digest": "sha256:" + "0" * 64,
                     "expected_configuration_revision": (
                         1 if function == "enable" else None
                     ),
                     "expected_selection_revision": selection_revision,
                     "expected_graph_revision": graph_revision,
-                    "requested_by": "subject/host-admin",
                 }
-                context = {
-                    "bot_id": host.store.bot_id, "port_kind": "management_action",
-                    "port_name": "component.selection." + function,
-                    "operation_id": operation_id, "input_digest": digest_json(payload),
-                }
-                async with host.store.pool.connection() as conn:
-                    query = await conn.execute(
-                        sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
-                            sql.Identifier(
-                                selection_namespace, "component_selection_" + function
-                            )
-                        ),
-                        (Jsonb(context), Jsonb(payload)),
-                    )
-                    result = (await query.fetchone())["result"]
-                assert result["ok"], result
-                return result["value"]
+                contract = host.registry.get("component.worker-host").management_contract
+                preview = await contract.query("validate", payload)
+                payload["plan_digest"] = preview["plan_digest"]
+                result = await contract.action(
+                    "module." + function,
+                    operation_id=operation_id,
+                    payload=payload,
+                    authorization=SimpleNamespace(web_subject_ref="subject/host-admin"),
+                    authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+                )
+                assert result["desired_enabled"] is (function == "enable")
+                return result
 
             before_add = host.registry.graph_identity
             enabled = await select(

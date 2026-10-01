@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.11"
+version = "1.6.12"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -293,6 +293,24 @@ port = "component.reload.enqueue"
 priority = "P1"
 actor_field = "requested_by"
 timeout_s = 15
+
+[[components.management_actions]]
+id = "module.enable"
+port = "component.selection.enable"
+priority = "P1"
+actor_field = "requested_by"
+transaction_preflight = "runtime.selection-commit"
+authorization_path = "/plan_digest"
+timeout_s = 45
+
+[[components.management_actions]]
+id = "module.disable"
+port = "component.selection.disable"
+priority = "P1"
+actor_field = "requested_by"
+transaction_preflight = "runtime.selection-commit"
+authorization_path = "/plan_digest"
+timeout_s = 45
 
 [[components.management_queries]]
 id = "reload"
