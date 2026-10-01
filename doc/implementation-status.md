@@ -540,3 +540,6 @@ Validation (2026-10-02): The isolated PostgreSQL complete 21-component Graph sta
 
 
 宿主路径清理候选 `ec98f48` 在线切换（2026-10-02）：从 `9a28547` 到本候选未改模块或内核 SQL baseline；运行镜像 `sha256:f208b7bd1e940258afbeb58105107f7a2f1d3e04392dc0e0dd88969341aa51d5` 内，新宿主导入有效、旧 `forest.clean_bot_host` 导入不存在，官方自动安装发现 15 个 builtin。旧 Supervisor 正常退出，原镜像保留为本地 `forest:pre-ec98f48`；原 Bot 库用 `pg_dump -Fc` 备份至 Git 忽略的 `.local/backups/forest_bot_pre_ec98f48.dump`，`pg_restore --list` 可读，容器和工作区 SHA-256 均为 `8ccaf1f8f1f1dba2798d1af4a6a261e4c8af335d8e02ef61076e3ad0d3ddd6c1`。未重建数据库，现有 2 条 Memory 来源及 1 个群主干在跨版本重启后保留。切换时过早启动的首轮探针在 Bot `STARTING` 且图尚未发布的首样本正确报 3 项启动期违规，随后 4 个样本均健康；从稳定状态重新观察 60 秒的 5 个样本均为 21 个 ACTIVE 成员、部署 ONLINE、管理 HTTP 200、0 个重叠 Session/积压发送/过期嵌入工作及 0 项违规。Supervisor 健康、0 次容器重启。最新入站仍为非白名单群的 `NO_TRIGGER/group_not_allowed`，获准群 `933179609` 的 @、真实模型回复、发送及预填组 Web 重排尚未验收。
+
+
+管理 Web 壳资源命名清理（2026-10-02）：剩余 `clean_management_static` 目录改为 `management_static`；旧 `clean-audit`、`clean-authorization-policy`、`clean-runtime-capacity`、`clean-configuration` 的 HTML/CSS/JS 资源和路由声明分别改为 `kernel-*` 与 `module-configuration`，不保留旧 URL。页面仍是部署/内核管理壳，业务配置界面继续由对应包 Generation 提供。资源目录 30 个文件均保留；管理相关快速回归 10 passed、10 skipped，完整本地回归 474 passed、110 skipped，Ruff 与全部管理脚本语法通过；本地 ASGI HTTP 实际读取 9 个新的首页和内核/模块资源均返回 200。尚未切换在线 Supervisor，本次为源码及本地 HTTP 验证。

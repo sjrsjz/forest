@@ -88,7 +88,7 @@ def create_deployment_management_app(
             )
         )
     scopes = ManagementScopeRegistry(tuple(providers), ticket_authority=ticket_authority)
-    static = files("forest").joinpath("clean_management_static")
+    static = files("forest").joinpath("management_static")
     app = FastAPI(title="Forest Deployment Console", docs_url=None, redoc_url=None)
     app.mount("/static", StaticFiles(directory=str(static)), name="static")
 

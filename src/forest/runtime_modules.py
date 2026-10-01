@@ -584,9 +584,9 @@ def configuration_management_contribution(
         "configuration",
         label,
         ("bot",),
-        "/static/modules/clean-configuration.html",
-        "/static/clean-configuration.js",
-        style="/static/modules/clean-configuration.css",
+        "/static/modules/module-configuration.html",
+        "/static/module-configuration.js",
+        style="/static/modules/module-configuration.css",
         group="configuration",
         order=10,
     )
