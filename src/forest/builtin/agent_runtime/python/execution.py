@@ -141,7 +141,7 @@ class AgentExecution:
             except ForestError as exc:
                 if self._releasing_owner:
                     return
-                if exc.status < 500 or monotonic() >= safe_until:
+                if (exc.status < 500 and exc.code != "OVERLOADED") or monotonic() >= safe_until:
                     execution.cancel()
                     return
                 await asyncio.sleep(_RUN_OWNER_RETRY_SECONDS)

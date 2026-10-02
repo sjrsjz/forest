@@ -252,6 +252,39 @@ async def test_run_owner_renewal_uses_distinct_operations_and_stops_with_call(mo
 
 
 @pytest.mark.asyncio
+async def test_run_owner_renewal_retries_temporary_worker_overload(monkeypatch):
+    monkeypatch.setattr("execution._RUN_OWNER_RENEW_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr("execution._RUN_OWNER_RETRY_SECONDS", 0.01)
+    calls = []
+    renewed = asyncio.Event()
+
+    async def renew(_name, _body, **kwargs):
+        calls.append(kwargs["operation_id"])
+        if len(calls) == 1:
+            raise ForestError("OVERLOADED", "Worker state request capacity exhausted", 429)
+        renewed.set()
+        return {"epoch": 7}
+
+    agent = AgentExecution(
+        SimpleNamespace(
+            uow=SimpleNamespace(call=renew),
+            operations=SimpleNamespace(stable=lambda value: value),
+        ), {}, lambda: None,
+    )
+    heartbeat = asyncio.create_task(agent._renew_owner_until_done(
+        {"run_id": "run/1", "owner_id": "worker/1", "epoch": 7},
+        asyncio.current_task(),
+    ))
+    try:
+        await asyncio.wait_for(renewed.wait(), 1)
+        assert not asyncio.current_task().cancelling()
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+    assert calls[:2] == ["renew-run:run/1:7:1", "renew-run:run/1:7:1"]
+
+
+@pytest.mark.asyncio
 async def test_run_owner_renewal_stops_execution_on_stale_epoch(monkeypatch):
     monkeypatch.setattr("execution._RUN_OWNER_RENEW_INTERVAL_SECONDS", 0.01)
 
