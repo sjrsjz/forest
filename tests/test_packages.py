@@ -8,6 +8,7 @@ import subprocess
 import sys
 import zipfile
 from argparse import Namespace
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -940,6 +941,47 @@ def test_import_policy_rejection_does_not_poison_immutable_version_registry(tmp_
     assert destination.list() == []
     assert not (destination.root / "catalog.sqlite3").exists()
     assert destination.import_archive(archive).digest == snapshot.digest
+
+
+def test_concurrent_archive_import_replays_one_atomic_catalog_receipt(tmp_path):
+    source_catalog = PackageCatalog(tmp_path / "source-catalog")
+    snapshot = source_catalog.build(source(tmp_path))
+    archive = source_catalog.export_archive(snapshot.digest)
+    destination_root = tmp_path / "destination"
+    operation_id = "web:sha256:" + "a" * 64
+    archive_sha256 = "sha256:" + hashlib.sha256(archive).hexdigest()
+
+    def import_once():
+        return PackageCatalog(destination_root).import_archive_idempotent(
+            archive, operation_id=operation_id, actor_ref="admin:one",
+            archive_sha256=archive_sha256,
+        ).digest
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        assert list(workers.map(lambda _: import_once(), range(2))) == [
+            snapshot.digest, snapshot.digest,
+        ]
+    destination = PackageCatalog(destination_root)
+    assert [item.digest for item in destination.list()] == [snapshot.digest]
+    assert import_once() == snapshot.digest
+    with pytest.raises(ForestError) as actor_conflict:
+        destination.import_archive_idempotent(
+            archive, operation_id=operation_id, actor_ref="admin:two",
+            archive_sha256=archive_sha256,
+        )
+    assert actor_conflict.value.code == "PACKAGE_IMPORT_OPERATION_CONFLICT"
+    with pytest.raises(ForestError) as digest_conflict:
+        destination.import_archive_idempotent(
+            archive + b"different", operation_id=operation_id, actor_ref="admin:one",
+            archive_sha256="sha256:" + hashlib.sha256(archive + b"different").hexdigest(),
+        )
+    assert digest_conflict.value.code == "PACKAGE_IMPORT_OPERATION_CONFLICT"
+    with pytest.raises(ForestError) as wrong_digest:
+        destination.import_archive_idempotent(
+            archive, operation_id="web:sha256:" + "b" * 64,
+            actor_ref="admin:one", archive_sha256="sha256:" + "0" * 64,
+        )
+    assert wrong_digest.value.code == "PACKAGE_ARCHIVE_DIGEST_MISMATCH"
 
 
 def test_unbound_web_artifacts_do_not_reserve_version_after_rejected_registration(tmp_path):

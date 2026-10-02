@@ -2130,6 +2130,45 @@ class PackageCatalog:
             check_manifest(manifest)
         return self._publish(captured, bind_version=bind_version)
 
+    def import_archive_idempotent(
+        self,
+        data: bytes,
+        *,
+        operation_id: str,
+        actor_ref: str,
+        archive_sha256: str,
+        check_manifest: Callable[[dict], None] | None = None,
+    ) -> PackageSnapshot:
+        """Publish an archive and its replay receipt in one catalog transaction."""
+        if (
+            not isinstance(operation_id, str)
+            or re.fullmatch(r"[A-Za-z0-9:._/-]{1,256}", operation_id) is None
+            or not isinstance(actor_ref, str)
+            or not 1 <= len(actor_ref) <= 128
+            or not isinstance(archive_sha256, str)
+            or re.fullmatch(r"sha256:[a-f0-9]{64}", archive_sha256) is None
+        ):
+            _fail("PACKAGE_IMPORT_OPERATION_INVALID", "Import operation identity is invalid")
+        if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_ARCHIVE_BYTES:
+            _fail("PACKAGE_TOO_LARGE", "Package ZIP exceeds the upload limit")
+        if "sha256:" + hashlib.sha256(data).hexdigest() != archive_sha256:
+            _fail("PACKAGE_ARCHIVE_DIGEST_MISMATCH", "Package ZIP differs from its declared digest")
+        prior = self._rows(
+            "SELECT actor_ref,archive_sha256,digest FROM package_imports WHERE operation_id=?",
+            (operation_id,), table="package_imports",
+        )
+        if prior:
+            if prior[0][:2] != (actor_ref, archive_sha256):
+                _fail("PACKAGE_IMPORT_OPERATION_CONFLICT", "Import key was used for another request")
+            return self.get(prior[0][2])
+        captured = archive_files(data)
+        manifest = _manifest(captured)
+        if check_manifest is not None:
+            check_manifest(manifest)
+        return self._publish(
+            captured, import_operation=(operation_id, actor_ref, archive_sha256)
+        )
+
     def export_archive(self, digest: str) -> bytes:
         files = self.get(digest)._verified_files()
         output = io.BytesIO()
@@ -2310,7 +2349,10 @@ class PackageCatalog:
                 return []
             return db.execute(query, parameters).fetchall()
 
-    def _publish(self, captured: dict[str, bytes], *, bind_version: bool = True) -> PackageSnapshot:
+    def _publish(
+        self, captured: dict[str, bytes], *, bind_version: bool = True,
+        import_operation: tuple[str, str, str] | None = None,
+    ) -> PackageSnapshot:
         manifest = _manifest(captured)
         digest = digest_json(
             {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
@@ -2323,7 +2365,25 @@ class PackageCatalog:
                 "digest TEXT NOT NULL, PRIMARY KEY(package_id,version))"
             )
             db.execute("CREATE TABLE IF NOT EXISTS artifacts (digest TEXT PRIMARY KEY)")
+            if import_operation is not None:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS package_imports ("
+                    "operation_id TEXT PRIMARY KEY, actor_ref TEXT NOT NULL, "
+                    "archive_sha256 TEXT NOT NULL, digest TEXT NOT NULL)"
+                )
             db.execute("BEGIN IMMEDIATE")
+            if import_operation is not None:
+                prior = db.execute(
+                    "SELECT actor_ref,archive_sha256,digest FROM package_imports "
+                    "WHERE operation_id=?", (import_operation[0],),
+                ).fetchone()
+                if prior is not None:
+                    if prior[:2] != import_operation[1:]:
+                        _fail(
+                            "PACKAGE_IMPORT_OPERATION_CONFLICT",
+                            "Import key was used for another request",
+                        )
+                    return self.get(prior[2])
             row = db.execute(
                 "SELECT digest FROM packages WHERE package_id=? AND version=?",
                 (manifest["package_id"], manifest["version"]),
@@ -2368,6 +2428,11 @@ class PackageCatalog:
                 db.execute(
                     "INSERT OR IGNORE INTO packages VALUES (?,?,?)",
                     (manifest["package_id"], manifest["version"], digest),
+                )
+            if import_operation is not None:
+                db.execute(
+                    "INSERT INTO package_imports VALUES (?,?,?,?)",
+                    (*import_operation, digest),
                 )
         return snapshot
 
