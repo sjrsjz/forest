@@ -49,6 +49,14 @@ class PackageArtifactDownloadDriver(PackageServiceEffectDriver, Protocol):
     async def download(self, payload: dict, *, max_bytes: int) -> PackageArtifactDownload: ...
 
 
+@runtime_checkable
+class PackageArtifactUploadDriver(PackageServiceEffectDriver, Protocol):
+    async def upload(
+        self, payload: dict, content: bytes, *, operation_id: str,
+        actor_ref: str, content_sha256: str, max_bytes: int,
+    ) -> dict: ...
+
+
 PackageIngressHandler = Callable[..., Awaitable[dict]]
 
 

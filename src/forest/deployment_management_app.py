@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from importlib.resources import files
+from tempfile import SpooledTemporaryFile
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
@@ -20,12 +24,14 @@ from forest.management_scopes import (
     DeploymentManagementScopeProvider,
     ManagementScopeRegistry,
 )
+from forest.packages import MAX_ARCHIVE_BYTES
 from forest.storage.management_asset_authority import CHUNK_BYTES
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 _SESSION_COOKIE = "forest_management_session"
 _CSRF_COOKIE = "forest_management_csrf"
 _ARTIFACT_REQUEST_BYTES = 16384
+_ARTIFACT_UPLOAD_SECONDS = 20
 
 
 class LoginInput(BaseModel):
@@ -405,6 +411,80 @@ def create_deployment_management_app(
                 "cache-control": "no-store",
             },
         )
+
+    @app.post(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/artifacts/{artifact_id}/upload"
+    )
+    async def scoped_artifact_upload(
+        scope_kind: str, scope_id: str, component_id: str, artifact_id: str,
+        request: Request,
+    ):
+        session = await authenticated(request, csrf=True, admin=True)
+        length_header = request.headers.get("x-forest-artifact-length", "")
+        transport_length = request.headers.get("content-length")
+        content_sha256 = request.headers.get("x-forest-artifact-sha256", "")
+        metadata_header = request.headers.get("x-forest-artifact-input", "{}")
+        if request.headers.get("content-type") != "application/zip":
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact upload must be ZIP", 415,
+            )
+        if (
+            not 1 <= len(length_header) <= 10
+            or not length_header.isascii() or not length_header.isdigit()
+            or not 1 <= int(length_header) <= MAX_ARCHIVE_BYTES
+            or (transport_length is not None and transport_length != length_header)
+            or re.fullmatch(r"sha256:[a-f0-9]{64}", content_sha256) is None
+            or len(metadata_header) > _ARTIFACT_REQUEST_BYTES
+        ):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID",
+                "Artifact upload headers are invalid or exceed their bound", 422,
+            )
+        try:
+            payload = json.loads(metadata_header)
+        except json.JSONDecodeError as exc:
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact metadata is not JSON", 422,
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact metadata must be an object", 422,
+            )
+        expected_length = int(length_header)
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
+            async with gateway.artifact_upload(
+                component_id, artifact_id, payload,
+                content_length=expected_length, content_sha256=content_sha256,
+                idempotency_key=request.headers.get("idempotency-key"),
+            ) as (max_bytes, commit):
+                try:
+                    async with asyncio.timeout(_ARTIFACT_UPLOAD_SECONDS):
+                        checksum = hashlib.sha256()
+                        received = 0
+                        with SpooledTemporaryFile(max_size=1024 * 1024, mode="w+b") as staged:
+                            async for fragment in request.stream():
+                                received += len(fragment)
+                                if received > expected_length or received > max_bytes:
+                                    raise ForestError(
+                                        "PACKAGE_TOO_LARGE",
+                                        "Artifact upload exceeds its declared size", 413,
+                                    )
+                                checksum.update(fragment)
+                                staged.write(fragment)
+                            if received != expected_length or (
+                                "sha256:" + checksum.hexdigest() != content_sha256
+                            ):
+                                raise ForestError(
+                                    "PACKAGE_ARCHIVE_DIGEST_MISMATCH",
+                                    "Artifact bytes differ from the signed upload declaration", 422,
+                                )
+                            staged.seek(0)
+                            return await commit(staged.read())
+                except TimeoutError as exc:
+                    raise ForestError(
+                        "PACKAGE_ARTIFACT_TIMEOUT", "Artifact upload exceeded its deadline", 504,
+                    ) from exc
 
     @app.post(
         "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"

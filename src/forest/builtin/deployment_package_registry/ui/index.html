@@ -8,23 +8,25 @@
     *{box-sizing:border-box}body{margin:0;padding:10px}section{border:1px solid #29493a;border-radius:9px;background:#102019;overflow:hidden}
     header,.footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px}
     header{border-bottom:1px solid #29493a}h2{font-size:16px;margin:0}small,#status{color:#91ac9a}
-    button,select{border:1px solid #365b49;border-radius:6px;background:#173426;color:#e9f7ef;padding:7px 12px;cursor:pointer}
+    button,select,input{border:1px solid #365b49;border-radius:6px;background:#173426;color:#e9f7ef;padding:7px 12px;cursor:pointer}
     button:disabled{opacity:.5;cursor:default}.list{max-height:410px;overflow:auto}
     .row{display:grid;grid-template-columns:minmax(170px,1fr) 90px 95px minmax(150px,1fr) minmax(250px,1.5fr) auto;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid #203e30;min-width:900px}
     .row:first-child{border-top:0}.row code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.actions{display:flex;gap:6px}
     #details{margin:0;border-top:1px solid #29493a;padding:12px;white-space:pre-wrap;overflow:auto;max-height:220px;font:12px/1.5 ui-monospace,monospace}
+    .import{justify-content:flex-start;border-bottom:1px solid #29493a}.import input{max-width:360px}
   </style>
 </head>
 <body>
   <section>
-    <header><h2>部署包目录</h2><small>全部署工件 · 只读</small><select id="scope" aria-label="包范围"><option value="">全部范围</option><option value="bot">Bot</option><option value="deployment">部署</option><option value="host">宿主</option></select><button id="refresh" type="button">刷新</button></header>
+    <header><h2>部署包目录</h2><small>全部署工件</small><select id="scope" aria-label="包范围"><option value="">全部范围</option><option value="bot">Bot</option><option value="deployment">部署</option><option value="host">宿主</option></select><button id="refresh" type="button">刷新</button></header>
+    <div class="footer import"><input id="zip" type="file" accept=".zip,application/zip" aria-label="选择部署包 ZIP"><button id="import" type="button">导入 ZIP</button><small>最多 32 MiB</small></div>
     <div id="items" class="list"></div>
     <div class="footer"><span id="status">等待连接</span><button id="more" type="button" hidden>下一页</button></div>
     <pre id="details" hidden></pre>
   </section>
   <script>
   (()=>{'use strict';
-    let port,nonce,sequence=0,pending=new Map(),revision=null,nextAfter=null,listingRequest=0;
+    let port,nonce,sequence=0,pending=new Map(),revision=null,nextAfter=null,listingRequest=0,importKey=null;
     const byId=id=>document.getElementById(id),items=byId('items'),status=byId('status'),details=byId('details');
     const send=(type,payload={})=>port?.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
     const resize=()=>send('resize',{height:Math.min(document.documentElement.scrollHeight,700)});
@@ -39,6 +41,12 @@
       const timer=setTimeout(()=>{pending.delete(request_id);reject(Error('工件下载超时'));},60000);
       pending.set(request_id,{resolve:data=>{clearTimeout(timer);resolve(data);},reject:error=>{clearTimeout(timer);reject(error);}});
       send('artifact-download',{request_id,artifact_id:'archive',value});
+    });
+    const upload=file=>new Promise((resolve,reject)=>{
+      const request_id=`import-${++sequence}`;
+      const timer=setTimeout(()=>{pending.delete(request_id);reject(Error('工件上传超时'));},120000);
+      pending.set(request_id,{resolve:data=>{clearTimeout(timer);resolve(data);},reject:error=>{clearTimeout(timer);reject(error);}});
+      send('artifact-upload',{request_id,artifact_id:'import',value:{},file,idempotency_key:importKey});
     });
     async function load(append=false){
       const request=++listingRequest;
@@ -80,6 +88,16 @@
       }catch(error){if(request===listingRequest){status.textContent=error.message;byId('more').disabled=false;}}
     }
     byId('refresh').onclick=()=>{revision=null;nextAfter=null;details.hidden=true;load(false);};
+    byId('zip').onchange=()=>{importKey=`import-${nonce}-${++sequence}`;};
+    byId('import').onclick=async()=>{
+      const button=byId('import'),file=byId('zip').files?.[0];
+      if(!file){status.textContent='请先选择 ZIP 文件';return;}
+      if(!importKey)importKey=`import-${nonce}-${++sequence}`;
+      button.disabled=true;status.textContent='正在导入 ZIP…';
+      try{const result=await upload(file);status.textContent=`已导入 ${result.package_id} ${result.package_version}`;await load(false);}
+      catch(error){status.textContent=error.message;}
+      finally{button.disabled=false;}
+    };
     byId('scope').onchange=()=>{revision=null;nextAfter=null;details.hidden=true;load(false);};
     byId('more').onclick=()=>load(true);
     addEventListener('message',event=>{
@@ -91,7 +109,7 @@
         if(value.protocol!=='forest.management-ui-channel/1'||value.nonce!==nonce)return;
         if(value.type==='initialize'){resize();load(false);return;}
         const request=pending.get(value.request_id);
-        if(request){pending.delete(value.request_id);if(value.type==='query-result'||value.type==='artifact-result')request.resolve(value.value);else request.reject(Error(value.message||'目录查询失败'));}
+        if(request){pending.delete(value.request_id);if(value.type==='query-result'||value.type==='artifact-result'||value.type==='artifact-upload-result')request.resolve(value.value);else request.reject(Error(value.message||'目录操作失败'));}
         else if(value.type==='error')status.textContent=value.message||'目录查询失败';
       };
       port.start();send('ready');

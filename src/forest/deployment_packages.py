@@ -62,20 +62,30 @@ def _configuration_storage(component_id: str) -> tuple[StorageBundleSpec, bytes]
 
 
 async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=False):
-    """Install and compile an official deployment package with read-only ports."""
+    """Install an official deployment package with bounded native port grants."""
 
     component = snapshot.component
     effects = tuple(component.get("effect_services", ()))
     requested = tuple(component.get("capabilities", {}).get("requests", ()))
+    upload_ports = {
+        item["port"] for item in component.get("management_artifacts", ())
+        if item["direction"] == "upload"
+    }
     if any(
-        item["semantics"] != "read"
-        or item["kind"] not in runtime.effect_driver_factories
-        or f"service.call:{item['name']}" not in requested
+        item["kind"] not in runtime.effect_driver_factories
+        or (item["name"] in upload_ports and (
+            item["semantics"] != "idempotent"
+            or f"service.call:{item['name']}" in requested
+        ))
+        or (item["name"] not in upload_ports and (
+            item["semantics"] != "read"
+            or f"service.call:{item['name']}" not in requested
+        ))
         for item in effects
     ):
         raise ForestError(
             "DEPLOYMENT_PACKAGE_PORT_UNAVAILABLE",
-            "Official deployment effect port has no read-only native binding", 503,
+            "Official deployment effect port has no permitted native binding", 503,
         )
     if component["scope"] != "deployment" or component.get("configuration_apply") or (
         component.get("domain_commands") or component.get("management_actions")

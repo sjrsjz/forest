@@ -12,7 +12,7 @@ import hashlib
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Mapping
-from contextlib import nullcontext
+from contextlib import asynccontextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -45,6 +45,7 @@ from forest.package_contribution_directories import FrozenContributionDirectorie
 from forest.package_effects import (
     PackageArtifactDownload,
     PackageArtifactDownloadDriver,
+    PackageArtifactUploadDriver,
     PackageEffectDriver,
     PackageEffectDriverFactory,
     PackageIngressEffectDriver,
@@ -385,6 +386,7 @@ class PackageGenerationAdapter:
             self.component.get("capabilities", {}).get("requests", ())
         )
         self._service_inflight = 0
+        self._artifact_inflight = 0
         self._services_drained = asyncio.Event()
         self._services_drained.set()
         self.failure: str | None = None
@@ -1869,15 +1871,24 @@ class PackageGenerationAdapter:
                 "PACKAGE_ARTIFACT_PORT_UNAVAILABLE",
                 "Declared artifact driver cannot download bytes", 503,
             )
+        if self._artifact_inflight >= 2 or (
+            self._service_inflight >= self.component["resources"]["max_inflight"]
+        ):
+            raise ForestError(
+                "PACKAGE_ARTIFACT_BUSY", "Artifact transfer capacity is exhausted", 429,
+            )
+        self._artifact_inflight += 1
         self._service_inflight += 1
         self._services_drained.clear()
+        pending = None
         try:
             await self._generation_verifier(
                 component_id=self.component_id, generation_id=identity.generation_id,
                 admission_lane="DATA",
             )
+            pending = asyncio.create_task(driver.download(payload, max_bytes=max_bytes))
             async with asyncio.timeout(30):
-                result = await driver.download(payload, max_bytes=max_bytes)
+                result = await asyncio.shield(pending)
             if (
                 type(result) is not PackageArtifactDownload
                 or type(result.content) is not bytes
@@ -1899,6 +1910,90 @@ class PackageGenerationAdapter:
                 "PACKAGE_ARTIFACT_TIMEOUT", "Artifact download exceeded its deadline", 504
             ) from exc
         finally:
+            if pending is not None and not pending.done():
+                try:
+                    await asyncio.shield(pending)
+                except Exception:
+                    pass
+            self._artifact_inflight -= 1
+            self._service_inflight -= 1
+            if self._service_inflight == 0:
+                self._services_drained.set()
+
+    @asynccontextmanager
+    async def management_artifact_upload(
+        self, declaration: dict, payload: dict, *, max_bytes: int
+    ):
+        if (
+            declaration not in self.component.get("effect_services", ())
+            or declaration["semantics"] != "idempotent"
+        ):
+            raise ForestError(
+                "MODULE_MANAGEMENT_BINDING_INVALID",
+                "Artifact upload is not bound to an idempotent Generation port", 409,
+            )
+        input_validator, output_validator = self._service_schemas[declaration["name"]]
+        if not isinstance(payload, dict) or not input_validator.is_valid(payload):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact input violates its schema", 422,
+            )
+        identity = self.generation_identity
+        if self.state is not PackageGenerationState.ACTIVE or identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE", "Package artifact Generation is inactive", 409,
+            )
+        driver = self._effect_drivers.get(declaration["name"])
+        if not isinstance(driver, PackageArtifactUploadDriver):
+            raise ForestError(
+                "PACKAGE_ARTIFACT_PORT_UNAVAILABLE", "Artifact upload driver is unavailable", 503,
+            )
+        if self._artifact_inflight >= 2 or (
+            self._service_inflight >= self.component["resources"]["max_inflight"]
+        ):
+            raise ForestError(
+                "PACKAGE_ARTIFACT_BUSY", "Artifact transfer capacity is exhausted", 429,
+            )
+        self._artifact_inflight += 1
+        self._service_inflight += 1
+        self._services_drained.clear()
+        pending = None
+        try:
+            await self._generation_verifier(
+                component_id=self.component_id, generation_id=identity.generation_id,
+                admission_lane="DATA",
+            )
+
+            async def publish(
+                content: bytes, *, operation_id: str, actor_ref: str, content_sha256: str
+            ) -> dict:
+                nonlocal pending
+                if pending is not None or type(content) is not bytes or (
+                    not 1 <= len(content) <= max_bytes
+                ):
+                    raise ForestError(
+                        "PACKAGE_ARTIFACT_INPUT_INVALID", "Artifact content is outside its bound", 422,
+                    )
+                pending = asyncio.create_task(driver.upload(
+                    payload, content, operation_id=operation_id,
+                    actor_ref=actor_ref, content_sha256=content_sha256,
+                    max_bytes=max_bytes,
+                ))
+                result = await asyncio.shield(pending)
+                if not isinstance(result, dict) or not output_validator.is_valid(result):
+                    raise ForestError(
+                        "PACKAGE_ARTIFACT_RESULT_INVALID",
+                        "Artifact driver returned an invalid result", 502,
+                    )
+                return result
+
+            yield publish
+        finally:
+            if pending is not None and not pending.done():
+                try:
+                    await asyncio.shield(pending)
+                except Exception:
+                    pass
+            self._artifact_inflight -= 1
             self._service_inflight -= 1
             if self._service_inflight == 0:
                 self._services_drained.set()

@@ -324,6 +324,62 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
             request_id: requestId, artifact_id: artifactId,
             value: {byte_length: total, filename: match[1]},
           }};
+          if (operationReplies.size >= 64) {
+            operationReplies.delete(operationReplies.keys().next().value);
+          }
+          operationReplies.set(requestId, reply);
+          send(reply.type, reply.payload);
+        } catch (error) {
+          send('operation-error', {request_id: requestId, operation_id: artifactId,
+            message: error instanceof Error ? error.message : String(error)});
+        }
+      } else if (message.type === 'artifact-upload') {
+        const requestId = message.request_id;
+        const artifactId = message.artifact_id;
+        const operation = row.management_contract?.artifacts?.find(item =>
+          item.artifact_id === artifactId && item.direction === 'upload');
+        const file = message.file;
+        const stableKey = message.idempotency_key;
+        if (
+          typeof requestId !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(requestId)
+          || !operation || !(file instanceof Blob)
+          || !Number.isSafeInteger(file.size) || file.size < 1
+          || file.size > operation.max_bytes
+          || typeof stableKey !== 'string' || !/^[a-zA-Z0-9._:-]{1,96}$/.test(stableKey)
+          || !message.value || Array.isArray(message.value)
+          || typeof message.value !== 'object'
+        ) throw new Error('模块工件上传请求无效');
+        const prior = operationReplies.get(requestId);
+        if (prior) { send(prior.type, prior.payload); return; }
+        try {
+          const digestBytes = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+          const digest = 'sha256:' + Array.from(new Uint8Array(digestBytes), byte =>
+            byte.toString(16).padStart(2, '0')).join('');
+          const response = await fetch(scopedPath(
+            `/management/v1/modules/${encodeURIComponent(row.component_id)}`
+            + `/artifacts/${encodeURIComponent(artifactId)}/upload`), {
+            method: 'POST', credentials: 'same-origin',
+            headers: {
+              'content-type': operation.media_type,
+              'x-forest-csrf': cookie('forest_management_csrf'),
+              'x-forest-artifact-input': JSON.stringify(message.value),
+              'x-forest-artifact-length': String(file.size),
+              'x-forest-artifact-sha256': digest,
+              'idempotency-key': `package-ui:${stableKey}`,
+            },
+            body: file,
+          });
+          const value = await response.json();
+          if (!response.ok) {
+            throw new Error(value.message || value.code || `HTTP ${response.status}`);
+          }
+          if (epoch !== workspaceEpoch) return;
+          const reply = {type: 'artifact-upload-result', payload: {
+            request_id: requestId, artifact_id: artifactId, value,
+          }};
+          if (operationReplies.size >= 64) {
+            operationReplies.delete(operationReplies.keys().next().value);
+          }
           operationReplies.set(requestId, reply);
           send(reply.type, reply.payload);
         } catch (error) {

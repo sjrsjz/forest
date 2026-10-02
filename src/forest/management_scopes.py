@@ -215,6 +215,61 @@ class DeploymentManagementGateway:
         )
         return await contract.download_artifact(artifact_id, body)
 
+    @asynccontextmanager
+    async def artifact_upload(
+        self, component_id: str, artifact_id: str, payload: dict,
+        *, content_length: int, content_sha256: str,
+        authorization=None, operation_id=None,
+    ):
+        binding = self._package_binding(component_id)
+        if binding is None:
+            raise ForestError(
+                "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND",
+                "Package artifact operation is unavailable", 404,
+            )
+        generation_id, graph_revision, module = binding
+        contract = module.management_contract
+        role = contract.artifact_required_role(artifact_id)
+        body = {
+            "payload": payload, "content_length": content_length,
+            "content_sha256": content_sha256,
+        }
+        async with contract.open_artifact_upload(artifact_id, payload) as (max_bytes, publish):
+            if not 1 <= content_length <= max_bytes:
+                raise ForestError(
+                    "PACKAGE_TOO_LARGE", "Artifact upload exceeds its declared limit", 413,
+                )
+            await self._authorize(
+                authorization,
+                target_scope_kind="deployment", target_scope_id="deployment",
+                target_component_id=component_id,
+                target_generation_id=generation_id,
+                target_graph_revision=graph_revision,
+                target_operation_ref=operation_id,
+                action_key=f"artifact.{artifact_id}.upload",
+                input_digest=digest_json(body), required_role=role,
+            )
+            if self.web_receipts is None or self.audit is None:
+                raise ForestError(
+                    "WEB_AUTHORITY_TRANSACTION_REQUIRED",
+                    "Artifact upload requires deployment Web receipt and audit storage", 503,
+                )
+            async with self.web_receipts.store.pool.connection() as conn, conn.transaction():
+                await self._authorize_mutation_in(
+                    conn, ticket=authorization, component_id=component_id,
+                    operation_id=operation_id, action_key=f"artifact.{artifact_id}.upload",
+                    input_digest=digest_json(body), plan_digest=None,
+                )
+
+            async def commit(content: bytes):
+                return await publish(
+                    content, operation_id=operation_id,
+                    actor_ref=authorization.web_subject_ref,
+                    content_sha256=content_sha256,
+                )
+
+            yield max_bytes, commit
+
     async def plan_configuration(
         self, component_id: str, *, authorization=None, operation_id=None, **_values
     ):
@@ -709,6 +764,42 @@ class _AuthorizedGateway:
             component_id, artifact_id, body,
             authorization=ticket, operation_id=operation_id,
         )
+
+    @asynccontextmanager
+    async def artifact_upload(
+        self, component_id: str, artifact_id: str, payload: dict,
+        *, content_length: int, content_sha256: str, idempotency_key: str | None,
+    ):
+        self._write()
+        upload = getattr(self.gateway, "artifact_upload", None)
+        if not callable(upload):
+            raise ForestError(
+                "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND",
+                "Package artifact upload is unavailable", 404,
+            )
+        if not isinstance(idempotency_key, str) or not 1 <= len(idempotency_key) <= 96:
+            raise ForestError(
+                "IDEMPOTENCY_KEY_REQUIRED", "A stable Idempotency-Key is required", 422,
+            )
+        generation_id, _revision = self.gateway.authorization_target(component_id)
+        operation_id = self.gateway.operation_id(
+            component_id, f"artifact.{artifact_id}.upload",
+            digest_json([generation_id, idempotency_key]),
+        )
+        body = {
+            "payload": payload, "content_length": content_length,
+            "content_sha256": content_sha256,
+        }
+        ticket, operation_id = await self._ticket(
+            component_id, f"artifact.{artifact_id}.upload", body,
+            operation_id=operation_id,
+        )
+        async with upload(
+            component_id, artifact_id, payload,
+            content_length=content_length, content_sha256=content_sha256,
+            authorization=ticket, operation_id=operation_id,
+        ) as permit:
+            yield permit
 
     async def plan_configuration(self, component_id: str, **values):
         self._write()

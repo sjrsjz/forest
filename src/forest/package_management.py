@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from forest.errors import ForestError
 from forest.module_management_contract import ModuleConfigurationContract
 from forest.packages import digest_json
@@ -102,8 +104,11 @@ class PackageManagementContract(ModuleConfigurationContract):
                 "direction": item["direction"],
                 "media_type": item["media_type"],
                 "max_bytes": item["max_bytes"],
-                "required_role": item.get("required_role", "AUDITOR"),
+                "required_role": item.get(
+                    "required_role", "ADMIN" if item["direction"] == "upload" else "AUDITOR"
+                ),
                 "input_schema": self.adapter.schema_snapshot(port["input_schema"]),
+                "idempotency_key_required": item["direction"] == "upload",
             }
             for item, port in self._artifacts.values()
         ]
@@ -117,7 +122,9 @@ class PackageManagementContract(ModuleConfigurationContract):
                 "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND",
                 "Package artifact operation does not exist", 404,
             ) from None
-        return item.get("required_role", "AUDITOR")
+        return item.get(
+            "required_role", "ADMIN" if item["direction"] == "upload" else "AUDITOR"
+        )
 
     async def download_artifact(self, artifact_id: str, payload: dict):
         try:
@@ -127,10 +134,31 @@ class PackageManagementContract(ModuleConfigurationContract):
                 "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND",
                 "Package artifact operation does not exist", 404,
             ) from None
+        if declaration["direction"] != "download":
+            raise ForestError(
+                "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND", "Artifact is not a download", 404,
+            )
         return await self.adapter.invoke_management_artifact_download(
             port, payload, max_bytes=declaration["max_bytes"],
             media_type=declaration["media_type"],
         )
+
+    @asynccontextmanager
+    async def open_artifact_upload(self, artifact_id: str, payload: dict):
+        try:
+            declaration, port = self._artifacts[artifact_id]
+        except KeyError:
+            raise ForestError(
+                "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND", "Artifact operation does not exist", 404,
+            ) from None
+        if declaration["direction"] != "upload":
+            raise ForestError(
+                "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND", "Artifact is not an upload", 404,
+            )
+        async with self.adapter.management_artifact_upload(
+            port, payload, max_bytes=declaration["max_bytes"],
+        ) as publish:
+            yield declaration["max_bytes"], publish
 
     def asset(self, asset_id: str) -> dict:
         try:

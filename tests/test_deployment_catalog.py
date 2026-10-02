@@ -363,12 +363,23 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         bot_package = package_catalog.build(
             Path(__file__).parents[1] / "src/forest/builtin/component_worker_host"
         )
-        assert module.management_contract.describe()["artifacts"] == [{
-            "artifact_id": "archive", "direction": "download",
-            "media_type": "application/zip", "max_bytes": 33554432,
-            "required_role": "ADMIN",
-            "input_schema": module.snapshot.schema("schemas/artifact-input.json"),
-        }]
+        upload_source = PackageCatalog(tmp_path / "upload-source")
+        upload_package = upload_source.build(Path(__file__).parents[1] / "examples/counter")
+        upload_bytes = upload_source.export_archive(upload_package.digest)
+        assert module.management_contract.describe()["artifacts"] == [
+            {
+                "artifact_id": "archive", "direction": "download",
+                "media_type": "application/zip", "max_bytes": 33554432,
+                "required_role": "ADMIN", "idempotency_key_required": False,
+                "input_schema": module.snapshot.schema("schemas/artifact-input.json"),
+            },
+            {
+                "artifact_id": "import", "direction": "upload",
+                "media_type": "application/zip", "max_bytes": 33554432,
+                "required_role": "ADMIN", "idempotency_key_required": True,
+                "input_schema": module.snapshot.schema("schemas/import-input.json"),
+            },
+        ]
         archive = await module.management_contract.download_artifact(
             "archive", {"package_digest": bot_package.digest},
         )
@@ -433,11 +444,61 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
                 content=b"x" * 16385,
             )
             assert oversized.status_code == 413
+            upload_path = (
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/artifacts/import/upload"
+            )
+            upload_headers = {
+                "origin": "http://forest.test",
+                "x-forest-csrf": client.cookies["forest_management_csrf"],
+                "content-type": "application/zip",
+                "x-forest-artifact-input": "{}",
+                "x-forest-artifact-length": str(len(upload_bytes)),
+                "x-forest-artifact-sha256": "sha256:" + hashlib.sha256(upload_bytes).hexdigest(),
+                "idempotency-key": "test-package-upload-1",
+            }
+            uploaded = await client.post(
+                upload_path, headers=upload_headers, content=upload_bytes,
+            )
+            assert uploaded.status_code == 200, uploaded.text
+            assert uploaded.json()["package_digest"] == upload_package.digest
+            assert package_catalog.get(upload_package.digest).digest == upload_package.digest
+            replay = await client.post(
+                upload_path, headers=upload_headers, content=upload_bytes,
+            )
+            assert replay.status_code == 200, replay.text
+            assert replay.json() == uploaded.json()
+            changed_bytes = upload_bytes + b"changed"
+            changed_headers = {
+                **upload_headers,
+                "x-forest-artifact-length": str(len(changed_bytes)),
+                "x-forest-artifact-sha256":
+                    "sha256:" + hashlib.sha256(changed_bytes).hexdigest(),
+            }
+            conflict = await client.post(
+                upload_path, headers=changed_headers, content=changed_bytes,
+            )
+            assert conflict.status_code == 409, conflict.text
+            reserved_headers = {
+                **upload_headers,
+                "idempotency-key": "test-package-upload-reserved",
+                "x-forest-artifact-length": str(len(archive.content)),
+                "x-forest-artifact-sha256":
+                    "sha256:" + hashlib.sha256(archive.content).hexdigest(),
+            }
+            reserved = await client.post(
+                upload_path, headers=reserved_headers, content=archive.content,
+            )
+            assert reserved.status_code == 403, reserved.text
+            assert reserved.json()["code"] == "PACKAGE_RESERVED_NAMESPACE"
         bridge = SimpleNamespace(package_registry_reader=controller.read_package_registry)
         bot_page = await package_catalog_page_service(bridge)({
             "protocol": "forest.package-catalog-page-request/1", "limit": 16,
         })
-        assert [item["scope"] for item in bot_page["items"]] == ["bot"]
+        assert {item["package_digest"] for item in bot_page["items"]} == {
+            bot_package.digest, upload_package.digest,
+        }
+        assert all(item["scope"] == "bot" for item in bot_page["items"])
         bot_bridge_artifact = await package_catalog_artifact_service(bridge)({
             "protocol": "forest.package-catalog-artifact-request/1",
             "package_digest": bot_package.digest,
@@ -464,7 +525,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         untrusted_manifest = untrusted_source / "module.toml"
         untrusted_manifest.write_text(
             untrusted_manifest.read_text(encoding="utf-8").replace(
-                'version = "1.1.0"', 'version = "1.1.2"', 1
+                'version = "1.2.0"', 'version = "1.2.2"', 1
             ), encoding="utf-8",
         )
         untrusted = package_catalog.build(untrusted_source)
@@ -480,15 +541,33 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.1.0"', 'version = "1.1.1"', 1
+                'version = "1.2.0"', 'version = "1.2.1"', 1
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(next_source)
         audit_generation = initial.graph_identity.generations["deployment.audit"]
-        updated = await controller.replace(
-            "deployment.package-registry", replacement.digest,
-            expected_graph_revision=initial.graph_identity.graph_revision,
-        )
+        async with module.management_contract.open_artifact_upload("import", {}):
+            async with module.management_contract.open_artifact_upload("import", {}):
+                with pytest.raises(ForestError) as capacity:
+                    async with module.management_contract.open_artifact_upload("import", {}):
+                        pass
+                assert capacity.value.code == "PACKAGE_ARTIFACT_BUSY"
+        async with module.management_contract.open_artifact_upload("import", {}) as _permit:
+            replacing = asyncio.create_task(controller.replace(
+                "deployment.package-registry", replacement.digest,
+                expected_graph_revision=initial.graph_identity.graph_revision,
+            ))
+            for _ in range(100):
+                if module.state.name == "QUIESCING":
+                    break
+                await asyncio.sleep(0.05)
+            assert module.state.name == "QUIESCING"
+            assert not replacing.done()
+            with pytest.raises(ForestError) as old_generation:
+                async with module.management_contract.open_artifact_upload("import", {}):
+                    pass
+            assert old_generation.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+        updated = await replacing
         assert updated.graph_identity.generations["deployment.audit"] == audit_generation
         assert (await package_catalog_page_service(bridge)({
             "protocol": "forest.package-catalog-page-request/1", "limit": 16,

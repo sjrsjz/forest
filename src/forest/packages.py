@@ -694,7 +694,7 @@ MANIFEST_SCHEMA = {
                             "properties": {
                                 "id": {"type": "string"},
                                 "port": {"type": "string"},
-                                "direction": {"const": "download"},
+                                "direction": {"enum": ["download", "upload"]},
                                 "media_type": {"const": "application/zip"},
                                 "max_bytes": {
                                     "type": "integer", "minimum": 1, "maximum": MAX_ARCHIVE_BYTES,
@@ -1555,14 +1555,19 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "Management operation identities must be valid and unique",
             )
         management_ids.add(operation_id)
-    read_effect_ports = {
-        item["name"] for item in effect_services if item["semantics"] == "read"
+    effect_port_semantics = {
+        item["name"]: item["semantics"] for item in effect_services
     }
     for declaration in management_artifacts:
-        if declaration["port"] not in read_effect_ports:
+        expected = "read" if declaration["direction"] == "download" else "idempotent"
+        if (
+            effect_port_semantics.get(declaration["port"]) != expected
+            or (declaration["direction"] == "upload"
+                and declaration.get("required_role", "ADMIN") != "ADMIN")
+        ):
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",
-                "Artifact downloads must bind a declared read-only effect port",
+                "Artifact direction and role must match its declared effect port",
             )
     for declaration in management_queries:
         if declaration.get("port") not in query_ports:
