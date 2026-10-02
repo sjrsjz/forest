@@ -158,6 +158,12 @@ Scheduler quiesce 先关闭新 actor admission，再等待已领取群离开模�
 
 群聊 `core reload` 不在 Shell Worker 内同步调用图替换。`kernel.runtime` 先以 operation、请求主体和 expected graph revision 写入持久请求；宿主监督循环另行领取并把稳定 activation ID 交给候选图。这样旧 Shell 可以先提交回执，再进入正常的消费者优先排空。宿主在发布后、完成请求前崩溃时，恢复器只依据同一 activation ID 的 RuntimeGraph 事实收敛成功；只有 PREPARED 的旧宿主候选不会跨 HostLease 冒充可继续发布的图。
 
+### 6.1 Agent 管理读模型
+
+会话、Run、模型请求/回合和工具调用均归 `agent.runtime` 的私有 Repository；WebUI 只能通过该包当前 Generation 的管理查询读取，不能跨 schema 拼接 Conversation 或 Provider 表。Run 将 `conversation_ref` 作为不可变身份存储，并用 `(bot_id,session_id,conversation_ref)` 外键锁定所属 Session，避免跨群管理视图依赖运行中的 lane 或从字符串前缀猜测归属。全 Bot 与单会话列表分别有按 `(created_at DESC,run_id DESC)` 的索引，状态筛选另有对应索引；单页最多 100 条。游标绑定会话、状态与首次查询时间，后续页只扫描该创建时间界限内更早的 Run。Run 的状态会继续变化，这个列表是活动诊断视图而不是跨 HTTP 请求冻结的 MVCC 历史快照；详情查询始终读取当前持久状态。列表只返回执行元数据，不返回 Prompt、模型正文、工具参数或 Payload 内容。
+
+模块自带紧凑管理 UI，通过 `agent.runs.page` 与 `agent.run` 两个只读端口提供筛选、翻页和 Run 状态。后续 Session、ModelTurn、ToolCall 的各自有界分页以及取消/UNKNOWN 对账必须继续在同一包管理契约内实现，不能在壳层新增 Agent 专用路由或读取此列表的内部表。
+
 ## 7. 实现拒绝项
 
 - 新增聊天业务 `contract.router`，或让内核 Contract Router 理解 Prompt、模板、群策略和 Agent 选择；

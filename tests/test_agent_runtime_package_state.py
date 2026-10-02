@@ -277,6 +277,46 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 timeout_seconds=10,
             )
         assert started["state"] == "PREPARING_MODEL"
+        listed = await instance.management_contract.query(
+            "agent.runs.page", {
+                "limit": 1,
+                "conversation_ref": "conversation/onebot/group/933179609",
+            }
+        )
+        assert [item["run_id"] for item in listed["items"]] == ["run/agent-package/1"]
+        assert listed["items"][0]["conversation_ref"] == (
+            "conversation/onebot/group/933179609"
+        )
+        assert listed["has_more"] is False
+        continued = await instance.management_contract.query(
+            "agent.runs.page", {
+                "conversation_ref": "conversation/onebot/group/933179609",
+                "snapshot_at": listed["snapshot_at"],
+                "after_created_at": listed["items"][0]["created_at"],
+                "after_run_id": "run/agent-package/1",
+                "cursor_filter_digest": listed["filter_digest"],
+            }
+        )
+        assert continued["items"] == []
+        other_group = await instance.management_contract.query(
+            "agent.runs.page", {"conversation_ref": "conversation/onebot/group/other"}
+        )
+        assert other_group["items"] == []
+        detailed = await instance.management_contract.query(
+            "agent.run", {"run_id": "run/agent-package/1"}
+        )
+        assert detailed["conversation_ref"] == "conversation/onebot/group/933179609"
+        with pytest.raises(ForestError) as invalid_cursor:
+            await instance.management_contract.query(
+                "agent.runs.page", {
+                    "conversation_ref": "conversation/onebot/group/933179609",
+                    "snapshot_at": listed["snapshot_at"],
+                    "after_created_at": listed["items"][0]["created_at"],
+                    "after_run_id": "run/agent-package/1",
+                    "cursor_filter_digest": "sha256:" + "0" * 64,
+                }
+            )
+        assert invalid_cursor.value.code == "AGENT_MANAGEMENT_CURSOR_INVALID"
 
         class _RollbackVerification(Exception):
             pass
@@ -2461,6 +2501,28 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert successor["session"]["active_run_id"] == "run/agent-package/2"
         assert successor["session"]["session_epoch"] == 2
         assert successor["profile"] == completed["profile"]
+        newest = await replacement.management_contract.query(
+            "agent.runs.page", {
+                "limit": 1,
+                "conversation_ref": "conversation/onebot/group/933179609",
+            }
+        )
+        assert [item["run_id"] for item in newest["items"]] == ["run/agent-package/2"]
+        assert newest["has_more"] is True
+        previous = await replacement.management_contract.query(
+            "agent.runs.page", {
+                "limit": 1,
+                "conversation_ref": "conversation/onebot/group/933179609",
+                "snapshot_at": newest["snapshot_at"],
+                "cursor_filter_digest": newest["filter_digest"],
+                "after_created_at": newest["next_cursor"]["created_at"],
+                "after_run_id": newest["next_cursor"]["run_id"],
+            }
+        )
+        assert [item["run_id"] for item in previous["items"]] == [
+            "run/agent-package/1"
+        ]
+        assert previous["has_more"] is False
 
         second_owner = await _lease_operation(
             store, replacement_participant, replacement_generation,

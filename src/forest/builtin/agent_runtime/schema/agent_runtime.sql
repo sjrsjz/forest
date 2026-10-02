@@ -18,6 +18,7 @@ CREATE TABLE agent_sessions (
     closed_at timestamptz,
     PRIMARY KEY (bot_id, session_id),
     UNIQUE (bot_id, start_operation_id),
+    UNIQUE (bot_id, session_id, conversation_ref),
     CHECK (
         (state='ACTIVE' AND active_run_id IS NOT NULL AND terminal_reason_code IS NULL
             AND closed_at IS NULL)
@@ -35,6 +36,7 @@ CREATE TABLE agent_runs (
     bot_id text NOT NULL,
     run_id text NOT NULL CHECK (octet_length(run_id) BETWEEN 1 AND 256),
     session_id text NOT NULL,
+    conversation_ref text NOT NULL CHECK (octet_length(conversation_ref) BETWEEN 1 AND 256),
     start_operation_id text NOT NULL
         CHECK (octet_length(start_operation_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
@@ -100,7 +102,8 @@ CREATE TABLE agent_runs (
     terminal_at timestamptz,
     PRIMARY KEY (bot_id, run_id),
     UNIQUE (bot_id, start_operation_id),
-    FOREIGN KEY (bot_id,session_id) REFERENCES agent_sessions(bot_id,session_id),
+    FOREIGN KEY (bot_id,session_id,conversation_ref)
+        REFERENCES agent_sessions(bot_id,session_id,conversation_ref),
     CHECK (
         (owner_id IS NULL AND owner_expires_at IS NULL)
         OR (owner_id IS NOT NULL AND owner_expires_at IS NOT NULL AND owner_epoch > 0)
@@ -125,6 +128,14 @@ CREATE UNIQUE INDEX one_unfinished_agent_run
     WHERE state NOT IN ('COMPLETED','FAILED','CANCELLED');
 CREATE INDEX agent_run_recovery_idx
     ON agent_runs(bot_id,state,owner_expires_at,updated_at);
+CREATE INDEX agent_run_management_global_idx
+    ON agent_runs(bot_id,created_at DESC,run_id DESC);
+CREATE INDEX agent_run_management_group_idx
+    ON agent_runs(bot_id,conversation_ref,created_at DESC,run_id DESC);
+CREATE INDEX agent_run_management_state_idx
+    ON agent_runs(bot_id,state,created_at DESC,run_id DESC);
+CREATE INDEX agent_run_management_group_state_idx
+    ON agent_runs(bot_id,conversation_ref,state,created_at DESC,run_id DESC);
 
 CREATE TABLE run_cancel_requests (
     bot_id text NOT NULL,
@@ -315,6 +326,68 @@ CREATE TABLE model_request_inheritances (
 CREATE FUNCTION guard_model_request_inheritance() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION 'Model request inheritance is immutable' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION agent_management_runs_page(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    page_limit integer := COALESCE((input->>'limit')::integer,50);
+    snapshot_at timestamptz := COALESCE((input->>'snapshot_at')::timestamptz,
+        statement_timestamp());
+    conversation_filter text := input->>'conversation_ref';
+    state_filter text := input->>'state';
+    after_created_at timestamptz := (input->>'after_created_at')::timestamptz;
+    filter_digest text := 'sha256:' || encode(sha256(convert_to(
+        jsonb_build_array(conversation_filter,state_filter,snapshot_at)::text,'UTF8'
+    )),'hex');
+    items jsonb;
+    has_more boolean;
+    next_cursor jsonb;
+BEGIN
+    IF page_limit NOT BETWEEN 1 AND 100 OR
+       snapshot_at>statement_timestamp() OR
+       ((after_created_at IS NOT NULL) <> (input ? 'after_run_id')) OR
+       (after_created_at IS NOT NULL AND
+        (NOT input ? 'snapshot_at' OR
+         input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest OR
+         after_created_at>snapshot_at)) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_MANAGEMENT_CURSOR_INVALID',
+                'message','Agent Run page limit or cursor is invalid','status',422)
+        );
+    END IF;
+    WITH page AS MATERIALIZED (
+        SELECT r.run_id,r.session_id,r.conversation_ref,r.state,
+               r.input_revision,r.checkpoint_seq,r.next_step_seq,
+               r.current_model_request_id,r.current_tool_call_id,
+               r.error_code,r.created_at,r.updated_at,r.terminal_at
+        FROM __forest_module_schema__.agent_runs r
+        WHERE r.bot_id=context->>'bot_id'
+          AND r.created_at<=snapshot_at
+          AND (conversation_filter IS NULL OR r.conversation_ref=conversation_filter)
+          AND (state_filter IS NULL OR r.state=state_filter)
+          AND (after_created_at IS NULL OR
+               (r.created_at,r.run_id)<(after_created_at,input->>'after_run_id'))
+        ORDER BY r.created_at DESC,r.run_id DESC LIMIT page_limit+1
+    ), visible AS MATERIALIZED (
+        SELECT * FROM page ORDER BY created_at DESC,run_id DESC LIMIT page_limit
+    )
+    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.created_at DESC,v.run_id DESC)
+                     FROM visible v),'[]'::jsonb),
+           (SELECT count(*)>page_limit FROM page),
+           (SELECT jsonb_build_object('created_at',v.created_at,'run_id',v.run_id)
+            FROM visible v ORDER BY v.created_at,v.run_id LIMIT 1)
+    INTO items,has_more,next_cursor;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'snapshot_at',snapshot_at,'filter_digest',filter_digest,
+            'items',items,'has_more',has_more,
+            'next_cursor',CASE WHEN has_more THEN next_cursor ELSE NULL END
+        )
+    );
 END;
 $$;
 CREATE TRIGGER model_request_inheritances_immutable
@@ -583,7 +656,8 @@ CREATE FUNCTION guard_agent_run() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN
     IF TG_OP='DELETE' OR
-       ROW(NEW.bot_id,NEW.run_id,NEW.session_id,NEW.start_operation_id,NEW.input_digest,
+       ROW(NEW.bot_id,NEW.run_id,NEW.session_id,NEW.conversation_ref,
+           NEW.start_operation_id,NEW.input_digest,
            NEW.agent_spec_revision,NEW.config_payload_id,NEW.config_payload_digest,
            NEW.config_owner_component_id,NEW.config_owner_kind,NEW.config_owner_id,
            NEW.preset_revision,NEW.preset_payload_id,NEW.preset_payload_digest,
@@ -591,7 +665,8 @@ BEGIN
            NEW.core_protocol_id,NEW.core_protocol_version,NEW.core_prompt_digest,
            NEW.parser_revision,NEW.absolute_deadline,NEW.created_at)
        IS DISTINCT FROM
-       ROW(OLD.bot_id,OLD.run_id,OLD.session_id,OLD.start_operation_id,OLD.input_digest,
+       ROW(OLD.bot_id,OLD.run_id,OLD.session_id,OLD.conversation_ref,
+           OLD.start_operation_id,OLD.input_digest,
            OLD.agent_spec_revision,OLD.config_payload_id,OLD.config_payload_digest,
            OLD.config_owner_component_id,OLD.config_owner_kind,OLD.config_owner_id,
            OLD.preset_revision,OLD.preset_payload_id,OLD.preset_payload_digest,
@@ -3712,7 +3787,7 @@ BEGIN
         requested_operation,requested_digest,requested_run
     );
     INSERT INTO __forest_module_schema__.agent_runs(
-        bot_id,run_id,session_id,start_operation_id,input_digest,state,
+        bot_id,run_id,session_id,conversation_ref,start_operation_id,input_digest,state,
         agent_spec_revision,config_payload_id,config_payload_digest,
         config_owner_component_id,config_owner_kind,config_owner_id,
         preset_revision,preset_payload_id,preset_payload_digest,
@@ -3721,7 +3796,8 @@ BEGIN
         absolute_deadline,input_revision,selected_input_end_seq,
         context_revision,context_view_revision
     ) VALUES (
-        requested_bot,requested_run,requested_session,requested_operation,requested_digest,
+        requested_bot,requested_run,requested_session,requested_conversation,
+        requested_operation,requested_digest,
         'PREPARING_MODEL',body->>'agent_spec_revision',body#>>'{config,payload_id}',
         body#>>'{config,digest}',body#>>'{config,owner_component_id}',
         body#>>'{config,owner_kind}',body#>>'{config,owner_id}',body->>'preset_revision',
@@ -4726,7 +4802,7 @@ BEGIN
         );
     END IF;
     INSERT INTO __forest_module_schema__.agent_runs(
-        bot_id,run_id,session_id,start_operation_id,input_digest,state,
+        bot_id,run_id,session_id,conversation_ref,start_operation_id,input_digest,state,
         agent_spec_revision,config_payload_id,config_payload_digest,
         config_owner_component_id,config_owner_kind,config_owner_id,
         preset_revision,preset_payload_id,preset_payload_digest,
@@ -4735,7 +4811,8 @@ BEGIN
         absolute_deadline,input_revision,selected_input_end_seq,
         context_revision,context_view_revision
     ) VALUES (
-        requested_bot,requested_run,requested_session,requested_operation,requested_digest,
+        requested_bot,requested_run,requested_session,previous.conversation_ref,
+        requested_operation,requested_digest,
         'PREPARING_MODEL',previous.agent_spec_revision,previous.config_payload_id,
         previous.config_payload_digest,previous.config_owner_component_id,
         previous.config_owner_kind,previous.config_owner_id,previous.preset_revision,
