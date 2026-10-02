@@ -13,6 +13,7 @@ from uuid import uuid4
 
 from forest.bot_host import BotHost
 from forest.errors import ForestError
+from forest.storage.deployment_catalog import DeploymentSupervisorLease
 
 _ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 
@@ -88,6 +89,17 @@ class MultiBotSupervisor:
 
     def notify(self) -> None:
         self._wake.set()
+
+    def authority_lease(self, *, allow_closing: bool = False) -> DeploymentSupervisorLease:
+        if (
+            type(self.lease) is not DeploymentSupervisorLease
+            or (self._closing and not allow_closing)
+        ):
+            raise ForestError(
+                "DEPLOYMENT_RUNTIME_UNAVAILABLE",
+                "Deployment Supervisor lease is unavailable", 503,
+            )
+        return self.lease
 
     def owned_tasks(self) -> tuple[asyncio.Task, ...]:
         return tuple(

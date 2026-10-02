@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
@@ -17,6 +18,7 @@ from psycopg import sql
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
+from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.model_contract import ModelCapabilities
@@ -33,11 +35,13 @@ from forest.package_capabilities import PackageCallScope
 from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.packages import storage_bundle_digest
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
+from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
 from forest.storage.bot_store import BotStore
 from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
+from forest.storage.deployment_generation import DeploymentGenerationAuthority
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInstaller
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
@@ -134,6 +138,191 @@ async def test_deployment_package_storage_has_its_own_scope_fenced_ledger(deploy
             digest,
         )
     assert caught.value.code == "INVALID_STORAGE_BUNDLE"
+
+
+@pytest.mark.postgres
+async def test_deployment_generations_publish_under_the_real_supervisor_lease(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    lease = await repository.claim_supervisor("host/one", "incarnation/one")
+    authority = DeploymentGenerationAuthority(repository.store)
+    runtime_scope = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_kwargs: lease)
+    )
+    assert runtime_scope.scope_kind == "deployment"
+    assert runtime_scope.scope_id == repository.store.deployment_id
+    assert runtime_scope.authority_lease() == lease
+    digest = "sha256:" + "1" * 64
+
+    def binding(component_id: str, *, revision: int = 1) -> PreparedGenerationBinding:
+        return PreparedGenerationBinding(
+            component_id=component_id, requires=(), package_id="deployment.test",
+            package_version="1.0.0", package_digest=digest, driver="python-worker",
+            trust_level="installed", descriptor_digest=digest,
+            route_contract_digest=digest, management_contract_digest=digest,
+            management_ui_digest=digest, config_revision=revision,
+            config_payload_id="config/" + component_id,
+            config_payload_digest=digest, instance_id="instance/" + component_id,
+            worker_incarnation="worker/" + component_id,
+            state_schema=1, state_contract_digest=digest,
+            capability_grants_digest=digest, data_admission=False,
+            control_admission=True,
+        )
+
+    class Configuration:
+        async def activate_in(self, conn, *, operation_id, revision, generation_id,
+                              expected_payload_id, expected_payload_digest):
+            assert operation_id.startswith("runtime-publish:")
+            assert generation_id.startswith("generation:")
+            assert revision > 0 and expected_payload_id.startswith("config/")
+            assert expected_payload_digest == digest
+            await conn.execute("SELECT 1")
+
+    with pytest.raises(ForestError) as caught:
+        await authority.prepare_graph(
+            lease,
+            [replace(binding("deployment.unregistered"), storage=RuntimeStorageBinding(
+                schema_id="deployment.unregistered.state", schema_version="1.0.0",
+                namespace=module_schema_namespace("deployment.unregistered.state"),
+                baseline_sha256="1" * 64, package_digest=digest,
+                repository_contract="deployment.unregistered/1",
+                execution_profile="declarative",
+            ))],
+            str(uuid4()),
+        )
+    assert caught.value.code == "RUNTIME_STORAGE_BINDING_MISMATCH"
+
+    first = await authority.prepare_graph(
+        lease, [binding("deployment.alpha"), binding("deployment.beta")], str(uuid4())
+    )
+    assert first.graph_revision == 1
+    assert await authority.prepare_graph(
+        lease, [binding("deployment.alpha"), binding("deployment.beta")], first.activation_id
+    ) == first
+    assert await authority.current_graph() is None
+    assert await authority.publish_graph(
+        lease, first,
+        configuration_activators={item: Configuration() for item in first.generations},
+    ) == 1
+    assert await authority.current_graph() == first
+
+    replacement = await authority.prepare_graph(
+        lease, [binding("deployment.beta", revision=2)], str(uuid4()),
+        retained_generations={"deployment.alpha": first.generations["deployment.alpha"]},
+        source_graph=first,
+    )
+    stale = await authority.prepare_graph(
+        lease, [binding("deployment.beta", revision=3)], str(uuid4())
+    )
+    assert replacement.graph_revision == 2
+    assert replacement.generations["deployment.alpha"] == first.generations["deployment.alpha"]
+    async with repository.store.pool.connection() as conn:
+        epochs = await (
+            await conn.execute(
+                "SELECT component_id,route_epoch FROM forest_deployment.runtime_graph_members "
+                "WHERE deployment_id=%s AND graph_id=%s",
+                (repository.store.deployment_id, replacement.graph_id),
+            )
+        ).fetchall()
+    assert {row["component_id"]: row["route_epoch"] for row in epochs} == {
+        "deployment.alpha": 1, "deployment.beta": 2,
+    }
+    assert await authority.publish_graph(
+        lease, replacement,
+        configuration_activators={"deployment.beta": Configuration()},
+    ) == 2
+    assert await authority.current_graph() == replacement
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        await authority.verify_generation_member_snapshot_in(
+            conn, component_id="deployment.alpha",
+            generation_id=replacement.generations["deployment.alpha"],
+        )
+    with pytest.raises(ForestError) as caught:
+        await authority.publish_graph(
+            lease, stale,
+            configuration_activators={"deployment.beta": Configuration()},
+        )
+    assert caught.value.code == "RUNTIME_GRAPH_STALE"
+    async with repository.store.pool.connection() as conn:
+        await authority.verify_active_generation_in(
+            conn, component_id="deployment.alpha",
+            generation_id=first.generations["deployment.alpha"], admission_lane="CONTROL",
+        )
+        await authority.verify_active_generation_in(
+            conn, component_id="deployment.beta",
+            generation_id=replacement.generations["deployment.beta"], admission_lane="CONTROL",
+        )
+        with pytest.raises(ForestError) as caught:
+            await authority.verify_active_generation_in(
+                conn, component_id="deployment.beta",
+                generation_id=first.generations["deployment.beta"], admission_lane="CONTROL",
+            )
+        assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    with pytest.raises(ForestError) as caught:
+        await authority.record_states(
+            lease, first, {"deployment.alpha": ("STOPPED", None)}
+        )
+    assert caught.value.code == "RUNTIME_GENERATION_STILL_ACTIVE"
+    await authority.record_states(
+        lease, first, {"deployment.beta": ("STOPPED", None)}
+    )
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        await authority.verify_active_generation_in(
+            conn, component_id="deployment.beta",
+            generation_id=replacement.generations["deployment.beta"],
+            admission_lane="CONTROL",
+        )
+        freezing = asyncio.create_task(authority.freeze_graph_admission(
+            lease, replacement, components=("deployment.beta",)
+        ))
+        done, pending = await asyncio.wait({freezing}, timeout=0.1)
+        assert not done and pending == {freezing}
+    assert await freezing == 1
+    async with repository.store.pool.connection() as conn:
+        with pytest.raises(ForestError) as caught:
+            await authority.verify_active_generation_in(
+                conn, component_id="deployment.beta",
+                generation_id=replacement.generations["deployment.beta"],
+                admission_lane="CONTROL",
+            )
+        assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+        await authority.verify_active_generation_in(
+            conn, component_id="deployment.alpha",
+            generation_id=replacement.generations["deployment.alpha"],
+            admission_lane="CONTROL",
+        )
+    assert await authority.resume_graph_admission(
+        lease, replacement, components=("deployment.beta",)
+    ) == 1
+    async with repository.store.pool.connection() as conn:
+        epoch = await (
+            await conn.execute(
+                "SELECT route_epoch FROM forest_deployment.runtime_graph_members "
+                "WHERE deployment_id=%s AND graph_id=%s AND component_id=%s",
+                (repository.store.deployment_id, replacement.graph_id, "deployment.beta"),
+            )
+        ).fetchone()
+    assert epoch["route_epoch"] == 4
+    assert await authority.retire_graph(lease, replacement) == replacement.graph_revision
+    assert await authority.current_graph() is None
+    await authority.record_states(
+        lease, replacement,
+        {"deployment.alpha": ("STOPPED", None), "deployment.beta": ("STOPPED", None)},
+    )
+    async with repository.store.pool.connection() as conn:
+        await authority.verify_generation_cleanup_in(
+            conn, component_id="deployment.beta",
+            generation_id=replacement.generations["deployment.beta"],
+        )
+    await repository.release_supervisor(lease)
+    async with repository.store.pool.connection() as conn:
+        with pytest.raises(ForestError) as caught:
+            await authority.verify_generation_cleanup_in(
+                conn, component_id="deployment.beta",
+                generation_id=replacement.generations["deployment.beta"],
+            )
+        assert caught.value.code == "RUNTIME_GENERATION_CLEANUP_DENIED"
 
 
 async def _storage_profile(repository, bot_id: str, name: str):

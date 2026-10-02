@@ -391,6 +391,8 @@ deployment/host 管理服务也有描述符、工件身份和
 
 部署数据库以自身 `forest_deployment.schema_bundles` 登记 deployment 包的不可变 SQL 命名空间，登记行必须绑定真实 `deployment_id`、schema ID、scope、包摘要和基线摘要。Bot 的 `forest_kernel.schema_bundles` 只接受 Bot 包；Domain authority 按准确的调用 scope 选择数据库和账本，绝不把 deployment ID 填入 Bot ID 字段。host 包如需持久存储，必须先有独立的 host 存储 authority 和 Generation 围栏，不能暂借部署或 Bot 账本。部署基线若发生不兼容改动，未上线阶段直接重建部署数据库，不为旧宿主对象添加迁移兼容层。
 
+deployment RuntimeGraph 的权威事实也只在部署数据库：由 Supervisor lease 围栏保护图修订时钟、候选/活动图、冻结 Generation 绑定及逐成员 route epoch。准备事务在当前图头上冻结来源版本，发布事务再次核对来源与存储账本，并与各模块配置激活及图发布 participant 同事务提交；输掉竞态的候选不能覆盖新图。保留成员沿用 Generation 与 route epoch，重建成员递增 epoch；冻结、恢复和退役只能由当前 lease 对准确图执行。`RuntimeModuleRegistry` 从其 scope runtime 获取 lease，不向 deployment 模块暴露 Bot kernel。只有在部署包的真实描述符、隔离 Worker、配置与管理契约已经接入这套 authority 后，部署 Web 网关才能把静态伪 Generation 替换为活动图事实。
+
 密钥输入在权限签名前投影为“是否变化 + 不可逆摘要”，原始密钥只交给经过校验的模块 handler，并立即进入凭据库加密路径；权限载荷、operation digest、审计参数和错误详情都不能携带密钥正文。输入错误返回稳定 `MODULE_MANAGEMENT_INPUT_INVALID`，未知或 query/action 类型不符返回 `MODULE_MANAGEMENT_OPERATION_NOT_FOUND`，校验详情必须可安全 JSON 序列化。
 
 官方模块的首版管理贡献必须覆盖以下能力：Agent 的配置、Run/ModelTurn/ToolStep 查询、取消和 UNKNOWN 对账；Memory 的配置、状态、来源组合筛选、关系遍历、真实召回试验、遗忘和人工关联；Routing 的已提交 Event/Job/dispatch trace 查询与受控重放；Command/Message Router 的 Binding 范围策略、容量、脱敏诊断和有界恢复；`kernel.audit` 的 Bot 审计元数据查询。这里定义的是模块必须发布的契约，不是当前完成度声明；实际落地情况只看[实现状态](implementation-status.md)。需要当前密码的策略/容量动作由通用管理网关在签票前重新鉴权，票据和 payload provenance 只携带去除密码后的规范载荷。旧 `/agent/*`、`/memory/*`、`/bots/{bot_id}/events/*`、`/bots/{bot_id}/component-jobs/*` 和命令/消息路由专用管理端点必须直接删除，不保留兼容别名。对应 HTML、CSS、ES module 控制器由模块描述符声明，`index.html`、`app.js` 和通用路由均不按这些组件 ID 分支。审计生产者也必须通过 `kernel.audit` 的显式写入端口提交，不能因为已有查询贡献就宣称存储所有权已经拆分完成。

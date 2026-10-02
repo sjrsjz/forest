@@ -1346,9 +1346,7 @@ class RuntimeModuleRegistry:
         self._generation_identities_bound = True
 
     def _lease(self, *, allow_closing=False):
-        if allow_closing and hasattr(self.runtime, "_cleanup_lease"):
-            return self.runtime._cleanup_lease()
-        return self.runtime.kernel._authority(allow_closing=allow_closing)
+        return self.runtime.authority_lease(allow_closing=allow_closing)
 
     @staticmethod
     def _lost_persistence_authority(exc):
@@ -1356,6 +1354,8 @@ class RuntimeModuleRegistry:
             "STALE_HOST",
             "KERNEL_UNAVAILABLE",
             "STORAGE_SEALED",
+            "STALE_DEPLOYMENT_SUPERVISOR",
+            "DEPLOYMENT_RUNTIME_UNAVAILABLE",
         }
 
     async def _record_current_states(self, lease, *, failure_code=None):

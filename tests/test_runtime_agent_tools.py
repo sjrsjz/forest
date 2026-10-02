@@ -418,6 +418,7 @@ async def test_replacement_drain_preserves_unselected_owned_work_and_router():
         scope_kind="bot",
         generation_authority=Authority(),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: "lease"),
+        authority_lease=lambda **_kwargs: "lease",
     )
     registry = RuntimeModuleRegistry(runtime, descriptors)
     registry.graph_identity = object()

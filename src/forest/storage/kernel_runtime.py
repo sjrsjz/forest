@@ -14,12 +14,12 @@ from forest.runtime_generation import (
     ActiveGenerationRoute,
     PreparedGenerationBinding,
     RuntimeGenerationGraph,
+    validate_prepared_bindings,
 )
 from forest.storage.runtime_identity import HostLease
 
 _IDENTIFIER = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 _DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
-_RAW_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
 
 class KernelRuntimeRepository:
@@ -2156,78 +2156,6 @@ class KernelRuntimeRepository:
         *,
         available_components: set[str] | None = None,
     ) -> list[PreparedGenerationBinding]:
-        try:
-            UUID(activation_id)
-        except (TypeError, ValueError, AttributeError):
-            raise ForestError(
-                "RUNTIME_ACTIVATION_ID_INVALID", "Runtime activation identity must be a UUID", 422
-            ) from None
-        ordered = sorted(bindings, key=lambda item: item.component_id)
-        components = {item.component_id for item in ordered}
-        required_components = components | (available_components or set())
-        if (not ordered and not available_components) or len(components) != len(ordered):
-            raise ForestError(
-                "RUNTIME_GENERATION_BINDING_INVALID",
-                "Runtime generation bindings must be unique and the Graph non-empty",
-                422,
-            )
-        for item in ordered:
-            storage = item.storage
-            strings = (
-                item.component_id,
-                item.package_id,
-                item.package_version,
-                item.driver,
-                item.config_payload_id,
-                item.instance_id,
-                item.worker_incarnation,
-            )
-            digests = (
-                item.package_digest,
-                item.descriptor_digest,
-                item.route_contract_digest,
-                item.management_contract_digest,
-                item.management_ui_digest,
-                item.config_payload_digest,
-                item.state_contract_digest,
-                item.capability_grants_digest,
-            )
-            invalid_storage = storage is not None and (
-                not all(
-                    isinstance(value, str) and value
-                    for value in (
-                        storage.schema_id,
-                        storage.schema_version,
-                        storage.namespace,
-                        storage.repository_contract,
-                    )
-                )
-                or not _RAW_DIGEST.fullmatch(storage.baseline_sha256)
-                or not _DIGEST.fullmatch(storage.package_digest)
-                or storage.execution_profile not in {"declarative", "official"}
-            )
-            if (
-                not _IDENTIFIER.fullmatch(item.component_id)
-                or any(not isinstance(value, str) or not value for value in strings)
-                or any(not _DIGEST.fullmatch(value) for value in digests)
-                or item.trust_level not in {"official", "installed"}
-                or type(item.config_revision) is not int
-                or item.config_revision <= 0
-                or type(item.state_schema) is not int
-                or item.state_schema <= 0
-                or type(item.data_admission) is not bool
-                or type(item.control_admission) is not bool
-                or len(item.requires) != len(set(item.requires))
-                or item.component_id in item.requires
-                or set(item.requires) - required_components
-                or len(item.retention_requires) != len(set(item.retention_requires))
-                or item.component_id in item.retention_requires
-                or set(item.retention_requires) - required_components
-                or invalid_storage
-            ):
-                raise ForestError(
-                    "RUNTIME_GENERATION_BINDING_INVALID",
-                    f"Prepared Generation binding is invalid for {item.component_id}",
-                    422,
-                )
-        return ordered
+        return validate_prepared_bindings(
+            bindings, activation_id, available_components=available_components
+        )

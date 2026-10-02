@@ -93,6 +93,11 @@ class DeploymentCatalogRepository:
                             (self.store.deployment_id, baseline_sha256),
                         )
                     ).fetchone()
+                    await conn.execute(
+                        "INSERT INTO forest_deployment.runtime_graph_clock(deployment_id) "
+                        "VALUES (%s)",
+                        (self.store.deployment_id,),
+                    )
                     await self._verify_inventory(conn)
                     return dict(identity)
             except ForestError:
@@ -135,6 +140,10 @@ class DeploymentCatalogRepository:
         expected_relations = {
             "deployment_identity",
             "schema_bundles",
+            "runtime_graph_clock",
+            "runtime_graphs",
+            "runtime_generations",
+            "runtime_graph_members",
             "supervisor_lease",
             "web_accounts",
             "web_setup_state",

@@ -366,6 +366,9 @@ class BotHost:
     def _cleanup_lease(self):
         return self._authority(allow_closing=True)
 
+    def authority_lease(self, *, allow_closing: bool = False):
+        return self._authority(allow_closing=allow_closing)
+
     def notify(self) -> None:
         if self.registry is not None:
             self.registry.notify_work()

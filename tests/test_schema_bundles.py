@@ -1436,6 +1436,7 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
@@ -2086,6 +2087,7 @@ async def test_runtime_registry_requires_and_publishes_prepared_generation_bindi
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=kernel,
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=repository,
     )
@@ -2665,6 +2667,7 @@ async def test_clean_kernel_bootstrap_publishes_all_required_authorities(clean_a
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
@@ -2739,6 +2742,7 @@ async def test_runtime_registry_transfers_unaffected_generations_without_restart
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
@@ -2825,6 +2829,7 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
@@ -3038,6 +3043,7 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
@@ -3178,6 +3184,7 @@ async def test_post_publication_activation_failure_retires_retained_generations(
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
@@ -3238,6 +3245,7 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )
@@ -5096,6 +5104,7 @@ async def test_routing_builtin_owns_worker_storage_and_lifecycle(
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=core.runtime,
     )

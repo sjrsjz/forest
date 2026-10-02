@@ -29,6 +29,67 @@ CREATE TABLE forest_deployment.schema_bundles (
     )
 );
 
+CREATE TABLE forest_deployment.runtime_graph_clock (
+    deployment_id text PRIMARY KEY REFERENCES forest_deployment.deployment_identity(deployment_id),
+    next_revision bigint NOT NULL DEFAULT 0 CHECK (next_revision >= 0),
+    active_revision bigint NOT NULL DEFAULT 0 CHECK (active_revision >= 0),
+    active_graph_id text,
+    CHECK (active_revision <= next_revision)
+);
+
+CREATE TABLE forest_deployment.runtime_graphs (
+    deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
+    graph_id text NOT NULL,
+    graph_revision bigint NOT NULL CHECK (graph_revision > 0),
+    graph_digest text NOT NULL CHECK (graph_digest ~ '^sha256:[0-9a-f]{64}$'),
+    activation_id text NOT NULL,
+    source_graph_id text,
+    source_revision bigint NOT NULL CHECK (source_revision >= 0),
+    owner_epoch bigint NOT NULL CHECK (owner_epoch > 0),
+    state text NOT NULL CHECK (state IN ('PREPARED','ACTIVE','RETIRED','FAILED')),
+    prepared_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    published_at timestamptz,
+    retired_at timestamptz,
+    PRIMARY KEY (deployment_id,graph_id),
+    UNIQUE (deployment_id,graph_revision),
+    UNIQUE (deployment_id,activation_id),
+    FOREIGN KEY (deployment_id,source_graph_id)
+        REFERENCES forest_deployment.runtime_graphs(deployment_id,graph_id)
+);
+
+CREATE TABLE forest_deployment.runtime_generations (
+    deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
+    generation_id text NOT NULL,
+    component_id text NOT NULL,
+    binding_digest text NOT NULL CHECK (binding_digest ~ '^sha256:[0-9a-f]{64}$'),
+    binding jsonb NOT NULL,
+    owner_epoch bigint NOT NULL CHECK (owner_epoch > 0),
+    state text NOT NULL CHECK (state IN ('PREPARED','ACTIVE','QUIESCING','STOPPED','FAILED')),
+    failure_code text CHECK (failure_code IS NULL OR failure_code ~ '^[A-Z][A-Z0-9_]{0,127}$'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (deployment_id,generation_id)
+);
+
+CREATE TABLE forest_deployment.runtime_graph_members (
+    deployment_id text NOT NULL,
+    graph_id text NOT NULL,
+    component_id text NOT NULL,
+    generation_id text NOT NULL,
+    data_admission boolean NOT NULL,
+    control_admission boolean NOT NULL,
+    route_epoch bigint NOT NULL DEFAULT 1 CHECK (route_epoch > 0),
+    PRIMARY KEY (deployment_id,graph_id,component_id),
+    UNIQUE (deployment_id,graph_id,generation_id),
+    FOREIGN KEY (deployment_id,graph_id)
+        REFERENCES forest_deployment.runtime_graphs(deployment_id,graph_id),
+    FOREIGN KEY (deployment_id,generation_id)
+        REFERENCES forest_deployment.runtime_generations(deployment_id,generation_id)
+);
+
+ALTER TABLE forest_deployment.runtime_graph_clock
+    ADD FOREIGN KEY (deployment_id,active_graph_id)
+    REFERENCES forest_deployment.runtime_graphs(deployment_id,graph_id);
+
 CREATE TABLE forest_deployment.supervisor_lease (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     host_id text,
