@@ -134,6 +134,10 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   const apply = document.createElement('button');
   apply.textContent = '应用计划';
   apply.disabled = true;
+  const editable = row.management_contract?.configuration?.operations?.includes('configuration.plan')
+    && row.management_contract?.configuration?.operations?.includes('configuration.apply');
+  discard.hidden = !editable;
+  apply.hidden = !editable;
   controls.append(state, discard, apply);
   const frame = document.createElement('iframe');
   frame.className = 'package-ui-frame';

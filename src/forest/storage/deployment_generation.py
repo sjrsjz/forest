@@ -56,6 +56,23 @@ class DeploymentGenerationAuthority:
     def __init__(self, store) -> None:
         self.store = store
 
+    async def verify_active_generation(
+        self, *, component_id: str, generation_id: str, admission_lane: str
+    ) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.verify_active_generation_in(
+                conn, component_id=component_id, generation_id=generation_id,
+                admission_lane=admission_lane,
+            )
+
+    async def verify_generation_member(
+        self, *, component_id: str, generation_id: str
+    ) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.verify_generation_member_in(
+                conn, component_id=component_id, generation_id=generation_id,
+            )
+
     async def _lease_in(self, conn, lease: DeploymentSupervisorLease) -> None:
         if type(lease) is not DeploymentSupervisorLease or lease.deployment_id != self.store.deployment_id:
             raise ForestError("STALE_DEPLOYMENT_SUPERVISOR", "Supervisor lease is invalid", 409)

@@ -6,6 +6,7 @@ import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -18,6 +19,7 @@ from psycopg import sql
 
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
+from forest.deployment_packages import bootstrap_builtin_deployment_package
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.embeddings import EmbeddingProfile
@@ -34,9 +36,10 @@ from forest.official_bot_provisioning import (
 )
 from forest.package_capabilities import PackageCallScope
 from forest.package_domain_authority import PostgresPackageDomainAuthority
-from forest.packages import digest_json, storage_bundle_digest
+from forest.packages import PackageCatalog, digest_json, storage_bundle_digest
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
+from forest.runtime_modules import RuntimeModuleRegistry
 from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
 from forest.storage.bot_store import BotStore
 from forest.storage.deployment_audit import DeploymentAuditRepository
@@ -266,6 +269,86 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
         {"name": "replayed"}, {"name": "competing"}
     )
     assert (await configuration.effective()).revision == 2
+
+
+@pytest.mark.postgres
+async def test_deployment_audit_builtin_runs_in_real_package_generation(
+    deployment_catalog, tmp_path
+):
+    catalog = deployment_catalog
+    await catalog.initialize()
+    lease = await catalog.claim_supervisor("host/audit", "incarnation/audit")
+    runtime = DeploymentRuntimeScope(
+        catalog.store, SimpleNamespace(authority_lease=lambda **_values: lease)
+    )
+    snapshot = PackageCatalog(tmp_path / "deployment-packages").build(
+        Path(__file__).parents[1] / "src/forest/builtin/deployment_audit"
+    )
+    descriptor = await bootstrap_builtin_deployment_package(snapshot, runtime)
+    registry = RuntimeModuleRegistry(runtime, (descriptor,))
+    try:
+        await registry.start()
+        assert await runtime.generation_authority.current_graph() == registry.graph_identity
+        module = registry.get("deployment.audit")
+        assert module.generation_identity.generation_id == (
+            registry.graph_identity.generations["deployment.audit"]
+        )
+        query = module.management_contract.query
+        assert await query("audit.records.query", {"limit": 10}) == {
+            "records": [], "next_before": None,
+        }
+
+        async with catalog.store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                "INSERT INTO forest_deployment.web_authority_receipts("
+                "deployment_id,ticket_id,ticket_digest,issuer_id,key_id,web_subject_ref,"
+                "web_role,session_ref,session_revision,target_scope_kind,target_scope_id,"
+                "target_component_id,target_generation_id,target_graph_revision,"
+                "target_operation_ref,action_key,input_digest,issued_at,expires_at) "
+                "VALUES (%s,'ticket/audit','sha256:' || repeat('1',64),'issuer/audit',"
+                "'key/audit','subject/audit','ADMIN','session/audit',1,'deployment',"
+                "'deployment','deployment.audit',%s,1,'operation/audit','audit.query',"
+                "'sha256:' || repeat('2',64),clock_timestamp(),"
+                "clock_timestamp() + interval '20 seconds')",
+                (catalog.store.deployment_id, module.generation_identity.generation_id),
+            )
+            await conn.execute(
+                "INSERT INTO forest_deployment.audit_records("
+                "deployment_id,audit_id,action,severity,producer_component_id,"
+                "producer_generation_id,origin_kind,actor_kind,actor_id,resource_kind,"
+                "resource_id,operation_kind,operation_id,receipt_ticket_id) "
+                "VALUES (%s,'audit:one','audit.query','SECURITY','deployment.audit',"
+                "%s,'web.management','web.subject','subject/audit',"
+                "'deployment.component','deployment.audit','web.action',"
+                "'operation/audit','ticket/audit')",
+                (catalog.store.deployment_id, module.generation_identity.generation_id),
+            )
+        page = await query("audit.records.query", {"limit": 10, "action": "audit.query"})
+        assert len(page["records"]) == 1
+        assert page["records"][0]["audit_id"] == "audit:one"
+        assert page["records"][0]["actor_id"] == "subject/audit"
+        assert page["records"][0]["details_payload_id"] is None
+        assert (await query("audit.records.query", {"action": "missing"}))["records"] == []
+
+        previous = registry
+        candidate = RuntimeModuleRegistry(runtime, (descriptor,))
+        assert candidate.plan_graph_transition(
+            previous, target_component_id="deployment.audit"
+        ) == ("deployment.audit",)
+        await candidate.prewarm()
+        await previous.drain_owned_work_for_replacement(candidate.activation_id)
+        await candidate.start()
+        assert candidate.graph_identity.graph_revision == 2
+        assert candidate.graph_identity.generations["deployment.audit"] != (
+            previous.graph_identity.generations["deployment.audit"]
+        )
+        assert (await candidate.get("deployment.audit").management_contract.query(
+            "audit.records.query", {"limit": 10}
+        ))["records"][0]["audit_id"] == "audit:one"
+        assert await previous.close() == []
+        registry = candidate
+    finally:
+        await registry.close()
 
 
 @pytest.mark.postgres
@@ -1180,7 +1263,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
 
 @pytest.mark.postgres
 async def test_deployment_webui_discovers_components_and_keeps_secrets_write_only(
-    deployment_catalog,
+    deployment_catalog, tmp_path,
 ):
     repository = deployment_catalog
     await repository.initialize()
@@ -1220,20 +1303,33 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         validate_target=lambda _bot_id, _target_dsn: None,
     )
     deployment_audit = DeploymentAuditRepository(repository.store)
+    lease = await repository.claim_supervisor("host/webui", "incarnation/webui")
+    deployment_runtime = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease)
+    )
+    audit_snapshot = PackageCatalog(tmp_path / "webui-deployment-packages").build(
+        Path(__file__).parents[1] / "src/forest/builtin/deployment_audit"
+    )
+    audit_descriptor = await bootstrap_builtin_deployment_package(
+        audit_snapshot, deployment_runtime
+    )
+    deployment_registry = RuntimeModuleRegistry(deployment_runtime, (audit_descriptor,))
+    await deployment_registry.start()
+    legacy_components = deployment_management_components(
+        catalog=repository,
+        secrets=secrets,
+        storage_profiles=storage_profiles,
+        bootstrap_profiles=bootstrap_profiles,
+        jobs=jobs,
+        supervisor=supervisor,
+        bootstrap_contributions=official_bootstrap_contributions(),
+        database_allocator=allocator,
+        web_identity=web_identity,
+    )
     app = create_deployment_management_app(
         deployment_id="deployment/test",
-        components=deployment_management_components(
-            catalog=repository,
-            secrets=secrets,
-            storage_profiles=storage_profiles,
-            bootstrap_profiles=bootstrap_profiles,
-            jobs=jobs,
-            supervisor=supervisor,
-            audit=deployment_audit,
-            bootstrap_contributions=official_bootstrap_contributions(),
-            database_allocator=allocator,
-            web_identity=web_identity,
-        ),
+        components=legacy_components,
+        deployment_registry_provider=lambda: deployment_registry,
         identity_authority=web_identity,
         deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
         deployment_audit=deployment_audit,
@@ -1254,7 +1350,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         runtime = await client.get("/management/v1/runtime", headers=headers)
         assert runtime.status_code == 200
         body = runtime.json()
-        assert body["runtime"]["graph_state"] == "CONTROL_PLANE"
+        assert body["runtime"]["graph_state"] == "ACTIVE"
+        assert body["runtime"]["graph_id"] == deployment_registry.graph_identity.graph_id
         assert {item["component_id"] for item in body["modules"]} == {
             "deployment.catalog",
             "deployment.secrets",
@@ -1262,6 +1359,18 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "deployment.accounts",
             "deployment.audit",
         }
+        audit_module = next(item for item in body["modules"]
+                            if item["component_id"] == "deployment.audit")
+        assert audit_module["generation_id"] == (
+            deployment_registry.graph_identity.generations["deployment.audit"]
+        )
+        audit_ui = await client.get(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            f"deployment.audit/management-ui/{audit_snapshot.management_ui()[0]['sha256']}",
+            headers=headers,
+        )
+        assert audit_ui.status_code == 200
+        assert "forest.management-ui-channel/1" in audit_ui.text
         assert (await client.get("/static/deployment-provisioning.js")).status_code == 200
         shell_script = (await client.get("/static/app.js")).text
         assert "/management/v1/scopes/" in shell_script
@@ -1455,6 +1564,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "web-subject/8c6976e5b5410415bde908bd4dee15df"
         }
         assert all(item["origin_kind"] == "web.management" for item in audit_records)
+    await deployment_registry.close()
 
 
 async def _eventually(assertion, *, timeout: float = 3) -> None:

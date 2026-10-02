@@ -130,50 +130,6 @@ class DeploymentAccountManagement:
         raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404)
 
 
-class DeploymentAuditManagement:
-    _fields_allowed = {
-        "action",
-        "producer_component_id",
-        "origin_kind",
-        "actor_kind",
-        "actor_id",
-        "resource_kind",
-        "resource_id",
-        "operation_kind",
-        "operation_id",
-        "before",
-        "limit",
-    }
-
-    def __init__(self, *, audit) -> None:
-        self.audit = audit
-
-    async def query(self, query_id: str, payload: dict):
-        if query_id != "audit.records.query":
-            raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404)
-        if not isinstance(payload, dict) or set(payload) - self._fields_allowed:
-            raise ForestError(
-                "DEPLOYMENT_MANAGEMENT_INPUT_INVALID",
-                "Audit query contains unknown fields",
-                422,
-            )
-        values = {
-            key: value for key, value in payload.items() if value is not None and value != ""
-        }
-        for kind, identity in (
-            ("actor_kind", "actor_id"),
-            ("resource_kind", "resource_id"),
-            ("operation_kind", "operation_id"),
-        ):
-            if (kind in values) != (identity in values):
-                raise ForestError(
-                    "DEPLOYMENT_MANAGEMENT_INPUT_INVALID",
-                    f"{kind} and {identity} must be supplied together",
-                    422,
-                )
-        return await self.audit.scan(**values)
-
-
 class DeploymentProvisioningManagement:
     def __init__(
         self,
@@ -322,7 +278,6 @@ def deployment_management_components(
     jobs,
     supervisor,
     bootstrap_contributions,
-    audit,
     database_allocator=None,
     web_identity=None,
 ):
@@ -373,22 +328,4 @@ def deployment_management_components(
                 contribution("deployment-accounts", "管理账号", 40),
             )
         )
-    components.append(
-        DeploymentManagementComponent(
-            "deployment.audit",
-            DeploymentAuditManagement(audit=audit),
-            (
-                RuntimeManagementContribution(
-                    "deployment-audit",
-                    "部署审计",
-                    ("deployment",),
-                    "/static/modules/kernel-audit.html",
-                    "/static/kernel-audit.js",
-                    style="/static/modules/kernel-audit.css",
-                    group="deployment",
-                    order=50,
-                ),
-            ),
-        )
-    )
     return tuple(components)

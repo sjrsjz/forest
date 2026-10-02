@@ -198,7 +198,7 @@ CREATE TABLE forest_deployment.web_authority_receipts (
     target_scope_id text NOT NULL CHECK (target_scope_id='deployment'),
     target_component_id text NOT NULL CHECK (octet_length(target_component_id) BETWEEN 1 AND 128),
     target_generation_id text NOT NULL CHECK (octet_length(target_generation_id) BETWEEN 1 AND 256),
-    target_graph_revision bigint NOT NULL CHECK (target_graph_revision=1),
+    target_graph_revision bigint NOT NULL CHECK (target_graph_revision > 0),
     target_operation_ref text NOT NULL CHECK (octet_length(target_operation_ref) BETWEEN 1 AND 256),
     action_key text NOT NULL CHECK (octet_length(action_key) BETWEEN 1 AND 200),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),

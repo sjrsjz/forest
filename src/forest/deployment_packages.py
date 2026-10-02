@@ -1,0 +1,145 @@
+"""Assemble trusted deployment packages against deployment-owned authorities."""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+from importlib.resources import files
+
+from jsonschema import Draft202012Validator
+
+from forest.errors import ForestError
+from forest.package_domain_authority import PostgresPackageDomainAuthority
+from forest.package_management import PackageManagementContract
+from forest.package_runtime import package_runtime_descriptor
+from forest.packages import digest_json, storage_bundle_digest
+from forest.runtime_modules import RuntimePackageManagementContribution, RuntimeStorageBundle
+from forest.schema_bundles import StorageBundleSpec
+from forest.storage.deployment_module_configuration import DeploymentModuleConfigurationRepository
+
+
+@dataclass(frozen=True)
+class _BuiltinGrant:
+    capability: str
+    resource_kind: str
+    resource_id: str
+
+
+@dataclass(frozen=True)
+class _BuiltinGrantSet:
+    entries: tuple[_BuiltinGrant, ...]
+    grant_set_digest: str
+
+
+class _ReadOnlyManagementContract(PackageManagementContract):
+    """Immutable deployment package configuration has no apply action."""
+
+    def describe(self) -> dict:
+        description = super().describe()
+        description["configuration"]["operations"] = ["configuration.read"]
+        return description
+
+    async def plan(self, **_values):
+        raise ForestError("MODULE_MANAGEMENT_UNAVAILABLE", "Configuration is immutable", 404)
+
+    async def apply(self, **_values):
+        raise ForestError("MODULE_MANAGEMENT_UNAVAILABLE", "Configuration is immutable", 404)
+
+
+async def bootstrap_builtin_deployment_package(snapshot, runtime):
+    """Install and compile an official deployment package with read-only ports."""
+
+    component = snapshot.component
+    if component["scope"] != "deployment" or component.get("configuration_apply") or (
+        component.get("domain_commands") or component.get("management_actions")
+        or component.get("owned_work_handlers") or component.get("effect_services")
+        or any(item["semantics"] != "read" for item in component.get("provides", ()))
+    ):
+        raise ForestError(
+            "DEPLOYMENT_PACKAGE_PORT_UNAVAILABLE",
+            "Only read-only deployment package ports have installed authorities", 503,
+        )
+    declared = snapshot.storage_bundle()
+    if declared is None or declared[0]["execution_profile"] != "official":
+        raise ForestError(
+            "DEPLOYMENT_PACKAGE_STORAGE_REQUIRED",
+            "Official deployment packages require an official SQL domain", 422,
+        )
+    metadata, owned_sql = declared
+    common_sql = files("forest.storage.official").joinpath(
+        "deployment_module_configuration.sql"
+    ).read_bytes()
+    baseline = common_sql + b"\n" + owned_sql
+    spec = StorageBundleSpec(
+        component_id=component["id"], schema_id=metadata["schema_id"],
+        schema_version=metadata["schema_version"],
+        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+        repository_contract=metadata["repository_contract"], scope="deployment",
+    )
+    storage = RuntimeStorageBundle(
+        spec, baseline, storage_bundle_digest(spec, "official"),
+        execution_profile="official",
+    )
+    await runtime.schema_bundle_installer.install(
+        spec, baseline, storage.package_digest, execution_profile="official"
+    )
+    config_schema = snapshot.schema(component["config_schema"])
+    config_value = snapshot.bootstrap_configuration()
+    if not Draft202012Validator(config_schema).is_valid(config_value):
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_INVALID", "Official bootstrap configuration is invalid", 422
+        )
+    configuration = DeploymentModuleConfigurationRepository(
+        runtime.store, component_id=component["id"], namespace=spec.namespace,
+        immutable_paths=tuple(component.get("config_immutable_paths", ())),
+    )
+    await configuration.ensure_initialized(
+        operation_id=f"bootstrap:{component['id']}:configuration", value=config_value,
+        validation_digest=digest_json(config_schema),
+    )
+    desired = await configuration.desired_checked()
+    if desired.validation_digest != digest_json(config_schema) or not (
+        Draft202012Validator(config_schema).is_valid(desired.value)
+    ):
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+            "Deployment configuration differs from the frozen package schema", 409,
+        )
+    requested = tuple(component.get("capabilities", {}).get("requests", ()))
+    grants = _BuiltinGrantSet(
+        tuple(_BuiltinGrant(item, "component", component["id"]) for item in requested),
+        digest_json([
+            "forest.deployment.official-capability-grants/1",
+            snapshot.digest, component["id"], requested,
+        ]),
+    )
+    domain = PostgresPackageDomainAuthority(
+        runtime.store, runtime.generation_authority,
+        component_id=component["id"], runtime_package_digest=snapshot.digest,
+        storage_spec=spec, storage_package_digest=storage.package_digest,
+        storage_execution_profile="official",
+    )
+    ui = snapshot.management_ui()
+    management = ()
+    if ui is not None:
+        declaration = component["management_ui"]
+        management = (RuntimePackageManagementContribution(
+            declaration.get("contribution_id", "configuration"),
+            declaration.get("label", component["id"]),
+            ("deployment",), component["id"], ui[0]["sha256"],
+            group=declaration.get("group", "deployment"),
+            order=declaration.get("order", 10),
+        ),)
+    descriptor = package_runtime_descriptor(
+        snapshot, bot_id=None, scope_id=runtime.scope_id,
+        module_configuration=configuration, grants=grants, resolved_contracts={},
+        generation_verifier=runtime.generation_authority.verify_active_generation,
+        generation_member_verifier=runtime.generation_authority.verify_generation_member,
+        state_queries=None, state_commands=None, domain_queries=domain,
+        service_operation_ledger=None, storage=storage, trust_level="official",
+        management=management,
+        management_contract_factory=lambda adapter: _ReadOnlyManagementContract(
+            configuration, adapter=adapter, schema=config_schema
+        ),
+    )
+    return descriptor

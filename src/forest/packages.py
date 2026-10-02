@@ -1944,6 +1944,27 @@ class PackageSnapshot:
             for reference in dict.fromkeys(references)
         }
 
+    def bootstrap_configuration(self) -> object:
+        """Read the bootstrap seed from this exact captured artifact."""
+
+        reference = self.component.get("bootstrap_config")
+        if (
+            not isinstance(reference, str)
+            or not re.fullmatch(r"[a-zA-Z0-9_./-]+\.json", reference)
+            or PurePosixPath(reference).is_absolute()
+            or ".." in PurePosixPath(reference).parts
+        ):
+            _fail("PACKAGE_CONFIGURATION_INVALID", "Bootstrap configuration path is invalid")
+        source = self._verified_files().get(reference)
+        if source is None:
+            _fail("PACKAGE_CONFIGURATION_INVALID", "Bootstrap configuration is absent")
+        try:
+            return json.loads(source)
+        except (UnicodeError, ValueError) as exc:
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_INVALID", "Bootstrap configuration is not JSON", 422
+            ) from exc
+
     def management_ui(self) -> tuple[dict, bytes] | None:
         files = self._verified_files()
         metadata = _management_ui(files, self.component)

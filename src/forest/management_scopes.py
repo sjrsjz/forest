@@ -8,6 +8,7 @@ import inspect
 import re
 import secrets
 from contextlib import asynccontextmanager
+from typing import Callable
 
 from forest.deployment_action_authorization import DeploymentActionAuthorization
 from forest.errors import ForestError
@@ -27,6 +28,7 @@ class DeploymentManagementGateway:
         ticket_authority=None,
         web_receipts=None,
         audit=None,
+        runtime_registry_provider: Callable | None = None,
     ) -> None:
         self.deployment_id = deployment_id
         self.components = components
@@ -34,12 +36,47 @@ class DeploymentManagementGateway:
         self.ticket_authority = ticket_authority
         self.web_receipts = web_receipts
         self.audit = audit
+        self._runtime_registry_provider = runtime_registry_provider
         self._operation_lock = asyncio.Lock()
 
+    @property
+    def runtime_registry(self):
+        return (
+            self._runtime_registry_provider()
+            if self._runtime_registry_provider is not None else None
+        )
+
+    def _package_binding(self, component_id: str):
+        registry = self.runtime_registry
+        if registry is None or component_id not in registry.states:
+            return None
+        graph = registry.graph_identity
+        if graph is None or registry.states[component_id] != "ACTIVE":
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE", "Deployment module is unavailable", 409
+            )
+        return graph.generations[component_id], graph.graph_revision, registry.get(component_id)
+
+    def _package_module(self, component_id: str):
+        binding = self._package_binding(component_id)
+        return binding[2] if binding is not None else None
+
     def authorization_target(self, component_id: str) -> tuple[str, int]:
+        registry = self.runtime_registry
+        graph = registry.graph_identity if registry is not None else None
         if component_id == "$runtime":
-            return "deployment/control-plane/1", 1
-        self._contract(component_id)
+            return (
+                (graph.graph_id, graph.graph_revision)
+                if graph is not None else ("deployment/control-plane/1", 1)
+            )
+        if registry is not None and component_id in registry.states:
+            if graph is None or registry.states[component_id] != "ACTIVE":
+                raise ForestError(
+                    "RUNTIME_GENERATION_NOT_ACTIVE", "Deployment module is unavailable", 409
+                )
+            return graph.generations[component_id], graph.graph_revision
+        if component_id not in self.registry:
+            raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Component does not exist", 404)
         return "deployment/" + component_id + "/1", 1
 
     async def _authorize(self, ticket, **expected) -> None:
@@ -50,32 +87,54 @@ class DeploymentManagementGateway:
                 "WEB_AUTHORITY_TICKET_REQUIRED", "Web authority ticket is required", 403
             )
         await self.ticket_authority.verify(ticket, **expected)
+        component_id = expected["target_component_id"]
+        if self.authorization_target(component_id) != (
+            expected["target_generation_id"], expected["target_graph_revision"]
+        ):
+            raise ForestError(
+                "WEB_AUTHORITY_TICKET_TARGET_MISMATCH",
+                "Deployment RuntimeGraph changed during authorization", 403,
+            )
 
     async def runtime(self, *, authorization=None, operation_id=None) -> dict:
+        generation_id, graph_revision = self.authorization_target("$runtime")
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
             target_scope_id="deployment",
             target_component_id="$runtime",
-            target_generation_id="deployment/control-plane/1",
-            target_graph_revision=1,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
             target_operation_ref=operation_id,
             action_key="runtime.read",
             input_digest=digest_json({}),
             required_role="AUDITOR",
         )
+        registry = self.runtime_registry
+        graph = registry.graph_identity if registry is not None else None
         return {
             "protocol": "forest.deployment-management-runtime/1",
-            "runtime": {
-                "bot_id": self.deployment_id,
-                "graph_state": "CONTROL_PLANE",
-                "graph_id": "deployment/control-plane/1",
-            },
-            "modules": [component.describe() for component in self.components],
+            "runtime": (
+                {
+                    "scope_kind": "deployment", "scope_id": self.deployment_id,
+                    "graph_state": "ACTIVE", "graph_id": graph.graph_id,
+                    "graph_revision": graph.graph_revision,
+                }
+                if graph is not None else {
+                    "scope_kind": "deployment", "scope_id": self.deployment_id,
+                    "graph_state": "CONTROL_PLANE", "graph_id": generation_id,
+                }
+            ),
+            "modules": (
+                registry.describe() if registry is not None else []
+            ) + [component.describe() for component in self.components],
         }
 
     async def read_configuration(self, component_id: str, *, authorization=None, operation_id=None):
-        generation_id, graph_revision = self.authorization_target(component_id)
+        binding = self._package_binding(component_id)
+        generation_id, graph_revision = (
+            binding[:2] if binding is not None else self.authorization_target(component_id)
+        )
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
@@ -88,7 +147,29 @@ class DeploymentManagementGateway:
             input_digest=digest_json({}),
             required_role="AUDITOR",
         )
+        if binding is not None:
+            return await binding[2].management_contract.read()
         self._unsupported_configuration(component_id)
+
+    async def read_management_ui(
+        self, component_id: str, artifact_sha256: str, *, authorization=None,
+        operation_id=None,
+    ) -> bytes:
+        binding = self._package_binding(component_id)
+        if binding is None:
+            raise ForestError(
+                "PACKAGE_MANAGEMENT_UI_NOT_FOUND", "Package UI is unavailable", 404
+            )
+        generation_id, graph_revision, module = binding
+        await self._authorize(
+            authorization, target_scope_kind="deployment", target_scope_id="deployment",
+            target_component_id=component_id, target_generation_id=generation_id,
+            target_graph_revision=graph_revision, target_operation_ref=operation_id,
+            action_key="configuration.read", input_digest=digest_json({}),
+            required_role="AUDITOR",
+        )
+        _metadata, content = module.management_ui_artifact(artifact_sha256)
+        return content
 
     async def plan_configuration(
         self, component_id: str, *, authorization=None, operation_id=None, **_values
@@ -131,7 +212,11 @@ class DeploymentManagementGateway:
     async def module_query(
         self, component_id: str, query_id: str, body: dict, *, authorization=None, operation_id=None
     ):
-        generation_id, graph_revision = self.authorization_target(component_id)
+        binding = self._package_binding(component_id)
+        generation_id, graph_revision = (
+            binding[:2] if binding is not None else self.authorization_target(component_id)
+        )
+        contract = binding[2].management_contract if binding is not None else self._contract(component_id)
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
@@ -144,7 +229,7 @@ class DeploymentManagementGateway:
             input_digest=digest_json(body),
             required_role="AUDITOR",
         )
-        return await self._contract(component_id).query(query_id, body)
+        return await contract.query(query_id, body)
 
     async def module_action(
         self,
@@ -226,6 +311,9 @@ class DeploymentManagementGateway:
         return receipt
 
     def _contract(self, component_id: str):
+        module = self._package_module(component_id)
+        if module is not None:
+            return module.management_contract
         component = self.registry.get(component_id)
         if component is None:
             raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Component does not exist", 404)

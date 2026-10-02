@@ -432,6 +432,12 @@ Secret 密文版本固化创建时的 `key_id`，Supervisor 从受保护的
 试解或静默重加密。文件拒绝重复 JSON key、未知字段、非规范 Base64、非 32 字节 key、重复 key
 material、缺失 active 引用和超过上限的 key 数，且 key material 不进入环境变量、repr、API 或日志。
 
+### 7.1 部署包查询与热替换的当前边界
+
+`deployment.audit` 是部署作用域的只读包：包内持有 SQL 查询、输入输出 schema、隔离 Worker 服务和管理 UI；部署审计事实的追加仍由内核在 Web 管理操作事务中完成。Supervisor 从不可变 PackageSnapshot 装配真实 deployment Registry，配置来自该包的私有命名空间，Domain 查询按 deployment ID、包摘要和活动 Generation 围栏。Web 网关从活动 Registry 发现贡献，并以真实图修订和 Generation 签发管理票据；调用前后复核目标，旧票据不能在图切换后误入新代际。
+
+Registry 的候选预热、旧代际排空、原子发布和新代际派发已经可用于部署包。生产管理面仍须提供有权限的部署包选择、候选构建、发布及失败回滚入口；其余账号、配置、Bot 目录、Secret 与供应服务尚未完成包化，现存宿主对象的伪 Generation 只能视为过渡状态。官方只读审计包的冻结能力集不等同于通用部署授权权威；引入写入、Effect 或第三方包前，必须建立可审计的部署作用域授权与事务端口，不能扩大当前引导器的默认许可。未上线部署数据库在基线改变后重建，不引入在线迁移兼容层。
+
 ## 8. 完成判据
 
 - 目标代码中不存在 `BindingRuntime` 类型或兼容别名；`BotRuntimeSupervisor` 不直接构造或保存 Agent、Memory、Shell、Job、Delivery 或具体平台客户端。

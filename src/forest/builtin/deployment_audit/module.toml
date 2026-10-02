@@ -1,0 +1,70 @@
+manifest_version = 1
+package_id = "forest.deployment-audit"
+version = "1.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "deployment_audit:DeploymentAudit"
+
+[[components]]
+id = "deployment.audit"
+scope = "deployment"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+bootstrap_config = "bootstrap.json"
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 4
+max_queue_items = 16
+max_state_inflight = 2
+max_owned_tasks = 1
+max_owned_resources = 1
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 30
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = ["domain.query:deployment.audit.page"]
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "deployment.audit.workspace"
+label = "部署审计"
+group = "deployment"
+order = 50
+
+[[components.provides]]
+name = "deployment.audit.query"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/page-input.json"
+output_schema = "schemas/page-output.json"
+
+[components.storage]
+schema_id = "forest.deployment.audit"
+schema_version = "1.0.0"
+baseline = "schema/audit.sql"
+baseline_sha256 = "5f0b56b26e17faf517ad8e787ca4a27f0633c38881222a40450ff94fbdefb3c5"
+scope = "deployment"
+repository_contract = "forest.deployment-audit.repository/1"
+execution_profile = "official"
+
+[[components.domain_queries]]
+name = "deployment.audit.page"
+contract = "1.0"
+function = "deployment_audit_page"
+input_schema = "schemas/page-input.json"
+output_schema = "schemas/page-output.json"
+
+[[components.management_queries]]
+id = "audit.records.query"
+port = "deployment.audit.query"
+default_limit = 50
+max_limit = 100
+timeout_s = 10

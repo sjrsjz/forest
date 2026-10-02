@@ -3,43 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import re
 
 from forest.errors import ForestError
 from forest.web_authority_ticket import WebAuthorityTicket
 
-_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]*\Z")
-
-
-def _identity(value, field: str, limit: int, *, optional: bool = False):
-    if value is None and optional:
-        return None
-    if (
-        not isinstance(value, str)
-        or not 1 <= len(value.encode("utf-8")) <= limit
-        or _IDENTITY.fullmatch(value) is None
-    ):
-        raise ForestError("DEPLOYMENT_AUDIT_QUERY_INVALID", f"Invalid {field}", 422)
-    return value
-
-
-def _pair(kind, identity, label):
-    if (kind is None) != (identity is None):
-        raise ForestError(
-            "DEPLOYMENT_AUDIT_QUERY_INVALID",
-            f"{label} kind and identity must appear together",
-            422,
-        )
-    if kind is not None:
-        _identity(kind, f"{label}_kind", 64)
-        if not isinstance(identity, str) or not 1 <= len(identity.encode("utf-8")) <= 256:
-            raise ForestError(
-                "DEPLOYMENT_AUDIT_QUERY_INVALID", f"Invalid {label}_id", 422
-            )
-
 
 class DeploymentAuditRepository:
-    """Append Web management envelopes and expose only redacted metadata."""
+    """Append immutable Web management envelopes; query projection belongs to the package."""
 
     _IMMUTABLE_FIELDS = (
         "action",
@@ -108,86 +78,6 @@ class DeploymentAuditRepository:
                 409,
             )
         return self._project(row)
-
-    async def scan(
-        self,
-        *,
-        action: str | None = None,
-        producer_component_id: str | None = None,
-        origin_kind: str | None = None,
-        actor_kind: str | None = None,
-        actor_id: str | None = None,
-        resource_kind: str | None = None,
-        resource_id: str | None = None,
-        operation_kind: str | None = None,
-        operation_id: str | None = None,
-        before: str | None = None,
-        limit: int = 50,
-    ) -> dict:
-        for field, value, size in (
-            ("action", action, 200),
-            ("producer_component_id", producer_component_id, 128),
-            ("origin_kind", origin_kind, 64),
-        ):
-            _identity(value, field, size, optional=True)
-        for kind, identity, label in (
-            (actor_kind, actor_id, "actor"),
-            (resource_kind, resource_id, "resource"),
-            (operation_kind, operation_id, "operation"),
-        ):
-            _pair(kind, identity, label)
-        _identity(before, "before", 128, optional=True)
-        if type(limit) is not int or not 1 <= limit <= 100:
-            raise ForestError(
-                "DEPLOYMENT_AUDIT_QUERY_INVALID", "Audit limit is outside 1..100", 422
-            )
-        async with self.store.pool.connection() as conn, conn.transaction():
-            cursor = None
-            if before is not None:
-                cursor = await (
-                    await conn.execute(
-                        "SELECT created_at,audit_id FROM forest_deployment.audit_records "
-                        "WHERE deployment_id=%s AND audit_id=%s",
-                        (self.store.deployment_id, before),
-                    )
-                ).fetchone()
-                if cursor is None:
-                    raise ForestError(
-                        "DEPLOYMENT_AUDIT_CURSOR_NOT_FOUND", "Audit cursor is unavailable", 404
-                    )
-            clauses = ["deployment_id=%s"]
-            params: list[object] = [self.store.deployment_id]
-            for field, value in (
-                ("action", action),
-                ("producer_component_id", producer_component_id),
-                ("origin_kind", origin_kind),
-                ("actor_kind", actor_kind),
-                ("actor_id", actor_id),
-                ("resource_kind", resource_kind),
-                ("resource_id", resource_id),
-                ("operation_kind", operation_kind),
-                ("operation_id", operation_id),
-            ):
-                if value is not None:
-                    clauses.append(field + "=%s")
-                    params.append(value)
-            if cursor is not None:
-                clauses.append("(created_at,audit_id)<(%s,%s)")
-                params.extend((cursor["created_at"], cursor["audit_id"]))
-            params.append(limit + 1)
-            rows = await (
-                await conn.execute(
-                    "SELECT * FROM forest_deployment.audit_records WHERE "
-                    + " AND ".join(clauses)
-                    + " ORDER BY created_at DESC,audit_id DESC LIMIT %s",
-                    params,
-                )
-            ).fetchall()
-        visible = rows[:limit]
-        return {
-            "records": [self._project(row) for row in visible],
-            "next_before": visible[-1]["audit_id"] if len(rows) > limit else None,
-        }
 
     @staticmethod
     def _project(row) -> dict:

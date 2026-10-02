@@ -7,6 +7,7 @@ import json
 import os
 import signal
 from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
@@ -14,7 +15,9 @@ from uuid import uuid4
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
+from forest.deployment_packages import bootstrap_builtin_deployment_package
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
+from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
 from forest.multi_bot_supervisor import MultiBotSupervisor
@@ -24,7 +27,9 @@ from forest.official_bot_provisioning import (
     OfficialBotSettingsResolver,
     official_bootstrap_contributions,
 )
+from forest.packages import PackageCatalog
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
+from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
@@ -184,6 +189,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     stop = asyncio.Event()
     management_server = None
     management_task = None
+    deployment_registry = None
     loop = asyncio.get_running_loop()
     for event in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -194,24 +200,39 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     try:
         await supervisor.start()
         await web_identity.initialize_setup(settings.web_bootstrap)
+        deployment_runtime = DeploymentRuntimeScope(store, supervisor)
+        package_catalog = PackageCatalog(
+            Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
+        )
+        audit_snapshot = package_catalog.build(
+            Path(str(files("forest").joinpath("builtin/deployment_audit")))
+        )
+        audit_descriptor = await bootstrap_builtin_deployment_package(
+            audit_snapshot, deployment_runtime
+        )
+        deployment_registry = RuntimeModuleRegistry(
+            deployment_runtime, (audit_descriptor,)
+        )
+        await deployment_registry.start()
+        legacy_components = deployment_management_components(
+            catalog=catalog,
+            secrets=secrets,
+            storage_profiles=storage_profiles,
+            bootstrap_profiles=bootstrap_profiles,
+            jobs=jobs,
+            supervisor=supervisor,
+            bootstrap_contributions=official_bootstrap_contributions(),
+            database_allocator=database_allocator,
+            web_identity=web_identity,
+        )
         import uvicorn
 
         management_server = uvicorn.Server(
             uvicorn.Config(
                 create_deployment_management_app(
                     deployment_id=settings.deployment_id,
-                    components=deployment_management_components(
-                        catalog=catalog,
-                        secrets=secrets,
-                        storage_profiles=storage_profiles,
-                        bootstrap_profiles=bootstrap_profiles,
-                        jobs=jobs,
-                        supervisor=supervisor,
-                        audit=deployment_audit,
-                        bootstrap_contributions=official_bootstrap_contributions(),
-                        database_allocator=database_allocator,
-                        web_identity=web_identity,
-                    ),
+                    components=legacy_components,
+                    deployment_registry_provider=lambda: deployment_registry,
                     identity_authority=web_identity,
                     deployment_web_receipts=web_receipts,
                     deployment_audit=deployment_audit,
@@ -260,5 +281,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             management_server.should_exit = True
         if management_task is not None:
             await asyncio.gather(management_task, return_exceptions=True)
+        if deployment_registry is not None:
+            await deployment_registry.close()
         await supervisor.close()
         await store.close()
