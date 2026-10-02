@@ -505,6 +505,16 @@ async def test_deployment_package_controller_restores_selected_artifact_after_re
         assert conflict.value.code == "RUNTIME_GRAPH_REVISION_CONFLICT"
         assert controller.registry is original
 
+        with pytest.raises(ForestError) as untrusted:
+            await controller.replace(
+                "deployment.audit", replacement.digest,
+                expected_graph_revision=old_revision,
+            )
+        assert untrusted.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
+        assert controller.registry is original
+
+        assert package_catalog.build_official(next_source).digest == replacement.digest
+
         active = await controller.replace(
             "deployment.audit",
             replacement.digest,

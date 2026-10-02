@@ -70,6 +70,22 @@ def source(tmp_path):
     return path
 
 
+def test_deployment_official_provenance_is_not_a_manifest_claim(tmp_path):
+    source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/deployment_audit"
+    catalog = PackageCatalog(tmp_path / "official")
+    artifact = catalog.build(source_root)
+    imported = PackageCatalog(tmp_path / "imported")
+    imported.import_archive(catalog.export_archive(artifact.digest))
+
+    for untrusted in (catalog, imported):
+        with pytest.raises(ForestError) as rejected:
+            untrusted.get_official_deployment(artifact.digest)
+        assert rejected.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
+
+    assert catalog.build_official(source_root).digest == artifact.digest
+    assert PackageCatalog(tmp_path / "official").get_official_deployment(artifact.digest).digest == artifact.digest
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ("deployment", "host"))
 async def test_non_bot_package_artifact_cannot_enter_bot_runtime(tmp_path, scope):

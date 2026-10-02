@@ -63,7 +63,7 @@ class DeploymentPackageController:
                 )
             defaults = {}
             for source in self.official_sources:
-                snapshot = self.catalog.build(source)
+                snapshot = self.catalog.build_official(source)
                 component_id = snapshot.component["id"]
                 if component_id in defaults:
                     raise ForestError(
@@ -73,7 +73,7 @@ class DeploymentPackageController:
             graph, selected = await self.runtime.generation_authority.active_package_selection()
             snapshots = (
                 {
-                    component_id: self.catalog.get(digest)
+                    component_id: self.catalog.get_official_deployment(digest)
                     for component_id, digest in selected.items()
                 }
                 if graph is not None
@@ -118,7 +118,7 @@ class DeploymentPackageController:
                 )
             if component_id not in self._snapshots:
                 raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Replacement target is absent", 404)
-            snapshot = self.catalog.get(package_digest)
+            snapshot = self.catalog.get_official_deployment(package_digest)
             if snapshot.component["id"] != component_id:
                 raise ForestError(
                     "DEPLOYMENT_PACKAGE_SELECTION_INVALID",

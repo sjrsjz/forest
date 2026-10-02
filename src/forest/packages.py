@@ -2024,6 +2024,53 @@ class PackageCatalog:
                 captured = with_checksums(captured)
         return self._publish(captured)
 
+    def build_official(self, source: Path) -> PackageSnapshot:
+        """Register a host-supplied official deployment source as a trusted artifact.
+
+        This authority is deliberately separate from ZIP import and ordinary build:
+        an artifact's own manifest cannot grant itself official SQL execution.
+        """
+
+        snapshot = self.build(source)
+        component = snapshot.component
+        storage = component.get("storage")
+        if (
+            component["scope"] != "deployment"
+            or storage is None
+            or storage.get("execution_profile") != "official"
+        ):
+            _fail(
+                "OFFICIAL_PACKAGE_SOURCE_INVALID",
+                "Official deployment source must declare deployment-scoped official storage",
+            )
+        with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
+            db.execute("PRAGMA synchronous=FULL")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS official_deployment_artifacts "
+                "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
+            )
+            db.execute(
+                "INSERT OR IGNORE INTO official_deployment_artifacts VALUES (?,?)",
+                (snapshot.digest, component["id"]),
+            )
+        return snapshot
+
+    def get_official_deployment(self, digest: str) -> PackageSnapshot:
+        """Open only artifacts admitted by the trusted host source path."""
+
+        snapshot = self.get(digest)
+        rows = self._rows(
+            "SELECT component_id FROM official_deployment_artifacts WHERE digest=?",
+            (digest,),
+            table="official_deployment_artifacts",
+        )
+        if len(rows) != 1 or rows[0][0] != snapshot.component["id"]:
+            _fail(
+                "OFFICIAL_PACKAGE_NOT_REGISTERED",
+                "Deployment artifact has no host-issued official provenance",
+            )
+        return snapshot
+
     def import_archive(
         self,
         data: bytes,
