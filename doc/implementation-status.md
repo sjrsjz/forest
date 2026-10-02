@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。当前生产装配已切为微内核包图；图文记忆主链已有隔离 Bot、真实 VL 嵌入端点、PostgreSQL 与 Milvus 的跨群召回和管理试验验证。获准群的真实 QQ 入站到回复、真实浏览器结合供应商的端到端链路、百万级混合负载及长期运行仍未验收，因此 Forest 仍不可发布。
+> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。当前 **Bot 运行图** 已切为微内核包图；部署 WebUI 仍以宿主 `deployment_management.py` 对象和固定字符串 Generation 提供管理操作，尚未达到 deployment/host 包图目标。图文记忆主链已有隔离 Bot、真实 VL 嵌入端点、PostgreSQL 与 Milvus 的跨群召回和管理试验验证。获准群的真实 QQ 入站到回复、真实浏览器结合供应商的端到端链路、百万级混合负载及长期运行仍未验收，因此 Forest 仍不可发布。
 
 本页保留按实施先后写下的阶段记录；早期段落中的“尚未”只描述当时状态，当前结论以第 8 节的切换清单和末尾最新验收记录为准。
 
@@ -236,8 +236,9 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 3. 补齐证据浏览的进一步分页和长期混合图文负载验收。
 4. 继续完成 [17](17-component-worker-host.md) 的包选择、显式启停和未变化 Generation 保留；对 Worker Host 配置控制事务验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
 5. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。
+6. 将部署控制面从宿主 `deployment_management.py`、`deployment_provisioning.py` 和固定静态 UI 迁入独立 deployment/host 包及各自 Generation；切换通用 scope provider 后删除旧对象与伪 Generation，不能通过搬运文件或包装旧对象声称完成。
 
-生产图已经是微内核包系统；目标重型 Bot 框架仍需完成 Memory 主链和长期运行验证。
+Bot 运行图已经是微内核包系统；部署/宿主控制面仍是缺口，目标重型 Bot 框架还需完成 Memory 主链与长期运行验证。
 
 现行 Memory 包 UI 增加独立真实浏览器冒烟脚本 `scripts/smoke_memory_module.py`：本机 Edge 验证了隔离 MessageChannel 初始化、管理试验结果中的群号/作者归因、超过两个 96 KiB 块的原图显示，以及分块被篡改时摘要拒绝显示。旧管理静态目录已经移除，依赖它的旧面板脚本及仍引用旧页面 DOM 的旧整站冒烟脚本同步删除；此浏览器 fixture 不替代真实 HTTP 会话、数据库和供应商图文召回验收。
 
@@ -653,3 +654,4 @@ Agent 取消意图与准备入口合流（2026-10-02）：Agent 包 4.29.2、SQL
 Agent 工具审批取消竞态（2026-10-02）：包版本 4.29.3、SQL 基线 2.25.3。工具审批登记现在同模型请求、模型尝试、请求继承和工具 Effect 准备一样，在 Run 锁内拒绝先提交的取消意图；已提交的审批保留原账本事实，后续重放按身份与状态围栏收敛。隔离 PostgreSQL 包状态用例验证取消存在时模型新请求、新尝试、工具审批登记和工具 Effect 准备均返回 AGENT_CANCEL_REQUESTED，回滚取消后各正常路径继续；同一用例还覆盖上轮的取消与继承并发，1 passed in 39.14s。未接触在线 Bot；其 Agent SQL 仍为 2.20.0，当前候选需独立清库或显式升级后才能部署。
 Agent 已交接模型回执恢复（2026-10-02）：Agent 包 4.30.0 新增对内核只读 runtime.effect-executor-outcome/1 的依赖。内核按准确 Effect/Attempt、冻结派发命令、Provider Generation 与因果根读取持久 service_operations，只在已成功提交的服务回执中返回结果；Agent 对 RESPONDED 或明确 NOT_SENT 使用原 Attempt 的 RECONCILIATION 观察，不再次调用 Provider。无服务操作、仍在执行、失败或 UNKNOWN 仍保持待对账，不能推断未发送。隔离完整 Bot PostgreSQL 故障注入使 Provider 回执成功持久化后、Agent 观察事务前报错；后续执行从内核回执恢复并完成一次回复，Provider 请求只有一次（1 passed in 53.17s）。正常成功链与账本绑定查询通过（1 passed in 52.91s），本地非 PostgreSQL 回归 486 passed、9 skipped；未向真实 QQ 发送。Provider 结果 Payload 已写但服务回执未提交的窗口及真实 Worker 进程崩溃仍待验收，在线 Bot 尚未部署此版本。
 Agent Provider 结果 Payload 恢复（2026-10-02）：Provider 包 4.3.0 通过只读 `provider.model.result.lookup/1` 查询原 Effect/Attempt 的冻结派发命令，并按 Provider owner 身份读取、校验已提交的 `model.result` 和可选 usage；Agent 包 4.31.0 在内核 service_operations 尚无成功回执时使用这条查询证据，以同一 Attempt 的 RECONCILIATION 观察继续执行，绝不据结果缺失推断未发送或重派。隔离完整 Bot PostgreSQL 故障注入在结果 Payload 已提交、服务回执尚未写入时中断，随后完成一条群回复且 Provider 请求只有一次（1 passed in 80.63s）。当前尚未覆盖真实进程在这一窗口被杀、换代后跨 Generation 查询及在线 Bot 部署；在线实例未改动。
+部署包化边界审计（2026-10-02）：核对当前工作树后确认 Bot 业务组件均由包图装配，但部署管理仍由 `deployment_management.py` 中的宿主对象直接持有目录、账号、Secret、供应和审计 authority；`DeploymentManagementGateway` 为它们合成固定 `deployment/<component>/1` 身份，没有真实 PackageSnapshot、Worker、Generation 或热重载生命周期。这是未完成的部署控制面重构，不应被 Bot 包图完成度掩盖。本轮先使通用包清单能静态捕获 `bot/deployment/host` 三种明确 scope，并要求 storage.scope 与组件 scope 一致；现有 Bot 装配继续显式拒绝非 Bot 包，避免把新工件误装进 Bot 图。包目录定向回归 91 passed、1 skipped，19 个官方 builtin 工件逐一重建通过，Ruff 通过。此步只建立不可变工件与 scope 围栏，尚未提供 deployment/host 包运行时，也未删除旧部署管理对象。

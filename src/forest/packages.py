@@ -112,8 +112,9 @@ MANIFEST_SCHEMA = {
                 "properties": {
                     **{
                         key: {"type": "string"}
-                        for key in ("id", "scope", "reload_mode", "config_schema")
+                        for key in ("id", "reload_mode", "config_schema")
                     },
+                    "scope": {"enum": ["bot", "deployment", "host"]},
                     "configuration_apply": {"const": "worker-host/1"},
                     "bootstrap_config": {"type": "string"},
                     "auto_install": {"type": "boolean"},
@@ -745,7 +746,7 @@ MANIFEST_SCHEMA = {
                             "schema_version": {"type": "string"},
                             "baseline": {"type": "string"},
                             "baseline_sha256": {"type": "string"},
-                            "scope": {"const": "bot"},
+                            "scope": {"enum": ["bot", "deployment", "host"]},
                             "repository_contract": {"type": "string"},
                             "execution_profile": {"enum": ["declarative", "official"]},
                         },
@@ -1121,6 +1122,11 @@ def _storage_bundle(files: dict[str, bytes], component: dict) -> dict | None:
     declaration = component.get("storage")
     if declaration is None:
         return None
+    if declaration["scope"] != component["scope"]:
+        _fail(
+            "INVALID_STORAGE_BUNDLE",
+            "Storage scope must match its owning component scope",
+        )
     schema_id = declaration["schema_id"]
     reference = declaration["baseline"]
     path = PurePosixPath(reference)
@@ -1211,8 +1217,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
             "UNSUPPORTED_COMPONENT_SET", "This runtime currently supports one component per package"
         )
     component = components[0]
-    if not IDENTIFIER.fullmatch(component.get("id", "")) or component.get("scope") != "bot":
-        _fail("INVALID_COMPONENT", "A valid Bot-scoped component is required")
+    if not IDENTIFIER.fullmatch(component.get("id", "")):
+        _fail("INVALID_COMPONENT", "A valid component identity is required")
     if component.get("reload_mode") != "drain":
         _fail("UNSUPPORTED_STATE_SCHEMA", "Only drain reload is supported")
     if any(

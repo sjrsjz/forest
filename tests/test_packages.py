@@ -63,6 +63,52 @@ def source(tmp_path):
     return path
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ("deployment", "host"))
+async def test_non_bot_package_artifact_cannot_enter_bot_runtime(tmp_path, scope):
+    root = source(tmp_path)
+    manifest = root / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace('scope = "bot"', f'scope = "{scope}"'),
+        encoding="utf-8",
+    )
+    catalog = PackageCatalog(tmp_path / "catalog")
+    snapshot = catalog.build(root)
+    assert snapshot.component["scope"] == scope
+    with pytest.raises(ForestError) as rejected:
+        await bootstrap_installed_package(
+            snapshot.digest, catalog, None, None, kernel=None,
+            initial_configuration={}, approved_capabilities=("state.read", "state.write"),
+        )
+    assert rejected.value.code == "PACKAGE_SCOPE_UNSUPPORTED"
+
+
+def test_package_storage_cannot_claim_another_scope(tmp_path):
+    root = source(tmp_path)
+    manifest = root / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace('scope = "bot"', 'scope = "deployment"'),
+        encoding="utf-8",
+    )
+    schema = root / "schema" / "baseline.sql"
+    schema.parent.mkdir()
+    baseline = b"CREATE TABLE owned_state (key text PRIMARY KEY, value jsonb NOT NULL);\n"
+    schema.write_bytes(baseline)
+    with manifest.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "\n[components.storage]\n"
+            'schema_id = "counter.state"\n'
+            'schema_version = "1.0.0"\n'
+            'baseline = "schema/baseline.sql"\n'
+            f'baseline_sha256 = "{hashlib.sha256(baseline).hexdigest()}"\n'
+            'scope = "bot"\n'
+            'repository_contract = "counter.repository/1"\n'
+        )
+    with pytest.raises(ForestError) as rejected:
+        PackageCatalog(tmp_path / "catalog").build(root)
+    assert rejected.value.code == "INVALID_STORAGE_BUNDLE"
+
+
 def test_build_never_imports_and_captures_complete_helpers(tmp_path):
     root = source(tmp_path)
     code = root / "python" / "counter.py"
