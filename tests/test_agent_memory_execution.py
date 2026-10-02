@@ -50,7 +50,7 @@ class MemoryServices:
 
 
 @pytest.mark.asyncio
-async def test_model_recovery_observes_only_a_committed_executor_receipt():
+async def test_model_recovery_prefers_committed_receipt_and_never_dispatches():
     calls = []
     result_ref = {
         "payload_id": "payload:result", "digest": "sha256:" + "1" * 64,
@@ -67,8 +67,15 @@ async def test_model_recovery_observes_only_a_committed_executor_receipt():
 
     async def service(name, body, **_kwargs):
         calls.append(name)
-        assert name == "runtime.effect-executor-outcome"
         assert body["effect_operation_id"] == "effect/1"
+        if name == "provider.model.result.lookup":
+            return {
+                "protocol": "forest.provider-result-lookup/1",
+                "effect_operation_id": "effect/1", "attempt_id": "attempt/1",
+                "request_id": "request/1", "payload_digest": receipt["payload_digest"],
+                "state": "ABSENT", "receipt": None,
+            }
+        assert name == "runtime.effect-executor-outcome"
         return {
             "protocol": "forest.effect-executor-outcome/1",
             "effect_operation_id": "effect/1", "attempt_id": "attempt/1",
@@ -109,11 +116,14 @@ async def test_model_recovery_observes_only_a_committed_executor_receipt():
         "attempt_id": "attempt/1", "effect_operation_id": "effect/1",
     }
     assert await model.reconcile_committed(**identity) is False
-    assert calls == ["runtime.effect-executor-outcome"]
+    assert calls == [
+        "runtime.effect-executor-outcome", "provider.model.result.lookup"
+    ]
     committed = True
     assert await model.reconcile_committed(**identity) is True
     assert calls == [
-        "runtime.effect-executor-outcome", "runtime.effect-executor-outcome",
+        "runtime.effect-executor-outcome", "provider.model.result.lookup",
+        "runtime.effect-executor-outcome",
         "agent.observe-model-effect",
     ]
 

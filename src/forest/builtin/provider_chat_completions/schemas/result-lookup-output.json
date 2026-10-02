@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "effect_operation_id",
+    "attempt_id",
+    "request_id",
+    "payload_digest",
+    "state",
+    "receipt"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.provider-result-lookup/1"
+    },
+    "effect_operation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "attempt_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "payload_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "state": {
+      "enum": [
+        "ABSENT",
+        "RESPONDED"
+      ]
+    },
+    "receipt": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/receipt"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "RESPONDED"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "receipt": {
+            "$ref": "#/$defs/receipt"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "receipt": {
+            "type": "null"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload_id",
+        "digest",
+        "owner_component_id",
+        "owner_kind",
+        "owner_id"
+      ],
+      "properties": {
+        "payload_id": {
+          "$ref": "#/$defs/id"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "owner_component_id": {
+          "const": "provider.chat-completions"
+        },
+        "owner_kind": {
+          "enum": [
+            "model.result",
+            "model.usage"
+          ]
+        },
+        "owner_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "result": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/payload"
+        },
+        {
+          "properties": {
+            "owner_kind": {
+              "const": "model.result"
+            }
+          }
+        }
+      ]
+    },
+    "usage": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/payload"
+        },
+        {
+          "properties": {
+            "owner_kind": {
+              "const": "model.usage"
+            }
+          }
+        }
+      ]
+    },
+    "receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "request_id",
+        "transport_attempt_id",
+        "payload_digest",
+        "result",
+        "usage",
+        "error_code"
+      ],
+      "properties": {
+        "status": {
+          "const": "RESPONDED"
+        },
+        "request_id": {
+          "$ref": "#/$defs/id"
+        },
+        "transport_attempt_id": {
+          "$ref": "#/$defs/id"
+        },
+        "payload_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "result": {
+          "$ref": "#/$defs/result"
+        },
+        "usage": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/usage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error_code": {
+          "type": "null"
+        }
+      }
+    }
+  }
+}

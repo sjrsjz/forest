@@ -862,7 +862,7 @@ class ModelExecution:
         self, *, owner: dict, request_id: str, attempt_id: str,
         effect_operation_id: str,
     ) -> bool:
-        """Consume a completed executor ledger receipt; never start dispatch."""
+        """Read committed executor or Provider-owned result evidence; never dispatch."""
 
         outcome = await self.ctx.services.call(
             "runtime.effect-executor-outcome",
@@ -886,14 +886,55 @@ class ModelExecution:
             raise ForestError(
                 "AGENT_EFFECT_OUTCOME_INVALID", "Executor outcome identity differs", 502
             )
-        if outcome["state"] != "SUCCEEDED":
-            return False
-        receipt = _receipt(
-            outcome["receipt"], request_id=request_id, attempt_id=attempt_id,
-            payload_digest=outcome["payload_digest"],
-        )
-        if receipt["status"] not in {"RESPONDED", "NOT_SENT"}:
-            return False
+        receipt = None
+        if outcome["state"] == "SUCCEEDED":
+            committed = _receipt(
+                outcome["receipt"], request_id=request_id, attempt_id=attempt_id,
+                payload_digest=outcome["payload_digest"],
+            )
+            if committed["status"] in {"RESPONDED", "NOT_SENT"}:
+                receipt = committed
+        if receipt is None:
+            lookup = await self.ctx.services.call(
+                "provider.model.result.lookup",
+                {
+                    "protocol": "forest.provider-result-lookup-request/1",
+                    "effect_operation_id": effect_operation_id,
+                    "attempt_id": attempt_id,
+                },
+                operation_id=self.ctx.operations.stable(
+                    f"lookup-provider-result:{attempt_id}"
+                ),
+                contract_major=1,
+                timeout=15,
+            )
+            if (
+                lookup.get("protocol") != "forest.provider-result-lookup/1"
+                or lookup.get("effect_operation_id") != effect_operation_id
+                or lookup.get("attempt_id") != attempt_id
+                or lookup.get("request_id") != request_id
+                or lookup.get("payload_digest") != outcome["payload_digest"]
+            ):
+                raise ForestError(
+                    "AGENT_PROVIDER_RESULT_LOOKUP_INVALID",
+                    "Provider result lookup identity differs", 502,
+                )
+            if lookup["state"] == "ABSENT":
+                return False
+            if lookup["state"] != "RESPONDED":
+                raise ForestError(
+                    "AGENT_PROVIDER_RESULT_LOOKUP_INVALID",
+                    "Provider result lookup state is invalid", 502,
+                )
+            receipt = _receipt(
+                lookup["receipt"], request_id=request_id, attempt_id=attempt_id,
+                payload_digest=outcome["payload_digest"],
+            )
+            if receipt["status"] != "RESPONDED":
+                raise ForestError(
+                    "AGENT_PROVIDER_RESULT_LOOKUP_INVALID",
+                    "Provider result lookup has no committed response", 502,
+                )
         await self._observe_receipt(
             owner=owner, request_id=request_id, attempt_id=attempt_id,
             effect_operation_id=effect_operation_id, receipt=receipt,

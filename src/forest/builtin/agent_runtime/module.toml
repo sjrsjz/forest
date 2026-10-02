@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.30.0"
+version = "4.31.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -44,6 +44,7 @@ requests = [
   "payload.write",
   "service.call:provider.profile.bind",
   "service.call:provider.model.dispatch",
+  "service.call:provider.model.result.lookup",
   "service.call:runtime.effect-executor-outcome",
   "service.call:conversation.context.snapshot",
   "service.call:conversation.context.prefill",
@@ -99,6 +100,12 @@ name = "provider.model.dispatch"
 contract = ">=2.0,<3.0"
 required = true
 startup_dependency = true
+
+[[components.requires]]
+name = "provider.model.result.lookup"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
 
 [[components.requires]]
 name = "runtime.effect-executor-outcome"

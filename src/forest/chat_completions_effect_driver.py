@@ -8,6 +8,7 @@ import json
 from collections.abc import Mapping
 
 from forest.errors import ForestError
+from forest.kernel_effect_executor_outcome import load_handed_off_model_command
 from forest.model_contract import ModelCapabilities, PreparedModelRequest
 from forest.model_transport import ChatCompletionsClient
 from forest.packages import digest_json
@@ -26,6 +27,16 @@ def _canonical(value: dict) -> bytes:
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
+
+
+def _provider_payload_ref(saved, *, owner_kind: str, owner_id: str) -> dict:
+    return {
+        "payload_id": saved.payload_id,
+        "digest": saved.content_digest,
+        "owner_component_id": "provider.chat-completions",
+        "owner_kind": owner_kind,
+        "owner_id": owner_id,
+    }
 
 
 class ChatCompletionsEffectDriver:
@@ -144,16 +155,6 @@ class ChatCompletionsEffectDriver:
             )
         return prepared, projection, wire
 
-    @staticmethod
-    def _payload_ref(saved, *, owner_kind: str, owner_id: str) -> dict:
-        return {
-            "payload_id": saved.payload_id,
-            "digest": saved.content_digest,
-            "owner_component_id": "provider.chat-completions",
-            "owner_kind": owner_kind,
-            "owner_id": owner_id,
-        }
-
     async def _materialize_result(
         self,
         result,
@@ -199,7 +200,7 @@ class ChatCompletionsEffectDriver:
                 parents=(projection["payload_id"], wire["payload_id"]),
                 expected_deletion_epoch=epoch,
             )
-            receipt["result"] = self._payload_ref(
+            receipt["result"] = _provider_payload_ref(
                 saved_result,
                 owner_kind="model.result",
                 owner_id=value["transport_attempt_id"],
@@ -222,7 +223,7 @@ class ChatCompletionsEffectDriver:
                     parents=(saved_result.payload_id,),
                     expected_deletion_epoch=epoch,
                 )
-                receipt["usage"] = self._payload_ref(
+                receipt["usage"] = _provider_payload_ref(
                     saved_usage,
                     owner_kind="model.usage",
                     owner_id=value["transport_attempt_id"],
@@ -318,10 +319,162 @@ class ChatCompletionsEffectDriver:
             await client.aclose()
 
 
+class ChatCompletionsResultLookupDriver:
+    """Read a Provider-owned result after HTTP handoff without dispatching again."""
+
+    def __init__(self, identity, declaration, *, effects, payloads, runtime) -> None:
+        if declaration.get("kind") != "chat-completions.result-lookup":
+            raise ForestError(
+                "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
+                "Provider result lookup received another effect kind", 500,
+            )
+        self.identity = identity
+        self.effects = effects
+        self.payloads = payloads
+        self.runtime = runtime
+        self.accepting = False
+
+    async def start(self) -> None:
+        self.accepting = True
+
+    async def quiesce(self) -> None:
+        self.accepting = False
+
+    async def resume(self) -> None:
+        self.accepting = True
+
+    async def close(self) -> None:
+        self.accepting = False
+
+    async def invoke(self, payload, *, scope, invocation):
+        if (
+            not self.accepting
+            or scope.component_id != self.identity.component_id
+            or scope.generation_id != self.identity.generation_id
+        ):
+            raise ForestError(
+                "PROVIDER_RESULT_LOOKUP_UNAVAILABLE", "Provider lookup is unavailable", 503,
+            )
+        await self.runtime.verify_generation_member(
+            component_id=self.identity.component_id,
+            generation_id=self.identity.generation_id,
+        )
+        effect, attempt, command = await load_handed_off_model_command(
+            self.effects,
+            self.payloads,
+            {
+                "protocol": "forest.effect-executor-outcome-request/1",
+                "effect_operation_id": payload["effect_operation_id"],
+                "attempt_id": payload["attempt_id"],
+            },
+        )
+        prepared = command["prepared"]
+        common = {
+            "protocol": "forest.provider-result-lookup/1",
+            "effect_operation_id": effect["effect_operation_id"],
+            "attempt_id": attempt["attempt_id"],
+            "request_id": prepared["request_id"],
+            "payload_digest": prepared["payload_digest"],
+        }
+        async with self.payloads.store.pool.connection() as conn, conn.transaction():
+            epoch = await self.payloads.epoch_in(conn)
+            result_ref = await self.payloads.find_owner_in(
+                conn,
+                owner_component_id=self.identity.component_id,
+                owner_kind="model.result",
+                owner_id=attempt["attempt_id"],
+            )
+            if result_ref is None:
+                return {**common, "state": "ABSENT", "receipt": None}
+            result_bytes = await self.payloads.read_bytes_in(
+                conn, result_ref.payload_id, expected_deletion_epoch=epoch
+            )
+            usage_ref = await self.payloads.find_owner_in(
+                conn,
+                owner_component_id=self.identity.component_id,
+                owner_kind="model.usage",
+                owner_id=attempt["attempt_id"],
+            )
+            usage_bytes = (
+                await self.payloads.read_bytes_in(
+                    conn, usage_ref.payload_id, expected_deletion_epoch=epoch
+                )
+                if usage_ref is not None else None
+            )
+        try:
+            if (
+                "sha256:" + hashlib.sha256(result_bytes).hexdigest()
+                != result_ref.content_digest
+                or (usage_ref is not None and (
+                    "sha256:" + hashlib.sha256(usage_bytes).hexdigest()
+                    != usage_ref.content_digest
+                ))
+            ):
+                raise ForestError(
+                    "PROVIDER_RESULT_CORRUPT", "Provider result digest differs", 500
+                )
+            result = json.loads(result_bytes)
+            usage = json.loads(usage_bytes) if usage_bytes is not None else None
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ForestError(
+                "PROVIDER_RESULT_CORRUPT", "Provider result Payload is invalid", 500
+            ) from exc
+        if (
+            type(result) is not dict
+            or set(result) != {
+                "protocol", "status", "request_id", "transport_attempt_id",
+                "payload_digest", "text", "tool_calls", "finish_reason",
+                "provider_response_id", "provider_model", "error_code",
+            }
+            or result["protocol"] != "forest.provider-model-result/1"
+            or result["status"] != "RESPONDED"
+            or result["request_id"] != prepared["request_id"]
+            or result["transport_attempt_id"] != attempt["attempt_id"]
+            or result["payload_digest"] != prepared["payload_digest"]
+            or not isinstance(result["text"], str)
+            or not isinstance(result["tool_calls"], list)
+            or result["error_code"] is not None
+            or (usage is not None and (
+                type(usage) is not dict
+                or set(usage) != {
+                    "protocol", "request_id", "transport_attempt_id", "usage"
+                }
+                or usage["protocol"] != "forest.provider-model-usage/1"
+                or usage["request_id"] != prepared["request_id"]
+                or usage["transport_attempt_id"] != attempt["attempt_id"]
+                or not isinstance(usage["usage"], dict)
+            ))
+        ):
+            raise ForestError(
+                "PROVIDER_RESULT_CORRUPT", "Provider result identity differs", 500
+            )
+        receipt = {
+            "status": "RESPONDED",
+            "request_id": prepared["request_id"],
+            "transport_attempt_id": attempt["attempt_id"],
+            "payload_digest": prepared["payload_digest"],
+            "result": _provider_payload_ref(
+                result_ref, owner_kind="model.result", owner_id=attempt["attempt_id"]
+            ),
+            "usage": (
+                _provider_payload_ref(
+                    usage_ref, owner_kind="model.usage", owner_id=attempt["attempt_id"]
+                ) if usage_ref is not None else None
+            ),
+            "error_code": None,
+        }
+        return {**common, "state": "RESPONDED", "receipt": receipt}
+
+
 def chat_completions_effect_driver_factory(
     *, effects, payloads, runtime, credential_resolver, client_factory=ChatCompletionsClient
 ):
     def create(configuration, configuration_revision, identity, declaration):
+        if declaration.get("kind") == "chat-completions.result-lookup":
+            return ChatCompletionsResultLookupDriver(
+                identity, declaration, effects=effects, payloads=payloads,
+                runtime=runtime,
+            )
         return ChatCompletionsEffectDriver(
             configuration,
             configuration_revision,

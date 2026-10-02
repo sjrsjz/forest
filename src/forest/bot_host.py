@@ -628,6 +628,7 @@ class BotHost:
         }
         automatic_effect_drivers = PackageEffectDriverRegistry({
             "chat-completions.http": provider_effect_factory,
+            "chat-completions.result-lookup": provider_effect_factory,
             "embedding.multimodal.http": embedding_effect_factory,
             "vector-index.milvus": vector_index_effect_factory,
             "media.public-image": media_effect_factory,

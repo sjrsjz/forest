@@ -136,6 +136,40 @@ class KernelPayloadRepository:
     def _table(self, name: str):
         return sql.SQL("{}.{}").format(sql.Identifier(self.namespace), sql.Identifier(name))
 
+    async def find_owner_in(
+        self, conn, *, owner_component_id: str, owner_kind: str, owner_id: str
+    ) -> CleanPayloadRef | None:
+        """Read an active payload by its immutable owner identity."""
+
+        _bounded(owner_component_id, "owner_component_id", 128)
+        _bounded(owner_kind, "owner_kind", 128)
+        _bounded(owner_id, "owner_id", 256)
+        await self._clock_in(conn)
+        payload_id = "payload:" + hashlib.sha256(
+            _canonical([self.store.bot_id, owner_component_id, owner_kind, owner_id])
+        ).hexdigest()
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT h.*,b.payload_id AS body_id FROM {} h LEFT JOIN {} b "
+                    "ON b.bot_id=h.bot_id AND b.payload_id=h.payload_id "
+                    "WHERE h.bot_id=%s AND h.payload_id=%s"
+                ).format(self._table("payload_headers"), self._table("payload_bodies")),
+                (self.store.bot_id, payload_id),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        if (
+            row["owner_component_id"] != owner_component_id
+            or row["owner_kind"] != owner_kind
+            or row["owner_id"] != owner_id
+        ):
+            raise ForestError("PAYLOAD_IDENTITY_CONFLICT", "Payload owner differs", 409)
+        if row["state"] != "ACTIVE" or row["body_id"] is None:
+            raise ForestError("PAYLOAD_REVOKED", "Payload body is unavailable", 410)
+        return self._ref(row)
+
     async def _clock_in(self, conn, *, expected=None, update=False):
         row = await (
             await conn.execute(

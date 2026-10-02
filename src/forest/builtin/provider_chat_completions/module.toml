@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.provider.chat-completions"
-version = "4.2.2"
+version = "4.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "provider:ChatCompletionsProvider"
@@ -44,3 +44,11 @@ kind = "chat-completions.http"
 semantics = "at-most-once"
 input_schema = "schemas/dispatch-input.json"
 output_schema = "schemas/dispatch-output.json"
+
+[[components.effect_services]]
+name = "provider.model.result.lookup"
+contract = "1.0"
+kind = "chat-completions.result-lookup"
+semantics = "read"
+input_schema = "schemas/result-lookup-input.json"
+output_schema = "schemas/result-lookup-output.json"

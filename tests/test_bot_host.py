@@ -53,6 +53,7 @@ from forest.storage.deployment_web_identity import (
     WebSubject,
 )
 from forest.storage.management_asset_authority import ManagementAssetAuthority
+from forest.storage.service_operations import KernelServiceOperationLedger
 from forest.unit_of_work import (
     ComponentConfigurationApplyScope,
     PostgresComponentConfigurationApplyCoordinator,
@@ -3458,7 +3459,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "result-ledger-recovery", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
+    "scenario", ("text", "visual", "cross-group", "success", "result-ledger-recovery", "result-payload-recovery", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -3520,7 +3521,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
         '<block block_type="Assistant"><content><text>Forest success fixture</text>'
         '</content></block></blocks></payload></valid_agent_protocol_content_block>'
-        if scenario in {"success", "result-ledger-recovery", "cross-group", "prepared-crash"} else None
+        if scenario in {"success", "result-ledger-recovery", "result-payload-recovery", "cross-group", "prepared-crash"} else None
     )
 
     async def create_websocket(_url, _token, **_limits):
@@ -3558,6 +3559,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 await asyncio.sleep(0.1)
         prepared_crash = asyncio.Event()
         result_observation_interrupted = asyncio.Event()
+        result_ledger_interrupted = asyncio.Event()
         recovery_payloads = []
         recovery_errors = []
         if scenario == "prepared-crash":
@@ -3612,6 +3614,24 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             monkeypatch.setattr(
                 PostgresPackageUnitOfWorkCoordinator,
                 "execute", interrupt_first_observation,
+            )
+        if scenario == "result-payload-recovery":
+            original_succeed = KernelServiceOperationLedger.succeed
+
+            async def interrupt_result_receipt(ledger, scope, route, result):
+                if (
+                    route.service_id == "provider.model.dispatch"
+                    and not result_ledger_interrupted.is_set()
+                ):
+                    result_ledger_interrupted.set()
+                    raise ForestError(
+                        "TEST_PROVIDER_RESULT_RECEIPT_INTERRUPTED",
+                        "Provider result Payload committed before service receipt", 503,
+                    )
+                return await original_succeed(ledger, scope, route, result)
+
+            monkeypatch.setattr(
+                KernelServiceOperationLedger, "succeed", interrupt_result_receipt
             )
         await clients[-1].handler(json.dumps({
             "self_id": int(settings.onebot_self_id), "post_type": "message",
@@ -4471,10 +4491,10 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 item["author"]["principal_ref"] == "qq:20003"
                 for item in queued.manifest["source_manifest"]
             )
-        if scenario in {"success", "result-ledger-recovery"}:
+        if scenario in {"success", "result-ledger-recovery", "result-payload-recovery"}:
             try:
                 async with asyncio.timeout(
-                    90 if scenario == "result-ledger-recovery" else 15
+                    90 if scenario in {"result-ledger-recovery", "result-payload-recovery"} else 15
                 ):
                     while not clients[-1].sent:
                         await asyncio.sleep(0.1)
@@ -4504,6 +4524,9 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             if scenario == "result-ledger-recovery":
                 assert result_observation_interrupted.is_set()
                 assert len(RecordingModelClient.requests) == 1
+            if scenario == "result-payload-recovery":
+                assert result_ledger_interrupted.is_set()
+                assert len(RecordingModelClient.requests) == 1
             agent_schema = next(
                 item.storage.spec.namespace for item in host.registry.descriptors
                 if item.component_id == "agent.runtime"
@@ -4528,9 +4551,14 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 "effect_operation_id": delivered_attempt["effect_operation_ref"],
                 "attempt_id": delivered_attempt["attempt_id"],
             })
-            assert stored_outcome["state"] == "SUCCEEDED"
+            assert stored_outcome["state"] == (
+                "ACTIVE" if scenario == "result-payload-recovery" else "SUCCEEDED"
+            )
             assert stored_outcome["request_id"] == delivered_attempt["request_id"]
-            assert stored_outcome["receipt"]["status"] == "RESPONDED"
+            if scenario == "result-payload-recovery":
+                assert stored_outcome["receipt"] is None
+            else:
+                assert stored_outcome["receipt"]["status"] == "RESPONDED"
             conversation_schema = next(
                 item.storage.spec.namespace for item in host.registry.descriptors
                 if item.component_id == "conversation.scheduler"
