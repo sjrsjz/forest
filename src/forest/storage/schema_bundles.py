@@ -92,6 +92,10 @@ class SchemaBundleInstaller:
     ) -> dict:
         """Install an exact bundle or prove that the exact bundle is already READY."""
 
+        if spec.scope != "bot":
+            raise ForestError(
+                "INVALID_STORAGE_BUNDLE", "Bot storage authority requires Bot scope", 422
+            )
         if execution_profile == "declarative":
             source = validate_storage_baseline(baseline, spec.baseline_sha256)
         elif execution_profile == "official":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -28,13 +29,17 @@ from forest.official_bot_provisioning import (
     official_bootstrap_contributions,
     official_bootstrap_schema_digests,
 )
+from forest.package_capabilities import PackageCallScope
+from forest.package_domain_authority import PostgresPackageDomainAuthority
+from forest.packages import storage_bundle_digest
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
-from forest.schema_bundles import module_schema_namespace
+from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
 from forest.storage.bot_store import BotStore
 from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
+from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInstaller
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_store import DeploymentStore
@@ -62,6 +67,73 @@ async def deployment_catalog():
         assert name.startswith("forest_deployment_") and len(name) == 50
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()
+
+
+@pytest.mark.postgres
+async def test_deployment_package_storage_has_its_own_scope_fenced_ledger(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    baseline = b"CREATE TABLE deployment_state (value text NOT NULL);"
+    spec = StorageBundleSpec(
+        component_id="deployment.sample",
+        schema_id="deployment.sample.state",
+        schema_version="1.0.0",
+        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+        repository_contract="deployment.sample/1",
+        scope="deployment",
+    )
+    digest = storage_bundle_digest(spec, "declarative")
+    installer = DeploymentSchemaBundleInstaller(repository.store)
+    installed = await installer.install(spec, baseline, digest)
+    assert installed["scope"] == "deployment"
+    assert installed["deployment_id"] == repository.store.deployment_id
+    assert await installer.install(spec, baseline, digest) == installed
+    assert (await repository.initialize())["deployment_id"] == repository.store.deployment_id
+
+    authority = PostgresPackageDomainAuthority(
+        repository.store,
+        object(),
+        component_id=spec.component_id,
+        runtime_package_digest="sha256:" + "1" * 64,
+        storage_spec=spec,
+        storage_package_digest=digest,
+        storage_execution_profile="declarative",
+    )
+
+    def call_scope(scope_id: str) -> PackageCallScope:
+        return PackageCallScope(
+            bot_id=None,
+            component_id=spec.component_id,
+            generation_id="generation/1",
+            instance_id="instance/1",
+            worker_incarnation="worker/1",
+            call_id="call/1",
+            call_operation_id="operation/1",
+            causal_root_kind="management",
+            causal_root_id="root/1",
+            scope_kind="deployment",
+            scope_id=scope_id,
+        )
+
+    async with repository.store.pool.connection() as conn:
+        await authority._verify_storage(conn, call_scope(repository.store.deployment_id))
+        with pytest.raises(ForestError) as caught:
+            await authority._verify_storage(conn, call_scope("deployment/other"))
+        assert caught.value.code == "DOMAIN_STORAGE_FENCE_MISMATCH"
+
+    with pytest.raises(ForestError) as caught:
+        await installer.install(
+            StorageBundleSpec(
+                spec.component_id,
+                spec.schema_id,
+                spec.schema_version,
+                spec.baseline_sha256,
+                spec.repository_contract,
+            ),
+            baseline,
+            digest,
+        )
+    assert caught.value.code == "INVALID_STORAGE_BUNDLE"
 
 
 async def _storage_profile(repository, bot_id: str, name: str):

@@ -1151,6 +1151,7 @@ def _storage_bundle(files: dict[str, bytes], component: dict) -> dict | None:
         declaration["schema_version"],
         declaration["baseline_sha256"],
         declaration["repository_contract"],
+        declaration["scope"],
     )
     execution_profile = declaration.get("execution_profile", "declarative")
     if execution_profile == "official":

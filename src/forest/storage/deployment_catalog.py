@@ -134,6 +134,7 @@ class DeploymentCatalogRepository:
         ).fetchall()
         expected_relations = {
             "deployment_identity",
+            "schema_bundles",
             "supervisor_lease",
             "web_accounts",
             "web_setup_state",
@@ -177,6 +178,27 @@ class DeploymentCatalogRepository:
             raise ForestError(
                 "DEPLOYMENT_SCHEMA_TAMPERED",
                 "Deployment catalog contains missing or unknown objects",
+                409,
+            )
+        registered = await (
+            await conn.execute(
+                "SELECT namespace::text AS namespace FROM forest_deployment.schema_bundles"
+            )
+        ).fetchall()
+        actual = await (
+            await conn.execute(
+                "SELECT nspname FROM pg_namespace WHERE nspname NOT IN "
+                "('pg_catalog','information_schema','public') "
+                "AND nspname NOT LIKE 'pg_toast%' AND nspname NOT LIKE 'pg_temp_%' "
+                "AND nspname NOT LIKE 'pg_toast_temp_%'"
+            )
+        ).fetchall()
+        if {row["nspname"] for row in actual} != {
+            "forest_deployment", *(row["namespace"] for row in registered)
+        }:
+            raise ForestError(
+                "DEPLOYMENT_SCHEMA_TAMPERED",
+                "Deployment database contains an unregistered module namespace",
                 409,
             )
 

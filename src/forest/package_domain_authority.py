@@ -531,7 +531,7 @@ class PostgresPackageDomainAuthority:
                 component_id=self.component_id,
                 generation_id=scope.generation_id,
             )
-        await self._verify_storage(conn)
+        await self._verify_storage(conn, scope)
         await self._verify_function(conn, function, query=kind == "query")
         await self._verify_payload_refs(
             conn, declaration, payload, scope=scope,
@@ -541,6 +541,8 @@ class PostgresPackageDomainAuthority:
             "protocol": "forest.domain-context/1",
             "port_kind": kind,
             "port_name": name,
+            "scope_kind": scope.scope_kind,
+            "scope_id": scope.scope_id,
             "bot_id": scope.bot_id,
             "component_id": scope.component_id,
             "generation_id": scope.generation_id,
@@ -575,13 +577,37 @@ class PostgresPackageDomainAuthority:
         ).fetchone()
         return self._result(row["result"] if row is not None else None)
 
-    async def _verify_storage(self, conn) -> None:
+    async def _verify_storage(self, conn, scope: PackageCallScope) -> None:
+        if self.storage_spec.scope != scope.scope_kind:
+            raise ForestError(
+                "DOMAIN_STORAGE_FENCE_MISMATCH",
+                "Domain storage scope differs from the caller", 409,
+            )
+        if scope.scope_kind == "bot" and (
+            scope.scope_id == getattr(self.store, "bot_id", None)
+            and scope.bot_id == getattr(self.store, "bot_id", None)
+        ):
+            ledger = sql.Identifier("forest_kernel", "schema_bundles")
+            owner_column = "bot_id"
+        elif scope.scope_kind == "deployment" and (
+            scope.scope_id == getattr(self.store, "deployment_id", None)
+            and scope.bot_id is None
+        ):
+            ledger = sql.Identifier("forest_deployment", "schema_bundles")
+            owner_column = "deployment_id"
+        else:
+            raise ForestError(
+                "DOMAIN_STORAGE_FENCE_MISMATCH",
+                "Domain storage authority does not own the caller scope", 409,
+            )
         row = await (
             await conn.execute(
-                "SELECT component_id,schema_version,namespace,baseline_sha256,package_digest,"
-                "repository_contract,execution_profile,state FROM forest_kernel.schema_bundles "
-                "WHERE bot_id=%s AND schema_id=%s",
-                (self.store.bot_id, self.storage_spec.schema_id),
+                sql.SQL(
+                    "SELECT component_id,schema_version,namespace,baseline_sha256,package_digest,"
+                    "repository_contract,execution_profile,state FROM {} "
+                    "WHERE {}=%s AND schema_id=%s"
+                ).format(ledger, sql.Identifier(owner_column)),
+                (scope.scope_id, self.storage_spec.schema_id),
             )
         ).fetchone()
         expected = {

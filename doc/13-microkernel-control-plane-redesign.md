@@ -389,6 +389,8 @@ deployment/host 管理服务也有描述符、工件身份和
 
 切换部署作用域时，先把 PackageSnapshot 的 `deployment`/`host` scope 与相应存储作用域绑定到真实部署/宿主 authority，再建立各自的配置、授权、服务路由和 Generation 图；Bot 装配器必须继续拒绝跨 scope 工件。部署网关的模块目录、授权目标与每次操作必须读取同一张 ACTIVE 图的真实 Generation/revision，关闭或换代时先阻止新调用并排空已准入调用。现行 `deployment_management.py` 中直接持有 Repository/Supervisor 的对象、`deployment_management_app.py` 中固定部署 UI 静态文件和 `DeploymentManagementGateway` 合成的 `deployment/<component>/1` 都是待删除实现；不能先删除 WebUI 功能，也不能给这些对象包一层 manifest 或把 Bot ID 改称 deployment ID 来冒充完成。
 
+部署数据库以自身 `forest_deployment.schema_bundles` 登记 deployment 包的不可变 SQL 命名空间，登记行必须绑定真实 `deployment_id`、schema ID、scope、包摘要和基线摘要。Bot 的 `forest_kernel.schema_bundles` 只接受 Bot 包；Domain authority 按准确的调用 scope 选择数据库和账本，绝不把 deployment ID 填入 Bot ID 字段。host 包如需持久存储，必须先有独立的 host 存储 authority 和 Generation 围栏，不能暂借部署或 Bot 账本。部署基线若发生不兼容改动，未上线阶段直接重建部署数据库，不为旧宿主对象添加迁移兼容层。
+
 密钥输入在权限签名前投影为“是否变化 + 不可逆摘要”，原始密钥只交给经过校验的模块 handler，并立即进入凭据库加密路径；权限载荷、operation digest、审计参数和错误详情都不能携带密钥正文。输入错误返回稳定 `MODULE_MANAGEMENT_INPUT_INVALID`，未知或 query/action 类型不符返回 `MODULE_MANAGEMENT_OPERATION_NOT_FOUND`，校验详情必须可安全 JSON 序列化。
 
 官方模块的首版管理贡献必须覆盖以下能力：Agent 的配置、Run/ModelTurn/ToolStep 查询、取消和 UNKNOWN 对账；Memory 的配置、状态、来源组合筛选、关系遍历、真实召回试验、遗忘和人工关联；Routing 的已提交 Event/Job/dispatch trace 查询与受控重放；Command/Message Router 的 Binding 范围策略、容量、脱敏诊断和有界恢复；`kernel.audit` 的 Bot 审计元数据查询。这里定义的是模块必须发布的契约，不是当前完成度声明；实际落地情况只看[实现状态](implementation-status.md)。需要当前密码的策略/容量动作由通用管理网关在签票前重新鉴权，票据和 payload provenance 只携带去除密码后的规范载荷。旧 `/agent/*`、`/memory/*`、`/bots/{bot_id}/events/*`、`/bots/{bot_id}/component-jobs/*` 和命令/消息路由专用管理端点必须直接删除，不保留兼容别名。对应 HTML、CSS、ES module 控制器由模块描述符声明，`index.html`、`app.js` 和通用路由均不按这些组件 ID 分支。审计生产者也必须通过 `kernel.audit` 的显式写入端口提交，不能因为已有查询贡献就宣称存储所有权已经拆分完成。

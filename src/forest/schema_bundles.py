@@ -56,6 +56,7 @@ class StorageBundleSpec:
     schema_version: str
     baseline_sha256: str
     repository_contract: str
+    scope: str = "bot"
 
     def __post_init__(self) -> None:
         if not isinstance(self.component_id, str) or not _IDENTIFIER.fullmatch(
@@ -75,6 +76,8 @@ class StorageBundleSpec:
             self.repository_contract
         ):
             _invalid("Storage repository contract is invalid")
+        if self.scope not in {"bot", "deployment", "host"}:
+            _invalid("Storage scope is invalid")
 
     @property
     def namespace(self) -> str:
@@ -86,7 +89,7 @@ class StorageBundleSpec:
             "schema_version": self.schema_version,
             "namespace": self.namespace,
             "baseline_sha256": self.baseline_sha256,
-            "scope": "bot",
+            "scope": self.scope,
             "repository_contract": self.repository_contract,
         }
 

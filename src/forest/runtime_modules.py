@@ -1492,6 +1492,7 @@ class RuntimeModuleRegistry:
                     descriptor.storage is not None
                     and (
                         descriptor.storage.spec.component_id != identity
+                        or descriptor.storage.spec.scope != self.scope_kind
                         or (
                         descriptor.storage.execution_profile != "official"
                         and descriptor.storage.package_digest

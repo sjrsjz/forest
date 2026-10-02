@@ -130,6 +130,25 @@ def test_package_storage_cannot_claim_another_scope(tmp_path):
         PackageCatalog(tmp_path / "catalog").build(root)
     assert rejected.value.code == "INVALID_STORAGE_BUNDLE"
 
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'scope = "bot"', 'scope = "deployment"'
+        ),
+        encoding="utf-8",
+    )
+    snapshot = PackageCatalog(tmp_path / "deployment-catalog").build(root)
+    storage, _ = snapshot.storage_bundle()
+    spec = StorageBundleSpec(
+        component_id=snapshot.component["id"],
+        schema_id="counter.state",
+        schema_version="1.0.0",
+        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+        repository_contract="counter.repository/1",
+        scope="deployment",
+    )
+    assert storage["scope"] == "deployment"
+    assert storage["package_digest"] == packages.storage_bundle_digest(spec, "declarative")
+
 
 @pytest.mark.asyncio
 async def test_bot_package_directory_fences_deployment_artifacts(tmp_path):
