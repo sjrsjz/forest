@@ -834,6 +834,31 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 (store.bot_id, concurrent_request_id),
             )).fetchone()
             assert inherited_count["n"] == 1
+        # After the UOW commit, a new Worker has no in-memory receipt. The
+        # durable recovery head must be the successor, not the abandoned input.
+        recovered_successor = await instance.invoke_management_query(
+            recovery_declaration, {"run_id": concurrent_run_id}, timeout_seconds=10,
+        )
+        assert recovered_successor["model_request"] == {
+            "request_id": concurrent_successor_id, "step_seq": 1,
+            "request_kind": "PRIMARY", "provider_component_id": "provider.chat",
+            "state": "READY", "attempt_count": 0,
+        }
+        assert recovered_successor["model_attempt"] is None
+        successor_resume = await instance.invoke_management_query(
+            frozen_declaration,
+            {"run_id": concurrent_run_id, "request_id": concurrent_successor_id},
+            timeout_seconds=10,
+        )
+        assert successor_resume["projection"] == successor_projection.canonical()
+        assert successor_resume["wire"] == successor_wire.canonical()
+        with pytest.raises(ForestError) as abandoned_resume:
+            await instance.invoke_management_query(
+                frozen_declaration,
+                {"run_id": concurrent_run_id, "request_id": concurrent_request_id},
+                timeout_seconds=10,
+            )
+        assert abandoned_resume.value.code == "AGENT_FROZEN_RESUME_UNAVAILABLE"
         third_request_id = "model-request/package/inheritance-race-third"
         third_projection = await _payload(
             kernel, owner_kind="model.projection", owner_id=third_request_id,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,7 +15,7 @@ from forest.model_contract import ModelCapabilities
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 from execution import AgentExecution
-from model_execution import ModelExecution
+from model_execution import ModelExecution, _digest
 
 
 class MemoryServices:
@@ -113,6 +114,64 @@ async def test_inheritance_transaction_failure_keeps_its_own_error():
             manifest={}, wire_bytes=b"wire",
         )
     assert failure.value.code == "PAYLOAD_REVOKED"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("write_error", "expected"),
+    [("PAYLOAD_PARENT_UNAVAILABLE", "AGENT_FROZEN_MODEL_INVALID"),
+     ("PAYLOAD_AUTHORITY_MISSING", "PAYLOAD_AUTHORITY_MISSING")],
+)
+async def test_frozen_unsent_retry_classifies_payload_write(write_error, expected):
+    request_id = "request/unsent"
+    source_manifest = {"input_batch": "batch/1"}
+    manifest = {
+        "request_id": request_id,
+        "projected_content_digest": "sha256:content",
+        "source_manifest": source_manifest,
+        "serializer_revision": "serializer/1",
+    }
+    body = {"model": "model/1", "stream": False, "max_completion_tokens": 256}
+    frozen = {
+        "request_id": request_id, "provider_profile_ref": "profile/1",
+        "capability_digest": "sha256:capability", "model_ref": "model/1",
+        "provider_generation_id": "provider/1", "state": "NOT_APPLIED",
+        "projection": {"owner_id": request_id, "owner_kind": "model.projection"},
+        "wire": {"owner_id": "attempt/old", "owner_kind": "model.wire",
+                 "digest": "sha256:wire"},
+        "projected_content_digest": "sha256:content",
+        "source_manifest_digest": _digest(source_manifest),
+        "output_token_budget": 256,
+    }
+
+    async def read_bytes(ref):
+        return json.dumps(manifest if ref["owner_kind"] == "model.projection"
+                          else body).encode()
+
+    async def fail_write(_content, **_kwargs):
+        raise ForestError(write_error, "retry wire unavailable", 409)
+
+    async def frozen_query(_name, _body):
+        return frozen
+
+    model = ModelExecution(SimpleNamespace(
+        identity={"graph_id": "graph/1", "graph_revision": 1, "bot_id": "bot/1"},
+        queries=SimpleNamespace(call=frozen_query),
+        payloads=SimpleNamespace(read_bytes=read_bytes, put_bytes=fail_write),
+    ))
+
+    async def profile(_request_id):
+        return ({"profile_ref": "profile/1", "capability_digest": "sha256:capability",
+                 "generation_id": "provider/1"},
+                ModelCapabilities("deployment/1", "model/1", "revision/1"))
+
+    model._profile = profile
+    with pytest.raises(ForestError) as failure:
+        await model.resume_frozen(
+            owner={"run_id": "run/1"}, request_id=request_id,
+            attempt_id="attempt/new", effect_operation_id="effect/new",
+        )
+    assert failure.value.code == expected
 
 
 def run():

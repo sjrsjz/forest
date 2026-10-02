@@ -492,13 +492,13 @@ class ModelExecution:
                 )
             wire = frozen["wire"]
         else:
-            wire = await self.ctx.payloads.put_bytes(
+            wire = await _frozen_payload_result(self.ctx.payloads.put_bytes(
                 wire_bytes,
                 owner_kind="model.wire",
                 owner_id=attempt_id,
                 media_type="application/json",
                 parents=(frozen["projection"], frozen["wire"]),
-            )
+            ))
         if wire["digest"] != frozen["wire"]["digest"]:
             raise ForestError(
                 "AGENT_FROZEN_MODEL_INVALID",
