@@ -217,7 +217,7 @@ async def _bot_state(
                 group = await (
                     await connection.execute(
                         sql.SQL(
-                            "SELECT lane.next_ingress_seq,lane.classified_through_seq,"
+                            "SELECT lane.binding_ref,lane.next_ingress_seq,lane.classified_through_seq,"
                             "lane.context_applied_seq,lane.active_run_ref IS NOT NULL AS active_run,"
                             "latest.ingress_seq,latest.received_at,latest.classification_state,"
                             "latest.trigger_decision,latest.reason_code,latest.classified_at,"
@@ -244,6 +244,17 @@ async def _bot_state(
                     "observed": group is not None,
                 }
                 if group is not None:
+                    latest_send = await (
+                        await connection.execute(
+                            sql.SQL(
+                                "SELECT intent_id,state,error_code,lane_sequence,completed_at "
+                                "FROM {}.send_intents WHERE bot_id=%s AND binding_ref=%s "
+                                "AND lane_kind='CHAT' AND ordering_key=%s "
+                                "ORDER BY lane_sequence DESC LIMIT 1"
+                            ).format(sql.Identifier(DELIVERY)),
+                            (bot_id, group["binding_ref"], f"onebot:group:{group_id}"),
+                        )
+                    ).fetchone()
                     group_state.update(
                         next_ingress_seq=group["next_ingress_seq"],
                         classified_through_seq=group["classified_through_seq"],
@@ -264,6 +275,19 @@ async def _bot_state(
                             else None
                         ),
                         latest_message_trigger_status=group["trigger_status"],
+                        latest_chat_send=(
+                            {
+                                "intent_id": latest_send["intent_id"],
+                                "state": latest_send["state"],
+                                "error_code": latest_send["error_code"],
+                                "lane_sequence": latest_send["lane_sequence"],
+                                "completed_at": (
+                                    latest_send["completed_at"].isoformat()
+                                    if latest_send["completed_at"] is not None else None
+                                ),
+                            }
+                            if latest_send is not None else None
+                        ),
                     )
             concurrency = await (
                 await connection.execute(

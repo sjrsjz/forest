@@ -126,6 +126,8 @@ docker run --rm --no-healthcheck --network forest-clean_default `
 
 要核对模块级热重载的实际影响，可重复传入 `--component-id audit.console --component-id kernel.audit`（最多八个不同组件）。探针在同一只读 repeatable-read 快照内返回当前 Graph 中这些组件的 Generation ID、包版本和工件摘要；当前 Graph 不含某组件时明确返回 `null`。在管理员经 WebUI 或获权群 Shell 提交重载前后比较目标及其依赖闭包与无关组件的身份，并结合持久重载回执判断完成状态；这个观测选项本身不提交重载。
 
+指定 `--group-id 933179609` 时，探针还从该群的 CHAT 投递 lane 读取最新一条发送意图的状态、错误码、序号及完成时间。查询使用 `(bot_id,binding_ref,lane_kind,ordering_key,lane_sequence)` 唯一索引，群消息增加后仍只读取末条意图；没有意图时返回 `latest_chat_send: null`。它不会读取回复正文，且 `SENT` 只证明 Delivery 已记录传输结果，群内实际呈现仍以低频现场观察为准。
+
 ## 受控进程现场验收
 
 `process.executor` 初始配置没有任何 ExecutionProfile。管理员应在 Bot 作用域选择该模块的“受控进程执行”配置贡献，通过通用 plan/apply 表单提交 [diagnostic.echo.json](../examples/process_executor/diagnostic.echo.json)；不要直接修改模块表或 Payload。该示例只适用于当前 `forest:local` 镜像：它冻结 `/usr/local/bin/python3.11` 的 SHA-256、`10001:10001` 身份、`/app` 工作目录、无网络策略和资源上限。镜像变化后必须先在候选镜像中重新计算并核对可执行文件摘要，再发布新配置 revision。
