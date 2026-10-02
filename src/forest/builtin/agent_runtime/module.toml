@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.28.0"
+version = "4.29.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -72,6 +72,7 @@ requests = [
   "uow.execute:agent.block-frozen-model",
   "uow.execute:agent.prepare-model-request",
   "uow.execute:agent.inherit-model-request",
+  "uow.execute:agent.recover-prepared-model",
   "uow.execute:agent.prepare-model-effect",
   "uow.execute:agent.handoff-model-effect",
   "uow.execute:agent.observe-model-effect",
@@ -174,9 +175,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.24.0"
+schema_version = "2.25.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "39a13714a098553375fd1ca8a6a019d78f44cca4d451c981bee90a42222242a7"
+baseline_sha256 = "3b72c5c09f1bdf4821d888fa713555f841afcdf834c45431fcf89eae5e66f1ab"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -495,6 +496,25 @@ owner_kind = "model.wire"
 owner_id_path = "/input/successor/first_attempt_id"
 
 [[components.unit_of_work_participants]]
+name = "agent.recover-prepared-model-record"
+contract = "1.0"
+function = "agent_recover_prepared_model"
+input_schema = "schemas/recover-prepared-model-envelope.json"
+output_schema = "schemas/model-request-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/successor/projection"
+owner_component_path = "/input/successor/projection/owner_component_id"
+owner_kind = "model.projection"
+owner_id_path = "/input/successor/request_id"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/successor/initial_wire"
+owner_component_path = "/input/successor/initial_wire/owner_component_id"
+owner_kind = "model.wire"
+owner_id_path = "/input/successor/first_attempt_id"
+
+[[components.unit_of_work_participants]]
 name = "agent.prepare-model-attempt-record"
 contract = "1.0"
 function = "agent_prepare_model_attempt"
@@ -780,6 +800,17 @@ timeout_s = 10
 steps = [
   { id = "effect", component_id = "kernel.effect", participant = "effect.prove-not-applied", input_path = "/effect" },
   { id = "agent", component_id = "agent.runtime", participant = "agent.inherit-model-request-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.recover-prepared-model"
+contract = "1.0"
+input_schema = "schemas/recover-prepared-model-input.json"
+output_schema = "schemas/model-request-output.json"
+timeout_s = 15
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.abandon", input_path = "/effect" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.recover-prepared-model-record" }
 ]
 
 [[components.unit_of_work_plans]]

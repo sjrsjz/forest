@@ -118,6 +118,8 @@ Agent 执行循环每轮先读取持久意图，再判断 deadline 和安全点�
 
 没有管理取消时，冷启动读到 `ATTEMPT_PREPARED` 也不能重新投影输入或拿新的授权票据覆盖旧 Effect。它必须先在同一 UnitOfWork 废弃原 PREPARED Effect、把原模型尝试与请求标为 `ABANDONED`，再从冻结 projection/wire 生成具有新请求 ID 的后继请求。后继请求绑定当前兼容的 Provider Generation，保留原内容摘要和来源，直到后继提交才允许外部 handoff；Provider 能力或冻结字节不兼容时停在可诊断等待态，不派发模型。该恢复事务与管理取消意图竞争同一 Run 锁，取消先到则恢复回滚，恢复先到则取消下一安全点处理后继。这是 PREPARED 后进程崩溃的必需恢复路径，不能靠重用同一 request ID 再执行 `prepare-model-effect`。
 
+实现使用 `agent.recover-prepared-model`，在单库 UnitOfWork 内依次执行 `effect.abandon` 和 `agent.recover-prepared-model-record`。Agent participant 在 Run owner/epoch 围栏下复核未交接的当前尝试、旧请求冻结摘要、全部更早尝试的 `NOT_APPLIED` 观察及取消意图，然后写不可变恢复关系与新 `READY` 请求；Provider Generation 可以变化，但 profile、模型、能力、角色和输出预算必须与冻结请求一致。Worker 在触发任何新召回、上下文投影或授权之前进入该分支；恢复校验失败只返回诊断并保留原 PREPARED 状态，使管理员仍可取消。事务提交后 Worker 重新读取 Run，再从新请求的冻结 wire 继续。
+
 ## 4. 冻结 lane 身份与回复路由
 
 Conversation lane 必须把以下身份作为创建后不可变事实保存：

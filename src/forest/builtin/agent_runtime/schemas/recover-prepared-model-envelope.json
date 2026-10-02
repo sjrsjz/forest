@@ -1,0 +1,397 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "caller",
+    "input",
+    "prior"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.uow-step/1"
+    },
+    "caller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component_id",
+        "generation_id"
+      ],
+      "properties": {
+        "component_id": {
+          "const": "agent.runtime"
+        },
+        "generation_id": {
+          "$ref": "#/$defs/id"
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "effect",
+        "owner",
+        "predecessor_request_id",
+        "prepared_attempt_id",
+        "effect_operation_id",
+        "abandonment_operation_id",
+        "successor"
+      ],
+      "properties": {
+        "effect": {
+          "$ref": "#/$defs/effect"
+        },
+        "owner": {
+          "$ref": "#/$defs/owner"
+        },
+        "predecessor_request_id": {
+          "$ref": "#/$defs/id"
+        },
+        "prepared_attempt_id": {
+          "$ref": "#/$defs/id"
+        },
+        "effect_operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "abandonment_operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "successor": {
+          "$ref": "#/$defs/successor"
+        }
+      },
+      "$defs": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "effect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "protocol",
+            "effect_operation_id",
+            "attempt_id",
+            "abandonment_operation_id",
+            "reason_code",
+            "cancel_effect"
+          ],
+          "properties": {
+            "protocol": {
+              "const": "forest.effect-abandon/1"
+            },
+            "effect_operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "attempt_id": {
+              "$ref": "#/$defs/id"
+            },
+            "abandonment_operation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "reason_code": {
+              "const": "AGENT_PREPARED_MODEL_RECOVERY"
+            },
+            "cancel_effect": {
+              "const": true
+            }
+          }
+        },
+        "owner": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "run_id",
+            "owner_id",
+            "epoch"
+          ],
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/id"
+            },
+            "owner_id": {
+              "$ref": "#/$defs/id"
+            },
+            "epoch": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "ref": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "payload_id",
+            "digest",
+            "owner_component_id",
+            "owner_kind",
+            "owner_id"
+          ],
+          "properties": {
+            "payload_id": {
+              "$ref": "#/$defs/id"
+            },
+            "digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "owner_component_id": {
+              "const": "agent.runtime"
+            },
+            "owner_kind": {
+              "enum": [
+                "model.projection",
+                "model.wire"
+              ]
+            },
+            "owner_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            }
+          }
+        },
+        "successor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_id",
+            "first_attempt_id",
+            "provider_component_id",
+            "provider_generation_id",
+            "provider_profile_ref",
+            "model_ref",
+            "instruction_channel",
+            "capability_digest",
+            "projection",
+            "initial_wire",
+            "projected_content_digest",
+            "source_manifest_digest",
+            "output_token_budget"
+          ],
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/id"
+            },
+            "first_attempt_id": {
+              "$ref": "#/$defs/id"
+            },
+            "provider_component_id": {
+              "const": "provider.chat-completions"
+            },
+            "provider_generation_id": {
+              "$ref": "#/$defs/id"
+            },
+            "provider_profile_ref": {
+              "$ref": "#/$defs/id"
+            },
+            "model_ref": {
+              "$ref": "#/$defs/id"
+            },
+            "instruction_channel": {
+              "enum": [
+                "SYSTEM",
+                "DEVELOPER",
+                "INSTRUCTIONS",
+                "DEGRADED_USER"
+              ]
+            },
+            "capability_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "projection": {
+              "$ref": "#/$defs/ref"
+            },
+            "initial_wire": {
+              "$ref": "#/$defs/ref"
+            },
+            "projected_content_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "source_manifest_digest": {
+              "$ref": "#/$defs/digest"
+            },
+            "output_token_budget": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        }
+      }
+    },
+    "prior": {
+      "type": "object"
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "effect": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol",
+        "effect_operation_id",
+        "attempt_id",
+        "abandonment_operation_id",
+        "reason_code",
+        "cancel_effect"
+      ],
+      "properties": {
+        "protocol": {
+          "const": "forest.effect-abandon/1"
+        },
+        "effect_operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "attempt_id": {
+          "$ref": "#/$defs/id"
+        },
+        "abandonment_operation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "reason_code": {
+          "const": "AGENT_PREPARED_MODEL_RECOVERY"
+        },
+        "cancel_effect": {
+          "const": true
+        }
+      }
+    },
+    "owner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "run_id",
+        "owner_id",
+        "epoch"
+      ],
+      "properties": {
+        "run_id": {
+          "$ref": "#/$defs/id"
+        },
+        "owner_id": {
+          "$ref": "#/$defs/id"
+        },
+        "epoch": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "payload_id",
+        "digest",
+        "owner_component_id",
+        "owner_kind",
+        "owner_id"
+      ],
+      "properties": {
+        "payload_id": {
+          "$ref": "#/$defs/id"
+        },
+        "digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "owner_component_id": {
+          "const": "agent.runtime"
+        },
+        "owner_kind": {
+          "enum": [
+            "model.projection",
+            "model.wire"
+          ]
+        },
+        "owner_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        }
+      }
+    },
+    "successor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "request_id",
+        "first_attempt_id",
+        "provider_component_id",
+        "provider_generation_id",
+        "provider_profile_ref",
+        "model_ref",
+        "instruction_channel",
+        "capability_digest",
+        "projection",
+        "initial_wire",
+        "projected_content_digest",
+        "source_manifest_digest",
+        "output_token_budget"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "#/$defs/id"
+        },
+        "first_attempt_id": {
+          "$ref": "#/$defs/id"
+        },
+        "provider_component_id": {
+          "$ref": "#/$defs/id"
+        },
+        "provider_generation_id": {
+          "$ref": "#/$defs/id"
+        },
+        "provider_profile_ref": {
+          "$ref": "#/$defs/id"
+        },
+        "model_ref": {
+          "$ref": "#/$defs/id"
+        },
+        "instruction_channel": {
+          "enum": [
+            "SYSTEM",
+            "DEVELOPER",
+            "INSTRUCTIONS",
+            "DEGRADED_USER"
+          ]
+        },
+        "capability_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "projection": {
+          "$ref": "#/$defs/ref"
+        },
+        "initial_wire": {
+          "$ref": "#/$defs/ref"
+        },
+        "projected_content_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "source_manifest_digest": {
+          "$ref": "#/$defs/digest"
+        },
+        "output_token_budget": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    }
+  }
+}

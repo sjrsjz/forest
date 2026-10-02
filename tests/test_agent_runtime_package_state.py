@@ -1132,6 +1132,132 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         )
         assert prepared_model_recovery["model_request"]["state"] == "ATTEMPT_PREPARED"
         assert prepared_model_recovery["model_attempt"]["state"] == "PREPARED"
+        frozen_prepared = await instance.invoke_management_query(
+            frozen_declaration,
+            {"run_id": model_owner["run_id"], "request_id": "model-request/package/1"},
+            timeout_seconds=10,
+        )
+        assert frozen_prepared["state"] == "ATTEMPT_PREPARED"
+        assert frozen_prepared["attempts"][-1]["state"] == "PREPARED"
+        recovered_projection = await _payload(
+            kernel, owner_component_id="agent.runtime",
+            owner_kind="model.projection",
+            owner_id="model-request/package/prepared-recovered",
+            value=b'{"messages":[{"role":"user","content":"A"}]}',
+        )
+        recovered_wire = await _payload(
+            kernel, owner_component_id="agent.runtime",
+            owner_kind="model.wire",
+            owner_id="model-attempt/package/prepared-recovered",
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        assert recovered_wire.digest == initial_wire.digest
+        recovery_effect = {
+            "protocol": "forest.effect-abandon/1",
+            "effect_operation_id": "model-effect/package/1",
+            "attempt_id": "model-attempt/package/1",
+            "abandonment_operation_id": "abandon/package/prepared-recovery",
+            "reason_code": "AGENT_PREPARED_MODEL_RECOVERY",
+            "cancel_effect": True,
+        }
+        recovery_envelope = {
+            "protocol": "forest.uow-step/1", "caller": caller,
+            "input": {
+                "effect": recovery_effect,
+                "owner": request_envelope["input"]["owner"],
+                "predecessor_request_id": "model-request/package/1",
+                "prepared_attempt_id": "model-attempt/package/1",
+                "effect_operation_id": "model-effect/package/1",
+                "abandonment_operation_id": "abandon/package/prepared-recovery",
+                "successor": {
+                    "request_id": "model-request/package/prepared-recovered",
+                    "first_attempt_id": "model-attempt/package/prepared-recovered",
+                    "provider_component_id": "provider.chat",
+                    "provider_generation_id": "generation/provider/package-test",
+                    "provider_profile_ref": "profile/provider/package-test",
+                    "model_ref": "model/package-test",
+                    "instruction_channel": "SYSTEM",
+                    "capability_digest": request_envelope["input"]["request"]["capability_digest"],
+                    "projection": recovered_projection.canonical(),
+                    "initial_wire": recovered_wire.canonical(),
+                    "projected_content_digest": request_envelope["input"]["request"]["projected_content_digest"],
+                    "source_manifest_digest": request_envelope["input"]["request"]["source_manifest_digest"],
+                    "output_token_budget": 256,
+                },
+            }, "prior": {},
+        }
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                await _seed_prepared_effect(
+                    conn, kernel, store,
+                    operation_id="model-effect/package/1",
+                    attempt_id="model-attempt/package/1", wire=wire,
+                    generation_id=generation_id,
+                )
+                abandoned = await registry.get(
+                    "kernel.effect"
+                ).unit_of_work_participant().invoke_in(
+                    conn, "effect.abandon", {
+                        **recovery_envelope, "input": recovery_effect,
+                    }, operation_id="effect-abandon/package/prepared-recovery",
+                    causal_root_kind="agent.run",
+                    causal_root_id=model_owner["run_id"],
+                    parent_call_id="call:agent-package/prepared-recovery",
+                    timeout_seconds=10,
+                )
+                recovery_envelope["prior"] = {"effect": abandoned}
+                recovered = await participant.invoke_in(
+                    conn, "agent.recover-prepared-model-record", recovery_envelope,
+                    operation_id="agent-recover/package/prepared-recovery",
+                    causal_root_kind="agent.run",
+                    causal_root_id=model_owner["run_id"],
+                    parent_call_id="call:agent-package/prepared-recovery",
+                    timeout_seconds=10,
+                )
+                assert recovered == {
+                    "request_id": "model-request/package/prepared-recovered",
+                    "step_seq": 1, "request_kind": "PRIMARY",
+                    "state": "READY", "attempt_count": 0,
+                }
+                replay = await participant.invoke_in(
+                    conn, "agent.recover-prepared-model-record", recovery_envelope,
+                    operation_id="agent-recover/package/prepared-recovery",
+                    causal_root_kind="agent.run",
+                    causal_root_id=model_owner["run_id"],
+                    parent_call_id="call:agent-package/prepared-recovery-replay",
+                    timeout_seconds=10,
+                )
+                assert replay == recovered
+                rows = await (await conn.execute(sql.SQL(
+                    "SELECT request_id,state,current_attempt_id FROM {}.model_requests "
+                    "WHERE bot_id=%s AND run_id=%s ORDER BY request_revision"
+                ).format(sql.Identifier(package.configuration.namespace)), (
+                    store.bot_id, model_owner["run_id"],
+                ))).fetchall()
+                assert [(row["request_id"], row["state"]) for row in rows] == [
+                    ("model-request/package/1", "ABANDONED"),
+                    ("model-request/package/prepared-recovered", "READY"),
+                ]
+                assert rows[0]["current_attempt_id"] is None
+                attempt_state = await (await conn.execute(sql.SQL(
+                    "SELECT state FROM {}.model_transport_attempts "
+                    "WHERE bot_id=%s AND attempt_id=%s"
+                ).format(sql.Identifier(package.configuration.namespace)), (
+                    store.bot_id, "model-attempt/package/1",
+                ))).fetchone()
+                assert attempt_state["state"] == "ABANDONED"
+                relation = await (await conn.execute(sql.SQL(
+                    "SELECT predecessor_request_id,successor_request_id "
+                    "FROM {}.model_request_prepared_recoveries "
+                    "WHERE bot_id=%s AND prepared_attempt_id=%s"
+                ).format(sql.Identifier(package.configuration.namespace)), (
+                    store.bot_id, "model-attempt/package/1",
+                ))).fetchone()
+                assert relation == {
+                    "predecessor_request_id": "model-request/package/1",
+                    "successor_request_id": "model-request/package/prepared-recovered",
+                }
+                raise _RollbackVerification
         prepared_model_cancel_state = await _payload(
             kernel, owner_kind="checkpoint.state",
             owner_id="checkpoint/package/prepared-model-cancel",

@@ -997,6 +997,44 @@ class AgentExecution:
                         f"Agent Run cannot execute from {state}",
                         409,
                     )
+                prepared_request = recovery.get("model_request")
+                prepared_attempt = recovery.get("model_attempt")
+                if (
+                    state == "PREPARING_MODEL"
+                    and isinstance(prepared_request, dict)
+                    and prepared_request["state"] == "ATTEMPT_PREPARED"
+                ):
+                    if (
+                        not isinstance(prepared_attempt, dict)
+                        or prepared_attempt["state"] != "PREPARED"
+                    ):
+                        return self._result(
+                            request, "BLOCKED_UNKNOWN", run,
+                            error_code="AGENT_PREPARED_MODEL_INCONSISTENT",
+                        )
+                    try:
+                        await self.model.recover_prepared(
+                            owner=owner,
+                            request_id=prepared_request["request_id"],
+                            attempt_id=prepared_attempt["attempt_id"],
+                            effect_operation_id=prepared_attempt["effect_operation_ref"],
+                        )
+                    except ForestError as exc:
+                        if exc.code == "AGENT_CANCEL_REQUESTED":
+                            continue
+                        if exc.code in {
+                            "MODEL_REQUEST_PROVIDER_REBIND_REQUIRED",
+                            "PROVIDER_PROFILE_FENCE_MISMATCH",
+                            "AGENT_FROZEN_MODEL_INVALID",
+                            "AGENT_FROZEN_RESUME_UNAVAILABLE",
+                            "EFFECT_NOT_ABANDONABLE",
+                        }:
+                            return self._result(
+                                request, "BLOCKED_UNKNOWN", run,
+                                error_code=exc.code,
+                            )
+                        raise
+                    continue
                 is_repair = state == "REPAIR_READY"
                 if not is_repair and recovery.get("model_request") is None:
                     selected = await self._acquire_input(

@@ -7,7 +7,7 @@
     "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "request_revision": {"type": "integer", "minimum": 1},
     "request_kind": {"enum": ["PRIMARY", "CONTINUATION", "REPAIR"]},
-    "state": {"enum": ["READY", "NOT_APPLIED"]},
+    "state": {"enum": ["READY", "NOT_APPLIED", "ATTEMPT_PREPARED"]},
     "attempts": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/attempt"}},
     "provider_generation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "provider_profile_ref": {"type": "string", "minLength": 1, "maxLength": 256},
@@ -28,7 +28,7 @@
         "attempt_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "effect_operation_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "attempt_no": {"type": "integer", "minimum": 1},
-        "state": {"enum": ["NOT_APPLIED"]}
+        "state": {"enum": ["NOT_APPLIED", "PREPARED"]}
       },
       "additionalProperties": false
     },

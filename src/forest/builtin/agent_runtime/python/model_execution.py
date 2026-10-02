@@ -591,6 +591,124 @@ class ModelExecution:
         )
         return successor_id
 
+    async def recover_prepared(
+        self, *, owner: dict, request_id: str, attempt_id: str,
+        effect_operation_id: str,
+    ) -> str:
+        """Abandon an unhanded Effect and create a new frozen request atomically."""
+
+        profile, target = await self._profile(request_id)
+        frozen = await self.ctx.queries.call(
+            "agent.frozen-model-resume",
+            {"run_id": owner["run_id"], "request_id": request_id},
+        )
+        if (
+            frozen["state"] != "ATTEMPT_PREPARED"
+            or not frozen["attempts"]
+            or frozen["attempts"][-1] != {
+                "attempt_id": attempt_id,
+                "effect_operation_id": effect_operation_id,
+                "attempt_no": len(frozen["attempts"]),
+                "state": "PREPARED",
+            }
+            or frozen["provider_profile_ref"] != profile["profile_ref"]
+            or frozen["capability_digest"] != profile["capability_digest"]
+            or frozen["model_ref"] != target.model
+            or frozen["projection"]["owner_id"] != request_id
+            or frozen["wire"]["owner_kind"] != "model.wire"
+        ):
+            raise ForestError(
+                "MODEL_REQUEST_PROVIDER_REBIND_REQUIRED",
+                "Prepared request is incompatible with the current Provider profile",
+                409,
+            )
+        projection_bytes = await _frozen_payload_result(
+            self.ctx.payloads.read_bytes(frozen["projection"])
+        )
+        wire_bytes = await _frozen_payload_result(
+            self.ctx.payloads.read_bytes(frozen["wire"])
+        )
+        try:
+            manifest = json.loads(projection_bytes)
+            body = json.loads(wire_bytes)
+        except (TypeError, ValueError) as exc:
+            raise ForestError(
+                "AGENT_FROZEN_MODEL_INVALID", "Prepared model bytes are invalid", 409
+            ) from exc
+        if (
+            not isinstance(manifest, dict)
+            or not isinstance(body, dict)
+            or manifest.get("request_id") != request_id
+            or manifest.get("projected_content_digest")
+                != frozen["projected_content_digest"]
+            or _digest(manifest.get("source_manifest"))
+                != frozen["source_manifest_digest"]
+            or body.get("model") != target.model
+            or type(body.get("stream")) is not bool
+            or body.get(target.output_token_parameter)
+                != frozen["output_token_budget"]
+            or not isinstance(manifest.get("serializer_revision"), str)
+        ):
+            raise ForestError(
+                "AGENT_FROZEN_MODEL_INVALID", "Prepared model payload changed", 409
+            )
+        successor_id = stable("model-request-prepared-recovery", request_id, attempt_id)
+        successor_attempt_id = stable("model-attempt", successor_id, 1)
+        successor_manifest = {**manifest, "request_id": successor_id}
+        projection = await _frozen_payload_result(self.ctx.payloads.put_bytes(
+            json.dumps(successor_manifest, sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=False, allow_nan=False).encode("utf-8"),
+            owner_kind="model.projection", owner_id=successor_id,
+            media_type="application/json", parents=(frozen["projection"],),
+        ))
+        wire = await _frozen_payload_result(self.ctx.payloads.put_bytes(
+            wire_bytes, owner_kind="model.wire", owner_id=successor_attempt_id,
+            media_type="application/json", parents=(frozen["wire"], projection),
+        ))
+        if wire["digest"] != frozen["wire"]["digest"]:
+            raise ForestError(
+                "AGENT_FROZEN_MODEL_INVALID", "Recovered wire digest changed", 409
+            )
+        abandonment_id = stable("abandon-prepared-model", attempt_id)
+        await self.ctx.uow.call(
+            "agent.recover-prepared-model",
+            {
+                "effect": {
+                    "protocol": "forest.effect-abandon/1",
+                    "effect_operation_id": effect_operation_id,
+                    "attempt_id": attempt_id,
+                    "abandonment_operation_id": abandonment_id,
+                    "reason_code": "AGENT_PREPARED_MODEL_RECOVERY",
+                    "cancel_effect": True,
+                },
+                "owner": owner,
+                "predecessor_request_id": request_id,
+                "prepared_attempt_id": attempt_id,
+                "effect_operation_id": effect_operation_id,
+                "abandonment_operation_id": abandonment_id,
+                "successor": {
+                    "request_id": successor_id,
+                    "first_attempt_id": successor_attempt_id,
+                    "provider_component_id": profile["component_id"],
+                    "provider_generation_id": profile["generation_id"],
+                    "provider_profile_ref": profile["profile_ref"],
+                    "model_ref": target.model,
+                    "instruction_channel": {
+                        "system": "SYSTEM", "developer": "DEVELOPER",
+                    }[target.system_role],
+                    "capability_digest": profile["capability_digest"],
+                    "projection": projection,
+                    "initial_wire": wire,
+                    "projected_content_digest": frozen["projected_content_digest"],
+                    "source_manifest_digest": frozen["source_manifest_digest"],
+                    "output_token_budget": frozen["output_token_budget"],
+                },
+            },
+            operation_id=stable("recover-prepared-model", request_id, attempt_id),
+            timeout=15,
+        )
+        return successor_id
+
     async def _dispatch_attempt(
         self, *, graph_id: str, graph_revision: int, bot_id: str,
         profile: dict, materialized: dict, owner: dict, request_id: str,

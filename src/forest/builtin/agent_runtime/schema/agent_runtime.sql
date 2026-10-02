@@ -583,6 +583,32 @@ CREATE TABLE model_transport_attempts (
     CHECK ((usage_payload_id IS NULL) = (usage_payload_digest IS NULL))
 );
 
+CREATE TABLE model_request_prepared_recoveries (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    predecessor_request_id text NOT NULL,
+    successor_request_id text NOT NULL,
+    prepared_attempt_id text NOT NULL,
+    effect_operation_id text NOT NULL,
+    abandonment_operation_id text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id),
+    UNIQUE (bot_id,predecessor_request_id),
+    UNIQUE (bot_id,successor_request_id),
+    UNIQUE (bot_id,prepared_attempt_id),
+    FOREIGN KEY (bot_id,predecessor_request_id)
+        REFERENCES model_requests(bot_id,request_id),
+    FOREIGN KEY (bot_id,successor_request_id)
+        REFERENCES model_requests(bot_id,request_id) DEFERRABLE INITIALLY DEFERRED,
+    FOREIGN KEY (bot_id,prepared_attempt_id)
+        REFERENCES model_transport_attempts(bot_id,attempt_id),
+    CHECK (predecessor_request_id<>successor_request_id)
+);
+CREATE TRIGGER model_request_prepared_recoveries_immutable
+    BEFORE UPDATE OR DELETE ON model_request_prepared_recoveries
+    FOR EACH ROW EXECUTE FUNCTION guard_model_request_inheritance();
+
 CREATE TABLE model_observations (
     bot_id text NOT NULL,
     observation_operation_id text NOT NULL
@@ -1586,6 +1612,193 @@ BEGIN
         predecessor.source_manifest_digest,predecessor.learning_candidates,
         predecessor.output_token_budget
     );
+    UPDATE __forest_module_schema__.agent_runs
+    SET current_model_request_id=successor_id,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('request_id',successor_id,
+            'step_seq',predecessor.step_seq,'request_kind',predecessor.request_kind,
+            'state','READY','attempt_count',0));
+END;
+$$;
+
+CREATE FUNCTION agent_recover_prepared_model(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    successor_value jsonb := body->'successor';
+    projection_value jsonb := successor_value->'projection';
+    wire_value jsonb := successor_value->'initial_wire';
+    effect_value jsonb := envelope#>'{prior,effect}';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    predecessor_id text := body->>'predecessor_request_id';
+    successor_id text := successor_value->>'request_id';
+    prepared_id text := body->>'prepared_attempt_id';
+    effect_id text := body->>'effect_operation_id';
+    abandonment_id text := body->>'abandonment_operation_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'participant_input_digest';
+    run_row record;
+    predecessor record;
+    attempt_row record;
+    existing record;
+    semantic_digest_value text;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR effect_value->>'bot_id' IS DISTINCT FROM requested_bot
+       OR effect_value->>'attempt_id' IS DISTINCT FROM prepared_id
+       OR effect_value->>'abandonment_operation_id' IS DISTINCT FROM abandonment_id
+       OR effect_value->>'reason_code' IS DISTINCT FROM 'AGENT_PREPARED_MODEL_RECOVERY'
+       OR effect_value->>'cancel_effect' IS DISTINCT FROM 'true'
+       OR body#>>'{effect,effect_operation_id}' IS DISTINCT FROM effect_id
+       OR body#>>'{effect,attempt_id}' IS DISTINCT FROM prepared_id
+       OR body#>>'{effect,abandonment_operation_id}' IS DISTINCT FROM abandonment_id
+       OR projection_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR projection_value->>'owner_kind' IS DISTINCT FROM 'model.projection'
+       OR projection_value->>'owner_id' IS DISTINCT FROM successor_id
+       OR wire_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR wire_value->>'owner_kind' IS DISTINCT FROM 'model.wire'
+       OR wire_value->>'owner_id' IS DISTINCT FROM successor_value->>'first_attempt_id'
+       OR predecessor_id IS NOT DISTINCT FROM successor_id THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_PREPARED_RECOVERY_INPUT_INVALID',
+                'message','Prepared model recovery input or Effect proof differs','status',422));
+    END IF;
+    SELECT *,clock_timestamp() AS database_now INTO run_row
+    FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    SELECT * INTO existing FROM __forest_module_schema__.model_request_prepared_recoveries
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF FOUND THEN
+        IF existing.input_digest IS DISTINCT FROM requested_digest
+           OR existing.predecessor_request_id IS DISTINCT FROM predecessor_id
+           OR existing.successor_request_id IS DISTINCT FROM successor_id
+           OR existing.prepared_attempt_id IS DISTINCT FROM prepared_id
+           OR existing.effect_operation_id IS DISTINCT FROM effect_id
+           OR existing.abandonment_operation_id IS DISTINCT FROM abandonment_id THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','AGENT_PREPARED_RECOVERY_CONFLICT',
+                    'message','Prepared recovery operation identity differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('request_id',successor_id,
+                'step_seq',(SELECT step_seq FROM __forest_module_schema__.model_requests
+                            WHERE bot_id=requested_bot AND request_id=successor_id),
+                'request_kind',(SELECT request_kind FROM __forest_module_schema__.model_requests
+                                WHERE bot_id=requested_bot AND request_id=successor_id),
+                'state','READY','attempt_count',0));
+    END IF;
+    IF run_row.run_id IS NULL OR run_row.owner_id IS DISTINCT FROM owner_value->>'owner_id'
+       OR run_row.owner_epoch IS DISTINCT FROM (owner_value->>'epoch')::bigint
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=run_row.database_now THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','STALE_AGENT_RUN_OWNER',
+                'message','Agent Run owner is stale','status',409));
+    END IF;
+    IF EXISTS (SELECT 1 FROM __forest_module_schema__.run_cancel_requests c
+               WHERE c.bot_id=requested_bot AND c.run_id=requested_run) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_REQUESTED',
+                'message','Agent cancellation won the Run boundary','status',409));
+    END IF;
+    SELECT * INTO predecessor FROM __forest_module_schema__.model_requests
+    WHERE bot_id=requested_bot AND request_id=predecessor_id FOR UPDATE;
+    SELECT * INTO attempt_row FROM __forest_module_schema__.model_transport_attempts
+    WHERE bot_id=requested_bot AND attempt_id=prepared_id FOR UPDATE;
+    IF predecessor.request_id IS NULL OR attempt_row.attempt_id IS NULL
+       OR predecessor.run_id IS DISTINCT FROM requested_run
+       OR predecessor.step_seq IS DISTINCT FROM run_row.next_step_seq
+       OR predecessor.state IS DISTINCT FROM 'ATTEMPT_PREPARED'
+       OR predecessor.current_attempt_id IS DISTINCT FROM prepared_id
+       OR predecessor.attempt_count IS DISTINCT FROM attempt_row.attempt_no
+       OR attempt_row.request_id IS DISTINCT FROM predecessor_id
+       OR attempt_row.effect_operation_ref IS DISTINCT FROM effect_id
+       OR attempt_row.state IS DISTINCT FROM 'PREPARED'
+       OR run_row.state IS DISTINCT FROM 'PREPARING_MODEL'
+       OR (run_row.current_model_request_id IS NOT NULL
+           AND run_row.current_model_request_id IS DISTINCT FROM predecessor_id)
+       OR predecessor.provider_component_id IS DISTINCT FROM successor_value->>'provider_component_id'
+       OR predecessor.provider_profile_ref IS DISTINCT FROM successor_value->>'provider_profile_ref'
+       OR predecessor.model_ref IS DISTINCT FROM successor_value->>'model_ref'
+       OR predecessor.instruction_channel IS DISTINCT FROM successor_value->>'instruction_channel'
+       OR predecessor.capability_digest IS DISTINCT FROM successor_value->>'capability_digest'
+       OR predecessor.output_token_budget IS DISTINCT FROM
+          (successor_value->>'output_token_budget')::integer
+       OR predecessor.projected_content_digest IS DISTINCT FROM
+          successor_value->>'projected_content_digest'
+       OR predecessor.source_manifest_digest IS DISTINCT FROM
+          successor_value->>'source_manifest_digest'
+       OR predecessor.initial_wire_payload_digest IS DISTINCT FROM wire_value->>'digest'
+       OR attempt_row.wire_payload_digest IS DISTINCT FROM wire_value->>'digest'
+       OR (SELECT count(*) FROM __forest_module_schema__.model_transport_attempts a
+           WHERE a.bot_id=requested_bot AND a.request_id=predecessor_id)
+          IS DISTINCT FROM predecessor.attempt_count::bigint
+       OR EXISTS (
+           SELECT 1 FROM __forest_module_schema__.model_transport_attempts a
+           WHERE a.bot_id=requested_bot AND a.request_id=predecessor_id
+             AND a.attempt_id<>prepared_id
+             AND (a.state<>'NOT_APPLIED' OR NOT EXISTS (
+                 SELECT 1 FROM __forest_module_schema__.model_observations o
+                 WHERE o.bot_id=a.bot_id AND o.attempt_id=a.attempt_id
+                   AND o.accepted AND o.resulting_state='NOT_APPLIED'
+             ))
+       ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_PREPARED_RECOVERY_BOUNDARY_CLOSED',
+                'message','Prepared attempt or frozen successor differs','status',409));
+    END IF;
+    semantic_digest_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_object(
+        'predecessor_digest',predecessor.semantic_request_digest,
+        'successor_request_id',successor_id,
+        'provider_generation_id',successor_value->>'provider_generation_id',
+        'projection_digest',projection_value->>'digest',
+        'wire_digest',wire_value->>'digest'
+    )::text,'UTF8')),'hex');
+    UPDATE __forest_module_schema__.model_transport_attempts
+    SET state='ABANDONED',settled_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND attempt_id=prepared_id;
+    UPDATE __forest_module_schema__.model_requests
+    SET state='ABANDONED',current_attempt_id=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=predecessor_id;
+    INSERT INTO __forest_module_schema__.model_requests(
+        bot_id,request_id,run_id,step_seq,request_kind,request_revision,
+        predecessor_request_id,semantic_request_digest,input_revision,context_revision,
+        context_view_revision,core_protocol_version,core_prompt_digest,preset_revision,
+        preset_payload_digest,provider_component_id,provider_generation_id,
+        provider_profile_ref,model_ref,instruction_channel,capability_digest,
+        projection_payload_id,projection_payload_digest,projection_owner_component_id,
+        projection_owner_kind,projection_owner_id,initial_wire_payload_id,
+        initial_wire_payload_digest,initial_wire_owner_component_id,
+        initial_wire_owner_kind,initial_wire_owner_id,projected_content_digest,
+        source_manifest_digest,learning_candidates,output_token_budget
+    ) VALUES (
+        requested_bot,successor_id,requested_run,predecessor.step_seq,
+        predecessor.request_kind,predecessor.request_revision+1,predecessor_id,
+        semantic_digest_value,predecessor.input_revision,predecessor.context_revision,
+        predecessor.context_view_revision,predecessor.core_protocol_version,
+        predecessor.core_prompt_digest,predecessor.preset_revision,
+        predecessor.preset_payload_digest,predecessor.provider_component_id,
+        successor_value->>'provider_generation_id',predecessor.provider_profile_ref,
+        predecessor.model_ref,predecessor.instruction_channel,
+        predecessor.capability_digest,projection_value->>'payload_id',
+        projection_value->>'digest',projection_value->>'owner_component_id',
+        projection_value->>'owner_kind',projection_value->>'owner_id',
+        wire_value->>'payload_id',wire_value->>'digest',
+        wire_value->>'owner_component_id',wire_value->>'owner_kind',
+        wire_value->>'owner_id',predecessor.projected_content_digest,
+        predecessor.source_manifest_digest,predecessor.learning_candidates,
+        predecessor.output_token_budget
+    );
+    INSERT INTO __forest_module_schema__.model_request_prepared_recoveries(
+        bot_id,operation_id,input_digest,predecessor_request_id,successor_request_id,
+        prepared_attempt_id,effect_operation_id,abandonment_operation_id
+    ) VALUES (requested_bot,requested_operation,requested_digest,predecessor_id,
+              successor_id,prepared_id,effect_id,abandonment_id);
     UPDATE __forest_module_schema__.agent_runs
     SET current_model_request_id=successor_id,updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND run_id=requested_run;
@@ -5888,11 +6101,12 @@ BEGIN
     WHERE request.bot_id=context->>'bot_id'
       AND request.run_id=input->>'run_id'
       AND request.request_id=input->>'request_id'
-      AND request.state IN ('READY','NOT_APPLIED')
+      AND request.state IN ('READY','NOT_APPLIED','ATTEMPT_PREPARED')
       AND run.state='PREPARING_MODEL'
       AND (
           run.current_model_request_id=request.request_id
-          OR (request.state='READY' AND run.current_model_request_id IS NULL
+          OR (request.state IN ('READY','ATTEMPT_PREPARED')
+              AND run.current_model_request_id IS NULL
               AND request.step_seq=run.next_step_seq)
       );
     IF NOT FOUND THEN
@@ -5924,6 +6138,27 @@ BEGIN
                 AND prior.request_id=request_row.request_id
                 AND prior.state<>'NOT_APPLIED'
           )
+    )) OR (request_row.state='ATTEMPT_PREPARED' AND NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.model_transport_attempts current_attempt
+        WHERE current_attempt.bot_id=request_row.bot_id
+          AND current_attempt.request_id=request_row.request_id
+          AND current_attempt.attempt_id=request_row.current_attempt_id
+          AND current_attempt.attempt_no=request_row.attempt_count
+          AND current_attempt.state='PREPARED'
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.model_transport_attempts prior
+              WHERE prior.bot_id=request_row.bot_id
+                AND prior.request_id=request_row.request_id
+                AND prior.attempt_id<>current_attempt.attempt_id
+                AND (prior.state<>'NOT_APPLIED' OR NOT EXISTS (
+                    SELECT 1 FROM __forest_module_schema__.model_observations o
+                    WHERE o.bot_id=prior.bot_id AND o.attempt_id=prior.attempt_id
+                      AND o.accepted AND o.resulting_state='NOT_APPLIED'
+                ))
+          )
+          AND (SELECT count(*) FROM __forest_module_schema__.model_transport_attempts a
+               WHERE a.bot_id=request_row.bot_id
+                 AND a.request_id=request_row.request_id)=request_row.attempt_count
     )) THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
