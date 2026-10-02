@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.27.1"
+version = "4.28.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -67,6 +67,8 @@ requests = [
   "uow.execute:agent.renew-run-lease",
   "uow.execute:agent.release-run-lease",
   "uow.execute:agent.fail-exhausted-model",
+  "uow.execute:agent.cancel-run",
+  "uow.execute:agent.cancel-prepared",
   "uow.execute:agent.block-frozen-model",
   "uow.execute:agent.prepare-model-request",
   "uow.execute:agent.inherit-model-request",
@@ -172,9 +174,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.23.1"
+schema_version = "2.24.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "52ba8e86ef42d145f537ac6436ccb974017f731d99db5a58d734ceafcc0e6520"
+baseline_sha256 = "39a13714a098553375fd1ca8a6a019d78f44cca4d451c981bee90a42222242a7"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -213,6 +215,20 @@ contract = "1.0"
 function = "agent_management_run_steps_page"
 input_schema = "schemas/management-run-steps-page-input.json"
 output_schema = "schemas/management-run-steps-page-output.json"
+
+[[components.domain_commands]]
+name = "agent.request-cancel"
+contract = "1.0"
+function = "agent_request_cancel"
+input_schema = "schemas/cancel-request-input.json"
+output_schema = "schemas/cancel-request-output.json"
+
+[[components.management_actions]]
+id = "agent.cancel.request"
+port = "agent.request-cancel"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 15
 
 [[components.management_queries]]
 id = "agent.runs.page"
@@ -410,6 +426,19 @@ output_schema = "schemas/fail-exhausted-model-output.json"
 
 [[components.unit_of_work_participants.payload_refs]]
 path = "/input/checkpoint_state"
+owner_component = "agent.runtime"
+owner_kind = "checkpoint.state"
+owner_id_path = "/input/checkpoint_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.cancel-run-record"
+contract = "1.0"
+function = "agent_cancel_run"
+input_schema = "schemas/cancel-run-envelope.json"
+output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/state"
 owner_component = "agent.runtime"
 owner_kind = "checkpoint.state"
 owner_id_path = "/input/checkpoint_id"
@@ -699,6 +728,27 @@ timeout_s = 10
 steps = [
   { id = "effect", component_id = "kernel.effect", participant = "effect.prove-not-applied", input_path = "/effect" },
   { id = "agent", component_id = "agent.runtime", participant = "agent.fail-exhausted-model-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.cancel-run"
+contract = "1.0"
+input_schema = "schemas/cancel-run-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+timeout_s = 15
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.cancel-run-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.cancel-prepared"
+contract = "1.0"
+input_schema = "schemas/cancel-prepared-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+timeout_s = 15
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.abandon", input_path = "/effect" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.cancel-run-record", input_path = "/agent" }
 ]
 
 [[components.unit_of_work_plans]]

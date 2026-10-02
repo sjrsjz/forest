@@ -63,6 +63,7 @@
         <div><dt>更新</dt><dd id="updated"></dd></div>
         <div><dt>终态</dt><dd id="terminal"></dd></div>
       </dl>
+      <div class="actions"><button id="request-cancel" type="button" hidden>请求取消 Run</button><span id="cancel-status"></span></div>
       <details><summary>模型回合</summary><div class="step-list" id="model-turns"></div><button id="more-model-turns" type="button" hidden>更多回合</button></details>
       <details><summary>工具调用</summary><div class="step-list" id="tool-calls"></div><button id="more-tool-calls" type="button" hidden>更多调用</button></details>
     </section>
@@ -76,10 +77,11 @@
     const pending=new Map(),el=id=>document.getElementById(id);
     const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
     const resize=()=>send('resize',{height:document.documentElement.scrollHeight});
-    const call=(operation_id,value)=>new Promise((resolve,reject)=>{
+    const request=(type,operation_id,value)=>new Promise((resolve,reject)=>{
       const request_id=`agent:${++sequence}`;pending.set(request_id,{resolve,reject});
-      send('query',{request_id,operation_id,value});
+      send(type,{request_id,operation_id,value});
     });
+    const call=(operation_id,value)=>request('query',operation_id,value);
     const status=message=>{el('status').textContent=message||'';resize();};
     function currentFilter(){
       const conversation_ref=el('conversation').value.trim(),state=el('state').value;
@@ -149,6 +151,22 @@
       el('created').textContent=row.created_at;
       el('updated').textContent=row.updated_at;
       el('terminal').textContent=row.terminal_at||'—';
+      el('cancel-status').textContent=row.cancel_request
+        ?`取消已请求：${row.cancel_request.requested_by} / ${row.cancel_request.reason_code}`
+        :'';
+      el('request-cancel').hidden=['COMPLETED','FAILED','CANCELLED'].includes(row.state)||Boolean(row.cancel_request);
+      el('request-cancel').onclick=async()=>{
+        const button=el('request-cancel');button.disabled=true;
+        try{
+          await request('action','agent.cancel.request',{
+            run_id:row.run_id,expected_checkpoint_seq:row.progress.checkpoint_seq,
+            reason_code:'ADMIN_CANCEL',
+          });
+          await detail(row.run_id);
+          status('取消意图已记录；已发出的外部调用须先完成对账。');
+        }catch(error){status(error.message);}
+        finally{button.disabled=false;}
+      };
       el('detail').hidden=false;resize();
       await loadSteps('MODEL_TURN');
       await loadSteps('TOOL_CALL');

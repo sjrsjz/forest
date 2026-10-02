@@ -221,6 +221,86 @@ CREATE TABLE run_cancel_requests (
     FOREIGN KEY (bot_id,run_id) REFERENCES agent_runs(bot_id,run_id)
 );
 
+CREATE FUNCTION agent_request_cancel(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_run text := input->>'run_id';
+    requested_checkpoint bigint := (input->>'expected_checkpoint_seq')::bigint;
+    requested_by text := input->>'requested_by';
+    requested_reason text := input->>'reason_code';
+    requested_digest text := 'sha256:' || encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    existing record;
+    run_row record;
+BEGIN
+    IF requested_operation IS NULL OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR requested_run IS NULL OR octet_length(requested_run) NOT BETWEEN 1 AND 256
+       OR requested_checkpoint IS NULL OR requested_checkpoint<0
+       OR requested_by IS NULL OR octet_length(requested_by) NOT BETWEEN 1 AND 256
+       OR requested_reason IS NULL OR octet_length(requested_reason) NOT BETWEEN 1 AND 128 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_REQUEST_INVALID',
+                'message','Agent cancellation request is invalid','status',422));
+    END IF;
+    SELECT * INTO existing FROM __forest_module_schema__.run_cancel_requests
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF existing IS NOT NULL THEN
+        IF existing.input_digest IS DISTINCT FROM requested_digest
+           OR existing.run_id IS DISTINCT FROM requested_run THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','AGENT_CANCEL_REQUEST_CONFLICT',
+                    'message','Agent cancellation operation differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.agent-cancel-requested/1',
+                'run_id',requested_run,'request_id',requested_operation,'state','REQUESTED'));
+    END IF;
+    SELECT * INTO run_row FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    IF run_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_RUN_NOT_FOUND',
+                'message','Agent Run does not exist','status',404));
+    END IF;
+    SELECT * INTO existing FROM __forest_module_schema__.run_cancel_requests
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF existing IS NOT NULL THEN
+        IF existing.input_digest IS DISTINCT FROM requested_digest
+           OR existing.run_id IS DISTINCT FROM requested_run THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','AGENT_CANCEL_REQUEST_CONFLICT',
+                    'message','Agent cancellation operation differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.agent-cancel-requested/1',
+                'run_id',requested_run,'request_id',requested_operation,'state','REQUESTED'));
+    END IF;
+    IF run_row.state IN ('COMPLETED','FAILED','CANCELLED')
+       OR run_row.checkpoint_seq IS DISTINCT FROM requested_checkpoint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_BOUNDARY_STALE',
+                'message','Agent Run checkpoint changed before cancellation','status',409));
+    END IF;
+    IF EXISTS (SELECT 1 FROM __forest_module_schema__.run_cancel_requests
+               WHERE bot_id=requested_bot AND run_id=requested_run) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_ALREADY_REQUESTED',
+                'message','Agent Run already has a cancellation request','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.run_cancel_requests(
+        bot_id,operation_id,input_digest,run_id,expected_checkpoint_seq,
+        requested_by,reason_code
+    ) VALUES (
+        requested_bot,requested_operation,requested_digest,requested_run,
+        requested_checkpoint,requested_by,requested_reason
+    );
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.agent-cancel-requested/1',
+            'run_id',requested_run,'request_id',requested_operation,'state','REQUESTED'));
+END;
+$$;
+
 CREATE TABLE session_close_operations (
     bot_id text NOT NULL,
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
@@ -678,7 +758,7 @@ CREATE TABLE tool_observations (
         observed_state IN ('WAIT_APPROVAL','DISPATCHING','SUCCEEDED','FAILED','CANCELLED','UNKNOWN')
     ),
     evidence_kind text NOT NULL CHECK (
-        evidence_kind IN ('AUTHORIZATION','EXECUTOR','RECONCILIATION')
+        evidence_kind IN ('AUTHORIZATION','EXECUTOR','RECONCILIATION','MANAGEMENT')
     ),
     effect_observation_ref text,
     approval_ref text,
@@ -970,13 +1050,17 @@ BEGIN
     END IF;
     IF OLD.state IN ('READY','NOT_APPLIED') AND NEW.state='ABANDONED'
        AND NEW.current_attempt_id IS NULL
-       AND EXISTS (
+       AND (EXISTS (
            SELECT 1 FROM model_request_inheritances inheritance
            WHERE inheritance.bot_id=OLD.bot_id
              AND inheritance.predecessor_request_id=OLD.request_id
              AND inheritance.predecessor_revision=OLD.request_revision
              AND inheritance.old_provider_generation_id=OLD.provider_generation_id
-       ) THEN
+       ) OR EXISTS (
+           SELECT 1 FROM run_cancel_requests cancellation
+           WHERE cancellation.bot_id=OLD.bot_id
+             AND cancellation.run_id=OLD.run_id
+       )) THEN
         RETURN NEW;
     END IF;
     RAISE EXCEPTION 'Illegal model request transition' USING ERRCODE='55000';
@@ -1238,7 +1322,7 @@ BEGIN
         OR
         (run_row.current_model_request_id IS NULL AND run_row.state='PREPARING_MODEL'
             AND m.run_id=requested_run AND m.step_seq=run_row.next_step_seq
-            AND m.state='READY')
+            AND m.state IN ('READY','ATTEMPT_PREPARED'))
     )
     ORDER BY
         CASE WHEN m.request_id=run_row.current_model_request_id THEN 0 ELSE 1 END,
@@ -1762,6 +1846,222 @@ BEGIN
         'protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('run_id',requested_run,'released',true)
     );
+END;
+$$;
+
+CREATE FUNCTION agent_cancel_run(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    owner_value jsonb := body->'owner';
+    state_value jsonb := body->'state';
+    prepared_value jsonb := body->'prepared';
+    effect_value jsonb := envelope#>'{prior,effect}';
+    requested_bot text := context->>'bot_id';
+    requested_run text := owner_value->>'run_id';
+    requested_owner text := owner_value->>'owner_id';
+    requested_epoch bigint := (owner_value->>'epoch')::bigint;
+    requested_request text := body->>'request_id';
+    requested_checkpoint text := body->>'checkpoint_id';
+    requested_digest text := context->>'participant_input_digest';
+    prepared_kind text := prepared_value->>'kind';
+    prepared_attempt text := prepared_value->>'attempt_id';
+    prepared_effect text := prepared_value->>'effect_operation_id';
+    run_row record;
+    session_row record;
+    cancel_row record;
+    existing record;
+    attempt_row record;
+    tool_row record;
+    next_sequence bigint;
+    checksum_value text;
+    observation_id text;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_request IS NULL OR requested_checkpoint IS NULL
+       OR state_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR state_value->>'owner_kind' IS DISTINCT FROM 'checkpoint.state'
+       OR state_value->>'owner_id' IS DISTINCT FROM requested_checkpoint
+       OR (prepared_value IS NOT NULL AND prepared_value<>'null'::jsonb
+           AND prepared_kind NOT IN ('MODEL','TOOL')) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_INPUT_INVALID',
+                'message','Agent cancellation checkpoint input is invalid','status',422));
+    END IF;
+    SELECT * INTO run_row FROM __forest_module_schema__.agent_runs
+    WHERE bot_id=requested_bot AND run_id=requested_run FOR UPDATE;
+    SELECT * INTO cancel_row FROM __forest_module_schema__.run_cancel_requests
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    SELECT * INTO existing FROM __forest_module_schema__.run_checkpoints
+    WHERE bot_id=requested_bot AND checkpoint_id=requested_checkpoint;
+    IF existing IS NOT NULL THEN
+        IF run_row IS NOT NULL AND cancel_row.operation_id=requested_request
+           AND existing.run_id=requested_run
+           AND existing.phase='CANCELLED'
+           AND existing.input_digest=requested_digest
+           AND existing.state_payload_id=state_value->>'payload_id'
+           AND existing.state_payload_digest=state_value->>'digest'
+           AND run_row.state='CANCELLED' THEN
+            RETURN __forest_module_schema__.agent_run_snapshot(
+                context,jsonb_build_object('run_id',requested_run));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_CHECKPOINT_CONFLICT',
+                'message','Agent cancellation checkpoint identity differs','status',409));
+    END IF;
+    IF run_row IS NULL OR cancel_row IS NULL
+       OR cancel_row.operation_id IS DISTINCT FROM requested_request
+       OR run_row.owner_id IS DISTINCT FROM requested_owner
+       OR run_row.owner_epoch IS DISTINCT FROM requested_epoch
+       OR run_row.owner_expires_at IS NULL
+       OR run_row.owner_expires_at<=clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_OWNER_STALE',
+                'message','Agent cancellation owner or request is stale','status',409));
+    END IF;
+    SELECT * INTO session_row FROM __forest_module_schema__.agent_sessions
+    WHERE bot_id=requested_bot AND session_id=run_row.session_id FOR UPDATE;
+    IF run_row.state IN ('COMPLETED','FAILED','CANCELLED')
+       OR session_row.state IS DISTINCT FROM 'ACTIVE'
+       OR session_row.active_run_id IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_BOUNDARY_CLOSED',
+                'message','Agent Run is not at a cancellable boundary','status',409));
+    END IF;
+    IF prepared_kind IS NOT NULL THEN
+        IF effect_value->>'attempt_id' IS DISTINCT FROM prepared_attempt
+           OR effect_value->>'abandonment_operation_id' IS DISTINCT FROM
+              prepared_value->>'abandonment_operation_id'
+           OR effect_value->>'reason_code' IS DISTINCT FROM 'AGENT_CANCELLED_BY_ADMIN'
+           OR effect_value->>'cancel_effect' IS DISTINCT FROM 'true' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','AGENT_CANCEL_EFFECT_PROOF_INVALID',
+                    'message','Prepared Effect abandonment proof differs','status',409));
+        END IF;
+        IF prepared_kind='MODEL' THEN
+            SELECT a.* INTO attempt_row
+            FROM __forest_module_schema__.model_transport_attempts a
+            JOIN __forest_module_schema__.model_requests m
+              ON m.bot_id=a.bot_id AND m.request_id=a.request_id
+            WHERE a.bot_id=requested_bot AND m.run_id=requested_run
+              AND a.attempt_id=prepared_attempt
+              AND a.effect_operation_ref=prepared_effect
+              AND a.state='PREPARED' AND m.state='ATTEMPT_PREPARED'
+              AND m.current_attempt_id=a.attempt_id
+              AND (run_row.current_model_request_id=m.request_id OR
+                   (run_row.current_model_request_id IS NULL
+                    AND run_row.state='PREPARING_MODEL'
+                    AND m.step_seq=run_row.next_step_seq)) FOR UPDATE OF a;
+            IF attempt_row IS NULL THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','AGENT_CANCEL_EFFECT_PROOF_INVALID',
+                        'message','Prepared model attempt identity differs','status',409));
+            END IF;
+        ELSE
+            SELECT * INTO tool_row FROM __forest_module_schema__.tool_calls
+            WHERE bot_id=requested_bot AND run_id=requested_run
+              AND effect_attempt_id=prepared_attempt
+              AND effect_operation_ref=prepared_effect
+              AND tool_call_id=run_row.current_tool_call_id
+              AND state IN ('PROPOSED','WAIT_APPROVAL') FOR UPDATE;
+            IF tool_row IS NULL THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','AGENT_CANCEL_EFFECT_PROOF_INVALID',
+                        'message','Prepared tool attempt identity differs','status',409));
+            END IF;
+        END IF;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.model_transport_attempts a
+        JOIN __forest_module_schema__.model_requests m
+          ON m.bot_id=a.bot_id AND m.request_id=a.request_id
+        WHERE a.bot_id=requested_bot AND m.run_id=requested_run
+          AND a.state IN ('PREPARED','DISPATCHING','UNKNOWN')
+          AND (prepared_kind IS DISTINCT FROM 'MODEL'
+               OR a.attempt_id IS DISTINCT FROM prepared_attempt
+               OR a.state IS DISTINCT FROM 'PREPARED')
+    ) OR EXISTS (
+        SELECT 1 FROM __forest_module_schema__.tool_calls t
+        WHERE t.bot_id=requested_bot AND t.run_id=requested_run
+          AND (t.state IN ('DISPATCHING','UNKNOWN') OR
+               (t.effect_attempt_id IS NOT NULL
+                AND t.state IN ('PROPOSED','WAIT_APPROVAL')
+                AND (prepared_kind IS DISTINCT FROM 'TOOL'
+                     OR t.effect_attempt_id IS DISTINCT FROM prepared_attempt)))
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_EFFECT_PENDING',
+                'message','External effect must be observed before cancellation','status',409));
+    END IF;
+    IF prepared_kind='MODEL' THEN
+        UPDATE __forest_module_schema__.model_transport_attempts
+        SET state='ABANDONED',settled_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND attempt_id=prepared_attempt;
+        UPDATE __forest_module_schema__.model_requests
+        SET state='ABANDONED',current_attempt_id=NULL,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND request_id=attempt_row.request_id;
+    END IF;
+    UPDATE __forest_module_schema__.model_requests
+    SET state='ABANDONED',current_attempt_id=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run
+      AND state IN ('READY','NOT_APPLIED');
+    FOR tool_row IN
+        SELECT * FROM __forest_module_schema__.tool_calls
+        WHERE bot_id=requested_bot AND run_id=requested_run
+          AND state IN ('PROPOSED','WAIT_APPROVAL') FOR UPDATE
+    LOOP
+        observation_id := 'cancel-tool:' || encode(sha256(convert_to(
+            jsonb_build_array(requested_request,tool_row.tool_call_id)::text,'UTF8'
+        )),'hex');
+        INSERT INTO __forest_module_schema__.tool_observations(
+            bot_id,observation_operation_id,tool_call_id,input_digest,
+            observed_state,evidence_kind,approval_ref,error_code,
+            accepted,previous_state,resulting_state
+        ) VALUES (
+            requested_bot,observation_id,tool_row.tool_call_id,
+            cancel_row.input_digest,'CANCELLED','MANAGEMENT',
+            tool_row.approval_ref,'AGENT_CANCELLED_BY_ADMIN',true,
+            tool_row.state,'CANCELLED'
+        );
+        UPDATE __forest_module_schema__.tool_calls
+        SET state='CANCELLED',error_code='AGENT_CANCELLED_BY_ADMIN',
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND tool_call_id=tool_row.tool_call_id;
+    END LOOP;
+    next_sequence := run_row.checkpoint_seq+1;
+    checksum_value := 'sha256:' || encode(sha256(convert_to(jsonb_build_array(
+        requested_run,next_sequence,'CANCELLED',run_row.input_revision,
+        run_row.next_step_seq,state_value->>'digest',requested_epoch
+    )::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.run_checkpoints(
+        bot_id,run_id,checkpoint_seq,checkpoint_id,input_digest,phase,
+        input_revision,next_step_seq,state_payload_id,state_payload_digest,
+        state_owner_component_id,state_owner_kind,state_owner_id,
+        checkpoint_checksum,owner_epoch
+    ) VALUES (
+        requested_bot,requested_run,next_sequence,requested_checkpoint,
+        requested_digest,'CANCELLED',run_row.input_revision,run_row.next_step_seq,
+        state_value->>'payload_id',state_value->>'digest',
+        state_value->>'owner_component_id',state_value->>'owner_kind',
+        state_value->>'owner_id',checksum_value,requested_epoch
+    );
+    UPDATE __forest_module_schema__.agent_runs
+    SET state='CANCELLED',checkpoint_seq=next_sequence,
+        current_model_request_id=NULL,current_tool_call_id=NULL,
+        reload_operation_id=NULL,reload_resume_phase=NULL,reload_generation_id=NULL,
+        final_candidate_payload_id=NULL,final_candidate_payload_digest=NULL,
+        error_code='AGENT_CANCELLED_BY_ADMIN',terminal_at=clock_timestamp(),
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND run_id=requested_run;
+    UPDATE __forest_module_schema__.agent_sessions
+    SET state='CANCELLED',active_run_id=NULL,
+        terminal_reason_code='AGENT_CANCELLED_BY_ADMIN',
+        closed_at=clock_timestamp(),updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND session_id=run_row.session_id;
+    RETURN __forest_module_schema__.agent_run_snapshot(
+        context,jsonb_build_object('run_id',requested_run));
 END;
 $$;
 

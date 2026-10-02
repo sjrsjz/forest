@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["owner", "request_id", "checkpoint_id", "state", "prepared"],
+  "properties": {
+    "owner": {"$ref": "#/$defs/owner"},
+    "request_id": {"$ref": "#/$defs/id"},
+    "checkpoint_id": {"$ref": "#/$defs/id"},
+    "state": {"$ref": "#/$defs/state"},
+    "prepared": {"type": "null"}
+  },
+  "$defs": {
+    "id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "owner": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_id", "owner_id", "epoch"],
+      "properties": {
+        "run_id": {"$ref": "#/$defs/id"},
+        "owner_id": {"$ref": "#/$defs/id"},
+        "epoch": {"type": "integer", "minimum": 1}
+      }
+    },
+    "state": {
+      "type": "object", "additionalProperties": false,
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"$ref": "#/$defs/id"},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_component_id": {"const": "agent.runtime"},
+        "owner_kind": {"const": "checkpoint.state"},
+        "owner_id": {"$ref": "#/$defs/id"}
+      }
+    }
+  }
+}

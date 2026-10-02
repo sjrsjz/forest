@@ -628,6 +628,7 @@ class ConversationScheduler(Plugin):
                 },
                 operation_id=ctx.operations.stable(f"compact-before-run:{run_ref}"),
             )
+        execute_revision = 0
         while True:
             execution = await ctx.services.call(
                 "agent.execute",
@@ -641,7 +642,7 @@ class ConversationScheduler(Plugin):
                     "actor": work["actor"],
                 },
                 operation_id=ctx.operations.stable(
-                    f"agent-execute:{run_ref}:{work['actor']['epoch']}"
+                    f"agent-execute:{run_ref}:{work['actor']['epoch']}:{execute_revision}"
                 ),
                 contract_major=2,
                 timeout=540,
@@ -650,7 +651,13 @@ class ConversationScheduler(Plugin):
             if status == "IDLE":
                 return self._release("IDLE")
             if status == "FINAL_READY":
-                await self._commit_final_reply(work, execution, ctx)
+                try:
+                    await self._commit_final_reply(work, execution, ctx)
+                except ForestError as exc:
+                    if exc.code != "AGENT_CANCEL_REQUESTED" or execute_revision >= 2:
+                        raise
+                    execute_revision += 1
+                    continue
                 return self._defer("COMPLETED", "session_handoff_pending", 0.1)
             if status == "COMPLETED":
                 handoff = await self._handoff(work, execution, new_run_deadline, ctx)
@@ -666,6 +673,7 @@ class ConversationScheduler(Plugin):
                     )
                 run_ref = handoff["run"]["run_id"]
                 resume = True
+                execute_revision = 0
                 continue
             if status == "WAIT_INPUT":
                 return self._defer(status, "classification_prefix_pending", 0.25)

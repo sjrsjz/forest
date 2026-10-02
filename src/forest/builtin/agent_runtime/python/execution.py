@@ -471,6 +471,97 @@ class AgentExecution:
             "error_code": values.get("error_code"),
         }
 
+    async def _finish_cancel(
+        self, request: dict, owner: dict, run: dict, recovery: dict
+    ) -> dict:
+        intent = recovery["cancel_request"]
+        model = recovery.get("model_request")
+        attempt = recovery.get("model_attempt")
+        tool = recovery.get("tool_call")
+        prepared = None
+        if (
+            isinstance(model, dict)
+            and model["state"] == "ATTEMPT_PREPARED"
+            and isinstance(attempt, dict)
+            and attempt["state"] == "PREPARED"
+        ):
+            prepared = {
+                "kind": "MODEL",
+                "effect_operation_id": attempt["effect_operation_ref"],
+                "attempt_id": attempt["attempt_id"],
+            }
+        elif (
+            isinstance(tool, dict)
+            and tool["state"] in {"PROPOSED", "WAIT_APPROVAL"}
+            and tool["effect_attempt_id"] is not None
+        ):
+            prepared = {
+                "kind": "TOOL",
+                "effect_operation_id": tool["effect_operation_ref"],
+                "attempt_id": tool["effect_attempt_id"],
+            }
+        checkpoint_id = stable(
+            "checkpoint-cancel", run["run_id"], intent["operation_id"],
+            run["progress"]["checkpoint_seq"] + 1,
+            run["progress"]["input_revision"],
+            run["progress"]["next_step_seq"],
+        )
+        state = await self.ctx.payloads.put_json(
+            {
+                "phase": "CANCELLED",
+                "run_id": run["run_id"],
+                "request_id": intent["operation_id"],
+                "reason_code": "AGENT_CANCELLED_BY_ADMIN",
+                "input_revision": run["progress"]["input_revision"],
+                "next_step_seq": run["progress"]["next_step_seq"],
+            },
+            owner_kind="checkpoint.state",
+            owner_id=checkpoint_id,
+            parents=(self._preset_ref(),),
+        )
+        agent = {
+            "owner": owner,
+            "request_id": intent["operation_id"],
+            "checkpoint_id": checkpoint_id,
+            "state": state,
+            "prepared": prepared,
+        }
+        plan = "agent.cancel-run"
+        payload = agent
+        if prepared is not None:
+            prepared["abandonment_operation_id"] = stable(
+                "abandon-cancel", intent["operation_id"], prepared["attempt_id"]
+            )
+            plan = "agent.cancel-prepared"
+            payload = {
+                "effect": {
+                    "protocol": "forest.effect-abandon/1",
+                    "effect_operation_id": prepared["effect_operation_id"],
+                    "attempt_id": prepared["attempt_id"],
+                    "abandonment_operation_id": prepared["abandonment_operation_id"],
+                    "reason_code": "AGENT_CANCELLED_BY_ADMIN",
+                    "cancel_effect": True,
+                },
+                "agent": agent,
+            }
+        try:
+            cancelled = await self.ctx.uow.call(
+                plan, payload,
+                operation_id=stable("cancel-run", intent["operation_id"], checkpoint_id),
+                timeout=15,
+            )
+        except ForestError as exc:
+            if exc.code not in {"AGENT_CANCEL_EFFECT_PENDING", "EFFECT_NOT_ABANDONABLE"}:
+                raise
+            return self._result(
+                request, "BLOCKED_UNKNOWN", run,
+                error_code="AGENT_CANCEL_EFFECT_PENDING",
+            )
+        return self._result(
+            request, "CANCELLED", cancelled,
+            error_code="AGENT_CANCELLED_BY_ADMIN",
+        )
+
     async def _model_snapshot(self, request: dict, run: dict, step_seq: int) -> dict:
         envelope = await self.ctx.services.call(
             "conversation.context.snapshot",
@@ -690,16 +781,40 @@ class AgentExecution:
             declarations, bindings = directory
             preset_context = await self._preset_context()
             while True:
-                if datetime.now(UTC) >= deadline:
-                    raise ForestError(
-                        "AGENT_DEADLINE_EXCEEDED", "Agent execution deadline expired", 409
-                    )
                 recovery = await self._recovery(run["run_id"])
                 state = recovery["state"]
                 run = await self._run(run["run_id"])
                 if state in {"COMPLETED", "FAILED", "CANCELLED"}:
                     return self._result(
                         request, state, run, error_code=run.get("error_code")
+                    )
+                if recovery.get("cancel_request") is not None:
+                    tool = recovery.get("tool_call")
+                    model = recovery.get("model_request")
+                    attempt = recovery.get("model_attempt")
+                    if (
+                        isinstance(model, dict)
+                        and model["state"] in {"DISPATCHING", "UNKNOWN"}
+                    ) or (
+                        isinstance(attempt, dict)
+                        and attempt["state"] in {"DISPATCHING", "UNKNOWN"}
+                    ) or (
+                        isinstance(tool, dict)
+                        and tool["state"] in {"DISPATCHING", "UNKNOWN"}
+                    ):
+                        if not (
+                            isinstance(tool, dict)
+                            and tool["state"] in {"DISPATCHING", "UNKNOWN"}
+                        ):
+                            return self._result(
+                                request, "BLOCKED_UNKNOWN", run,
+                                error_code="AGENT_CANCEL_EFFECT_PENDING",
+                            )
+                    else:
+                        return await self._finish_cancel(request, owner, run, recovery)
+                if datetime.now(UTC) >= deadline:
+                    raise ForestError(
+                        "AGENT_DEADLINE_EXCEEDED", "Agent execution deadline expired", 409
                     )
                 reload_operation = self.reload_operation()
                 if reload_operation is not None and state in {
@@ -728,9 +843,14 @@ class AgentExecution:
                             "Durable ToolCall is absent from the frozen directory",
                             409,
                         )
-                    resolved = await self.tools.invoke(
-                        owner=owner, tool=tool, binding=binding
-                    )
+                    try:
+                        resolved = await self.tools.invoke(
+                            owner=owner, tool=tool, binding=binding
+                        )
+                    except ForestError as exc:
+                        if exc.code != "AGENT_CANCEL_REQUESTED":
+                            raise
+                        continue
                     if resolved["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                         continue
                     return self._result(
@@ -755,9 +875,14 @@ class AgentExecution:
                             "Durable ToolCall is absent from the frozen directory",
                             409,
                         )
-                    invoked_tool = await self.tools.invoke(
-                        owner=owner, tool=tool, binding=binding
-                    )
+                    try:
+                        invoked_tool = await self.tools.invoke(
+                            owner=owner, tool=tool, binding=binding
+                        )
+                    except ForestError as exc:
+                        if exc.code != "AGENT_CANCEL_REQUESTED":
+                            raise
+                        continue
                     if invoked_tool["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                         continue
                     return self._result(
@@ -782,9 +907,14 @@ class AgentExecution:
                             "Durable ToolCall is absent from the frozen directory",
                             409,
                         )
-                    reconciled = await self.tools.invoke(
-                        owner=owner, tool=tool, binding=binding
-                    )
+                    try:
+                        reconciled = await self.tools.invoke(
+                            owner=owner, tool=tool, binding=binding
+                        )
+                    except ForestError as exc:
+                        if exc.code != "AGENT_CANCEL_REQUESTED":
+                            raise
+                        continue
                     if reconciled["status"] in {"SUCCEEDED", "FAILED", "CANCELLED"}:
                         continue
                     return self._result(
@@ -986,6 +1116,8 @@ class AgentExecution:
                             effect_operation_id=stable("model-effect", attempt_id),
                         )
                     except ForestError as exc:
+                        if exc.code == "AGENT_CANCEL_REQUESTED":
+                            continue
                         reason_code = {
                             "MODEL_REQUEST_PROVIDER_REBIND_REQUIRED":
                                 "AGENT_FROZEN_PROVIDER_INCOMPATIBLE",
@@ -1003,28 +1135,33 @@ class AgentExecution:
                             raise
                         return blocked
                 else:
-                    invoked = await self.model.invoke(
-                        owner=owner,
-                        request_id=request_id,
-                        attempt_id=attempt_id,
-                        effect_operation_id=stable("model-effect", attempt_id),
-                        snapshot=snapshot,
-                        preset_context=[] if is_repair else preset_context,
-                        source_refs=source_refs,
-                        tools=declarations,
-                        evidence_ref=evidence_ref,
-                        memory_query_id=memory_query_id,
-                        repair=repair,
-                        output_tokens=self.config["output_tokens"],
-                        stream=self.config["stream"],
-                        request_kind=(
-                            "REPAIR"
-                            if is_repair
-                            else "PRIMARY"
-                            if step_seq == 1
-                            else "CONTINUATION"
-                        ),
-                    )
+                    try:
+                        invoked = await self.model.invoke(
+                            owner=owner,
+                            request_id=request_id,
+                            attempt_id=attempt_id,
+                            effect_operation_id=stable("model-effect", attempt_id),
+                            snapshot=snapshot,
+                            preset_context=[] if is_repair else preset_context,
+                            source_refs=source_refs,
+                            tools=declarations,
+                            evidence_ref=evidence_ref,
+                            memory_query_id=memory_query_id,
+                            repair=repair,
+                            output_tokens=self.config["output_tokens"],
+                            stream=self.config["stream"],
+                            request_kind=(
+                                "REPAIR"
+                                if is_repair
+                                else "PRIMARY"
+                                if step_seq == 1
+                                else "CONTINUATION"
+                            ),
+                        )
+                    except ForestError as exc:
+                        if exc.code != "AGENT_CANCEL_REQUESTED":
+                            raise
+                        continue
                 if invoked["status"] == "UNKNOWN":
                     return self._result(
                         request,

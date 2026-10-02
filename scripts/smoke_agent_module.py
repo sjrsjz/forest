@@ -84,7 +84,7 @@ def main() -> None:
  sandbox="allow-scripts allow-same-origin"></iframe>
 <script>
 const frame=document.getElementById('agent'),channel=new MessageChannel(),nonce='agent-smoke';
-window.calls=[];window.ready=false;
+window.calls=[];window.ready=false;window.cancelled=false;
 frame.addEventListener('load',()=>{
   channel.port1.onmessage=event=>{
     const data=event.data;
@@ -93,8 +93,16 @@ frame.addEventListener('load',()=>{
       channel.port1.postMessage({protocol:data.protocol,type:'initialize',nonce});
       window.ready=true;return;
     }
-    if(data.type!=='query')return;
-    calls.push({operation_id:data.operation_id,value:data.value});
+    if(!['query','action'].includes(data.type))return;
+    calls.push({type:data.type,operation_id:data.operation_id,value:data.value});
+    if(data.type==='action'){
+      if(data.operation_id!=='agent.cancel.request')throw new Error('Unexpected action');
+      window.cancelled=true;
+      channel.port1.postMessage({protocol:data.protocol,nonce,type:'operation-result',
+        request_id:data.request_id,value:{protocol:'forest.agent-cancel-requested/1',
+        run_id:'run:one',request_id:'cancel:one',state:'REQUESTED'}});
+      return;
+    }
     let value;
     if(data.operation_id==='agent.sessions.page'){
       value=__SESSIONS__;
@@ -104,7 +112,8 @@ frame.addEventListener('load',()=>{
       value={run_id:'run:one',session_id:'session:one',conversation_ref:'onebot:group:933179609',
         state:'PREPARING_MODEL',error_code:null,progress:{input_revision:1,checkpoint_seq:0},
         current:{model_request_id:null,tool_call_id:null},created_at:'2026-10-02T00:00:00Z',
-        updated_at:'2026-10-02T00:00:01Z',terminal_at:null};
+        updated_at:'2026-10-02T00:00:01Z',terminal_at:null,
+        cancel_request:window.cancelled?{requested_by:'admin:smoke',reason_code:'ADMIN_CANCEL'}:null};
     }else if(data.operation_id==='agent.steps.page'){
       value=data.value.kind==='MODEL_TURN'?__TURN__:__TOOL__;
     }else throw new Error('Unexpected operation '+data.operation_id);
@@ -161,6 +170,16 @@ frame.addEventListener('load',()=>{
                 expect(frame.locator("#detail")).to_contain_text("run:one")
                 expect(frame.locator("#model-turns")).to_contain_text("turn:one")
                 expect(frame.locator("#tool-calls")).to_contain_text("diagnostic_echo")
+                frame.locator("#request-cancel").click()
+                expect(frame.locator("#cancel-status")).to_contain_text("ADMIN_CANCEL")
+                expect(frame.locator("#request-cancel")).to_be_hidden()
+                cancel_calls = [call for call in page.evaluate("window.calls")
+                                if call["operation_id"] == "agent.cancel.request"]
+                assert cancel_calls == [{
+                    "type": "action", "operation_id": "agent.cancel.request",
+                    "value": {"run_id": "run:one", "expected_checkpoint_seq": 0,
+                              "reason_code": "ADMIN_CANCEL"},
+                }]
                 frame.locator("#next").click()
                 expect(frame.locator("#next")).to_be_hidden()
                 frame.locator("#conversation").fill("onebot:group:933179609")

@@ -112,7 +112,9 @@ Agent 的工具目录 SDK 因此只有 `list`、`dispatch_prepared` 和 `query_h
 
 “Agent 正在工作时有新触发”只改变下一次模型调用的输入版本，不启动并发响应；模型流和未闭合工具组中途不修改请求。Agent 完成且没有新 trigger 时，静默排空剩余普通消息，不额外调用模型。
 
-管理取消的竞态边界覆盖三种外部效果交接和最终回复提交：管理动作必须在锁定 Run 后校验期望 `checkpoint_seq`，用调用 operation ID 幂等写入唯一不可变意图，并由管理入口注入可信管理员主体。模型与工具 handoff、旧版 `agent.complete-run-record` 及正式 `agent.commit-final-run` 均在同一 Run 锁下检查意图；若完成事实先提交，取消动作只能拒绝，不能撤销已经发布的回复。意图先提交时，尚未交接的效果不得再 dispatch，最终回复不得再提交。已交接效果必须先走原 Effect 观察或查询端口收敛；`DISPATCHING/UNKNOWN` 没有权威结论时，取消保持待处理，不能把 Run 和 Session 伪装成 `CANCELLED`。尚未交接的 `PREPARED` Effect 应通过 `kernel.effect` 的受限 abandon participant 与 Agent 状态在同一 UnitOfWork 收敛。只有消除所有未决外部效果后，Agent 包才能持 owner fence 写入取消 checkpoint、原子关闭 Run/Session；Conversation 再按准确领取组取消 trigger 并释放 lane。重启后的同一意图继续这一状态机，不创建新的 Agent 或外部效果。
+管理取消的竞态边界覆盖外部效果交接和最终回复提交。`agent.cancel.request` 是包管理动作：Web 权威注入管理员主体，私有 Domain Command 锁定 Run、校验期望 `checkpoint_seq`，以调用 operation ID 幂等写入唯一不可变意图；WebUI 展示意图状态并禁止重复请求。模型与工具 handoff、旧版 `agent.complete-run-record` 及正式 `agent.commit-final-run` 均在同一 Run 锁下检查意图；若完成事实先提交，取消动作拒绝，不能撤销已经发布的回复。意图先提交时，尚未交接的效果不得再 dispatch，最终回复不得再提交。
+
+Agent 执行循环每轮先读取持久意图，再判断 deadline 和安全点。无未决效果时走 `agent.cancel-run`；模型或工具处于 `PREPARED` 时，以 `kernel.effect/effect.abandon` → `agent.runtime/agent.cancel-run-record` 的 UnitOfWork 原子废弃效果、写取消 checkpoint 并关闭 Run/Session。恢复查询必须能在 `PREPARING_MODEL` 且 Run 尚未填入 `current_model_request_id` 时取回 `ATTEMPT_PREPARED` 模型尝试。`READY/NOT_APPLIED` 模型请求在关闭时标为 `ABANDONED`；未交接的工具调用写管理观察记录再转 `CANCELLED`。已交接效果先走原 Effect 观察或工具查询端口收敛；`DISPATCHING/UNKNOWN` 没有权威结论时仅返回待对账，不得伪装为已取消。Conversation 收到 Agent 的 `CANCELLED` 后按准确领取组终结 trigger 并释放 lane；若取消意图在最终回复提交事务前获胜，Scheduler 用新的 Agent 执行调用读取意图，不沿用已缓存的 `FINAL_READY` 回执。重启后的同一意图继续这一状态机，不创建新的 Agent 或外部效果。
 
 ## 4. 冻结 lane 身份与回复路由
 
@@ -155,6 +157,8 @@ CorePrompt 是 `agent.runtime` 包内版本化协议，随 Agent spec 和 parser
 | `FINAL_READY` | 用稳定计划 ID 重试三 participant UnitOfWork |
 | `COMPLETED` 且 Session 活跃 | 跳过模型和回复提交，只执行幂等 Session 交接 |
 | `FAILED/AGENT_PROTOCOL_FAILED` | Conversation 以准确 Session/Run fence 终结该 Run 已领取的 trigger，保存失败成员与原因并释放 lane；重启后重放同一失败 operation |
+| 已有取消意图且无未决效果 | Agent 写取消 checkpoint 并关闭 Run/Session，Conversation 终结已领取 trigger 后释放 lane |
+| 已有取消意图且效果 `DISPATCHING/UNKNOWN` | 保留意图与原效果身份，继续原查询/观察；无权威结论时不进入终态 |
 
 Scheduler quiesce 先关闭新 actor admission，再等待已领取群离开模型/工具 handoff 临界区并到达 checkpoint。不能通过取消协程把已 handoff 的外部调用伪装成未执行；结果必须由 Provider/Effect/Delivery 账本决定。
 
@@ -164,7 +168,7 @@ Scheduler quiesce 先关闭新 actor admission，再等待已领取群离开模�
 
 会话、Run、模型请求/回合和工具调用均归 `agent.runtime` 的私有 Repository；WebUI 只能通过该包当前 Generation 的管理查询读取，不能跨 schema 拼接 Conversation 或 Provider 表。Run 将 `conversation_ref` 作为不可变身份存储，并用 `(bot_id,session_id,conversation_ref)` 外键锁定所属 Session，避免跨群管理视图依赖运行中的 lane 或从字符串前缀猜测归属。全 Bot 与单会话列表分别有按 `(created_at DESC,run_id DESC)` 的索引，状态筛选另有对应索引；单页最多 100 条。游标绑定会话、状态与首次查询时间，后续页只扫描该创建时间界限内更早的 Run。Run 的状态会继续变化，这个列表是活动诊断视图而不是跨 HTTP 请求冻结的 MVCC 历史快照；详情查询始终读取当前持久状态。列表只返回执行元数据，不返回 Prompt、模型正文、工具参数或 Payload 内容。
 
-模块自带紧凑管理 UI。`agent.sessions.page` 按 Bot、群聊及 Session 状态有界分页，点击 Session 后通过准确 `session_id` 筛选 `agent.runs.page`，`agent.run` 返回当前 Run 状态。Session 与 Run 分别以创建时间及身份 ID 为键集游标，游标绑定筛选和首次查询时间，单页最多 100 条。`agent.steps.page` 在单个 Run 内按 step 序号分别分页读取 ModelTurn 或 ToolCall，可按工具状态筛选；游标绑定 Run、记录种类、筛选条件和首次查询时间。ModelTurn 通过 `(bot_id,run_id,request_id,step_seq)` 外键指向同一 Run 的 ModelRequest，ToolCall 通过 `(bot_id,run_id,turn_id,step_seq)` 外键指向同一 Run 的 ModelTurn，因此归因由数据库约束而不是管理层推断。列表只暴露时序和状态元数据，不暴露模型正文或工具参数；可变状态仍是当前诊断值，不承诺跨页冻结。取消及 UNKNOWN 对账必须继续在同一包管理契约内实现，不能在壳层新增 Agent 专用路由或读取此列表的内部表。
+模块自带紧凑管理 UI。`agent.sessions.page` 按 Bot、群聊及 Session 状态有界分页，点击 Session 后通过准确 `session_id` 筛选 `agent.runs.page`，`agent.run` 返回当前 Run 状态。Session 与 Run 分别以创建时间及身份 ID 为键集游标，游标绑定筛选和首次查询时间，单页最多 100 条。`agent.steps.page` 在单个 Run 内按 step 序号分别分页读取 ModelTurn 或 ToolCall，可按工具状态筛选；游标绑定 Run、记录种类、筛选条件和首次查询时间。ModelTurn 通过 `(bot_id,run_id,request_id,step_seq)` 外键指向同一 Run 的 ModelRequest，ToolCall 通过 `(bot_id,run_id,turn_id,step_seq)` 外键指向同一 Run 的 ModelTurn，因此归因由数据库约束而不是管理层推断。列表只暴露时序和状态元数据，不暴露模型正文或工具参数；可变状态仍是当前诊断值，不承诺跨页冻结。取消动作与意图状态由 Agent 包管理契约提供；UNKNOWN 效果的人工对账入口仍需在效果所有者的受限端口中实现，不能在壳层新增 Agent 专用路由或读取此列表的内部表。
 
 ## 7. 实现拒绝项
 

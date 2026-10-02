@@ -1092,6 +1092,65 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert prepared_attempt["input_payload"] == effect_input.canonical()
         assert prepared_attempt["wire_payload"] == wire.canonical()
         assert prepared_attempt["permit"]["attempt_id"] == "model-attempt/package/1"
+        prepared_model_recovery = await instance.invoke_management_query(
+            recovery_declaration, {"run_id": "run/agent-package/model-port"},
+            timeout_seconds=10,
+        )
+        assert prepared_model_recovery["model_request"]["state"] == "ATTEMPT_PREPARED"
+        assert prepared_model_recovery["model_attempt"]["state"] == "PREPARED"
+        prepared_model_cancel_state = await _payload(
+            kernel, owner_kind="checkpoint.state",
+            owner_id="checkpoint/package/prepared-model-cancel",
+            value=b'{"phase":"CANCELLED","model":"prepared"}',
+        )
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute(sql.SQL(
+                    "INSERT INTO {}.run_cancel_requests "
+                    "(bot_id,operation_id,input_digest,run_id,expected_checkpoint_seq,"
+                    "requested_by,reason_code) "
+                    "SELECT bot_id,%s,%s,run_id,checkpoint_seq,%s,%s "
+                    "FROM {}.agent_runs WHERE bot_id=%s AND run_id=%s"
+                ).format(
+                    sql.Identifier(package.configuration.namespace),
+                    sql.Identifier(package.configuration.namespace),
+                ), (
+                    "cancel/package/prepared-model",
+                    digest_json({"cancel": "prepared-model"}),
+                    "admin:test", "ADMIN_CANCEL", store.bot_id,
+                    "run/agent-package/model-port",
+                ))
+                prepared_model_cancelled = await participant.invoke_in(
+                    conn, "agent.cancel-run-record", {
+                        "protocol": "forest.uow-step/1", "caller": caller,
+                        "input": {
+                            "owner": request_envelope["input"]["owner"],
+                            "request_id": "cancel/package/prepared-model",
+                            "checkpoint_id": prepared_model_cancel_state.owner_id,
+                            "state": prepared_model_cancel_state.canonical(),
+                            "prepared": {
+                                "kind": "MODEL",
+                                "effect_operation_id": "model-effect/package/1",
+                                "attempt_id": "model-attempt/package/1",
+                                "abandonment_operation_id": "abandon/package/prepared-model",
+                            },
+                        },
+                        "prior": {"effect": {
+                            "attempt_id": "model-attempt/package/1",
+                            "abandonment_operation_id": "abandon/package/prepared-model",
+                            "reason_code": "AGENT_CANCELLED_BY_ADMIN",
+                            "cancel_effect": True,
+                        }},
+                    },
+                    operation_id="agent-cancel/package/prepared-model",
+                    causal_root_kind="agent.run",
+                    causal_root_id="run/agent-package/model-port",
+                    parent_call_id="call:agent-package/prepared-model-cancel",
+                    timeout_seconds=10,
+                )
+                assert prepared_model_cancelled["state"] == "CANCELLED"
+                assert prepared_model_cancelled["session"]["state"] == "CANCELLED"
+                raise _RollbackVerification
         handoff_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -1768,6 +1827,71 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert prepared_recovery["tool_call"]["effect_attempt_id"] == (
             "tool-attempt/package/repair"
         )
+        prepared_cancel_state = await _payload(
+            kernel, owner_kind="checkpoint.state",
+            owner_id="checkpoint/package/prepared-tool-cancel",
+            value=b'{"phase":"CANCELLED","tool":"prepared"}',
+        )
+        prepared_cancel_envelope = {
+            "protocol": "forest.uow-step/1", "caller": caller,
+            "input": {
+                "owner": request_envelope["input"]["owner"],
+                "request_id": "cancel/package/prepared-tool",
+                "checkpoint_id": prepared_cancel_state.owner_id,
+                "state": prepared_cancel_state.canonical(),
+                "prepared": None,
+            },
+            "prior": {},
+        }
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute(sql.SQL(
+                    "INSERT INTO {}.run_cancel_requests "
+                    "(bot_id,operation_id,input_digest,run_id,expected_checkpoint_seq,"
+                    "requested_by,reason_code) "
+                    "SELECT bot_id,%s,%s,run_id,checkpoint_seq,%s,%s "
+                    "FROM {}.agent_runs WHERE bot_id=%s AND run_id=%s"
+                ).format(
+                    sql.Identifier(package.configuration.namespace),
+                    sql.Identifier(package.configuration.namespace),
+                ), (
+                    "cancel/package/prepared-tool",
+                    digest_json({"cancel": "prepared-tool"}),
+                    "admin:test", "ADMIN_CANCEL", store.bot_id,
+                    "run/agent-package/model-port",
+                ))
+                with pytest.raises(ForestError) as pending_effect:
+                    await participant.invoke_in(
+                        conn, "agent.cancel-run-record", prepared_cancel_envelope,
+                        operation_id="agent-cancel/package/missing-proof",
+                        causal_root_kind="agent.run",
+                        causal_root_id="run/agent-package/model-port",
+                        parent_call_id="call:agent-package/missing-proof",
+                        timeout_seconds=10,
+                    )
+                assert pending_effect.value.code == "AGENT_CANCEL_EFFECT_PENDING"
+                prepared_cancel_envelope["input"]["prepared"] = {
+                    "kind": "TOOL", "effect_operation_id": "tool-effect/package/repair",
+                    "attempt_id": "tool-attempt/package/repair",
+                    "abandonment_operation_id": "abandon/package/prepared-tool",
+                }
+                prepared_cancel_envelope["prior"]["effect"] = {
+                    "attempt_id": "tool-attempt/package/repair",
+                    "abandonment_operation_id": "abandon/package/prepared-tool",
+                    "reason_code": "AGENT_CANCELLED_BY_ADMIN",
+                    "cancel_effect": True,
+                }
+                prepared_cancelled = await participant.invoke_in(
+                    conn, "agent.cancel-run-record", prepared_cancel_envelope,
+                    operation_id="agent-cancel/package/prepared-tool",
+                    causal_root_kind="agent.run",
+                    causal_root_id="run/agent-package/model-port",
+                    parent_call_id="call:agent-package/prepared-tool-cancel",
+                    timeout_seconds=10,
+                )
+                assert prepared_cancelled["state"] == "CANCELLED"
+                assert prepared_cancelled["session"]["state"] == "CANCELLED"
+                raise _RollbackVerification
         handoff_tool_envelope = {
             "protocol": "forest.uow-step/1",
             "caller": caller,
@@ -2714,5 +2838,95 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         )
         assert final_snapshot["session"]["state"] == "CLOSED"
         assert final_snapshot["session"]["active_run_id"] is None
+
+        third_start = json.loads(json.dumps(start_envelope))
+        third_start["caller"]["generation_id"] = replacement_generation
+        third_start["input"].update(
+            session_id="session/agent-package/cancel",
+            run_id="run/agent-package/cancel",
+        )
+        third_start["input"]["input_batch"].update(
+            input_batch_ref="input-batch/agent-package/cancel",
+            trigger_claim={
+                "ref": "claim:" + "c" * 64,
+                "count": 1,
+                "last_trigger_ref": "trigger/cancel",
+                "last_trigger_ingress_seq": 1,
+                "digest": digest_json({"claim": "cancel"}),
+            },
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            cancellable = await replacement_participant.invoke_in(
+                conn, "agent.start-run-record", third_start,
+                operation_id="agent-run-start/package/cancel",
+                causal_root_kind="conversation.run",
+                causal_root_id="run/agent-package/cancel",
+                parent_call_id="call:agent-package/start-cancel",
+                timeout_seconds=10,
+            )
+        assert cancellable["state"] == "PREPARING_MODEL"
+        actor = SimpleNamespace(actor_ref="admin:test", web_subject_ref="admin:test")
+        with pytest.raises(ForestError) as stale_cancel:
+            await replacement.management_contract.action(
+                "agent.cancel.request", operation_id="cancel/package/stale",
+                payload={"run_id": "run/agent-package/cancel",
+                         "expected_checkpoint_seq": 1,
+                         "reason_code": "ADMIN_CANCEL"},
+                authorization=actor,
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+        assert stale_cancel.value.code == "AGENT_CANCEL_BOUNDARY_STALE"
+        requested = await replacement.management_contract.action(
+            "agent.cancel.request", operation_id="cancel/package/valid",
+            payload={"run_id": "run/agent-package/cancel",
+                     "expected_checkpoint_seq": 0,
+                     "reason_code": "ADMIN_CANCEL"},
+            authorization=actor,
+            authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+        )
+        assert requested["state"] == "REQUESTED"
+        assert await replacement.management_contract.action(
+            "agent.cancel.request", operation_id="cancel/package/valid",
+            payload={"run_id": "run/agent-package/cancel",
+                     "expected_checkpoint_seq": 0,
+                     "reason_code": "ADMIN_CANCEL"},
+            authorization=actor,
+            authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+        ) == requested
+        cancel_owner = await _lease_operation(
+            store, replacement_participant, replacement_generation,
+            "agent.acquire-run-record",
+            {"run_id": "run/agent-package/cancel", "owner_id": "agent-worker/cancel",
+             "lease_seconds": 120},
+            "agent-acquire/package/cancel",
+        )
+        cancel_state = await _payload(
+            kernel, owner_kind="checkpoint.state",
+            owner_id="checkpoint/package/cancel",
+            value=b'{"phase":"CANCELLED"}',
+        )
+        cancel_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": {"component_id": "agent.runtime",
+                       "generation_id": replacement_generation},
+            "input": {"owner": _owner_ref(cancel_owner),
+                      "request_id": requested["request_id"],
+                      "checkpoint_id": cancel_state.owner_id,
+                      "state": cancel_state.canonical(), "prepared": None},
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            cancelled = await replacement_participant.invoke_in(
+                conn, "agent.cancel-run-record", cancel_envelope,
+                operation_id="agent-cancel/package/direct",
+                causal_root_kind="agent.run",
+                causal_root_id="run/agent-package/cancel",
+                parent_call_id="call:agent-package/cancel",
+                timeout_seconds=10,
+            )
+        assert cancelled["state"] == "CANCELLED"
+        assert cancelled["session"]["state"] == "CANCELLED"
+        assert cancelled["cancel_request"]["requested_by"] == "admin:test"
+        assert cancelled["progress"]["checkpoint_seq"] == 1
     finally:
         assert await registry.close() == []
