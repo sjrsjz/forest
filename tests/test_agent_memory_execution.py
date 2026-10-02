@@ -13,6 +13,7 @@ from forest.errors import ForestError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 from execution import AgentExecution
+from model_execution import ModelExecution
 
 
 class MemoryServices:
@@ -43,6 +44,42 @@ class MemoryServices:
         if name == "memory.query.cancel":
             return {"query_id": body["query_id"], "status": "CANCELLED"}
         raise AssertionError(name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload_error", "expected"),
+    [("PAYLOAD_REVOKED", "AGENT_FROZEN_MODEL_INVALID"),
+     ("PAYLOAD_DIGEST_MISMATCH", "AGENT_FROZEN_MODEL_INVALID"),
+     ("PAYLOAD_AUTHORITY_MISSING", "PAYLOAD_AUTHORITY_MISSING")],
+)
+async def test_frozen_model_payload_failure_is_terminal_only_when_definitive(
+    monkeypatch, payload_error, expected
+):
+    async def profile(_request_id):
+        return ({"profile_ref": "profile/1", "capability_digest": "digest/1"},
+                SimpleNamespace(model="model/1"))
+
+    async def frozen(_name, _body):
+        return {"request_id": "request/1", "provider_profile_ref": "profile/1",
+                "capability_digest": "digest/1", "model_ref": "model/1",
+                "projection": {"owner_id": "request/1"}, "wire": {"owner_id": "attempt/1"}}
+
+    async def unreadable(_reference):
+        raise ForestError(payload_error, "payload unavailable", 409)
+
+    model = ModelExecution(SimpleNamespace(
+        identity={"graph_id": "graph/1", "graph_revision": 1, "bot_id": "bot/1"},
+        queries=SimpleNamespace(call=frozen),
+        payloads=SimpleNamespace(read_bytes=unreadable),
+    ))
+    monkeypatch.setattr(model, "_profile", profile)
+    with pytest.raises(ForestError) as failure:
+        await model.resume_frozen(
+            owner={"run_id": "run/1"}, request_id="request/1",
+            attempt_id="attempt/1", effect_operation_id="effect/1",
+        )
+    assert failure.value.code == expected
 
 
 def run():

@@ -13,6 +13,29 @@ from turn_recording import stable
 from forest.errors import ForestError
 from forest.model_contract import MediaSnapshot, ModelCapabilities
 
+_FROZEN_PAYLOAD_FAILURES = frozenset({
+    "PAYLOAD_REFERENCE_INVALID",
+    "PAYLOAD_IDENTITY_CONFLICT",
+    "PAYLOAD_NOT_FOUND",
+    "PAYLOAD_REVOKED",
+    "PAYLOAD_DIGEST_MISMATCH",
+    "PAYLOAD_ID_CONFLICT",
+    "PAYLOAD_PARENT_UNAVAILABLE",
+})
+
+
+async def _frozen_payload_result(awaitable):
+    try:
+        return await awaitable
+    except ForestError as exc:
+        if exc.code not in _FROZEN_PAYLOAD_FAILURES:
+            raise
+        raise ForestError(
+            "AGENT_FROZEN_MODEL_INVALID",
+            "Frozen model Payload is unavailable or differs from its exact reference",
+            409,
+        ) from exc
+
 
 def _digest(value) -> str:
     encoded = json.dumps(
@@ -410,8 +433,12 @@ class ModelExecution:
                 "Frozen request is bound to an incompatible Provider profile",
                 409,
             )
-        projection_bytes = await self.ctx.payloads.read_bytes(frozen["projection"])
-        wire_bytes = await self.ctx.payloads.read_bytes(frozen["wire"])
+        projection_bytes = await _frozen_payload_result(
+            self.ctx.payloads.read_bytes(frozen["projection"])
+        )
+        wire_bytes = await _frozen_payload_result(
+            self.ctx.payloads.read_bytes(frozen["wire"])
+        )
         try:
             manifest = json.loads(projection_bytes)
             body = json.loads(wire_bytes)
@@ -507,7 +534,7 @@ class ModelExecution:
         )
         successor_attempt_id = stable("model-attempt", successor_id, 1)
         successor_manifest = {**manifest, "request_id": successor_id}
-        projection = await self.ctx.payloads.put_bytes(
+        projection_write = self.ctx.payloads.put_bytes(
             json.dumps(
                 successor_manifest, sort_keys=True, separators=(",", ":"),
                 ensure_ascii=False, allow_nan=False,
@@ -515,17 +542,19 @@ class ModelExecution:
             owner_kind="model.projection", owner_id=successor_id,
             media_type="application/json", parents=(frozen["projection"],),
         )
-        wire = await self.ctx.payloads.put_bytes(
+        projection = await _frozen_payload_result(projection_write)
+        wire_write = self.ctx.payloads.put_bytes(
             wire_bytes,
             owner_kind="model.wire", owner_id=successor_attempt_id,
             media_type="application/json", parents=(frozen["wire"], projection),
         )
+        wire = await _frozen_payload_result(wire_write)
         if wire["digest"] != frozen["wire"]["digest"]:
             raise ForestError(
                 "AGENT_FROZEN_MODEL_INVALID",
                 "Inherited wire differs from the frozen predecessor", 409,
             )
-        await self.ctx.uow.call(
+        inheritance = self.ctx.uow.call(
             "agent.inherit-model-request",
             {
                 "effect": {
@@ -560,6 +589,7 @@ class ModelExecution:
             ),
             timeout=15,
         )
+        await _frozen_payload_result(inheritance)
         return successor_id
 
     async def _dispatch_attempt(
