@@ -190,6 +190,33 @@ def run():
 
 
 @pytest.mark.asyncio
+async def test_busy_run_owner_is_a_deferred_resume(monkeypatch):
+    durable = {**run(), "state": "PREPARING_MODEL"}
+
+    async def load_or_start(_request):
+        return durable
+
+    async def busy(_name, _body, **_kwargs):
+        raise ForestError("AGENT_RUN_BUSY", "Previous Worker still owns Run", 409)
+
+    agent = AgentExecution(
+        SimpleNamespace(
+            uow=SimpleNamespace(call=busy),
+            operations=SimpleNamespace(stable=lambda value: value),
+        ), {}, lambda: None,
+    )
+    monkeypatch.setattr(agent, "_load_or_start", load_or_start)
+    result = await agent.execute({
+        "actor": {"conversation_id": durable["conversation_ref"]},
+        "conversation_id": durable["conversation_ref"],
+        "absolute_deadline": None, "resume": True,
+        "session_ref": "session/1", "run_ref": durable["run_id"],
+    })
+    assert result["status"] == "WAIT_OWNER"
+    assert result["run_ref"] == durable["run_id"]
+
+
+@pytest.mark.asyncio
 async def test_recall_waits_for_capture_then_replays_one_frozen_query():
     durable = run()
     frozen_deadline = (datetime.fromisoformat(durable["created_at"])

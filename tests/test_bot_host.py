@@ -54,6 +54,7 @@ from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.unit_of_work import (
     ComponentConfigurationApplyScope,
     PostgresComponentConfigurationApplyCoordinator,
+    PostgresPackageUnitOfWorkCoordinator,
 )
 from forest.vector_index_effect_driver import vector_collection_name
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
@@ -3455,12 +3456,14 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish", "reload-full")
+    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt")
 )
-async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario):
+async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
+    if scenario == "reload-lost-receipt":
+        monkeypatch.setattr("forest.bot_host._HOST_LEASE_TTL", timedelta(seconds=15))
     name = "forest_recall_" + uuid4().hex
     admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
@@ -3504,10 +3507,11 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
     clients = []
     RecordingModelClient.requests = []
     RecordingModelClient.first_gate = (
-        asyncio.Event() if scenario in {"cross-group", "requeue", "reload", "reload-publish", "reload-full"} else None
+        asyncio.Event() if scenario in {"cross-group", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt"} else None
     )
     RecordingModelClient.not_sent_attempts = (
         3 if scenario == "requeue" else 2 if scenario == "reload-full"
+        else 1 if scenario == "reload-lost-receipt"
         else 1 if scenario in {"reload", "reload-publish"} else 0
     )
     RecordingModelClient.reply_text = (
@@ -3522,15 +3526,18 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
         clients.append(client)
         return client
 
-    host = BotHost(
-        settings,
-        model_client_factory=RecordingModelClient,
-        embedding_client_factory=None if real_transport else FakeEmbeddingClient,
-        media_client_factory=ValidPngMediaClient if valid_media else FakeMediaClient,
-        vector_index_client_factory=None if real_transport else FakeMilvusClient,
-        websocket_client_factory=create_websocket,
-        package_catalog=PackageCatalog(tmp_path / "recall-packages"),
-    )
+    def create_host(catalog_name):
+        return BotHost(
+            settings,
+            model_client_factory=RecordingModelClient,
+            embedding_client_factory=None if real_transport else FakeEmbeddingClient,
+            media_client_factory=ValidPngMediaClient if valid_media else FakeMediaClient,
+            vector_index_client_factory=None if real_transport else FakeMilvusClient,
+            websocket_client_factory=create_websocket,
+            package_catalog=PackageCatalog(tmp_path / catalog_name),
+        )
+
+    host = create_host("recall-packages")
     try:
         await host.start()
         memory_schema = next(
@@ -3743,7 +3750,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                     (settings.bot_id,),
                 )).fetchone()
             assert resumed["reload_operation_id"] is None
-        if scenario in {"reload-publish", "reload-full"}:
+        if scenario in {"reload-publish", "reload-full", "reload-lost-receipt"}:
             old_graph = host.registry
             old_agent = old_graph.get("agent.runtime")
             old_provider_generation = old_graph.get(
@@ -3766,6 +3773,32 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
 
             old_agent.begin_replacement = tracked_replacement
             old_graph.drain_owned_work_for_replacement = tracked_drain
+            lost_receipt = asyncio.Event()
+            if scenario == "reload-lost-receipt":
+                original_execute = PostgresPackageUnitOfWorkCoordinator.execute
+
+                async def drop_inheritance_receipt(
+                    coordinator, scope, declaration, payload, **kwargs
+                ):
+                    result = await original_execute(
+                        coordinator, scope, declaration, payload, **kwargs
+                    )
+                    if (declaration["name"] == "agent.inherit-model-request"
+                            and not lost_receipt.is_set()):
+                        victim = host.registry.get("agent.runtime")._worker
+                        assert victim.alive
+                        victim.process.kill()
+                        lost_receipt.set()
+                        raise ForestError(
+                            "TEST_INHERITANCE_RECEIPT_LOST",
+                            "Agent Worker died after inheritance commit", 503,
+                        )
+                    return result
+
+                monkeypatch.setattr(
+                    PostgresPackageUnitOfWorkCoordinator, "execute",
+                    drop_inheritance_receipt,
+                )
             replacement_task = asyncio.create_task(
                 host.replace_runtime_graph(
                     target_component_id=(
@@ -3810,10 +3843,98 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario)
                 assert replacement.get("agent.runtime").generation_identity.generation_id != (
                     parked["reload_generation_id"]
                 )
-                if scenario == "reload-full":
+                if scenario in {"reload-full", "reload-lost-receipt"}:
                     assert replacement.get(
                         "provider.chat-completions"
                     ).generation_identity.generation_id != old_provider_generation
+                if scenario == "reload-lost-receipt":
+                    async with asyncio.timeout(60):
+                        await lost_receipt.wait()
+                    agent_schema = next(
+                        item.storage.spec.namespace for item in replacement.descriptors
+                        if item.component_id == "agent.runtime"
+                    )
+                    async with host.store.pool.connection() as conn:
+                        inherited = await (await conn.execute(
+                            sql.SQL(
+                                "SELECT request_id,state FROM {}.model_requests "
+                                "WHERE bot_id=%s ORDER BY request_revision"
+                            ).format(sql.Identifier(agent_schema)),
+                            (settings.bot_id,),
+                        )).fetchall()
+                    assert len(inherited) == 2
+                    assert [item["state"] for item in inherited] == ["ABANDONED", "READY"]
+                    assert len(RecordingModelClient.requests) == 1
+                    runtime_schema = host._kernel.runtime.namespace
+                    try:
+                        await host.close()
+                    except ForestError as exc:
+                        assert exc.code == "RUNTIME_MODULE_CLEANUP_FAILED"
+                        assert exc.details["errors"]
+                    # A forced crash leaves the old HostLease fenced until its
+                    # database deadline. Observe that deadline; never rewrite it.
+                    observer = await psycopg.AsyncConnection.connect(uri)
+                    try:
+                        async with asyncio.timeout(180):
+                            while True:
+                                lease = await (await observer.execute(
+                                    sql.SQL(
+                                        "SELECT expires_at<=clock_timestamp() AS expired "
+                                        "FROM {}.host_lease WHERE bot_id=%s"
+                                    ).format(sql.Identifier(runtime_schema)),
+                                    (settings.bot_id,),
+                                )).fetchone()
+                                assert lease is not None
+                                if lease[0]:
+                                    break
+                                await asyncio.sleep(0.5)
+                    finally:
+                        await observer.close()
+                    host = create_host("recall-restarted-packages")
+                    await host.start()
+                    conversation_schema = next(
+                        item.storage.spec.namespace for item in host.registry.descriptors
+                        if item.component_id == "conversation.scheduler"
+                    )
+                    async with asyncio.timeout(45):
+                        while True:
+                            async with host.store.pool.connection() as conn:
+                                settled = await (await conn.execute(
+                                    sql.SQL(
+                                        "SELECT input_payload->'outcome'->'result'->>"
+                                        "'agent_status' AS status FROM {}."
+                                        "conversation_agent_work_settlements "
+                                        "ORDER BY created_at DESC LIMIT 1"
+                                    ).format(sql.Identifier(conversation_schema)),
+                                )).fetchone()
+                            if settled is not None and settled["status"] == "WAIT_OWNER":
+                                break
+                            await asyncio.sleep(0.2)
+                    assert len(RecordingModelClient.requests) == 1
+                    async with asyncio.timeout(360):
+                        while len(RecordingModelClient.requests) < 2:
+                            await asyncio.sleep(0.5)
+                    successor = RecordingModelClient.requests[1]
+                    async with host.store.pool.connection() as conn:
+                        lineage = await (await conn.execute(
+                            sql.SQL(
+                                "SELECT request_id,predecessor_request_id,"
+                                "request_revision,state FROM {}.model_requests "
+                                "WHERE bot_id=%s ORDER BY request_revision"
+                            ).format(sql.Identifier(agent_schema)),
+                            (settings.bot_id,),
+                        )).fetchall()
+                    assert len(lineage) == 3
+                    assert [item["request_revision"] for item in lineage] == [1, 2, 3]
+                    assert [item["state"] for item in lineage[:2]] == [
+                        "ABANDONED", "ABANDONED"
+                    ]
+                    assert lineage[1]["request_id"] == inherited[1]["request_id"]
+                    assert lineage[2]["predecessor_request_id"] == inherited[1]["request_id"]
+                    assert successor.request_id == lineage[2]["request_id"]
+                    assert successor.body == prepared.body
+                    assert successor.payload_digest == prepared.payload_digest
+                    return
                 try:
                     async with asyncio.timeout(45):
                         while len(RecordingModelClient.requests) < 2:

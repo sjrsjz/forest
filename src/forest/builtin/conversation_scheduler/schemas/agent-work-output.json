@@ -8,7 +8,7 @@
     "disposition": {"enum": ["RELEASE", "DEFER"]},
     "agent_status": {
       "enum": [
-        "IDLE", "WAIT_INPUT", "WAIT_MEMORY", "WAIT_TOOL", "WAIT_APPROVAL", "BLOCKED_UNKNOWN",
+        "IDLE", "WAIT_INPUT", "WAIT_OWNER", "WAIT_MEMORY", "WAIT_TOOL", "WAIT_APPROVAL", "BLOCKED_UNKNOWN",
         "RELOAD_WAIT", "COMPLETED", "FAILED", "CANCELLED", "REQUEUED"
       ]
     },

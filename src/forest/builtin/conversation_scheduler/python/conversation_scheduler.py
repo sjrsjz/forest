@@ -669,6 +669,8 @@ class ConversationScheduler(Plugin):
                 continue
             if status == "WAIT_INPUT":
                 return self._defer(status, "classification_prefix_pending", 0.25)
+            if status == "WAIT_OWNER":
+                return self._defer(status, "agent_owner_lease_pending", 30.0)
             if status == "WAIT_MEMORY":
                 return self._defer(status, "memory_recall_pending", 2.0)
             if status == "WAIT_APPROVAL":

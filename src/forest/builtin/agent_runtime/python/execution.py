@@ -611,16 +611,21 @@ class AgentExecution:
             )
         if deadline is None:
             deadline = _deadline(run["absolute_deadline"])
-        owner_record = await self.ctx.uow.call(
-            "agent.acquire-run-lease",
-            {
-                "run_id": run["run_id"],
-                "owner_id": self.ctx.operations.stable(f"run-owner:{run['run_id']}"),
-                "lease_seconds": 300,
-            },
-            operation_id=self.ctx.operations.stable(f"acquire-run:{run['run_id']}"),
-            timeout=15,
-        )
+        try:
+            owner_record = await self.ctx.uow.call(
+                "agent.acquire-run-lease",
+                {
+                    "run_id": run["run_id"],
+                    "owner_id": self.ctx.operations.stable(f"run-owner:{run['run_id']}"),
+                    "lease_seconds": 300,
+                },
+                operation_id=self.ctx.operations.stable(f"acquire-run:{run['run_id']}"),
+                timeout=15,
+            )
+        except ForestError as exc:
+            if exc.code != "AGENT_RUN_BUSY":
+                raise
+            return self._result(request, "WAIT_OWNER", run)
         owner = self._owner(owner_record)
         try:
             directory = tool_directory(
