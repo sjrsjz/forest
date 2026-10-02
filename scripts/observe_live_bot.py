@@ -43,6 +43,10 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--stale-seconds", type=int, default=300)
     value.add_argument("--health-url", default="http://supervisor:8081/")
     value.add_argument("--group-id", help="Inspect one OneBot group lane without reading message content.")
+    value.add_argument(
+        "--component-id", action="append", default=[],
+        help="Include one current Graph component's Generation identity (at most eight).",
+    )
     return value
 
 
@@ -55,6 +59,11 @@ def _validate(arguments: argparse.Namespace) -> None:
         raise SystemExit("--stale-seconds must be between 1 and 86400")
     if arguments.group_id is not None and re.fullmatch(r"[1-9][0-9]{0,19}", arguments.group_id) is None:
         raise SystemExit("--group-id must be a positive decimal OneBot group ID")
+    if len(arguments.component_id) > 8 or len(set(arguments.component_id)) != len(arguments.component_id):
+        raise SystemExit("--component-id accepts at most eight distinct components")
+    if any(re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", item) is None
+           for item in arguments.component_id):
+        raise SystemExit("--component-id must be a valid component ID")
 
 
 async def _deployment_state(store, bot_id: str) -> dict:
@@ -75,7 +84,8 @@ async def _deployment_state(store, bot_id: str) -> dict:
 
 
 async def _bot_state(
-    store: BotStore, bot_id: str, stale_seconds: int, group_id: str | None = None
+    store: BotStore, bot_id: str, stale_seconds: int, group_id: str | None = None,
+    component_ids: tuple[str, ...] = (),
 ) -> dict:
     async with store.pool.connection() as connection:
         async with connection.transaction():
@@ -110,6 +120,25 @@ async def _bot_state(
             ).fetchone()
             if graph is None:
                 raise RuntimeError("RUNTIME_GRAPH_HEAD_MISSING")
+            components = None
+            if component_ids:
+                rows = await (
+                    await connection.execute(
+                        sql.SQL(
+                            "SELECT component_id,generation_id,package_version,package_digest "
+                            "FROM {}.runtime_graph_modules WHERE bot_id=%s AND graph_id=%s "
+                            "AND component_id=ANY(%s) ORDER BY component_id"
+                        ).format(sql.Identifier(RUNTIME)),
+                        (bot_id, graph["graph_id"], list(component_ids)),
+                    )
+                ).fetchall()
+                components = {component_id: None for component_id in component_ids}
+                for row in rows:
+                    components[row["component_id"]] = {
+                        "generation_id": row["generation_id"],
+                        "package_version": row["package_version"],
+                        "package_digest": row["package_digest"],
+                    }
             members = await (
                 await connection.execute(
                     sql.SQL(
@@ -313,6 +342,8 @@ async def _bot_state(
     }
     if group_state is not None:
         result["target_group"] = group_state
+    if components is not None:
+        result["components"] = components
     return result
 
 
@@ -375,7 +406,8 @@ async def observe(arguments: argparse.Namespace) -> int:
             deployment_state, bot_state, health_status = await asyncio.gather(
                 _deployment_state(deployment, arguments.bot_id),
                 _bot_state(
-                    bot_store, arguments.bot_id, arguments.stale_seconds, arguments.group_id
+                    bot_store, arguments.bot_id, arguments.stale_seconds,
+                    arguments.group_id, tuple(arguments.component_id),
                 ),
                 asyncio.to_thread(_health, arguments.health_url),
             )
