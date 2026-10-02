@@ -43,6 +43,8 @@ from forest.package_capabilities import (
 )
 from forest.package_contribution_directories import FrozenContributionDirectories
 from forest.package_effects import (
+    PackageArtifactDownload,
+    PackageArtifactDownloadDriver,
     PackageEffectDriver,
     PackageEffectDriverFactory,
     PackageIngressEffectDriver,
@@ -1840,6 +1842,66 @@ class PackageGenerationAdapter:
                 502,
             )
         return result
+
+    async def invoke_management_artifact_download(
+        self, declaration: dict, payload: dict, *, max_bytes: int, media_type: str
+    ) -> PackageArtifactDownload:
+        if declaration not in self.component.get("effect_services", ()) or (
+            declaration["semantics"] != "read"
+        ):
+            raise ForestError(
+                "MODULE_MANAGEMENT_BINDING_INVALID",
+                "Artifact operation is not bound to a read-only Generation port", 409,
+            )
+        input_validator, _output_validator = self._service_schemas[declaration["name"]]
+        if not isinstance(payload, dict) or not input_validator.is_valid(payload):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact input violates its schema", 422
+            )
+        identity = self.generation_identity
+        if self.state is not PackageGenerationState.ACTIVE or identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE", "Package artifact Generation is inactive", 409
+            )
+        driver = self._effect_drivers.get(declaration["name"])
+        if not isinstance(driver, PackageArtifactDownloadDriver):
+            raise ForestError(
+                "PACKAGE_ARTIFACT_PORT_UNAVAILABLE",
+                "Declared artifact driver cannot download bytes", 503,
+            )
+        self._service_inflight += 1
+        self._services_drained.clear()
+        try:
+            await self._generation_verifier(
+                component_id=self.component_id, generation_id=identity.generation_id,
+                admission_lane="DATA",
+            )
+            async with asyncio.timeout(30):
+                result = await driver.download(payload, max_bytes=max_bytes)
+            if (
+                type(result) is not PackageArtifactDownload
+                or type(result.content) is not bytes
+                or not 1 <= len(result.content) <= max_bytes
+                or result.media_type != media_type
+                or not isinstance(result.filename, str)
+                or not 1 <= len(result.filename) <= 128
+                or result.filename.startswith(".")
+                or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+                       for char in result.filename)
+            ):
+                raise ForestError(
+                    "PACKAGE_ARTIFACT_RESULT_INVALID",
+                    "Artifact driver returned bytes outside its frozen contract", 502,
+                )
+            return result
+        except TimeoutError as exc:
+            raise ForestError(
+                "PACKAGE_ARTIFACT_TIMEOUT", "Artifact download exceeded its deadline", 504
+            ) from exc
+        finally:
+            self._service_inflight -= 1
+            if self._service_inflight == 0:
+                self._services_drained.set()
 
     async def invoke_management_action(
         self,

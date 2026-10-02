@@ -190,6 +190,31 @@ class DeploymentManagementGateway:
         _metadata, content = module.management_ui_artifact(artifact_sha256)
         return content
 
+    async def artifact_download(
+        self, component_id: str, artifact_id: str, body: dict,
+        *, authorization=None, operation_id=None,
+    ):
+        binding = self._package_binding(component_id)
+        if binding is None:
+            raise ForestError(
+                "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND",
+                "Package artifact operation is unavailable", 404,
+            )
+        generation_id, graph_revision, module = binding
+        contract = module.management_contract
+        role = contract.artifact_required_role(artifact_id)
+        await self._authorize(
+            authorization,
+            target_scope_kind="deployment", target_scope_id="deployment",
+            target_component_id=component_id,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
+            target_operation_ref=operation_id,
+            action_key=f"artifact.{artifact_id}.download",
+            input_digest=digest_json(body), required_role=role,
+        )
+        return await contract.download_artifact(artifact_id, body)
+
     async def plan_configuration(
         self, component_id: str, *, authorization=None, operation_id=None, **_values
     ):
@@ -668,6 +693,21 @@ class _AuthorizedGateway:
             artifact_sha256,
             authorization=ticket,
             operation_id=operation_id,
+        )
+
+    async def artifact_download(self, component_id: str, artifact_id: str, body: dict):
+        download = getattr(self.gateway, "artifact_download", None)
+        if not callable(download):
+            raise ForestError(
+                "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND",
+                "Package artifact operation is unavailable", 404,
+            )
+        ticket, operation_id = await self._ticket(
+            component_id, f"artifact.{artifact_id}.download", body
+        )
+        return await download(
+            component_id, artifact_id, body,
+            authorization=ticket, operation_id=operation_id,
         )
 
     async def plan_configuration(self, component_id: str, **values):

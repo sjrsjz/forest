@@ -442,7 +442,7 @@ material、缺失 active 引用和超过上限的 key 数，且 key material 不
 
 部署 Graph 变更有独立的只读候选预览：输入操作种类、组件 ID、不可变包摘要和来源图修订，控制器从持久包目录读取准确工件，用正式描述符投影和 Graph 规划器计算成员摘要、准备/排空/保留集合及 Worker 容量，并返回规范 `plan_digest`。预览不安装 SQL、不初始化配置、不启动 Worker，也不写图操作账本。管理台只能在预览后提交；Web 网关对新操作在入队前按同一输入重算摘要，且在持久请求中冻结它。事务内仍以活动图修订 CAS、模块成员和 Web 票据为最终围栏；同一操作的准确重放先读原回执，不用新图重新规划。预览只证明声明与当前图的规划结果，不能承诺 Worker 预热、健康或发布一定成功。
 
-`deployment.package-registry` 现在有独立的官方只读包和真实 deployment Generation：包内 Worker 声明 `packages` 与 `artifact` 管理查询及自带 UI，按 `bot/deployment/host` scope 筛选全部署工件；宿主通过与该 Generation 绑定的受限 `deployment.catalog.*` 原生读端口访问物理工件目录。官方来源由宿主显式登记的工件摘要证明；不拥有业务 SQL 的官方包只安装标准配置账本，不能借无存储声明绕过来源围栏。普通 ZIP 包既不能取得原生目录端口，也不能因模仿官方组件 ID 获得官方 trust。Bot Worker Host 的包候选内核桥只接受 Bot 范围请求，再经部署控制器解析当前活动目录 Generation 的只读模块查询；替换、排空或缺失期间不回退读取物理目录，返回明确不可用。它仍是有限的跨 scope 管理查询桥，尚未成为通用跨 scope Contract Router。ZIP 上传、不可变导入、导入错误投影与原包导出尚未接入；它们仍须按第 6 节的有界 artifact 操作与模块自有幂等账本实现，不能临时放进 Web 壳或 `$runtime` Graph action。
+`deployment.package-registry` 现在有独立的官方只读包和真实 deployment Generation：包内 Worker 声明 `packages` 与 `artifact` 管理查询及自带 UI，按 `bot/deployment/host` scope 筛选全部署工件；宿主通过与该 Generation 绑定的受限 `deployment.catalog.*` 原生读端口访问物理工件目录。官方来源由宿主显式登记的工件摘要证明；不拥有业务 SQL 的官方包只安装标准配置账本，不能借无存储声明绕过来源围栏。普通 ZIP 包既不能取得原生目录端口，也不能因模仿官方组件 ID 获得官方 trust。Bot Worker Host 的包候选内核桥只接受 Bot 范围请求，再经部署控制器解析当前活动目录 Generation 的只读模块查询；替换、排空或缺失期间不回退读取物理目录，返回明确不可用。它仍是有限的跨 scope 管理查询桥，尚未成为通用跨 scope Contract Router。模块现通过声明式只读 artifact 操作下载原包 ZIP：Web 网关验证会话、CSRF、管理角色和活动 Generation，包端口按不可变摘要导出，响应受 32 MiB 声明上限约束。当前传输在端口和网关内持有有界字节数组，尚未实现通用工件句柄与流式读取；ZIP 上传、不可变导入及导入错误投影仍须按第 6 节的有界 artifact 操作与模块自有幂等账本实现，不能临时放进 Web 壳或 `$runtime` Graph action。
 
 ## 8. 完成判据
 

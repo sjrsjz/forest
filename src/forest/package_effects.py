@@ -37,6 +37,18 @@ class PackageServiceEffectDriver(PackageEffectDriver, Protocol):
     ) -> dict: ...
 
 
+@dataclass(frozen=True)
+class PackageArtifactDownload:
+    content: bytes
+    media_type: str
+    filename: str
+
+
+@runtime_checkable
+class PackageArtifactDownloadDriver(PackageServiceEffectDriver, Protocol):
+    async def download(self, payload: dict, *, max_bytes: int) -> PackageArtifactDownload: ...
+
+
 PackageIngressHandler = Callable[..., Awaitable[dict]]
 
 

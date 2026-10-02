@@ -266,6 +266,70 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
             message: error instanceof Error ? error.message : String(error),
           });
         }
+      } else if (message.type === 'artifact-download') {
+        const requestId = message.request_id;
+        const artifactId = message.artifact_id;
+        const operation = row.management_contract?.artifacts?.find(item =>
+          item.artifact_id === artifactId && item.direction === 'download');
+        if (
+          typeof requestId !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(requestId)
+          || !operation || !message.value || Array.isArray(message.value)
+          || typeof message.value !== 'object'
+        ) throw new Error('模块工件下载请求无效');
+        const prior = operationReplies.get(requestId);
+        if (prior) { send(prior.type, prior.payload); return; }
+        try {
+          const response = await fetch(scopedPath(
+            `/management/v1/modules/${encodeURIComponent(row.component_id)}`
+            + `/artifacts/${encodeURIComponent(artifactId)}/download`), {
+            method: 'POST', credentials: 'same-origin',
+            headers: {'content-type': 'application/json',
+              'x-forest-csrf': cookie('forest_management_csrf')},
+            body: JSON.stringify(message.value),
+          });
+          if (!response.ok) {
+            const failure = await response.json().catch(() => ({}));
+            throw new Error(failure.message || failure.code || `HTTP ${response.status}`);
+          }
+          const advertised = Number(response.headers.get('content-length'));
+          if (!Number.isSafeInteger(advertised) || advertised < 1
+              || advertised > operation.max_bytes
+              || response.headers.get('content-type') !== operation.media_type
+              || !response.body) throw new Error('工件响应不符合声明的长度或媒体类型');
+          const reader = response.body.getReader();
+          const chunks = [];
+          let total = 0;
+          while (true) {
+            const part = await reader.read();
+            if (part.done) break;
+            total += part.value.byteLength;
+            if (total > advertised) {
+              await reader.cancel();
+              throw new Error('工件下载超过声明长度');
+            }
+            chunks.push(part.value);
+          }
+          if (total !== advertised) throw new Error('工件下载长度与声明不符');
+          if (epoch !== workspaceEpoch) return;
+          const match = /^attachment; filename="([A-Za-z0-9._-]{1,128})"$/.exec(
+            response.headers.get('content-disposition') || '');
+          if (!match) throw new Error('工件文件名无效');
+          const url = URL.createObjectURL(new Blob(chunks, {type: operation.media_type}));
+          try {
+            const link = document.createElement('a');
+            link.href = url; link.download = match[1]; link.hidden = true;
+            shell.append(link); link.click(); link.remove();
+          } finally { setTimeout(() => URL.revokeObjectURL(url), 30000); }
+          const reply = {type: 'artifact-result', payload: {
+            request_id: requestId, artifact_id: artifactId,
+            value: {byte_length: total, filename: match[1]},
+          }};
+          operationReplies.set(requestId, reply);
+          send(reply.type, reply.payload);
+        } catch (error) {
+          send('operation-error', {request_id: requestId, operation_id: artifactId,
+            message: error instanceof Error ? error.message : String(error)});
+        }
       } else if (['asset-begin', 'asset-chunk', 'asset-finalize'].includes(message.type)) {
         const requestId = message.request_id;
         const assetId = message.asset_id;

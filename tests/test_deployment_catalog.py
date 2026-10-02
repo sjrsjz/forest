@@ -363,6 +363,76 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         bot_package = package_catalog.build(
             Path(__file__).parents[1] / "src/forest/builtin/component_worker_host"
         )
+        assert module.management_contract.describe()["artifacts"] == [{
+            "artifact_id": "archive", "direction": "download",
+            "media_type": "application/zip", "max_bytes": 33554432,
+            "required_role": "ADMIN",
+            "input_schema": module.snapshot.schema("schemas/artifact-input.json"),
+        }]
+        archive = await module.management_contract.download_artifact(
+            "archive", {"package_digest": bot_package.digest},
+        )
+        assert archive.media_type == "application/zip"
+        assert PackageCatalog(tmp_path / "export-check").import_archive(
+            archive.content
+        ).digest == bot_package.digest
+        identity = DeploymentWebIdentityAuthority(
+            repository.store, active_key_id="key/package-registry",
+            key_resolver=lambda _key_id: bytes(range(32)),
+        )
+        now = datetime.now(timezone.utc)
+        await identity.initialize_setup(SimpleNamespace(
+            setup_id="setup/package-registry0001", pairing_code="r" * 48,
+            issued_at=now, expires_at=now + timedelta(hours=1),
+        ))
+        await identity.complete_setup(
+            pairing_code="r" * 48, username="admin",
+            display_name="Administrator", password="deployment-web-password",
+        )
+        app = create_deployment_management_app(
+            deployment_id=repository.store.deployment_id, components=(),
+            deployment_registry_provider=lambda: controller.registry,
+            identity_authority=identity,
+            deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
+            deployment_audit=DeploymentAuditRepository(repository.store),
+            allowed_origin="http://forest.test",
+        )
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://forest.test"
+        ) as client:
+            login = await client.post(
+                "/management/v1/auth/login",
+                headers={"origin": "http://forest.test"},
+                json={"username": "admin", "password": "deployment-web-password"},
+            )
+            assert login.status_code == 200, login.text
+            download = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/artifacts/archive/download",
+                headers={
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": client.cookies["forest_management_csrf"],
+                },
+                json={"package_digest": bot_package.digest},
+            )
+            assert download.status_code == 200, download.text
+            assert download.headers["content-type"] == "application/zip"
+            assert download.headers["x-content-type-options"] == "nosniff"
+            assert len(download.content) == int(download.headers["content-length"])
+            assert PackageCatalog(tmp_path / "http-export-check").import_archive(
+                download.content
+            ).digest == bot_package.digest
+            oversized = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/artifacts/archive/download",
+                headers={
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": client.cookies["forest_management_csrf"],
+                    "content-type": "application/json",
+                },
+                content=b"x" * 16385,
+            )
+            assert oversized.status_code == 413
         bridge = SimpleNamespace(package_registry_reader=controller.read_package_registry)
         bot_page = await package_catalog_page_service(bridge)({
             "protocol": "forest.package-catalog-page-request/1", "limit": 16,
@@ -394,7 +464,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         untrusted_manifest = untrusted_source / "module.toml"
         untrusted_manifest.write_text(
             untrusted_manifest.read_text(encoding="utf-8").replace(
-                'version = "1.0.0"', 'version = "1.0.2"', 1
+                'version = "1.1.0"', 'version = "1.1.2"', 1
             ), encoding="utf-8",
         )
         untrusted = package_catalog.build(untrusted_source)
@@ -410,7 +480,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.0.0"', 'version = "1.0.1"', 1
+                'version = "1.1.0"', 'version = "1.1.1"', 1
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(next_source)

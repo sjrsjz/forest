@@ -50,6 +50,13 @@ class PackageManagementContract(ModuleConfigurationContract):
         self._assets = {
             item["id"]: item for item in component.get("management_assets", ())
         }
+        effect_ports = {
+            item["name"]: item for item in component.get("effect_services", ())
+        }
+        self._artifacts = {
+            item["id"]: (item, effect_ports[item["port"]])
+            for item in component.get("management_artifacts", ())
+        }
 
     def describe(self) -> dict:
         value = super().describe()
@@ -89,7 +96,41 @@ class PackageManagementContract(ModuleConfigurationContract):
             }
             for item in self._assets.values()
         ]
+        value["artifacts"] = [
+            {
+                "artifact_id": item["id"],
+                "direction": item["direction"],
+                "media_type": item["media_type"],
+                "max_bytes": item["max_bytes"],
+                "required_role": item.get("required_role", "AUDITOR"),
+                "input_schema": self.adapter.schema_snapshot(port["input_schema"]),
+            }
+            for item, port in self._artifacts.values()
+        ]
         return value
+
+    def artifact_required_role(self, artifact_id: str) -> str:
+        try:
+            item, _port = self._artifacts[artifact_id]
+        except KeyError:
+            raise ForestError(
+                "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND",
+                "Package artifact operation does not exist", 404,
+            ) from None
+        return item.get("required_role", "AUDITOR")
+
+    async def download_artifact(self, artifact_id: str, payload: dict):
+        try:
+            declaration, port = self._artifacts[artifact_id]
+        except KeyError:
+            raise ForestError(
+                "MODULE_MANAGEMENT_ARTIFACT_NOT_FOUND",
+                "Package artifact operation does not exist", 404,
+            ) from None
+        return await self.adapter.invoke_management_artifact_download(
+            port, payload, max_bytes=declaration["max_bytes"],
+            media_type=declaration["media_type"],
+        )
 
     def asset(self, asset_id: str) -> dict:
         try:

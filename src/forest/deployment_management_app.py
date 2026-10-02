@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from importlib.resources import files
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,6 +25,7 @@ from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 _SESSION_COOKIE = "forest_management_session"
 _CSRF_COOKIE = "forest_management_csrf"
+_ARTIFACT_REQUEST_BYTES = 16384
 
 
 class LoginInput(BaseModel):
@@ -356,6 +358,53 @@ def create_deployment_management_app(
                 body=body,
                 idempotency_key=request.headers.get("idempotency-key"),
             )
+
+    @app.post(
+        "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"
+        "{component_id}/artifacts/{artifact_id}/download"
+    )
+    async def scoped_artifact_download(
+        scope_kind: str, scope_id: str, component_id: str, artifact_id: str,
+        request: Request,
+    ):
+        session = await authenticated(request, csrf=True)
+        if request.headers.get("content-type") != "application/json":
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact input must be JSON", 415,
+            )
+        content = bytearray()
+        async for fragment in request.stream():
+            if len(content) + len(fragment) > _ARTIFACT_REQUEST_BYTES:
+                raise ForestError(
+                    "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact input exceeds 16 KiB", 413,
+                )
+            content.extend(fragment)
+        try:
+            body = json.loads(content)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact input is not valid JSON", 422,
+            ) from exc
+        if not isinstance(body, dict):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact input must be an object", 422,
+            )
+        async with scopes.gateway(scope_kind, scope_id, session) as gateway:
+            artifact = await gateway.artifact_download(component_id, artifact_id, body)
+
+        async def chunks():
+            for offset in range(0, len(artifact.content), 65536):
+                yield artifact.content[offset:offset + 65536]
+
+        return StreamingResponse(
+            chunks(), media_type=artifact.media_type,
+            headers={
+                "content-length": str(len(artifact.content)),
+                "content-disposition": f'attachment; filename="{artifact.filename}"',
+                "x-content-type-options": "nosniff",
+                "cache-control": "no-store",
+            },
+        )
 
     @app.post(
         "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"

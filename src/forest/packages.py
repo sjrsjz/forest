@@ -684,6 +684,25 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "management_artifacts": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["id", "port", "direction", "media_type", "max_bytes"],
+                            "properties": {
+                                "id": {"type": "string"},
+                                "port": {"type": "string"},
+                                "direction": {"const": "download"},
+                                "media_type": {"const": "application/zip"},
+                                "max_bytes": {
+                                    "type": "integer", "minimum": 1, "maximum": MAX_ARCHIVE_BYTES,
+                                },
+                                "required_role": {"enum": ["ADMIN", "AUDITOR"]},
+                            },
+                        },
+                    },
                     "unit_of_work_plans": {
                         "type": "array",
                         "maxItems": 32,
@@ -1303,6 +1322,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     management_queries = component.get("management_queries", [])
     management_actions = component.get("management_actions", [])
     management_assets = component.get("management_assets", [])
+    management_artifacts = component.get("management_artifacts", [])
     asset_by_id = {}
     for asset in management_assets:
         asset_id = asset["id"]
@@ -1527,7 +1547,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     )
     command_ports = {item["name"] for item in domain_commands}
     management_ids = set()
-    for declaration in (*management_queries, *management_actions):
+    for declaration in (*management_queries, *management_actions, *management_artifacts):
         operation_id = declaration.get("id", "")
         if not IDENTIFIER.fullmatch(operation_id) or operation_id in management_ids:
             _fail(
@@ -1535,6 +1555,15 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "Management operation identities must be valid and unique",
             )
         management_ids.add(operation_id)
+    read_effect_ports = {
+        item["name"] for item in effect_services if item["semantics"] == "read"
+    }
+    for declaration in management_artifacts:
+        if declaration["port"] not in read_effect_ports:
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Artifact downloads must bind a declared read-only effect port",
+            )
     for declaration in management_queries:
         if declaration.get("port") not in query_ports:
             _fail(

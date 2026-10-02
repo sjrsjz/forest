@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 
 from forest.errors import ForestError
+from forest.package_effects import PackageArtifactDownload
 
 _SERVICES = frozenset({"deployment.catalog.page", "deployment.catalog.artifact"})
 
@@ -53,3 +54,18 @@ class DeploymentPackageCatalogEffectDriver:
         if self.service_id == "deployment.catalog.page":
             return await asyncio.to_thread(self.catalog.page, **payload)
         return await asyncio.to_thread(self.catalog.artifact, payload["package_digest"])
+
+    async def download(self, payload: dict, *, max_bytes: int) -> PackageArtifactDownload:
+        if not self.accepting or self.service_id != "deployment.catalog.artifact":
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE", "Package archive port is unavailable", 409
+            )
+        digest = payload["package_digest"]
+        content = await asyncio.to_thread(self.catalog.export_archive, digest)
+        if len(content) > max_bytes:
+            raise ForestError(
+                "PACKAGE_TOO_LARGE", "Package archive exceeds the declared download bound", 413
+            )
+        return PackageArtifactDownload(
+            content, "application/zip", "forest-package-" + digest[7:23] + ".zip"
+        )
