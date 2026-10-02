@@ -260,7 +260,7 @@
       root.append(card);
     }
     if(!page.items.length)root.textContent='没有可见证据。';
-    $('trial-count').textContent=`证据 ${page.total_count} 项 · 缺失 ${page.missing_count} 项 · 图快照 ${page.graph_snapshot_ref}`;
+    $('trial-count').textContent=`可见证据 ${page.total_count} 项 · 图快照 ${page.graph_snapshot_ref}`;
     $('trial-next').disabled=!page.has_more;
   }
   async function startTrial(){

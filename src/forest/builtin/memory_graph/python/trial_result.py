@@ -123,12 +123,11 @@ async def read_page(ctx, payload):
     last_index = selected[-1]["evidence_index"] if selected else after
     has_more = any(gate["evidence_index"] > last_index for gate in values)
     return {
-        "protocol": "forest.memory-trial-result-page/1",
+        "protocol": "forest.memory-trial-result-page/2",
         "query_id": query_id,
         "bundle_id": evidence["bundle_id"],
         "graph_snapshot_ref": evidence["graph_snapshot_ref"],
         "total_count": len(values),
-        "missing_count": evidence["missing_count"],
         "content_truncated": evidence["content_truncated"],
         "truncated": evidence["truncated"],
         "association_sampled": evidence["association_sampled"],

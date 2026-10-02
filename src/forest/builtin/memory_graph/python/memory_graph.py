@@ -165,7 +165,7 @@ class MemoryGraph(Plugin):
     @service(
         "memory.trial.result",
         semantics="read",
-        contract="1.0",
+        contract="2.0",
         input_schema="schemas/trial-result-input.json",
         output_schema="schemas/trial-result-output.json",
     )

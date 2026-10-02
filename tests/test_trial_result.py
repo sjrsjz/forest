@@ -55,7 +55,7 @@ async def test_trial_result_pages_keep_group_and_author_attribution():
                 "input_kind": "ADMIN_TRIAL", "bot_id": "bot/1",
                 "query_id": "trial/1", "bundle_id": "bundle/1",
                 "graph_snapshot_ref": "memory-query:trial/1",
-                "current_source": None, "missing_count": 0,
+                "current_source": None, "missing_count": 2,
                 "content_truncated": False, "truncated": False,
                 "association_sampled": True,
                 "item_indexes": list(range(6)),
@@ -75,6 +75,7 @@ async def test_trial_result_pages_keep_group_and_author_attribution():
     })
     assert first["has_more"] and first["next_index"] == 4
     assert first["total_count"] == second["total_count"] == 5
+    assert "missing_count" not in first and "missing_count" not in second
     assert [item["external_group_id"] for item in first["items"]] == [
         "group/0", "group/2", "group/3", "group/4",
     ]
