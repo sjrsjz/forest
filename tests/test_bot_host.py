@@ -1585,6 +1585,25 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert "Forest audit:" in (
                 await core_command("audit.tail", {"limit": 1})
             ).text
+            memory_before = host.registry.graph_identity
+            memory_affected = set(host.registry.replacement_closure("memory.graph"))
+            assert "memory.graph" in memory_affected
+            assert "audit.console" not in memory_affected
+            await host.replace_runtime_graph(
+                target_component_id="memory.graph",
+                expected_graph_revision=memory_before.graph_revision,
+            )
+            memory_after = host.registry.graph_identity
+            assert memory_after.graph_revision == memory_before.graph_revision + 1
+            assert set(memory_after.generations) == set(memory_before.generations)
+            assert all(
+                (memory_after.generations[component_id] != memory_before.generations[component_id])
+                == (component_id in memory_affected)
+                for component_id in memory_before.generations
+            )
+            assert memory_after.generations["audit.console"] == memory_before.generations[
+                "audit.console"
+            ]
             async with host.store.pool.connection() as conn:
                 grants = await (
                     await conn.execute(
