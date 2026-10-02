@@ -46,13 +46,40 @@ class _ReadOnlyManagementContract(PackageManagementContract):
         raise ForestError("MODULE_MANAGEMENT_UNAVAILABLE", "Configuration is immutable", 404)
 
 
+def _configuration_storage(component_id: str) -> tuple[StorageBundleSpec, bytes]:
+    baseline = files("forest.storage.official").joinpath(
+        "deployment_module_configuration.sql"
+    ).read_bytes()
+    schema_id = "forest.deployment.config." + hashlib.sha256(
+        component_id.encode()
+    ).hexdigest()[:32]
+    return StorageBundleSpec(
+        component_id=component_id, schema_id=schema_id, schema_version="1.0.0",
+        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+        repository_contract="forest.deployment-configuration.repository/1",
+        scope="deployment",
+    ), baseline
+
+
 async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=False):
     """Install and compile an official deployment package with read-only ports."""
 
     component = snapshot.component
+    effects = tuple(component.get("effect_services", ()))
+    requested = tuple(component.get("capabilities", {}).get("requests", ()))
+    if any(
+        item["semantics"] != "read"
+        or item["kind"] not in runtime.effect_driver_factories
+        or f"service.call:{item['name']}" not in requested
+        for item in effects
+    ):
+        raise ForestError(
+            "DEPLOYMENT_PACKAGE_PORT_UNAVAILABLE",
+            "Official deployment effect port has no read-only native binding", 503,
+        )
     if component["scope"] != "deployment" or component.get("configuration_apply") or (
         component.get("domain_commands") or component.get("management_actions")
-        or component.get("owned_work_handlers") or component.get("effect_services")
+        or component.get("owned_work_handlers")
         or any(item["semantics"] != "read" for item in component.get("provides", ()))
     ):
         raise ForestError(
@@ -60,29 +87,35 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
             "Only read-only deployment package ports have installed authorities", 503,
         )
     declared = snapshot.storage_bundle()
-    if declared is None or declared[0]["execution_profile"] != "official":
-        raise ForestError(
-            "DEPLOYMENT_PACKAGE_STORAGE_REQUIRED",
-            "Official deployment packages require an official SQL domain", 422,
+    if declared is not None:
+        metadata, owned_sql = declared
+        if metadata["execution_profile"] != "official":
+            raise ForestError(
+                "DEPLOYMENT_PACKAGE_STORAGE_REQUIRED",
+                "Official deployment storage must use the trusted SQL profile", 422,
+            )
+        common_sql = files("forest.storage.official").joinpath(
+            "deployment_module_configuration.sql"
+        ).read_bytes()
+        baseline = common_sql + b"\n" + owned_sql
+        spec = StorageBundleSpec(
+            component_id=component["id"], schema_id=metadata["schema_id"],
+            schema_version=metadata["schema_version"],
+            baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+            repository_contract=metadata["repository_contract"], scope="deployment",
         )
-    metadata, owned_sql = declared
-    common_sql = files("forest.storage.official").joinpath(
-        "deployment_module_configuration.sql"
-    ).read_bytes()
-    baseline = common_sql + b"\n" + owned_sql
-    spec = StorageBundleSpec(
-        component_id=component["id"], schema_id=metadata["schema_id"],
-        schema_version=metadata["schema_version"],
-        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
-        repository_contract=metadata["repository_contract"], scope="deployment",
-    )
-    storage = RuntimeStorageBundle(
-        spec, baseline, storage_bundle_digest(spec, "official"),
-        execution_profile="official",
-    )
+        storage = RuntimeStorageBundle(
+            spec, baseline, storage_bundle_digest(spec, "official"),
+            execution_profile="official",
+        )
+    else:
+        spec, baseline = _configuration_storage(component["id"])
+        storage = None
     if not plan_only:
         await runtime.schema_bundle_installer.install(
-            spec, baseline, storage.package_digest, execution_profile="official"
+            spec, baseline,
+            storage.package_digest if storage is not None else storage_bundle_digest(spec, "official"),
+            execution_profile="official",
         )
     config_schema = snapshot.schema(component["config_schema"])
     config_value = snapshot.bootstrap_configuration()
@@ -107,7 +140,6 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
                 "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
                 "Deployment configuration differs from the frozen package schema", 409,
             )
-    requested = tuple(component.get("capabilities", {}).get("requests", ()))
     grants = _BuiltinGrantSet(
         tuple(_BuiltinGrant(item, "component", component["id"]) for item in requested),
         digest_json([
@@ -115,12 +147,19 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
             snapshot.digest, component["id"], requested,
         ]),
     )
-    domain = PostgresPackageDomainAuthority(
-        runtime.store, runtime.generation_authority,
-        component_id=component["id"], runtime_package_digest=snapshot.digest,
-        storage_spec=spec, storage_package_digest=storage.package_digest,
-        storage_execution_profile="official",
+    domain = (
+        PostgresPackageDomainAuthority(
+            runtime.store, runtime.generation_authority,
+            component_id=component["id"], runtime_package_digest=snapshot.digest,
+            storage_spec=spec, storage_package_digest=storage.package_digest,
+            storage_execution_profile="official",
+        )
+        if storage is not None else None
     )
+    effect_factories = {
+        item["name"]: runtime.effect_driver_factories[item["kind"]]
+        for item in effects
+    }
     ui = snapshot.management_ui()
     management = ()
     if ui is not None:
@@ -139,6 +178,7 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
         generation_member_verifier=runtime.generation_authority.verify_generation_member,
         state_queries=None, state_commands=None, domain_queries=domain,
         service_operation_ledger=None, storage=storage, trust_level="official",
+        effect_driver_factories=effect_factories,
         management=management,
         management_contract_factory=lambda adapter: _ReadOnlyManagementContract(
             configuration, adapter=adapter, schema=config_schema
@@ -174,18 +214,7 @@ async def bootstrap_installed_deployment_package(snapshot, runtime, *, plan_only
         raise ForestError(
             "PACKAGE_CONFIGURATION_INVALID", "Deployment bootstrap configuration is invalid", 422
         )
-    baseline = files("forest.storage.official").joinpath(
-        "deployment_module_configuration.sql"
-    ).read_bytes()
-    schema_id = "forest.deployment.config." + hashlib.sha256(
-        component["id"].encode()
-    ).hexdigest()[:32]
-    spec = StorageBundleSpec(
-        component_id=component["id"], schema_id=schema_id, schema_version="1.0.0",
-        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
-        repository_contract="forest.deployment-configuration.repository/1",
-        scope="deployment",
-    )
+    spec, baseline = _configuration_storage(component["id"])
     if not plan_only:
         await runtime.schema_bundle_installer.install(
             spec, baseline, storage_bundle_digest(spec, "official"),

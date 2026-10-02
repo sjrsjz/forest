@@ -55,7 +55,12 @@ class DeploymentPackageController:
         descriptors = []
         for _component_id, snapshot in sorted(snapshots.items()):
             declared = snapshot.storage_bundle()
-            official = declared is not None and declared[0]["execution_profile"] == "official"
+            official = self.catalog.is_official_deployment(snapshot.digest)
+            if declared is not None and declared[0]["execution_profile"] == "official" and not official:
+                raise ForestError(
+                    "OFFICIAL_PACKAGE_NOT_REGISTERED",
+                    "Deployment artifact has no host-issued official provenance", 403,
+                )
             compile_package = (
                 bootstrap_builtin_deployment_package
                 if official else bootstrap_installed_deployment_package

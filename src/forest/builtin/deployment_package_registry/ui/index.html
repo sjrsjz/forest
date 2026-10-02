@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root{color-scheme:dark;font:14px/1.4 system-ui,sans-serif;color:#dcebe2;background:#0d1712}
+    *{box-sizing:border-box}body{margin:0;padding:10px}section{border:1px solid #29493a;border-radius:9px;background:#102019;overflow:hidden}
+    header,.footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px}
+    header{border-bottom:1px solid #29493a}h2{font-size:16px;margin:0}small,#status{color:#91ac9a}
+    button,select{border:1px solid #365b49;border-radius:6px;background:#173426;color:#e9f7ef;padding:7px 12px;cursor:pointer}
+    button:disabled{opacity:.5;cursor:default}.list{max-height:410px;overflow:auto}
+    .row{display:grid;grid-template-columns:minmax(170px,1fr) 90px 95px minmax(150px,1fr) minmax(250px,1.5fr) auto;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid #203e30;min-width:900px}
+    .row:first-child{border-top:0}.row code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    #details{margin:0;border-top:1px solid #29493a;padding:12px;white-space:pre-wrap;overflow:auto;max-height:220px;font:12px/1.5 ui-monospace,monospace}
+  </style>
+</head>
+<body>
+  <section>
+    <header><h2>部署包目录</h2><small>全部署工件 · 只读</small><select id="scope" aria-label="包范围"><option value="">全部范围</option><option value="bot">Bot</option><option value="deployment">部署</option><option value="host">宿主</option></select><button id="refresh" type="button">刷新</button></header>
+    <div id="items" class="list"></div>
+    <div class="footer"><span id="status">等待连接</span><button id="more" type="button" hidden>下一页</button></div>
+    <pre id="details" hidden></pre>
+  </section>
+  <script>
+  (()=>{'use strict';
+    let port,nonce,sequence=0,pending=new Map(),revision=null,nextAfter=null,listingRequest=0;
+    const byId=id=>document.getElementById(id),items=byId('items'),status=byId('status'),details=byId('details');
+    const send=(type,payload={})=>port?.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
+    const resize=()=>send('resize',{height:Math.min(document.documentElement.scrollHeight,700)});
+    const query=(operation_id,value)=>new Promise((resolve,reject)=>{
+      const request_id=`packages-${++sequence}`;
+      const timer=setTimeout(()=>{pending.delete(request_id);reject(Error('目录查询超时'));},35000);
+      pending.set(request_id,{resolve:data=>{clearTimeout(timer);resolve(data);},reject:error=>{clearTimeout(timer);reject(error);}});
+      send('query',{request_id,operation_id,value});
+    });
+    async function load(append=false){
+      const request=++listingRequest;
+      status.textContent='正在读取目录…';
+      byId('more').disabled=true;
+      try{
+        const cursor=append&&nextAfter?{...nextAfter,catalog_revision:revision}:{};
+        const scope=byId('scope').value;
+        const page=await query('packages',{limit:32,...(scope?{scope}:{}),...cursor});
+        if(request!==listingRequest)return;
+        if(!append)items.replaceChildren();
+        revision=page.catalog_revision;nextAfter=page.next_after;
+        for(const item of page.items){
+          const row=document.createElement('div');row.className='row';
+          for(const value of [item.package_id,item.package_version,item.scope,item.component_id,item.package_digest]){
+            const cell=document.createElement('code');cell.textContent=value;row.append(cell);
+          }
+          const inspect=document.createElement('button');inspect.type='button';inspect.textContent='详情';
+          inspect.onclick=async()=>{
+            inspect.disabled=true;
+            try{const value=await query('artifact',{package_digest:item.package_digest});details.textContent=JSON.stringify(value,null,2);details.hidden=false;resize();}
+            catch(error){status.textContent=error.message;}
+            finally{inspect.disabled=false;}
+          };
+          row.append(inspect);items.append(row);
+        }
+        byId('more').hidden=!nextAfter;
+        byId('more').disabled=false;
+        status.textContent=`已显示 ${items.children.length} 个部署包`;
+        resize();
+      }catch(error){if(request===listingRequest){status.textContent=error.message;byId('more').disabled=false;}}
+    }
+    byId('refresh').onclick=()=>{revision=null;nextAfter=null;details.hidden=true;load(false);};
+    byId('scope').onchange=()=>{revision=null;nextAfter=null;details.hidden=true;load(false);};
+    byId('more').onclick=()=>load(true);
+    addEventListener('message',event=>{
+      const message=event.data||{};
+      if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect'||typeof message.nonce!=='string')return;
+      port=event.ports[0];nonce=message.nonce;
+      port.onmessage=event=>{
+        const value=event.data||{};
+        if(value.protocol!=='forest.management-ui-channel/1'||value.nonce!==nonce)return;
+        if(value.type==='initialize'){resize();load(false);return;}
+        const request=pending.get(value.request_id);
+        if(request){pending.delete(value.request_id);if(value.type==='query-result')request.resolve(value.value);else request.reject(Error(value.message||'目录查询失败'));}
+        else if(value.type==='error')status.textContent=value.message||'目录查询失败';
+      };
+      port.start();send('ready');
+    },{once:true});
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "scope": {"enum": ["bot", "deployment", "host"]},
+    "after_package_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "after_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "catalog_revision": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 64}
+  },
+  "dependentRequired": {
+    "after_package_id": ["after_version", "catalog_revision"],
+    "after_version": ["after_package_id", "catalog_revision"]
+  },
+  "additionalProperties": false
+}

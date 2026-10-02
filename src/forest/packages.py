@@ -2040,12 +2040,11 @@ class PackageCatalog:
         storage = component.get("storage")
         if (
             component["scope"] != "deployment"
-            or storage is None
-            or storage.get("execution_profile") != "official"
+            or (storage is not None and storage.get("execution_profile") != "official")
         ):
             _fail(
                 "OFFICIAL_PACKAGE_SOURCE_INVALID",
-                "Official deployment source must declare deployment-scoped official storage",
+                "Official deployment source must declare deployment scope and trusted storage",
             )
         snapshot = self._publish(captured)
         with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
@@ -2075,6 +2074,14 @@ class PackageCatalog:
                 "Deployment artifact has no host-issued official provenance",
             )
         return snapshot
+
+    def is_official_deployment(self, digest: str) -> bool:
+        snapshot = self.get(digest)
+        rows = self._rows(
+            "SELECT component_id FROM official_deployment_artifacts WHERE digest=?",
+            (digest,), table="official_deployment_artifacts",
+        )
+        return len(rows) == 1 and rows[0][0] == snapshot.component["id"]
 
     def import_archive(
         self,

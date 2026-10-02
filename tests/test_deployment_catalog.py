@@ -325,6 +325,100 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
 
 
 @pytest.mark.postgres
+async def test_deployment_package_registry_runs_as_reloadable_generation(
+    deployment_catalog, tmp_path
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    lease = await repository.claim_supervisor("host/package-registry", "incarnation/package-registry")
+    package_catalog = PackageCatalog(tmp_path / "packages")
+    runtime = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
+        package_catalog=package_catalog,
+    )
+    audit_source = Path(__file__).parents[1] / "src/forest/builtin/deployment_audit"
+    registry_source = Path(__file__).parents[1] / "src/forest/builtin/deployment_package_registry"
+    controller = DeploymentPackageController(
+        runtime, package_catalog, official_sources=(audit_source, registry_source),
+    )
+    restarted = None
+    try:
+        initial = await controller.start()
+        module = initial.get("deployment.package-registry")
+        page = await module.management_contract.query(
+            "packages", {"limit": 16, "scope": "deployment"},
+        )
+        assert {item["component_id"] for item in page["items"]} == {
+            "deployment.audit", "deployment.package-registry",
+        }
+        assert all(item["scope"] == "deployment" for item in page["items"])
+        artifact = await module.management_contract.query(
+            "artifact", {"package_digest": module.snapshot.digest},
+        )
+        assert artifact["component_id"] == "deployment.package-registry"
+        bot_package = package_catalog.build(
+            Path(__file__).parents[1] / "src/forest/builtin/component_worker_host"
+        )
+        bot_artifact = await module.management_contract.query(
+            "artifact", {"package_digest": bot_package.digest},
+        )
+        assert bot_artifact["scope"] == "bot"
+        assert any(
+            item["package_digest"] == bot_package.digest
+            for item in (await module.management_contract.query(
+                "packages", {"limit": 16},
+            ))["items"]
+        )
+        untrusted_source = tmp_path / "untrusted-package-registry"
+        shutil.copytree(registry_source, untrusted_source)
+        untrusted_manifest = untrusted_source / "module.toml"
+        untrusted_manifest.write_text(
+            untrusted_manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.0"', 'version = "1.0.2"', 1
+            ), encoding="utf-8",
+        )
+        untrusted = package_catalog.build(untrusted_source)
+        with pytest.raises(ForestError) as untrusted_port:
+            await controller.preview_change(
+                operation_kind="REPLACE", component_id="deployment.package-registry",
+                package_digest=untrusted.digest,
+                expected_graph_revision=initial.graph_identity.graph_revision,
+            )
+        assert untrusted_port.value.code == "DEPLOYMENT_PACKAGE_PORT_UNAVAILABLE"
+        next_source = tmp_path / "next-package-registry"
+        shutil.copytree(registry_source, next_source)
+        manifest = next_source / "module.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.0"', 'version = "1.0.1"', 1
+            ), encoding="utf-8",
+        )
+        replacement = package_catalog.build_official(next_source)
+        audit_generation = initial.graph_identity.generations["deployment.audit"]
+        updated = await controller.replace(
+            "deployment.package-registry", replacement.digest,
+            expected_graph_revision=initial.graph_identity.graph_revision,
+        )
+        assert updated.graph_identity.generations["deployment.audit"] == audit_generation
+        page = await updated.get("deployment.package-registry").management_contract.query(
+            "packages", {"limit": 16},
+        )
+        assert any(item["package_digest"] == replacement.digest for item in page["items"])
+        restarted = DeploymentPackageController(
+            runtime, package_catalog, official_sources=(audit_source, registry_source),
+        )
+        recovered = await restarted.start()
+        assert recovered.get("deployment.package-registry").snapshot.digest == replacement.digest
+        assert (await recovered.get("deployment.package-registry").management_contract.query(
+            "packages", {"limit": 16},
+        ))["items"]
+    finally:
+        if restarted is not None:
+            await restarted.close()
+        await controller.close()
+
+
+@pytest.mark.postgres
 async def test_deployment_web_queues_and_reconciles_package_replacement(
     deployment_catalog, tmp_path
 ):

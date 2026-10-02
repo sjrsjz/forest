@@ -203,14 +203,17 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     try:
         await supervisor.start()
         await web_identity.initialize_setup(settings.web_bootstrap)
-        deployment_runtime = DeploymentRuntimeScope(store, supervisor)
         package_catalog = PackageCatalog(
             Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
+        )
+        deployment_runtime = DeploymentRuntimeScope(
+            store, supervisor, package_catalog=package_catalog
         )
         deployment_controller = DeploymentPackageController(
             deployment_runtime, package_catalog,
             official_sources=(
                 Path(str(files("forest").joinpath("builtin/deployment_audit"))),
+                Path(str(files("forest").joinpath("builtin/deployment_package_registry"))),
             ),
         )
         await deployment_controller.start()
