@@ -90,6 +90,43 @@ ALTER TABLE forest_deployment.runtime_graph_clock
     ADD FOREIGN KEY (deployment_id,active_graph_id)
     REFERENCES forest_deployment.runtime_graphs(deployment_id,graph_id);
 
+CREATE TABLE forest_deployment.runtime_replacement_requests (
+    deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[0-9a-f]{64}$'),
+    requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 128),
+    target_component_id text NOT NULL CHECK (target_component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
+    package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[0-9a-f]{64}$'),
+    expected_graph_revision bigint NOT NULL CHECK (expected_graph_revision > 0),
+    activation_id text NOT NULL,
+    receipt_ticket_id text NOT NULL,
+    state text NOT NULL DEFAULT 'QUEUED'
+        CHECK (state IN ('QUEUED','RUNNING','SUCCEEDED','FAILED')),
+    owner_epoch bigint CHECK (owner_epoch IS NULL OR owner_epoch > 0),
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    result_graph_id text,
+    result_graph_revision bigint CHECK (result_graph_revision IS NULL OR result_graph_revision > 0),
+    error_code text CHECK (error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (deployment_id,operation_id),
+    UNIQUE (deployment_id,activation_id),
+    FOREIGN KEY (deployment_id,result_graph_id)
+        REFERENCES forest_deployment.runtime_graphs(deployment_id,graph_id),
+    CHECK (
+        (state='QUEUED' AND owner_epoch IS NULL AND attempt_count=0
+            AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NULL)
+        OR (state='RUNNING' AND owner_epoch IS NOT NULL AND attempt_count>0
+            AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NULL)
+        OR (state='SUCCEEDED' AND owner_epoch IS NOT NULL AND attempt_count>0
+            AND result_graph_id IS NOT NULL AND result_graph_revision IS NOT NULL AND error_code IS NULL)
+        OR (state='FAILED' AND owner_epoch IS NOT NULL AND attempt_count>0
+            AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NOT NULL)
+    )
+);
+CREATE INDEX runtime_replacement_queue
+    ON forest_deployment.runtime_replacement_requests(deployment_id,state,created_at,operation_id);
+
 CREATE TABLE forest_deployment.supervisor_lease (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
     host_id text,
@@ -210,6 +247,10 @@ CREATE TABLE forest_deployment.web_authority_receipts (
     UNIQUE (deployment_id,target_operation_ref),
     CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '30 seconds')
 );
+
+ALTER TABLE forest_deployment.runtime_replacement_requests
+    ADD FOREIGN KEY (deployment_id,receipt_ticket_id)
+    REFERENCES forest_deployment.web_authority_receipts(deployment_id,ticket_id);
 
 CREATE TABLE forest_deployment.audit_records (
     deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
@@ -489,6 +530,40 @@ CREATE TRIGGER web_setup_change_guard
 CREATE TRIGGER web_authority_receipt_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.web_authority_receipts
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE FUNCTION forest_deployment.guard_runtime_replacement() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Deployment replacement request cannot be deleted';
+    END IF;
+    IF ROW(OLD.deployment_id,OLD.operation_id,OLD.input_digest,OLD.requested_by,
+           OLD.target_component_id,OLD.package_digest,OLD.expected_graph_revision,
+           OLD.activation_id,OLD.receipt_ticket_id,OLD.created_at)
+       IS DISTINCT FROM
+       ROW(NEW.deployment_id,NEW.operation_id,NEW.input_digest,NEW.requested_by,
+           NEW.target_component_id,NEW.package_digest,NEW.expected_graph_revision,
+           NEW.activation_id,NEW.receipt_ticket_id,NEW.created_at)
+       OR OLD.state IN ('SUCCEEDED','FAILED')
+       OR NOT (
+           (OLD.state='QUEUED' AND NEW.state='RUNNING'
+                AND NEW.attempt_count=OLD.attempt_count+1 AND NEW.owner_epoch>0)
+           OR (OLD.state='RUNNING' AND NEW.state='RUNNING'
+                AND NEW.attempt_count=OLD.attempt_count+1
+                AND NEW.owner_epoch>OLD.owner_epoch)
+           OR (OLD.state='RUNNING' AND NEW.state IN ('SUCCEEDED','FAILED')
+                AND NEW.attempt_count=OLD.attempt_count
+                AND NEW.owner_epoch=OLD.owner_epoch)
+       ) OR NEW.updated_at<OLD.updated_at THEN
+        RAISE EXCEPTION 'Invalid deployment replacement transition';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER runtime_replacement_transition
+    BEFORE UPDATE OR DELETE ON forest_deployment.runtime_replacement_requests
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_runtime_replacement();
 
 CREATE TRIGGER deployment_audit_record_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.audit_records

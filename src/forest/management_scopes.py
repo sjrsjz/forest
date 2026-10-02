@@ -29,6 +29,7 @@ class DeploymentManagementGateway:
         web_receipts=None,
         audit=None,
         runtime_registry_provider: Callable | None = None,
+        replacement_authority=None,
     ) -> None:
         self.deployment_id = deployment_id
         self.components = components
@@ -37,13 +38,15 @@ class DeploymentManagementGateway:
         self.web_receipts = web_receipts
         self.audit = audit
         self._runtime_registry_provider = runtime_registry_provider
+        self.replacement_authority = replacement_authority
         self._operation_lock = asyncio.Lock()
 
     @property
     def runtime_registry(self):
         return (
             self._runtime_registry_provider()
-            if self._runtime_registry_provider is not None else None
+            if self._runtime_registry_provider is not None
+            else None
         )
 
     def _package_binding(self, component_id: str):
@@ -67,7 +70,8 @@ class DeploymentManagementGateway:
         if component_id == "$runtime":
             return (
                 (graph.graph_id, graph.graph_revision)
-                if graph is not None else ("deployment/control-plane/1", 1)
+                if graph is not None
+                else ("deployment/control-plane/1", 1)
             )
         if registry is not None and component_id in registry.states:
             if graph is None or registry.states[component_id] != "ACTIVE":
@@ -89,11 +93,13 @@ class DeploymentManagementGateway:
         await self.ticket_authority.verify(ticket, **expected)
         component_id = expected["target_component_id"]
         if self.authorization_target(component_id) != (
-            expected["target_generation_id"], expected["target_graph_revision"]
+            expected["target_generation_id"],
+            expected["target_graph_revision"],
         ):
             raise ForestError(
                 "WEB_AUTHORITY_TICKET_TARGET_MISMATCH",
-                "Deployment RuntimeGraph changed during authorization", 403,
+                "Deployment RuntimeGraph changed during authorization",
+                403,
             )
 
     async def runtime(self, *, authorization=None, operation_id=None) -> dict:
@@ -116,18 +122,22 @@ class DeploymentManagementGateway:
             "protocol": "forest.deployment-management-runtime/1",
             "runtime": (
                 {
-                    "scope_kind": "deployment", "scope_id": self.deployment_id,
-                    "graph_state": "ACTIVE", "graph_id": graph.graph_id,
+                    "scope_kind": "deployment",
+                    "scope_id": self.deployment_id,
+                    "graph_state": "ACTIVE",
+                    "graph_id": graph.graph_id,
                     "graph_revision": graph.graph_revision,
                 }
-                if graph is not None else {
-                    "scope_kind": "deployment", "scope_id": self.deployment_id,
-                    "graph_state": "CONTROL_PLANE", "graph_id": generation_id,
+                if graph is not None
+                else {
+                    "scope_kind": "deployment",
+                    "scope_id": self.deployment_id,
+                    "graph_state": "CONTROL_PLANE",
+                    "graph_id": generation_id,
                 }
             ),
-            "modules": (
-                registry.describe() if registry is not None else []
-            ) + [component.describe() for component in self.components],
+            "modules": (registry.describe() if registry is not None else [])
+            + [component.describe() for component in self.components],
         }
 
     async def read_configuration(self, component_id: str, *, authorization=None, operation_id=None):
@@ -152,20 +162,27 @@ class DeploymentManagementGateway:
         self._unsupported_configuration(component_id)
 
     async def read_management_ui(
-        self, component_id: str, artifact_sha256: str, *, authorization=None,
+        self,
+        component_id: str,
+        artifact_sha256: str,
+        *,
+        authorization=None,
         operation_id=None,
     ) -> bytes:
         binding = self._package_binding(component_id)
         if binding is None:
-            raise ForestError(
-                "PACKAGE_MANAGEMENT_UI_NOT_FOUND", "Package UI is unavailable", 404
-            )
+            raise ForestError("PACKAGE_MANAGEMENT_UI_NOT_FOUND", "Package UI is unavailable", 404)
         generation_id, graph_revision, module = binding
         await self._authorize(
-            authorization, target_scope_kind="deployment", target_scope_id="deployment",
-            target_component_id=component_id, target_generation_id=generation_id,
-            target_graph_revision=graph_revision, target_operation_ref=operation_id,
-            action_key="configuration.read", input_digest=digest_json({}),
+            authorization,
+            target_scope_kind="deployment",
+            target_scope_id="deployment",
+            target_component_id=component_id,
+            target_generation_id=generation_id,
+            target_graph_revision=graph_revision,
+            target_operation_ref=operation_id,
+            action_key="configuration.read",
+            input_digest=digest_json({}),
             required_role="AUDITOR",
         )
         _metadata, content = module.management_ui_artifact(artifact_sha256)
@@ -212,11 +229,40 @@ class DeploymentManagementGateway:
     async def module_query(
         self, component_id: str, query_id: str, body: dict, *, authorization=None, operation_id=None
     ):
+        if component_id == "$runtime":
+            if (
+                query_id != "module.replace.status"
+                or not isinstance(body, dict)
+                or (set(body) != {"operation_id"})
+            ):
+                raise ForestError(
+                    "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404
+                )
+            generation_id, graph_revision = self.authorization_target("$runtime")
+            await self._authorize(
+                authorization,
+                target_scope_kind="deployment",
+                target_scope_id="deployment",
+                target_component_id="$runtime",
+                target_generation_id=generation_id,
+                target_graph_revision=graph_revision,
+                target_operation_ref=operation_id,
+                action_key=query_id,
+                input_digest=digest_json(body),
+                required_role="AUDITOR",
+            )
+            if self.replacement_authority is None:
+                raise ForestError(
+                    "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Replacement authority is unavailable", 503
+                )
+            return await self.replacement_authority.get(body["operation_id"])
         binding = self._package_binding(component_id)
         generation_id, graph_revision = (
             binding[:2] if binding is not None else self.authorization_target(component_id)
         )
-        contract = binding[2].management_contract if binding is not None else self._contract(component_id)
+        contract = (
+            binding[2].management_contract if binding is not None else self._contract(component_id)
+        )
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
@@ -242,6 +288,48 @@ class DeploymentManagementGateway:
         operation_id=None,
     ):
         operation_id = operation_id or self.operation_id(component_id, action_id, idempotency_key)
+        if component_id == "$runtime":
+            if action_id != "module.replace":
+                raise ForestError(
+                    "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404
+                )
+            if self.replacement_authority is None:
+                raise ForestError(
+                    "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Replacement authority is unavailable", 503
+                )
+            registry = self.runtime_registry
+            if registry is None:
+                raise ForestError(
+                    "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Deployment Registry is unavailable", 503
+                )
+            generation_id, graph_revision = self.authorization_target("$runtime")
+            input_digest = digest_json(body)
+            await self._authorize(
+                authorization,
+                target_scope_kind="deployment",
+                target_scope_id="deployment",
+                target_component_id="$runtime",
+                target_generation_id=generation_id,
+                target_graph_revision=graph_revision,
+                target_operation_ref=operation_id,
+                action_key=action_id,
+                input_digest=input_digest,
+                required_role="ADMIN",
+            )
+            guard = DeploymentActionAuthorization(
+                authorization,
+                self._authorize_mutation_in,
+                "$runtime",
+                action_id,
+                input_digest,
+                operation_id,
+            )
+            return await self.replacement_authority.enqueue_web(
+                lease=registry.runtime.authority_lease(),
+                ticket=authorization,
+                body=body,
+                authorize_in=guard.accept_in,
+            )
         generation_id, graph_revision = self.authorization_target(component_id)
         input_digest = digest_json(body)
         await self._authorize(
@@ -327,9 +415,7 @@ class DeploymentManagementGateway:
             404,
         )
 
-    def operation_id(
-        self, component_id: str, action_id: str, key: str | None
-    ) -> str:
+    def operation_id(self, component_id: str, action_id: str, key: str | None) -> str:
         if key is None or not 1 <= len(key) <= 128:
             raise ForestError(
                 "IDEMPOTENCY_KEY_REQUIRED", "A stable Idempotency-Key is required", 422
@@ -369,9 +455,7 @@ class DeploymentManagementScopeProvider:
     @asynccontextmanager
     async def gateway(self, scope_id: str):
         if scope_id != self.scope_id:
-            raise ForestError(
-                "MANAGEMENT_SCOPE_NOT_FOUND", "Management scope does not exist", 404
-            )
+            raise ForestError("MANAGEMENT_SCOPE_NOT_FOUND", "Management scope does not exist", 404)
         yield self._gateway
 
 
@@ -503,8 +587,15 @@ class _AuthorizedGateway:
             return None, operation_id
         generation_id, graph_revision = self.gateway.authorization_target(component_id)
         operation_id = operation_id or "web-read:" + digest_json(
-            [self.session.session_ref, self.scope_kind, self.scope_id, component_id,
-             action_key, body, secrets.token_urlsafe(16)]
+            [
+                self.session.session_ref,
+                self.scope_kind,
+                self.scope_id,
+                component_id,
+                action_key,
+                body,
+                secrets.token_urlsafe(16),
+            ]
         )
         ticket = await self.ticket_authority.issue(
             session=self.session,
@@ -620,21 +711,31 @@ class _AuthorizedGateway:
             component_id, asset_id, "begin", body.get("upload_id", "")
         )
         ticket, operation_id = await self._ticket(
-            component_id, "asset." + asset_id + ".begin", body,
+            component_id,
+            "asset." + asset_id + ".begin",
+            body,
             operation_id=operation_id,
         )
         return await self.gateway.asset_begin(
-            component_id, asset_id, body, authorization=ticket,
+            component_id,
+            asset_id,
+            body,
+            authorization=ticket,
             operation_id=operation_id,
         )
 
     async def asset_chunk(
-        self, component_id: str, asset_id: str, upload_id: str,
-        chunk_index: int, content: bytes,
+        self,
+        component_id: str,
+        asset_id: str,
+        upload_id: str,
+        chunk_index: int,
+        content: bytes,
     ):
         self._write()
         body = {
-            "upload_id": upload_id, "chunk_index": chunk_index,
+            "upload_id": upload_id,
+            "chunk_index": chunk_index,
             "byte_length": len(content),
             "digest": "sha256:" + hashlib.sha256(content).hexdigest(),
         }
@@ -642,12 +743,19 @@ class _AuthorizedGateway:
             component_id, asset_id, "chunk", f"{upload_id}:{chunk_index}"
         )
         ticket, operation_id = await self._ticket(
-            component_id, "asset." + asset_id + ".chunk", body,
+            component_id,
+            "asset." + asset_id + ".chunk",
+            body,
             operation_id=operation_id,
         )
         return await self.gateway.asset_chunk(
-            component_id, asset_id, upload_id, chunk_index, content,
-            authorization=ticket, operation_id=operation_id,
+            component_id,
+            asset_id,
+            upload_id,
+            chunk_index,
+            content,
+            authorization=ticket,
+            operation_id=operation_id,
         )
 
     async def asset_finalize(self, component_id: str, asset_id: str, upload_id: str):
@@ -657,10 +765,15 @@ class _AuthorizedGateway:
             component_id, asset_id, "finalize", upload_id
         )
         ticket, operation_id = await self._ticket(
-            component_id, "asset." + asset_id + ".finalize", body,
+            component_id,
+            "asset." + asset_id + ".finalize",
+            body,
             operation_id=operation_id,
         )
         return await self.gateway.asset_finalize(
-            component_id, asset_id, upload_id, authorization=ticket,
+            component_id,
+            asset_id,
+            upload_id,
+            authorization=ticket,
             operation_id=operation_id,
         )

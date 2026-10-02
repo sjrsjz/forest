@@ -1,6 +1,7 @@
 let apiBase = '/management/v1';
 let scopes = [];
 let workspaceEpoch = 0;
+let currentRole = null;
 const $ = id => document.getElementById(id);
 
 function cookie(name) {
@@ -492,10 +493,40 @@ async function refresh() {
   if (snapshot.scopes && renderScopes(snapshot.scopes)) return refresh();
   unmountPackage();
   const runtime = snapshot.runtime;
-  $('bot-id').textContent = runtime.bot_id;
+  $('bot-id').textContent = runtime.bot_id || runtime.scope_id;
   $('runtime-state').textContent = runtime.graph_state;
   $('graph-id').textContent = runtime.graph_id;
   $('module-count').textContent = snapshot.modules.length;
+  const graphControl = $('graph-control');
+  const graphForm = $('graph-replace-form');
+  const graphModules = snapshot.modules.filter(row => row.artifact?.scope === 'deployment');
+  graphControl.classList.toggle('hidden', runtime.scope_kind !== 'deployment'
+    || currentRole !== 'ADMIN' || !graphModules.length);
+  if (!graphControl.classList.contains('hidden')) {
+    const selector = graphForm.elements.component_id;
+    const selected = selector.value;
+    selector.replaceChildren(...graphModules.map(row => {
+      const option = document.createElement('option');
+      option.value = row.component_id;
+      option.textContent = `${row.component_id} · ${row.artifact.package_version}`;
+      return option;
+    }));
+    selector.value = graphModules.some(row => row.component_id === selected)
+      ? selected : graphModules[0].component_id;
+    graphForm.dataset.revision = String(runtime.graph_revision);
+    $('graph-replace-revision').textContent = String(runtime.graph_revision);
+    if (!graphForm.elements.package_digest.value) {
+      graphForm.elements.package_digest.value = graphModules.find(
+        row => row.component_id === selector.value
+      ).artifact.package_digest;
+    }
+    selector.onchange = () => {
+      graphForm.elements.package_digest.value = graphModules.find(
+        row => row.component_id === selector.value
+      ).artifact.package_digest;
+      delete graphForm.dataset.operationKey;
+    };
+  }
   const nav = $('module-nav');
   const table = $('module-table');
   nav.replaceChildren();
@@ -519,6 +550,59 @@ async function refresh() {
     table.append(item);
   }
 }
+
+$('graph-replace-form').oninput = () => {
+  delete $('graph-replace-form').dataset.operationKey;
+};
+
+$('graph-replace-form').onsubmit = async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const output = $('graph-replace-status');
+  const button = form.querySelector('button[type="submit"]');
+  const scope = apiBase;
+  const epoch = workspaceEpoch;
+  const body = {
+    component_id: form.elements.component_id.value,
+    package_digest: form.elements.package_digest.value.trim(),
+    expected_graph_revision: Number(form.dataset.revision),
+  };
+  form.dataset.operationKey ||= Array.from(
+    crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')
+  ).join('');
+  button.disabled = true;
+  try {
+    const saved = await api('/management/v1/modules/$runtime/actions/module.replace', {
+      method: 'POST',
+      headers: {'idempotency-key': form.dataset.operationKey},
+      body: JSON.stringify(body),
+    });
+    output.textContent = `请求 ${saved.operation_id}：${saved.state}`;
+    const deadline = Date.now() + 180000;
+    while (apiBase === scope && workspaceEpoch === epoch && Date.now() < deadline) {
+      if (['SUCCEEDED', 'FAILED'].includes(saved.state)) {
+        delete form.dataset.operationKey;
+        if (saved.state === 'SUCCEEDED') await refresh();
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const status = await api('/management/v1/modules/$runtime/queries/module.replace.status', {
+        method: 'POST', body: JSON.stringify({operation_id: saved.operation_id}),
+      });
+      output.textContent = `请求 ${saved.operation_id}：${status.state}`
+        + (status.error_code ? ` · ${status.error_code}` : '');
+      if (['SUCCEEDED', 'FAILED'].includes(status.state)) {
+        delete form.dataset.operationKey;
+        if (status.state === 'SUCCEEDED') await refresh();
+        break;
+      }
+    }
+  } catch (error) {
+    output.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+};
 
 $('scope-select').onchange = async event => {
   const scopeId = event.currentTarget.value;
@@ -564,13 +648,14 @@ $('login-form').onsubmit = async event => {
   const form = new FormData(event.currentTarget);
   apiBase = '/management/v1';
   try {
-    await api('/management/v1/auth/login', {
+    const session = await api('/management/v1/auth/login', {
       method: 'POST',
       body: JSON.stringify({
         username: form.get('username'),
         password: form.get('password'),
       }),
     });
+    currentRole = session.subject.role;
     await refresh();
     $('login').classList.add('hidden');
     $('console').classList.remove('hidden');
@@ -591,7 +676,8 @@ $('back').onclick = showOverview;
 
 async function start() {
   try {
-    await api('/management/v1/auth/session');
+    const session = await api('/management/v1/auth/session');
+    currentRole = session.subject.role;
     await refresh();
     $('console').classList.remove('hidden');
     return;

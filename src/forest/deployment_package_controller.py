@@ -44,12 +44,14 @@ class DeploymentPackageController:
             )
         return self._registry
 
-    async def _assemble(self, snapshots: dict[str, PackageSnapshot]) -> RuntimeModuleRegistry:
+    async def _assemble(
+        self, snapshots: dict[str, PackageSnapshot], *, activation_id: str | None = None
+    ) -> RuntimeModuleRegistry:
         descriptors = [
             await bootstrap_builtin_deployment_package(snapshot, self.runtime)
             for _component_id, snapshot in sorted(snapshots.items())
         ]
-        return RuntimeModuleRegistry(self.runtime, tuple(descriptors))
+        return RuntimeModuleRegistry(self.runtime, tuple(descriptors), activation_id=activation_id)
 
     async def start(self) -> RuntimeModuleRegistry:
         async with self._lock:
@@ -97,7 +99,12 @@ class DeploymentPackageController:
             return registry
 
     async def replace(
-        self, component_id: str, package_digest: str, *, expected_graph_revision: int
+        self,
+        component_id: str,
+        package_digest: str,
+        *,
+        expected_graph_revision: int,
+        activation_id: str | None = None,
     ) -> RuntimeModuleRegistry:
         """Replace one package under a graph-revision CAS; never reopen an unknown head."""
 
@@ -119,7 +126,7 @@ class DeploymentPackageController:
                     409,
                 )
             snapshots = {**self._snapshots, component_id: snapshot}
-            candidate = await self._assemble(snapshots)
+            candidate = await self._assemble(snapshots, activation_id=activation_id)
             affected = candidate.plan_graph_transition(previous, target_component_id=component_id)
             drained = False
             try:
@@ -213,6 +220,71 @@ class DeploymentPackageController:
                 )
                 raise failure from errors[0]
             return candidate
+
+    async def serve_replacements(self, authority) -> None:
+        """Reconcile durable requests before executing another Graph transition."""
+
+        while not self._closed:
+            request = await authority.claim(self.runtime.authority_lease())
+            if request is None:
+                await asyncio.sleep(0.5)
+                continue
+            try:
+                evidence = await authority.published_graph(request)
+                if evidence is None:
+                    if request["attempt_count"] > 1:
+                        raise ForestError(
+                            "RUNTIME_REPLACEMENT_INTERRUPTED",
+                            "Prior deployment replacement ended before publication",
+                            409,
+                        )
+                    if (
+                        self.registry.graph_identity.graph_revision
+                        != request["expected_graph_revision"]
+                    ):
+                        raise ForestError(
+                            "RUNTIME_GRAPH_REVISION_CONFLICT",
+                            "Deployment Graph changed before queued replacement",
+                            409,
+                        )
+                    await self.replace(
+                        request["target_component_id"],
+                        request["package_digest"],
+                        expected_graph_revision=request["expected_graph_revision"],
+                        activation_id=request["activation_id"],
+                    )
+                    evidence = await authority.published_graph(request)
+                    if evidence is None:
+                        raise ForestError(
+                            "RUNTIME_REPLACEMENT_RESULT_INVALID",
+                            "Published deployment Graph has no durable evidence",
+                            503,
+                        )
+                await authority.settle(
+                    self.runtime.authority_lease(),
+                    operation_id=request["operation_id"],
+                    graph=evidence,
+                )
+            except asyncio.CancelledError:
+                raise
+            except BaseException as error:
+                evidence = await authority.published_graph(request)
+                await authority.settle(
+                    self.runtime.authority_lease(),
+                    operation_id=request["operation_id"],
+                    graph=evidence,
+                    error_code=(
+                        None
+                        if evidence is not None
+                        else (
+                            error.code
+                            if isinstance(error, ForestError)
+                            else "RUNTIME_REPLACEMENT_FAILED"
+                        )
+                    ),
+                )
+                if self._fatal is not None:
+                    raise self._fatal from error
 
     async def close(self) -> None:
         async with self._lock:

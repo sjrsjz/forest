@@ -50,6 +50,7 @@ from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_generation import DeploymentGenerationAuthority
 from forest.storage.deployment_module_configuration import DeploymentModuleConfigurationRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
+from forest.storage.deployment_replacements import DeploymentReplacementAuthority
 from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInstaller
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
@@ -152,12 +153,16 @@ async def test_deployment_package_storage_has_its_own_scope_fenced_ledger(deploy
 async def test_deployment_configuration_revision_activates_with_real_generation(deployment_catalog):
     catalog = deployment_catalog
     await catalog.initialize()
-    source = files("forest.storage.official").joinpath(
-        "deployment_module_configuration.sql"
-    ).read_bytes()
+    source = (
+        files("forest.storage.official")
+        .joinpath("deployment_module_configuration.sql")
+        .read_bytes()
+    )
     spec = StorageBundleSpec(
-        component_id="deployment.settings", schema_id="deployment.settings",
-        schema_version="1.0.0", baseline_sha256=hashlib.sha256(source).hexdigest(),
+        component_id="deployment.settings",
+        schema_id="deployment.settings",
+        schema_version="1.0.0",
+        baseline_sha256=hashlib.sha256(source).hexdigest(),
         repository_contract="forest.deployment-module-configuration.repository/1",
         scope="deployment",
     )
@@ -170,13 +175,18 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
     )
     schema_digest = digest_json({"protocol": "forest.deployment-settings/1"})
     first = await configuration.ensure_initialized(
-        operation_id="bootstrap/settings", value={"name": "forest"},
+        operation_id="bootstrap/settings",
+        value={"name": "forest"},
         validation_digest=schema_digest,
     )
-    assert await configuration.ensure_initialized(
-        operation_id="bootstrap/settings", value={"name": "forest"},
-        validation_digest=schema_digest,
-    ) == first
+    assert (
+        await configuration.ensure_initialized(
+            operation_id="bootstrap/settings",
+            value={"name": "forest"},
+            validation_digest=schema_digest,
+        )
+        == first
+    )
     assert (await configuration.desired_checked()).value == {"name": "forest"}
 
     lease = await catalog.claim_supervisor("host/config", "incarnation/config")
@@ -185,46 +195,77 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
 
     def binding(current):
         return PreparedGenerationBinding(
-            component_id=spec.component_id, requires=(), package_id="deployment.settings",
-            package_version="1.0.0", package_digest=digest, driver="python-worker",
-            trust_level="official", descriptor_digest=digest, route_contract_digest=digest,
-            management_contract_digest=digest, management_ui_digest=digest,
-            config_revision=current.revision, config_payload_id=current.payload_id,
-            config_payload_digest=current.payload_digest, instance_id="instance/settings",
-            worker_incarnation="worker/settings", state_schema=1,
-            state_contract_digest=digest, capability_grants_digest=digest,
-            data_admission=False, control_admission=True,
+            component_id=spec.component_id,
+            requires=(),
+            package_id="deployment.settings",
+            package_version="1.0.0",
+            package_digest=digest,
+            driver="python-worker",
+            trust_level="official",
+            descriptor_digest=digest,
+            route_contract_digest=digest,
+            management_contract_digest=digest,
+            management_ui_digest=digest,
+            config_revision=current.revision,
+            config_payload_id=current.payload_id,
+            config_payload_digest=current.payload_digest,
+            instance_id="instance/settings",
+            worker_incarnation="worker/settings",
+            state_schema=1,
+            state_contract_digest=digest,
+            capability_grants_digest=digest,
+            data_admission=False,
+            control_admission=True,
             storage=RuntimeStorageBinding(
-                schema_id=spec.schema_id, schema_version=spec.schema_version,
-                namespace=spec.namespace, baseline_sha256=spec.baseline_sha256,
-                package_digest=storage_digest, repository_contract=spec.repository_contract,
+                schema_id=spec.schema_id,
+                schema_version=spec.schema_version,
+                namespace=spec.namespace,
+                baseline_sha256=spec.baseline_sha256,
+                package_digest=storage_digest,
+                repository_contract=spec.repository_contract,
                 execution_profile="official",
             ),
         )
 
     graph = await authority.prepare_graph(lease, [binding(first)], str(uuid4()))
-    assert await authority.publish_graph(
-        lease, graph, configuration_activators={spec.component_id: configuration}
-    ) == graph.graph_revision
+    assert (
+        await authority.publish_graph(
+            lease, graph, configuration_activators={spec.component_id: configuration}
+        )
+        == graph.graph_revision
+    )
     assert await configuration.effective() == first
 
     plan = await configuration.plan(
-        operation_id="plan/settings/2", expected_desired_revision=1,
-        value={"name": "forest two"}, validation_digest=schema_digest,
+        operation_id="plan/settings/2",
+        expected_desired_revision=1,
+        value={"name": "forest two"},
+        validation_digest=schema_digest,
     )
     second = await configuration.apply(
-        operation_id="apply/settings/2", plan_id=plan["plan_id"],
+        operation_id="apply/settings/2",
+        plan_id=plan["plan_id"],
         expected_desired_revision=1,
     )
     assert (await configuration.desired()).revision == 2
     assert (await configuration.effective()).revision == 1
-    assert (await configuration.ensure_initialized(
-        operation_id="bootstrap/settings", value={"name": "forest"},
-        validation_digest=schema_digest,
-    )).revision == 2
+    assert (
+        await configuration.ensure_initialized(
+            operation_id="bootstrap/settings",
+            value={"name": "forest"},
+            validation_digest=schema_digest,
+        )
+    ).revision == 2
     wrong = await authority.prepare_graph(
-        lease, [replace(binding(second), config_payload_id=first.payload_id,
-                        config_payload_digest=first.payload_digest)], str(uuid4())
+        lease,
+        [
+            replace(
+                binding(second),
+                config_payload_id=first.payload_id,
+                config_payload_digest=first.payload_digest,
+            )
+        ],
+        str(uuid4()),
     )
     replacement = await authority.prepare_graph(lease, [binding(second)], str(uuid4()))
     with pytest.raises(ForestError) as caught:
@@ -242,8 +283,10 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
 
     async def plan_third(operation_id: str, name: str):
         return await configuration.plan(
-            operation_id=operation_id, expected_desired_revision=2,
-            value={"name": name}, validation_digest=schema_digest,
+            operation_id=operation_id,
+            expected_desired_revision=2,
+            value={"name": name},
+            validation_digest=schema_digest,
         )
 
     replay_a, replay_b = await asyncio.gather(
@@ -255,7 +298,8 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
 
     async def apply_third(plan_id: str, operation_id: str):
         return await configuration.apply(
-            operation_id=operation_id, plan_id=plan_id,
+            operation_id=operation_id,
+            plan_id=plan_id,
             expected_desired_revision=2,
         )
 
@@ -264,14 +308,163 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
         apply_third(competing["plan_id"], "apply/settings/competing"),
         return_exceptions=True,
     )
-    assert sum(isinstance(value, ForestError) and value.code == "MODULE_CONFIGURATION_CONFLICT"
-               for value in outcomes) == 1
+    assert (
+        sum(
+            isinstance(value, ForestError) and value.code == "MODULE_CONFIGURATION_CONFLICT"
+            for value in outcomes
+        )
+        == 1
+    )
     winner = next(value for value in outcomes if not isinstance(value, BaseException))
     assert winner.revision == 3
     assert (await configuration.desired(include_value=True)).value in (
-        {"name": "replayed"}, {"name": "competing"}
+        {"name": "replayed"},
+        {"name": "competing"},
     )
     assert (await configuration.effective()).revision == 2
+
+
+@pytest.mark.postgres
+async def test_deployment_web_queues_and_reconciles_package_replacement(
+    deployment_catalog, tmp_path
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    lease = await repository.claim_supervisor("host/web-replace", "incarnation/web-replace")
+    runtime = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease)
+    )
+    package_catalog = PackageCatalog(tmp_path / "replacement-packages")
+    controller = DeploymentPackageController(
+        runtime,
+        package_catalog,
+        official_sources=(Path(__file__).parents[1] / "src/forest/builtin/deployment_audit",),
+    )
+    await controller.start()
+    replacements = DeploymentReplacementAuthority(repository.store)
+    identity = DeploymentWebIdentityAuthority(
+        repository.store,
+        active_key_id="key/replacement",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    now = datetime.now(timezone.utc)
+    await identity.initialize_setup(
+        SimpleNamespace(
+            setup_id="setup/webreplacement0001",
+            pairing_code="q" * 48,
+            issued_at=now,
+            expires_at=now + timedelta(hours=1),
+        )
+    )
+    await identity.complete_setup(
+        pairing_code="q" * 48,
+        username="admin",
+        display_name="Administrator",
+        password="deployment-web-password",
+    )
+    app = create_deployment_management_app(
+        deployment_id=repository.store.deployment_id,
+        components=(),
+        deployment_registry_provider=lambda: controller.registry,
+        deployment_replacements=replacements,
+        identity_authority=identity,
+        deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
+        deployment_audit=DeploymentAuditRepository(repository.store),
+        allowed_origin="http://forest.test",
+    )
+    worker = asyncio.create_task(controller.serve_replacements(replacements))
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://forest.test"
+        ) as client:
+            login = await client.post(
+                "/management/v1/auth/login",
+                headers={"origin": "http://forest.test"},
+                json={"username": "admin", "password": "deployment-web-password"},
+            )
+            assert login.status_code == 200
+            headers = {
+                "origin": "http://forest.test",
+                "x-forest-csrf": client.cookies["forest_management_csrf"],
+            }
+            old = controller.registry.graph_identity
+            body = {
+                "component_id": "deployment.audit",
+                "package_digest": controller.registry.get("deployment.audit").snapshot.digest,
+                "expected_graph_revision": old.graph_revision,
+            }
+            action_path = (
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "$runtime/actions/module.replace"
+            )
+            saved = await client.post(
+                action_path,
+                headers={**headers, "idempotency-key": "replace-audit-1"},
+                json=body,
+            )
+            assert saved.status_code == 200, saved.text
+            request = saved.json()
+            assert request["state"] == "QUEUED"
+            assert request["receipt_ticket_id"]
+            async with repository.store.pool.connection() as conn:
+                audit = await (
+                    await conn.execute(
+                        "SELECT operation_id,receipt_ticket_id FROM "
+                        "forest_deployment.audit_records WHERE deployment_id=%s "
+                        "AND operation_id=%s",
+                        (repository.store.deployment_id, request["operation_id"]),
+                    )
+                ).fetchall()
+            assert len(audit) == 1
+            assert audit[0]["receipt_ticket_id"] == request["receipt_ticket_id"]
+            status_path = (
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "$runtime/queries/module.replace.status"
+            )
+            async with asyncio.timeout(15):
+                while True:
+                    status = await client.post(
+                        status_path,
+                        headers=headers,
+                        json={"operation_id": request["operation_id"]},
+                    )
+                    assert status.status_code == 200, status.text
+                    if status.json()["state"] in {"SUCCEEDED", "FAILED"}:
+                        break
+                    await asyncio.sleep(0.05)
+            assert status.json()["state"] == "SUCCEEDED", status.text
+            assert controller.registry.graph_identity.graph_revision > old.graph_revision
+            replay = await client.post(
+                action_path,
+                headers={**headers, "idempotency-key": "replace-audit-1"},
+                json=body,
+            )
+            assert replay.status_code == 200, replay.text
+            assert replay.json()["operation_id"] == request["operation_id"]
+            assert replay.json()["state"] == "SUCCEEDED"
+            conflict = await client.post(
+                action_path, headers={**headers, "idempotency-key": "replace-audit-1"},
+                json={**body, "package_digest": "sha256:" + "1" * 64},
+            )
+            assert conflict.status_code == 409
+            assert conflict.json()["code"] == "RUNTIME_REPLACEMENT_CONFLICT"
+            async with repository.store.pool.connection() as conn:
+                count = await (
+                    await conn.execute(
+                        "SELECT count(*) AS value FROM forest_deployment.audit_records "
+                        "WHERE deployment_id=%s AND operation_id=%s",
+                        (repository.store.deployment_id, request["operation_id"]),
+                    )
+                ).fetchone()
+            assert count["value"] == 1
+            assert (
+                controller.registry.graph_identity.graph_revision
+                == status.json()["result_graph_revision"]
+            )
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+        await controller.close()
 
 
 @pytest.mark.postgres
@@ -286,9 +479,7 @@ async def test_deployment_package_controller_restores_selected_artifact_after_re
     )
     package_catalog = PackageCatalog(tmp_path / "catalog")
     source = Path(__file__).parents[1] / "src/forest/builtin/deployment_audit"
-    controller = DeploymentPackageController(
-        runtime, package_catalog, official_sources=(source,)
-    )
+    controller = DeploymentPackageController(runtime, package_catalog, official_sources=(source,))
     restarted = None
     try:
         original = await controller.start()
@@ -307,14 +498,16 @@ async def test_deployment_package_controller_restores_selected_artifact_after_re
         old_revision = original.graph_identity.graph_revision
         with pytest.raises(ForestError) as conflict:
             await controller.replace(
-                "deployment.audit", replacement.digest,
+                "deployment.audit",
+                replacement.digest,
                 expected_graph_revision=old_revision + 1,
             )
         assert conflict.value.code == "RUNTIME_GRAPH_REVISION_CONFLICT"
         assert controller.registry is original
 
         active = await controller.replace(
-            "deployment.audit", replacement.digest,
+            "deployment.audit",
+            replacement.digest,
             expected_graph_revision=old_revision,
         )
         assert active.get("deployment.audit").snapshot.digest == replacement.digest
@@ -327,38 +520,64 @@ async def test_deployment_package_controller_restores_selected_artifact_after_re
 
         def ticket(component_id: str, generation_id: str, revision: int, operation: str):
             return WebAuthorityTicket(
-                "forest.web-authority-ticket/1", f"ticket/{operation}",
-                "issuer/packages", "key/packages", "subject/packages", "ADMIN",
-                "session/packages", 1, "deployment", "deployment", component_id,
-                generation_id, revision, f"operation/{operation}", "module.replace",
-                digest_json({"operation": operation}), None,
-                now, now + timedelta(seconds=20), "hmac-sha256:" + "0" * 64,
+                "forest.web-authority-ticket/1",
+                f"ticket/{operation}",
+                "issuer/packages",
+                "key/packages",
+                "subject/packages",
+                "ADMIN",
+                "session/packages",
+                1,
+                "deployment",
+                "deployment",
+                component_id,
+                generation_id,
+                revision,
+                f"operation/{operation}",
+                "module.replace",
+                digest_json({"operation": operation}),
+                None,
+                now,
+                now + timedelta(seconds=20),
+                "hmac-sha256:" + "0" * 64,
             )
 
         with pytest.raises(ForestError) as stale:
-            await receipts.accept(ticket=ticket(
-                "$runtime", original.graph_identity.graph_id, old_revision, "stale"
-            ))
+            await receipts.accept(
+                ticket=ticket("$runtime", original.graph_identity.graph_id, old_revision, "stale")
+            )
         assert stale.value.code == "WEB_AUTHORITY_TICKET_TARGET_MISMATCH"
-        accepted = await receipts.accept(ticket=ticket(
-            "$runtime", active.graph_identity.graph_id,
-            active.graph_identity.graph_revision, "current",
-        ))
+        accepted = await receipts.accept(
+            ticket=ticket(
+                "$runtime",
+                active.graph_identity.graph_id,
+                active.graph_identity.graph_revision,
+                "current",
+            )
+        )
         assert accepted["target_graph_revision"] == active.graph_identity.graph_revision
         generation = active.graph_identity.generations["deployment.audit"]
-        assert (await receipts.accept(ticket=ticket(
-            "deployment.audit", generation, active.graph_identity.graph_revision,
-            "member",
-        )))["target_generation_id"] == generation
+        assert (
+            await receipts.accept(
+                ticket=ticket(
+                    "deployment.audit",
+                    generation,
+                    active.graph_identity.graph_revision,
+                    "member",
+                )
+            )
+        )["target_generation_id"] == generation
 
         restarted = DeploymentPackageController(
             runtime, package_catalog, official_sources=(source,)
         )
         recovered = await restarted.start()
         assert recovered.get("deployment.audit").snapshot.digest == replacement.digest
-        assert (await recovered.get("deployment.audit").management_contract.query(
-            "audit.records.query", {"limit": 1}
-        )) == {"records": [], "next_before": None}
+        assert (
+            await recovered.get("deployment.audit").management_contract.query(
+                "audit.records.query", {"limit": 1}
+            )
+        ) == {"records": [], "next_before": None}
     finally:
         if restarted is not None:
             await restarted.close()
@@ -384,12 +603,14 @@ async def test_deployment_audit_builtin_runs_in_real_package_generation(
         await registry.start()
         assert await runtime.generation_authority.current_graph() == registry.graph_identity
         module = registry.get("deployment.audit")
-        assert module.generation_identity.generation_id == (
-            registry.graph_identity.generations["deployment.audit"]
+        assert (
+            module.generation_identity.generation_id
+            == (registry.graph_identity.generations["deployment.audit"])
         )
         query = module.management_contract.query
         assert await query("audit.records.query", {"limit": 10}) == {
-            "records": [], "next_before": None,
+            "records": [],
+            "next_before": None,
         }
 
         async with catalog.store.pool.connection() as conn, conn.transaction():
@@ -433,12 +654,15 @@ async def test_deployment_audit_builtin_runs_in_real_package_generation(
         await previous.drain_owned_work_for_replacement(candidate.activation_id)
         await candidate.start()
         assert candidate.graph_identity.graph_revision == 2
-        assert candidate.graph_identity.generations["deployment.audit"] != (
-            previous.graph_identity.generations["deployment.audit"]
+        assert (
+            candidate.graph_identity.generations["deployment.audit"]
+            != (previous.graph_identity.generations["deployment.audit"])
         )
-        assert (await candidate.get("deployment.audit").management_contract.query(
-            "audit.records.query", {"limit": 10}
-        ))["records"][0]["audit_id"] == "audit:one"
+        assert (
+            await candidate.get("deployment.audit").management_contract.query(
+                "audit.records.query", {"limit": 10}
+            )
+        )["records"][0]["audit_id"] == "audit:one"
         assert await previous.close() == []
         registry = candidate
     finally:
@@ -461,22 +685,40 @@ async def test_deployment_generations_publish_under_the_real_supervisor_lease(de
 
     def binding(component_id: str, *, revision: int = 1) -> PreparedGenerationBinding:
         return PreparedGenerationBinding(
-            component_id=component_id, requires=(), package_id="deployment.test",
-            package_version="1.0.0", package_digest=digest, driver="python-worker",
-            trust_level="installed", descriptor_digest=digest,
-            route_contract_digest=digest, management_contract_digest=digest,
-            management_ui_digest=digest, config_revision=revision,
+            component_id=component_id,
+            requires=(),
+            package_id="deployment.test",
+            package_version="1.0.0",
+            package_digest=digest,
+            driver="python-worker",
+            trust_level="installed",
+            descriptor_digest=digest,
+            route_contract_digest=digest,
+            management_contract_digest=digest,
+            management_ui_digest=digest,
+            config_revision=revision,
             config_payload_id="config/" + component_id,
-            config_payload_digest=digest, instance_id="instance/" + component_id,
+            config_payload_digest=digest,
+            instance_id="instance/" + component_id,
             worker_incarnation="worker/" + component_id,
-            state_schema=1, state_contract_digest=digest,
-            capability_grants_digest=digest, data_admission=False,
+            state_schema=1,
+            state_contract_digest=digest,
+            capability_grants_digest=digest,
+            data_admission=False,
             control_admission=True,
         )
 
     class Configuration:
-        async def activate_in(self, conn, *, operation_id, revision, generation_id,
-                              expected_payload_id, expected_payload_digest):
+        async def activate_in(
+            self,
+            conn,
+            *,
+            operation_id,
+            revision,
+            generation_id,
+            expected_payload_id,
+            expected_payload_digest,
+        ):
             assert operation_id.startswith("runtime-publish:")
             assert generation_id.startswith("generation:")
             assert revision > 0 and expected_payload_id.startswith("config/")
@@ -486,13 +728,20 @@ async def test_deployment_generations_publish_under_the_real_supervisor_lease(de
     with pytest.raises(ForestError) as caught:
         await authority.prepare_graph(
             lease,
-            [replace(binding("deployment.unregistered"), storage=RuntimeStorageBinding(
-                schema_id="deployment.unregistered.state", schema_version="1.0.0",
-                namespace=module_schema_namespace("deployment.unregistered.state"),
-                baseline_sha256="1" * 64, package_digest=digest,
-                repository_contract="deployment.unregistered/1",
-                execution_profile="declarative",
-            ))],
+            [
+                replace(
+                    binding("deployment.unregistered"),
+                    storage=RuntimeStorageBinding(
+                        schema_id="deployment.unregistered.state",
+                        schema_version="1.0.0",
+                        namespace=module_schema_namespace("deployment.unregistered.state"),
+                        baseline_sha256="1" * 64,
+                        package_digest=digest,
+                        repository_contract="deployment.unregistered/1",
+                        execution_profile="declarative",
+                    ),
+                )
+            ],
             str(uuid4()),
         )
     assert caught.value.code == "RUNTIME_STORAGE_BINDING_MISMATCH"
@@ -501,18 +750,27 @@ async def test_deployment_generations_publish_under_the_real_supervisor_lease(de
         lease, [binding("deployment.alpha"), binding("deployment.beta")], str(uuid4())
     )
     assert first.graph_revision == 1
-    assert await authority.prepare_graph(
-        lease, [binding("deployment.alpha"), binding("deployment.beta")], first.activation_id
-    ) == first
+    assert (
+        await authority.prepare_graph(
+            lease, [binding("deployment.alpha"), binding("deployment.beta")], first.activation_id
+        )
+        == first
+    )
     assert await authority.current_graph() is None
-    assert await authority.publish_graph(
-        lease, first,
-        configuration_activators={item: Configuration() for item in first.generations},
-    ) == 1
+    assert (
+        await authority.publish_graph(
+            lease,
+            first,
+            configuration_activators={item: Configuration() for item in first.generations},
+        )
+        == 1
+    )
     assert await authority.current_graph() == first
 
     replacement = await authority.prepare_graph(
-        lease, [binding("deployment.beta", revision=2)], str(uuid4()),
+        lease,
+        [binding("deployment.beta", revision=2)],
+        str(uuid4()),
         retained_generations={"deployment.alpha": first.generations["deployment.alpha"]},
         source_graph=first,
     )
@@ -530,76 +788,89 @@ async def test_deployment_generations_publish_under_the_real_supervisor_lease(de
             )
         ).fetchall()
     assert {row["component_id"]: row["route_epoch"] for row in epochs} == {
-        "deployment.alpha": 1, "deployment.beta": 2,
+        "deployment.alpha": 1,
+        "deployment.beta": 2,
     }
-    assert await authority.publish_graph(
-        lease, replacement,
-        configuration_activators={"deployment.beta": Configuration()},
-    ) == 2
+    assert (
+        await authority.publish_graph(
+            lease,
+            replacement,
+            configuration_activators={"deployment.beta": Configuration()},
+        )
+        == 2
+    )
     assert await authority.current_graph() == replacement
     async with repository.store.pool.connection() as conn, conn.transaction():
         await conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         await authority.verify_generation_member_snapshot_in(
-            conn, component_id="deployment.alpha",
+            conn,
+            component_id="deployment.alpha",
             generation_id=replacement.generations["deployment.alpha"],
         )
     with pytest.raises(ForestError) as caught:
         await authority.publish_graph(
-            lease, stale,
+            lease,
+            stale,
             configuration_activators={"deployment.beta": Configuration()},
         )
     assert caught.value.code == "RUNTIME_GRAPH_STALE"
     async with repository.store.pool.connection() as conn:
         await authority.verify_active_generation_in(
-            conn, component_id="deployment.alpha",
-            generation_id=first.generations["deployment.alpha"], admission_lane="CONTROL",
+            conn,
+            component_id="deployment.alpha",
+            generation_id=first.generations["deployment.alpha"],
+            admission_lane="CONTROL",
         )
         await authority.verify_active_generation_in(
-            conn, component_id="deployment.beta",
-            generation_id=replacement.generations["deployment.beta"], admission_lane="CONTROL",
-        )
-        with pytest.raises(ForestError) as caught:
-            await authority.verify_active_generation_in(
-                conn, component_id="deployment.beta",
-                generation_id=first.generations["deployment.beta"], admission_lane="CONTROL",
-            )
-        assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
-    with pytest.raises(ForestError) as caught:
-        await authority.record_states(
-            lease, first, {"deployment.alpha": ("STOPPED", None)}
-        )
-    assert caught.value.code == "RUNTIME_GENERATION_STILL_ACTIVE"
-    await authority.record_states(
-        lease, first, {"deployment.beta": ("STOPPED", None)}
-    )
-    async with repository.store.pool.connection() as conn, conn.transaction():
-        await authority.verify_active_generation_in(
-            conn, component_id="deployment.beta",
+            conn,
+            component_id="deployment.beta",
             generation_id=replacement.generations["deployment.beta"],
             admission_lane="CONTROL",
         )
-        freezing = asyncio.create_task(authority.freeze_graph_admission(
-            lease, replacement, components=("deployment.beta",)
-        ))
+        with pytest.raises(ForestError) as caught:
+            await authority.verify_active_generation_in(
+                conn,
+                component_id="deployment.beta",
+                generation_id=first.generations["deployment.beta"],
+                admission_lane="CONTROL",
+            )
+        assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+    with pytest.raises(ForestError) as caught:
+        await authority.record_states(lease, first, {"deployment.alpha": ("STOPPED", None)})
+    assert caught.value.code == "RUNTIME_GENERATION_STILL_ACTIVE"
+    await authority.record_states(lease, first, {"deployment.beta": ("STOPPED", None)})
+    async with repository.store.pool.connection() as conn, conn.transaction():
+        await authority.verify_active_generation_in(
+            conn,
+            component_id="deployment.beta",
+            generation_id=replacement.generations["deployment.beta"],
+            admission_lane="CONTROL",
+        )
+        freezing = asyncio.create_task(
+            authority.freeze_graph_admission(lease, replacement, components=("deployment.beta",))
+        )
         done, pending = await asyncio.wait({freezing}, timeout=0.1)
         assert not done and pending == {freezing}
     assert await freezing == 1
     async with repository.store.pool.connection() as conn:
         with pytest.raises(ForestError) as caught:
             await authority.verify_active_generation_in(
-                conn, component_id="deployment.beta",
+                conn,
+                component_id="deployment.beta",
                 generation_id=replacement.generations["deployment.beta"],
                 admission_lane="CONTROL",
             )
         assert caught.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
         await authority.verify_active_generation_in(
-            conn, component_id="deployment.alpha",
+            conn,
+            component_id="deployment.alpha",
             generation_id=replacement.generations["deployment.alpha"],
             admission_lane="CONTROL",
         )
-    assert await authority.resume_graph_admission(
-        lease, replacement, components=("deployment.beta",)
-    ) == 1
+    assert (
+        await authority.resume_graph_admission(lease, replacement, components=("deployment.beta",))
+        == 1
+    )
     async with repository.store.pool.connection() as conn:
         epoch = await (
             await conn.execute(
@@ -612,19 +883,22 @@ async def test_deployment_generations_publish_under_the_real_supervisor_lease(de
     assert await authority.retire_graph(lease, replacement) == replacement.graph_revision
     assert await authority.current_graph() is None
     await authority.record_states(
-        lease, replacement,
+        lease,
+        replacement,
         {"deployment.alpha": ("STOPPED", None), "deployment.beta": ("STOPPED", None)},
     )
     async with repository.store.pool.connection() as conn:
         await authority.verify_generation_cleanup_in(
-            conn, component_id="deployment.beta",
+            conn,
+            component_id="deployment.beta",
             generation_id=replacement.generations["deployment.beta"],
         )
     await repository.release_supervisor(lease)
     async with repository.store.pool.connection() as conn:
         with pytest.raises(ForestError) as caught:
             await authority.verify_generation_cleanup_in(
-                conn, component_id="deployment.beta",
+                conn,
+                component_id="deployment.beta",
                 generation_id=replacement.generations["deployment.beta"],
             )
         assert caught.value.code == "RUNTIME_GENERATION_CLEANUP_DENIED"
@@ -978,7 +1252,10 @@ async def test_bootstrap_profile_is_component_scoped_immutable_and_secret_ref_on
             "allowed_group_ids": ["933179609"],
         },
     }
-    schemas = {component_id: "sha256:" + str(index) * 64 for index, component_id in enumerate(components, 1)}
+    schemas = {
+        component_id: "sha256:" + str(index) * 64
+        for index, component_id in enumerate(components, 1)
+    }
     created = await profiles.create(
         operation_id="bootstrap-profile/profile/1",
         profile_ref="bootstrap-profile/profile/1",
@@ -1241,8 +1518,8 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 "group_trigger_mode": "MENTION",
                 "private_enabled": True,
             },
-                "shell.command": {
-                    "protocol": "forest.shell.command/1",
+            "shell.command": {
+                "protocol": "forest.shell.command/1",
                 "binding_ref": "binding/main",
                 "administrator_principals": ["qq:10001"],
             },
@@ -1258,9 +1535,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 "access_token_ref": "secret://official/onebot",
             },
         }
-        bootstrap_profiles = DeploymentBootstrapProfileAuthority(
-            repository.store, secrets=secrets
-        )
+        bootstrap_profiles = DeploymentBootstrapProfileAuthority(repository.store, secrets=secrets)
         bootstrap = await bootstrap_profiles.create(
             operation_id="bootstrap-profile/official/create",
             profile_ref="bootstrap-profile/official/1",
@@ -1306,6 +1581,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
         )
         await supervisor.start()
         try:
+
             async def provisioned():
                 job = await jobs.inspect("provisioning/official/1")
                 assert job["state"] != "FAILED", job.get("last_error_code")
@@ -1335,9 +1611,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                     )
                 ).fetchone()
                 assert graph["count"] == 0
-                provider_namespace = module_schema_namespace(
-                    "forest.provider.chat-completions"
-                )
+                provider_namespace = module_schema_namespace("forest.provider.chat-completions")
                 head = await (
                     await conn.execute(
                         sql.SQL("SELECT * FROM {}.module_configuration_heads").format(
@@ -1350,14 +1624,17 @@ async def test_official_provisioner_materializes_module_authorities_without_star
             await target.close()
     finally:
         assert target_name.startswith("forest_bot_") and len(target_name) == 35
-        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(target_name)))
+        await admin.execute(
+            sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(target_name))
+        )
         await admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(target_role)))
         await admin.close()
 
 
 @pytest.mark.postgres
 async def test_deployment_webui_discovers_components_and_keeps_secrets_write_only(
-    deployment_catalog, tmp_path,
+    deployment_catalog,
+    tmp_path,
 ):
     repository = deployment_catalog
     await repository.initialize()
@@ -1453,10 +1730,12 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "deployment.accounts",
             "deployment.audit",
         }
-        audit_module = next(item for item in body["modules"]
-                            if item["component_id"] == "deployment.audit")
-        assert audit_module["generation_id"] == (
-            deployment_registry.graph_identity.generations["deployment.audit"]
+        audit_module = next(
+            item for item in body["modules"] if item["component_id"] == "deployment.audit"
+        )
+        assert (
+            audit_module["generation_id"]
+            == (deployment_registry.graph_identity.generations["deployment.audit"])
         )
         audit_ui = await client.get(
             "/management/v1/scopes/deployment/deployment/modules/"
@@ -1551,13 +1830,12 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert all(item["surface"]["kind"] == "trusted-module" for item in catalog_body["items"])
         assert all(item["schema_digest"].startswith("sha256:") for item in catalog_body["items"])
         assert (await client.get("/static/bootstrap-component.js")).status_code == 200
-        assert "textarea name=\"components\"" not in (
-            await client.get("/static/modules/deployment-provisioning.html")
-        ).text
+        assert (
+            'textarea name="components"'
+            not in (await client.get("/static/modules/deployment-provisioning.html")).text
+        )
 
-        components = {
-            item["component_id"]: item["initial_value"] for item in catalog_body["items"]
-        }
+        components = {item["component_id"]: item["initial_value"] for item in catalog_body["items"]}
         for index, (secret_ref, purpose) in enumerate(
             (
                 (
@@ -1734,6 +2012,7 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
     )
     await supervisor.start()
     try:
+
         async def both_online():
             rows = await repository.list_bots()
             return len(rows) == 2 and all(row["observed_state"] == "ONLINE" for row in rows)
@@ -1759,9 +2038,7 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
             supervisor.notify()
 
             async def alpha_withdrawn():
-                rows = {
-                    item["bot_id"]: item for item in await supervisor.management_scopes()
-                }
+                rows = {item["bot_id"]: item for item in await supervisor.management_scopes()}
                 return rows["bot/alpha"]["available"] is False
 
             await _eventually(alpha_withdrawn)
@@ -1777,9 +2054,7 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
         scopes = {item["bot_id"]: item for item in await supervisor.management_scopes()}
         assert scopes["bot/alpha"]["available"] is False
         with pytest.raises(ForestError) as unavailable:
-            async with supervisor.management_host(
-                supervisor.management_scope_id("bot/alpha")
-            ):
+            async with supervisor.management_host(supervisor.management_scope_id("bot/alpha")):
                 pass
         assert unavailable.value.code == "BOT_MANAGEMENT_UNAVAILABLE"
     finally:
@@ -1843,6 +2118,7 @@ async def test_multi_bot_supervisor_contains_one_bot_start_failure(deployment_ca
     )
     await supervisor.start()
     try:
+
         async def converged():
             rows = {row["bot_id"]: row for row in await repository.list_bots()}
             return (
@@ -1922,6 +2198,7 @@ async def test_multi_bot_supervisor_marks_runtime_owned_task_failure(deployment_
     )
     await supervisor.start()
     try:
+
         async def failed():
             current = await repository.inspect("bot/runtime-failure")
             return current["observed_state"] == "FAILED"

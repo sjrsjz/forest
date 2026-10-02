@@ -33,6 +33,7 @@ from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
+from forest.storage.deployment_replacements import DeploymentReplacementAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_store import DeploymentStore
@@ -156,6 +157,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     )
     web_receipts = DeploymentWebAuthorityRepository(store)
     deployment_audit = DeploymentAuditRepository(store)
+    replacements = DeploymentReplacementAuthority(store)
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
@@ -188,6 +190,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     stop = asyncio.Event()
     management_server = None
     management_task = None
+    replacement_task = None
     deployment_controller = None
     loop = asyncio.get_running_loop()
     for event in (signal.SIGINT, signal.SIGTERM):
@@ -230,6 +233,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     deployment_id=settings.deployment_id,
                     components=legacy_components,
                     deployment_registry_provider=lambda: deployment_controller.registry,
+                    deployment_replacements=replacements,
                     identity_authority=web_identity,
                     deployment_web_receipts=web_receipts,
                     deployment_audit=deployment_audit,
@@ -264,10 +268,17 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             flush=True,
         )
         stop_task = asyncio.create_task(stop.wait(), name="deployment-supervisor-stop")
+        replacement_task = asyncio.create_task(
+            deployment_controller.serve_replacements(replacements),
+            name="deployment-package-replacements",
+        )
         fatal_task = asyncio.create_task(
             deployment_controller.fatal_event.wait(), name="deployment-package-fatal"
         )
-        tasks = (stop_task, fatal_task, management_task, *supervisor.owned_tasks())
+        tasks = (
+            stop_task, fatal_task, management_task, replacement_task,
+            *supervisor.owned_tasks(),
+        )
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         if not stop.is_set():
             if fatal_task in done and deployment_controller.fatal_error is not None:
@@ -276,7 +287,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             await failed
             raise RuntimeError("Deployment supervisor task stopped unexpectedly")
     finally:
-        for task in (stop_task, fatal_task):
+        for task in (stop_task, fatal_task, replacement_task):
             if task is not None and not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)

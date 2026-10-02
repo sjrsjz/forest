@@ -47,6 +47,16 @@
       <div id="notice" class="notice hidden"></div>
       <section id="overview" class="pane">
         <div class="pane-head"><div><small>RUNTIME GRAPH</small><h1>模块注册表</h1></div></div>
+        <details id="graph-control" class="graph-control hidden">
+          <summary>部署图 · 替换包</summary>
+          <form id="graph-replace-form" class="graph-replace-form">
+            <label>模块<select name="component_id" required></select></label>
+            <label>包摘要<input name="package_digest" required pattern="sha256:[a-f0-9]{64}" spellcheck="false"></label>
+            <span>当前图修订 <code id="graph-replace-revision"></code></span>
+            <button type="submit">提交替换</button>
+          </form>
+          <output id="graph-replace-status" aria-live="polite"></output>
+        </details>
         <div id="module-table" class="module-table"></div>
       </section>
       <section id="module-view" class="pane hidden">
