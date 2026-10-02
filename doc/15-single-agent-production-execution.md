@@ -116,6 +116,8 @@ Agent 的工具目录 SDK 因此只有 `list`、`dispatch_prepared` 和 `query_h
 
 Agent 执行循环每轮先读取持久意图，再判断 deadline 和安全点。无未决效果时走 `agent.cancel-run`；模型或工具处于 `PREPARED` 时，以 `kernel.effect/effect.abandon` → `agent.runtime/agent.cancel-run-record` 的 UnitOfWork 原子废弃效果、写取消 checkpoint 并关闭 Run/Session。恢复查询必须能在 `PREPARING_MODEL` 且 Run 尚未填入 `current_model_request_id` 时取回 `ATTEMPT_PREPARED` 模型尝试。`READY/NOT_APPLIED` 模型请求在关闭时标为 `ABANDONED`；未交接的工具调用写管理观察记录再转 `CANCELLED`。已交接效果先走原 Effect 观察或工具查询端口收敛；`DISPATCHING/UNKNOWN` 没有权威结论时仅返回待对账，不得伪装为已取消。Conversation 收到 Agent 的 `CANCELLED` 后按准确领取组终结 trigger 并释放 lane；若取消意图在最终回复提交事务前获胜，Scheduler 用新的 Agent 执行调用读取意图，不沿用已缓存的 `FINAL_READY` 回执。重启后的同一意图继续这一状态机，不创建新的 Agent 或外部效果。
 
+没有管理取消时，冷启动读到 `ATTEMPT_PREPARED` 也不能重新投影输入或拿新的授权票据覆盖旧 Effect。它必须先在同一 UnitOfWork 废弃原 PREPARED Effect、把原模型尝试与请求标为 `ABANDONED`，再从冻结 projection/wire 生成具有新请求 ID 的后继请求。后继请求绑定当前兼容的 Provider Generation，保留原内容摘要和来源，直到后继提交才允许外部 handoff；Provider 能力或冻结字节不兼容时停在可诊断等待态，不派发模型。该恢复事务与管理取消意图竞争同一 Run 锁，取消先到则恢复回滚，恢复先到则取消下一安全点处理后继。这是 PREPARED 后进程崩溃的必需恢复路径，不能靠重用同一 request ID 再执行 `prepare-model-effect`。
+
 ## 4. 冻结 lane 身份与回复路由
 
 Conversation lane 必须把以下身份作为创建后不可变事实保存：

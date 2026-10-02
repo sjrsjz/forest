@@ -102,6 +102,40 @@ async def _lease_operation(store, participant, generation_id, name, input_body, 
         )
 
 
+async def _seed_prepared_effect(
+    conn, kernel, store, *, operation_id, attempt_id, wire, generation_id,
+    executor_component_id="provider.chat", authorization_action="provider.invoke",
+):
+    """Seed a real Effect authority PREPARED row for a cross-participant rollback check."""
+    namespace = sql.Identifier(kernel.effect.namespace)
+    await conn.execute(sql.SQL(
+        "INSERT INTO {}.effect_operations "
+        "(bot_id,effect_operation_id,input_digest,effect_kind,target_kind,target_id,"
+        "producer_component_id,producer_generation_id,root_operation_kind,"
+        "root_operation_id,state,current_attempt_id,attempt_count) "
+        "VALUES (%s,%s,%s,'test.prepared','component.service',%s,"
+        "'agent.runtime',%s,'agent.run',%s,'PREPARED',%s,1)"
+    ).format(namespace), (
+        store.bot_id, operation_id, digest_json({"effect": operation_id}),
+        executor_component_id + "/test", generation_id, operation_id, attempt_id,
+    ))
+    await conn.execute(sql.SQL(
+        "INSERT INTO {}.effect_attempts "
+        "(bot_id,attempt_id,effect_operation_id,attempt_no,permit_operation_id,"
+        "wire_payload_id,wire_payload_digest,authorization_ticket_id,"
+        "authorization_action,authorization_resource_kind,authorization_resource_id,"
+        "authorization_policy_revision,executor_component_id,executor_generation_id,"
+        "fence_kind,fence_id,fence_epoch,deadline_at) "
+        "VALUES (%s,%s,%s,1,%s,%s,%s,%s,%s,'bot',%s,1,"
+        "%s,%s,'runtime.graph','graph/package-test',1,%s)"
+    ).format(namespace), (
+        store.bot_id, attempt_id, operation_id, "permit/" + attempt_id,
+        wire.payload_id, wire.digest, "ticket/" + attempt_id,
+        authorization_action, store.bot_id, executor_component_id,
+        generation_id, datetime.now(timezone.utc) + timedelta(seconds=20),
+    ))
+
+
 def _owner_ref(owner):
     return {key: owner[key] for key in ("run_id", "owner_id", "epoch")}
 
@@ -1120,6 +1154,32 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "admin:test", "ADMIN_CANCEL", store.bot_id,
                     "run/agent-package/model-port",
                 ))
+                await _seed_prepared_effect(
+                    conn, kernel, store,
+                    operation_id="model-effect/package/1",
+                    attempt_id="model-attempt/package/1", wire=wire,
+                    generation_id=generation_id,
+                )
+                abandoned_model = await registry.get(
+                    "kernel.effect"
+                ).unit_of_work_participant().invoke_in(
+                    conn, "effect.abandon", {
+                        "protocol": "forest.uow-step/1", "caller": caller,
+                        "input": {
+                            "protocol": "forest.effect-abandon/1",
+                            "effect_operation_id": "model-effect/package/1",
+                            "attempt_id": "model-attempt/package/1",
+                            "abandonment_operation_id": "abandon/package/prepared-model",
+                            "reason_code": "AGENT_CANCELLED_BY_ADMIN",
+                            "cancel_effect": True,
+                        }, "prior": {},
+                    },
+                    operation_id="effect-abandon/package/prepared-model",
+                    causal_root_kind="agent.run",
+                    causal_root_id="run/agent-package/model-port",
+                    parent_call_id="call:agent-package/abandon-model",
+                    timeout_seconds=10,
+                )
                 prepared_model_cancelled = await participant.invoke_in(
                     conn, "agent.cancel-run-record", {
                         "protocol": "forest.uow-step/1", "caller": caller,
@@ -1135,12 +1195,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                                 "abandonment_operation_id": "abandon/package/prepared-model",
                             },
                         },
-                        "prior": {"effect": {
-                            "attempt_id": "model-attempt/package/1",
-                            "abandonment_operation_id": "abandon/package/prepared-model",
-                            "reason_code": "AGENT_CANCELLED_BY_ADMIN",
-                            "cancel_effect": True,
-                        }},
+                        "prior": {"effect": abandoned_model},
                     },
                     operation_id="agent-cancel/package/prepared-model",
                     causal_root_kind="agent.run",
@@ -1150,6 +1205,18 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 )
                 assert prepared_model_cancelled["state"] == "CANCELLED"
                 assert prepared_model_cancelled["session"]["state"] == "CANCELLED"
+                effect_state = await (await conn.execute(sql.SQL(
+                    "SELECT o.state AS operation_state,a.state AS attempt_state "
+                    "FROM {}.effect_operations o JOIN {}.effect_attempts a "
+                    "ON a.bot_id=o.bot_id AND a.effect_operation_id=o.effect_operation_id "
+                    "WHERE o.bot_id=%s AND o.effect_operation_id=%s"
+                ).format(
+                    sql.Identifier(kernel.effect.namespace),
+                    sql.Identifier(kernel.effect.namespace),
+                ), (store.bot_id, "model-effect/package/1"))).fetchone()
+                assert effect_state == {
+                    "operation_state": "CANCELLED", "attempt_state": "ABANDONED",
+                }
                 raise _RollbackVerification
         handoff_envelope = {
             "protocol": "forest.uow-step/1",
@@ -1870,17 +1937,40 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                         timeout_seconds=10,
                     )
                 assert pending_effect.value.code == "AGENT_CANCEL_EFFECT_PENDING"
+                await _seed_prepared_effect(
+                    conn, kernel, store,
+                    operation_id="tool-effect/package/repair",
+                    attempt_id="tool-attempt/package/repair", wire=tool_wire,
+                    generation_id="generation/tool/package-test",
+                    executor_component_id="tool.echo",
+                    authorization_action="tool.invoke",
+                )
                 prepared_cancel_envelope["input"]["prepared"] = {
                     "kind": "TOOL", "effect_operation_id": "tool-effect/package/repair",
                     "attempt_id": "tool-attempt/package/repair",
                     "abandonment_operation_id": "abandon/package/prepared-tool",
                 }
-                prepared_cancel_envelope["prior"]["effect"] = {
-                    "attempt_id": "tool-attempt/package/repair",
-                    "abandonment_operation_id": "abandon/package/prepared-tool",
-                    "reason_code": "AGENT_CANCELLED_BY_ADMIN",
-                    "cancel_effect": True,
-                }
+                abandoned_tool = await registry.get(
+                    "kernel.effect"
+                ).unit_of_work_participant().invoke_in(
+                    conn, "effect.abandon", {
+                        "protocol": "forest.uow-step/1", "caller": caller,
+                        "input": {
+                            "protocol": "forest.effect-abandon/1",
+                            "effect_operation_id": "tool-effect/package/repair",
+                            "attempt_id": "tool-attempt/package/repair",
+                            "abandonment_operation_id": "abandon/package/prepared-tool",
+                            "reason_code": "AGENT_CANCELLED_BY_ADMIN",
+                            "cancel_effect": True,
+                        }, "prior": {},
+                    },
+                    operation_id="effect-abandon/package/prepared-tool",
+                    causal_root_kind="agent.run",
+                    causal_root_id="run/agent-package/model-port",
+                    parent_call_id="call:agent-package/abandon-tool",
+                    timeout_seconds=10,
+                )
+                prepared_cancel_envelope["prior"]["effect"] = abandoned_tool
                 prepared_cancelled = await participant.invoke_in(
                     conn, "agent.cancel-run-record", prepared_cancel_envelope,
                     operation_id="agent-cancel/package/prepared-tool",
@@ -1891,6 +1981,18 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 )
                 assert prepared_cancelled["state"] == "CANCELLED"
                 assert prepared_cancelled["session"]["state"] == "CANCELLED"
+                effect_state = await (await conn.execute(sql.SQL(
+                    "SELECT o.state AS operation_state,a.state AS attempt_state "
+                    "FROM {}.effect_operations o JOIN {}.effect_attempts a "
+                    "ON a.bot_id=o.bot_id AND a.effect_operation_id=o.effect_operation_id "
+                    "WHERE o.bot_id=%s AND o.effect_operation_id=%s"
+                ).format(
+                    sql.Identifier(kernel.effect.namespace),
+                    sql.Identifier(kernel.effect.namespace),
+                ), (store.bot_id, "tool-effect/package/repair"))).fetchone()
+                assert effect_state == {
+                    "operation_state": "CANCELLED", "attempt_state": "ABANDONED",
+                }
                 raise _RollbackVerification
         handoff_tool_envelope = {
             "protocol": "forest.uow-step/1",
