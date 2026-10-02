@@ -120,6 +120,8 @@ Agent 执行循环每轮先读取持久意图，再判断 deadline 和安全点�
 
 实现使用 `agent.recover-prepared-model`，在单库 UnitOfWork 内依次执行 `effect.abandon` 和 `agent.recover-prepared-model-record`。Agent participant 在 Run owner/epoch 围栏下复核未交接的当前尝试、旧请求冻结摘要、全部更早尝试的 `NOT_APPLIED` 观察及取消意图，然后写不可变恢复关系与新 `READY` 请求；Provider Generation 可以变化，但 profile、模型、能力、角色和输出预算必须与冻结请求一致。Worker 在触发任何新召回、上下文投影或授权之前进入该分支；恢复校验失败只返回诊断并保留原 PREPARED 状态，使管理员仍可取消。事务提交后 Worker 重新读取 Run，再从新请求的冻结 wire 继续。
 
+这里存在两种不同的 wire：`model_requests.initial_wire_*` 是冻结的 Provider HTTP 请求体，`model_transport_attempts.wire_*` 是 `kernel.effect` 的派发命令 Payload，后者包含执行围栏及对前者的引用。恢复后继必须保持模型请求体的字节与 digest；旧 Effect 命令只由 Effect authority 在原子事务中废弃。不得直接比较这两种 Payload 的 digest，也不得把旧 Effect 命令复制成新模型请求体。
+
 ## 4. 冻结 lane 身份与回复路由
 
 Conversation lane 必须把以下身份作为创建后不可变事实保存：

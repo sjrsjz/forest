@@ -1062,8 +1062,9 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             owner_component_id="kernel.effect",
             owner_kind="effect.wire",
             owner_id="model-attempt/package/1",
-            value=b'{"model":"model/package-test","messages":[]}',
+            value=b'{"dispatch":"provider.model.dispatch","request_id":"model-request/package/1"}',
         )
+        assert wire.digest != initial_wire.digest
         effect_input = await _payload(
             kernel,
             owner_component_id="kernel.effect",
@@ -1329,8 +1330,9 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         plan_effect_wire = await _payload(
             kernel, owner_component_id="kernel.effect", owner_kind="effect.wire",
             owner_id=plan_attempt_id,
-            value=b'{"model":"model/package-test","messages":[]}',
+            value=b'{"dispatch":"provider.model.dispatch","request_id":"model-request/package/prepared-plan"}',
         )
+        assert plan_effect_wire.digest != plan_wire.digest
         plan_effect_input = await _payload(
             kernel, owner_component_id="kernel.effect", owner_kind="effect.input",
             owner_id=plan_effect_id, value=b'{"request_id":"prepared-plan"}',

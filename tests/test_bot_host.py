@@ -3456,13 +3456,13 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "long-model-lease")
+    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
-    if scenario == "reload-lost-receipt":
+    if scenario in {"reload-lost-receipt", "prepared-crash"}:
         monkeypatch.setattr("forest.bot_host._HOST_LEASE_TTL", timedelta(seconds=15))
     name = "forest_recall_" + uuid4().hex
     admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
@@ -3518,7 +3518,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
         '<block block_type="Assistant"><content><text>Forest success fixture</text>'
         '</content></block></blocks></payload></valid_agent_protocol_content_block>'
-        if scenario in {"success", "cross-group"} else None
+        if scenario in {"success", "cross-group", "prepared-crash"} else None
     )
 
     async def create_websocket(_url, _token, **_limits):
@@ -3554,6 +3554,39 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 if domain is not None and domain["state"] == "READY":
                     break
                 await asyncio.sleep(0.1)
+        prepared_crash = asyncio.Event()
+        recovery_payloads = []
+        recovery_errors = []
+        if scenario == "prepared-crash":
+            original_execute = PostgresPackageUnitOfWorkCoordinator.execute
+
+            async def crash_after_prepare(coordinator, scope, declaration, payload, **kwargs):
+                recovering = declaration["name"] == "agent.recover-prepared-model"
+                if recovering:
+                    recovery_payloads.append(payload)
+                try:
+                    result = await original_execute(
+                        coordinator, scope, declaration, payload, **kwargs
+                    )
+                except ForestError as error:
+                    if recovering:
+                        recovery_errors.append(error)
+                    raise
+                if (declaration["name"] == "agent.prepare-model-effect"
+                        and not prepared_crash.is_set()):
+                    victim = host.registry.get("agent.runtime")._worker
+                    assert victim.alive
+                    victim.process.kill()
+                    prepared_crash.set()
+                    raise ForestError(
+                        "TEST_PREPARED_MODEL_WORKER_CRASH",
+                        "Agent Worker died after preparing its Effect", 503,
+                    )
+                return result
+
+            monkeypatch.setattr(
+                PostgresPackageUnitOfWorkCoordinator, "execute", crash_after_prepare
+            )
         await clients[-1].handler(json.dumps({
             "self_id": int(settings.onebot_self_id), "post_type": "message",
             "message_type": "group", "sub_type": "normal",
@@ -3570,6 +3603,183 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 }}] if scenario == "visual" else []),
             ],
         }).encode())
+        if scenario == "prepared-crash":
+            async with asyncio.timeout(90):
+                await prepared_crash.wait()
+            assert RecordingModelClient.requests == []
+            agent_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "agent.runtime"
+            )
+            async with host.store.pool.connection() as conn:
+                frozen_request = await (await conn.execute(sql.SQL(
+                    "SELECT request_id,state,initial_wire_payload_digest,"
+                    "projected_content_digest,source_manifest_digest "
+                    "FROM {}.model_requests WHERE bot_id=%s"
+                ).format(sql.Identifier(agent_schema)), (settings.bot_id,))).fetchone()
+                frozen_attempt = await (await conn.execute(sql.SQL(
+                    "SELECT attempt_id,effect_operation_ref,state "
+                    "FROM {}.model_transport_attempts WHERE bot_id=%s"
+                ).format(sql.Identifier(agent_schema)), (settings.bot_id,))).fetchone()
+            assert frozen_request["state"] == "ATTEMPT_PREPARED"
+            assert frozen_attempt["state"] == "PREPARED"
+            runtime_schema = host._kernel.runtime.namespace
+            try:
+                await host.close()
+            except ForestError as exc:
+                assert exc.code == "RUNTIME_MODULE_CLEANUP_FAILED"
+                assert exc.details["errors"]
+            observer = await psycopg.AsyncConnection.connect(uri)
+            try:
+                async with asyncio.timeout(180):
+                    while True:
+                        lease = await (await observer.execute(sql.SQL(
+                            "SELECT expires_at<=clock_timestamp() AS expired "
+                            "FROM {}.host_lease WHERE bot_id=%s"
+                        ).format(sql.Identifier(runtime_schema)),
+                            (settings.bot_id,))).fetchone()
+                        assert lease is not None
+                        if lease[0]:
+                            break
+                        await asyncio.sleep(0.5)
+            finally:
+                await observer.close()
+            host = create_host("recall-prepared-crash-restarted")
+            await host.start()
+            # The crashed Worker cannot release its 300-second Run lease.
+            # Observe the database fence rather than assuming a wall-clock delay.
+            async with asyncio.timeout(420):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        owner_expiry = await (await conn.execute(sql.SQL(
+                            "SELECT owner_expires_at<=clock_timestamp() AS expired "
+                            "FROM {}.agent_runs WHERE bot_id=%s"
+                        ).format(sql.Identifier(agent_schema)),
+                            (settings.bot_id,))).fetchone()
+                    assert owner_expiry is not None
+                    if owner_expiry["expired"]:
+                        break
+                    await asyncio.sleep(1)
+            try:
+                async with asyncio.timeout(90):
+                    while not RecordingModelClient.requests and not recovery_errors:
+                        await asyncio.sleep(0.5)
+                    if recovery_errors:
+                        raise TimeoutError
+            except TimeoutError as exc:
+                conversation_schema = next(
+                    item.storage.spec.namespace for item in host.registry.descriptors
+                    if item.component_id == "conversation.scheduler"
+                )
+                async with host.store.pool.connection() as conn:
+                    runs = await (await conn.execute(sql.SQL(
+                        "SELECT run_id,state,owner_id,owner_epoch,owner_expires_at,"
+                    "current_model_request_id,error_code,absolute_deadline,"
+                    "clock_timestamp() AS database_now "
+                        "FROM {}.agent_runs WHERE bot_id=%s"
+                    ).format(sql.Identifier(agent_schema)), (settings.bot_id,))).fetchall()
+                    requests = await (await conn.execute(sql.SQL(
+                        "SELECT request_id,state,request_revision,current_attempt_id "
+                        "FROM {}.model_requests WHERE bot_id=%s ORDER BY request_revision"
+                    ).format(sql.Identifier(agent_schema)), (settings.bot_id,))).fetchall()
+                    attempts = await (await conn.execute(sql.SQL(
+                        "SELECT attempt_id,state,effect_operation_ref "
+                        "FROM {}.model_transport_attempts WHERE bot_id=%s"
+                    ).format(sql.Identifier(agent_schema)), (settings.bot_id,))).fetchall()
+                    lanes = await (await conn.execute(sql.SQL(
+                        "SELECT active_run_ref,resume_reason_code,resume_not_before "
+                        "FROM {}.conversation_lanes WHERE bot_id=%s"
+                    ).format(sql.Identifier(conversation_schema)),
+                        (settings.bot_id,))).fetchall()
+                    settlements = await (await conn.execute(sql.SQL(
+                        "SELECT input_payload->'outcome' AS outcome FROM {}."
+                        "conversation_agent_work_settlements "
+                        "ORDER BY created_at DESC LIMIT 5"
+                    ).format(sql.Identifier(conversation_schema)))).fetchall()
+                    predecessor = await (await conn.execute(sql.SQL(
+                        "SELECT * FROM {}.model_requests WHERE bot_id=%s "
+                        "AND request_id=%s"
+                    ).format(sql.Identifier(agent_schema)),
+                        (settings.bot_id, frozen_request["request_id"]))).fetchone()
+                    prepared_attempt = await (await conn.execute(sql.SQL(
+                        "SELECT * FROM {}.model_transport_attempts WHERE bot_id=%s "
+                        "AND attempt_id=%s"
+                    ).format(sql.Identifier(agent_schema)),
+                        (settings.bot_id, frozen_attempt["attempt_id"]))).fetchone()
+                failures = {
+                    component_id: work.failure
+                    for component_id, instance in host.registry.instances.items()
+                    if (work := getattr(instance, "_owned_work", None)) is not None
+                    and work.failure is not None
+                }
+                mismatch = []
+                if recovery_payloads:
+                    successor = recovery_payloads[-1]["successor"]
+                    for key in (
+                        "provider_component_id", "provider_profile_ref", "model_ref",
+                        "instruction_channel", "capability_digest",
+                        "output_token_budget", "projected_content_digest",
+                        "source_manifest_digest",
+                    ):
+                        if predecessor[key] != successor[key]:
+                            mismatch.append((key, predecessor[key], successor[key]))
+                    if predecessor["initial_wire_payload_digest"] != (
+                        successor["initial_wire"]["digest"]
+                    ):
+                        mismatch.append("initial_wire_digest")
+                    if prepared_attempt["wire_payload_digest"] != (
+                        successor["initial_wire"]["digest"]
+                    ):
+                        mismatch.append("attempt_wire_digest")
+                    if predecessor["attempt_count"] != prepared_attempt["attempt_no"]:
+                        mismatch.append("attempt_count")
+                    if predecessor["current_attempt_id"] != prepared_attempt["attempt_id"]:
+                        mismatch.append("current_attempt_id")
+                raise AssertionError(
+                    f"Prepared crash did not resume: runs={runs}, requests={requests}, "
+                    f"attempts={attempts}, lanes={lanes}, settlements={settlements}, "
+                    f"owned_failures={failures}, recovery_errors="
+                    f"{[(item.code, item.details) for item in recovery_errors]}, "
+                    f"mismatch={mismatch}"
+                ) from exc
+            resumed = RecordingModelClient.requests[0]
+            resumed.verify()
+            assert resumed.request_id != frozen_request["request_id"]
+            assert resumed.payload_digest == frozen_request["initial_wire_payload_digest"]
+            async with host.store.pool.connection() as conn:
+                lineage = await (await conn.execute(sql.SQL(
+                    "SELECT request_id,predecessor_request_id,request_revision,state,"
+                    "initial_wire_payload_digest,projected_content_digest,"
+                    "source_manifest_digest FROM {}.model_requests "
+                    "WHERE bot_id=%s ORDER BY request_revision"
+                ).format(sql.Identifier(agent_schema)), (settings.bot_id,))).fetchall()
+                old_effect = await (await conn.execute(sql.SQL(
+                    "SELECT o.state AS operation_state,a.state AS attempt_state "
+                    "FROM {}.effect_operations o JOIN {}.effect_attempts a "
+                    "ON a.bot_id=o.bot_id AND a.effect_operation_id=o.effect_operation_id "
+                    "WHERE o.bot_id=%s AND o.effect_operation_id=%s"
+                ).format(sql.Identifier(host._kernel.effect.namespace),
+                         sql.Identifier(host._kernel.effect.namespace)),
+                    (settings.bot_id, frozen_attempt["effect_operation_ref"]))).fetchone()
+            assert len(lineage) == 2
+            assert lineage[0]["state"] == "ABANDONED"
+            assert lineage[1]["predecessor_request_id"] == frozen_request["request_id"]
+            assert lineage[1]["request_id"] == resumed.request_id
+            assert lineage[1]["request_revision"] == 2
+            assert lineage[1]["initial_wire_payload_digest"] == (
+                frozen_request["initial_wire_payload_digest"]
+            )
+            assert lineage[1]["projected_content_digest"] == (
+                frozen_request["projected_content_digest"]
+            )
+            assert lineage[1]["source_manifest_digest"] == (
+                frozen_request["source_manifest_digest"]
+            )
+            assert old_effect == {
+                "operation_state": "CANCELLED", "attempt_state": "ABANDONED",
+            }
+            assert len(RecordingModelClient.requests) == 1
+            return
         try:
             async with asyncio.timeout(120 if real_transport else 45):
                 while not RecordingModelClient.requests:

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.29.0"
+version = "4.29.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -175,9 +175,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.25.0"
+schema_version = "2.25.1"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "3b72c5c09f1bdf4821d888fa713555f841afcdf834c45431fcf89eae5e66f1ab"
+baseline_sha256 = "14db62b6e68d9f777698592d4b49767773e261200a9458428af9cb832a8e6e5c"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"

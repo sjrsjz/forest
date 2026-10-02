@@ -1734,7 +1734,6 @@ BEGIN
        OR predecessor.source_manifest_digest IS DISTINCT FROM
           successor_value->>'source_manifest_digest'
        OR predecessor.initial_wire_payload_digest IS DISTINCT FROM wire_value->>'digest'
-       OR attempt_row.wire_payload_digest IS DISTINCT FROM wire_value->>'digest'
        OR (SELECT count(*) FROM __forest_module_schema__.model_transport_attempts a
            WHERE a.bot_id=requested_bot AND a.request_id=predecessor_id)
           IS DISTINCT FROM predecessor.attempt_count::bigint
