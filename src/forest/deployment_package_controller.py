@@ -75,6 +75,23 @@ class DeploymentPackageController:
             return self.catalog.get_official_deployment(digest)
         return snapshot
 
+    async def read_package_registry(self, query_id: str, payload: dict) -> dict:
+        """Resolve one read through the currently active deployment module Generation."""
+
+        if query_id not in {"packages", "artifact"} or not isinstance(payload, dict):
+            raise ForestError(
+                "DEPLOYMENT_PACKAGE_QUERY_INVALID", "Package registry query is invalid", 422
+            )
+        registry = self.registry
+        if registry.states.get("deployment.package-registry") != "ACTIVE":
+            raise ForestError(
+                "DEPLOYMENT_PACKAGE_REGISTRY_UNAVAILABLE",
+                "Deployment package registry Generation is unavailable", 503,
+            )
+        return await registry.get("deployment.package-registry").management_contract.query(
+            query_id, payload
+        )
+
     async def preview_change(
         self, *, operation_kind: str, component_id: str,
         package_digest: str, expected_graph_revision: int,

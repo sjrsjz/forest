@@ -12,6 +12,7 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
 
+from forest.bot_host import BotHost
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
@@ -161,6 +162,25 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
+    package_catalog = PackageCatalog(
+        Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
+    )
+    deployment_controller = None
+
+    async def read_deployment_packages(query_id: str, payload: dict) -> dict:
+        if deployment_controller is None:
+            raise ForestError(
+                "DEPLOYMENT_PACKAGE_REGISTRY_UNAVAILABLE",
+                "Deployment package registry Generation is unavailable", 503,
+            )
+        return await deployment_controller.read_package_registry(query_id, payload)
+
+    def bot_host_factory(bot_settings):
+        return BotHost(
+            bot_settings, package_catalog=package_catalog,
+            package_registry_reader=read_deployment_packages,
+        )
+
     settings_resolver = OfficialBotSettingsResolver(secrets=secrets)
     database_allocator = LocalPostgresDatabaseAllocator(settings.dsn)
     executor = DeploymentProvisioningExecutor(
@@ -181,6 +201,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             bootstrap_profiles=bootstrap_profiles,
             settings_resolver=settings_resolver,
         ),
+        host_factory=bot_host_factory,
         host_id="deployment-host/" + settings.deployment_id,
         incarnation=incarnation,
         poll_seconds=settings.poll_seconds,
@@ -191,7 +212,6 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     management_server = None
     management_task = None
     graph_change_task = None
-    deployment_controller = None
     loop = asyncio.get_running_loop()
     for event in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -203,9 +223,6 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     try:
         await supervisor.start()
         await web_identity.initialize_setup(settings.web_bootstrap)
-        package_catalog = PackageCatalog(
-            Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
-        )
         deployment_runtime = DeploymentRuntimeScope(
             store, supervisor, package_catalog=package_catalog
         )

@@ -191,12 +191,21 @@ async def test_bot_package_directory_fences_deployment_artifacts(tmp_path):
     assert [item["scope"] for item in catalog.page(scope="deployment")["items"]] == [
         "deployment"
     ]
-    context = SimpleNamespace(package_catalog=catalog)
+    calls = []
+
+    async def read_registry(query_id, payload):
+        calls.append((query_id, payload))
+        if query_id == "packages":
+            return catalog.page(**payload)
+        return catalog.artifact(payload["package_digest"])
+
+    context = SimpleNamespace(package_registry_reader=read_registry)
     page = await package_catalog_page_service(context)({
         "protocol": "forest.package-catalog-page-request/1", "limit": 1,
     })
     assert [item["package_digest"] for item in page["items"]] == [bot.digest]
     assert page["next_after"] is None
+    assert calls[0] == ("packages", {"limit": 1, "scope": "bot"})
     with pytest.raises(ForestError) as rejected:
         await package_catalog_artifact_service(context)({
             "protocol": "forest.package-catalog-artifact-request/1",

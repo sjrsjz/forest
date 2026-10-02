@@ -136,14 +136,14 @@ class RuntimeKernelServiceContext:
         return self._registry._lease()
 
     @property
-    def package_catalog(self):
-        """Read-only deployment artifact directory attached to this Bot host."""
-        catalog = getattr(self._registry.runtime.bot, "package_catalog", None)
-        if catalog is None:
+    def package_registry_reader(self):
+        """Cross-scope read port bound to the active deployment package module."""
+        reader = getattr(self._registry.runtime.bot, "package_registry_reader", None)
+        if not callable(reader):
             raise ForestError(
-                "PACKAGE_CATALOG_UNAVAILABLE", "Deployment package catalog is unavailable", 503
+                "PACKAGE_CATALOG_UNAVAILABLE", "Deployment package registry is unavailable", 503
             )
-        return catalog
+        return reader
 
     @property
     def component_candidate_previewer(self):

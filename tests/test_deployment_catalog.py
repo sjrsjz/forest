@@ -26,6 +26,10 @@ from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
+from forest.kernel_package_catalog_snapshot import (
+    package_catalog_artifact_service,
+    package_catalog_page_service,
+)
 from forest.model_contract import ModelCapabilities
 from forest.multi_bot_supervisor import MultiBotSupervisor
 from forest.official_bot_provisioning import (
@@ -359,6 +363,22 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         bot_package = package_catalog.build(
             Path(__file__).parents[1] / "src/forest/builtin/component_worker_host"
         )
+        bridge = SimpleNamespace(package_registry_reader=controller.read_package_registry)
+        bot_page = await package_catalog_page_service(bridge)({
+            "protocol": "forest.package-catalog-page-request/1", "limit": 16,
+        })
+        assert [item["scope"] for item in bot_page["items"]] == ["bot"]
+        bot_bridge_artifact = await package_catalog_artifact_service(bridge)({
+            "protocol": "forest.package-catalog-artifact-request/1",
+            "package_digest": bot_package.digest,
+        })
+        assert bot_bridge_artifact["package_digest"] == bot_package.digest
+        with pytest.raises(ForestError) as bridge_scope:
+            await package_catalog_artifact_service(bridge)({
+                "protocol": "forest.package-catalog-artifact-request/1",
+                "package_digest": module.snapshot.digest,
+            })
+        assert bridge_scope.value.code == "PACKAGE_SCOPE_UNSUPPORTED"
         bot_artifact = await module.management_contract.query(
             "artifact", {"package_digest": bot_package.digest},
         )
@@ -400,6 +420,9 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
             expected_graph_revision=initial.graph_identity.graph_revision,
         )
         assert updated.graph_identity.generations["deployment.audit"] == audit_generation
+        assert (await package_catalog_page_service(bridge)({
+            "protocol": "forest.package-catalog-page-request/1", "limit": 16,
+        }))["items"]
         page = await updated.get("deployment.package-registry").management_contract.query(
             "packages", {"limit": 16},
         )

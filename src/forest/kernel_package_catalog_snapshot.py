@@ -1,8 +1,6 @@
-"""Read-only bridge from the deployment artifact catalog to Bot package Workers."""
+"""Scope-limited bridge from Bot Workers to the active deployment package module."""
 
 from __future__ import annotations
-
-import asyncio
 
 from forest.errors import ForestError
 
@@ -19,13 +17,17 @@ def package_catalog_page_service(context):
             raise ForestError(
                 "PACKAGE_CATALOG_PAGE_INVALID", "Package catalog page input is invalid", 422
             )
-        return await asyncio.to_thread(
-            context.package_catalog.page,
-            after_package_id=request.get("after_package_id", ""),
-            after_version=request.get("after_version", ""),
-            limit=request.get("limit", 32),
-            catalog_revision=request.get("catalog_revision"),
-            scope="bot",
+        return await context.package_registry_reader(
+            "packages",
+            {
+                "limit": request.get("limit", 32),
+                "scope": "bot",
+                **{
+                    key: request[key]
+                    for key in ("after_package_id", "after_version", "catalog_revision")
+                    if key in request
+                },
+            },
         )
 
     return read
@@ -43,8 +45,8 @@ def package_catalog_artifact_service(context):
                 "Package artifact request is invalid",
                 422,
             )
-        artifact = await asyncio.to_thread(
-            context.package_catalog.artifact, request["package_digest"]
+        artifact = await context.package_registry_reader(
+            "artifact", {"package_digest": request["package_digest"]}
         )
         if artifact["scope"] != "bot":
             raise ForestError(

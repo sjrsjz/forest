@@ -324,6 +324,7 @@ class BotHost:
         media_client_factory=None,
         websocket_client_factory=None,
         package_catalog=None,
+        package_registry_reader=None,
     ) -> None:
         self.settings = settings
         self.store = BotStore(settings.dsn, settings.bot_id)
@@ -348,6 +349,7 @@ class BotHost:
         self.package_catalog = package_catalog or PackageCatalog(
             Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
         )
+        self.package_registry_reader = package_registry_reader
         self.selection_reader: ComponentSelectionReader | None = None
 
     @property
