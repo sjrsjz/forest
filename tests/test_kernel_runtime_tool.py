@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from forest.builtin_runtime_tool import runtime_status_tool_service
 from forest.errors import ForestError
+from forest.kernel_runtime_tool import runtime_status_tool_service
 
 
 @pytest.mark.asyncio

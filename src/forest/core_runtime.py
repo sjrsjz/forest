@@ -1,4 +1,4 @@
-"""Bootstrap the required clean kernel modules before any business graph is admitted."""
+"""Bootstrap trusted kernel authorities before admitting the package graph."""
 
 from __future__ import annotations
 
@@ -7,22 +7,17 @@ import re
 from dataclasses import dataclass
 from uuid import uuid4
 
-from forest.builtin_component_candidate_preview import component_candidate_preview_service
-from forest.builtin_package_catalog_snapshot import (
-    package_catalog_artifact_service,
-    package_catalog_page_service,
-)
-from forest.builtin_runtime_graph_snapshot import (
-    runtime_graph_snapshot_service,
-    runtime_status_snapshot_service,
-)
-from forest.builtin_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
 from forest.errors import ForestError
 from forest.kernel_audit_participant import KernelAuditUnitOfWorkParticipant
 from forest.kernel_authorization_participant import (
     KernelAuthorizationUnitOfWorkParticipant,
 )
+from forest.kernel_component_candidate_preview import component_candidate_preview_service
 from forest.kernel_effect_participant import KernelEffectUnitOfWorkParticipant
+from forest.kernel_package_catalog_snapshot import (
+    package_catalog_artifact_service,
+    package_catalog_page_service,
+)
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
 from forest.kernel_resource_admission import (
     KERNEL_RESOURCE_POLICY_DEFAULT,
@@ -30,6 +25,11 @@ from forest.kernel_resource_admission import (
     assess_worker_capacity,
     validate_kernel_resource_policy,
 )
+from forest.kernel_runtime_graph_snapshot import (
+    runtime_graph_snapshot_service,
+    runtime_status_snapshot_service,
+)
+from forest.kernel_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
 from forest.module_management_contract import (
     AuditManagementContract,
     ModuleConfigurationContract,

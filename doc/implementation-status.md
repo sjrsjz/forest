@@ -61,6 +61,8 @@
 
 内核的 Runtime、Payload、Authorization、Effect 与 Audit Authority 仍是可信微内核组件。它们不是可卸载业务插件，也不应迁入 `builtin`。
 
+内核向包提供的 RuntimeGraph 状态、候选图预检、包工件目录和带准确来源的 `runtime_status` Agent 工具，属于受限的 Kernel Service 桥接，不拥有可热重载业务状态。它们以 `kernel_*` 源文件命名并由 `core_runtime` 注册；真正的 builtin 组件仍必须从不可变包快照装配。`builtin_packages.py` 是包装载器，不是业务插件。
+
 ## 4. 已切换的生产 builtin
 
 生产组合根已统一通过 `bootstrap_builtin_package()` 装载以下组件。Host 只装配配置、能力授权、效果驱动和冻结契约句柄，不再构造这些组件的 Repository 或业务 Runtime：
@@ -590,3 +592,5 @@ Memory 定点热重载回归（2026-10-02）：在隔离 PostgreSQL 的完整 22
 在线静默 Context 诊断（2026-10-02）：当前 `forest-main` 的 4 个会话共保有 49 个活动 Context 单元，单会话最多 20 个；分类到 Context 的水位无积压，当前修订也无待领取的 Context 维护。官方配置高水位为 512、裁剪后保留 256 个单元，故目前 0 个已归档单元、0 个 READY 文档 facet 符合阈值语义，不能据此诊断为 RAG 故障。代码中的空闲维护领取要求无活动 Session、无未决触发及已排空输入；每次归档候选最多 64 个，成功后按视图修订继续领取，已有隔离 PostgreSQL 的 `64+4` 追赶验证。本次在线计数只证明低于阈值的当前状态，不证明数月负载下归档吞吐足够；获准群 `933179609` 仍无入站。
 
 Context 前缀裁剪边界修正（2026-10-02）：`conversation_prepare_context_compaction` 过去在最旧 64 个活动单元内逐项排除未决触发/当前 Session 必留项，可能跳过中间受保护单元却归档其后的消息，破坏连续旧前缀与归档引用的时序语义。现在按 Context 顺序标出首个受保护单元，只归档它之前的连续前缀；若最旧单元受保护则本次跳过，等待触发结算或后续安全边界。Conversation 包升至 `4.22.0`，私有 SQL 基线升至 `4.18.0`。隔离 PostgreSQL 用例构造第 4 条为未决触发、第 5 条为可归档单元，验证计划只选择第 1–3 条；同一测试文件与完整 22 组件 Host 图回归 `2 passed in 338.34s`，Ruff 与差异检查通过。在线 Supervisor 仍运行旧 `4.17.0` SQL 基线，本次源码修正尚未切换；现有在线状态低于裁剪高水位，因此未在真实群中触发该边界。
+
+宿主 `builtin_*` 边界命名审计（2026-10-02）：根目录四个残留 `builtin_*` 服务文件逐项核对后均为可信内核的受限桥接，没有业务 Worker、私有业务状态或可卸载生命周期；将候选图预检、包工件目录、RuntimeGraph 状态投影与准确来源 `runtime_status` 工具分别改为 `kernel_*` 文件，删除旧路径并更新组合根及测试引用。根目录唯一保留的 `builtin_*.py` 是不可变包装载器 `builtin_packages.py`，不是插件实现。内核工具与 Agent 工具契约定向回归 `14 passed`，内核组合根导入、Ruff 与差异检查通过。这是职责命名清理，没有把四个内核端口伪装成可热重载组件；在线实例未因该重命名重启。
