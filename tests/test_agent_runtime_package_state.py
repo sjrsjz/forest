@@ -1576,6 +1576,31 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "next_state": "WAIT_TOOL",
             "tool_call_id": "tool-call/package/repair",
         }
+        turns = await instance.management_contract.query(
+            "agent.steps.page", {
+                "run_id": "run/agent-package/model-port", "kind": "MODEL_TURN",
+                "limit": 1,
+            }
+        )
+        assert turns["items"][0]["turn_id"] == "model-turn/package/repair"
+        assert turns["items"][0]["request_id"] == "model-request/package/repair"
+        tools = await instance.management_contract.query(
+            "agent.steps.page", {
+                "run_id": "run/agent-package/model-port", "kind": "TOOL_CALL",
+                "state": "PROPOSED", "limit": 1,
+            }
+        )
+        assert tools["items"][0]["tool_call_id"] == "tool-call/package/repair"
+        assert tools["items"][0]["turn_id"] == turns["items"][0]["turn_id"]
+        assert tools["items"][0]["step_seq"] == turns["items"][0]["step_seq"]
+        assert tools["items"][0]["tool_component_id"] == "tool.echo"
+        with pytest.raises(ForestError):
+            await instance.management_contract.query(
+                "agent.steps.page", {
+                    "run_id": "run/agent-package/model-port",
+                    "kind": "MODEL_TURN", "state": "PROPOSED",
+                }
+            )
         repaired_recovery = await instance.invoke_management_query(
             recovery_declaration,
             {"run_id": "run/agent-package/model-port"},
@@ -1798,6 +1823,15 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 parent_call_id="call:agent-package/model-port/tool-success", timeout_seconds=10,
             )
         assert settled_tool["resulting_state"] == "SUCCEEDED"
+        completed_tools = await instance.management_contract.query(
+            "agent.steps.page", {
+                "run_id": "run/agent-package/model-port", "kind": "TOOL_CALL",
+                "state": "SUCCEEDED",
+            }
+        )
+        assert [item["tool_call_id"] for item in completed_tools["items"]] == [
+            "tool-call/package/repair"
+        ]
         tool_recovery = await instance.invoke_management_query(
             recovery_declaration, {"run_id": "run/agent-package/model-port"}, timeout_seconds=10
         )

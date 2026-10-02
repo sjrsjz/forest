@@ -280,6 +280,7 @@ CREATE TABLE model_requests (
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,request_id),
     UNIQUE (bot_id,run_id,step_seq,request_kind,request_revision),
+    UNIQUE (bot_id,run_id,request_id,step_seq),
     FOREIGN KEY (bot_id,run_id) REFERENCES agent_runs(bot_id,run_id),
     FOREIGN KEY (bot_id,predecessor_request_id)
         REFERENCES model_requests(bot_id,request_id)
@@ -528,8 +529,9 @@ CREATE TABLE model_turns (
     PRIMARY KEY (bot_id,turn_id),
     UNIQUE (bot_id,request_id),
     UNIQUE (bot_id,run_id,step_seq),
-    FOREIGN KEY (bot_id,run_id) REFERENCES agent_runs(bot_id,run_id),
-    FOREIGN KEY (bot_id,request_id) REFERENCES model_requests(bot_id,request_id),
+    UNIQUE (bot_id,run_id,turn_id,step_seq),
+    FOREIGN KEY (bot_id,run_id,request_id,step_seq)
+        REFERENCES model_requests(bot_id,run_id,request_id,step_seq),
     CHECK ((assistant_payload_id IS NULL) = (assistant_payload_digest IS NULL)),
     CHECK ((function_call_payload_id IS NULL) = (function_call_payload_digest IS NULL)),
     CHECK (NOT (terminal AND function_call_payload_id IS NOT NULL)),
@@ -581,8 +583,8 @@ CREATE TABLE tool_calls (
     PRIMARY KEY (bot_id,tool_call_id),
     UNIQUE (bot_id,turn_id),
     UNIQUE (bot_id,effect_operation_ref),
-    FOREIGN KEY (bot_id,run_id) REFERENCES agent_runs(bot_id,run_id),
-    FOREIGN KEY (bot_id,turn_id) REFERENCES model_turns(bot_id,turn_id),
+    FOREIGN KEY (bot_id,run_id,turn_id,step_seq)
+        REFERENCES model_turns(bot_id,run_id,turn_id,step_seq),
     CHECK ((result_payload_id IS NULL) = (result_payload_digest IS NULL)),
     CHECK (
         (effect_attempt_id IS NULL AND authorization_ticket_id IS NULL
@@ -627,9 +629,103 @@ CREATE TABLE tool_observations (
 CREATE INDEX model_request_state_idx ON model_requests(bot_id,state,updated_at);
 CREATE INDEX model_attempt_state_idx ON model_transport_attempts(bot_id,state,settled_at);
 CREATE INDEX tool_call_state_idx ON tool_calls(bot_id,state,updated_at);
-CREATE INDEX tool_call_run_idx ON tool_calls(bot_id,run_id);
+CREATE UNIQUE INDEX tool_call_run_step_idx ON tool_calls(bot_id,run_id,step_seq);
 CREATE UNIQUE INDEX tool_call_approval_ref_idx ON tool_calls(bot_id,approval_ref)
     WHERE approval_ref IS NOT NULL;
+
+CREATE FUNCTION agent_management_run_steps_page(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_run text := input->>'run_id';
+    requested_kind text := input->>'kind';
+    state_filter text := input->>'state';
+    page_limit integer := COALESCE((input->>'limit')::integer,50);
+    snapshot_at timestamptz := COALESCE((input->>'snapshot_at')::timestamptz,
+        statement_timestamp());
+    after_step integer := (input->>'after_step_seq')::integer;
+    filter_digest text := 'sha256:' || encode(sha256(convert_to(
+        jsonb_build_array(requested_run,requested_kind,state_filter,snapshot_at)::text,
+        'UTF8'
+    )),'hex');
+    items jsonb;
+    has_more boolean;
+    last_step integer;
+BEGIN
+    IF requested_run IS NULL OR requested_kind IS NULL OR
+       requested_kind NOT IN ('MODEL_TURN','TOOL_CALL') OR
+       (requested_kind='MODEL_TURN' AND state_filter IS NOT NULL) OR
+       page_limit NOT BETWEEN 1 AND 100 OR snapshot_at>statement_timestamp() OR
+       (after_step IS NOT NULL AND
+        (NOT input ? 'snapshot_at' OR
+         input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_MANAGEMENT_CURSOR_INVALID',
+                'message','Agent execution page input or cursor is invalid','status',422)
+        );
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.agent_runs
+        WHERE bot_id=requested_bot AND run_id=requested_run
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_RUN_NOT_FOUND',
+                'message','Agent Run does not exist','status',404)
+        );
+    END IF;
+    IF requested_kind='MODEL_TURN' THEN
+        WITH page AS MATERIALIZED (
+            SELECT 'MODEL_TURN'::text AS kind,t.turn_id,t.request_id,t.step_seq,
+                   t.terminal,t.thinking_only,t.truncated_after_function_call,
+                   t.repair_of_request_id,t.raw_candidate_digest,t.created_at
+            FROM __forest_module_schema__.model_turns t
+            WHERE t.bot_id=requested_bot AND t.run_id=requested_run
+              AND t.created_at<=snapshot_at
+              AND (after_step IS NULL OR t.step_seq<after_step)
+            ORDER BY t.step_seq DESC LIMIT page_limit+1
+        ), visible AS MATERIALIZED (
+            SELECT * FROM page ORDER BY step_seq DESC LIMIT page_limit
+        )
+        SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.step_seq DESC)
+                         FROM visible v),'[]'::jsonb),
+               (SELECT count(*)>page_limit FROM page),
+               (SELECT min(step_seq) FROM visible)
+        INTO items,has_more,last_step;
+    ELSE
+        WITH page AS MATERIALIZED (
+            SELECT 'TOOL_CALL'::text AS kind,t.tool_call_id,t.turn_id,t.step_seq,
+                   t.tool_name,t.tool_component_id,t.tool_generation_id,
+                   t.tool_service_id,t.state,t.approval_required,t.supports_query,
+                   t.error_code,t.created_at,t.updated_at
+            FROM __forest_module_schema__.tool_calls t
+            WHERE t.bot_id=requested_bot AND t.run_id=requested_run
+              AND t.created_at<=snapshot_at
+              AND (state_filter IS NULL OR t.state=state_filter)
+              AND (after_step IS NULL OR t.step_seq<after_step)
+            ORDER BY t.step_seq DESC LIMIT page_limit+1
+        ), visible AS MATERIALIZED (
+            SELECT * FROM page ORDER BY step_seq DESC LIMIT page_limit
+        )
+        SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.step_seq DESC)
+                         FROM visible v),'[]'::jsonb),
+               (SELECT count(*)>page_limit FROM page),
+               (SELECT min(step_seq) FROM visible)
+        INTO items,has_more,last_step;
+    END IF;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'run_id',requested_run,'kind',requested_kind,
+            'snapshot_at',snapshot_at,'filter_digest',filter_digest,
+            'items',items,'has_more',has_more,
+            'next_cursor',CASE WHEN has_more THEN
+                jsonb_build_object('step_seq',last_step) ELSE NULL END
+        )
+    );
+END;
+$$;
 
 CREATE FUNCTION guard_agent_session() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$

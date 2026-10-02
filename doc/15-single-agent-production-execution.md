@@ -162,7 +162,7 @@ Scheduler quiesce 先关闭新 actor admission，再等待已领取群离开模�
 
 会话、Run、模型请求/回合和工具调用均归 `agent.runtime` 的私有 Repository；WebUI 只能通过该包当前 Generation 的管理查询读取，不能跨 schema 拼接 Conversation 或 Provider 表。Run 将 `conversation_ref` 作为不可变身份存储，并用 `(bot_id,session_id,conversation_ref)` 外键锁定所属 Session，避免跨群管理视图依赖运行中的 lane 或从字符串前缀猜测归属。全 Bot 与单会话列表分别有按 `(created_at DESC,run_id DESC)` 的索引，状态筛选另有对应索引；单页最多 100 条。游标绑定会话、状态与首次查询时间，后续页只扫描该创建时间界限内更早的 Run。Run 的状态会继续变化，这个列表是活动诊断视图而不是跨 HTTP 请求冻结的 MVCC 历史快照；详情查询始终读取当前持久状态。列表只返回执行元数据，不返回 Prompt、模型正文、工具参数或 Payload 内容。
 
-模块自带紧凑管理 UI，通过 `agent.runs.page` 与 `agent.run` 两个只读端口提供筛选、翻页和 Run 状态。后续 Session、ModelTurn、ToolCall 的各自有界分页以及取消/UNKNOWN 对账必须继续在同一包管理契约内实现，不能在壳层新增 Agent 专用路由或读取此列表的内部表。
+模块自带紧凑管理 UI，通过 `agent.runs.page` 与 `agent.run` 两个只读端口提供筛选、翻页和 Run 状态。`agent.steps.page` 在单个 Run 内按 step 序号分别分页读取 ModelTurn 或 ToolCall，可按工具状态筛选；游标绑定 Run、记录种类、筛选条件和首次查询时间，单页最多 100 条。ModelTurn 通过 `(bot_id,run_id,request_id,step_seq)` 外键指向同一 Run 的 ModelRequest，ToolCall 通过 `(bot_id,run_id,turn_id,step_seq)` 外键指向同一 Run 的 ModelTurn，因此归因由数据库约束而不是管理层推断。列表只暴露时序和状态元数据，不暴露模型正文或工具参数；可变状态仍是当前诊断值，不承诺跨页冻结。后续 Session 的独立分页以及取消/UNKNOWN 对账必须继续在同一包管理契约内实现，不能在壳层新增 Agent 专用路由或读取此列表的内部表。
 
 ## 7. 实现拒绝项
 

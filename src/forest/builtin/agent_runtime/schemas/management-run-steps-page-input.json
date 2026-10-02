@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "kind"],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "kind": {"enum": ["MODEL_TURN", "TOOL_CALL"]},
+    "state": {"enum": ["PROPOSED", "WAIT_APPROVAL", "DISPATCHING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+    "snapshot_at": {"type": "string", "format": "date-time"},
+    "after_step_seq": {"type": "integer", "minimum": 1},
+    "cursor_filter_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  },
+  "dependentRequired": {
+    "after_step_seq": ["snapshot_at", "cursor_filter_digest"]
+  },
+  "if": {"properties": {"kind": {"const": "MODEL_TURN"}}},
+  "then": {"not": {"required": ["state"]}}
+}

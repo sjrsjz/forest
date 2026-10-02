@@ -38,6 +38,32 @@ def main() -> None:
     second = {**first, "items": [], "has_more": False, "next_cursor": None}
     for value in (first, second):
         Draft202012Validator(page_schema).validate(value)
+    step_schema = json.loads((
+        root / "src/forest/builtin/agent_runtime/schemas/management-run-steps-page-output.json"
+    ).read_text(encoding="utf-8"))
+    step_base = {
+        "run_id": "run:one", "snapshot_at": first["snapshot_at"],
+        "filter_digest": first["filter_digest"], "has_more": False,
+        "next_cursor": None,
+    }
+    turn_page = {**step_base, "kind": "MODEL_TURN", "items": [{
+        "kind": "MODEL_TURN", "turn_id": "turn:one", "request_id": "request:one",
+        "step_seq": 1, "terminal": False, "thinking_only": False,
+        "truncated_after_function_call": False, "repair_of_request_id": None,
+        "raw_candidate_digest": "sha256:" + "b" * 64,
+        "created_at": row["created_at"],
+    }]}
+    tool_page = {**step_base, "kind": "TOOL_CALL", "items": [{
+        "kind": "TOOL_CALL", "tool_call_id": "tool:one", "turn_id": "turn:one",
+        "step_seq": 1, "tool_name": "diagnostic_echo",
+        "tool_component_id": "process.executor", "tool_generation_id": "generation:one",
+        "tool_service_id": "tool.execute", "state": "SUCCEEDED",
+        "approval_required": False, "supports_query": False,
+        "error_code": None, "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }]}
+    for value in (turn_page, tool_page):
+        Draft202012Validator(step_schema).validate(value)
     parent = """<!doctype html><html><meta charset="utf-8"><body>
 <iframe id="agent" src="/agent" width="1100" height="650"
  sandbox="allow-scripts allow-same-origin"></iframe>
@@ -62,6 +88,8 @@ frame.addEventListener('load',()=>{
         state:'PREPARING_MODEL',error_code:null,progress:{input_revision:1,checkpoint_seq:0},
         current:{model_request_id:null,tool_call_id:null},created_at:'2026-10-02T00:00:00Z',
         updated_at:'2026-10-02T00:00:01Z',terminal_at:null};
+    }else if(data.operation_id==='agent.steps.page'){
+      value=data.value.kind==='MODEL_TURN'?__TURN__:__TOOL__;
     }else throw new Error('Unexpected operation '+data.operation_id);
     channel.port1.postMessage({protocol:data.protocol,nonce,type:'operation-result',
       request_id:data.request_id,value});
@@ -71,6 +99,8 @@ frame.addEventListener('load',()=>{
 });
 </script></body></html>""".replace("__FIRST__", json.dumps(first)).replace(
         "__SECOND__", json.dumps(second)
+    ).replace("__TURN__", json.dumps(turn_page)).replace(
+        "__TOOL__", json.dumps(tool_page)
     )
 
     class Handler(BaseHTTPRequestHandler):
@@ -110,6 +140,8 @@ frame.addEventListener('load',()=>{
                 expect(frame.locator("#items .item")).to_have_count(1)
                 frame.locator("#items .item").click()
                 expect(frame.locator("#detail")).to_contain_text("run:one")
+                expect(frame.locator("#model-turns")).to_contain_text("turn:one")
+                expect(frame.locator("#tool-calls")).to_contain_text("diagnostic_echo")
                 frame.locator("#next").click()
                 expect(frame.locator("#next")).to_be_hidden()
                 frame.locator("#conversation").fill("onebot:group:933179609")

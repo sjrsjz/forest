@@ -18,6 +18,8 @@
     .detail{border:1px solid #284036;border-radius:8px;padding:12px}
     dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:0}
     dl div{min-width:0}dt{color:#a9c1b2}dd{margin:3px 0 0;overflow-wrap:anywhere}
+    details{margin-top:10px;border-top:1px solid #284036;padding-top:8px}summary{cursor:pointer}
+    .step-list{max-height:240px;overflow:auto}.step-list div{padding:7px 0;border-bottom:1px solid #284036;overflow-wrap:anywhere}
     [hidden]{display:none!important}
     @media(max-width:760px){.item{grid-template-columns:1fr 1fr}dl{grid-template-columns:1fr 1fr}}
   </style>
@@ -51,12 +53,15 @@
         <div><dt>更新</dt><dd id="updated"></dd></div>
         <div><dt>终态</dt><dd id="terminal"></dd></div>
       </dl>
+      <details><summary>模型回合</summary><div class="step-list" id="model-turns"></div><button id="more-model-turns" type="button" hidden>更多回合</button></details>
+      <details><summary>工具调用</summary><div class="step-list" id="tool-calls"></div><button id="more-tool-calls" type="button" hidden>更多调用</button></details>
     </section>
     <p id="status" role="status"></p>
   </main>
   <script>
   (()=>{'use strict';
     let port,nonce,sequence=0,pageCursor=null,filter={},selectedRun='';
+    const stepCursors={MODEL_TURN:null,TOOL_CALL:null};
     const pending=new Map(),el=id=>document.getElementById(id);
     const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
     const resize=()=>send('resize',{height:document.documentElement.scrollHeight});
@@ -104,6 +109,29 @@
       el('updated').textContent=row.updated_at;
       el('terminal').textContent=row.terminal_at||'—';
       el('detail').hidden=false;resize();
+      await loadSteps('MODEL_TURN');
+      await loadSteps('TOOL_CALL');
+    }
+    async function loadSteps(kind,next=false){
+      const run_id=selectedRun;
+      const prefix=kind==='MODEL_TURN'?'model-turns':'tool-calls';
+      if(!next){stepCursors[kind]=null;el(prefix).replaceChildren();}
+      const input={run_id,kind,limit:20};
+      if(next&&stepCursors[kind])Object.assign(input,stepCursors[kind]);
+      const page=await call('agent.steps.page',input);
+      if(run_id!==selectedRun)return;
+      for(const item of page.items){
+        const row=document.createElement('div');
+        row.textContent=kind==='MODEL_TURN'
+          ?`#${item.step_seq} / ${item.turn_id} / ${item.request_id} / ${item.terminal?'终答':item.thinking_only?'思考':'继续'}`
+          :`#${item.step_seq} / ${item.tool_name} / ${item.tool_component_id} / ${item.state}${item.error_code?' / '+item.error_code:''}`;
+        el(prefix).append(row);
+      }
+      stepCursors[kind]=page.has_more?{
+        snapshot_at:page.snapshot_at,cursor_filter_digest:page.filter_digest,
+        after_step_seq:page.next_cursor.step_seq,
+      }:null;
+      el('more-'+prefix).hidden=!stepCursors[kind];resize();
     }
     addEventListener('message',event=>{
       const message=event.data||{};
@@ -122,6 +150,8 @@
     el('search').onclick=()=>load().catch(error=>status(error.message));
     el('next').onclick=()=>load(true).catch(error=>status(error.message));
     el('refresh-detail').onclick=()=>detail(selectedRun).catch(error=>status(error.message));
+    el('more-model-turns').onclick=()=>loadSteps('MODEL_TURN',true).catch(error=>status(error.message));
+    el('more-tool-calls').onclick=()=>loadSteps('TOOL_CALL',true).catch(error=>status(error.message));
     el('conversation').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();load().catch(error=>status(error.message));}};
   })();
   </script>
