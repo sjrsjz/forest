@@ -5,6 +5,7 @@ import hashlib
 import os
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from importlib.resources import files
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -33,7 +34,7 @@ from forest.official_bot_provisioning import (
 )
 from forest.package_capabilities import PackageCallScope
 from forest.package_domain_authority import PostgresPackageDomainAuthority
-from forest.packages import storage_bundle_digest
+from forest.packages import digest_json, storage_bundle_digest
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
@@ -42,6 +43,7 @@ from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_generation import DeploymentGenerationAuthority
+from forest.storage.deployment_module_configuration import DeploymentModuleConfigurationRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInstaller
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
@@ -138,6 +140,132 @@ async def test_deployment_package_storage_has_its_own_scope_fenced_ledger(deploy
             digest,
         )
     assert caught.value.code == "INVALID_STORAGE_BUNDLE"
+
+
+@pytest.mark.postgres
+async def test_deployment_configuration_revision_activates_with_real_generation(deployment_catalog):
+    catalog = deployment_catalog
+    await catalog.initialize()
+    source = files("forest.storage.official").joinpath(
+        "deployment_module_configuration.sql"
+    ).read_bytes()
+    spec = StorageBundleSpec(
+        component_id="deployment.settings", schema_id="deployment.settings",
+        schema_version="1.0.0", baseline_sha256=hashlib.sha256(source).hexdigest(),
+        repository_contract="forest.deployment-module-configuration.repository/1",
+        scope="deployment",
+    )
+    storage_digest = storage_bundle_digest(spec, "official")
+    await DeploymentSchemaBundleInstaller(catalog.store).install(
+        spec, source, storage_digest, execution_profile="official"
+    )
+    configuration = DeploymentModuleConfigurationRepository(
+        catalog.store, component_id=spec.component_id, namespace=spec.namespace
+    )
+    schema_digest = digest_json({"protocol": "forest.deployment-settings/1"})
+    first = await configuration.ensure_initialized(
+        operation_id="bootstrap/settings", value={"name": "forest"},
+        validation_digest=schema_digest,
+    )
+    assert await configuration.ensure_initialized(
+        operation_id="bootstrap/settings", value={"name": "forest"},
+        validation_digest=schema_digest,
+    ) == first
+    assert (await configuration.desired_checked()).value == {"name": "forest"}
+
+    lease = await catalog.claim_supervisor("host/config", "incarnation/config")
+    authority = DeploymentGenerationAuthority(catalog.store)
+    digest = "sha256:" + "1" * 64
+
+    def binding(current):
+        return PreparedGenerationBinding(
+            component_id=spec.component_id, requires=(), package_id="deployment.settings",
+            package_version="1.0.0", package_digest=digest, driver="python-worker",
+            trust_level="official", descriptor_digest=digest, route_contract_digest=digest,
+            management_contract_digest=digest, management_ui_digest=digest,
+            config_revision=current.revision, config_payload_id=current.payload_id,
+            config_payload_digest=current.payload_digest, instance_id="instance/settings",
+            worker_incarnation="worker/settings", state_schema=1,
+            state_contract_digest=digest, capability_grants_digest=digest,
+            data_admission=False, control_admission=True,
+            storage=RuntimeStorageBinding(
+                schema_id=spec.schema_id, schema_version=spec.schema_version,
+                namespace=spec.namespace, baseline_sha256=spec.baseline_sha256,
+                package_digest=storage_digest, repository_contract=spec.repository_contract,
+                execution_profile="official",
+            ),
+        )
+
+    graph = await authority.prepare_graph(lease, [binding(first)], str(uuid4()))
+    assert await authority.publish_graph(
+        lease, graph, configuration_activators={spec.component_id: configuration}
+    ) == graph.graph_revision
+    assert await configuration.effective() == first
+
+    plan = await configuration.plan(
+        operation_id="plan/settings/2", expected_desired_revision=1,
+        value={"name": "forest two"}, validation_digest=schema_digest,
+    )
+    second = await configuration.apply(
+        operation_id="apply/settings/2", plan_id=plan["plan_id"],
+        expected_desired_revision=1,
+    )
+    assert (await configuration.desired()).revision == 2
+    assert (await configuration.effective()).revision == 1
+    assert (await configuration.ensure_initialized(
+        operation_id="bootstrap/settings", value={"name": "forest"},
+        validation_digest=schema_digest,
+    )).revision == 2
+    wrong = await authority.prepare_graph(
+        lease, [replace(binding(second), config_payload_id=first.payload_id,
+                        config_payload_digest=first.payload_digest)], str(uuid4())
+    )
+    replacement = await authority.prepare_graph(lease, [binding(second)], str(uuid4()))
+    with pytest.raises(ForestError) as caught:
+        await authority.publish_graph(
+            lease, wrong, configuration_activators={spec.component_id: configuration}
+        )
+    assert caught.value.code == "MODULE_CONFIGURATION_IDENTITY_CONFLICT"
+    assert (await configuration.effective()).revision == 1
+    assert await authority.current_graph() == graph
+    await authority.publish_graph(
+        lease, replacement, configuration_activators={spec.component_id: configuration}
+    )
+    assert await authority.current_graph() == replacement
+    assert (await configuration.effective(include_value=True)).value == {"name": "forest two"}
+
+    async def plan_third(operation_id: str, name: str):
+        return await configuration.plan(
+            operation_id=operation_id, expected_desired_revision=2,
+            value={"name": name}, validation_digest=schema_digest,
+        )
+
+    replay_a, replay_b = await asyncio.gather(
+        plan_third("plan/settings/replay", "replayed"),
+        plan_third("plan/settings/replay", "replayed"),
+    )
+    assert replay_a == replay_b
+    competing = await plan_third("plan/settings/competing", "competing")
+
+    async def apply_third(plan_id: str, operation_id: str):
+        return await configuration.apply(
+            operation_id=operation_id, plan_id=plan_id,
+            expected_desired_revision=2,
+        )
+
+    outcomes = await asyncio.gather(
+        apply_third(replay_a["plan_id"], "apply/settings/replay"),
+        apply_third(competing["plan_id"], "apply/settings/competing"),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(value, ForestError) and value.code == "MODULE_CONFIGURATION_CONFLICT"
+               for value in outcomes) == 1
+    winner = next(value for value in outcomes if not isinstance(value, BaseException))
+    assert winner.revision == 3
+    assert (await configuration.desired(include_value=True)).value in (
+        {"name": "replayed"}, {"name": "competing"}
+    )
+    assert (await configuration.effective()).revision == 2
 
 
 @pytest.mark.postgres
