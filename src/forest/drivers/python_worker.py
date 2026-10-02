@@ -25,6 +25,7 @@ from uuid import uuid4
 from forest.command_contract import schema_digest
 from forest.drivers.protocol import MAX_FRAME_BYTES, FrameWriter, encode_frame, read_frame
 from forest.errors import ForestError
+from forest.scope_identity import bind_scope_identity
 from forest.worker_limits import WorkerLimits
 
 
@@ -78,25 +79,6 @@ class WorkerIdentity:
                 self.incarnation,
             )
         ) or (
-            not isinstance(self.scope_kind, str)
-            or self.scope_kind not in {"bot", "deployment", "host"}
-        ) or (
-            self.scope_kind == "bot"
-            and (
-                not isinstance(self.bot_id, str)
-                or not self.bot_id
-                or len(self.bot_id) > 128
-                or (self.scope_id is not None and self.scope_id != self.bot_id)
-            )
-        ) or (
-            self.scope_kind != "bot"
-            and (
-                self.bot_id is not None
-                or not isinstance(self.scope_id, str)
-                or not self.scope_id
-                or len(self.scope_id) > 128
-            )
-        ) or (
             self.graph_id is not None
             and (not isinstance(self.graph_id, str) or not self.graph_id or len(self.graph_id) > 128)
         ) or (
@@ -127,8 +109,13 @@ class WorkerIdentity:
             )
         ):
             raise ValueError("Worker identity or scope binding is invalid")
-        if self.scope_id is None:
-            object.__setattr__(self, "scope_id", self.bot_id)
+        object.__setattr__(
+            self,
+            "scope_id",
+            bind_scope_identity(
+                scope_kind=self.scope_kind, scope_id=self.scope_id, bot_id=self.bot_id
+            ),
+        )
 
 
 StateHandler = Callable[[WorkerIdentity, str, str, dict], Awaitable[Any]]

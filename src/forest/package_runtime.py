@@ -68,6 +68,7 @@ from forest.runtime_modules import (
     RuntimeModuleDescriptor,
     RuntimeShellCommandContribution,
 )
+from forest.scope_identity import bind_scope_identity
 from forest.shell_command_protocol import (
     ShellCommandExecutionRequest,
     ShellCommandExecutionResult,
@@ -212,7 +213,8 @@ class PackageGenerationAdapter:
         self,
         *,
         snapshot: PackageSnapshot,
-        bot_id: str,
+        bot_id: str | None,
+        scope_id: str | None = None,
         module_configuration: Any,
         grants: Any,
         service_routes: Mapping[str, Any],
@@ -244,6 +246,10 @@ class PackageGenerationAdapter:
         self.component = snapshot.component
         self.component_id = self.component["id"]
         self.bot_id = bot_id
+        self.scope_kind = self.component["scope"]
+        self.scope_id = bind_scope_identity(
+            scope_kind=self.scope_kind, scope_id=scope_id, bot_id=bot_id
+        )
         self.module_configuration = module_configuration
         self.grants = grants
         self._service_routes = dict(service_routes)
@@ -392,6 +398,8 @@ class PackageGenerationAdapter:
                 )
             self._owned_work = PackageOwnedWorkSupervisor(
                 bot_id=self.bot_id,
+                scope_kind=self.scope_kind,
+                scope_id=self.scope_id,
                 component_id=self.component_id,
                 declarations=self._owned_work_declarations,
                 schemas=self._owned_work_schemas,
@@ -697,6 +705,8 @@ class PackageGenerationAdapter:
             )
         scope = PackageCallScope(
             bot_id=self.bot_id,
+            scope_kind=self.scope_kind,
+            scope_id=self.scope_id,
             component_id=self.component_id,
             generation_id=identity.generation_id,
             instance_id=prepared.instance_id,
@@ -883,6 +893,8 @@ class PackageGenerationAdapter:
             await self._domain_commands.invoke_preparation_command(
                 PackageCallScope(
                     bot_id=self.bot_id,
+                    scope_kind=self.scope_kind,
+                    scope_id=self.scope_id,
                     component_id=self.component_id,
                     generation_id=identity.generation_id,
                     instance_id=prepared.instance_id,
@@ -939,6 +951,8 @@ class PackageGenerationAdapter:
             await self._domain_commands.invoke_cleanup_command(
                 PackageCallScope(
                     bot_id=self.bot_id,
+                    scope_kind=self.scope_kind,
+                    scope_id=self.scope_id,
                     component_id=self.component_id,
                     generation_id=identity.generation_id,
                     instance_id=prepared.instance_id,
@@ -1003,6 +1017,8 @@ class PackageGenerationAdapter:
         call_id = "call:" + uuid4().hex
         scope_values = dict(
             bot_id=self.bot_id,
+            scope_kind=self.scope_kind,
+            scope_id=self.scope_id,
             component_id=self.component_id,
             generation_id=identity.generation_id,
             instance_id=prepared.instance_id,
@@ -1217,7 +1233,7 @@ class PackageGenerationAdapter:
                     )
                 action_id = declaration["management_operation_id"]
                 operation_id = "shell:action:" + hashlib.sha256(
-                    (self.bot_id + "\0" + request.request_id + "\0" + action_id).encode()
+                    (self.scope_id + "\0" + request.request_id + "\0" + action_id).encode()
                 ).hexdigest()
                 plan_digest = contract.authorization_plan_digest(
                     action_id, request.arguments
@@ -1675,6 +1691,8 @@ class PackageGenerationAdapter:
         )
         scope = PackageCallScope(
             bot_id=outer.bot_id,
+            scope_kind=outer.scope_kind,
+            scope_id=outer.scope_id,
             component_id=outer.component_id,
             generation_id=outer.generation_id,
             instance_id=outer.instance_id,
@@ -1734,6 +1752,8 @@ class PackageGenerationAdapter:
         return (
             PackageCallScope(
                 bot_id=self.bot_id,
+                scope_kind=self.scope_kind,
+                scope_id=self.scope_id,
                 component_id=self.component_id,
                 generation_id=identity.generation_id,
                 instance_id=prepared.instance_id,
@@ -2097,6 +2117,8 @@ class PackageGenerationAdapter:
         causal_root_kind, causal_root_id = worker.call_causal_root(call_id)
         values = dict(
             bot_id=self.bot_id,
+            scope_kind=self.scope_kind,
+            scope_id=self.scope_id,
             component_id=self.component_id,
             generation_id=generation.generation_id,
             instance_id=prepared.instance_id,
@@ -2561,6 +2583,8 @@ class PackageGenerationAdapter:
                 generation_id=self.generation_identity.generation_id,
                 incarnation=self._prepared_binding.worker_incarnation,
                 bot_id=self.bot_id,
+                scope_kind=self.scope_kind,
+                scope_id=self.scope_id,
                 graph_id=self.generation_identity.graph_id,
                 graph_revision=self.generation_identity.graph_revision,
                 configuration_payload_id=(
@@ -2788,7 +2812,8 @@ class PackageGenerationAdapter:
 def package_runtime_descriptor(
     snapshot: PackageSnapshot,
     *,
-    bot_id: str,
+    bot_id: str | None,
+    scope_id: str | None = None,
     module_configuration: Any,
     grants: Any,
     resolved_contracts: Mapping[str, str],
@@ -2827,6 +2852,9 @@ def package_runtime_descriptor(
             500,
         )
     component = snapshot.component
+    bind_scope_identity(
+        scope_kind=component["scope"], scope_id=scope_id, bot_id=bot_id
+    )
     immutable_paths = tuple(component.get("config_immutable_paths", ()))
     if immutable_paths and tuple(getattr(module_configuration, "immutable_paths", ())) != immutable_paths:
         raise ForestError(
@@ -3113,6 +3141,7 @@ def package_runtime_descriptor(
         adapter = PackageGenerationAdapter(
             snapshot=snapshot,
             bot_id=bot_id,
+            scope_id=scope_id,
             module_configuration=module_configuration,
             grants=grants,
             service_routes=routes,
@@ -3154,12 +3183,13 @@ def package_runtime_descriptor(
         requires=tuple(
             dict.fromkeys(
                 (
-                    "kernel.runtime",
-                    "kernel.payload",
-                    "kernel.authorization",
+                    *(
+                        ("kernel.runtime", "kernel.payload", "kernel.authorization")
+                        if component["scope"] == "bot" else ()
+                    ),
                     *(
                         ("routing.graph",)
-                        if (
+                        if component["scope"] == "bot" and (
                             component.get("publishes")
                             or component.get("subscribes")
                             or component.get("jobs")

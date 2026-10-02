@@ -18,6 +18,7 @@ from forest.package_capabilities import (
     PackageServiceRoute,
 )
 from forest.runtime_contracts import RuntimeServiceInvocation
+from forest.scope_identity import bind_scope_identity
 
 
 class PackageOwnedWorkSupervisor:
@@ -26,7 +27,9 @@ class PackageOwnedWorkSupervisor:
     def __init__(
         self,
         *,
-        bot_id: str,
+        bot_id: str | None,
+        scope_kind: str = "bot",
+        scope_id: str | None = None,
         component_id: str,
         declarations: tuple[dict, ...],
         schemas: dict,
@@ -41,6 +44,10 @@ class PackageOwnedWorkSupervisor:
         call_finished: Callable[[str], None],
     ) -> None:
         self.bot_id = bot_id
+        self.scope_kind = scope_kind
+        self.scope_id = bind_scope_identity(
+            scope_kind=scope_kind, scope_id=scope_id, bot_id=bot_id
+        )
         self.component_id = component_id
         self.declarations = declarations
         self.schemas = schemas
@@ -150,6 +157,8 @@ class PackageOwnedWorkSupervisor:
         identity, prepared, _worker = self.binding()
         return PackageOwnedWorkCallScope(
             bot_id=self.bot_id,
+            scope_kind=self.scope_kind,
+            scope_id=self.scope_id,
             component_id=self.component_id,
             generation_id=identity.generation_id,
             instance_id=prepared.instance_id,

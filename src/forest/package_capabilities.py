@@ -6,10 +6,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from forest.scope_identity import bind_scope_identity
+
 
 @dataclass(frozen=True)
 class PackageCallScope:
-    bot_id: str
+    bot_id: str | None
     component_id: str
     generation_id: str
     instance_id: str
@@ -19,6 +21,17 @@ class PackageCallScope:
     causal_root_kind: str
     causal_root_id: str
     recovered_generation: bool = field(default=False, kw_only=True)
+    scope_kind: str = field(default="bot", kw_only=True)
+    scope_id: str | None = field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "scope_id",
+            bind_scope_identity(
+                scope_kind=self.scope_kind, scope_id=self.scope_id, bot_id=self.bot_id
+            ),
+        )
 
 
 @dataclass(frozen=True)

@@ -11,6 +11,7 @@ import pytest
 
 from forest.errors import ForestError
 from forest.job_protocol import DurableJobExecutionRequest
+from forest.package_capabilities import PackageCallScope
 from forest.package_runtime import (
     PackageGenerationAdapter,
     PackageGenerationState,
@@ -19,6 +20,7 @@ from forest.package_runtime import (
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationContext
+from forest.runtime_modules import RuntimeModuleRegistry
 
 
 class NoServiceLedger:
@@ -50,6 +52,88 @@ class Configuration:
             payload_digest=digest_json(value),
             value=value if include_value else None,
         )
+
+
+def test_package_call_scope_binds_exact_runtime_scope():
+    common = dict(
+        component_id="deployment.audit", generation_id="generation/one",
+        instance_id="instance/one", worker_incarnation="incarnation/one",
+        call_id="call/one", call_operation_id="operation/one",
+        causal_root_kind="management", causal_root_id="operation/one",
+    )
+    bot = PackageCallScope(bot_id="bot/one", **common)
+    assert (bot.scope_kind, bot.scope_id, bot.bot_id) == (
+        "bot", "bot/one", "bot/one"
+    )
+    deployment = PackageCallScope(
+        bot_id=None, scope_kind="deployment", scope_id="deployment/one", **common
+    )
+    assert (deployment.scope_kind, deployment.scope_id, deployment.bot_id) == (
+        "deployment", "deployment/one", None
+    )
+    with pytest.raises(ValueError, match="Non-Bot scope"):
+        PackageCallScope(
+            bot_id="bot/one", scope_kind="deployment", scope_id="deployment/one",
+            **common,
+        )
+
+
+def test_deployment_package_management_scope_never_invents_bot_id(tmp_path):
+    source = tmp_path / "source"
+    shutil.copytree(Path(__file__).parents[1] / "examples/counter", source)
+    manifest = source / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'scope = "bot"', 'scope = "deployment"'
+        ), encoding="utf-8",
+    )
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    adapter = PackageGenerationAdapter(
+        snapshot=snapshot, bot_id=None, scope_id="deployment/one",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        service_routes={}, resolved_contracts={},
+        generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=None, state_commands=None,
+        service_operation_ledger=NoServiceLedger(),
+    )
+    adapter.state = PackageGenerationState.ACTIVE
+    adapter.generation_identity = SimpleNamespace(generation_id="generation/one")
+    adapter._prepared_binding = SimpleNamespace(
+        instance_id="instance/one", worker_incarnation="incarnation/one"
+    )
+    scope, _ = adapter._management_scope("operation/one")
+    assert (scope.scope_kind, scope.scope_id, scope.bot_id) == (
+        "deployment", "deployment/one", None
+    )
+
+
+def test_deployment_package_descriptor_has_no_bot_kernel_dependency(tmp_path):
+    source = tmp_path / "source"
+    shutil.copytree(Path(__file__).parents[1] / "examples/counter", source)
+    manifest = source / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'scope = "bot"', 'scope = "deployment"'
+        ), encoding="utf-8",
+    )
+    snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    descriptor = package_runtime_descriptor(
+        snapshot, bot_id=None, scope_id="deployment/one",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        resolved_contracts={}, generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=SimpleNamespace(), state_commands=SimpleNamespace(),
+        service_operation_ledger=NoServiceLedger(),
+    )
+    assert descriptor.requires == ()
+    registry = RuntimeModuleRegistry(
+        SimpleNamespace(scope_kind="deployment", generation_authority=None),
+        (descriptor,),
+    )
+    assert registry.order == ["example.counter"]
 
 
 async def test_management_preflight_wraps_the_domain_transaction(tmp_path):
@@ -452,6 +536,22 @@ async def test_effect_driver_is_owned_by_the_same_package_generation(tmp_path):
         async def close(self):
             events.append("close")
 
+    class LookupDriver:
+        async def invoke(self, _payload, *, scope, invocation):
+            raise AssertionError("Read lookup is not invoked in this lifecycle test")
+
+        async def start(self):
+            pass
+
+        async def quiesce(self):
+            pass
+
+        async def resume(self):
+            pass
+
+        async def close(self):
+            pass
+
     adapter = PackageGenerationAdapter(
         snapshot=snapshot,
         bot_id="bot-package-runtime",
@@ -465,7 +565,8 @@ async def test_effect_driver_is_owned_by_the_same_package_generation(tmp_path):
         state_commands=None,
             service_operation_ledger=EffectServiceLedger(),
             effect_driver_factories={
-                "provider.model.dispatch": lambda *_values: Driver()
+                "provider.model.dispatch": lambda *_values: Driver(),
+                "provider.model.result.lookup": lambda *_values: LookupDriver(),
             },
     )
     context = PreparedGenerationContext(
