@@ -738,6 +738,98 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
             "memory": {},
         }
+        # An unresolved trigger in the bounded oldest window pins the archive
+        # prefix.  Later eligible units must stay in the active view.
+        with pytest.raises(RollbackProbe):
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {0}.inbox_messages SELECT "
+                        "(jsonb_populate_record(NULL::{0}.inbox_messages,"
+                        "to_jsonb(i)||jsonb_build_object('event_id','event/blocked-prefix',"
+                        "'ingress_seq',2,'admission_operation_id','admit/blocked-prefix',"
+                        "'source_event_ref','onebot-message/blocked-prefix',"
+                        "'platform_message_ref','message/blocked-prefix'))).* "
+                        "FROM {0}.inbox_messages i WHERE i.bot_id=%s AND i.event_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, event_id),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.conversation_triggers("
+                        "bot_id,conversation_id,trigger_id,event_id,ingress_seq,"
+                        "principal_ref,input_digest) SELECT bot_id,conversation_id,"
+                        "'trigger/blocked-prefix',event_id,ingress_seq,"
+                        "author_subject_ref,input_digest FROM {}.inbox_messages "
+                        "WHERE bot_id=%s AND event_id='event/blocked-prefix'"
+                    ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                    (store.bot_id,),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {0}.context_units SELECT "
+                        "(jsonb_populate_record(NULL::{0}.context_units,"
+                        "to_jsonb(u)||jsonb_build_object('unit_id','input/blocked-prefix',"
+                        "'context_revision',4,'event_id','event/blocked-prefix',"
+                        "'ingress_seq',2))).* FROM {0}.context_units u "
+                        "WHERE u.bot_id=%s AND u.event_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, event_id),
+                )
+                for revision in (5, 6):
+                    await conn.execute(
+                        sql.SQL(
+                            "INSERT INTO {0}.context_units SELECT "
+                            "(jsonb_populate_record(NULL::{0}.context_units,"
+                            "to_jsonb(u)||jsonb_build_object('unit_id',%s::text,"
+                            "'context_revision',%s::bigint,'source_id',%s::text))).* "
+                            "FROM {0}.context_units u WHERE u.bot_id=%s "
+                            "AND u.unit_id='control/pre-run/3'"
+                        ).format(sql.Identifier(namespace)),
+                        (f"control/after-block/{revision}", revision,
+                         f"control/after-block/{revision}", store.bot_id),
+                    )
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {0}.active_context_units("
+                        "bot_id,conversation_id,unit_id,context_revision,unit_index) "
+                        "SELECT bot_id,conversation_id,unit_id,context_revision,unit_index "
+                        "FROM {0}.context_units WHERE bot_id=%s "
+                        "AND conversation_id=%s AND context_revision IN (4,5,6)"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, actor["conversation_id"]),
+                )
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {}.conversation_lanes SET context_revision=6,"
+                        "context_view_unit_count=6 WHERE bot_id=%s AND conversation_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (store.bot_id, actor["conversation_id"]),
+                )
+                blocked_plan = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT {}.conversation_prepare_context_compaction("
+                            "%s::jsonb,%s::jsonb) AS result"
+                        ).format(sql.Identifier(namespace)),
+                        (
+                            Jsonb({
+                                "bot_id": store.bot_id,
+                                "operation_id": "conversation/pre-run/blocked-prefix",
+                                "participant_input_digest": "sha256:" + "0" * 64,
+                            }),
+                            Jsonb({
+                                "protocol": "forest.uow-step/1",
+                                "input": pre_run_input,
+                                "prior": {},
+                            }),
+                        ),
+                    )
+                ).fetchone()
+                assert blocked_plan["result"]["ok"] is True
+                assert [unit["context_revision"] for unit in
+                        blocked_plan["result"]["value"]["commit"]["units"]] == [1, 2, 3]
+                raise RollbackProbe
         pre_run = await instance._unit_of_work_coordinator.execute(
             PackageCallScope(
                 bot_id=store.bot_id,

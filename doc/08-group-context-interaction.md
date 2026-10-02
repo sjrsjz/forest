@@ -495,7 +495,7 @@ async def silent_drain_or_close(conversation_id, actor_fence, operation_id):
 
 ViewPlan固定有序源集、覆盖范围、基础context_view_revision、context_view_profile_ref、tokenizer/策略版本、预算、必留触发/因果组及deletion epoch。发布时核验所有依赖；老计划晚完成不得覆盖新输入或新视图。若只裁剪已声明前缀，必须证明保留当前完整后缀，且整体预算仍合法，否则重建计划；不能覆盖旧的整段Context快照。相同来源、策略、预算和必留集合得到相同保留/移出语义，不发生LLM工件选择。ModelRequestManifest 只记录能力投影，不产生第二套历史保留/移出清单。来源/删除屏障仍遵守[06](06-concurrent-convergence.md)。
 
-当前基线以 `context_view_unit_count/context_archived_unit_count` 避免为判断阈值反复扫描完整历史。一次发布先写受管 `context.archive` JSON 引用，再写 `context_compactions` 和精确 `context_compaction_units` 成员关系，最后单调推进 `context_view_revision`；原 `context_units` 与 Payload 不更新、不删除。快照用反连接只物化活动单元，并在最前面加入最新机器可读归档引用。新 Run 的触发输入和当前必要后缀受保护；ViewPlan 发布后，该 Run 在所有后续模型步骤保持同一 `context_view_revision`，只追加因果单元。
+当前基线以 `context_view_unit_count/context_archived_unit_count` 避免为判断阈值反复扫描完整历史。一次发布先写受管 `context.archive` JSON 引用，再写 `context_compactions` 和精确 `context_compaction_units` 成员关系，最后单调推进 `context_view_revision`；原 `context_units` 与 Payload 不更新、不删除。快照用反连接只物化活动单元，并在最前面加入最新机器可读归档引用。裁剪只能取按 Context 顺序排列的连续最旧前缀：遇到未决触发或当前 Session 的必留单元即停止，不能跳过该单元继续归档更晚消息；即便因此暂时高于水位，也要等待触发结算或下一安全边界。新 Run 的触发输入和当前必要后缀受保护；ViewPlan 发布后，该 Run 在所有后续模型步骤保持同一 `context_view_revision`，只追加因果单元。
 
 新 Session 的首个 Run 在 `agent.execute` 选择触发 InputBatch 之前，由 `conversation.scheduler` 持有 Actor 围栏执行 `conversation.compact-before-run`。这个独立 UnitOfWork 使用 Conversation 包自身的视图策略，按“确定性计划 → 归档 Payload → 视图提交 → Memory 归档资格”顺序原子提交；它不虚构 InputBatch，也不把裁剪策略交给 Agent 或 Provider。已提交的归档按操作身份重放；若重试时 Session 已启动且本操作未归档，则跳过新裁剪，由 Agent 读取已经存在的 Run。随后 Agent 在同一 Actor 围栏下选择输入，`context_view_revision` 因而是裁剪后的版本。Run 中途的模型安全点只接入新输入，不重新选择历史窗口；后续 Run 的 Session 交接仍须明确设计安全裁剪边界，不能沿用前一个 Run 的固定视图假装已经裁剪。
 

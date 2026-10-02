@@ -2462,9 +2462,10 @@ BEGIN
         WHERE a.bot_id=requested_bot AND a.conversation_id=requested_conversation
         ORDER BY a.context_revision,a.unit_index
         LIMIT archive_target
-    ), candidates AS (
-        SELECT a.* FROM oldest a
-        WHERE NOT EXISTS (
+    ), marked AS (
+        SELECT a.*,
+            row_number() OVER (ORDER BY a.context_revision,a.unit_index) AS archive_order,
+            (EXISTS (
               SELECT 1 FROM __forest_module_schema__.conversation_triggers t
               WHERE t.bot_id=a.bot_id AND t.conversation_id=a.conversation_id
                 AND t.event_id=a.event_id AND (
@@ -2476,8 +2477,7 @@ BEGIN
                           AND g.claim_state='TERMINAL'
                     ))
                 )
-          )
-          AND NOT (
+            ) OR (
               lane.active_session_ref IS NOT NULL AND (
                   EXISTS (
                       SELECT 1 FROM __forest_module_schema__.input_batches b
@@ -2490,8 +2490,18 @@ BEGIN
                         AND op.session_ref=lane.active_session_ref
                   )
               )
-          )
-        ORDER BY a.context_revision,a.unit_index
+            )) AS is_protected
+        FROM oldest a
+    ), candidates AS (
+        -- An unresolved trigger or active Session unit pins the suffix: an
+        -- archive may only remove the contiguous prefix before that unit.
+        SELECT m.* FROM (
+            SELECT marked.*,
+                   min(archive_order) FILTER (WHERE is_protected) OVER () AS first_protected
+            FROM marked
+        ) m
+        WHERE m.first_protected IS NULL OR m.archive_order<m.first_protected
+        ORDER BY m.archive_order
     )
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
                'unit_id',unit_id,'context_revision',context_revision,
