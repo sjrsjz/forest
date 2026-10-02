@@ -2121,6 +2121,7 @@ class PackageCatalog:
         after_version: str = "",
         limit: int = 32,
         catalog_revision: str | None = None,
+        scope: str | None = None,
     ) -> dict:
         """Project verified installable artifacts without exposing files or paths."""
         if (
@@ -2137,13 +2138,30 @@ class PackageCatalog:
             or type(limit) is not int
             or not 1 <= limit <= 64
             or (catalog_revision is not None and not isinstance(catalog_revision, str))
+            or (scope is not None and (
+                not isinstance(scope, str)
+                or scope not in {"bot", "deployment", "host"}
+            ))
         ):
             _fail("PACKAGE_CATALOG_PAGE_INVALID", "Package catalog page input is invalid")
         rows = self._rows(
             "SELECT package_id,version,digest FROM packages ORDER BY package_id,version", ()
         )
+        if scope is not None:
+            scoped_rows = []
+            for package_id, package_version, digest in rows:
+                snapshot = self.get(digest)
+                if (snapshot.manifest["package_id"], snapshot.manifest["version"]) != (
+                    package_id, package_version
+                ):
+                    _fail("PACKAGE_TAMPERED", "Catalog index differs from its immutable package")
+                if snapshot.component["scope"] == scope:
+                    scoped_rows.append((package_id, package_version, digest))
+            rows = scoped_rows
         revision = digest_json({
-            "protocol": "forest.package-catalog-revision/1", "entries": rows,
+            "protocol": "forest.package-catalog-revision/1",
+            "scope": scope,
+            "entries": rows,
         })
         if catalog_revision is not None and catalog_revision != revision:
             raise ForestError(

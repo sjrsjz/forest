@@ -8,6 +8,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
@@ -15,6 +16,10 @@ from jsonschema import Draft202012Validator
 from forest import packages
 from forest.builtin_packages import bootstrap_installed_package
 from forest.errors import ForestError
+from forest.kernel_package_catalog_snapshot import (
+    package_catalog_artifact_service,
+    package_catalog_page_service,
+)
 from forest.packages import PackageCatalog
 from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
 
@@ -107,6 +112,39 @@ def test_package_storage_cannot_claim_another_scope(tmp_path):
     with pytest.raises(ForestError) as rejected:
         PackageCatalog(tmp_path / "catalog").build(root)
     assert rejected.value.code == "INVALID_STORAGE_BUNDLE"
+
+
+@pytest.mark.asyncio
+async def test_bot_package_directory_fences_deployment_artifacts(tmp_path):
+    catalog = PackageCatalog(tmp_path / "catalog")
+    bot = catalog.build(EXAMPLE)
+    bot_revision = catalog.page(scope="bot")["catalog_revision"]
+    deployment_root = source(tmp_path)
+    manifest = deployment_root / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        .replace('package_id = "example.counter"', 'package_id = "example.deployment-counter"')
+        .replace('scope = "bot"', 'scope = "deployment"'),
+        encoding="utf-8",
+    )
+    deployment = catalog.build(deployment_root)
+    assert catalog.page(scope="bot")["catalog_revision"] == bot_revision
+    assert [item["scope"] for item in catalog.page(scope="bot")["items"]] == ["bot"]
+    assert [item["scope"] for item in catalog.page(scope="deployment")["items"]] == [
+        "deployment"
+    ]
+    context = SimpleNamespace(package_catalog=catalog)
+    page = await package_catalog_page_service(context)({
+        "protocol": "forest.package-catalog-page-request/1", "limit": 1,
+    })
+    assert [item["package_digest"] for item in page["items"]] == [bot.digest]
+    assert page["next_after"] is None
+    with pytest.raises(ForestError) as rejected:
+        await package_catalog_artifact_service(context)({
+            "protocol": "forest.package-catalog-artifact-request/1",
+            "package_digest": deployment.digest,
+        })
+    assert rejected.value.code == "PACKAGE_SCOPE_UNSUPPORTED"
 
 
 def test_build_never_imports_and_captures_complete_helpers(tmp_path):

@@ -25,6 +25,7 @@ def package_catalog_page_service(context):
             after_version=request.get("after_version", ""),
             limit=request.get("limit", 32),
             catalog_revision=request.get("catalog_revision"),
+            scope="bot",
         )
 
     return read
@@ -42,8 +43,14 @@ def package_catalog_artifact_service(context):
                 "Package artifact request is invalid",
                 422,
             )
-        return await asyncio.to_thread(
+        artifact = await asyncio.to_thread(
             context.package_catalog.artifact, request["package_digest"]
         )
+        if artifact["scope"] != "bot":
+            raise ForestError(
+                "PACKAGE_SCOPE_UNSUPPORTED",
+                "Bot package directory cannot expose another scope", 422,
+            )
+        return artifact
 
     return read
