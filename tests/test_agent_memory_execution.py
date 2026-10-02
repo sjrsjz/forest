@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from datetime import UTC, datetime, timedelta
@@ -217,6 +218,97 @@ async def test_busy_run_owner_is_a_deferred_resume(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_owner_renewal_uses_distinct_operations_and_stops_with_call(monkeypatch):
+    monkeypatch.setattr("execution._RUN_OWNER_RENEW_INTERVAL_SECONDS", 0.01)
+    calls = []
+    renewed_twice = asyncio.Event()
+
+    async def renew(name, body, **kwargs):
+        calls.append((name, body, kwargs["operation_id"]))
+        if len(calls) == 2:
+            renewed_twice.set()
+        return {"epoch": 7}
+
+    agent = AgentExecution(
+        SimpleNamespace(
+            uow=SimpleNamespace(call=renew),
+            operations=SimpleNamespace(stable=lambda value: value),
+        ), {}, lambda: None,
+    )
+    owner = {"run_id": "run/1", "owner_id": "worker/1", "epoch": 7}
+    heartbeat = asyncio.create_task(
+        agent._renew_owner_until_done(owner, asyncio.current_task())
+    )
+    try:
+        await asyncio.wait_for(renewed_twice.wait(), 1)
+    finally:
+        heartbeat.cancel()
+        await asyncio.gather(heartbeat, return_exceptions=True)
+    assert len(calls) >= 2
+    assert all(name == "agent.renew-run-lease" for name, _body, _operation in calls)
+    assert all(body == {"owner": owner, "lease_seconds": 300}
+               for _name, body, _operation in calls)
+    assert len({operation for _name, _body, operation in calls}) == len(calls)
+
+
+@pytest.mark.asyncio
+async def test_run_owner_renewal_stops_execution_on_stale_epoch(monkeypatch):
+    monkeypatch.setattr("execution._RUN_OWNER_RENEW_INTERVAL_SECONDS", 0.01)
+
+    async def stale(_name, _body, **_kwargs):
+        raise ForestError("STALE_AGENT_RUN_OWNER", "Run owner was replaced", 409)
+
+    agent = AgentExecution(
+        SimpleNamespace(
+            uow=SimpleNamespace(call=stale),
+            operations=SimpleNamespace(stable=lambda value: value),
+        ), {}, lambda: None,
+    )
+
+    async def long_execution():
+        heartbeat = asyncio.create_task(agent._renew_owner_until_done(
+            {"run_id": "run/1", "owner_id": "worker/1", "epoch": 7},
+            asyncio.current_task(),
+        ))
+        try:
+            await asyncio.Event().wait()
+        finally:
+            heartbeat.cancel()
+            await asyncio.gather(heartbeat, return_exceptions=True)
+
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(asyncio.create_task(long_execution()), 1)
+
+
+@pytest.mark.asyncio
+async def test_reload_release_does_not_cancel_execution_on_late_renewal(monkeypatch):
+    monkeypatch.setattr("execution._RUN_OWNER_RENEW_INTERVAL_SECONDS", 0.01)
+    renewing = asyncio.Event()
+    release = asyncio.Event()
+
+    async def stale_after_park(_name, _body, **_kwargs):
+        renewing.set()
+        await release.wait()
+        raise ForestError("STALE_AGENT_RUN_OWNER", "Parked Run released its owner", 409)
+
+    agent = AgentExecution(
+        SimpleNamespace(
+            uow=SimpleNamespace(call=stale_after_park),
+            operations=SimpleNamespace(stable=lambda value: value),
+        ), {}, lambda: None,
+    )
+    heartbeat = asyncio.create_task(agent._renew_owner_until_done(
+        {"run_id": "run/1", "owner_id": "worker/1", "epoch": 7},
+        asyncio.current_task(),
+    ))
+    await asyncio.wait_for(renewing.wait(), 1)
+    agent._releasing_owner = True
+    release.set()
+    await asyncio.wait_for(heartbeat, 1)
+    assert not asyncio.current_task().cancelling()
+
+
+@pytest.mark.asyncio
 async def test_recall_waits_for_capture_then_replays_one_frozen_query():
     durable = run()
     frozen_deadline = (datetime.fromisoformat(durable["created_at"])
@@ -292,6 +384,7 @@ async def test_replacement_parks_before_next_model_call(
         uow=SimpleNamespace(call=uow_call),
         payloads=SimpleNamespace(put_json=put_json, read_json=read_json),
         agent_tools=SimpleNamespace(list=tools_list),
+        tasks=SimpleNamespace(spawn_owned=lambda work, **_kwargs: asyncio.create_task(work)),
         identity={"graph_id": "graph/1", "graph_revision": 1},
         operations=SimpleNamespace(stable=lambda value: value),
     )

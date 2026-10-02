@@ -3456,7 +3456,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt")
+    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "long-model-lease")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -3507,7 +3507,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
     clients = []
     RecordingModelClient.requests = []
     RecordingModelClient.first_gate = (
-        asyncio.Event() if scenario in {"cross-group", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt"} else None
+        asyncio.Event() if scenario in {"cross-group", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "long-model-lease"} else None
     )
     RecordingModelClient.not_sent_attempts = (
         3 if scenario == "requeue" else 2 if scenario == "reload-full"
@@ -3664,6 +3664,34 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             assert manifest["media_transform_refs"]
         else:
             assert b"image_url" not in prepared.body
+        if scenario == "long-model-lease":
+            agent_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "agent.runtime"
+            )
+
+            async def owner_lease():
+                async with host.store.pool.connection() as conn:
+                    return await (await conn.execute(
+                        sql.SQL("SELECT owner_id,owner_epoch,owner_expires_at "
+                                "FROM {}.agent_runs WHERE bot_id=%s")
+                        .format(sql.Identifier(agent_schema)), (settings.bot_id,),
+                    )).fetchone()
+
+            initial_owner = await owner_lease()
+            assert initial_owner["owner_id"] is not None
+            async with asyncio.timeout(90):
+                while True:
+                    renewed_owner = await owner_lease()
+                    assert renewed_owner["owner_id"] == initial_owner["owner_id"]
+                    assert renewed_owner["owner_epoch"] == initial_owner["owner_epoch"]
+                    if renewed_owner["owner_expires_at"] > (
+                        initial_owner["owner_expires_at"] + timedelta(seconds=30)
+                    ):
+                        break
+                    await asyncio.sleep(0.2)
+            assert len(RecordingModelClient.requests) == 1
+            RecordingModelClient.first_gate.set()
         if scenario == "reload":
             old_graph = host.registry
             agent = old_graph.get("agent.runtime")

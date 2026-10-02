@@ -76,6 +76,8 @@ Request 已写为 `READY` 但尚无 Effect 时，以及既有 Attempt 全部明�
 
 若 Worker 在继承事务提交后、回执送达前崩溃，新 Host 必须先等旧 HostLease 到期；新 Agent 领取同一 Run 时，旧 Run owner 尚有效则返回 `WAIT_OWNER`，Conversation 以 30 秒间隔延期同一工作，不将其结算为失败或抢夺租约。旧 owner 自然到期后，Agent 从持久恢复查询读取已推进的后继请求头，只能用后继的冻结投影与 wire 继续；前驱 `ABANDONED` 不能再次派发。若冷启动形成又一个 Provider Generation，还需以当前后继为前驱再继承一代，请求 ID 变化而 wire 字节及摘要不变。`WAIT_OWNER` 是跨包执行回执，不是新的 Agent Run 状态。
 
+活动 `agent.execute` 持有 300 秒 Run owner lease；Agent 包在同一次调用的任务所有权下每 60 秒调用 `agent.renew-run-lease`，逐次使用不同的稳定 operation ID，并始终复核原 owner ID/epoch。暂时性续租失败在保守的 60 秒安全余量前重试；明确失去 owner 或无法在余量前续租时取消主执行，后续由持久 Effect 状态恢复，不能带过期 owner 继续交接。调用结束先取消并等待续租任务，再释放 Run lease。热重载停车开始主动释放 owner 时，续租任务停止；即使并发续租的迟到回执是 `STALE_AGENT_RUN_OWNER`，也不能取消正常的 `RELOAD_WAIT` 停车结果。
+
 冻结投影或 wire 的精确 PayloadRef 无效、身份不符、正文缺失或已撤销、字节摘要不符，以及继承或 `NOT_APPLIED` 重试复制 wire 时同一 owner 内容冲突或父载荷不可用，均属于确定性载荷失败；Worker 只在调用 Payload 读写端口时将这些错误归入 `AGENT_FROZEN_PAYLOAD_INVALID` 的持久阻断，不把失效的冻结请求继续发给 Provider。`agent.inherit-model-request` 的 Effect 证明和 Agent 事务回执保持各自原始错误码，即使错误码恰好带有 `PAYLOAD_` 前缀，也不能由 Worker 推断为冻结载荷损坏。Payload authority 暂时不可用、分块协议暂时异常和继承事务失败仍向外传播以保留重试与对账语义。
 
 解析失败只能提交 `agent.record-protocol-failure/1`。该端口在同一事务中验证当前成功 Attempt、写入不可变 failure 与 checkpoint、清除当前 Model 请求，并把 Run 推进到 `REPAIR_READY` 或 `FAILED`；第一次进入 `REPAIR_READY` 即持久消耗唯一 repair 配额并固定下一步号，后续候选不能再次申请修复。修复输入仅从 failure 引用的有界 feedback Payload 恢复，禁止容错解析、从错误 XML 猜字段或在 Provider 层重试协议。

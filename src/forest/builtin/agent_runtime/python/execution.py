@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from time import monotonic
 from uuid import uuid4
 
 from context_projection import ContextSnapshotReader, claim_summaries
@@ -16,6 +17,10 @@ from forest.errors import ForestError
 
 _MAX_TRANSPORT_ATTEMPTS = 3
 _BACKOFF_SECONDS = (1.0, 3.0)
+_RUN_OWNER_LEASE_SECONDS = 300
+_RUN_OWNER_RENEW_INTERVAL_SECONDS = 60
+_RUN_OWNER_RETRY_SECONDS = 5
+_RUN_OWNER_SAFETY_MARGIN_SECONDS = 60
 
 
 def _deadline(value: str) -> datetime:
@@ -63,6 +68,7 @@ class AgentExecution:
         self.model = ModelExecution(ctx)
         self.tools = ToolExecution(ctx)
         self.turns = TurnRecorder(ctx)
+        self._releasing_owner = False
 
     def _configuration_ref(self) -> dict:
         identity = self.ctx.identity
@@ -113,6 +119,44 @@ class AgentExecution:
             "epoch": value["epoch"],
         }
 
+    async def _renew_owner_until_done(self, owner: dict, execution: asyncio.Task) -> None:
+        """Keep the Run epoch live while this call awaits external work."""
+        renewal = 1
+        safe_until = monotonic() + (
+            _RUN_OWNER_LEASE_SECONDS - _RUN_OWNER_SAFETY_MARGIN_SECONDS
+        )
+        await asyncio.sleep(_RUN_OWNER_RENEW_INTERVAL_SECONDS)
+        while True:
+            if self._releasing_owner:
+                return
+            try:
+                await self.ctx.uow.call(
+                    "agent.renew-run-lease",
+                    {"owner": owner, "lease_seconds": _RUN_OWNER_LEASE_SECONDS},
+                    operation_id=self.ctx.operations.stable(
+                        f"renew-run:{owner['run_id']}:{owner['epoch']}:{renewal}"
+                    ),
+                    timeout=15,
+                )
+            except ForestError as exc:
+                if self._releasing_owner:
+                    return
+                if exc.status < 500 or monotonic() >= safe_until:
+                    execution.cancel()
+                    return
+                await asyncio.sleep(_RUN_OWNER_RETRY_SECONDS)
+                continue
+            except Exception:
+                if self._releasing_owner:
+                    return
+                execution.cancel()
+                return
+            safe_until = monotonic() + (
+                _RUN_OWNER_LEASE_SECONDS - _RUN_OWNER_SAFETY_MARGIN_SECONDS
+            )
+            renewal += 1
+            await asyncio.sleep(_RUN_OWNER_RENEW_INTERVAL_SECONDS)
+
     async def _run(self, run_id: str) -> dict:
         return await self.ctx.queries.call("agent.run-snapshot", {"run_id": run_id})
 
@@ -139,6 +183,7 @@ class AgentExecution:
             owner_id=checkpoint_id,
             parents=(self._preset_ref(),),
         )
+        self._releasing_owner = True
         parked = await self.ctx.uow.call(
             "agent.park-reload",
             {
@@ -617,7 +662,7 @@ class AgentExecution:
                 {
                     "run_id": run["run_id"],
                     "owner_id": self.ctx.operations.stable(f"run-owner:{run['run_id']}"),
-                    "lease_seconds": 300,
+                    "lease_seconds": _RUN_OWNER_LEASE_SECONDS,
                 },
                 operation_id=self.ctx.operations.stable(f"acquire-run:{run['run_id']}"),
                 timeout=15,
@@ -627,7 +672,18 @@ class AgentExecution:
                 raise
             return self._result(request, "WAIT_OWNER", run)
         owner = self._owner(owner_record)
+        heartbeat = None
         try:
+            execution = asyncio.current_task()
+            if execution is None:
+                raise ForestError(
+                    "AGENT_EXECUTION_TASK_MISSING",
+                    "Agent execution has no supervised task", 500,
+                )
+            heartbeat = self.ctx.tasks.spawn_owned(
+                self._renew_owner_until_done(owner, execution),
+                name=f"agent-run-owner:{run['run_id']}",
+            )
             directory = tool_directory(
                 await self.ctx.agent_tools.list(), identity=dict(self.ctx.identity)
             )
@@ -1001,6 +1057,9 @@ class AgentExecution:
                     ),
                 )
         finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
             try:
                 await self.ctx.uow.call(
                     "agent.release-run-lease",
