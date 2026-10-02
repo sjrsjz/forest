@@ -3680,13 +3680,13 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
 
             initial_owner = await owner_lease()
             assert initial_owner["owner_id"] is not None
-            async with asyncio.timeout(90):
+            async with asyncio.timeout(160):
                 while True:
                     renewed_owner = await owner_lease()
                     assert renewed_owner["owner_id"] == initial_owner["owner_id"]
                     assert renewed_owner["owner_epoch"] == initial_owner["owner_epoch"]
                     if renewed_owner["owner_expires_at"] > (
-                        initial_owner["owner_expires_at"] + timedelta(seconds=30)
+                        initial_owner["owner_expires_at"] + timedelta(seconds=90)
                     ):
                         break
                     await asyncio.sleep(0.2)
