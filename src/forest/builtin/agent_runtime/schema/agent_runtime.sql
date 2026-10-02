@@ -4827,6 +4827,18 @@ BEGIN
             )
         );
     END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.run_cancel_requests c
+        WHERE c.bot_id=requested_bot AND c.run_id=requested_run
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_CANCEL_REQUESTED',
+                'message','Agent Run cancellation won the reply commit race','status',409
+            )
+        );
+    END IF;
     IF run_row.state IS DISTINCT FROM 'FINAL_READY' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
@@ -5232,6 +5244,18 @@ BEGIN
         ),'{value,learning}',__forest_module_schema__.agent_final_learning(
             context,jsonb_build_object('run_id',requested_run)
         ));
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.run_cancel_requests c
+        WHERE c.bot_id=requested_bot AND c.run_id=requested_run
+    ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','AGENT_CANCEL_REQUESTED',
+                'message','Agent Run cancellation won the reply commit race','status',409
+            )
+        );
     END IF;
     IF run_row.state IS DISTINCT FROM 'FINAL_READY' OR run_row.owner_id IS NOT NULL THEN
         RETURN jsonb_build_object(

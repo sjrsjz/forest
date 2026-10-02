@@ -112,6 +112,8 @@ Agent 的工具目录 SDK 因此只有 `list`、`dispatch_prepared` 和 `query_h
 
 “Agent 正在工作时有新触发”只改变下一次模型调用的输入版本，不启动并发响应；模型流和未闭合工具组中途不修改请求。Agent 完成且没有新 trigger 时，静默排空剩余普通消息，不额外调用模型。
 
+管理取消的竞态边界覆盖三种外部效果交接和最终回复提交：管理动作必须在锁定 Run 后校验期望 `checkpoint_seq`，用调用 operation ID 幂等写入唯一不可变意图，并由管理入口注入可信管理员主体。模型与工具 handoff、旧版 `agent.complete-run-record` 及正式 `agent.commit-final-run` 均在同一 Run 锁下检查意图；若完成事实先提交，取消动作只能拒绝，不能撤销已经发布的回复。意图先提交时，尚未交接的效果不得再 dispatch，最终回复不得再提交。已交接效果必须先走原 Effect 观察或查询端口收敛；`DISPATCHING/UNKNOWN` 没有权威结论时，取消保持待处理，不能把 Run 和 Session 伪装成 `CANCELLED`。尚未交接的 `PREPARED` Effect 应通过 `kernel.effect` 的受限 abandon participant 与 Agent 状态在同一 UnitOfWork 收敛。只有消除所有未决外部效果后，Agent 包才能持 owner fence 写入取消 checkpoint、原子关闭 Run/Session；Conversation 再按准确领取组取消 trigger 并释放 lane。重启后的同一意图继续这一状态机，不创建新的 Agent 或外部效果。
+
 ## 4. 冻结 lane 身份与回复路由
 
 Conversation lane 必须把以下身份作为创建后不可变事实保存：

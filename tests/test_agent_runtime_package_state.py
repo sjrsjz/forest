@@ -2595,24 +2595,79 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             owner_id="checkpoint/package/second/completed",
             value=b'{"phase":"COMPLETED"}',
         )
+        second_complete_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": conversation_caller,
+            "input": {
+                "owner": _owner_ref(second_owner),
+                "checkpoint_id": second_completed_state.owner_id,
+                "state": second_completed_state.canonical(),
+            },
+            "prior": {},
+        }
+        cancel_race_reply = await _payload(
+            kernel, owner_kind="final.reply",
+            owner_id="final-reply/package/cancel-race",
+            value=b'{"text":"cancel race"}',
+        )
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute(sql.SQL(
+                    "INSERT INTO {}.run_cancel_requests "
+                    "(bot_id,operation_id,input_digest,run_id,expected_checkpoint_seq,"
+                    "requested_by,reason_code) "
+                    "SELECT bot_id,%s,%s,run_id,checkpoint_seq,%s,%s "
+                    "FROM {}.agent_runs WHERE bot_id=%s AND run_id=%s"
+                ).format(
+                    sql.Identifier(package.configuration.namespace),
+                    sql.Identifier(package.configuration.namespace),
+                ), (
+                    "cancel/package/second", digest_json({"cancel": 2}),
+                    "admin:test", "ADMIN_CANCEL", store.bot_id,
+                    second_owner["run_id"],
+                ))
+                with pytest.raises(ForestError) as cancel_won:
+                    await replacement_participant.invoke_in(
+                        conn, "agent.complete-run-record", second_complete_envelope,
+                        operation_id="agent-run-complete/package/cancel-race",
+                        causal_root_kind="conversation.final-reply",
+                        causal_root_id=second_owner["run_id"],
+                        parent_call_id="call:agent-package/cancel-race",
+                        timeout_seconds=10,
+                    )
+                assert cancel_won.value.code == "AGENT_CANCEL_REQUESTED"
+                await conn.execute(sql.SQL(
+                    "UPDATE {}.agent_runs SET final_candidate_payload_id=%s,"
+                    "final_candidate_payload_digest=%s WHERE bot_id=%s AND run_id=%s"
+                ).format(sql.Identifier(package.configuration.namespace)), (
+                    cancel_race_reply.payload_id, cancel_race_reply.digest,
+                    store.bot_id, second_owner["run_id"],
+                ))
+                with pytest.raises(ForestError) as final_cancel_won:
+                    await replacement_participant.invoke_in(
+                        conn, "agent.commit-final-run-record", {
+                            "protocol": "forest.uow-step/1",
+                            "caller": conversation_caller,
+                            "input": {
+                                "run_id": second_owner["run_id"],
+                                "session_id": "session/agent-package/1",
+                                "reply": cancel_race_reply.canonical(),
+                            },
+                            "prior": {},
+                        },
+                        operation_id="agent-final-commit/package/cancel-race",
+                        causal_root_kind="conversation.final-reply",
+                        causal_root_id=second_owner["run_id"],
+                        parent_call_id="call:agent-package/final-cancel-race",
+                        timeout_seconds=10,
+                    )
+                assert final_cancel_won.value.code == "AGENT_CANCEL_REQUESTED"
+                raise _RollbackVerification
         async with store.pool.connection() as conn, conn.transaction():
             second_completed = await replacement_participant.invoke_in(
                 conn,
                 "agent.complete-run-record",
-                {
-                    "protocol": "forest.uow-step/1",
-                    "caller": conversation_caller,
-                    "input": {
-                        "owner": {
-                            "run_id": second_owner["run_id"],
-                            "owner_id": second_owner["owner_id"],
-                            "epoch": second_owner["epoch"],
-                        },
-                        "checkpoint_id": second_completed_state.owner_id,
-                        "state": second_completed_state.canonical(),
-                    },
-                    "prior": {},
-                },
+                second_complete_envelope,
                 operation_id="agent-run-complete/package/2",
                 causal_root_kind="conversation.final-reply",
                 causal_root_id="run/agent-package/2",
