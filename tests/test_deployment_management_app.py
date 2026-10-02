@@ -388,6 +388,7 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
 
     class WorkerContract(_Contract):
         selection_applied = False
+        reload_reads = 0
 
         def authorization_plan_digest(self, action_id, payload):
             assert action_id == "module.enable"
@@ -400,7 +401,7 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
                     "graph_revision": 1, "next_after": None,
                     "members": [{"component_id": "component.worker-host", "status": "ACTIVE",
                                  "package_id": "forest.component-worker-host",
-                                 "package_version": "1.6.17"}],
+                                 "package_version": "1.6.20"}],
                 }
             if query_id == "module":
                 assert payload["component_id"] == "component.worker-host"
@@ -411,7 +412,7 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
                                "generation_id": "generation/worker-browser-smoke",
                                "status": "ACTIVE", "config_revision": 1,
                                "package_id": "forest.component-worker-host",
-                               "package_version": "1.6.17",
+                               "package_version": "1.6.20",
                                "package_digest": "sha256:" + "a" * 64,
                                "data_admission": True, "control_admission": True},
                 }
@@ -450,6 +451,21 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
                         "component_id": "process.executor", "desired_enabled": True,
                         "selection_revision": 2, "state": "SUBMITTED",
                         "kernel": {"state": "SUCCEEDED", "graph_revision": 2}}
+            if query_id == "reload":
+                assert payload == {"request_id": "reload:" + "d" * 32}
+                self.reload_reads += 1
+                return {
+                    "protocol": "forest.component-reload-status/1",
+                    "request_id": payload["request_id"],
+                    "component_id": "component.worker-host",
+                    "expected_graph_revision": 1,
+                    "requested_by": "web-subject/test",
+                    "state": "SUBMITTED", "attempt_count": 1,
+                    "error_code": None,
+                    "kernel": {"state": "SUCCEEDED", "graph_revision": 2},
+                    "created_at": "2026-10-02T00:00:00Z",
+                    "updated_at": "2026-10-02T00:00:01Z",
+                }
             raise AssertionError(f"Unexpected Worker Host query: {query_id}")
 
         async def action(self, action_id, *, operation_id, payload,
@@ -633,6 +649,19 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
                     "SUCCEEDED"
                 )
                 assert worker_contract.selection_applied
+                worker_frame.locator("#reload-request-id").fill("reload:" + "d" * 32)
+                worker_frame.locator("#refresh-reload").click()
+                expect(worker_frame.locator("#reload-result")).to_contain_text("SUCCEEDED")
+                assert worker_contract.reload_reads == 1
+                page.locator("#back").click()
+                page.locator("#module-nav button").filter(
+                    has_text="component.worker-host"
+                ).click()
+                worker_frame = page.frame_locator("iframe.package-ui-frame")
+                worker_frame.locator("#reload-request-id").fill("reload:" + "d" * 32)
+                worker_frame.locator("#refresh-reload").click()
+                expect(worker_frame.locator("#reload-result")).to_contain_text("SUCCEEDED")
+                assert worker_contract.reload_reads == 2
                 assert not errors, errors
                 page.locator("#back").click()
                 with page.expect_response("**/management/v1/auth/logout") as logout:

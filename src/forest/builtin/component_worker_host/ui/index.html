@@ -93,8 +93,11 @@
       </div>
     </details>
     <p>重载会替换目标及依赖它的 Generation；其他 Generation 保留原身份。旧 Worker 退役后仍可查询请求状态。</p>
+    <div class="row">
+      <label>重载请求<input id="reload-request-id" placeholder="reload:..."></label>
+      <button id="refresh-reload" type="button">查询状态</button>
+    </div>
     <div id="reload-result" hidden></div>
-    <button id="refresh-reload" type="button" hidden>刷新重载状态</button>
     <div class="row">
       <label>配置重建请求<input id="configuration-request-id" placeholder="config-rebuild:..."></label>
       <button id="refresh-configuration" type="button">查询状态</button>
@@ -108,7 +111,7 @@
   </main>
   <script>
   (()=>{'use strict';
-    let port,nonce,sequence=0,graphId='',graphRevision=0,nextAfter=null,selected='',reloadId='',catalogRevision='',catalogNext=null;
+    let port,nonce,sequence=0,graphId='',graphRevision=0,nextAfter=null,selected='',catalogRevision='',catalogNext=null;
     const pending=new Map(),byId=id=>document.getElementById(id);
     const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
     const resize=()=>send('resize',{height:document.documentElement.scrollHeight});
@@ -274,13 +277,14 @@
       byId('reload').disabled=true;
       try{
         const saved=await call('action','module.reload',{component_id:selected,expected_graph_revision:graphRevision});
-        reloadId=saved.request_id;byId('refresh-reload').hidden=false;
+        byId('reload-request-id').value=saved.request_id;
         await reloadStatus();
       }finally{byId('reload').disabled=false;}
     }
     async function reloadStatus(){
-      if(!reloadId)return;
-      const value=await call('query','reload',{request_id:reloadId});
+      const request_id=byId('reload-request-id').value.trim();
+      if(!/^reload:[0-9a-f]{32}$/.test(request_id))throw new Error('Invalid reload request ID');
+      const value=await call('query','reload',{request_id});
       const kernel=value.kernel;
       byId('reload-result').hidden=false;
       byId('reload-result').textContent=`${value.request_id}: ${kernel?.state||value.state}`+

@@ -600,3 +600,5 @@ Context 前缀裁剪边界修正（2026-10-02）：`conversation_prepare_context
 控制包自身定点热重载回归（2026-10-02）：在隔离 PostgreSQL 的完整 Bot 图中，经 `component.worker-host` 包的 `module.reload` 管理 action 请求替换 `component.worker-host` 自己。旧 Generation 的持久入队和包 owned-work 将请求交给版本化内核替换端口；Graph revision 增加 1 后，正式依赖闭包内 Generation 换代、闭包外 Generation 保留，新 Worker Host 仍可读取原请求及内核 `SUCCEEDED` 状态并列出完整模块目录。定向用例 `1 passed in 65.34s`，Ruff 通过，测试使用假 OneBot/模型/嵌入客户端，没有向 QQ 发送消息。这验证控制包自重载协议，不代替在线已认证 WebUI 会话下的定点替换、失败回滚或真实消息流验证。
 
 Memory 管理试验浏览器 fixture 协议校正（2026-10-02）：隔离 UI 冒烟脚本原先仍伪造旧版结果页，缺少当前状态和结果契约的必填字段，且含已移除的 `missing_count`；假 MessageChannel 绕过 Host 输出校验，所以旧脚本可误报 UI 可用。fixture 已对齐 `forest.memory-trial/1` 与 `forest.memory-trial-result-page/2`，并用包内 JSON Schema 检查本次模拟的状态、结果和图片分块响应。本机 Edge 冒烟及 Ruff 通过；它验证的是隔离 UI 与现行协议的一致性，真实管理 HTTP、数据库和供应商图文召回仍需另行验收。
+
+Worker Host 重载状态入口修正（2026-10-02）：管理页原来只把已持久化重载请求 ID 保存在 iframe 内存变量中；页面刷新或控制包自身换代后，管理员无法从该页输入已有 ID 继续查询。现在模块 UI 显示并接受 `reload:...` 请求 ID，按包内现有读取契约校验后查询状态，包工件版本升至 `1.6.20`，存储基线未变。经认证 HTTP 和隔离 iframe 的本机 Edge 用例验证离开模块页、重新打开后输入同一请求 ID 可再次读取 `SUCCEEDED` 状态（`1 passed in 3.43s`）；包工件构建、内嵌脚本语法与差异检查通过。这验证状态入口的恢复能力，不等于在线 Supervisor 已完成定点热重载；当前运行镜像尚未包含此 UI 修正。
