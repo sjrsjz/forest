@@ -100,6 +100,9 @@ async def test_real_process_identity_environment_and_stable_operations(tmp_path,
         )
         assert first["pid"] == worker.pid and worker.pid != os.getpid()
         assert first["call_id"] == "attempt-a"
+        assert first["identity"]["scope_kind"] == "bot"
+        assert first["identity"]["scope_id"] == "bot-test"
+        assert first["identity"]["bot_id"] == "bot-test"
         assert first["operation"] == second["operation"]
         assert first["payload"] == {"text": "图文 DTO"}
         assert not any(first["environment"].values())
@@ -110,6 +113,38 @@ async def test_real_process_identity_environment_and_stable_operations(tmp_path,
     finally:
         await worker.stop()
     assert not worker.alive and worker._temporary is None
+
+
+async def test_deployment_worker_identity_has_no_bot_id(tmp_path):
+    snapshot = package(tmp_path)
+    snapshot.manifest["components"][0]["scope"] = "deployment"
+    identity = WorkerIdentity(
+        str(uuid4()), str(uuid4()), str(uuid4()), None,
+        scope_kind="deployment", scope_id="deployment/test",
+    )
+    worker = PythonWorker(snapshot, identity)
+    try:
+        await worker.launch()
+        await worker.prepare({})
+        await worker.start()
+        await worker.activate()
+        echoed = await worker.invoke(
+            "probe.echo", {}, call_id="deployment-call",
+            operation_id="deployment-operation",
+        )
+        assert echoed["identity"]["scope_kind"] == "deployment"
+        assert echoed["identity"]["scope_id"] == "deployment/test"
+        assert echoed["identity"]["bot_id"] is None
+    finally:
+        await worker.stop()
+
+
+def test_worker_rejects_package_scope_mismatch(tmp_path):
+    snapshot = package(tmp_path)
+    snapshot.manifest["components"][0]["scope"] = "deployment"
+    with pytest.raises(ForestError) as rejected:
+        PythonWorker(snapshot, identity())
+    assert rejected.value.code == "WORKER_SCOPE_MISMATCH"
 
 
 async def test_payload_port_moves_large_bodies_by_exact_chunked_reference(tmp_path):

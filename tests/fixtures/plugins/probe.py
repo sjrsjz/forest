@@ -54,6 +54,7 @@ class Probe(Plugin):
             "pid": os.getpid(),
             "call_id": ctx.call_id,
             "operation": ctx.operations.stable("probe:v1"),
+            "identity": dict(ctx.identity),
             "restored": self._snapshot,
             "environment": {
                 name: name in os.environ

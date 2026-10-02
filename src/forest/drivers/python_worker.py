@@ -60,12 +60,14 @@ class WorkerIdentity:
     instance_id: str
     generation_id: str
     incarnation: str
-    bot_id: str
+    bot_id: str | None
     graph_id: str | None = None
     graph_revision: int | None = None
     configuration_payload_id: str | None = None
     configuration_payload_digest: str | None = None
     configuration_owner_id: str | None = None
+    scope_kind: str = "bot"
+    scope_id: str | None = None
 
     def __post_init__(self):
         if any(
@@ -74,7 +76,25 @@ class WorkerIdentity:
                 self.instance_id,
                 self.generation_id,
                 self.incarnation,
-                self.bot_id,
+            )
+        ) or (
+            not isinstance(self.scope_kind, str)
+            or self.scope_kind not in {"bot", "deployment", "host"}
+        ) or (
+            self.scope_kind == "bot"
+            and (
+                not isinstance(self.bot_id, str)
+                or not self.bot_id
+                or len(self.bot_id) > 128
+                or (self.scope_id is not None and self.scope_id != self.bot_id)
+            )
+        ) or (
+            self.scope_kind != "bot"
+            and (
+                self.bot_id is not None
+                or not isinstance(self.scope_id, str)
+                or not self.scope_id
+                or len(self.scope_id) > 128
             )
         ) or (
             self.graph_id is not None
@@ -106,7 +126,9 @@ class WorkerIdentity:
                 )
             )
         ):
-            raise ValueError("Worker identity fields must contain 1 to 128 characters")
+            raise ValueError("Worker identity or scope binding is invalid")
+        if self.scope_id is None:
+            object.__setattr__(self, "scope_id", self.bot_id)
 
 
 StateHandler = Callable[[WorkerIdentity, str, str, dict], Awaitable[Any]]
@@ -139,6 +161,12 @@ class PythonWorker:
         payload_handler: PayloadHandler | None = None,
         call_closed_handler: CallClosedHandler | None = None,
     ):
+        declared_scope = snapshot.manifest["components"][0].get("scope")
+        if declared_scope is not None and declared_scope != identity.scope_kind:
+            raise ForestError(
+                "WORKER_SCOPE_MISMATCH",
+                "Package and Worker scope identities differ", 409,
+            )
         self.package = snapshot
         self.identity = identity
         self.state_handler = state_handler

@@ -7,6 +7,7 @@ import stat
 import subprocess
 import sys
 import zipfile
+from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,7 @@ from jsonschema import Draft202012Validator
 
 from forest import packages
 from forest.builtin_packages import bootstrap_installed_package
+from forest.cli import run_plugin_command
 from forest.errors import ForestError
 from forest.kernel_package_catalog_snapshot import (
     package_catalog_artifact_service,
@@ -86,6 +88,21 @@ async def test_non_bot_package_artifact_cannot_enter_bot_runtime(tmp_path, scope
             initial_configuration={}, approved_capabilities=("state.read", "state.write"),
         )
     assert rejected.value.code == "PACKAGE_SCOPE_UNSUPPORTED"
+
+
+@pytest.mark.asyncio
+async def test_deployment_package_passes_isolated_worker_check(tmp_path, capsys):
+    root = source(tmp_path)
+    manifest = root / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace('scope = "bot"', 'scope = "deployment"'),
+        encoding="utf-8",
+    )
+    await run_plugin_command(Namespace(
+        command="plugin", plugin_command="check", source=root,
+        cache_dir=tmp_path / "catalog", config_json="{}",
+    ))
+    assert json.loads(capsys.readouterr().out)["status"] == "checked"
 
 
 def test_package_storage_cannot_claim_another_scope(tmp_path):

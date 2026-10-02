@@ -132,7 +132,13 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
     ).is_valid(config):
         raise ForestError("CONFIG_INVALID", "Configuration does not match the package schema", 422)
     if args.plugin_command == "check":
-        identity = WorkerIdentity(str(uuid4()), str(uuid4()), str(uuid4()), "package-check")
+        scope_kind = snapshot.component["scope"]
+        identity = WorkerIdentity(
+            str(uuid4()), str(uuid4()), str(uuid4()),
+            "package-check" if scope_kind == "bot" else None,
+            scope_kind=scope_kind,
+            scope_id="package-check",
+        )
         worker = PythonWorker(
             snapshot, identity, limits=WorkerLimits.from_component(snapshot.component)
         )
