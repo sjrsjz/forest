@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 from forest.deployment_packages import (
@@ -10,7 +11,7 @@ from forest.deployment_packages import (
     bootstrap_installed_deployment_package,
 )
 from forest.errors import ForestError
-from forest.packages import PackageCatalog, PackageSnapshot
+from forest.packages import PackageCatalog, PackageSnapshot, digest_json
 from forest.runtime_modules import RuntimeModuleRegistry
 
 
@@ -48,7 +49,8 @@ class DeploymentPackageController:
         return self._registry
 
     async def _assemble(
-        self, snapshots: dict[str, PackageSnapshot], *, activation_id: str | None = None
+        self, snapshots: dict[str, PackageSnapshot], *, activation_id: str | None = None,
+        plan_only: bool = False,
     ) -> RuntimeModuleRegistry:
         descriptors = []
         for _component_id, snapshot in sorted(snapshots.items()):
@@ -58,7 +60,7 @@ class DeploymentPackageController:
                 bootstrap_builtin_deployment_package
                 if official else bootstrap_installed_deployment_package
             )
-            descriptors.append(await compile_package(snapshot, self.runtime))
+            descriptors.append(await compile_package(snapshot, self.runtime, plan_only=plan_only))
         return RuntimeModuleRegistry(self.runtime, tuple(descriptors), activation_id=activation_id)
 
     def _selected_snapshot(self, digest: str) -> PackageSnapshot:
@@ -67,6 +69,72 @@ class DeploymentPackageController:
         if declared is not None and declared[0]["execution_profile"] == "official":
             return self.catalog.get_official_deployment(digest)
         return snapshot
+
+    async def preview_change(
+        self, *, operation_kind: str, component_id: str,
+        package_digest: str, expected_graph_revision: int,
+    ) -> dict:
+        """Validate a candidate and calculate Graph impact without provisioning."""
+
+        if not isinstance(operation_kind, str) or operation_kind not in {"ADD", "REPLACE"}:
+            raise ForestError(
+                "DEPLOYMENT_GRAPH_CHANGE_INPUT_INVALID", "Graph change kind is invalid", 422
+            )
+        if (
+            not isinstance(component_id, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", component_id) is None
+            or not isinstance(package_digest, str)
+            or re.fullmatch(r"sha256:[a-f0-9]{64}", package_digest) is None
+            or type(expected_graph_revision) is not int
+            or expected_graph_revision < 1
+        ):
+            raise ForestError(
+                "DEPLOYMENT_GRAPH_CHANGE_INPUT_INVALID", "Graph change input is invalid", 422
+            )
+        async with self._lock:
+            previous = self.registry
+            graph = previous.graph_identity
+            if graph.graph_revision != expected_graph_revision:
+                raise ForestError(
+                    "RUNTIME_GRAPH_REVISION_CONFLICT", "Deployment Graph changed", 409
+                )
+            if (component_id in self._snapshots) != (operation_kind == "REPLACE"):
+                raise ForestError(
+                    "RUNTIME_MODULE_SELECTION_CONFLICT",
+                    "Deployment module membership differs from the requested operation", 409,
+                )
+            snapshot = self._selected_snapshot(package_digest)
+            if snapshot.component["id"] != component_id:
+                raise ForestError(
+                    "DEPLOYMENT_PACKAGE_SELECTION_INVALID",
+                    "Candidate artifact has another component identity", 409,
+                )
+            candidate = await self._assemble(
+                {**self._snapshots, component_id: snapshot}, plan_only=True
+            )
+            impact = candidate.preview_graph_transition(
+                previous, target_component_id=component_id
+            )
+            facts = {
+                "protocol": "forest.deployment-graph-change-preview/1",
+                "operation_kind": operation_kind,
+                "source_graph_id": graph.graph_id,
+                "source_graph_revision": graph.graph_revision,
+                "component_id": component_id,
+                "package_digest": snapshot.digest,
+                "manifest_digest": digest_json(snapshot.manifest),
+                "members": [
+                    {"component_id": member, "descriptor_digest": descriptor_digest}
+                    for member, descriptor_digest
+                    in candidate.preview_descriptor_digests(previous)
+                ],
+                "impact": {
+                    field: list(getattr(impact, field))
+                    for field in ("replace", "retain", "remove", "add", "drain", "prepare")
+                },
+                "worker_capacity": impact.worker_capacity.as_fact(),
+            }
+            return {**facts, "plan_digest": digest_json(facts)}
 
     async def start(self) -> RuntimeModuleRegistry:
         async with self._lock:

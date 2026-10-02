@@ -95,6 +95,7 @@ CREATE TABLE forest_deployment.runtime_graph_change_requests (
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     operation_kind text NOT NULL CHECK (operation_kind IN ('ADD','REPLACE')),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[0-9a-f]{64}$'),
+    plan_digest text NOT NULL CHECK (plan_digest ~ '^sha256:[0-9a-f]{64}$'),
     requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 128),
     target_component_id text NOT NULL CHECK (target_component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
     package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[0-9a-f]{64}$'),
@@ -538,11 +539,11 @@ BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'Deployment Graph change request cannot be deleted';
     END IF;
-    IF ROW(OLD.deployment_id,OLD.operation_id,OLD.operation_kind,OLD.input_digest,OLD.requested_by,
+    IF ROW(OLD.deployment_id,OLD.operation_id,OLD.operation_kind,OLD.input_digest,OLD.plan_digest,OLD.requested_by,
            OLD.target_component_id,OLD.package_digest,OLD.expected_graph_revision,
            OLD.activation_id,OLD.receipt_ticket_id,OLD.created_at)
        IS DISTINCT FROM
-       ROW(NEW.deployment_id,NEW.operation_id,NEW.operation_kind,NEW.input_digest,NEW.requested_by,
+       ROW(NEW.deployment_id,NEW.operation_id,NEW.operation_kind,NEW.input_digest,NEW.plan_digest,NEW.requested_by,
            NEW.target_component_id,NEW.package_digest,NEW.expected_graph_revision,
            NEW.activation_id,NEW.receipt_ticket_id,NEW.created_at)
        OR OLD.state IN ('SUCCEEDED','FAILED')

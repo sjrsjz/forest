@@ -55,7 +55,8 @@
             <label id="graph-new-component" class="hidden">新模块 ID<input name="new_component_id" pattern="[a-z0-9][a-z0-9._-]{0,127}" spellcheck="false"></label>
             <label>包摘要<input name="package_digest" required pattern="sha256:[a-f0-9]{64}" spellcheck="false"></label>
             <span>当前图修订 <code id="graph-replace-revision"></code></span>
-            <button type="submit">提交替换</button>
+            <button type="button" id="graph-preview-button">预览影响</button>
+            <button type="submit" disabled>提交图变更</button>
           </form>
           <output id="graph-replace-status" aria-live="polite"></output>
         </details>

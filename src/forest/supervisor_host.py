@@ -234,6 +234,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     components=legacy_components,
                     deployment_registry_provider=lambda: deployment_controller.registry,
                     deployment_graph_changes=graph_changes,
+                    deployment_change_previewer=deployment_controller.preview_change,
                     identity_authority=web_identity,
                     deployment_web_receipts=web_receipts,
                     deployment_audit=deployment_audit,

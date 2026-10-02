@@ -46,7 +46,7 @@ class _ReadOnlyManagementContract(PackageManagementContract):
         raise ForestError("MODULE_MANAGEMENT_UNAVAILABLE", "Configuration is immutable", 404)
 
 
-async def bootstrap_builtin_deployment_package(snapshot, runtime):
+async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=False):
     """Install and compile an official deployment package with read-only ports."""
 
     component = snapshot.component
@@ -80,9 +80,10 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime):
         spec, baseline, storage_bundle_digest(spec, "official"),
         execution_profile="official",
     )
-    await runtime.schema_bundle_installer.install(
-        spec, baseline, storage.package_digest, execution_profile="official"
-    )
+    if not plan_only:
+        await runtime.schema_bundle_installer.install(
+            spec, baseline, storage.package_digest, execution_profile="official"
+        )
     config_schema = snapshot.schema(component["config_schema"])
     config_value = snapshot.bootstrap_configuration()
     if not Draft202012Validator(config_schema).is_valid(config_value):
@@ -93,18 +94,19 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime):
         runtime.store, component_id=component["id"], namespace=spec.namespace,
         immutable_paths=tuple(component.get("config_immutable_paths", ())),
     )
-    await configuration.ensure_initialized(
-        operation_id=f"bootstrap:{component['id']}:configuration", value=config_value,
-        validation_digest=digest_json(config_schema),
-    )
-    desired = await configuration.desired_checked()
-    if desired.validation_digest != digest_json(config_schema) or not (
-        Draft202012Validator(config_schema).is_valid(desired.value)
-    ):
-        raise ForestError(
-            "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
-            "Deployment configuration differs from the frozen package schema", 409,
+    if not plan_only:
+        await configuration.ensure_initialized(
+            operation_id=f"bootstrap:{component['id']}:configuration", value=config_value,
+            validation_digest=digest_json(config_schema),
         )
+        desired = await configuration.desired_checked()
+        if desired.validation_digest != digest_json(config_schema) or not (
+            Draft202012Validator(config_schema).is_valid(desired.value)
+        ):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+                "Deployment configuration differs from the frozen package schema", 409,
+            )
     requested = tuple(component.get("capabilities", {}).get("requests", ()))
     grants = _BuiltinGrantSet(
         tuple(_BuiltinGrant(item, "component", component["id"]) for item in requested),
@@ -141,11 +143,12 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime):
         management_contract_factory=lambda adapter: _ReadOnlyManagementContract(
             configuration, adapter=adapter, schema=config_schema
         ),
+        plan_only=plan_only,
     )
     return descriptor
 
 
-async def bootstrap_installed_deployment_package(snapshot, runtime):
+async def bootstrap_installed_deployment_package(snapshot, runtime, *, plan_only=False):
     """Compile a declaration-only deployment Worker without official SQL authority."""
 
     component = snapshot.component
@@ -183,26 +186,28 @@ async def bootstrap_installed_deployment_package(snapshot, runtime):
         repository_contract="forest.deployment-configuration.repository/1",
         scope="deployment",
     )
-    await runtime.schema_bundle_installer.install(
-        spec, baseline, storage_bundle_digest(spec, "official"),
-        execution_profile="official",
-    )
+    if not plan_only:
+        await runtime.schema_bundle_installer.install(
+            spec, baseline, storage_bundle_digest(spec, "official"),
+            execution_profile="official",
+        )
     configuration = DeploymentModuleConfigurationRepository(
         runtime.store, component_id=component["id"], namespace=spec.namespace,
         immutable_paths=tuple(component.get("config_immutable_paths", ())),
     )
-    await configuration.ensure_initialized(
-        operation_id=f"bootstrap:{component['id']}:configuration", value=config_value,
-        validation_digest=digest_json(config_schema),
-    )
-    desired = await configuration.desired_checked()
-    if desired.validation_digest != digest_json(config_schema) or not (
-        Draft202012Validator(config_schema).is_valid(desired.value)
-    ):
-        raise ForestError(
-            "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
-            "Deployment configuration differs from the frozen package schema", 409,
+    if not plan_only:
+        await configuration.ensure_initialized(
+            operation_id=f"bootstrap:{component['id']}:configuration", value=config_value,
+            validation_digest=digest_json(config_schema),
         )
+        desired = await configuration.desired_checked()
+        if desired.validation_digest != digest_json(config_schema) or not (
+            Draft202012Validator(config_schema).is_valid(desired.value)
+        ):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+                "Deployment configuration differs from the frozen package schema", 409,
+            )
     grants = _BuiltinGrantSet(
         (), digest_json(["forest.deployment.installed-grants/1", snapshot.digest, component["id"]]),
     )
@@ -228,4 +233,5 @@ async def bootstrap_installed_deployment_package(snapshot, runtime):
         management_contract_factory=lambda adapter: _ReadOnlyManagementContract(
             configuration, adapter=adapter, schema=config_schema
         ),
+        plan_only=plan_only,
     )

@@ -514,6 +514,10 @@ async function refresh() {
     }));
     selector.value = graphModules.some(row => row.component_id === selected)
       ? selected : graphModules[0].component_id;
+    if (graphForm.dataset.revision !== String(runtime.graph_revision)) {
+      delete graphForm.dataset.operationKey;
+      resetGraphPreview();
+    }
     graphForm.dataset.revision = String(runtime.graph_revision);
     $('graph-replace-revision').textContent = String(runtime.graph_revision);
     if (graphForm.elements.operation.value !== 'add' && !graphForm.elements.package_digest.value) {
@@ -526,6 +530,7 @@ async function refresh() {
         row => row.component_id === selector.value
       ).artifact.package_digest;
       delete graphForm.dataset.operationKey;
+      resetGraphPreview();
     };
   }
   const nav = $('module-nav');
@@ -552,8 +557,28 @@ async function refresh() {
   }
 }
 
+let graphChangePreview = null;
+
+function resetGraphPreview(clearStatus = true) {
+  graphChangePreview = null;
+  $('graph-replace-form').querySelector('button[type="submit"]').disabled = true;
+  if (clearStatus) $('graph-replace-status').textContent = '';
+}
+
+function graphChangeInput(form) {
+  const adding = form.elements.operation.value === 'add';
+  return {
+    operation_kind: adding ? 'ADD' : 'REPLACE',
+    component_id: adding ? form.elements.new_component_id.value.trim()
+      : form.elements.component_id.value,
+    package_digest: form.elements.package_digest.value.trim(),
+    expected_graph_revision: Number(form.dataset.revision),
+  };
+}
+
 $('graph-replace-form').oninput = () => {
   delete $('graph-replace-form').dataset.operationKey;
+  resetGraphPreview();
 };
 
 $('graph-replace-form').elements.operation.onchange = () => {
@@ -567,6 +592,31 @@ $('graph-replace-form').elements.operation.onchange = () => {
   form.elements.package_digest.value = adding ? ''
     : (form.elements.component_id.selectedOptions[0]?.dataset.packageDigest || '');
   delete form.dataset.operationKey;
+  resetGraphPreview();
+};
+
+$('graph-preview-button').onclick = async () => {
+  const form = $('graph-replace-form');
+  if (!form.reportValidity()) return;
+  const input = graphChangeInput(form);
+  const fingerprint = JSON.stringify(input);
+  const button = $('graph-preview-button');
+  const output = $('graph-replace-status');
+  button.disabled = true;
+  resetGraphPreview();
+  try {
+    const preview = await api('/management/v1/modules/$runtime/queries/module.change.preview', {
+      method: 'POST', body: JSON.stringify(input),
+    });
+    if (JSON.stringify(graphChangeInput(form)) !== fingerprint) return;
+    graphChangePreview = {fingerprint, planDigest: preview.plan_digest};
+    output.textContent = `影响：准备 ${preview.impact.prepare.join(', ') || '无'}；排空 ${preview.impact.drain.join(', ') || '无'}；保留 ${preview.impact.retain.join(', ') || '无'}。计划 ${preview.plan_digest}`;
+    form.querySelector('button[type="submit"]').disabled = false;
+  } catch (error) {
+    output.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 };
 
 $('graph-replace-form').onsubmit = async event => {
@@ -576,13 +626,15 @@ $('graph-replace-form').onsubmit = async event => {
   const button = form.querySelector('button[type="submit"]');
   const scope = apiBase;
   const epoch = workspaceEpoch;
-  const adding = form.elements.operation.value === 'add';
-  const body = {
-    component_id: adding ? form.elements.new_component_id.value.trim()
-      : form.elements.component_id.value,
-    package_digest: form.elements.package_digest.value.trim(),
-    expected_graph_revision: Number(form.dataset.revision),
-  };
+  const input = graphChangeInput(form);
+  if (!graphChangePreview || graphChangePreview.fingerprint !== JSON.stringify(input)) {
+    resetGraphPreview();
+    output.textContent = '请重新预览候选图';
+    return;
+  }
+  const adding = input.operation_kind === 'ADD';
+  const {operation_kind: _kind, ...body} = input;
+  body.plan_digest = graphChangePreview.planDigest;
   form.dataset.operationKey ||= Array.from(
     crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')
   ).join('');
@@ -599,6 +651,7 @@ $('graph-replace-form').onsubmit = async event => {
     while (apiBase === scope && workspaceEpoch === epoch && Date.now() < deadline) {
       if (['SUCCEEDED', 'FAILED'].includes(saved.state)) {
         delete form.dataset.operationKey;
+        resetGraphPreview(false);
         if (saved.state === 'SUCCEEDED') await refresh();
         break;
       }
@@ -610,6 +663,7 @@ $('graph-replace-form').onsubmit = async event => {
         + (status.error_code ? ` · ${status.error_code}` : '');
       if (['SUCCEEDED', 'FAILED'].includes(status.state)) {
         delete form.dataset.operationKey;
+        resetGraphPreview(false);
         if (status.state === 'SUCCEEDED') await refresh();
         break;
       }
@@ -617,7 +671,7 @@ $('graph-replace-form').onsubmit = async event => {
   } catch (error) {
     output.textContent = error.message;
   } finally {
-    button.disabled = false;
+    button.disabled = graphChangePreview === null;
   }
 };
 

@@ -29,16 +29,20 @@ class DeploymentGraphChangeAuthority:
             "component_id",
             "package_digest",
             "expected_graph_revision",
+            "plan_digest",
         }:
             raise ForestError("DEPLOYMENT_GRAPH_CHANGE_INPUT_INVALID", "Graph change fields differ", 422)
         component_id = body["component_id"]
         package_digest = body["package_digest"]
         revision = body["expected_graph_revision"]
+        plan_digest = body["plan_digest"]
         if (
             not isinstance(component_id, str)
             or _COMPONENT.fullmatch(component_id) is None
             or not isinstance(package_digest, str)
             or _DIGEST.fullmatch(package_digest) is None
+            or not isinstance(plan_digest, str)
+            or _DIGEST.fullmatch(plan_digest) is None
             or type(revision) is not int
             or revision < 1
             or ticket.target_component_id != "$runtime"
@@ -72,6 +76,7 @@ class DeploymentGraphChangeAuthority:
             if existing is not None:
                 if (
                     existing["input_digest"] != ticket.input_digest
+                    or existing["plan_digest"] != plan_digest
                     or existing["requested_by"] != ticket.web_subject_ref
                     or existing["operation_kind"] != operation_kind
                 ):
@@ -118,14 +123,15 @@ class DeploymentGraphChangeAuthority:
             saved = await (
                 await conn.execute(
                     "INSERT INTO forest_deployment.runtime_graph_change_requests("
-                    "deployment_id,operation_id,operation_kind,input_digest,requested_by,target_component_id,"
+                    "deployment_id,operation_id,operation_kind,input_digest,plan_digest,requested_by,target_component_id,"
                     "package_digest,expected_graph_revision,activation_id,receipt_ticket_id) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                     (
                         self.store.deployment_id,
                         operation_id,
                         operation_kind,
                         ticket.input_digest,
+                        plan_digest,
                         ticket.web_subject_ref,
                         component_id,
                         package_digest,
@@ -277,7 +283,7 @@ class DeploymentGraphChangeAuthority:
             ).fetchone()
             return dict(saved)
 
-    async def get(self, operation_id: str) -> dict:
+    async def find(self, operation_id: str) -> dict | None:
         async with self.store.pool.connection() as conn:
             row = await (
                 await conn.execute(
@@ -286,6 +292,10 @@ class DeploymentGraphChangeAuthority:
                     (self.store.deployment_id, operation_id),
                 )
             ).fetchone()
-            if row is None:
-                raise ForestError("DEPLOYMENT_GRAPH_CHANGE_NOT_FOUND", "Request is absent", 404)
-            return dict(row)
+            return dict(row) if row is not None else None
+
+    async def get(self, operation_id: str) -> dict:
+        row = await self.find(operation_id)
+        if row is None:
+            raise ForestError("DEPLOYMENT_GRAPH_CHANGE_NOT_FOUND", "Request is absent", 404)
+        return row

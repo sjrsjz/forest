@@ -30,6 +30,7 @@ class DeploymentManagementGateway:
         audit=None,
         runtime_registry_provider: Callable | None = None,
         graph_change_authority=None,
+        graph_change_previewer: Callable | None = None,
     ) -> None:
         self.deployment_id = deployment_id
         self.components = components
@@ -39,6 +40,7 @@ class DeploymentManagementGateway:
         self.audit = audit
         self._runtime_registry_provider = runtime_registry_provider
         self.graph_change_authority = graph_change_authority
+        self.graph_change_previewer = graph_change_previewer
         self._operation_lock = asyncio.Lock()
 
     @property
@@ -230,11 +232,16 @@ class DeploymentManagementGateway:
         self, component_id: str, query_id: str, body: dict, *, authorization=None, operation_id=None
     ):
         if component_id == "$runtime":
-            if (
-                query_id != "module.change.status"
-                or not isinstance(body, dict)
-                or (set(body) != {"operation_id"})
-            ):
+            if query_id == "module.change.status":
+                valid = isinstance(body, dict) and set(body) == {"operation_id"}
+            elif query_id == "module.change.preview":
+                valid = isinstance(body, dict) and set(body) == {
+                    "operation_kind", "component_id", "package_digest",
+                    "expected_graph_revision",
+                }
+            else:
+                valid = False
+            if not valid:
                 raise ForestError(
                     "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404
                 )
@@ -249,8 +256,14 @@ class DeploymentManagementGateway:
                 target_operation_ref=operation_id,
                 action_key=query_id,
                 input_digest=digest_json(body),
-                required_role="AUDITOR",
+                required_role="ADMIN" if query_id == "module.change.preview" else "AUDITOR",
             )
+            if query_id == "module.change.preview":
+                if self.graph_change_previewer is None:
+                    raise ForestError(
+                        "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Graph preview is unavailable", 503
+                    )
+                return await self.graph_change_previewer(**body)
             if self.graph_change_authority is None:
                 raise ForestError(
                     "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Replacement authority is unavailable", 503
@@ -303,6 +316,12 @@ class DeploymentManagementGateway:
                     "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Deployment Registry is unavailable", 503
                 )
             generation_id, graph_revision = self.authorization_target("$runtime")
+            if not isinstance(body, dict) or set(body) != {
+                "component_id", "package_digest", "expected_graph_revision", "plan_digest"
+            }:
+                raise ForestError(
+                    "DEPLOYMENT_GRAPH_CHANGE_INPUT_INVALID", "Graph change fields differ", 422
+                )
             input_digest = digest_json(body)
             await self._authorize(
                 authorization,
@@ -316,6 +335,27 @@ class DeploymentManagementGateway:
                 input_digest=input_digest,
                 required_role="ADMIN",
             )
+            if await self.graph_change_authority.find(operation_id) is None:
+                if self.graph_change_previewer is None:
+                    raise ForestError(
+                        "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Graph preview is unavailable", 503
+                    )
+                try:
+                    preview = await self.graph_change_previewer(
+                        operation_kind="ADD" if action_id == "module.add" else "REPLACE",
+                        component_id=body["component_id"],
+                        package_digest=body["package_digest"],
+                        expected_graph_revision=body["expected_graph_revision"],
+                    )
+                except ForestError:
+                    if await self.graph_change_authority.find(operation_id) is None:
+                        raise
+                else:
+                    if body["plan_digest"] != preview["plan_digest"]:
+                        raise ForestError(
+                            "DEPLOYMENT_GRAPH_CHANGE_PLAN_CONFLICT",
+                            "Submitted Graph plan differs from the current candidate", 409,
+                        )
             guard = DeploymentActionAuthorization(
                 authorization,
                 self._authorize_mutation_in,

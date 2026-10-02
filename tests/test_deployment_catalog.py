@@ -367,6 +367,7 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
         components=(),
         deployment_registry_provider=lambda: controller.registry,
         deployment_graph_changes=graph_changes,
+        deployment_change_previewer=controller.preview_change,
         identity_authority=identity,
         deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
         deployment_audit=DeploymentAuditRepository(repository.store),
@@ -398,6 +399,27 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
                 "/management/v1/scopes/deployment/deployment/modules/"
                 "$runtime/actions/module.replace"
             )
+            preview_path = action_path.replace(
+                "/actions/module.replace", "/queries/module.change.preview"
+            )
+            async def preview_for(kind, candidate):
+                response = await client.post(
+                    preview_path, headers=headers,
+                    json={"operation_kind": kind, **candidate},
+                )
+                assert response.status_code == 200, response.text
+                return response.json()
+
+            initial_preview = await preview_for("REPLACE", body)
+            assert initial_preview["impact"]["replace"] == ["deployment.audit"]
+            body["plan_digest"] = initial_preview["plan_digest"]
+            wrong_plan = await client.post(
+                action_path,
+                headers={**headers, "idempotency-key": "replace-audit-wrong-plan"},
+                json={**body, "plan_digest": "sha256:" + "0" * 64},
+            )
+            assert wrong_plan.status_code == 409
+            assert wrong_plan.json()["code"] == "DEPLOYMENT_GRAPH_CHANGE_PLAN_CONFLICT"
             saved = await client.post(
                 action_path,
                 headers={**headers, "idempotency-key": "replace-audit-1"},
@@ -471,6 +493,29 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
                 "package_digest": probe.digest,
                 "expected_graph_revision": controller.registry.graph_identity.graph_revision,
             }
+            probe_preview = await preview_for("ADD", add_body)
+            assert probe_preview["impact"]["add"] == [probe.component["id"]]
+            assert probe_preview["impact"]["retain"] == ["deployment.audit"]
+            assert (await preview_for("ADD", add_body))["plan_digest"] == probe_preview["plan_digest"]
+            async with repository.store.pool.connection() as conn:
+                schema = await (
+                    await conn.execute(
+                        "SELECT 1 FROM forest_deployment.schema_bundles "
+                        "WHERE deployment_id=%s AND component_id=%s",
+                        (repository.store.deployment_id, probe.component["id"]),
+                    )
+                ).fetchone()
+                queued = await (
+                    await conn.execute(
+                        "SELECT count(*) AS value FROM "
+                        "forest_deployment.runtime_graph_change_requests "
+                        "WHERE deployment_id=%s",
+                        (repository.store.deployment_id,),
+                    )
+                ).fetchone()
+            assert schema is None
+            assert queued["value"] == 1
+            add_body["plan_digest"] = probe_preview["plan_digest"]
             added = await client.post(
                 action_path.replace("module.replace", "module.add"),
                 headers={**headers, "idempotency-key": "add-probe-1"},
@@ -522,14 +567,17 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
                 staged_catalog.export_archive(next_staged.digest)
             )
             retained_audit = controller.registry.graph_identity.generations["deployment.audit"]
+            upgrade_body = {
+                "component_id": probe.component["id"],
+                "package_digest": next_probe.digest,
+                "expected_graph_revision": controller.registry.graph_identity.graph_revision,
+            }
+            upgrade_preview = await preview_for("REPLACE", upgrade_body)
+            assert upgrade_preview["impact"]["replace"] == [probe.component["id"]]
             upgraded = await client.post(
                 action_path,
                 headers={**headers, "idempotency-key": "replace-probe-1"},
-                json={
-                    "component_id": probe.component["id"],
-                    "package_digest": next_probe.digest,
-                    "expected_graph_revision": controller.registry.graph_identity.graph_revision,
-                },
+                json={**upgrade_body, "plan_digest": upgrade_preview["plan_digest"]},
             )
             assert upgraded.status_code == 200, upgraded.text
             async with asyncio.timeout(15):
