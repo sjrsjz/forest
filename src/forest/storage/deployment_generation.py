@@ -443,6 +443,49 @@ class DeploymentGenerationAuthority:
                 {item["component_id"]: item["generation_id"] for item in members},
             )
 
+    async def active_package_selection(self) -> tuple[RuntimeGenerationGraph | None, dict[str, str]]:
+        """Read the exact package artifacts bound to the current deployment Graph."""
+
+        graph = await self.current_graph()
+        if graph is None:
+            return None, {}
+        async with self.store.pool.connection() as conn, conn.transaction():
+            clock = await self._clock_in(conn)
+            if clock["active_graph_id"] != graph.graph_id or (
+                clock["active_revision"] != graph.graph_revision
+            ):
+                raise ForestError("RUNTIME_GRAPH_NOT_CURRENT", "RuntimeGraph changed", 409)
+            rows = await (
+                await conn.execute(
+                    "SELECT m.component_id,m.generation_id,g.binding,g.binding_digest,g.state "
+                    "FROM forest_deployment.runtime_graph_members m JOIN "
+                    "forest_deployment.runtime_generations g ON "
+                    "g.deployment_id=m.deployment_id AND g.generation_id=m.generation_id "
+                    "WHERE m.deployment_id=%s AND m.graph_id=%s",
+                    (self.store.deployment_id, graph.graph_id),
+                )
+            ).fetchall()
+            if {row["component_id"]: row["generation_id"] for row in rows} != graph.generations:
+                raise ForestError(
+                    "RUNTIME_GRAPH_IDENTITY_CONFLICT", "Active Graph members changed", 409
+                )
+            selection = {}
+            for row in rows:
+                binding = row["binding"]
+                package = binding.get("package") if isinstance(binding, dict) else None
+                digest = package.get("package_digest") if isinstance(package, dict) else None
+                if (
+                    row["state"] != "ACTIVE"
+                    or row["binding_digest"] != digest_json(binding)
+                    or not isinstance(digest, str)
+                ):
+                    raise ForestError(
+                        "RUNTIME_GENERATION_BINDING_INVALID",
+                        "Active deployment package binding is invalid", 409,
+                    )
+                selection[row["component_id"]] = digest
+            return graph, selection
+
     async def _current_members_in(
         self, conn, graph: RuntimeGenerationGraph, *, update: bool = False
     ) -> list[dict]:

@@ -19,7 +19,7 @@ class DeploymentWebAuthorityRepository:
         if (
             ticket.target_scope_kind != "deployment"
             or ticket.target_scope_id != "deployment"
-            or ticket.target_graph_revision != 1
+            or ticket.target_graph_revision < 1
         ):
             raise ForestError(
                 "WEB_AUTHORITY_TICKET_TARGET_MISMATCH",
@@ -61,6 +61,50 @@ class DeploymentWebAuthorityRepository:
                     409,
                 )
             return dict(existing)
+        if ticket.target_component_id == "$runtime" or not (
+            ticket.target_graph_revision == 1
+            and ticket.target_generation_id
+            == f"deployment/{ticket.target_component_id}/1"
+        ):
+            clock = await (
+                await conn.execute(
+                    "SELECT active_graph_id,active_revision FROM "
+                    "forest_deployment.runtime_graph_clock WHERE deployment_id=%s FOR SHARE",
+                    (self.store.deployment_id,),
+                )
+            ).fetchone()
+            if clock is None or clock["active_revision"] != ticket.target_graph_revision:
+                raise ForestError(
+                    "WEB_AUTHORITY_TICKET_TARGET_MISMATCH",
+                    "Deployment RuntimeGraph changed before Web action", 403,
+                )
+            if ticket.target_component_id == "$runtime":
+                matching = clock["active_graph_id"] == ticket.target_generation_id
+            else:
+                member = await (
+                    await conn.execute(
+                        "SELECT m.generation_id,m.control_admission,g.state FROM "
+                        "forest_deployment.runtime_graph_members m JOIN "
+                        "forest_deployment.runtime_generations g ON "
+                        "g.deployment_id=m.deployment_id AND g.generation_id=m.generation_id "
+                        "WHERE m.deployment_id=%s AND m.graph_id=%s AND m.component_id=%s",
+                        (
+                            self.store.deployment_id, clock["active_graph_id"],
+                            ticket.target_component_id,
+                        ),
+                    )
+                ).fetchone()
+                matching = (
+                    member is not None
+                    and member["generation_id"] == ticket.target_generation_id
+                    and member["control_admission"]
+                    and member["state"] == "ACTIVE"
+                )
+            if not matching:
+                raise ForestError(
+                    "WEB_AUTHORITY_TICKET_TARGET_MISMATCH",
+                    "Deployment Generation changed before Web action", 403,
+                )
         now = (
             await (await conn.execute("SELECT clock_timestamp() AS value")).fetchone()
         )["value"]

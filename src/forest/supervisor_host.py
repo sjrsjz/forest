@@ -15,7 +15,7 @@ from uuid import uuid4
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
-from forest.deployment_packages import bootstrap_builtin_deployment_package
+from forest.deployment_package_controller import DeploymentPackageController
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
@@ -29,7 +29,6 @@ from forest.official_bot_provisioning import (
 )
 from forest.packages import PackageCatalog
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
-from forest.runtime_modules import RuntimeModuleRegistry
 from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
@@ -189,7 +188,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     stop = asyncio.Event()
     management_server = None
     management_task = None
-    deployment_registry = None
+    deployment_controller = None
     loop = asyncio.get_running_loop()
     for event in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -197,6 +196,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         except (NotImplementedError, RuntimeError):
             signal.signal(event, lambda *_args: loop.call_soon_threadsafe(stop.set))
     stop_task = None
+    fatal_task = None
     try:
         await supervisor.start()
         await web_identity.initialize_setup(settings.web_bootstrap)
@@ -204,16 +204,13 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         package_catalog = PackageCatalog(
             Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
         )
-        audit_snapshot = package_catalog.build(
-            Path(str(files("forest").joinpath("builtin/deployment_audit")))
+        deployment_controller = DeploymentPackageController(
+            deployment_runtime, package_catalog,
+            official_sources=(
+                Path(str(files("forest").joinpath("builtin/deployment_audit"))),
+            ),
         )
-        audit_descriptor = await bootstrap_builtin_deployment_package(
-            audit_snapshot, deployment_runtime
-        )
-        deployment_registry = RuntimeModuleRegistry(
-            deployment_runtime, (audit_descriptor,)
-        )
-        await deployment_registry.start()
+        await deployment_controller.start()
         legacy_components = deployment_management_components(
             catalog=catalog,
             secrets=secrets,
@@ -232,7 +229,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 create_deployment_management_app(
                     deployment_id=settings.deployment_id,
                     components=legacy_components,
-                    deployment_registry_provider=lambda: deployment_registry,
+                    deployment_registry_provider=lambda: deployment_controller.registry,
                     identity_authority=web_identity,
                     deployment_web_receipts=web_receipts,
                     deployment_audit=deployment_audit,
@@ -267,21 +264,31 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             flush=True,
         )
         stop_task = asyncio.create_task(stop.wait(), name="deployment-supervisor-stop")
-        tasks = (stop_task, management_task, *supervisor.owned_tasks())
+        fatal_task = asyncio.create_task(
+            deployment_controller.fatal_event.wait(), name="deployment-package-fatal"
+        )
+        tasks = (stop_task, fatal_task, management_task, *supervisor.owned_tasks())
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         if not stop.is_set():
+            if fatal_task in done and deployment_controller.fatal_error is not None:
+                raise deployment_controller.fatal_error
             failed = next(task for task in tasks if task in done)
             await failed
             raise RuntimeError("Deployment supervisor task stopped unexpectedly")
     finally:
-        if stop_task is not None and not stop_task.done():
-            stop_task.cancel()
-            await asyncio.gather(stop_task, return_exceptions=True)
+        for task in (stop_task, fatal_task):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         if management_server is not None:
             management_server.should_exit = True
         if management_task is not None:
             await asyncio.gather(management_task, return_exceptions=True)
-        if deployment_registry is not None:
-            await deployment_registry.close()
-        await supervisor.close()
-        await store.close()
+        try:
+            if deployment_controller is not None:
+                await deployment_controller.close()
+        finally:
+            try:
+                await supervisor.close()
+            finally:
+                await store.close()

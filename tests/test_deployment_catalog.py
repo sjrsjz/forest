@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import shutil
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib.resources import files
@@ -19,6 +20,7 @@ from psycopg import sql
 
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
+from forest.deployment_package_controller import DeploymentPackageController
 from forest.deployment_packages import bootstrap_builtin_deployment_package
 from forest.deployment_provisioning import DeploymentProvisioningExecutor
 from forest.deployment_runtime import DeploymentRuntimeScope
@@ -54,6 +56,7 @@ from forest.storage.deployment_storage_profiles import DeploymentStorageProfileA
 from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
+from forest.web_authority_ticket import WebAuthorityTicket
 
 
 @pytest_asyncio.fixture
@@ -269,6 +272,97 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
         {"name": "replayed"}, {"name": "competing"}
     )
     assert (await configuration.effective()).revision == 2
+
+
+@pytest.mark.postgres
+async def test_deployment_package_controller_restores_selected_artifact_after_restart(
+    deployment_catalog, tmp_path
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    lease = await repository.claim_supervisor("host/packages", "incarnation/packages")
+    runtime = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease)
+    )
+    package_catalog = PackageCatalog(tmp_path / "catalog")
+    source = Path(__file__).parents[1] / "src/forest/builtin/deployment_audit"
+    controller = DeploymentPackageController(
+        runtime, package_catalog, official_sources=(source,)
+    )
+    restarted = None
+    try:
+        original = await controller.start()
+        original_digest = original.get("deployment.audit").snapshot.digest
+        next_source = tmp_path / "next-audit"
+        shutil.copytree(source, next_source)
+        manifest = next_source / "module.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.0"', 'version = "1.0.1"', 1
+            ),
+            encoding="utf-8",
+        )
+        replacement = package_catalog.build(next_source)
+        assert replacement.digest != original_digest
+        old_revision = original.graph_identity.graph_revision
+        with pytest.raises(ForestError) as conflict:
+            await controller.replace(
+                "deployment.audit", replacement.digest,
+                expected_graph_revision=old_revision + 1,
+            )
+        assert conflict.value.code == "RUNTIME_GRAPH_REVISION_CONFLICT"
+        assert controller.registry is original
+
+        active = await controller.replace(
+            "deployment.audit", replacement.digest,
+            expected_graph_revision=old_revision,
+        )
+        assert active.get("deployment.audit").snapshot.digest == replacement.digest
+        assert active.graph_identity.graph_revision > old_revision
+        _graph, selection = await runtime.generation_authority.active_package_selection()
+        assert selection == {"deployment.audit": replacement.digest}
+
+        receipts = DeploymentWebAuthorityRepository(repository.store)
+        now = datetime.now(timezone.utc)
+
+        def ticket(component_id: str, generation_id: str, revision: int, operation: str):
+            return WebAuthorityTicket(
+                "forest.web-authority-ticket/1", f"ticket/{operation}",
+                "issuer/packages", "key/packages", "subject/packages", "ADMIN",
+                "session/packages", 1, "deployment", "deployment", component_id,
+                generation_id, revision, f"operation/{operation}", "module.replace",
+                digest_json({"operation": operation}), None,
+                now, now + timedelta(seconds=20), "hmac-sha256:" + "0" * 64,
+            )
+
+        with pytest.raises(ForestError) as stale:
+            await receipts.accept(ticket=ticket(
+                "$runtime", original.graph_identity.graph_id, old_revision, "stale"
+            ))
+        assert stale.value.code == "WEB_AUTHORITY_TICKET_TARGET_MISMATCH"
+        accepted = await receipts.accept(ticket=ticket(
+            "$runtime", active.graph_identity.graph_id,
+            active.graph_identity.graph_revision, "current",
+        ))
+        assert accepted["target_graph_revision"] == active.graph_identity.graph_revision
+        generation = active.graph_identity.generations["deployment.audit"]
+        assert (await receipts.accept(ticket=ticket(
+            "deployment.audit", generation, active.graph_identity.graph_revision,
+            "member",
+        )))["target_generation_id"] == generation
+
+        restarted = DeploymentPackageController(
+            runtime, package_catalog, official_sources=(source,)
+        )
+        recovered = await restarted.start()
+        assert recovered.get("deployment.audit").snapshot.digest == replacement.digest
+        assert (await recovered.get("deployment.audit").management_contract.query(
+            "audit.records.query", {"limit": 1}
+        )) == {"records": [], "next_before": None}
+    finally:
+        if restarted is not None:
+            await restarted.close()
+        await controller.close()
 
 
 @pytest.mark.postgres
