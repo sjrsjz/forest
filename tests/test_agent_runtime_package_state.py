@@ -1258,6 +1258,224 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "successor_request_id": "model-request/package/prepared-recovered",
                 }
                 raise _RollbackVerification
+        plan_run_id = "run/agent-package/prepared-plan"
+        plan_request_id = "model-request/package/prepared-plan"
+        plan_attempt_id = "model-attempt/package/prepared-plan"
+        plan_effect_id = "model-effect/package/prepared-plan"
+        plan_start = {
+            **model_start,
+            "input": {
+                **model_start["input"],
+                "conversation_ref": "conversation/onebot/group/prepared-plan",
+                "session_id": "session/agent-package/prepared-plan",
+                "run_id": plan_run_id,
+                "input_batch": {
+                    **model_start["input"]["input_batch"],
+                    "input_batch_ref": "input-batch/agent-package/prepared-plan",
+                    "input_batch_digest": digest_json({"batch": "prepared-plan"}),
+                    "source_manifest_digest": digest_json({"source": "prepared-plan"}),
+                    "trigger_claim": {
+                        "ref": "claim:" + "3" * 64, "count": 1,
+                        "last_trigger_ref": "trigger/prepared-plan",
+                        "last_trigger_ingress_seq": 1,
+                        "digest": digest_json({"claim": "prepared-plan"}),
+                    },
+                },
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn, "agent.start-run-record", plan_start,
+                operation_id="agent-run-start/package/prepared-plan",
+                causal_root_kind="conversation.run", causal_root_id=plan_run_id,
+                parent_call_id="call:agent-package/prepared-plan/start",
+                timeout_seconds=10,
+            )
+        plan_owner = await _lease_operation(
+            store, participant, generation_id, "agent.acquire-run-record",
+            {"run_id": plan_run_id, "owner_id": "agent-worker/prepared-plan",
+             "lease_seconds": 120},
+            "agent-acquire/package/prepared-plan",
+        )
+        plan_projection = await _payload(
+            kernel, owner_kind="model.projection", owner_id=plan_request_id,
+            value=b'{"messages":[{"role":"user","content":"A"}]}',
+        )
+        plan_wire = await _payload(
+            kernel, owner_kind="model.wire", owner_id=plan_attempt_id,
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        plan_request = {
+            **request_envelope,
+            "input": {
+                "owner": _owner_ref(plan_owner),
+                "request": {
+                    **request_envelope["input"]["request"],
+                    "request_id": plan_request_id,
+                    "projection": plan_projection.canonical(),
+                    "first_attempt_id": plan_attempt_id,
+                    "initial_wire": plan_wire.canonical(),
+                },
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn, "agent.prepare-model-request-record", plan_request,
+                operation_id="agent-model-request/package/prepared-plan",
+                causal_root_kind="agent.run", causal_root_id=plan_run_id,
+                parent_call_id="call:agent-package/prepared-plan/request",
+                timeout_seconds=10,
+            )
+        plan_effect_wire = await _payload(
+            kernel, owner_component_id="kernel.effect", owner_kind="effect.wire",
+            owner_id=plan_attempt_id,
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        plan_effect_input = await _payload(
+            kernel, owner_component_id="kernel.effect", owner_kind="effect.input",
+            owner_id=plan_effect_id, value=b'{"request_id":"prepared-plan"}',
+        )
+        plan_attempt = {
+            **attempt_envelope,
+            "input": {
+                **attempt_envelope["input"],
+                "owner": _owner_ref(plan_owner),
+                "request_id": plan_request_id,
+                "attempt_id": plan_attempt_id,
+                "effect_operation_ref": plan_effect_id,
+            },
+            "prior": {
+                **attempt_envelope["prior"],
+                "effect": {
+                    **attempt_envelope["prior"]["effect"],
+                    "input_payload": plan_effect_input.canonical(),
+                    "wire_payload": plan_effect_wire.canonical(),
+                    "permit": {
+                        **attempt_envelope["prior"]["effect"]["permit"],
+                        "effect_operation_id": plan_effect_id,
+                        "attempt_id": plan_attempt_id,
+                        "wire_payload_id": plan_effect_wire.payload_id,
+                        "wire_payload_digest": plan_effect_wire.digest,
+                    },
+                },
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn, "agent.prepare-model-attempt-record", plan_attempt,
+                operation_id="agent-model-attempt/package/prepared-plan",
+                causal_root_kind="agent.run", causal_root_id=plan_run_id,
+                parent_call_id="call:agent-package/prepared-plan/attempt",
+                timeout_seconds=10,
+            )
+            await _seed_prepared_effect(
+                conn, kernel, store, operation_id=plan_effect_id,
+                attempt_id=plan_attempt_id, wire=plan_effect_wire,
+                generation_id=generation_id,
+            )
+        plan_successor_id = "model-request/package/prepared-plan-successor"
+        plan_successor_attempt_id = "model-attempt/package/prepared-plan-successor"
+        plan_successor_projection = await _payload(
+            kernel, owner_kind="model.projection", owner_id=plan_successor_id,
+            value=b'{"messages":[{"role":"user","content":"A"}]}',
+        )
+        plan_successor_wire = await _payload(
+            kernel, owner_kind="model.wire", owner_id=plan_successor_attempt_id,
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        plan_payload = {
+            **recovery_envelope["input"],
+            "effect": {
+                **recovery_effect,
+                "effect_operation_id": plan_effect_id,
+                "attempt_id": plan_attempt_id,
+                "abandonment_operation_id": "abandon/package/prepared-plan",
+            },
+            "owner": _owner_ref(plan_owner),
+            "predecessor_request_id": plan_request_id,
+            "prepared_attempt_id": plan_attempt_id,
+            "effect_operation_id": plan_effect_id,
+            "abandonment_operation_id": "abandon/package/prepared-plan",
+            "successor": {
+                **recovery_envelope["input"]["successor"],
+                "request_id": plan_successor_id,
+                "first_attempt_id": plan_successor_attempt_id,
+                "projection": plan_successor_projection.canonical(),
+                "initial_wire": plan_successor_wire.canonical(),
+            },
+        }
+        plan_declaration = next(
+            item for item in instance.component["unit_of_work_plans"]
+            if item["name"] == "agent.recover-prepared-model"
+        )
+        binding = instance._prepared_binding
+        plan_scope = PackageCallScope(
+            bot_id=store.bot_id, component_id="agent.runtime",
+            generation_id=generation_id, instance_id=binding.instance_id,
+            worker_incarnation=binding.worker_incarnation,
+            call_id="call:agent-package/prepared-plan",
+            call_operation_id="agent-recover/package/prepared-plan",
+            causal_root_kind="agent.run", causal_root_id=plan_run_id,
+        )
+        assert instance._service_schemas[plan_declaration["name"]][0].is_valid(
+            plan_payload
+        )
+        invalid_plan = {
+            **plan_payload,
+            "successor": {
+                **plan_payload["successor"], "model_ref": "model/incompatible",
+            },
+        }
+        with pytest.raises(ForestError) as rejected_plan:
+            await instance._unit_of_work_coordinator.execute(
+                replace(plan_scope, call_operation_id="agent-recover/package/rejected"),
+                plan_declaration, invalid_plan,
+                parent_call_id="call:agent-package/prepared-plan/rejected",
+                timeout_seconds=15,
+            )
+        assert rejected_plan.value.code == "AGENT_PREPARED_RECOVERY_BOUNDARY_CLOSED"
+        async with store.pool.connection() as conn:
+            before = await (await conn.execute(sql.SQL(
+                "SELECT o.state AS effect_state,a.state AS attempt_state "
+                "FROM {}.effect_operations o JOIN {}.effect_attempts a "
+                "ON a.bot_id=o.bot_id AND a.effect_operation_id=o.effect_operation_id "
+                "WHERE o.bot_id=%s AND o.effect_operation_id=%s"
+            ).format(sql.Identifier(kernel.effect.namespace),
+                     sql.Identifier(kernel.effect.namespace)),
+                (store.bot_id, plan_effect_id))).fetchone()
+            assert before == {
+                "effect_state": "PREPARED", "attempt_state": "PREPARED",
+            }
+        plan_result = await instance._unit_of_work_coordinator.execute(
+            plan_scope, plan_declaration, plan_payload,
+            parent_call_id="call:agent-package/prepared-plan",
+            timeout_seconds=15,
+        )
+        assert plan_result["request_id"] == plan_successor_id
+        assert plan_result["state"] == "READY"
+        assert await instance._unit_of_work_coordinator.execute(
+            plan_scope, plan_declaration, plan_payload,
+            parent_call_id="call:agent-package/prepared-plan/replay",
+            timeout_seconds=15,
+        ) == plan_result
+        plan_recovery = await instance.invoke_management_query(
+            recovery_declaration, {"run_id": plan_run_id}, timeout_seconds=10,
+        )
+        assert plan_recovery["model_request"]["request_id"] == plan_successor_id
+        assert plan_recovery["model_request"]["state"] == "READY"
+        assert plan_recovery["model_attempt"] is None
+        async with store.pool.connection() as conn:
+            effect_state = await (await conn.execute(sql.SQL(
+                "SELECT o.state AS operation_state,a.state AS attempt_state "
+                "FROM {}.effect_operations o JOIN {}.effect_attempts a "
+                "ON a.bot_id=o.bot_id AND a.effect_operation_id=o.effect_operation_id "
+                "WHERE o.bot_id=%s AND o.effect_operation_id=%s"
+            ).format(sql.Identifier(kernel.effect.namespace),
+                     sql.Identifier(kernel.effect.namespace)),
+                (store.bot_id, plan_effect_id))).fetchone()
+            assert effect_state == {
+                "operation_state": "CANCELLED", "attempt_state": "ABANDONED",
+            }
         prepared_model_cancel_state = await _payload(
             kernel, owner_kind="checkpoint.state",
             owner_id="checkpoint/package/prepared-model-cancel",
