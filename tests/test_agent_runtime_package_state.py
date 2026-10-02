@@ -1478,6 +1478,83 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             assert effect_state == {
                 "operation_state": "CANCELLED", "attempt_state": "ABANDONED",
             }
+        cancel_race_request_id = "model-request/package/cancel-race"
+        cancel_race_attempt_id = "model-attempt/package/cancel-race"
+        cancel_race_projection = await _payload(
+            kernel, owner_kind="model.projection", owner_id=cancel_race_request_id,
+            value=b'{"messages":[{"role":"user","content":"A"}]}',
+        )
+        cancel_race_wire = await _payload(
+            kernel, owner_kind="model.wire", owner_id=cancel_race_attempt_id,
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        cancel_race_declaration = next(
+            item for item in instance.component["unit_of_work_plans"]
+            if item["name"] == "agent.inherit-model-request"
+        )
+        cancel_race_payload = {
+            "effect": {
+                "protocol": "forest.effect-unsent-proof-request/1", "attempts": [],
+            },
+            "owner": _owner_ref(plan_owner),
+            "predecessor_request_id": plan_successor_id,
+            "successor": {
+                **plan_payload["successor"],
+                "request_id": cancel_race_request_id,
+                "first_attempt_id": cancel_race_attempt_id,
+                "provider_generation_id": "generation/provider/package-cancel-race",
+                "projection": cancel_race_projection.canonical(),
+                "initial_wire": cancel_race_wire.canonical(),
+            },
+        }
+        assert instance._service_schemas[cancel_race_declaration["name"]][0].is_valid(
+            cancel_race_payload
+        )
+
+        async def blocked_cancel_race_inheritance():
+            return await instance._unit_of_work_coordinator.execute(
+                replace(
+                    plan_scope,
+                    call_operation_id="agent-inherit/package/cancel-race",
+                ),
+                cancel_race_declaration, cancel_race_payload,
+                parent_call_id="call:agent-package/cancel-race",
+                timeout_seconds=15,
+            )
+
+        async with store.pool.connection() as conn, conn.transaction():
+            run_checkpoint = await (await conn.execute(sql.SQL(
+                "SELECT checkpoint_seq FROM {}.agent_runs "
+                "WHERE bot_id=%s AND run_id=%s FOR UPDATE"
+            ).format(sql.Identifier(package.configuration.namespace)),
+                (store.bot_id, plan_run_id))).fetchone()
+            cancel_intent = await (await conn.execute(sql.SQL(
+                "SELECT {}.agent_request_cancel(%s::jsonb,%s::jsonb) AS result"
+            ).format(sql.Identifier(package.configuration.namespace)), (
+                Jsonb({
+                    "bot_id": store.bot_id,
+                    "operation_id": "cancel/package/prepared-plan-race",
+                }),
+                Jsonb({
+                    "run_id": plan_run_id,
+                    "expected_checkpoint_seq": run_checkpoint["checkpoint_seq"],
+                    "requested_by": "admin:test", "reason_code": "ADMIN_CANCEL",
+                }),
+            ))).fetchone()
+            assert cancel_intent["result"]["ok"] is True
+            inheritance_task = asyncio.create_task(blocked_cancel_race_inheritance())
+            await asyncio.sleep(0.05)
+            assert not inheritance_task.done()
+        with pytest.raises(ForestError) as cancelled_inheritance:
+            await inheritance_task
+        assert cancelled_inheritance.value.code == "AGENT_CANCEL_REQUESTED"
+        async with store.pool.connection() as conn:
+            successor = await (await conn.execute(sql.SQL(
+                "SELECT count(*) AS total FROM {}.model_requests "
+                "WHERE bot_id=%s AND run_id=%s"
+            ).format(sql.Identifier(package.configuration.namespace)),
+                (store.bot_id, plan_run_id))).fetchone()
+            assert successor["total"] == 2
         prepared_model_cancel_state = await _payload(
             kernel, owner_kind="checkpoint.state",
             owner_id="checkpoint/package/prepared-model-cancel",

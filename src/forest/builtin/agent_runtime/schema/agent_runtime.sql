@@ -1501,6 +1501,12 @@ BEGIN
             'error',jsonb_build_object('code','STALE_AGENT_RUN_OWNER',
                 'message','Agent Run owner is stale','status',409));
     END IF;
+    IF EXISTS (SELECT 1 FROM __forest_module_schema__.run_cancel_requests c
+               WHERE c.bot_id=requested_bot AND c.run_id=requested_run) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_REQUESTED',
+                'message','Agent cancellation won the model inheritance boundary','status',409));
+    END IF;
     SELECT * INTO predecessor FROM __forest_module_schema__.model_requests
     WHERE bot_id=requested_bot AND request_id=predecessor_id FOR UPDATE;
     IF NOT FOUND OR predecessor.run_id IS DISTINCT FROM requested_run
@@ -2638,6 +2644,12 @@ BEGIN
             )
         );
     END IF;
+    IF EXISTS (SELECT 1 FROM __forest_module_schema__.run_cancel_requests c
+               WHERE c.bot_id=requested_bot AND c.run_id=requested_run) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_REQUESTED',
+                'message','Agent cancellation won the model request boundary','status',409));
+    END IF;
     SELECT EXISTS (
         SELECT 1 FROM __forest_module_schema__.protocol_failures f
         WHERE f.bot_id=requested_bot AND f.run_id=requested_run
@@ -2816,6 +2828,12 @@ BEGIN
                 'input_payload',input_value,'wire_payload',wire_value,'permit',effect_permit
             )
         );
+    END IF;
+    IF EXISTS (SELECT 1 FROM __forest_module_schema__.run_cancel_requests c
+               WHERE c.bot_id=requested_bot AND c.run_id=requested_run) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CANCEL_REQUESTED',
+                'message','Agent cancellation won the model attempt boundary','status',409));
     END IF;
     SELECT * INTO request_row
     FROM __forest_module_schema__.model_requests
@@ -4000,6 +4018,13 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
             'code','AGENT_TOOL_EFFECT_BOUNDARY_CLOSED','message','ToolCall is not at the preparation boundary','status',409));
     ELSE
+        IF EXISTS (
+            SELECT 1 FROM __forest_module_schema__.run_cancel_requests c
+            WHERE c.bot_id=requested_bot AND c.run_id=requested_run
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+                'code','AGENT_CANCEL_REQUESTED','message','Agent cancellation won the tool effect boundary','status',409));
+        END IF;
         UPDATE __forest_module_schema__.tool_calls
         SET effect_attempt_id=requested_attempt,
             authorization_ticket_id=effect_value->>'authorization_ticket_id',
