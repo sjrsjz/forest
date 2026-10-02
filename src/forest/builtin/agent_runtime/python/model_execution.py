@@ -852,6 +852,61 @@ class ModelExecution:
                 "usage": None,
                 "error_code": "PROVIDER_DISPATCH_RESULT_UNKNOWN",
             }
+        return await self._observe_receipt(
+            owner=owner, request_id=request_id, attempt_id=attempt_id,
+            effect_operation_id=effect_operation_id, receipt=receipt,
+            evidence_kind="executor", observation_kind="model-observation",
+        )
+
+    async def reconcile_committed(
+        self, *, owner: dict, request_id: str, attempt_id: str,
+        effect_operation_id: str,
+    ) -> bool:
+        """Consume a completed executor ledger receipt; never start dispatch."""
+
+        outcome = await self.ctx.services.call(
+            "runtime.effect-executor-outcome",
+            {
+                "protocol": "forest.effect-executor-outcome-request/1",
+                "effect_operation_id": effect_operation_id,
+                "attempt_id": attempt_id,
+            },
+            operation_id=self.ctx.operations.stable(
+                f"inspect-model-effect:{attempt_id}"
+            ),
+            contract_major=1,
+            timeout=15,
+        )
+        if (
+            outcome.get("protocol") != "forest.effect-executor-outcome/1"
+            or outcome.get("effect_operation_id") != effect_operation_id
+            or outcome.get("attempt_id") != attempt_id
+            or outcome.get("request_id") != request_id
+        ):
+            raise ForestError(
+                "AGENT_EFFECT_OUTCOME_INVALID", "Executor outcome identity differs", 502
+            )
+        if outcome["state"] != "SUCCEEDED":
+            return False
+        receipt = _receipt(
+            outcome["receipt"], request_id=request_id, attempt_id=attempt_id,
+            payload_digest=outcome["payload_digest"],
+        )
+        if receipt["status"] not in {"RESPONDED", "NOT_SENT"}:
+            return False
+        await self._observe_receipt(
+            owner=owner, request_id=request_id, attempt_id=attempt_id,
+            effect_operation_id=effect_operation_id, receipt=receipt,
+            evidence_kind="reconciliation",
+            observation_kind="model-reconciliation",
+        )
+        return True
+
+    async def _observe_receipt(
+        self, *, owner: dict, request_id: str, attempt_id: str,
+        effect_operation_id: str, receipt: dict, evidence_kind: str,
+        observation_kind: str,
+    ) -> dict:
         observed_state = {
             "RESPONDED": "SUCCEEDED",
             "NOT_SENT": "NOT_APPLIED",
@@ -863,7 +918,9 @@ class ModelExecution:
             for role, item in (("RESULT", receipt["result"]), ("USAGE", receipt["usage"]))
             if item is not None
         ]
-        observation_id = self.ctx.operations.stable(f"model-observation:{attempt_id}")
+        observation_id = self.ctx.operations.stable(
+            f"{observation_kind}:{attempt_id}"
+        )
         await self.ctx.uow.call(
             "agent.observe-model-effect",
             {
@@ -873,7 +930,7 @@ class ModelExecution:
                     "attempt_id": attempt_id,
                     "observation_operation_id": observation_id,
                     "status": observed_state,
-                    "evidence_kind": "executor",
+                    "evidence_kind": evidence_kind,
                     "evidence": {"value": receipt, "parents": parents},
                 },
                 "agent": {
@@ -882,16 +939,22 @@ class ModelExecution:
                     "request_id": request_id,
                     "attempt_id": attempt_id,
                     "observed_state": observed_state,
-                    "evidence_kind": "EXECUTOR",
+                    "evidence_kind": evidence_kind.upper(),
                     "effect_observation_ref": self.ctx.operations.stable(
                         f"effect-observation:{attempt_id}"
+                        if evidence_kind == "executor"
+                        else f"effect-model-reconciliation:{attempt_id}"
                     ),
                     "effect_step_id": "effect",
                     "evidence_digest": _digest(receipt),
                     "payloads": payloads,
                 },
             },
-            operation_id=self.ctx.operations.stable(f"observe-model-effect:{attempt_id}"),
+            operation_id=self.ctx.operations.stable(
+                f"observe-model-effect:{attempt_id}"
+                if evidence_kind == "executor"
+                else f"observe-model-reconciliation:{attempt_id}"
+            ),
             timeout=15,
         )
         if receipt["status"] != "RESPONDED":

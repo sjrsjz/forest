@@ -13,6 +13,7 @@ from forest.kernel_authorization_participant import (
     KernelAuthorizationUnitOfWorkParticipant,
 )
 from forest.kernel_component_candidate_preview import component_candidate_preview_service
+from forest.kernel_effect_executor_outcome import effect_executor_outcome_service
 from forest.kernel_effect_participant import KernelEffectUnitOfWorkParticipant
 from forest.kernel_package_catalog_snapshot import (
     package_catalog_artifact_service,
@@ -145,6 +146,7 @@ _MODULES = {
             "runtime.graph.reload",
             "runtime.graph-replacement.request",
             "runtime.graph-replacement.status",
+            "runtime.effect-executor-outcome",
             "runtime.graph.snapshot",
             "runtime.status.snapshot",
             "runtime.maintenance.set",
@@ -161,6 +163,7 @@ _MODULES = {
             "runtime.graph.reload",
             "runtime.graph-replacement.request",
             "runtime.graph-replacement.status",
+            "runtime.effect-executor-outcome",
             "runtime.graph.snapshot",
             "runtime.status.snapshot",
             "runtime.maintenance.set",
@@ -943,6 +946,12 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                         1,
                         ("kernel.runtime",),
                         runtime_graph_replacement_status_service,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "runtime.effect-executor-outcome",
+                        1,
+                        ("kernel.runtime", "kernel.effect", "kernel.payload"),
+                        effect_executor_outcome_service,
                     ),
                 )
                 if component_id == "kernel.runtime"

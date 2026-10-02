@@ -35,6 +35,56 @@ class KernelServiceOperationLedger:
         self.runtime = runtime
         self.payloads = payloads
 
+    async def inspect(
+        self, *, component_id: str, operation_id: str, service_name: str,
+        input_digest: str, generation_id: str, causal_root_kind: str,
+        causal_root_id: str,
+    ) -> dict:
+        """Read a bound durable outcome without admitting another dispatch."""
+
+        for value, field, limit in (
+            (component_id, "component_id", 128),
+            (operation_id, "operation_id", 256),
+            (service_name, "service_name", 128),
+            (generation_id, "generation_id", 512),
+            (causal_root_kind, "causal_root_kind", 128),
+            (causal_root_id, "causal_root_id", 256),
+        ):
+            _bounded(value, field, limit)
+        if (
+            not isinstance(input_digest, str)
+            or len(input_digest) != 71
+            or not input_digest.startswith("sha256:")
+            or any(char not in "0123456789abcdef" for char in input_digest[7:])
+        ):
+            raise ForestError("SERVICE_OPERATION_INPUT_INVALID", "Invalid input digest", 422)
+        async with self.runtime.store.pool.connection() as conn, conn.transaction():
+            row = await (await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND component_id=%s "
+                    "AND operation_id=%s"
+                ).format(self.runtime._table("service_operations")),
+                (self.runtime.store.bot_id, component_id, operation_id),
+            )).fetchone()
+            if row is None:
+                return {"state": "ABSENT", "result": None}
+            if (
+                row["service_name"] != service_name
+                or row["input_digest"] != input_digest
+                or row["active_generation_id"] != generation_id
+                or row["causal_root_kind"] != causal_root_kind
+                or row["causal_root_id"] != causal_root_id
+            ):
+                raise ForestError(
+                    "SERVICE_OPERATION_CONFLICT",
+                    "Executor service operation differs from the frozen Effect",
+                    409,
+                )
+            if row["status"] == "SUCCEEDED":
+                outcome = await self._outcome(conn, row)
+                return {"state": "SUCCEEDED", "result": outcome.result}
+            return {"state": row["status"], "result": None}
+
     async def _current_begin_route(self, conn, scope, route) -> PackageServiceRoute:
         if route.owned_work:
             accepted = await self.runtime.verify_generation_member_in(

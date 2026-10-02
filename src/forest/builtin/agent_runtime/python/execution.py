@@ -788,6 +788,21 @@ class AgentExecution:
                     return self._result(
                         request, state, run, error_code=run.get("error_code")
                     )
+                model_head = recovery.get("model_request")
+                model_attempt = recovery.get("model_attempt")
+                if (
+                    state in {"MODEL_PENDING", "BLOCKED_UNKNOWN"}
+                    and isinstance(model_head, dict)
+                    and isinstance(model_attempt, dict)
+                    and model_attempt["state"] in {"DISPATCHING", "UNKNOWN"}
+                    and await self.model.reconcile_committed(
+                        owner=owner,
+                        request_id=model_head["request_id"],
+                        attempt_id=model_attempt["attempt_id"],
+                        effect_operation_id=model_attempt["effect_operation_ref"],
+                    )
+                ):
+                    continue
                 if recovery.get("cancel_request") is not None:
                     tool = recovery.get("tool_call")
                     model = recovery.get("model_request")

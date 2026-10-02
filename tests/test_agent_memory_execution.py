@@ -50,6 +50,75 @@ class MemoryServices:
 
 
 @pytest.mark.asyncio
+async def test_model_recovery_observes_only_a_committed_executor_receipt():
+    calls = []
+    result_ref = {
+        "payload_id": "payload:result", "digest": "sha256:" + "1" * 64,
+        "owner_component_id": "provider.chat-completions",
+        "owner_kind": "model.result", "owner_id": "attempt/1",
+    }
+    receipt = {
+        "status": "RESPONDED", "request_id": "request/1",
+        "transport_attempt_id": "attempt/1",
+        "payload_digest": "sha256:" + "2" * 64,
+        "result": result_ref, "usage": None, "error_code": None,
+    }
+    committed = False
+
+    async def service(name, body, **_kwargs):
+        calls.append(name)
+        assert name == "runtime.effect-executor-outcome"
+        assert body["effect_operation_id"] == "effect/1"
+        return {
+            "protocol": "forest.effect-executor-outcome/1",
+            "effect_operation_id": "effect/1", "attempt_id": "attempt/1",
+            "request_id": "request/1", "payload_digest": receipt["payload_digest"],
+            "state": "SUCCEEDED" if committed else "ABSENT",
+            "receipt": receipt if committed else None,
+        }
+
+    async def observe(name, body, **_kwargs):
+        calls.append(name)
+        assert name == "agent.observe-model-effect"
+        assert body["effect"]["evidence_kind"] == "reconciliation"
+        assert body["agent"]["evidence_kind"] == "RECONCILIATION"
+        assert body["agent"]["payloads"] == [
+            {"role": "RESULT", "payload": result_ref}
+        ]
+        return {"accepted": True}
+
+    async def read_result(reference):
+        assert reference == result_ref
+        return {
+            "protocol": "forest.provider-model-result/1", "status": "RESPONDED",
+            "request_id": "request/1", "transport_attempt_id": "attempt/1",
+            "payload_digest": receipt["payload_digest"], "text": "recovered",
+            "tool_calls": [], "finish_reason": "stop",
+            "provider_response_id": "response/1", "provider_model": "model/1",
+            "error_code": None,
+        }
+
+    model = ModelExecution(SimpleNamespace(
+        services=SimpleNamespace(call=service),
+        uow=SimpleNamespace(call=observe),
+        payloads=SimpleNamespace(read_json=read_result),
+        operations=SimpleNamespace(stable=lambda value: "operation:" + value),
+    ))
+    identity = {
+        "owner": {"run_id": "run/1"}, "request_id": "request/1",
+        "attempt_id": "attempt/1", "effect_operation_id": "effect/1",
+    }
+    assert await model.reconcile_committed(**identity) is False
+    assert calls == ["runtime.effect-executor-outcome"]
+    committed = True
+    assert await model.reconcile_committed(**identity) is True
+    assert calls == [
+        "runtime.effect-executor-outcome", "runtime.effect-executor-outcome",
+        "agent.observe-model-effect",
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("payload_error", "expected"),
     [("PAYLOAD_REVOKED", "AGENT_FROZEN_MODEL_INVALID"),

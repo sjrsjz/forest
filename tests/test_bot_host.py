@@ -31,6 +31,7 @@ from forest.component_selection import ComponentSelectionSnapshot
 from forest.deployment_management_app import create_deployment_management_app
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
+from forest.kernel_effect_executor_outcome import effect_executor_outcome_service
 from forest.kernel_resource_admission import KERNEL_RESOURCE_POLICY_SCHEMA
 from forest.management_gateway import ConfigurationApplyInput, ManagementGateway
 from forest.media_capture_io import CapturedImage
@@ -38,6 +39,7 @@ from forest.model_contract import MediaSnapshot, ModelCapabilities, ModelResult
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import (
     FrozenServiceRoute,
+    RuntimeKernelServiceContext,
     RuntimeServiceInvocation,
 )
 from forest.runtime_modules import ModuleLifecycleState
@@ -3456,7 +3458,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
+    "scenario", ("text", "visual", "cross-group", "success", "result-ledger-recovery", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -3518,7 +3520,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
         '<block block_type="Assistant"><content><text>Forest success fixture</text>'
         '</content></block></blocks></payload></valid_agent_protocol_content_block>'
-        if scenario in {"success", "cross-group", "prepared-crash"} else None
+        if scenario in {"success", "result-ledger-recovery", "cross-group", "prepared-crash"} else None
     )
 
     async def create_websocket(_url, _token, **_limits):
@@ -3555,6 +3557,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                     break
                 await asyncio.sleep(0.1)
         prepared_crash = asyncio.Event()
+        result_observation_interrupted = asyncio.Event()
         recovery_payloads = []
         recovery_errors = []
         if scenario == "prepared-crash":
@@ -3586,6 +3589,29 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
 
             monkeypatch.setattr(
                 PostgresPackageUnitOfWorkCoordinator, "execute", crash_after_prepare
+            )
+        if scenario == "result-ledger-recovery":
+            original_execute = PostgresPackageUnitOfWorkCoordinator.execute
+
+            async def interrupt_first_observation(
+                coordinator, scope, declaration, payload, **kwargs
+            ):
+                if (
+                    declaration["name"] == "agent.observe-model-effect"
+                    and not result_observation_interrupted.is_set()
+                ):
+                    result_observation_interrupted.set()
+                    raise ForestError(
+                        "TEST_MODEL_OBSERVATION_INTERRUPTED",
+                        "Provider receipt committed before Agent observation", 503,
+                    )
+                return await original_execute(
+                    coordinator, scope, declaration, payload, **kwargs
+                )
+
+            monkeypatch.setattr(
+                PostgresPackageUnitOfWorkCoordinator,
+                "execute", interrupt_first_observation,
             )
         await clients[-1].handler(json.dumps({
             "self_id": int(settings.onebot_self_id), "post_type": "message",
@@ -4445,9 +4471,11 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 item["author"]["principal_ref"] == "qq:20003"
                 for item in queued.manifest["source_manifest"]
             )
-        if scenario == "success":
+        if scenario in {"success", "result-ledger-recovery"}:
             try:
-                async with asyncio.timeout(15):
+                async with asyncio.timeout(
+                    90 if scenario == "result-ledger-recovery" else 15
+                ):
                     while not clients[-1].sent:
                         await asyncio.sleep(0.1)
             except TimeoutError as exc:
@@ -4473,6 +4501,36 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 raise AssertionError(f"Successful model response did not deliver: {diagnostics}") from exc
             assert len(clients[-1].sent) == 1
             assert b"Forest success fixture" in clients[-1].sent[0].wire_body
+            if scenario == "result-ledger-recovery":
+                assert result_observation_interrupted.is_set()
+                assert len(RecordingModelClient.requests) == 1
+            agent_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "agent.runtime"
+            )
+            async with host.store.pool.connection() as conn:
+                delivered_attempt = await (await conn.execute(sql.SQL(
+                    "SELECT r.request_id,a.attempt_id,a.effect_operation_ref "
+                    "FROM {}.model_transport_attempts a JOIN {}.model_requests r "
+                    "ON r.bot_id=a.bot_id AND r.request_id=a.request_id "
+                    "WHERE a.bot_id=%s AND a.state='SUCCEEDED'"
+                ).format(sql.Identifier(agent_schema), sql.Identifier(agent_schema)),
+                    (settings.bot_id,))).fetchone()
+            assert delivered_attempt is not None
+            outcome_query = effect_executor_outcome_service(
+                RuntimeKernelServiceContext(
+                    host.registry,
+                    ("kernel.runtime", "kernel.effect", "kernel.payload"),
+                )
+            )
+            stored_outcome = await outcome_query({
+                "protocol": "forest.effect-executor-outcome-request/1",
+                "effect_operation_id": delivered_attempt["effect_operation_ref"],
+                "attempt_id": delivered_attempt["attempt_id"],
+            })
+            assert stored_outcome["state"] == "SUCCEEDED"
+            assert stored_outcome["request_id"] == delivered_attempt["request_id"]
+            assert stored_outcome["receipt"]["status"] == "RESPONDED"
             conversation_schema = next(
                 item.storage.spec.namespace for item in host.registry.descriptors
                 if item.component_id == "conversation.scheduler"
