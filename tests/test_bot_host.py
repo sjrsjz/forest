@@ -1401,6 +1401,95 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
 
 
 @pytest.mark.postgres
+async def test_worker_host_can_reload_its_own_generation(tmp_path):
+    dsn = os.environ.get("FOREST_TEST_DSN")
+    if not dsn:
+        pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
+    name = "forest_self_reload_" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    parsed = urlsplit(dsn)
+    uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
+    settings = BotSettings(
+        bot_id="bot-worker-self-reload", dsn=uri,
+        model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
+        model="test-model", model_deployment_id="provider.chat-completions/test",
+        model_max_output_tokens=1024, model_input_modalities=("text",),
+        embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
+        embedding_api_key="test-embedding-key",
+        embedding_deployment_id="embedding.multimodal/qiyu-vl/test",
+        embedding_model_revision="test-revision/1",
+        embedding_model="Qwen/Qwen3-VL-Embedding-8B", embedding_dimensions=4096,
+        onebot_self_id="123456789", onebot_websocket_url="ws://127.0.0.1:3001/",
+        onebot_access_token="test-onebot-token",
+        allowed_group_ids=("933179609",), group_trigger_mode="MENTION",
+        private_enabled=True, shell_administrator_ids=("42",),
+        agent_system_prompt="Worker Host self-reload fixture.",
+    )
+
+    async def create_websocket(_url, _token, **_limits):
+        return FakeWebSocketClient(settings.onebot_self_id)
+
+    host = BotHost(
+        settings,
+        model_client_factory=FakeModelClient,
+        embedding_client_factory=FakeEmbeddingClient,
+        media_client_factory=FakeMediaClient,
+        vector_index_client_factory=FakeMilvusClient,
+        websocket_client_factory=create_websocket,
+        package_catalog=PackageCatalog(tmp_path / "self-reload-packages"),
+    )
+    try:
+        await host.start()
+        try:
+            before = host.registry.graph_identity
+            affected = set(host.registry.replacement_closure("component.worker-host"))
+            worker_host = host.registry.get("component.worker-host")
+            request = await worker_host.management_contract.action(
+                "module.reload",
+                operation_id="web:reload-worker-host-itself",
+                payload={
+                    "component_id": "component.worker-host",
+                    "expected_graph_revision": before.graph_revision,
+                },
+                authorization=SimpleNamespace(actor_ref="subject/host-admin"),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            assert request["state"] == "QUEUED"
+            async with asyncio.timeout(180):
+                while host.registry.graph_identity.graph_id == before.graph_id:
+                    latest = (await host._kernel.runtime.status())["latest_replacement"]
+                    if latest is not None and latest["state"] == "FAILED":
+                        pytest.fail(f"Worker Host self-reload failed: {latest}")
+                    await asyncio.sleep(0.1)
+                while (await host._kernel.runtime.status())["latest_replacement"]["state"] != "SUCCEEDED":
+                    await asyncio.sleep(0.1)
+            after = host.registry.graph_identity
+            assert after.graph_revision == before.graph_revision + 1
+            assert set(after.generations) == set(before.generations)
+            assert all(
+                (after.generations[component_id] != before.generations[component_id])
+                == (component_id in affected)
+                for component_id in before.generations
+            )
+            new_worker_host = host.registry.get("component.worker-host")
+            saved = await new_worker_host.management_contract.query(
+                "reload", {"request_id": request["request_id"]}
+            )
+            assert saved["state"] == "SUBMITTED"
+            assert saved["kernel"]["state"] == "SUCCEEDED"
+            assert saved["kernel"]["graph_revision"] == after.graph_revision
+            modules = await new_worker_host.management_contract.query("modules", {})
+            assert len(modules["members"]) == len(after.generations)
+        finally:
+            await host.close()
+    finally:
+        assert name.startswith("forest_self_reload_") and len(name) == 51
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        await admin.close()
+
+
+@pytest.mark.postgres
 async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
