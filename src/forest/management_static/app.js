@@ -508,6 +508,7 @@ async function refresh() {
     selector.replaceChildren(...graphModules.map(row => {
       const option = document.createElement('option');
       option.value = row.component_id;
+      option.dataset.packageDigest = row.artifact.package_digest;
       option.textContent = `${row.component_id} · ${row.artifact.package_version}`;
       return option;
     }));
@@ -515,7 +516,7 @@ async function refresh() {
       ? selected : graphModules[0].component_id;
     graphForm.dataset.revision = String(runtime.graph_revision);
     $('graph-replace-revision').textContent = String(runtime.graph_revision);
-    if (!graphForm.elements.package_digest.value) {
+    if (graphForm.elements.operation.value !== 'add' && !graphForm.elements.package_digest.value) {
       graphForm.elements.package_digest.value = graphModules.find(
         row => row.component_id === selector.value
       ).artifact.package_digest;
@@ -555,6 +556,19 @@ $('graph-replace-form').oninput = () => {
   delete $('graph-replace-form').dataset.operationKey;
 };
 
+$('graph-replace-form').elements.operation.onchange = () => {
+  const form = $('graph-replace-form');
+  const adding = form.elements.operation.value === 'add';
+  $('graph-existing-component').classList.toggle('hidden', adding);
+  $('graph-new-component').classList.toggle('hidden', !adding);
+  form.elements.component_id.required = !adding;
+  form.elements.new_component_id.required = adding;
+  form.querySelector('button[type="submit"]').textContent = adding ? '提交新增' : '提交替换';
+  form.elements.package_digest.value = adding ? ''
+    : (form.elements.component_id.selectedOptions[0]?.dataset.packageDigest || '');
+  delete form.dataset.operationKey;
+};
+
 $('graph-replace-form').onsubmit = async event => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -562,8 +576,10 @@ $('graph-replace-form').onsubmit = async event => {
   const button = form.querySelector('button[type="submit"]');
   const scope = apiBase;
   const epoch = workspaceEpoch;
+  const adding = form.elements.operation.value === 'add';
   const body = {
-    component_id: form.elements.component_id.value,
+    component_id: adding ? form.elements.new_component_id.value.trim()
+      : form.elements.component_id.value,
     package_digest: form.elements.package_digest.value.trim(),
     expected_graph_revision: Number(form.dataset.revision),
   };
@@ -572,7 +588,8 @@ $('graph-replace-form').onsubmit = async event => {
   ).join('');
   button.disabled = true;
   try {
-    const saved = await api('/management/v1/modules/$runtime/actions/module.replace', {
+    const saved = await api('/management/v1/modules/$runtime/actions/'
+      + (adding ? 'module.add' : 'module.replace'), {
       method: 'POST',
       headers: {'idempotency-key': form.dataset.operationKey},
       body: JSON.stringify(body),
@@ -586,7 +603,7 @@ $('graph-replace-form').onsubmit = async event => {
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 1000));
-      const status = await api('/management/v1/modules/$runtime/queries/module.replace.status', {
+      const status = await api('/management/v1/modules/$runtime/queries/module.change.status', {
         method: 'POST', body: JSON.stringify({operation_id: saved.operation_id}),
       });
       output.textContent = `请求 ${saved.operation_id}：${status.state}`

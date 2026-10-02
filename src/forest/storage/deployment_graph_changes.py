@@ -1,4 +1,4 @@
-"""Durable, lease-fenced deployment RuntimeGraph replacement requests."""
+"""Durable, lease-fenced deployment RuntimeGraph change requests."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ _COMPONENT = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 _DIGEST = re.compile(r"sha256:[a-f0-9]{64}\Z")
 
 
-class DeploymentReplacementAuthority:
+class DeploymentGraphChangeAuthority:
     def __init__(self, store) -> None:
         self.store = store
         self.generations = DeploymentGenerationAuthority(store)
@@ -30,7 +30,7 @@ class DeploymentReplacementAuthority:
             "package_digest",
             "expected_graph_revision",
         }:
-            raise ForestError("RUNTIME_REPLACEMENT_INPUT_INVALID", "Replacement fields differ", 422)
+            raise ForestError("DEPLOYMENT_GRAPH_CHANGE_INPUT_INVALID", "Graph change fields differ", 422)
         component_id = body["component_id"]
         package_digest = body["package_digest"]
         revision = body["expected_graph_revision"]
@@ -42,28 +42,29 @@ class DeploymentReplacementAuthority:
             or type(revision) is not int
             or revision < 1
             or ticket.target_component_id != "$runtime"
-            or ticket.action_key != "module.replace"
+            or ticket.action_key not in {"module.add", "module.replace"}
             or ticket.input_digest != digest_json(body)
         ):
             raise ForestError(
-                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Replacement input is invalid", 422
+                "DEPLOYMENT_GRAPH_CHANGE_INPUT_INVALID", "Graph change input is invalid", 422
             )
         operation_id = ticket.target_operation_ref
+        operation_kind = "ADD" if ticket.action_key == "module.add" else "REPLACE"
         activation_id = str(
             uuid5(
                 NAMESPACE_URL,
-                f"forest:{self.store.deployment_id}:replace:{operation_id}",
+                f"forest:{self.store.deployment_id}:graph-change:{operation_id}",
             )
         )
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.generations._lease_in(conn, lease)
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                (f"forest.deployment.replace/{self.store.deployment_id}/{operation_id}",),
+                (f"forest.deployment.graph-change/{self.store.deployment_id}/{operation_id}",),
             )
             existing = await (
                 await conn.execute(
-                    "SELECT * FROM forest_deployment.runtime_replacement_requests "
+                    "SELECT * FROM forest_deployment.runtime_graph_change_requests "
                     "WHERE deployment_id=%s AND operation_id=%s",
                     (self.store.deployment_id, operation_id),
                 )
@@ -72,10 +73,11 @@ class DeploymentReplacementAuthority:
                 if (
                     existing["input_digest"] != ticket.input_digest
                     or existing["requested_by"] != ticket.web_subject_ref
+                    or existing["operation_kind"] != operation_kind
                 ):
                     raise ForestError(
-                        "RUNTIME_REPLACEMENT_CONFLICT",
-                        "Replacement operation belongs to another input or actor",
+                        "DEPLOYMENT_GRAPH_CHANGE_CONFLICT",
+                        "Graph change operation belongs to another input or actor",
                         409,
                     )
                 return dict(existing)
@@ -101,8 +103,11 @@ class DeploymentReplacementAuthority:
                     (self.store.deployment_id, clock["active_graph_id"], component_id),
                 )
             ).fetchone()
-            if member is None:
-                raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Replacement target is absent", 404)
+            if (member is None) != (operation_kind == "ADD"):
+                raise ForestError(
+                    "RUNTIME_MODULE_SELECTION_CONFLICT",
+                    "Deployment module membership differs from the requested operation", 409,
+                )
             receipt = authorize_in(conn)
             if inspect.isawaitable(receipt):
                 receipt = await receipt
@@ -112,13 +117,14 @@ class DeploymentReplacementAuthority:
                 )
             saved = await (
                 await conn.execute(
-                    "INSERT INTO forest_deployment.runtime_replacement_requests("
-                    "deployment_id,operation_id,input_digest,requested_by,target_component_id,"
+                    "INSERT INTO forest_deployment.runtime_graph_change_requests("
+                    "deployment_id,operation_id,operation_kind,input_digest,requested_by,target_component_id,"
                     "package_digest,expected_graph_revision,activation_id,receipt_ticket_id) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                     (
                         self.store.deployment_id,
                         operation_id,
+                        operation_kind,
                         ticket.input_digest,
                         ticket.web_subject_ref,
                         component_id,
@@ -136,7 +142,7 @@ class DeploymentReplacementAuthority:
             await self.generations._lease_in(conn, lease)
             row = await (
                 await conn.execute(
-                    "SELECT * FROM forest_deployment.runtime_replacement_requests "
+                    "SELECT * FROM forest_deployment.runtime_graph_change_requests "
                     "WHERE deployment_id=%s AND (state='QUEUED' OR "
                     "(state='RUNNING' AND owner_epoch<%s)) "
                     "ORDER BY created_at,operation_id FOR UPDATE SKIP LOCKED LIMIT 1",
@@ -147,7 +153,7 @@ class DeploymentReplacementAuthority:
                 return None
             saved = await (
                 await conn.execute(
-                    "UPDATE forest_deployment.runtime_replacement_requests "
+                    "UPDATE forest_deployment.runtime_graph_change_requests "
                     "SET state='RUNNING',owner_epoch=%s,attempt_count=attempt_count+1,"
                     "updated_at=clock_timestamp() WHERE deployment_id=%s AND operation_id=%s "
                     "RETURNING *",
@@ -179,7 +185,7 @@ class DeploymentReplacementAuthority:
                 return None
             if row["binding"]["package"]["package_digest"] != request["package_digest"]:
                 raise ForestError(
-                    "RUNTIME_REPLACEMENT_RESULT_INVALID",
+                    "DEPLOYMENT_GRAPH_CHANGE_RESULT_INVALID",
                     "Published package differs from the frozen request",
                     409,
                 )
@@ -196,18 +202,18 @@ class DeploymentReplacementAuthority:
         if (graph is None) == (error_code is None) or (
             error_code is not None and re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", error_code) is None
         ):
-            raise ForestError("RUNTIME_REPLACEMENT_RESULT_INVALID", "Invalid result", 422)
+            raise ForestError("DEPLOYMENT_GRAPH_CHANGE_RESULT_INVALID", "Invalid result", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.generations._lease_in(conn, lease)
             row = await (
                 await conn.execute(
-                    "SELECT * FROM forest_deployment.runtime_replacement_requests "
+                    "SELECT * FROM forest_deployment.runtime_graph_change_requests "
                     "WHERE deployment_id=%s AND operation_id=%s FOR UPDATE",
                     (self.store.deployment_id, operation_id),
                 )
             ).fetchone()
             if row is None:
-                raise ForestError("RUNTIME_REPLACEMENT_NOT_FOUND", "Request is absent", 404)
+                raise ForestError("DEPLOYMENT_GRAPH_CHANGE_NOT_FOUND", "Request is absent", 404)
             if row["state"] in {"SUCCEEDED", "FAILED"}:
                 if (
                     row["state"] != ("SUCCEEDED" if graph is not None else "FAILED")
@@ -217,13 +223,13 @@ class DeploymentReplacementAuthority:
                     or row["error_code"] != error_code
                 ):
                     raise ForestError(
-                        "RUNTIME_REPLACEMENT_CONFLICT",
-                        "Replacement terminal result differs",
+                        "DEPLOYMENT_GRAPH_CHANGE_CONFLICT",
+                        "Graph change terminal result differs",
                         409,
                     )
                 return dict(row)
             if row["state"] != "RUNNING" or row["owner_epoch"] != lease.owner_epoch:
-                raise ForestError("STALE_RUNTIME_REPLACEMENT", "Request owner changed", 409)
+                raise ForestError("STALE_DEPLOYMENT_GRAPH_CHANGE", "Request owner changed", 409)
             if graph is not None:
                 proof = await (
                     await conn.execute(
@@ -239,7 +245,7 @@ class DeploymentReplacementAuthority:
                     or proof["state"] not in {"ACTIVE", "RETIRED"}
                 ):
                     raise ForestError(
-                        "RUNTIME_REPLACEMENT_RESULT_INVALID", "Graph proof differs", 409
+                        "DEPLOYMENT_GRAPH_CHANGE_RESULT_INVALID", "Graph proof differs", 409
                     )
             else:
                 proof = await (
@@ -251,11 +257,11 @@ class DeploymentReplacementAuthority:
                 ).fetchone()
                 if proof is not None and proof["state"] in {"ACTIVE", "RETIRED"}:
                     raise ForestError(
-                        "RUNTIME_REPLACEMENT_RESULT_INVALID", "Published Graph cannot fail", 409
+                        "DEPLOYMENT_GRAPH_CHANGE_RESULT_INVALID", "Published Graph cannot fail", 409
                     )
             saved = await (
                 await conn.execute(
-                    "UPDATE forest_deployment.runtime_replacement_requests "
+                    "UPDATE forest_deployment.runtime_graph_change_requests "
                     "SET state=%s,result_graph_id=%s,result_graph_revision=%s,error_code=%s,"
                     "updated_at=clock_timestamp() WHERE deployment_id=%s AND operation_id=%s "
                     "RETURNING *",
@@ -275,11 +281,11 @@ class DeploymentReplacementAuthority:
         async with self.store.pool.connection() as conn:
             row = await (
                 await conn.execute(
-                    "SELECT * FROM forest_deployment.runtime_replacement_requests "
+                    "SELECT * FROM forest_deployment.runtime_graph_change_requests "
                     "WHERE deployment_id=%s AND operation_id=%s",
                     (self.store.deployment_id, operation_id),
                 )
             ).fetchone()
             if row is None:
-                raise ForestError("RUNTIME_REPLACEMENT_NOT_FOUND", "Request is absent", 404)
+                raise ForestError("DEPLOYMENT_GRAPH_CHANGE_NOT_FOUND", "Request is absent", 404)
             return dict(row)

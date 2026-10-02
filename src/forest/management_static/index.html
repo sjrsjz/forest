@@ -48,9 +48,11 @@
       <section id="overview" class="pane">
         <div class="pane-head"><div><small>RUNTIME GRAPH</small><h1>模块注册表</h1></div></div>
         <details id="graph-control" class="graph-control hidden">
-          <summary>部署图 · 替换包</summary>
+          <summary>部署图 · 新增 / 替换包</summary>
           <form id="graph-replace-form" class="graph-replace-form">
-            <label>模块<select name="component_id" required></select></label>
+            <label>操作<select name="operation"><option value="replace">替换</option><option value="add">新增</option></select></label>
+            <label id="graph-existing-component">现有模块<select name="component_id" required></select></label>
+            <label id="graph-new-component" class="hidden">新模块 ID<input name="new_component_id" pattern="[a-z0-9][a-z0-9._-]{0,127}" spellcheck="false"></label>
             <label>包摘要<input name="package_digest" required pattern="sha256:[a-f0-9]{64}" spellcheck="false"></label>
             <span>当前图修订 <code id="graph-replace-revision"></code></span>
             <button type="submit">提交替换</button>

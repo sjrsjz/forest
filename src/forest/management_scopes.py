@@ -29,7 +29,7 @@ class DeploymentManagementGateway:
         web_receipts=None,
         audit=None,
         runtime_registry_provider: Callable | None = None,
-        replacement_authority=None,
+        graph_change_authority=None,
     ) -> None:
         self.deployment_id = deployment_id
         self.components = components
@@ -38,7 +38,7 @@ class DeploymentManagementGateway:
         self.web_receipts = web_receipts
         self.audit = audit
         self._runtime_registry_provider = runtime_registry_provider
-        self.replacement_authority = replacement_authority
+        self.graph_change_authority = graph_change_authority
         self._operation_lock = asyncio.Lock()
 
     @property
@@ -231,7 +231,7 @@ class DeploymentManagementGateway:
     ):
         if component_id == "$runtime":
             if (
-                query_id != "module.replace.status"
+                query_id != "module.change.status"
                 or not isinstance(body, dict)
                 or (set(body) != {"operation_id"})
             ):
@@ -251,11 +251,11 @@ class DeploymentManagementGateway:
                 input_digest=digest_json(body),
                 required_role="AUDITOR",
             )
-            if self.replacement_authority is None:
+            if self.graph_change_authority is None:
                 raise ForestError(
                     "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Replacement authority is unavailable", 503
                 )
-            return await self.replacement_authority.get(body["operation_id"])
+            return await self.graph_change_authority.get(body["operation_id"])
         binding = self._package_binding(component_id)
         generation_id, graph_revision = (
             binding[:2] if binding is not None else self.authorization_target(component_id)
@@ -289,11 +289,11 @@ class DeploymentManagementGateway:
     ):
         operation_id = operation_id or self.operation_id(component_id, action_id, idempotency_key)
         if component_id == "$runtime":
-            if action_id != "module.replace":
+            if action_id not in {"module.add", "module.replace"}:
                 raise ForestError(
                     "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404
                 )
-            if self.replacement_authority is None:
+            if self.graph_change_authority is None:
                 raise ForestError(
                     "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Replacement authority is unavailable", 503
                 )
@@ -324,7 +324,7 @@ class DeploymentManagementGateway:
                 input_digest,
                 operation_id,
             )
-            return await self.replacement_authority.enqueue_web(
+            return await self.graph_change_authority.enqueue_web(
                 lease=registry.runtime.authority_lease(),
                 ticket=authorization,
                 body=body,

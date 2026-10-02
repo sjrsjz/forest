@@ -90,9 +90,10 @@ ALTER TABLE forest_deployment.runtime_graph_clock
     ADD FOREIGN KEY (deployment_id,active_graph_id)
     REFERENCES forest_deployment.runtime_graphs(deployment_id,graph_id);
 
-CREATE TABLE forest_deployment.runtime_replacement_requests (
+CREATE TABLE forest_deployment.runtime_graph_change_requests (
     deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    operation_kind text NOT NULL CHECK (operation_kind IN ('ADD','REPLACE')),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[0-9a-f]{64}$'),
     requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 128),
     target_component_id text NOT NULL CHECK (target_component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
@@ -124,8 +125,8 @@ CREATE TABLE forest_deployment.runtime_replacement_requests (
             AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NOT NULL)
     )
 );
-CREATE INDEX runtime_replacement_queue
-    ON forest_deployment.runtime_replacement_requests(deployment_id,state,created_at,operation_id);
+CREATE INDEX runtime_graph_change_queue
+    ON forest_deployment.runtime_graph_change_requests(deployment_id,state,created_at,operation_id);
 
 CREATE TABLE forest_deployment.supervisor_lease (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
@@ -248,7 +249,7 @@ CREATE TABLE forest_deployment.web_authority_receipts (
     CHECK (expires_at > issued_at AND expires_at <= issued_at + interval '30 seconds')
 );
 
-ALTER TABLE forest_deployment.runtime_replacement_requests
+ALTER TABLE forest_deployment.runtime_graph_change_requests
     ADD FOREIGN KEY (deployment_id,receipt_ticket_id)
     REFERENCES forest_deployment.web_authority_receipts(deployment_id,ticket_id);
 
@@ -531,17 +532,17 @@ CREATE TRIGGER web_authority_receipt_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.web_authority_receipts
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
-CREATE FUNCTION forest_deployment.guard_runtime_replacement() RETURNS trigger
+CREATE FUNCTION forest_deployment.guard_runtime_graph_change() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 BEGIN
     IF TG_OP = 'DELETE' THEN
-        RAISE EXCEPTION 'Deployment replacement request cannot be deleted';
+        RAISE EXCEPTION 'Deployment Graph change request cannot be deleted';
     END IF;
-    IF ROW(OLD.deployment_id,OLD.operation_id,OLD.input_digest,OLD.requested_by,
+    IF ROW(OLD.deployment_id,OLD.operation_id,OLD.operation_kind,OLD.input_digest,OLD.requested_by,
            OLD.target_component_id,OLD.package_digest,OLD.expected_graph_revision,
            OLD.activation_id,OLD.receipt_ticket_id,OLD.created_at)
        IS DISTINCT FROM
-       ROW(NEW.deployment_id,NEW.operation_id,NEW.input_digest,NEW.requested_by,
+       ROW(NEW.deployment_id,NEW.operation_id,NEW.operation_kind,NEW.input_digest,NEW.requested_by,
            NEW.target_component_id,NEW.package_digest,NEW.expected_graph_revision,
            NEW.activation_id,NEW.receipt_ticket_id,NEW.created_at)
        OR OLD.state IN ('SUCCEEDED','FAILED')
@@ -555,15 +556,15 @@ BEGIN
                 AND NEW.attempt_count=OLD.attempt_count
                 AND NEW.owner_epoch=OLD.owner_epoch)
        ) OR NEW.updated_at<OLD.updated_at THEN
-        RAISE EXCEPTION 'Invalid deployment replacement transition';
+        RAISE EXCEPTION 'Invalid deployment Graph change transition';
     END IF;
     RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER runtime_replacement_transition
-    BEFORE UPDATE OR DELETE ON forest_deployment.runtime_replacement_requests
-    FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_runtime_replacement();
+CREATE TRIGGER runtime_graph_change_transition
+    BEFORE UPDATE OR DELETE ON forest_deployment.runtime_graph_change_requests
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_runtime_graph_change();
 
 CREATE TRIGGER deployment_audit_record_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.audit_records

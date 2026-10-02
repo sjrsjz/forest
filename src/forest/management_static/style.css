@@ -29,7 +29,7 @@ button.quiet { color:#bad0c5; background:#13251e; border:1px solid #315144; }
 .module-table { min-height:0; overflow:auto; }
 .graph-control { flex:0 0 auto; border-bottom:1px solid #223a30; padding:8px 16px; }
 .graph-control summary { cursor:pointer; color:#a9d9c1; font-weight:600; }
-.graph-replace-form { display:grid; grid-template-columns:minmax(160px,1fr) minmax(280px,2fr) auto auto; gap:10px; align-items:end; margin:10px 0 6px; }
+.graph-replace-form { display:grid; grid-template-columns:110px minmax(160px,1fr) minmax(280px,2fr) auto auto; gap:10px; align-items:end; margin:10px 0 6px; }
 .graph-replace-form label { display:grid; gap:4px; min-width:0; color:#9db5a8; font-size:12px; }
 .graph-replace-form input,.graph-replace-form select { width:100%; min-width:0; }
 .graph-replace-form span { color:#9db5a8; white-space:nowrap; padding-bottom:9px; }

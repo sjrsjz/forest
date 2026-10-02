@@ -48,9 +48,9 @@ from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_generation import DeploymentGenerationAuthority
+from forest.storage.deployment_graph_changes import DeploymentGraphChangeAuthority
 from forest.storage.deployment_module_configuration import DeploymentModuleConfigurationRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
-from forest.storage.deployment_replacements import DeploymentReplacementAuthority
 from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInstaller
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
@@ -341,7 +341,7 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
         official_sources=(Path(__file__).parents[1] / "src/forest/builtin/deployment_audit",),
     )
     await controller.start()
-    replacements = DeploymentReplacementAuthority(repository.store)
+    graph_changes = DeploymentGraphChangeAuthority(repository.store)
     identity = DeploymentWebIdentityAuthority(
         repository.store,
         active_key_id="key/replacement",
@@ -366,13 +366,14 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
         deployment_id=repository.store.deployment_id,
         components=(),
         deployment_registry_provider=lambda: controller.registry,
-        deployment_replacements=replacements,
+        deployment_graph_changes=graph_changes,
         identity_authority=identity,
         deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
         deployment_audit=DeploymentAuditRepository(repository.store),
         allowed_origin="http://forest.test",
     )
-    worker = asyncio.create_task(controller.serve_replacements(replacements))
+    worker = asyncio.create_task(controller.serve_graph_changes(graph_changes))
+    restarted = None
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://forest.test"
@@ -419,7 +420,7 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
             assert audit[0]["receipt_ticket_id"] == request["receipt_ticket_id"]
             status_path = (
                 "/management/v1/scopes/deployment/deployment/modules/"
-                "$runtime/queries/module.replace.status"
+                "$runtime/queries/module.change.status"
             )
             async with asyncio.timeout(15):
                 while True:
@@ -447,7 +448,7 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
                 json={**body, "package_digest": "sha256:" + "1" * 64},
             )
             assert conflict.status_code == 409
-            assert conflict.json()["code"] == "RUNTIME_REPLACEMENT_CONFLICT"
+            assert conflict.json()["code"] == "DEPLOYMENT_GRAPH_CHANGE_CONFLICT"
             async with repository.store.pool.connection() as conn:
                 count = await (
                     await conn.execute(
@@ -461,9 +462,109 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
                 controller.registry.graph_identity.graph_revision
                 == status.json()["result_graph_revision"]
             )
+            probe_source = Path(__file__).parents[1] / "examples/deployment_probe"
+            staged_catalog = PackageCatalog(tmp_path / "staged-deployment-probe")
+            staged = staged_catalog.build(probe_source)
+            probe = package_catalog.import_archive(staged_catalog.export_archive(staged.digest))
+            add_body = {
+                "component_id": probe.component["id"],
+                "package_digest": probe.digest,
+                "expected_graph_revision": controller.registry.graph_identity.graph_revision,
+            }
+            added = await client.post(
+                action_path.replace("module.replace", "module.add"),
+                headers={**headers, "idempotency-key": "add-probe-1"},
+                json=add_body,
+            )
+            assert added.status_code == 200, added.text
+            assert added.json()["operation_kind"] == "ADD"
+            async with asyncio.timeout(15):
+                while True:
+                    add_status = await client.post(
+                        status_path, headers=headers,
+                        json={"operation_id": added.json()["operation_id"]},
+                    )
+                    assert add_status.status_code == 200, add_status.text
+                    if add_status.json()["state"] in {"SUCCEEDED", "FAILED"}:
+                        break
+                    await asyncio.sleep(0.05)
+            assert add_status.json()["state"] == "SUCCEEDED", add_status.text
+            result = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "example.deployment-probe/queries/probe.echo",
+                headers=headers, json={"value": "live"},
+            )
+            assert result.status_code == 200, result.text
+            assert result.json() == {"echo": "live"}
+            ui_metadata, _ui_content = probe.management_ui()
+            ui_response = await client.get(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                f"example.deployment-probe/management-ui/{ui_metadata['sha256']}"
+            )
+            assert ui_response.status_code == 200, ui_response.text
+            assert "查询插件" in ui_response.text
+            next_source = tmp_path / "next-deployment-probe"
+            shutil.copytree(probe_source, next_source)
+            manifest = next_source / "module.toml"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    'version = "0.1.0"', 'version = "0.1.1"', 1
+                ), encoding="utf-8",
+            )
+            worker_source = next_source / "python/deployment_probe.py"
+            worker_source.write_text(
+                worker_source.read_text(encoding="utf-8").replace(
+                    'payload["value"]', '"next:" + payload["value"]'
+                ), encoding="utf-8",
+            )
+            next_staged = staged_catalog.build(next_source)
+            next_probe = package_catalog.import_archive(
+                staged_catalog.export_archive(next_staged.digest)
+            )
+            retained_audit = controller.registry.graph_identity.generations["deployment.audit"]
+            upgraded = await client.post(
+                action_path,
+                headers={**headers, "idempotency-key": "replace-probe-1"},
+                json={
+                    "component_id": probe.component["id"],
+                    "package_digest": next_probe.digest,
+                    "expected_graph_revision": controller.registry.graph_identity.graph_revision,
+                },
+            )
+            assert upgraded.status_code == 200, upgraded.text
+            async with asyncio.timeout(15):
+                while True:
+                    upgrade_status = await client.post(
+                        status_path, headers=headers,
+                        json={"operation_id": upgraded.json()["operation_id"]},
+                    )
+                    assert upgrade_status.status_code == 200, upgrade_status.text
+                    if upgrade_status.json()["state"] in {"SUCCEEDED", "FAILED"}:
+                        break
+                    await asyncio.sleep(0.05)
+            assert upgrade_status.json()["state"] == "SUCCEEDED", upgrade_status.text
+            assert controller.registry.graph_identity.generations["deployment.audit"] == retained_audit
+            result = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "example.deployment-probe/queries/probe.echo",
+                headers=headers, json={"value": "live"},
+            )
+            assert result.status_code == 200, result.text
+            assert result.json() == {"echo": "next:live"}
+            restarted = DeploymentPackageController(
+                runtime, package_catalog,
+                official_sources=(Path(__file__).parents[1] / "src/forest/builtin/deployment_audit",),
+            )
+            recovered = await restarted.start()
+            assert recovered.get(probe.component["id"]).snapshot.digest == next_probe.digest
+            assert await recovered.get(probe.component["id"]).management_contract.query(
+                "probe.echo", {"value": "recovered"}
+            ) == {"echo": "next:recovered"}
     finally:
         worker.cancel()
         await asyncio.gather(worker, return_exceptions=True)
+        if restarted is not None:
+            await restarted.close()
         await controller.close()
 
 

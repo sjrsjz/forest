@@ -1996,11 +1996,15 @@ class PackageCatalog:
     def __init__(self, root: Path) -> None:
         self.root = private_directory(root)
 
-    def build(self, source: Path, *, development: bool = False) -> PackageSnapshot:
+    def _source_files(self, source: Path) -> tuple[dict[str, bytes], dict[str, bytes]]:
         source, source_files, captured, _ = _validated_source(source)
         catalog_root = self.root.resolve()
         if catalog_root == source or catalog_root.is_relative_to(source):
             _fail("INVALID_PACKAGE_PATH", "Artifact catalog cannot be inside the source package")
+        return source_files, captured
+
+    def build(self, source: Path, *, development: bool = False) -> PackageSnapshot:
+        source_files, captured = self._source_files(source)
         if development:
             source_digest = digest_json(
                 {name: hashlib.sha256(value).hexdigest() for name, value in source_files.items()}
@@ -2031,8 +2035,8 @@ class PackageCatalog:
         an artifact's own manifest cannot grant itself official SQL execution.
         """
 
-        snapshot = self.build(source)
-        component = snapshot.component
+        _source_files, captured = self._source_files(source)
+        component = _manifest(captured)["components"][0]
         storage = component.get("storage")
         if (
             component["scope"] != "deployment"
@@ -2043,6 +2047,7 @@ class PackageCatalog:
                 "OFFICIAL_PACKAGE_SOURCE_INVALID",
                 "Official deployment source must declare deployment-scoped official storage",
             )
+        snapshot = self._publish(captured)
         with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
             db.execute("PRAGMA synchronous=FULL")
             db.execute(

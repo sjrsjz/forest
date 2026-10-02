@@ -71,6 +71,12 @@ def source(tmp_path):
 
 
 def test_deployment_official_provenance_is_not_a_manifest_claim(tmp_path):
+    invalid = PackageCatalog(tmp_path / "invalid-official")
+    with pytest.raises(ForestError) as wrong_scope:
+        invalid.build_official(EXAMPLE)
+    assert wrong_scope.value.code == "OFFICIAL_PACKAGE_SOURCE_INVALID"
+    assert invalid.list() == []
+
     source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/deployment_audit"
     catalog = PackageCatalog(tmp_path / "official")
     artifact = catalog.build(source_root)

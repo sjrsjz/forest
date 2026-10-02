@@ -432,13 +432,13 @@ Secret 密文版本固化创建时的 `key_id`，Supervisor 从受保护的
 试解或静默重加密。文件拒绝重复 JSON key、未知字段、非规范 Base64、非 32 字节 key、重复 key
 material、缺失 active 引用和超过上限的 key 数，且 key material 不进入环境变量、repr、API 或日志。
 
-### 7.1 部署包查询与热替换的当前边界
+### 7.1 部署包查询、新增与热替换的当前边界
 
 `deployment.audit` 是部署作用域的只读包：包内持有 SQL 查询、输入输出 schema、隔离 Worker 服务和管理 UI；部署审计事实的追加仍由内核在 Web 管理操作事务中完成。Supervisor 从不可变 PackageSnapshot 装配真实 deployment Registry，配置来自该包的私有命名空间，Domain 查询按 deployment ID、包摘要和活动 Generation 围栏。Web 网关从活动 Registry 发现贡献，并以真实图修订和 Generation 签发管理票据；调用前后复核目标，旧票据不能在图切换后误入新代际。
 
-部署包控制器持有当前 Registry，以预期图修订 CAS 执行候选预热、旧代际排空、原子发布、新代际派发和失败恢复；重启时从数据库活动 Generation 绑定取回包摘要，再从持久包目录打开同一不可变工件，缺失工件必须阻止启动而不是退回镜像默认版。部署 Web 写回执在同一事务内锁定活动图头，并复核 `$runtime` 图身份或模块 Generation 与控制准入。管理员的 `$runtime/module.replace` 先把票据回执、审计事实和固定目标包摘要/图修订/activation 的请求原子提交，再由 Supervisor lease 认领；发布后的重放按 activation 的活动或退役图证据结算，发布前中断的旧 owner 请求明确失败，不能用相同 activation 在新 lease 下盲重试。管理台通用图面板只提交和观察该内核操作，不能替模块包提供专用业务表单。
+部署包控制器持有当前 Registry，以预期图修订 CAS 执行候选预热、受影响旧代际排空、原子发布、新代际派发和失败恢复；纯新增且无受影响旧成员时不制造空排空集合，保留成员直接由新图继承。重启时从数据库活动 Generation 绑定取回包摘要，再从持久包目录打开同一不可变工件，缺失工件必须阻止启动而不是退回镜像默认版。部署 Web 写回执在同一事务内锁定活动图头，并复核 `$runtime` 图身份或模块 Generation 与控制准入。管理员的 `$runtime/module.add` 与 `$runtime/module.replace` 先把票据回执、审计事实和固定操作种类、目标包摘要、图修订、activation 的请求原子提交，再由 Supervisor lease 认领；二者共用 `$runtime/module.change.status` 查询持久状态。发布后的重放按 activation 的活动或退役图证据结算，发布前中断的旧 owner 请求明确失败，不能用相同 activation 在新 lease 下盲重试。管理台通用图面板只提交和观察内核图操作，不能替模块包提供专用业务表单。
 
-当前入口仅能替换已装配的官方只读部署包。`execution_profile = "official"` 是工件自报字段，不能证明官方来源；目录仅在宿主显式构建官方来源时登记摘要，部署控制器启动、恢复和替换都要求该独立登记事实。普通本地构建或 ZIP 导入即使声明同一 profile，也不能取得官方 SQL 执行资格。部署包目录的 Web 导入、候选校验与通用 deployment 授权/写端口仍待完成。其余账号、配置、Bot 目录、Secret 与供应服务尚未完成包化，现存宿主对象的伪 Generation 只能视为过渡状态。官方只读审计包的冻结能力集不等同于通用部署授权权威；引入写入、Effect 或第三方包前，必须建立可审计的部署作用域授权与事务端口，不能扩大当前引导器的默认许可。未上线部署数据库在基线改变后重建，不引入在线迁移兼容层。
+当前支持已装配官方只读包的替换，以及普通 ZIP 导入的声明式、无存储、无额外能力请求的 deployment Worker 新增与替换；普通包只开放 manifest 声明为 `read` 的 Worker 服务和管理查询，配置先由冻结 bootstrap seed 初始化且当前只读。`execution_profile = "official"` 是工件自报字段，不能证明官方来源；目录仅在宿主显式构建官方来源时登记摘要，部署控制器启动、恢复和替换都要求该独立登记事实。普通本地构建或 ZIP 导入即使声明同一 profile，也不能取得官方 SQL 执行资格。包的隔离 Python 进程目前不是恶意代码 OS 沙箱，故普通部署插件仍应视为由管理员主动安装的代码；协议级端口限制不能被表述为文件或网络系统调用隔离。部署包目录的 Web ZIP 导入、候选校验、普通包私有存储、通用 deployment 授权/写端口和模块配置换代仍待完成。其余账号、配置、Bot 目录、Secret 与供应服务尚未完成包化，现存宿主对象的伪 Generation 只能视为过渡状态。官方只读审计包的冻结能力集不等同于通用部署授权权威；引入写入或 Effect 前，必须建立可审计的部署作用域授权与事务端口，不能扩大当前引导器的默认许可。未上线部署数据库在基线改变后重建，不引入在线迁移兼容层。
 
 ## 8. 完成判据
 

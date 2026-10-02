@@ -144,7 +144,7 @@ class DeploymentCatalogRepository:
             "runtime_graphs",
             "runtime_generations",
             "runtime_graph_members",
-            "runtime_replacement_requests",
+            "runtime_graph_change_requests",
             "supervisor_lease",
             "web_accounts",
             "web_setup_state",
@@ -184,7 +184,7 @@ class DeploymentCatalogRepository:
             "guard_web_account_change",
             "guard_web_session_change",
             "guard_web_setup_change",
-            "guard_runtime_replacement",
+            "guard_runtime_graph_change",
         }:
             raise ForestError(
                 "DEPLOYMENT_SCHEMA_TAMPERED",

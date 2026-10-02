@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from forest.deployment_packages import bootstrap_builtin_deployment_package
+from forest.deployment_packages import (
+    bootstrap_builtin_deployment_package,
+    bootstrap_installed_deployment_package,
+)
 from forest.errors import ForestError
 from forest.packages import PackageCatalog, PackageSnapshot
 from forest.runtime_modules import RuntimeModuleRegistry
@@ -47,11 +50,23 @@ class DeploymentPackageController:
     async def _assemble(
         self, snapshots: dict[str, PackageSnapshot], *, activation_id: str | None = None
     ) -> RuntimeModuleRegistry:
-        descriptors = [
-            await bootstrap_builtin_deployment_package(snapshot, self.runtime)
-            for _component_id, snapshot in sorted(snapshots.items())
-        ]
+        descriptors = []
+        for _component_id, snapshot in sorted(snapshots.items()):
+            declared = snapshot.storage_bundle()
+            official = declared is not None and declared[0]["execution_profile"] == "official"
+            compile_package = (
+                bootstrap_builtin_deployment_package
+                if official else bootstrap_installed_deployment_package
+            )
+            descriptors.append(await compile_package(snapshot, self.runtime))
         return RuntimeModuleRegistry(self.runtime, tuple(descriptors), activation_id=activation_id)
+
+    def _selected_snapshot(self, digest: str) -> PackageSnapshot:
+        snapshot = self.catalog.get(digest)
+        declared = snapshot.storage_bundle()
+        if declared is not None and declared[0]["execution_profile"] == "official":
+            return self.catalog.get_official_deployment(digest)
+        return snapshot
 
     async def start(self) -> RuntimeModuleRegistry:
         async with self._lock:
@@ -73,7 +88,7 @@ class DeploymentPackageController:
             graph, selected = await self.runtime.generation_authority.active_package_selection()
             snapshots = (
                 {
-                    component_id: self.catalog.get_official_deployment(digest)
+                    component_id: self._selected_snapshot(digest)
                     for component_id, digest in selected.items()
                 }
                 if graph is not None
@@ -108,21 +123,56 @@ class DeploymentPackageController:
     ) -> RuntimeModuleRegistry:
         """Replace one package under a graph-revision CAS; never reopen an unknown head."""
 
+        return await self._change(
+            component_id, package_digest,
+            expected_graph_revision=expected_graph_revision,
+            activation_id=activation_id, adding=False,
+        )
+
+    async def add(
+        self,
+        component_id: str,
+        package_digest: str,
+        *,
+        expected_graph_revision: int,
+        activation_id: str | None = None,
+    ) -> RuntimeModuleRegistry:
+        """Publish a new deployment package Generation while retaining unrelated members."""
+
+        return await self._change(
+            component_id, package_digest,
+            expected_graph_revision=expected_graph_revision,
+            activation_id=activation_id, adding=True,
+        )
+
+    async def _change(
+        self,
+        component_id: str,
+        package_digest: str,
+        *,
+        expected_graph_revision: int,
+        activation_id: str | None,
+        adding: bool,
+    ) -> RuntimeModuleRegistry:
+
         async with self._lock:
             previous = self.registry
             if previous.graph_identity.graph_revision != expected_graph_revision:
                 raise ForestError(
                     "RUNTIME_GRAPH_REVISION_CONFLICT",
-                    "Deployment RuntimeGraph changed before replacement",
+                    "Deployment RuntimeGraph changed before the requested change",
                     409,
                 )
-            if component_id not in self._snapshots:
-                raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Replacement target is absent", 404)
-            snapshot = self.catalog.get_official_deployment(package_digest)
+            if adding == (component_id in self._snapshots):
+                raise ForestError(
+                    "RUNTIME_MODULE_SELECTION_CONFLICT",
+                    "Deployment module membership differs from the requested operation", 409,
+                )
+            snapshot = self._selected_snapshot(package_digest)
             if snapshot.component["id"] != component_id:
                 raise ForestError(
                     "DEPLOYMENT_PACKAGE_SELECTION_INVALID",
-                    "Replacement artifact has another component identity",
+                    "Graph change artifact has another component identity",
                     409,
                 )
             snapshots = {**self._snapshots, component_id: snapshot}
@@ -131,12 +181,13 @@ class DeploymentPackageController:
             drained = False
             try:
                 await candidate.prewarm()
-                await previous.drain_owned_work_for_replacement(
-                    candidate.activation_id,
-                    components=(affected if len(affected) < len(previous.order) else None),
-                    candidate_components=candidate.prepared_replacement_facts(),
-                )
-                drained = True
+                if affected:
+                    await previous.drain_owned_work_for_replacement(
+                        candidate.activation_id,
+                        components=(affected if len(affected) < len(previous.order) else None),
+                        candidate_components=candidate.prepared_replacement_facts(),
+                    )
+                    drained = True
                 await candidate.start()
                 candidate.accept_retained_ownership()
             except BaseException as error:
@@ -221,7 +272,7 @@ class DeploymentPackageController:
                 raise failure from errors[0]
             return candidate
 
-    async def serve_replacements(self, authority) -> None:
+    async def serve_graph_changes(self, authority) -> None:
         """Reconcile durable requests before executing another Graph transition."""
 
         while not self._closed:
@@ -234,8 +285,8 @@ class DeploymentPackageController:
                 if evidence is None:
                     if request["attempt_count"] > 1:
                         raise ForestError(
-                            "RUNTIME_REPLACEMENT_INTERRUPTED",
-                            "Prior deployment replacement ended before publication",
+                            "DEPLOYMENT_GRAPH_CHANGE_INTERRUPTED",
+                            "Prior deployment Graph change ended before publication",
                             409,
                         )
                     if (
@@ -244,19 +295,19 @@ class DeploymentPackageController:
                     ):
                         raise ForestError(
                             "RUNTIME_GRAPH_REVISION_CONFLICT",
-                            "Deployment Graph changed before queued replacement",
+                            "Deployment Graph changed before queued change",
                             409,
                         )
-                    await self.replace(
-                        request["target_component_id"],
-                        request["package_digest"],
+                    operation = self.add if request["operation_kind"] == "ADD" else self.replace
+                    await operation(
+                        request["target_component_id"], request["package_digest"],
                         expected_graph_revision=request["expected_graph_revision"],
                         activation_id=request["activation_id"],
                     )
                     evidence = await authority.published_graph(request)
                     if evidence is None:
                         raise ForestError(
-                            "RUNTIME_REPLACEMENT_RESULT_INVALID",
+                            "DEPLOYMENT_GRAPH_CHANGE_RESULT_INVALID",
                             "Published deployment Graph has no durable evidence",
                             503,
                         )
