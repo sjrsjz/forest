@@ -38,6 +38,21 @@ def main() -> None:
     second = {**first, "items": [], "has_more": False, "next_cursor": None}
     for value in (first, second):
         Draft202012Validator(page_schema).validate(value)
+    session_schema = json.loads((
+        root / "src/forest/builtin/agent_runtime/schemas/management-sessions-page-output.json"
+    ).read_text(encoding="utf-8"))
+    session_row = {
+        "session_id": "session:one", "conversation_ref": row["conversation_ref"],
+        "state": "ACTIVE", "active_run_id": row["run_id"],
+        "session_epoch": 1, "terminal_reason_code": None,
+        "created_at": row["created_at"], "updated_at": row["updated_at"],
+        "closed_at": None,
+    }
+    session_page = {
+        "snapshot_at": first["snapshot_at"], "filter_digest": first["filter_digest"],
+        "items": [session_row], "has_more": False, "next_cursor": None,
+    }
+    Draft202012Validator(session_schema).validate(session_page)
     step_schema = json.loads((
         root / "src/forest/builtin/agent_runtime/schemas/management-run-steps-page-output.json"
     ).read_text(encoding="utf-8"))
@@ -81,7 +96,9 @@ frame.addEventListener('load',()=>{
     if(data.type!=='query')return;
     calls.push({operation_id:data.operation_id,value:data.value});
     let value;
-    if(data.operation_id==='agent.runs.page'){
+    if(data.operation_id==='agent.sessions.page'){
+      value=__SESSIONS__;
+    }else if(data.operation_id==='agent.runs.page'){
       value=data.value.after_run_id?__SECOND__:__FIRST__;
     }else if(data.operation_id==='agent.run'){
       value={run_id:'run:one',session_id:'session:one',conversation_ref:'onebot:group:933179609',
@@ -99,7 +116,9 @@ frame.addEventListener('load',()=>{
 });
 </script></body></html>""".replace("__FIRST__", json.dumps(first)).replace(
         "__SECOND__", json.dumps(second)
-    ).replace("__TURN__", json.dumps(turn_page)).replace(
+    ).replace("__SESSIONS__", json.dumps(session_page)).replace(
+        "__TURN__", json.dumps(turn_page)
+    ).replace(
         "__TOOL__", json.dumps(tool_page)
     )
 
@@ -154,6 +173,14 @@ frame.addEventListener('load',()=>{
                 assert page_calls[-1]["value"]["conversation_ref"] == (
                     "onebot:group:933179609"
                 )
+                frame.locator("#session-browser summary").click()
+                expect(frame.locator("#sessions .item")).to_have_count(1)
+                frame.locator("#sessions .item").click()
+                expect(frame.locator("#session-filter")).to_contain_text("session:one")
+                expect(frame.locator("#items .item")).to_have_count(1)
+                calls = page.evaluate("window.calls")
+                assert calls[-1]["operation_id"] == "agent.runs.page"
+                assert calls[-1]["value"]["session_id"] == "session:one"
                 assert not errors, errors
             finally:
                 browser.close()

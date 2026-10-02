@@ -5,6 +5,7 @@
   "properties": {
     "limit": {"type": "integer", "minimum": 1, "maximum": 100},
     "conversation_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "session_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "state": {"enum": ["WAIT_INPUT", "PREPARING_MODEL", "MODEL_PENDING", "PARSING", "REPAIR_READY", "WAIT_TOOL", "WAIT_APPROVAL", "BLOCKED_UNKNOWN", "SAFE_BOUNDARY", "FINAL_READY", "RELOAD_WAIT", "COMPLETED", "FAILED", "CANCELLED"]},
     "snapshot_at": {"type": "string", "format": "date-time"},
     "after_created_at": {"type": "string", "format": "date-time"},

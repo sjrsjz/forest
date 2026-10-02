@@ -27,7 +27,16 @@
 <body>
   <main>
     <h1>Agent 执行记录</h1>
-    <p>按 Bot 或准确会话筛选 Run；列表只展示执行元数据，点击查看持久状态。</p>
+    <p>按 Bot、群聊或 Session 追踪执行；列表只展示执行元数据。</p>
+    <details id="session-browser">
+      <summary>浏览 Session</summary>
+      <div class="filters">
+        <label>Session 状态<select id="session-state"><option value="">全部</option><option>ACTIVE</option><option>CLOSED</option><option>FAILED</option><option>CANCELLED</option></select></label>
+        <button id="search-sessions" type="button">查询 Session</button>
+      </div>
+      <div class="actions"><span id="session-count"></span><button id="next-sessions" type="button" hidden>下一页</button></div>
+      <div class="list" id="sessions"></div>
+    </details>
     <div class="filters">
       <label>会话引用<input id="conversation" placeholder="onebot:group:933179609" autocomplete="off"></label>
       <label>Run 状态<select id="state"><option value="">全部</option>
@@ -38,6 +47,7 @@
         <option>FAILED</option><option>CANCELLED</option></select></label>
       <button id="search" type="button">查询</button>
     </div>
+    <div class="actions"><span id="session-filter">全部 Session</span><button id="clear-session" type="button" hidden>清除 Session 筛选</button></div>
     <div class="actions"><span id="count"></span><button id="next" type="button" hidden>下一页</button></div>
     <div class="list" id="items" aria-live="polite"></div>
     <section class="detail" id="detail" hidden>
@@ -60,7 +70,8 @@
   </main>
   <script>
   (()=>{'use strict';
-    let port,nonce,sequence=0,pageCursor=null,filter={},selectedRun='';
+    let port,nonce,sequence=0,pageCursor=null,filter={},selectedRun='',selectedSession='';
+    let sessionCursor=null,sessionFilter={};
     const stepCursors={MODEL_TURN:null,TOOL_CALL:null};
     const pending=new Map(),el=id=>document.getElementById(id);
     const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
@@ -73,7 +84,37 @@
     function currentFilter(){
       const conversation_ref=el('conversation').value.trim(),state=el('state').value;
       if(conversation_ref.length>256)throw new Error('会话引用过长');
-      return {...(conversation_ref?{conversation_ref}:{}),...(state?{state}:{})};
+      return {...(conversation_ref?{conversation_ref}:{}),...(selectedSession?{session_id:selectedSession}:{}),...(state?{state}:{})};
+    }
+    async function loadSessions(next=false){
+      if(!next){
+        const conversation_ref=el('conversation').value.trim(),state=el('session-state').value;
+        if(conversation_ref.length>256)throw new Error('会话引用过长');
+        sessionFilter={...(conversation_ref?{conversation_ref}:{}),...(state?{state}:{})};
+        sessionCursor=null;el('sessions').replaceChildren();
+      }
+      const input={...sessionFilter,limit:30};
+      if(next&&sessionCursor)Object.assign(input,sessionCursor);
+      const page=await call('agent.sessions.page',input);
+      for(const row of page.items){
+        const item=document.createElement('button');item.type='button';item.className='item';
+        for(const value of [row.session_id,row.conversation_ref,row.state,row.updated_at]){
+          const cell=document.createElement('span');cell.textContent=value||'—';item.append(cell);
+        }
+        item.onclick=()=>{
+          selectedSession=row.session_id;el('conversation').value=row.conversation_ref;
+          el('session-filter').textContent=`Session: ${selectedSession}`;
+          el('clear-session').hidden=false;
+          load().catch(error=>status(error.message));
+        };
+        el('sessions').append(item);
+      }
+      el('session-count').textContent=`本页 ${page.items.length} 条${page.has_more?'，还有后续':''}`;
+      sessionCursor=page.has_more?{
+        snapshot_at:page.snapshot_at,cursor_filter_digest:page.filter_digest,
+        after_created_at:page.next_cursor.created_at,after_session_id:page.next_cursor.session_id,
+      }:null;
+      el('next-sessions').hidden=!sessionCursor;resize();
     }
     async function load(next=false){
       if(!next){filter=currentFilter();pageCursor=null;el('items').replaceChildren();el('detail').hidden=true;}
@@ -147,12 +188,22 @@
       };
       port.start();send('ready');
     },{once:true});
-    el('search').onclick=()=>load().catch(error=>status(error.message));
+    el('session-browser').ontoggle=()=>{if(el('session-browser').open)loadSessions().catch(error=>status(error.message));};
+    el('search-sessions').onclick=()=>loadSessions().catch(error=>status(error.message));
+    el('next-sessions').onclick=()=>loadSessions(true).catch(error=>status(error.message));
+    el('search').onclick=()=>{
+      selectedSession='';el('session-filter').textContent='全部 Session';el('clear-session').hidden=true;
+      load().catch(error=>status(error.message));
+    };
+    el('clear-session').onclick=()=>{
+      selectedSession='';el('session-filter').textContent='全部 Session';el('clear-session').hidden=true;
+      load().catch(error=>status(error.message));
+    };
     el('next').onclick=()=>load(true).catch(error=>status(error.message));
     el('refresh-detail').onclick=()=>detail(selectedRun).catch(error=>status(error.message));
     el('more-model-turns').onclick=()=>loadSteps('MODEL_TURN',true).catch(error=>status(error.message));
     el('more-tool-calls').onclick=()=>loadSteps('TOOL_CALL',true).catch(error=>status(error.message));
-    el('conversation').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();load().catch(error=>status(error.message));}};
+    el('conversation').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();el('search').click();}};
   })();
   </script>
 </body>

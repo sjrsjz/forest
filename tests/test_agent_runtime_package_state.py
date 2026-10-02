@@ -277,10 +277,31 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 timeout_seconds=10,
             )
         assert started["state"] == "PREPARING_MODEL"
+        sessions = await instance.management_contract.query(
+            "agent.sessions.page", {
+                "conversation_ref": "conversation/onebot/group/933179609",
+                "state": "ACTIVE", "limit": 1,
+            }
+        )
+        assert [item["session_id"] for item in sessions["items"]] == [
+            "session/agent-package/1"
+        ]
+        assert sessions["items"][0]["active_run_id"] == "run/agent-package/1"
+        session_tail = await instance.management_contract.query(
+            "agent.sessions.page", {
+                "conversation_ref": "conversation/onebot/group/933179609",
+                "state": "ACTIVE", "snapshot_at": sessions["snapshot_at"],
+                "after_created_at": sessions["items"][0]["created_at"],
+                "after_session_id": "session/agent-package/1",
+                "cursor_filter_digest": sessions["filter_digest"],
+            }
+        )
+        assert session_tail["items"] == []
         listed = await instance.management_contract.query(
             "agent.runs.page", {
                 "limit": 1,
                 "conversation_ref": "conversation/onebot/group/933179609",
+                "session_id": "session/agent-package/1",
             }
         )
         assert [item["run_id"] for item in listed["items"]] == ["run/agent-package/1"]
@@ -291,6 +312,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         continued = await instance.management_contract.query(
             "agent.runs.page", {
                 "conversation_ref": "conversation/onebot/group/933179609",
+                "session_id": "session/agent-package/1",
                 "snapshot_at": listed["snapshot_at"],
                 "after_created_at": listed["items"][0]["created_at"],
                 "after_run_id": "run/agent-package/1",
@@ -310,6 +332,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             await instance.management_contract.query(
                 "agent.runs.page", {
                     "conversation_ref": "conversation/onebot/group/933179609",
+                    "session_id": "session/agent-package/1",
                     "snapshot_at": listed["snapshot_at"],
                     "after_created_at": listed["items"][0]["created_at"],
                     "after_run_id": "run/agent-package/1",

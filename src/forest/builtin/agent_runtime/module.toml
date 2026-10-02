@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.26.0"
+version = "4.27.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -53,6 +53,7 @@ requests = [
   "service.call:memory.query.cancel",
   "domain.query:agent.run-snapshot",
   "domain.query:agent.management-runs-page",
+  "domain.query:agent.management-sessions-page",
   "domain.query:agent.management-run-steps-page",
   "domain.query:agent.run-recovery",
   "domain.query:agent.execution-history",
@@ -171,9 +172,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.22.0"
+schema_version = "2.23.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "33b31c03d4a687babd090b8d5a767c106baf666a3ece36d63ba7a8c16d6630fd"
+baseline_sha256 = "446869797b1864ceac660f44f30ea72530e4c29b0feac5b4a0234403c0c590ce"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -191,6 +192,20 @@ contract = "1.0"
 function = "agent_management_runs_page"
 input_schema = "schemas/management-runs-page-input.json"
 output_schema = "schemas/management-runs-page-output.json"
+
+[[components.domain_queries]]
+name = "agent.management-sessions-page"
+contract = "1.0"
+function = "agent_management_sessions_page"
+input_schema = "schemas/management-sessions-page-input.json"
+output_schema = "schemas/management-sessions-page-output.json"
+
+[[components.management_queries]]
+id = "agent.sessions.page"
+port = "agent.management-sessions-page"
+default_limit = 50
+max_limit = 100
+timeout_s = 10
 
 [[components.domain_queries]]
 name = "agent.management-run-steps-page"

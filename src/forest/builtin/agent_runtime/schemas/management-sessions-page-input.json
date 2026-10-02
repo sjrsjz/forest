@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+    "conversation_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "state": {"enum": ["ACTIVE", "CLOSED", "FAILED", "CANCELLED"]},
+    "snapshot_at": {"type": "string", "format": "date-time"},
+    "after_created_at": {"type": "string", "format": "date-time"},
+    "after_session_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "cursor_filter_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  },
+  "dependentRequired": {
+    "after_created_at": ["after_session_id", "snapshot_at", "cursor_filter_digest"],
+    "after_session_id": ["after_created_at", "snapshot_at", "cursor_filter_digest"]
+  }
+}

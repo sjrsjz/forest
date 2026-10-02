@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["snapshot_at", "filter_digest", "items", "has_more", "next_cursor"],
+  "properties": {
+    "snapshot_at": {"type": "string", "format": "date-time"},
+    "filter_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "items": {"type": "array", "maxItems": 100, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["session_id", "conversation_ref", "state", "active_run_id", "session_epoch", "terminal_reason_code", "created_at", "updated_at", "closed_at"],
+      "properties": {
+        "session_id": {"type": "string"},
+        "conversation_ref": {"type": "string"},
+        "state": {"enum": ["ACTIVE", "CLOSED", "FAILED", "CANCELLED"]},
+        "active_run_id": {"type": ["string", "null"]},
+        "session_epoch": {"type": "integer", "minimum": 1},
+        "terminal_reason_code": {"type": ["string", "null"]},
+        "created_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "closed_at": {"type": ["string", "null"], "format": "date-time"}
+      }
+    }},
+    "has_more": {"type": "boolean"},
+    "next_cursor": {"oneOf": [
+      {"type": "null"},
+      {"type": "object", "additionalProperties": false,
+       "required": ["created_at", "session_id"],
+       "properties": {
+         "created_at": {"type": "string", "format": "date-time"},
+         "session_id": {"type": "string"}
+       }}
+    ]}
+  }
+}

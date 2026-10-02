@@ -31,6 +31,74 @@ CREATE TABLE agent_sessions (
 
 CREATE UNIQUE INDEX one_active_agent_session
     ON agent_sessions(bot_id,conversation_ref) WHERE state='ACTIVE';
+CREATE INDEX agent_session_management_global_idx
+    ON agent_sessions(bot_id,created_at DESC,session_id DESC);
+CREATE INDEX agent_session_management_group_idx
+    ON agent_sessions(bot_id,conversation_ref,created_at DESC,session_id DESC);
+CREATE INDEX agent_session_management_state_idx
+    ON agent_sessions(bot_id,state,created_at DESC,session_id DESC);
+CREATE INDEX agent_session_management_group_state_idx
+    ON agent_sessions(bot_id,conversation_ref,state,created_at DESC,session_id DESC);
+
+CREATE FUNCTION agent_management_sessions_page(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    page_limit integer := COALESCE((input->>'limit')::integer,50);
+    snapshot_at timestamptz := COALESCE((input->>'snapshot_at')::timestamptz,
+        statement_timestamp());
+    conversation_filter text := input->>'conversation_ref';
+    state_filter text := input->>'state';
+    after_created_at timestamptz := (input->>'after_created_at')::timestamptz;
+    filter_digest text := 'sha256:' || encode(sha256(convert_to(
+        jsonb_build_array(conversation_filter,state_filter,snapshot_at)::text,'UTF8'
+    )),'hex');
+    items jsonb;
+    has_more boolean;
+    next_cursor jsonb;
+BEGIN
+    IF page_limit NOT BETWEEN 1 AND 100 OR
+       snapshot_at>statement_timestamp() OR
+       ((after_created_at IS NOT NULL) <> (input ? 'after_session_id')) OR
+       (after_created_at IS NOT NULL AND
+        (NOT input ? 'snapshot_at' OR
+         input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest OR
+         after_created_at>snapshot_at)) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_MANAGEMENT_CURSOR_INVALID',
+                'message','Agent Session page limit or cursor is invalid','status',422)
+        );
+    END IF;
+    WITH page AS MATERIALIZED (
+        SELECT s.session_id,s.conversation_ref,s.state,s.active_run_id,
+               s.session_epoch,s.terminal_reason_code,s.created_at,s.updated_at,s.closed_at
+        FROM __forest_module_schema__.agent_sessions s
+        WHERE s.bot_id=context->>'bot_id'
+          AND s.created_at<=snapshot_at
+          AND (conversation_filter IS NULL OR s.conversation_ref=conversation_filter)
+          AND (state_filter IS NULL OR s.state=state_filter)
+          AND (after_created_at IS NULL OR
+               (s.created_at,s.session_id)<(after_created_at,input->>'after_session_id'))
+        ORDER BY s.created_at DESC,s.session_id DESC LIMIT page_limit+1
+    ), visible AS MATERIALIZED (
+        SELECT * FROM page ORDER BY created_at DESC,session_id DESC LIMIT page_limit
+    )
+    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.created_at DESC,v.session_id DESC)
+                     FROM visible v),'[]'::jsonb),
+           (SELECT count(*)>page_limit FROM page),
+           (SELECT jsonb_build_object('created_at',v.created_at,'session_id',v.session_id)
+            FROM visible v ORDER BY v.created_at,v.session_id LIMIT 1)
+    INTO items,has_more,next_cursor;
+    RETURN jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'snapshot_at',snapshot_at,'filter_digest',filter_digest,
+            'items',items,'has_more',has_more,
+            'next_cursor',CASE WHEN has_more THEN next_cursor ELSE NULL END
+        )
+    );
+END;
+$$;
 
 CREATE TABLE agent_runs (
     bot_id text NOT NULL,
@@ -136,6 +204,8 @@ CREATE INDEX agent_run_management_state_idx
     ON agent_runs(bot_id,state,created_at DESC,run_id DESC);
 CREATE INDEX agent_run_management_group_state_idx
     ON agent_runs(bot_id,conversation_ref,state,created_at DESC,run_id DESC);
+CREATE INDEX agent_run_management_session_idx
+    ON agent_runs(bot_id,session_id,created_at DESC,run_id DESC);
 
 CREATE TABLE run_cancel_requests (
     bot_id text NOT NULL,
@@ -337,10 +407,11 @@ DECLARE
     snapshot_at timestamptz := COALESCE((input->>'snapshot_at')::timestamptz,
         statement_timestamp());
     conversation_filter text := input->>'conversation_ref';
+    session_filter text := input->>'session_id';
     state_filter text := input->>'state';
     after_created_at timestamptz := (input->>'after_created_at')::timestamptz;
     filter_digest text := 'sha256:' || encode(sha256(convert_to(
-        jsonb_build_array(conversation_filter,state_filter,snapshot_at)::text,'UTF8'
+        jsonb_build_array(conversation_filter,session_filter,state_filter,snapshot_at)::text,'UTF8'
     )),'hex');
     items jsonb;
     has_more boolean;
@@ -368,6 +439,7 @@ BEGIN
         WHERE r.bot_id=context->>'bot_id'
           AND r.created_at<=snapshot_at
           AND (conversation_filter IS NULL OR r.conversation_ref=conversation_filter)
+          AND (session_filter IS NULL OR r.session_id=session_filter)
           AND (state_filter IS NULL OR r.state=state_filter)
           AND (after_created_at IS NULL OR
                (r.created_at,r.run_id)<(after_created_at,input->>'after_run_id'))
