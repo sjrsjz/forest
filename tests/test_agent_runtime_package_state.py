@@ -1548,6 +1548,71 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         with pytest.raises(ForestError) as cancelled_inheritance:
             await inheritance_task
         assert cancelled_inheritance.value.code == "AGENT_CANCEL_REQUESTED"
+        async with store.pool.connection() as conn, conn.transaction():
+            with pytest.raises(ForestError) as cancelled_request:
+                await participant.invoke_in(
+                    conn, "agent.prepare-model-request-record", {
+                        **plan_request,
+                        "input": {
+                            **plan_request["input"],
+                            "request": {
+                                **plan_request["input"]["request"],
+                                "request_id": cancel_race_request_id,
+                                "first_attempt_id": cancel_race_attempt_id,
+                                "projection": cancel_race_projection.canonical(),
+                                "initial_wire": cancel_race_wire.canonical(),
+                            },
+                        },
+                    },
+                    operation_id="agent-model-request/package/cancel-race",
+                    causal_root_kind="agent.run", causal_root_id=plan_run_id,
+                    parent_call_id="call:agent-package/cancel-race/request",
+                    timeout_seconds=10,
+                )
+            assert cancelled_request.value.code == "AGENT_CANCEL_REQUESTED"
+        cancel_attempt_effect_id = "model-effect/package/cancel-race"
+        cancel_attempt_input = await _payload(
+            kernel, owner_component_id="kernel.effect", owner_kind="effect.input",
+            owner_id=cancel_attempt_effect_id, value=b'{"request_id":"cancel-race"}',
+        )
+        cancel_attempt_wire = await _payload(
+            kernel, owner_component_id="kernel.effect", owner_kind="effect.wire",
+            owner_id=cancel_race_attempt_id,
+            value=b'{"dispatch":"provider.model.dispatch","request_id":"cancel-race"}',
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            with pytest.raises(ForestError) as cancelled_attempt:
+                await participant.invoke_in(
+                    conn, "agent.prepare-model-attempt-record", {
+                        **plan_attempt,
+                        "input": {
+                            **plan_attempt["input"],
+                            "request_id": plan_successor_id,
+                            "attempt_id": cancel_race_attempt_id,
+                            "effect_operation_ref": cancel_attempt_effect_id,
+                        },
+                        "prior": {
+                            **plan_attempt["prior"],
+                            "effect": {
+                                **plan_attempt["prior"]["effect"],
+                                "input_payload": cancel_attempt_input.canonical(),
+                                "wire_payload": cancel_attempt_wire.canonical(),
+                                "permit": {
+                                    **plan_attempt["prior"]["effect"]["permit"],
+                                    "effect_operation_id": cancel_attempt_effect_id,
+                                    "attempt_id": cancel_race_attempt_id,
+                                    "wire_payload_id": cancel_attempt_wire.payload_id,
+                                    "wire_payload_digest": cancel_attempt_wire.digest,
+                                },
+                            },
+                        },
+                    },
+                    operation_id="agent-model-attempt/package/cancel-race",
+                    causal_root_kind="agent.run", causal_root_id=plan_run_id,
+                    parent_call_id="call:agent-package/cancel-race/attempt",
+                    timeout_seconds=10,
+                )
+            assert cancelled_attempt.value.code == "AGENT_CANCEL_REQUESTED"
         async with store.pool.connection() as conn:
             successor = await (await conn.execute(sql.SQL(
                 "SELECT count(*) AS total FROM {}.model_requests "
@@ -2247,6 +2312,34 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             },
             "prior": {"approval": approval_state},
         }
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute(sql.SQL(
+                    "INSERT INTO {}.run_cancel_requests "
+                    "(bot_id,operation_id,input_digest,run_id,expected_checkpoint_seq,"
+                    "requested_by,reason_code) "
+                    "SELECT bot_id,%s,%s,run_id,checkpoint_seq,%s,%s "
+                    "FROM {}.agent_runs WHERE bot_id=%s AND run_id=%s"
+                ).format(
+                    sql.Identifier(package.configuration.namespace),
+                    sql.Identifier(package.configuration.namespace),
+                ), (
+                    "cancel/package/tool-approval-race",
+                    digest_json({"cancel": "tool-approval-race"}),
+                    "admin:test", "ADMIN_CANCEL", store.bot_id,
+                    "run/agent-package/model-port",
+                ))
+                with pytest.raises(ForestError) as cancelled_approval:
+                    await participant.invoke_in(
+                        conn, "agent.record-tool-approval-request", approval_envelope,
+                        operation_id="agent-tool-approval/package/cancel-race",
+                        causal_root_kind="agent.execute",
+                        causal_root_id="run/agent-package/model-port",
+                        parent_call_id="call:agent-package/tool-approval-cancel-race",
+                        timeout_seconds=10,
+                    )
+                assert cancelled_approval.value.code == "AGENT_CANCEL_REQUESTED"
+                raise _RollbackVerification
         async with store.pool.connection() as conn, conn.transaction():
             requested_approval = await participant.invoke_in(
                 conn,
@@ -2301,6 +2394,34 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 }
             },
         }
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute(sql.SQL(
+                    "INSERT INTO {}.run_cancel_requests "
+                    "(bot_id,operation_id,input_digest,run_id,expected_checkpoint_seq,"
+                    "requested_by,reason_code) "
+                    "SELECT bot_id,%s,%s,run_id,checkpoint_seq,%s,%s "
+                    "FROM {}.agent_runs WHERE bot_id=%s AND run_id=%s"
+                ).format(
+                    sql.Identifier(package.configuration.namespace),
+                    sql.Identifier(package.configuration.namespace),
+                ), (
+                    "cancel/package/tool-prepare-race",
+                    digest_json({"cancel": "tool-prepare-race"}),
+                    "admin:test", "ADMIN_CANCEL", store.bot_id,
+                    "run/agent-package/model-port",
+                ))
+                with pytest.raises(ForestError) as cancelled_tool_prepare:
+                    await participant.invoke_in(
+                        conn, "agent.prepare-tool-effect-record", prepare_tool_envelope,
+                        operation_id="agent-tool-prepare/package/cancel-race",
+                        causal_root_kind="agent.execute",
+                        causal_root_id="run/agent-package/model-port",
+                        parent_call_id="call:agent-package/tool-prepare-cancel-race",
+                        timeout_seconds=10,
+                    )
+                assert cancelled_tool_prepare.value.code == "AGENT_CANCEL_REQUESTED"
+                raise _RollbackVerification
         async with store.pool.connection() as conn, conn.transaction():
             prepared_tool = await participant.invoke_in(
                 conn, "agent.prepare-tool-effect-record", prepare_tool_envelope,

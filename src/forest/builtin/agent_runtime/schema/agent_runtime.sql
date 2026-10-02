@@ -3854,6 +3854,13 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
             'code','AGENT_TOOL_APPROVAL_BOUNDARY_CLOSED','message','ToolCall is not at the approval boundary','status',409));
     END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.run_cancel_requests c
+        WHERE c.bot_id=requested_bot AND c.run_id=requested_run
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object(
+            'code','AGENT_CANCEL_REQUESTED','message','Agent cancellation won the tool approval boundary','status',409));
+    END IF;
     INSERT INTO __forest_module_schema__.tool_observations(
         bot_id,observation_operation_id,tool_call_id,input_digest,observed_state,evidence_kind,
         approval_ref,accepted,previous_state,resulting_state)
