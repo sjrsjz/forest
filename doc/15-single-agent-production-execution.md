@@ -74,7 +74,7 @@ Request 已写为 `READY` 但尚无 Effect 时，以及既有 Attempt 全部明�
 
 发布前的 `agent.replacement-guard` 核对候选 Provider 预热后声明的 profile、模型与能力摘要，并检查 Agent 已收敛的未发送观察；两侧观察在原 `agent.observe-model-effect` UnitOfWork 中原子提交，发布后继承又由 Effect participant 在同一事务内复核。事实缺失或变化、证据缺失、`UNKNOWN` 或代次不变都拒绝发布并恢复旧图。发布后若冻结 Provider profile 与实际绑定不一致，或冻结投影/wire 已损坏，Agent 在仍持有 Run lease 时通过 `agent.block-frozen-model/1` 固定当前请求头、错误码和不可变 `BLOCKED_UNKNOWN` checkpoint；下次领取只返回诊断，不重建请求或派发 Effect。该阻断只处理确定性不兼容与载荷损坏；暂时性 I/O、数据库或继承事务失败仍由原 operation 重试或对账。同一 operation 并发继承合流、不同 operation 竞争排他，以及后继再次被继承后重放前笔操作仍返回原始 `READY` 回执，均已在真实 PostgreSQL 中验证。Worker 层丢失回执后的重启、首个新 Effect 失败及连续真实 Provider 热换代仍待验收；这些不能由单次整图热重载通过来替代。
 
-冻结投影或 wire 的精确 PayloadRef 无效、身份不符、正文缺失或已撤销、字节摘要不符，以及继承时同一 owner 内容冲突或父载荷不可用，均属于确定性载荷失败；Worker 将这些错误归入 `AGENT_FROZEN_PAYLOAD_INVALID` 的持久阻断，不把失效的冻结请求继续发给 Provider。Payload authority 暂时不可用、分块协议暂时异常和继承事务的非载荷错误仍向外传播以保留重试与对账语义。
+冻结投影或 wire 的精确 PayloadRef 无效、身份不符、正文缺失或已撤销、字节摘要不符，以及继承时同一 owner 内容冲突或父载荷不可用，均属于确定性载荷失败；Worker 只在调用 Payload 读写端口时将这些错误归入 `AGENT_FROZEN_PAYLOAD_INVALID` 的持久阻断，不把失效的冻结请求继续发给 Provider。`agent.inherit-model-request` 的 Effect 证明和 Agent 事务回执保持各自原始错误码，即使错误码恰好带有 `PAYLOAD_` 前缀，也不能由 Worker 推断为冻结载荷损坏。Payload authority 暂时不可用、分块协议暂时异常和继承事务失败仍向外传播以保留重试与对账语义。
 
 解析失败只能提交 `agent.record-protocol-failure/1`。该端口在同一事务中验证当前成功 Attempt、写入不可变 failure 与 checkpoint、清除当前 Model 请求，并把 Run 推进到 `REPAIR_READY` 或 `FAILED`；第一次进入 `REPAIR_READY` 即持久消耗唯一 repair 配额并固定下一步号，后续候选不能再次申请修复。修复输入仅从 failure 引用的有界 feedback Payload 恢复，禁止容错解析、从错误 XML 猜字段或在 Provider 层重试协议。
 

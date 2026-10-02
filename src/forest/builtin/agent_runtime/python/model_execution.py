@@ -554,7 +554,7 @@ class ModelExecution:
                 "AGENT_FROZEN_MODEL_INVALID",
                 "Inherited wire differs from the frozen predecessor", 409,
             )
-        inheritance = self.ctx.uow.call(
+        await self.ctx.uow.call(
             "agent.inherit-model-request",
             {
                 "effect": {
@@ -589,7 +589,6 @@ class ModelExecution:
             ),
             timeout=15,
         )
-        await _frozen_payload_result(inheritance)
         return successor_id
 
     async def _dispatch_attempt(
