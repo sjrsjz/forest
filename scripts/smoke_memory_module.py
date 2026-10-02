@@ -17,6 +17,7 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from jsonschema import Draft202012Validator
 from playwright.sync_api import expect, sync_playwright
 
 
@@ -67,7 +68,7 @@ def main() -> None:
 const fixture=__FIXTURE__;
 const bytes=Uint8Array.from(atob(fixture.image_base64),char=>char.charCodeAt(0));
 const frame=document.getElementById('memory'),channel=new MessageChannel(),nonce='memory-smoke';
-window.calls=[];window.ready=false;window.corrupt=false;window.batchApplied=false;
+    window.calls=[];window.responses=[];window.ready=false;window.corrupt=false;window.batchApplied=false;
 frame.addEventListener('load',()=>{
   channel.port1.onmessage=event=>{
     const data=event.data;
@@ -111,18 +112,25 @@ frame.addEventListener('load',()=>{
       state:'SUCCEEDED',selection_id:'selection:smoke',after_ordinal:0,
       attempt_count:1,error_code:null,result:{first_ordinal:1,last_ordinal:2,
         suppressed_source_units:2,vector_deletions:0,retracted_relations:0}};
-    else if(data.operation_id==='memory.trial.get')value={state:'READY',query_mode:'MIXED',
-      expires_at:'2026-09-29T00:00:00Z',evidence_ref:{payload_id:'evidence-1'}};
-    else if(data.operation_id==='memory.trial.result')value={query_id:'trial:smoke',
+    else if(data.operation_id==='memory.trial.get')value={
+      protocol:'forest.memory-trial/1',query_id:'trial:smoke',state:'READY',query_mode:'MIXED',
+      deadline_at:'2026-09-28T23:00:00Z',expires_at:'2026-09-29T00:00:00Z',
+      error_code:null,evidence_ref:{payload_id:'evidence-1',
+        digest:fixture.digest,owner_component_id:'memory.graph',
+        owner_kind:'retrieval.evidence',owner_id:'trial:smoke'}};
+    else if(data.operation_id==='memory.trial.result')value={
+      protocol:'forest.memory-trial-result-page/2',query_id:'trial:smoke',
       bundle_id:'bundle-1',graph_snapshot_ref:'snapshot-1',total_count:1,
-      missing_count:0,content_truncated:false,truncated:false,
+      content_truncated:false,truncated:false,
       association_sampled:false,has_more:false,next_index:null,items:[{
-        source_unit_id:'source-1',source_id:'group-source-1',source_kind:'GROUP',
+        item_index:0,source_unit_id:'source-1',source_id:'group-source-1',source_kind:'GROUP',
         platform:'onebot',external_group_id:'933179609',trunk_id:'trunk-1',
         author_subject_ref:'qq:author-1',occurred_at:'2026-09-28T00:00:00Z',
         is_seed:true,rank_score:0.9,excerpt:'跨群图像证据',excerpt_truncated:false,
         image_count:1,images:[{part_id:'image-1',media_type:'image/png',
-          width:256,height:256,media_ref:{digest:fixture.digest}}]
+          width:256,height:256,media_ref:{payload_id:'image-1',digest:fixture.digest,
+            owner_component_id:'memory.graph',owner_kind:'retrieval.image',
+            owner_id:'trial:smoke'}}]
       }]};
     else if(data.operation_id==='memory.trial.image'){
       const offset=data.value.offset,size=Math.min(98304,bytes.length-offset);
@@ -134,6 +142,8 @@ frame.addEventListener('load',()=>{
         byte_length:bytes.length,eof:offset+size===bytes.length,
         data_base64:btoa(String.fromCharCode(...chunkBytes))};
     }else throw Error('Unexpected operation '+data.operation_id);
+    if(data.operation_id.startsWith('memory.trial.'))
+      window.responses.push({operation_id:data.operation_id,value});
     channel.port1.postMessage({protocol:data.protocol,
       type:data.type==='action'?'action-result':'query-result',nonce,
       request_id:data.request_id,value});
@@ -216,6 +226,18 @@ frame.addEventListener('load',()=>{
                 assert set(action_calls[0]["value"]) == {
                     "selection_id", "after_ordinal", "batch_size", "plan",
                 }
+                schema_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/memory_graph/schemas"
+                trial_schemas = {
+                    "memory.trial.get": "trial-get-output.json",
+                    "memory.trial.result": "trial-result-output.json",
+                    "memory.trial.image": "trial-image-output.json",
+                }
+                validators = {
+                    operation: Draft202012Validator(json.loads((schema_root / name).read_text(encoding="utf-8")))
+                    for operation, name in trial_schemas.items()
+                }
+                for response in page.evaluate("window.responses"):
+                    validators[response["operation_id"]].validate(response["value"])
             finally:
                 browser.close()
     finally:
