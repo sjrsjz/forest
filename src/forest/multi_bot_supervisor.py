@@ -380,6 +380,10 @@ class MultiBotSupervisor:
         except Exception as exc:
             runner.management_accepting = False
             runner.host = None
+            async with runner.management_condition:
+                await runner.management_condition.wait_for(
+                    lambda: runner.management_inflight == 0
+                )
             if host is not None:
                 try:
                     await host.close()

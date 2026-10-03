@@ -1,0 +1,78 @@
+import asyncio
+from types import SimpleNamespace
+
+from forest.errors import ForestError
+from forest.multi_bot_supervisor import MultiBotSupervisor, _BotRunner
+
+
+async def test_failed_bot_drains_admitted_management_before_closing_host():
+    online = asyncio.Event()
+    failed = asyncio.Event()
+    close_called = asyncio.Event()
+    trigger_failure = asyncio.Event()
+    observed = []
+
+    class Catalog:
+        async def observe(self, _lease, *, observed_state, **_kwargs):
+            observed.append(observed_state)
+            if observed_state == "ONLINE":
+                online.set()
+            elif observed_state == "FAILED":
+                failed.set()
+
+    class StorageProfiles:
+        async def resolve(self, **_kwargs):
+            return SimpleNamespace(dsn="postgresql://test")
+
+    class Host:
+        def __init__(self, settings):
+            self.settings = settings
+            self.registry = SimpleNamespace(
+                graph_identity=SimpleNamespace(graph_id="graph/test")
+            )
+            self._supervision_task = None
+
+        async def start(self):
+            async def fail():
+                await trigger_failure.wait()
+                raise ForestError("BOT_TEST_FAILURE", "Test runtime failed", 503)
+
+            self._supervision_task = asyncio.create_task(fail())
+
+        async def close(self):
+            close_called.set()
+
+    supervisor = MultiBotSupervisor(
+        Catalog(),
+        storage_profiles=StorageProfiles(),
+        settings_resolver=lambda bot, storage: SimpleNamespace(
+            bot_id=bot["bot_id"], dsn=storage.dsn
+        ),
+        host_factory=Host,
+    )
+    supervisor.lease = object()
+    runner = _BotRunner(asyncio.Event())
+    bot = {
+        "bot_id": "bot/test",
+        "storage_profile_ref": "storage/test",
+        "storage_generation": 1,
+    }
+    supervisor._runners[bot["bot_id"]] = runner
+    task = asyncio.create_task(supervisor._run_bot(bot, runner))
+    try:
+        await asyncio.wait_for(online.wait(), timeout=2)
+        async with supervisor.management_host(supervisor.management_scope_id(bot["bot_id"])):
+            trigger_failure.set()
+            async with asyncio.timeout(2):
+                while runner.management_accepting:
+                    await asyncio.sleep(0)
+            assert not close_called.is_set()
+            assert not failed.is_set()
+        await asyncio.wait_for(task, timeout=2)
+        assert close_called.is_set()
+        assert failed.is_set()
+        assert observed == ["STARTING", "ONLINE", "FAILED"]
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
