@@ -66,6 +66,7 @@
       <div class="actions"><button id="request-cancel" type="button" hidden>请求取消 Run</button><span id="cancel-status"></span></div>
       <details><summary>模型回合</summary><div class="step-list" id="model-turns"></div><button id="more-model-turns" type="button" hidden>更多回合</button></details>
       <details><summary>工具调用</summary><div class="step-list" id="tool-calls"></div><button id="more-tool-calls" type="button" hidden>更多调用</button></details>
+      <details><summary>待核对效果</summary><p>这里只列出尚未证明终态的效果；缺少回执不能证明请求未发送。</p><div class="step-list" id="unresolved-effects"></div><button id="more-effects" type="button" hidden>更多效果</button></details>
     </section>
     <p id="status" role="status"></p>
   </main>
@@ -73,7 +74,7 @@
   (()=>{'use strict';
     let port,nonce,sequence=0,pageCursor=null,filter={},selectedRun='',selectedSession='';
     let sessionCursor=null,sessionFilter={};
-    const stepCursors={MODEL_TURN:null,TOOL_CALL:null};
+    const stepCursors={MODEL_TURN:null,TOOL_CALL:null};let effectCursor=null;
     const pending=new Map(),el=id=>document.getElementById(id);
     const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
     const resize=()=>send('resize',{height:document.documentElement.scrollHeight});
@@ -170,6 +171,7 @@
       el('detail').hidden=false;resize();
       await loadSteps('MODEL_TURN');
       await loadSteps('TOOL_CALL');
+      await loadEffects();
     }
     async function loadSteps(kind,next=false){
       const run_id=selectedRun;
@@ -191,6 +193,21 @@
         after_step_seq:page.next_cursor.step_seq,
       }:null;
       el('more-'+prefix).hidden=!stepCursors[kind];resize();
+    }
+    async function loadEffects(next=false){
+      const run_id=selectedRun;
+      if(!next){effectCursor=null;el('unresolved-effects').replaceChildren();}
+      const page=await call('agent.effects.page',{run_id,limit:20,...(next&&effectCursor?effectCursor:{})});
+      if(run_id!==selectedRun)return;
+      for(const item of page.items){
+        const row=document.createElement('div');
+        const lookup={LOCAL_RECEIPT:'仅查已有回执',TOOL_QUERY:'可查询工具原操作',NONE:'无查询能力'}[item.lookup_kind];
+        row.textContent=`#${item.step_seq} / ${item.kind} / ${item.state} / ${item.case_id} / ${item.owner_component_id}@${item.owner_generation_id} / ${item.service_ref} / operation ${item.effect_operation_ref} / attempt ${item.effect_attempt_id||'—'} / ${lookup}`;
+        el('unresolved-effects').append(row);
+      }
+      if(!next&&!page.items.length)el('unresolved-effects').textContent='当前无待核对效果';
+      effectCursor=page.next_cursor;
+      el('more-effects').hidden=!effectCursor;resize();
     }
     addEventListener('message',event=>{
       const message=event.data||{};
@@ -221,6 +238,7 @@
     el('refresh-detail').onclick=()=>detail(selectedRun).catch(error=>status(error.message));
     el('more-model-turns').onclick=()=>loadSteps('MODEL_TURN',true).catch(error=>status(error.message));
     el('more-tool-calls').onclick=()=>loadSteps('TOOL_CALL',true).catch(error=>status(error.message));
+    el('more-effects').onclick=()=>loadEffects(true).catch(error=>status(error.message));
     el('conversation').onkeydown=event=>{if(event.key==='Enter'){event.preventDefault();el('search').click();}};
   })();
   </script>

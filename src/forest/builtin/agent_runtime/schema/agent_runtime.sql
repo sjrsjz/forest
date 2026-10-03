@@ -905,6 +905,81 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_management_effects_page(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_run text := input->>'run_id';
+    page_limit integer := COALESCE((input->>'limit')::integer,50);
+    after_step integer := (input->>'after_step_seq')::integer;
+    after_kind text := input->>'after_kind';
+    after_case text := input->>'after_case_id';
+    items jsonb;
+    has_more boolean;
+    next_cursor jsonb;
+BEGIN
+    IF requested_bot IS NULL OR requested_run IS NULL OR
+       page_limit NOT BETWEEN 1 AND 100 OR
+       ((after_step IS NULL) <> (after_kind IS NULL)) OR
+       ((after_step IS NULL) <> (after_case IS NULL)) OR
+       (after_step IS NOT NULL AND (after_step<1 OR
+           after_kind NOT IN ('MODEL_ATTEMPT','TOOL_CALL') OR
+           octet_length(after_case) NOT BETWEEN 1 AND 256)) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_MANAGEMENT_CURSOR_INVALID',
+                'message','Agent effect page input or cursor is invalid','status',422));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM __forest_module_schema__.agent_runs
+                   WHERE bot_id=requested_bot AND run_id=requested_run) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_RUN_NOT_FOUND',
+                'message','Agent Run does not exist','status',404));
+    END IF;
+    WITH cases AS (
+        SELECT 'MODEL_ATTEMPT'::text AS kind,a.attempt_id AS case_id,
+               r.step_seq,a.state,a.effect_operation_ref,
+               a.attempt_id AS effect_attempt_id,
+               r.provider_component_id AS owner_component_id,
+               r.provider_generation_id AS owner_generation_id,
+               r.model_ref AS service_ref,'LOCAL_RECEIPT'::text AS lookup_kind,
+               a.prepared_at AS created_at
+        FROM __forest_module_schema__.model_transport_attempts a
+        JOIN __forest_module_schema__.model_requests r
+          ON (r.bot_id,r.request_id)=(a.bot_id,a.request_id)
+        WHERE a.bot_id=requested_bot AND r.run_id=requested_run
+          AND a.state IN ('DISPATCHING','UNKNOWN')
+        UNION ALL
+        SELECT 'TOOL_CALL'::text,t.tool_call_id,t.step_seq,t.state,
+               t.effect_operation_ref,t.effect_attempt_id,
+               t.tool_component_id,t.tool_generation_id,
+               t.tool_service_id,CASE WHEN t.supports_query THEN 'TOOL_QUERY'
+                   ELSE 'NONE' END,t.created_at
+        FROM __forest_module_schema__.tool_calls t
+        WHERE t.bot_id=requested_bot AND t.run_id=requested_run
+          AND t.state IN ('DISPATCHING','UNKNOWN')
+    ), page AS MATERIALIZED (
+        SELECT * FROM cases
+        WHERE after_step IS NULL OR
+              (step_seq,kind,case_id)<(after_step,after_kind,after_case)
+        ORDER BY step_seq DESC,kind DESC,case_id DESC LIMIT page_limit+1
+    ), visible AS MATERIALIZED (
+        SELECT * FROM page ORDER BY step_seq DESC,kind DESC,case_id DESC
+        LIMIT page_limit
+    )
+    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v)
+               ORDER BY v.step_seq DESC,v.kind DESC,v.case_id DESC)
+               FROM visible v),'[]'::jsonb),
+           (SELECT count(*)>page_limit FROM page),
+           (SELECT jsonb_build_object('after_step_seq',v.step_seq,
+               'after_kind',v.kind,'after_case_id',v.case_id)
+            FROM visible v ORDER BY v.step_seq,v.kind,v.case_id LIMIT 1)
+    INTO items,has_more,next_cursor;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('run_id',requested_run,'items',items,
+            'next_cursor',CASE WHEN has_more THEN next_cursor ELSE NULL END));
+END;
+$$;
+
 CREATE FUNCTION guard_agent_session() RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
 BEGIN

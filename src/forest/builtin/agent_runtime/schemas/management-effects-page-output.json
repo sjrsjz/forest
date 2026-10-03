@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "items", "next_cursor"],
+  "properties": {
+    "run_id": {"type": "string"},
+    "items": {"type": "array", "maxItems": 100, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "case_id", "step_seq", "state", "effect_operation_ref", "effect_attempt_id", "owner_component_id", "owner_generation_id", "service_ref", "lookup_kind", "created_at"],
+      "properties": {
+        "kind": {"enum": ["MODEL_ATTEMPT", "TOOL_CALL"]},
+        "case_id": {"type": "string"},
+        "step_seq": {"type": "integer", "minimum": 1},
+        "state": {"enum": ["DISPATCHING", "UNKNOWN"]},
+        "effect_operation_ref": {"type": "string"},
+        "effect_attempt_id": {"type": ["string", "null"]},
+        "owner_component_id": {"type": "string"},
+        "owner_generation_id": {"type": "string"},
+        "service_ref": {"type": "string"},
+        "lookup_kind": {"enum": ["LOCAL_RECEIPT", "TOOL_QUERY", "NONE"]},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    }},
+    "next_cursor": {"oneOf": [
+      {"type": "null"},
+      {"type": "object", "additionalProperties": false,
+       "required": ["after_step_seq", "after_kind", "after_case_id"],
+       "properties": {
+         "after_step_seq": {"type": "integer", "minimum": 1},
+         "after_kind": {"enum": ["MODEL_ATTEMPT", "TOOL_CALL"]},
+         "after_case_id": {"type": "string"}
+       }}
+    ]}
+  }
+}

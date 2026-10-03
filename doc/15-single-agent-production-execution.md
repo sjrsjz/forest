@@ -180,6 +180,8 @@ Scheduler quiesce 先关闭新 actor admission，再等待已领取群离开模�
 
 模块自带紧凑管理 UI。`agent.sessions.page` 按 Bot、群聊及 Session 状态有界分页，点击 Session 后通过准确 `session_id` 筛选 `agent.runs.page`，`agent.run` 返回当前 Run 状态。Session 与 Run 分别以创建时间及身份 ID 为键集游标，游标绑定筛选和首次查询时间，单页最多 100 条。`agent.steps.page` 在单个 Run 内按 step 序号分别分页读取 ModelTurn 或 ToolCall，可按工具状态筛选；游标绑定 Run、记录种类、筛选条件和首次查询时间。ModelTurn 通过 `(bot_id,run_id,request_id,step_seq)` 外键指向同一 Run 的 ModelRequest，ToolCall 通过 `(bot_id,run_id,turn_id,step_seq)` 外键指向同一 Run 的 ModelTurn，因此归因由数据库约束而不是管理层推断。列表只暴露时序和状态元数据，不暴露模型正文或工具参数；可变状态仍是当前诊断值，不承诺跨页冻结。取消动作与意图状态由 Agent 包管理契约提供；UNKNOWN 效果的人工对账入口仍需在效果所有者的受限端口中实现，不能在壳层新增 Agent 专用路由或读取此列表的内部表。
 
+Agent 包的 `agent.effects.page` 已提供按 Run 分页的只读待核对清单，只包含 `DISPATCHING/UNKNOWN` 模型 Attempt 与工具调用的 Effect operation、Attempt、冻结所有者 Generation 和查询能力。模型的 `LOCAL_RECEIPT` 仅表示可以查找已有 Provider 回执，绝不表示查无回执即可认定未发送；工具的 `TOOL_QUERY` 才表示 manifest 声明了原操作查询能力。该清单不读取 Payload，也不能直接修改效果状态。需要人工介入时，仍须在效果所有者的受限端口提交可验证证据，并由原 Agent/Effect UnitOfWork 原子收敛；当前尚未提供这个写入入口。
+
 ## 7. 实现拒绝项
 
 - 新增聊天业务 `contract.router`，或让内核 Contract Router 理解 Prompt、模板、群策略和 Agent 选择；

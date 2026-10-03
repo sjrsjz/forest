@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id"],
+  "properties": {
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+    "after_step_seq": {"type": "integer", "minimum": 1},
+    "after_kind": {"enum": ["MODEL_ATTEMPT", "TOOL_CALL"]},
+    "after_case_id": {"type": "string", "minLength": 1, "maxLength": 256}
+  },
+  "dependentRequired": {
+    "after_step_seq": ["after_kind", "after_case_id"],
+    "after_kind": ["after_step_seq", "after_case_id"],
+    "after_case_id": ["after_step_seq", "after_kind"]
+  }
+}

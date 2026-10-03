@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.31.0"
+version = "4.32.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -57,6 +57,7 @@ requests = [
   "domain.query:agent.management-runs-page",
   "domain.query:agent.management-sessions-page",
   "domain.query:agent.management-run-steps-page",
+  "domain.query:agent.management-effects-page",
   "domain.query:agent.run-recovery",
   "domain.query:agent.execution-history",
   "domain.query:agent.frozen-model-resume",
@@ -189,9 +190,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.25.3"
+schema_version = "2.26.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "266d94b6aad26806441decbc5c46a90e2b05901a16748dea4560bf9a76d0821c"
+baseline_sha256 = "875429d462017cb5f2da143215cc1d5f649d7b05d42f33d7ee6730b2521e2000"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -260,6 +261,20 @@ timeout_s = 10
 [[components.management_queries]]
 id = "agent.steps.page"
 port = "agent.management-run-steps-page"
+default_limit = 50
+max_limit = 100
+timeout_s = 10
+
+[[components.domain_queries]]
+name = "agent.management-effects-page"
+contract = "1.0"
+function = "agent_management_effects_page"
+input_schema = "schemas/management-effects-page-input.json"
+output_schema = "schemas/management-effects-page-output.json"
+
+[[components.management_queries]]
+id = "agent.effects.page"
+port = "agent.management-effects-page"
 default_limit = 50
 max_limit = 100
 timeout_s = 10

@@ -235,6 +235,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
@@ -1738,6 +1739,23 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 timeout_seconds=10,
             )
         assert handed_off["state"] == "DISPATCHING"
+        unresolved_model = await instance.management_contract.query(
+            "agent.effects.page", {"run_id": "run/agent-package/model-port", "limit": 1}
+        )
+        assert [(case["kind"], case["case_id"], case["effect_operation_ref"])
+                for case in unresolved_model["items"]] == [
+            ("MODEL_ATTEMPT", "model-attempt/package/1", "model-effect/package/1")
+        ]
+        assert unresolved_model["items"][0]["owner_generation_id"] == (
+            "generation/provider/package-test"
+        )
+        assert unresolved_model["items"][0]["lookup_kind"] == "LOCAL_RECEIPT"
+        assert unresolved_model["next_cursor"] is None
+        with pytest.raises(ForestError) as missing_effect_run:
+            await instance.management_contract.query(
+                "agent.effects.page", {"run_id": "run/agent-package/other"}
+            )
+        assert missing_effect_run.value.code == "AGENT_RUN_NOT_FOUND"
         model_recovery = await instance.invoke_management_query(
             recovery_declaration,
             {"run_id": "run/agent-package/model-port"},
@@ -2558,6 +2576,17 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 parent_call_id="call:agent-package/model-port/tool-dispatch", timeout_seconds=10,
             )
         assert handed_off_tool["resulting_state"] == "DISPATCHING"
+        unresolved_tool = await instance.management_contract.query(
+            "agent.effects.page", {"run_id": "run/agent-package/model-port"}
+        )
+        assert [(case["kind"], case["case_id"], case["effect_operation_ref"])
+                for case in unresolved_tool["items"]] == [
+            ("TOOL_CALL", "tool-call/package/repair", "tool-effect/package/repair")
+        ]
+        assert unresolved_tool["items"][0]["lookup_kind"] == "TOOL_QUERY"
+        assert unresolved_tool["items"][0]["effect_attempt_id"] == (
+            "tool-attempt/package/repair"
+        )
         tool_result = await _payload(
             kernel, owner_component_id="tool.echo", owner_kind="tool.result",
             owner_id="tool-call/package/repair", value=b'{"value":"A"}',
