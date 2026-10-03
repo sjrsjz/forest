@@ -109,6 +109,33 @@ def test_lock_validates_complete_transitive_closure_and_extra_markers():
         validate_lock(extra, "dependencies.lock.json")
 
 
+def test_multitarget_lock_selects_only_current_wheel_and_checks_foreign_hash():
+    current = current_target()
+    foreign = {**current, "platform": "another-platform"}
+    native_wheel = wheel("native_demo")
+    foreign_wheel = wheel("foreign_demo")
+    lock = {
+        "lock_version": 2,
+        "targets": [
+            {"target": current, "requirements": ["native_demo==1.0"],
+             "wheels": [native_wheel[0]]},
+            {"target": foreign, "requirements": ["foreign_demo==1.0"],
+             "wheels": [foreign_wheel[0]]},
+        ],
+    }
+    files = {
+        "dependencies.lock.json": json.dumps(lock).encode(),
+        native_wheel[0]["file"]: native_wheel[1],
+        foreign_wheel[0]["file"]: foreign_wheel[1],
+    }
+    selected = validate_lock(files, "dependencies.lock.json")
+    assert "native_demo/__init__.py" in selected.files
+    assert "foreign_demo/__init__.py" not in selected.files
+    damaged = {**files, foreign_wheel[0]["file"]: b"damaged"}
+    with pytest.raises(ForestError, match="hash"):
+        validate_lock(damaged, "dependencies.lock.json")
+
+
 @pytest.mark.parametrize("change,code", [
     ("target", "DEPENDENCY_TARGET_MISMATCH"),
     ("sdk", "DEPENDENCY_TARGET_MISMATCH"),

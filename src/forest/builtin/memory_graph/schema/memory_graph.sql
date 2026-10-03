@@ -748,6 +748,8 @@ CREATE TABLE embedding_facets (
     state text NOT NULL DEFAULT 'PENDING' CHECK (
         state IN ('PENDING','PREPARED','DISPATCHED','EMBEDDED','READY','UNKNOWN','FAILED','SUPPRESSED')
     ),
+    failure_code text CHECK (failure_code IS NULL OR
+        failure_code ~ '^[A-Z][A-Z0-9_]{0,127}$'),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     current_attempt_id text,
@@ -786,6 +788,7 @@ CREATE TABLE embedding_facets (
     CHECK ((state IN ('EMBEDDED','READY')) = (result_payload_digest IS NOT NULL)),
     CHECK ((state='READY') = (published_at IS NOT NULL)),
     CHECK ((state='READY') = (published_xid IS NOT NULL)),
+    CHECK (failure_code IS NULL OR state IN ('FAILED','SUPPRESSED')),
     UNIQUE (bot_id,index_ref_id)
 );
 
@@ -4254,7 +4257,7 @@ BEGIN
            OLD.space_id,OLD.accepted_deletion_epoch,OLD.created_at) THEN
         RAISE EXCEPTION 'Embedding facet identity is immutable' USING ERRCODE='55000';
     END IF;
-    IF OLD.state='PENDING' AND NEW.state IN ('PREPARED','SUPPRESSED') THEN RETURN NEW; END IF;
+    IF OLD.state='PENDING' AND NEW.state IN ('PREPARED','FAILED','SUPPRESSED') THEN RETURN NEW; END IF;
     IF OLD.state='PENDING' AND NEW.state='PENDING'
        AND NEW.next_attempt_at>=OLD.next_attempt_at
        AND ROW(NEW.attempt_count,NEW.current_attempt_id,NEW.index_ref_id,
@@ -7992,6 +7995,62 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
 END;
 $$;
 
+CREATE FUNCTION memory_reject_embedding_facet(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    requested_bot text := context->>'bot_id';
+    requested_claim text := body->>'claim_id';
+    requested_facet text := body->>'facet_id';
+    claim_row __forest_module_schema__.embedding_claims%ROWTYPE;
+    facet_row __forest_module_schema__.embedding_facets%ROWTYPE;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR envelope#>>'{caller,generation_id}' IS DISTINCT FROM context->>'generation_id'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-embedding-facet-reject/1'
+       OR body->>'reason_code' IS DISTINCT FROM 'EMBEDDING_FACET_INVALID'
+       OR requested_bot IS NULL OR requested_claim IS NULL OR requested_facet IS NULL
+       OR body->>'facet_content_digest' !~ '^sha256:[a-f0-9]{64}$'
+       OR body->>'space_id' !~ '^sha256:[a-f0-9]{64}$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_FACET_REJECTION_INVALID',
+                'message','Embedding facet rejection is invalid','status',422));
+    END IF;
+    SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
+    WHERE bot_id=requested_bot AND claim_id=requested_claim FOR UPDATE;
+    IF claim_row IS NULL OR claim_row.state<>'CLAIMED'
+       OR claim_row.lease_deadline<=clock_timestamp()
+       OR claim_row.space_id IS DISTINCT FROM body->>'space_id'
+       OR EXISTS (SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts
+                  WHERE bot_id=requested_bot AND claim_id=requested_claim) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_CLAIM_LOST',
+                'message','Embedding claim is no longer rejectable','status',409));
+    END IF;
+    SELECT f.* INTO facet_row FROM __forest_module_schema__.embedding_facets f
+    JOIN __forest_module_schema__.embedding_claim_items ci
+      ON ci.bot_id=f.bot_id AND ci.facet_id=f.facet_id
+    WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
+      AND ci.facet_id=requested_facet FOR UPDATE OF f;
+    IF facet_row IS NULL OR facet_row.state<>'PENDING'
+       OR facet_row.space_id IS DISTINCT FROM claim_row.space_id
+       OR facet_row.facet_content_digest IS DISTINCT FROM body->>'facet_content_digest' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_FACET_CHANGED',
+                'message','Embedding facet changed before rejection','status',409));
+    END IF;
+    UPDATE __forest_module_schema__.embedding_facets
+    SET state='FAILED',failure_code=body->>'reason_code',updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND facet_id=requested_facet;
+    UPDATE __forest_module_schema__.embedding_claims
+    SET state='EXPIRED' WHERE bot_id=requested_bot AND claim_id=requested_claim;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-embedding-facet-rejected/1',
+            'claim_id',requested_claim,'facet_id',requested_facet,'state','FAILED'));
+END;
+$$;
+
 CREATE FUNCTION memory_settle_embedding_work(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -8319,7 +8378,8 @@ RETURNS TABLE (
     occurred_at timestamptz, source_order_seq bigint, part_count integer,
     eligibility_state text, source_status text, source_revision bigint,
     author_payload_id text, document_facet_count integer,
-    ready_document_facet_count integer, index_coverage text)
+    ready_document_facet_count integer, failed_document_facet_count integer,
+    index_coverage text)
 -- Keep this function inlineable: source pagination must push ORDER BY/LIMIT
 -- into the indexed source scan before calculating facet coverage.
 -- All relation names are schema-qualified; builtins below use pg_catalog.
@@ -8328,13 +8388,15 @@ LANGUAGE sql STABLE AS $$
         s.platform,s.realm_id,s.external_group_id,u.author_subject_ref,
         u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
         u.eligibility_state,s.status,u.source_revision,u.author_payload_id,
-        coverage.facet_count,coverage.ready_count,coverage.index_coverage
+        coverage.facet_count,coverage.ready_count,coverage.failed_count,
+        coverage.index_coverage
     FROM __forest_module_schema__.source_units u
     JOIN __forest_module_schema__.memory_sources s
       ON s.bot_id=u.bot_id AND s.source_id=u.source_id
     CROSS JOIN LATERAL (
         SELECT pg_catalog.count(*)::integer AS facet_count,
                pg_catalog.count(*) FILTER (WHERE f.state='READY')::integer AS ready_count,
+               pg_catalog.count(*) FILTER (WHERE f.state='FAILED')::integer AS failed_count,
                CASE WHEN pg_catalog.count(*)=0 THEN 'NO_FACETS'
                     WHEN pg_catalog.count(*) FILTER (WHERE f.state='READY')=pg_catalog.count(*)
                         THEN 'COMPLETE'
@@ -8451,7 +8513,7 @@ BEGIN
                 u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
                 u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
                 u.eligibility_state,u.source_status,u.document_facet_count,
-                u.ready_document_facet_count,u.index_coverage
+                u.ready_document_facet_count,u.failed_document_facet_count,u.index_coverage
             FROM unnest(COALESCE(ready_source_ids,ARRAY[]::text[])) candidate(source_unit_id)
             JOIN __forest_module_schema__.memory_filtered_source_units(
                 context->>'bot_id',input,snapshot_time,snapshot_value) u
@@ -8476,7 +8538,7 @@ BEGIN
                 u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
                 u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
                 u.eligibility_state,u.source_status,u.document_facet_count,
-                u.ready_document_facet_count,u.index_coverage
+                u.ready_document_facet_count,u.failed_document_facet_count,u.index_coverage
             FROM __forest_module_schema__.memory_filtered_source_units(
                 context->>'bot_id',input,snapshot_time,snapshot_value) u
             WHERE after_time IS NULL OR

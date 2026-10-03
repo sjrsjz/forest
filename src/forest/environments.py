@@ -39,7 +39,7 @@ SDK_API = "1.0"
 SDK_FILES = (
     "__init__.py", "command_contract.py", "errors.py", "sdk.py", "drivers/__init__.py",
     "drivers/protocol.py", "drivers/python_worker.py", "drivers/worker.py",
-    "model_contract.py", "scope_identity.py", "worker_limits.py",
+    "model_contract.py", "embedding_contract.py", "scope_identity.py", "worker_limits.py",
 )
 MAX_ENVIRONMENT_BYTES = 256 * 1024 * 1024
 MAX_ENVIRONMENT_FILES = 8192
@@ -202,10 +202,7 @@ def _wheel(entry: dict, content: bytes) -> tuple[str, Version, list[Requirement]
     return name, version, requirements, installed
 
 
-def validate_lock(files: dict[str, bytes], reference: str) -> LockedDependencies:
-    if not isinstance(reference, str) or reference not in files or not reference.endswith(".json"):
-        _fail("dependency_lock must name a captured JSON file")
-    lock = _json(files[reference])
+def _validate_single_target_lock(files: dict[str, bytes], lock: dict) -> LockedDependencies:
     if (not isinstance(lock, dict) or set(lock) != {"lock_version", "target", "requirements", "wheels"}
             or type(lock["lock_version"]) is not int or lock["lock_version"] != 1
             or not isinstance(lock["requirements"], list) or len(lock["requirements"]) > 128
@@ -270,6 +267,79 @@ def validate_lock(files: dict[str, bytes], reference: str) -> LockedDependencies
     if set(included) != set(wheels):
         _fail("Lock contains wheels outside the exact dependency closure")
     return LockedDependencies(lock, dict(installed.values()))
+
+
+def validate_lock(files: dict[str, bytes], reference: str) -> LockedDependencies:
+    if not isinstance(reference, str) or reference not in files or not reference.endswith(".json"):
+        _fail("dependency_lock must name a captured JSON file")
+    lock = _json(files[reference])
+    if not isinstance(lock, dict):
+        _fail("Unsupported dependency lock schema")
+    if lock.get("lock_version") == 1:
+        return _validate_single_target_lock(files, lock)
+    if (set(lock) != {"lock_version", "targets"}
+            or type(lock["lock_version"]) is not int or lock["lock_version"] != 2
+            or not isinstance(lock["targets"], list)
+            or not 1 <= len(lock["targets"]) <= 16):
+        _fail("Unsupported dependency lock schema")
+    seen_targets = set()
+    all_wheels = set()
+    selected = None
+    for variant in lock["targets"]:
+        if (not isinstance(variant, dict)
+                or set(variant) != {"target", "requirements", "wheels"}
+                or not isinstance(variant["target"], dict)
+                or set(variant["target"]) != set(current_target())
+                or any(not isinstance(value, str) or not value
+                       for value in variant["target"].values())
+                or not isinstance(variant["requirements"], list)
+                or not isinstance(variant["wheels"], list)
+                or len(variant["requirements"]) > 128
+                or len(variant["wheels"]) > 128
+                or any(not isinstance(value, str) for value in variant["requirements"])):
+            _fail("Invalid target variant in dependency lock")
+        identity = digest_json(variant["target"])
+        if identity in seen_targets:
+            _fail("Duplicate dependency target")
+        seen_targets.add(identity)
+        if variant["target"] == current_target():
+            selected = variant
+        for entry in variant["wheels"]:
+            if (not isinstance(entry, dict)
+                    or set(entry) != {"file", "name", "version", "sha256"}
+                    or any(not isinstance(value, str) for value in entry.values())
+                    or not entry["file"].startswith("wheelhouse/")
+                    or not entry["file"].endswith(".whl")
+                    or entry["file"] not in files
+                    or entry["file"] in all_wheels
+                    or len(entry["sha256"]) != 64
+                    or any(char not in "0123456789abcdef" for char in entry["sha256"])
+                    or hashlib.sha256(files[entry["file"]]).hexdigest() != entry["sha256"]):
+                _fail("Target wheel differs from its locked identity/hash")
+            try:
+                wheel_name, wheel_version, _, _ = parse_wheel_filename(
+                    Path(entry["file"]).name
+                )
+                if (wheel_name != canonicalize_name(entry["name"])
+                        or wheel_version != Version(entry["version"])):
+                    _fail("Target wheel filename differs from its locked identity")
+            except (InvalidWheelFilename, InvalidVersion) as exc:
+                raise ForestError(
+                    "INVALID_DEPENDENCY_LOCK", "Invalid target wheel identity", 422
+                ) from exc
+            all_wheels.add(entry["file"])
+    if all_wheels != {path for path in files if path.endswith(".whl")}:
+        _fail("Every vendored wheel must be named in the dependency lock")
+    if selected is None:
+        _fail("Dependency lock Python/platform/SDK differs from deployment",
+              "DEPENDENCY_TARGET_MISMATCH")
+    selected_files = {
+        path: content for path, content in files.items()
+        if not path.endswith(".whl") or path in {item["file"] for item in selected["wheels"]}
+    }
+    selected_lock = {"lock_version": 1, **selected}
+    verified = _validate_single_target_lock(selected_files, selected_lock)
+    return LockedDependencies(lock, verified.files)
 
 
 @dataclass(frozen=True)

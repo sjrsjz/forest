@@ -16,8 +16,10 @@ from PIL import Image
 from forest.builtin.embedding_multimodal.python.embedding_provider import (
     MultimodalEmbeddingProvider,
 )
+from forest.drivers import PythonWorker, WorkerIdentity
 from forest.embeddings import PreparedEmbeddingRequest
 from forest.errors import ForestError
+from forest.packages import PackageCatalog
 
 
 def _reference(payload_id, content, *, component="memory.graph", owner_kind=None):
@@ -52,6 +54,74 @@ class _Payloads:
         self.items[reference["payload_id"]] = reference, content
         self.writes.append(reference)
         return reference
+
+
+@pytest.mark.asyncio
+async def test_isolated_embedding_worker_retains_exact_invalid_facet_identity(tmp_path):
+    invalid_bytes = b"x" * (4 * 1024 * 1024 + 1)
+    reference = _reference("invalid-source-image", invalid_bytes)
+
+    async def payload_gateway(_identity, _call_id, request):
+        assert request["action"] == "read-chunk"
+        assert request["reference"] == reference
+        offset = request["offset"]
+        part = invalid_bytes[offset:offset + request["max_bytes"]]
+        return {
+            "data_base64": base64.b64encode(part).decode("ascii"),
+            "offset": offset, "byte_length": len(invalid_bytes),
+            "eof": offset + len(part) == len(invalid_bytes),
+        }
+
+    snapshot = PackageCatalog(tmp_path / "packages").build(
+        Path(__file__).parents[1] / "src/forest/builtin/embedding_multimodal"
+    )
+    worker = PythonWorker(
+        snapshot, WorkerIdentity("embedding-test", "generation-1", "incarnation-1", "bot-1"),
+        payload_handler=payload_gateway,
+    )
+    try:
+        await worker.launch()
+        await worker.prepare({
+            "protocol": "forest.embedding.multimodal/1",
+            "endpoint": "https://example.invalid/embeddings",
+            "credential_ref": "credential-1", "timeout_seconds": 60,
+            "max_connections": 1,
+            "profile": {"deployment_id": "test-deployment", "model_revision": "test-revision",
+                        "model": "Qwen/Qwen3-VL-Embedding-8B", "dimensions": 4096},
+        })
+        await worker.start()
+        await worker.activate()
+        bound = await worker.invoke(
+            "embedding.profile.bind",
+            {"protocol": "forest.embedding-bind-request/1", "request_id": "request-1"},
+            call_id="bind-1", operation_id="bind-operation-1",
+        )
+        facet = {
+            "facet_id": "facet-invalid", "source_unit_id": "source-1",
+            "source_revision": 1, "part_id": "part-image", "trunk_id": "group-trunk",
+            "conversation_ref": "onebot:group:933179609", "author_ref": "onebot:user:42",
+            "modality": "IMAGE", "selector_start_char": None,
+            "selector_end_char": None, "input_payload": reference,
+            "facet_content_digest": reference["digest"],
+            "input_byte_length": len(invalid_bytes), "media_type": "image/png",
+            "width": 1, "height": 1,
+        }
+        with pytest.raises(ForestError) as caught:
+            await worker.invoke(
+                "embedding.request.materialize",
+                {"protocol": "forest.embedding-materialize/1",
+                 "request_id": "request-1", "transport_attempt_id": "attempt-1",
+                 "component_id": "embedding.multimodal", "generation_id": "generation-1",
+                 "profile_ref": bound["profile_ref"], "space_id": bound["space_id"],
+                 "purpose": "DOCUMENT", "facets": [facet]},
+                call_id="materialize-1", operation_id="materialize-operation-1",
+            )
+        assert caught.value.code == "EMBEDDING_FACET_INVALID"
+        assert caught.value.details == {
+            "facet_id": "facet-invalid", "facet_content_digest": reference["digest"],
+        }
+    finally:
+        await worker.stop()
 
 
 @pytest.mark.asyncio
@@ -136,6 +206,24 @@ async def test_materializer_freezes_large_image_as_attributed_rendition(trial):
     )
     with pytest.raises(ForestError, match="provenance"):
         replace(prepared, manifest_json=json.dumps(tampered_manifest)).verify()
+    invalid_bytes = b"x" * (4 * 1024 * 1024 + 1)
+    invalid_ref = _reference(
+        "invalid-source-image", invalid_bytes,
+        owner_kind="trial.input" if trial else "archived.source",
+    )
+    payloads.items[invalid_ref["payload_id"]] = invalid_ref, invalid_bytes
+    invalid_facet = {
+        **request["facets"][0], "facet_id": "facet-invalid",
+        "input_payload": invalid_ref, "facet_content_digest": invalid_ref["digest"],
+        "input_byte_length": len(invalid_bytes),
+    }
+    with pytest.raises(ForestError) as caught:
+        await provider.materialize({**request, "facets": [invalid_facet]}, ctx)
+    assert caught.value.code == "EMBEDDING_FACET_INVALID"
+    assert caught.value.details == {
+        "facet_id": invalid_facet["facet_id"],
+        "facet_content_digest": invalid_ref["digest"],
+    }
 
 
 @pytest.mark.asyncio

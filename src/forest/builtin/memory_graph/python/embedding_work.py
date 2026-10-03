@@ -220,22 +220,45 @@ async def dispatch(ctx, task, profile):
             "MEMORY_EMBEDDING_PROFILE_MISMATCH",
             "Claim space differs from the bound embedding Generation", 409,
         )
-    materialized = await ctx.services.call(
-        "embedding.request.materialize",
-        {
-            "protocol": "forest.embedding-materialize/1",
-            "request_id": request_id,
-            "transport_attempt_id": attempt_id,
-            "component_id": bound["component_id"],
-            "generation_id": bound["generation_id"],
-            "profile_ref": bound["profile_ref"],
-            "space_id": claim["space_id"],
-            "purpose": claim["purpose"],
-            "facets": claim["facets"],
-        },
-        operation_id=ctx.operations.stable("embedding-materialize:" + claim_id),
-        timeout=120,
-    )
+    try:
+        materialized = await ctx.services.call(
+            "embedding.request.materialize",
+            {
+                "protocol": "forest.embedding-materialize/1",
+                "request_id": request_id,
+                "transport_attempt_id": attempt_id,
+                "component_id": bound["component_id"],
+                "generation_id": bound["generation_id"],
+                "profile_ref": bound["profile_ref"],
+                "space_id": claim["space_id"],
+                "purpose": claim["purpose"],
+                "facets": claim["facets"],
+            },
+            operation_id=ctx.operations.stable("embedding-materialize:" + claim_id),
+            timeout=120,
+        )
+    except ForestError as exc:
+        details = exc.details if isinstance(exc.details, dict) else {}
+        invalid = next((facet for facet in claim["facets"]
+                        if facet["facet_id"] == details.get("facet_id")
+                        and facet["facet_content_digest"] ==
+                        details.get("facet_content_digest")), None)
+        if exc.code != "EMBEDDING_FACET_INVALID" or invalid is None:
+            raise
+        await ctx.uow.call(
+            "memory.reject-embedding-facet",
+            {
+                "protocol": "forest.memory-embedding-facet-reject/1",
+                "claim_id": claim_id,
+                "facet_id": invalid["facet_id"],
+                "facet_content_digest": invalid["facet_content_digest"],
+                "space_id": claim["space_id"],
+                "reason_code": exc.code,
+            },
+            operation_id=ctx.operations.stable("embedding-reject-facet:" + claim_id),
+            timeout=20,
+        )
+        return {"claim_id": claim_id, "state": "NOT_SENT"}
     if (
         materialized.get("protocol") != "forest.embedding-materialized/1"
         or any(materialized.get(key) != bound[key] for key in (

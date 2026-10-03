@@ -5,7 +5,7 @@ import json
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
-from forest.embeddings import IMAGE_INPUT_POLICY
+from forest.embedding_contract import IMAGE_INPUT_POLICY
 from forest.errors import ForestError
 from forest.sdk import Plugin, service
 
@@ -252,7 +252,16 @@ async def _prepare_request(request, profile, space_id, payloads, bot_id):
         )
     inputs, manifest_facets, image_bytes = [], [], 0
     for facet in facets:
-        wire, manifest, image_size = await _embedding_input(facet, payloads, bot_id)
+        try:
+            wire, manifest, image_size = await _embedding_input(facet, payloads, bot_id)
+        except ForestError as exc:
+            if exc.code != "EMBEDDING_FACET_INVALID":
+                raise
+            raise ForestError(
+                exc.code, exc.message, exc.status,
+                details={"facet_id": facet["facet_id"],
+                         "facet_content_digest": facet["facet_content_digest"]},
+            ) from exc
         inputs.append(wire)
         manifest_facets.append(manifest)
         image_bytes += image_size

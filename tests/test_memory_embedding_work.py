@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from forest.builtin.memory_graph.python.embedding_work import dispatch, recover
+from forest.errors import ForestError
 
 
 def _ref(owner_kind, owner_id):
@@ -160,6 +161,65 @@ async def test_embedding_worker_handoffs_before_http_and_observes_claim_order():
     assert observed["memory"]["vectors"][0]["vector_digest"] == (
         "sha256:" + hashlib.sha256(encoded).hexdigest()
     )
+
+
+@pytest.mark.asyncio
+async def test_invalid_embedding_facet_ends_only_its_claim_before_budget_or_http():
+    calls = []
+    space = "sha256:" + "b" * 64
+    digest = "sha256:" + "a" * 64
+    profile_snapshot = {
+        "deployment_id": "embedding/test", "model_revision": "test/1",
+        "model": "jina-clip-v2", "dimensions": 2,
+    }
+    facets = [
+        {"facet_id": "facet/invalid", "facet_content_digest": digest},
+        {"facet_id": "facet/valid", "facet_content_digest": digest},
+    ]
+
+    async def service_call(name, payload, **_kwargs):
+        calls.append(name)
+        if name == "embedding.profile.bind":
+            return {
+                "protocol": "forest.embedding-profile/2",
+                "request_id": "op:embedding-request:claim/invalid",
+                "component_id": "embedding.multimodal",
+                "generation_id": "generation/one",
+                "profile_ref": "profile:" + "c" * 64,
+                "space_id": space, "profile": profile_snapshot,
+                "max_batch_items": 8,
+            }
+        assert name == "embedding.request.materialize"
+        assert payload["facets"] == facets
+        raise ForestError(
+            "EMBEDDING_FACET_INVALID", "Archived image cannot be decoded", 422,
+            details={"facet_id": "facet/invalid", "facet_content_digest": digest},
+        )
+
+    async def uow_call(name, payload, **_kwargs):
+        calls.append(name)
+        assert name == "memory.reject-embedding-facet"
+        assert payload == {
+            "protocol": "forest.memory-embedding-facet-reject/1",
+            "claim_id": "claim/invalid", "facet_id": "facet/invalid",
+            "facet_content_digest": digest, "space_id": space,
+            "reason_code": "EMBEDDING_FACET_INVALID",
+        }
+        return {"claim_id": "claim/invalid", "facet_id": "facet/invalid", "state": "FAILED"}
+
+    ctx = SimpleNamespace(
+        operations=SimpleNamespace(stable=lambda step: "op:" + step),
+        services=SimpleNamespace(call=service_call),
+        uow=SimpleNamespace(call=uow_call),
+    )
+    result = await dispatch(
+        ctx, {"payload": {"claim_id": "claim/invalid", "space_id": space,
+                          "purpose": "DOCUMENT", "facets": facets}},
+        {"embedding": profile_snapshot},
+    )
+    assert result == {"claim_id": "claim/invalid", "state": "NOT_SENT"}
+    assert calls == ["embedding.profile.bind", "embedding.request.materialize",
+                     "memory.reject-embedding-facet"]
 
 
 @pytest.mark.asyncio

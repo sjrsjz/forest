@@ -153,10 +153,44 @@ async def test_embedding_claim_budgets_bounded_image_renditions(clean_authority,
     assert [item["facet_id"] for item in first["value"]["payload"]["facets"]] == [
         "facet/image/1", "facet/image/2",
     ]
+    rejection = {
+        "protocol": "forest.memory-embedding-facet-reject/1",
+        "claim_id": "claim/images/first", "facet_id": "facet/image/1",
+        "facet_content_digest": digest, "space_id": space,
+        "reason_code": "EMBEDDING_FACET_INVALID",
+    }
+    async with store.pool.connection() as conn, conn.transaction():
+        rejected = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_reject_embedding_facet(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id, "generation_id": "generation/images",
+                   "operation_id": "reject/images/first",
+                   "participant_input_digest": digest_json(rejection)}),
+            Jsonb({"protocol": "forest.uow-step/1",
+                   "caller": {"component_id": "memory.graph",
+                              "generation_id": "generation/images"},
+                   "input": rejection, "prior": {}}),
+        ))).fetchone())["result"]
+        assert rejected["ok"], rejected
+        assert rejected["value"]["state"] == "FAILED"
+        state = (await (await conn.execute(sql.SQL(
+            "SELECT state,failure_code FROM {}.embedding_facets "
+            "WHERE bot_id=%s AND facet_id='facet/image/1'"
+        ).format(namespace), (store.bot_id,))).fetchone())
+        assert state == {"state": "FAILED", "failure_code": "EMBEDDING_FACET_INVALID"}
+        source_page = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_query_sources(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"limit": 50, "source_id": "source/images"}),
+        ))).fetchone())["result"]
+        assert source_page["ok"], source_page
+        assert sum(item["failed_document_facet_count"]
+                   for item in source_page["value"]["items"]) == 1
     second = await claim("claim/images/second")
     assert second["ok"], second
     assert [item["facet_id"] for item in second["value"]["payload"]["facets"]] == [
-        "facet/image/3",
+        "facet/image/2", "facet/image/3",
     ]
 
 

@@ -32,6 +32,17 @@ from forest.worker_limits import WorkerLimits
 def _error_details(error: dict) -> dict | None:
     """Only typed state-repair metadata may cross the private IPC boundary."""
     details = error.get("details")
+    if error.get("code") == "EMBEDDING_FACET_INVALID" and isinstance(details, dict):
+        facet_id = details.get("facet_id")
+        digest = details.get("facet_content_digest")
+        if (set(details) == {"facet_id", "facet_content_digest"}
+                and isinstance(facet_id, str)
+                and 1 <= len(facet_id.encode("utf-8")) <= 256
+                and isinstance(digest, str)
+                and digest.startswith("sha256:") and len(digest) == 71
+                and all(char in "0123456789abcdef" for char in digest[7:])):
+            return {"facet_id": facet_id, "facet_content_digest": digest}
+        return None
     if error.get("code") != "KERNEL_CONTENT_REVOKED" or not isinstance(details, dict):
         return None
     revision, digest, state = (details.get(key) for key in (

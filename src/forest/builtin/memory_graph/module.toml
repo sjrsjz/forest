@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.72.0"
+version = "1.73.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -81,6 +81,7 @@ requests = [
   "uow.execute:memory.publish-retrieval-evidence",
   "uow.execute:memory.reserve-embedding-budget",
   "uow.execute:memory.prepare-embedding-effect",
+  "uow.execute:memory.reject-embedding-facet",
   "uow.execute:memory.handoff-embedding-effect",
   "uow.execute:memory.abandon-embedding-effect",
   "uow.execute:memory.observe-embedding-effect",
@@ -271,9 +272,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.62.0"
+schema_version = "3.63.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "85830fe82b76658702fc6c036077037f7eb9805f47b3c8837f639af409232e82"
+baseline_sha256 = "7ad4e6ef6d374f5a6dedcb2a4964496d08c1b70e00d5ed741302b2d07d205937"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -589,6 +590,13 @@ owner_kind_path = "/input/facets/*/input_payload/owner_kind"
 owner_id_path = "/input/facets/*/input_payload/owner_id"
 
 [[components.unit_of_work_participants]]
+name = "memory.reject-embedding-facet-record"
+contract = "1.0"
+function = "memory_reject_embedding_facet"
+input_schema = "schemas/reject-embedding-facet-envelope.json"
+output_schema = "schemas/reject-embedding-facet-output.json"
+
+[[components.unit_of_work_participants]]
 name = "memory.prepare-embedding-attempt-record"
 contract = "1.0"
 function = "memory_prepare_embedding_attempt"
@@ -744,6 +752,16 @@ output_schema = "schemas/prepare-document-facets-output.json"
 timeout_s = 15
 steps = [
   { id = "memory", component_id = "memory.graph", participant = "memory.prepare-facets-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "memory.reject-embedding-facet"
+contract = "1.0"
+input_schema = "schemas/reject-embedding-facet-input.json"
+output_schema = "schemas/reject-embedding-facet-output.json"
+timeout_s = 15
+steps = [
+  { id = "memory", component_id = "memory.graph", participant = "memory.reject-embedding-facet-record" }
 ]
 
 [[components.unit_of_work_plans]]

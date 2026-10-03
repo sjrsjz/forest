@@ -21,8 +21,8 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
-from PIL import __version__ as PILLOW_VERSION
 
+from forest.embedding_contract import IMAGE_INPUT_POLICY
 from forest.errors import ForestError
 from forest.model_contract import MediaSnapshot
 
@@ -39,7 +39,6 @@ MAX_BATCH_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
-IMAGE_INPUT_POLICY = f"authorized_capture_jpeg_fit_4m_v2_pillow-{PILLOW_VERSION}"
 SOURCE_FIELDS = frozenset(
     {
         "bot_id",
