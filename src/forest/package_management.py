@@ -177,29 +177,16 @@ class PackageManagementContract(ModuleConfigurationContract):
             conn, port, payload, operation_id=operation_id,
         )
 
-    async def artifact_receipt(self, artifact_id: str, payload: dict) -> dict | None:
+    async def artifact_close(self, artifact_id: str, payload: dict) -> dict | None:
         declaration, _port = self._artifacts[artifact_id]
-        query_id = declaration.get("receipt_query")
-        if query_id is None:
+        name = declaration.get("close_port")
+        if name is None:
             return None
-        receipt = await self.query(query_id, payload)
-        if (
-            not isinstance(receipt, dict)
-            or type(receipt.get("found")) is not bool
-            or (
-                receipt["found"]
-                and not isinstance(receipt.get("package_digest"), str)
-            )
-            or (
-                not receipt["found"]
-                and receipt.get("package_digest") is not None
-            )
-        ):
-            raise ForestError(
-                "PACKAGE_ARTIFACT_RECEIPT_INVALID",
-                "Artifact receipt query returned an invalid result", 502,
-            )
-        return receipt
+        port = next(
+            item for item in self.adapter.component.get("effect_services", ())
+            if item["name"] == name
+        )
+        return await self.adapter.invoke_management_artifact_close(port, payload)
 
     def asset(self, asset_id: str) -> dict:
         try:

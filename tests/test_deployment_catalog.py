@@ -553,6 +553,20 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
             assert rejected.json()["records"][0]["error_code"] == (
                 "PACKAGE_ARCHIVE_DIGEST_MISMATCH"
             )
+            rejected_import = rejected.json()["records"][0]
+            assert package_catalog.close_import_if_absent(
+                operation_id=rejected_import["operation_id"],
+                actor_ref=rejected_import["actor_ref"],
+                archive_sha256=rejected_import["archive_sha256"],
+            ) == {"found": False, "package_digest": None, "closed": True}
+            with pytest.raises(ForestError) as closed_import:
+                package_catalog.import_archive_idempotent(
+                    upload_bytes,
+                    operation_id=rejected_import["operation_id"],
+                    actor_ref=rejected_import["actor_ref"],
+                    archive_sha256=rejected_import["archive_sha256"],
+                )
+            assert closed_import.value.code == "PACKAGE_IMPORT_CLOSED"
             terminal_replay = await client.post(
                 upload_path, headers=mismatched_headers, content=upload_bytes,
             )
@@ -628,7 +642,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         untrusted_manifest = untrusted_source / "module.toml"
         untrusted_manifest.write_text(
             untrusted_manifest.read_text(encoding="utf-8").replace(
-                'version = "1.4.1"', 'version = "1.4.3"', 1
+                'version = "1.5.0"', 'version = "1.5.2"', 1
             ), encoding="utf-8",
         )
         untrusted = package_catalog.build(untrusted_source)
@@ -644,7 +658,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.4.1"', 'version = "1.4.2"', 1
+                'version = "1.5.0"', 'version = "1.5.1"', 1
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(next_source)

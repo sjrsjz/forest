@@ -10,6 +10,7 @@ import zipfile
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -996,6 +997,58 @@ def test_concurrent_archive_import_replays_one_atomic_catalog_receipt(tmp_path):
             actor_ref="admin:one", archive_sha256="sha256:" + "0" * 64,
         )
     assert wrong_digest.value.code == "PACKAGE_ARCHIVE_DIGEST_MISMATCH"
+
+
+def test_import_close_and_publish_choose_one_durable_outcome(tmp_path):
+    source_catalog = PackageCatalog(tmp_path / "source-catalog")
+    snapshot = source_catalog.build(source(tmp_path))
+    archive = source_catalog.export_archive(snapshot.digest)
+    root = tmp_path / "destination"
+    identity = {
+        "operation_id": "web:sha256:" + "d" * 64,
+        "actor_ref": "admin:one",
+        "archive_sha256": "sha256:" + hashlib.sha256(archive).hexdigest(),
+    }
+    closed = PackageCatalog(root).close_import_if_absent(**identity)
+    assert closed == {"found": False, "package_digest": None, "closed": True}
+    assert PackageCatalog(root).close_import_if_absent(**identity) == closed
+    with pytest.raises(ForestError) as late:
+        PackageCatalog(root).import_archive_idempotent(archive, **identity)
+    assert late.value.code == "PACKAGE_IMPORT_CLOSED"
+    with pytest.raises(ForestError) as conflict:
+        PackageCatalog(root).close_import_if_absent(**{**identity, "actor_ref": "admin:two"})
+    assert conflict.value.code == "PACKAGE_IMPORT_OPERATION_CONFLICT"
+
+    racing = {**identity, "operation_id": "web:sha256:" + "e" * 64}
+    ready = Event()
+
+    def publish():
+        ready.wait()
+        try:
+            return ("published", PackageCatalog(root).import_archive_idempotent(
+                archive, **racing,
+            ).digest)
+        except ForestError as error:
+            return ("rejected", error.code)
+
+    def close():
+        ready.wait()
+        return PackageCatalog(root).close_import_if_absent(**racing)
+
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        publication = workers.submit(publish)
+        closure = workers.submit(close)
+        ready.set()
+        published, observed = publication.result(), closure.result()
+    if observed["found"]:
+        assert observed == {
+            "found": True, "package_digest": snapshot.digest, "closed": False,
+        }
+        assert published == ("published", snapshot.digest)
+    else:
+        assert observed == {"found": False, "package_digest": None, "closed": True}
+        assert published == ("rejected", "PACKAGE_IMPORT_CLOSED")
+    assert PackageCatalog(root).close_import_if_absent(**racing) == observed
 
 
 def test_unbound_web_artifacts_do_not_reserve_version_after_rejected_registration(tmp_path):

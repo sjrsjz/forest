@@ -312,7 +312,7 @@ class DeploymentManagementGateway:
                     "PACKAGE_TOO_LARGE", "PACKAGE_ARCHIVE_DIGEST_MISMATCH",
                     }
                 ):
-                    receipt = await contract.artifact_receipt(
+                    receipt = await contract.artifact_close(
                         artifact_id, {
                             "operation_id": operation_id,
                             "actor_ref": authorization.web_subject_ref,
@@ -321,8 +321,8 @@ class DeploymentManagementGateway:
                     )
                     if receipt is None:
                         raise ForestError(
-                            "PACKAGE_ARTIFACT_RECEIPT_UNAVAILABLE",
-                            "Artifact rejection requires durable receipt evidence", 503,
+                            "PACKAGE_ARTIFACT_CLOSE_UNAVAILABLE",
+                            "Artifact rejection requires a durable physical close fence", 503,
                         )
                     settlement = {
                         "operation_id": operation_id,

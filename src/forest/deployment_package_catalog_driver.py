@@ -10,6 +10,7 @@ from forest.package_effects import PackageArtifactDownload
 _SERVICES = frozenset({
     "deployment.catalog.page", "deployment.catalog.artifact",
     "deployment.catalog.import", "deployment.catalog.import-receipt",
+    "deployment.catalog.import-close",
 })
 
 
@@ -28,7 +29,9 @@ class DeploymentPackageCatalogEffectDriver:
             declaration.get("name") not in _SERVICES
             or declaration.get("kind") != "deployment.package-catalog"
             or declaration.get("semantics") != (
-                "idempotent" if declaration.get("name") == "deployment.catalog.import" else "read"
+                "idempotent" if declaration.get("name") in {
+                    "deployment.catalog.import", "deployment.catalog.import-close",
+                } else "read"
             )
             or identity.component_id != "deployment.package-registry"
             or catalog is None
@@ -77,6 +80,8 @@ class DeploymentPackageCatalogEffectDriver:
                 "found": receipt is not None,
                 "package_digest": receipt["package_digest"] if receipt is not None else None,
             }
+        if self.service_id == "deployment.catalog.import-close":
+            return await asyncio.to_thread(self.catalog.close_import_if_absent, **payload)
         if self.service_id == "deployment.catalog.page":
             return await asyncio.to_thread(self.catalog.page, **payload)
         return await asyncio.to_thread(self.catalog.artifact, payload["package_digest"])
@@ -113,3 +118,10 @@ class DeploymentPackageCatalogEffectDriver:
             check_manifest=_check_external_manifest,
         )
         return await asyncio.to_thread(self.catalog.artifact, snapshot.digest)
+
+    async def close_upload(self, payload: dict) -> dict:
+        if not self.accepting or self.service_id != "deployment.catalog.import-close":
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE", "Package import close port is unavailable", 409,
+            )
+        return await asyncio.to_thread(self.catalog.close_import_if_absent, **payload)

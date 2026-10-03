@@ -71,13 +71,21 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
         item["port"] for item in component.get("management_artifacts", ())
         if item["direction"] == "upload"
     }
+    close_ports = {
+        item["close_port"] for item in component.get("management_artifacts", ())
+        if "close_port" in item
+    }
     if any(
         item["kind"] not in runtime.effect_driver_factories
         or (item["name"] in upload_ports and (
             item["semantics"] != "idempotent"
             or f"service.call:{item['name']}" in requested
         ))
-        or (item["name"] not in upload_ports and (
+        or (item["name"] in close_ports and (
+            item["semantics"] != "idempotent"
+            or f"service.call:{item['name']}" not in requested
+        ))
+        or (item["name"] not in upload_ports | close_ports and (
             item["semantics"] != "read"
             or f"service.call:{item['name']}" not in requested
         ))

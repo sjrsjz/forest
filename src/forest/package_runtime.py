@@ -1998,6 +1998,51 @@ class PackageGenerationAdapter:
             if self._service_inflight == 0:
                 self._services_drained.set()
 
+    async def invoke_management_artifact_close(
+        self, declaration: dict, payload: dict,
+    ) -> dict:
+        if (
+            declaration not in self.component.get("effect_services", ())
+            or declaration["semantics"] != "idempotent"
+        ):
+            raise ForestError(
+                "MODULE_MANAGEMENT_BINDING_INVALID",
+                "Artifact close is not bound to an idempotent Generation port", 409,
+            )
+        input_validator, output_validator = self._service_schemas[declaration["name"]]
+        if not isinstance(payload, dict) or not input_validator.is_valid(payload):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID", "Artifact close input is invalid", 422,
+            )
+        identity = self.generation_identity
+        if self.state is not PackageGenerationState.ACTIVE or identity is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_NOT_ACTIVE", "Artifact Generation is inactive", 409,
+            )
+        driver = self._effect_drivers.get(declaration["name"])
+        close_upload = getattr(driver, "close_upload", None)
+        if not callable(close_upload) or self._service_inflight >= self.component["resources"]["max_inflight"]:
+            raise ForestError(
+                "PACKAGE_ARTIFACT_PORT_UNAVAILABLE", "Artifact close port is unavailable", 503,
+            )
+        self._service_inflight += 1
+        self._services_drained.clear()
+        try:
+            await self._generation_verifier(
+                component_id=self.component_id, generation_id=identity.generation_id,
+                admission_lane="DATA",
+            )
+            result = await close_upload(payload)
+            if not isinstance(result, dict) or not output_validator.is_valid(result):
+                raise ForestError(
+                    "PACKAGE_ARTIFACT_RESULT_INVALID", "Artifact close returned an invalid result", 502,
+                )
+            return result
+        finally:
+            self._service_inflight -= 1
+            if self._service_inflight == 0:
+                self._services_drained.set()
+
     async def invoke_management_artifact_command_in(
         self, conn, declaration: dict, payload: dict, *, operation_id: str,
     ) -> dict:
