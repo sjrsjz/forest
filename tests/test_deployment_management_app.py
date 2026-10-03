@@ -574,8 +574,7 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
     identity = _IdentityAuthority()
     app = create_deployment_management_app(
         deployment_id="deployment/browser-smoke",
-        components=(),
-        identity_authority=identity,
+                identity_authority=identity,
         allowed_origin=origin,
         bot_supervisor=Supervisor(),
     )
@@ -683,8 +682,7 @@ async def test_first_setup_endpoint_requires_exact_origin_and_closes_after_pairi
     identity.setup_required = True
     app = create_deployment_management_app(
         deployment_id="deployment/test",
-        components=(),
-        identity_authority=identity,
+                identity_authority=identity,
         allowed_origin="http://forest.test",
     )
     payload = {
@@ -789,8 +787,7 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
 
     app = create_deployment_management_app(
         deployment_id="deployment/test",
-        components=(),
-        identity_authority=(identity := _IdentityAuthority()),
+                identity_authority=(identity := _IdentityAuthority()),
         allowed_origin="http://forest.test",
         bot_supervisor=Supervisor(),
     )
@@ -962,8 +959,7 @@ async def test_asset_routes_forward_bounded_binary_under_bot_web_tickets(monkeyp
             yield object()
 
     app = create_deployment_management_app(
-        deployment_id="deployment/test", components=(),
-        identity_authority=_IdentityAuthority(), allowed_origin="http://forest.test",
+        deployment_id="deployment/test",         identity_authority=_IdentityAuthority(), allowed_origin="http://forest.test",
         bot_supervisor=Supervisor(),
     )
     async with AsyncClient(

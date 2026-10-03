@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import inspect
 import re
@@ -24,7 +23,6 @@ class DeploymentManagementGateway:
         self,
         *,
         deployment_id: str,
-        components: tuple,
         ticket_authority=None,
         web_receipts=None,
         audit=None,
@@ -33,15 +31,12 @@ class DeploymentManagementGateway:
         graph_change_previewer: Callable | None = None,
     ) -> None:
         self.deployment_id = deployment_id
-        self.components = components
-        self.registry = {component.component_id: component for component in components}
         self.ticket_authority = ticket_authority
         self.web_receipts = web_receipts
         self.audit = audit
         self._runtime_registry_provider = runtime_registry_provider
         self.graph_change_authority = graph_change_authority
         self.graph_change_previewer = graph_change_previewer
-        self._operation_lock = asyncio.Lock()
 
     @property
     def runtime_registry(self):
@@ -81,9 +76,7 @@ class DeploymentManagementGateway:
                     "RUNTIME_GENERATION_NOT_ACTIVE", "Deployment module is unavailable", 409
                 )
             return graph.generations[component_id], graph.graph_revision
-        if component_id not in self.registry:
-            raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Component does not exist", 404)
-        return "deployment/" + component_id + "/1", 1
+        raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Component does not exist", 404)
 
     async def _authorize(self, ticket, **expected) -> None:
         if self.ticket_authority is None:
@@ -138,15 +131,11 @@ class DeploymentManagementGateway:
                     "graph_id": generation_id,
                 }
             ),
-            "modules": (registry.describe() if registry is not None else [])
-            + [component.describe() for component in self.components],
+            "modules": registry.describe() if registry is not None else [],
         }
 
     async def read_configuration(self, component_id: str, *, authorization=None, operation_id=None):
-        binding = self._package_binding(component_id)
-        generation_id, graph_revision = (
-            binding[:2] if binding is not None else self.authorization_target(component_id)
-        )
+        generation_id, graph_revision, module = self._require_package_binding(component_id)
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
@@ -159,9 +148,7 @@ class DeploymentManagementGateway:
             input_digest=digest_json({}),
             required_role="AUDITOR",
         )
-        if binding is not None:
-            return await binding[2].management_contract.read()
-        self._unsupported_configuration(component_id)
+        return await module.management_contract.read()
 
     async def read_management_ui(
         self,
@@ -426,13 +413,8 @@ class DeploymentManagementGateway:
                     "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Replacement authority is unavailable", 503
                 )
             return await self.graph_change_authority.get(body["operation_id"])
-        binding = self._package_binding(component_id)
-        generation_id, graph_revision = (
-            binding[:2] if binding is not None else self.authorization_target(component_id)
-        )
-        contract = (
-            binding[2].management_contract if binding is not None else self._contract(component_id)
-        )
+        generation_id, graph_revision, module = self._require_package_binding(component_id)
+        contract = module.management_contract
         required_role_for_query = getattr(contract, "query_required_role", None)
         required_role = (
             required_role_for_query(query_id)
@@ -450,10 +432,7 @@ class DeploymentManagementGateway:
             input_digest=digest_json(body),
             required_role=required_role,
         )
-        authorized_query = getattr(contract, "query_authorized", None)
-        if callable(authorized_query):
-            return await authorized_query(query_id, body, authorization=authorization)
-        return await contract.query(query_id, body)
+        return await contract.query_authorized(query_id, body, authorization=authorization)
 
     async def module_action(
         self,
@@ -549,33 +528,14 @@ class DeploymentManagementGateway:
             input_digest=input_digest,
             required_role="ADMIN",
         )
-        package = self._package_module(component_id)
-        if package is not None:
-            return await package.management_contract.action(
-                action_id,
-                operation_id=operation_id,
-                payload=body,
-                authorization=authorization,
-                authorization_guard=self._authorize_mutation_in,
-            )
-        async with self._operation_lock:
-            return await self._contract(component_id).action(
-                action_id,
-                operation_id=operation_id,
-                payload=body,
-                authorization=(
-                    DeploymentActionAuthorization(
-                        authorization,
-                        self._authorize_mutation_in,
-                        component_id,
-                        action_id,
-                        input_digest,
-                        operation_id,
-                    )
-                    if self.ticket_authority is not None
-                    else None
-                ),
-            )
+        package = self._require_package_binding(component_id)[2]
+        return await package.management_contract.action(
+            action_id,
+            operation_id=operation_id,
+            payload=body,
+            authorization=authorization,
+            authorization_guard=self._authorize_mutation_in,
+        )
 
     async def _authorize_mutation_in(
         self,
@@ -612,17 +572,14 @@ class DeploymentManagementGateway:
         await self.audit.append_web_action_in(conn, ticket=ticket, receipt=receipt)
         return receipt
 
-    def _contract(self, component_id: str):
-        module = self._package_module(component_id)
-        if module is not None:
-            return module.management_contract
-        component = self.registry.get(component_id)
-        if component is None:
+    def _require_package_binding(self, component_id: str):
+        binding = self._package_binding(component_id)
+        if binding is None:
             raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Component does not exist", 404)
-        return component.contract
+        return binding
 
     def _unsupported_configuration(self, component_id: str) -> None:
-        self._contract(component_id)
+        self._require_package_binding(component_id)
         raise ForestError(
             "MODULE_MANAGEMENT_UNAVAILABLE",
             "Component does not publish a configuration contract",

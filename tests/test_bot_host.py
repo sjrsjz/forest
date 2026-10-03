@@ -2684,7 +2684,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
             management_app = create_deployment_management_app(
                 deployment_id="deployment/host-trial",
-                components=(), identity_authority=TrialIdentity(),
+                identity_authority=TrialIdentity(),
                 allowed_origin="http://forest.test",
                 bot_supervisor=TrialSupervisor(),
             )
@@ -3389,8 +3389,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
             async with _real_web_identity_for_bot_test(dsn) as identity:
                 web_app = create_deployment_management_app(
-                    deployment_id="deployment/host-web-test", components=(),
-                    identity_authority=identity, allowed_origin="http://forest.test",
+                    deployment_id="deployment/host-web-test",                     identity_authority=identity, allowed_origin="http://forest.test",
                     bot_supervisor=SelectionWebSupervisor(),
                 )
                 base = (
@@ -4312,8 +4311,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
 
             async with _real_web_identity_for_bot_test(dsn) as identity:
                 web_app = create_deployment_management_app(
-                    deployment_id="deployment/host-web-test", components=(),
-                    identity_authority=identity, allowed_origin="http://forest.test",
+                    deployment_id="deployment/host-web-test",                     identity_authority=identity, allowed_origin="http://forest.test",
                     bot_supervisor=RequeueWebSupervisor(),
                 )
                 base = (

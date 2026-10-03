@@ -34,6 +34,9 @@ class PackageManagementContract(ModuleConfigurationContract):
             item["name"]: item for item in component.get("domain_queries", ())
         }
         query_ports.update(
+            (item["name"], item) for item in component.get("kernel_queries", ())
+        )
+        query_ports.update(
             (item["name"], item)
             for item in component.get("provides", ())
             if item["semantics"] == "read"
@@ -67,6 +70,11 @@ class PackageManagementContract(ModuleConfigurationContract):
     def describe(self) -> dict:
         value = super().describe()
         value["protocol"] = self.protocol
+        bootstrap_catalog_query = self.adapter.component.get("management_ui", {}).get(
+            "bootstrap_catalog_query"
+        )
+        if bootstrap_catalog_query is not None:
+            value["bootstrap_catalog_query"] = bootstrap_catalog_query
         value["queries"] = [
             {
                 "query_id": operation_id,

@@ -50,6 +50,16 @@ button.quiet { color:#bad0c5; background:#13251e; border:1px solid #315144; }
 .host-secret-dialog label { display:grid; gap:8px; }
 .host-secret-dialog input { width:100%; }
 .host-secret-dialog form div { display:flex; justify-content:flex-end; gap:8px; }
+.bootstrap-editor-dialog { width:min(1080px,calc(100vw - 36px)); max-height:min(850px,calc(100dvh - 36px)); padding:0; border:1px solid #416e54; border-radius:10px; color:#e7fff3; background:#10251b; }
+.bootstrap-editor-dialog::backdrop { background:rgba(0,0,0,.76); }
+.bootstrap-editor-dialog > form { display:flex; flex-direction:column; max-height:calc(100dvh - 38px); }
+.bootstrap-editor-dialog > form > header,.bootstrap-editor-dialog > form > footer { flex:0 0 auto; display:flex; align-items:center; gap:12px; padding:14px 18px; border-bottom:1px solid #29473a; }
+.bootstrap-editor-dialog > form > header { flex-direction:column; align-items:flex-start; gap:3px; }
+.bootstrap-editor-dialog h2,.bootstrap-editor-dialog h3 { margin:0; }
+.bootstrap-editor-dialog > form > footer { justify-content:flex-end; border-top:1px solid #29473a; border-bottom:0; }
+.bootstrap-editor-panels { overflow:auto; min-height:0; display:grid; grid-template-columns:repeat(auto-fit,minmax(min(330px,100%),1fr)); gap:10px; padding:14px; }
+.bootstrap-editor-panel { min-width:0; border:1px solid #29473a; border-radius:9px; padding:12px; background:#0d1a15; }
+.bootstrap-editor-panel h3 { font-size:15px; margin:0 0 10px; }
 .notice { position:absolute; z-index:4; top:24px; right:24px; max-width:520px; padding:10px 14px; border:1px solid #77504b; border-radius:8px; background:#321b19; color:#ffc8c1; }
 @media (max-width:780px){.console{grid-template:54px 44px minmax(0,1fr)/1fr}.sidebar{border-right:0;border-bottom:1px solid #223a30}.sidebar-title{display:none}#module-nav{display:flex;overflow-x:auto;padding:4px}#module-nav button{flex:0 0 auto;width:auto;max-width:220px}.workspace{grid-row:3}.module-row{grid-template-columns:1fr 90px}.module-row code{display:none}.runtime-line code{display:none}}
 @media (max-width:1100px){.graph-replace-form{grid-template-columns:1fr 1fr}.graph-replace-form span{align-self:center;padding:0}}

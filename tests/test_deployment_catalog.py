@@ -18,13 +18,17 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
+from forest.bootstrap_contributions import BootstrapConfigurationRegistry
 from forest.deployment_kernel_management import (
+    BootstrapCatalogKernelQuery,
+    BootstrapProfileKernelCommand,
     DeploymentKernelManagementAuthority,
+    LocalStorageProfileKernelCommand,
     ProvisioningJobKernelCommand,
     SecretPutKernelCommand,
+    StorageProfileKernelCommand,
     WebAccountKernelCommand,
 )
-from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_package_controller import DeploymentPackageController
 from forest.deployment_packages import bootstrap_builtin_deployment_package
@@ -488,8 +492,7 @@ priority = "P1"
             display_name="Administrator", password="deployment-web-password",
         )
         app = create_deployment_management_app(
-            deployment_id=repository.store.deployment_id, components=(),
-            deployment_registry_provider=lambda: controller.registry,
+            deployment_id=repository.store.deployment_id,             deployment_registry_provider=lambda: controller.registry,
             identity_authority=identity,
             deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
             deployment_audit=DeploymentAuditRepository(repository.store),
@@ -983,8 +986,7 @@ async def test_deployment_web_queues_and_reconciles_package_replacement(
     )
     app = create_deployment_management_app(
         deployment_id=repository.store.deployment_id,
-        components=(),
-        deployment_registry_provider=lambda: controller.registry,
+                deployment_registry_provider=lambda: controller.registry,
         deployment_graph_changes=graph_changes,
         deployment_change_previewer=controller.preview_change,
         identity_authority=identity,
@@ -2655,16 +2657,32 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         new_target_dsn=lambda _bot_id: allocated_dsn,
         validate_target=lambda _bot_id, _target_dsn: None,
     )
+    bootstrap_registry = BootstrapConfigurationRegistry(official_bootstrap_contributions())
     deployment_audit = DeploymentAuditRepository(repository.store)
     lease = await repository.claim_supervisor("host/webui", "incarnation/webui")
     deployment_runtime = DeploymentRuntimeScope(
         repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
+        kernel_query_handlers={
+            ("deployment.provisioning", "deployment.bootstrap-catalog"):
+                BootstrapCatalogKernelQuery(bootstrap_registry),
+        },
         kernel_management_handlers={
             ("deployment.secrets", "deployment.secret-put"):
                 SecretPutKernelCommand(secrets),
             **{
                 ("deployment.accounts", kind): WebAccountKernelCommand(web_identity, kind)
                 for kind in WebAccountKernelCommand._METHODS
+            },
+            ("deployment.provisioning", "deployment.storage-create-local"):
+                LocalStorageProfileKernelCommand(secrets, storage_profiles, allocator),
+            ("deployment.provisioning", "deployment.storage-create"):
+                StorageProfileKernelCommand(storage_profiles),
+            ("deployment.provisioning", "deployment.bootstrap-create"):
+                BootstrapProfileKernelCommand(bootstrap_profiles, bootstrap_registry),
+            **{
+                ("deployment.provisioning", kind): ProvisioningJobKernelCommand(
+                    jobs, kind, notify=supervisor.notify,
+                ) for kind in ProvisioningJobKernelCommand._METHODS
             },
         },
     )
@@ -2680,6 +2698,9 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     )
     account_snapshot = package_catalog.build(
         Path(__file__).parents[1] / "src/forest/builtin/deployment_accounts"
+    )
+    provisioning_snapshot = package_catalog.build(
+        Path(__file__).parents[1] / "src/forest/builtin/deployment_provisioning"
     )
     wrong_binding = DeploymentRuntimeScope(
         repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
@@ -2705,24 +2726,17 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     account_descriptor = await bootstrap_builtin_deployment_package(
         account_snapshot, deployment_runtime
     )
+    provisioning_descriptor = await bootstrap_builtin_deployment_package(
+        provisioning_snapshot, deployment_runtime
+    )
     deployment_registry = RuntimeModuleRegistry(
         deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor,
-                             account_descriptor)
+                             account_descriptor, provisioning_descriptor)
     )
     await deployment_registry.start()
-    legacy_components = deployment_management_components(
-        secrets=secrets,
-        storage_profiles=storage_profiles,
-        bootstrap_profiles=bootstrap_profiles,
-        jobs=jobs,
-        supervisor=supervisor,
-        bootstrap_contributions=official_bootstrap_contributions(),
-        database_allocator=allocator,
-    )
     app = create_deployment_management_app(
         deployment_id="deployment/test",
-        components=legacy_components,
-        deployment_registry_provider=lambda: deployment_registry,
+                deployment_registry_provider=lambda: deployment_registry,
         identity_authority=web_identity,
         deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
         deployment_audit=deployment_audit,
@@ -2864,7 +2878,23 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert filtered.status_code == 200, filtered.text
         assert [item["bot_id"] for item in filtered.json()["items"]] == ["bot/webui"]
-        assert (await client.get("/static/deployment-provisioning.js")).status_code == 200
+        provisioning_ui = await client.get(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            f"deployment.provisioning/management-ui/{provisioning_snapshot.management_ui()[0]['sha256']}",
+            headers=headers,
+        )
+        assert provisioning_ui.status_code == 200
+        assert "bootstrap-editors-open" in provisioning_ui.text
+        provisioning_module = next(
+            item for item in body["modules"]
+            if item["component_id"] == "deployment.provisioning"
+        )
+        assert provisioning_module["generation_id"] == (
+            deployment_registry.graph_identity.generations["deployment.provisioning"]
+        )
+        assert provisioning_module["management_contract"]["bootstrap_catalog_query"] == (
+            "provisioning.bootstrap-catalog"
+        )
         shell_script = (await client.get("/static/app.js")).text
         assert "/management/v1/scopes/" in shell_script
         assert "bot-scopes" not in shell_script
@@ -2969,10 +2999,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert all(item["surface"]["kind"] == "trusted-module" for item in catalog_body["items"])
         assert all(item["schema_digest"].startswith("sha256:") for item in catalog_body["items"])
         assert (await client.get("/static/bootstrap-component.js")).status_code == 200
-        assert (
-            'textarea name="components"'
-            not in (await client.get("/static/modules/deployment-provisioning.html")).text
-        )
+        assert 'textarea name="components"' not in provisioning_ui.text
 
         components = {item["component_id"]: item["initial_value"] for item in catalog_body["items"]}
         for index, (secret_ref, purpose) in enumerate(
@@ -3045,7 +3072,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             ),
             (
                 "deployment.provisioning",
-                "deployment/deployment.provisioning/1",
+                deployment_registry.graph_identity.generations["deployment.provisioning"],
                 "bootstrap.create",
             ),
             (
@@ -3060,7 +3087,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             ),
             (
                 "deployment.provisioning",
-                "deployment/deployment.provisioning/1",
+                deployment_registry.graph_identity.generations["deployment.provisioning"],
                 "storage.create-local",
             ),
         ]
@@ -3089,10 +3116,40 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "web-subject/8c6976e5b5410415bde908bd4dee15df"
         }
         assert all(item["origin_kind"] == "web.management" for item in audit_records)
+        provisioning_base = (
+            "/management/v1/scopes/deployment/deployment/modules/deployment.provisioning/"
+        )
+        queued = await client.post(
+            provisioning_base + "actions/provisioning.enqueue",
+            headers={**headers, "idempotency-key": "provisioning-web-enqueue"},
+            json={
+                "job_id": "provisioning/web/1", "bot_id": "bot/web",
+                "display_name": "Web Bot", "storage_profile_ref": "storage-profile/web/1",
+                "storage_generation": 1,
+                "bootstrap_profile_ref": "bootstrap-profile/web/1",
+            },
+        )
+        assert queued.status_code == 200, queued.text
+        assert queued.json()["state"] == "QUEUED"
+        job_page = await client.post(
+            provisioning_base + "queries/provisioning.jobs.list",
+            headers=headers, json={"limit": 1, "bot_id": "bot/web", "state": "QUEUED"},
+        )
+        assert job_page.status_code == 200, job_page.text
+        assert [item["job_id"] for item in job_page.json()["items"]] == [
+            "provisioning/web/1"
+        ]
+        cancelled = await client.post(
+            provisioning_base + "actions/provisioning.cancel",
+            headers={**headers, "idempotency-key": "provisioning-web-cancel"},
+            json={"job_id": "provisioning/web/1", "expected_revision": 1},
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        assert cancelled.json()["state"] == "CANCELLED"
         previous = deployment_registry
         candidate = RuntimeModuleRegistry(
             deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor,
-                                 account_descriptor)
+                                 account_descriptor, provisioning_descriptor)
         )
         drained = candidate.plan_graph_transition(
             previous, target_component_id="deployment.secrets"
@@ -3156,7 +3213,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         account_previous = deployment_registry
         account_candidate = RuntimeModuleRegistry(
             deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor,
-                                 account_descriptor)
+                                 account_descriptor, provisioning_descriptor)
         )
         account_drained = account_candidate.plan_graph_transition(
             account_previous, target_component_id="deployment.accounts"
@@ -3208,6 +3265,32 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                 )
             ).fetchone()
         assert versions["count"] == 1
+        provision_previous = deployment_registry
+        provision_candidate = RuntimeModuleRegistry(
+            deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor,
+                                 account_descriptor, provisioning_descriptor)
+        )
+        provision_drained = provision_candidate.plan_graph_transition(
+            provision_previous, target_component_id="deployment.provisioning"
+        )
+        assert provision_drained == ("deployment.provisioning",)
+        await provision_candidate.prewarm()
+        await provision_previous.drain_owned_work_for_replacement(
+            provision_candidate.activation_id, components=provision_drained,
+        )
+        await provision_candidate.start()
+        provision_candidate.accept_retained_ownership()
+        assert provision_candidate.graph_identity.generations["deployment.provisioning"] != (
+            provision_previous.graph_identity.generations["deployment.provisioning"]
+        )
+        await provision_previous.close()
+        deployment_registry = provision_candidate
+        after_reload = await client.post(
+            provisioning_base + "queries/provisioning.jobs.list",
+            headers=headers, json={"limit": 1, "state": "CANCELLED"},
+        )
+        assert after_reload.status_code == 200, after_reload.text
+        assert after_reload.json()["items"][0]["job_id"] == "provisioning/web/1"
     await deployment_registry.close()
 
 

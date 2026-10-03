@@ -51,7 +51,6 @@ class SetupCompleteInput(BaseModel):
 def create_deployment_management_app(
     *,
     deployment_id: str,
-    components: tuple,
     identity_authority,
     allowed_origin: str,
     bot_supervisor=None,
@@ -80,7 +79,6 @@ def create_deployment_management_app(
     )
     deployment_gateway = DeploymentManagementGateway(
         deployment_id=deployment_id,
-        components=components,
         ticket_authority=ticket_authority,
         web_receipts=deployment_web_receipts,
         audit=deployment_audit,

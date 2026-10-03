@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。当前 **Bot 运行图** 已切为微内核包图；部署 WebUI 仍以宿主 `deployment_management.py` 对象和固定字符串 Generation 提供管理操作，尚未达到 deployment/host 包图目标。图文记忆主链已有隔离 Bot、真实 VL 嵌入端点、PostgreSQL 与 Milvus 的跨群召回和管理试验验证。获准群的真实 QQ 入站到回复、真实浏览器结合供应商的端到端链路、百万级混合负载及长期运行仍未验收，因此 Forest 仍不可发布。
+> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。**Bot 运行图** 已切为微内核包图；部署审计、Bot 目录、Secret、账号、包目录和供应 WebUI 已切为真实可热替换部署包，旧 `deployment_management.py` 伪组件与固定字符串 Generation 已删除。供应执行器和部分控制面操作仍在宿主内核装配，host 作用域包图尚未落地。图文记忆主链已有隔离 Bot、真实 VL 嵌入端点、PostgreSQL 与 Milvus 的跨群召回和管理试验验证。获准群的真实 QQ 入站到回复、真实浏览器结合供应商的端到端链路、百万级混合负载及长期运行仍未验收，因此 Forest 仍不可发布。
 
 本页保留按实施先后写下的阶段记录；早期段落中的“尚未”只描述当时状态，当前结论以第 8 节的切换清单和末尾最新验收记录为准。
 
@@ -236,9 +236,9 @@ Memory 查询根有显式 `input_kind`，以非空约束区分群来源查询和
 3. 补齐证据浏览的进一步分页和长期混合图文负载验收。
 4. 继续完成 [17](17-component-worker-host.md) 的包选择、显式启停和未变化 Generation 保留；对 Worker Host 配置控制事务验证热重载失败回滚、长任务 drain、群并发、审批、Provider/Tool 不确定结果和 WebUI 包管理贡献。
 5. 在真实 OneBot 实例上只进行准许群的单次低频交互验收。
-6. 将部署控制面从宿主 `deployment_management.py`、`deployment_provisioning.py` 和固定静态 UI 迁入独立 deployment/host 包及各自 Generation；切换通用 scope provider 后删除旧对象与伪 Generation，不能通过搬运文件或包装旧对象声称完成。
+6. 继续拆分宿主供应执行器 `deployment_provisioning.py` 与其余尚未包化的控制面服务，建立 host 作用域包图；审视受限内核端口，确保 Bot 基础身份与运行意图仍由内核持有，builtin 仅提供管理能力。
 
-Bot 运行图已经是微内核包系统；部署/宿主控制面仍是缺口，目标重型 Bot 框架还需完成 Memory 主链与长期运行验证。
+Bot 运行图与主要部署 WebUI 已采用微内核包系统；供应执行器、host 控制面及真实 QQ、图文 Memory 的长期验收仍是缺口。
 
 现行 Memory 包 UI 增加独立真实浏览器冒烟脚本 `scripts/smoke_memory_module.py`：本机 Edge 验证了隔离 MessageChannel 初始化、管理试验结果中的群号/作者归因、超过两个 96 KiB 块的原图显示，以及分块被篡改时摘要拒绝显示。旧管理静态目录已经移除，依赖它的旧面板脚本及仍引用旧页面 DOM 的旧整站冒烟脚本同步删除；此浏览器 fixture 不替代真实 HTTP 会话、数据库和供应商图文召回验收。
 
@@ -703,3 +703,5 @@ Bot 包候选桥收敛（2026-10-02）：`kernel.runtime` 的 `deployment.packag
 Bootstrap 供应事务端口准备（2026-10-03）：`BootstrapProfileKernelCommand` 已把模块贡献注册表的集合校验放在事务前准备，把服务端 schema digest、Secret 引用核对与不可变 Profile 写入放入调用者的同一部署事务；旧 `bootstrap.create` 入口复用该最终命令边界。供应 Job 的 enqueue/cancel 权威也已允许加入调用者事务，为准确 Generation 与 Web 回执围栏接入做准备。隔离 PostgreSQL 的 WebUI/图切换、Bootstrap Profile 不可变性及供应 Job 租约针对性用例共 3 passed，Ruff 通过。供应包及通用嵌套 Bootstrap UI 承载仍未实现，不能把这一步称为供应组件包化。
 
 供应 Job 内核端口（2026-10-04）：新增准确 kind 绑定的 Storage Profile 与 Job enqueue/cancel 内核命令；后者把提交后的 Supervisor 唤醒与持久写事务分开，失败或输出 schema 拒绝时没有唤醒。隔离 PostgreSQL 用例先让输出校验拒绝写入，再以同一操作成功入队，唤醒回调从另一连接看到已提交的 `QUEUED` 行；与现有 Secret/账号 WebUI 端口联合回归 2 passed。供应包尚未声明和绑定这些端口，部署宿主仍使用旧供应伪组件。
+
+供应管理包与真实 Generation 切换（2026-10-04）：新增 `builtin/deployment_provisioning`，包自带 Job 游标分页查询、Storage/Bootstrap/Job 管理动作声明和分步 WebUI；Bootstrap catalog 经准确官方内核只读端口发布，宿主通用嵌套贡献 broker 在独立弹窗中装载七个模块各自的设置界面，供应包 iframe 只接收结果值。内核继续持有 Bot 基础身份、期望运行状态、Secret、数据库分配器、Bootstrap 冻结和 Job 账本；写动作在活动 CONTROL Generation 围栏、Web 回执与审计同一事务内完成，Job 唤醒仅在提交后。生产 Supervisor 装载该包，旧 `deployment_management.py` 伪组件、合成 Generation 分支及固定供应页面已删除。隔离 PostgreSQL 部署目录/管理网关 26 passed、1 skipped，覆盖实际包启动、Bootstrap catalog、存储合流、Job 查询/取消与供应 Generation 热替换；本地包/管理/Bot Host 122 passed、38 skipped；Ruff、JS 语法与差异检查通过。在线 QQ Supervisor 与真实浏览器交互尚未在此次切换后验收；供应执行器和 host 作用域包图仍需拆分。

@@ -113,6 +113,7 @@ def _component_schema_references(component: Mapping[str, Any]) -> tuple[str, ...
         component.get("effect_services", ()),
         component.get("domain_queries", ()),
         component.get("domain_commands", ()),
+        component.get("kernel_queries", ()),
         component.get("kernel_commands", ()),
         component.get("job_types", ()),
         component.get("unit_of_work_plans", ()),
@@ -230,6 +231,7 @@ class PackageGenerationAdapter:
         payload_authority: PackagePayloadAuthority | None = None,
         domain_queries: PackageDomainQueries | None = None,
         domain_commands: PackageDomainCommands | None = None,
+        kernel_management_queries=None,
         kernel_management_commands=None,
         unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
         unit_of_work_coordinator: PackageUnitOfWorkCoordinator | None = None,
@@ -268,6 +270,7 @@ class PackageGenerationAdapter:
         self._payload_reserved_bytes = 0
         self._domain_queries = domain_queries
         self._domain_commands = domain_commands
+        self._kernel_management_queries = kernel_management_queries
         self._kernel_management_commands = kernel_management_commands
         self._unit_of_work_authority = unit_of_work_authority
         self._unit_of_work_coordinator = unit_of_work_coordinator
@@ -328,6 +331,7 @@ class PackageGenerationAdapter:
                 *self.component.get("effect_services", ()),
                 *self.component.get("domain_queries", ()),
                 *self.component.get("domain_commands", ()),
+                *self.component.get("kernel_queries", ()),
                 *self.component.get("kernel_commands", ()),
                 *self.component.get("job_types", ()),
                 *self.component.get("unit_of_work_plans", ()),
@@ -1782,11 +1786,12 @@ class PackageGenerationAdapter:
         timeout_seconds: float,
     ) -> Any:
         domain_query = declaration in self.component.get("domain_queries", ())
+        kernel_query = declaration in self.component.get("kernel_queries", ())
         read_service = (
             declaration in self.component.get("provides", ())
             and declaration["semantics"] == "read"
         )
-        if not domain_query and not read_service:
+        if not domain_query and not kernel_query and not read_service:
             raise ForestError(
                 "MODULE_MANAGEMENT_BINDING_INVALID",
                 "Management query is not bound to this package Generation",
@@ -1801,11 +1806,13 @@ class PackageGenerationAdapter:
             )
         operation_id = "management-query:" + uuid4().hex
         scope, parent_call_id = self._management_scope(operation_id)
-        if domain_query:
-            authority = self._domain_queries
+        if domain_query or kernel_query:
+            authority = (
+                self._kernel_management_queries if kernel_query else self._domain_queries
+            )
             if authority is None:
                 raise ForestError(
-                    "CAPABILITY_UNAVAILABLE", "Domain query authority is unavailable", 503
+                    "CAPABILITY_UNAVAILABLE", "Management query authority is unavailable", 503
                 )
             result = await authority.invoke_query(
                 scope,
@@ -3058,6 +3065,7 @@ def package_runtime_descriptor(
     payload_authority: PackagePayloadAuthority | None = None,
     domain_queries: PackageDomainQueries | None = None,
     domain_commands: PackageDomainCommands | None = None,
+    kernel_management_queries=None,
     kernel_management_commands=None,
     unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
     unit_of_work_coordinator_factory: Callable[
@@ -3107,12 +3115,14 @@ def package_runtime_descriptor(
             "Official storage execution requires an official package trust binding",
             403,
         )
-    if component.get("kernel_commands") and (
-        trust_level != "official" or kernel_management_commands is None
+    if (component.get("kernel_commands") or component.get("kernel_queries")) and (
+        trust_level != "official"
+        or (component.get("kernel_commands") and kernel_management_commands is None)
+        or (component.get("kernel_queries") and kernel_management_queries is None)
     ):
         raise ForestError(
             "KERNEL_MANAGEMENT_AUTHORITY_UNAVAILABLE",
-            "Kernel management commands require official deployment authority", 403,
+            "Kernel management ports require official deployment authority", 403,
         )
     effect_driver_factories = dict(effect_driver_factories or {})
     declared_effect_services = {
@@ -3395,6 +3405,7 @@ def package_runtime_descriptor(
             payload_authority=payload_authority,
             domain_queries=domain_queries,
             domain_commands=domain_commands,
+            kernel_management_queries=kernel_management_queries,
             kernel_management_commands=kernel_management_commands,
             unit_of_work_authority=unit_of_work_authority,
             unit_of_work_coordinator=unit_of_work_coordinator,

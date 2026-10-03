@@ -1,3 +1,5 @@
+import {createBootstrapEditorBroker} from './bootstrap-contributions.js';
+
 let apiBase = '/management/v1';
 let scopes = [];
 let workspaceEpoch = 0;
@@ -123,6 +125,9 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   const operationReplies = new Map();
   const nonce = crypto.randomUUID();
   const channel = new MessageChannel();
+  const bootstrapEditors = createBootstrapEditorBroker({
+    notice, isCurrent: () => epoch === workspaceEpoch,
+  });
   const shell = document.createElement('div');
   shell.className = 'sandbox-shell';
   const controls = document.createElement('div');
@@ -326,6 +331,33 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
           send('operation-error', {
             request_id: requestId,
             operation_id: operationId,
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } else if (message.type === 'bootstrap-editors-open') {
+        const requestId = message.request_id;
+        const operationId = row.management_contract?.bootstrap_catalog_query;
+        if (typeof requestId !== 'string'
+          || !/^[a-zA-Z0-9._:-]{1,128}$/.test(requestId)
+          || message.operation_id !== operationId
+          || row.artifact?.trust_level !== 'official'
+          || !row.management_contract?.queries?.some(item => item.query_id === operationId)
+          || !message.value || Object.keys(message.value).length !== 0) {
+          throw new Error('Bootstrap editor request is not declared by this official module');
+        }
+        try {
+          const catalog = await api(
+            `/management/v1/modules/${encodeURIComponent(row.component_id)}`
+            + `/queries/${encodeURIComponent(operationId)}`,
+            {method: 'POST', body: '{}'},
+          );
+          const value = await bootstrapEditors.open(catalog);
+          if (epoch === workspaceEpoch) send('bootstrap-editors-result', {
+            request_id: requestId, operation_id: operationId, value,
+          });
+        } catch (error) {
+          if (epoch === workspaceEpoch) send('operation-error', {
+            request_id: requestId, operation_id: operationId,
             message: error instanceof Error ? error.message : String(error),
           });
         }
@@ -554,6 +586,7 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   }, '*', [channel.port2]);
   frame.src = scopedPath(surface.artifact);
   activeSandboxCleanup = () => {
+    bootstrapEditors.close();
     cancelSecretPrompt?.();
     secretDialog.remove();
     channel.port1.close();

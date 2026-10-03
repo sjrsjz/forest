@@ -1,0 +1,150 @@
+manifest_version = 1
+package_id = "forest.deployment-provisioning"
+version = "1.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "deployment_provisioning:DeploymentProvisioning"
+
+[[components]]
+id = "deployment.provisioning"
+scope = "deployment"
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+bootstrap_config = "bootstrap.json"
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 4
+max_queue_items = 16
+max_state_inflight = 2
+max_owned_tasks = 1
+max_owned_resources = 1
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 30
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = ["domain.query:deployment.provisioning.jobs.read"]
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "deployment.provisioning.workspace"
+label = "Bot 供应"
+group = "deployment"
+order = 30
+bootstrap_catalog_query = "provisioning.bootstrap-catalog"
+
+[[components.provides]]
+name = "deployment.provisioning.jobs.page"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/jobs-page-input.json"
+output_schema = "schemas/jobs-page-output.json"
+
+[components.storage]
+schema_id = "forest.deployment.provisioning-ui"
+schema_version = "1.0.0"
+baseline = "schema/provisioning.sql"
+baseline_sha256 = "1547a7650698180896f2106eed5e22b2a8753a833c25353567337b49a15c58b6"
+scope = "deployment"
+repository_contract = "forest.deployment-provisioning-ui.repository/1"
+execution_profile = "official"
+
+[[components.domain_queries]]
+name = "deployment.provisioning.jobs.read"
+contract = "1.0"
+function = "deployment_provisioning_jobs_page"
+input_schema = "schemas/jobs-page-input.json"
+output_schema = "schemas/jobs-page-output.json"
+
+[[components.kernel_queries]]
+name = "deployment.provisioning.bootstrap.catalog"
+contract = "1.0"
+kind = "deployment.bootstrap-catalog"
+input_schema = "schemas/bootstrap-catalog-input.json"
+output_schema = "schemas/bootstrap-catalog-output.json"
+
+[[components.kernel_commands]]
+name = "deployment.provisioning.storage-create-local"
+contract = "1.0"
+kind = "deployment.storage-create-local"
+input_schema = "schemas/storage-input.json"
+output_schema = "schemas/storage-output.json"
+
+[[components.kernel_commands]]
+name = "deployment.provisioning.storage-create"
+contract = "1.0"
+kind = "deployment.storage-create"
+input_schema = "schemas/storage-input.json"
+output_schema = "schemas/storage-output.json"
+
+[[components.kernel_commands]]
+name = "deployment.provisioning.bootstrap-create"
+contract = "1.0"
+kind = "deployment.bootstrap-create"
+input_schema = "schemas/bootstrap-input.json"
+output_schema = "schemas/bootstrap-output.json"
+
+[[components.kernel_commands]]
+name = "deployment.provisioning.enqueue"
+contract = "1.0"
+kind = "deployment.provisioning-enqueue"
+input_schema = "schemas/enqueue-input.json"
+output_schema = "schemas/job-output.json"
+
+[[components.kernel_commands]]
+name = "deployment.provisioning.cancel"
+contract = "1.0"
+kind = "deployment.provisioning-cancel"
+input_schema = "schemas/cancel-input.json"
+output_schema = "schemas/job-output.json"
+
+[[components.management_queries]]
+id = "provisioning.jobs.list"
+port = "deployment.provisioning.jobs.page"
+default_limit = 50
+max_limit = 100
+timeout_s = 10
+
+[[components.management_queries]]
+id = "provisioning.bootstrap-catalog"
+port = "deployment.provisioning.bootstrap.catalog"
+default_limit = 64
+max_limit = 64
+timeout_s = 10
+
+[[components.management_actions]]
+id = "storage.create-local"
+port = "deployment.provisioning.storage-create-local"
+priority = "P0"
+timeout_s = 20
+
+[[components.management_actions]]
+id = "storage.create"
+port = "deployment.provisioning.storage-create"
+priority = "P0"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "bootstrap.create"
+port = "deployment.provisioning.bootstrap-create"
+priority = "P0"
+timeout_s = 20
+
+[[components.management_actions]]
+id = "provisioning.enqueue"
+port = "deployment.provisioning.enqueue"
+priority = "P0"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "provisioning.cancel"
+port = "deployment.provisioning.cancel"
+priority = "P0"
+timeout_s = 15

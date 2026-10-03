@@ -12,9 +12,17 @@ from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
 
+from forest.bootstrap_contributions import BootstrapConfigurationRegistry
 from forest.bot_host import BotHost
-from forest.deployment_kernel_management import SecretPutKernelCommand, WebAccountKernelCommand
-from forest.deployment_management import deployment_management_components
+from forest.deployment_kernel_management import (
+    BootstrapCatalogKernelQuery,
+    BootstrapProfileKernelCommand,
+    LocalStorageProfileKernelCommand,
+    ProvisioningJobKernelCommand,
+    SecretPutKernelCommand,
+    StorageProfileKernelCommand,
+    WebAccountKernelCommand,
+)
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_package_controller import DeploymentPackageController
@@ -163,6 +171,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
+    bootstrap_registry = BootstrapConfigurationRegistry(official_bootstrap_contributions())
     package_catalog = PackageCatalog(
         Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
     )
@@ -226,12 +235,27 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         await web_identity.initialize_setup(settings.web_bootstrap)
         deployment_runtime = DeploymentRuntimeScope(
             store, supervisor, package_catalog=package_catalog,
+            kernel_query_handlers={
+                ("deployment.provisioning", "deployment.bootstrap-catalog"):
+                    BootstrapCatalogKernelQuery(bootstrap_registry),
+            },
             kernel_management_handlers={
                 ("deployment.secrets", "deployment.secret-put"):
                     SecretPutKernelCommand(secrets),
                 **{
                     ("deployment.accounts", kind): WebAccountKernelCommand(web_identity, kind)
                     for kind in WebAccountKernelCommand._METHODS
+                },
+                ("deployment.provisioning", "deployment.storage-create-local"):
+                    LocalStorageProfileKernelCommand(secrets, storage_profiles, database_allocator),
+                ("deployment.provisioning", "deployment.storage-create"):
+                    StorageProfileKernelCommand(storage_profiles),
+                ("deployment.provisioning", "deployment.bootstrap-create"):
+                    BootstrapProfileKernelCommand(bootstrap_profiles, bootstrap_registry),
+                **{
+                    ("deployment.provisioning", kind): ProvisioningJobKernelCommand(
+                        jobs, kind, notify=supervisor.notify,
+                    ) for kind in ProvisioningJobKernelCommand._METHODS
                 },
             },
         )
@@ -242,26 +266,17 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 Path(str(files("forest").joinpath("builtin/deployment_bot_catalog"))),
                 Path(str(files("forest").joinpath("builtin/deployment_secrets"))),
                 Path(str(files("forest").joinpath("builtin/deployment_accounts"))),
+                Path(str(files("forest").joinpath("builtin/deployment_provisioning"))),
                 Path(str(files("forest").joinpath("builtin/deployment_package_registry"))),
             ),
         )
         await deployment_controller.start()
-        legacy_components = deployment_management_components(
-            secrets=secrets,
-            storage_profiles=storage_profiles,
-            bootstrap_profiles=bootstrap_profiles,
-            jobs=jobs,
-            supervisor=supervisor,
-            bootstrap_contributions=official_bootstrap_contributions(),
-            database_allocator=database_allocator,
-        )
         import uvicorn
 
         management_server = uvicorn.Server(
             uvicorn.Config(
                 create_deployment_management_app(
                     deployment_id=settings.deployment_id,
-                    components=legacy_components,
                     deployment_registry_provider=lambda: deployment_controller.registry,
                     deployment_graph_changes=graph_changes,
                     deployment_change_previewer=deployment_controller.preview_change,

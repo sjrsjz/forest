@@ -16,6 +16,68 @@ from forest.errors import ForestError
 from forest.security import hash_password
 
 
+class DeploymentKernelQueryAuthority:
+    """Exact official read ports, fenced to the active deployment Generation."""
+
+    def __init__(
+        self, store, generations, *, component_id: str, ports: tuple[dict, ...],
+        handlers: dict,
+    ) -> None:
+        self.store = store
+        self.generations = generations
+        self.component_id = component_id
+        self.ports = {item["name"]: item["kind"] for item in ports}
+        self.handlers = dict(handlers)
+
+    async def invoke_query(
+        self, scope, declaration: dict, payload: dict, *, parent_call_id: str,
+        timeout_seconds: float,
+    ) -> dict:
+        if (
+            scope.scope_kind != "deployment"
+            or scope.scope_id != self.store.deployment_id
+            or scope.component_id != self.component_id
+            or scope.bot_id is not None
+            or self.ports.get(declaration["name"]) != declaration["kind"]
+        ):
+            raise ForestError(
+                "KERNEL_MANAGEMENT_BINDING_INVALID",
+                "Kernel Query differs from its official deployment binding", 409,
+            )
+        handler = self.handlers.get((self.component_id, declaration["kind"]))
+        if handler is None:
+            raise ForestError(
+                "KERNEL_MANAGEMENT_PORT_UNAVAILABLE",
+                "Kernel management Query has no bound handler", 503,
+            )
+        async with asyncio.timeout(timeout_seconds):
+            await self.generations.verify_active_generation(
+                component_id=self.component_id, generation_id=scope.generation_id,
+                admission_lane="DATA",
+            )
+            result = await handler.query(payload)
+            await self.generations.verify_active_generation(
+                component_id=self.component_id, generation_id=scope.generation_id,
+                admission_lane="DATA",
+            )
+        return result
+
+
+class BootstrapCatalogKernelQuery:
+    def __init__(self, registry) -> None:
+        self.registry = registry
+
+    async def query(self, payload: dict) -> dict:
+        if payload:
+            raise ForestError(
+                "BOOTSTRAP_CATALOG_QUERY_INVALID", "Bootstrap catalog query is invalid", 422,
+            )
+        return {
+            "protocol": "forest.bootstrap-configuration-catalog/1",
+            "items": self.registry.facts(),
+        }
+
+
 class DeploymentKernelManagementAuthority:
     def __init__(
         self, store, generations, *, component_id: str, ports: tuple[dict, ...],

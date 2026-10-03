@@ -243,7 +243,7 @@ Job。浏览器不得提交 `schema_digests`，也不得用一个六组件 JSON 
 `(order, component_id)` 确定排序并拒绝重复 component/surface 身份；profile 必须准确覆盖本次注册的
 组件集合，缺项、多项或失配都在入队前拒绝。
 
-本地 Storage 供应必须在同一个部署数据库事务里接纳 Web 回执、写入 DSN Secret 和创建 Storage Profile；Profile 冲突、Secret 用途错误或输入冲突都回滚整笔事务，不能留下孤立 DSN。该内核命令先按操作 ID 合流并在同一连接读取 Secret 状态；成功重放直接使用已提交的 Profile 回执，不重新生成随机数据库密码。未来 `deployment.provisioning` 包只声明操作与提供 UI，不持有主密钥、数据库分配器或供应账本。
+本地 Storage 供应必须在同一个部署数据库事务里接纳 Web 回执、写入 DSN Secret 和创建 Storage Profile；Profile 冲突、Secret 用途错误或输入冲突都回滚整笔事务，不能留下孤立 DSN。该内核命令先按操作 ID 合流并在同一连接读取 Secret 状态；成功重放直接使用已提交的 Profile 回执，不重新生成随机数据库密码。`deployment.provisioning` 包声明管理操作、Job 分页查询与 UI；主密钥、数据库分配器和供应账本仍由内核受限端口持有。
 
 创建期 UI 使用与运行期管理贡献相同的受控 surface 身份。内置模块可以共享宿主提供的 schema 表单
 renderer，模块也可以发布自己的 template/module/style；两者都只能返回该组件的配置值，不能选择
@@ -393,7 +393,7 @@ deployment/host 管理服务也有描述符、工件身份和
 关闭宿主时先撤下目录再反向排空。`deployment.audit` 只拥有部署审计脱敏查询与 UI，由部署数据库事务在查询前后复核管理员会话。账号身份、密码摘要、登录会话和最后一名管理员保护由内核持有；`deployment.accounts` 包拥有有界账号目录查询、操作声明和 UI，经受限内核命令提交创建、变更、改密与撤销会话，并保留自我降权后的幂等回执恢复。部署显示名称和会话 TTL 由 `deployment.configuration` 声明 schema、读取、计划、提交与 UI，登录/会话壳层只消费其生效投影。备份、Bot 目录和存储供应分别属于 deployment/host 服务；不能把某个临时 `ManagementRuntime` 字段列表当作最终注册表，
 也不能为了共用 transport 给 deployment 操作伪造 Bot ID 或 Bot ticket。
 
-切换部署作用域时，先把 PackageSnapshot 的 `deployment`/`host` scope 与相应存储作用域绑定到真实部署/宿主 authority，再建立各自的配置、授权、服务路由和 Generation 图；Bot 装配器必须继续拒绝跨 scope 工件。部署网关的模块目录、授权目标与每次操作必须读取同一张 ACTIVE 图的真实 Generation/revision，关闭或换代时先阻止新调用并排空已准入调用。现行 `deployment_management.py` 中直接持有 Repository/Supervisor 的对象、`deployment_management_app.py` 中固定部署 UI 静态文件和 `DeploymentManagementGateway` 合成的 `deployment/<component>/1` 都是待删除实现；不能先删除 WebUI 功能，也不能给这些对象包一层 manifest 或把 Bot ID 改称 deployment ID 来冒充完成。
+切换部署作用域时，先把 PackageSnapshot 的 `deployment`/`host` scope 与相应存储作用域绑定到真实部署/宿主 authority，再建立各自的配置、授权、服务路由和 Generation 图；Bot 装配器必须继续拒绝跨 scope 工件。部署网关的模块目录、授权目标与每次操作必须读取同一张 ACTIVE 图的真实 Generation/revision，关闭或换代时先阻止新调用并排空已准入调用。`deployment_management.py` 伪组件及其合成的 `deployment/<component>/1` Generation 已删除；管理网关只接受包图中的真实部署组件。Bot 实体的基础身份与期望运行状态由内核目录持有，builtin 包只能通过受限端口查询或提交管理操作；包卸载不得删除 Bot 身份或改变运行意图。
 
 部署数据库以自身 `forest_deployment.schema_bundles` 登记 deployment 包的不可变 SQL 命名空间，登记行必须绑定真实 `deployment_id`、schema ID、scope、包摘要和基线摘要。Bot 的 `forest_kernel.schema_bundles` 只接受 Bot 包；Domain authority 按准确的调用 scope 选择数据库和账本，绝不把 deployment ID 填入 Bot ID 字段。host 包如需持久存储，必须先有独立的 host 存储 authority 和 Generation 围栏，不能暂借部署或 Bot 账本。部署基线若发生不兼容改动，未上线阶段直接重建部署数据库，不为旧宿主对象添加迁移兼容层。
 

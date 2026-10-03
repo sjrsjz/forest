@@ -79,8 +79,7 @@ async def _browser_apply_real_forget_batch(host, selection_id: str) -> str:
     identity = _IdentityAuthority()
     identity.subject = WebSubject("admin/one", "admin", "Administrator", "ADMIN", True, 1)
     app = create_deployment_management_app(
-        deployment_id="deployment/real-memory-batch", components=(),
-        identity_authority=identity, allowed_origin=origin,
+        deployment_id="deployment/real-memory-batch",         identity_authority=identity, allowed_origin=origin,
         bot_supervisor=Supervisor(),
     )
     server = uvicorn.Server(uvicorn.Config(

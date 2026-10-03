@@ -394,6 +394,23 @@ MANIFEST_SCHEMA = {
                             "unit_of_work_participants",
                         )
                     },
+                    "kernel_queries": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "name", "contract", "kind", "input_schema", "output_schema",
+                            ],
+                            "properties": {
+                                key: {"type": "string"}
+                                for key in (
+                                    "name", "contract", "kind", "input_schema", "output_schema",
+                                )
+                            },
+                        },
+                    },
                     "kernel_commands": {
                         "type": "array",
                         "maxItems": 16,
@@ -631,6 +648,7 @@ MANIFEST_SCHEMA = {
                                 "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
                             },
                             "order": {"type": "integer", "minimum": -10000, "maximum": 10000},
+                            "bootstrap_catalog_query": {"type": "string"},
                         },
                     },
                     "management_queries": {
@@ -1340,6 +1358,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     effect_services = component.get("effect_services", [])
     domain_queries = component.get("domain_queries", [])
     domain_commands = component.get("domain_commands", [])
+    kernel_queries = component.get("kernel_queries", [])
     kernel_commands = component.get("kernel_commands", [])
     management_queries = component.get("management_queries", [])
     management_actions = component.get("management_actions", [])
@@ -1376,6 +1395,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         and not effect_services
         and not domain_queries
         and not domain_commands
+        and not kernel_queries
         and not kernel_commands
         and not unit_of_work_participants
         and not unit_of_work_plans
@@ -1398,6 +1418,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         *effect_services,
         *domain_queries,
         *domain_commands,
+        *kernel_queries,
         *kernel_commands,
         *unit_of_work_participants,
         *unit_of_work_plans,
@@ -1416,13 +1437,13 @@ def _manifest(files: dict[str, bytes]) -> dict:
         _schema(files, service.get("output_schema"))
         if service in effect_services and not IDENTIFIER.fullmatch(service.get("kind", "")):
             _fail("INVALID_SERVICES", "Effect services require a valid driver kind")
-        if service in kernel_commands and (
+        if service in (*kernel_queries, *kernel_commands) and (
             component["scope"] != "deployment"
             or not IDENTIFIER.fullmatch(service.get("kind", ""))
         ):
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",
-                "Kernel management commands require a deployment scope and exact kind",
+                "Kernel management ports require a deployment scope and exact kind",
             )
         if service in effect_services and service.get("ingress") is not None:
             ingress = service["ingress"]
@@ -1565,7 +1586,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     "UnitOfWork steps must name unique IDs and declared participants",
                 )
             step_ids.add(step_id)
-    query_ports = {item["name"] for item in domain_queries}
+    query_ports = {item["name"] for item in (*domain_queries, *kernel_queries)}
     guard_query = component.get("lifecycle", {}).get("replacement_guard_query")
     if guard_query is not None and guard_query not in {
         item["name"] for item in domain_queries
@@ -1620,7 +1641,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         if declaration.get("port") not in query_ports:
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",
-                "Management queries must bind a Domain Query or read-only service port",
+                "Management queries must bind a Domain or kernel Query or read-only service port",
             )
         if declaration.get("default_limit", 1) > declaration.get("max_limit", 10000):
             _fail(
@@ -1630,7 +1651,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         actor_field = declaration.get("actor_field")
         if actor_field is not None:
             port = next(
-                item for item in (*domain_queries, *services)
+                item for item in (*domain_queries, *kernel_queries, *services)
                 if item["name"] == declaration["port"]
             )
             input_schema = _schema(files, port["input_schema"])
@@ -1724,6 +1745,30 @@ def _manifest(files: dict[str, bytes]) -> dict:
         _fail(
             "INVALID_MANAGEMENT_OPERATIONS",
             "Kernel Commands must bind exactly one declared management Action",
+        )
+    if sorted(item["name"] for item in kernel_queries) != sorted(
+        query["port"] for query in management_queries
+        if query["port"] in {item["name"] for item in kernel_queries}
+    ):
+        _fail(
+            "INVALID_MANAGEMENT_OPERATIONS",
+            "Kernel Queries must bind exactly one declared management Query",
+        )
+    bootstrap_catalog_query = component.get("management_ui", {}).get(
+        "bootstrap_catalog_query"
+    )
+    if bootstrap_catalog_query is not None and not any(
+        query["id"] == bootstrap_catalog_query
+        and any(
+            port["name"] == query["port"]
+            and port["kind"] == "deployment.bootstrap-catalog"
+            for port in kernel_queries
+        )
+        for query in management_queries
+    ):
+        _fail(
+            "INVALID_MANAGEMENT_UI",
+            "Bootstrap editor composition requires an exact kernel catalog Query",
         )
     directory_kinds = set()
     for declaration in component.get("contribution_directories", []):
