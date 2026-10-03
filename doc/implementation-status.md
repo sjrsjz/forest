@@ -750,3 +750,5 @@ Bot 异常关闭的管理排空（2026-10-04）：`MultiBotSupervisor._run_bot` 
 已有 OFFLINE Bot 时的部署包热替换（2026-10-04）：在隔离候选的真实 Edge 管理页面，将 `deployment.provisioning` 准确包从 1.0.1 换至 1.0.0，再换回 1.0.1；部署图修订从 6→7→8，页面无脚本异常。换代后只读复核同一 Bot 仍为 `READY/OFFLINE`、Job 仍为首次尝试 `SUCCEEDED`，候选与在线 Supervisor 均健康。此验证的是包代际切换不会改写内核 Bot 目录事实；尚未验证换代中正在执行的供应 Job 如何排空或接管。
 
 包自有任务冻结竞态（2026-10-04）：`PackageOwnedWorkSupervisor` 的空队列轮询限速此前可能在旧 Generation 冻结时仍睡眠，醒来后新发起 claim。现在对 `inflight` 排空策略在实际发起领取前复核准入门；此前已经进入权威领取调用的工作仍由原有在途排空屏障等待。`backlog` 策略继续允许冻结后领取直到队列排空。针对限速等待期间冻结的并发用例及既有 backlog 行为通过，包自有任务 4 passed、包运行时 11 passed，Ruff 与差异检查通过。该修正不等于供应 Job 已包化。
+
+供应基线去除平行组件名单（2026-10-04）：`OfficialBotProvisioner` 原本在 `BotHost.provision()` 已按 builtin manifest 与选择事实安装完模块权威后，再用一份固定 22 组件 ID 名单验收；这会把今后合法新增的自动安装包误判为供应失败。现以包装配成功为准，删除平行名单；开发期重建脚本只验证基线非空和运行图未启动，不再要求固定 schema bundle 数。使用现有 Linux 测试镜像只读挂载当前源码、共享独立临时 PostgreSQL 网络，真实供应与开发期重建回归 `2 passed`（106.62 秒）；Ruff 与差异检查通过，临时数据库容器已移除。此项没有解决宿主供应执行器和 `BotHost` 配置覆盖仍掌握官方业务装配的问题。

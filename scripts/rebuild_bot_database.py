@@ -26,7 +26,6 @@ from pymilvus.exceptions import MilvusException
 
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
-    OFFICIAL_BOT_COMPONENT_IDS,
     OfficialBotProvisioner,
     OfficialBotSettingsResolver,
 )
@@ -259,7 +258,7 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                     ).fetchone()
             finally:
                 await target.close()
-            if bundles["count"] != len(OFFICIAL_BOT_COMPONENT_IDS) or graph_heads["count"] != 0:
+            if bundles["count"] == 0 or graph_heads["count"] != 0:
                 raise ForestError(
                     "BOT_REBUILD_VERIFICATION_FAILED",
                     "Rebuilt Bot database does not contain the expected clean baseline",

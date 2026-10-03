@@ -78,15 +78,6 @@ def validate_vector_index_configuration(value: object) -> dict:
         "VECTOR_INDEX_CONFIGURATION_INVALID", "Vector index configuration is invalid",
     )
 
-OFFICIAL_BOT_COMPONENT_IDS = frozenset({
-    "kernel.runtime", "kernel.payload", "kernel.authorization", "kernel.effect",
-    "kernel.audit", "component.worker-host", "audit.console", "provider.chat-completions",
-    "embedding.multimodal", "vector.index", "memory.graph", "media.capture",
-    "agent.runtime", "routing.graph", "conversation.trigger-policy",
-    "codec.onebot", "conversation.scheduler", "adapter.onebot", "delivery",
-    "process.executor", "job.scheduler", "shell.command",
-})
-
 PROVIDER_BOOTSTRAP_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -590,10 +581,4 @@ class OfficialBotProvisioner:
                 target_dsn=storage.dsn,
             )
         host = self.host_factory(settings)
-        components = await host.provision()
-        if set(components) != OFFICIAL_BOT_COMPONENT_IDS:
-            raise ForestError(
-                "PROVISIONING_MODULE_SET_INVALID",
-                "Provisioned official module set differs",
-                409,
-            )
+        await host.provision()
