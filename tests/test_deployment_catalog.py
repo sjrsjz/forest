@@ -608,6 +608,122 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
             assert len(reserved_page.json()["records"]) == 1
             assert reserved_page.json()["records"][0]["package_digest"] is None
             assert reserved_page.json()["records"][0]["error_code"] is None
+            reserved_import = reserved_page.json()["records"][0]
+            namespace = module_schema_namespace("forest.deployment.package-imports")
+            async with repository.store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL("UPDATE {}.package_import_requests SET created_at="
+                            "clock_timestamp()-interval '2 minutes' "
+                            "WHERE operation_id=%s").format(sql.Identifier(namespace)),
+                    (reserved_import["operation_id"],),
+                )
+            for _ in range(100):
+                recovered_reserved = await module.management_contract.query(
+                    "import.page", {"operation_id": reserved_import["operation_id"]},
+                )
+                if recovered_reserved["records"][0]["status"] == "INTERRUPTED":
+                    break
+                await asyncio.sleep(0.1)
+            assert recovered_reserved["records"][0]["status"] == "INTERRUPTED"
+            assert package_catalog.close_import_if_absent(
+                operation_id=reserved_import["operation_id"],
+                actor_ref=reserved_import["actor_ref"],
+                archive_sha256=reserved_import["archive_sha256"],
+            ) == {"found": False, "package_digest": None, "closed": True}
+
+            lost_settlement = {
+                "operation_id": "test-recovery-published",
+                "actor_ref": "admin:recovery",
+                "archive_sha256": "sha256:" + hashlib.sha256(upload_bytes).hexdigest(),
+            }
+            async with repository.store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL("INSERT INTO {}.package_import_requests "
+                            "(operation_id,actor_ref,generation_id,content_length,"
+                            "archive_sha256,status,created_at) VALUES "
+                            "(%s,%s,%s,%s,%s,'RESERVED',"
+                            "clock_timestamp()-interval '2 minutes')")
+                    .format(sql.Identifier(namespace)),
+                    (
+                        lost_settlement["operation_id"], lost_settlement["actor_ref"],
+                        initial.graph_identity.generations["deployment.package-registry"],
+                        len(upload_bytes), lost_settlement["archive_sha256"],
+                    ),
+                )
+                assert package_catalog.import_archive_idempotent(
+                    upload_bytes, **lost_settlement,
+                ).digest == upload_package.digest
+            for _ in range(100):
+                recovered_published = await module.management_contract.query(
+                    "import.page", {"operation_id": lost_settlement["operation_id"]},
+                )
+                if recovered_published["records"][0]["status"] == "SUCCEEDED":
+                    break
+                await asyncio.sleep(0.1)
+            assert recovered_published["records"][0]["status"] == "SUCCEEDED"
+            assert recovered_published["records"][0]["package_digest"] == (
+                upload_package.digest
+            )
+
+            retry_operation = "test-recovery-effect-failure"
+            close_driver = module.management_contract.adapter._effect_drivers[
+                "deployment.catalog.import-close"
+            ]
+            original_invoke = close_driver.invoke
+            failed_once = False
+
+            async def fail_first_close(payload, *, scope, invocation):
+                nonlocal failed_once
+                if payload["operation_id"] == retry_operation and not failed_once:
+                    failed_once = True
+                    raise ForestError(
+                        "PACKAGE_CATALOG_TEMPORARY", "Catalog is temporarily unavailable", 503,
+                    )
+                return await original_invoke(payload, scope=scope, invocation=invocation)
+
+            close_driver.invoke = fail_first_close
+            async with repository.store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL("INSERT INTO {}.package_import_requests "
+                            "(operation_id,actor_ref,generation_id,content_length,"
+                            "archive_sha256,status,created_at) VALUES "
+                            "(%s,%s,%s,%s,%s,'RESERVED',"
+                            "clock_timestamp()-interval '2 minutes')")
+                    .format(sql.Identifier(namespace)),
+                    (
+                        retry_operation, "admin:recovery",
+                        initial.graph_identity.generations["deployment.package-registry"],
+                        len(upload_bytes), lost_settlement["archive_sha256"],
+                    ),
+                )
+            for _ in range(100):
+                retry_page = await module.management_contract.query(
+                    "import.page", {"operation_id": retry_operation},
+                )
+                if retry_page["records"][0]["recovery_error_code"] is not None:
+                    break
+                await asyncio.sleep(0.1)
+            assert failed_once
+            assert retry_page["records"][0]["status"] == "RESERVED"
+            assert retry_page["records"][0]["recovery_error_code"] == (
+                "PACKAGE_CATALOG_TEMPORARY"
+            )
+            async with repository.store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL("UPDATE {}.package_import_requests SET "
+                            "recovery_next_attempt_at=clock_timestamp() "
+                            "WHERE operation_id=%s").format(sql.Identifier(namespace)),
+                    (retry_operation,),
+                )
+            for _ in range(100):
+                retry_page = await module.management_contract.query(
+                    "import.page", {"operation_id": retry_operation},
+                )
+                if retry_page["records"][0]["status"] == "INTERRUPTED":
+                    break
+                await asyncio.sleep(0.1)
+            assert retry_page["records"][0]["status"] == "INTERRUPTED"
+            assert retry_page["records"][0]["recovery_error_code"] is None
         bridge = SimpleNamespace(package_registry_reader=controller.read_package_registry)
         bot_page = await package_catalog_page_service(bridge)({
             "protocol": "forest.package-catalog-page-request/1", "limit": 16,
@@ -642,7 +758,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         untrusted_manifest = untrusted_source / "module.toml"
         untrusted_manifest.write_text(
             untrusted_manifest.read_text(encoding="utf-8").replace(
-                'version = "1.5.0"', 'version = "1.5.2"', 1
+                'version = "1.6.0"', 'version = "1.6.2"', 1
             ), encoding="utf-8",
         )
         untrusted = package_catalog.build(untrusted_source)
@@ -658,7 +774,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.5.0"', 'version = "1.5.1"', 1
+                'version = "1.6.0"', 'version = "1.6.1"', 1
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(next_source)

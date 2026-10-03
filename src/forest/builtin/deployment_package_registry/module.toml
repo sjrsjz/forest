@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-package-registry"
-version = "1.5.0"
+version = "1.6.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_package_registry:DeploymentPackageRegistry"
@@ -109,9 +109,9 @@ output_schema = "schemas/import-receipt-output.json"
 
 [components.storage]
 schema_id = "forest.deployment.package-imports"
-schema_version = "1.0.0"
+schema_version = "1.1.0"
 baseline = "schema/imports.sql"
-baseline_sha256 = "5fdf26bfd8fdec0044c997ca687e82bba424d72677d0f609d0401ad23f13dc83"
+baseline_sha256 = "bb4e94d51597791d195671a6364b01b9fe21f6c2fafb930a6fe5c31707516efc"
 scope = "deployment"
 repository_contract = "forest.deployment-package-imports.repository/1"
 execution_profile = "official"
@@ -136,6 +136,21 @@ contract = "1.0"
 function = "package_import_page"
 input_schema = "schemas/import-page-input.json"
 output_schema = "schemas/import-page-output.json"
+
+[[components.owned_work_handlers]]
+name = "deployment.package-registry.import.recover"
+contract = "1.0"
+handler = "deployment.package-registry.import.recover"
+claim_function = "package_import_recovery_claim"
+settle_function = "package_import_recovery_settle"
+input_schema = "schemas/import-receipt-input.json"
+output_schema = "schemas/import-close-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 15
+settle_timeout_s = 5
+lease_seconds = 30
 
 [[components.management_queries]]
 id = "packages"

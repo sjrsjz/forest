@@ -55,7 +55,7 @@
     }
     function importRow(item){
       const row=document.createElement('div');row.className='row import-row';
-      for(const value of [item.status,item.operation_id,item.actor_ref,item.package_digest||item.error_code,item.updated_at])cell(row,value);
+      for(const value of [item.status,item.operation_id,item.actor_ref,item.package_digest||item.error_code||item.recovery_error_code,item.updated_at])cell(row,value);
       row.onclick=()=>showDetails(item);items.append(row);
     }
     async function load(append=false){

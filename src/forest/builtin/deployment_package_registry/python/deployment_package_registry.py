@@ -1,7 +1,7 @@
 """Deployment-owned package directory projection."""
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, service
+from forest.sdk import Plugin, job, service
 
 
 class DeploymentPackageRegistry(Plugin):
@@ -32,4 +32,11 @@ class DeploymentPackageRegistry(Plugin):
         return await ctx.services.call(
             "deployment.catalog.import-receipt", payload,
             operation_id=ctx.operations.stable("catalog-import-receipt"), timeout=30,
+        )
+
+    @job("deployment.package-registry.import.recover")
+    async def recover_import(self, task, ctx):
+        return await ctx.services.call(
+            "deployment.catalog.import-close", task["payload"],
+            operation_id=ctx.operations.stable("catalog-import-close"), timeout=10,
         )
