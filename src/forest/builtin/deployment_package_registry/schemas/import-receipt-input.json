@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"operation_id":{"type":"string","minLength":1,"maxLength":256},"actor_ref":{"type":"string","minLength":1,"maxLength":128},"archive_sha256":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"}},"required":["operation_id","actor_ref","archive_sha256"],"additionalProperties":false}

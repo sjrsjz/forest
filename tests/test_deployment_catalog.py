@@ -468,6 +468,35 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
             )
             assert replay.status_code == 200, replay.text
             assert replay.json() == uploaded.json()
+            async with repository.store.pool.connection() as conn:
+                receipt_row = await (await conn.execute(
+                    "SELECT target_operation_ref,web_subject_ref FROM "
+                    "forest_deployment.web_authority_receipts "
+                    "WHERE action_key='artifact.import.upload' AND input_digest=%s",
+                    (digest_json({
+                        "payload": {}, "content_length": len(upload_bytes),
+                        "content_sha256": upload_headers["x-forest-artifact-sha256"],
+                    }),),
+                )).fetchone()
+            receipt_input = {
+                "operation_id": receipt_row["target_operation_ref"],
+                "actor_ref": receipt_row["web_subject_ref"],
+                "archive_sha256": upload_headers["x-forest-artifact-sha256"],
+            }
+            recovered = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/queries/import.receipt",
+                headers={
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": client.cookies["forest_management_csrf"],
+                },
+                json=receipt_input,
+            )
+            assert recovered.status_code == 200, recovered.text
+            assert recovered.json() == {
+                "protocol": "forest.package-import-receipt/1", "found": True,
+                "package_digest": upload_package.digest,
+            }
             changed_bytes = upload_bytes + b"changed"
             changed_headers = {
                 **upload_headers,
@@ -525,7 +554,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         untrusted_manifest = untrusted_source / "module.toml"
         untrusted_manifest.write_text(
             untrusted_manifest.read_text(encoding="utf-8").replace(
-                'version = "1.2.0"', 'version = "1.2.2"', 1
+                'version = "1.3.0"', 'version = "1.3.2"', 1
             ), encoding="utf-8",
         )
         untrusted = package_catalog.build(untrusted_source)
@@ -541,7 +570,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.2.0"', 'version = "1.2.1"', 1
+                'version = "1.3.0"', 'version = "1.3.1"', 1
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(next_source)

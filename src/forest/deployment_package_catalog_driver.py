@@ -8,7 +8,8 @@ from forest.errors import ForestError
 from forest.package_effects import PackageArtifactDownload
 
 _SERVICES = frozenset({
-    "deployment.catalog.page", "deployment.catalog.artifact", "deployment.catalog.import",
+    "deployment.catalog.page", "deployment.catalog.artifact",
+    "deployment.catalog.import", "deployment.catalog.import-receipt",
 })
 
 
@@ -69,6 +70,13 @@ class DeploymentPackageCatalogEffectDriver:
                 "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
                 "Package import accepts only the declared artifact upload operation", 403,
             )
+        if self.service_id == "deployment.catalog.import-receipt":
+            receipt = await asyncio.to_thread(self.catalog.import_receipt, **payload)
+            return {
+                "protocol": "forest.package-import-receipt/1",
+                "found": receipt is not None,
+                "package_digest": receipt["package_digest"] if receipt is not None else None,
+            }
         if self.service_id == "deployment.catalog.page":
             return await asyncio.to_thread(self.catalog.page, **payload)
         return await asyncio.to_thread(self.catalog.artifact, payload["package_digest"])

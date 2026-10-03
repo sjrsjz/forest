@@ -26,3 +26,10 @@ class DeploymentPackageRegistry(Plugin):
             "deployment.catalog.artifact", payload,
             operation_id=ctx.operations.stable("catalog-artifact"), timeout=30,
         )
+
+    @service("deployment.package-registry.import-receipt", semantics="read")
+    async def import_receipt(self, payload, ctx):
+        return await ctx.services.call(
+            "deployment.catalog.import-receipt", payload,
+            operation_id=ctx.operations.stable("catalog-import-receipt"), timeout=30,
+        )

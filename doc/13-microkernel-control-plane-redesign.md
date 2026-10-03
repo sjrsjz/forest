@@ -409,6 +409,8 @@ UI 生命周期同样分层。目录贡献可以调用壳层提供的通用 `ope
 
 部署包 ZIP 上传的写入协议固定为：网关在读取文件正文前按模块当前声明校验方向、媒体类型、已声明字节数（与现有 `Content-Length` 交叉校验）、上传 SHA-256、幂等键、管理员会话与 CSRF，并为准确 Generation 签票和保留排空租约；上传流有上限地暂存并计算摘要，只有字节数与摘要均吻合才允许模块调用受限目录发布端口。该端口在物理目录的同一 SQLite 写事务中核对 `(operation_id, actor_ref, archive_sha256)`，发布不可变包版本并写成功回执；同键同内容返回原工件，同键不同主体或内容拒绝，并发调用串行合流。文件重命名先于目录事务提交时，崩溃重放必须重新验证内容寻址目录并完成登记，不得以遗留目录推断导入成功。物理目录回执只保证工件写入幂等。当前 Web 上传在读取正文前已将签票回执和请求审计写入 deployment PostgreSQL；模块自有导入结果/错误投影及两库间的自动恢复仍待实现。
 
+导入结果账本须由 `deployment.package-registry` 私有 SQL 拥有，而不是由 Web 壳推断 HTTP 成败。上传操作在读正文前调用包声明的 `import.reserve` Command，与 Web ticket 回执和请求审计在同一 deployment PostgreSQL 事务内建立 `RESERVED` 事实，冻结操作 ID、主体、Generation、字节数与 ZIP 摘要；`import.settle` 只允许把它单向结算为 `SUCCEEDED`（带不可变包摘要）、`REJECTED`（带类型化错误码）或 `INTERRUPTED`。目录 SQLite 的成功回执与 PostgreSQL 状态无法跨库原子提交，因此重启后由该包的恢复工作扫描超时 `RESERVED`：先通过受限目录端口按原操作 ID/主体/ZIP 摘要读取并验证成功回执，有证据则补结算成功；无成功证据也无可重放 ZIP 时只能标 `INTERRUPTED`，不能猜测失败或重复发布。原始 ZIP 若仍可用，只能以相同冻结操作重放。管理查询必须按状态、主体、包摘要和时间做游标分页，并显示明确的错误码及物理回执证据；当前网关直接写请求审计、目录仅有成功回执的实现是过渡状态，接入模块账本时应删除这段宿主代办逻辑。
+
 `deployment.package-registry` 拥有全部署的包列表、ZIP 导入、原工件导出、校验结果和导入错误投影，并通过上述 artifact 操作传输 ZIP 与包内管理 UI。它不决定某个 Bot 的组件代际；该选择与配置属于 Bot scope 的 `component.worker-host`。类似地，备份容器的导入/下载使用 artifact 传输，但备份 Job、恢复、激活和存储回收必须由各自 deployment/host 模块声明独立操作与生命周期，不得建成一个再次集中所有资源的“存储后台”。
 
 备份与恢复的目标模块边界固定如下。`deployment.backup` 拥有跨 deployment 与多个 Bot cut 的备份集合、创建 Job、列表/详情、只读验证、外部容器导入及备份容器下载；它通过受限端口调用各 Bot 的一致性切口和宿主 artifact store，不取得 Bot 业务写权限。`deployment.restore` 拥有从已验证备份创建 SEALED 候选、候选校验、激活计划、storage head 切换与激活 Job；它只能消费 `deployment.backup` 发布的不可变备份引用，不能自行读取任意文件路径。二者是独立模块、独立 Generation 和独立操作命名空间，恢复失败不能阻断新备份，备份模块也不能绕过恢复计划直接替换活动 Bot。

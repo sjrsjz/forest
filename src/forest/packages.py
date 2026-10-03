@@ -2145,6 +2145,37 @@ class PackageCatalog:
         check_manifest: Callable[[dict], None] | None = None,
     ) -> PackageSnapshot:
         """Publish an archive and its replay receipt in one catalog transaction."""
+        prior_digest = self._import_digest(
+            operation_id=operation_id, actor_ref=actor_ref,
+            archive_sha256=archive_sha256,
+        )
+        if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_ARCHIVE_BYTES:
+            _fail("PACKAGE_TOO_LARGE", "Package ZIP exceeds the upload limit")
+        if "sha256:" + hashlib.sha256(data).hexdigest() != archive_sha256:
+            _fail("PACKAGE_ARCHIVE_DIGEST_MISMATCH", "Package ZIP differs from its declared digest")
+        if prior_digest is not None:
+            return self.get(prior_digest)
+        captured = archive_files(data)
+        manifest = _manifest(captured)
+        if check_manifest is not None:
+            check_manifest(manifest)
+        return self._publish(
+            captured, import_operation=(operation_id, actor_ref, archive_sha256)
+        )
+
+    def import_receipt(
+        self, *, operation_id: str, actor_ref: str, archive_sha256: str
+    ) -> dict | None:
+        """Recover a committed import without trusting an HTTP response or ZIP staging."""
+        digest = self._import_digest(
+            operation_id=operation_id, actor_ref=actor_ref,
+            archive_sha256=archive_sha256,
+        )
+        return self.artifact(digest) if digest is not None else None
+
+    def _import_digest(
+        self, *, operation_id: str, actor_ref: str, archive_sha256: str
+    ) -> str | None:
         if (
             not isinstance(operation_id, str)
             or re.fullmatch(r"[A-Za-z0-9:._/-]{1,256}", operation_id) is None
@@ -2154,10 +2185,6 @@ class PackageCatalog:
             or re.fullmatch(r"sha256:[a-f0-9]{64}", archive_sha256) is None
         ):
             _fail("PACKAGE_IMPORT_OPERATION_INVALID", "Import operation identity is invalid")
-        if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_ARCHIVE_BYTES:
-            _fail("PACKAGE_TOO_LARGE", "Package ZIP exceeds the upload limit")
-        if "sha256:" + hashlib.sha256(data).hexdigest() != archive_sha256:
-            _fail("PACKAGE_ARCHIVE_DIGEST_MISMATCH", "Package ZIP differs from its declared digest")
         prior = self._rows(
             "SELECT actor_ref,archive_sha256,digest FROM package_imports WHERE operation_id=?",
             (operation_id,), table="package_imports",
@@ -2165,14 +2192,8 @@ class PackageCatalog:
         if prior:
             if prior[0][:2] != (actor_ref, archive_sha256):
                 _fail("PACKAGE_IMPORT_OPERATION_CONFLICT", "Import key was used for another request")
-            return self.get(prior[0][2])
-        captured = archive_files(data)
-        manifest = _manifest(captured)
-        if check_manifest is not None:
-            check_manifest(manifest)
-        return self._publish(
-            captured, import_operation=(operation_id, actor_ref, archive_sha256)
-        )
+            return prior[0][2]
+        return None
 
     def export_archive(self, digest: str) -> bytes:
         files = self.get(digest)._verified_files()

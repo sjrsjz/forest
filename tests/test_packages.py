@@ -963,6 +963,14 @@ def test_concurrent_archive_import_replays_one_atomic_catalog_receipt(tmp_path):
         ]
     destination = PackageCatalog(destination_root)
     assert [item.digest for item in destination.list()] == [snapshot.digest]
+    assert destination.import_receipt(
+        operation_id=operation_id, actor_ref="admin:one",
+        archive_sha256=archive_sha256,
+    )["package_digest"] == snapshot.digest
+    assert destination.import_receipt(
+        operation_id="web:sha256:" + "c" * 64, actor_ref="admin:one",
+        archive_sha256=archive_sha256,
+    ) is None
     assert import_once() == snapshot.digest
     with pytest.raises(ForestError) as actor_conflict:
         destination.import_archive_idempotent(
@@ -970,6 +978,12 @@ def test_concurrent_archive_import_replays_one_atomic_catalog_receipt(tmp_path):
             archive_sha256=archive_sha256,
         )
     assert actor_conflict.value.code == "PACKAGE_IMPORT_OPERATION_CONFLICT"
+    with pytest.raises(ForestError) as receipt_conflict:
+        destination.import_receipt(
+            operation_id=operation_id, actor_ref="admin:two",
+            archive_sha256=archive_sha256,
+        )
+    assert receipt_conflict.value.code == "PACKAGE_IMPORT_OPERATION_CONFLICT"
     with pytest.raises(ForestError) as digest_conflict:
         destination.import_archive_idempotent(
             archive + b"different", operation_id=operation_id, actor_ref="admin:one",

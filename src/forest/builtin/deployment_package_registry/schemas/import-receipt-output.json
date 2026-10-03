@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"protocol":{"const":"forest.package-import-receipt/1"},"found":{"type":"boolean"},"package_digest":{"type":["string","null"],"pattern":"^sha256:[a-f0-9]{64}$"}},"required":["protocol","found","package_digest"],"additionalProperties":false}
