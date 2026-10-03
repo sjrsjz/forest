@@ -287,7 +287,9 @@ class PackageManagementContract(ModuleConfigurationContract):
             )
         command_payload = dict(payload)
         if actor_field is not None:
-            actor = getattr(authorization, "actor_ref", None)
+            actor = getattr(authorization, "actor_ref", None) or getattr(
+                authorization, "web_subject_ref", None
+            )
             if not isinstance(actor, str) or not actor:
                 raise ForestError(
                     "WEB_AUTHORITY_TICKET_REQUIRED",

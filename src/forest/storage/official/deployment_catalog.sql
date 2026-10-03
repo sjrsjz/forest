@@ -479,6 +479,122 @@ CREATE TABLE forest_deployment.operations (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+-- The kernel owns Bot identity and runtime intent. Official deployment packages
+-- may only project this state or submit an authenticated intent change here.
+CREATE FUNCTION forest_deployment.bot_catalog_page(
+    requested_limit integer, after_bot_id text, search_text text
+) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    entries jsonb;
+    found_count integer;
+BEGIN
+    IF requested_limit NOT BETWEEN 1 AND 100
+       OR (after_bot_id IS NOT NULL AND (octet_length(after_bot_id) NOT BETWEEN 1 AND 128))
+       OR (search_text IS NOT NULL AND octet_length(search_text) > 128) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','BOT_CATALOG_QUERY_INVALID',
+                'message','Bot catalog query is invalid','status',422));
+    END IF;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'bot_id',page.bot_id,'display_name',page.display_name,
+        'supply_state',page.supply_state,'desired_state',page.desired_state,
+        'intent_revision',page.intent_revision,'observed_state',page.observed_state,
+        'error_code',page.error_code) ORDER BY page.bot_id),'[]'::jsonb),count(*)
+    INTO entries,found_count
+    FROM (
+        SELECT b.bot_id,b.display_name,b.supply_state,i.desired_state,
+            i.revision AS intent_revision,o.observed_state,o.error_code
+        FROM forest_deployment.bots b
+        JOIN forest_deployment.runtime_intents i USING(bot_id)
+        LEFT JOIN forest_deployment.runtime_observations o USING(bot_id)
+        WHERE (after_bot_id IS NULL OR b.bot_id>after_bot_id)
+          AND (search_text IS NULL OR search_text='' OR
+               b.bot_id ILIKE '%'||search_text||'%' OR
+               b.display_name ILIKE '%'||search_text||'%')
+        ORDER BY b.bot_id LIMIT requested_limit+1
+    ) page;
+    IF found_count>requested_limit THEN
+        entries:=entries-requested_limit;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('items',entries,
+            'next_after',CASE WHEN found_count>requested_limit
+                THEN entries->(requested_limit-1)->>'bot_id' ELSE NULL END));
+END;
+$$;
+
+CREATE FUNCTION forest_deployment.bot_set_desired(
+    requested_operation text, requested_digest text, requested_bot text,
+    requested_state text, expected_revision bigint,
+    caller_component text, caller_generation text
+) RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    prior forest_deployment.operations%ROWTYPE;
+    current_revision bigint;
+    saved_revision bigint;
+BEGIN
+    IF octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR octet_length(requested_bot) NOT BETWEEN 1 AND 128
+       OR requested_state NOT IN ('ONLINE','OFFLINE')
+       OR expected_revision IS NULL OR expected_revision<1 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','DEPLOYMENT_INPUT_INVALID',
+                'message','Runtime intent is invalid','status',422));
+    END IF;
+    IF caller_component IS NOT NULL THEN
+        IF caller_generation IS NULL OR NOT EXISTS (
+            SELECT 1 FROM forest_deployment.web_authority_receipts r
+            WHERE r.target_operation_ref=requested_operation
+              AND r.target_component_id=caller_component
+              AND r.target_generation_id=caller_generation
+              AND r.action_key='bot.set-desired'
+              AND r.input_digest=requested_digest AND r.web_role='ADMIN'
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','WEB_AUTHORITY_TICKET_REQUIRED',
+                    'message','Bot intent change requires an accepted Web ticket','status',403));
+        END IF;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.deployment.operation/'||requested_operation,0));
+    SELECT * INTO prior FROM forest_deployment.operations
+        WHERE operation_id=requested_operation;
+    IF FOUND THEN
+        IF prior.input_digest<>requested_digest OR prior.operation_kind<>'SET_DESIRED' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','DEPLOYMENT_OPERATION_CONFLICT',
+                    'message','Operation input differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('bot_id',prior.bot_id,
+                'intent_revision',prior.resulting_revision));
+    END IF;
+    SELECT revision INTO current_revision FROM forest_deployment.runtime_intents
+        WHERE bot_id=requested_bot FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','BOT_NOT_FOUND',
+                'message','Bot identity does not exist','status',404));
+    END IF;
+    IF current_revision<>expected_revision THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','BOT_INTENT_REVISION_CONFLICT',
+                'message','Bot runtime intent changed','status',409));
+    END IF;
+    UPDATE forest_deployment.runtime_intents SET desired_state=requested_state,
+        revision=revision+1,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot RETURNING revision INTO saved_revision;
+    INSERT INTO forest_deployment.operations(
+        operation_id,operation_kind,input_digest,bot_id,resulting_revision
+    ) VALUES (requested_operation,'SET_DESIRED',requested_digest,
+        requested_bot,saved_revision);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('bot_id',requested_bot,
+            'intent_revision',saved_revision));
+END;
+$$;
+
 CREATE TABLE forest_deployment.secret_slots (
     secret_ref text PRIMARY KEY CHECK (octet_length(secret_ref) BETWEEN 10 AND 512),
     purpose text NOT NULL CHECK (octet_length(purpose) BETWEEN 1 AND 256),

@@ -31,7 +31,7 @@ class _BuiltinGrantSet:
     grant_set_digest: str
 
 
-class _ReadOnlyManagementContract(PackageManagementContract):
+class _ImmutableConfigurationManagementContract(PackageManagementContract):
     """Immutable deployment package configuration has no apply action."""
 
     def describe(self) -> dict:
@@ -100,17 +100,20 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
         for item in component.get("management_artifacts", ())
         for key in ("reserve_port", "settle_port") if key in item
     }
+    action_commands = {
+        item["port"] for item in component.get("management_actions", ())
+    }
     declared_commands = {
         item["name"] for item in component.get("domain_commands", ())
     }
     if component["scope"] != "deployment" or component.get("configuration_apply") or (
-        declared_commands != artifact_commands or component.get("management_actions")
+        declared_commands != artifact_commands | action_commands
         or (component.get("owned_work_handlers") and not component.get("storage"))
         or any(item["semantics"] != "read" for item in component.get("provides", ()))
     ):
         raise ForestError(
             "DEPLOYMENT_PACKAGE_PORT_UNAVAILABLE",
-            "Deployment package write ports require declared artifact transaction hooks", 503,
+            "Deployment package write ports must match declared management bindings", 503,
         )
     declared = snapshot.storage_bundle()
     if declared is not None:
@@ -209,7 +212,7 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
         storage=storage, trust_level="official",
         effect_driver_factories=effect_factories,
         management=management,
-        management_contract_factory=lambda adapter: _ReadOnlyManagementContract(
+        management_contract_factory=lambda adapter: _ImmutableConfigurationManagementContract(
             configuration, adapter=adapter, schema=config_schema
         ),
         plan_only=plan_only,
@@ -288,7 +291,7 @@ async def bootstrap_installed_deployment_package(snapshot, runtime, *, plan_only
         state_queries=None, state_commands=None, domain_queries=None,
         service_operation_ledger=None, storage=None, trust_level="installed",
         management=management,
-        management_contract_factory=lambda adapter: _ReadOnlyManagementContract(
+        management_contract_factory=lambda adapter: _ImmutableConfigurationManagementContract(
             configuration, adapter=adapter, schema=config_schema
         ),
         plan_only=plan_only,

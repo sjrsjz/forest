@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"protocol":{"const":"forest.deployment-bot-catalog/1"}},"required":["protocol"],"additionalProperties":false}

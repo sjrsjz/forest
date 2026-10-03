@@ -345,7 +345,84 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         package_catalog=package_catalog,
     )
     audit_source = Path(__file__).parents[1] / "src/forest/builtin/deployment_audit"
-    registry_source = Path(__file__).parents[1] / "src/forest/builtin/deployment_package_registry"
+    registry_source = tmp_path / "registry-with-action"
+    shutil.copytree(
+        Path(__file__).parents[1] / "src/forest/builtin/deployment_package_registry",
+        registry_source,
+    )
+    owned_sql = registry_source / "schema/imports.sql"
+    original_hash = hashlib.sha256(owned_sql.read_bytes()).hexdigest()
+    owned_sql.write_text(
+        owned_sql.read_text(encoding="utf-8") + """
+CREATE TABLE management_probe_operations (
+    operation_id text PRIMARY KEY,
+    input_value text NOT NULL
+);
+CREATE FUNCTION package_management_probe(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    saved text;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'deployment'
+       OR context->>'component_id' IS DISTINCT FROM 'deployment.package-registry'
+       OR context->>'port_kind' IS DISTINCT FROM 'management_action'
+       OR context->>'port_name' IS DISTINCT FROM 'deployment.package-registry.management.probe'
+       OR input->>'value' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MANAGEMENT_PROBE_INVALID',
+                'message','Probe input is invalid','status',422));
+    END IF;
+    IF input->>'value' = 'reject' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MANAGEMENT_PROBE_REJECTED',
+                'message','Probe deliberately rejected','status',422));
+    END IF;
+    INSERT INTO __forest_module_schema__.management_probe_operations
+        (operation_id,input_value)
+    VALUES (context->>'operation_id',input->>'value')
+    ON CONFLICT (operation_id) DO NOTHING;
+    SELECT input_value INTO saved
+    FROM __forest_module_schema__.management_probe_operations
+    WHERE operation_id=context->>'operation_id';
+    IF saved IS DISTINCT FROM input->>'value' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MANAGEMENT_PROBE_CONFLICT',
+                'message','Probe operation differs','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('value',saved));
+END;
+$$;
+""", encoding="utf-8",
+    )
+    (registry_source / "schemas/management-probe-input.json").write_text(
+        '{"type":"object","additionalProperties":false,"required":["value"],'
+        '"properties":{"value":{"type":"string","minLength":1}}}',
+        encoding="utf-8",
+    )
+    (registry_source / "schemas/management-probe-output.json").write_text(
+        '{"type":"object","additionalProperties":false,"required":["value"],'
+        '"properties":{"value":{"type":"string"}}}',
+        encoding="utf-8",
+    )
+    manifest_path = registry_source / "module.toml"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            original_hash, hashlib.sha256(owned_sql.read_bytes()).hexdigest(), 1,
+        ) + """
+[[components.domain_commands]]
+name = "deployment.package-registry.management.probe"
+contract = "1.0"
+function = "package_management_probe"
+input_schema = "schemas/management-probe-input.json"
+output_schema = "schemas/management-probe-output.json"
+
+[[components.management_actions]]
+id = "probe"
+port = "deployment.package-registry.management.probe"
+priority = "P1"
+""", encoding="utf-8",
+    )
     controller = DeploymentPackageController(
         runtime, package_catalog, official_sources=(audit_source, registry_source),
     )
@@ -421,6 +498,43 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
                 json={"username": "admin", "password": "deployment-web-password"},
             )
             assert login.status_code == 200, login.text
+            action_path = (
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/actions/probe"
+            )
+            action_headers = {
+                "origin": "http://forest.test",
+                "x-forest-csrf": client.cookies["forest_management_csrf"],
+                "idempotency-key": "deployment-package-action-probe",
+            }
+            action = await client.post(
+                action_path, headers=action_headers, json={"value": "action-works"},
+            )
+            assert action.status_code == 200, action.text
+            assert action.json() == {"value": "action-works"}
+            replayed_action = await client.post(
+                action_path, headers=action_headers, json={"value": "action-works"},
+            )
+            assert replayed_action.json() == action.json()
+            denied_action = await client.post(
+                action_path,
+                headers={**action_headers, "idempotency-key": "deployment-probe-reject"},
+                json={"value": "reject"},
+            )
+            assert denied_action.status_code == 422, denied_action.text
+            assert denied_action.json()["code"] == "MANAGEMENT_PROBE_REJECTED"
+            probe_schema = module_schema_namespace("forest.deployment.package-imports")
+            async with repository.store.pool.connection() as conn:
+                probe_rows = await (await conn.execute(
+                    sql.SQL("SELECT input_value FROM {}.management_probe_operations")
+                    .format(sql.Identifier(probe_schema))
+                )).fetchall()
+                accepted_probe = await (await conn.execute(
+                    "SELECT action_key FROM forest_deployment.web_authority_receipts "
+                    "WHERE action_key='probe'"
+                )).fetchall()
+            assert [row["input_value"] for row in probe_rows] == ["action-works"]
+            assert len(accepted_probe) == 1
             download = await client.post(
                 "/management/v1/scopes/deployment/deployment/modules/"
                 "deployment.package-registry/artifacts/archive/download",
@@ -2425,6 +2539,16 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         display_name="Administrator",
         password="deployment-web-password",
     )
+    bot_profile = await _storage_profile(repository, "bot/webui", "webui")
+    bot_bootstrap = await _bootstrap_profile(repository, bot_profile, "webui")
+    await repository.register_ready(
+        operation_id="provision/webui",
+        bot_id="bot/webui",
+        display_name="WebUI Bot",
+        storage_profile_ref=bot_profile.profile_ref,
+        bootstrap_profile_ref=bot_bootstrap.profile_ref,
+        bootstrap_manifest_digest=bot_bootstrap.manifest_digest,
+    )
     supervisor = SimpleNamespace(notify=lambda: None)
     allocated_dsn = "postgresql://forest:hidden-password@postgres/forest_bot_web"
     allocator = SimpleNamespace(
@@ -2436,16 +2560,24 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     deployment_runtime = DeploymentRuntimeScope(
         repository.store, SimpleNamespace(authority_lease=lambda **_values: lease)
     )
-    audit_snapshot = PackageCatalog(tmp_path / "webui-deployment-packages").build(
+    package_catalog = PackageCatalog(tmp_path / "webui-deployment-packages")
+    audit_snapshot = package_catalog.build(
         Path(__file__).parents[1] / "src/forest/builtin/deployment_audit"
+    )
+    bot_snapshot = package_catalog.build(
+        Path(__file__).parents[1] / "src/forest/builtin/deployment_bot_catalog"
     )
     audit_descriptor = await bootstrap_builtin_deployment_package(
         audit_snapshot, deployment_runtime
     )
-    deployment_registry = RuntimeModuleRegistry(deployment_runtime, (audit_descriptor,))
+    bot_descriptor = await bootstrap_builtin_deployment_package(
+        bot_snapshot, deployment_runtime
+    )
+    deployment_registry = RuntimeModuleRegistry(
+        deployment_runtime, (audit_descriptor, bot_descriptor)
+    )
     await deployment_registry.start()
     legacy_components = deployment_management_components(
-        catalog=repository,
         secrets=secrets,
         storage_profiles=storage_profiles,
         bootstrap_profiles=bootstrap_profiles,
@@ -2482,7 +2614,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert body["runtime"]["graph_state"] == "ACTIVE"
         assert body["runtime"]["graph_id"] == deployment_registry.graph_identity.graph_id
         assert {item["component_id"] for item in body["modules"]} == {
-            "deployment.catalog",
+            "deployment.bot-catalog",
             "deployment.secrets",
             "deployment.provisioning",
             "deployment.accounts",
@@ -2502,6 +2634,50 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert audit_ui.status_code == 200
         assert "forest.management-ui-channel/1" in audit_ui.text
+        bot_ui = await client.get(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            f"deployment.bot-catalog/management-ui/{bot_snapshot.management_ui()[0]['sha256']}",
+            headers=headers,
+        )
+        assert bot_ui.status_code == 200
+        page_path = (
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.bot-catalog/queries/bots.list"
+        )
+        page = await client.post(page_path, headers=headers, json={"limit": 20})
+        assert page.status_code == 200, page.text
+        assert [item["bot_id"] for item in page.json()["items"]] == ["bot/webui"]
+        action_path = (
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.bot-catalog/actions/bot.set-desired"
+        )
+        action_headers = {**headers, "idempotency-key": "webui-bot-online"}
+        action = await client.post(action_path, headers=action_headers, json={
+            "bot_id": "bot/webui", "desired_state": "ONLINE", "expected_revision": 1,
+        })
+        assert action.status_code == 200, action.text
+        assert action.json() == {"bot_id": "bot/webui", "intent_revision": 2}
+        assert (await repository.inspect("bot/webui"))["desired_state"] == "ONLINE"
+        replay = await client.post(action_path, headers=action_headers, json={
+            "bot_id": "bot/webui", "desired_state": "ONLINE", "expected_revision": 1,
+        })
+        assert replay.json() == action.json()
+        stale = await client.post(
+            action_path,
+            headers={**headers, "idempotency-key": "webui-bot-stale"},
+            json={
+                "bot_id": "bot/webui", "desired_state": "OFFLINE",
+                "expected_revision": 1,
+            },
+        )
+        assert stale.status_code == 409, stale.text
+        assert stale.json()["code"] == "BOT_INTENT_REVISION_CONFLICT"
+        assert (await repository.inspect("bot/webui"))["desired_state"] == "ONLINE"
+        filtered = await client.post(
+            page_path, headers=headers, json={"limit": 1, "search": "WebUI"}
+        )
+        assert filtered.status_code == 200, filtered.text
+        assert [item["bot_id"] for item in filtered.json()["items"]] == ["bot/webui"]
         assert (await client.get("/static/deployment-provisioning.js")).status_code == 200
         shell_script = (await client.get("/static/app.js")).text
         assert "/management/v1/scopes/" in shell_script
@@ -2541,7 +2717,9 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             json={},
         )
         assert listed.status_code == 200
-        assert listed.json()["items"][0]["secret_ref"] == "secret://web/test"
+        assert any(
+            item["secret_ref"] == "secret://web/test" for item in listed.json()["items"]
+        )
         assert "never-return-this" not in listed.text
         storage = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
@@ -2663,6 +2841,11 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                 "bootstrap.create",
             ),
             (
+                "deployment.bot-catalog",
+                deployment_registry.graph_identity.generations["deployment.bot-catalog"],
+                "bot.set-desired",
+            ),
+            (
                 "deployment.secrets",
                 "deployment/deployment.secrets/1",
                 "secret.put",
@@ -2682,11 +2865,13 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert audit_page.status_code == 200
         audit_records = audit_page.json()["records"]
         assert {item["action"] for item in audit_records} == {
+            "bot.set-desired",
             "secret.put",
             "storage.create-local",
             "bootstrap.create",
         }
         assert {item["producer_component_id"] for item in audit_records} == {
+            "deployment.bot-catalog",
             "deployment.secrets",
             "deployment.provisioning",
         }

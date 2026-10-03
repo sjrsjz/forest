@@ -230,12 +230,12 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             deployment_runtime, package_catalog,
             official_sources=(
                 Path(str(files("forest").joinpath("builtin/deployment_audit"))),
+                Path(str(files("forest").joinpath("builtin/deployment_bot_catalog"))),
                 Path(str(files("forest").joinpath("builtin/deployment_package_registry"))),
             ),
         )
         await deployment_controller.start()
         legacy_components = deployment_management_components(
-            catalog=catalog,
             secrets=secrets,
             storage_profiles=storage_profiles,
             bootstrap_profiles=bootstrap_profiles,

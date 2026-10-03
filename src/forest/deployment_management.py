@@ -32,29 +32,6 @@ class DeploymentManagementComponent:
         }
 
 
-class DeploymentCatalogManagement:
-    def __init__(self, *, catalog, supervisor) -> None:
-        self.catalog = catalog
-        self.supervisor = supervisor
-
-    async def query(self, query_id: str, payload: dict):
-        if query_id != "bots.list" or payload:
-            raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404)
-        return {"items": list(await self.catalog.list_bots())}
-
-    async def action(
-        self, action_id: str, *, operation_id: str, payload: dict, authorization=None
-    ):
-        if action_id != "bot.set-desired":
-            raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404)
-        values = _fields(payload, {"bot_id", "desired_state", "expected_revision"})
-        saved = await self.catalog.set_desired(
-            operation_id=operation_id, authorization=authorization, **values
-        )
-        self.supervisor.notify()
-        return saved
-
-
 class DeploymentSecretManagement:
     def __init__(self, *, secrets) -> None:
         self.secrets = secrets
@@ -271,7 +248,6 @@ class DeploymentProvisioningManagement:
 
 def deployment_management_components(
     *,
-    catalog,
     secrets,
     storage_profiles,
     bootstrap_profiles,
@@ -296,11 +272,6 @@ def deployment_management_components(
         )
 
     components = [
-        DeploymentManagementComponent(
-            "deployment.catalog",
-            DeploymentCatalogManagement(catalog=catalog, supervisor=supervisor),
-            contribution("deployment-catalog", "Bot 运行目录", 10),
-        ),
         DeploymentManagementComponent(
             "deployment.secrets",
             DeploymentSecretManagement(secrets=secrets),

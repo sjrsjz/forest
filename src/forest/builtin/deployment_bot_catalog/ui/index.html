@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root{color-scheme:dark;font:14px/1.45 system-ui,sans-serif;color:#dcebe2;background:#0d1712}
+    *{box-sizing:border-box}body{margin:0;padding:10px}main{border:1px solid #29493a;border-radius:9px;background:#102019;overflow:hidden}
+    header,.toolbar,.footer{display:flex;align-items:center;gap:8px;padding:9px 12px;flex-wrap:wrap}
+    header{border-bottom:1px solid #29493a}h2{font-size:16px;margin:0 auto 0 0}#status{color:#91ac9a}
+    button,input{border:1px solid #365b49;border-radius:6px;background:#173426;color:#e9f7ef;padding:7px 10px}
+    button{cursor:pointer}button:disabled{opacity:.5;cursor:default}input{min-width:180px;flex:1}
+    .list{max-height:430px;overflow:auto}.row{display:grid;grid-template-columns:minmax(200px,2fr) 110px 110px 90px minmax(110px,1fr) auto;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid #203e30;min-width:730px}
+    .row code,.row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.identity{display:flex;flex-direction:column;min-width:0}.identity small{color:#91ac9a}
+    .footer{justify-content:space-between;border-top:1px solid #29493a}
+  </style>
+</head>
+<body>
+<main>
+  <header><h2>Bot 运行目录</h2><button id="refresh" type="button">刷新</button></header>
+  <form id="filter" class="toolbar"><input id="search" placeholder="筛选 Bot ID 或名称" aria-label="筛选 Bot"><button type="submit">查询</button></form>
+  <div id="items" class="list"></div>
+  <div class="footer"><span id="status">等待连接</span><button id="more" type="button" hidden>下一页</button></div>
+</main>
+<script>
+(()=>{'use strict';
+  let port,nonce,sequence=0,pending=new Map(),nextAfter=null,activeSearch='';
+  const $=id=>document.getElementById(id),items=$('items'),status=$('status');
+  const send=(type,payload={})=>port?.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
+  const resize=()=>send('resize',{height:Math.min(document.documentElement.scrollHeight,620)});
+  const request=(type,operation_id,value,idempotency_key)=>new Promise((resolve,reject)=>{
+    const request_id='bot-catalog-'+(++sequence);
+    pending.set(request_id,{resolve,reject});
+    send(type,{request_id,operation_id,value,...(idempotency_key?{idempotency_key}:{})});
+  });
+  const cell=(row,value)=>{const el=document.createElement('span');el.textContent=value??'—';row.append(el);};
+  function render(item){
+    const row=document.createElement('div');row.className='row';
+    const identity=document.createElement('div');identity.className='identity';
+    const title=document.createElement('strong');title.textContent=item.display_name;
+    const id=document.createElement('small');id.textContent=item.bot_id;identity.append(title,id);row.append(identity);
+    cell(row,item.supply_state);cell(row,item.desired_state);cell(row,item.observed_state);
+    const revision=document.createElement('code');revision.textContent='rev '+item.intent_revision;row.append(revision);
+    const button=document.createElement('button');button.type='button';button.textContent=item.desired_state==='ONLINE'?'停止':'启动';
+    button.disabled=item.supply_state!=='READY';
+    button.onclick=async()=>{
+      button.disabled=true;status.textContent='正在提交运行意图…';
+      try{
+        await request('action','bot.set-desired',{
+          bot_id:item.bot_id,desired_state:item.desired_state==='ONLINE'?'OFFLINE':'ONLINE',
+          expected_revision:item.intent_revision},crypto.randomUUID());
+        await load(false);
+      }catch(error){status.textContent=error.message;button.disabled=false;}
+    };
+    row.append(button);items.append(row);
+  }
+  async function load(append){
+    const search=$('search').value.trim();
+    if(!append){items.replaceChildren();nextAfter=null;activeSearch=search;}
+    if(append&&search!==activeSearch)return load(false);
+    $('more').disabled=true;status.textContent='正在读取…';
+    try{
+      const page=await request('query','bots.list',{limit:50,...(activeSearch?{search:activeSearch}:{}),...(append&&nextAfter?{after:nextAfter}:{})});
+      for(const item of page.items)render(item);
+      nextAfter=page.next_after;$('more').hidden=!nextAfter;
+      status.textContent=`已显示 ${items.children.length} 个 Bot`;
+      resize();
+    }catch(error){status.textContent=error.message;}
+    finally{$('more').disabled=false;}
+  }
+  $('filter').onsubmit=event=>{event.preventDefault();load(false);};
+  $('refresh').onclick=()=>load(false);$('more').onclick=()=>load(true);
+  addEventListener('message',event=>{
+    const message=event.data||{};
+    if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect'||typeof message.nonce!=='string')return;
+    port=event.ports[0];nonce=message.nonce;
+    port.onmessage=event=>{
+      const value=event.data||{};
+      if(value.protocol!=='forest.management-ui-channel/1'||value.nonce!==nonce)return;
+      if(value.type==='initialize'){resize();load(false);return;}
+      const entry=pending.get(value.request_id);
+      if(entry){pending.delete(value.request_id);if(value.type==='query-result'||value.type==='action-result')entry.resolve(value.value);else entry.reject(Error(value.message||'Bot 目录操作失败'));}
+      else if(value.type==='error')status.textContent=value.message||'Bot 目录操作失败';
+    };
+    port.start();send('ready');
+  },{once:true});
+})();
+</script>
+</body>
+</html>

@@ -549,6 +549,15 @@ class DeploymentManagementGateway:
             input_digest=input_digest,
             required_role="ADMIN",
         )
+        package = self._package_module(component_id)
+        if package is not None:
+            return await package.management_contract.action(
+                action_id,
+                operation_id=operation_id,
+                payload=body,
+                authorization=authorization,
+                authorization_guard=self._authorize_mutation_in,
+            )
         async with self._operation_lock:
             return await self._contract(component_id).action(
                 action_id,

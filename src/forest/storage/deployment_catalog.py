@@ -186,6 +186,8 @@ class DeploymentCatalogRepository:
             "guard_web_session_change",
             "guard_web_setup_change",
             "guard_runtime_graph_change",
+            "bot_catalog_page",
+            "bot_set_desired",
         }:
             raise ForestError(
                 "DEPLOYMENT_SCHEMA_TAMPERED",
@@ -326,7 +328,11 @@ class DeploymentCatalogRepository:
     ) -> dict:
         _bounded(operation_id, "operation_id", 256)
         _bounded(bot_id, "bot_id", 128)
-        if desired_state not in {"OFFLINE", "ONLINE"} or type(expected_revision) is not int:
+        if (
+            desired_state not in {"OFFLINE", "ONLINE"}
+            or type(expected_revision) is not int
+            or not 1 <= expected_revision <= 9223372036854775807
+        ):
             raise ForestError("DEPLOYMENT_INPUT_INVALID", "Runtime intent is invalid", 422)
         input_digest = digest_json(
             {
@@ -339,35 +345,18 @@ class DeploymentCatalogRepository:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )
-            replay = await self._operation(conn, operation_id, input_digest)
-            if replay is not None:
-                return await self._bot_in(conn, replay["bot_id"])
-            current = await (
+            result = await (
                 await conn.execute(
-                    "SELECT * FROM forest_deployment.runtime_intents WHERE bot_id=%s FOR UPDATE",
-                    (bot_id,),
+                    "SELECT forest_deployment.bot_set_desired(%s,%s,%s,%s,%s,NULL,NULL) "
+                    "AS result",
+                    (operation_id, input_digest, bot_id, desired_state, expected_revision),
                 )
             ).fetchone()
-            if current is None:
-                raise ForestError("BOT_NOT_FOUND", "Bot identity does not exist", 404)
-            if current["revision"] != expected_revision:
-                raise ForestError(
-                    "BOT_INTENT_REVISION_CONFLICT",
-                    "Bot runtime intent changed",
-                    409,
-                    details={"revision": current["revision"]},
-                )
-            saved = await (
-                await conn.execute(
-                    "UPDATE forest_deployment.runtime_intents SET desired_state=%s,"
-                    "revision=revision+1,updated_at=clock_timestamp() WHERE bot_id=%s RETURNING *",
-                    (desired_state, bot_id),
-                )
-            ).fetchone()
-            await self._save_operation(
-                conn, operation_id, "SET_DESIRED", input_digest, bot_id, saved["revision"]
-            )
-            return await self._bot_in(conn, bot_id)
+            envelope = result["result"]
+            if envelope["ok"] is not True:
+                error = envelope["error"]
+                raise ForestError(error["code"], error["message"], error["status"])
+            return await self._bot_in(conn, envelope["value"]["bot_id"])
 
     async def claim_supervisor(
         self, host_id: str, incarnation: str, *, lease_seconds: int = 30
