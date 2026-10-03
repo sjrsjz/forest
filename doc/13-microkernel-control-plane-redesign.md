@@ -243,6 +243,8 @@ Job。浏览器不得提交 `schema_digests`，也不得用一个六组件 JSON 
 `(order, component_id)` 确定排序并拒绝重复 component/surface 身份；profile 必须准确覆盖本次注册的
 组件集合，缺项、多项或失配都在入队前拒绝。
 
+本地 Storage 供应必须在同一个部署数据库事务里接纳 Web 回执、写入 DSN Secret 和创建 Storage Profile；Profile 冲突、Secret 用途错误或输入冲突都回滚整笔事务，不能留下孤立 DSN。该内核命令先按操作 ID 合流并在同一连接读取 Secret 状态；成功重放直接使用已提交的 Profile 回执，不重新生成随机数据库密码。未来 `deployment.provisioning` 包只声明操作与提供 UI，不持有主密钥、数据库分配器或供应账本。
+
 创建期 UI 使用与运行期管理贡献相同的受控 surface 身份。内置模块可以共享宿主提供的 schema 表单
 renderer，模块也可以发布自己的 template/module/style；两者都只能返回该组件的配置值，不能选择
 其他组件、伪造摘要、直接建库或启动 RuntimeGraph。Bot 建成后，配置所有权转交各模块自己的

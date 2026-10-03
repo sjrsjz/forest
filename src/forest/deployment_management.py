@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from forest.bootstrap_contributions import BootstrapConfigurationRegistry
+from forest.deployment_action_authorization import authorize_deployment_action_in
+from forest.deployment_kernel_management import LocalStorageProfileKernelCommand
 from forest.errors import ForestError
 from forest.runtime_modules import RuntimeManagementContribution
 
@@ -44,7 +46,6 @@ class DeploymentProvisioningManagement:
         bootstrap_contributions,
         database_allocator=None,
     ) -> None:
-        self.secrets = secrets
         self.storage_profiles = storage_profiles
         self.bootstrap_profiles = bootstrap_profiles
         self.jobs = jobs
@@ -52,7 +53,9 @@ class DeploymentProvisioningManagement:
         self.bootstrap_registry = BootstrapConfigurationRegistry(
             tuple(bootstrap_contributions)
         )
-        self.database_allocator = database_allocator
+        self.local_storage_command = LocalStorageProfileKernelCommand(
+            secrets, storage_profiles, database_allocator,
+        )
 
     async def query(self, query_id: str, payload: dict):
         if query_id == "provisioning.jobs.list":
@@ -71,45 +74,20 @@ class DeploymentProvisioningManagement:
         self, action_id: str, *, operation_id: str, payload: dict, authorization=None
     ):
         if action_id == "storage.create-local":
-            if self.database_allocator is None:
-                raise ForestError(
-                    "STORAGE_ALLOCATION_UNAVAILABLE",
-                    "Local PostgreSQL allocation is unavailable",
-                    409,
-                )
             values = _fields(
                 payload,
                 {"profile_ref", "bot_id", "storage_generation", "dsn_secret_ref"},
             )
-            try:
-                secret = await self.secrets.metadata(values["dsn_secret_ref"])
-            except ForestError as exc:
-                if exc.code != "SECRET_NOT_FOUND":
-                    raise
-                target_dsn = self.database_allocator.new_target_dsn(values["bot_id"])
-                await self.secrets.put(
-                    operation_id=operation_id + "/dsn",
-                    secret_ref=values["dsn_secret_ref"],
-                    purpose="storage.postgresql.dsn",
-                    plaintext=target_dsn.encode(),
-                    expected_revision=0,
-                    authorization=authorization,
-                )
-            else:
-                if secret.purpose != "storage.postgresql.dsn":
-                    raise ForestError(
-                        "STORAGE_PROFILE_SECRET_PURPOSE_INVALID",
-                        "Storage profile requires a PostgreSQL DSN secret",
-                        409,
-                    )
-                target_dsn = await self.secrets.resolve_text(values["dsn_secret_ref"])
-                self.database_allocator.validate_target(values["bot_id"], target_dsn)
-            saved = await self.storage_profiles.create(
-                operation_id=operation_id + "/profile",
-                authorization=authorization,
-                **values,
+            prepared = await self.local_storage_command.prepare(
+                values, operation_id=operation_id,
             )
-            return asdict(saved)
+            async with self.storage_profiles.store.transaction() as conn:
+                await authorize_deployment_action_in(
+                    conn, authorization, operation_id=operation_id,
+                )
+                return await self.local_storage_command.execute_in(
+                    conn, prepared, operation_id=operation_id,
+                )
         if action_id == "storage.create":
             values = _fields(
                 payload,

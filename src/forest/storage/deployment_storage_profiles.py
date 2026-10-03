@@ -57,6 +57,7 @@ class DeploymentStorageProfileAuthority:
         storage_generation: int,
         dsn_secret_ref: str,
         authorization=None,
+        conn=None,
     ) -> StorageProfileMetadata:
         _bounded(operation_id, "operation_id", 256)
         _bounded(bot_id, "bot_id", 128)
@@ -64,13 +65,6 @@ class DeploymentStorageProfileAuthority:
             raise ForestError("STORAGE_PROFILE_INPUT_INVALID", "Profile reference is invalid", 422)
         if type(storage_generation) is not int or storage_generation < 1:
             raise ForestError("STORAGE_PROFILE_INPUT_INVALID", "Storage generation is invalid", 422)
-        secret = await self.secrets.metadata(dsn_secret_ref)
-        if secret.purpose != "storage.postgresql.dsn":
-            raise ForestError(
-                "STORAGE_PROFILE_SECRET_PURPOSE_INVALID",
-                "Storage profile requires a PostgreSQL DSN secret",
-                409,
-            )
         input_digest = digest_json(
             {
                 "profile_ref": profile_ref,
@@ -79,7 +73,7 @@ class DeploymentStorageProfileAuthority:
                 "dsn_secret_ref": dsn_secret_ref,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self.store.transaction(conn) as conn:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )
@@ -103,6 +97,13 @@ class DeploymentStorageProfileAuthority:
                         409,
                     )
                 return self._metadata(replay)
+            secret = await self.secrets.metadata_in(conn, dsn_secret_ref)
+            if secret.purpose != "storage.postgresql.dsn":
+                raise ForestError(
+                    "STORAGE_PROFILE_SECRET_PURPOSE_INVALID",
+                    "Storage profile requires a PostgreSQL DSN secret",
+                    409,
+                )
             existing = await (
                 await conn.execute(
                     "SELECT 1 FROM forest_deployment.storage_profiles WHERE profile_ref=%s",

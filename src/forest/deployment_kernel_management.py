@@ -139,3 +139,59 @@ class WebAccountKernelCommand:
             operation_id=operation_id, conn=conn, **prepared,
         )
         return subject.as_dict()
+
+
+class LocalStorageProfileKernelCommand:
+    """Atomically bind one locally allocated DSN Secret to its profile."""
+
+    def __init__(self, secrets, storage_profiles, allocator) -> None:
+        self.secrets = secrets
+        self.storage_profiles = storage_profiles
+        self.allocator = allocator
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        if self.allocator is None:
+            raise ForestError(
+                "STORAGE_ALLOCATION_UNAVAILABLE",
+                "Local PostgreSQL allocation is unavailable", 409,
+            )
+        return dict(payload)
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"forest.deployment.local-storage/{operation_id}",),
+        )
+        profile_operation_id = operation_id + "/profile"
+        replay = await (
+            await conn.execute(
+                "SELECT 1 FROM forest_deployment.storage_profile_operations "
+                "WHERE operation_id=%s",
+                (profile_operation_id,),
+            )
+        ).fetchone()
+        if replay is None:
+            secret_ref = prepared["dsn_secret_ref"]
+            try:
+                secret = await self.secrets.metadata_in(conn, secret_ref)
+            except ForestError as exc:
+                if exc.code != "SECRET_NOT_FOUND":
+                    raise
+                target_dsn = self.allocator.new_target_dsn(prepared["bot_id"])
+                await self.secrets.put_in(
+                    conn, operation_id=operation_id + "/dsn",
+                    secret_ref=secret_ref, purpose="storage.postgresql.dsn",
+                    plaintext=target_dsn.encode(), expected_revision=0,
+                )
+            else:
+                if secret.purpose != "storage.postgresql.dsn":
+                    raise ForestError(
+                        "STORAGE_PROFILE_SECRET_PURPOSE_INVALID",
+                        "Storage profile requires a PostgreSQL DSN secret", 409,
+                    )
+                target_dsn = await self.secrets.resolve_text_in(conn, secret_ref)
+                self.allocator.validate_target(prepared["bot_id"], target_dsn)
+        saved = await self.storage_profiles.create(
+            operation_id=profile_operation_id, conn=conn, **prepared,
+        )
+        return asdict(saved)

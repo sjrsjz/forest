@@ -2863,6 +2863,22 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             },
         )
         assert replayed_storage.json() == storage.json()
+        rejected_storage = await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.provisioning/actions/storage.create-local",
+            headers={**headers, "idempotency-key": "storage-web-conflict"},
+            json={
+                "profile_ref": "storage-profile/web/1",
+                "bot_id": "bot/web",
+                "storage_generation": 1,
+                "dsn_secret_ref": "secret://web/orphan",
+            },
+        )
+        assert rejected_storage.status_code == 409, rejected_storage.text
+        assert rejected_storage.json()["code"] == "STORAGE_PROFILE_EXISTS"
+        with pytest.raises(ForestError) as absent_secret:
+            await secrets.metadata("secret://web/orphan")
+        assert absent_secret.value.code == "SECRET_NOT_FOUND"
         bootstrap_catalog = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
             "deployment.provisioning/queries/provisioning.bootstrap-catalog",
@@ -3089,6 +3105,32 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert updated_after_reload.status_code == 200, updated_after_reload.text
         assert updated_after_reload.json()["revision"] == 4
+        concurrent_storage_path = (
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.provisioning/actions/storage.create-local"
+        )
+        concurrent_storage_payload = {
+            "profile_ref": "storage-profile/web/concurrent",
+            "bot_id": "bot/web", "storage_generation": 2,
+            "dsn_secret_ref": "secret://web/concurrent",
+        }
+        concurrent_storage = await asyncio.gather(*(
+            client.post(
+                concurrent_storage_path,
+                headers={**headers, "idempotency-key": "storage-web-concurrent"},
+                json=concurrent_storage_payload,
+            ) for _ in range(2)
+        ))
+        assert [response.status_code for response in concurrent_storage] == [200, 200]
+        assert concurrent_storage[0].json() == concurrent_storage[1].json()
+        async with repository.store.pool.connection() as conn:
+            versions = await (
+                await conn.execute(
+                    "SELECT count(*) AS count FROM forest_deployment.secret_versions "
+                    "WHERE secret_ref=%s", ("secret://web/concurrent",),
+                )
+            ).fetchone()
+        assert versions["count"] == 1
     await deployment_registry.close()
 
 

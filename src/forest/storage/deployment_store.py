@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 
@@ -44,3 +46,12 @@ class DeploymentStore:
 
     async def close(self) -> None:
         await self.pool.close()
+
+    @asynccontextmanager
+    async def transaction(self, conn=None):
+        """Join a caller-owned deployment transaction or own one explicitly."""
+        if conn is not None:
+            yield conn
+            return
+        async with self.pool.connection() as owned, owned.transaction():
+            yield owned

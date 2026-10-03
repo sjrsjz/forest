@@ -175,6 +175,9 @@ class DeploymentSecretAuthority:
         row = await self._current(secret_ref)
         return self._metadata(row)
 
+    async def metadata_in(self, conn, secret_ref: str) -> SecretMetadata:
+        return self._metadata(await self._current_in(conn, secret_ref))
+
     async def list_metadata(self, *, limit: int = 200) -> tuple[SecretMetadata, ...]:
         if type(limit) is not int or not 1 <= limit <= 500:
             raise ForestError("SECRET_INPUT_INVALID", "Secret list limit is invalid", 422)
@@ -192,6 +195,12 @@ class DeploymentSecretAuthority:
 
     async def resolve(self, secret_ref: str) -> bytes:
         row = await self._current(secret_ref)
+        return await self._decrypt(secret_ref, row)
+
+    async def resolve_in(self, conn, secret_ref: str) -> bytes:
+        return await self._decrypt(secret_ref, await self._current_in(conn, secret_ref))
+
+    async def _decrypt(self, secret_ref: str, row) -> bytes:
         key = await self._key(row["key_id"])
         try:
             plaintext = AESGCM(key).decrypt(
@@ -208,8 +217,15 @@ class DeploymentSecretAuthority:
         return plaintext
 
     async def resolve_text(self, secret_ref: str) -> str:
+        return self._decode_text(await self.resolve(secret_ref))
+
+    async def resolve_text_in(self, conn, secret_ref: str) -> str:
+        return self._decode_text(await self.resolve_in(conn, secret_ref))
+
+    @staticmethod
+    def _decode_text(plaintext: bytes) -> str:
         try:
-            value = (await self.resolve(secret_ref)).decode("utf-8")
+            value = plaintext.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ForestError("SECRET_TEXT_INVALID", "Secret is not UTF-8 text", 422) from exc
         if not value or "\x00" in value:
@@ -217,17 +233,20 @@ class DeploymentSecretAuthority:
         return value
 
     async def _current(self, secret_ref: str):
+        async with self.store.pool.connection() as conn:
+            return await self._current_in(conn, secret_ref)
+
+    async def _current_in(self, conn, secret_ref: str):
         if not isinstance(secret_ref, str) or _SECRET_REF.fullmatch(secret_ref) is None:
             raise ForestError("SECRET_INPUT_INVALID", "Secret reference is invalid", 422)
-        async with self.store.pool.connection() as conn:
-            row = await (
-                await conn.execute(
-                    "SELECT v.*,s.purpose,s.revision FROM forest_deployment.secret_slots s "
-                    "JOIN forest_deployment.secret_versions v ON v.secret_ref=s.secret_ref "
-                    "AND v.version=s.current_version WHERE s.secret_ref=%s",
-                    (secret_ref,),
-                )
-            ).fetchone()
+        row = await (
+            await conn.execute(
+                "SELECT v.*,s.purpose,s.revision FROM forest_deployment.secret_slots s "
+                "JOIN forest_deployment.secret_versions v ON v.secret_ref=s.secret_ref "
+                "AND v.version=s.current_version WHERE s.secret_ref=%s",
+                (secret_ref,),
+            )
+        ).fetchone()
         if row is None:
             raise ForestError("SECRET_NOT_FOUND", "Secret reference does not exist", 404)
         return row
