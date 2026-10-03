@@ -701,3 +701,5 @@ Bot 包候选桥收敛（2026-10-02）：`kernel.runtime` 的 `deployment.packag
 本地 Storage 供应合流（2026-10-03）：旧 `deployment.provisioning` 入口此前把 DSN Secret 和 Storage Profile 分两笔事务写入，Profile 冲突会留下孤立 Secret。现复用最终受限内核命令的 `prepare/execute_in` 边界，在同一事务中接纳 Web 回执、检查或写入 Secret、创建 Profile；按操作 ID 加事务锁，成功重放不重新生成随机 DSN，失败整体回滚。隔离 PostgreSQL 回归明确验证已存在 Profile 引起的 409 后新 Secret 不存在；两个并发同键请求返回相同回执且只生成一个 Secret 版本，WebUI/图热替换针对性用例通过（1 passed）；Ruff 通过。该命令尚未由可热重载供应包声明，旧供应 UI 与伪 Generation 仍待移除。
 
 Bootstrap 供应事务端口准备（2026-10-03）：`BootstrapProfileKernelCommand` 已把模块贡献注册表的集合校验放在事务前准备，把服务端 schema digest、Secret 引用核对与不可变 Profile 写入放入调用者的同一部署事务；旧 `bootstrap.create` 入口复用该最终命令边界。供应 Job 的 enqueue/cancel 权威也已允许加入调用者事务，为准确 Generation 与 Web 回执围栏接入做准备。隔离 PostgreSQL 的 WebUI/图切换、Bootstrap Profile 不可变性及供应 Job 租约针对性用例共 3 passed，Ruff 通过。供应包及通用嵌套 Bootstrap UI 承载仍未实现，不能把这一步称为供应组件包化。
+
+供应 Job 内核端口（2026-10-04）：新增准确 kind 绑定的 Storage Profile 与 Job enqueue/cancel 内核命令；后者把提交后的 Supervisor 唤醒与持久写事务分开，失败或输出 schema 拒绝时没有唤醒。隔离 PostgreSQL 用例先让输出校验拒绝写入，再以同一操作成功入队，唤醒回调从另一连接看到已提交的 `QUEUED` 行；与现有 Secret/账号 WebUI 端口联合回归 2 passed。供应包尚未声明和绑定这些端口，部署宿主仍使用旧供应伪组件。

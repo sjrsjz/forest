@@ -18,7 +18,12 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
-from forest.deployment_kernel_management import SecretPutKernelCommand, WebAccountKernelCommand
+from forest.deployment_kernel_management import (
+    DeploymentKernelManagementAuthority,
+    ProvisioningJobKernelCommand,
+    SecretPutKernelCommand,
+    WebAccountKernelCommand,
+)
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_package_controller import DeploymentPackageController
@@ -2270,6 +2275,78 @@ async def test_provisioning_job_claim_renew_retry_and_success_are_fenced(deploym
     with pytest.raises(ForestError) as caught:
         await jobs.fail(supervisor, claim, error_code="STALE_TEST")
     assert caught.value.code == "STALE_PROVISIONING_CLAIM"
+
+
+@pytest.mark.postgres
+async def test_provisioning_kernel_command_notifies_only_after_commit(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    storage = await _storage_profile(repository, "bot/kernel-job", "kernel-job")
+    profile = await _bootstrap_profile(repository, storage, "kernel-job")
+    jobs = DeploymentProvisioningJobAuthority(repository.store)
+    observed = []
+
+    def notify():
+        with psycopg.connect(repository.store.pool.conninfo, autocommit=True) as conn:
+            row = conn.execute(
+                "SELECT state FROM forest_deployment.provisioning_jobs WHERE job_id=%s",
+                ("provisioning/kernel-job/1",),
+            ).fetchone()
+            observed.append(None if row is None else row[0])
+
+    async def verify_generation(_conn, **_values):
+        return None
+
+    async def before_write(_conn):
+        return None
+
+    declaration = {
+        "name": "deployment.provisioning.enqueue",
+        "kind": "deployment.provisioning-enqueue",
+    }
+    authority = DeploymentKernelManagementAuthority(
+        repository.store,
+        SimpleNamespace(verify_active_generation_in=verify_generation),
+        component_id="deployment.provisioning", ports=(declaration,),
+        handlers={
+            ("deployment.provisioning", "deployment.provisioning-enqueue"):
+                ProvisioningJobKernelCommand(
+                    jobs, "deployment.provisioning-enqueue", notify=notify,
+                ),
+        },
+    )
+    scope = SimpleNamespace(
+        scope_kind="deployment", scope_id=repository.store.deployment_id,
+        component_id="deployment.provisioning", bot_id=None,
+        call_operation_id="provisioning/kernel-job/enqueue",
+        generation_id="generation/kernel-job/1",
+    )
+    payload = {
+        "job_id": "provisioning/kernel-job/1", "bot_id": storage.bot_id,
+        "display_name": "Kernel Job", "storage_profile_ref": storage.profile_ref,
+        "storage_generation": storage.storage_generation,
+        "bootstrap_profile_ref": profile.profile_ref,
+    }
+    arguments = {
+        "parent_call_id": "call/kernel-job/1", "timeout_seconds": 10,
+        "before_write": before_write, "management_authorization": object(),
+    }
+    with pytest.raises(ForestError) as rejected:
+        await authority.invoke_management_action(
+            scope, declaration, payload,
+            result_validator=lambda _value: False, **arguments,
+        )
+    assert rejected.value.code == "MODULE_MANAGEMENT_OUTPUT_INVALID"
+    assert observed == []
+    with pytest.raises(ForestError) as absent:
+        await jobs.inspect(payload["job_id"])
+    assert absent.value.code == "PROVISIONING_JOB_NOT_FOUND"
+    result = await authority.invoke_management_action(
+        scope, declaration, payload,
+        result_validator=lambda value: value["state"] == "QUEUED", **arguments,
+    )
+    assert result["job_id"] == payload["job_id"]
+    assert observed == ["QUEUED"]
 
 
 @pytest.mark.postgres

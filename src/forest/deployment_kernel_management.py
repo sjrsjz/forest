@@ -68,7 +68,10 @@ class DeploymentKernelManagementAuthority:
                         "MODULE_MANAGEMENT_OUTPUT_INVALID",
                         "Kernel Command result violates its frozen package schema", 502,
                     )
-                return result
+            after_commit = getattr(handler, "after_commit", None)
+            if after_commit is not None:
+                after_commit(result)
+            return result
         except ForestError:
             raise
         except psycopg.Error as exc:
@@ -222,3 +225,49 @@ class BootstrapProfileKernelCommand:
             "bot_id": saved.bot_id,
             "manifest_digest": saved.manifest_digest,
         }
+
+
+class StorageProfileKernelCommand:
+    def __init__(self, profiles) -> None:
+        self.profiles = profiles
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        return dict(payload)
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        saved = await self.profiles.create(
+            operation_id=operation_id, conn=conn, **prepared,
+        )
+        return asdict(saved)
+
+
+class ProvisioningJobKernelCommand:
+    """One exact Job transition; enqueue wakes the supervisor after commit."""
+
+    _METHODS = {
+        "deployment.provisioning-enqueue": "enqueue",
+        "deployment.provisioning-cancel": "cancel",
+    }
+
+    def __init__(self, jobs, kind: str, *, notify=None) -> None:
+        self.jobs = jobs
+        self.method = self._METHODS[kind]
+        self.notify = notify if self.method == "enqueue" else None
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        return dict(payload)
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        saved = await getattr(self.jobs, self.method)(
+            operation_id=operation_id, conn=conn, **prepared,
+        )
+        return {
+            key: saved[key] for key in (
+                "job_id", "bot_id", "state", "revision", "attempt_no",
+                "max_attempts", "last_error_code",
+            )
+        }
+
+    def after_commit(self, result: dict) -> None:
+        if self.notify is not None:
+            self.notify()
