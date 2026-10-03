@@ -577,13 +577,14 @@ class RuntimeComponentJobContribution:
 
 def configuration_management_contribution(
     label: str = "配置",
+    *, scope_kinds: tuple[str, ...] = ("bot",),
 ) -> RuntimeManagementContribution:
     """Declare the shared trusted renderer for a module-owned configuration contract."""
 
     return RuntimeManagementContribution(
         "configuration",
         label,
-        ("bot",),
+        scope_kinds,
         "/static/modules/module-configuration.html",
         "/static/module-configuration.js",
         style="/static/modules/module-configuration.css",

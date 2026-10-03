@@ -17,7 +17,11 @@ from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.package_management import PackageManagementContract
 from forest.package_runtime import package_runtime_descriptor
 from forest.packages import digest_json, storage_bundle_digest
-from forest.runtime_modules import RuntimePackageManagementContribution, RuntimeStorageBundle
+from forest.runtime_modules import (
+    RuntimePackageManagementContribution,
+    RuntimeStorageBundle,
+    configuration_management_contribution,
+)
 from forest.schema_bundles import StorageBundleSpec
 from forest.storage.deployment_module_configuration import DeploymentModuleConfigurationRepository
 
@@ -33,21 +37,6 @@ class _BuiltinGrant:
 class _BuiltinGrantSet:
     entries: tuple[_BuiltinGrant, ...]
     grant_set_digest: str
-
-
-class _ImmutableConfigurationManagementContract(PackageManagementContract):
-    """Immutable deployment package configuration has no apply action."""
-
-    def describe(self) -> dict:
-        description = super().describe()
-        description["configuration"]["operations"] = ["configuration.read"]
-        return description
-
-    async def plan(self, **_values):
-        raise ForestError("MODULE_MANAGEMENT_UNAVAILABLE", "Configuration is immutable", 404)
-
-    async def apply(self, **_values):
-        raise ForestError("MODULE_MANAGEMENT_UNAVAILABLE", "Configuration is immutable", 404)
 
 
 def _configuration_storage(component_id: str) -> tuple[StorageBundleSpec, bytes]:
@@ -68,23 +57,33 @@ def _configuration_storage(component_id: str) -> tuple[StorageBundleSpec, bytes]
 async def _prepared_configuration(configuration, binding, schema: dict):
     if binding is None:
         selected = await configuration.desired_checked()
+    elif binding.get("source") == "desired":
+        selected = await configuration.desired_checked()
     else:
         selected = await configuration.effective(include_value=True)
-        if (
-            selected.revision != binding.get("revision")
-            or selected.payload_id != binding.get("payload_id")
-            or selected.payload_digest != binding.get("payload_digest")
-        ):
-            raise ForestError(
-                "DEPLOYMENT_CONFIGURATION_BINDING_MISMATCH",
-                "Active Graph configuration differs from the effective revision", 409,
-            )
+    if binding is not None and (
+        selected.revision != binding.get("revision")
+        or selected.payload_id != binding.get("payload_id")
+        or selected.payload_digest != binding.get("payload_digest")
+    ):
+        raise ForestError(
+            "DEPLOYMENT_CONFIGURATION_BINDING_MISMATCH",
+            "Graph configuration differs from its frozen revision", 409,
+        )
     if not Draft202012Validator(schema).is_valid(selected.value):
         raise ForestError(
             "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
             "Deployment configuration differs from the frozen package schema", 409,
         )
     return selected
+
+
+def _validate_management_configuration(value, schema: dict) -> None:
+    if not Draft202012Validator(schema).is_valid(value):
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_INVALID",
+            "Deployment configuration violates its package schema", 422,
+        )
 
 
 async def bootstrap_builtin_deployment_package(
@@ -249,11 +248,13 @@ async def bootstrap_builtin_deployment_package(
         for item in effects
     }
     ui = snapshot.management_ui()
-    management = ()
+    management = (configuration_management_contribution(
+        component["id"], scope_kinds=("deployment",),
+    ),)
     if ui is not None:
         declaration = component["management_ui"]
-        management = (RuntimePackageManagementContribution(
-            declaration.get("contribution_id", "configuration"),
+        management += (RuntimePackageManagementContribution(
+            declaration.get("contribution_id", component["id"] + ".workspace"),
             declaration.get("label", component["id"]),
             ("deployment",), component["id"], ui[0]["sha256"],
             group=declaration.get("group", "deployment"),
@@ -274,8 +275,12 @@ async def bootstrap_builtin_deployment_package(
         storage=storage, trust_level="official",
         effect_driver_factories=effect_factories,
         management=management,
-        management_contract_factory=lambda adapter: _ImmutableConfigurationManagementContract(
-            configuration, adapter=adapter, schema=config_schema
+        management_contract_factory=lambda adapter: PackageManagementContract(
+            configuration, adapter=adapter, schema=config_schema,
+            validator=lambda value: _validate_management_configuration(value, config_schema),
+            apply_callback=lambda **values: runtime.apply_configuration(
+                configuration, validation_digest=digest_json(config_schema), **values
+            ),
         ),
         plan_only=plan_only,
     )
@@ -339,11 +344,13 @@ async def bootstrap_installed_deployment_package(
         (), digest_json(["forest.deployment.installed-grants/1", snapshot.digest, component["id"]]),
     )
     ui = snapshot.management_ui()
-    management = ()
+    management = (configuration_management_contribution(
+        component["id"], scope_kinds=("deployment",),
+    ),)
     if ui is not None:
         declaration = component["management_ui"]
-        management = (RuntimePackageManagementContribution(
-            declaration.get("contribution_id", "configuration"),
+        management += (RuntimePackageManagementContribution(
+            declaration.get("contribution_id", component["id"] + ".workspace"),
             declaration.get("label", component["id"]),
             ("deployment",), component["id"], ui[0]["sha256"],
             group=declaration.get("group", "deployment"),
@@ -358,8 +365,12 @@ async def bootstrap_installed_deployment_package(
         state_queries=None, state_commands=None, domain_queries=None,
         service_operation_ledger=None, storage=None, trust_level="installed",
         management=management,
-        management_contract_factory=lambda adapter: _ImmutableConfigurationManagementContract(
-            configuration, adapter=adapter, schema=config_schema
+        management_contract_factory=lambda adapter: PackageManagementContract(
+            configuration, adapter=adapter, schema=config_schema,
+            validator=lambda value: _validate_management_configuration(value, config_schema),
+            apply_callback=lambda **values: runtime.apply_configuration(
+                configuration, validation_digest=digest_json(config_schema), **values
+            ),
         ),
         plan_only=plan_only,
     )

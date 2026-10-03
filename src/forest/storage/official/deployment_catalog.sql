@@ -120,12 +120,16 @@ CREATE INDEX package_service_operations_status
 CREATE TABLE forest_deployment.runtime_graph_change_requests (
     deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
-    operation_kind text NOT NULL CHECK (operation_kind IN ('ADD','REPLACE')),
+    operation_kind text NOT NULL CHECK (operation_kind IN ('ADD','REPLACE','CONFIGURE')),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[0-9a-f]{64}$'),
     plan_digest text NOT NULL CHECK (plan_digest ~ '^sha256:[0-9a-f]{64}$'),
     requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 128),
     target_component_id text NOT NULL CHECK (target_component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
     package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[0-9a-f]{64}$'),
+    configuration_revision bigint CHECK (configuration_revision IS NULL OR configuration_revision > 0),
+    configuration_payload_digest text CHECK (
+        configuration_payload_digest IS NULL OR configuration_payload_digest ~ '^sha256:[0-9a-f]{64}$'
+    ),
     expected_graph_revision bigint NOT NULL CHECK (expected_graph_revision > 0),
     activation_id text NOT NULL,
     receipt_ticket_id text NOT NULL,
@@ -142,6 +146,12 @@ CREATE TABLE forest_deployment.runtime_graph_change_requests (
     UNIQUE (deployment_id,activation_id),
     FOREIGN KEY (deployment_id,result_graph_id)
         REFERENCES forest_deployment.runtime_graphs(deployment_id,graph_id),
+    CHECK (
+        (operation_kind='CONFIGURE' AND configuration_revision IS NOT NULL
+            AND configuration_payload_digest IS NOT NULL)
+        OR (operation_kind<>'CONFIGURE' AND configuration_revision IS NULL
+            AND configuration_payload_digest IS NULL)
+    ),
     CHECK (
         (state='QUEUED' AND owner_epoch IS NULL AND attempt_count=0
             AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NULL)
@@ -724,11 +734,13 @@ BEGIN
         RAISE EXCEPTION 'Deployment Graph change request cannot be deleted';
     END IF;
     IF ROW(OLD.deployment_id,OLD.operation_id,OLD.operation_kind,OLD.input_digest,OLD.plan_digest,OLD.requested_by,
-           OLD.target_component_id,OLD.package_digest,OLD.expected_graph_revision,
+           OLD.target_component_id,OLD.package_digest,OLD.configuration_revision,
+           OLD.configuration_payload_digest,OLD.expected_graph_revision,
            OLD.activation_id,OLD.receipt_ticket_id,OLD.created_at)
        IS DISTINCT FROM
        ROW(NEW.deployment_id,NEW.operation_id,NEW.operation_kind,NEW.input_digest,NEW.plan_digest,NEW.requested_by,
-           NEW.target_component_id,NEW.package_digest,NEW.expected_graph_revision,
+           NEW.target_component_id,NEW.package_digest,NEW.configuration_revision,
+           NEW.configuration_payload_digest,NEW.expected_graph_revision,
            NEW.activation_id,NEW.receipt_ticket_id,NEW.created_at)
        OR OLD.state IN ('SUCCEEDED','FAILED')
        OR NOT (

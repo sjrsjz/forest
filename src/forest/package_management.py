@@ -21,12 +21,13 @@ class PackageManagementContract(ModuleConfigurationContract):
         adapter,
         schema: dict,
         validator=None,
+        apply_callback=None,
     ) -> None:
         super().__init__(
             configuration,
             schema=schema,
             validator=validator,
-            apply_callback=adapter.apply_configuration,
+            apply_callback=apply_callback or adapter.apply_configuration,
         )
         self.adapter = adapter
         component = adapter.component

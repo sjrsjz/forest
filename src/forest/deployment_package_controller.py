@@ -242,6 +242,34 @@ class DeploymentPackageController:
             activation_id=activation_id, adding=False,
         )
 
+    async def configure(
+        self, component_id: str, package_digest: str, *,
+        expected_graph_revision: int, configuration_revision: int,
+        configuration_payload_digest: str, activation_id: str,
+    ) -> RuntimeModuleRegistry:
+        """Publish one committed desired revision as a new Generation."""
+
+        if (
+            type(configuration_revision) is not int
+            or configuration_revision < 1
+            or not isinstance(configuration_payload_digest, str)
+            or re.fullmatch(r"sha256:[a-f0-9]{64}", configuration_payload_digest) is None
+        ):
+            raise ForestError(
+                "DEPLOYMENT_CONFIGURATION_CHANGE_INVALID", "Configuration identity is invalid", 422,
+            )
+        return await self._change(
+            component_id, package_digest,
+            expected_graph_revision=expected_graph_revision,
+            activation_id=activation_id, adding=False,
+            configuration_binding={
+                "revision": configuration_revision,
+                "payload_id": "config:" + configuration_payload_digest[7:],
+                "payload_digest": configuration_payload_digest,
+                "source": "desired",
+            },
+        )
+
     async def add(
         self,
         component_id: str,
@@ -266,6 +294,7 @@ class DeploymentPackageController:
         expected_graph_revision: int,
         activation_id: str | None,
         adding: bool,
+        configuration_binding: dict | None = None,
     ) -> RuntimeModuleRegistry:
 
         async with self._lock:
@@ -288,12 +317,20 @@ class DeploymentPackageController:
                     "Graph change artifact has another component identity",
                     409,
                 )
+            if configuration_binding is not None and (
+                self._snapshots[component_id].digest != package_digest
+            ):
+                raise ForestError(
+                    "DEPLOYMENT_CONFIGURATION_CHANGE_INVALID",
+                    "Configuration change cannot replace its package", 409,
+                )
             snapshots = {**self._snapshots, component_id: snapshot}
+            frozen = await self._active_configurations(previous.graph_identity)
+            if configuration_binding is not None:
+                frozen[component_id] = configuration_binding
             candidate = await self._assemble(
                 snapshots, activation_id=activation_id,
-                frozen_configurations=await self._active_configurations(
-                    previous.graph_identity
-                ),
+                frozen_configurations=frozen,
             )
             affected = candidate.plan_graph_transition(previous, target_component_id=component_id)
             drained = False
@@ -416,12 +453,21 @@ class DeploymentPackageController:
                             "Deployment Graph changed before queued change",
                             409,
                         )
-                    operation = self.add if request["operation_kind"] == "ADD" else self.replace
-                    await operation(
-                        request["target_component_id"], request["package_digest"],
-                        expected_graph_revision=request["expected_graph_revision"],
-                        activation_id=request["activation_id"],
-                    )
+                    if request["operation_kind"] == "CONFIGURE":
+                        await self.configure(
+                            request["target_component_id"], request["package_digest"],
+                            expected_graph_revision=request["expected_graph_revision"],
+                            configuration_revision=request["configuration_revision"],
+                            configuration_payload_digest=request["configuration_payload_digest"],
+                            activation_id=request["activation_id"],
+                        )
+                    else:
+                        operation = self.add if request["operation_kind"] == "ADD" else self.replace
+                        await operation(
+                            request["target_component_id"], request["package_digest"],
+                            expected_graph_revision=request["expected_graph_revision"],
+                            activation_id=request["activation_id"],
+                        )
                     evidence = await authority.published_graph(request)
                     if evidence is None:
                         raise ForestError(

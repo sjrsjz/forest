@@ -961,6 +961,167 @@ priority = "P1"
 
 
 @pytest.mark.postgres
+async def test_deployment_configuration_apply_publishes_frozen_generation(
+    deployment_catalog, tmp_path
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    lease = await repository.claim_supervisor("host/config-web", "incarnation/config-web")
+    changes = DeploymentGraphChangeAuthority(repository.store)
+    runtime = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
+        graph_change_authority=changes,
+    )
+    package_catalog = PackageCatalog(tmp_path / "config-packages")
+    controller = DeploymentPackageController(
+        runtime, package_catalog,
+        official_sources=(Path(__file__).parents[1] / "src/forest/builtin/deployment_audit",),
+    )
+    await controller.start()
+    contributions = controller.registry._descriptor_fact(
+        next(descriptor for descriptor in controller.registry.descriptors
+             if descriptor.component_id == "deployment.audit")
+    )["management_contributions"]
+    assert any(item["contribution_id"] == "configuration" and
+               item["scope_kinds"] == ["deployment"] for item in contributions)
+    identity = DeploymentWebIdentityAuthority(
+        repository.store,
+        active_key_id="key/config-web",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    now = datetime.now(timezone.utc)
+    await identity.initialize_setup(SimpleNamespace(
+        setup_id="setup/config-web-00001", pairing_code="c" * 48,
+        issued_at=now, expires_at=now + timedelta(hours=1),
+    ))
+    await identity.complete_setup(
+        pairing_code="c" * 48, username="admin",
+        display_name="Administrator", password="deployment-web-password",
+    )
+    app = create_deployment_management_app(
+        deployment_id=repository.store.deployment_id,
+        deployment_registry_provider=lambda: controller.registry,
+        deployment_graph_changes=changes,
+        deployment_change_previewer=controller.preview_change,
+        identity_authority=identity,
+        deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
+        deployment_audit=DeploymentAuditRepository(repository.store),
+        allowed_origin="http://forest.test",
+    )
+    worker = None
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://forest.test"
+        ) as client:
+            login = await client.post(
+                "/management/v1/auth/login",
+                headers={"origin": "http://forest.test"},
+                json={"username": "admin", "password": "deployment-web-password"},
+            )
+            assert login.status_code == 200, login.text
+            headers = {
+                "origin": "http://forest.test",
+                "x-forest-csrf": client.cookies["forest_management_csrf"],
+            }
+            base = (
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.audit/configuration"
+            )
+            before = (await client.get(base, headers=headers)).json()
+            assert before["desired"]["revision"] == before["effective"]["revision"] == 1
+            invalid = await client.post(
+                base + "/plans",
+                headers={**headers, "idempotency-key": "config-invalid"},
+                json={"expected_desired_revision": 1, "value": {"protocol": "invalid"}},
+            )
+            assert invalid.status_code == 422, invalid.text
+            source_graph = controller.registry.graph_identity
+            plan = await client.post(
+                base + "/plans",
+                headers={**headers, "idempotency-key": "config-plan"},
+                json={
+                    "expected_desired_revision": 1,
+                    "value": before["desired"]["value"],
+                },
+            )
+            assert plan.status_code == 200, plan.text
+            applied = await client.post(
+                base + "/apply",
+                headers={**headers, "idempotency-key": "config-apply"},
+                json={"plan_id": plan.json()["plan_id"], "expected_desired_revision": 1},
+            )
+            assert applied.status_code == 200, applied.text
+            result = applied.json()
+            assert result["configuration"]["revision"] == 2
+            assert result["rebuild"]["state"] == "QUEUED"
+            request_id = result["rebuild"]["request_id"]
+            second_plan = await client.post(
+                base + "/plans",
+                headers={**headers, "idempotency-key": "config-plan-next"},
+                json={
+                    "expected_desired_revision": 2,
+                    "value": before["desired"]["value"],
+                },
+            )
+            assert second_plan.status_code == 200, second_plan.text
+            pending = await client.post(
+                base + "/apply",
+                headers={**headers, "idempotency-key": "config-apply-next"},
+                json={
+                    "plan_id": second_plan.json()["plan_id"],
+                    "expected_desired_revision": 2,
+                },
+            )
+            assert pending.status_code == 409, pending.text
+            assert pending.json()["code"] == "DEPLOYMENT_CONFIGURATION_CHANGE_PENDING"
+            assert controller.registry.graph_identity == source_graph
+            assert (await controller.registry.get("deployment.audit").module_configuration.desired()).revision == 2
+            worker = asyncio.create_task(controller.serve_graph_changes(changes))
+            status_path = (
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "$runtime/queries/module.change.status"
+            )
+            async with asyncio.timeout(15):
+                while True:
+                    status = await client.post(
+                        status_path, headers=headers, json={"operation_id": request_id},
+                    )
+                    assert status.status_code == 200, status.text
+                    if status.json()["state"] in {"SUCCEEDED", "FAILED"}:
+                        break
+                    await asyncio.sleep(0.05)
+            assert status.json()["state"] == "SUCCEEDED", status.text
+            assert status.json()["operation_kind"] == "CONFIGURE"
+            assert controller.registry.graph_identity.graph_revision > source_graph.graph_revision
+            after = (await client.get(base, headers=headers)).json()
+            assert after["desired"]["revision"] == after["effective"]["revision"] == 2
+            assert controller.registry.get("deployment.audit")._prepared_binding.config_revision == 2
+            stale = await client.post(
+                base + "/apply",
+                headers={**headers, "idempotency-key": "config-apply-stale-plan"},
+                json={
+                    "plan_id": second_plan.json()["plan_id"],
+                    "expected_desired_revision": 2,
+                },
+            )
+            assert stale.status_code == 409, stale.text
+            assert stale.json()["code"] == "MODULE_CONFIGURATION_CONFLICT"
+            assert (await controller.registry.get("deployment.audit").module_configuration.desired()).revision == 2
+            replay = await client.post(
+                base + "/apply",
+                headers={**headers, "idempotency-key": "config-apply"},
+                json={"plan_id": plan.json()["plan_id"], "expected_desired_revision": 1},
+            )
+            assert replay.status_code == 200, replay.text
+            assert replay.json()["rebuild"]["request_id"] == request_id
+    finally:
+        if worker is not None:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+        await controller.close()
+
+
+@pytest.mark.postgres
 async def test_deployment_web_queues_and_reconciles_package_replacement(
     deployment_catalog, tmp_path
 ):

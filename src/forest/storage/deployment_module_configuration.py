@@ -175,9 +175,12 @@ class DeploymentModuleConfigurationRepository:
                    value: object, validation_digest: str, authorization=None,
                    authorization_guard=None, authorization_input_digest: str | None = None) -> dict:
         payload_id, payload_digest = self._payload(value)
+        target_generation_id = getattr(authorization, "target_generation_id", None)
+        target_graph_revision = getattr(authorization, "target_graph_revision", None)
         input_digest = digest_json([
             "forest.deployment.module-configuration.plan/1", self.component_id,
             expected_desired_revision, value, validation_digest,
+            target_generation_id, target_graph_revision,
         ])
         plan_id = "config-plan:" + hashlib.sha256(
             f"{self.store.deployment_id}\0{self.component_id}\0{operation_id}".encode()
@@ -206,29 +209,38 @@ class DeploymentModuleConfigurationRepository:
             await self._assert_immutable_in(conn, value)
             row = await (await conn.execute(
                 sql.SQL("INSERT INTO {}(deployment_id,plan_id,operation_id,input_digest,"
-                        "expected_desired_revision,config_value,config_payload_id,"
+                        "expected_desired_revision,target_generation_id,target_graph_revision,"
+                        "config_value,config_payload_id,"
                         "config_payload_digest,validation_digest) "
-                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *").format(
+                        "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *").format(
                     self._table("module_configuration_plans")
                 ), (self.store.deployment_id, plan_id, operation_id, input_digest,
-                    expected_desired_revision, Jsonb(value), payload_id, payload_digest,
-                    validation_digest),
+                    expected_desired_revision, target_generation_id,
+                    target_graph_revision, Jsonb(value), payload_id,
+                    payload_digest, validation_digest),
             )).fetchone()
             return dict(row)
 
     async def apply(self, *, operation_id: str, plan_id: str,
                     expected_desired_revision: int, authorization=None,
-                    authorization_guard=None) -> EffectiveModuleConfiguration:
+                    authorization_guard=None, expected_validation_digest=None,
+                    target_generation_id=None,
+                    target_graph_revision=None) -> EffectiveModuleConfiguration:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.apply_in(
                 conn, operation_id=operation_id, plan_id=plan_id,
                 expected_desired_revision=expected_desired_revision,
                 authorization=authorization, authorization_guard=authorization_guard,
+                expected_validation_digest=expected_validation_digest,
+                target_generation_id=target_generation_id,
+                target_graph_revision=target_graph_revision,
             )
 
     async def apply_in(self, conn, *, operation_id: str, plan_id: str,
                        expected_desired_revision: int, authorization=None,
-                       authorization_guard=None, pre_commit_validator=None) -> EffectiveModuleConfiguration:
+                       authorization_guard=None, pre_commit_validator=None,
+                       expected_validation_digest=None, target_generation_id=None,
+                       target_graph_revision=None) -> EffectiveModuleConfiguration:
         input_digest = digest_json([
             "forest.deployment.module-configuration.apply/1", self.component_id,
             plan_id, expected_desired_revision,
@@ -259,7 +271,11 @@ class DeploymentModuleConfigurationRepository:
         )).fetchone()
         if (plan is None or plan["state"] != "PLANNED"
                 or plan["expected_desired_revision"] != expected_desired_revision
-                or head["desired_revision"] != expected_desired_revision):
+                or head["desired_revision"] != expected_desired_revision
+                or plan["target_generation_id"] != target_generation_id
+                or plan["target_graph_revision"] != target_graph_revision
+                or (expected_validation_digest is not None and
+                    plan["validation_digest"] != expected_validation_digest)):
             raise ForestError("MODULE_CONFIGURATION_CONFLICT", "Plan is stale or consumed", 409)
         if self._payload(plan["config_value"]) != (
             plan["config_payload_id"], plan["config_payload_digest"]

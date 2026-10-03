@@ -235,6 +235,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         await web_identity.initialize_setup(settings.web_bootstrap)
         deployment_runtime = DeploymentRuntimeScope(
             store, supervisor, package_catalog=package_catalog,
+            graph_change_authority=graph_changes,
             kernel_query_handlers={
                 ("deployment.provisioning", "deployment.bootstrap-catalog"):
                     BootstrapCatalogKernelQuery(bootstrap_registry),

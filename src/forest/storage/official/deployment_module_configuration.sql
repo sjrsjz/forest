@@ -13,6 +13,10 @@ CREATE TABLE module_configuration_plans (
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     expected_desired_revision bigint NOT NULL CHECK (expected_desired_revision >= 0),
+    target_generation_id text CHECK (
+        target_generation_id IS NULL OR octet_length(target_generation_id) BETWEEN 1 AND 256
+    ),
+    target_graph_revision bigint CHECK (target_graph_revision IS NULL OR target_graph_revision > 0),
     config_value jsonb NOT NULL,
     config_payload_id text NOT NULL CHECK (octet_length(config_payload_id) BETWEEN 1 AND 256),
     config_payload_digest text NOT NULL CHECK (config_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
@@ -23,6 +27,7 @@ CREATE TABLE module_configuration_plans (
     applied_at timestamptz,
     PRIMARY KEY (deployment_id,plan_id),
     UNIQUE (deployment_id,operation_id),
+    CHECK ((target_generation_id IS NULL) = (target_graph_revision IS NULL)),
     CHECK ((state='PLANNED' AND applied_revision IS NULL AND applied_at IS NULL)
         OR (state='APPLIED' AND applied_revision IS NOT NULL AND applied_at IS NOT NULL))
 );
@@ -72,11 +77,13 @@ CREATE FUNCTION forest_deployment_configuration_plan_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
     IF ROW(OLD.deployment_id,OLD.plan_id,OLD.operation_id,OLD.input_digest,
-           OLD.expected_desired_revision,OLD.config_value,OLD.config_payload_id,
+           OLD.expected_desired_revision,OLD.target_generation_id,OLD.target_graph_revision,
+           OLD.config_value,OLD.config_payload_id,
            OLD.config_payload_digest,OLD.validation_digest,OLD.created_at)
        IS DISTINCT FROM
        ROW(NEW.deployment_id,NEW.plan_id,NEW.operation_id,NEW.input_digest,
-           NEW.expected_desired_revision,NEW.config_value,NEW.config_payload_id,
+           NEW.expected_desired_revision,NEW.target_generation_id,NEW.target_graph_revision,
+           NEW.config_value,NEW.config_payload_id,
            NEW.config_payload_digest,NEW.validation_digest,NEW.created_at)
        OR OLD.state='APPLIED'
        OR NOT (OLD.state='PLANNED' AND NEW.state='APPLIED') THEN

@@ -143,6 +143,159 @@ class DeploymentGraphChangeAuthority:
             ).fetchone()
             return dict(saved)
 
+    async def enqueue_configuration(
+        self, *, lease, ticket: WebAuthorityTicket, configuration,
+        plan_id: str, expected_desired_revision: int, validation_digest: str,
+        authorize_in,
+    ) -> dict:
+        """Commit desired configuration and its exact Graph request together."""
+
+        if not isinstance(ticket, WebAuthorityTicket):
+            raise ForestError("WEB_AUTHORITY_TICKET_INVALID", "Web ticket is required", 403)
+        component_id = configuration.component_id
+        operation_id = ticket.target_operation_ref
+        input_body = {
+            "plan_id": plan_id,
+            "expected_desired_revision": expected_desired_revision,
+        }
+        plan_digest = digest_json({"plan_id": plan_id})
+        if (
+            ticket.action_key != "configuration.apply"
+            or ticket.target_component_id != component_id
+            or ticket.input_digest != digest_json(input_body)
+            or ticket.plan_digest != plan_digest
+            or type(expected_desired_revision) is not int
+            or expected_desired_revision < 1
+        ):
+            raise ForestError(
+                "DEPLOYMENT_CONFIGURATION_CHANGE_INVALID",
+                "Configuration change input differs from its Web authority", 422,
+            )
+        activation_id = str(uuid5(
+            NAMESPACE_URL,
+            f"forest:{self.store.deployment_id}:graph-change:{operation_id}",
+        ))
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.generations._lease_in(conn, lease)
+            clock = await (
+                await conn.execute(
+                    "SELECT active_graph_id,active_revision FROM "
+                    "forest_deployment.runtime_graph_clock WHERE deployment_id=%s FOR UPDATE",
+                    (self.store.deployment_id,),
+                )
+            ).fetchone()
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (f"forest.deployment.graph-change/{self.store.deployment_id}/{operation_id}",),
+            )
+            existing = await (
+                await conn.execute(
+                    "SELECT * FROM forest_deployment.runtime_graph_change_requests "
+                    "WHERE deployment_id=%s AND operation_id=%s",
+                    (self.store.deployment_id, operation_id),
+                )
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["operation_kind"] != "CONFIGURE"
+                    or existing["input_digest"] != ticket.input_digest
+                    or existing["plan_digest"] != plan_digest
+                    or existing["requested_by"] != ticket.web_subject_ref
+                    or existing["target_component_id"] != component_id
+                ):
+                    raise ForestError(
+                        "DEPLOYMENT_GRAPH_CHANGE_CONFLICT",
+                        "Configuration operation belongs to another input or actor", 409,
+                    )
+                saved = await configuration.apply_in(
+                    conn, operation_id=operation_id, plan_id=plan_id,
+                    expected_desired_revision=expected_desired_revision,
+                    expected_validation_digest=validation_digest,
+                    target_generation_id=ticket.target_generation_id,
+                    target_graph_revision=ticket.target_graph_revision,
+                )
+                if saved.revision != existing["configuration_revision"] or (
+                    saved.payload_digest != existing["configuration_payload_digest"]
+                ):
+                    raise ForestError(
+                        "DEPLOYMENT_GRAPH_CHANGE_RESULT_INVALID",
+                        "Configuration request differs from its revision", 409,
+                    )
+                return {"configuration": saved, "request": dict(existing)}
+            if clock is None or (
+                clock["active_revision"] != ticket.target_graph_revision
+                or clock["active_graph_id"] is None
+            ):
+                raise ForestError(
+                    "RUNTIME_GRAPH_REVISION_CONFLICT", "Deployment Graph changed", 409,
+                )
+            await self.generations.verify_active_generation_in(
+                conn, component_id=component_id,
+                generation_id=ticket.target_generation_id, admission_lane="CONTROL",
+            )
+            member = await (
+                await conn.execute(
+                    "SELECT g.binding FROM forest_deployment.runtime_graph_members m "
+                    "JOIN forest_deployment.runtime_generations g "
+                    "ON g.deployment_id=m.deployment_id AND g.generation_id=m.generation_id "
+                    "WHERE m.deployment_id=%s AND m.graph_id=%s AND m.component_id=%s",
+                    (self.store.deployment_id, clock["active_graph_id"], component_id),
+                )
+            ).fetchone()
+            if member is None or not isinstance(member["binding"], dict):
+                raise ForestError("RUNTIME_GENERATION_BINDING_INVALID", "Generation binding is absent", 409)
+            package_binding = member["binding"].get("package")
+            package_digest = (
+                package_binding.get("package_digest")
+                if isinstance(package_binding, dict) else None
+            )
+            if not isinstance(package_digest, str) or _DIGEST.fullmatch(package_digest) is None:
+                raise ForestError("RUNTIME_GENERATION_BINDING_INVALID", "Package binding is invalid", 409)
+            pending = await (
+                await conn.execute(
+                    "SELECT 1 FROM forest_deployment.runtime_graph_change_requests "
+                    "WHERE deployment_id=%s AND target_component_id=%s "
+                    "AND state IN ('QUEUED','RUNNING') LIMIT 1",
+                    (self.store.deployment_id, component_id),
+                )
+            ).fetchone()
+            if pending is not None:
+                raise ForestError(
+                    "DEPLOYMENT_CONFIGURATION_CHANGE_PENDING",
+                    "Component already has an unsettled Graph change", 409,
+                )
+            receipt = authorize_in(conn)
+            if inspect.isawaitable(receipt):
+                receipt = await receipt
+            if not isinstance(receipt, dict) or not isinstance(receipt.get("ticket_id"), str):
+                raise ForestError(
+                    "WEB_AUTHORITY_TRANSACTION_REQUIRED", "Web receipt is required", 503,
+                )
+            saved = await configuration.apply_in(
+                conn, operation_id=operation_id, plan_id=plan_id,
+                expected_desired_revision=expected_desired_revision,
+                expected_validation_digest=validation_digest,
+                target_generation_id=ticket.target_generation_id,
+                target_graph_revision=ticket.target_graph_revision,
+            )
+            request = await (
+                await conn.execute(
+                    "INSERT INTO forest_deployment.runtime_graph_change_requests("
+                    "deployment_id,operation_id,operation_kind,input_digest,plan_digest,"
+                    "requested_by,target_component_id,package_digest,configuration_revision,"
+                    "configuration_payload_digest,expected_graph_revision,activation_id,"
+                    "receipt_ticket_id) VALUES (%s,%s,'CONFIGURE',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "RETURNING *",
+                    (
+                        self.store.deployment_id, operation_id, ticket.input_digest,
+                        plan_digest, ticket.web_subject_ref, component_id, package_digest,
+                        saved.revision, saved.payload_digest, clock["active_revision"],
+                        activation_id, receipt["ticket_id"],
+                    ),
+                )
+            ).fetchone()
+            return {"configuration": saved, "request": dict(request)}
+
     async def claim(self, lease) -> dict | None:
         async with self.store.pool.connection() as conn, conn.transaction():
             await self.generations._lease_in(conn, lease)
@@ -195,6 +348,18 @@ class DeploymentGraphChangeAuthority:
                     "Published package differs from the frozen request",
                     409,
                 )
+            if request["operation_kind"] == "CONFIGURE":
+                configuration = row["binding"].get("configuration")
+                if (
+                    not isinstance(configuration, dict)
+                    or configuration.get("revision") != request["configuration_revision"]
+                    or configuration.get("payload_digest")
+                    != request["configuration_payload_digest"]
+                ):
+                    raise ForestError(
+                        "DEPLOYMENT_GRAPH_CHANGE_RESULT_INVALID",
+                        "Published configuration differs from the frozen request", 409,
+                    )
             return dict(row)
 
     async def settle(

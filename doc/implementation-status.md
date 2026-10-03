@@ -710,4 +710,6 @@ Bootstrap 供应事务端口准备（2026-10-03）：`BootstrapProfileKernelComm
 
 部署包只读验收探针（2026-10-04）：`scripts/observe_live_bot.py` 新增可选 `--deployment-component-id`，在同一部署库只读 repeatable-read 快照内核对活动 Graph、指定组件的 Generation 状态和控制入口；缺席或非活动明确产生违反项，旧部署库缺少 Graph 基线时报告 `DEPLOYMENT_SCHEMA_INCOMPATIBLE`。该选项默认关闭。在线 PostgreSQL 只读查询确认当前生产库仍无 `runtime_graph_clock`，因此尚不能用它验收当前源码的部署包；需在候选基线重建后运行。即使组件 ACTIVE，此探针也不能证明供应 Job 的认领已归包所有；当前 Supervisor 常驻供应循环仍待拆分。
 
-部署配置冻结恢复（2026-10-04）：部署包控制器现在从活动 Graph 同时读取准确包摘要和配置修订绑定；进程恢复及普通包新增/替换沿用活动 `effective` 配置，不能把已经提交但尚未发布的 `desired` 顺带装进旧图或无关候选。配置仓库允许在 `desired` 已前进时重新发布当前 `effective` 修订，仍拒绝激活任意更旧修订。隔离 PostgreSQL 用例制造 `desired=2/effective=1` 的窗口，验证重启和再替换都保持修订 1，并验证任意旧修订拒绝（定向 2 passed）；Ruff 和差异检查通过。部署配置的 Web plan/apply 与绑定修订的独立换代请求仍未实现，设计约束见第 13 号文档 7.2 节；在线实例仍是旧部署基线。
+部署配置冻结恢复（2026-10-04）：部署包控制器现在从活动 Graph 同时读取准确包摘要和配置修订绑定；进程恢复及普通包新增/替换沿用活动 `effective` 配置，不能把已经提交但尚未发布的 `desired` 顺带装进旧图或无关候选。配置仓库允许在 `desired` 已前进时重新发布当前 `effective` 修订，仍拒绝激活任意更旧修订。隔离 PostgreSQL 用例制造 `desired=2/effective=1` 的窗口，验证重启和再替换都保持修订 1，并验证任意旧修订拒绝（定向 2 passed）；Ruff 和差异检查通过。在线实例仍是旧部署基线。
+
+部署配置计划与换代（2026-10-04）：官方及安装的部署包现在经通用管理契约发布配置读取、计划、应用和受信配置页。计划绑定包 schema 摘要、目标 CONTROL Generation 与 Graph 修订；应用在一个部署数据库事务中写入 Web 回执/审计、`desired` 修订及带准确包/配置摘要的持久 `CONFIGURE` 请求。旧计划、同组件未结算 Graph 变更被拒绝；同键重放返回原请求。Supervisor 按冻结配置装配候选并在 Graph 发布事务中推进 `effective`；进程恢复与普通包替换仍使用当前活动 `effective`。隔离 PostgreSQL 的真实 Web→Graph→Worker 用例及相关部署回归 6 passed，覆盖未结算请求和过期计划。在线实例仍是旧部署基线，真实浏览器与 QQ 交互尚未切换验收。

@@ -337,7 +337,8 @@ class DeploymentManagementGateway:
     async def plan_configuration(
         self, component_id: str, *, authorization=None, operation_id=None, **_values
     ):
-        generation_id, graph_revision = self.authorization_target(component_id)
+        body = _values["body"]
+        generation_id, graph_revision, module = self._require_package_binding(component_id)
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
@@ -347,16 +348,22 @@ class DeploymentManagementGateway:
             target_graph_revision=graph_revision,
             target_operation_ref=operation_id,
             action_key="configuration.plan",
-            input_digest=digest_json(_values["body"].model_dump(mode="json")),
+            input_digest=digest_json(body.model_dump(mode="json")),
             required_role="ADMIN",
         )
-        self._unsupported_configuration(component_id)
+        return await module.management_contract.plan(
+            operation_id=operation_id,
+            expected_desired_revision=body.expected_desired_revision,
+            value=body.value,
+            authorization=authorization,
+            authorization_guard=self._authorize_mutation_in,
+        )
 
     async def apply_configuration(
         self, component_id: str, *, authorization=None, operation_id=None, **_values
     ):
         body = _values["body"]
-        generation_id, graph_revision = self.authorization_target(component_id)
+        generation_id, graph_revision, module = self._require_package_binding(component_id)
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
@@ -370,7 +377,13 @@ class DeploymentManagementGateway:
             plan_digest=digest_json({"plan_id": body.plan_id}),
             required_role="ADMIN",
         )
-        self._unsupported_configuration(component_id)
+        return await module.management_contract.apply(
+            operation_id=operation_id,
+            plan_id=body.plan_id,
+            expected_desired_revision=body.expected_desired_revision,
+            authorization=authorization,
+            authorization_guard=self._authorize_mutation_in,
+        )
 
     async def module_query(
         self, component_id: str, query_id: str, body: dict, *, authorization=None, operation_id=None
@@ -577,14 +590,6 @@ class DeploymentManagementGateway:
         if binding is None:
             raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Component does not exist", 404)
         return binding
-
-    def _unsupported_configuration(self, component_id: str) -> None:
-        self._require_package_binding(component_id)
-        raise ForestError(
-            "MODULE_MANAGEMENT_UNAVAILABLE",
-            "Component does not publish a configuration contract",
-            404,
-        )
 
     def operation_id(self, component_id: str, action_id: str, key: str | None) -> str:
         if key is None or not 1 <= len(key) <= 128:
