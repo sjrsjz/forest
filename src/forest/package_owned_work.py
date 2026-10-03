@@ -289,7 +289,7 @@ class PackageOwnedWorkSupervisor:
             )
 
     async def _deliver_with_renew(self, declaration: dict, claim: dict, delivery):
-        if "renew_function" not in declaration:
+        if "renew_function" not in declaration and declaration.get("authority") != "kernel":
             return await delivery
         task = asyncio.create_task(delivery)
         claim_hash = hashlib.sha256(claim["claim_token"].encode("utf-8")).hexdigest()

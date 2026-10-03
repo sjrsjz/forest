@@ -176,26 +176,32 @@ class DeploymentProvisioningJobAuthority:
         *,
         worker_id: str,
         lease_seconds: int = 120,
+        conn=None,
     ) -> DeploymentProvisioningClaim | None:
         _text(worker_id, "worker_id", 256)
         if type(lease_seconds) is not int or not 10 <= lease_seconds <= 900:
             raise ForestError("PROVISIONING_INPUT_INVALID", "Provisioning lease is invalid", 422)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self.store.transaction(conn) as conn:
             await self._verify_supervisor_in(conn, supervisor)
+            await conn.execute(
+                "UPDATE forest_deployment.provisioning_jobs SET state='BLOCKED_UNKNOWN',"
+                "last_error_code='PROVISIONING_CLAIM_EXPIRED',lease_owner=NULL,"
+                "lease_expires_at=NULL,retry_not_before=NULL,revision=revision+1,"
+                "updated_at=clock_timestamp() WHERE state='RUNNING' "
+                "AND lease_expires_at<=clock_timestamp()"
+            )
             await conn.execute(
                 "UPDATE forest_deployment.provisioning_jobs SET state='FAILED',"
                 "last_error_code='PROVISIONING_ATTEMPTS_EXHAUSTED',lease_owner=NULL,"
                 "lease_expires_at=NULL,retry_not_before=NULL,completed_at=clock_timestamp(),"
                 "revision=revision+1,updated_at=clock_timestamp() WHERE attempt_no>=max_attempts "
-                "AND ((state='RUNNING' AND lease_expires_at<=clock_timestamp()) OR "
-                "(state='RETRY_WAIT' AND retry_not_before<=clock_timestamp()))"
+                "AND state='RETRY_WAIT' AND retry_not_before<=clock_timestamp()"
             )
             row = await (
                 await conn.execute(
                     "WITH candidate AS (SELECT job_id FROM forest_deployment.provisioning_jobs "
                     "WHERE attempt_no<max_attempts AND (state='QUEUED' OR "
-                    "(state='RETRY_WAIT' AND retry_not_before<=clock_timestamp()) OR "
-                    "(state='RUNNING' AND lease_expires_at<=clock_timestamp())) "
+                    "(state='RETRY_WAIT' AND retry_not_before<=clock_timestamp())) "
                     "ORDER BY created_at,job_id FOR UPDATE SKIP LOCKED LIMIT 1) "
                     "UPDATE forest_deployment.provisioning_jobs j SET state='RUNNING',"
                     "attempt_no=j.attempt_no+1,lease_owner=%s,lease_epoch=j.lease_epoch+1,"
@@ -214,11 +220,12 @@ class DeploymentProvisioningJobAuthority:
         claim: DeploymentProvisioningClaim,
         *,
         lease_seconds: int = 120,
+        conn=None,
     ) -> DeploymentProvisioningClaim:
         self._validate_claim(claim)
         if type(lease_seconds) is not int or not 10 <= lease_seconds <= 900:
             raise ForestError("PROVISIONING_INPUT_INVALID", "Provisioning lease is invalid", 422)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self.store.transaction(conn) as conn:
             await self._verify_supervisor_in(conn, supervisor)
             row = await (
                 await conn.execute(
@@ -240,6 +247,7 @@ class DeploymentProvisioningJobAuthority:
         claim: DeploymentProvisioningClaim,
         *,
         catalog,
+        conn=None,
     ) -> dict:
         """Publish the Bot identity and settle its fenced Job in one transaction."""
         self._validate_claim(claim)
@@ -247,7 +255,7 @@ class DeploymentProvisioningJobAuthority:
             raise ForestError(
                 "PROVISIONING_INPUT_INVALID", "Catalog belongs to another deployment store", 422
             )
-        async with self.store.transaction() as conn:
+        async with self.store.transaction(conn) as conn:
             await self._verify_supervisor_in(conn, supervisor)
             await self._owned_in(conn, claim)
             await catalog.register_ready(
@@ -271,13 +279,14 @@ class DeploymentProvisioningJobAuthority:
         *,
         error_code: str,
         retry_seconds: int = 5,
+        conn=None,
     ) -> dict:
         self._validate_claim(claim)
         if not isinstance(error_code, str) or _ERROR.fullmatch(error_code) is None:
             error_code = "BOT_PROVISIONING_FAILED"
         if type(retry_seconds) is not int or not 1 <= retry_seconds <= 3600:
             raise ForestError("PROVISIONING_INPUT_INVALID", "Retry delay is invalid", 422)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self.store.transaction(conn) as conn:
             await self._verify_supervisor_in(conn, supervisor)
             current = await self._owned_in(conn, claim)
             terminal = current["attempt_no"] >= current["max_attempts"]
@@ -296,6 +305,28 @@ class DeploymentProvisioningJobAuthority:
                         terminal,
                         claim.job_id,
                     ),
+                )
+            ).fetchone()
+            return dict(row)
+
+    async def block_unknown(
+        self, supervisor: DeploymentSupervisorLease,
+        claim: DeploymentProvisioningClaim, *, error_code: str,
+        conn=None,
+    ) -> dict:
+        self._validate_claim(claim)
+        if not isinstance(error_code, str) or _ERROR.fullmatch(error_code) is None:
+            error_code = "BOT_PROVISIONING_RESULT_UNKNOWN"
+        async with self.store.transaction(conn) as conn:
+            await self._verify_supervisor_in(conn, supervisor)
+            await self._owned_in(conn, claim)
+            row = await (
+                await conn.execute(
+                    "UPDATE forest_deployment.provisioning_jobs SET state='BLOCKED_UNKNOWN',"
+                    "lease_owner=NULL,lease_expires_at=NULL,retry_not_before=NULL,"
+                    "last_error_code=%s,revision=revision+1,updated_at=clock_timestamp() "
+                    "WHERE job_id=%s RETURNING *",
+                    (error_code, claim.job_id),
                 )
             ).fetchone()
             return dict(row)
@@ -387,6 +418,30 @@ class DeploymentProvisioningJobAuthority:
         if row is None:
             raise ForestError("PROVISIONING_JOB_NOT_FOUND", "Provisioning Job not found", 404)
         return dict(row)
+
+    async def held_claim(
+        self, supervisor: DeploymentSupervisorLease, *, job_id: str,
+        claim_token: str, attempt_no: int, conn=None,
+    ) -> DeploymentProvisioningClaim:
+        _text(job_id, "job_id", 256)
+        _text(claim_token, "claim_token", 256)
+        if type(attempt_no) is not int or attempt_no < 1:
+            raise ForestError("PROVISIONING_INPUT_INVALID", "Attempt is invalid", 422)
+        async with self.store.transaction(conn) as conn:
+            await self._verify_supervisor_in(conn, supervisor)
+            row = await (
+                await conn.execute(
+                    "SELECT * FROM forest_deployment.provisioning_jobs WHERE job_id=%s "
+                    "AND state='RUNNING' AND lease_owner=%s AND attempt_no=%s "
+                    "AND lease_expires_at>clock_timestamp() FOR SHARE",
+                    (job_id, claim_token, attempt_no),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError(
+                    "STALE_PROVISIONING_CLAIM", "Provisioning claim is stale", 409
+                )
+            return self._claim(row)
 
     async def list(self, *, limit: int = 100) -> tuple[dict, ...]:
         if type(limit) is not int or not 1 <= limit <= 500:

@@ -579,8 +579,6 @@ MANIFEST_SCHEMA = {
                                 "name",
                                 "contract",
                                 "handler",
-                                "claim_function",
-                                "settle_function",
                                 "input_schema",
                                 "output_schema",
                                 "max_concurrency",
@@ -591,6 +589,7 @@ MANIFEST_SCHEMA = {
                                 "lease_seconds",
                             ],
                             "properties": {
+                                "authority": {"enum": ["package", "kernel"]},
                                 **{
                                     key: {"type": "string"}
                                     for key in (
@@ -1542,15 +1541,26 @@ def _manifest(files: dict[str, bytes]) -> dict:
                         "Asset-backed payload refs require a matching management action and exact metadata paths",
                     )
         if service in owned_work_handlers:
-            renewable = "renew_function" in service
+            authority = service.get("authority", "package")
+            renewable = "renew_function" in service or authority == "kernel"
             if (
-                not SQL_FUNCTION.fullmatch(service.get("claim_function", ""))
-                or not SQL_FUNCTION.fullmatch(service.get("settle_function", ""))
+                (authority == "package" and (
+                    not SQL_FUNCTION.fullmatch(service.get("claim_function", ""))
+                    or not SQL_FUNCTION.fullmatch(service.get("settle_function", ""))
+                ))
+                or (authority == "kernel" and (
+                    component["scope"] != "deployment"
+                    or any(key in service for key in (
+                        "claim_function", "settle_function", "renew_function"
+                    ))
+                ))
                 or not IDENTIFIER.fullmatch(service.get("handler", ""))
                 or renewable != ("renew_timeout_s" in service)
                 or renewable != ("renew_interval_s" in service)
                 or (renewable and (
-                    not SQL_FUNCTION.fullmatch(service["renew_function"])
+                    (authority == "package" and not SQL_FUNCTION.fullmatch(
+                        service["renew_function"]
+                    ))
                     or service["lease_seconds"] <= (
                         service["renew_interval_s"] + service["renew_timeout_s"]
                         + service["settle_timeout_s"]
@@ -1565,7 +1575,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     "Owned work requires a fenced lease beyond execution or renewal",
                 )
     if (
-        domain_queries or domain_commands or unit_of_work_participants or owned_work_handlers
+        domain_queries or domain_commands or unit_of_work_participants or
+        any(item.get("authority", "package") == "package" for item in owned_work_handlers)
     ) and component.get("storage") is None:
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority ports require package storage")
     functions = [
@@ -1573,6 +1584,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     ] + [
         function
         for item in owned_work_handlers
+        if item.get("authority", "package") == "package"
         for function in (item["claim_function"], item["settle_function"],
                          *([item["renew_function"]] if "renew_function" in item else []))
     ]

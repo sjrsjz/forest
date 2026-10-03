@@ -393,7 +393,7 @@ CREATE TABLE forest_deployment.provisioning_jobs (
         bootstrap_manifest_digest ~ '^sha256:[a-f0-9]{64}$'
     ),
     state text NOT NULL CHECK (
-        state IN ('QUEUED','RUNNING','RETRY_WAIT','SUCCEEDED','FAILED','CANCELLED')
+        state IN ('QUEUED','RUNNING','RETRY_WAIT','BLOCKED_UNKNOWN','SUCCEEDED','FAILED','CANCELLED')
     ),
     attempt_no integer NOT NULL DEFAULT 0 CHECK (attempt_no >= 0),
     max_attempts integer NOT NULL CHECK (max_attempts BETWEEN 1 AND 20),

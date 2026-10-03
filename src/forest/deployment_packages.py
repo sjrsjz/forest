@@ -93,6 +93,18 @@ async def bootstrap_builtin_deployment_package(
 
     component = snapshot.component
     effects = tuple(component.get("effect_services", ()))
+    owned_work = tuple(component.get("owned_work_handlers", ()))
+    kernel_work = tuple(
+        item for item in owned_work if item.get("authority", "package") == "kernel"
+    )
+    if kernel_work and (
+        len(kernel_work) != len(owned_work)
+        or component["id"] not in runtime.kernel_owned_work_authorities
+    ):
+        raise ForestError(
+            "DEPLOYMENT_KERNEL_WORK_UNAVAILABLE",
+            "Kernel-owned work requires one exact official authority binding", 503,
+        )
     requested = tuple(component.get("capabilities", {}).get("requests", ()))
     upload_ports = {
         item["port"] for item in component.get("management_artifacts", ())
@@ -113,7 +125,7 @@ async def bootstrap_builtin_deployment_package(
             or f"service.call:{item['name']}" not in requested
         ))
         or (item["name"] not in upload_ports | close_ports and (
-            item["semantics"] != "read"
+            item["semantics"] not in {"read", "idempotent"}
             or f"service.call:{item['name']}" not in requested
         ))
         for item in effects
@@ -148,7 +160,7 @@ async def bootstrap_builtin_deployment_package(
             not in runtime.kernel_query_handlers
             for item in kernel_queries
         )
-        or (component.get("owned_work_handlers") and not component.get("storage"))
+        or (owned_work and not kernel_work and not component.get("storage"))
         or any(item["semantics"] != "read" for item in component.get("provides", ()))
     ):
         raise ForestError(
@@ -270,7 +282,10 @@ async def bootstrap_builtin_deployment_package(
         domain_commands=domain,
         kernel_management_queries=kernel_query_authority,
         kernel_management_commands=kernel_management,
-        owned_work_authority=domain if component.get("owned_work_handlers") else None,
+        owned_work_authority=(
+            runtime.kernel_owned_work_authorities[component["id"]]
+            if kernel_work else domain if owned_work else None
+        ),
         service_operation_ledger=runtime.service_operation_ledger,
         storage=storage, trust_level="official",
         effect_driver_factories=effect_factories,

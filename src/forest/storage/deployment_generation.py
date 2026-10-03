@@ -73,6 +73,21 @@ class DeploymentGenerationAuthority:
                 conn, component_id=component_id, generation_id=generation_id,
             )
 
+    async def verify_owned_work_in(
+        self, conn, lease: DeploymentSupervisorLease, *, component_id: str,
+        generation_id: str, claim_new: bool,
+    ) -> dict:
+        """Lock Supervisor before Graph so claim and freeze share one lock order."""
+        await self._lease_in(conn, lease)
+        if claim_new:
+            return await self.verify_active_generation_in(
+                conn, component_id=component_id, generation_id=generation_id,
+                admission_lane="DATA",
+            )
+        return await self.verify_generation_member_in(
+            conn, component_id=component_id, generation_id=generation_id,
+        )
+
     async def _lease_in(self, conn, lease: DeploymentSupervisorLease) -> None:
         if type(lease) is not DeploymentSupervisorLease or lease.deployment_id != self.store.deployment_id:
             raise ForestError("STALE_DEPLOYMENT_SUPERVISOR", "Supervisor lease is invalid", 409)

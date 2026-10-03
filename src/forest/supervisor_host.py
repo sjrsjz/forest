@@ -26,7 +26,8 @@ from forest.deployment_kernel_management import (
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_package_controller import DeploymentPackageController
-from forest.deployment_provisioning import DeploymentProvisioningExecutor
+from forest.deployment_provisioning_driver import DeploymentProvisioningEffectDriver
+from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwnedWorkAuthority
 from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
@@ -193,16 +194,9 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
 
     settings_resolver = OfficialBotSettingsResolver(secrets=secrets)
     database_allocator = LocalPostgresDatabaseAllocator(settings.dsn)
-    executor = DeploymentProvisioningExecutor(
-        jobs=jobs,
-        catalog=catalog,
-        storage_profiles=storage_profiles,
-        bootstrap_profiles=bootstrap_profiles,
-        provisioner=OfficialBotProvisioner(
-            settings_resolver=settings_resolver,
-            database_allocator=database_allocator,
-        ),
-        worker_id="deployment-provisioner/" + incarnation,
+    provisioner = OfficialBotProvisioner(
+        settings_resolver=settings_resolver,
+        database_allocator=database_allocator,
     )
     supervisor = MultiBotSupervisor(
         catalog,
@@ -216,8 +210,14 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         incarnation=incarnation,
         poll_seconds=settings.poll_seconds,
         max_starting=settings.max_starting,
-        provisioning_executor=executor,
     )
+
+    def notify_deployment_work():
+        if deployment_controller is not None:
+            try:
+                deployment_controller.registry.notify_work()
+            except ForestError:
+                pass
     stop = asyncio.Event()
     management_server = None
     management_task = None
@@ -255,10 +255,23 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     BootstrapProfileKernelCommand(bootstrap_profiles, bootstrap_registry),
                 **{
                     ("deployment.provisioning", kind): ProvisioningJobKernelCommand(
-                        jobs, kind, notify=supervisor.notify,
+                        jobs, kind, notify=notify_deployment_work,
                     ) for kind in ProvisioningJobKernelCommand._METHODS
                 },
             },
+        )
+        deployment_runtime.kernel_owned_work_authorities["deployment.provisioning"] = (
+            DeploymentProvisioningOwnedWorkAuthority(deployment_runtime, jobs, catalog)
+        )
+        deployment_runtime.effect_driver_factories[
+            "deployment.provisioning-materializer"
+        ] = lambda configuration, revision, identity, declaration: (
+            DeploymentProvisioningEffectDriver(
+                configuration, revision, identity, declaration,
+                runtime=deployment_runtime, jobs=jobs,
+                storage_profiles=storage_profiles,
+                bootstrap_profiles=bootstrap_profiles, provisioner=provisioner,
+            )
         )
         deployment_controller = DeploymentPackageController(
             deployment_runtime, package_catalog,

@@ -249,7 +249,7 @@ Job。浏览器不得提交 `schema_digests`，也不得用一个六组件 JSON 
 
 供应执行必须在准确的 `deployment.provisioning` Generation 生命周期内准入。冻结旧代后不得再领取新 Job；已领取工作、嵌套效果和结算须排空或留下明确的 `UNKNOWN` 对账事实，不能由租约超时推断“没有建库”并盲目重试。Worker 只取得 Bot ID、不可变 Storage/Bootstrap Profile 引用、摘要和有界操作身份，不取得 DSN、主密钥或其他 Secret 明文。物理建库由内核受限端口执行；Bot 模块基线装配由通用 RuntimeGraph/Generation 生命周期设施按冻结贡献目录完成，不能让宿主按业务组件 ID 拼装模块。两个端口均按冻结 Profile 与目标 Bot 身份核验，不接受任意数据库名或包路径。建库成功但 READY 尚未提交时，同一 Job 的恢复只能复用该数据库；READY 已提交后的重放只能读回原 Bot 身份与结果，不能重建或产生第二个 Bot。
 
-`READY` 发布与 `OFFLINE` 意图必须在一个部署事务内线性化，并验证当前供应 claim、准确 Generation 和 Profile 摘要；Job 终态和该发布之间若不能同事务提交，就必须有持久、单向且幂等的发布回执，使崩溃恢复不会把 READY Bot 判为失败后再次供应。当前代码中的 `MultiBotSupervisor._provision`、`DeploymentProvisioningExecutor` 以及宿主直接创建 `OfficialBotProvisioner` 仍承担供应业务，是待移除的过渡实现；包的管理 UI 已热替换不等于供应 Job 已受包生命周期管辖。
+`READY` 发布与 `OFFLINE` 意图必须在一个部署事务内线性化，并验证当前供应 claim、准确 Generation 和 Profile 摘要。当前 `deployment.provisioning` 包通过声明的 `owned_work_handlers` 持有 Worker handler；内核只持有唯一 Job 账本、Generation 围栏和受限物理建库端口。claim 在同一事务内验证 active Generation 并领取 Job；续租、结算在 member Generation 围栏下复核准确 claim；READY/OFFLINE 发布与 Job 成功终态在同一事务提交。未知外部结果保持 `BLOCKED_UNKNOWN`，不能仅凭租约过期自动重发。`MultiBotSupervisor` 只管理 Bot 运行意图与实例，不再执行供应 Job。
 
 创建期 UI 使用与运行期管理贡献相同的受控 surface 身份。内置模块可以共享宿主提供的 schema 表单
 renderer，模块也可以发布自己的 template/module/style；两者都只能返回该组件的配置值，不能选择
@@ -260,7 +260,7 @@ configuration authority，bootstrap profile 保持不可变来源事实，不成
 
 沙箱 iframe 与其响应 CSP 都允许 `allow-forms`，使模块表单的 `submit` 事件可以由脚本接管；响应仍固定 `form-action 'none'`，禁止表单直接向网络提交。包 UI 的管理动作只能通过受限 MessageChannel 与宿主网关发出。
 
-`bootstrap.create` 的组件集合验证和服务端 schema digest 取自同一个冻结的贡献注册表；内核端口在 Web 回执与审计同一事务里检查 Secret 引用并写入不可变 Profile。`provisioning.enqueue` 与 `provisioning.cancel` 也需要接受同一个调用者事务，以使准确包 Generation 围栏、Web 授权和 Job 状态迁移一起提交。入队唤醒执行该 Job 的准确 Generation 必须发生在提交之后，不能把尚未提交的 Job 当作可领取事实；当前代码仍由 Supervisor 唤醒旧宿主执行器，尚未满足最终生命周期边界。
+`bootstrap.create` 的组件集合验证和服务端 schema digest 取自同一个冻结的贡献注册表；内核端口在 Web 回执与审计同一事务里检查 Secret 引用并写入不可变 Profile。`provisioning.enqueue` 与 `provisioning.cancel` 接受同一个调用者事务，使准确包 Generation 围栏、Web 授权和 Job 状态迁移一起提交。入队后的唤醒发生在事务提交之后，由部署包图上的通用 owned-work 通知端口转给当前 `deployment.provisioning` Generation；定期轮询也能恢复漏失的通知。
 
 组件 manifest 可声明：
 

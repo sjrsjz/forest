@@ -32,7 +32,8 @@ from forest.deployment_kernel_management import (
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_package_controller import DeploymentPackageController
 from forest.deployment_packages import bootstrap_builtin_deployment_package
-from forest.deployment_provisioning import DeploymentProvisioningExecutor
+from forest.deployment_provisioning_driver import DeploymentProvisioningEffectDriver
+from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwnedWorkAuthority
 from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
@@ -43,7 +44,6 @@ from forest.kernel_package_catalog_snapshot import (
 from forest.model_contract import ModelCapabilities
 from forest.multi_bot_supervisor import MultiBotSupervisor
 from forest.official_bot_provisioning import (
-    OfficialBotCatalogSettingsResolver,
     OfficialBotProvisioner,
     OfficialBotSettingsResolver,
     default_vector_index_configuration,
@@ -2483,6 +2483,39 @@ async def test_provisioning_job_claim_renew_retry_and_success_are_fenced(deploym
 
 
 @pytest.mark.postgres
+async def test_expired_provisioning_claim_blocks_unknown_result(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    storage = await _storage_profile(repository, "bot/expired-job", "expired-job")
+    profile = await _bootstrap_profile(repository, storage, "expired-job")
+    jobs = DeploymentProvisioningJobAuthority(repository.store)
+    await jobs.enqueue(
+        operation_id="provisioning/expired-job/enqueue",
+        job_id="provisioning/expired-job/1",
+        bot_id="bot/expired-job",
+        display_name="Expired Job",
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=storage.storage_generation,
+        bootstrap_profile_ref=profile.profile_ref,
+    )
+    supervisor = await repository.claim_supervisor("host/expired-job", "incarnation/expired-job")
+    claim = await jobs.claim(supervisor, worker_id="worker/expired-job")
+    assert claim is not None
+    async with repository.store.transaction() as conn:
+        await conn.execute(
+            "UPDATE forest_deployment.provisioning_jobs "
+            "SET lease_expires_at=clock_timestamp()-interval '1 second' "
+            "WHERE job_id=%s", (claim.job_id,),
+        )
+    assert await jobs.claim(supervisor, worker_id="worker/retry") is None
+    blocked = await jobs.inspect(claim.job_id)
+    assert blocked["state"] == "BLOCKED_UNKNOWN"
+    assert blocked["attempt_no"] == 1
+    assert blocked["last_error_code"] == "PROVISIONING_CLAIM_EXPIRED"
+    assert await jobs.claim(supervisor, worker_id="worker/retry") is None
+
+
+@pytest.mark.postgres
 async def test_provisioning_kernel_command_notifies_only_after_commit(deployment_catalog):
     repository = deployment_catalog
     await repository.initialize()
@@ -2552,56 +2585,6 @@ async def test_provisioning_kernel_command_notifies_only_after_commit(deployment
     )
     assert result["job_id"] == payload["job_id"]
     assert observed == ["QUEUED"]
-
-
-@pytest.mark.postgres
-async def test_provisioning_executor_resolves_frozen_inputs_before_ready_publication(
-    deployment_catalog,
-):
-    repository = deployment_catalog
-    await repository.initialize()
-    storage = await _storage_profile(repository, "bot/executor", "executor")
-    profile = await _bootstrap_profile(repository, storage, "executor")
-    secrets = DeploymentSecretAuthority(
-        repository.store,
-        active_key_id="master/test/1",
-        key_resolver=lambda _key_id: bytes(range(32)),
-    )
-    storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
-    bootstrap_profiles = DeploymentBootstrapProfileAuthority(repository.store, secrets=secrets)
-    jobs = DeploymentProvisioningJobAuthority(repository.store)
-    await jobs.enqueue(
-        operation_id="provisioning/executor/enqueue",
-        job_id="provisioning/executor/1",
-        bot_id="bot/executor",
-        display_name="Executor",
-        storage_profile_ref=storage.profile_ref,
-        storage_generation=storage.storage_generation,
-        bootstrap_profile_ref=profile.profile_ref,
-    )
-    calls = []
-
-    async def provisioner(*, claim, storage, profile):
-        calls.append((claim, storage, profile))
-        assert storage.dsn.endswith("/forest_executor")
-        assert profile.manifest_digest == claim.bootstrap_manifest_digest
-
-    executor = DeploymentProvisioningExecutor(
-        jobs=jobs,
-        catalog=repository,
-        storage_profiles=storage_profiles,
-        bootstrap_profiles=bootstrap_profiles,
-        provisioner=provisioner,
-        worker_id="worker/executor",
-    )
-    supervisor = await repository.claim_supervisor("host/executor", "incarnation/executor")
-    result = await executor.run_once(supervisor)
-    assert result["state"] == "SUCCEEDED"
-    assert len(calls) == 1
-    bot = await repository.inspect("bot/executor")
-    assert bot["supply_state"] == "READY"
-    assert bot["desired_state"] == "OFFLINE"
-    assert await executor.run_once(supervisor) is None
 
 
 @pytest.mark.postgres
@@ -2772,54 +2755,21 @@ async def test_official_provisioner_materializes_module_authorities_without_star
             components=components,
             schema_digests=official_bootstrap_schema_digests(),
         )
-        jobs = DeploymentProvisioningJobAuthority(repository.store)
-        await jobs.enqueue(
-            operation_id="provisioning/official/enqueue",
-            job_id="provisioning/official/1",
-            bot_id="bot/official",
-            display_name="Official",
-            storage_profile_ref=storage.profile_ref,
-            storage_generation=storage.storage_generation,
-            bootstrap_profile_ref=bootstrap.profile_ref,
-        )
         resolver = OfficialBotSettingsResolver(secrets=secrets)
-        executor = DeploymentProvisioningExecutor(
-            jobs=jobs,
-            catalog=repository,
-            storage_profiles=storage_profiles,
-            bootstrap_profiles=bootstrap_profiles,
-            provisioner=OfficialBotProvisioner(
-                settings_resolver=resolver,
-                database_allocator=allocator,
-            ),
-            worker_id="worker/official",
+        resolved_storage = await storage_profiles.resolve(
+            profile_ref=storage.profile_ref,
+            expected_bot_id=storage.bot_id,
+            expected_storage_generation=storage.storage_generation,
         )
-        supervisor = MultiBotSupervisor(
-            repository,
-            storage_profiles=storage_profiles,
-            settings_resolver=OfficialBotCatalogSettingsResolver(
-                bootstrap_profiles=bootstrap_profiles,
-                settings_resolver=resolver,
-            ),
-            host_id="host/official",
-            incarnation="incarnation/official",
-            poll_seconds=0.05,
-            provisioning_executor=executor,
+        resolved_profile = await bootstrap_profiles.load(bootstrap.profile_ref)
+        await OfficialBotProvisioner(
+            settings_resolver=resolver,
+            database_allocator=allocator,
+        )(
+            claim=SimpleNamespace(bot_id="bot/official"),
+            storage=resolved_storage,
+            profile=resolved_profile,
         )
-        await supervisor.start()
-        try:
-
-            async def provisioned():
-                job = await jobs.inspect("provisioning/official/1")
-                assert job["state"] != "FAILED", job.get("last_error_code")
-                return job["state"] == "SUCCEEDED"
-
-            await _eventually(provisioned, timeout=60)
-        finally:
-            await supervisor.close()
-        bot = await repository.inspect("bot/official")
-        assert bot["bootstrap_profile_ref"] == bootstrap.profile_ref
-        assert bot["bootstrap_manifest_digest"] == bootstrap.manifest_digest
 
         target = BotStore(target_dsn, "bot/official")
         await target.open()
@@ -2938,6 +2888,30 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                 ) for kind in ProvisioningJobKernelCommand._METHODS
             },
         },
+    )
+    deployment_runtime.kernel_owned_work_authorities["deployment.provisioning"] = (
+        DeploymentProvisioningOwnedWorkAuthority(deployment_runtime, jobs, repository)
+    )
+    materialized = []
+    drain_materialize_started = asyncio.Event()
+    release_drain_materialize = asyncio.Event()
+
+    async def materialize(*, claim, storage, profile):
+        materialized.append((claim.job_id, storage.profile_ref, profile.profile_ref))
+        if claim.job_id == "provisioning/package-drain/1":
+            drain_materialize_started.set()
+            await release_drain_materialize.wait()
+
+    deployment_runtime.effect_driver_factories[
+        "deployment.provisioning-materializer"
+    ] = lambda configuration, revision, identity, declaration: (
+        DeploymentProvisioningEffectDriver(
+            configuration, revision, identity, declaration,
+            runtime=deployment_runtime, jobs=jobs,
+            storage_profiles=storage_profiles,
+            bootstrap_profiles=bootstrap_profiles,
+            provisioner=materialize,
+        )
     )
     package_catalog = PackageCatalog(tmp_path / "webui-deployment-packages")
     audit_snapshot = package_catalog.build(
@@ -3403,6 +3377,35 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert cancelled.status_code == 200, cancelled.text
         assert cancelled.json()["state"] == "CANCELLED"
+        package_storage = await _storage_profile(
+            repository, "bot/package-worker", "package-worker"
+        )
+        package_bootstrap = await _bootstrap_profile(
+            repository, package_storage, "package-worker"
+        )
+        await jobs.enqueue(
+            operation_id="provisioning/package-worker/enqueue",
+            job_id="provisioning/package-worker/1",
+            bot_id="bot/package-worker",
+            display_name="Package Worker",
+            storage_profile_ref=package_storage.profile_ref,
+            storage_generation=package_storage.storage_generation,
+            bootstrap_profile_ref=package_bootstrap.profile_ref,
+        )
+
+        async def package_job_completed():
+            state = (await jobs.inspect("provisioning/package-worker/1"))["state"]
+            assert state not in {"FAILED", "BLOCKED_UNKNOWN"}
+            return state == "SUCCEEDED"
+
+        await _eventually(package_job_completed, timeout=20)
+        assert materialized == [
+            ("provisioning/package-worker/1", package_storage.profile_ref,
+             package_bootstrap.profile_ref)
+        ]
+        package_bot = await repository.inspect("bot/package-worker")
+        assert package_bot["supply_state"] == "READY"
+        assert package_bot["desired_state"] == "OFFLINE"
         previous = deployment_registry
         candidate = RuntimeModuleRegistry(
             deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor,
@@ -3522,6 +3525,22 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                 )
             ).fetchone()
         assert versions["count"] == 1
+        drain_storage = await _storage_profile(
+            repository, "bot/package-drain", "package-drain"
+        )
+        drain_bootstrap = await _bootstrap_profile(
+            repository, drain_storage, "package-drain"
+        )
+        await jobs.enqueue(
+            operation_id="provisioning/package-drain/enqueue",
+            job_id="provisioning/package-drain/1",
+            bot_id="bot/package-drain",
+            display_name="Package Drain",
+            storage_profile_ref=drain_storage.profile_ref,
+            storage_generation=drain_storage.storage_generation,
+            bootstrap_profile_ref=drain_bootstrap.profile_ref,
+        )
+        await asyncio.wait_for(drain_materialize_started.wait(), timeout=10)
         provision_previous = deployment_registry
         provision_candidate = RuntimeModuleRegistry(
             deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor,
@@ -3532,9 +3551,16 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert provision_drained == ("deployment.provisioning",)
         await provision_candidate.prewarm()
-        await provision_previous.drain_owned_work_for_replacement(
-            provision_candidate.activation_id, components=provision_drained,
+        draining = asyncio.create_task(
+            provision_previous.drain_owned_work_for_replacement(
+                provision_candidate.activation_id, components=provision_drained,
+            )
         )
+        await asyncio.sleep(0.05)
+        assert not draining.done()
+        release_drain_materialize.set()
+        await asyncio.wait_for(draining, timeout=20)
+        assert (await jobs.inspect("provisioning/package-drain/1"))["state"] == "SUCCEEDED"
         await provision_candidate.start()
         provision_candidate.accept_retained_ownership()
         assert provision_candidate.graph_identity.generations["deployment.provisioning"] != (

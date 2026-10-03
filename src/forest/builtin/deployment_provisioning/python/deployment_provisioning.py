@@ -1,7 +1,7 @@
 """Reloadable provisioning Job projection; durable writes use exact kernel ports."""
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, service
+from forest.sdk import Plugin, job, service
 
 
 class DeploymentProvisioning(Plugin):
@@ -16,3 +16,10 @@ class DeploymentProvisioning(Plugin):
     @service("deployment.provisioning.jobs.page", semantics="read")
     async def jobs(self, payload, ctx):
         return await ctx.queries.call("deployment.provisioning.jobs.read", payload)
+
+    @job("deployment.provisioning.execute")
+    async def execute_job(self, task, ctx):
+        return await ctx.services.call(
+            "deployment.provisioning.materialize", task["payload"],
+            operation_id=ctx.operations.stable("materialize:v1"),
+        )

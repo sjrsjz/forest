@@ -19,7 +19,7 @@ BEGIN
        OR (after_job IS NOT NULL AND octet_length(after_job) NOT BETWEEN 1 AND 256)
        OR (requested_bot IS NOT NULL AND octet_length(requested_bot) NOT BETWEEN 1 AND 128)
        OR (requested_state IS NOT NULL AND requested_state NOT IN
-           ('QUEUED','RUNNING','RETRY_WAIT','SUCCEEDED','FAILED','CANCELLED')) THEN
+           ('QUEUED','RUNNING','RETRY_WAIT','BLOCKED_UNKNOWN','SUCCEEDED','FAILED','CANCELLED')) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','PROVISIONING_QUERY_INVALID',
                 'message','Provisioning query is invalid','status',422));

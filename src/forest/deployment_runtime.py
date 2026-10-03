@@ -32,6 +32,7 @@ class DeploymentRuntimeScope:
         self.graph_change_authority = graph_change_authority
         self.kernel_management_handlers = dict(kernel_management_handlers or {})
         self.kernel_query_handlers = dict(kernel_query_handlers or {})
+        self.kernel_owned_work_authorities = {}
         self.effect_driver_factories = (
             {
                 "deployment.package-catalog": (

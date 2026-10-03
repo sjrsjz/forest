@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["job_id", "bot_id", "storage_profile_ref", "storage_generation", "bootstrap_profile_ref", "bootstrap_manifest_digest", "claim_token", "attempt_no"],
+  "properties": {
+    "job_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "bot_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "storage_profile_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+    "storage_generation": {"type": "integer", "minimum": 1},
+    "bootstrap_profile_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+    "bootstrap_manifest_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "claim_token": {"type": "string", "minLength": 1, "maxLength": 256},
+    "attempt_no": {"type": "integer", "minimum": 1}
+  }
+}
