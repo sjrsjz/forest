@@ -72,6 +72,8 @@ flowchart TB
 
 控制台没有固定业务导航。壳层只渲染登录主体、作用域选择器、由内核枚举的模块入口和一个工作区容器。deployment、host、Bot、Binding 与组件实例都是可选择作用域；选择 Bot 只是改变查询与操作的 scope，不会进入一套预制的 Bot CRUD 产品。
 
+Bot 作用域的管理 provider 先向 Supervisor 领取当前 BotHost 的有界管理准入，再为这次调用临时构造 Gateway；调用结束时归还准入，不跨请求缓存 BotHost 或 Gateway。Bot 退役与重载必须能释放旧宿主及其整张模块图；控制台保留的目录投影和会话票据都不能以强引用延长旧代际生命。
+
 当前作用域的导航、设置页、诊断页和动作由已发布模块的 `ManagementContribution` 组成。连“安全”“存储”“备份”“追踪”也不是壳层硬编码业务页；它们分别由拥有相应契约的内核模块或业务模块贡献。壳层只理解贡献协议中的标题、排序、schema、query/action、UI 工件和能力要求，不理解 Agent prompt、记忆节点、OneBot 字段、调度策略或模块私有表。
 
 内核贡献一个不可卸载的最小工作区，用于查看当前作用域的 ModuleRegistry、RuntimeGraph、Generation、契约路由、能力授予、生命周期操作和宿主恢复。它是注册事实的通用投影，不是另一个集中式业务管理器。模块生命周期卡片、通用 schema 表单和失败诊断都由该协议生成；具体业务配置、关系浏览器、连接控制和任务管理由各模块自己的 contribution/UI 提供。

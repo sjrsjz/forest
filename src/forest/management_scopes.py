@@ -643,7 +643,6 @@ class BotManagementScopeProvider:
             raise ValueError("Bot management requires a Web authority ticket signer")
         self.supervisor = supervisor
         self.ticket_authority = ticket_authority
-        self._gateways: dict[str, tuple[object, ManagementGateway]] = {}
 
     async def list_scopes(self) -> tuple[dict, ...]:
         return await self.supervisor.management_scopes()
@@ -651,18 +650,11 @@ class BotManagementScopeProvider:
     @asynccontextmanager
     async def gateway(self, scope_id: str):
         async with self.supervisor.management_host(scope_id) as host:
-            cached = self._gateways.get(scope_id)
-            if cached is None or cached[0] is not host:
-                cached = (
-                    host,
-                    ManagementGateway(
-                        host,
-                        ticket_authority=self.ticket_authority,
-                        scope_id=scope_id,
-                    ),
-                )
-                self._gateways[scope_id] = cached
-            yield cached[1]
+            yield ManagementGateway(
+                host,
+                ticket_authority=self.ticket_authority,
+                scope_id=scope_id,
+            )
 
 
 class ManagementScopeRegistry:
