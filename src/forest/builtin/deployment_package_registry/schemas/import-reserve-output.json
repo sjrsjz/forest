@@ -1,0 +1,1 @@
+{"type":"object","additionalProperties":false,"required":["operation_id","status"],"properties":{"operation_id":{"type":"string"},"status":{"enum":["RESERVED","SUCCEEDED","REJECTED","INTERRUPTED"]}}}

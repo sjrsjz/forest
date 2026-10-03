@@ -260,13 +260,38 @@ class DeploymentManagementGateway:
                     operation_id=operation_id, action_key=f"artifact.{artifact_id}.upload",
                     input_digest=digest_json(body), plan_digest=None,
                 )
+                await contract.artifact_command_in(
+                    conn, artifact_id, "reserve", {
+                        "operation_id": operation_id,
+                        "actor_ref": authorization.web_subject_ref,
+                        "generation_id": generation_id,
+                        "content_length": content_length,
+                        "archive_sha256": content_sha256,
+                    }, operation_id=operation_id,
+                )
 
             async def commit(content: bytes):
-                return await publish(
+                result = await publish(
                     content, operation_id=operation_id,
                     actor_ref=authorization.web_subject_ref,
                     content_sha256=content_sha256,
                 )
+                async with self.web_receipts.store.pool.connection() as conn, conn.transaction():
+                    await self._authorize_mutation_in(
+                        conn, ticket=authorization, component_id=component_id,
+                        operation_id=operation_id, action_key=f"artifact.{artifact_id}.upload",
+                        input_digest=digest_json(body), plan_digest=None,
+                    )
+                    await contract.artifact_command_in(
+                        conn, artifact_id, "settle", {
+                            "operation_id": operation_id,
+                            "actor_ref": authorization.web_subject_ref,
+                            "archive_sha256": content_sha256,
+                            "status": "SUCCEEDED",
+                            "package_digest": result["package_digest"],
+                        }, operation_id=operation_id,
+                    )
+                return result
 
             yield max_bytes, commit
 
@@ -356,6 +381,11 @@ class DeploymentManagementGateway:
         contract = (
             binding[2].management_contract if binding is not None else self._contract(component_id)
         )
+        required_role_for_query = getattr(contract, "query_required_role", None)
+        required_role = (
+            required_role_for_query(query_id)
+            if callable(required_role_for_query) else "AUDITOR"
+        )
         await self._authorize(
             authorization,
             target_scope_kind="deployment",
@@ -366,8 +396,11 @@ class DeploymentManagementGateway:
             target_operation_ref=operation_id,
             action_key=query_id,
             input_digest=digest_json(body),
-            required_role="AUDITOR",
+            required_role=required_role,
         )
+        authorized_query = getattr(contract, "query_authorized", None)
+        if callable(authorized_query):
+            return await authorized_query(query_id, body, authorization=authorization)
         return await contract.query(query_id, body)
 
     async def module_action(

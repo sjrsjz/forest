@@ -160,6 +160,23 @@ class PackageManagementContract(ModuleConfigurationContract):
         ) as publish:
             yield declaration["max_bytes"], publish
 
+    async def artifact_command_in(
+        self, conn, artifact_id: str, phase: str, payload: dict, *, operation_id: str,
+    ) -> dict | None:
+        declaration, _port = self._artifacts[artifact_id]
+        if phase not in {"reserve", "settle"}:
+            raise ForestError("MODULE_MANAGEMENT_BINDING_INVALID", "Artifact phase is invalid", 409)
+        name = declaration.get(f"{phase}_port")
+        if name is None:
+            return None
+        port = next(
+            item for item in self.adapter.component.get("domain_commands", ())
+            if item["name"] == name
+        )
+        return await self.adapter.invoke_management_artifact_command_in(
+            conn, port, payload, operation_id=operation_id,
+        )
+
     def asset(self, asset_id: str) -> dict:
         try:
             return self._assets[asset_id]

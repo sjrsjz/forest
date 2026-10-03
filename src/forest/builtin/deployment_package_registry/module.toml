@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-package-registry"
-version = "1.3.0"
+version = "1.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_package_registry:DeploymentPackageRegistry"
@@ -98,6 +98,36 @@ visibility = "management"
 input_schema = "schemas/import-receipt-input.json"
 output_schema = "schemas/import-receipt-output.json"
 
+[components.storage]
+schema_id = "forest.deployment.package-imports"
+schema_version = "1.0.0"
+baseline = "schema/imports.sql"
+baseline_sha256 = "5fdf26bfd8fdec0044c997ca687e82bba424d72677d0f609d0401ad23f13dc83"
+scope = "deployment"
+repository_contract = "forest.deployment-package-imports.repository/1"
+execution_profile = "official"
+
+[[components.domain_commands]]
+name = "deployment.package-registry.import.reserve"
+contract = "1.0"
+function = "package_import_reserve"
+input_schema = "schemas/import-reserve-input.json"
+output_schema = "schemas/import-reserve-output.json"
+
+[[components.domain_commands]]
+name = "deployment.package-registry.import.settle"
+contract = "1.0"
+function = "package_import_settle"
+input_schema = "schemas/import-settle-input.json"
+output_schema = "schemas/import-settle-output.json"
+
+[[components.domain_queries]]
+name = "deployment.package-registry.import.page"
+contract = "1.0"
+function = "package_import_page"
+input_schema = "schemas/import-page-input.json"
+output_schema = "schemas/import-page-output.json"
+
 [[components.management_queries]]
 id = "packages"
 port = "deployment.package-registry.page"
@@ -116,6 +146,14 @@ port = "deployment.package-registry.import-receipt"
 required_role = "ADMIN"
 timeout_s = 30
 
+[[components.management_queries]]
+id = "import.page"
+port = "deployment.package-registry.import.page"
+required_role = "ADMIN"
+default_limit = 32
+max_limit = 100
+timeout_s = 30
+
 [[components.management_artifacts]]
 id = "archive"
 port = "deployment.catalog.artifact"
@@ -131,3 +169,5 @@ direction = "upload"
 media_type = "application/zip"
 max_bytes = 33554432
 required_role = "ADMIN"
+reserve_port = "deployment.package-registry.import.reserve"
+settle_port = "deployment.package-registry.import.settle"

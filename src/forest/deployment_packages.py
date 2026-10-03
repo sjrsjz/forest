@@ -87,14 +87,22 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
             "DEPLOYMENT_PACKAGE_PORT_UNAVAILABLE",
             "Official deployment effect port has no permitted native binding", 503,
         )
+    artifact_commands = {
+        item[key]
+        for item in component.get("management_artifacts", ())
+        for key in ("reserve_port", "settle_port") if key in item
+    }
+    declared_commands = {
+        item["name"] for item in component.get("domain_commands", ())
+    }
     if component["scope"] != "deployment" or component.get("configuration_apply") or (
-        component.get("domain_commands") or component.get("management_actions")
+        declared_commands != artifact_commands or component.get("management_actions")
         or component.get("owned_work_handlers")
         or any(item["semantics"] != "read" for item in component.get("provides", ()))
     ):
         raise ForestError(
             "DEPLOYMENT_PACKAGE_PORT_UNAVAILABLE",
-            "Only read-only deployment package ports have installed authorities", 503,
+            "Deployment package write ports require declared artifact transaction hooks", 503,
         )
     declared = snapshot.storage_bundle()
     if declared is not None:
@@ -187,6 +195,7 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
         generation_verifier=runtime.generation_authority.verify_active_generation,
         generation_member_verifier=runtime.generation_authority.verify_generation_member,
         state_queries=None, state_commands=None, domain_queries=domain,
+        domain_commands=domain,
         service_operation_ledger=None, storage=storage, trust_level="official",
         effect_driver_factories=effect_factories,
         management=management,

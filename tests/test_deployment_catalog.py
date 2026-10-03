@@ -497,6 +497,19 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
                 "protocol": "forest.package-import-receipt/1", "found": True,
                 "package_digest": upload_package.digest,
             }
+            imports = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/queries/import.page",
+                headers={
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": client.cookies["forest_management_csrf"],
+                },
+                json={"operation_id": receipt_input["operation_id"]},
+            )
+            assert imports.status_code == 200, imports.text
+            assert len(imports.json()["records"]) == 1
+            assert imports.json()["records"][0]["status"] == "SUCCEEDED"
+            assert imports.json()["records"][0]["package_digest"] == upload_package.digest
             changed_bytes = upload_bytes + b"changed"
             changed_headers = {
                 **upload_headers,
@@ -520,6 +533,19 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
             )
             assert reserved.status_code == 403, reserved.text
             assert reserved.json()["code"] == "PACKAGE_RESERVED_NAMESPACE"
+            reserved_page = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/queries/import.page",
+                headers={
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": client.cookies["forest_management_csrf"],
+                },
+                json={"status": "RESERVED", "limit": 1},
+            )
+            assert reserved_page.status_code == 200, reserved_page.text
+            assert len(reserved_page.json()["records"]) == 1
+            assert reserved_page.json()["records"][0]["package_digest"] is None
+            assert reserved_page.json()["records"][0]["error_code"] is None
         bridge = SimpleNamespace(package_registry_reader=controller.read_package_registry)
         bot_page = await package_catalog_page_service(bridge)({
             "protocol": "forest.package-catalog-page-request/1", "limit": 16,
@@ -554,7 +580,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         untrusted_manifest = untrusted_source / "module.toml"
         untrusted_manifest.write_text(
             untrusted_manifest.read_text(encoding="utf-8").replace(
-                'version = "1.3.0"', 'version = "1.3.2"', 1
+                'version = "1.4.0"', 'version = "1.4.2"', 1
             ), encoding="utf-8",
         )
         untrusted = package_catalog.build(untrusted_source)
@@ -564,13 +590,13 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
                 package_digest=untrusted.digest,
                 expected_graph_revision=initial.graph_identity.graph_revision,
             )
-        assert untrusted_port.value.code == "DEPLOYMENT_PACKAGE_PORT_UNAVAILABLE"
+        assert untrusted_port.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
         next_source = tmp_path / "next-package-registry"
         shutil.copytree(registry_source, next_source)
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.3.0"', 'version = "1.3.1"', 1
+                'version = "1.4.0"', 'version = "1.4.1"', 1
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(next_source)

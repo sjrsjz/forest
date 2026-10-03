@@ -5,101 +5,93 @@
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     :root{color-scheme:dark;font:14px/1.4 system-ui,sans-serif;color:#dcebe2;background:#0d1712}
-    *{box-sizing:border-box}body{margin:0;padding:10px}section{border:1px solid #29493a;border-radius:9px;background:#102019;overflow:hidden}
-    header,.footer{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px}
-    header{border-bottom:1px solid #29493a}h2{font-size:16px;margin:0}small,#status{color:#91ac9a}
-    button,select,input{border:1px solid #365b49;border-radius:6px;background:#173426;color:#e9f7ef;padding:7px 12px;cursor:pointer}
-    button:disabled{opacity:.5;cursor:default}.list{max-height:410px;overflow:auto}
-    .row{display:grid;grid-template-columns:minmax(170px,1fr) 90px 95px minmax(150px,1fr) minmax(250px,1.5fr) auto;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid #203e30;min-width:900px}
+    *{box-sizing:border-box}body{margin:0;padding:10px}main{border:1px solid #29493a;border-radius:9px;background:#102019;overflow:hidden}
+    header,.toolbar,.footer{display:flex;align-items:center;gap:8px;padding:9px 12px;flex-wrap:wrap}
+    header{border-bottom:1px solid #29493a}h2{font-size:16px;margin:0 auto 0 0}small,#status{color:#91ac9a}
+    button,select,input{border:1px solid #365b49;border-radius:6px;background:#173426;color:#e9f7ef;padding:7px 10px}
+    button{cursor:pointer}button:disabled{opacity:.5;cursor:default}button.active{background:#315e47}
+    .toolbar{border-bottom:1px solid #29493a}.toolbar input{min-width:120px;flex:1}.toolbar input[type=file]{max-width:330px}
+    .list{max-height:350px;overflow:auto}.row{display:grid;grid-template-columns:minmax(150px,1fr) 90px 90px minmax(140px,1fr) minmax(210px,1.4fr) auto;align-items:center;gap:8px;padding:7px 12px;border-top:1px solid #203e30;min-width:850px}
     .row:first-child{border-top:0}.row code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.actions{display:flex;gap:6px}
-    #details{margin:0;border-top:1px solid #29493a;padding:12px;white-space:pre-wrap;overflow:auto;max-height:220px;font:12px/1.5 ui-monospace,monospace}
-    .import{justify-content:flex-start;border-bottom:1px solid #29493a}.import input{max-width:360px}
+    .import-row{grid-template-columns:100px minmax(180px,1fr) minmax(160px,1fr) minmax(210px,1.2fr) 170px;cursor:pointer}
+    .footer{justify-content:space-between;border-top:1px solid #29493a}#details{margin:0;border-top:1px solid #29493a;padding:10px;white-space:pre-wrap;overflow:auto;max-height:180px;font:12px/1.5 ui-monospace,monospace}
+    [hidden]{display:none!important}
   </style>
 </head>
 <body>
-  <section>
-    <header><h2>部署包目录</h2><small>全部署工件</small><select id="scope" aria-label="包范围"><option value="">全部范围</option><option value="bot">Bot</option><option value="deployment">部署</option><option value="host">宿主</option></select><button id="refresh" type="button">刷新</button></header>
-    <div class="footer import"><input id="zip" type="file" accept=".zip,application/zip" aria-label="选择部署包 ZIP"><button id="import" type="button">导入 ZIP</button><small>最多 32 MiB</small></div>
+  <main>
+    <header><h2>部署包目录</h2><button id="packages-tab" class="active" type="button">包目录</button><button id="imports-tab" type="button">导入记录</button><button id="refresh" type="button">刷新</button></header>
+    <div id="packages-tools" class="toolbar"><select id="scope" aria-label="包范围"><option value="">全部范围</option><option value="bot">Bot</option><option value="deployment">部署</option><option value="host">宿主</option></select><input id="zip" type="file" accept=".zip,application/zip" aria-label="选择部署包 ZIP"><button id="import" type="button">导入 ZIP</button><small>上限 32 MiB</small></div>
+    <div id="imports-tools" class="toolbar" hidden><select id="import-status" aria-label="导入状态"><option value="">全部状态</option><option>RESERVED</option><option>SUCCEEDED</option><option>REJECTED</option><option>INTERRUPTED</option></select><input id="import-actor" placeholder="管理员主体" aria-label="管理员主体"><input id="import-digest" placeholder="包摘要 sha256:…" aria-label="包摘要"><button id="filter-imports" type="button">查询</button></div>
     <div id="items" class="list"></div>
     <div class="footer"><span id="status">等待连接</span><button id="more" type="button" hidden>下一页</button></div>
     <pre id="details" hidden></pre>
-  </section>
+  </main>
   <script>
   (()=>{'use strict';
-    let port,nonce,sequence=0,pending=new Map(),revision=null,nextAfter=null,listingRequest=0,importKey=null;
+    let port,nonce,sequence=0,pending=new Map(),revision=null,nextCursor=null,requestNumber=0,importKey=null,view='packages';
     const byId=id=>document.getElementById(id),items=byId('items'),status=byId('status'),details=byId('details');
     const send=(type,payload={})=>port?.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
-    const resize=()=>send('resize',{height:Math.min(document.documentElement.scrollHeight,700)});
-    const query=(operation_id,value)=>new Promise((resolve,reject)=>{
-      const request_id=`packages-${++sequence}`;
-      const timer=setTimeout(()=>{pending.delete(request_id);reject(Error('目录查询超时'));},35000);
+    const resize=()=>send('resize',{height:Math.min(document.documentElement.scrollHeight,680)});
+    const request=(type,operation_id,value,file)=>new Promise((resolve,reject)=>{
+      const request_id='registry-'+(++sequence);
+      const timer=setTimeout(()=>{pending.delete(request_id);reject(Error('请求超时'));},type==='artifact-upload'?120000:60000);
       pending.set(request_id,{resolve:data=>{clearTimeout(timer);resolve(data);},reject:error=>{clearTimeout(timer);reject(error);}});
-      send('query',{request_id,operation_id,value});
+      if(type==='query')send(type,{request_id,operation_id,value});
+      else if(type==='artifact-download')send(type,{request_id,artifact_id:'archive',value});
+      else send(type,{request_id,artifact_id:'import',value:{},file,idempotency_key:importKey});
     });
-    const download=value=>new Promise((resolve,reject)=>{
-      const request_id=`archive-${++sequence}`;
-      const timer=setTimeout(()=>{pending.delete(request_id);reject(Error('工件下载超时'));},60000);
-      pending.set(request_id,{resolve:data=>{clearTimeout(timer);resolve(data);},reject:error=>{clearTimeout(timer);reject(error);}});
-      send('artifact-download',{request_id,artifact_id:'archive',value});
-    });
-    const upload=file=>new Promise((resolve,reject)=>{
-      const request_id=`import-${++sequence}`;
-      const timer=setTimeout(()=>{pending.delete(request_id);reject(Error('工件上传超时'));},120000);
-      pending.set(request_id,{resolve:data=>{clearTimeout(timer);resolve(data);},reject:error=>{clearTimeout(timer);reject(error);}});
-      send('artifact-upload',{request_id,artifact_id:'import',value:{},file,idempotency_key:importKey});
-    });
-    async function load(append=false){
-      const request=++listingRequest;
-      status.textContent='正在读取目录…';
-      byId('more').disabled=true;
-      try{
-        const cursor=append&&nextAfter?{...nextAfter,catalog_revision:revision}:{};
-        const scope=byId('scope').value;
-        const page=await query('packages',{limit:32,...(scope?{scope}:{}),...cursor});
-        if(request!==listingRequest)return;
-        if(!append)items.replaceChildren();
-        revision=page.catalog_revision;nextAfter=page.next_after;
-        for(const item of page.items){
-          const row=document.createElement('div');row.className='row';
-          for(const value of [item.package_id,item.package_version,item.scope,item.component_id,item.package_digest]){
-            const cell=document.createElement('code');cell.textContent=value;row.append(cell);
-          }
-          const inspect=document.createElement('button');inspect.type='button';inspect.textContent='详情';
-          inspect.onclick=async()=>{
-            inspect.disabled=true;
-            try{const value=await query('artifact',{package_digest:item.package_digest});details.textContent=JSON.stringify(value,null,2);details.hidden=false;resize();}
-            catch(error){status.textContent=error.message;}
-            finally{inspect.disabled=false;}
-          };
-          const archive=document.createElement('button');archive.type='button';archive.textContent='下载 ZIP';
-          archive.onclick=async()=>{
-            archive.disabled=true;
-            try{const saved=await download({package_digest:item.package_digest});status.textContent=`已下载 ${saved.byte_length} 字节`;}
-            catch(error){status.textContent=error.message;}
-            finally{archive.disabled=false;}
-          };
-          const actions=document.createElement('div');actions.className='actions';actions.append(inspect,archive);
-          row.append(actions);items.append(row);
-        }
-        byId('more').hidden=!nextAfter;
-        byId('more').disabled=false;
-        status.textContent=`已显示 ${items.children.length} 个部署包`;
-        resize();
-      }catch(error){if(request===listingRequest){status.textContent=error.message;byId('more').disabled=false;}}
+    const cell=(row,value)=>{const el=document.createElement('code');el.textContent=value??'—';el.title=String(value??'');row.append(el);};
+    const showDetails=value=>{details.textContent=JSON.stringify(value,null,2);details.hidden=false;resize();};
+    function packageRow(item){
+      const row=document.createElement('div');row.className='row';
+      for(const value of [item.package_id,item.package_version,item.scope,item.component_id,item.package_digest])cell(row,value);
+      const actions=document.createElement('div');actions.className='actions';
+      const inspect=document.createElement('button');inspect.type='button';inspect.textContent='详情';
+      inspect.onclick=async()=>{inspect.disabled=true;try{showDetails(await request('query','artifact',{package_digest:item.package_digest}));}catch(error){status.textContent=error.message;}finally{inspect.disabled=false;}};
+      const download=document.createElement('button');download.type='button';download.textContent='下载 ZIP';
+      download.onclick=async()=>{download.disabled=true;try{const result=await request('artifact-download',null,{package_digest:item.package_digest});status.textContent='已下载 '+result.byte_length+' 字节';}catch(error){status.textContent=error.message;}finally{download.disabled=false;}};
+      actions.append(inspect,download);row.append(actions);items.append(row);
     }
-    byId('refresh').onclick=()=>{revision=null;nextAfter=null;details.hidden=true;load(false);};
-    byId('zip').onchange=()=>{importKey=`import-${nonce}-${++sequence}`;};
+    function importRow(item){
+      const row=document.createElement('div');row.className='row import-row';
+      for(const value of [item.status,item.operation_id,item.actor_ref,item.package_digest||item.error_code,item.updated_at])cell(row,value);
+      row.onclick=()=>showDetails(item);items.append(row);
+    }
+    async function load(append=false){
+      const current=++requestNumber,active=view;status.textContent='正在读取…';byId('more').disabled=true;
+      try{
+        let page;
+        if(active==='packages'){
+          const scope=byId('scope').value;
+          page=await request('query','packages',{limit:32,...(scope?{scope}:{}),...(append&&nextCursor?{...nextCursor,catalog_revision:revision}:{})});
+        }else{
+          const selected=byId('import-status').value,actor=byId('import-actor').value.trim(),digest=byId('import-digest').value.trim();
+          page=await request('query','import.page',{limit:32,...(selected?{status:selected}:{}),...(actor?{actor_ref:actor}:{}),...(digest?{package_digest:digest}:{}),...(append&&nextCursor?{before:nextCursor}:{})});
+        }
+        if(current!==requestNumber||active!==view)return;
+        if(!append)items.replaceChildren();
+        if(active==='packages'){revision=page.catalog_revision;nextCursor=page.next_after;page.items.forEach(packageRow);}
+        else{nextCursor=page.next_before;page.records.forEach(importRow);}
+        byId('more').hidden=!nextCursor;byId('more').disabled=false;
+        status.textContent='已显示 '+items.children.length+' 条'+(active==='packages'?'包':'导入记录');resize();
+      }catch(error){if(current===requestNumber){status.textContent=error.message;byId('more').disabled=false;}}
+    }
+    function switchView(next){view=next;revision=null;nextCursor=null;details.hidden=true;byId('packages-tools').hidden=next!=='packages';byId('imports-tools').hidden=next!=='imports';byId('packages-tab').classList.toggle('active',next==='packages');byId('imports-tab').classList.toggle('active',next==='imports');load();}
+    byId('packages-tab').onclick=()=>switchView('packages');byId('imports-tab').onclick=()=>switchView('imports');
+    byId('refresh').onclick=()=>{revision=null;nextCursor=null;details.hidden=true;load();};
+    byId('filter-imports').onclick=()=>{nextCursor=null;details.hidden=true;load();};
+    byId('scope').onchange=()=>{revision=null;nextCursor=null;details.hidden=true;load();};
+    byId('more').onclick=()=>load(true);
+    byId('zip').onchange=()=>{importKey='import-'+nonce+'-'+(++sequence);};
     byId('import').onclick=async()=>{
       const button=byId('import'),file=byId('zip').files?.[0];
       if(!file){status.textContent='请先选择 ZIP 文件';return;}
-      if(!importKey)importKey=`import-${nonce}-${++sequence}`;
+      if(!importKey)importKey='import-'+nonce+'-'+(++sequence);
       button.disabled=true;status.textContent='正在导入 ZIP…';
-      try{const result=await upload(file);status.textContent=`已导入 ${result.package_id} ${result.package_version}`;await load(false);}
-      catch(error){status.textContent=error.message;}
-      finally{button.disabled=false;}
+      try{const result=await request('artifact-upload',null,null,file);status.textContent='已导入 '+result.package_id+' '+result.package_version;await load();}
+      catch(error){status.textContent=error.message;}finally{button.disabled=false;}
     };
-    byId('scope').onchange=()=>{revision=null;nextAfter=null;details.hidden=true;load(false);};
-    byId('more').onclick=()=>load(true);
     addEventListener('message',event=>{
       const message=event.data||{};
       if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect'||typeof message.nonce!=='string')return;
@@ -107,10 +99,10 @@
       port.onmessage=event=>{
         const value=event.data||{};
         if(value.protocol!=='forest.management-ui-channel/1'||value.nonce!==nonce)return;
-        if(value.type==='initialize'){resize();load(false);return;}
-        const request=pending.get(value.request_id);
-        if(request){pending.delete(value.request_id);if(value.type==='query-result'||value.type==='artifact-result'||value.type==='artifact-upload-result')request.resolve(value.value);else request.reject(Error(value.message||'目录操作失败'));}
-        else if(value.type==='error')status.textContent=value.message||'目录查询失败';
+        if(value.type==='initialize'){resize();load();return;}
+        const pendingRequest=pending.get(value.request_id);
+        if(pendingRequest){pending.delete(value.request_id);if(['query-result','artifact-result','artifact-upload-result'].includes(value.type))pendingRequest.resolve(value.value);else pendingRequest.reject(Error(value.message||'目录操作失败'));}
+        else if(value.type==='error')status.textContent=value.message||'目录操作失败';
       };
       port.start();send('ready');
     },{once:true});

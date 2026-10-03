@@ -700,6 +700,8 @@ MANIFEST_SCHEMA = {
                                     "type": "integer", "minimum": 1, "maximum": MAX_ARCHIVE_BYTES,
                                 },
                                 "required_role": {"enum": ["ADMIN", "AUDITOR"]},
+                                "reserve_port": {"type": "string"},
+                                "settle_port": {"type": "string"},
                             },
                         },
                     },
@@ -1564,6 +1566,13 @@ def _manifest(files: dict[str, bytes]) -> dict:
             effect_port_semantics.get(declaration["port"]) != expected
             or (declaration["direction"] == "upload"
                 and declaration.get("required_role", "ADMIN") != "ADMIN")
+            or (("reserve_port" in declaration) != ("settle_port" in declaration))
+            or (declaration["direction"] != "upload" and "reserve_port" in declaration)
+            or ("reserve_port" in declaration and (
+                declaration["reserve_port"] not in command_ports
+                or declaration["settle_port"] not in command_ports
+                or declaration["reserve_port"] == declaration["settle_port"]
+            ))
         ):
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",

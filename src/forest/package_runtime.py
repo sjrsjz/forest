@@ -1998,6 +1998,31 @@ class PackageGenerationAdapter:
             if self._service_inflight == 0:
                 self._services_drained.set()
 
+    async def invoke_management_artifact_command_in(
+        self, conn, declaration: dict, payload: dict, *, operation_id: str,
+    ) -> dict:
+        if declaration not in self.component.get("domain_commands", ()):
+            raise ForestError(
+                "MODULE_MANAGEMENT_BINDING_INVALID",
+                "Artifact hook is not a declared Domain Command", 409,
+            )
+        authority = self._domain_commands
+        if authority is None:
+            raise ForestError(
+                "CAPABILITY_UNAVAILABLE", "Artifact domain authority is unavailable", 503,
+            )
+        input_validator, output_validator = self._service_schemas[declaration["name"]]
+        if not isinstance(payload, dict) or not input_validator.is_valid(payload):
+            raise ForestError(
+                "MODULE_MANAGEMENT_INPUT_INVALID",
+                "Artifact hook input violates its immutable package schema", 422,
+            )
+        scope, parent_call_id = self._management_scope(operation_id)
+        return await authority.invoke_artifact_command_in(
+            conn, scope, declaration, payload, parent_call_id=parent_call_id,
+            timeout_seconds=30, result_validator=output_validator.is_valid,
+        )
+
     async def invoke_management_action(
         self,
         declaration: dict,

@@ -356,6 +356,39 @@ class PostgresPackageDomainAuthority:
                 "DOMAIN_AUTHORITY_FAILED", "Domain authority transaction failed", 503
             ) from exc
 
+    async def invoke_artifact_command_in(
+        self, conn, scope: PackageCallScope, declaration: dict, payload: dict,
+        *, parent_call_id: str, timeout_seconds: float, result_validator,
+    ) -> Any:
+        """Execute a declared artifact hook inside the Web authority transaction."""
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                await self.runtime.verify_active_generation_in(
+                    conn, component_id=self.component_id,
+                    generation_id=scope.generation_id, admission_lane="CONTROL",
+                )
+                result = await self._invoke_in(
+                    conn, "management_action", scope, declaration, payload,
+                    parent_call_id=parent_call_id, timeout_seconds=timeout_seconds,
+                    generation_verified=True,
+                )
+                if not result_validator(result):
+                    raise ForestError(
+                        "MODULE_MANAGEMENT_OUTPUT_INVALID",
+                        "Artifact command result violates its package schema", 502,
+                    )
+                return result
+        except ForestError:
+            raise
+        except TimeoutError as exc:
+            raise ForestError(
+                "DOMAIN_AUTHORITY_TIMEOUT", "Domain authority exceeded its deadline", 504
+            ) from exc
+        except psycopg.Error as exc:
+            raise ForestError(
+                "DOMAIN_AUTHORITY_FAILED", "Domain authority transaction failed", 503
+            ) from exc
+
     async def invoke_owned_work(
         self,
         phase: str,
