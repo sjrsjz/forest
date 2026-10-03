@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.runtime_contracts import RuntimeUnitOfWorkParticipantHandle
 from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.kernel_audit import AuditEnvelope
 
@@ -66,9 +67,10 @@ class ShellManagementAuthorization:
         if registry is None:
             raise ForestError("KERNEL_UNAVAILABLE", "RuntimeGraph is unavailable", 503)
         try:
-            shell = registry.get("shell.command")
-            participant = shell.unit_of_work_participant()
-        except (KeyError, AttributeError) as exc:
+            participant = RuntimeUnitOfWorkParticipantHandle(
+                registry.contract_router, "shell.command"
+            ).resolve()
+        except ForestError as exc:
             raise ForestError(
                 "SHELL_MANAGEMENT_AUTHORITY_UNAVAILABLE",
                 "Shell claim verifier is unavailable",
