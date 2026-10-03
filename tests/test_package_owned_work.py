@@ -105,3 +105,24 @@ async def test_timed_out_backlog_probe_retries_without_declaring_queue_empty():
         assert failures == []
     finally:
         await supervisor.close()
+
+
+async def test_inflight_freeze_during_poll_delay_does_not_start_new_claim():
+    class CountingAuthority:
+        calls = 0
+
+        async def invoke_owned_work(self, *_args, **_kwargs):
+            self.calls += 1
+            return None
+
+    authority = CountingAuthority()
+    supervisor = _supervisor("inflight", authority, [])
+    supervisor.open_admission()
+    name = supervisor.declarations[0]["name"]
+    supervisor._next_claim_at[name] = asyncio.get_running_loop().time() + 0.05
+    pending = asyncio.create_task(supervisor._claim_when_due(supervisor.declarations[0]))
+    await asyncio.sleep(0)
+    assert supervisor._claim_locks[name].locked()
+    supervisor.freeze_admission()
+    assert await asyncio.wait_for(pending, 1) is None
+    assert authority.calls == 0

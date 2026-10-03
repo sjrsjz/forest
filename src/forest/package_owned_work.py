@@ -246,6 +246,8 @@ class PackageOwnedWorkSupervisor:
             delay = self._next_claim_at[name] - asyncio.get_running_loop().time()
             if delay > 0:
                 await asyncio.sleep(delay)
+            if self.drain_policy == "inflight" and not self.admission.is_set():
+                return None
             claim = await self._claim(declaration)
             now = asyncio.get_running_loop().time()
             self._next_claim_at[name] = (
