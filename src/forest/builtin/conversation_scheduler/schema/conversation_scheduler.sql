@@ -3654,6 +3654,85 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION conversation_list_claim_anomalies(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_conversation text := input->>'conversation_id';
+    after_conversation text := input->>'after_conversation_id';
+    after_claim text := input->>'after_claim_ref';
+    requested_limit integer := (input->>'limit')::integer;
+    items_value jsonb;
+    has_more_value boolean;
+    next_conversation text;
+    next_claim text;
+BEGIN
+    IF requested_limit IS NULL OR requested_limit NOT BETWEEN 1 AND 50
+       OR (requested_conversation IS NOT NULL
+           AND octet_length(requested_conversation) NOT BETWEEN 1 AND 256)
+       OR (after_conversation IS NULL) IS DISTINCT FROM (after_claim IS NULL)
+       OR (after_conversation IS NOT NULL
+           AND octet_length(after_conversation) NOT BETWEEN 1 AND 256)
+       OR (after_claim IS NOT NULL AND after_claim !~ '^claim:[a-f0-9]{64}$') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONVERSATION_CLAIM_ANOMALY_LIST_INVALID',
+                'message','Claim anomaly filter is invalid','status',422));
+    END IF;
+    WITH page AS (
+        SELECT g.conversation_id,g.claim_ref,g.session_ref,g.run_ref,
+               l.channel_kind,l.channel_ref,
+               l.active_session_ref AS lane_session_ref,
+               l.active_run_ref AS lane_run_ref,
+               CASE WHEN l.active_session_ref IS NULL AND l.active_run_ref IS NULL
+                    THEN 'MULTIPLE_ACTIVE_GROUPS'
+                    ELSE 'LANE_CLAIM_MISMATCH' END AS anomaly_code
+        FROM __forest_module_schema__.trigger_claim_groups g
+        JOIN __forest_module_schema__.conversation_lanes l
+          ON l.bot_id=g.bot_id AND l.conversation_id=g.conversation_id
+        WHERE g.bot_id=requested_bot AND g.claim_state='ACTIVE'
+          AND (requested_conversation IS NULL
+               OR g.conversation_id=requested_conversation)
+          AND (after_conversation IS NULL
+               OR (g.conversation_id,g.claim_ref)>(after_conversation,after_claim))
+          AND (
+              (l.active_session_ref=g.session_ref AND l.active_run_ref=g.run_ref)
+              OR (l.active_session_ref IS NULL AND l.active_run_ref IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM __forest_module_schema__.trigger_claim_groups other
+                      WHERE other.bot_id=g.bot_id
+                        AND other.conversation_id=g.conversation_id
+                        AND other.claim_state='ACTIVE'
+                        AND other.claim_ref<>g.claim_ref
+                  ))
+          ) IS NOT TRUE
+        ORDER BY g.conversation_id,g.claim_ref LIMIT requested_limit+1
+    ), numbered AS (
+        SELECT *,row_number() OVER (ORDER BY conversation_id,claim_ref) AS rn
+        FROM page
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+               'conversation_id',conversation_id,'channel_kind',channel_kind,
+               'channel_ref',channel_ref,'claim_ref',claim_ref,
+               'session_ref',session_ref,'run_ref',run_ref,
+               'lane_session_ref',lane_session_ref,'lane_run_ref',lane_run_ref,
+               'anomaly_code',anomaly_code
+           ) ORDER BY conversation_id,claim_ref)
+           FILTER (WHERE rn<=requested_limit),'[]'::jsonb),
+           COALESCE(bool_or(rn>requested_limit),false),
+           max(conversation_id) FILTER (WHERE rn=requested_limit),
+           max(claim_ref) FILTER (WHERE rn=requested_limit)
+    INTO items_value,has_more_value,next_conversation,next_claim FROM numbered;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.conversation-claim-anomalies/1',
+            'items',items_value,'has_more',has_more_value,
+            'next_cursor',CASE WHEN has_more_value THEN jsonb_build_object(
+                'conversation_id',next_conversation,'claim_ref',next_claim
+            ) ELSE NULL END
+        ));
+END;
+$$;
+
 CREATE FUNCTION conversation_requeue_run(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.22.1"
+version = "4.23.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -82,9 +82,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.18.0"
+schema_version = "4.19.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "bbcbbf60b04914e87767d97d7578347af8e76d7d7b2b8a8b53812d3f3e48ac8a"
+baseline_sha256 = "da9ecc9f5dafdc9c9c50838b6fbf56e01875fda30600b08efbc5574159335f79"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -110,6 +110,13 @@ function = "conversation_list_requeue_candidates"
 input_schema = "schemas/requeue-candidates-input.json"
 output_schema = "schemas/requeue-candidates-output.json"
 
+[[components.domain_queries]]
+name = "conversation.list-claim-anomalies"
+contract = "1.0"
+function = "conversation_list_claim_anomalies"
+input_schema = "schemas/claim-anomalies-input.json"
+output_schema = "schemas/claim-anomalies-output.json"
+
 [[components.domain_commands]]
 name = "conversation.request-requeue"
 contract = "1.0"
@@ -126,6 +133,14 @@ timeout_s = 10
 [[components.management_queries]]
 id = "conversation.requeue.candidates"
 port = "conversation.list-requeue-candidates"
+required_role = "ADMIN"
+default_limit = 20
+max_limit = 50
+timeout_s = 10
+
+[[components.management_queries]]
+id = "conversation.claim.anomalies"
+port = "conversation.list-claim-anomalies"
 required_role = "ADMIN"
 default_limit = 20
 max_limit = 50

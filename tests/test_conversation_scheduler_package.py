@@ -105,6 +105,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
@@ -1620,6 +1621,66 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                              "run_ref": "prefill-run"},
                         ))["value"]["state"] == "APPLIED"
                         raise _RollbackOrphan
+                with pytest.raises(_RollbackOrphan):
+                    async with store.pool.connection() as conn, conn.transaction():
+                        await conn.execute(
+                            sql.SQL("INSERT INTO {}.trigger_claim_groups("
+                                    "bot_id,conversation_id,claim_ref,session_ref,run_ref,"
+                                    "trigger_count,segment_count,last_trigger_ref,"
+                                    "last_trigger_ingress_seq,claim_digest) "
+                                    "VALUES (%s,%s,%s,%s,%s,1,1,%s,1,%s)")
+                            .format(sql.Identifier(namespace)),
+                            (store.bot_id, prefill_conversation, "claim:" + "f" * 64,
+                             "orphan-session", "orphan-run", "orphan-trigger",
+                             "sha256:" + "f" * 64),
+                        )
+
+                        async def anomaly_page(after=None):
+                            payload = {"conversation_id": prefill_conversation, "limit": 1}
+                            if after is not None:
+                                payload.update(after_conversation_id=after["conversation_id"],
+                                               after_claim_ref=after["claim_ref"])
+                            row = await (
+                                await conn.execute(
+                                    sql.SQL("SELECT {}.conversation_list_claim_anomalies("
+                                            "%s::jsonb,%s::jsonb) AS result")
+                                    .format(sql.Identifier(namespace)),
+                                    (Jsonb({"bot_id": store.bot_id}), Jsonb(payload)),
+                                )
+                            ).fetchone()
+                            return row["result"]["value"]
+
+                        first_page = await anomaly_page()
+                        assert first_page["has_more"] is True
+                        second_page = await anomaly_page(first_page["next_cursor"])
+                        assert second_page["has_more"] is False
+                        assert {item["claim_ref"] for item in
+                                first_page["items"] + second_page["items"]} == {
+                            claim_ref, "claim:" + "f" * 64,
+                        }
+                        assert all(item["anomaly_code"] == "MULTIPLE_ACTIVE_GROUPS"
+                                   for item in first_page["items"] + second_page["items"])
+                        await conn.execute(
+                            sql.SQL("UPDATE {}.conversation_lanes SET "
+                                    "active_session_ref=%s WHERE bot_id=%s "
+                                    "AND conversation_id=%s")
+                            .format(sql.Identifier(namespace)),
+                            ("unrelated-session", store.bot_id, prefill_conversation),
+                        )
+                        mismatched = await (
+                            await conn.execute(
+                                sql.SQL("SELECT {}.conversation_list_claim_anomalies("
+                                        "%s::jsonb,%s::jsonb) AS result")
+                                .format(sql.Identifier(namespace)),
+                                (Jsonb({"bot_id": store.bot_id}),
+                                 Jsonb({"conversation_id": prefill_conversation,
+                                        "limit": 20})),
+                            )
+                        ).fetchone()
+                        assert len(mismatched["result"]["value"]["items"]) == 2
+                        assert all(item["anomaly_code"] == "LANE_CLAIM_MISMATCH"
+                                   for item in mismatched["result"]["value"]["items"])
+                        raise _RollbackOrphan
             else:
                 assert prefilled["trigger_claim"]["count"] == 128
                 assert prefilled["trigger_claim"]["last_trigger_ref"] == "prefill-trigger/128"
@@ -1666,6 +1727,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ).fetchone()
         assert candidates["result"]["value"]["items"][0]["run_ref"] == "prefill-run"
         assert candidates["result"]["value"]["has_more"] is False
+        healthy = await instance.management_contract.query(
+            "conversation.claim.anomalies",
+            {"conversation_id": prefill_conversation, "limit": 20},
+        )
+        assert healthy["items"] == []
         authorization = SimpleNamespace(
             actor_ref="subject/package-admin",
             web_subject_ref="subject/package-admin",
