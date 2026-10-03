@@ -288,6 +288,60 @@ class PackageOwnedWorkSupervisor:
                 502,
             )
 
+    async def _deliver_with_renew(self, declaration: dict, claim: dict, delivery):
+        if "renew_function" not in declaration:
+            return await delivery
+        task = asyncio.create_task(delivery)
+        claim_hash = hashlib.sha256(claim["claim_token"].encode("utf-8")).hexdigest()
+        renewal_no = 0
+        try:
+            while True:
+                done, _ = await asyncio.wait(
+                    {task}, timeout=declaration["renew_interval_s"]
+                )
+                if done:
+                    return await task
+                renewal_no += 1
+                try:
+                    result = await self.authority.invoke_owned_work(
+                        "renew",
+                        self._scope(
+                            f"owned-renew:{claim_hash}:{renewal_no}",
+                            causal_root_kind=claim["causal_root_kind"],
+                            causal_root_id=claim["causal_root_id"],
+                        ),
+                        declaration,
+                        {
+                            "protocol": "forest.owned-work-renew-request/1",
+                            "work_id": claim["work_id"],
+                            "claim_token": claim["claim_token"],
+                            "attempt": claim["attempt"],
+                            "lease_seconds": declaration["lease_seconds"],
+                        },
+                        timeout_seconds=declaration["renew_timeout_s"],
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise ForestError(
+                        "OWNED_WORK_RENEWAL_LOST",
+                        "Claim renewal failed; effect outcome requires reconciliation",
+                        503,
+                    ) from exc
+                if result != {
+                    "protocol": "forest.owned-work-renewed/1",
+                    "work_id": claim["work_id"],
+                }:
+                    raise ForestError(
+                        "OWNED_WORK_RENEWAL_LOST",
+                        "Claim renewal returned an invalid acknowledgement",
+                        503,
+                    )
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
     async def _execute(self, declaration: dict, claim: dict) -> None:
         identity, _prepared, worker = self.binding()
         scope = self._scope(
@@ -310,11 +364,15 @@ class PackageOwnedWorkSupervisor:
         }
         stage = "before"
         try:
-            admission = await self.operation_ledger.begin(scope, route, operation_input)
+            admission = await self._deliver_with_renew(
+                declaration, claim,
+                self.operation_ledger.begin(scope, route, operation_input),
+            )
             if admission.execute:
                 stage = "dispatch"
-                self.call_started(scope.call_id)
-                try:
+
+                async def run_handler():
+                    nonlocal stage
                     result = await worker.deliver_job(
                         declaration["handler"],
                         {
@@ -333,18 +391,25 @@ class PackageOwnedWorkSupervisor:
                             generation_id=identity.generation_id,
                         ),
                     )
+                    _input_validator, output_validator = self.schemas[declaration["name"]]
+                    if not output_validator.is_valid(result):
+                        raise ForestError(
+                            "OWNED_WORK_OUTPUT_INVALID",
+                            "Package owned work result violates its immutable schema",
+                            502,
+                        )
+                    stage = "ledger-commit"
+                    await self.operation_ledger.succeed(scope, route, result)
+                    stage = "done"
+                    return result
+
+                self.call_started(scope.call_id)
+                try:
+                    result = await self._deliver_with_renew(
+                        declaration, claim, run_handler()
+                    )
                 finally:
                     self.call_finished(scope.call_id)
-                _input_validator, output_validator = self.schemas[declaration["name"]]
-                if not output_validator.is_valid(result):
-                    raise ForestError(
-                        "OWNED_WORK_OUTPUT_INVALID",
-                        "Package owned work result violates its immutable schema",
-                        502,
-                    )
-                stage = "ledger-commit"
-                await self.operation_ledger.succeed(scope, route, result)
-                stage = "done"
             elif admission.error is not None:
                 stage = "replay-failure"
                 raise ForestError(
@@ -366,6 +431,8 @@ class PackageOwnedWorkSupervisor:
         except asyncio.CancelledError:
             raise
         except ForestError as error:
+            if error.code == "OWNED_WORK_RENEWAL_LOST":
+                raise
             if stage in {"before", "ledger-commit"}:
                 raise
             if stage == "dispatch":

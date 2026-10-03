@@ -398,9 +398,11 @@ class PostgresPackageDomainAuthority:
         *,
         timeout_seconds: float,
     ) -> Any:
-        if phase not in {"claim", "settle"}:
+        if phase not in {"claim", "renew", "settle"}:
             raise ForestError("OWNED_WORK_PHASE_INVALID", "Owned work phase is invalid", 422)
         function = declaration.get(f"{phase}_function")
+        if function is None:
+            raise ForestError("OWNED_WORK_PHASE_INVALID", "Owned work phase is undeclared", 422)
         port = {
             "name": f"{declaration.get('name', '')}.{phase}",
             "function": function,
@@ -550,6 +552,7 @@ class PostgresPackageDomainAuthority:
                 "management_action",
                 "participant",
                 "owned_claim",
+                "owned_renew",
                 "owned_settle",
             }
         ):

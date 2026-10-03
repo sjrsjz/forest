@@ -599,6 +599,7 @@ MANIFEST_SCHEMA = {
                                         "handler",
                                         "claim_function",
                                         "settle_function",
+                                        "renew_function",
                                         "input_schema",
                                         "output_schema",
                                     )
@@ -619,6 +620,16 @@ MANIFEST_SCHEMA = {
                                     "type": "integer",
                                     "minimum": 1,
                                     "maximum": 60,
+                                },
+                                "renew_timeout_s": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 60,
+                                },
+                                "renew_interval_s": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": 3600,
                                 },
                                 "lease_seconds": {
                                     "type": "integer",
@@ -1530,17 +1541,29 @@ def _manifest(files: dict[str, bytes]) -> dict:
                         "INVALID_MANAGEMENT_ASSETS",
                         "Asset-backed payload refs require a matching management action and exact metadata paths",
                     )
-        if service in owned_work_handlers and (
-            not SQL_FUNCTION.fullmatch(service.get("claim_function", ""))
-            or not SQL_FUNCTION.fullmatch(service.get("settle_function", ""))
-            or not IDENTIFIER.fullmatch(service.get("handler", ""))
-            or service["lease_seconds"]
-            <= service["handler_timeout_s"] + service["settle_timeout_s"]
-        ):
-            _fail(
-                "INVALID_OWNED_WORK",
-                "Owned work requires valid functions, handler, and a lease beyond execution",
-            )
+        if service in owned_work_handlers:
+            renewable = "renew_function" in service
+            if (
+                not SQL_FUNCTION.fullmatch(service.get("claim_function", ""))
+                or not SQL_FUNCTION.fullmatch(service.get("settle_function", ""))
+                or not IDENTIFIER.fullmatch(service.get("handler", ""))
+                or renewable != ("renew_timeout_s" in service)
+                or renewable != ("renew_interval_s" in service)
+                or (renewable and (
+                    not SQL_FUNCTION.fullmatch(service["renew_function"])
+                    or service["lease_seconds"] <= (
+                        service["renew_interval_s"] + service["renew_timeout_s"]
+                        + service["settle_timeout_s"]
+                    )
+                ))
+                or (not renewable and service["lease_seconds"] <= (
+                    service["handler_timeout_s"] + service["settle_timeout_s"]
+                ))
+            ):
+                _fail(
+                    "INVALID_OWNED_WORK",
+                    "Owned work requires a fenced lease beyond execution or renewal",
+                )
     if (
         domain_queries or domain_commands or unit_of_work_participants or owned_work_handlers
     ) and component.get("storage") is None:
@@ -1550,7 +1573,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
     ] + [
         function
         for item in owned_work_handlers
-        for function in (item["claim_function"], item["settle_function"])
+        for function in (item["claim_function"], item["settle_function"],
+                         *([item["renew_function"]] if "renew_function" in item else []))
     ]
     if len(functions) != len(set(functions)):
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority functions must be unique")
