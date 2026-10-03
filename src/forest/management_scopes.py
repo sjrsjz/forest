@@ -260,7 +260,7 @@ class DeploymentManagementGateway:
                     operation_id=operation_id, action_key=f"artifact.{artifact_id}.upload",
                     input_digest=digest_json(body), plan_digest=None,
                 )
-                await contract.artifact_command_in(
+                reservation = await contract.artifact_command_in(
                     conn, artifact_id, "reserve", {
                         "operation_id": operation_id,
                         "actor_ref": authorization.web_subject_ref,
@@ -269,8 +269,19 @@ class DeploymentManagementGateway:
                         "archive_sha256": content_sha256,
                     }, operation_id=operation_id,
                 )
+            if reservation is not None and reservation["status"] in {
+                "REJECTED", "INTERRUPTED",
+            }:
+                raise ForestError(
+                    "PACKAGE_IMPORT_ALREADY_TERMINAL",
+                    "This import operation has a terminal result", 409,
+                )
+
+            publish_started = False
 
             async def commit(content: bytes):
+                nonlocal publish_started
+                publish_started = True
                 result = await publish(
                     content, operation_id=operation_id,
                     actor_ref=authorization.web_subject_ref,
@@ -293,7 +304,48 @@ class DeploymentManagementGateway:
                     )
                 return result
 
-            yield max_bytes, commit
+            try:
+                yield max_bytes, commit
+            except ForestError as error:
+                if reservation is not None and reservation["status"] == "RESERVED" and (
+                    not publish_started and error.code in {
+                    "PACKAGE_TOO_LARGE", "PACKAGE_ARCHIVE_DIGEST_MISMATCH",
+                    }
+                ):
+                    receipt = await contract.artifact_receipt(
+                        artifact_id, {
+                            "operation_id": operation_id,
+                            "actor_ref": authorization.web_subject_ref,
+                            "archive_sha256": content_sha256,
+                        },
+                    )
+                    if receipt is None:
+                        raise ForestError(
+                            "PACKAGE_ARTIFACT_RECEIPT_UNAVAILABLE",
+                            "Artifact rejection requires durable receipt evidence", 503,
+                        )
+                    settlement = {
+                        "operation_id": operation_id,
+                        "actor_ref": authorization.web_subject_ref,
+                        "archive_sha256": content_sha256,
+                        "status": "SUCCEEDED" if receipt["found"] else "REJECTED",
+                    }
+                    if receipt["found"]:
+                        settlement["package_digest"] = receipt["package_digest"]
+                    else:
+                        settlement["error_code"] = error.code
+                    async with self.web_receipts.store.pool.connection() as conn, conn.transaction():
+                        await self._authorize_mutation_in(
+                            conn, ticket=authorization, component_id=component_id,
+                            operation_id=operation_id,
+                            action_key=f"artifact.{artifact_id}.upload",
+                            input_digest=digest_json(body), plan_digest=None,
+                        )
+                        await contract.artifact_command_in(
+                            conn, artifact_id, "settle", settlement,
+                            operation_id=operation_id,
+                        )
+                raise
 
     async def plan_configuration(
         self, component_id: str, *, authorization=None, operation_id=None, **_values

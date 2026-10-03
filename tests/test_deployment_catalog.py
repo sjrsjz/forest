@@ -510,6 +510,50 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
             assert len(imports.json()["records"]) == 1
             assert imports.json()["records"][0]["status"] == "SUCCEEDED"
             assert imports.json()["records"][0]["package_digest"] == upload_package.digest
+            bad_bytes = b"x" * len(upload_bytes)
+            bad_replay = await client.post(
+                upload_path, headers=upload_headers, content=bad_bytes,
+            )
+            assert bad_replay.status_code == 422, bad_replay.text
+            still_succeeded = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/queries/import.page",
+                headers={
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": client.cookies["forest_management_csrf"],
+                },
+                json={"operation_id": receipt_input["operation_id"]},
+            )
+            assert still_succeeded.json()["records"][0]["status"] == "SUCCEEDED"
+            mismatched_headers = {
+                **upload_headers,
+                "idempotency-key": "test-package-upload-bad-digest",
+                "x-forest-artifact-sha256": "sha256:" + "0" * 64,
+            }
+            mismatched = await client.post(
+                upload_path, headers=mismatched_headers, content=upload_bytes,
+            )
+            assert mismatched.status_code == 422, mismatched.text
+            assert mismatched.json()["code"] == "PACKAGE_ARCHIVE_DIGEST_MISMATCH"
+            rejected = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/queries/import.page",
+                headers={
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": client.cookies["forest_management_csrf"],
+                },
+                json={"status": "REJECTED"},
+            )
+            assert rejected.status_code == 200, rejected.text
+            assert len(rejected.json()["records"]) == 1
+            assert rejected.json()["records"][0]["error_code"] == (
+                "PACKAGE_ARCHIVE_DIGEST_MISMATCH"
+            )
+            terminal_replay = await client.post(
+                upload_path, headers=mismatched_headers, content=upload_bytes,
+            )
+            assert terminal_replay.status_code == 409, terminal_replay.text
+            assert terminal_replay.json()["code"] == "PACKAGE_IMPORT_ALREADY_TERMINAL"
             changed_bytes = upload_bytes + b"changed"
             changed_headers = {
                 **upload_headers,
@@ -580,7 +624,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         untrusted_manifest = untrusted_source / "module.toml"
         untrusted_manifest.write_text(
             untrusted_manifest.read_text(encoding="utf-8").replace(
-                'version = "1.4.0"', 'version = "1.4.2"', 1
+                'version = "1.4.1"', 'version = "1.4.3"', 1
             ), encoding="utf-8",
         )
         untrusted = package_catalog.build(untrusted_source)
@@ -596,7 +640,7 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.4.0"', 'version = "1.4.1"', 1
+                'version = "1.4.1"', 'version = "1.4.2"', 1
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(next_source)

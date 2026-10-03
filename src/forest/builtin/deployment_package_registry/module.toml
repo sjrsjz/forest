@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-package-registry"
-version = "1.4.0"
+version = "1.4.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_package_registry:DeploymentPackageRegistry"
@@ -171,3 +171,4 @@ max_bytes = 33554432
 required_role = "ADMIN"
 reserve_port = "deployment.package-registry.import.reserve"
 settle_port = "deployment.package-registry.import.settle"
+receipt_query = "import.receipt"

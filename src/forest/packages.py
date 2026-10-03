@@ -702,6 +702,7 @@ MANIFEST_SCHEMA = {
                                 "required_role": {"enum": ["ADMIN", "AUDITOR"]},
                                 "reserve_port": {"type": "string"},
                                 "settle_port": {"type": "string"},
+                                "receipt_query": {"type": "string"},
                             },
                         },
                     },
@@ -1567,7 +1568,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
             or (declaration["direction"] == "upload"
                 and declaration.get("required_role", "ADMIN") != "ADMIN")
             or (("reserve_port" in declaration) != ("settle_port" in declaration))
+            or (("reserve_port" in declaration) != ("receipt_query" in declaration))
             or (declaration["direction"] != "upload" and "reserve_port" in declaration)
+            or ("receipt_query" in declaration and declaration["receipt_query"] not in {
+                item["id"] for item in management_queries
+            })
             or ("reserve_port" in declaration and (
                 declaration["reserve_port"] not in command_ports
                 or declaration["settle_port"] not in command_ports
