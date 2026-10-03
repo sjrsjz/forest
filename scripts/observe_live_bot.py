@@ -47,6 +47,10 @@ def parser() -> argparse.ArgumentParser:
         "--component-id", action="append", default=[],
         help="Include one current Graph component's Generation identity (at most eight).",
     )
+    value.add_argument(
+        "--deployment-component-id", action="append", default=[],
+        help="Require one active deployment Graph component (at most eight).",
+    )
     return value
 
 
@@ -64,23 +68,85 @@ def _validate(arguments: argparse.Namespace) -> None:
     if any(re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", item) is None
            for item in arguments.component_id):
         raise SystemExit("--component-id must be a valid component ID")
+    if (len(arguments.deployment_component_id) > 8 or
+            len(set(arguments.deployment_component_id)) != len(arguments.deployment_component_id)):
+        raise SystemExit("--deployment-component-id accepts at most eight distinct components")
+    if any(re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", item) is None
+           for item in arguments.deployment_component_id):
+        raise SystemExit("--deployment-component-id must be a valid component ID")
 
 
-async def _deployment_state(store, bot_id: str) -> dict:
+async def _deployment_state(
+    store, bot_id: str, component_ids: tuple[str, ...] = (),
+) -> dict:
     async with store.pool.connection() as connection:
-        row = await (
-            await connection.execute(
-                "SELECT b.supply_state,i.desired_state,o.observed_state,o.error_code "
-                "FROM forest_deployment.bots b "
-                "JOIN forest_deployment.runtime_intents i USING(bot_id) "
-                "LEFT JOIN forest_deployment.runtime_observations o USING(bot_id) "
-                "WHERE b.bot_id=%s",
-                (bot_id,),
-            )
-        ).fetchone()
+        async with connection.transaction():
+            await connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            row = await (
+                await connection.execute(
+                    "SELECT b.supply_state,i.desired_state,o.observed_state,o.error_code "
+                    "FROM forest_deployment.bots b "
+                    "JOIN forest_deployment.runtime_intents i USING(bot_id) "
+                    "LEFT JOIN forest_deployment.runtime_observations o USING(bot_id) "
+                    "WHERE b.bot_id=%s",
+                    (bot_id,),
+                )
+            ).fetchone()
+            graph = None
+            if component_ids:
+                schema = await (
+                    await connection.execute(
+                        "SELECT to_regclass('forest_deployment.runtime_graph_clock') "
+                        "AS graph_clock"
+                    )
+                ).fetchone()
+                if schema["graph_clock"] is None:
+                    raise RuntimeError(
+                        "DEPLOYMENT_SCHEMA_INCOMPATIBLE: runtime_graph_clock is absent; "
+                        "install the candidate deployment baseline before checking packages"
+                    )
+                graph = await (
+                    await connection.execute(
+                        "SELECT c.active_graph_id,g.graph_revision,g.state "
+                        "FROM forest_deployment.runtime_graph_clock c "
+                        "LEFT JOIN forest_deployment.runtime_graphs g "
+                        "ON g.deployment_id=c.deployment_id AND g.graph_id=c.active_graph_id "
+                        "WHERE c.deployment_id=%s",
+                        (store.deployment_id,),
+                    )
+                ).fetchone()
+                members = await (
+                    await connection.execute(
+                        "SELECT m.component_id,m.generation_id,m.control_admission,"
+                        "m.data_admission,g.state AS generation_state "
+                        "FROM forest_deployment.runtime_graph_clock c "
+                        "JOIN forest_deployment.runtime_graph_members m "
+                        "ON m.deployment_id=c.deployment_id AND m.graph_id=c.active_graph_id "
+                        "JOIN forest_deployment.runtime_generations g "
+                        "ON g.deployment_id=m.deployment_id AND g.generation_id=m.generation_id "
+                        "WHERE c.deployment_id=%s AND m.component_id=ANY(%s) "
+                        "ORDER BY m.component_id",
+                        (store.deployment_id, list(component_ids)),
+                    )
+                ).fetchall()
     if row is None:
         raise RuntimeError("BOT_NOT_FOUND")
-    return dict(row)
+    result = dict(row)
+    if component_ids:
+        result["graph"] = {
+            "graph_id": graph["active_graph_id"] if graph else None,
+            "graph_revision": graph["graph_revision"] if graph else None,
+            "state": graph["state"] if graph else None,
+            "components": {component_id: None for component_id in component_ids},
+        }
+        for member in members:
+            result["graph"]["components"][member["component_id"]] = {
+                "generation_id": member["generation_id"],
+                "state": member["generation_state"],
+                "control_admission": member["control_admission"],
+                "data_admission": member["data_admission"],
+            }
+    return result
 
 
 async def _bot_state(
@@ -382,6 +448,14 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
         failures.append("DEPLOYMENT_INTENT_INVALID")
     if deployment["observed_state"] != "ONLINE" or deployment["error_code"] is not None:
         failures.append("DEPLOYMENT_OBSERVATION_INVALID")
+    if "graph" in deployment:
+        graph = deployment["graph"]
+        if graph["state"] != "ACTIVE":
+            failures.append("DEPLOYMENT_GRAPH_INACTIVE")
+        if any(member is None or member["state"] != "ACTIVE" or
+               not member["control_admission"]
+               for member in graph["components"].values()):
+            failures.append("DEPLOYMENT_COMPONENT_INACTIVE")
     if bot["schema_bundles"] != EXPECTED_COMPONENTS or bot["members"] != EXPECTED_COMPONENTS:
         failures.append("RUNTIME_GRAPH_CARDINALITY_INVALID")
     if bot["lifecycle_recorded"] != EXPECTED_COMPONENTS or bot["active_members"] != EXPECTED_COMPONENTS:
@@ -428,7 +502,9 @@ async def observe(arguments: argparse.Namespace) -> int:
         await bot_store.open()
         while True:
             deployment_state, bot_state, health_status = await asyncio.gather(
-                _deployment_state(deployment, arguments.bot_id),
+                _deployment_state(
+                    deployment, arguments.bot_id, tuple(arguments.deployment_component_id),
+                ),
                 _bot_state(
                     bot_store, arguments.bot_id, arguments.stale_seconds,
                     arguments.group_id, tuple(arguments.component_id),

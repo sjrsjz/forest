@@ -124,6 +124,8 @@ docker run --rm --no-healthcheck --network forest-clean_default `
   --duration-seconds 3600 --interval-seconds 30
 ```
 
+验收部署级包时追加 `--deployment-component-id deployment.provisioning`。探针会在部署库的只读 repeatable-read 快照中报告当前 Graph、该组件的 Generation 状态与控制入口；Graph 非 ACTIVE，或指定组件缺席、非 ACTIVE、无控制入口，均产生违反项。该选项默认不启用，以便先观察旧镜像和旧部署图；它只能证明包已发布并允许控制调用，不能单独证明供应 Job 已改由包编排。
+
 要核对模块级热重载的实际影响，可重复传入 `--component-id audit.console --component-id kernel.audit`（最多八个不同组件）。探针在同一只读 repeatable-read 快照内返回当前 Graph 中这些组件的 Generation ID、包版本和工件摘要；当前 Graph 不含某组件时明确返回 `null`。在管理员经 WebUI 或获权群 Shell 提交重载前后比较目标及其依赖闭包与无关组件的身份，并结合持久重载回执判断完成状态；这个观测选项本身不提交重载。
 
 指定 `--group-id 933179609` 时，探针还从该群的 CHAT 投递 lane 读取最新一条发送意图的状态、错误码、序号及完成时间。查询使用 `(bot_id,binding_ref,lane_kind,ordering_key,lane_sequence)` 唯一索引，群消息增加后仍只读取末条意图；没有意图时返回 `latest_chat_send: null`。它不会读取回复正文，且 `SENT` 只证明 Delivery 已记录传输结果，群内实际呈现仍以低频现场观察为准。
