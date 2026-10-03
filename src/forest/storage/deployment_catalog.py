@@ -227,6 +227,7 @@ class DeploymentCatalogRepository:
         bootstrap_profile_ref: str,
         bootstrap_manifest_digest: str,
         storage_generation: int = 1,
+        conn=None,
     ) -> dict:
         for value, field, limit in (
             (operation_id, "operation_id", 256),
@@ -251,7 +252,7 @@ class DeploymentCatalogRepository:
                 "bootstrap_manifest_digest": bootstrap_manifest_digest,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self.store.transaction(conn) as conn:
             replay = await self._operation(conn, operation_id, input_digest)
             if replay is not None:
                 return await self._bot_in(conn, replay["bot_id"])

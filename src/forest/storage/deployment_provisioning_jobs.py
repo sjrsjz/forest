@@ -234,34 +234,33 @@ class DeploymentProvisioningJobAuthority:
                 raise ForestError("STALE_PROVISIONING_CLAIM", "Provisioning claim is stale", 409)
             return self._claim(row)
 
-    async def succeed(
+    async def complete_ready(
         self,
         supervisor: DeploymentSupervisorLease,
         claim: DeploymentProvisioningClaim,
+        *,
+        catalog,
     ) -> dict:
+        """Publish the Bot identity and settle its fenced Job in one transaction."""
         self._validate_claim(claim)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        if catalog.store is not self.store:
+            raise ForestError(
+                "PROVISIONING_INPUT_INVALID", "Catalog belongs to another deployment store", 422
+            )
+        async with self.store.transaction() as conn:
             await self._verify_supervisor_in(conn, supervisor)
-            bot = await (
-                await conn.execute(
-                    "SELECT 1 FROM forest_deployment.bots WHERE bot_id=%s AND supply_state='READY' "
-                    "AND storage_profile_ref=%s AND storage_generation=%s "
-                    "AND bootstrap_profile_ref=%s AND bootstrap_manifest_digest=%s FOR SHARE",
-                    (
-                        claim.bot_id,
-                        claim.storage_profile_ref,
-                        claim.storage_generation,
-                        claim.bootstrap_profile_ref,
-                        claim.bootstrap_manifest_digest,
-                    ),
-                )
-            ).fetchone()
-            if bot is None:
-                raise ForestError(
-                    "PROVISIONING_RESULT_MISSING",
-                    "Ready Bot catalog fact is required before Job completion",
-                    409,
-                )
+            await self._owned_in(conn, claim)
+            await catalog.register_ready(
+                operation_id=f"provision-ready/{claim.job_id}",
+                bot_id=claim.bot_id,
+                display_name=claim.display_name,
+                storage_profile_ref=claim.storage_profile_ref,
+                bootstrap_profile_ref=claim.bootstrap_profile_ref,
+                bootstrap_manifest_digest=claim.bootstrap_manifest_digest,
+                storage_generation=claim.storage_generation,
+                conn=conn,
+            )
+            await self._verify_supervisor_in(conn, supervisor)
             row = await self._finish_in(conn, claim, state="SUCCEEDED", error_code=None)
             return dict(row)
 

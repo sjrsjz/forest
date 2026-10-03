@@ -83,16 +83,9 @@ class DeploymentProvisioningExecutor:
                     task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
                 raise
-            await self.catalog.register_ready(
-                operation_id=f"provision-ready/{claim.job_id}",
-                bot_id=claim.bot_id,
-                display_name=claim.display_name,
-                storage_profile_ref=claim.storage_profile_ref,
-                bootstrap_profile_ref=claim.bootstrap_profile_ref,
-                bootstrap_manifest_digest=claim.bootstrap_manifest_digest,
-                storage_generation=claim.storage_generation,
+            return await self.jobs.complete_ready(
+                supervisor_lease, claim, catalog=self.catalog,
             )
-            return await self.jobs.succeed(supervisor_lease, claim)
         except Exception as exc:
             error_code = exc.code if isinstance(exc, ForestError) else "BOT_PROVISIONING_FAILED"
             if not isinstance(error_code, str) or _ERROR.fullmatch(error_code) is None:

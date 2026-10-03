@@ -2469,16 +2469,13 @@ async def test_provisioning_job_claim_renew_retry_and_success_are_fenced(deploym
     assert second is not None
     assert second.attempt_no == 2
     assert second.lease_epoch == claim.lease_epoch + 1
-    await repository.register_ready(
-        operation_id="provision-ready/provisioning/jobs/1",
-        bot_id="bot/jobs",
-        display_name="Jobs",
-        storage_profile_ref=storage.profile_ref,
-        bootstrap_profile_ref=profile.profile_ref,
-        bootstrap_manifest_digest=profile.manifest_digest,
-        storage_generation=storage.storage_generation,
-    )
-    succeeded = await jobs.succeed(supervisor, second)
+    with pytest.raises(ForestError) as stale_publication:
+        await jobs.complete_ready(supervisor, claim, catalog=repository)
+    assert stale_publication.value.code == "STALE_PROVISIONING_CLAIM"
+    with pytest.raises(ForestError) as missing_bot:
+        await repository.inspect("bot/jobs")
+    assert missing_bot.value.code == "BOT_NOT_FOUND"
+    succeeded = await jobs.complete_ready(supervisor, second, catalog=repository)
     assert succeeded["state"] == "SUCCEEDED"
     with pytest.raises(ForestError) as caught:
         await jobs.fail(supervisor, claim, error_code="STALE_TEST")
@@ -2605,6 +2602,56 @@ async def test_provisioning_executor_resolves_frozen_inputs_before_ready_publica
     assert bot["supply_state"] == "READY"
     assert bot["desired_state"] == "OFFLINE"
     assert await executor.run_once(supervisor) is None
+
+
+@pytest.mark.postgres
+async def test_provisioning_ready_publication_and_job_settlement_are_atomic(
+    deployment_catalog, monkeypatch,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    storage = await _storage_profile(repository, "bot/atomic", "atomic")
+    profile = await _bootstrap_profile(repository, storage, "atomic")
+    jobs = DeploymentProvisioningJobAuthority(repository.store)
+    await jobs.enqueue(
+        operation_id="provisioning/atomic/enqueue",
+        job_id="provisioning/atomic/1",
+        bot_id="bot/atomic",
+        display_name="Atomic",
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=storage.storage_generation,
+        bootstrap_profile_ref=profile.profile_ref,
+    )
+    supervisor = await repository.claim_supervisor("host/atomic", "incarnation/atomic")
+    claim = await jobs.claim(supervisor, worker_id="worker/atomic")
+    assert claim is not None
+
+    original_finish = jobs._finish_in
+
+    async def reject_settlement(*_args, **_kwargs):
+        raise ForestError("SETTLEMENT_REJECTED", "Settlement failed", 409)
+
+    monkeypatch.setattr(jobs, "_finish_in", reject_settlement)
+    with pytest.raises(ForestError) as rejected:
+        await jobs.complete_ready(supervisor, claim, catalog=repository)
+    assert rejected.value.code == "SETTLEMENT_REJECTED"
+    with pytest.raises(ForestError) as missing:
+        await repository.inspect(claim.bot_id)
+    assert missing.value.code == "BOT_NOT_FOUND"
+    assert (await jobs.inspect(claim.job_id))["state"] == "RUNNING"
+    async with repository.store.pool.connection() as conn:
+        operation = await (
+            await conn.execute(
+                "SELECT 1 FROM forest_deployment.operations WHERE operation_id=%s",
+                (f"provision-ready/{claim.job_id}",),
+            )
+        ).fetchone()
+    assert operation is None
+
+    monkeypatch.setattr(jobs, "_finish_in", original_finish)
+    settled = await jobs.complete_ready(supervisor, claim, catalog=repository)
+    assert settled["state"] == "SUCCEEDED"
+    assert (await repository.inspect(claim.bot_id))["supply_state"] == "READY"
 
 
 @pytest.mark.postgres
