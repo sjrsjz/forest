@@ -617,6 +617,47 @@ CREATE TABLE forest_deployment.secret_versions (
     PRIMARY KEY (secret_ref,version)
 );
 
+CREATE FUNCTION forest_deployment.secret_metadata_page(
+    requested_limit integer, after_secret_ref text, search_text text
+) RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    entries jsonb;
+    found_count integer;
+BEGIN
+    IF requested_limit NOT BETWEEN 1 AND 100
+       OR (after_secret_ref IS NOT NULL AND
+           octet_length(after_secret_ref) NOT BETWEEN 1 AND 512)
+       OR (search_text IS NOT NULL AND octet_length(search_text)>128) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','SECRET_QUERY_INVALID',
+                'message','Secret metadata query is invalid','status',422));
+    END IF;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'secret_ref',page.secret_ref,'purpose',page.purpose,
+        'version',page.current_version,'revision',page.revision,
+        'key_id',page.key_id) ORDER BY page.secret_ref),'[]'::jsonb),count(*)
+    INTO entries,found_count
+    FROM (
+        SELECT s.secret_ref,s.purpose,s.current_version,s.revision,v.key_id
+        FROM forest_deployment.secret_slots s
+        JOIN forest_deployment.secret_versions v ON
+            v.secret_ref=s.secret_ref AND v.version=s.current_version
+        WHERE (after_secret_ref IS NULL OR s.secret_ref>after_secret_ref)
+          AND (search_text IS NULL OR search_text='' OR
+               s.secret_ref ILIKE '%'||search_text||'%' OR
+               s.purpose ILIKE '%'||search_text||'%')
+        ORDER BY s.secret_ref LIMIT requested_limit+1
+    ) page;
+    IF found_count>requested_limit THEN
+        entries:=entries-requested_limit;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('items',entries,
+            'next_after',CASE WHEN found_count>requested_limit
+                THEN entries->(requested_limit-1)->>'secret_ref' ELSE NULL END));
+END;
+$$;
+
 CREATE INDEX bots_supply_idx ON forest_deployment.bots(supply_state,created_at,bot_id);
 CREATE INDEX observations_retry_idx
     ON forest_deployment.runtime_observations(observed_state,retry_not_before,bot_id);

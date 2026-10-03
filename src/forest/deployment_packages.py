@@ -8,6 +8,7 @@ from importlib.resources import files
 
 from jsonschema import Draft202012Validator
 
+from forest.deployment_kernel_management import DeploymentKernelManagementAuthority
 from forest.errors import ForestError
 from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.package_management import PackageManagementContract
@@ -100,14 +101,21 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
         for item in component.get("management_artifacts", ())
         for key in ("reserve_port", "settle_port") if key in item
     }
+    kernel_commands = tuple(component.get("kernel_commands", ()))
+    kernel_action_ports = {item["name"] for item in kernel_commands}
     action_commands = {
         item["port"] for item in component.get("management_actions", ())
-    }
+    } - kernel_action_ports
     declared_commands = {
         item["name"] for item in component.get("domain_commands", ())
     }
     if component["scope"] != "deployment" or component.get("configuration_apply") or (
         declared_commands != artifact_commands | action_commands
+        or any(
+            (component["id"], item["kind"])
+            not in runtime.kernel_management_handlers
+            for item in kernel_commands
+        )
         or (component.get("owned_work_handlers") and not component.get("storage"))
         or any(item["semantics"] != "read" for item in component.get("provides", ()))
     ):
@@ -185,6 +193,14 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
         )
         if storage is not None else None
     )
+    kernel_management = (
+        DeploymentKernelManagementAuthority(
+            runtime.store, runtime.generation_authority,
+            component_id=component["id"], ports=kernel_commands,
+            handlers=runtime.kernel_management_handlers,
+        )
+        if kernel_commands else None
+    )
     effect_factories = {
         item["name"]: runtime.effect_driver_factories[item["kind"]]
         for item in effects
@@ -207,6 +223,7 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
         generation_member_verifier=runtime.generation_authority.verify_generation_member,
         state_queries=None, state_commands=None, domain_queries=domain,
         domain_commands=domain,
+        kernel_management_commands=kernel_management,
         owned_work_authority=domain if component.get("owned_work_handlers") else None,
         service_operation_ledger=runtime.service_operation_ledger,
         storage=storage, trust_level="official",

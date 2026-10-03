@@ -394,6 +394,23 @@ MANIFEST_SCHEMA = {
                             "unit_of_work_participants",
                         )
                     },
+                    "kernel_commands": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "name", "contract", "kind", "input_schema", "output_schema",
+                            ],
+                            "properties": {
+                                key: {"type": "string"}
+                                for key in (
+                                    "name", "contract", "kind", "input_schema", "output_schema",
+                                )
+                            },
+                        },
+                    },
                     "job_types": {
                         "type": "array",
                         "maxItems": 32,
@@ -656,6 +673,7 @@ MANIFEST_SCHEMA = {
                                 "authorization_path": {"type": "string"},
                                 "transaction_preflight": {"type": "string"},
                                 "actor_field": {"type": "string"},
+                                "secret_field": {"type": "string"},
                                 "timeout_s": {
                                     "type": "number",
                                     "exclusiveMinimum": 0,
@@ -1322,6 +1340,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
     effect_services = component.get("effect_services", [])
     domain_queries = component.get("domain_queries", [])
     domain_commands = component.get("domain_commands", [])
+    kernel_commands = component.get("kernel_commands", [])
     management_queries = component.get("management_queries", [])
     management_actions = component.get("management_actions", [])
     management_assets = component.get("management_assets", [])
@@ -1357,6 +1376,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         and not effect_services
         and not domain_queries
         and not domain_commands
+        and not kernel_commands
         and not unit_of_work_participants
         and not unit_of_work_plans
         and not job_types
@@ -1378,6 +1398,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         *effect_services,
         *domain_queries,
         *domain_commands,
+        *kernel_commands,
         *unit_of_work_participants,
         *unit_of_work_plans,
         *job_types,
@@ -1395,6 +1416,14 @@ def _manifest(files: dict[str, bytes]) -> dict:
         _schema(files, service.get("output_schema"))
         if service in effect_services and not IDENTIFIER.fullmatch(service.get("kind", "")):
             _fail("INVALID_SERVICES", "Effect services require a valid driver kind")
+        if service in kernel_commands and (
+            component["scope"] != "deployment"
+            or not IDENTIFIER.fullmatch(service.get("kind", ""))
+        ):
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Kernel management commands require a deployment scope and exact kind",
+            )
         if service in effect_services and service.get("ingress") is not None:
             ingress = service["ingress"]
             ingress_name = ingress.get("name", "")
@@ -1549,6 +1578,9 @@ def _manifest(files: dict[str, bytes]) -> dict:
         item["name"] for item in services if item["semantics"] == "read"
     )
     command_ports = {item["name"] for item in domain_commands}
+    management_command_ports = command_ports | {
+        item["name"] for item in kernel_commands
+    }
     management_ids = set()
     for declaration in (*management_queries, *management_actions, *management_artifacts):
         operation_id = declaration.get("id", "")
@@ -1625,11 +1657,12 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_MANAGEMENT_OPERATIONS",
                 "Management-only services must be read-only management query ports",
             )
+    kernel_by_name = {item["name"]: item for item in kernel_commands}
     for declaration in management_actions:
-        if declaration.get("port") not in command_ports:
+        if declaration.get("port") not in management_command_ports:
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",
-                "Management actions must bind an exact declared Domain Command port",
+                "Management actions must bind an exact Domain or kernel Command port",
             )
         preflight = declaration.get("transaction_preflight")
         if preflight is not None and not IDENTIFIER.fullmatch(preflight):
@@ -1646,7 +1679,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
         actor_field = declaration.get("actor_field")
         if actor_field is not None:
             port = next(
-                item for item in domain_commands if item["name"] == declaration["port"]
+                item for item in (*domain_commands, *kernel_commands)
+                if item["name"] == declaration["port"]
             )
             input_schema = _schema(files, port["input_schema"])
             properties = input_schema.get("properties", {})
@@ -1666,6 +1700,31 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     "INVALID_MANAGEMENT_OPERATIONS",
                     "Management authorization_path cannot reference an injected actor field",
                 )
+        secret_field = declaration.get("secret_field")
+        if secret_field is not None:
+            port = kernel_by_name.get(declaration["port"])
+            schema = _schema(files, port["input_schema"]) if port is not None else {}
+            properties = schema.get("properties", {})
+            if (
+                port is None
+                or not IDENTIFIER.fullmatch(secret_field)
+                or secret_field == actor_field
+                or secret_field not in schema.get("required", ())
+                or not isinstance(properties, dict)
+                or properties.get(secret_field, {}).get("type") != "string"
+            ):
+                _fail(
+                    "INVALID_MANAGEMENT_OPERATIONS",
+                    "Host secret input requires a required string on a kernel Command",
+                )
+    if sorted(item["name"] for item in kernel_commands) != sorted(
+        action["port"] for action in management_actions
+        if action["port"] in kernel_by_name
+    ):
+        _fail(
+            "INVALID_MANAGEMENT_OPERATIONS",
+            "Kernel Commands must bind exactly one declared management Action",
+        )
     directory_kinds = set()
     for declaration in component.get("contribution_directories", []):
         kind = declaration.get("kind")

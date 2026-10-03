@@ -32,35 +32,6 @@ class DeploymentManagementComponent:
         }
 
 
-class DeploymentSecretManagement:
-    def __init__(self, *, secrets) -> None:
-        self.secrets = secrets
-
-    async def query(self, query_id: str, payload: dict):
-        if query_id != "secrets.list":
-            raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404)
-        values = _fields(payload, set(), {"limit"})
-        rows = await self.secrets.list_metadata(limit=values.get("limit", 200))
-        return {"items": [asdict(row) for row in rows]}
-
-    async def action(
-        self, action_id: str, *, operation_id: str, payload: dict, authorization=None
-    ):
-        if action_id != "secret.put":
-            raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404)
-        values = _fields(payload, {"secret_ref", "purpose", "plaintext", "expected_revision"})
-        plaintext = values.pop("plaintext")
-        if not isinstance(plaintext, str):
-            raise ForestError("DEPLOYMENT_MANAGEMENT_INPUT_INVALID", "Secret must be text", 422)
-        saved = await self.secrets.put(
-            operation_id=operation_id,
-            plaintext=plaintext.encode(),
-            authorization=authorization,
-            **values,
-        )
-        return asdict(saved)
-
-
 class DeploymentAccountManagement:
     def __init__(self, *, identity) -> None:
         self.identity = identity
@@ -272,11 +243,6 @@ def deployment_management_components(
         )
 
     components = [
-        DeploymentManagementComponent(
-            "deployment.secrets",
-            DeploymentSecretManagement(secrets=secrets),
-            contribution("deployment-secrets", "Secret 引用", 20),
-        ),
         DeploymentManagementComponent(
             "deployment.provisioning",
             DeploymentProvisioningManagement(

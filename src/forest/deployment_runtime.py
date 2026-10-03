@@ -13,7 +13,10 @@ from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInsta
 class DeploymentRuntimeScope:
     scope_kind = "deployment"
 
-    def __init__(self, store, supervisor, *, package_catalog=None) -> None:
+    def __init__(
+        self, store, supervisor, *, package_catalog=None,
+        kernel_management_handlers=None,
+    ) -> None:
         self.store = store
         self.scope_id = store.deployment_id
         self.supervisor = supervisor
@@ -23,6 +26,7 @@ class DeploymentRuntimeScope:
         )
         self.schema_bundle_installer = DeploymentSchemaBundleInstaller(store)
         self.package_catalog = package_catalog
+        self.kernel_management_handlers = dict(kernel_management_handlers or {})
         self.effect_driver_factories = (
             {
                 "deployment.package-catalog": (

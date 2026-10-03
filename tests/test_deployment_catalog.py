@@ -18,6 +18,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
+from forest.deployment_kernel_management import SecretPutKernelCommand
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_package_controller import DeploymentPackageController
@@ -60,7 +61,7 @@ from forest.storage.deployment_graph_changes import DeploymentGraphChangeAuthori
 from forest.storage.deployment_module_configuration import DeploymentModuleConfigurationRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInstaller
-from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
+from forest.storage.deployment_secret_authority import DeploymentSecretAuthority, SecretMetadata
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
@@ -2044,6 +2045,28 @@ async def test_deployment_secret_rotation_is_encrypted_cas_and_write_only(
         await wrong.resolve(first.secret_ref)
     assert caught.value.code == "SECRET_DECRYPTION_FAILED"
 
+    racing = await asyncio.gather(
+        secrets.put(
+            operation_id="secret/race/shared-operation",
+            secret_ref="secret://race/alpha",
+            purpose="test.credential",
+            plaintext=b"alpha",
+            expected_revision=0,
+        ),
+        secrets.put(
+            operation_id="secret/race/shared-operation",
+            secret_ref="secret://race/beta",
+            purpose="test.credential",
+            plaintext=b"beta",
+            expected_revision=0,
+        ),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(item, SecretMetadata) for item in racing) == 1
+    assert [item.code for item in racing if isinstance(item, ForestError)] == [
+        "SECRET_OPERATION_CONFLICT"
+    ]
+
 
 @pytest.mark.postgres
 async def test_deployment_secret_keyring_rotates_writes_and_retains_old_decryption(
@@ -2558,7 +2581,11 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     deployment_audit = DeploymentAuditRepository(repository.store)
     lease = await repository.claim_supervisor("host/webui", "incarnation/webui")
     deployment_runtime = DeploymentRuntimeScope(
-        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease)
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
+        kernel_management_handlers={
+            ("deployment.secrets", "deployment.secret-put"):
+                SecretPutKernelCommand(secrets),
+        },
     )
     package_catalog = PackageCatalog(tmp_path / "webui-deployment-packages")
     audit_snapshot = package_catalog.build(
@@ -2567,14 +2594,32 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     bot_snapshot = package_catalog.build(
         Path(__file__).parents[1] / "src/forest/builtin/deployment_bot_catalog"
     )
+    secret_snapshot = package_catalog.build(
+        Path(__file__).parents[1] / "src/forest/builtin/deployment_secrets"
+    )
+    wrong_binding = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
+        kernel_management_handlers={
+            ("deployment.other", "deployment.secret-put"):
+                SecretPutKernelCommand(secrets),
+        },
+    )
+    with pytest.raises(ForestError) as denied:
+        await bootstrap_builtin_deployment_package(
+            secret_snapshot, wrong_binding, plan_only=True,
+        )
+    assert denied.value.code == "DEPLOYMENT_PACKAGE_PORT_UNAVAILABLE"
     audit_descriptor = await bootstrap_builtin_deployment_package(
         audit_snapshot, deployment_runtime
     )
     bot_descriptor = await bootstrap_builtin_deployment_package(
         bot_snapshot, deployment_runtime
     )
+    secret_descriptor = await bootstrap_builtin_deployment_package(
+        secret_snapshot, deployment_runtime
+    )
     deployment_registry = RuntimeModuleRegistry(
-        deployment_runtime, (audit_descriptor, bot_descriptor)
+        deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor)
     )
     await deployment_registry.start()
     legacy_components = deployment_management_components(
@@ -2620,6 +2665,11 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "deployment.accounts",
             "deployment.audit",
         }
+        secret_module = next(
+            item for item in body["modules"]
+            if item["component_id"] == "deployment.secrets"
+        )
+        assert secret_module["management_contract"]["actions"][0]["secret_field"] == "plaintext"
         audit_module = next(
             item for item in body["modules"] if item["component_id"] == "deployment.audit"
         )
@@ -2640,6 +2690,13 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             headers=headers,
         )
         assert bot_ui.status_code == 200
+        secret_ui = await client.get(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            f"deployment.secrets/management-ui/{secret_snapshot.management_ui()[0]['sha256']}",
+            headers=headers,
+        )
+        assert secret_ui.status_code == 200
+        assert 'name="plaintext"' not in secret_ui.text
         page_path = (
             "/management/v1/scopes/deployment/deployment/modules/"
             "deployment.bot-catalog/queries/bots.list"
@@ -2720,6 +2777,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert any(
             item["secret_ref"] == "secret://web/test" for item in listed.json()["items"]
         )
+        assert "never-return-this" not in listed.text
         assert "never-return-this" not in listed.text
         storage = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
@@ -2847,7 +2905,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             ),
             (
                 "deployment.secrets",
-                "deployment/deployment.secrets/1",
+                deployment_registry.graph_identity.generations["deployment.secrets"],
                 "secret.put",
             ),
             (
@@ -2879,6 +2937,40 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "web-subject/8c6976e5b5410415bde908bd4dee15df"
         }
         assert all(item["origin_kind"] == "web.management" for item in audit_records)
+        previous = deployment_registry
+        candidate = RuntimeModuleRegistry(
+            deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor)
+        )
+        drained = candidate.plan_graph_transition(
+            previous, target_component_id="deployment.secrets"
+        )
+        assert drained == ("deployment.secrets",)
+        await candidate.prewarm()
+        await previous.drain_owned_work_for_replacement(
+            candidate.activation_id, components=drained,
+        )
+        await candidate.start()
+        candidate.accept_retained_ownership()
+        assert (
+            candidate.graph_identity.generations["deployment.secrets"]
+            != previous.graph_identity.generations["deployment.secrets"]
+        )
+        await previous.close()
+        deployment_registry = candidate
+        rotated = await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.secrets/actions/secret.put",
+            headers={**headers, "idempotency-key": "secret-web-after-reload"},
+            json={
+                "secret_ref": "secret://web/test",
+                "purpose": "test.credential",
+                "plaintext": "replacement-value",
+                "expected_revision": 1,
+            },
+        )
+        assert rotated.status_code == 200, rotated.text
+        assert rotated.json()["revision"] == 2
+        assert "replacement-value" not in rotated.text
     await deployment_registry.close()
 
 

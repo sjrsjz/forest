@@ -147,6 +147,56 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   frame.title = contribution.label;
   shell.append(controls, frame);
   root.append(shell);
+  const secretDialog = document.createElement('dialog');
+  secretDialog.className = 'host-secret-dialog';
+  const secretForm = document.createElement('form');
+  const secretTitle = document.createElement('h3');
+  secretTitle.textContent = '输入 Secret 新值';
+  const secretLabel = document.createElement('label');
+  secretLabel.textContent = '新值';
+  const secretInput = document.createElement('input');
+  secretInput.type = 'password';
+  secretInput.autocomplete = 'new-password';
+  secretInput.required = true;
+  const secretButtons = document.createElement('div');
+  const secretCancel = document.createElement('button');
+  secretCancel.type = 'button';
+  secretCancel.textContent = '取消';
+  const secretSubmit = document.createElement('button');
+  secretSubmit.type = 'submit';
+  secretSubmit.textContent = '提交';
+  secretLabel.append(secretInput);
+  secretButtons.append(secretCancel, secretSubmit);
+  secretForm.append(secretTitle, secretLabel, secretButtons);
+  secretDialog.append(secretForm);
+  document.body.append(secretDialog);
+  let cancelSecretPrompt = null;
+  const askHostSecret = () => new Promise((resolve, reject) => {
+    if (cancelSecretPrompt || epoch !== workspaceEpoch) {
+      reject(new Error('Secret 输入窗口不可用'));
+      return;
+    }
+    const finish = (value, error) => {
+      if (!cancelSecretPrompt) return;
+      cancelSecretPrompt = null;
+      secretInput.value = '';
+      if (secretDialog.open) secretDialog.close();
+      if (error) reject(error); else resolve(value);
+    };
+    cancelSecretPrompt = () => finish(null, new Error('已取消 Secret 输入'));
+    secretForm.onsubmit = event => {
+      event.preventDefault();
+      if (!secretInput.value) return;
+      finish(secretInput.value, null);
+    };
+    secretCancel.onclick = cancelSecretPrompt;
+    secretDialog.oncancel = event => {
+      event.preventDefault();
+      cancelSecretPrompt?.();
+    };
+    secretDialog.showModal();
+    secretInput.focus();
+  });
 
   const send = (type, payload = {}) => channel.port1.postMessage({
     protocol: 'forest.management-ui-channel/1', type, nonce, ...payload,
@@ -220,7 +270,7 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
         discard.click();
       } else if (message.type === 'resize') {
         send('resize-assigned', {height: frame.clientHeight});
-      } else if (message.type === 'query' || message.type === 'action') {
+      } else if (['query', 'action', 'secret-action'].includes(message.type)) {
         const requestId = message.request_id;
         const operationId = message.operation_id;
         if (
@@ -234,18 +284,29 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
           send(prior.type, prior.payload);
           return;
         }
-        const kind = message.type === 'query' ? 'queries' : 'actions';
-        const options = {method: 'POST', body: JSON.stringify(message.value)};
-        if (message.type === 'action') {
-          const stableKey = message.idempotency_key;
-          if (stableKey !== undefined && (
-            typeof stableKey !== 'string'
-            || !/^[a-zA-Z0-9._:-]{1,96}$/.test(stableKey)
-          )) throw new Error('模块动作幂等键无效');
-          options.headers = {'idempotency-key': stableKey
-            ? `package-ui:${stableKey}` : `package-ui:${nonce}:${requestId}`};
-        }
+        const secretAction = message.type === 'secret-action';
+        const declaredAction = row.management_contract?.actions?.find(item =>
+          item.action_id === operationId);
+        const secretField = declaredAction?.secret_field;
         try {
+          if ((secretAction && (!secretField || Object.hasOwn(message.value, secretField)))
+            || (message.type === 'action' && secretField)) {
+            throw new Error('Secret Action 必须由宿主输入明文');
+          }
+          const kind = message.type === 'query' ? 'queries' : 'actions';
+          const requestValue = secretAction
+            ? {...message.value, [secretField]: await askHostSecret()} : message.value;
+          if (epoch !== workspaceEpoch) throw new Error('模块 UI 已切换');
+          const options = {method: 'POST', body: JSON.stringify(requestValue)};
+          if (message.type !== 'query') {
+            const stableKey = message.idempotency_key;
+            if (stableKey !== undefined && (
+              typeof stableKey !== 'string'
+              || !/^[a-zA-Z0-9._:-]{1,96}$/.test(stableKey)
+            )) throw new Error('模块动作幂等键无效');
+            options.headers = {'idempotency-key': stableKey
+              ? `package-ui:${stableKey}` : `package-ui:${nonce}:${requestId}`};
+          }
           const value = await api(
             `/management/v1/modules/${encodeURIComponent(row.component_id)}/${kind}/${encodeURIComponent(operationId)}`,
             options,
@@ -491,6 +552,8 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   }, '*', [channel.port2]);
   frame.src = scopedPath(surface.artifact);
   activeSandboxCleanup = () => {
+    cancelSecretPrompt?.();
+    secretDialog.remove();
     channel.port1.close();
     frame.onload = null;
     frame.src = 'about:blank';

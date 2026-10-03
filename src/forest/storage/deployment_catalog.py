@@ -188,6 +188,7 @@ class DeploymentCatalogRepository:
             "guard_runtime_graph_change",
             "bot_catalog_page",
             "bot_set_desired",
+            "secret_metadata_page",
         }:
             raise ForestError(
                 "DEPLOYMENT_SCHEMA_TAMPERED",

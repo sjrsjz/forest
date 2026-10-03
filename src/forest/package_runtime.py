@@ -113,6 +113,7 @@ def _component_schema_references(component: Mapping[str, Any]) -> tuple[str, ...
         component.get("effect_services", ()),
         component.get("domain_queries", ()),
         component.get("domain_commands", ()),
+        component.get("kernel_commands", ()),
         component.get("job_types", ()),
         component.get("unit_of_work_plans", ()),
         component.get("unit_of_work_participants", ()),
@@ -229,6 +230,7 @@ class PackageGenerationAdapter:
         payload_authority: PackagePayloadAuthority | None = None,
         domain_queries: PackageDomainQueries | None = None,
         domain_commands: PackageDomainCommands | None = None,
+        kernel_management_commands=None,
         unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
         unit_of_work_coordinator: PackageUnitOfWorkCoordinator | None = None,
         configuration_apply_coordinator=None,
@@ -266,6 +268,7 @@ class PackageGenerationAdapter:
         self._payload_reserved_bytes = 0
         self._domain_queries = domain_queries
         self._domain_commands = domain_commands
+        self._kernel_management_commands = kernel_management_commands
         self._unit_of_work_authority = unit_of_work_authority
         self._unit_of_work_coordinator = unit_of_work_coordinator
         self._configuration_apply_coordinator = configuration_apply_coordinator
@@ -325,6 +328,7 @@ class PackageGenerationAdapter:
                 *self.component.get("effect_services", ()),
                 *self.component.get("domain_queries", ()),
                 *self.component.get("domain_commands", ()),
+                *self.component.get("kernel_commands", ()),
                 *self.component.get("job_types", ()),
                 *self.component.get("unit_of_work_plans", ()),
             )
@@ -2087,7 +2091,8 @@ class PackageGenerationAdapter:
                 "Management action requires a transactional authority guard",
                 403,
             )
-        if declaration not in self.component.get("domain_commands", ()):
+        kernel_command = declaration in self.component.get("kernel_commands", ())
+        if not kernel_command and declaration not in self.component.get("domain_commands", ()):
             raise ForestError(
                 "MODULE_MANAGEMENT_BINDING_INVALID",
                 "Management action is not bound to this package Generation",
@@ -2097,13 +2102,15 @@ class PackageGenerationAdapter:
         if action is None or action["port"] != declaration["name"]:
             raise ForestError(
                 "MODULE_MANAGEMENT_BINDING_INVALID",
-                "Management action ID does not bind this Domain Command port",
+                "Management action ID does not bind this Command port",
                 409,
             )
-        authority = self._domain_commands
+        authority = (
+            self._kernel_management_commands if kernel_command else self._domain_commands
+        )
         if authority is None:
             raise ForestError(
-                "CAPABILITY_UNAVAILABLE", "Domain command authority is unavailable", 503
+                "CAPABILITY_UNAVAILABLE", "Management command authority is unavailable", 503
             )
         input_validator, output_validator = self._service_schemas[declaration["name"]]
         if not isinstance(payload, dict) or not input_validator.is_valid(payload):
@@ -3051,6 +3058,7 @@ def package_runtime_descriptor(
     payload_authority: PackagePayloadAuthority | None = None,
     domain_queries: PackageDomainQueries | None = None,
     domain_commands: PackageDomainCommands | None = None,
+    kernel_management_commands=None,
     unit_of_work_authority: PackageUnitOfWorkAuthority | None = None,
     unit_of_work_coordinator_factory: Callable[
         [str, Mapping[str, Any]], PackageUnitOfWorkCoordinator
@@ -3098,6 +3106,13 @@ def package_runtime_descriptor(
             "PACKAGE_STORAGE_TRUST_REQUIRED",
             "Official storage execution requires an official package trust binding",
             403,
+        )
+    if component.get("kernel_commands") and (
+        trust_level != "official" or kernel_management_commands is None
+    ):
+        raise ForestError(
+            "KERNEL_MANAGEMENT_AUTHORITY_UNAVAILABLE",
+            "Kernel management commands require official deployment authority", 403,
         )
     effect_driver_factories = dict(effect_driver_factories or {})
     declared_effect_services = {
@@ -3380,6 +3395,7 @@ def package_runtime_descriptor(
             payload_authority=payload_authority,
             domain_queries=domain_queries,
             domain_commands=domain_commands,
+            kernel_management_commands=kernel_management_commands,
             unit_of_work_authority=unit_of_work_authority,
             unit_of_work_coordinator=unit_of_work_coordinator,
             configuration_apply_coordinator=configuration_apply_coordinator,

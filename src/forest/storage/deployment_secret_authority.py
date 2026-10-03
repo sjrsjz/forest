@@ -57,6 +57,21 @@ class DeploymentSecretAuthority:
         expected_revision: int,
         authorization=None,
     ) -> SecretMetadata:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_deployment_action_in(
+                conn, authorization, operation_id=operation_id
+            )
+            return await self.put_in(
+                conn, operation_id=operation_id, secret_ref=secret_ref,
+                purpose=purpose, plaintext=plaintext,
+                expected_revision=expected_revision,
+            )
+
+    async def put_in(
+        self, conn, *, operation_id: str, secret_ref: str, purpose: str,
+        plaintext: bytes, expected_revision: int,
+    ) -> SecretMetadata:
+        """Commit one kernel-owned Secret write in the caller's fenced transaction."""
         _bounded(operation_id, "operation_id", 256)
         _bounded(purpose, "purpose", 256)
         if not isinstance(secret_ref, str) or _SECRET_REF.fullmatch(secret_ref) is None:
@@ -78,83 +93,83 @@ class DeploymentSecretAuthority:
                 "key_id": self.active_key_id,
             }
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
-            await authorize_deployment_action_in(
-                conn, authorization, operation_id=operation_id
-            )
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"forest.deployment.secret-operation/{operation_id}",),
+        )
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"forest.deployment.secret/{secret_ref}",),
+        )
+        replay = await (
             await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                (f"forest.deployment.secret/{secret_ref}",),
+                "SELECT v.*,s.purpose,s.revision FROM forest_deployment.secret_versions v "
+                "JOIN forest_deployment.secret_slots s USING(secret_ref) "
+                "WHERE v.operation_id=%s",
+                (operation_id,),
             )
-            replay = await (
-                await conn.execute(
-                    "SELECT v.*,s.purpose,s.revision FROM forest_deployment.secret_versions v "
-                    "JOIN forest_deployment.secret_slots s USING(secret_ref) "
-                    "WHERE v.operation_id=%s",
-                    (operation_id,),
-                )
-            ).fetchone()
-            if replay is not None:
-                if replay["input_digest"] != input_digest:
-                    raise ForestError("SECRET_OPERATION_CONFLICT", "Secret operation differs", 409)
-                return self._metadata(replay)
-            slot = await (
-                await conn.execute(
-                    "SELECT * FROM forest_deployment.secret_slots WHERE secret_ref=%s FOR UPDATE",
-                    (secret_ref,),
-                )
-            ).fetchone()
-            observed_revision = 0 if slot is None else slot["revision"]
-            if observed_revision != expected_revision:
-                raise ForestError(
-                    "SECRET_REVISION_CONFLICT",
-                    "Secret revision changed",
-                    409,
-                    details={"revision": observed_revision},
-                )
-            if slot is not None and slot["purpose"] != purpose:
-                raise ForestError("SECRET_PURPOSE_CONFLICT", "Secret purpose differs", 409)
-            version = 1 if slot is None else slot["current_version"] + 1
-            key = await self._key(self.active_key_id)
-            nonce = urandom(12)
-            ciphertext = AESGCM(key).encrypt(
-                nonce, plaintext, self._associated_data(secret_ref, purpose, version)
+        ).fetchone()
+        if replay is not None:
+            if replay["input_digest"] != input_digest:
+                raise ForestError("SECRET_OPERATION_CONFLICT", "Secret operation differs", 409)
+            return self._metadata(replay)
+        slot = await (
+            await conn.execute(
+                "SELECT * FROM forest_deployment.secret_slots WHERE secret_ref=%s FOR UPDATE",
+                (secret_ref,),
             )
-            if slot is None:
-                await conn.execute(
-                    "INSERT INTO forest_deployment.secret_slots("
-                    "secret_ref,purpose,current_version) VALUES (%s,%s,%s)",
-                    (secret_ref, purpose, version),
-                )
-            else:
-                await conn.execute(
-                    "UPDATE forest_deployment.secret_slots SET current_version=%s,"
-                    "revision=revision+1,updated_at=clock_timestamp() WHERE secret_ref=%s",
-                    (version, secret_ref),
-                )
-            saved = await (
-                await conn.execute(
-                    "INSERT INTO forest_deployment.secret_versions("
-                    "secret_ref,version,operation_id,input_digest,key_id,nonce,ciphertext,"
-                    "plaintext_digest) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *,"
-                    "(SELECT purpose FROM forest_deployment.secret_slots WHERE secret_ref=%s) "
-                    "AS purpose,(SELECT revision FROM forest_deployment.secret_slots "
-                    "WHERE secret_ref=%s) AS revision",
-                    (
-                        secret_ref,
-                        version,
-                        operation_id,
-                        input_digest,
-                        self.active_key_id,
-                        nonce,
-                        ciphertext,
-                        plaintext_digest,
-                        secret_ref,
-                        secret_ref,
-                    ),
-                )
-            ).fetchone()
-            return self._metadata(saved)
+        ).fetchone()
+        observed_revision = 0 if slot is None else slot["revision"]
+        if observed_revision != expected_revision:
+            raise ForestError(
+                "SECRET_REVISION_CONFLICT",
+                "Secret revision changed",
+                409,
+                details={"revision": observed_revision},
+            )
+        if slot is not None and slot["purpose"] != purpose:
+            raise ForestError("SECRET_PURPOSE_CONFLICT", "Secret purpose differs", 409)
+        version = 1 if slot is None else slot["current_version"] + 1
+        key = await self._key(self.active_key_id)
+        nonce = urandom(12)
+        ciphertext = AESGCM(key).encrypt(
+            nonce, plaintext, self._associated_data(secret_ref, purpose, version)
+        )
+        if slot is None:
+            await conn.execute(
+                "INSERT INTO forest_deployment.secret_slots("
+                "secret_ref,purpose,current_version) VALUES (%s,%s,%s)",
+                (secret_ref, purpose, version),
+            )
+        else:
+            await conn.execute(
+                "UPDATE forest_deployment.secret_slots SET current_version=%s,"
+                "revision=revision+1,updated_at=clock_timestamp() WHERE secret_ref=%s",
+                (version, secret_ref),
+            )
+        saved = await (
+            await conn.execute(
+                "INSERT INTO forest_deployment.secret_versions("
+                "secret_ref,version,operation_id,input_digest,key_id,nonce,ciphertext,"
+                "plaintext_digest) VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *,"
+                "(SELECT purpose FROM forest_deployment.secret_slots WHERE secret_ref=%s) "
+                "AS purpose,(SELECT revision FROM forest_deployment.secret_slots "
+                "WHERE secret_ref=%s) AS revision",
+                (
+                    secret_ref,
+                    version,
+                    operation_id,
+                    input_digest,
+                    self.active_key_id,
+                    nonce,
+                    ciphertext,
+                    plaintext_digest,
+                    secret_ref,
+                    secret_ref,
+                ),
+            )
+        ).fetchone()
+        return self._metadata(saved)
 
     async def metadata(self, secret_ref: str) -> SecretMetadata:
         row = await self._current(secret_ref)

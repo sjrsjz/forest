@@ -41,6 +41,10 @@ class PackageManagementContract(ModuleConfigurationContract):
         command_ports = {
             item["name"]: item for item in component.get("domain_commands", ())
         }
+        command_ports.update(
+            (item["name"], item)
+            for item in component.get("kernel_commands", ())
+        )
         self._queries = {
             item["id"]: (item, query_ports[item["port"]])
             for item in component.get("management_queries", ())
@@ -86,6 +90,10 @@ class PackageManagementContract(ModuleConfigurationContract):
             {
                 "action_id": operation_id,
                 "priority": declaration["priority"],
+                **(
+                    {"secret_field": declaration["secret_field"]}
+                    if "secret_field" in declaration else {}
+                ),
                 "input_schema": self._public_action_schema(declaration, port),
                 "output_schema": self.adapter.schema_snapshot(port["output_schema"]),
             }
