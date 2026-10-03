@@ -274,6 +274,12 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
             validation_digest=schema_digest,
         )
     ).revision == 2
+    recovered = await authority.prepare_graph(lease, [binding(first)], str(uuid4()))
+    await authority.publish_graph(
+        lease, recovered, configuration_activators={spec.component_id: configuration}
+    )
+    assert (await configuration.desired()).revision == 2
+    assert (await configuration.effective()).revision == 1
     wrong = await authority.prepare_graph(
         lease,
         [
@@ -292,7 +298,7 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
         )
     assert caught.value.code == "MODULE_CONFIGURATION_IDENTITY_CONFLICT"
     assert (await configuration.effective()).revision == 1
-    assert await authority.current_graph() == graph
+    assert await authority.current_graph() == recovered
     await authority.publish_graph(
         lease, replacement, configuration_activators={spec.component_id: configuration}
     )
@@ -339,6 +345,14 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
         {"name": "replayed"},
         {"name": "competing"},
     )
+    assert (await configuration.effective()).revision == 2
+    stale = await authority.prepare_graph(lease, [binding(first)], str(uuid4()))
+    with pytest.raises(ForestError) as stale_error:
+        await authority.publish_graph(
+            lease, stale, configuration_activators={spec.component_id: configuration}
+        )
+    assert stale_error.value.code == "MODULE_CONFIGURATION_CONFLICT"
+    assert await authority.current_graph() == replacement
     assert (await configuration.effective()).revision == 2
 
 
@@ -1293,7 +1307,8 @@ async def test_deployment_package_controller_restores_selected_artifact_after_re
         assert active.get("deployment.audit").snapshot.digest == replacement.digest
         assert active.graph_identity.graph_revision > old_revision
         _graph, selection = await runtime.generation_authority.active_package_selection()
-        assert selection == {"deployment.audit": replacement.digest}
+        assert selection["deployment.audit"]["package_digest"] == replacement.digest
+        assert selection["deployment.audit"]["configuration"]["revision"] == 1
 
         receipts = DeploymentWebAuthorityRepository(repository.store)
         now = datetime.now(timezone.utc)
@@ -1348,16 +1363,46 @@ async def test_deployment_package_controller_restores_selected_artifact_after_re
             )
         )["target_generation_id"] == generation
 
+        configuration = active.get("deployment.audit").module_configuration
+        frozen = await configuration.effective(include_value=True)
+        plan = await configuration.plan(
+            operation_id="pending-deployment-config-plan",
+            expected_desired_revision=frozen.revision,
+            value=frozen.value,
+            validation_digest=frozen.validation_digest,
+        )
+        pending = await configuration.apply(
+            operation_id="pending-deployment-config-apply",
+            plan_id=plan["plan_id"], expected_desired_revision=frozen.revision,
+        )
+        assert pending.revision == frozen.revision + 1
+        assert (await configuration.effective()).revision == frozen.revision
+
         restarted = DeploymentPackageController(
             runtime, package_catalog, official_sources=(source,)
         )
         recovered = await restarted.start()
         assert recovered.get("deployment.audit").snapshot.digest == replacement.digest
+        assert recovered.get("deployment.audit")._prepared_binding.config_revision == frozen.revision
         assert (
             await recovered.get("deployment.audit").management_contract.query(
                 "audit.records.query", {"limit": 1}
             )
         ) == {"records": [], "next_before": None}
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.1"', 'version = "1.0.2"', 1
+            ),
+            encoding="utf-8",
+        )
+        newer = package_catalog.build_official(next_source)
+        upgraded = await restarted.replace(
+            "deployment.audit", newer.digest,
+            expected_graph_revision=recovered.graph_identity.graph_revision,
+        )
+        assert upgraded.get("deployment.audit")._prepared_binding.config_revision == frozen.revision
+        assert (await configuration.desired()).revision == pending.revision
+        assert (await configuration.effective()).revision == frozen.revision
     finally:
         if restarted is not None:
             await restarted.close()

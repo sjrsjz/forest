@@ -50,7 +50,7 @@ class DeploymentPackageController:
 
     async def _assemble(
         self, snapshots: dict[str, PackageSnapshot], *, activation_id: str | None = None,
-        plan_only: bool = False,
+        plan_only: bool = False, frozen_configurations: dict[str, dict] | None = None,
     ) -> RuntimeModuleRegistry:
         descriptors = []
         for _component_id, snapshot in sorted(snapshots.items()):
@@ -65,7 +65,10 @@ class DeploymentPackageController:
                 bootstrap_builtin_deployment_package
                 if official else bootstrap_installed_deployment_package
             )
-            descriptors.append(await compile_package(snapshot, self.runtime, plan_only=plan_only))
+            descriptors.append(await compile_package(
+                snapshot, self.runtime, plan_only=plan_only,
+                frozen_configuration=(frozen_configurations or {}).get(snapshot.component["id"]),
+            ))
         return RuntimeModuleRegistry(self.runtime, tuple(descriptors), activation_id=activation_id)
 
     def _selected_snapshot(self, digest: str) -> PackageSnapshot:
@@ -74,6 +77,19 @@ class DeploymentPackageController:
         if declared is not None and declared[0]["execution_profile"] == "official":
             return self.catalog.get_official_deployment(digest)
         return snapshot
+
+    async def _active_configurations(self, graph) -> dict[str, dict]:
+        current, selection = await self.runtime.generation_authority.active_package_selection()
+        if current is None or current.graph_id != graph.graph_id or (
+            current.graph_revision != graph.graph_revision
+        ):
+            raise ForestError(
+                "RUNTIME_GRAPH_NOT_CURRENT", "Deployment Graph changed", 409,
+            )
+        return {
+            component_id: binding["configuration"]
+            for component_id, binding in selection.items()
+        }
 
     async def read_package_registry(self, query_id: str, payload: dict) -> dict:
         """Resolve one read through the currently active deployment module Generation."""
@@ -132,7 +148,8 @@ class DeploymentPackageController:
                     "Candidate artifact has another component identity", 409,
                 )
             candidate = await self._assemble(
-                {**self._snapshots, component_id: snapshot}, plan_only=True
+                {**self._snapshots, component_id: snapshot}, plan_only=True,
+                frozen_configurations=await self._active_configurations(graph),
             )
             impact = candidate.preview_graph_transition(
                 previous, target_component_id=component_id
@@ -178,8 +195,8 @@ class DeploymentPackageController:
             graph, selected = await self.runtime.generation_authority.active_package_selection()
             snapshots = (
                 {
-                    component_id: self._selected_snapshot(digest)
-                    for component_id, digest in selected.items()
+                    component_id: self._selected_snapshot(binding["package_digest"])
+                    for component_id, binding in selected.items()
                 }
                 if graph is not None
                 else defaults
@@ -193,7 +210,13 @@ class DeploymentPackageController:
                     "Active package selection does not match its components",
                     409,
                 )
-            registry = await self._assemble(snapshots)
+            registry = await self._assemble(
+                snapshots,
+                frozen_configurations={
+                    component_id: binding["configuration"]
+                    for component_id, binding in selected.items()
+                },
+            )
             try:
                 await registry.start()
             except BaseException:
@@ -266,7 +289,12 @@ class DeploymentPackageController:
                     409,
                 )
             snapshots = {**self._snapshots, component_id: snapshot}
-            candidate = await self._assemble(snapshots, activation_id=activation_id)
+            candidate = await self._assemble(
+                snapshots, activation_id=activation_id,
+                frozen_configurations=await self._active_configurations(
+                    previous.graph_identity
+                ),
+            )
             affected = candidate.plan_graph_transition(previous, target_component_id=component_id)
             drained = False
             try:

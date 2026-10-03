@@ -443,8 +443,8 @@ class DeploymentGenerationAuthority:
                 {item["component_id"]: item["generation_id"] for item in members},
             )
 
-    async def active_package_selection(self) -> tuple[RuntimeGenerationGraph | None, dict[str, str]]:
-        """Read the exact package artifacts bound to the current deployment Graph."""
+    async def active_package_selection(self) -> tuple[RuntimeGenerationGraph | None, dict[str, dict]]:
+        """Read each active artifact and its frozen configuration binding."""
 
         graph = await self.current_graph()
         if graph is None:
@@ -474,16 +474,25 @@ class DeploymentGenerationAuthority:
                 binding = row["binding"]
                 package = binding.get("package") if isinstance(binding, dict) else None
                 digest = package.get("package_digest") if isinstance(package, dict) else None
+                configuration = binding.get("configuration") if isinstance(binding, dict) else None
                 if (
                     row["state"] != "ACTIVE"
                     or row["binding_digest"] != digest_json(binding)
                     or not isinstance(digest, str)
+                    or not isinstance(configuration, dict)
+                    or type(configuration.get("revision")) is not int
+                    or configuration["revision"] < 1
+                    or not isinstance(configuration.get("payload_id"), str)
+                    or not isinstance(configuration.get("payload_digest"), str)
                 ):
                     raise ForestError(
                         "RUNTIME_GENERATION_BINDING_INVALID",
                         "Active deployment package binding is invalid", 409,
                     )
-                selection[row["component_id"]] = digest
+                selection[row["component_id"]] = {
+                    "package_digest": digest,
+                    "configuration": configuration,
+                }
             return graph, selection
 
     async def _current_members_in(

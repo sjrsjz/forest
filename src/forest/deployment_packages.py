@@ -65,7 +65,31 @@ def _configuration_storage(component_id: str) -> tuple[StorageBundleSpec, bytes]
     ), baseline
 
 
-async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=False):
+async def _prepared_configuration(configuration, binding, schema: dict):
+    if binding is None:
+        selected = await configuration.desired_checked()
+    else:
+        selected = await configuration.effective(include_value=True)
+        if (
+            selected.revision != binding.get("revision")
+            or selected.payload_id != binding.get("payload_id")
+            or selected.payload_digest != binding.get("payload_digest")
+        ):
+            raise ForestError(
+                "DEPLOYMENT_CONFIGURATION_BINDING_MISMATCH",
+                "Active Graph configuration differs from the effective revision", 409,
+            )
+    if not Draft202012Validator(schema).is_valid(selected.value):
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+            "Deployment configuration differs from the frozen package schema", 409,
+        )
+    return selected
+
+
+async def bootstrap_builtin_deployment_package(
+    snapshot, runtime, *, plan_only=False, frozen_configuration=None,
+):
     """Install an official deployment package with bounded native port grants."""
 
     component = snapshot.component
@@ -178,14 +202,16 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
             operation_id=f"bootstrap:{component['id']}:configuration", value=config_value,
             validation_digest=digest_json(config_schema),
         )
-        desired = await configuration.desired_checked()
-        if desired.validation_digest != digest_json(config_schema) or not (
-            Draft202012Validator(config_schema).is_valid(desired.value)
-        ):
+        prepared_configuration = await _prepared_configuration(
+            configuration, frozen_configuration, config_schema,
+        )
+        if prepared_configuration.validation_digest != digest_json(config_schema):
             raise ForestError(
                 "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
                 "Deployment configuration differs from the frozen package schema", 409,
             )
+    else:
+        prepared_configuration = None
     grants = _BuiltinGrantSet(
         tuple(_BuiltinGrant(item, "component", component["id"]) for item in requested),
         digest_json([
@@ -236,6 +262,7 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
     descriptor = package_runtime_descriptor(
         snapshot, bot_id=None, scope_id=runtime.scope_id,
         module_configuration=configuration, grants=grants, resolved_contracts={},
+        prepared_configuration=prepared_configuration,
         generation_verifier=runtime.generation_authority.verify_active_generation,
         generation_member_verifier=runtime.generation_authority.verify_generation_member,
         state_queries=None, state_commands=None, domain_queries=domain,
@@ -255,7 +282,9 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
     return descriptor
 
 
-async def bootstrap_installed_deployment_package(snapshot, runtime, *, plan_only=False):
+async def bootstrap_installed_deployment_package(
+    snapshot, runtime, *, plan_only=False, frozen_configuration=None,
+):
     """Compile a declaration-only deployment Worker without official SQL authority."""
 
     component = snapshot.component
@@ -296,14 +325,16 @@ async def bootstrap_installed_deployment_package(snapshot, runtime, *, plan_only
             operation_id=f"bootstrap:{component['id']}:configuration", value=config_value,
             validation_digest=digest_json(config_schema),
         )
-        desired = await configuration.desired_checked()
-        if desired.validation_digest != digest_json(config_schema) or not (
-            Draft202012Validator(config_schema).is_valid(desired.value)
-        ):
+        prepared_configuration = await _prepared_configuration(
+            configuration, frozen_configuration, config_schema,
+        )
+        if prepared_configuration.validation_digest != digest_json(config_schema):
             raise ForestError(
                 "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
                 "Deployment configuration differs from the frozen package schema", 409,
             )
+    else:
+        prepared_configuration = None
     grants = _BuiltinGrantSet(
         (), digest_json(["forest.deployment.installed-grants/1", snapshot.digest, component["id"]]),
     )
@@ -321,6 +352,7 @@ async def bootstrap_installed_deployment_package(snapshot, runtime, *, plan_only
     return package_runtime_descriptor(
         snapshot, bot_id=None, scope_id=runtime.scope_id,
         module_configuration=configuration, grants=grants, resolved_contracts={},
+        prepared_configuration=prepared_configuration,
         generation_verifier=runtime.generation_authority.verify_active_generation,
         generation_member_verifier=runtime.generation_authority.verify_generation_member,
         state_queries=None, state_commands=None, domain_queries=None,

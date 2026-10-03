@@ -464,6 +464,14 @@ material、缺失 active 引用和超过上限的 key 数，且 key material 不
 
 `deployment.bot-catalog` 已由宿主伪组件迁为官方可热替换包。内核持有 `bots`、`runtime_intents`、`runtime_observations` 和幂等操作账本；包不复制 Bot 身份或运行意图。内核的 `bot_catalog_page` 只返回有界分页投影，`bot_set_desired` 以操作 ID、输入摘要和期望修订在一个事务内合流；包私有 SQL 仅作端口绑定与上下文校验。管理 Action 先核对当前 CONTROL Generation，再在同一 PostgreSQL 事务内写 Web 签票回执与审计，内核端口再次匹配操作、摘要、组件与 Generation 后才推进意图。宿主的内部调度调用和包管理调用共用内核意图更新规则，旧宿主 Bot 目录页面和契约已经删除。部署基线已变，未上线实例须重建部署数据库；不保留旧基线迁移兼容层。
 
+### 7.2 部署包配置换代协议（待实现）
+
+部署包的 WebUI 和 JSON Schema 由包贡献，内核只提供通用的计划、授权、图切换和持久回执。当前部署配置仓库虽已有不可变修订、计划、`desired/effective` 双水位和发布事务中的 `activate_in`，部署管理契约仍只开放读取；不能仅删除只读限制就把配置变更称为完成。恢复启动和普通包图变更现已沿用活动 Graph 冻结的 `effective` 修订；配置必须与实际 Worker Generation 的冻结输入保持一致，不能让界面显示新值而运行图继续使用旧值，也不能在重启时把未发布的 `desired` 当成已发布的 `effective`。
+
+计划阶段只校验包声明的 schema 和不可变字段，保存输入摘要、预期配置修订及目标包/图身份，不改变活动 Graph。应用阶段在同一个部署数据库事务内复核精确 CONTROL Generation、图修订、Web 签票与审计回执；锁定配置头和图头，按操作 ID 幂等推进 `desired`，并写入绑定**准确配置修订、Payload 摘要、来源图、包摘要**的持久换代请求。一个组件已有未结算配置换代时拒绝另一笔新应用；同一操作的重放返回原请求，不生成第二个修订或唤醒第二次换代。事务提交后才能唤醒 Supervisor。
+
+换代 Worker 在 Supervisor lease 下领取该请求，从持久包目录装配准确工件，并按请求绑定的配置修订预热候选 Graph；不得读取届时的最新 `desired` 代替请求值。受影响的旧组件按正常热替换协议停止接单、排空和释放资源；未受影响的 Generation 继续保留。候选发布时，配置 `effective` 修订和 Graph 头、Generation 状态在**同一事务**提交；发布前失败保留旧图和旧 `effective`，请求记录明确错误及可重试性，发布后结果不明则按图和配置激活事实核对，不重新执行已提交的物理效果。重启恢复也必须按活动 Graph 中冻结的配置修订装配，待处理或失败的 `desired` 只能作为管理状态显示。普通安装包与官方包遵守同一配置协议，但官方物理端口的授予仍取决于独立的官方来源事实；配置值不能扩大能力。
+
 ## 8. 完成判据
 
 - 目标代码中不存在 `BindingRuntime` 类型或兼容别名；`BotRuntimeSupervisor` 不直接构造或保存 Agent、Memory、Shell、Job、Delivery 或具体平台客户端。

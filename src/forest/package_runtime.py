@@ -221,6 +221,7 @@ class PackageGenerationAdapter:
         bot_id: str | None,
         scope_id: str | None = None,
         module_configuration: Any,
+        prepared_configuration=None,
         grants: Any,
         service_routes: Mapping[str, Any],
         resolved_contracts: Mapping[str, str],
@@ -258,6 +259,7 @@ class PackageGenerationAdapter:
             scope_kind=self.scope_kind, scope_id=scope_id, bot_id=bot_id
         )
         self.module_configuration = module_configuration
+        self._prepared_configuration = prepared_configuration
         self.grants = grants
         self._service_routes = dict(service_routes)
         self._resolved_contracts = dict(resolved_contracts)
@@ -2725,10 +2727,12 @@ class PackageGenerationAdapter:
             raise ForestError(
                 "LIFECYCLE_INVALID", "Package Generation was already prepared", 409
             )
-        desired = await self.module_configuration.desired(include_value=True)
+        selected = self._prepared_configuration
+        if selected is None:
+            selected = await self.module_configuration.desired(include_value=True)
         schema = self._compiled_schemas[self.component["config_schema"]]
         errors = sorted(
-            Draft202012Validator(schema).iter_errors(desired.value),
+            Draft202012Validator(schema).iter_errors(selected.value),
             key=lambda item: tuple(str(part) for part in item.absolute_path),
         )
         if errors:
@@ -2740,7 +2744,7 @@ class PackageGenerationAdapter:
         try:
             configuration = json.loads(
                 json.dumps(
-                    desired.value,
+                    selected.value,
                     ensure_ascii=False,
                     allow_nan=False,
                     separators=(",", ":"),
@@ -2755,7 +2759,7 @@ class PackageGenerationAdapter:
             if inspect.isawaitable(validation):
                 await validation
         self._configuration = configuration
-        self._configuration_revision = desired.revision
+        self._configuration_revision = selected.revision
         identity_seed = hashlib.sha256(
             f"{context.activation_id}\0{self.component_id}\0{self.snapshot.digest}".encode()
         ).hexdigest()
@@ -2772,9 +2776,9 @@ class PackageGenerationAdapter:
             route_contract_digest=context.route_contract_digest,
             management_contract_digest=context.management_contract_digest,
             management_ui_digest=context.management_ui_digest,
-            config_revision=desired.revision,
-            config_payload_id=desired.payload_id,
-            config_payload_digest=desired.payload_digest,
+            config_revision=selected.revision,
+            config_payload_id=selected.payload_id,
+            config_payload_digest=selected.payload_digest,
             instance_id="instance:" + identity_seed,
             worker_incarnation="worker:" + identity_seed,
             state_schema=context.state_schema,
@@ -3056,6 +3060,7 @@ def package_runtime_descriptor(
     bot_id: str | None,
     scope_id: str | None = None,
     module_configuration: Any,
+    prepared_configuration=None,
     grants: Any,
     resolved_contracts: Mapping[str, str],
     generation_verifier: GenerationVerifier,
@@ -3395,6 +3400,7 @@ def package_runtime_descriptor(
             bot_id=bot_id,
             scope_id=scope_id,
             module_configuration=module_configuration,
+            prepared_configuration=prepared_configuration,
             grants=grants,
             service_routes=routes,
             resolved_contracts=resolved_contracts,

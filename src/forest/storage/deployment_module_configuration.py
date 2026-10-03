@@ -312,7 +312,10 @@ class DeploymentModuleConfigurationRepository:
             ):
                 raise ForestError("MODULE_CONFIGURATION_OPERATION_CONFLICT", "Activation identity differs", 409)
             return await self._revision_in(conn, revision, include_value=False)
-        if head["desired_revision"] != revision or head["effective_revision"] < 1:
+        if head["effective_revision"] < 1 or (
+            head["desired_revision"] != revision
+            and head["effective_revision"] != revision
+        ):
             raise ForestError("MODULE_CONFIGURATION_CONFLICT", "Desired configuration changed", 409)
         configuration = await self._revision_in(conn, revision, include_value=False)
         if (configuration.payload_id != expected_payload_id
