@@ -21,6 +21,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import httpx
+from PIL import __version__ as PILLOW_VERSION
 
 from forest.errors import ForestError
 from forest.model_contract import MediaSnapshot
@@ -38,6 +39,7 @@ MAX_BATCH_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_MANIFEST_BYTES = 256 * 1024
+IMAGE_INPUT_POLICY = f"authorized_capture_jpeg_fit_4m_v2_pillow-{PILLOW_VERSION}"
 SOURCE_FIELDS = frozenset(
     {
         "bot_id",
@@ -203,7 +205,7 @@ class EmbeddingProfile:
             "query_task": "retrieval.query" if self.model == JINA_MODEL else None,
             "normalized": True,
             "truncate": False if self.model == JINA_MODEL else "right",
-            "image_input": "authorized_capture_bytes_v1",
+            "image_input": IMAGE_INPUT_POLICY,
             "postprocessing": "l2_float32_v1",
             "mixed_strategy": "independent_facets_v1",
         }
@@ -241,7 +243,12 @@ class TrialMediaCapture:
             or not 0 < len(self.content) <= MAX_IMAGE_BYTES
             or type(self.width) is not int or not 0 < self.width <= 100000
             or type(self.height) is not int or not 0 < self.height <= 100000
-            or self.transform_ref is not None
+            or (self.transform_ref is not None and (
+                not isinstance(self.transform_ref, str)
+                or not self.transform_ref.startswith("image-transform:sha256:")
+                or len(self.transform_ref) != len("image-transform:sha256:") + 64
+                or any(char not in "0123456789abcdef" for char in self.transform_ref[-64:])
+            ))
         ):
             raise _error("EMBEDDING_IMAGE_INVALID", "Trial image capture is invalid")
         digest = _hash(self.content)
@@ -303,6 +310,23 @@ class EmbeddingInput:
                 if key in source and source[key] != getattr(self.image, key):
                     raise _error(
                         "EMBEDDING_SOURCE_INVALID", "Image capture and attribution disagree"
+                    )
+            original_digest = source.get("payload_digest")
+            if original_digest is not None:
+                expected_transform = (
+                    "image-transform:" + _hash(_encode([
+                        IMAGE_INPUT_POLICY, original_digest, self.image.blob_digest,
+                        self.image.width, self.image.height,
+                    ]))
+                    if self.image.transform_ref is not None else None
+                )
+                if (
+                    self.image.transform_ref != expected_transform
+                    or (expected_transform is None
+                        and original_digest != self.image.blob_digest)
+                ):
+                    raise _error(
+                        "EMBEDDING_SOURCE_INVALID", "Image rendition lost its original source"
                     )
         object.__setattr__(self, "source_json", _encode(source, limit=4096).decode("utf-8"))
 

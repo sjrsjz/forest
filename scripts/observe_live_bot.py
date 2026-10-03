@@ -44,6 +44,10 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--health-url", default="http://supervisor:8081/")
     value.add_argument("--group-id", help="Inspect one OneBot group lane without reading message content.")
     value.add_argument(
+        "--embedding-diagnostics", action="store_true",
+        help="Include the last hour of embedding work failure codes (costlier read).",
+    )
+    value.add_argument(
         "--component-id", action="append", default=[],
         help="Include one current Graph component's Generation identity (at most eight).",
     )
@@ -151,7 +155,7 @@ async def _deployment_state(
 
 async def _bot_state(
     store: BotStore, bot_id: str, stale_seconds: int, group_id: str | None = None,
-    component_ids: tuple[str, ...] = (),
+    component_ids: tuple[str, ...] = (), *, embedding_diagnostics: bool = False,
 ) -> dict:
     async with store.pool.connection() as connection:
         async with connection.transaction():
@@ -232,13 +236,30 @@ async def _bot_state(
                         "(SELECT count(*) FROM {m}.source_units WHERE bot_id=%s) AS sources,"
                         "(SELECT count(*) FROM {m}.embedding_facets WHERE bot_id=%s) AS facets,"
                         "(SELECT count(*) FROM {m}.embedding_facets WHERE bot_id=%s AND state='READY') AS ready_facets,"
+                        "(SELECT count(*) FROM {m}.embedding_facets WHERE bot_id=%s "
+                        " AND purpose='DOCUMENT' AND state='PENDING' "
+                        " AND next_attempt_at<=clock_timestamp()) AS pending_embedding_due,"
+                        "(SELECT count(*) FROM {m}.embedding_facets WHERE bot_id=%s "
+                        " AND purpose='DOCUMENT' AND state='PENDING' "
+                        " AND next_attempt_at<clock_timestamp()-interval '5 minutes') "
+                        "AS pending_embedding_overdue,"
+                        "(SELECT extract(epoch FROM min(next_attempt_at)-clock_timestamp())::bigint "
+                        " FROM {m}.embedding_facets WHERE bot_id=%s "
+                        " AND purpose='DOCUMENT' AND state='PENDING') "
+                        "AS next_pending_embedding_seconds,"
+                        "(SELECT extract(epoch FROM clock_timestamp()-min(updated_at))::bigint "
+                        " FROM {m}.embedding_facets WHERE bot_id=%s "
+                        " AND purpose='DOCUMENT' AND state='UNKNOWN') "
+                        "AS oldest_unknown_embedding_seconds,"
                         "(SELECT count(*) FROM {m}.embedding_batch_attempts WHERE bot_id=%s "
                         " AND state IN ('PREPARED','DISPATCHED') "
                         " AND deadline_at<clock_timestamp()-(%s * interval '1 second')) AS stale_attempts,"
                         "(SELECT count(*) FROM {m}.embedding_budget_reservations WHERE bot_id=%s AND state='RESERVED' "
                         " AND deadline_at<clock_timestamp()-(%s * interval '1 second')) AS stale_reservations"
                     ).format(m=sql.Identifier(MEMORY)),
-                    (bot_id, bot_id, bot_id, bot_id, bot_id, stale_seconds, bot_id, stale_seconds),
+                    (bot_id, bot_id, bot_id, bot_id, bot_id, bot_id, bot_id,
+                     bot_id, bot_id,
+                     stale_seconds, bot_id, stale_seconds),
                 )
             ).fetchone()
             facet_states = await (
@@ -261,6 +282,34 @@ async def _bot_state(
                     (bot_id,),
                 )
             ).fetchall()
+            embedding_budget = await (
+                await connection.execute(
+                    sql.SQL(
+                        "SELECT reserved_requests,settled_requests,unknown_requests,"
+                        "reserved_tokens,charged_tokens,unknown_tokens "
+                        "FROM {}.embedding_budget_days WHERE bot_id=%s "
+                        "AND budget_day=(clock_timestamp() AT TIME ZONE 'UTC')::date"
+                    ).format(sql.Identifier(MEMORY)),
+                    (bot_id,),
+                )
+            ).fetchone()
+            recent_embedding_work_errors = []
+            if embedding_diagnostics:
+                recent_embedding_work_errors = await (
+                    await connection.execute(
+                        sql.SQL(
+                            "SELECT s.input_payload->'outcome'->'error'->>'code' AS code,"
+                            "count(*) AS count "
+                            "FROM {m}.embedding_claims c "
+                            "JOIN {m}.embedding_work_settlements s "
+                            "ON s.bot_id=c.bot_id AND s.claim_token=c.claim_id "
+                            "WHERE c.bot_id=%s AND c.created_at>=clock_timestamp()-interval '1 hour' "
+                            "AND s.input_payload->'outcome'->>'status'='FAILED' "
+                            "GROUP BY s.input_payload->'outcome'->'error'->>'code'"
+                        ).format(m=sql.Identifier(MEMORY)),
+                        (bot_id,),
+                    )
+                ).fetchall()
             latest_decisions = await (
                 await connection.execute(
                     sql.SQL(
@@ -417,6 +466,7 @@ async def _bot_state(
                 f"{row['state']}.{row['error_code'] or 'NONE'}": row["count"]
                 for row in attempt_failures
             },
+            "embedding_budget_today": dict(embedding_budget) if embedding_budget else None,
         },
         "concurrency": dict(concurrency),
         "conversation_claims": dict(claims),
@@ -430,6 +480,10 @@ async def _bot_state(
         ],
         "work": dict(work),
     }
+    if embedding_diagnostics:
+        result["memory"]["embedding_work_errors_last_hour"] = {
+            row["code"] or "NONE": row["count"] for row in recent_embedding_work_errors
+        }
     if group_state is not None:
         result["target_group"] = group_state
     if components is not None:
@@ -508,6 +562,7 @@ async def observe(arguments: argparse.Namespace) -> int:
                 _bot_state(
                     bot_store, arguments.bot_id, arguments.stale_seconds,
                     arguments.group_id, tuple(arguments.component_id),
+                    embedding_diagnostics=arguments.embedding_diagnostics,
                 ),
                 asyncio.to_thread(_health, arguments.health_url),
             )

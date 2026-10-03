@@ -1,9 +1,49 @@
 import base64
 import hashlib
+import io
 import json
 
+from PIL import Image, ImageOps, UnidentifiedImageError
+
+from forest.embeddings import IMAGE_INPUT_POLICY
 from forest.errors import ForestError
 from forest.sdk import Plugin, service
+
+MAX_EMBEDDING_IMAGE_BYTES = 4 * 1024 * 1024
+
+
+def _fit_image(content, width, height):
+    """Freeze a bounded rendition while retaining the original Payload as parent."""
+
+    try:
+        with Image.open(io.BytesIO(content)) as original:
+            if original.size != (width, height) or width * height > 40_000_000:
+                raise ForestError(
+                    "EMBEDDING_FACET_INVALID", "Archived image dimensions are invalid", 422
+                )
+            image = ImageOps.exif_transpose(original)
+            if image.mode in {"RGBA", "LA", "P"}:
+                rgba = image.convert("RGBA")
+                background = Image.new("RGB", rgba.size, "white")
+                background.paste(rgba, mask=rgba.getchannel("A"))
+                image = background
+            else:
+                image = image.convert("RGB")
+            for side in (2048, 1536, 1024, 768):
+                candidate = image.copy()
+                candidate.thumbnail((side, side), Image.Resampling.LANCZOS)
+                output = io.BytesIO()
+                candidate.save(output, format="JPEG", quality=82, subsampling=0)
+                rendition = output.getvalue()
+                if len(rendition) <= MAX_EMBEDDING_IMAGE_BYTES:
+                    return rendition, candidate.size
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
+        raise ForestError(
+            "EMBEDDING_FACET_INVALID", "Archived image cannot be decoded", 422
+        ) from exc
+    raise ForestError(
+        "EMBEDDING_FACET_INVALID", "Archived image cannot fit its embedding limit", 422
+    )
 
 
 def _plain(value):
@@ -50,7 +90,7 @@ def _profile_snapshot(profile):
         "query_task": query_task,
         "normalized": True,
         "truncate": truncate,
-        "image_input": "authorized_capture_bytes_v1",
+        "image_input": IMAGE_INPUT_POLICY,
         "postprocessing": "l2_float32_v1",
         "mixed_strategy": "independent_facets_v1",
     }
@@ -133,23 +173,42 @@ async def _embedding_input(facet, payloads, bot_id):
             raise ForestError(
                 "EMBEDDING_FACET_INVALID", "Archived image selector is invalid", 422
             )
-        selected = content
         if (
             facet["media_type"] not in {"image/png", "image/jpeg", "image/webp", "image/gif"}
-            or len(content) > 4 * 1024 * 1024
+            or not 0 < len(content) <= 32 * 1024 * 1024
         ):
             raise ForestError(
                 "EMBEDDING_FACET_INVALID", "Archived image facet is not embeddable", 422
             )
+        if (
+            len(content) != facet["input_byte_length"]
+            or _bytes_digest(content) != facet["facet_content_digest"]
+        ):
+            raise ForestError(
+                "EMBEDDING_FACET_INVALID", "Archived facet bytes differ from their identity", 409
+            )
+        selected = content
+        capture_mime = facet["media_type"]
+        capture_width, capture_height = facet["width"], facet["height"]
+        transform_ref = None
+        if len(content) > MAX_EMBEDDING_IMAGE_BYTES:
+            selected, (capture_width, capture_height) = _fit_image(
+                content, capture_width, capture_height
+            )
+            capture_mime = "image/jpeg"
+            transform_ref = "image-transform:" + _digest([
+                IMAGE_INPUT_POLICY, facet["facet_content_digest"],
+                _bytes_digest(selected), capture_width, capture_height,
+            ])
         capture = {
             "bot_id": bot_id,
             "media_ref": facet["input_payload"]["payload_id"],
             "part_id": facet["part_id"],
-            "mime": facet["media_type"],
-            "blob_digest": facet["input_payload"]["digest"],
-            "width": facet["width"],
-            "height": facet["height"],
-            "transform_ref": None,
+            "mime": capture_mime,
+            "blob_digest": _bytes_digest(selected),
+            "width": capture_width,
+            "height": capture_height,
+            "transform_ref": transform_ref,
         }
         if facet.get("input_kind") == "ADMIN_TRIAL":
             capture.update({
@@ -162,10 +221,12 @@ async def _embedding_input(facet, payloads, bot_id):
                 "media_revision": facet["source_revision"],
                 "source_unit_id": facet["source_unit_id"],
             })
-        wire = {"image": base64.b64encode(content).decode("ascii")}
+        wire = {"image": base64.b64encode(selected).decode("ascii")}
     if (
-        len(selected) != facet["input_byte_length"]
-        or _bytes_digest(selected) != facet["facet_content_digest"]
+        facet["modality"] == "TEXT" and (
+            len(selected) != facet["input_byte_length"]
+            or _bytes_digest(selected) != facet["facet_content_digest"]
+        )
     ):
         raise ForestError(
             "EMBEDDING_FACET_INVALID", "Archived facet bytes differ from their identity", 409

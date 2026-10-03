@@ -2,12 +2,16 @@
 
 import base64
 import hashlib
+import io
 import json
+import random
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
+from PIL import Image
 
 from forest.builtin.embedding_multimodal.python.embedding_provider import (
     MultimodalEmbeddingProvider,
@@ -48,6 +52,90 @@ class _Payloads:
         self.items[reference["payload_id"]] = reference, content
         self.writes.append(reference)
         return reference
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trial", [False, True])
+async def test_materializer_freezes_large_image_as_attributed_rendition(trial):
+    width = height = 2304
+    source = Image.frombytes(
+        "L", (width, height), random.Random(7).randbytes(width * height)
+    )
+    encoded = io.BytesIO()
+    source.save(encoded, format="PNG")
+    original = encoded.getvalue()
+    assert 4 * 1024 * 1024 < len(original) < 8 * 1024 * 1024
+    reference = _reference(
+        "large-source-image", original,
+        owner_kind="trial.input" if trial else "archived.source",
+    )
+    payloads = _Payloads({"large-source-image": (reference, original)})
+    provider = MultimodalEmbeddingProvider()
+    await provider.prepare(None, {
+        "protocol": "forest.embedding.multimodal/1",
+        "endpoint": "https://example.invalid/embeddings",
+        "credential_ref": "credential-1", "timeout_seconds": 60,
+        "max_connections": 1,
+        "profile": {"deployment_id": "test-deployment", "model_revision": "test-revision",
+                    "model": "Qwen/Qwen3-VL-Embedding-8B", "dimensions": 4096},
+    })
+    request = {
+        "protocol": "forest.embedding-materialize/1",
+        "request_id": "request-1", "transport_attempt_id": "attempt-1",
+        "component_id": "embedding.multimodal", "generation_id": "generation-1",
+        "profile_ref": provider.profile_ref, "space_id": provider.space_id,
+        "purpose": "QUERY" if trial else "DOCUMENT",
+        "facets": [{
+            **({"input_kind": "ADMIN_TRIAL", "input_ref": "query-1",
+                "input_revision": 1, "query_id": "query-1"} if trial else {
+                    "source_unit_id": "source-1", "source_revision": 1,
+                    "trunk_id": "group-trunk",
+                    "conversation_ref": "onebot:group:933179609",
+                    "author_ref": "onebot:user:42",
+                }),
+            "facet_id": "facet-image",
+            "part_id": "part-image", "modality": "IMAGE",
+            "selector_start_char": None, "selector_end_char": None,
+            "input_payload": reference, "facet_content_digest": reference["digest"],
+            "input_byte_length": len(original), "media_type": "image/png",
+            "width": width, "height": height,
+        }],
+    }
+    schema_path = (Path(__file__).parents[1] / "src/forest/builtin/embedding_multimodal"
+                   / "schemas/materialize-input.json")
+    Draft202012Validator(json.loads(schema_path.read_text(encoding="utf-8"))).validate(request)
+    ctx = SimpleNamespace(
+        identity={"bot_id": "bot-1", "generation_id": "generation-1"},
+        payloads=payloads,
+    )
+    result = await provider.materialize(request, ctx)
+    body = payloads.items[result["prepared"]["body"]["payload_id"]][1]
+    manifest_json = payloads.items[result["prepared"]["manifest"]["payload_id"]][1]
+    prepared = PreparedEmbeddingRequest(
+        request_id="request-1", transport_attempt_id="attempt-1",
+        body=body, manifest_json=manifest_json.decode("utf-8"),
+        payload_digest=result["prepared"]["payload_digest"],
+        space_id=result["prepared"]["space_id"],
+    )
+    prepared.verify()
+    image_input = json.loads(body)["input"][0]["image"]
+    assert image_input.startswith("data:image/jpeg;base64,")
+    rendition = base64.b64decode(image_input.split(",", 1)[1])
+    assert len(rendition) <= 4 * 1024 * 1024
+    assert prepared.manifest["facets"][0]["source"]["payload_digest"] == reference["digest"]
+    if trial:
+        assert prepared.manifest["facets"][0]["source"]["input_kind"] == "ADMIN_TRIAL"
+    else:
+        assert prepared.manifest["facets"][0]["source"]["trunk_id"] == "group-trunk"
+    assert prepared.manifest["facets"][0]["capture"]["transform_ref"].startswith(
+        "image-transform:sha256:"
+    )
+    tampered_manifest = prepared.manifest
+    tampered_manifest["facets"][0]["capture"]["transform_ref"] = (
+        "image-transform:sha256:" + "0" * 64
+    )
+    with pytest.raises(ForestError, match="provenance"):
+        replace(prepared, manifest_json=json.dumps(tampered_manifest)).verify()
 
 
 @pytest.mark.asyncio
