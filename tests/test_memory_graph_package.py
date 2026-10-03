@@ -53,6 +53,113 @@ def _trial_owner_id(query_id: str, part_id: str) -> str:
     ).hexdigest()
 
 
+@pytest.mark.postgres
+async def test_embedding_claim_budgets_bounded_image_renditions(clean_authority, tmp_path):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "memory-packages"), store, installer, kernel=kernel,
+        initial_configuration=_configuration(), resolved_contracts={},
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    digest = "sha256:" + "a" * 64
+    space = "sha256:" + "b" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_domains "
+            "(bot_id,initialization_operation_id,input_digest,space_id,"
+            "embedding_model_kind,model_revision_digest,dimensions,max_batch_items,"
+            "normalization,fusion_policy_revision) VALUES "
+            "(%s,'domain/large-images',%s,%s,'TEXT_IMAGE',%s,4096,8,'L2','facets/1')"
+        ).format(namespace), (store.bot_id, digest, space, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_sources "
+            "(bot_id,source_id,registration_operation_id,input_digest,source_kind,"
+            "platform,realm_id,external_group_id,identity_incarnation,identity_digest,"
+            "trunk_id) VALUES "
+            "(%s,'source/images','register/images',%s,'GROUP','onebot','qq',"
+            "'933179609',1,%s,'trunk/images')"
+        ).format(namespace), (store.bot_id, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_trunks(bot_id,trunk_id,source_id) "
+            "VALUES (%s,'trunk/images','source/images')"
+        ).format(namespace), (store.bot_id,))
+        for index, byte_length in enumerate((12, 6, 1), start=1):
+            unit = f"unit/image/{index}"
+            part = f"part/image/{index}"
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.source_units "
+                "(bot_id,source_unit_id,capture_operation_id,input_digest,source_id,"
+                "trunk_id,source_order_seq,source_revision,unit_kind,modality,part_count,"
+                "content_manifest_digest,author_subject_ref,author_payload_id,"
+                "author_payload_digest,author_owner_component_id,author_owner_kind,"
+                "author_owner_id,accepted_deletion_epoch,eligibility_state,eligible_at,"
+                "occurred_at) VALUES "
+                "(%s,%s,%s,%s,'source/images','trunk/images',%s,1,'message','IMAGE',1,"
+                "%s,'onebot:user:42',%s,%s,'adapter.onebot','message.author',%s,0,"
+                "'ELIGIBLE',clock_timestamp(),clock_timestamp())"
+            ).format(namespace), (
+                store.bot_id, unit, f"capture/image/{index}", digest, index, digest,
+                f"author/image/{index}", digest, f"event/image/{index}",
+            ))
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.source_parts "
+                "(bot_id,source_unit_id,part_id,part_index,part_kind,media_type,"
+                "payload_id,payload_digest,payload_owner_component_id,payload_owner_kind,"
+                "payload_owner_id,width,height,byte_length) VALUES "
+                "(%s,%s,%s,0,'IMAGE','image/png',%s,%s,'adapter.onebot',"
+                "'context.image',%s,2048,2048,%s)"
+            ).format(namespace), (
+                store.bot_id, unit, part, f"payload/image/{index}", digest,
+                f"payload-owner/image/{index}", byte_length * 1024 * 1024,
+            ))
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.source_occurrences "
+                "(bot_id,occurrence_id,source_unit_id,binding_ref,conversation_ref,"
+                "event_ref,eligibility_state,input_batch_ref,context_revision,observed_at) "
+                "VALUES (%s,%s,%s,'onebot:group:933179609',"
+                "'onebot:group:933179609',%s,'ELIGIBLE',%s,1,clock_timestamp())"
+            ).format(namespace), (
+                store.bot_id, f"occurrence/image/{index}", unit,
+                f"event/image/{index}", f"batch/image/{index}",
+            ))
+            await conn.execute(sql.SQL(
+                "INSERT INTO {}.embedding_facets "
+                "(bot_id,facet_id,purpose,input_kind,input_ref,input_revision,"
+                "source_unit_id,source_revision,part_id,modality,input_payload_id,"
+                "input_payload_digest,facet_content_digest,input_media_type,"
+                "input_byte_length,space_id,accepted_deletion_epoch) VALUES "
+                "(%s,%s,'DOCUMENT','SOURCE_UNIT',%s,1,%s,1,%s,'IMAGE',%s,%s,%s,"
+                "'image/png',%s,%s,0)"
+            ).format(namespace), (
+                store.bot_id, f"facet/image/{index}", unit, unit, part,
+                f"payload/image/{index}", digest, digest,
+                byte_length * 1024 * 1024, space,
+            ))
+
+    async def claim(token):
+        async with store.pool.connection() as conn:
+            return (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_claim_embedding_batch(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id, "generation_id": "generation/images"}),
+                Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                       "claim_token": token, "lease_seconds": 360}),
+            ))).fetchone())["result"]
+
+    first = await claim("claim/images/first")
+    assert first["ok"], first
+    assert [item["facet_id"] for item in first["value"]["payload"]["facets"]] == [
+        "facet/image/1", "facet/image/2",
+    ]
+    second = await claim("claim/images/second")
+    assert second["ok"], second
+    assert [item["facet_id"] for item in second["value"]["payload"]["facets"]] == [
+        "facet/image/3",
+    ]
+
+
 async def _browser_apply_real_forget_batch(host, selection_id: str) -> str:
     import uvicorn
     from playwright.sync_api import expect, sync_playwright
@@ -1429,6 +1536,15 @@ def test_query_facets_keep_trial_input_identity_separate_from_source_identity():
                 },
             }, {"part/text": text},
         )
+    large_image = {
+        **part, "part_id": "part/large-image", "part_kind": "IMAGE",
+        "byte_length": 12 * 1024 * 1024,
+        "source_unit_id": "unit/1", "source_revision": 1,
+        "input_identity": {"kind": "SOURCE_UNIT", "ref": "unit/1", "revision": 1},
+    }
+    assert query_part_facets("query/1", "space/1", large_image, {})[0][
+        "input_byte_length"
+    ] == 12 * 1024 * 1024
 
 
 def test_query_preparation_contract_discriminates_source_and_trial_identity():

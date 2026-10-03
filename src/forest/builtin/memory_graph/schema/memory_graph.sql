@@ -7827,7 +7827,11 @@ BEGIN
         ORDER BY CASE purpose WHEN 'QUERY' THEN 0 ELSE 1 END,created_at,facet_id LIMIT 1
     ), ranked AS (
         SELECT candidates.*,
-               sum(CASE WHEN modality='IMAGE' THEN input_byte_length ELSE 0 END)
+               -- Materialization bounds every image rendition to 4 MiB before
+               -- building the wire request. Budget the bounded wire input,
+               -- not the potentially 32 MiB archived original.
+               sum(CASE WHEN modality='IMAGE'
+                        THEN least(input_byte_length,4194304) ELSE 0 END)
                    OVER (ORDER BY candidates.created_at,candidates.facet_id) AS image_bytes
         FROM candidates JOIN focus ON candidates.purpose=focus.purpose
           AND candidates.query_id IS NOT DISTINCT FROM focus.query_id
