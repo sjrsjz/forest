@@ -171,11 +171,13 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   secretDialog.append(secretForm);
   document.body.append(secretDialog);
   let cancelSecretPrompt = null;
-  const askHostSecret = () => new Promise((resolve, reject) => {
+  const askHostSecret = field => new Promise((resolve, reject) => {
     if (cancelSecretPrompt || epoch !== workspaceEpoch) {
       reject(new Error('Secret 输入窗口不可用'));
       return;
     }
+    secretTitle.textContent = field === 'password' ? '输入密码' : '输入 Secret 新值';
+    secretLabel.firstChild.textContent = field === 'password' ? '密码' : '新值';
     const finish = (value, error) => {
       if (!cancelSecretPrompt) return;
       cancelSecretPrompt = null;
@@ -295,7 +297,7 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
           }
           const kind = message.type === 'query' ? 'queries' : 'actions';
           const requestValue = secretAction
-            ? {...message.value, [secretField]: await askHostSecret()} : message.value;
+            ? {...message.value, [secretField]: await askHostSecret(secretField)} : message.value;
           if (epoch !== workspaceEpoch) throw new Error('模块 UI 已切换');
           const options = {method: 'POST', body: JSON.stringify(requestValue)};
           if (message.type !== 'query') {

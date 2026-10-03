@@ -6,11 +6,13 @@ outside the transaction, but its only durable effect must occur in execute_in.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 
 import psycopg
 
 from forest.errors import ForestError
+from forest.security import hash_password
 
 
 class DeploymentKernelManagementAuthority:
@@ -108,3 +110,32 @@ class SecretPutKernelCommand:
             expected_revision=prepared.expected_revision,
         )
         return asdict(saved)
+
+
+class WebAccountKernelCommand:
+    """One declared account operation bound to the kernel identity authority."""
+
+    _METHODS = {
+        "deployment.account-create": "create_account",
+        "deployment.account-update": "update_account",
+        "deployment.account-password": "change_password",
+        "deployment.account-revoke-sessions": "revoke_sessions",
+    }
+
+    def __init__(self, identity, kind: str) -> None:
+        self.identity = identity
+        self.method = self._METHODS[kind]
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        prepared = dict(payload)
+        if self.method in {"create_account", "change_password"}:
+            prepared["_prepared_password_hash"] = await asyncio.to_thread(
+                hash_password, prepared["password"],
+            )
+        return prepared
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        subject = await getattr(self.identity, self.method)(
+            operation_id=operation_id, conn=conn, **prepared,
+        )
+        return subject.as_dict()

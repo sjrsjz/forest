@@ -32,52 +32,6 @@ class DeploymentManagementComponent:
         }
 
 
-class DeploymentAccountManagement:
-    def __init__(self, *, identity) -> None:
-        self.identity = identity
-
-    async def query(self, query_id: str, payload: dict):
-        if query_id != "accounts.list" or payload:
-            raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Query does not exist", 404)
-        return {"items": list(await self.identity.list_accounts())}
-
-    async def action(
-        self, action_id: str, *, operation_id: str, payload: dict, authorization=None
-    ):
-        if action_id == "account.create":
-            values = _fields(payload, {"username", "display_name", "password", "role"})
-            return (
-                await self.identity.create_account(
-                    operation_id=operation_id, authorization=authorization, **values
-                )
-            ).as_dict()
-        if action_id == "account.update":
-            values = _fields(
-                payload,
-                {"subject_id", "display_name", "role", "enabled", "expected_revision"},
-            )
-            return (
-                await self.identity.update_account(
-                    operation_id=operation_id, authorization=authorization, **values
-                )
-            ).as_dict()
-        if action_id == "account.password":
-            values = _fields(payload, {"subject_id", "password", "expected_revision"})
-            return (
-                await self.identity.change_password(
-                    operation_id=operation_id, authorization=authorization, **values
-                )
-            ).as_dict()
-        if action_id == "account.sessions.revoke":
-            values = _fields(payload, {"subject_id", "expected_revision"})
-            return (
-                await self.identity.revoke_sessions(
-                    operation_id=operation_id, authorization=authorization, **values
-                )
-            ).as_dict()
-        raise ForestError("MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Action does not exist", 404)
-
-
 class DeploymentProvisioningManagement:
     def __init__(
         self,
@@ -226,7 +180,6 @@ def deployment_management_components(
     supervisor,
     bootstrap_contributions,
     database_allocator=None,
-    web_identity=None,
 ):
     def contribution(identity: str, label: str, order: int) -> tuple[RuntimeManagementContribution, ...]:
         return (
@@ -257,12 +210,4 @@ def deployment_management_components(
             contribution("deployment-provisioning", "Bot 供应", 30),
         ),
     ]
-    if web_identity is not None:
-        components.append(
-            DeploymentManagementComponent(
-                "deployment.accounts",
-                DeploymentAccountManagement(identity=web_identity),
-                contribution("deployment-accounts", "管理账号", 40),
-            )
-        )
     return tuple(components)

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root{color-scheme:dark;font:14px/1.4 system-ui,sans-serif;color:#dcebe2;background:#0d1712}*{box-sizing:border-box}body{margin:0;padding:10px}
+main{border:1px solid #29493a;border-radius:9px;background:#102019;overflow:hidden}header,.toolbar,.footer{display:flex;align-items:center;gap:8px;padding:9px 12px;flex-wrap:wrap}header{border-bottom:1px solid #29493a}h2{font-size:16px;margin:0 auto 0 0}small,#status{color:#91ac9a}
+button,input,select{border:1px solid #365b49;border-radius:6px;background:#173426;color:#e9f7ef;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.toolbar input{flex:1;min-width:180px}
+.create{display:grid;grid-template-columns:1fr 1.3fr 130px auto;gap:8px;padding:12px;align-items:end;border-bottom:1px solid #29493a}.create label,.row label{display:grid;gap:4px;min-width:0}.create input,.row input,.row select{width:100%;min-width:0}.list{max-height:400px;overflow:auto}.row{display:grid;grid-template-columns:minmax(180px,1.3fr) minmax(150px,1.2fr) 100px 75px auto;gap:8px;align-items:end;padding:8px 12px;border-top:1px solid #203e30;min-width:760px}.identity{display:grid;min-width:0}.identity strong,.identity code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.identity code{font-size:11px;color:#91ac9a}.actions{display:flex;gap:5px;flex-wrap:wrap}.footer{justify-content:space-between;border-top:1px solid #29493a}[hidden]{display:none!important}@media(max-width:850px){.create{grid-template-columns:1fr 1fr}.create button{grid-column:1/-1}}
+</style></head><body><main>
+<header><h2>管理账号与会话</h2><button id="refresh" type="button">刷新</button></header>
+<form id="create" class="create"><label>用户名<input name="username" required minlength="3" maxlength="64" pattern="[a-z][a-z0-9._-]{2,63}"></label><label>显示名<input name="display_name" required maxlength="128"></label><label>角色<select name="role"><option value="AUDITOR">AUDITOR</option><option value="ADMIN">ADMIN</option></select></label><button>创建并设置密码</button></form>
+<form id="filter" class="toolbar"><input id="search" placeholder="筛选用户名或显示名" aria-label="筛选账号"><button>查询</button><small>密码只在宿主弹窗中输入</small></form>
+<div id="items" class="list"></div><div class="footer"><span id="status">等待连接</span><button id="more" type="button" hidden>下一页</button></div>
+</main><script>
+(()=>{'use strict';let port,nonce,sequence=0,pending=new Map(),after=null,activeSearch='';
+const $=id=>document.getElementById(id),items=$('items'),status=$('status');
+const send=(type,payload={})=>port?.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
+const resize=()=>send('resize',{height:Math.min(document.documentElement.scrollHeight,720)});
+const request=(type,operation_id,value,idempotency_key)=>new Promise((resolve,reject)=>{const request_id='account-ui-'+(++sequence);pending.set(request_id,{resolve,reject});send(type,{request_id,operation_id,value,...(idempotency_key?{idempotency_key}:{})});});
+const act=(type,id,value)=>request(type,id,value,crypto.randomUUID());
+function row(item){const form=document.createElement('form');form.className='row';
+  const identity=document.createElement('div');identity.className='identity';const name=document.createElement('strong');name.textContent=item.username;const ref=document.createElement('code');ref.textContent=`${item.subject_id} · rev ${item.revision}`;identity.append(name,ref);
+  const label=(text,control)=>{const node=document.createElement('label');node.append(text,control);return node;};
+  const display=document.createElement('input');display.value=item.display_name;display.required=true;display.maxLength=128;
+  const role=document.createElement('select');for(const value of ['ADMIN','AUDITOR']){const option=document.createElement('option');option.value=option.textContent=value;option.selected=value===item.role;role.append(option);}
+  const enabled=document.createElement('input');enabled.type='checkbox';enabled.checked=item.enabled;
+  const actions=document.createElement('div');actions.className='actions';const save=document.createElement('button');save.textContent='保存';const password=document.createElement('button');password.type='button';password.textContent='改密';const revoke=document.createElement('button');revoke.type='button';revoke.textContent='撤销会话';actions.append(save,password,revoke);
+  form.append(identity,label('显示名',display),label('角色',role),label('启用',enabled),actions);
+  form.onsubmit=async event=>{event.preventDefault();save.disabled=true;try{await act('action','account.update',{subject_id:item.subject_id,display_name:display.value,role:role.value,enabled:enabled.checked,expected_revision:item.revision});await load(false);}catch(error){status.textContent=error.message;}finally{save.disabled=false;}};
+  password.onclick=async()=>{password.disabled=true;try{await act('secret-action','account.password',{subject_id:item.subject_id,expected_revision:item.revision});status.textContent='密码已更新，旧会话已撤销';await load(false);}catch(error){status.textContent=error.message;}finally{password.disabled=false;}};
+  revoke.onclick=async()=>{revoke.disabled=true;try{await act('action','account.sessions.revoke',{subject_id:item.subject_id,expected_revision:item.revision});status.textContent='活跃会话已撤销';}catch(error){status.textContent=error.message;}finally{revoke.disabled=false;}};
+  return form;}
+async function load(append){const search=$('search').value.trim();if(!append){items.replaceChildren();after=null;activeSearch=search;}if(append&&search!==activeSearch)return load(false);$('more').disabled=true;status.textContent='正在读取…';
+  try{const page=await request('query','accounts.list',{limit:50,...(activeSearch?{search:activeSearch}:{}),...(append&&after?{after}:{})});for(const item of page.items)items.append(row(item));after=page.next_after;$('more').hidden=!after;status.textContent=`已显示 ${items.children.length} 个账号`;resize();}catch(error){status.textContent=error.message;}finally{$('more').disabled=false;}}
+  $('create').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget;const values=Object.fromEntries(new FormData(form));const button=form.querySelector('button');button.disabled=true;try{await act('secret-action','account.create',values);form.reset();await load(false);}catch(error){status.textContent=error.message;}finally{button.disabled=false;}};
+  $('filter').onsubmit=event=>{event.preventDefault();load(false);};$('refresh').onclick=()=>load(false);$('more').onclick=()=>load(true);
+  addEventListener('message',event=>{const message=event.data||{};if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect'||typeof message.nonce!=='string')return;port=event.ports[0];nonce=message.nonce;port.onmessage=event=>{const value=event.data||{};if(value.protocol!=='forest.management-ui-channel/1'||value.nonce!==nonce)return;if(value.type==='initialize'){resize();load(false);return;}const entry=pending.get(value.request_id);if(entry){pending.delete(value.request_id);if(value.type==='query-result'||value.type==='action-result')entry.resolve(value.value);else entry.reject(Error(value.message||'账号操作失败'));}else if(value.type==='error')status.textContent=value.message||'账号操作失败';};port.start();send('ready');},{once:true});
+})();
+</script></body></html>

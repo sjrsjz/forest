@@ -1358,11 +1358,13 @@ class RuntimeModuleRegistry:
             "DEPLOYMENT_RUNTIME_UNAVAILABLE",
         }
 
-    async def _record_current_states(self, lease, *, failure_code=None):
+    async def _record_current_states(self, lease, *, failure_code=None, components=None):
         if self.generation_authority is None or self.graph_identity is None:
             return
         states = {}
         for component_id, state in self.states.items():
+            if components is not None and component_id not in components:
+                continue
             if component_id in self._retained_components and not self._retained_committed:
                 continue
             if state == ModuleLifecycleState.FAILED:
@@ -2234,7 +2236,7 @@ class RuntimeModuleRegistry:
             ):
                 self.contract_router.deactivate()
             errors = []
-            released_sources: set[RuntimeModuleRegistry] = set()
+            released_sources: dict[RuntimeModuleRegistry, set[str]] = {}
             if (
                 self._replacement_operation_id is None
                 and not self._replacement_owned_frozen
@@ -2275,7 +2277,7 @@ class RuntimeModuleRegistry:
                     source = self._retained_sources.get(component_id)
                     if source is not None and self.states[component_id] == ModuleLifecycleState.STOPPED:
                         source._release_transferred(component_id)
-                        released_sources.add(source)
+                        released_sources.setdefault(source, set()).add(component_id)
                         del self._retained_sources[component_id]
                 except Exception as exc:
                     errors.append(exc)
@@ -2294,8 +2296,10 @@ class RuntimeModuleRegistry:
                     else ("RUNTIME_MODULE_CLEANUP_FAILED" if errors else None)
                 )
                 await self._record_current_states(lease, failure_code=failure_code)
-                for source in released_sources:
-                    await source._record_current_states(lease, failure_code=failure_code)
+                for source, components in released_sources.items():
+                    await source._record_current_states(
+                        lease, failure_code=failure_code, components=components,
+                    )
             self._closed = not errors and all(
                 component_id in self._transferred_components
                 or (

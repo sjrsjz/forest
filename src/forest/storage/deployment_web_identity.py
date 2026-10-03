@@ -8,6 +8,7 @@ import hmac
 import inspect
 import math
 import re
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -101,6 +102,14 @@ class DeploymentWebIdentityAuthority:
         self.store = store
         self.active_key_id = _text(active_key_id, "active_key_id", 256)
         self.key_resolver = key_resolver
+
+    @asynccontextmanager
+    async def _account_transaction(self, conn):
+        if conn is not None:
+            yield conn
+            return
+        async with self.store.pool.connection() as owned, owned.transaction():
+            yield owned
 
     async def initialize_setup(self, credential) -> dict:
         """Install one pairing challenge without ever reopening completed setup."""
@@ -307,6 +316,8 @@ class DeploymentWebIdentityAuthority:
         password: str,
         role: str,
         authorization=None,
+        conn=None,
+        _prepared_password_hash=None,
     ) -> WebSubject:
         return await self._create_account(
             operation_id=operation_id,
@@ -316,6 +327,8 @@ class DeploymentWebIdentityAuthority:
             password=password,
             role=role,
             authorization=authorization,
+            conn=conn,
+            _prepared_password_hash=_prepared_password_hash,
         )
 
     async def _create_account(
@@ -328,14 +341,20 @@ class DeploymentWebIdentityAuthority:
         password: str,
         role: str,
         authorization=None,
+        conn=None,
+        _prepared_password_hash=None,
     ) -> WebSubject:
         operation_id = _text(operation_id, "operation_id", 256)
         username = _username(username)
         display_name = _text(display_name, "display_name", 128)
         role = _role(role)
-        password_hash = await asyncio.to_thread(hash_password, password)
+        password_hash = (
+            _prepared_password_hash
+            if _prepared_password_hash is not None
+            else await asyncio.to_thread(hash_password, password)
+        )
         subject_id = "web-subject/" + hashlib.sha256(username.encode()).hexdigest()[:32]
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._account_transaction(conn) as conn:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )
@@ -412,6 +431,7 @@ class DeploymentWebIdentityAuthority:
         enabled: bool,
         expected_revision: int,
         authorization=None,
+        conn=None,
     ) -> WebSubject:
         operation_id = _text(operation_id, "operation_id", 256)
         subject_id = _text(subject_id, "subject_id", 128)
@@ -422,7 +442,7 @@ class DeploymentWebIdentityAuthority:
         input_digest = digest_json(
             [subject_id, display_name, role, enabled, expected_revision]
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._account_transaction(conn) as conn:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )
@@ -507,13 +527,19 @@ class DeploymentWebIdentityAuthority:
         password: str,
         expected_revision: int,
         authorization=None,
+        conn=None,
+        _prepared_password_hash=None,
     ) -> WebSubject:
         operation_id = _text(operation_id, "operation_id", 256)
         subject_id = _text(subject_id, "subject_id", 128)
         if type(expected_revision) is not int or expected_revision < 1:
             raise ForestError("WEB_IDENTITY_INPUT_INVALID", "Account revision is invalid", 422)
-        password_hash = await asyncio.to_thread(hash_password, password)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        password_hash = (
+            _prepared_password_hash
+            if _prepared_password_hash is not None
+            else await asyncio.to_thread(hash_password, password)
+        )
+        async with self._account_transaction(conn) as conn:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )
@@ -594,13 +620,14 @@ class DeploymentWebIdentityAuthority:
         subject_id: str,
         expected_revision: int,
         authorization=None,
+        conn=None,
     ) -> WebSubject:
         operation_id = _text(operation_id, "operation_id", 256)
         subject_id = _text(subject_id, "subject_id", 128)
         if type(expected_revision) is not int or expected_revision < 1:
             raise ForestError("WEB_IDENTITY_INPUT_INVALID", "Account revision is invalid", 422)
         input_digest = digest_json([subject_id, expected_revision])
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._account_transaction(conn) as conn:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )

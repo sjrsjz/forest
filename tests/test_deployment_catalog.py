@@ -18,7 +18,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
-from forest.deployment_kernel_management import SecretPutKernelCommand
+from forest.deployment_kernel_management import SecretPutKernelCommand, WebAccountKernelCommand
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_package_controller import DeploymentPackageController
@@ -2585,6 +2585,10 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         kernel_management_handlers={
             ("deployment.secrets", "deployment.secret-put"):
                 SecretPutKernelCommand(secrets),
+            **{
+                ("deployment.accounts", kind): WebAccountKernelCommand(web_identity, kind)
+                for kind in WebAccountKernelCommand._METHODS
+            },
         },
     )
     package_catalog = PackageCatalog(tmp_path / "webui-deployment-packages")
@@ -2596,6 +2600,9 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     )
     secret_snapshot = package_catalog.build(
         Path(__file__).parents[1] / "src/forest/builtin/deployment_secrets"
+    )
+    account_snapshot = package_catalog.build(
+        Path(__file__).parents[1] / "src/forest/builtin/deployment_accounts"
     )
     wrong_binding = DeploymentRuntimeScope(
         repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
@@ -2618,8 +2625,12 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     secret_descriptor = await bootstrap_builtin_deployment_package(
         secret_snapshot, deployment_runtime
     )
+    account_descriptor = await bootstrap_builtin_deployment_package(
+        account_snapshot, deployment_runtime
+    )
     deployment_registry = RuntimeModuleRegistry(
-        deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor)
+        deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor,
+                             account_descriptor)
     )
     await deployment_registry.start()
     legacy_components = deployment_management_components(
@@ -2630,7 +2641,6 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         supervisor=supervisor,
         bootstrap_contributions=official_bootstrap_contributions(),
         database_allocator=allocator,
-        web_identity=web_identity,
     )
     app = create_deployment_management_app(
         deployment_id="deployment/test",
@@ -2670,6 +2680,19 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             if item["component_id"] == "deployment.secrets"
         )
         assert secret_module["management_contract"]["actions"][0]["secret_field"] == "plaintext"
+        account_module = next(
+            item for item in body["modules"] if item["component_id"] == "deployment.accounts"
+        )
+        assert account_module["generation_id"] == (
+            deployment_registry.graph_identity.generations["deployment.accounts"]
+        )
+        assert {
+            item["action_id"]: item.get("secret_field")
+            for item in account_module["management_contract"]["actions"]
+        } == {
+            "account.create": "password", "account.update": None,
+            "account.password": "password", "account.sessions.revoke": None,
+        }
         audit_module = next(
             item for item in body["modules"] if item["component_id"] == "deployment.audit"
         )
@@ -2697,6 +2720,35 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert secret_ui.status_code == 200
         assert 'name="plaintext"' not in secret_ui.text
+        account_ui = await client.get(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            f"deployment.accounts/management-ui/{account_snapshot.management_ui()[0]['sha256']}",
+            headers=headers,
+        )
+        assert account_ui.status_code == 200
+        assert 'name="password"' not in account_ui.text
+        account_page = await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.accounts/queries/accounts.list",
+            headers=headers, json={"limit": 1},
+        )
+        assert account_page.status_code == 200, account_page.text
+        assert [item["username"] for item in account_page.json()["items"]] == ["admin"]
+        created_account = await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.accounts/actions/account.create",
+            headers={**headers, "idempotency-key": "webui-account-create"},
+            json={"username": "reader", "display_name": "Reader",
+                  "password": "reader-password-123", "role": "AUDITOR"},
+        )
+        assert created_account.status_code == 200, created_account.text
+        assert created_account.json()["username"] == "reader"
+        assert "reader-password-123" not in created_account.text
+        assert (await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.accounts/queries/accounts.list",
+            headers=headers, json={"limit": 1, "after": "admin"},
+        )).json()["items"][0]["username"] == "reader"
         page_path = (
             "/management/v1/scopes/deployment/deployment/modules/"
             "deployment.bot-catalog/queries/bots.list"
@@ -2894,6 +2946,11 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             for row in receipts
         ] == [
             (
+                "deployment.accounts",
+                deployment_registry.graph_identity.generations["deployment.accounts"],
+                "account.create",
+            ),
+            (
                 "deployment.provisioning",
                 "deployment/deployment.provisioning/1",
                 "bootstrap.create",
@@ -2923,12 +2980,14 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert audit_page.status_code == 200
         audit_records = audit_page.json()["records"]
         assert {item["action"] for item in audit_records} == {
+            "account.create",
             "bot.set-desired",
             "secret.put",
             "storage.create-local",
             "bootstrap.create",
         }
         assert {item["producer_component_id"] for item in audit_records} == {
+            "deployment.accounts",
             "deployment.bot-catalog",
             "deployment.secrets",
             "deployment.provisioning",
@@ -2939,7 +2998,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert all(item["origin_kind"] == "web.management" for item in audit_records)
         previous = deployment_registry
         candidate = RuntimeModuleRegistry(
-            deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor)
+            deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor,
+                                 account_descriptor)
         )
         drained = candidate.plan_graph_transition(
             previous, target_component_id="deployment.secrets"
@@ -2971,6 +3031,64 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert rotated.status_code == 200, rotated.text
         assert rotated.json()["revision"] == 2
         assert "replacement-value" not in rotated.text
+        account_path = (
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.accounts/actions/"
+        )
+        updated = await client.post(
+            account_path + "account.update",
+            headers={**headers, "idempotency-key": "webui-account-update"},
+            json={"subject_id": created_account.json()["subject_id"],
+                  "display_name": "Reader Two", "role": "AUDITOR",
+                  "enabled": True, "expected_revision": 1},
+        )
+        assert updated.status_code == 200, updated.text
+        assert updated.json()["revision"] == 2
+        password = await client.post(
+            account_path + "account.password",
+            headers={**headers, "idempotency-key": "webui-account-password"},
+            json={"subject_id": created_account.json()["subject_id"],
+                  "password": "reader-new-password-123", "expected_revision": 2},
+        )
+        assert password.status_code == 200, password.text
+        assert password.json()["revision"] == 3
+        assert "reader-new-password-123" not in password.text
+        revoked = await client.post(
+            account_path + "account.sessions.revoke",
+            headers={**headers, "idempotency-key": "webui-account-revoke"},
+            json={"subject_id": created_account.json()["subject_id"],
+                  "expected_revision": 3},
+        )
+        assert revoked.status_code == 200, revoked.text
+        account_previous = deployment_registry
+        account_candidate = RuntimeModuleRegistry(
+            deployment_runtime, (audit_descriptor, bot_descriptor, secret_descriptor,
+                                 account_descriptor)
+        )
+        account_drained = account_candidate.plan_graph_transition(
+            account_previous, target_component_id="deployment.accounts"
+        )
+        assert account_drained == ("deployment.accounts",)
+        await account_candidate.prewarm()
+        await account_previous.drain_owned_work_for_replacement(
+            account_candidate.activation_id, components=account_drained,
+        )
+        await account_candidate.start()
+        account_candidate.accept_retained_ownership()
+        assert account_candidate.graph_identity.generations["deployment.accounts"] != (
+            account_previous.graph_identity.generations["deployment.accounts"]
+        )
+        await account_previous.close()
+        deployment_registry = account_candidate
+        updated_after_reload = await client.post(
+            account_path + "account.update",
+            headers={**headers, "idempotency-key": "webui-account-after-reload"},
+            json={"subject_id": created_account.json()["subject_id"],
+                  "display_name": "Reader Three", "role": "AUDITOR",
+                  "enabled": True, "expected_revision": 3},
+        )
+        assert updated_after_reload.status_code == 200, updated_after_reload.text
+        assert updated_after_reload.json()["revision"] == 4
     await deployment_registry.close()
 
 

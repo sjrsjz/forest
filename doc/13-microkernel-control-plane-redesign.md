@@ -384,7 +384,7 @@ revision 或 `WebAuthority.issue(bot_id=...)`。
 deployment/host 管理服务也有描述符、工件身份和
 `DISCOVERED → VALIDATED → PREPARED → ACTIVE → QUIESCING → QUIESCENT → STOPPED/FAILED`
 生命周期；注册表必须整体准备成功后再发布给 scope provider，恢复数据库、替换部署 authority 或
-关闭宿主时先撤下目录再反向排空。`deployment.audit` 只拥有部署审计脱敏查询与 UI，由部署数据库事务在查询前后复核管理员会话。`deployment.accounts` 拥有账号目录、创建、变更计划/提交和 UI，并保留自我降权后的幂等回执恢复。部署显示名称和会话 TTL 由 `deployment.configuration` 声明 schema、读取、计划、提交与 UI，登录/会话壳层只消费其生效投影。备份、Bot 目录和存储供应分别属于 deployment/host 服务；不能把某个临时 `ManagementRuntime` 字段列表当作最终注册表，
+关闭宿主时先撤下目录再反向排空。`deployment.audit` 只拥有部署审计脱敏查询与 UI，由部署数据库事务在查询前后复核管理员会话。账号身份、密码摘要、登录会话和最后一名管理员保护由内核持有；`deployment.accounts` 包拥有有界账号目录查询、操作声明和 UI，经受限内核命令提交创建、变更、改密与撤销会话，并保留自我降权后的幂等回执恢复。部署显示名称和会话 TTL 由 `deployment.configuration` 声明 schema、读取、计划、提交与 UI，登录/会话壳层只消费其生效投影。备份、Bot 目录和存储供应分别属于 deployment/host 服务；不能把某个临时 `ManagementRuntime` 字段列表当作最终注册表，
 也不能为了共用 transport 给 deployment 操作伪造 Bot ID 或 Bot ticket。
 
 切换部署作用域时，先把 PackageSnapshot 的 `deployment`/`host` scope 与相应存储作用域绑定到真实部署/宿主 authority，再建立各自的配置、授权、服务路由和 Generation 图；Bot 装配器必须继续拒绝跨 scope 工件。部署网关的模块目录、授权目标与每次操作必须读取同一张 ACTIVE 图的真实 Generation/revision，关闭或换代时先阻止新调用并排空已准入调用。现行 `deployment_management.py` 中直接持有 Repository/Supervisor 的对象、`deployment_management_app.py` 中固定部署 UI 静态文件和 `DeploymentManagementGateway` 合成的 `deployment/<component>/1` 都是待删除实现；不能先删除 WebUI 功能，也不能给这些对象包一层 manifest 或把 Bot ID 改称 deployment ID 来冒充完成。
@@ -398,6 +398,8 @@ deployment 包配置的修订账本位于各包私有 SQL 命名空间，以真�
 `deployment.secrets` 的包 UI 只发送 `secret-action` 和非密钥字段，宿主弹窗采集明文并直接提交给当前 Generation 绑定的内核事务命令，明文不进入包 iframe、Worker、查询结果或审计。Web 签票只保存请求摘要，不保存请求正文；内核命令先复核当前 CONTROL Generation，在同一 PostgreSQL 事务中接纳 Web 回执与审计，再调用 Secret 权威完成 AEAD 加密写入；失败时上述写入一并回滚。普通包和 Bot Worker 不能声明或调用该端口。权限载荷、operation digest、审计参数和错误详情都不能携带密钥正文。输入错误返回稳定 `MODULE_MANAGEMENT_INPUT_INVALID`，未知或 query/action 类型不符返回 `MODULE_MANAGEMENT_OPERATION_NOT_FOUND`，校验详情必须可安全 JSON 序列化。
 
 Secret 权威先按 operation ID、再按 Secret 引用获取事务锁，保证不同引用并发复用同一个幂等键时也只有一个写入成功，另一个得到类型化 `SECRET_OPERATION_CONFLICT`；同引用轮换仍由 revision CAS 决定。密文版本存于内核部署数据库，`deployment.secrets` 包只拥有有界元数据查询与管理界面，不复制主密钥或 Secret 状态。
+
+`deployment.accounts` 包按用户名游标分页读取账号元数据；其 iframe 和 Worker 不持有密码。创建及改密时 UI 只发送非敏感字段和 `secret-action`，宿主弹窗采集密码，按准确包 Generation 在同一事务中接纳 Web 回执与审计，再调用内核 Web 身份权威。账号写入通过操作 ID 锁和全局账号锁合流，revision CAS 处理陈旧更新；禁用或改密撤销活动会话，不能删除最后一名启用管理员。连续多次定点热替换时，保留来源图只记录本次真正释放的 Generation 状态，不能重复提交历史 `STOPPED` 迁移。
 
 官方模块的首版管理贡献必须覆盖以下能力：Agent 的配置、Run/ModelTurn/ToolStep 查询、取消和 UNKNOWN 对账；Memory 的配置、状态、来源组合筛选、关系遍历、真实召回试验、遗忘和人工关联；Routing 的已提交 Event/Job/dispatch trace 查询与受控重放；Command/Message Router 的 Binding 范围策略、容量、脱敏诊断和有界恢复；`kernel.audit` 的 Bot 审计元数据查询。这里定义的是模块必须发布的契约，不是当前完成度声明；实际落地情况只看[实现状态](implementation-status.md)。需要当前密码的策略/容量动作由通用管理网关在签票前重新鉴权，票据和 payload provenance 只携带去除密码后的规范载荷。旧 `/agent/*`、`/memory/*`、`/bots/{bot_id}/events/*`、`/bots/{bot_id}/component-jobs/*` 和命令/消息路由专用管理端点必须直接删除，不保留兼容别名。对应 HTML、CSS、ES module 控制器由模块描述符声明，`index.html`、`app.js` 和通用路由均不按这些组件 ID 分支。审计生产者也必须通过 `kernel.audit` 的显式写入端口提交，不能因为已有查询贡献就宣称存储所有权已经拆分完成。
 
@@ -446,7 +448,7 @@ material、缺失 active 引用和超过上限的 key 数，且 key material 不
 
 部署包控制器持有当前 Registry，以预期图修订 CAS 执行候选预热、受影响旧代际排空、原子发布、新代际派发和失败恢复；纯新增且无受影响旧成员时不制造空排空集合，保留成员直接由新图继承。重启时从数据库活动 Generation 绑定取回包摘要，再从持久包目录打开同一不可变工件，缺失工件必须阻止启动而不是退回镜像默认版。部署 Web 写回执在同一事务内锁定活动图头，并复核 `$runtime` 图身份或模块 Generation 与控制准入。管理员的 `$runtime/module.add` 与 `$runtime/module.replace` 先把票据回执、审计事实和固定操作种类、目标包摘要、图修订、activation 的请求原子提交，再由 Supervisor lease 认领；二者共用 `$runtime/module.change.status` 查询持久状态。发布后的重放按 activation 的活动或退役图证据结算，发布前中断的旧 owner 请求明确失败，不能用相同 activation 在新 lease 下盲重试。管理台通用图面板只提交和观察内核图操作，不能替模块包提供专用业务表单。
 
-当前支持已装配官方包的替换，以及普通 ZIP 导入的声明式、无存储、无额外能力请求的 deployment Worker 新增与替换；普通包只开放 manifest 声明为 `read` 的 Worker 服务和管理查询，配置先由冻结 bootstrap seed 初始化且当前只读。`execution_profile = "official"` 是工件自报字段，不能证明官方来源；目录仅在宿主显式构建官方来源时登记摘要，部署控制器启动、恢复和替换都要求该独立登记事实。普通本地构建或 ZIP 导入即使声明同一 profile，也不能取得官方 SQL 执行资格。包的隔离 Python 进程目前不是恶意代码 OS 沙箱，故普通部署插件仍应视为由管理员主动安装的代码；协议级端口限制不能被表述为文件或网络系统调用隔离。部署包目录的导入结果/错误投影、候选校验、普通包私有存储、通用 deployment 写端口和模块配置换代仍待完成。`deployment.audit`、`deployment.package-registry`、`deployment.bot-catalog` 和 `deployment.secrets` 已有真实包 Generation；账号、配置与供应管理仍有宿主伪 Generation，必须继续迁移。内核持有 Web 身份与 Secret 加密等基础权威，但管理 UI、操作目录和可替换生命周期属于包；涉及明文的写操作由准确 Generation 和同事务 Web 回执围栏约束的窄内核命令执行。未上线部署数据库在基线改变后重建，不引入在线迁移兼容层。
+当前支持已装配官方包的替换，以及普通 ZIP 导入的声明式、无存储、无额外能力请求的 deployment Worker 新增与替换；普通包只开放 manifest 声明为 `read` 的 Worker 服务和管理查询，配置先由冻结 bootstrap seed 初始化且当前只读。`execution_profile = "official"` 是工件自报字段，不能证明官方来源；目录仅在宿主显式构建官方来源时登记摘要，部署控制器启动、恢复和替换都要求该独立登记事实。普通本地构建或 ZIP 导入即使声明同一 profile，也不能取得官方 SQL 执行资格。包的隔离 Python 进程目前不是恶意代码 OS 沙箱，故普通部署插件仍应视为由管理员主动安装的代码；协议级端口限制不能被表述为文件或网络系统调用隔离。部署包目录的导入结果/错误投影、候选校验、普通包私有存储、通用 deployment 写端口和模块配置换代仍待完成。`deployment.audit`、`deployment.package-registry`、`deployment.bot-catalog`、`deployment.secrets` 和 `deployment.accounts` 已有真实包 Generation；配置与供应管理仍有宿主伪 Generation，必须继续迁移。内核持有 Web 身份与 Secret 加密等基础权威，但管理 UI、操作目录和可替换生命周期属于包；涉及明文的写操作由准确 Generation 和同事务 Web 回执围栏约束的窄内核命令执行。未上线部署数据库在基线改变后重建，不引入在线迁移兼容层。
 
 部署 Graph 变更有独立的只读候选预览：输入操作种类、组件 ID、不可变包摘要和来源图修订，控制器从持久包目录读取准确工件，用正式描述符投影和 Graph 规划器计算成员摘要、准备/排空/保留集合及 Worker 容量，并返回规范 `plan_digest`。预览不安装 SQL、不初始化配置、不启动 Worker，也不写图操作账本。管理台只能在预览后提交；Web 网关对新操作在入队前按同一输入重算摘要，且在持久请求中冻结它。事务内仍以活动图修订 CAS、模块成员和 Web 票据为最终围栏；同一操作的准确重放先读原回执，不用新图重新规划。预览只证明声明与当前图的规划结果，不能承诺 Worker 预热、健康或发布一定成功。
 

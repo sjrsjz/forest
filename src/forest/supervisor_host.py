@@ -13,7 +13,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from forest.bot_host import BotHost
-from forest.deployment_kernel_management import SecretPutKernelCommand
+from forest.deployment_kernel_management import SecretPutKernelCommand, WebAccountKernelCommand
 from forest.deployment_management import deployment_management_components
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
@@ -229,6 +229,10 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             kernel_management_handlers={
                 ("deployment.secrets", "deployment.secret-put"):
                     SecretPutKernelCommand(secrets),
+                **{
+                    ("deployment.accounts", kind): WebAccountKernelCommand(web_identity, kind)
+                    for kind in WebAccountKernelCommand._METHODS
+                },
             },
         )
         deployment_controller = DeploymentPackageController(
@@ -237,6 +241,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 Path(str(files("forest").joinpath("builtin/deployment_audit"))),
                 Path(str(files("forest").joinpath("builtin/deployment_bot_catalog"))),
                 Path(str(files("forest").joinpath("builtin/deployment_secrets"))),
+                Path(str(files("forest").joinpath("builtin/deployment_accounts"))),
                 Path(str(files("forest").joinpath("builtin/deployment_package_registry"))),
             ),
         )
@@ -249,7 +254,6 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             supervisor=supervisor,
             bootstrap_contributions=official_bootstrap_contributions(),
             database_allocator=database_allocator,
-            web_identity=web_identity,
         )
         import uvicorn
 
