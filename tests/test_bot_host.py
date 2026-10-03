@@ -264,6 +264,25 @@ class ValidPngMediaClient(FakeMediaClient):
         return CapturedImage(buffer.getvalue(), "image/png", 64, 64)
 
 
+class LargePngMediaClient(FakeMediaClient):
+    _capture = None
+
+    async def fetch(self, locator):
+        self.fetched.append(locator)
+        if type(self)._capture is None:
+            width, height = 1600, 1200
+            pixels = hashlib.shake_256(b"forest-real-vl-large-image").digest(
+                width * height * 3
+            )
+            image = Image.frombytes("RGB", (width, height), pixels)
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            content = buffer.getvalue()
+            assert 4 * 1024 * 1024 < len(content) <= 8 * 1024 * 1024
+            type(self)._capture = CapturedImage(content, "image/png", width, height)
+        return type(self)._capture
+
+
 def qiyu_embedding_config(path: str) -> dict[str, str]:
     wanted = {
         "EMBEDDING_PROVIDER", "EMBEDDING_MODEL", "EMBEDDING_DIMENSION",
@@ -4608,7 +4627,9 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
 
 
 @pytest.mark.postgres
-async def test_real_vl_auto_archive_cross_group_recall_and_management_trial(tmp_path):
+async def test_real_vl_large_image_auto_archive_cross_group_recall_and_management_trial(
+    tmp_path,
+):
     dsn = os.environ.get("FOREST_TEST_DSN")
     qiyu_env_file = os.environ.get("FOREST_TEST_QIYU_ENV_FILE")
     milvus_uri = os.environ.get("FOREST_TEST_MILVUS_URI")
@@ -4653,7 +4674,7 @@ async def test_real_vl_auto_archive_cross_group_recall_and_management_trial(tmp_
 
     host = BotHost(
         settings, model_client_factory=RecordingModelClient,
-        media_client_factory=ValidPngMediaClient,
+        media_client_factory=LargePngMediaClient,
         websocket_client_factory=create_websocket,
         package_catalog=PackageCatalog(tmp_path / "cross-vl-packages"),
     )
