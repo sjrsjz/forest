@@ -12,7 +12,8 @@ Bot 是长期存在的身份、资源、授权、预算和数据作用域记录�
 
 | Authority / 模块 | 独占事实 |
 |---|---|
-| `deployment.bot-catalog` | 稳定且不可复用的 `bot_id`、显示名、供应状态与目标存储引用 |
+| 部署内核 Bot 目录 | 稳定且不可复用的 `bot_id`、显示名、供应状态、目标存储引用及期望运行状态；包卸载不得删除或改写这些事实 |
+| `deployment.bot-catalog` | 目录分页、创建、重命名与供应管理的可替换入口；只能通过受限内核端口提交管理操作，不复制 Bot 身份或运行意图 |
 | `kernel.runtime` | RuntimeGraph head、DATA/CONTROL admission、maintenance epoch 与运行状态 |
 | `kernel.authorization` | policy revision、主体、grant、撤权与准确 audience Generation |
 | 配额/预算模块 | 资源限额、消费账本与预算策略；若首版由 kernel 模块提供也保持独立契约 |
@@ -31,7 +32,7 @@ Bot 是长期存在的身份、资源、授权、预算和数据作用域记录�
 
 ### 1.1 目录供应与运行准入
 
-`deployment.bot-catalog` 只描述作用域供应：
+部署内核 Bot 目录持有作用域供应状态；`deployment.bot-catalog` 只发布查询和管理操作：
 
 ```text
 RESERVED → PROVISIONING → READY
@@ -51,7 +52,7 @@ OFFLINE → STARTING → ONLINE → PAUSING → PAUSED
 
 供应计划通过模块描述符验证所选模块、独立存储和必需依赖；Memory 不是内核强制模块，只有所选 RuntimeGraph 声明它为必需依赖时才阻止该图启动。普通暂停由 `kernel.runtime` 关闭 `data_admission`，停止创建新 Run 与业务任务，保留绑定接收、Inbox、持久 Job 记录以及 `control_admission`，因此管理员仍可在群里查询、取消或恢复。已运行工作按 pause 的类型化参数选择排空或取消，不能含糊地假定已停止。恢复按明确积压/过期策略消费，并使用最新 `maintenance_epoch`；旧重载不能覆盖新暂停。真正停止会反向排空 RuntimeGraph 并关闭其连接，不删除记忆，也不保证该 Binding 仍能接收群管理命令。
 
-删除是由 `deployment.bot-catalog` 发起的持久协调操作：依次请求 `kernel.runtime` 冻结接入，各 owner 取消或对账执行、撤权、清理索引及媒体并执行存储保留政策，最后由目录 authority 标记 DELETED。每个 participant 只改自己的 namespace；任一步失败都保留可恢复状态。`bot_id` 不再复用，备份恢复也不能复制出同时有效的相同身份。
+删除由 `deployment.bot-catalog` 通过受限内核端口发起持久协调操作：依次请求 `kernel.runtime` 冻结接入，各 owner 取消或对账执行、撤权、清理索引及媒体并执行存储保留政策，最后由内核 Bot 目录 authority 标记 DELETED。每个 participant 只改自己的 namespace；任一步失败都保留可恢复状态。`bot_id` 不再复用，备份恢复也不能复制出同时有效的相同身份。
 
 ## 2. 会话与工作上下文
 

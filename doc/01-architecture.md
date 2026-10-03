@@ -117,7 +117,7 @@ WebUI提供正式配置界面和运维流程；管理API独立于平台Adapter�
 | 模块 | 核心输入/输出 | 状态所有者 | 缺失或故障行为 |
 |---|---|---|---|
 | `adapter.onebot` | 平台帧 → 已认证 `InboundMessage`；获许可 `TransportAttempt` → 传输观察 | Binding 配置引用、连接/客户端代际、平台事件观察与待回执映射 | 绑定离线，Delivery 持久排队；不拖垮其他绑定 |
-| `bot.directory` | Bot 身份、账号归属预留与作用域解析 | 部署目录与 Bot 元数据；不拥有目标 Bot 的 Binding 配置 | 启动依赖；新账号归属操作暂停 |
+| `deployment.bot-catalog` | 目录分页与管理动作 → 部署内核受限 Bot 目录端口 | 可替换的目录管理贡献；Bot 身份、供应状态与期望运行意图由部署内核持有，不拥有目标 Bot 的 Binding 配置 | 目录发现入口暂不可用；已有 Bot 身份及运行意图不变 |
 | `conversation.scheduler` | 全量入站 → 分类流水、输入切口、Context、Agent 启动/续跑请求、最终回复提交 | 每会话邮箱、actor lease、输入游标、触发、InputBatch、Context 与 reply sequence；只引用 Agent Session/Run | 暂停消费，Inbox/触发状态保留 |
 | `command.router` / `message.router` | 业务命令与普通 Handler 的策略/执行 → 分类结果；调用目标由内核 Contract Router 按冻结 RuntimeGraph 解析 | 各自策略、claim 与结果；不拥有 Inbox、Agent 或内核 service head | 错误按阶段策略隔离，禁止全链静默吞错 |
 | `agent.runtime` | 冻结 Run 输入 → checkpoint、ModelTurn、ToolCall、最终候选 | Agent Session、Run、模型请求/观察、轮次、工具与 checkpoint；不拥有 Context、trigger 或 SendIntent | 从安全边界恢复，其他会话继续 |
