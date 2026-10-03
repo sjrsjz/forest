@@ -1552,19 +1552,9 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
         try:
             assert set(host.registry.states.values()) == {ModuleLifecycleState.ACTIVE}
             worker_host = host.registry.get("component.worker-host")
-            package_page = await worker_host.management_contract.query(
-                "packages", {"limit": 32},
-            )
-            assert package_page["items"]
-            assert {item["component_id"] for item in package_page["items"]} >= {
-                "component.worker-host", "memory.graph", "agent.runtime",
-            }
-            assert all(
-                item["package_digest"].startswith("sha256:")
-                and item["manifest_digest"].startswith("sha256:")
-                and "root" not in item
-                for item in package_page["items"]
-            )
+            with pytest.raises(ForestError) as unavailable_catalog:
+                await worker_host.management_contract.query("packages", {"limit": 32})
+            assert unavailable_catalog.value.code == "PACKAGE_CATALOG_UNAVAILABLE"
             agent_member = await worker_host.management_contract.query(
                 "module", {"component_id": "agent.runtime"}
             )
