@@ -97,7 +97,7 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
     }
     if component["scope"] != "deployment" or component.get("configuration_apply") or (
         declared_commands != artifact_commands or component.get("management_actions")
-        or component.get("owned_work_handlers")
+        or (component.get("owned_work_handlers") and not component.get("storage"))
         or any(item["semantics"] != "read" for item in component.get("provides", ()))
     ):
         raise ForestError(
@@ -196,7 +196,9 @@ async def bootstrap_builtin_deployment_package(snapshot, runtime, *, plan_only=F
         generation_member_verifier=runtime.generation_authority.verify_generation_member,
         state_queries=None, state_commands=None, domain_queries=domain,
         domain_commands=domain,
-        service_operation_ledger=None, storage=storage, trust_level="official",
+        owned_work_authority=domain if component.get("owned_work_handlers") else None,
+        service_operation_ledger=runtime.service_operation_ledger,
+        storage=storage, trust_level="official",
         effect_driver_factories=effect_factories,
         management=management,
         management_contract_factory=lambda adapter: _ReadOnlyManagementContract(

@@ -90,6 +90,33 @@ ALTER TABLE forest_deployment.runtime_graph_clock
     ADD FOREIGN KEY (deployment_id,active_graph_id)
     REFERENCES forest_deployment.runtime_graphs(deployment_id,graph_id);
 
+CREATE TABLE forest_deployment.package_service_operations (
+    deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
+    component_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    service_id text NOT NULL,
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    causal_root_kind text NOT NULL,
+    causal_root_id text NOT NULL,
+    generation_id text NOT NULL,
+    call_id text NOT NULL,
+    deadline_at timestamptz NOT NULL,
+    status text NOT NULL CHECK (status IN ('ACTIVE','SUCCEEDED','FAILED','UNKNOWN')),
+    outcome jsonb,
+    error_code text CHECK (error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    completed_at timestamptz,
+    PRIMARY KEY (deployment_id,component_id,operation_id),
+    UNIQUE (deployment_id,call_id),
+    FOREIGN KEY (deployment_id,generation_id)
+        REFERENCES forest_deployment.runtime_generations(deployment_id,generation_id),
+    CHECK ((status='ACTIVE' AND outcome IS NULL AND completed_at IS NULL)
+        OR (status='UNKNOWN' AND outcome IS NULL AND completed_at IS NOT NULL)
+        OR (status IN ('SUCCEEDED','FAILED') AND outcome IS NOT NULL AND completed_at IS NOT NULL))
+);
+CREATE INDEX package_service_operations_status
+    ON forest_deployment.package_service_operations(deployment_id,status,deadline_at);
+
 CREATE TABLE forest_deployment.runtime_graph_change_requests (
     deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),

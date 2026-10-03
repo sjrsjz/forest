@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from forest.deployment_package_catalog_driver import DeploymentPackageCatalogEffectDriver
+from forest.deployment_service_ledger import DeploymentPackageServiceOperationLedger
 from forest.errors import ForestError
 from forest.storage.deployment_catalog import DeploymentSupervisorLease
 from forest.storage.deployment_generation import DeploymentGenerationAuthority
@@ -17,6 +18,9 @@ class DeploymentRuntimeScope:
         self.scope_id = store.deployment_id
         self.supervisor = supervisor
         self.generation_authority = DeploymentGenerationAuthority(store)
+        self.service_operation_ledger = DeploymentPackageServiceOperationLedger(
+            store, self.generation_authority,
+        )
         self.schema_bundle_installer = DeploymentSchemaBundleInstaller(store)
         self.package_catalog = package_catalog
         self.effect_driver_factories = (

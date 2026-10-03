@@ -40,7 +40,11 @@ from forest.official_bot_provisioning import (
     official_bootstrap_contributions,
     official_bootstrap_schema_digests,
 )
-from forest.package_capabilities import PackageCallScope
+from forest.package_capabilities import (
+    PackageCallScope,
+    PackageServiceError,
+    PackageServiceRoute,
+)
 from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.packages import PackageCatalog, digest_json, storage_bundle_digest
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
@@ -1106,6 +1110,106 @@ async def test_deployment_package_controller_restores_selected_artifact_after_re
         if restarted is not None:
             await restarted.close()
         await controller.close()
+
+
+@pytest.mark.postgres
+async def test_deployment_owned_work_operation_ledger_fences_replay_and_unknown(
+    deployment_catalog, tmp_path
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    lease = await repository.claim_supervisor("host/owned-ledger", "incarnation/owned-ledger")
+    runtime = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease)
+    )
+    source = Path(__file__).parents[1] / "src/forest/builtin/deployment_audit"
+    snapshot = PackageCatalog(tmp_path / "packages").build(source)
+    descriptor = await bootstrap_builtin_deployment_package(snapshot, runtime)
+    registry = RuntimeModuleRegistry(runtime, (descriptor,))
+    try:
+        await registry.start()
+        graph = registry.graph_identity
+        generation = graph.generations["deployment.audit"]
+        route = PackageServiceRoute(
+            service_id="owned-work.deployment.audit.recovery",
+            graph_id=graph.graph_id, graph_revision=graph.graph_revision,
+            admission_lane="DATA", owned_work=True, parent_call_id=None,
+            timeout_seconds=10,
+        )
+        scope = PackageCallScope(
+            bot_id=None, scope_kind="deployment", scope_id=repository.store.deployment_id,
+            component_id="deployment.audit", generation_id=generation,
+            instance_id="instance/ledger", worker_incarnation="worker/ledger",
+            call_id="call:ledger-a", call_operation_id="owned:ledger-success",
+            causal_root_kind="package.owned-work", causal_root_id="owned:ledger-success",
+        )
+        ledger = runtime.service_operation_ledger
+        assert (await ledger.begin(scope, route, {"value": 1})).execute is True
+        competing = replace(scope, call_id="call:ledger-b")
+        in_progress = await ledger.begin(competing, route, {"value": 1})
+        assert in_progress.error.code == "SERVICE_OPERATION_IN_PROGRESS"
+        await ledger.succeed(scope, route, {"value": "done"})
+        assert (await ledger.begin(competing, route, {"value": 1})).result == {
+            "value": "done",
+        }
+        parallel = replace(
+            scope, call_id="call:parallel-a", call_operation_id="owned:ledger-parallel",
+            causal_root_id="owned:ledger-parallel",
+        )
+        parallel_other = replace(parallel, call_id="call:parallel-b")
+        admissions = await asyncio.gather(
+            ledger.begin(parallel, route, {"value": "parallel"}),
+            ledger.begin(parallel_other, route, {"value": "parallel"}),
+        )
+        assert sum(item.execute for item in admissions) == 1
+        assert sorted(
+            item.error.code for item in admissions if item.error is not None
+        ) == ["SERVICE_OPERATION_IN_PROGRESS"]
+        await ledger.succeed(
+            parallel if admissions[0].execute else parallel_other,
+            route, {"value": "parallel"},
+        )
+        with pytest.raises(ForestError) as conflict:
+            await ledger.begin(competing, route, {"value": 2})
+        assert conflict.value.code == "SERVICE_OPERATION_CONFLICT"
+
+        failure = replace(
+            scope, call_id="call:ledger-fail", call_operation_id="owned:ledger-fail",
+            causal_root_id="owned:ledger-fail",
+        )
+        assert (await ledger.begin(failure, route, {})).execute is True
+        await ledger.fail(
+            failure, route, PackageServiceError("RECOVERY_PROBE_REJECTED", "Rejected", 422),
+        )
+        replay_failure = await ledger.begin(
+            replace(failure, call_id="call:ledger-fail-replay"), route, {},
+        )
+        assert replay_failure.error.code == "RECOVERY_PROBE_REJECTED"
+
+        unknown = replace(
+            scope, call_id="call:ledger-unknown", call_operation_id="owned:ledger-unknown",
+            causal_root_id="owned:ledger-unknown",
+        )
+        assert (await ledger.begin(unknown, route, {})).execute is True
+        async with repository.store.pool.connection() as conn:
+            await conn.execute(
+                "UPDATE forest_deployment.package_service_operations "
+                "SET deadline_at=clock_timestamp()-interval '1 second' "
+                "WHERE deployment_id=%s AND component_id=%s AND operation_id=%s",
+                (
+                    repository.store.deployment_id, unknown.component_id,
+                    unknown.call_operation_id,
+                ),
+            )
+        replay_unknown = await ledger.begin(
+            replace(unknown, call_id="call:ledger-unknown-replay"), route, {},
+        )
+        assert replay_unknown.error.code == "SERVICE_OPERATION_UNKNOWN"
+        with pytest.raises(ForestError) as stale:
+            await ledger.succeed(unknown, route, {"value": "late"})
+        assert stale.value.code == "SERVICE_OPERATION_STALE_ATTEMPT"
+    finally:
+        await registry.close()
 
 
 @pytest.mark.postgres

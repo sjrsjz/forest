@@ -144,6 +144,7 @@ class DeploymentCatalogRepository:
             "runtime_graphs",
             "runtime_generations",
             "runtime_graph_members",
+            "package_service_operations",
             "runtime_graph_change_requests",
             "supervisor_lease",
             "web_accounts",
