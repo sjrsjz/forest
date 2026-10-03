@@ -2885,6 +2885,10 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert provisioning_ui.status_code == 200
         assert "bootstrap-editors-open" in provisioning_ui.text
+        assert "sandbox allow-scripts allow-forms" in (
+            provisioning_ui.headers["content-security-policy"]
+        )
+        assert "form-action 'none'" in provisioning_ui.headers["content-security-policy"]
         provisioning_module = next(
             item for item in body["modules"]
             if item["component_id"] == "deployment.provisioning"

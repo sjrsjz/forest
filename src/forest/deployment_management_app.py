@@ -280,7 +280,7 @@ def create_deployment_management_app(
                 headers={
                     "x-frame-options": "SAMEORIGIN",
                     "content-security-policy": (
-                        "sandbox allow-scripts; default-src 'none'; "
+                        "sandbox allow-scripts allow-forms; default-src 'none'; "
                         "script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
                         "img-src blob: data:; connect-src 'none'; font-src 'none'; "
                         "frame-ancestors 'self'; base-uri 'none'; form-action 'none'"

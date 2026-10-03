@@ -147,7 +147,7 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   controls.append(state, discard, apply);
   const frame = document.createElement('iframe');
   frame.className = 'package-ui-frame';
-  frame.sandbox = 'allow-scripts';
+  frame.sandbox = 'allow-scripts allow-forms';
   frame.referrerPolicy = 'no-referrer';
   frame.title = contribution.label;
   shell.append(controls, frame);
