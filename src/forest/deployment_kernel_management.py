@@ -7,6 +7,7 @@ outside the transaction, but its only durable effect must occur in execute_in.
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from dataclasses import asdict
 
 import psycopg
@@ -195,3 +196,29 @@ class LocalStorageProfileKernelCommand:
             operation_id=profile_operation_id, conn=conn, **prepared,
         )
         return asdict(saved)
+
+
+class BootstrapProfileKernelCommand:
+    """Freeze module-owned Bootstrap seeds under the deployment transaction."""
+
+    def __init__(self, profiles, registry) -> None:
+        self.profiles = profiles
+        self.registry = registry
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        prepared = dict(payload)
+        prepared["components"] = deepcopy(
+            self.registry.validate_components(prepared["components"]),
+        )
+        return prepared
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        saved = await self.profiles.create(
+            operation_id=operation_id, conn=conn,
+            schema_digests=self.registry.schema_digests(), **prepared,
+        )
+        return {
+            "profile_ref": saved.profile_ref,
+            "bot_id": saved.bot_id,
+            "manifest_digest": saved.manifest_digest,
+        }

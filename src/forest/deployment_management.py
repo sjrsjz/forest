@@ -6,7 +6,10 @@ from dataclasses import asdict, dataclass
 
 from forest.bootstrap_contributions import BootstrapConfigurationRegistry
 from forest.deployment_action_authorization import authorize_deployment_action_in
-from forest.deployment_kernel_management import LocalStorageProfileKernelCommand
+from forest.deployment_kernel_management import (
+    BootstrapProfileKernelCommand,
+    LocalStorageProfileKernelCommand,
+)
 from forest.errors import ForestError
 from forest.runtime_modules import RuntimeManagementContribution
 
@@ -55,6 +58,9 @@ class DeploymentProvisioningManagement:
         )
         self.local_storage_command = LocalStorageProfileKernelCommand(
             secrets, storage_profiles, database_allocator,
+        )
+        self.bootstrap_command = BootstrapProfileKernelCommand(
+            bootstrap_profiles, self.bootstrap_registry,
         )
 
     async def query(self, query_id: str, payload: dict):
@@ -109,20 +115,16 @@ class DeploymentProvisioningManagement:
                     "components",
                 },
             )
-            values["components"] = self.bootstrap_registry.validate_components(
-                values["components"]
+            prepared = await self.bootstrap_command.prepare(
+                values, operation_id=operation_id,
             )
-            saved = await self.bootstrap_profiles.create(
-                operation_id=operation_id,
-                schema_digests=self.bootstrap_registry.schema_digests(),
-                authorization=authorization,
-                **values,
-            )
-            return {
-                "profile_ref": saved.profile_ref,
-                "bot_id": saved.bot_id,
-                "manifest_digest": saved.manifest_digest,
-            }
+            async with self.bootstrap_profiles.store.transaction() as conn:
+                await authorize_deployment_action_in(
+                    conn, authorization, operation_id=operation_id,
+                )
+                return await self.bootstrap_command.execute_in(
+                    conn, prepared, operation_id=operation_id,
+                )
         if action_id == "provisioning.enqueue":
             values = _fields(
                 payload,

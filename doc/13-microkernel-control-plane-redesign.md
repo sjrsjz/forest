@@ -250,6 +250,10 @@ renderer，模块也可以发布自己的 template/module/style；两者都只�
 其他组件、伪造摘要、直接建库或启动 RuntimeGraph。Bot 建成后，配置所有权转交各模块自己的
 configuration authority，bootstrap profile 保持不可变来源事实，不成为长期全局配置对象。
 
+供应包的 iframe 保持 `connect-src 'none'`，不能自行下载并执行其他模块的 Bootstrap 脚本。WebUI 壳层需要一个通用的嵌套贡献承载协议：包请求装载由内核安装目录返回的 Bootstrap contribution 集合，壳层核对调用方当前 Generation、声明的 catalog query、surface 身份和作用域后，在随包页面卸载的宿主容器内装载各模块自己的 template/module/style；每个编辑器只返回其组件配置值。包请求读取时，壳层按目录中的 component ID 收集这些值，再交给供应操作校验；包不能提供任意脚本 URL、替换目录身份或直接操作其他模块 DOM。这样供应包负责工作流，模块继续拥有设置界面，而宿主只提供通用、安全的贡献承载。
+
+`bootstrap.create` 的组件集合验证和服务端 schema digest 取自同一个冻结的贡献注册表；内核端口在 Web 回执与审计同一事务里检查 Secret 引用并写入不可变 Profile。`provisioning.enqueue` 与 `provisioning.cancel` 也需要接受同一个调用者事务，以使准确包 Generation 围栏、Web 授权和 Job 状态迁移一起提交。入队唤醒 Supervisor 必须发生在提交之后，不能把尚未提交的 Job 当作可领取事实。
+
 组件 manifest 可声明：
 
 ```toml

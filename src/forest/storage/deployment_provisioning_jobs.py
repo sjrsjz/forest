@@ -60,6 +60,7 @@ class DeploymentProvisioningJobAuthority:
         bootstrap_profile_ref: str,
         max_attempts: int = 5,
         authorization=None,
+        conn=None,
     ) -> dict:
         for value, field, limit in (
             (operation_id, "operation_id", 256),
@@ -87,7 +88,7 @@ class DeploymentProvisioningJobAuthority:
             "max_attempts": max_attempts,
         }
         input_digest = digest_json(request)
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self.store.transaction(conn) as conn:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )
@@ -307,13 +308,14 @@ class DeploymentProvisioningJobAuthority:
         job_id: str,
         expected_revision: int,
         authorization=None,
+        conn=None,
     ) -> dict:
         _text(operation_id, "operation_id", 256)
         _text(job_id, "job_id", 256)
         if type(expected_revision) is not int or expected_revision < 1:
             raise ForestError("PROVISIONING_INPUT_INVALID", "Job revision is invalid", 422)
         input_digest = digest_json([job_id, expected_revision])
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self.store.transaction(conn) as conn:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )

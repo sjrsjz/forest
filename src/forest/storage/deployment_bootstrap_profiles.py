@@ -59,6 +59,7 @@ class DeploymentBootstrapProfileAuthority:
         components: dict[str, dict],
         schema_digests: dict[str, str],
         authorization=None,
+        conn=None,
     ) -> BootstrapProfile:
         self._text(operation_id, "operation_id", 256)
         self._text(bot_id, "bot_id", 128)
@@ -104,8 +105,6 @@ class DeploymentBootstrapProfileAuthority:
                     "config": config,
                 }
             )
-        for secret_ref in sorted(secret_refs):
-            await self.secrets.metadata(secret_ref)
         manifest_digest = digest_json(
             {
                 "bot_id": bot_id,
@@ -115,10 +114,12 @@ class DeploymentBootstrapProfileAuthority:
             }
         )
         input_digest = digest_json([profile_ref, manifest_digest])
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self.store.transaction(conn) as conn:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )
+            for secret_ref in sorted(secret_refs):
+                await self.secrets.metadata_in(conn, secret_ref)
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
                 (f"forest.deployment.bootstrap-profile/{profile_ref}",),
