@@ -7830,14 +7830,22 @@ BEGIN
     IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
     END IF;
+    WITH expired AS MATERIALIZED (
+        SELECT c.bot_id,c.claim_id
+        FROM __forest_module_schema__.embedding_claims c
+        WHERE c.bot_id=requested_bot AND c.state='CLAIMED'
+          AND c.lease_deadline<=clock_timestamp()
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts a
+              WHERE a.bot_id=c.bot_id AND a.claim_id=c.claim_id
+          )
+        ORDER BY c.lease_deadline,c.claim_id
+        FOR UPDATE OF c SKIP LOCKED LIMIT 32
+    )
     UPDATE __forest_module_schema__.embedding_claims c
     SET state='EXPIRED'
-    WHERE c.bot_id=requested_bot AND c.state='CLAIMED'
-      AND c.lease_deadline<=clock_timestamp()
-      AND NOT EXISTS (
-          SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts a
-          WHERE a.bot_id=c.bot_id AND a.claim_id=c.claim_id
-      );
+    FROM expired e
+    WHERE c.bot_id=e.bot_id AND c.claim_id=e.claim_id;
     WITH candidates AS MATERIALIZED (
         SELECT f.*,source_data.trunk_id,source_data.author_subject_ref,
                source_data.conversation_ref,

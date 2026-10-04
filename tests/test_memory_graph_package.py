@@ -193,6 +193,34 @@ async def test_embedding_claim_budgets_bounded_image_renditions(clean_authority,
         "facet/image/2", "facet/image/3",
     ]
 
+    # Stale claims without a prepared attempt are retired in bounded batches.
+    # The live second claim must remain untouched while this backlog drains.
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_claims("
+            "bot_id,claim_id,purpose,space_id,source_epoch_high_watermark,"
+            "lease_seconds,lease_deadline,item_limit,item_count,claim_payload) "
+            "SELECT %s,'stale/image/'||lpad(n::text,3,'0'),'DOCUMENT',%s,0,"
+            "3,clock_timestamp()-interval '1 second',1,0,'{{}}'::jsonb "
+            "FROM generate_series(1,70) AS n"
+        ).format(namespace), (store.bot_id, space))
+    for round_no, expired_count in enumerate((32, 64, 70), 1):
+        empty = await claim(f"claim/images/drain/{round_no}")
+        assert empty["ok"] and empty["value"] is None
+        async with store.pool.connection() as conn:
+            counts = await (await conn.execute(sql.SQL(
+                "SELECT count(*) FILTER (WHERE state='EXPIRED') AS expired,"
+                "count(*) FILTER (WHERE state='CLAIMED') AS active "
+                "FROM {}.embedding_claims WHERE bot_id=%s "
+                "AND left(claim_id,12)='stale/image/'"
+            ).format(namespace), (store.bot_id,))).fetchone()
+            live = await (await conn.execute(sql.SQL(
+                "SELECT state FROM {}.embedding_claims "
+                "WHERE bot_id=%s AND claim_id='claim/images/second'"
+            ).format(namespace), (store.bot_id,))).fetchone()
+        assert counts == {"expired": expired_count, "active": 70 - expired_count}
+        assert live["state"] == "CLAIMED"
+
 
 async def _browser_apply_real_forget_batch(host, selection_id: str) -> str:
     import uvicorn
