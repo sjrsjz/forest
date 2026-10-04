@@ -3662,6 +3662,7 @@ SET search_path = pg_catalog
 AS $$
 DECLARE
     body jsonb := envelope->'input';
+    agent_proof jsonb := envelope#>'{prior,agent}';
     actor jsonb := body->'actor';
     requested_bot text := context->>'bot_id';
     requested_operation text := context->>'operation_id';
@@ -3686,7 +3687,13 @@ BEGIN
        OR requested_epoch IS NULL OR requested_epoch<1
        OR requested_session IS NULL OR requested_run IS NULL
        OR requested_status NOT IN ('FAILED','CANCELLED')
-       OR requested_reason IS NULL OR octet_length(requested_reason) NOT BETWEEN 1 AND 128 THEN
+       OR requested_reason IS NULL OR octet_length(requested_reason) NOT BETWEEN 1 AND 128
+       OR agent_proof->>'protocol' IS DISTINCT FROM 'forest.agent-terminal-proof/1'
+       OR agent_proof->>'conversation_id' IS DISTINCT FROM requested_conversation
+       OR agent_proof->>'session_ref' IS DISTINCT FROM requested_session
+       OR agent_proof->>'run_ref' IS DISTINCT FROM requested_run
+       OR agent_proof->>'terminal_status' IS DISTINCT FROM requested_status
+       OR agent_proof->>'reason_code' IS DISTINCT FROM requested_reason THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(

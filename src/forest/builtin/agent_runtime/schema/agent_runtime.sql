@@ -6118,6 +6118,54 @@ BEGIN
     );
 END;
 $$;
+CREATE FUNCTION agent_verify_terminal_run(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    run_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR body#>>'{actor,conversation_id}' IS NULL
+       OR body->>'session_ref' IS NULL OR body->>'run_ref' IS NULL
+       OR body->>'terminal_status' NOT IN ('FAILED','CANCELLED')
+       OR body->>'reason_code' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_TERMINAL_PROOF_INPUT_INVALID',
+                'message','Terminal Run verification input is invalid','status',422));
+    END IF;
+    SELECT r.run_id,r.session_id,r.conversation_ref,r.state,r.error_code,
+           r.terminal_at,s.state AS session_state,s.terminal_reason_code,
+           s.active_run_id,s.closed_at
+    INTO run_row
+    FROM __forest_module_schema__.agent_runs r
+    JOIN __forest_module_schema__.agent_sessions s
+      ON s.bot_id=r.bot_id AND s.session_id=r.session_id
+    WHERE r.bot_id=context->>'bot_id' AND r.run_id=body->>'run_ref'
+    FOR SHARE OF r,s;
+    IF run_row.run_id IS NULL
+       OR run_row.session_id IS DISTINCT FROM body->>'session_ref'
+       OR run_row.conversation_ref IS DISTINCT FROM body#>>'{actor,conversation_id}'
+       OR run_row.state IS DISTINCT FROM body->>'terminal_status'
+       OR run_row.error_code IS DISTINCT FROM body->>'reason_code'
+       OR run_row.terminal_at IS NULL
+       OR run_row.session_state IS DISTINCT FROM body->>'terminal_status'
+       OR run_row.terminal_reason_code IS DISTINCT FROM body->>'reason_code'
+       OR run_row.active_run_id IS NOT NULL OR run_row.closed_at IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_RUN_NOT_TERMINAL',
+                'message','Agent Run and Session do not share the requested terminal fact',
+                'status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.agent-terminal-proof/1',
+            'conversation_id',run_row.conversation_ref,
+            'session_ref',run_row.session_id,'run_ref',run_row.run_id,
+            'terminal_status',run_row.state,'reason_code',run_row.error_code));
+END;
+$$;
+
 CREATE FUNCTION agent_verify_completed_compaction(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE

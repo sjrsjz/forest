@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.28.0"
+version = "4.29.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -92,9 +92,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.23.0"
+schema_version = "4.24.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "b3d230fee4c89e4181a3c52ba7fa46567b354889241ea70138256e6db9212a06"
+baseline_sha256 = "7766e563869d194292ce99e1c0e59649febfc5bd021e9cb71ad066acf47dc056"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -368,6 +368,7 @@ input_schema = "schemas/commit-terminal-run-plan.json"
 output_schema = "schemas/terminalize-run-output.json"
 timeout_s = 20
 steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.verify-terminal-run", input_path = "/conversation" },
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.terminalize-run", input_path = "/conversation" }
 ]
 

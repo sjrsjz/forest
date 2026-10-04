@@ -3668,7 +3668,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "result-ledger-recovery", "result-payload-recovery", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
+    "scenario", ("text", "visual", "cross-group", "success", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -3722,7 +3722,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         asyncio.Event() if scenario in {"cross-group", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "long-model-lease"} else None
     )
     RecordingModelClient.not_sent_attempts = (
-        3 if scenario == "requeue" else 2 if scenario == "reload-full"
+        3 if scenario in {"requeue", "transport-exhausted"} else 2 if scenario == "reload-full"
         else 1 if scenario == "reload-lost-receipt"
         else 1 if scenario in {"reload", "reload-publish"} else 0
     )
@@ -4667,6 +4667,45 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                         item.body == prepared.body
                         for item in RecordingModelClient.requests
                     )
+        if scenario == "transport-exhausted":
+            agent_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "agent.runtime"
+            )
+            conversation_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "conversation.scheduler"
+            )
+            async with asyncio.timeout(50):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        run = await (await conn.execute(
+                            sql.SQL("SELECT state,error_code FROM {}.agent_runs "
+                                    "WHERE bot_id=%s ORDER BY created_at DESC LIMIT 1")
+                            .format(sql.Identifier(agent_schema)),
+                            (settings.bot_id,),
+                        )).fetchone()
+                        claim = await (await conn.execute(
+                            sql.SQL("SELECT claim_state,terminal_status FROM {}."
+                                    "trigger_claim_groups WHERE bot_id=%s "
+                                    "LIMIT 1")
+                            .format(sql.Identifier(conversation_schema)),
+                            (settings.bot_id,),
+                        )).fetchone()
+                        lane = await (await conn.execute(
+                            sql.SQL("SELECT active_run_ref FROM {}.conversation_lanes "
+                                    "WHERE bot_id=%s")
+                            .format(sql.Identifier(conversation_schema)),
+                            (settings.bot_id,),
+                        )).fetchone()
+                    if (run is not None and run["state"] == "FAILED"
+                            and claim is not None and claim["claim_state"] == "TERMINAL"):
+                        break
+                    await asyncio.sleep(0.1)
+            assert run["error_code"] == "AGENT_MODEL_TRANSPORT_FAILED"
+            assert claim["terminal_status"] == "FAILED"
+            assert lane["active_run_ref"] is None
+            assert len(RecordingModelClient.requests) == 3
         if scenario == "cross-group":
             await clients[-1].handler(json.dumps({
                 "self_id": int(settings.onebot_self_id), "post_type": "message",

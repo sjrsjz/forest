@@ -658,6 +658,56 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert budget_sessions["items"][0]["terminal_reason_code"] == (
             "AGENT_CONTEXT_REQUIRED_OVER_BUDGET"
         )
+        terminal_input = {
+            "actor": {
+                "conversation_id": "conversation/onebot/group/context-budget",
+                "owner_id": "conversation-worker/context-budget", "epoch": 1,
+            },
+            "session_ref": "session/agent-package/context-budget",
+            "run_ref": "run/agent-package/context-budget",
+            "terminal_status": "FAILED",
+            "reason_code": "AGENT_CONTEXT_REQUIRED_OVER_BUDGET",
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            terminal_proof = await participant.invoke_in(
+                conn, "agent.verify-terminal-run", {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {"component_id": "conversation.scheduler",
+                               "generation_id": generation_id},
+                    "input": terminal_input, "prior": {},
+                },
+                operation_id="agent-terminal-proof/package/context-budget",
+                causal_root_kind="conversation.agent-run",
+                causal_root_id="run/agent-package/context-budget",
+                parent_call_id="call:agent-package/context-budget/proof",
+                timeout_seconds=10,
+            )
+        assert terminal_proof == {
+            "protocol": "forest.agent-terminal-proof/1",
+            "conversation_id": "conversation/onebot/group/context-budget",
+            "session_ref": "session/agent-package/context-budget",
+            "run_ref": "run/agent-package/context-budget",
+            "terminal_status": "FAILED",
+            "reason_code": "AGENT_CONTEXT_REQUIRED_OVER_BUDGET",
+        }
+        with pytest.raises(ForestError) as mismatched_reason:
+            async with store.pool.connection() as conn, conn.transaction():
+                await participant.invoke_in(
+                    conn, "agent.verify-terminal-run", {
+                        "protocol": "forest.uow-step/1",
+                        "caller": {"component_id": "conversation.scheduler",
+                                   "generation_id": generation_id},
+                        "input": {**terminal_input,
+                                  "reason_code": "AGENT_PROTOCOL_FAILED"},
+                        "prior": {},
+                    },
+                    operation_id="agent-terminal-proof/package/wrong-reason",
+                    causal_root_kind="conversation.agent-run",
+                    causal_root_id="run/agent-package/context-budget",
+                    parent_call_id="call:agent-package/context-budget/wrong-reason",
+                    timeout_seconds=10,
+                )
+        assert mismatched_reason.value.code == "AGENT_RUN_NOT_TERMINAL"
 
         model_start = {
             **start_envelope,

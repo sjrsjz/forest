@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.37.0"
+version = "4.38.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -201,9 +201,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.28.0"
+schema_version = "2.29.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "b621140267bc77081d13417694e8565e6879e848c5784ede30fbde61064e01f2"
+baseline_sha256 = "559274f9bc6874b060d5f5dac52165c303c4aad67d1f746f7e8cd8b33baaa169"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -698,6 +698,13 @@ path = "/input/source_candidate"
 owner_component = "agent.runtime"
 owner_kind = "assistant.candidate"
 owner_id_path = "/input/turn_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.verify-terminal-run"
+contract = "1.0"
+function = "agent_verify_terminal_run"
+input_schema = "schemas/terminal-proof-envelope.json"
+output_schema = "schemas/terminal-proof-output.json"
 
 [[components.unit_of_work_participants]]
 name = "agent.verify-completed-compaction"

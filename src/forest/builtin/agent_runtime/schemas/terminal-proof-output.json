@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "conversation_id", "session_ref", "run_ref", "terminal_status", "reason_code"],
+  "properties": {
+    "protocol": {"const": "forest.agent-terminal-proof/1"},
+    "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "session_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "run_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "terminal_status": {"enum": ["FAILED", "CANCELLED"]},
+    "reason_code": {"type": "string", "minLength": 1, "maxLength": 128}
+  }
+}

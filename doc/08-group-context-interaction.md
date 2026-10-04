@@ -501,7 +501,7 @@ ViewPlan固定有序源集、覆盖范围、基础context_view_revision、contex
 
 Conversation 的 Context 快照 v3 现在固定 `media_cost_revision`、活动媒体字节数，以及每个活动单元已物化图片的片序号、媒体修订、尺寸、字节数和受管 Payload 引用。Agent 核对这些事实与原始图片 part 一致，只读取快照中 READY 的资产；PENDING 片保持显式状态。Context 历史图片不再由 Agent 按最近 32 张或 12 MiB 静默截断；解析端口的单次 256 项上限由分批调用满足，超出快照可发布界时明确失败。相同 Run 的下一次模型调用重新取得安全点快照，迟到图片可在那时进入，但不得修改已冻结的请求。模型不支持图片时，能力投影仍按原规则去图，不改变 Context 快照。
 
-这仍只是受管媒体文件字节界，不是解码后像素内存、tokenizer 估算或完整冻结必要集合 ViewPlan。快照目前用活动媒体高水位和 4096 个活动单元作为发布硬界；必留单元使活动视图超界时会明确拒绝本次模型请求。Agent 仅将 Context 的 `CONTEXT_VIEW_HARD_LIMIT` 与 `CONTEXT_VIEW_MEDIA_OVER_BUDGET` 视为不可再归档的确定性失败：在模型请求尚未准备、运行所有权和输入修订均未改变时，写入失败 checkpoint，并终结 Agent Run/Session；Conversation 随后按既有终态事务结算该群触发，避免反复领取。其他快照错误仍按可恢复错误处理。RAG 证据图片改由 Memory 检索策略的 `max_retrieval_media_bytes` 冻结选择，Agent 只核对证据并投影；预算省略保留来源片及明确原因。此上限与 Context 活动历史窗口分别计量，尚未形成统一模型请求的本地 token/传输估算。后续必须由 Conversation/Context 持久冻结带估算版本和必要集合的完整单元选择，并对 Memory 证据与历史的合并传输硬界给出明确失败策略，不能把本次快照协议升级称作完整 ViewPlan 已落地。
+这仍只是受管媒体文件字节界，不是解码后像素内存、tokenizer 估算或完整冻结必要集合 ViewPlan。快照目前用活动媒体高水位和 4096 个活动单元作为发布硬界；必留单元使活动视图超界时会明确拒绝本次模型请求。Agent 仅将 Context 的 `CONTEXT_VIEW_HARD_LIMIT` 与 `CONTEXT_VIEW_MEDIA_OVER_BUDGET` 视为不可再归档的确定性失败：在模型请求尚未准备、运行所有权和输入修订均未改变时，写入失败 checkpoint，并终结 Agent Run/Session；Conversation 随后在终态 UnitOfWork 中先由 Agent participant 核对准确 Run、Session、状态和原因，再结算该群触发，避免反复领取或提前清空。其他快照错误仍按可恢复错误处理。RAG 证据图片改由 Memory 检索策略的 `max_retrieval_media_bytes` 冻结选择，Agent 只核对证据并投影；预算省略保留来源片及明确原因。此上限与 Context 活动历史窗口分别计量，尚未形成统一模型请求的本地 token/传输估算。后续必须由 Conversation/Context 持久冻结带估算版本和必要集合的完整单元选择，并对 Memory 证据与历史的合并传输硬界给出明确失败策略，不能把本次快照协议升级称作完整 ViewPlan 已落地。
 
 新 Session 的首个 Run 在 `agent.execute` 选择触发 InputBatch 之前，由 `conversation.scheduler` 持有 Actor 围栏执行 `conversation.compact-before-run`。这个独立 UnitOfWork 使用 Conversation 包自身的视图策略，按“确定性计划 → 归档 Payload → 视图提交 → Memory 归档资格”顺序原子提交；它不虚构 InputBatch，也不把裁剪策略交给 Agent 或 Provider。已提交的归档按操作身份重放；若重试时 Session 已启动且本操作未归档，则跳过新裁剪，由 Agent 读取已经存在的 Run。随后 Agent 在同一 Actor 围栏下选择输入，`context_view_revision` 因而是裁剪后的版本。Run 中途的模型安全点只接入新输入，不重新选择历史窗口。当前 Run 完成且正式回复已经提交后，`conversation.compact-before-handoff` 先由 Agent participant 证明该 Run 是活动 Session 中已完成的 Run，再在同一事务中按 Actor/Session/Run 围栏归档连续旧前缀；此安全边界允许移出该已完成 Run 的单元，但仍保留未决触发。后继 Run 随后的 `SESSION_END` 选择冻结新视图版本，活动 Run 工作期间的普通维护仍保护整个 Session，不能改动它已冻结的视图。
 
@@ -617,5 +617,6 @@ Bot 已提交的最终回复通过 ModelTurn 入 Context；平台再次推送同
 | GI-36 | 预填事务已提交而调用响应丢失，随后新消息又入队 | 相同 operation 重放原批次；新 operation 从已提交游标继续，最终切口只在下一次合法安全点冻结 |
 | GI-37 | 已完成 Run 的回复提交后，同 Session 存在旧输入和待处理新触发 | Agent 证明完成边界；交接前只归档连续旧前缀，未决触发不丢失；后继 Run 读取新 `context_view_revision` |
 | GI-38 | Run 尚未完成、Session 已交接或 Actor 已换代时尝试交接裁剪 | Agent/Conversation 围栏拒绝旧请求；活动模型的固定视图不被普通维护改写 |
+| GI-39 | Conversation 收到 FAILED/CANCELLED 回执，但 Agent Run/Session 状态或原因不一致 | 终态 UOW 先由 Agent participant 拒绝；群触发和活动 Session 不被提前清空，恢复后读取准确终态再结算 |
 
 除上述场景外，性质检查应持续验证输入范围恰好覆盖连续前缀、触发状态不由消费游标推导、单群唯一 Session/有效提交者、所有输出可追溯到固定输入批次。可交换的 Bot 全局记忆操作另按[06 的性质验收](06-concurrent-convergence.md#10-性质验证与并发时序验收)执行，不能把消息顺序、授权仲裁或模型文本误当作可交换更新。

@@ -497,8 +497,30 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "terminal_status": "FAILED",
                 "reason_code": "AGENT_PROTOCOL_FAILED",
             },
-            "prior": {},
+            "prior": {"agent": {
+                "protocol": "forest.agent-terminal-proof/1",
+                "conversation_id": actor["conversation_id"],
+                "session_ref": "session/1",
+                "run_ref": "run/1",
+                "terminal_status": "FAILED",
+                "reason_code": "AGENT_PROTOCOL_FAILED",
+            }},
         }
+        with pytest.raises(ForestError) as wrong_terminal_proof:
+            async with store.pool.connection() as conn, conn.transaction():
+                await participant.invoke_in(
+                    conn, "conversation.terminalize-run",
+                    {**terminal, "prior": {"agent": {
+                        **terminal["prior"]["agent"],
+                        "run_ref": "run/another",
+                    }}},
+                    operation_id="uow-step:conversation-terminal/wrong-proof",
+                    causal_root_kind="conversation.agent-run",
+                    causal_root_id="run/1",
+                    parent_call_id="call:conversation/terminal-wrong-proof",
+                    timeout_seconds=10,
+                )
+        assert wrong_terminal_proof.value.code == "CONVERSATION_TERMINAL_INPUT_INVALID"
         with pytest.raises(RollbackProbe):
             async with store.pool.connection() as conn, conn.transaction():
                 await conn.execute(

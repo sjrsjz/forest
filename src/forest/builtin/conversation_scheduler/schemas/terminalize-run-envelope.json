@@ -15,7 +15,24 @@
       }
     },
     "input": {"$ref": "#/$defs/terminal"},
-    "prior": {"type": "object"}
+    "prior": {
+      "type": "object", "additionalProperties": false,
+      "required": ["agent"],
+      "properties": {
+        "agent": {
+          "type": "object", "additionalProperties": false,
+          "required": ["protocol", "conversation_id", "session_ref", "run_ref", "terminal_status", "reason_code"],
+          "properties": {
+            "protocol": {"const": "forest.agent-terminal-proof/1"},
+            "conversation_id": {"$ref": "#/$defs/id"},
+            "session_ref": {"$ref": "#/$defs/id"},
+            "run_ref": {"$ref": "#/$defs/id"},
+            "terminal_status": {"enum": ["FAILED", "CANCELLED"]},
+            "reason_code": {"type": "string", "minLength": 1, "maxLength": 128}
+          }
+        }
+      }
+    }
   },
   "$defs": {
     "id": {"type": "string", "minLength": 1, "maxLength": 512},
