@@ -1,4 +1,5 @@
 import hashlib
+import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -8,6 +9,8 @@ from forest.sdk import Plugin, job, service
 
 
 class ConversationScheduler(Plugin):
+    MAX_PRE_RUN_COMPACTION_SEGMENTS = 8
+
     async def prepare(self, ctx, config, restored_state=None):
         await super().prepare(ctx, config, restored_state)
         value = dict(config)
@@ -647,6 +650,48 @@ class ConversationScheduler(Plugin):
             return False
         return True
 
+    async def _compact_before_run(self, work, ctx):
+        actor = work["actor"]
+        started_at = time.monotonic()
+        for segment_index in range(self.MAX_PRE_RUN_COMPACTION_SEGMENTS):
+            # Keep room for the 540 s Agent service within this 600 s handler.
+            if segment_index and time.monotonic() - started_at >= 20:
+                return False
+            result = await ctx.uow.call(
+                "conversation.compact-before-run",
+                {
+                    "anchor": {
+                        "protocol": "forest.conversation-pre-run-anchor/1",
+                        "conversation_id": work["conversation_id"],
+                        "actor": actor,
+                    },
+                    "context_view": self._context_view,
+                    "payload": {
+                        "protocol": "forest.payload-json-from-prior/1",
+                        "prior_step_id": "prepare",
+                    },
+                    "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
+                    "memory": {},
+                },
+                operation_id=ctx.operations.stable(
+                    f"compact-before-run:{work['run_ref']}:{actor['epoch']}:{segment_index}"
+                ),
+            )
+            if (result.get("protocol") != "forest.context-pre-run-compaction/1"
+                    or result.get("conversation_id") != work["conversation_id"]):
+                raise ForestError(
+                    "CONVERSATION_PRE_RUN_COMPACTION_INVALID",
+                    "Pre-run Context compaction returned another conversation", 409,
+                )
+            if result["status"] == "SKIPPED":
+                return True
+            if result["status"] != "COMPACTED":
+                raise ForestError(
+                    "CONVERSATION_PRE_RUN_COMPACTION_INVALID",
+                    "Pre-run Context compaction returned an unknown state", 409,
+                )
+        return False
+
     @job("conversation.agent-run")
     async def agent_run(self, task, ctx):
         work = task["payload"]
@@ -673,25 +718,8 @@ class ConversationScheduler(Plugin):
             work, work["session_ref"], run_ref, ctx, allow_absent_run=True
         ):
             return self._release("REQUEUED")
-        if not resume:
-            await ctx.uow.call(
-                "conversation.compact-before-run",
-                {
-                    "anchor": {
-                        "protocol": "forest.conversation-pre-run-anchor/1",
-                        "conversation_id": work["conversation_id"],
-                        "actor": work["actor"],
-                    },
-                    "context_view": self._context_view,
-                    "payload": {
-                        "protocol": "forest.payload-json-from-prior/1",
-                        "prior_step_id": "prepare",
-                    },
-                    "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
-                    "memory": {},
-                },
-                operation_id=ctx.operations.stable(f"compact-before-run:{run_ref}"),
-            )
+        if not resume and not await self._compact_before_run(work, ctx):
+            return self._defer("WAIT_CONTEXT", "CONTEXT_PRE_RUN_MORE", 0.5)
         execute_revision = 0
         while True:
             execution = await ctx.services.call(

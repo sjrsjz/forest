@@ -505,6 +505,8 @@ Conversation 的 Context 快照 v3 现在固定 `media_cost_revision`、活动�
 
 新 Session 的首个 Run 在 `agent.execute` 选择触发 InputBatch 之前，由 `conversation.scheduler` 持有 Actor 围栏执行 `conversation.compact-before-run`。这个独立 UnitOfWork 使用 Conversation 包自身的视图策略，按“确定性计划 → 归档 Payload → 视图提交 → Memory 归档资格”顺序原子提交；它不虚构 InputBatch，也不把裁剪策略交给 Agent 或 Provider。已提交的归档按操作身份重放；若重试时 Session 已启动且本操作未归档，则跳过新裁剪，由 Agent 读取已经存在的 Run。随后 Agent 在同一 Actor 围栏下选择输入，`context_view_revision` 因而是裁剪后的版本。Run 中途的模型安全点只接入新输入，不重新选择历史窗口；后续 Run 的 Session 交接仍须明确设计安全裁剪边界，不能沿用前一个 Run 的固定视图假装已经裁剪。
 
+预运行归档每笔至多移出 64 个完整单元，调度器在一次 Actor 领取内可连续提交至多 8 笔；开始下一笔前还要检查预运行时间预算，为同一工作处理器内最长 540 秒的 Agent 调用留出余量。每笔操作身份包含 Run、Actor epoch 和分段序号，重放同笔不重复归档，新领取也不被旧回执卡住。达到分段或时间界后仍需归档时，调度器结算为 `WAIT_CONTEXT` 并短暂延期，释放 Actor 供同群后续领取继续；归档返回 `SKIPPED` 才进入 Agent。未决触发或活动 Session 保护的后缀仍可能使归档停在硬界以上，此时后续快照明确拒绝，不能冒称已完成预算收敛；必要集合超界的有界终结策略仍待实现。
+
 高流量下合并同会话尚未执行的维护唤醒，维护desired/processed水位；合并只影响本地工作批量，不能遗漏任何来源。采用裁剪高/低水位避免每条消息反复重算，大对象使用缓存token计数与受监督本地计算。系统指令、作者/群来源标题、必留内容和输出预留先计费；超窗时减少普通原文/Evidence项，不能剥掉来源标题凑预算。待答触发必要原文仍放不下就走上述明确失败策略，不自动发摘要请求，也不自动调更昂贵模型。
 
 当前会话的 `context_applied_seq` 是串行前缀消费，不是可交换的消息集合归约；顺序由持久入站和已记录切口确定。不同物理到达时机可能产生不同批次和回复，这是交互调度语义。持久重放必须复用已记录批次、步骤和回复，不重新挑选切口或重新生成已完成回答来追求所谓合流。
