@@ -497,6 +497,8 @@ ViewPlan固定有序源集、覆盖范围、基础context_view_revision、contex
 
 当前基线以 `context_view_unit_count/context_archived_unit_count` 避免为判断阈值反复扫描完整历史。一次发布先写受管 `context.archive` JSON 引用，再写 `context_compactions` 和精确 `context_compaction_units` 成员关系，最后单调推进 `context_view_revision`；原 `context_units` 与 Payload 不更新、不删除。快照用反连接只物化活动单元，并在最前面加入最新机器可读归档引用。裁剪只能取按 Context 顺序排列的连续最旧前缀：遇到未决触发或当前 Session 的必留单元即停止，不能跳过该单元继续归档更晚消息；即便因此暂时高于水位，也要等待触发结算或下一安全边界。新 Run 的触发输入和当前必要后缀受保护；ViewPlan 发布后，该 Run 在所有后续模型步骤保持同一 `context_view_revision`，只追加因果单元。
 
+**当前实现差距：**这里的“当前基线”只实现 `context-view-unit-window-v1` 的单元数高低水位，并没有实现上文所述的本地 token/多模态字节预算 ViewPlan。`agent.runtime` 当前还会在模型请求准备时最多选取 32 张活动图片，并分别以 12 MiB 上限选择上下文图片和召回图片；这是一层临时的请求字节保护，不是 Context 已完成预算裁决的证据。它可能省略仍在活动视图内的图片，因此不能把现状描述为符合“Context 独占历史选择”契约。后续必须由 Conversation/Context 持久冻结带估算版本和必要集合的完整单元选择，明确区分模型能力投影与传输硬限制，再移除 Agent 的历史图片选择；超出必要集合硬界须给出可恢复的明确失败，而不能把图片悄悄标成不可用。
+
 新 Session 的首个 Run 在 `agent.execute` 选择触发 InputBatch 之前，由 `conversation.scheduler` 持有 Actor 围栏执行 `conversation.compact-before-run`。这个独立 UnitOfWork 使用 Conversation 包自身的视图策略，按“确定性计划 → 归档 Payload → 视图提交 → Memory 归档资格”顺序原子提交；它不虚构 InputBatch，也不把裁剪策略交给 Agent 或 Provider。已提交的归档按操作身份重放；若重试时 Session 已启动且本操作未归档，则跳过新裁剪，由 Agent 读取已经存在的 Run。随后 Agent 在同一 Actor 围栏下选择输入，`context_view_revision` 因而是裁剪后的版本。Run 中途的模型安全点只接入新输入，不重新选择历史窗口；后续 Run 的 Session 交接仍须明确设计安全裁剪边界，不能沿用前一个 Run 的固定视图假装已经裁剪。
 
 高流量下合并同会话尚未执行的维护唤醒，维护desired/processed水位；合并只影响本地工作批量，不能遗漏任何来源。采用裁剪高/低水位避免每条消息反复重算，大对象使用缓存token计数与受监督本地计算。系统指令、作者/群来源标题、必留内容和输出预留先计费；超窗时减少普通原文/Evidence项，不能剥掉来源标题凑预算。待答触发必要原文仍放不下就走上述明确失败策略，不自动发摘要请求，也不自动调更昂贵模型。
