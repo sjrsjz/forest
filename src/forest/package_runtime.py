@@ -2731,6 +2731,12 @@ class PackageGenerationAdapter:
         if selected is None:
             selected = await self.module_configuration.desired(include_value=True)
         schema = self._compiled_schemas[self.component["config_schema"]]
+        if selected.validation_digest != digest_json(schema):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+                "Generation configuration was not validated for its captured package schema",
+                409,
+            )
         errors = sorted(
             Draft202012Validator(schema).iter_errors(selected.value),
             key=lambda item: tuple(str(part) for part in item.absolute_path),

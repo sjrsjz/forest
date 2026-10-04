@@ -39,6 +39,11 @@ class EffectServiceLedger:
 
 
 class Configuration:
+    validation_digest = digest_json(json.loads((
+        Path(__file__).parents[1]
+        / "src/forest/builtin/trigger_policy/schemas/config.json"
+    ).read_text(encoding="utf-8")))
+
     async def desired(self, *, include_value=False):
         value = {
             "protocol": "forest.conversation.trigger-policy/1",
@@ -50,6 +55,7 @@ class Configuration:
             revision=1,
             payload_id="payload:configuration:1",
             payload_digest=digest_json(value),
+            validation_digest=self.validation_digest,
             value=value if include_value else None,
         )
 
@@ -501,6 +507,9 @@ async def test_effect_driver_is_owned_by_the_same_package_generation(tmp_path):
                 revision=7,
                 payload_id="payload:provider:7",
                 payload_digest=digest_json(config),
+                validation_digest=digest_json(
+                    snapshot.schema(snapshot.component["config_schema"])
+                ),
                 value=config if include_value else None,
             )
 
@@ -620,6 +629,9 @@ async def test_duplex_effect_ingress_is_generation_bound_and_drained(tmp_path):
                 revision=1,
                 payload_id="payload:ingress:1",
                 payload_digest=digest_json({}),
+                validation_digest=digest_json(
+                    snapshot.schema(snapshot.component["config_schema"])
+                ),
                 value={} if include_value else None,
             )
 
@@ -797,6 +809,9 @@ async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_p
                 revision=3,
                 payload_id="payload:process:3",
                 payload_digest=digest_json(configuration),
+                validation_digest=digest_json(
+                    snapshot.schema(snapshot.component["config_schema"])
+                ),
                 value=configuration if include_value else None,
             )
 

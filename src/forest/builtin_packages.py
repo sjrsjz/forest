@@ -866,10 +866,6 @@ async def _bootstrap_package_snapshot(
             value=initial_configuration,
             validation_digest=schema_digest,
         )
-    elif trust_level == "official":
-        await _official_desired(
-            configuration, configuration_schema, schema_digest, configuration_validator
-        )
     if trust_level == "installed":
         await _installed_desired(layout, configuration)
     elif initial_configuration is not None:

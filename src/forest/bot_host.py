@@ -19,7 +19,6 @@ from forest.builtin_packages import (
     bootstrap_builtin_package,
     bootstrap_builtin_snapshot,
     bootstrap_installed_package,
-    official_builtin_configuration,
 )
 from forest.chat_completions_effect_driver import (
     chat_completions_effect_driver_factory,
@@ -36,7 +35,6 @@ from forest.component_selection import (
 from forest.component_selection_commit import resolve_selection_commit_preflight
 from forest.core_runtime import bootstrap_kernel
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
-from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.kernel_payload_effect_driver import kernel_payload_json_effect_driver_factory
 from forest.kernel_resource_admission import assess_worker_capacity_in
@@ -55,6 +53,7 @@ from forest.runtime_modules import (
     RuntimeWorkerCapacity,
 )
 from forest.shell_management_authority import ShellManagementAuthorization
+from forest.standalone_bot_bootstrap import standalone_creation_components
 from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.bot_store import BotStore
 from forest.storage.schema_bundles import SchemaBundleInstaller
@@ -443,103 +442,6 @@ class BotHost:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await assess_worker_capacity_in(self._kernel, conn, capacity)
 
-    async def _bootstrap_overrides(self, settings: BotSettings) -> dict[str, dict]:
-        """Translate creation settings once; runtime assembly reads module ledgers."""
-
-        capabilities = settings.model_capabilities or ModelCapabilities(
-            deployment_id=settings.model_deployment_id,
-            model=settings.model,
-            capability_revision="operator-declared/1",
-            input_modalities=settings.model_input_modalities,
-            max_output_tokens=settings.model_max_output_tokens,
-        )
-        embedding_profile = {
-            "deployment_id": settings.embedding_deployment_id,
-            "model_revision": settings.embedding_model_revision,
-            "model": settings.embedding_model,
-            "dimensions": settings.embedding_dimensions,
-        }
-        preset_system = settings.agent_preset_system or (
-            (settings.agent_system_prompt,) if settings.agent_system_prompt else ()
-        )
-        preset_owner_id = "preset/agent.runtime/default"
-        preset_payload = await self._kernel.payload.put_bytes(
-            owner_component_id="agent.runtime",
-            owner_kind="preset.context",
-            owner_id=preset_owner_id,
-            media_type="application/json",
-            content=json.dumps(
-                {"system": list(preset_system)},
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8"),
-            expected_deletion_epoch=await self._kernel.payload.epoch(),
-        )
-        return {
-            "provider_chat_completions": {
-                "base_url": settings.model_base_url,
-                "credential_ref": settings.model_credential_ref,
-                "timeout_seconds": settings.model_timeout_seconds,
-                "max_connections": settings.model_max_connections,
-                "capabilities": capabilities.as_dict(),
-            },
-            "embedding_multimodal": {
-                "endpoint": settings.embedding_endpoint,
-                "credential_ref": settings.embedding_credential_ref,
-                "timeout_seconds": settings.embedding_timeout_seconds,
-                "max_connections": settings.embedding_max_connections,
-                "profile": embedding_profile,
-            },
-            "vector_index_milvus": {
-                "space_id": EmbeddingProfile(**embedding_profile).space_id,
-                "dimensions": settings.embedding_dimensions,
-                "endpoint": settings.vector_index_endpoint,
-                "credential_ref": settings.vector_index_credential_ref,
-                "timeout_seconds": settings.vector_index_timeout_seconds,
-            },
-            "trigger_policy": {
-                "allowed_group_ids": list(settings.allowed_group_ids),
-                "group_trigger_mode": settings.group_trigger_mode,
-                "private_enabled": settings.private_enabled,
-            },
-            "adapter_onebot": {
-                "bindings": [
-                    {
-                        "binding_ref": "binding/main",
-                        "binding_epoch": 1,
-                        "self_id": settings.onebot_self_id,
-                        "credential_ref": settings.onebot_secret_ref,
-                        "websocket_url": settings.onebot_websocket_url,
-                        "timeout_seconds": 30,
-                        "event_capacity": 512,
-                        "pending_capacity": 64,
-                        "enabled": True,
-                    }
-                ],
-            },
-            "memory_graph": {
-                "embedding": {
-                    "model_kind": "TEXT_IMAGE",
-                    **embedding_profile,
-                    "normalization": "L2",
-                },
-            },
-            "agent_runtime": {
-                "preset": {
-                    "payload_id": preset_payload.payload_id,
-                    "digest": preset_payload.content_digest,
-                    "owner_id": preset_owner_id,
-                },
-                "output_tokens": settings.model_max_output_tokens,
-            },
-            "shell_command": {
-                "administrator_principals": [
-                    "qq:" + value for value in settings.shell_administrator_ids
-                ],
-            },
-        }
-
     async def _assemble_candidate(
         self, activation_id: str | None = None,
         *, bootstrap_package_digests: dict[str, str] | None = None,
@@ -655,14 +557,6 @@ class BotHost:
             credential_resolver=resolve_onebot_secret,
             **adapter_driver_options,
         )
-        bootstrap_overrides = (
-            await self._bootstrap_overrides(bootstrap_settings)
-            if isinstance(bootstrap_settings, BotSettings) else {}
-        )
-        profile_components = (
-            dict(bootstrap_settings.components)
-            if isinstance(bootstrap_settings, BotBootstrapSettings) else None
-        )
         bootstrap_grants = {
             "memory_graph": (
                 CapabilityGrant("embedding.invoke", "bot", self.store.bot_id, delegable=True),
@@ -712,6 +606,14 @@ class BotHost:
             (source, self.package_catalog.build(source))
             for source in auto_install_builtin_sources()
         )
+        if isinstance(bootstrap_settings, BotBootstrapSettings):
+            profile_components = dict(bootstrap_settings.components)
+        elif isinstance(bootstrap_settings, BotSettings):
+            profile_components = standalone_creation_components(
+                bootstrap_settings, automatic_sources
+            )
+        else:
+            profile_components = None
         if expected_packages:
             captured_ids = set()
             for _source, snapshot in automatic_sources:
@@ -735,10 +637,6 @@ class BotHost:
                 initial_configuration = await materialize_bootstrap_configuration(
                     snapshot, profile_components,
                     payloads=self._kernel.payload,
-                )
-            elif bootstrap_settings is not None:
-                initial_configuration = official_builtin_configuration(
-                    source.name, overrides=bootstrap_overrides.get(source.name)
                 )
             else:
                 initial_configuration = None
