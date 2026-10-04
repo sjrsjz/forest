@@ -130,6 +130,33 @@ MANIFEST_SCHEMA = {
                             "schema": {"type": "string"},
                             "initial_value": {"type": "string"},
                             "ui_entrypoint": {"type": "string"},
+                            "secret_refs": {
+                                "type": "array", "maxItems": 16,
+                                "items": {
+                                    "type": "object", "additionalProperties": False,
+                                    "required": ["field", "purpose"],
+                                    "properties": {
+                                        "field": {"type": "string"},
+                                        "purpose": {"type": "string"},
+                                        "allow_empty": {"type": "boolean"},
+                                    },
+                                },
+                            },
+                            "origins": {
+                                "type": "array", "maxItems": 16,
+                                "items": {
+                                    "type": "object", "additionalProperties": False,
+                                    "required": ["field", "schemes"],
+                                    "properties": {
+                                        "field": {"type": "string"},
+                                        "schemes": {
+                                            "type": "array", "minItems": 1, "maxItems": 4,
+                                            "uniqueItems": True,
+                                            "items": {"enum": ["http", "https", "ws", "wss"]},
+                                        },
+                                    },
+                                },
+                            },
                         },
                     },
                     "auto_install": {"type": "boolean"},
@@ -1462,6 +1489,23 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_BOOTSTRAP_CONTRIBUTION",
                 "Creation-time schema and initial value must describe an object",
             )
+        for kind in ("secret_refs", "origins"):
+            fields = [item["field"] for item in contribution.get(kind, ())]
+            if len(fields) != len(set(fields)):
+                _fail("INVALID_BOOTSTRAP_CONTRIBUTION", "Creation input constraint repeats a field")
+            for field in fields:
+                property_schema = setup_schema.get("properties", {}).get(field)
+                if (
+                    not isinstance(field, str)
+                    or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", field) is None
+                    or not isinstance(property_schema, dict)
+                    or property_schema.get("type") != "string"
+                    or field not in setup_schema.get("required", ())
+                ):
+                    _fail(
+                        "INVALID_BOOTSTRAP_CONTRIBUTION",
+                        "Creation input constraint must target a required string field",
+                    )
         _bootstrap_ui(files, component)
     _bootstrap_materialization(files, component)
     replacement_facts_schema = component.get("lifecycle", {}).get(

@@ -61,6 +61,8 @@ class BootstrapConfigurationContribution:
     surface: RuntimeManagementContribution | BootstrapPackageSurface
     package_digest: str
     order: int = 100
+    secret_refs: tuple[tuple[str, str, bool], ...] = ()
+    origins: tuple[tuple[str, tuple[str, ...]], ...] = ()
     validator: Callable[[dict], object] | None = None
 
     def __post_init__(self) -> None:
@@ -80,6 +82,24 @@ class BootstrapConfigurationContribution:
         Draft202012Validator.check_schema(self.schema)
         if tuple(Draft202012Validator(self.schema).iter_errors(self.initial_value)):
             raise ValueError("Bootstrap contribution initial value does not match its schema")
+        required = set(self.schema.get("required", ()))
+        properties = self.schema.get("properties", {})
+        for field, purpose, allow_empty in self.secret_refs:
+            property_schema = properties.get(field)
+            if (
+                field not in required or not isinstance(property_schema, dict)
+                or property_schema.get("type") != "string"
+                or not purpose or type(allow_empty) is not bool
+            ):
+                raise ValueError("Bootstrap Secret declaration is invalid")
+        for field, schemes in self.origins:
+            property_schema = properties.get(field)
+            if (
+                field not in required or not isinstance(property_schema, dict)
+                or property_schema.get("type") != "string"
+                or not schemes or set(schemes) - {"http", "https", "ws", "wss"}
+            ):
+                raise ValueError("Bootstrap origin declaration is invalid")
         if self.validator is not None:
             self.validator(deepcopy(self.initial_value))
 

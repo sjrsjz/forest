@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.provider.chat-completions"
-version = "4.3.1"
+version = "4.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "provider:ChatCompletionsProvider"
@@ -21,6 +21,14 @@ description = "Model endpoint, credential reference, limits, and declared capabi
 order = 10
 schema = "schemas/config.json"
 initial_value = "bootstrap.json"
+
+[[components.bootstrap_contribution.secret_refs]]
+field = "credential_ref"
+purpose = "provider.chat-completions.credential"
+
+[[components.bootstrap_contribution.origins]]
+field = "base_url"
+schemes = ["http", "https"]
 
 [components.resources]
 max_frame_bytes = 262144

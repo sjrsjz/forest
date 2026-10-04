@@ -159,6 +159,14 @@ def official_bootstrap_contributions(
                 surface=surface,
                 package_digest=snapshot.digest,
                 order=declaration["order"],
+                secret_refs=tuple(
+                    (item["field"], item["purpose"], item.get("allow_empty", False))
+                    for item in declaration.get("secret_refs", ())
+                ),
+                origins=tuple(
+                    (item["field"], tuple(item["schemes"]))
+                    for item in declaration.get("origins", ())
+                ),
             )
         )
     return tuple(contributions)
@@ -256,7 +264,7 @@ class OfficialBotSettingsResolver:
             "output_token_parameter",
             "tool_image_mapping",
         }
-        provider, _capabilities = validate_provider_configuration(
+        validate_provider_configuration(
             {
                 **provider_seed,
                 "capabilities": {
@@ -266,7 +274,7 @@ class OfficialBotSettingsResolver:
                 },
             }
         )
-        embedding, embedding_profile = validate_embedding_configuration(
+        _embedding, embedding_profile = validate_embedding_configuration(
             components["embedding.multimodal"].config
         )
         vector_index = validate_vector_index_configuration(
@@ -292,23 +300,14 @@ class OfficialBotSettingsResolver:
                 "Shell and OneBot binding references differ",
                 409,
             )
-        self._origin(provider["base_url"], {"http", "https"}, "model base URL")
-        self._origin(embedding["endpoint"], {"http", "https"}, "embedding endpoint")
-        self._origin(vector_index["endpoint"], {"http", "https"}, "vector index endpoint")
-        self._origin(onebot["websocket_url"], {"ws", "wss"}, "OneBot WebSocket URL")
-        await self._verify_secret(
-            provider["credential_ref"], "provider.chat-completions.credential"
-        )
-        await self._verify_secret(
-            embedding["credential_ref"], "embedding.multimodal.credential"
-        )
-        if vector_index["credential_ref"]:
-            await self._verify_secret(
-                vector_index["credential_ref"], "vector.index.credential"
-            )
-        await self._verify_secret(
-            onebot["access_token_ref"], "adapter.onebot.access-token"
-        )
+        for contribution in self.bootstrap_registry.contributions:
+            value = components[contribution.component_id].config
+            for field, schemes in contribution.origins:
+                self._origin(value[field], set(schemes), f"{contribution.component_id}.{field}")
+            for field, purpose, allow_empty in contribution.secret_refs:
+                secret_ref = value[field]
+                if secret_ref or not allow_empty:
+                    await self._verify_secret(secret_ref, purpose)
         return BotBootstrapSettings(
             bot_id=profile.bot_id,
             dsn=storage.dsn,

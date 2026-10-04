@@ -143,3 +143,49 @@ async def test_ready_bot_launch_uses_profile_only_as_provenance():
     )
     assert (launch.bot_id, launch.dsn) == (storage.bot_id, storage.dsn)
     assert not hasattr(launch, "agent_preset_system")
+
+
+@pytest.mark.asyncio
+async def test_package_creation_constraints_bind_secret_purpose_and_origin():
+    registry = BootstrapConfigurationRegistry(official_bootstrap_contributions())
+    components = tuple(
+        SimpleNamespace(
+            component_id=item.component_id,
+            config=item.initial_value.copy(),
+            schema_digest=item.schema_digest,
+            package_digest=item.package_digest,
+        )
+        for item in registry.contributions
+    )
+    profile = SimpleNamespace(
+        bot_id="bot/test", storage_profile_ref="storage/test", storage_generation=1,
+        components=components,
+    )
+    storage = SimpleNamespace(
+        bot_id="bot/test", profile_ref="storage/test", storage_generation=1,
+        dsn="postgresql://localhost/forest_test",
+    )
+    calls = []
+
+    class Secrets:
+        async def resolve_text_for_purpose(self, reference, purpose):
+            calls.append((reference, purpose))
+            return "test-key"
+
+    resolver = OfficialBotSettingsResolver(secrets=Secrets(), bootstrap_registry=registry)
+    await resolver.resolve(profile=profile, storage=storage)
+    assert {purpose for _reference, purpose in calls} == {
+        "provider.chat-completions.credential",
+        "embedding.multimodal.credential",
+        "adapter.onebot.access-token",
+    }
+    assert any(
+        item.component_id == "vector.index"
+        and item.secret_refs == (("credential_ref", "vector.index.credential", True),)
+        for item in registry.contributions
+    )
+    onebot = next(item for item in components if item.component_id == "adapter.onebot")
+    onebot.config["websocket_url"] = "https://example.com"
+    with pytest.raises(ForestError) as rejected:
+        await resolver.resolve(profile=profile, storage=storage)
+    assert rejected.value.code == "OFFICIAL_BOOTSTRAP_CONFIGURATION_INVALID"
