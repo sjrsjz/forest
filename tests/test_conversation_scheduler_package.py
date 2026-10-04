@@ -2555,5 +2555,85 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         )
         assert managed_state["state"] == "REJECTED"
         assert managed_state["disposition_code"] == "RUN_ANSWERED"
+
+        oversized_content = json.dumps({"text": "x" * 524288}).encode()
+        oversized = await kernel.payload.put_bytes(
+            owner_component_id="conversation.scheduler",
+            owner_kind="context.control",
+            owner_id="context/payload-boundary",
+            media_type="application/json",
+            content=oversized_content,
+            expected_deletion_epoch=await kernel.payload.epoch(),
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            added = await (
+                await conn.execute(
+                    sql.SQL(
+                        "INSERT INTO {}.context_units (bot_id,conversation_id,unit_id,"
+                        "context_revision,unit_index,kind,source_component_id,source_kind,"
+                        "source_id,payload_id,payload_digest,payload_byte_length,"
+                        "payload_owner_component_id,payload_owner_kind,payload_owner_id) "
+                        "SELECT u.bot_id,u.conversation_id,%s,l.context_revision+1,0,"
+                        "'CONTROL','conversation.scheduler','context.control',%s,%s,%s,%s,"
+                        "'conversation.scheduler','context.control',%s "
+                        "FROM {}.context_units u JOIN {}.conversation_lanes l "
+                        "USING (bot_id,conversation_id) WHERE u.bot_id=%s "
+                        "AND u.conversation_id=%s AND u.event_id=%s "
+                        "RETURNING context_revision"
+                    ).format(
+                        sql.Identifier(namespace), sql.Identifier(namespace),
+                        sql.Identifier(namespace),
+                    ),
+                    (
+                        "unit/payload-boundary", "context/payload-boundary",
+                        oversized.payload_id, oversized.content_digest,
+                        len(oversized_content), "context/payload-boundary", store.bot_id,
+                        "conversation/onebot/group/silent", "event/onebot/silent-3",
+                    ),
+                )
+            ).fetchone()
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.active_context_units(bot_id,conversation_id,unit_id,"
+                    "context_revision,unit_index) VALUES (%s,%s,%s,%s,0)"
+                ).format(sql.Identifier(namespace)),
+                (
+                    store.bot_id, "conversation/onebot/group/silent",
+                    "unit/payload-boundary", added["context_revision"],
+                ),
+            )
+            actor_after = await (
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {}.conversation_lanes SET context_revision=%s,"
+                        "context_view_unit_count=context_view_unit_count+1,"
+                        "context_view_payload_bytes=context_view_payload_bytes+%s,"
+                        "actor_owner_id=%s,actor_epoch=actor_epoch+1,"
+                        "actor_expires_at=clock_timestamp()+interval '5 minutes' "
+                        "WHERE bot_id=%s AND conversation_id=%s "
+                        "RETURNING conversation_id,actor_owner_id,actor_epoch"
+                    ).format(sql.Identifier(namespace)),
+                    (
+                        added["context_revision"], len(oversized_content),
+                        "claim/payload-boundary", store.bot_id,
+                        "conversation/onebot/group/silent",
+                    ),
+                )
+            ).fetchone()
+        with pytest.raises(ForestError) as over_budget:
+            await endpoint.invoke_routed(
+                route,
+                RuntimeServiceInvocation(
+                    "conversation:snapshot:over-budget", 10,
+                    "test.conversation", "conversation/onebot/group/silent",
+                ),
+                ({"actor": {
+                    "conversation_id": actor_after["conversation_id"],
+                    "owner_id": actor_after["actor_owner_id"],
+                    "epoch": actor_after["actor_epoch"],
+                }},),
+                {},
+            )
+        assert over_budget.value.code == "CONTEXT_VIEW_HARD_LIMIT"
     finally:
         assert await registry.close() == []

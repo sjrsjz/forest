@@ -222,6 +222,7 @@ class ConversationScheduler(Plugin):
         actor = payload["actor"]
         offset = 0
         metadata = None
+        payload_bytes = None
         raw_pages = []
         archive_present = False
         while True:
@@ -254,12 +255,14 @@ class ConversationScheduler(Plugin):
             }
             if metadata is None:
                 metadata = current_metadata
+                payload_bytes = page["context_view_payload_bytes"]
                 if metadata["total_units"] > 4096:
                     raise ForestError(
                         "CONTEXT_VIEW_HARD_LIMIT",
                         "Active Context exceeds the bounded snapshot size", 413,
                     )
-            elif current_metadata != metadata:
+            elif (current_metadata != metadata
+                  or page["context_view_payload_bytes"] != payload_bytes):
                 raise ForestError(
                     "CONTEXT_SNAPSHOT_FENCE_CHANGED",
                     "Conversation Context changed during snapshot materialization",
@@ -289,6 +292,22 @@ class ConversationScheduler(Plugin):
                 "CONTEXT_SNAPSHOT_COUNT_CONFLICT",
                 "Conversation Context count differs from its materialized view",
                 409,
+            )
+        materialized_payload_bytes = sum(
+            unit["payload_byte_length"]
+            for page_offset, units in raw_pages
+            for index, unit in enumerate(units)
+            if not (archive_present and page_offset == 0 and index == 0)
+        )
+        if materialized_payload_bytes != payload_bytes:
+            raise ForestError(
+                "CONTEXT_SNAPSHOT_PAYLOAD_COST_CONFLICT",
+                "Conversation Payload facts differ from the active window", 409,
+            )
+        if payload_bytes > self._context_view["high_watermark_payload_bytes"]:
+            raise ForestError(
+                "CONTEXT_VIEW_HARD_LIMIT",
+                "Required Context Payload exceeds the configured model-view bound", 413,
             )
         media_bytes = sum(
             part["byte_length"] for _, units in raw_pages
