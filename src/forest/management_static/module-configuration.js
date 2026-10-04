@@ -1,3 +1,5 @@
+import {randomId} from './random-id.js';
+
 export async function mount({root, component, api, notice, refresh}) {
   const base = `/management/v1/modules/${encodeURIComponent(component.component_id)}/configuration`;
   const current = await api(base);
@@ -16,7 +18,7 @@ export async function mount({root, component, api, notice, refresh}) {
       } catch {
         throw new Error('JSON 格式无效。');
       }
-      const key = crypto.randomUUID();
+      const key = randomId();
       const plan = await api(`${base}/plans`, {
         method: 'POST',
         headers: {'idempotency-key': `${key}:plan`},

@@ -1,3 +1,5 @@
+import {randomId} from './random-id.js';
+
 const PROTOCOL = 'forest.kernel-resource-policy/1';
 const FIELDS = [
   'max_workers', 'max_frame_bytes', 'max_inflight', 'max_queue_items',
@@ -22,7 +24,7 @@ export async function mount({root, component, api, notice, refresh}) {
         if (!Number.isSafeInteger(value) || value < 1) throw new Error(`${field} 必须为正整数`);
         return [field, value];
       }));
-      const key = crypto.randomUUID();
+      const key = randomId();
       const plan = await api(`${base}/plans`, {
         method: 'POST', headers: {'idempotency-key': `${key}:plan`},
         body: JSON.stringify({expected_desired_revision: current.desired.revision,

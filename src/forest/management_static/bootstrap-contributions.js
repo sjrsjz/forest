@@ -1,4 +1,5 @@
 // Host-owned composition of trusted install-time module surfaces.
+import {randomId} from './random-id.js';
 export function createBootstrapEditorBroker({notice, isCurrent}) {
   let active = null;
 
@@ -125,7 +126,7 @@ export function createBootstrapEditorBroker({notice, isCurrent}) {
           session.editors.set(contribution.component_id, {
             read: () => new Promise((resolve, reject) => {
               if (pending) return reject(new Error('Bootstrap 包界面正在读取'));
-              const id = crypto.randomUUID();
+              const id = randomId();
               const timeout = setTimeout(() => {
                 pending = null;
                 reject(new Error('Bootstrap 包界面读取超时'));

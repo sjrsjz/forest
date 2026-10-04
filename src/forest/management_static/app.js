@@ -1,4 +1,5 @@
 import {createBootstrapEditorBroker} from './bootstrap-contributions.js';
+import {randomId} from './random-id.js';
 
 let apiBase = '/management/v1';
 let scopes = [];
@@ -123,7 +124,7 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
   let assetChunkMessages = [];
   let resizeMessages = [];
   const operationReplies = new Map();
-  const nonce = crypto.randomUUID();
+  const nonce = randomId();
   const channel = new MessageChannel();
   const bootstrapEditors = createBootstrapEditorBroker({
     notice, isCurrent: () => epoch === workspaceEpoch,
@@ -260,7 +261,7 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
         apply.disabled = true;
         state.textContent = '草稿未生成计划';
       } else if (message.type === 'validate' || message.type === 'request-plan') {
-        const key = crypto.randomUUID();
+        const key = randomId();
         plan = await api(`${base}/plans`, {
           method: 'POST',
           headers: {'idempotency-key': `${key}:plan`},

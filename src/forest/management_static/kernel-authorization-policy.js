@@ -1,3 +1,5 @@
+import {randomId} from './random-id.js';
+
 const PROTOCOL = 'forest.web-operation-policy/1';
 
 function splitSubjects(value) {
@@ -48,7 +50,7 @@ export async function mount({root, component, api, notice, refresh}) {
     notice('');
     try {
       const value = collect(rows);
-      const key = crypto.randomUUID();
+      const key = randomId();
       const plan = await api(`${base}/plans`, {
         method: 'POST',
         headers: {'idempotency-key': `${key}:plan`},
