@@ -40,13 +40,17 @@ CREATE TABLE media_capture_parts (
     media_type text,
     width integer,
     height integer,
+    decoded_pixels integer CHECK (
+        decoded_pixels IS NULL OR decoded_pixels BETWEEN 1 AND 16777216
+    ),
     byte_length integer,
     error_code text,
     PRIMARY KEY (capture_id,part_id),
     UNIQUE (capture_id,part_index),
     CHECK (
         (part_kind='TEXT' AND state='READY' AND media_ref IS NULL AND locator IS NULL AND payload IS NOT NULL)
-        OR (part_kind='IMAGE' AND media_ref IS NOT NULL AND locator IS NOT NULL)
+        OR (part_kind='IMAGE' AND media_ref IS NOT NULL AND locator IS NOT NULL
+            AND (state<>'READY' OR decoded_pixels IS NOT NULL))
     )
 );
 
@@ -59,6 +63,10 @@ CREATE TABLE media_assets (
     media_type text NOT NULL CHECK (media_type IN ('image/png','image/jpeg','image/webp','image/gif')),
     width integer NOT NULL CHECK (width > 0),
     height integer NOT NULL CHECK (height > 0),
+    decoded_pixels integer NOT NULL CHECK (
+        decoded_pixels BETWEEN 1 AND 16777216
+        AND decoded_pixels::bigint >= width::bigint * height::bigint
+    ),
     byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 8388608),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (media_ref,media_revision),
@@ -178,7 +186,8 @@ BEGIN
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
         'part_id',p.part_id,'part_index',p.part_index,'part_kind',p.part_kind,'state',p.state,
         'media_ref',p.media_ref,'locator',p.locator,'payload',p.payload,'media_type',p.media_type,
-        'width',p.width,'height',p.height,'byte_length',p.byte_length,'error_code',p.error_code
+        'width',p.width,'height',p.height,'decoded_pixels',p.decoded_pixels,
+        'byte_length',p.byte_length,'error_code',p.error_code
     ) ORDER BY p.part_index),'[]'::jsonb) INTO parts
     FROM __forest_module_schema__.media_capture_parts p WHERE p.capture_id=capture.capture_id;
     payload := jsonb_build_object(
@@ -206,7 +215,7 @@ BEGIN
     IF NOT FOUND OR capture.state<>'CLAIMED' OR capture.claim_token IS DISTINCT FROM input->>'claim_token' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object('code','MEDIA_CAPTURE_CLAIM_LOST','message','Media capture claim is no longer current','status',409));
     END IF;
-    SELECT COALESCE(jsonb_agg(jsonb_build_object('part_id',p.part_id,'part_index',p.part_index,'part_kind',p.part_kind,'state',p.state,'media_ref',p.media_ref,'locator',p.locator,'payload',p.payload,'media_type',p.media_type,'width',p.width,'height',p.height,'byte_length',p.byte_length,'error_code',p.error_code) ORDER BY p.part_index),'[]'::jsonb) INTO parts
+    SELECT COALESCE(jsonb_agg(jsonb_build_object('part_id',p.part_id,'part_index',p.part_index,'part_kind',p.part_kind,'state',p.state,'media_ref',p.media_ref,'locator',p.locator,'payload',p.payload,'media_type',p.media_type,'width',p.width,'height',p.height,'decoded_pixels',p.decoded_pixels,'byte_length',p.byte_length,'error_code',p.error_code) ORDER BY p.part_index),'[]'::jsonb) INTO parts
     FROM __forest_module_schema__.media_capture_parts p WHERE p.capture_id=capture.capture_id;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object(
         'capture_id',capture.capture_id,'claim_token',capture.claim_token,'identity',capture.identity,'source_unit_id',capture.source_unit_id,
@@ -235,14 +244,16 @@ BEGIN
     IF NOT FOUND OR capture.state<>'CLAIMED' OR capture.claim_token IS DISTINCT FROM input->>'claim_token' OR part.media_ref IS DISTINCT FROM input->>'media_ref' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object('code','MEDIA_CAPTURE_CLAIM_LOST','message','Media capture claim is no longer current','status',409));
     END IF;
-    INSERT INTO __forest_module_schema__.media_assets(media_ref,capture_id,part_id,payload,media_type,width,height,byte_length)
-    VALUES(input->>'media_ref',input->>'capture_id',input->>'part_id',input->'payload',input->>'media_type',(input->>'width')::integer,(input->>'height')::integer,(input->>'byte_length')::integer)
+    INSERT INTO __forest_module_schema__.media_assets(media_ref,capture_id,part_id,payload,media_type,width,height,decoded_pixels,byte_length)
+    VALUES(input->>'media_ref',input->>'capture_id',input->>'part_id',input->'payload',input->>'media_type',(input->>'width')::integer,(input->>'height')::integer,(input->>'decoded_pixels')::integer,(input->>'byte_length')::integer)
     ON CONFLICT DO NOTHING;
     SELECT count(*),bool_and(
         a.media_ref=input->>'media_ref' AND a.capture_id=input->>'capture_id'
         AND a.part_id=input->>'part_id' AND a.payload=input->'payload'
         AND a.media_type=input->>'media_type' AND a.width=(input->>'width')::integer
-        AND a.height=(input->>'height')::integer AND a.byte_length=(input->>'byte_length')::integer
+        AND a.height=(input->>'height')::integer
+        AND a.decoded_pixels=(input->>'decoded_pixels')::integer
+        AND a.byte_length=(input->>'byte_length')::integer
     ) INTO asset_count,asset_matches
     FROM __forest_module_schema__.media_assets a
     WHERE a.media_ref=input->>'media_ref'
@@ -250,7 +261,7 @@ BEGIN
     IF asset_count<>1 OR NOT asset_matches THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',jsonb_build_object('code','MEDIA_ASSET_CONFLICT','message','Media asset identity names different content','status',409));
     END IF;
-    UPDATE __forest_module_schema__.media_capture_parts SET state='READY',payload=input->'payload',media_type=input->>'media_type',width=(input->>'width')::integer,height=(input->>'height')::integer,byte_length=(input->>'byte_length')::integer,error_code=NULL
+    UPDATE __forest_module_schema__.media_capture_parts SET state='READY',payload=input->'payload',media_type=input->>'media_type',width=(input->>'width')::integer,height=(input->>'height')::integer,decoded_pixels=(input->>'decoded_pixels')::integer,byte_length=(input->>'byte_length')::integer,error_code=NULL
     WHERE capture_id=input->>'capture_id' AND part_id=input->>'part_id';
     result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',jsonb_build_object('capture_id',input->>'capture_id','part_id',input->>'part_id','state','READY'));
     INSERT INTO __forest_module_schema__.media_command_operations VALUES(context->>'operation_id','media.publish-image',input,result_value);

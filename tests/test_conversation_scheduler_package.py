@@ -63,7 +63,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "retain_payload_bytes": 262144,
                 "high_watermark_media_bytes": 12582912,
                 "retain_media_bytes": 6291456,
-                "policy_revision": "context-view-multimodal-window-v3",
+                "high_watermark_decoded_bytes": 134217728,
+                "retain_decoded_bytes": 67108864,
+                "policy_revision": "context-view-multimodal-window-v4",
             },
         },
         resolved_contracts={},
@@ -790,8 +792,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "owner_id": media_ref,
             },
             "byte_length": 2048,
-            "width": 1,
-            "height": 1,
+            "width": 1024,
+            "height": 1024,
+            "decoded_pixels": 1048576,
         }
         async with store.pool.connection() as conn, conn.transaction():
             fact_result = await (
@@ -826,7 +829,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "retain_payload_bytes": 512,
                 "high_watermark_media_bytes": 12582912,
                 "retain_media_bytes": 6291456,
-                "policy_revision": "context-view-multimodal-window-v3",
+                "high_watermark_decoded_bytes": 134217728,
+                "retain_decoded_bytes": 67108864,
+                "policy_revision": "context-view-multimodal-window-v4",
             },
             "payload": {
                 "protocol": "forest.payload-json-from-prior/1",
@@ -961,6 +966,32 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ).fetchone()
         assert media_only_plan["value"]["value"]["commit"]["archived_unit_count"] == 1
         assert media_only_plan["value"]["value"]["commit"]["archived_media_bytes"] == 2048
+        assert media_only_plan["value"]["value"]["commit"]["archived_decoded_bytes"] == 4194304
+        decoded_only_input = copy.deepcopy(pre_run_input)
+        decoded_only_input["context_view"].update({
+            "high_watermark_payload_bytes": 524288,
+            "retain_payload_bytes": 262144,
+            "high_watermark_decoded_bytes": 1024,
+            "retain_decoded_bytes": 512,
+        })
+        async with store.pool.connection() as conn, conn.transaction():
+            decoded_only_plan = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_prepare_context_compaction("
+                            "%s::jsonb,%s::jsonb) AS value")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({
+                        "bot_id": store.bot_id,
+                        "operation_id": "conversation/pre-run/decoded-only",
+                        "participant_input_digest": "sha256:" + "0" * 64,
+                    }), Jsonb({
+                        "protocol": "forest.uow-step/1",
+                        "input": decoded_only_input,
+                        "prior": {},
+                    })),
+                )
+            ).fetchone()
+        assert decoded_only_plan["value"]["value"]["commit"]["archived_decoded_bytes"] == 4194304
         # An unresolved trigger in the bounded oldest window pins the archive
         # prefix.  Later eligible units must stay in the active view.
         with pytest.raises(RollbackProbe):
@@ -1318,6 +1349,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                             "byte_length": 2048,
                             "width": 1,
                             "height": 1,
+                            "decoded_pixels": 1,
                         })),
                     )
             next_classification = copy.deepcopy(silent_classification)
@@ -1339,7 +1371,8 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                         early_lane = await (
                             await conn.execute(
                                 sql.SQL("SELECT context_applied_seq,"
-                                        "context_view_media_bytes FROM {}.conversation_lanes "
+                                        "context_view_media_bytes,"
+                                        "context_view_decoded_bytes FROM {}.conversation_lanes "
                                         "WHERE bot_id=%s AND conversation_id=%s")
                                 .format(sql.Identifier(namespace)),
                                 (store.bot_id, "conversation/onebot/group/silent"),
@@ -1349,6 +1382,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                         break
                     await asyncio.sleep(0.05)
                 assert early_lane["context_view_media_bytes"] == 2048
+                assert early_lane["context_view_decoded_bytes"] == 4
 
         compacted = None
         for _attempt in range(100):
@@ -1454,6 +1488,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "byte_length": 2048,
                 "width": 1,
                 "height": 1,
+                "decoded_pixels": 1,
             }
             command_context = {
                 "bot_id": store.bot_id,
@@ -1474,7 +1509,8 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     assert recorded["value"]["value"] == {"recorded": True}
                 lane_cost = await (
                     await conn.execute(
-                        sql.SQL("SELECT context_view_media_bytes,media_cost_revision "
+                        sql.SQL("SELECT context_view_media_bytes,"
+                                "context_view_decoded_bytes,media_cost_revision "
                                 "FROM {}.conversation_lanes WHERE bot_id=%s "
                                 "AND conversation_id=%s")
                         .format(sql.Identifier(namespace)),
@@ -1482,6 +1518,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     )
                 ).fetchone()
             assert lane_cost["context_view_media_bytes"] == expected_active_bytes
+            assert lane_cost["context_view_decoded_bytes"] == (4 if index == 3 else 0)
             assert lane_cost["media_cost_revision"] == index // 2 + 2
         async with store.pool.connection() as conn, conn.transaction():
             snapshot_actor = await (
@@ -1500,10 +1537,10 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     ),
                 )
             ).fetchone()
-        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 3)]
+        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 4)]
         route = FrozenServiceRoute(
             service_id="conversation.context.snapshot",
-            version=3,
+            version=4,
             caller_component_id="kernel.runtime",
             provider_component_id="conversation.scheduler",
             provider_generation_id=instance.generation_identity.generation_id,
@@ -1531,8 +1568,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ),
             {},
         )
-        assert snapshot["protocol"] == "forest.conversation-context-snapshot/3"
+        assert snapshot["protocol"] == "forest.conversation-context-snapshot/4"
         assert snapshot["context_view_media_bytes"] == 2048
+        assert snapshot["context_view_decoded_bytes"] == 4
         assert snapshot["context_view_revision"] == 1
         assert snapshot["unit_count"] == 2
         manifest = json.loads(

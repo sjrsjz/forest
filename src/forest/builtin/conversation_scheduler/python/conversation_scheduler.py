@@ -32,6 +32,8 @@ class ConversationScheduler(Plugin):
                 "retain_payload_bytes",
                 "high_watermark_media_bytes",
                 "retain_media_bytes",
+                "high_watermark_decoded_bytes",
+                "retain_decoded_bytes",
                 "policy_revision",
             }
             or type(view["high_watermark_units"]) is not int
@@ -46,7 +48,11 @@ class ConversationScheduler(Plugin):
             or type(view["retain_media_bytes"]) is not int
             or not 1024 <= view["high_watermark_media_bytes"] <= 134_217_728
             or not 1 <= view["retain_media_bytes"] < view["high_watermark_media_bytes"]
-            or view["policy_revision"] != "context-view-multimodal-window-v3"
+            or type(view["high_watermark_decoded_bytes"]) is not int
+            or type(view["retain_decoded_bytes"]) is not int
+            or not 1024 <= view["high_watermark_decoded_bytes"] <= 536_870_912
+            or not 1 <= view["retain_decoded_bytes"] < view["high_watermark_decoded_bytes"]
+            or view["policy_revision"] != "context-view-multimodal-window-v4"
         ):
             raise ForestError(
                 "CONVERSATION_CONFIGURATION_INVALID",
@@ -71,7 +77,7 @@ class ConversationScheduler(Plugin):
     @service(
         "conversation.media-cost.record",
         semantics="idempotent",
-        contract="1.0",
+        contract="2.0",
         input_schema="schemas/media-cost-input.json",
         output_schema="schemas/media-cost-output.json",
     )
@@ -217,7 +223,7 @@ class ConversationScheduler(Plugin):
             level += 1
         return nodes, level
 
-    @service("conversation.context.snapshot", semantics="idempotent", contract="3.0")
+    @service("conversation.context.snapshot", semantics="idempotent", contract="4.0")
     async def context_snapshot(self, payload, ctx):
         actor = payload["actor"]
         offset = 0
@@ -229,7 +235,7 @@ class ConversationScheduler(Plugin):
             page = await ctx.queries.call(
                 "conversation.context-page",
                 {"actor": actor, "offset": offset, "limit": 32},
-                contract_major=2,
+                contract_major=3,
             )
             current_metadata = {
                 key: page[key]
@@ -247,6 +253,7 @@ class ConversationScheduler(Plugin):
                     "thread_ref",
                     "context_view_unit_count",
                     "context_view_media_bytes",
+                    "context_view_decoded_bytes",
                     "media_cost_revision",
                     "context_archived_unit_count",
                     "archive",
@@ -323,6 +330,22 @@ class ConversationScheduler(Plugin):
                 "CONTEXT_VIEW_MEDIA_OVER_BUDGET",
                 "Required Context media exceeds the configured model-view bound", 413,
             )
+        decoded_bytes = sum(
+            part["decoded_pixels"] * 4
+            for _, units in raw_pages
+            for unit in units
+            for part in unit["media_parts"]
+        )
+        if decoded_bytes != metadata["context_view_decoded_bytes"]:
+            raise ForestError(
+                "CONTEXT_SNAPSHOT_DECODED_COST_CONFLICT",
+                "Conversation decoded media facts differ from the active window", 409,
+            )
+        if decoded_bytes > self._context_view["high_watermark_decoded_bytes"]:
+            raise ForestError(
+                "CONTEXT_VIEW_DECODED_OVER_BUDGET",
+                "Required Context decoded media exceeds the model-view bound", 413,
+            )
         pages = []
         for offset, units in raw_pages:
             saved = await ctx.payloads.put_json(
@@ -340,9 +363,9 @@ class ConversationScheduler(Plugin):
             )
             pages.append(self._exact(saved))
         roots, tree_depth = await self._snapshot_tree(pages, ctx)
-        owner_id = ctx.operations.stable("context-snapshot-manifest:v3")
+        owner_id = ctx.operations.stable("context-snapshot-manifest:v4")
         document = {
-            "protocol": "forest.conversation-context-snapshot/3",
+            "protocol": "forest.conversation-context-snapshot/4",
             **metadata,
             "unit_count": unit_count,
             "tree_depth": tree_depth,
@@ -355,13 +378,14 @@ class ConversationScheduler(Plugin):
             parents=roots,
         )
         return {
-            "protocol": "forest.conversation-context-snapshot/3",
+            "protocol": "forest.conversation-context-snapshot/4",
             "conversation_id": metadata["conversation_id"],
             "context_applied_seq": metadata["context_applied_seq"],
             "context_revision": metadata["context_revision"],
             "context_view_revision": metadata["context_view_revision"],
             "media_cost_revision": metadata["media_cost_revision"],
             "context_view_media_bytes": media_bytes,
+            "context_view_decoded_bytes": decoded_bytes,
             "unit_count": unit_count,
             "snapshot": self._exact(saved),
         }

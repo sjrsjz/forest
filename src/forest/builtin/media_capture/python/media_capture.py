@@ -70,6 +70,7 @@ class MediaCapture(Plugin):
                         },
                     },
                     operation_id=ctx.operations.stable("fetch:" + part["part_id"]),
+                    contract_major=2,
                     timeout=45,
                 )
                 await ctx.commands.call(
@@ -83,9 +84,11 @@ class MediaCapture(Plugin):
                         "media_type": fetched["media_type"],
                         "width": fetched["width"],
                         "height": fetched["height"],
+                        "decoded_pixels": fetched["decoded_pixels"],
                         "byte_length": fetched["byte_length"],
                     },
                     operation_id=ctx.operations.stable("publish:" + part["part_id"]),
+                    contract_major=2,
                 )
             except ForestError as error:
                 await ctx.commands.call(
@@ -103,6 +106,7 @@ class MediaCapture(Plugin):
         current = await ctx.queries.call(
             "media.capture.current",
             {"capture_id": capture["capture_id"], "claim_token": capture["claim_token"]},
+            contract_major=2,
         )
         if any(part["state"] == "PENDING" for part in current["parts"]):
             return {"disposition": "RETRY", "memory_published": False}
@@ -126,10 +130,12 @@ class MediaCapture(Plugin):
                         "byte_length": part["byte_length"],
                         "width": part["width"],
                         "height": part["height"],
+                        "decoded_pixels": part["decoded_pixels"],
                     },
                     operation_id=ctx.operations.stable(
                         "conversation-media-cost:" + part["part_id"]
                     ),
+                    contract_major=2,
                     timeout=30,
                 )
             except ForestError as error:
@@ -160,7 +166,10 @@ class MediaCapture(Plugin):
                 "unit_kind": current["unit_kind"],
                 "author_subject_ref": current["author_subject_ref"],
                 "author": current["author"],
-                "parts": ready,
+                "parts": [
+                    {key: value for key, value in part.items() if key != "decoded_pixels"}
+                    for part in ready
+                ],
                 "occurrence": {
                     "occurrence_id": ctx.operations.stable("memory-occurrence"),
                     "binding_ref": current["binding_ref"],

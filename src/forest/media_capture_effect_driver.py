@@ -89,7 +89,7 @@ class MediaImageFetchEffectDriver:
             expected_deletion_epoch=epoch,
         )
         return {
-            "protocol": "forest.media-image-fetch-result/1",
+            "protocol": "forest.media-image-fetch-result/2",
             "media_ref": payload["media_ref"],
             "payload": {
                 "payload_id": saved.payload_id,
@@ -101,6 +101,7 @@ class MediaImageFetchEffectDriver:
             "media_type": image.media_type,
             "width": image.width,
             "height": image.height,
+            "decoded_pixels": image.decoded_pixels,
             "byte_length": len(image.content),
             "operation_id": invocation.operation_id,
         }

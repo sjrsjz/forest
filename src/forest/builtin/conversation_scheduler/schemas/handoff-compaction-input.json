@@ -76,6 +76,8 @@
         "retain_payload_bytes",
         "high_watermark_media_bytes",
         "retain_media_bytes",
+        "high_watermark_decoded_bytes",
+        "retain_decoded_bytes",
         "policy_revision"
       ],
       "properties": {
@@ -109,8 +111,18 @@
           "minimum": 1,
           "maximum": 134217727
         },
+        "high_watermark_decoded_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 536870912
+        },
+        "retain_decoded_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 536870911
+        },
         "policy_revision": {
-          "const": "context-view-multimodal-window-v3"
+          "const": "context-view-multimodal-window-v4"
         }
       }
     },

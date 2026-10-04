@@ -33,6 +33,7 @@ class CapturedImage:
     media_type: str
     width: int
     height: int
+    decoded_pixels: int
 
 
 def _validate(content: bytes) -> CapturedImage:
@@ -63,7 +64,7 @@ def _validate(content: bytes) -> CapturedImage:
                     if frames > MAX_MEDIA_FRAMES or pixels > MAX_MEDIA_PIXELS:
                         raise _error("MEDIA_PIXELS_EXCEEDED")
                     image.load()
-            return CapturedImage(content, media_type, width, height)
+            return CapturedImage(content, media_type, width, height, pixels)
         except ForestError:
             raise
         except Exception:

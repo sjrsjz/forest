@@ -29,6 +29,7 @@ _MANIFEST_FIELDS = {
     "thread_ref",
     "context_view_unit_count",
     "context_view_media_bytes",
+    "context_view_decoded_bytes",
     "media_cost_revision",
     "context_archived_unit_count",
     "archive",
@@ -272,7 +273,7 @@ class ContextSnapshotReader:
     async def load(self, envelope: dict, *, expected: dict) -> dict:
         if (
             not isinstance(envelope, dict)
-            or envelope.get("protocol") != "forest.conversation-context-snapshot/3"
+            or envelope.get("protocol") != "forest.conversation-context-snapshot/4"
             or set(expected)
             != {
                 "conversation_id",
@@ -305,7 +306,10 @@ class ContextSnapshotReader:
                     "Conversation snapshot differs from the durable Agent input fence",
                     409,
                 )
-        for name in ("media_cost_revision", "context_view_media_bytes"):
+        for name in (
+            "media_cost_revision", "context_view_media_bytes",
+            "context_view_decoded_bytes",
+        ):
             if manifest.get(name) != envelope.get(name) or not _integer(
                 manifest.get(name), maximum=1_000_000_000_000
             ):
@@ -322,6 +326,7 @@ class ContextSnapshotReader:
         units = []
         active_offset = 0
         media_bytes = 0
+        decoded_bytes = 0
         archive_seen = False
         for page_index, page in enumerate(pages):
             if (
@@ -367,6 +372,10 @@ class ContextSnapshotReader:
                     part.get("byte_length", 0) for part in media_parts
                     if isinstance(part, dict) and type(part.get("byte_length")) is int
                 )
+                decoded_bytes += sum(
+                    part.get("decoded_pixels", 0) * 4 for part in media_parts
+                    if isinstance(part, dict) and type(part.get("decoded_pixels")) is int
+                )
                 units.append(unit)
         if (
             active_offset != manifest["total_units"]
@@ -374,6 +383,7 @@ class ContextSnapshotReader:
             or envelope.get("unit_count") != len(units)
             or manifest["context_view_unit_count"] != active_offset
             or manifest["context_view_media_bytes"] != media_bytes
+            or manifest["context_view_decoded_bytes"] != decoded_bytes
         ):
             raise ForestError(
                 "AGENT_CONTEXT_COUNT_CONFLICT",
@@ -450,6 +460,12 @@ class ContextSnapshotReader:
                     or media.get("media_revision") != parts[index].get("media_revision")
                     or type(media.get("byte_length")) is not int
                     or not 0 < media["byte_length"] <= 8_388_608
+                    or type(media.get("decoded_pixels")) is not int
+                    or not 0 < media["decoded_pixels"] <= 16_777_216
+                    or type(media.get("width")) is not int
+                    or type(media.get("height")) is not int
+                    or media["width"] < 1 or media["height"] < 1
+                    or media["decoded_pixels"] < media["width"] * media["height"]
                 ):
                     raise ForestError(
                         "AGENT_CONTEXT_MEDIA_SOURCE_MISMATCH",

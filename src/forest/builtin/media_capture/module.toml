@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.media-capture"
-version = "2.2.0"
+version = "2.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "media_capture:MediaCapture"
@@ -50,16 +50,16 @@ order = 15
 
 [components.storage]
 schema_id = "forest.media.capture"
-schema_version = "2.1.0"
+schema_version = "2.2.0"
 baseline = "schema/media_capture.sql"
-baseline_sha256 = "139256e8995616b115130cffd4e2c0327984962f4ee14a40cf09f3c1f3936f2e"
+baseline_sha256 = "79e3e106c481d4f798b3b2b9c19848115598b3da078ecadc3f4940381100c426"
 scope = "bot"
 repository_contract = "forest.media-capture.repository/2"
 execution_profile = "official"
 
 [[components.requires]]
 name = "conversation.media-cost.record"
-contract = ">=1.0,<2.0"
+contract = ">=2.0,<3.0"
 required = true
 startup_dependency = false
 
@@ -84,7 +84,7 @@ output_schema = "schemas/context-resolve-output.json"
 
 [[components.effect_services]]
 name = "media.image.fetch"
-contract = "1.0"
+contract = "2.0"
 kind = "media.public-image"
 semantics = "idempotent"
 input_schema = "schemas/image-fetch-input.json"
@@ -92,7 +92,7 @@ output_schema = "schemas/image-fetch-output.json"
 
 [[components.domain_queries]]
 name = "media.capture.current"
-contract = "1.0"
+contract = "2.0"
 function = "media_capture_current"
 input_schema = "schemas/capture-current-input.json"
 output_schema = "schemas/capture-work-input.json"
@@ -106,7 +106,7 @@ output_schema = "schemas/context-resolve-output.json"
 
 [[components.domain_commands]]
 name = "media.publish-image"
-contract = "1.0"
+contract = "2.0"
 function = "media_publish_image"
 input_schema = "schemas/publish-image-input.json"
 output_schema = "schemas/part-command-output.json"

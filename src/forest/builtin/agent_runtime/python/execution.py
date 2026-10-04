@@ -612,7 +612,7 @@ class AgentExecution:
                 "context-snapshot", run["run_id"],
                 run["progress"]["input_revision"], step_seq,
             ),
-            contract_major=3,
+            contract_major=4,
             timeout=120,
         )
         reader = ContextSnapshotReader(self.ctx, bot_id=self.ctx.identity["bot_id"])
@@ -1193,6 +1193,7 @@ class AgentExecution:
                         if exc.code not in {
                             "CONTEXT_VIEW_HARD_LIMIT",
                             "CONTEXT_VIEW_MEDIA_OVER_BUDGET",
+                            "CONTEXT_VIEW_DECODED_OVER_BUDGET",
                         }:
                             raise
                         return await self._fail_context_budget(

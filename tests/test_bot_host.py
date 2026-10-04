@@ -250,7 +250,7 @@ class FakeMediaClient(FakeModelClient):
             and sum("retry" in (item.get("uri") or "") for item in self.fetched) == 1
         ):
             raise ForestError("MEDIA_TRANSPORT_FAILED", "retry fixture", 502)
-        return CapturedImage(b"fake-png-bytes", "image/png", 2, 3)
+        return CapturedImage(b"fake-png-bytes", "image/png", 2, 3, 6)
 
 
 class ValidPngMediaClient(FakeMediaClient):
@@ -262,7 +262,7 @@ class ValidPngMediaClient(FakeMediaClient):
         image = Image.new("RGB", (64, 64), (33, 91, 147))
         buffer = io.BytesIO()
         image.save(buffer, format="PNG")
-        return CapturedImage(buffer.getvalue(), "image/png", 64, 64)
+        return CapturedImage(buffer.getvalue(), "image/png", 64, 64, 4096)
 
 
 class LargePngMediaClient(FakeMediaClient):
@@ -280,7 +280,7 @@ class LargePngMediaClient(FakeMediaClient):
             image.save(buffer, format="PNG")
             content = buffer.getvalue()
             assert 4 * 1024 * 1024 < len(content) <= 8 * 1024 * 1024
-            type(self)._capture = CapturedImage(content, "image/png", width, height)
+            type(self)._capture = CapturedImage(content, "image/png", width, height, width * height)
         return type(self)._capture
 
 
@@ -4988,7 +4988,9 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
                 "retain_payload_bytes": 262144,
                 "high_watermark_media_bytes": 12582912,
                 "retain_media_bytes": 6291456,
-                "policy_revision": "context-view-multimodal-window-v3",
+                "high_watermark_decoded_bytes": 134217728,
+                "retain_decoded_bytes": 67108864,
+                "policy_revision": "context-view-multimodal-window-v4",
             },
         }
         plan = await configuration.plan(
