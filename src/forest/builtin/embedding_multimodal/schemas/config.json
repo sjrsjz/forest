@@ -19,7 +19,17 @@
         "model_revision": {"type": "string", "minLength": 1, "maxLength": 256},
         "model": {"enum": ["jina-clip-v2", "Qwen/Qwen3-VL-Embedding-8B"]},
         "dimensions": {"type": "integer", "minimum": 1, "maximum": 4096}
-      }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"model": {"const": "jina-clip-v2"}}},
+          "then": {"properties": {"dimensions": {"maximum": 1024}}}
+        },
+        {
+          "if": {"properties": {"model": {"const": "Qwen/Qwen3-VL-Embedding-8B"}}},
+          "then": {"properties": {"dimensions": {"enum": [64, 128, 256, 512, 768, 1024, 2048, 4096]}}}
+        }
+      ]
     }
   }
 }

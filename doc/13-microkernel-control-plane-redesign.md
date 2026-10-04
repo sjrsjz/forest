@@ -140,6 +140,8 @@ Python 只用于降低模块实现与部署成本，不降低内核正确性要�
 
 模块 Worker 与宿主效果驱动是两个执行对象，但只能属于同一个 Package Generation 生命周期。模块 Worker 拥有业务协议、参数投影、状态转换和结果解释，只能提交内容寻址、类型化且已授权的效果计划；包 manifest 仅以 `effect_services` 声明准确 effect kind、重放语义和输入/输出 schema，部署环境按 kind 提供最小受限驱动工厂。`job_types`、普通 service、Event、ComponentJob、Command 与消息 handler 都必须先进入包内 Worker，不能把业务 handler 塞进效果驱动。`PackageGenerationAdapter` 用冻结配置与准确 Generation 创建驱动，并统一执行 start、quiesce、resume、close；候选失败必须同时回收 Worker 与已启动驱动，旧代排空必须覆盖 Worker 调用、嵌套效果调用及终态提交。Effect authority 固化 operation、输入、目标、调用 Generation、执行器 Generation、deadline 与 fence 后，准确驱动才可解析 Secret 并发生网络、文件或进程交接。驱动不能理解上层 Job、Agent、Memory 或消息协议，不能脱离包路由形成另一个宿主业务模块，也不能独立切换配置。Secret 明文不进入 Worker、配置 Payload、Event、Job、trace 或结果；Worker 也不获得通用 HTTP、文件系统、子进程或任意 Secret 读取能力。Provider、Embedding、Vector Index、OneBot transport、Media fetch 与 Process Executor 各自使用受限 effect kind 和目标 schema，不能共享一个“万能网络请求”接口。
 
+部署 Profile 解析只验证 Secret 引用存在且用途匹配；长期存活的 BotSettings 仅保留引用，不保留 Provider、Embedding、Vector Index 或 OneBot 凭据明文。每个准确的 Effect Driver 在自己的 Generation 创建时，经部署 Secret 权威的用途限定解析端口取得当前引用的明文；配置热换代必须使用新 Generation 冻结配置中的引用。独立的本地 BotHost 入口可以使用进程环境提供的初始明文，但部署控制器不得把这条退路当作 Secret 轮换机制。
+
 持续产生外部输入的双向资源使用同一条 `effect_services` 声明中的私有 `ingress` 端口，不能另建宿主 Adapter 回调或把该端口注册为公开 Runtime service。`ingress` 固化 Worker handler 名、输入/输出 schema、重放语义与单帧 deadline；驱动工厂仍只创建一个资源对象，因此 OneBot 发送和 WebSocket 接收共享准确客户端、Secret lease 与 Generation。候选 `start` 只允许连接、鉴权和有界缓冲，`bind_ingress` 只能取得回到本代 Worker 的窄回调；RuntimeGraph 提交后的同步 `activate_ingress` 才能开放外部接纳。排空顺序固定为冻结持久图准入、`freeze_ingress` 阻止新帧、Worker quiesce、等待已接纳 ingress/服务调用及账本终态归零、驱动 quiesce、资源 close。回滚恢复先使 Worker 可执行并恢复驱动的待命资源，重新发布图后再打开 ingress；候选失败或激活失败必须关闭已经构造的驱动和 Worker。驱动不得选择目标组件、取得 Registry、绕过 schema、伪造因果根或向新 Generation 转交旧缓冲帧。
 
 每个 `provides` 与 `effect_service` 都必须声明可审查的执行语义。`at-most-once` 使用持久操作账本，适用于不能证明可重复的业务写入或远端副作用；`idempotent` 依赖稳定目标键和目标系统的覆盖/删除语义，在同一调用重试时重新执行；`read` 不产生业务写入，不保存终态结果。三者都受同一 Package Generation admission、在途计数、输入输出 schema 和排空约束。语义属于单个服务的包契约，不能从包是否申请过某项写能力推断，更不能由宿主按服务名硬编码。
@@ -257,6 +259,8 @@ Job。浏览器不得提交 `schema_digests`，也不得用一个六组件 JSON 
 renderer，模块也可以发布自己的 template/module/style；两者都只能返回该组件的配置值，不能选择
 其他组件、伪造摘要、直接建库或启动 RuntimeGraph。Bot 建成后，配置所有权转交各模块自己的
 configuration authority，bootstrap profile 保持不可变来源事实，不成为长期全局配置对象。
+
+官方 Bot 创建期目录由 `components.bootstrap_contribution` 从已校验、内容寻址的 builtin 包工件生成，声明组件标签、说明、顺序、schema 和初值引用；宿主只提供通用 schema 表单承载。运行期与创建期同形的 Provider、Embedding、Vector Index、Trigger Policy 和 Shell 共用包内配置 schema；Agent 与 OneBot 的创建期输入是有意独立的投影，使用各自包内的创建期 schema。Embedding 的模型和维度组合由包 schema 约束；Vector Index 初值明确声明绑定的 Embedding 空间，改动创建期 Embedding 身份时必须相应更新 Vector Index 身份，供应解析复核两者一致。部署 Supervisor 在启动时把准确包工件的创建期贡献冻结为同一注册表，并把它传给供应配置解析；不能在供应期间重新按可变源码计算 schema 摘要。当前创建期自定义 template/module/style 尚未接入工件声明，所有官方组件仍使用通用 schema 表单。
 
 供应包的 iframe 保持 `connect-src 'none'`，不能自行下载并执行其他模块的 Bootstrap 脚本。WebUI 壳层需要一个通用的嵌套贡献承载协议：包请求装载由内核安装目录返回的 Bootstrap contribution 集合，壳层核对调用方当前 Generation、声明的 catalog query、surface 身份和作用域后，在随包页面卸载的宿主容器内装载各模块自己的 template/module/style；每个编辑器只返回其组件配置值。包请求读取时，壳层按目录中的 component ID 收集这些值，再交给供应操作校验；包不能提供任意脚本 URL、替换目录身份或直接操作其他模块 DOM。这样供应包负责工作流，模块继续拥有设置界面，而宿主只提供通用、安全的贡献承载。
 

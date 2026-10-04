@@ -173,9 +173,11 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
-    bootstrap_registry = BootstrapConfigurationRegistry(official_bootstrap_contributions())
     package_catalog = PackageCatalog(
         Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
+    )
+    bootstrap_registry = BootstrapConfigurationRegistry(
+        official_bootstrap_contributions(package_catalog)
     )
     deployment_controller = None
 
@@ -194,7 +196,9 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             credential_resolver=secrets.resolve_text_for_purpose,
         )
 
-    settings_resolver = OfficialBotSettingsResolver(secrets=secrets)
+    settings_resolver = OfficialBotSettingsResolver(
+        secrets=secrets, bootstrap_registry=bootstrap_registry
+    )
     database_allocator = LocalPostgresDatabaseAllocator(settings.dsn)
     provisioner = OfficialBotProvisioner(
         settings_resolver=settings_resolver,

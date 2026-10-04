@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.1.3"
+version = "2.1.4"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -14,6 +14,13 @@ config_schema = "schemas/config.json"
 bootstrap_config = "bootstrap.json"
 auto_install = true
 configuration_apply = "worker-host/1"
+
+[components.bootstrap_contribution]
+label = "OneBot Adapter"
+description = "Bot identity, WebSocket endpoint, binding, and access-token reference."
+order = 70
+schema = "schemas/bootstrap-config.json"
+initial_value = "bootstrap-setup.json"
 
 [components.resources]
 max_frame_bytes = 262144

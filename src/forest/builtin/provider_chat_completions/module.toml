@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.provider.chat-completions"
-version = "4.3.0"
+version = "4.3.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "provider:ChatCompletionsProvider"
@@ -14,6 +14,13 @@ config_schema = "schemas/config.json"
 bootstrap_config = "bootstrap.json"
 auto_install = true
 configuration_apply = "worker-host/1"
+
+[components.bootstrap_contribution]
+label = "Chat Completions Provider"
+description = "Model endpoint, credential reference, limits, and declared capabilities."
+order = 10
+schema = "schemas/config.json"
+initial_value = "bootstrap.json"
 
 [components.resources]
 max_frame_bytes = 262144

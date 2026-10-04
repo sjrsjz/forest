@@ -117,6 +117,18 @@ MANIFEST_SCHEMA = {
                     "scope": {"enum": ["bot", "deployment", "host"]},
                     "configuration_apply": {"const": "worker-host/1"},
                     "bootstrap_config": {"type": "string"},
+                    "bootstrap_contribution": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["label", "description", "order", "schema", "initial_value"],
+                        "properties": {
+                            "label": {"type": "string", "minLength": 1, "maxLength": 128},
+                            "description": {"type": "string", "minLength": 1, "maxLength": 512},
+                            "order": {"type": "integer", "minimum": -10000, "maximum": 10000},
+                            "schema": {"type": "string"},
+                            "initial_value": {"type": "string"},
+                        },
+                    },
                     "auto_install": {"type": "boolean"},
                     "state_schema": {"type": "integer", "minimum": 1, "maximum": 2147483647},
                     "config_immutable_paths": {
@@ -1357,6 +1369,39 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_BOOTSTRAP_CONFIGURATION",
                 "Bootstrap configuration must be a JSON object",
             )
+    contribution = component.get("bootstrap_contribution")
+    if contribution is not None:
+        if component["scope"] != "bot" or not component.get("auto_install"):
+            _fail(
+                "INVALID_BOOTSTRAP_CONTRIBUTION",
+                "Creation-time contributions require an auto-installed Bot component",
+            )
+        setup_schema = _schema(files, contribution["schema"])
+        reference = contribution["initial_value"]
+        parts = PurePosixPath(reference)
+        if (
+            parts.is_absolute()
+            or ".." in parts.parts
+            or not reference.endswith(".json")
+            or reference not in files
+        ):
+            _fail("INVALID_BOOTSTRAP_CONTRIBUTION", "Initial value path is invalid")
+        try:
+            initial_value = json.loads(files[reference])
+            json.dumps(initial_value, allow_nan=False)
+        except (ValueError, UnicodeError, TypeError) as exc:
+            raise ForestError(
+                "INVALID_BOOTSTRAP_CONTRIBUTION", "Initial value is not JSON", 422
+            ) from exc
+        if (
+            setup_schema.get("type") != "object"
+            or not isinstance(initial_value, dict)
+            or not Draft202012Validator(setup_schema).is_valid(initial_value)
+        ):
+            _fail(
+                "INVALID_BOOTSTRAP_CONTRIBUTION",
+                "Creation-time schema and initial value must describe an object",
+            )
     replacement_facts_schema = component.get("lifecycle", {}).get(
         "replacement_facts_schema"
     )
@@ -2153,6 +2198,17 @@ class PackageSnapshot:
             raise ForestError(
                 "PACKAGE_CONFIGURATION_INVALID", "Bootstrap configuration is not JSON", 422
             ) from exc
+
+    def bootstrap_contribution(self) -> tuple[dict, dict, dict] | None:
+        """Read a creation-time contribution from this captured artifact."""
+
+        declaration = self.component.get("bootstrap_contribution")
+        if declaration is None:
+            return None
+        files = self._verified_files()
+        schema = _schema(files, declaration["schema"])
+        initial_value = json.loads(files[declaration["initial_value"]])
+        return declaration.copy(), schema, initial_value
 
     def management_ui(self) -> tuple[dict, bytes] | None:
         files = self._verified_files()

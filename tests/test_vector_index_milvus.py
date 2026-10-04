@@ -8,13 +8,11 @@ from uuid import uuid4
 import pytest
 from test_schema_bundles import clean_authority as clean_authority
 
-from forest.builtin_packages import bootstrap_builtin_package
+from forest.builtin_packages import bootstrap_builtin_package, official_builtin_configuration
 from forest.core_runtime import bootstrap_kernel
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
-    default_embedding_configuration,
-    default_vector_index_configuration,
     validate_vector_index_configuration,
 )
 from forest.package_effects import PackageEffectDriverRegistry
@@ -50,7 +48,7 @@ async def test_embedding_and_vector_identity_are_package_declared_immutable_path
     store, installer = clean_authority
     kernel = await bootstrap_kernel(store, installer)
     catalog = PackageCatalog(tmp_path / "packages")
-    embedding_value = default_embedding_configuration()
+    embedding_value = official_builtin_configuration("embedding_multimodal")
     embedding = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/embedding_multimodal",
         catalog, store, installer, kernel=kernel,
@@ -80,8 +78,9 @@ async def test_embedding_and_vector_identity_are_package_declared_immutable_path
     assert embedding_error.value.code == "MODULE_CONFIGURATION_IMMUTABLE"
 
     profile = EmbeddingProfile(**embedding_value["profile"])
-    vector_value = default_vector_index_configuration(
-        space_id=profile.space_id, dimensions=profile.dimensions,
+    vector_value = official_builtin_configuration(
+        "vector_index_milvus",
+        overrides={"space_id": profile.space_id, "dimensions": profile.dimensions},
     )
     vector = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",

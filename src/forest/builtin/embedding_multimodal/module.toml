@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.embedding.multimodal"
-version = "2.7.0"
+version = "2.7.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "embedding_provider:MultimodalEmbeddingProvider"
@@ -16,6 +16,13 @@ bootstrap_config = "bootstrap.json"
 auto_install = true
 configuration_apply = "worker-host/1"
 config_immutable_paths = ["/profile"]
+
+[components.bootstrap_contribution]
+label = "Multimodal Embedding Provider"
+description = "Bot-lifetime text and image embedding identity and endpoint."
+order = 20
+schema = "schemas/config.json"
+initial_value = "bootstrap.json"
 
 [components.resources]
 max_frame_bytes = 262144

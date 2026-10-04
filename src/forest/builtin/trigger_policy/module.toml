@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation.trigger-policy"
-version = "1.0.2"
+version = "1.0.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "trigger_policy:TriggerPolicy"
@@ -14,6 +14,13 @@ config_schema = "schemas/config.json"
 bootstrap_config = "bootstrap.json"
 auto_install = true
 configuration_apply = "worker-host/1"
+
+[components.bootstrap_contribution]
+label = "Conversation Trigger Policy"
+description = "Allowed groups and the conditions that create an Agent turn."
+order = 40
+schema = "schemas/config.json"
+initial_value = "bootstrap.json"
 
 [components.resources]
 max_frame_bytes = 65536

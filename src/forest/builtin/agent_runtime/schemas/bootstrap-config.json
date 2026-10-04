@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol": {"const": "forest.agent.runtime.bootstrap/1"},
+    "preset_system": {
+      "type": "array",
+      "items": {"type": "string", "maxLength": 65536},
+      "maxItems": 32
+    }
+  },
+  "required": ["protocol", "preset_system"],
+  "additionalProperties": false
+}

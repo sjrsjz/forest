@@ -1435,16 +1435,16 @@ async def test_embedding_configuration_can_rotate_its_secret_reference(tmp_path)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
     settings = BotSettings(
         bot_id="bot-secret-rotation", dsn=uri,
-        model_base_url="http://127.0.0.1:8000/v1", model_api_key="old-model-key",
+        model_base_url="http://127.0.0.1:8000/v1", model_api_key="",
         model="test-model", model_deployment_id="provider.chat-completions/test",
         model_max_output_tokens=1024, model_input_modalities=("text",),
         embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
-        embedding_api_key="old-embedding-key",
+        embedding_api_key="",
         embedding_deployment_id="embedding.multimodal/qiyu-vl/test",
         embedding_model_revision="test-revision/1",
         embedding_model="Qwen/Qwen3-VL-Embedding-8B", embedding_dimensions=4096,
         onebot_self_id="123456789", onebot_websocket_url="ws://127.0.0.1:3001/",
-        onebot_access_token="old-onebot-token", allowed_group_ids=("933179609",),
+        onebot_access_token="", allowed_group_ids=("933179609",),
         group_trigger_mode="MENTION", private_enabled=True,
         shell_administrator_ids=("42",), agent_system_prompt="Secret rotation fixture.",
     )
@@ -1472,6 +1472,7 @@ async def test_embedding_configuration_can_rotate_its_secret_reference(tmp_path)
             self.credentials.append(credential)
 
     async def create_websocket(_url, _token, **_limits):
+        assert _token == "old-onebot-token"
         return FakeWebSocketClient(settings.onebot_self_id)
 
     host = BotHost(

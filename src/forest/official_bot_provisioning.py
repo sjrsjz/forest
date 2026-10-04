@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 
 import psycopg
 from jsonschema import Draft202012Validator
 from psycopg_pool import PoolTimeout
 
-from forest.bootstrap_contributions import BootstrapConfigurationContribution
+from forest.bootstrap_contributions import (
+    BootstrapConfigurationContribution,
+    BootstrapConfigurationRegistry,
+)
 from forest.bot_host import BotHost, BotSettings
 from forest.builtin_packages import (
-    official_builtin_configuration,
+    auto_install_builtin_sources,
     official_builtin_configuration_schema,
 )
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.model_contract import ModelCapabilities
+from forest.packages import PackageCatalog
 from forest.runtime_modules import RuntimeManagementContribution
 from forest.storage.bot_provisioning_receipt import BotProvisioningReceiptAuthority
 from forest.storage.bot_store import BotStore
@@ -24,20 +31,6 @@ from forest.storage.bot_store import BotStore
 PROVIDER_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("provider_chat_completions")
 EMBEDDING_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("embedding_multimodal")
 VECTOR_INDEX_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("vector_index_milvus")
-
-
-def default_provider_configuration() -> dict:
-    return official_builtin_configuration("provider_chat_completions")
-
-
-def default_embedding_configuration() -> dict:
-    return official_builtin_configuration("embedding_multimodal")
-
-
-def default_vector_index_configuration(*, space_id: str, dimensions: int) -> dict:
-    return official_builtin_configuration(
-        "vector_index_milvus", overrides={"space_id": space_id, "dimensions": dimensions}
-    )
 
 
 def _validated_package_configuration(
@@ -82,96 +75,10 @@ def validate_vector_index_configuration(value: object) -> dict:
         "VECTOR_INDEX_CONFIGURATION_INVALID", "Vector index configuration is invalid",
     )
 
-PROVIDER_BOOTSTRAP_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "required": [
-        "protocol",
-        "base_url",
-        "credential_ref",
-        "timeout_seconds",
-        "max_connections",
-        "capabilities",
-    ],
-    "properties": {
-        "protocol": {"const": "forest.provider.chat-completions/1"},
-        "base_url": {"type": "string", "minLength": 1, "maxLength": 2048},
-        "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
-        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 600},
-        "max_connections": {"type": "integer", "minimum": 1, "maximum": 128},
-        "capabilities": {"type": "object"},
-    },
-    "additionalProperties": False,
-}
-EMBEDDING_BOOTSTRAP_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "required": [
-        "protocol",
-        "endpoint",
-        "credential_ref",
-        "timeout_seconds",
-        "max_connections",
-        "profile",
-    ],
-    "properties": {
-        "protocol": {"const": "forest.embedding.multimodal/1"},
-        "endpoint": {"type": "string", "minLength": 1, "maxLength": 2048},
-        "credential_ref": {"type": "string", "minLength": 1, "maxLength": 512},
-        "timeout_seconds": {"type": "number", "minimum": 1, "maximum": 300},
-        "max_connections": {"type": "integer", "minimum": 1, "maximum": 32},
-        "profile": {"type": "object"},
-    },
-    "additionalProperties": False,
-}
-TRIGGER_POLICY_BOOTSTRAP_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "required": [
-        "protocol",
-        "allowed_group_ids",
-        "group_trigger_mode",
-        "private_enabled",
-    ],
-    "properties": {
-        "protocol": {"const": "forest.conversation.trigger-policy/1"},
-        "allowed_group_ids": {
-            "type": "array",
-            "items": {"type": "string", "pattern": "^[0-9]+$"},
-            "uniqueItems": True,
-        },
-        "group_trigger_mode": {"enum": ["MENTION", "ALL", "DISABLED"]},
-        "private_enabled": {"type": "boolean"},
-    },
-    "additionalProperties": False,
-}
-SHELL_BOOTSTRAP_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {
-        "protocol": {"const": "forest.shell.command/1"},
-        "binding_ref": {"type": "string"},
-        "administrator_principals": {
-            "type": "array",
-            "items": {"type": "string"},
-            "uniqueItems": True,
-        },
-    },
-    "required": ["protocol", "binding_ref", "administrator_principals"],
-    "additionalProperties": False,
-}
-
-
-def default_shell_configuration() -> dict:
-    return {
-        "protocol": "forest.shell.command/1",
-        "binding_ref": "binding/main",
-        "administrator_principals": [],
-    }
-
-
 def validate_shell_configuration(value: object) -> dict:
-    if not Draft202012Validator(SHELL_BOOTSTRAP_SCHEMA).is_valid(value):
+    if not Draft202012Validator(
+        official_builtin_configuration_schema("shell_command")
+    ).is_valid(value):
         raise ForestError(
             "SHELL_CONFIGURATION_INVALID", "Shell configuration is invalid", 422
         )
@@ -181,17 +88,10 @@ def validate_shell_configuration(value: object) -> dict:
     }
 
 
-def default_trigger_policy_configuration() -> dict:
-    return {
-        "protocol": "forest.conversation.trigger-policy/1",
-        "allowed_group_ids": [],
-        "group_trigger_mode": "MENTION",
-        "private_enabled": True,
-    }
-
-
 def validate_trigger_policy_configuration(value: object) -> dict:
-    if not Draft202012Validator(TRIGGER_POLICY_BOOTSTRAP_SCHEMA).is_valid(value):
+    if not Draft202012Validator(
+        official_builtin_configuration_schema("trigger_policy")
+    ).is_valid(value):
         raise ForestError(
             "TRIGGER_POLICY_CONFIGURATION_INVALID",
             "Trigger policy configuration is invalid",
@@ -201,51 +101,6 @@ def validate_trigger_policy_configuration(value: object) -> dict:
         **value,
         "allowed_group_ids": tuple(value["allowed_group_ids"]),
     }
-
-AGENT_BOOTSTRAP_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {
-        "protocol": {"const": "forest.agent.runtime.bootstrap/1"},
-        "preset_system": {
-            "type": "array",
-            "items": {"type": "string", "maxLength": 65536},
-            "maxItems": 32,
-        },
-    },
-    "required": ["protocol", "preset_system"],
-    "additionalProperties": False,
-}
-
-ONEBOT_BOOTSTRAP_SCHEMA = {
-    "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object",
-    "properties": {
-        "protocol": {"const": "forest.adapter.onebot.bootstrap/1"},
-        "binding_id": {"const": "binding/main"},
-        "self_id": {"type": "string", "pattern": "^[0-9]+$", "maxLength": 32},
-        "websocket_url": {"type": "string", "minLength": 1, "maxLength": 2048},
-        "access_token_ref": {"type": "string", "minLength": 10, "maxLength": 512},
-    },
-    "required": [
-        "protocol",
-        "binding_id",
-        "self_id",
-        "websocket_url",
-        "access_token_ref",
-    ],
-    "additionalProperties": False,
-}
-
-OFFICIAL_BOOTSTRAP_SCHEMAS = {
-    "provider.chat-completions": PROVIDER_BOOTSTRAP_SCHEMA,
-    "embedding.multimodal": EMBEDDING_BOOTSTRAP_SCHEMA,
-    "vector.index": VECTOR_INDEX_CONFIGURATION_SCHEMA,
-    "conversation.trigger-policy": TRIGGER_POLICY_BOOTSTRAP_SCHEMA,
-    "shell.command": SHELL_BOOTSTRAP_SCHEMA,
-    "agent.runtime": AGENT_BOOTSTRAP_SCHEMA,
-    "adapter.onebot": ONEBOT_BOOTSTRAP_SCHEMA,
-}
 
 
 def _bootstrap_surface(component_id: str, label: str) -> RuntimeManagementContribution:
@@ -260,103 +115,63 @@ def _bootstrap_surface(component_id: str, label: str) -> RuntimeManagementContri
     )
 
 
-def official_bootstrap_contributions() -> tuple[BootstrapConfigurationContribution, ...]:
-    """Return the official install catalog without constructing a Bot runtime graph."""
+def official_bootstrap_contributions(
+    package_catalog: PackageCatalog | None = None,
+) -> tuple[BootstrapConfigurationContribution, ...]:
+    """Capture creation-time declarations from the exact builtin package artifacts."""
 
-    default_embedding = default_embedding_configuration()
-    default_embedding_profile = EmbeddingProfile(**default_embedding["profile"])
-    values = (
-        (
-            "provider.chat-completions",
-            "Chat Completions Provider",
-            "Model endpoint, credential reference, limits, and declared capabilities.",
-            default_provider_configuration(),
-            validate_provider_configuration,
-        ),
-        (
-            "embedding.multimodal",
-            "Multimodal Embedding Provider",
-            "Bot-lifetime text and image embedding identity and endpoint.",
-            default_embedding,
-            validate_embedding_configuration,
-        ),
-        (
-            "vector.index",
-            "Milvus Vector Index",
-            "Rebuildable ANN index endpoint bound to the Bot embedding space.",
-            default_vector_index_configuration(
-                space_id=default_embedding_profile.space_id,
-                dimensions=default_embedding_profile.dimensions,
-            ),
-            validate_vector_index_configuration,
-        ),
-        (
-            "conversation.trigger-policy",
-            "Conversation Trigger Policy",
-            "Allowed groups and the conditions that create an Agent turn.",
-            default_trigger_policy_configuration(),
-            validate_trigger_policy_configuration,
-        ),
-        (
-            "shell.command",
-            "Group Shell",
-            "Binding and administrator principals allowed to invoke control commands.",
-            default_shell_configuration(),
-            validate_shell_configuration,
-        ),
-        (
-            "agent.runtime",
-            "Agent Runtime",
-            "Core system-prompt preset injected into every Agent run.",
-            {
-                "protocol": "forest.agent.runtime.bootstrap/1",
-                "preset_system": [],
-            },
-            None,
-        ),
-        (
-            "adapter.onebot",
-            "OneBot Adapter",
-            "Bot identity, WebSocket endpoint, binding, and access-token reference.",
-            {
-                "protocol": "forest.adapter.onebot.bootstrap/1",
-                "binding_id": "binding/main",
-                "self_id": "10000",
-                "websocket_url": "ws://127.0.0.1:3001/",
-                "access_token_ref": "secret://adapter.onebot/default",
-            },
-            None,
-        ),
-    )
-    return tuple(
-        BootstrapConfigurationContribution(
-            component_id=component_id,
-            label=label,
-            description=description,
-            schema=OFFICIAL_BOOTSTRAP_SCHEMAS[component_id],
-            initial_value=initial_value,
-            surface=_bootstrap_surface(component_id, label),
-            order=index * 10,
-            validator=validator,
+    if package_catalog is None:
+        with TemporaryDirectory(prefix="forest-bootstrap-") as directory:
+            return official_bootstrap_contributions(PackageCatalog(Path(directory)))
+    contributions = []
+    for source in auto_install_builtin_sources():
+        manifest = tomllib.loads((source / "module.toml").read_text(encoding="utf-8"))
+        if "bootstrap_contribution" not in manifest["components"][0]:
+            continue
+        snapshot = package_catalog.build(source)
+        captured = snapshot.bootstrap_contribution()
+        if captured is None:
+            raise ForestError(
+                "OFFICIAL_BOOTSTRAP_CONTRIBUTION_CHANGED",
+                "Creation-time contribution changed while capturing its package",
+                409,
+            )
+        declaration, schema, initial_value = captured
+        component_id = snapshot.component["id"]
+        label = declaration["label"]
+        contributions.append(
+            BootstrapConfigurationContribution(
+                component_id=component_id,
+                label=label,
+                description=declaration["description"],
+                schema=schema,
+                initial_value=initial_value,
+                surface=_bootstrap_surface(component_id, label),
+                order=declaration["order"],
+            )
         )
-        for index, (component_id, label, description, initial_value, validator) in enumerate(
-            values, 1
-        )
-    )
+    return tuple(contributions)
 
 
-def official_bootstrap_schema_digests() -> dict[str, str]:
-    return {item.component_id: item.schema_digest for item in official_bootstrap_contributions()}
+def official_bootstrap_schema_digests(
+    registry: BootstrapConfigurationRegistry | None = None,
+) -> dict[str, str]:
+    registry = registry or BootstrapConfigurationRegistry(official_bootstrap_contributions())
+    return registry.schema_digests()
 
 
-def validate_official_bootstrap_components(components: object) -> dict[str, dict]:
-    if not isinstance(components, dict) or set(components) != set(OFFICIAL_BOOTSTRAP_SCHEMAS):
+def validate_official_bootstrap_components(
+    components: object, *, registry: BootstrapConfigurationRegistry | None = None,
+) -> dict[str, dict]:
+    registry = registry or BootstrapConfigurationRegistry(official_bootstrap_contributions())
+    schemas = {item.component_id: item.schema for item in registry.contributions}
+    if not isinstance(components, dict) or set(components) != set(schemas):
         raise ForestError(
             "OFFICIAL_BOOTSTRAP_COMPONENT_SET_INVALID",
             "Official Bot bootstrap component set differs",
             422,
         )
-    for component_id, schema in OFFICIAL_BOOTSTRAP_SCHEMAS.items():
+    for component_id, schema in schemas.items():
         errors = tuple(Draft202012Validator(schema).iter_errors(components[component_id]))
         if errors:
             raise ForestError(
@@ -371,8 +186,13 @@ def validate_official_bootstrap_components(components: object) -> dict[str, dict
 class OfficialBotSettingsResolver:
     """Resolve one frozen official profile into runtime settings without retaining plaintext."""
 
-    def __init__(self, *, secrets) -> None:
+    def __init__(
+        self, *, secrets, bootstrap_registry: BootstrapConfigurationRegistry | None = None,
+    ) -> None:
         self.secrets = secrets
+        self.bootstrap_registry = bootstrap_registry or BootstrapConfigurationRegistry(
+            official_bootstrap_contributions()
+        )
 
     async def resolve(self, *, profile, storage) -> BotSettings:
         if (
@@ -387,9 +207,10 @@ class OfficialBotSettingsResolver:
             )
         components = {item.component_id: item for item in profile.components}
         validate_official_bootstrap_components(
-            {component_id: item.config for component_id, item in components.items()}
+            {component_id: item.config for component_id, item in components.items()},
+            registry=self.bootstrap_registry,
         )
-        expected_digests = official_bootstrap_schema_digests()
+        expected_digests = official_bootstrap_schema_digests(self.bootstrap_registry)
         for component_id, item in components.items():
             if item.schema_digest != expected_digests[component_id]:
                 raise ForestError(
@@ -457,38 +278,37 @@ class OfficialBotSettingsResolver:
         self._origin(embedding["endpoint"], {"http", "https"}, "embedding endpoint")
         self._origin(vector_index["endpoint"], {"http", "https"}, "vector index endpoint")
         self._origin(onebot["websocket_url"], {"ws", "wss"}, "OneBot WebSocket URL")
-        model_key = await self._secret(
+        await self._verify_secret(
             provider["credential_ref"], "provider.chat-completions.credential"
         )
-        embedding_key = await self._secret(
+        await self._verify_secret(
             embedding["credential_ref"], "embedding.multimodal.credential"
         )
-        vector_index_token = (
-            await self._secret(vector_index["credential_ref"], "vector.index.credential")
-            if vector_index["credential_ref"]
-            else ""
-        )
-        onebot_token = await self._secret(
+        if vector_index["credential_ref"]:
+            await self._verify_secret(
+                vector_index["credential_ref"], "vector.index.credential"
+            )
+        await self._verify_secret(
             onebot["access_token_ref"], "adapter.onebot.access-token"
         )
         return BotSettings(
             bot_id=profile.bot_id,
             dsn=storage.dsn,
             model_base_url=provider["base_url"],
-            model_api_key=model_key,
+            model_api_key="",
             model=capabilities.model,
             model_deployment_id=capabilities.deployment_id,
             model_max_output_tokens=capabilities.max_output_tokens,
             model_input_modalities=capabilities.input_modalities,
             embedding_endpoint=embedding["endpoint"],
-            embedding_api_key=embedding_key,
+            embedding_api_key="",
             embedding_deployment_id=embedding_profile.deployment_id,
             embedding_model_revision=embedding_profile.model_revision,
             embedding_model=embedding_profile.model,
             embedding_dimensions=embedding_profile.dimensions,
             onebot_self_id=onebot["self_id"],
             onebot_websocket_url=onebot["websocket_url"],
-            onebot_access_token=onebot_token,
+            onebot_access_token="",
             allowed_group_ids=trigger["allowed_group_ids"],
             group_trigger_mode=trigger["group_trigger_mode"],
             private_enabled=trigger["private_enabled"],
@@ -507,20 +327,22 @@ class OfficialBotSettingsResolver:
             embedding_max_connections=embedding["max_connections"],
             model_capabilities=capabilities,
             vector_index_endpoint=vector_index["endpoint"],
-            vector_index_token=vector_index_token,
+            vector_index_token="",
             vector_index_credential_ref=vector_index["credential_ref"],
             vector_index_timeout_seconds=vector_index["timeout_seconds"],
         )
 
-    async def _secret(self, secret_ref: str, purpose: str) -> str:
-        metadata = await self.secrets.metadata(secret_ref)
-        if metadata.purpose != purpose:
-            raise ForestError(
-                "OFFICIAL_BOOTSTRAP_SECRET_PURPOSE_INVALID",
-                "Bootstrap secret purpose differs",
-                409,
-            )
-        return await self.secrets.resolve_text(secret_ref)
+    async def _verify_secret(self, secret_ref: str, purpose: str) -> None:
+        try:
+            await self.secrets.resolve_text_for_purpose(secret_ref, purpose)
+        except ForestError as error:
+            if error.code == "SECRET_PURPOSE_CONFLICT":
+                raise ForestError(
+                    "OFFICIAL_BOOTSTRAP_SECRET_PURPOSE_INVALID",
+                    "Bootstrap secret purpose differs",
+                    409,
+                ) from error
+            raise
 
     @staticmethod
     def _origin(value: str, schemes: set[str], field: str) -> None:

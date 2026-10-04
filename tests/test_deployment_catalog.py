@@ -19,6 +19,7 @@ from httpx import ASGITransport, AsyncClient
 from psycopg import sql
 
 from forest.bootstrap_contributions import BootstrapConfigurationRegistry
+from forest.builtin_packages import official_builtin_configuration
 from forest.deployment_kernel_management import (
     BootstrapCatalogKernelQuery,
     BootstrapProfileKernelCommand,
@@ -47,7 +48,6 @@ from forest.multi_bot_supervisor import MultiBotSupervisor
 from forest.official_bot_provisioning import (
     OfficialBotProvisioner,
     OfficialBotSettingsResolver,
-    default_vector_index_configuration,
     official_bootstrap_contributions,
     official_bootstrap_schema_digests,
 )
@@ -2771,14 +2771,17 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 },
             },
             "vector.index": {
-                **default_vector_index_configuration(
-                    space_id=EmbeddingProfile(
-                        deployment_id="embedding.multimodal/test",
-                        model_revision="test/1",
-                        model="Qwen/Qwen3-VL-Embedding-8B",
-                        dimensions=4096,
-                    ).space_id,
-                    dimensions=4096,
+                **official_builtin_configuration(
+                    "vector_index_milvus",
+                    overrides={
+                        "space_id": EmbeddingProfile(
+                            deployment_id="embedding.multimodal/test",
+                            model_revision="test/1",
+                            model="Qwen/Qwen3-VL-Embedding-8B",
+                            dimensions=4096,
+                        ).space_id,
+                        "dimensions": 4096,
+                    },
                 ),
                 "endpoint": "http://milvus:19530",
             },
@@ -2789,7 +2792,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
                 "private_enabled": True,
             },
             "shell.command": {
-                "protocol": "forest.shell.command/1",
+                "protocol": "forest.shell.command/2",
                 "binding_ref": "binding/main",
                 "administrator_principals": ["qq:10001"],
             },
@@ -2830,6 +2833,15 @@ async def test_official_provisioner_materializes_module_authorities_without_star
             expected_storage_generation=storage.storage_generation,
         )
         resolved_profile = await bootstrap_profiles.load(bootstrap.profile_ref)
+        resolved_settings = await resolver.resolve(
+            profile=resolved_profile, storage=resolved_storage
+        )
+        assert (
+            resolved_settings.model_api_key,
+            resolved_settings.embedding_api_key,
+            resolved_settings.vector_index_token,
+            resolved_settings.onebot_access_token,
+        ) == ("", "", "", "")
         provisioner = OfficialBotProvisioner(
             settings_resolver=resolver,
             database_allocator=allocator,
