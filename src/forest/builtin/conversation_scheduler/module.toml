@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.25.0"
+version = "4.26.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -77,7 +77,7 @@ output_schema = "schemas/media-cost-output.json"
 
 [[components.provides]]
 name = "conversation.context.snapshot"
-contract = "2.0"
+contract = "3.0"
 semantics = "idempotent"
 input_schema = "schemas/context-snapshot-input.json"
 output_schema = "schemas/context-snapshot-output.json"
@@ -91,16 +91,16 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.21.0"
+schema_version = "4.22.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "a0a5d61e23d2660992384f961602038986ddc2fd343416b4ac865133b38a2cc1"
+baseline_sha256 = "393aa82b9760ece47ad28b235c643d96deedb04125bfdec3c8efc36329cdf898"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
 
 [[components.domain_queries]]
 name = "conversation.context-page"
-contract = "1.0"
+contract = "2.0"
 function = "conversation_context_page"
 input_schema = "schemas/context-page-input.json"
 output_schema = "schemas/context-page-output.json"

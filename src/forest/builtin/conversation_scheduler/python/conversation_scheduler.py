@@ -152,6 +152,9 @@ class ConversationScheduler(Plugin):
                     "owner_id": unit["author_owner_id"],
                 }
                 parents[author["payload_id"]] = author
+            for media in unit["media_parts"]:
+                reference = media["payload"]
+                parents[reference["payload_id"]] = reference
         return tuple(parents[key] for key in sorted(parents))
 
     @staticmethod
@@ -184,6 +187,7 @@ class ConversationScheduler(Plugin):
             "author_owner_id": None,
             "author_subject_ref": None,
             "trigger_decision": None,
+            "media_parts": [],
         }
 
     async def _snapshot_tree(self, pages, ctx):
@@ -210,17 +214,18 @@ class ConversationScheduler(Plugin):
             level += 1
         return nodes, level
 
-    @service("conversation.context.snapshot", semantics="idempotent", contract="2.0")
+    @service("conversation.context.snapshot", semantics="idempotent", contract="3.0")
     async def context_snapshot(self, payload, ctx):
         actor = payload["actor"]
         offset = 0
         metadata = None
-        pages = []
+        raw_pages = []
         archive_present = False
         while True:
             page = await ctx.queries.call(
                 "conversation.context-page",
                 {"actor": actor, "offset": offset, "limit": 32},
+                contract_major=2,
             )
             current_metadata = {
                 key: page[key]
@@ -237,6 +242,8 @@ class ConversationScheduler(Plugin):
                     "channel_ref",
                     "thread_ref",
                     "context_view_unit_count",
+                    "context_view_media_bytes",
+                    "media_cost_revision",
                     "context_archived_unit_count",
                     "archive",
                     "total_units",
@@ -244,6 +251,11 @@ class ConversationScheduler(Plugin):
             }
             if metadata is None:
                 metadata = current_metadata
+                if metadata["total_units"] > 4096:
+                    raise ForestError(
+                        "CONTEXT_VIEW_HARD_LIMIT",
+                        "Active Context exceeds the bounded snapshot size", 413,
+                    )
             elif current_metadata != metadata:
                 raise ForestError(
                     "CONTEXT_SNAPSHOT_FENCE_CHANGED",
@@ -257,20 +269,7 @@ class ConversationScheduler(Plugin):
                     units.insert(0, archive_unit)
                     archive_present = True
             if units:
-                saved = await ctx.payloads.put_json(
-                    {
-                        "protocol": "forest.conversation-context-page/1",
-                        "conversation_id": page["conversation_id"],
-                        "context_revision": page["context_revision"],
-                        "context_view_revision": page["context_view_revision"],
-                        "offset": offset,
-                        "units": units,
-                    },
-                    owner_kind="context.snapshot.page",
-                    owner_id=ctx.operations.stable(f"context-snapshot-page:{offset}"),
-                    parents=self._unit_parents(units),
-                )
-                pages.append(self._exact(saved))
+                raw_pages.append((offset, units))
             next_offset = page["next_offset"]
             if next_offset is None:
                 break
@@ -288,10 +287,40 @@ class ConversationScheduler(Plugin):
                 "Conversation Context count differs from its materialized view",
                 409,
             )
+        media_bytes = sum(
+            part["byte_length"] for _, units in raw_pages
+            for unit in units for part in unit["media_parts"]
+        )
+        if media_bytes != metadata["context_view_media_bytes"]:
+            raise ForestError(
+                "CONTEXT_SNAPSHOT_MEDIA_COST_CONFLICT",
+                "Conversation media facts differ from the active window", 409,
+            )
+        if media_bytes > self._context_view["high_watermark_media_bytes"]:
+            raise ForestError(
+                "CONTEXT_VIEW_MEDIA_OVER_BUDGET",
+                "Required Context media exceeds the configured model-view bound", 413,
+            )
+        pages = []
+        for offset, units in raw_pages:
+            saved = await ctx.payloads.put_json(
+                {
+                    "protocol": "forest.conversation-context-page/1",
+                    "conversation_id": metadata["conversation_id"],
+                    "context_revision": metadata["context_revision"],
+                    "context_view_revision": metadata["context_view_revision"],
+                    "offset": offset,
+                    "units": units,
+                },
+                owner_kind="context.snapshot.page",
+                owner_id=ctx.operations.stable(f"context-snapshot-page:{offset}"),
+                parents=self._unit_parents(units),
+            )
+            pages.append(self._exact(saved))
         roots, tree_depth = await self._snapshot_tree(pages, ctx)
-        owner_id = ctx.operations.stable("context-snapshot-manifest:v2")
+        owner_id = ctx.operations.stable("context-snapshot-manifest:v3")
         document = {
-            "protocol": "forest.conversation-context-snapshot/2",
+            "protocol": "forest.conversation-context-snapshot/3",
             **metadata,
             "unit_count": unit_count,
             "tree_depth": tree_depth,
@@ -304,11 +333,13 @@ class ConversationScheduler(Plugin):
             parents=roots,
         )
         return {
-            "protocol": "forest.conversation-context-snapshot/2",
+            "protocol": "forest.conversation-context-snapshot/3",
             "conversation_id": metadata["conversation_id"],
             "context_applied_seq": metadata["context_applied_seq"],
             "context_revision": metadata["context_revision"],
             "context_view_revision": metadata["context_view_revision"],
+            "media_cost_revision": metadata["media_cost_revision"],
+            "context_view_media_bytes": media_bytes,
             "unit_count": unit_count,
             "snapshot": self._exact(saved),
         }

@@ -1109,11 +1109,23 @@ async def test_conversation_package_owns_ingress_and_classification_participants
 
         for index in (2, 3):
             next_event_id = f"event/onebot/silent-{index}"
+            next_content_bytes = (
+                json.dumps({"parts": [{
+                    "type": "image",
+                    "media_ref": "media:" + hashlib.sha256(
+                        f"onebot-message/silent-{index}\0".encode() + b"0"
+                    ).hexdigest(),
+                    "media_revision": 1,
+                    "state": "PENDING_CAPTURE",
+                }]}, separators=(",", ":")).encode()
+                if index == 3
+                else (f'{{"segments":[{{"type":"text","text":"ordinary-{index}"}}]}}').encode()
+            )
             next_content = await _payload(
                 kernel.payload,
                 owner_kind="onebot.normalized-event",
                 event_id=next_event_id,
-                content=(f'{{"segments":[{{"type":"text","text":"ordinary-{index}"}}]}}').encode(),
+                content=next_content_bytes,
             )
             next_author = await _payload(
                 kernel.payload,
@@ -1128,7 +1140,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "source_event_ref": f"onebot-message/silent-{index}",
                     "platform_message_ref": f"message/silent-{index}",
                     "content": next_content,
-                    "content_byte_length": len((f'{{"segments":[{{"type":"text","text":"ordinary-{index}"}}]}}').encode()),
+                    "content_byte_length": len(next_content_bytes),
                     "author": next_author,
                 }
             )
@@ -1365,10 +1377,10 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     ),
                 )
             ).fetchone()
-        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 2)]
+        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 3)]
         route = FrozenServiceRoute(
             service_id="conversation.context.snapshot",
-            version=2,
+            version=3,
             caller_component_id="kernel.runtime",
             provider_component_id="conversation.scheduler",
             provider_generation_id=instance.generation_identity.generation_id,
@@ -1396,7 +1408,8 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ),
             {},
         )
-        assert snapshot["protocol"] == "forest.conversation-context-snapshot/2"
+        assert snapshot["protocol"] == "forest.conversation-context-snapshot/3"
+        assert snapshot["context_view_media_bytes"] == 2048
         assert snapshot["context_view_revision"] == 1
         assert snapshot["unit_count"] == 2
         manifest = json.loads(
@@ -1413,6 +1426,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "conversation.input",
         ]
         assert page["units"][1]["author_subject_ref"] == "qq:43"
+        assert page["units"][1]["media_parts"][0]["byte_length"] == 2048
 
         instance.freeze_owned_admission()
         await instance.drain_owned_work()

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.33.1"
+version = "4.34.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -126,7 +126,7 @@ startup_dependency = false
 
 [[components.requires]]
 name = "conversation.context.snapshot"
-contract = ">=2.0,<3.0"
+contract = ">=3.0,<4.0"
 required = true
 startup_dependency = false
 

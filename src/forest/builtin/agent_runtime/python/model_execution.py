@@ -219,51 +219,73 @@ class ModelExecution:
         media_parents = []
         seen_media = set()
         context_media = []
+        expected_assets = {}
         if "image" in target.input_modalities:
             for unit in snapshot.get("units", ()):
                 for part in unit.get("parts", ()):
-                    if (part.get("type") == "image"
-                            and isinstance(part.get("media_ref"), str)
-                            and type(part.get("media_revision")) is int):
-                        context_media.append({
-                            "source_unit_id": unit["unit_id"],
-                            "part_id": part["part_id"],
-                            "media_ref": part["media_ref"],
-                            "media_revision": part["media_revision"],
-                        })
-        # Prefer the newest visible images; older context still carries an
-        # explicit unavailable marker in the model projection.
-        requested_media = context_media[-32:]
-        requested_identities = {
-            (item["source_unit_id"], item["part_id"], item["media_ref"], item["media_revision"])
-            for item in requested_media
-        }
+                    if part.get("type") != "image":
+                        continue
+                    materialization = part.get("materialization")
+                    if not isinstance(materialization, dict) or materialization.get("state") not in {
+                        "READY", "PENDING",
+                    }:
+                        raise ForestError(
+                            "AGENT_CONTEXT_MEDIA_PLAN_INVALID",
+                            "Context image has no frozen materialization decision", 409,
+                        )
+                    if materialization["state"] != "READY":
+                        continue
+                    item = {
+                        "source_unit_id": unit["unit_id"],
+                        "part_id": part["part_id"],
+                        "media_ref": part["media_ref"],
+                        "media_revision": part["media_revision"],
+                    }
+                    identity = (
+                        item["source_unit_id"], item["part_id"],
+                        item["media_ref"], item["media_revision"],
+                    )
+                    if identity in expected_assets:
+                        raise ForestError(
+                            "AGENT_CONTEXT_MEDIA_PLAN_INVALID",
+                            "Context image materialization repeats a part", 409,
+                        )
+                    expected_assets[identity] = materialization
+                    context_media.append(item)
         assets = []
-        if requested_media:
+        for start in range(0, len(context_media), 256):
             resolved = await self.ctx.services.call(
-                "media.context.resolve", {"items": requested_media},
-                operation_id=self.ctx.operations.stable(f"media-resolve:{request_id}"),
+                "media.context.resolve", {"items": context_media[start:start + 256]},
+                operation_id=self.ctx.operations.stable(
+                    f"media-resolve:{request_id}:{start}"
+                ),
                 timeout=30,
             )
-            assets = resolved["assets"]
-        context_image_budget = 12 * 1024 * 1024
+            assets.extend(resolved["assets"])
         for asset in assets:
             identity = (asset["source_unit_id"], asset["part_id"])
             binding = (*identity, asset["media_ref"], asset["media_revision"])
-            if identity in seen_media or binding not in requested_identities:
+            materialization = expected_assets.get(binding)
+            if identity in seen_media or materialization is None:
                 raise ForestError(
                     "AGENT_MEDIA_INPUT_INVALID", "Resolved image differs from its context source", 422
                 )
             seen_media.add(identity)
-            if asset["byte_length"] > context_image_budget:
-                continue
+            if (
+                asset["payload"] != materialization["payload"]
+                or asset["byte_length"] != materialization["byte_length"]
+                or asset["width"] != materialization["width"]
+                or asset["height"] != materialization["height"]
+            ):
+                raise ForestError(
+                    "AGENT_MEDIA_INPUT_INVALID", "Resolved image differs from the frozen Context fact", 409,
+                )
             reference = asset["payload"]
             content = await self.ctx.payloads.read_bytes(reference)
             if len(content) != asset["byte_length"]:
                 raise ForestError(
                     "AGENT_MEDIA_INPUT_INVALID", "Managed image length changed", 409
                 )
-            context_image_budget -= len(content)
             image = MediaSnapshot(
                 bot_id, asset["media_ref"], asset["media_revision"],
                 asset["source_unit_id"], asset["part_id"], asset["media_type"],
@@ -272,6 +294,11 @@ class ModelExecution:
             images[identity] = image
             images[asset["media_ref"]] = image
             media_parents.append(reference)
+        if len(seen_media) != len(context_media):
+            raise ForestError(
+                "AGENT_MEDIA_ASSET_MISSING",
+                "Frozen Context image is unavailable for this model attempt", 503,
+            )
         if (evidence_ref is None) != (memory_query_id is None):
             raise ForestError(
                 "AGENT_MEMORY_FENCE_MISMATCH", "Memory evidence and query identity differ", 409

@@ -3,14 +3,16 @@
   "type": "object",
   "required": [
     "protocol", "conversation_id", "context_applied_seq", "context_revision",
-    "context_view_revision", "unit_count", "snapshot"
+    "context_view_revision", "media_cost_revision", "context_view_media_bytes", "unit_count", "snapshot"
   ],
   "properties": {
-    "protocol": {"const": "forest.conversation-context-snapshot/2"},
+    "protocol": {"const": "forest.conversation-context-snapshot/3"},
     "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "context_applied_seq": {"type": "integer", "minimum": 0},
     "context_revision": {"type": "integer", "minimum": 0},
     "context_view_revision": {"type": "integer", "minimum": 0},
+    "media_cost_revision": {"type": "integer", "minimum": 0},
+    "context_view_media_bytes": {"type": "integer", "minimum": 0},
     "unit_count": {"type": "integer", "minimum": 0, "maximum": 1000001},
     "snapshot": {"$ref": "#/$defs/payload"}
   },

@@ -28,6 +28,8 @@ _MANIFEST_FIELDS = {
     "channel_ref",
     "thread_ref",
     "context_view_unit_count",
+    "context_view_media_bytes",
+    "media_cost_revision",
     "context_archived_unit_count",
     "archive",
     "total_units",
@@ -142,8 +144,12 @@ def _part_id(unit_id: str, index: int) -> str:
 def _parts(unit_id: str, value: dict) -> list[dict]:
     raw = value.get("parts")
     if isinstance(raw, list):
+        if len(raw) > 256:
+            raise ForestError(
+                "AGENT_CONTEXT_PART_LIMIT", "Context unit exceeds 256 parts", 413,
+            )
         result = []
-        for index, item in enumerate(raw[:256]):
+        for index, item in enumerate(raw):
             if not isinstance(item, dict):
                 result.append(
                     {
@@ -266,7 +272,7 @@ class ContextSnapshotReader:
     async def load(self, envelope: dict, *, expected: dict) -> dict:
         if (
             not isinstance(envelope, dict)
-            or envelope.get("protocol") != "forest.conversation-context-snapshot/2"
+            or envelope.get("protocol") != "forest.conversation-context-snapshot/3"
             or set(expected)
             != {
                 "conversation_id",
@@ -299,6 +305,14 @@ class ContextSnapshotReader:
                     "Conversation snapshot differs from the durable Agent input fence",
                     409,
                 )
+        for name in ("media_cost_revision", "context_view_media_bytes"):
+            if manifest.get(name) != envelope.get(name) or not _integer(
+                manifest.get(name), maximum=1_000_000_000_000
+            ):
+                raise ForestError(
+                    "AGENT_CONTEXT_FENCE_MISMATCH",
+                    "Conversation media view differs from its immutable snapshot", 409,
+                )
         depth = manifest["tree_depth"]
         if not _integer(depth, maximum=8):
             raise ForestError(
@@ -307,6 +321,7 @@ class ContextSnapshotReader:
         pages = await self._pages(manifest["roots"], depth)
         units = []
         active_offset = 0
+        media_bytes = 0
         archive_seen = False
         for page_index, page in enumerate(pages):
             if (
@@ -343,12 +358,22 @@ class ContextSnapshotReader:
                     active_offset += 1
                 _unit_ref(unit, "payload")
                 _unit_ref(unit, "author")
+                media_parts = unit.get("media_parts")
+                if not isinstance(media_parts, list) or len(media_parts) > 256:
+                    raise ForestError(
+                        "AGENT_CONTEXT_PAGE_INVALID", "Context media facts are invalid", 409,
+                    )
+                media_bytes += sum(
+                    part.get("byte_length", 0) for part in media_parts
+                    if isinstance(part, dict) and type(part.get("byte_length")) is int
+                )
                 units.append(unit)
         if (
             active_offset != manifest["total_units"]
             or len(units) != manifest["unit_count"]
             or envelope.get("unit_count") != len(units)
             or manifest["context_view_unit_count"] != active_offset
+            or manifest["context_view_media_bytes"] != media_bytes
         ):
             raise ForestError(
                 "AGENT_CONTEXT_COUNT_CONFLICT",
@@ -414,6 +439,40 @@ class ContextSnapshotReader:
                 source["group_source_id"] = snapshot["conversation_id"]
             if snapshot["thread_ref"]:
                 source["thread_id"] = snapshot["thread_ref"]
+            parts = _parts(unit_id, content)
+            seen_indexes = set()
+            for media in unit["media_parts"]:
+                index = media.get("part_index") if isinstance(media, dict) else None
+                if (
+                    type(index) is not int or not 0 <= index < len(parts)
+                    or index in seen_indexes or parts[index].get("type") != "image"
+                    or media.get("media_ref") != parts[index].get("media_ref")
+                    or media.get("media_revision") != parts[index].get("media_revision")
+                    or type(media.get("byte_length")) is not int
+                    or not 0 < media["byte_length"] <= 8_388_608
+                ):
+                    raise ForestError(
+                        "AGENT_CONTEXT_MEDIA_SOURCE_MISMATCH",
+                        "Context media fact does not match its source part", 409,
+                    )
+                reference = _exact_ref(
+                    media.get("payload"), component="media.capture",
+                    kinds=("media.asset",),
+                )
+                if reference["owner_id"] != media["media_ref"]:
+                    raise ForestError(
+                        "AGENT_CONTEXT_MEDIA_SOURCE_MISMATCH",
+                        "Context media Payload belongs to another asset", 409,
+                    )
+                seen_indexes.add(index)
+                parts[index]["materialization"] = {
+                    "state": "READY", "payload": reference,
+                    "byte_length": media["byte_length"],
+                    "width": media["width"], "height": media["height"],
+                }
+            for part in parts:
+                if part["type"] == "image" and "materialization" not in part:
+                    part["materialization"] = {"state": "PENDING"}
             projected.append(
                 {
                     "unit_id": unit_id,
@@ -426,7 +485,7 @@ class ContextSnapshotReader:
                     }[kind],
                     "source": source,
                     "author": author,
-                    "parts": _parts(unit_id, content),
+                    "parts": parts,
                     "input_batch_id": unit.get("input_batch_id"),
                     "ingress_seq": unit.get("ingress_seq"),
                 }
@@ -437,6 +496,8 @@ class ContextSnapshotReader:
             "context_applied_seq": snapshot["context_applied_seq"],
             "context_revision": snapshot["context_revision"],
             "context_view_revision": snapshot["context_view_revision"],
+            "media_cost_revision": snapshot["media_cost_revision"],
+            "context_view_media_bytes": snapshot["context_view_media_bytes"],
             "source_manifest": snapshot["snapshot"],
             "units": projected,
         }
@@ -691,6 +752,8 @@ class ContextSnapshotReader:
             "input_revision": progress["input_revision"],
             "context_revision": progress["context_revision"],
             "context_view_revision": progress["context_view_revision"],
+            "media_cost_revision": base["media_cost_revision"],
+            "context_view_media_bytes": base["context_view_media_bytes"],
             "selected_input_end_seq": progress["selected_input_end_seq"],
             "trigger_claims": claim_summaries(inputs),
             "input_batch_ids": [item["input_batch_ref"] for item in inputs],

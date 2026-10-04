@@ -482,7 +482,13 @@ class _Projection:
                     if image is None and isinstance(media_ref, str):
                         image = self.media.get(media_ref)
                 if reason is None and image is None:
-                    reason = "MEDIA_UNAVAILABLE"
+                    materialization = part.get("materialization")
+                    reason = (
+                        "MEDIA_PENDING_AT_SNAPSHOT"
+                        if isinstance(materialization, dict)
+                        and materialization.get("state") == "PENDING"
+                        else "MEDIA_UNAVAILABLE"
+                    )
                 if reason is not None:
                     self.omitted.append({**reference, "reason": reason})
                     content = self.text({"part_id": part_id, "type": "unavailable", "reason": reason,

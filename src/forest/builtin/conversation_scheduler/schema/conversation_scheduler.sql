@@ -458,6 +458,7 @@ CREATE TABLE context_media_costs (
     part_index integer NOT NULL CHECK (part_index >= 0),
     media_ref text NOT NULL CHECK (media_ref ~ '^media:[a-f0-9]{64}$'),
     media_revision bigint NOT NULL CHECK (media_revision = 1),
+    payload_id text NOT NULL CHECK (octet_length(payload_id) BETWEEN 1 AND 256),
     payload_digest text NOT NULL CHECK (payload_digest ~ '^sha256:[a-f0-9]{64}$'),
     byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 8388608),
     width integer NOT NULL CHECK (width > 0),
@@ -526,6 +527,7 @@ BEGIN
     IF FOUND THEN
         IF previous.media_ref IS DISTINCT FROM input->>'media_ref'
            OR previous.media_revision IS DISTINCT FROM requested_revision
+           OR previous.payload_id IS DISTINCT FROM input#>>'{payload,payload_id}'
            OR previous.payload_digest IS DISTINCT FROM input#>>'{payload,digest}'
            OR previous.byte_length IS DISTINCT FROM (input->>'byte_length')::integer
            OR previous.width IS DISTINCT FROM (input->>'width')::integer
@@ -539,9 +541,10 @@ BEGIN
     END IF;
     INSERT INTO __forest_module_schema__.context_media_costs(
         bot_id,conversation_id,event_id,part_index,media_ref,media_revision,
-        payload_digest,byte_length,width,height
+        payload_id,payload_digest,byte_length,width,height
     ) VALUES (requested_bot,requested_conversation,requested_event,requested_index,
-        input->>'media_ref',requested_revision,input#>>'{payload,digest}',
+        input->>'media_ref',requested_revision,input#>>'{payload,payload_id}',
+        input#>>'{payload,digest}',
         (input->>'byte_length')::integer,(input->>'width')::integer,
         (input->>'height')::integer);
     SELECT EXISTS (
@@ -2343,7 +2346,21 @@ BEGIN
         'author_owner_kind',u.author_owner_kind,
         'author_owner_id',u.author_owner_id,
         'author_subject_ref',u.author_subject_ref,
-        'trigger_decision',u.trigger_decision
+        'trigger_decision',u.trigger_decision,
+        'media_parts',COALESCE((
+            SELECT jsonb_agg(jsonb_build_object(
+                'part_index',m.part_index,'media_ref',m.media_ref,
+                'media_revision',m.media_revision,'byte_length',m.byte_length,
+                'width',m.width,'height',m.height,
+                'payload',jsonb_build_object(
+                    'payload_id',m.payload_id,'digest',m.payload_digest,
+                    'owner_component_id','media.capture','owner_kind','media.asset',
+                    'owner_id',m.media_ref)
+            ) ORDER BY m.part_index)
+            FROM __forest_module_schema__.context_media_costs m
+            WHERE m.bot_id=u.bot_id AND m.conversation_id=u.conversation_id
+              AND m.event_id=u.event_id
+        ),'[]'::jsonb)
     ) ORDER BY u.context_revision,u.unit_index),'[]'::jsonb)
     INTO units
     FROM (
@@ -2403,6 +2420,8 @@ BEGIN
             'thread_ref',lane.thread_ref,
             'context_view_unit_count',lane.context_view_unit_count,
             'context_view_payload_bytes',lane.context_view_payload_bytes,
+            'context_view_media_bytes',lane.context_view_media_bytes,
+            'media_cost_revision',lane.media_cost_revision,
             'context_archived_unit_count',lane.context_archived_unit_count,
             'archive',archive_value,'offset',requested_offset,
             'next_offset',next_offset,'total_units',total_units,'units',units

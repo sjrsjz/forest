@@ -499,7 +499,9 @@ ViewPlan固定有序源集、覆盖范围、基础context_view_revision、contex
 
 **当前实现差距：**`context-view-multimodal-window-v3` 由 Conversation 持久记录并验证每条 Context 单元的序列化 Payload 字节长度；另以 `context_media_costs` 记录已获取图片的真实受管字节数。OneBot 入站时只有图片引用，`media.capture` 发布资产后通过受限服务交给 Conversation；Conversation 命令核对原消息、片序号、媒体引用及 Payload 所有权。事实按消息与 part 唯一，重复发布合流，冲突拒绝。事实写入、输入物化和归档共用 lane 行锁：先到的媒体在输入物化时计入，后到的媒体在该输入仍活动时增量计入，已归档输入的迟到媒体只留下来源事实，不重新计入活动窗口。`media_cost_revision` 唤醒空闲维护，并使计划与发布之间出现新媒体的旧归档计划失效。每次归档只移出连续旧前缀的完整单元，按条数、序列化字节、媒体字节三个高低水位收敛；提交复核每个移出单元的媒体字节与活动计数。
 
-这仍只是受管媒体文件字节界，不是解码后像素内存、tokenizer 估算或完整冻结必要集合 ViewPlan。`agent.runtime` 当前仍在模型请求准备时最多选取 32 张活动图片，并分别以 12 MiB 上限选择上下文图片和召回图片；这可能省略仍在活动视图内的图片，因此不能把现状描述为符合“Context 独占历史选择”契约。后续必须由 Conversation/Context 持久冻结带估算版本和必要集合的完整单元选择，明确区分模型能力投影与传输硬限制，再移除 Agent 的历史图片选择；超出必要集合硬界须给出可恢复的明确失败，而不能把图片悄悄标成不可用。
+Conversation 的 Context 快照 v3 现在固定 `media_cost_revision`、活动媒体字节数，以及每个活动单元已物化图片的片序号、媒体修订、尺寸、字节数和受管 Payload 引用。Agent 核对这些事实与原始图片 part 一致，只读取快照中 READY 的资产；PENDING 片保持显式状态。Context 历史图片不再由 Agent 按最近 32 张或 12 MiB 静默截断；解析端口的单次 256 项上限由分批调用满足，超出快照可发布界时明确失败。相同 Run 的下一次模型调用重新取得安全点快照，迟到图片可在那时进入，但不得修改已冻结的请求。模型不支持图片时，能力投影仍按原规则去图，不改变 Context 快照。
+
+这仍只是受管媒体文件字节界，不是解码后像素内存、tokenizer 估算或完整冻结必要集合 ViewPlan。快照目前用活动媒体高水位和 4096 个活动单元作为发布硬界；必留单元使活动视图超界时会明确拒绝本次模型请求。召回证据图片仍有 Agent 内的 12 MiB 选择上限，尚需把证据选择责任与必要集合、传输硬界分别收口。后续必须由 Conversation/Context 持久冻结带估算版本和必要集合的完整单元选择，并为 RAG 证据另定义有界选择协议，不能把本次快照协议升级称作完整 ViewPlan 已落地。
 
 新 Session 的首个 Run 在 `agent.execute` 选择触发 InputBatch 之前，由 `conversation.scheduler` 持有 Actor 围栏执行 `conversation.compact-before-run`。这个独立 UnitOfWork 使用 Conversation 包自身的视图策略，按“确定性计划 → 归档 Payload → 视图提交 → Memory 归档资格”顺序原子提交；它不虚构 InputBatch，也不把裁剪策略交给 Agent 或 Provider。已提交的归档按操作身份重放；若重试时 Session 已启动且本操作未归档，则跳过新裁剪，由 Agent 读取已经存在的 Run。随后 Agent 在同一 Actor 围栏下选择输入，`context_view_revision` 因而是裁剪后的版本。Run 中途的模型安全点只接入新输入，不重新选择历史窗口；后续 Run 的 Session 交接仍须明确设计安全裁剪边界，不能沿用前一个 Run 的固定视图假装已经裁剪。
 
