@@ -784,3 +784,5 @@ Worker Host 配置重建状态查询直连领域端口（2026-10-04）：配置�
 原生 Effect 配置安全校验按种类绑定（2026-10-04）：BotHost 不再按 process_executor 目录名注入配置校验工厂；宿主的 PackageEffectDriverRegistry 将 process.native 驱动和同一配置安全解析器绑定，通用包装配器按工件声明的 effect_services.kind 选择并组合校验器，创建、配置提交与 Generation prepare 仍走该校验边界。删除旧工厂 API 与组件名映射；普通插件不能以此执行宿主 Python 代码。本地原生进程测试 3 passed、4 skipped，隔离 PostgreSQL 的完整 Bot 热重载 1 passed（103.79 秒），Ruff 通过。Effect Driver 工厂注册本身仍由 BotHost 装配，后续仍需收敛其宿主端口组织。
 
 Memory UNKNOWN 来源可见性（2026-10-04）：Memory 包来源分页返回当前修订的 UNKNOWN 文档 facet 数，新增服务端 `only_unknown_facets` 筛选及部分索引有界候选路径；WebUI 显示数量并提供筛选。筛选只是只读诊断，不会重新派发可能已计费的 Effect，现有预算仍把 UNKNOWN 请求和估计 token 计入日上限。隔离 PostgreSQL 来源分页/快照/覆盖回归 1 passed，Ruff、JS 语法和差异检查通过。人工重试与成本收敛政策仍待确定；此版本尚未切到在线实例。
+
+Memory 完整图与稀疏来源实测（2026-10-04）：含新版 Memory 包的完整 Bot 图完成 Embedding 凭据引用换代和 Generation 热重载，隔离 PostgreSQL 用例 1 passed（159.69 秒）。另在独立临时 Bot 库写入 100,000 条合格来源、一个旧来源的 UNKNOWN 文档 facet，ANALYZE 后同一连接各查询预热一次并测五次：普通首页 50 条中位 2.34 ms、UNKNOWN 筛选 1 条中位 1.33 ms、UNKNOWN 与不匹配来源条件组合空结果中位 1.20 ms；临时库已删除。该数据只证明稀疏 UNKNOWN 的当前有界候选路径与完整图热替换可用，不代表百万级、密集 UNKNOWN、真实浏览器或在线 Bot 已验收。
