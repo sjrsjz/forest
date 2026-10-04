@@ -375,6 +375,7 @@ class AdapterOneBot(Plugin):
                 "platform_message_ref": message_ref,
                 "author_subject_ref": author_subject_ref,
                 "content": normalized_saved["payload"],
+                "content_byte_length": normalized_saved["byte_length"],
                 "author": author_saved["payload"],
                 "received_at": event["received_at"],
                 "classification_deadline": event["classification_deadline"],

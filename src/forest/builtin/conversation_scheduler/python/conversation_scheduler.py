@@ -22,12 +22,22 @@ class ConversationScheduler(Plugin):
         if (
             not isinstance(view, dict)
             or set(view)
-            != {"high_watermark_units", "retain_units", "policy_revision"}
+            != {
+                "high_watermark_units",
+                "retain_units",
+                "high_watermark_payload_bytes",
+                "retain_payload_bytes",
+                "policy_revision",
+            }
             or type(view["high_watermark_units"]) is not int
             or type(view["retain_units"]) is not int
             or not 2 <= view["high_watermark_units"] <= 1_000_000
             or not 1 <= view["retain_units"] < view["high_watermark_units"]
-            or view["policy_revision"] != "context-view-unit-window-v1"
+            or type(view["high_watermark_payload_bytes"]) is not int
+            or type(view["retain_payload_bytes"]) is not int
+            or not 1024 <= view["high_watermark_payload_bytes"] <= 134_217_728
+            or not 1 <= view["retain_payload_bytes"] < view["high_watermark_payload_bytes"]
+            or view["policy_revision"] != "context-view-payload-window-v2"
         ):
             raise ForestError(
                 "CONVERSATION_CONFIGURATION_INVALID",
@@ -399,6 +409,7 @@ class ConversationScheduler(Plugin):
             )
         run_ref = execution["run_ref"]
         reply_ref = reply["owner_id"]
+        reply_byte_length = len(await ctx.payloads.read_bytes(reply))
         intent_id = self._stable("delivery-intent", run_ref)
         part_id = self._stable("delivery-part", run_ref, reply_ref)
         await ctx.uow.call(
@@ -415,6 +426,7 @@ class ConversationScheduler(Plugin):
                     "session_ref": execution["session_ref"],
                     "run_ref": run_ref,
                     "reply": reply,
+                    "reply_byte_length": reply_byte_length,
                     "unit_id": self._stable("context-reply", run_ref),
                 },
                 "memory": {

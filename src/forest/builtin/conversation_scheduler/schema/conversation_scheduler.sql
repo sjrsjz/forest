@@ -15,6 +15,8 @@ CREATE TABLE conversation_lanes (
     context_revision bigint NOT NULL DEFAULT 0 CHECK (context_revision >= 0),
     context_view_revision bigint NOT NULL DEFAULT 0 CHECK (context_view_revision >= 0),
     context_view_unit_count bigint NOT NULL DEFAULT 0 CHECK (context_view_unit_count >= 0),
+    context_view_payload_bytes bigint NOT NULL DEFAULT 0
+        CHECK (context_view_payload_bytes >= 0),
     context_archived_unit_count bigint NOT NULL DEFAULT 0
         CHECK (context_archived_unit_count >= 0),
     maintenance_generation_id text CHECK (
@@ -85,6 +87,7 @@ CREATE TABLE inbox_messages (
         CHECK (octet_length(author_subject_ref) BETWEEN 1 AND 256),
     content_payload_id text NOT NULL CHECK (octet_length(content_payload_id) BETWEEN 1 AND 256),
     content_payload_digest text NOT NULL CHECK (content_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    content_byte_length integer NOT NULL CHECK (content_byte_length BETWEEN 1 AND 1048576),
     content_owner_component_id text NOT NULL
         CHECK (octet_length(content_owner_component_id) BETWEEN 1 AND 128),
     content_owner_kind text NOT NULL
@@ -385,6 +388,7 @@ CREATE TABLE context_units (
     ingress_seq bigint CHECK (ingress_seq IS NULL OR ingress_seq > 0),
     payload_id text NOT NULL CHECK (octet_length(payload_id) BETWEEN 1 AND 256),
     payload_digest text NOT NULL CHECK (payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    payload_byte_length integer NOT NULL CHECK (payload_byte_length BETWEEN 1 AND 1048576),
     payload_owner_component_id text NOT NULL
         CHECK (octet_length(payload_owner_component_id) BETWEEN 1 AND 128),
     payload_owner_kind text NOT NULL
@@ -478,7 +482,9 @@ CREATE TABLE context_compactions (
     archive_payload_id text NOT NULL CHECK (octet_length(archive_payload_id) BETWEEN 1 AND 256),
     archive_payload_digest text NOT NULL CHECK (archive_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
     archived_unit_count bigint NOT NULL CHECK (archived_unit_count > 0),
+    archived_payload_bytes bigint NOT NULL CHECK (archived_payload_bytes > 0),
     resulting_view_unit_count bigint NOT NULL CHECK (resulting_view_unit_count >= 0),
+    resulting_view_payload_bytes bigint NOT NULL CHECK (resulting_view_payload_bytes >= 0),
     cumulative_archived_unit_count bigint NOT NULL
         CHECK (cumulative_archived_unit_count >= archived_unit_count),
     first_context_revision bigint NOT NULL CHECK (first_context_revision > 0),
@@ -1068,7 +1074,7 @@ BEGIN
     INSERT INTO __forest_module_schema__.inbox_messages(
         bot_id,conversation_id,event_id,ingress_seq,admission_operation_id,input_digest,
         source_component_id,source_event_ref,event_kind,platform_message_ref,
-        author_subject_ref,content_payload_id,content_payload_digest,
+        author_subject_ref,content_payload_id,content_payload_digest,content_byte_length,
         content_owner_component_id,content_owner_kind,content_owner_id,
         author_payload_id,author_payload_digest,author_owner_component_id,
         author_owner_kind,author_owner_id,context_disposition,sent_at,received_at,
@@ -1078,7 +1084,8 @@ BEGIN
         requested_operation,requested_digest,body->>'source_component_id',
         body->>'source_event_ref',body->>'event_kind',body->>'platform_message_ref',
         body->>'author_subject_ref',body#>>'{content,payload_id}',
-        body#>>'{content,digest}',body#>>'{content,owner_component_id}',
+        body#>>'{content,digest}',(body->>'content_byte_length')::integer,
+        body#>>'{content,owner_component_id}',
         body#>>'{content,owner_kind}',body#>>'{content,owner_id}',
         body#>>'{author,payload_id}',body#>>'{author,digest}',
         body#>>'{author,owner_component_id}',body#>>'{author,owner_kind}',
@@ -1989,7 +1996,7 @@ BEGIN
         INSERT INTO __forest_module_schema__.context_units(
             bot_id,conversation_id,unit_id,context_revision,unit_index,kind,
             source_component_id,source_kind,source_id,input_batch_id,event_id,ingress_seq,
-            payload_id,payload_digest,payload_owner_component_id,payload_owner_kind,
+            payload_id,payload_digest,payload_byte_length,payload_owner_component_id,payload_owner_kind,
             payload_owner_id,author_payload_id,author_payload_digest,
             author_owner_component_id,author_owner_kind,author_owner_id,
             author_subject_ref,trigger_decision
@@ -2001,7 +2008,7 @@ BEGIN
                selection_context_revision,
                row_number() OVER (ORDER BY ingress_seq)-1,
                'INPUT',source_component_id,'conversation.input',event_id,batch_id,
-               event_id,ingress_seq,content_payload_id,content_payload_digest,
+               event_id,ingress_seq,content_payload_id,content_payload_digest,content_byte_length,
                content_owner_component_id,content_owner_kind,content_owner_id,
                author_payload_id,author_payload_digest,author_owner_component_id,
                author_owner_kind,author_owner_id,author_subject_ref,trigger_decision
@@ -2077,6 +2084,13 @@ BEGIN
     SET context_applied_seq=COALESCE(selection_end,context_applied_seq),
         context_revision=selection_context_revision,
         context_view_unit_count=context_view_unit_count+COALESCE(event_count,0),
+        context_view_payload_bytes=context_view_payload_bytes+COALESCE((
+            SELECT sum(content_byte_length)
+            FROM __forest_module_schema__.inbox_messages
+            WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+              AND selection_start IS NOT NULL
+              AND ingress_seq BETWEEN selection_start AND selection_end
+        ),0),
         active_session_ref=CASE
             WHEN requested_boundary='SESSION_END' AND selection_kind='SILENT_DRAIN'
                 THEN NULL
@@ -2185,6 +2199,7 @@ BEGIN
         'input_batch_id',u.input_batch_id,'event_id',u.event_id,
         'ingress_seq',u.ingress_seq,'payload_id',u.payload_id,
         'payload_digest',u.payload_digest,
+        'payload_byte_length',u.payload_byte_length,
         'payload_owner_component_id',u.payload_owner_component_id,
         'payload_owner_kind',u.payload_owner_kind,
         'payload_owner_id',u.payload_owner_id,
@@ -2253,6 +2268,7 @@ BEGIN
             'channel_kind',lane.channel_kind,'channel_ref',lane.channel_ref,
             'thread_ref',lane.thread_ref,
             'context_view_unit_count',lane.context_view_unit_count,
+            'context_view_payload_bytes',lane.context_view_payload_bytes,
             'context_archived_unit_count',lane.context_archived_unit_count,
             'archive',archive_value,'offset',requested_offset,
             'next_offset',next_offset,'total_units',total_units,'units',units
@@ -2279,18 +2295,22 @@ DECLARE
     requested_conversation text := COALESCE(selected->>'conversation_id',anchor->>'conversation_id');
     high_watermark integer := (policy->>'high_watermark_units')::integer;
     retain_units integer := (policy->>'retain_units')::integer;
+    high_watermark_bytes bigint := (policy->>'high_watermark_payload_bytes')::bigint;
+    retain_bytes bigint := (policy->>'retain_payload_bytes')::bigint;
     policy_revision text := policy->>'policy_revision';
     lane record;
     replay record;
     archive_target bigint;
     units jsonb;
     archived_count bigint;
+    archived_bytes bigint;
     first_revision bigint;
     last_revision bigint;
     source_set_digest text;
     published_view_revision bigint;
     cumulative_count bigint;
     resulting_count bigint;
+    resulting_bytes bigint;
     compaction_id text;
     archive_value jsonb;
     commit_value jsonb;
@@ -2306,7 +2326,9 @@ BEGIN
        OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
        OR high_watermark NOT BETWEEN 2 AND 1000000
        OR retain_units NOT BETWEEN 1 AND high_watermark-1
-       OR policy_revision IS DISTINCT FROM 'context-view-unit-window-v1' THEN
+       OR high_watermark_bytes NOT BETWEEN 1024 AND 134217728
+       OR retain_bytes NOT BETWEEN 1 AND high_watermark_bytes-1
+       OR policy_revision IS DISTINCT FROM 'context-view-payload-window-v2' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -2361,6 +2383,7 @@ BEGIN
             'context_revision',u.context_revision,
             'unit_index',u.unit_index,
             'payload_digest',u.payload_digest,
+            'payload_byte_length',u.payload_byte_length,
             'author_payload_digest',u.author_payload_digest,
             'event_id',u.event_id,
             'input_batch_id',u.input_batch_id
@@ -2394,7 +2417,9 @@ BEGIN
             'source_set_digest',replay.source_set_digest,
             'policy_revision',replay.policy_revision,
             'archived_unit_count',replay.archived_unit_count,
+            'archived_payload_bytes',replay.archived_payload_bytes,
             'resulting_view_unit_count',replay.resulting_view_unit_count,
+            'resulting_view_payload_bytes',replay.resulting_view_payload_bytes,
             'cumulative_archived_unit_count',replay.cumulative_archived_unit_count,
             'first_context_revision',replay.first_context_revision,
             'last_context_revision',replay.last_context_revision,'units',units
@@ -2442,7 +2467,8 @@ BEGIN
             )
         );
     END IF;
-    IF lane.context_view_unit_count <= high_watermark THEN
+    IF lane.context_view_unit_count <= high_watermark
+       AND lane.context_view_payload_bytes <= high_watermark_bytes THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object(
@@ -2452,7 +2478,17 @@ BEGIN
     END IF;
     -- Keep the archive manifest and its Memory eligibility proof bounded.
     -- A later maintenance claim will continue from the next active prefix.
-    archive_target := LEAST(lane.context_view_unit_count-retain_units,64);
+    -- The unit retention level is a target, not a floor: byte pressure may
+    -- archive below it while keeping at least the newest active unit.
+    archive_target := LEAST(lane.context_view_unit_count-1,64);
+    IF archive_target < 1 THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object(
+                'protocol','forest.payload-json-plan/1','status','SKIP'
+            )
+        );
+    END IF;
     WITH oldest AS MATERIALIZED (
         SELECT u.*
         FROM __forest_module_schema__.active_context_units a
@@ -2492,7 +2528,7 @@ BEGIN
               )
             )) AS is_protected
         FROM oldest a
-    ), candidates AS (
+    ), eligible AS (
         -- An unresolved trigger or active Session unit pins the suffix: an
         -- archive may only remove the contiguous prefix before that unit.
         SELECT m.* FROM (
@@ -2502,15 +2538,32 @@ BEGIN
         ) m
         WHERE m.first_protected IS NULL OR m.archive_order<m.first_protected
         ORDER BY m.archive_order
+    ), ranked AS (
+        SELECT eligible.*,
+               sum(payload_byte_length) OVER (ORDER BY archive_order) AS prefix_bytes
+        FROM eligible
+    ), cutoff AS (
+        SELECT COALESCE(
+            min(archive_order) FILTER (WHERE
+                lane.context_view_unit_count-archive_order<=retain_units
+                AND lane.context_view_payload_bytes-prefix_bytes<=retain_bytes),
+            max(archive_order)
+        ) AS last_order FROM ranked
+    ), candidates AS (
+        SELECT ranked.* FROM ranked CROSS JOIN cutoff
+        WHERE ranked.archive_order<=cutoff.last_order
+        ORDER BY ranked.archive_order
     )
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
                'unit_id',unit_id,'context_revision',context_revision,
                'unit_index',unit_index,'payload_digest',payload_digest,
+               'payload_byte_length',payload_byte_length,
                'author_payload_digest',author_payload_digest,'event_id',event_id,
                'input_batch_id',input_batch_id
            ) ORDER BY context_revision,unit_index),'[]'::jsonb),
-           count(*)::bigint,min(context_revision),max(context_revision)
-    INTO units,archived_count,first_revision,last_revision
+           count(*)::bigint,COALESCE(sum(payload_byte_length),0)::bigint,
+           min(context_revision),max(context_revision)
+    INTO units,archived_count,archived_bytes,first_revision,last_revision
     FROM candidates;
     IF archived_count=0 THEN
         RETURN jsonb_build_object(
@@ -2525,6 +2578,7 @@ BEGIN
     );
     published_view_revision := lane.context_view_revision+1;
     resulting_count := lane.context_view_unit_count-archived_count;
+    resulting_bytes := lane.context_view_payload_bytes-archived_bytes;
     cumulative_count := lane.context_archived_unit_count+archived_count;
     compaction_id := 'compaction:' || encode(sha256(convert_to(jsonb_build_array(
         requested_bot,requested_conversation,published_view_revision,
@@ -2550,7 +2604,9 @@ BEGIN
         'published_view_revision',published_view_revision,
         'source_set_digest',source_set_digest,'policy_revision',policy_revision,
         'archived_unit_count',archived_count,
+        'archived_payload_bytes',archived_bytes,
         'resulting_view_unit_count',resulting_count,
+        'resulting_view_payload_bytes',resulting_bytes,
         'cumulative_archived_unit_count',cumulative_count,
         'first_context_revision',first_revision,'last_context_revision',last_revision,
         'units',units
@@ -2596,6 +2652,7 @@ DECLARE
     lane record;
     existing record;
     unit_count integer;
+    payload_bytes bigint;
     event_refs jsonb;
     result_value jsonb;
 BEGIN
@@ -2664,7 +2721,9 @@ BEGIN
            OR lane.context_view_revision IS DISTINCT FROM
               (commit_value->>'base_view_revision')::bigint
            OR lane.context_view_unit_count <
-              (commit_value->>'archived_unit_count')::bigint THEN
+              (commit_value->>'archived_unit_count')::bigint
+           OR lane.context_view_payload_bytes <
+              (commit_value->>'archived_payload_bytes')::bigint THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object(
@@ -2673,9 +2732,18 @@ BEGIN
                 )
             );
         END IF;
-        SELECT count(*)::integer INTO unit_count
-        FROM jsonb_array_elements(commit_value->'units');
-        IF unit_count<>(commit_value->>'archived_unit_count')::bigint THEN
+        SELECT count(*)::integer,COALESCE(sum(u.payload_byte_length),0)::bigint
+        INTO unit_count,payload_bytes
+        FROM jsonb_array_elements(commit_value->'units') item
+        JOIN __forest_module_schema__.context_units u
+          ON u.bot_id=requested_bot
+         AND u.conversation_id=commit_value->>'conversation_id'
+         AND u.unit_id=item->>'unit_id'
+         AND u.payload_byte_length=(item->>'payload_byte_length')::integer;
+        IF unit_count<>(commit_value->>'archived_unit_count')::bigint
+           OR payload_bytes<>(commit_value->>'archived_payload_bytes')::bigint
+           OR lane.context_view_payload_bytes-payload_bytes <>
+              (commit_value->>'resulting_view_payload_bytes')::bigint THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object(
@@ -2688,7 +2756,8 @@ BEGIN
             bot_id,conversation_id,compaction_id,operation_id,input_digest,
             base_view_revision,published_view_revision,source_set_digest,policy_revision,
             archive_payload_id,archive_payload_digest,archived_unit_count,
-            resulting_view_unit_count,cumulative_archived_unit_count,
+            archived_payload_bytes,resulting_view_unit_count,
+            resulting_view_payload_bytes,cumulative_archived_unit_count,
             first_context_revision,last_context_revision
         ) VALUES (
             requested_bot,commit_value->>'conversation_id',commit_value->>'compaction_id',
@@ -2698,7 +2767,9 @@ BEGIN
             commit_value->>'source_set_digest',commit_value->>'policy_revision',
             payload_ref->>'payload_id',payload_ref->>'digest',
             (commit_value->>'archived_unit_count')::bigint,
+            (commit_value->>'archived_payload_bytes')::bigint,
             (commit_value->>'resulting_view_unit_count')::bigint,
+            (commit_value->>'resulting_view_payload_bytes')::bigint,
             (commit_value->>'cumulative_archived_unit_count')::bigint,
             (commit_value->>'first_context_revision')::bigint,
             (commit_value->>'last_context_revision')::bigint
@@ -2735,6 +2806,8 @@ BEGIN
         UPDATE __forest_module_schema__.conversation_lanes
         SET context_view_revision=(commit_value->>'published_view_revision')::bigint,
             context_view_unit_count=(commit_value->>'resulting_view_unit_count')::bigint,
+            context_view_payload_bytes=
+                (commit_value->>'resulting_view_payload_bytes')::bigint,
             context_archived_unit_count=
                 (commit_value->>'cumulative_archived_unit_count')::bigint,
             updated_at=clock_timestamp()
@@ -3286,7 +3359,7 @@ BEGIN
     INSERT INTO __forest_module_schema__.context_units(
         bot_id,conversation_id,unit_id,context_revision,unit_index,kind,
         source_component_id,source_kind,source_id,input_batch_id,event_id,ingress_seq,
-        payload_id,payload_digest,payload_owner_component_id,payload_owner_kind,
+            payload_id,payload_digest,payload_byte_length,payload_owner_component_id,payload_owner_kind,
         payload_owner_id,author_payload_id,author_payload_digest,
         author_owner_component_id,author_owner_kind,author_owner_id,
         author_subject_ref,trigger_decision
@@ -3294,6 +3367,7 @@ BEGIN
         requested_bot,requested_conversation,requested_unit,context_revision_value,0,'REPLY',
         'agent.runtime','final.reply',requested_reply,NULL,NULL,NULL,
         reply_value->>'payload_id',reply_value->>'digest',
+        (body->>'reply_byte_length')::integer,
         reply_value->>'owner_component_id',reply_value->>'owner_kind',
         reply_value->>'owner_id',NULL,NULL,NULL,NULL,NULL,NULL,NULL
     );
@@ -3312,6 +3386,8 @@ BEGIN
     UPDATE __forest_module_schema__.conversation_lanes
     SET context_revision=context_revision_value,
         context_view_unit_count=context_view_unit_count+1,
+        context_view_payload_bytes=context_view_payload_bytes+
+            (body->>'reply_byte_length')::integer,
         mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
     answered_events_value := __forest_module_schema__.conversation_answered_proposal_events(

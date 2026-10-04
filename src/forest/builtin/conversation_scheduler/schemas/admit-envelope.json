@@ -32,7 +32,7 @@
       "required": [
         "conversation_id", "source_component_id", "binding_ref", "platform",
         "channel_kind", "channel_ref", "thread_ref", "event_id", "source_event_ref",
-        "event_kind", "platform_message_ref", "author_subject_ref", "content", "author",
+        "event_kind", "platform_message_ref", "author_subject_ref", "content", "content_byte_length", "author",
         "received_at", "classification_deadline", "sent_at", "context_disposition"
       ],
       "properties": {
@@ -49,6 +49,7 @@
         "platform_message_ref": {"type": ["string", "null"], "maxLength": 512},
         "author_subject_ref": {"type": "string", "minLength": 1, "maxLength": 256},
         "content": {"$ref": "#/$defs/payload_ref"},
+        "content_byte_length": {"type": "integer", "minimum": 1, "maximum": 1048576},
         "author": {"$ref": "#/$defs/payload_ref"},
         "received_at": {"type": "string", "format": "date-time"},
         "classification_deadline": {"type": "string", "format": "date-time"},

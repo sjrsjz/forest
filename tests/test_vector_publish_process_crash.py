@@ -98,7 +98,9 @@ async def _crash_child(spec_path: Path) -> None:
                 "context_view": {
                     "high_watermark_units": 2,
                     "retain_units": 1,
-                    "policy_revision": "context-view-unit-window-v1",
+                    "high_watermark_payload_bytes": 524288,
+                    "retain_payload_bytes": 262144,
+                    "policy_revision": "context-view-payload-window-v2",
                 },
             },
             validation_digest=digest_json(conversation.snapshot.schema("schemas/config.json")),

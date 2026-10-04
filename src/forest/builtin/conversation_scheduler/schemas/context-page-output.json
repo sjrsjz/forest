@@ -5,7 +5,7 @@
     "conversation_id", "context_applied_seq", "classified_through_seq",
     "context_revision", "context_view_revision", "source_component_id",
     "binding_ref", "platform", "channel_kind", "channel_ref", "thread_ref",
-    "context_view_unit_count", "context_archived_unit_count", "archive",
+    "context_view_unit_count", "context_view_payload_bytes", "context_archived_unit_count", "archive",
     "offset", "next_offset", "total_units", "units"
   ],
   "properties": {
@@ -21,6 +21,7 @@
     "channel_ref": {"type": "string"},
     "thread_ref": {"type": ["string", "null"]},
     "context_view_unit_count": {"type": "integer", "minimum": 0},
+    "context_view_payload_bytes": {"type": "integer", "minimum": 0},
     "context_archived_unit_count": {"type": "integer", "minimum": 0},
     "archive": {
       "oneOf": [
@@ -71,7 +72,7 @@
       "required": [
         "conversation_id", "unit_id", "context_revision", "unit_index", "kind",
         "source_component_id", "source_kind", "source_id", "input_batch_id", "event_id",
-        "ingress_seq", "payload_id", "payload_digest", "payload_owner_component_id",
+        "ingress_seq", "payload_id", "payload_digest", "payload_byte_length", "payload_owner_component_id",
         "payload_owner_kind", "payload_owner_id", "author_payload_id",
         "author_payload_digest", "author_owner_component_id", "author_owner_kind",
         "author_owner_id", "author_subject_ref", "trigger_decision"
@@ -86,6 +87,7 @@
         "event_id": {"$ref": "#/$defs/nullable_string"},
         "ingress_seq": {"type": ["integer", "null"], "minimum": 1},
         "payload_id": {"type": "string"}, "payload_digest": {"$ref": "#/$defs/digest"},
+        "payload_byte_length": {"type": "integer", "minimum": 1},
         "payload_owner_component_id": {"type": "string"},
         "payload_owner_kind": {"type": "string"}, "payload_owner_id": {"type": "string"},
         "author_payload_id": {"$ref": "#/$defs/nullable_string"},

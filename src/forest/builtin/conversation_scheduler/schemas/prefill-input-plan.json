@@ -142,6 +142,8 @@
       "required": [
         "high_watermark_units",
         "retain_units",
+        "high_watermark_payload_bytes",
+        "retain_payload_bytes",
         "policy_revision"
       ],
       "properties": {
@@ -155,8 +157,10 @@
           "minimum": 1,
           "maximum": 999999
         },
+        "high_watermark_payload_bytes": {"type": "integer", "minimum": 1024, "maximum": 134217728},
+        "retain_payload_bytes": {"type": "integer", "minimum": 1, "maximum": 134217727},
         "policy_revision": {
-          "const": "context-view-unit-window-v1"
+          "const": "context-view-payload-window-v2"
         }
       },
       "additionalProperties": false

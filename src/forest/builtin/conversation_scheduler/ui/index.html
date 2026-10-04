@@ -27,7 +27,7 @@
   </section>
   <section id="settings" class="hidden">
     <p class="hint muted">窗口阈值由 Conversation Context 自行执行；更改草稿后通过宿主计划检查并应用。</p>
-    <div class="field-row"><label>高水位单元数<input id="high" type="number" min="2" max="1000000"></label><label>裁剪后保留单元数<input id="retain" type="number" min="1" max="999999"></label><button id="plan" disabled>检查配置计划</button></div>
+    <div class="field-row"><label>高水位单元数<input id="high" type="number" min="2" max="1000000"></label><label>裁剪后保留单元数<input id="retain" type="number" min="1" max="999999"></label><label>高水位内容字节数<input id="high-bytes" type="number" min="1024" max="134217728"></label><label>裁剪后内容字节数<input id="retain-bytes" type="number" min="1" max="134217727"></label><button id="plan" disabled>检查配置计划</button></div>
   </section>
   <div id="status" class="status" role="status"></div>
 </div>
@@ -42,8 +42,8 @@
   const status=value=>{$('status').textContent=value||'';};
   const cell=(row,value)=>{const node=row.insertCell();node.textContent=value??'—';return node;};
   function show(tab){for(const id of ['runs','settings'])$(id).classList.toggle('hidden',id!==tab);document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
-  function renderSettings(){if(!draft)return;$('high').value=draft.context_view.high_watermark_units;$('retain').value=draft.context_view.retain_units;}
-  function updateDraft(){const high=Number($('high').value),retain=Number($('retain').value);if(!Number.isSafeInteger(high)||!Number.isSafeInteger(retain)||retain<1||high>1000000||retain>=high)throw Error('窗口阈值必须是整数，且保留数小于高水位');draft.context_view.high_watermark_units=high;draft.context_view.retain_units=retain;send('set-draft',{value:draft});}
+  function renderSettings(){if(!draft)return;$('high').value=draft.context_view.high_watermark_units;$('retain').value=draft.context_view.retain_units;$('high-bytes').value=draft.context_view.high_watermark_payload_bytes;$('retain-bytes').value=draft.context_view.retain_payload_bytes;}
+  function updateDraft(){const high=Number($('high').value),retain=Number($('retain').value),highBytes=Number($('high-bytes').value),retainBytes=Number($('retain-bytes').value);if(!Number.isSafeInteger(high)||!Number.isSafeInteger(retain)||high<2||high>1000000||retain<1||retain>=high||!Number.isSafeInteger(highBytes)||!Number.isSafeInteger(retainBytes)||highBytes<1024||highBytes>134217728||retainBytes<1||retainBytes>=highBytes)throw Error('上下文窗口阈值无效');Object.assign(draft.context_view,{high_watermark_units:high,retain_units:retain,high_watermark_payload_bytes:highBytes,retain_payload_bytes:retainBytes});send('set-draft',{value:draft});}
   async function load(next=false){
     const anomalyMode=$('anomalies').checked,input={limit:20};
     const exact=$('conversation-filter').value.trim();if(exact)input.conversation_id=exact;

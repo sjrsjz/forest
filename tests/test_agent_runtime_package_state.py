@@ -155,7 +155,9 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "context_view": {
                 "high_watermark_units": 1024,
                 "retain_units": 768,
-                "policy_revision": "context-view-unit-window-v1",
+                "high_watermark_payload_bytes": 524288,
+                "retain_payload_bytes": 262144,
+                "policy_revision": "context-view-payload-window-v2",
             },
         },
         resolved_contracts={},
@@ -2776,10 +2778,11 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "bot_id,conversation_id,conversation_key_digest,source_component_id,"
                     "binding_ref,platform,channel_kind,channel_ref,next_ingress_seq,"
                     "classified_through_seq,context_applied_seq,context_revision,"
-                    "context_view_revision,context_view_unit_count,actor_owner_id,actor_epoch,"
+                    "context_view_revision,context_view_unit_count,context_view_payload_bytes,"
+                    "actor_owner_id,actor_epoch,"
                     "actor_expires_at,active_session_ref,active_run_ref) VALUES ("
                     "%s,%s,%s,'adapter.onebot','binding/main','onebot-v11','GROUP',"
-                    "'933179609',4,3,1,1,1,1,%s,1,clock_timestamp()+interval '5 minutes',%s,%s)"
+                    "'933179609',4,3,1,1,1,1,1,%s,1,clock_timestamp()+interval '5 minutes',%s,%s)"
                 ).format(sql.Identifier(conversation_namespace)),
                 (
                     store.bot_id,
@@ -2814,7 +2817,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "bot_id,conversation_id,event_id,ingress_seq,admission_operation_id,"
                     "input_digest,source_component_id,source_event_ref,event_kind,"
                     "platform_message_ref,author_subject_ref,content_payload_id,"
-                    "content_payload_digest,content_owner_component_id,content_owner_kind,"
+                    "content_payload_digest,content_byte_length,content_owner_component_id,content_owner_kind,"
                     "content_owner_id,author_payload_id,author_payload_digest,"
                     "author_owner_component_id,author_owner_kind,author_owner_id,"
                     "context_disposition,classification_state,trigger_decision,"
@@ -2823,7 +2826,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "reason_code,received_at,classification_deadline,classified_at) VALUES ("
                     "%s,%s,'event/start-atomic',1,'admit/start-atomic',%s,'adapter.onebot',"
                     "'source/start-atomic','message.group','message/start-atomic','qq:99',"
-                    "'payload/content/start-atomic',%s,'adapter.onebot','onebot.normalized-event',"
+                    "'payload/content/start-atomic',%s,1,'adapter.onebot','onebot.normalized-event',"
                     "'event/start-atomic','payload/author/start-atomic',%s,'adapter.onebot',"
                     "'onebot.author-snapshot','event/start-atomic','MATERIALIZE','FINAL','TRIGGER',"
                     "'classify/start-atomic',%s,'conversation.trigger-policy',"
@@ -2853,9 +2856,10 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     "INSERT INTO {}.context_units("
                     "bot_id,conversation_id,unit_id,context_revision,unit_index,kind,"
                     "source_component_id,source_kind,source_id,payload_id,payload_digest,"
+                    "payload_byte_length,"
                     "payload_owner_component_id,payload_owner_kind,payload_owner_id) VALUES ("
                     "%s,%s,'context/initial',1,0,'AGENT_STEP','agent.runtime','model.turn',"
-                    "'turn/initial','payload/context/initial',%s,'agent.runtime',"
+                    "'turn/initial','payload/context/initial',%s,1,'agent.runtime',"
                     "'model.turn','turn/initial')"
                 ).format(sql.Identifier(conversation_namespace)),
                 (store.bot_id, "conversation/onebot/group/933179609", digest),
@@ -2878,7 +2882,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                         "bot_id,conversation_id,event_id,ingress_seq,admission_operation_id,"
                         "input_digest,source_component_id,source_event_ref,event_kind,"
                         "platform_message_ref,author_subject_ref,content_payload_id,"
-                        "content_payload_digest,content_owner_component_id,content_owner_kind,"
+                        "content_payload_digest,content_byte_length,content_owner_component_id,content_owner_kind,"
                         "content_owner_id,author_payload_id,author_payload_digest,"
                         "author_owner_component_id,author_owner_kind,author_owner_id,"
                         "context_disposition,classification_state,trigger_decision,"
@@ -2886,7 +2890,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                         "classifier_component_id,classifier_generation_id,rule_revision,"
                         "reason_code,received_at,classification_deadline,classified_at) VALUES ("
                         "%s,%s,%s,%s,%s,%s,'adapter.onebot',%s,'message.group',%s,'qq:43',"
-                        "%s,%s,'adapter.onebot','onebot.normalized-event',%s,%s,%s,"
+                        "%s,%s,1,'adapter.onebot','onebot.normalized-event',%s,%s,%s,"
                         "'adapter.onebot','onebot.author-snapshot',%s,'MATERIALIZE','FINAL',%s,"
                         "%s,%s,'conversation.trigger-policy','generation/trigger/test',"
                         "'rule/1','test',clock_timestamp(),clock_timestamp()+interval '1 minute',"

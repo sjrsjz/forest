@@ -15,12 +15,13 @@
     },
     "input": {
       "type": "object", "additionalProperties": false,
-      "required": ["actor", "session_ref", "run_ref", "reply", "unit_id"],
+      "required": ["actor", "session_ref", "run_ref", "reply", "reply_byte_length", "unit_id"],
       "properties": {
         "actor": {"$ref": "#/$defs/actor"},
         "session_ref": {"$ref": "#/$defs/id"},
         "run_ref": {"$ref": "#/$defs/id"},
         "reply": {"$ref": "#/$defs/reply"},
+        "reply_byte_length": {"type": "integer", "minimum": 1, "maximum": 1048576},
         "unit_id": {"$ref": "#/$defs/id"}
       }
     },

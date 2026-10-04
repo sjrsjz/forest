@@ -16,6 +16,7 @@ from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import bootstrap_builtin_package
 from forest.core_runtime import bootstrap_kernel
+from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
@@ -57,7 +58,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "context_view": {
                 "high_watermark_units": 2,
                 "retain_units": 1,
-                "policy_revision": "context-view-unit-window-v1",
+                "high_watermark_payload_bytes": 524288,
+                "retain_payload_bytes": 262144,
+                "policy_revision": "context-view-payload-window-v2",
             },
         },
         resolved_contracts={},
@@ -125,11 +128,12 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         instance = registry.get("conversation.scheduler")
         participant = instance.unit_of_work_participant()
         event_id = "event/onebot/1"
+        content_bytes = b'{"segments":[{"type":"text","text":"' + b"A" * 1024 + b'"}]}'
         content = await _payload(
             kernel.payload,
             owner_kind="onebot.normalized-event",
             event_id=event_id,
-            content=b'{"segments":[{"type":"text","text":"A"}]}',
+            content=content_bytes,
         )
         author = await _payload(
             kernel.payload,
@@ -158,6 +162,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "platform_message_ref": "message/1",
                 "author_subject_ref": "qq:42",
                 "content": content,
+                "content_byte_length": len(content_bytes),
                 "author": author,
                 "received_at": received_at.isoformat(),
                 "classification_deadline": (
@@ -168,6 +173,21 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             },
             "prior": {},
         }
+        wrong_length = copy.deepcopy(admission)
+        wrong_length["input"]["content_byte_length"] += 1
+        with pytest.raises(ForestError) as rejected_length:
+            async with store.pool.connection() as conn, conn.transaction():
+                await participant.invoke_in(
+                    conn,
+                    "conversation.admit-message",
+                    wrong_length,
+                    operation_id="uow-step:conversation-admit/wrong-length",
+                    causal_root_kind="onebot.ingress",
+                    causal_root_id=event_id,
+                    parent_call_id="call:ingress/wrong-length",
+                    timeout_seconds=10,
+                )
+        assert rejected_length.value.code == "DOMAIN_PAYLOAD_METADATA_CONFLICT"
         async with store.pool.connection() as conn, conn.transaction():
             first = await participant.invoke_in(
                 conn,
@@ -685,10 +705,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     sql.SQL(
                         "INSERT INTO {}.context_units (bot_id,conversation_id,unit_id,"
                         "context_revision,unit_index,kind,source_component_id,source_kind,"
-                        "source_id,payload_id,payload_digest,payload_owner_component_id,"
+                        "source_id,payload_id,payload_digest,payload_byte_length,payload_owner_component_id,"
                         "payload_owner_kind,payload_owner_id) "
                         "SELECT bot_id,conversation_id,%s,%s,0,'CONTROL',"
                         "source_component_id,'context.control',%s,payload_id,payload_digest,"
+                        "payload_byte_length,"
                         "payload_owner_component_id,payload_owner_kind,payload_owner_id "
                         "FROM {}.context_units WHERE bot_id=%s AND conversation_id=%s "
                         "AND event_id=%s"
@@ -712,9 +733,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             await conn.execute(
                 sql.SQL(
                     "UPDATE {}.conversation_lanes SET context_revision=3,"
-                    "context_view_unit_count=3 WHERE bot_id=%s AND conversation_id=%s"
+                    "context_view_unit_count=3,"
+                    "context_view_payload_bytes=context_view_payload_bytes+2*%s "
+                    "WHERE bot_id=%s AND conversation_id=%s"
                 ).format(sql.Identifier(namespace)),
-                (store.bot_id, actor["conversation_id"]),
+                (len(content_bytes), store.bot_id, actor["conversation_id"]),
             )
         compact_plan = next(
             item for item in instance.component["unit_of_work_plans"]
@@ -728,9 +751,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "actor": actor,
             },
             "context_view": {
-                "high_watermark_units": 2,
-                "retain_units": 1,
-                "policy_revision": "context-view-unit-window-v1",
+                "high_watermark_units": 512,
+                "retain_units": 256,
+                "high_watermark_payload_bytes": 1024,
+                "retain_payload_bytes": 512,
+                "policy_revision": "context-view-payload-window-v2",
             },
             "payload": {
                 "protocol": "forest.payload-json-from-prior/1",
@@ -803,9 +828,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 await conn.execute(
                     sql.SQL(
                         "UPDATE {}.conversation_lanes SET context_revision=6,"
-                        "context_view_unit_count=6 WHERE bot_id=%s AND conversation_id=%s"
+                        "context_view_unit_count=6,"
+                        "context_view_payload_bytes=context_view_payload_bytes+3*%s "
+                        "WHERE bot_id=%s AND conversation_id=%s"
                     ).format(sql.Identifier(namespace)),
-                    (store.bot_id, actor["conversation_id"]),
+                    (len(content_bytes), store.bot_id, actor["conversation_id"]),
                 )
                 blocked_plan = await (
                     await conn.execute(
@@ -857,7 +884,8 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 await conn.execute(
                     sql.SQL(
                         "SELECT context_view_revision,context_view_unit_count,"
-                        "context_archived_unit_count FROM {}.conversation_lanes "
+                        "context_view_payload_bytes,context_archived_unit_count "
+                        "FROM {}.conversation_lanes "
                         "WHERE bot_id=%s AND conversation_id=%s"
                     ).format(sql.Identifier(namespace)),
                     (store.bot_id, actor["conversation_id"]),
@@ -866,6 +894,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         assert view == {
             "context_view_revision": 1,
             "context_view_unit_count": 1,
+            "context_view_payload_bytes": len(content_bytes),
             "context_archived_unit_count": 2,
         }
         async with store.pool.connection() as conn, conn.transaction():
@@ -919,6 +948,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "platform_message_ref": "message/silent-1",
                 "author_subject_ref": "qq:43",
                 "content": silent_content,
+                "content_byte_length": len(b'{"segments":[{"type":"text","text":"ordinary"}]}'),
                 "author": silent_author,
             }
         )
@@ -1022,6 +1052,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "source_event_ref": f"onebot-message/silent-{index}",
                     "platform_message_ref": f"message/silent-{index}",
                     "content": next_content,
+                    "content_byte_length": len((f'{{"segments":[{{"type":"text","text":"ordinary-{index}"}}]}}').encode()),
                     "author": next_author,
                 }
             )
@@ -1219,6 +1250,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "source_event_ref": f"onebot-message/silent-{index}",
                     "platform_message_ref": f"message/silent-{index}",
                     "content": next_content,
+                    "content_byte_length": len(b'{"segments":[{"type":"text","text":"backlog"}]}'),
                     "author": next_author,
                     "received_at": now.isoformat(),
                     "classification_deadline": (now + timedelta(seconds=30)).isoformat(),
@@ -1293,10 +1325,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "INSERT INTO {m}.context_units("
                     "bot_id,conversation_id,unit_id,context_revision,unit_index,kind,"
                     "source_component_id,source_kind,source_id,payload_id,payload_digest,"
+                    "payload_byte_length,"
                     "payload_owner_component_id,payload_owner_kind,payload_owner_id) "
                     "SELECT %s,%s,'maintenance-control:'||g::text,%s,g-1,'CONTROL',"
                     "'conversation.scheduler','context.maintenance-fixture',"
-                    "'maintenance-control:'||g::text,%s,%s,%s,%s,%s "
+                    "'maintenance-control:'||g::text,%s,%s,1,%s,%s,%s "
                     "FROM generate_series(1,67) AS g"
                 ).format(m=sql.Identifier(namespace)),
                 (
@@ -1322,6 +1355,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 sql.SQL(
                     "UPDATE {}.conversation_lanes SET context_revision=context_revision+1,"
                     "context_view_unit_count=context_view_unit_count+67,"
+                    "context_view_payload_bytes=context_view_payload_bytes+67,"
                     "updated_at=clock_timestamp() WHERE bot_id=%s AND conversation_id=%s"
                 ).format(sql.Identifier(namespace)),
                 (store.bot_id, "conversation/onebot/group/silent"),
@@ -1395,6 +1429,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "bot_id,conversation_id,event_id,ingress_seq,admission_operation_id,"
                     "input_digest,source_component_id,source_event_ref,event_kind,"
                     "author_subject_ref,content_payload_id,content_payload_digest,"
+                    "content_byte_length,"
                     "content_owner_component_id,content_owner_kind,content_owner_id,"
                     "author_payload_id,author_payload_digest,author_owner_component_id,"
                     "author_owner_kind,author_owner_id,context_disposition,"
@@ -1404,7 +1439,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "classified_at) "
                     "SELECT %s,%s,'prefill-event/'||n,n,'prefill-admit/'||n,%s,"
                     "'adapter.onebot','prefill-source/'||n,'message.group',"
-                    "'qq:'||n,'payload/content/'||n,%s,'adapter.onebot',"
+                    "'qq:'||n,'payload/content/'||n,%s,1,'adapter.onebot',"
                     "'onebot.normalized-event','prefill-event/'||n,"
                     "'payload/author/'||n,%s,'adapter.onebot',"
                     "'onebot.author-snapshot','prefill-event/'||n,'MATERIALIZE',"
@@ -1926,6 +1961,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "owner_kind": "final.reply",
                     "owner_id": "prefill-reply",
                 },
+                "reply_byte_length": 1,
                 "unit_id": "prefill-reply/unit",
             },
             "prior": {"agent": {
@@ -2119,6 +2155,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "bot_id,conversation_id,event_id,ingress_seq,admission_operation_id,"
                     "input_digest,source_component_id,source_event_ref,event_kind,"
                     "author_subject_ref,content_payload_id,content_payload_digest,"
+                    "content_byte_length,"
                     "content_owner_component_id,content_owner_kind,content_owner_id,"
                     "author_payload_id,author_payload_digest,author_owner_component_id,"
                     "author_owner_kind,author_owner_id,context_disposition,"
@@ -2128,7 +2165,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     "classified_at) "
                     "SELECT %s,%s,'prefill-event/'||n,n,'prefill-admit/'||n,%s,"
                     "'adapter.onebot','prefill-source/'||n,'message.group',"
-                    "'qq:'||n,'payload/content/'||n,%s,'adapter.onebot',"
+                    "'qq:'||n,'payload/content/'||n,%s,1,'adapter.onebot',"
                     "'onebot.normalized-event','prefill-event/'||n,"
                     "'payload/author/'||n,%s,'adapter.onebot',"
                     "'onebot.author-snapshot','prefill-event/'||n,'MATERIALIZE',"

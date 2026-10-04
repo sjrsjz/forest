@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +15,9 @@ from forest.runtime_generation import BoundGenerationIdentity, PreparedGeneratio
 
 
 class _Configuration:
+    def __init__(self, validation_digest):
+        self.validation_digest = validation_digest
+
     async def desired(self, *, include_value=False):
         value = {
             "protocol": "forest.agent.runtime/1",
@@ -33,6 +37,7 @@ class _Configuration:
             revision=1,
             payload_id="payload:agent-configuration:1",
             payload_digest=digest_json(value),
+            validation_digest=self.validation_digest,
             value=value if include_value else None,
         )
 
@@ -53,6 +58,9 @@ class _NoOwnedWorkAuthority:
 async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_path):
     source = Path(__file__).parents[1] / "src/forest/builtin/agent_runtime"
     snapshot = PackageCatalog(tmp_path / "catalog").build(source)
+    configuration = _Configuration(
+        digest_json(json.loads((source / "schemas/config.json").read_text(encoding="utf-8")))
+    )
 
     async def verify_generation(**_values):
         return None
@@ -60,7 +68,7 @@ async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_pat
     adapter = PackageGenerationAdapter(
         snapshot=snapshot,
         bot_id="bot-agent-package",
-        module_configuration=_Configuration(),
+        module_configuration=configuration,
         grants=SimpleNamespace(grant_set_digest="sha256:" + "2" * 64, entries=()),
         service_routes={},
         resolved_contracts={},
