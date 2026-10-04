@@ -76,19 +76,6 @@ def validate_vector_index_configuration(value: object) -> dict:
         "VECTOR_INDEX_CONFIGURATION_INVALID", "Vector index configuration is invalid",
     )
 
-def validate_shell_configuration(value: object) -> dict:
-    if not Draft202012Validator(
-        official_builtin_configuration_schema("shell_command")
-    ).is_valid(value):
-        raise ForestError(
-            "SHELL_CONFIGURATION_INVALID", "Shell configuration is invalid", 422
-        )
-    return {
-        **value,
-        "administrator_principals": tuple(value["administrator_principals"]),
-    }
-
-
 def validate_trigger_policy_configuration(value: object) -> dict:
     if not Draft202012Validator(
         official_builtin_configuration_schema("trigger_policy")
@@ -291,14 +278,6 @@ class OfficialBotSettingsResolver:
         validate_trigger_policy_configuration(
             components["conversation.trigger-policy"].config
         )
-        shell = validate_shell_configuration(components["shell.command"].config)
-        onebot = components["adapter.onebot"].config
-        if shell["binding_ref"] != onebot["binding_id"]:
-            raise ForestError(
-                "OFFICIAL_BOOTSTRAP_BINDING_MISMATCH",
-                "Shell and OneBot binding references differ",
-                409,
-            )
         for contribution in self.bootstrap_registry.contributions:
             value = components[contribution.component_id].config
             for field, schemes in contribution.origins:

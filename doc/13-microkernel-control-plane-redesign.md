@@ -261,7 +261,7 @@ renderer，模块也可以发布自己的 template/module/style；两者都只�
 其他组件、伪造摘要、直接建库或启动 RuntimeGraph。Bot 建成后，配置所有权转交各模块自己的
 configuration authority，bootstrap profile 保持不可变来源事实，不成为长期全局配置对象。
 
-官方 Bot 创建期目录由 `components.bootstrap_contribution` 从已校验、内容寻址的 builtin 包工件生成，声明组件标签、说明、顺序、schema 和初值引用；宿主提供通用 schema 表单承载，包也可声明自包含的 `ui_entrypoint`。运行期与创建期同形的 Provider、Embedding、Vector Index、Trigger Policy 和 Shell 共用包内配置 schema；Agent 与 OneBot 的创建期输入是有意独立的投影，使用各自包内的创建期 schema。Embedding 的模型和维度组合由包 schema 约束；Vector Index 初值明确声明绑定的 Embedding 空间，改动创建期 Embedding 身份时必须相应更新 Vector Index 身份，供应解析复核两者一致。部署 Supervisor 在启动时把准确包工件的创建期贡献冻结为同一注册表，并把它传给供应配置解析；不可变 Bootstrap Profile 同时记录 schema 与包摘要，首次 Bot 物化在安装模块前复核准确包工件。READY 后 Profile 只保留来源事实，运行图换代不得继续把创建时的包摘要当作版本锁；模块配置和选择事实决定现役 Generation。Agent 的创建期编辑器已由包内 HTML 提供：管理路由复核当前冻结包与文件摘要，浏览器以 opaque-origin iframe、禁止网络连接的 CSP 和一次性 MessageChannel 承载；iframe 只能返回本组件配置值，内核仍按冻结目录 schema 校验。其他官方包可继续使用通用表单；分离的 template/module/style 工件尚未接入创建期协议。
+官方 Bot 创建期目录由 `components.bootstrap_contribution` 从已校验、内容寻址的 builtin 包工件生成，声明组件标签、说明、顺序、schema 和初值引用；宿主提供通用 schema 表单承载，包也可声明自包含的 `ui_entrypoint`。运行期与创建期同形的 Provider、Embedding、Vector Index 和 Trigger Policy 共用包内配置 schema；Shell、Agent 与 OneBot 的创建期输入是有意独立的投影，使用各自包内的创建期 schema。Embedding 的模型和维度组合由包 schema 约束；Vector Index 初值明确声明绑定的 Embedding 空间，改动创建期 Embedding 身份时必须相应更新 Vector Index 身份，供应解析复核两者一致。部署 Supervisor 在启动时把准确包工件的创建期贡献冻结为同一注册表，并把它传给供应配置解析；不可变 Bootstrap Profile 同时记录 schema 与包摘要，首次 Bot 物化在安装模块前复核准确包工件。READY 后 Profile 只保留来源事实，运行图换代不得继续把创建时的包摘要当作版本锁；模块配置和选择事实决定现役 Generation。Agent 的创建期编辑器已由包内 HTML 提供：管理路由复核当前冻结包与文件摘要，浏览器以 opaque-origin iframe、禁止网络连接的 CSP 和一次性 MessageChannel 承载；iframe 只能返回本组件配置值，内核仍按冻结目录 schema 校验。其他官方包可继续使用通用表单；分离的 template/module/style 工件尚未接入创建期协议。
 
 供应包的 iframe 保持 `connect-src 'none'`，不能自行下载并执行其他模块的 Bootstrap 脚本。WebUI 壳层需要一个通用的嵌套贡献承载协议：包请求装载由内核安装目录返回的 Bootstrap contribution 集合，壳层核对调用方当前 Generation、声明的 catalog query、surface 身份和作用域后，在随包页面卸载的宿主容器内装载各模块自己的 template/module/style；每个编辑器只返回其组件配置值。包请求读取时，壳层按目录中的 component ID 收集这些值，再交给供应操作校验；包不能提供任意脚本 URL、替换目录身份或直接操作其他模块 DOM。这样供应包负责工作流，模块继续拥有设置界面，而宿主只提供通用、安全的贡献承载。
 
@@ -300,7 +300,7 @@ READY Bot 的启动参数只含经目录、Storage Profile 和 Bootstrap manifes
 
 首次物化从准确包工件读取 `bootstrap_materialization` 声明。无声明时，带创建期贡献的包直接采用本组件冻结 Profile 值，不带贡献的包采用包内 `bootstrap_config` 种子。需要转换的包声明 `forest.bootstrap-materialization/1` 的 `base` 和顶层 `overlay`：`$bootstrap` 只按组件 ID 与 JSON Pointer 读取冻结 Profile，`$payload_json` 只以当前包组件为 owner 写入 JSON Payload 并返回受控引用。模板、引用、深度和文件大小在包捕获时校验；物化结果再按准确包的运行期配置 schema 校验。Agent 的 preset、OneBot 的 bindings 和 Memory 的 Embedding Profile 使用各自包模板，宿主不按这三个业务组件名生成初值。
 
-创建期贡献还声明自身必填字符串字段的 `secret_refs(field,purpose,allow_empty)` 与 `origins(field,schemes)`。供应解析遍历冻结的准确包贡献执行用途限定 Secret 核对和 URL scheme/authority 校验；Vector token 的空值只因该包声明 `allow_empty` 才被接受。这些约束留在包 manifest，不由供应宿主按 Provider、Embedding、Vector 或 OneBot 名称猜测。Vector 空间与 Embedding Profile 的派生一致性、Shell binding 与 OneBot binding 的跨组件断言目前仍由供应解析显式核对，尚未移入包声明验证协议。
+创建期贡献还声明自身必填字符串字段的 `secret_refs(field,purpose,allow_empty)` 与 `origins(field,schemes)`。供应解析遍历冻结的准确包贡献执行用途限定 Secret 核对和 URL scheme/authority 校验；Vector token 的空值只因该包声明 `allow_empty` 才被接受。这些约束留在包 manifest，不由供应宿主按 Provider、Embedding、Vector 或 OneBot 名称猜测。Vector 空间与 Embedding Profile 的派生一致性仍由供应解析显式核对，尚未移入包声明验证协议。Shell 包的创建期输入只包含管理员名单，运行期 binding 由其包内物化模板读取 OneBot 的冻结 binding_id，不再由部署宿主重复比较。
 
 ## 6. 路由、授权和 dispatch trace
 

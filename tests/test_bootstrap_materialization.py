@@ -51,6 +51,7 @@ async def test_package_templates_materialize_profile_links_and_agent_payload(tmp
     provider = await materialize("provider_chat_completions")
     agent = await materialize("agent_runtime")
     onebot = await materialize("adapter_onebot")
+    shell = await materialize("shell_command")
     memory = await materialize("memory_graph")
     assert provider == profile["provider.chat-completions"]
     assert agent["output_tokens"] == 2048
@@ -59,4 +60,7 @@ async def test_package_templates_materialize_profile_links_and_agent_payload(tmp
     assert payloads.writes[0]["owner_component_id"] == "agent.runtime"
     assert onebot["bindings"][0]["self_id"] == "123456789"
     assert onebot["bindings"][0]["enabled"] is True
+    assert "binding_ref" not in profile["shell.command"]
+    assert shell["binding_ref"] == profile["adapter.onebot"]["binding_id"]
+    assert shell["administrator_principals"] == profile["shell.command"]["administrator_principals"]
     assert memory["embedding"]["model_revision"] == "model/new"

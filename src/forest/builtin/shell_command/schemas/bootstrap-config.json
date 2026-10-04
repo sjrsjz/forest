@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol": {"const": "forest.shell.command.bootstrap/1"},
+    "administrator_principals": {
+      "type": "array", "maxItems": 4096, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^qq:[0-9]+$", "maxLength": 256}
+    }
+  },
+  "required": ["protocol", "administrator_principals"],
+  "additionalProperties": false
+}

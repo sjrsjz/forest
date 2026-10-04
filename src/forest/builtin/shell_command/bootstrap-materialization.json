@@ -1,0 +1,8 @@
+{
+  "protocol": "forest.bootstrap-materialization/1",
+  "base": "seed",
+  "overlay": {
+    "binding_ref": {"$bootstrap": "adapter.onebot#/binding_id"},
+    "administrator_principals": {"$bootstrap": "shell.command#/administrator_principals"}
+  }
+}
