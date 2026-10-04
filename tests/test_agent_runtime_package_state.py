@@ -536,6 +536,88 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "protocol_failure": None,
         }
 
+        budget_start = {
+            **start_envelope,
+            "input": {
+                **start_envelope["input"],
+                "conversation_ref": "conversation/onebot/group/context-budget",
+                "session_id": "session/agent-package/context-budget",
+                "run_id": "run/agent-package/context-budget",
+                "input_batch": {
+                    **start_envelope["input"]["input_batch"],
+                    "input_batch_ref": "input-batch/agent-package/context-budget",
+                    "input_batch_digest": digest_json({"batch": "context-budget"}),
+                    "source_manifest_digest": digest_json({"source": "context-budget"}),
+                    "trigger_claim": {
+                        "ref": "claim:" + "3" * 64, "count": 1,
+                        "last_trigger_ref": "trigger/context-budget",
+                        "last_trigger_ingress_seq": 1,
+                        "digest": digest_json({"claim": "context-budget"}),
+                    },
+                },
+            },
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn, "agent.start-run-record", budget_start,
+                operation_id="agent-run-start/package/context-budget",
+                causal_root_kind="conversation.run",
+                causal_root_id="run/agent-package/context-budget",
+                parent_call_id="call:agent-package/context-budget/start",
+                timeout_seconds=10,
+            )
+        budget_owner = await _lease_operation(
+            store, participant, generation_id, "agent.acquire-run-record",
+            {"run_id": "run/agent-package/context-budget",
+             "owner_id": "agent-worker/context-budget", "lease_seconds": 120},
+            "agent-run-acquire/package/context-budget",
+        )
+        budget_checkpoint = await _payload(
+            kernel, owner_kind="checkpoint.state",
+            owner_id="checkpoint/context-budget/1",
+            value=b'{"phase":"FAILED","source_error_code":"CONTEXT_VIEW_HARD_LIMIT"}',
+        )
+        budget_input = {
+            "owner": _owner_ref(budget_owner),
+            "input_revision": 1, "step_seq": 1,
+            "source_error_code": "CONTEXT_VIEW_HARD_LIMIT",
+            "checkpoint_id": budget_checkpoint.owner_id,
+            "checkpoint_state": budget_checkpoint.canonical(),
+        }
+        with pytest.raises(ForestError) as stale_budget:
+            await _lease_operation(
+                store, participant, generation_id,
+                "agent.fail-context-budget-record",
+                {**budget_input, "input_revision": 2},
+                "agent-context-budget/package/stale",
+            )
+        assert stale_budget.value.code == "AGENT_CONTEXT_BUDGET_BOUNDARY_CLOSED"
+        settled_budget = await _lease_operation(
+            store, participant, generation_id,
+            "agent.fail-context-budget-record", budget_input,
+            "agent-context-budget/package/1",
+        )
+        assert settled_budget == {
+            "run_id": "run/agent-package/context-budget",
+            "state": "FAILED",
+            "error_code": "AGENT_CONTEXT_REQUIRED_OVER_BUDGET",
+        }
+        budget_run = await instance.management_contract.query(
+            "agent.run", {"run_id": "run/agent-package/context-budget"}
+        )
+        assert budget_run["state"] == "FAILED"
+        assert budget_run["progress"]["checkpoint_seq"] == 1
+        assert budget_run["current"]["model_request_id"] is None
+        budget_sessions = await instance.management_contract.query(
+            "agent.sessions.page", {
+                "conversation_ref": "conversation/onebot/group/context-budget",
+                "state": "FAILED", "limit": 1,
+            }
+        )
+        assert budget_sessions["items"][0]["terminal_reason_code"] == (
+            "AGENT_CONTEXT_REQUIRED_OVER_BUDGET"
+        )
+
         model_start = {
             **start_envelope,
             "input": {

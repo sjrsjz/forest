@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.35.0"
+version = "4.36.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -79,6 +79,7 @@ requests = [
   "uow.execute:agent.renew-run-lease",
   "uow.execute:agent.release-run-lease",
   "uow.execute:agent.fail-exhausted-model",
+  "uow.execute:agent.fail-context-budget",
   "uow.execute:agent.cancel-run",
   "uow.execute:agent.cancel-prepared",
   "uow.execute:agent.block-frozen-model",
@@ -200,9 +201,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.26.0"
+schema_version = "2.27.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "875429d462017cb5f2da143215cc1d5f649d7b05d42f33d7ee6730b2521e2000"
+baseline_sha256 = "22efabd3d87cd8ed6d464737bc44ebc5bcb7cae6ede2bf3e5d361dc72c2c7225"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -463,6 +464,19 @@ contract = "1.0"
 function = "agent_fail_exhausted_model"
 input_schema = "schemas/fail-exhausted-model-envelope.json"
 output_schema = "schemas/fail-exhausted-model-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/checkpoint_state"
+owner_component = "agent.runtime"
+owner_kind = "checkpoint.state"
+owner_id_path = "/input/checkpoint_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.fail-context-budget-record"
+contract = "1.0"
+function = "agent_fail_context_budget"
+input_schema = "schemas/fail-context-budget-envelope.json"
+output_schema = "schemas/fail-context-budget-output.json"
 
 [[components.unit_of_work_participants.payload_refs]]
 path = "/input/checkpoint_state"
@@ -787,6 +801,16 @@ timeout_s = 10
 steps = [
   { id = "effect", component_id = "kernel.effect", participant = "effect.prove-not-applied", input_path = "/effect" },
   { id = "agent", component_id = "agent.runtime", participant = "agent.fail-exhausted-model-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.fail-context-budget"
+contract = "1.0"
+input_schema = "schemas/fail-context-budget-input.json"
+output_schema = "schemas/fail-context-budget-output.json"
+timeout_s = 10
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.fail-context-budget-record" }
 ]
 
 [[components.unit_of_work_plans]]

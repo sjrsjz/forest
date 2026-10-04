@@ -258,6 +258,48 @@ class AgentExecution:
             request, "FAILED", run, error_code="AGENT_MODEL_TRANSPORT_FAILED"
         )
 
+    async def _fail_context_budget(self, request, owner, run, source_code):
+        """Settle an irreducible Context view before any model effect is prepared."""
+        revision = run["progress"]["input_revision"]
+        step_seq = run["progress"]["next_step_seq"]
+        checkpoint_id = stable(
+            "checkpoint-context-budget", run["run_id"], revision, step_seq,
+            source_code,
+        )
+        checkpoint = await self.ctx.payloads.put_json(
+            {
+                "phase": "FAILED",
+                "run_id": run["run_id"],
+                "input_revision": revision,
+                "next_step_seq": step_seq,
+                "source_error_code": source_code,
+                "error_code": "AGENT_CONTEXT_REQUIRED_OVER_BUDGET",
+            },
+            owner_kind="checkpoint.state",
+            owner_id=checkpoint_id,
+            parents=(self._preset_ref(),),
+        )
+        await self.ctx.uow.call(
+            "agent.fail-context-budget",
+            {
+                "owner": owner,
+                "input_revision": revision,
+                "step_seq": step_seq,
+                "source_error_code": source_code,
+                "checkpoint_id": checkpoint_id,
+                "checkpoint_state": checkpoint,
+            },
+            operation_id=self.ctx.operations.stable(
+                f"context-budget:{checkpoint_id}"
+            ),
+            timeout=15,
+        )
+        failed = await self._run(run["run_id"])
+        return self._result(
+            request, "FAILED", failed,
+            error_code="AGENT_CONTEXT_REQUIRED_OVER_BUDGET",
+        )
+
     async def _block_frozen_model(self, request, owner, reason_code):
         run = await self._run(owner["run_id"])
         recovery = await self._recovery(owner["run_id"])
@@ -1145,7 +1187,17 @@ class AgentExecution:
                         if selected["status"] == "BATCH":
                             await self._cancel_superseded_recall(run, step_seq)
                             continue
-                    snapshot = await self._model_snapshot(request, run, step_seq)
+                    try:
+                        snapshot = await self._model_snapshot(request, run, step_seq)
+                    except ForestError as exc:
+                        if exc.code not in {
+                            "CONTEXT_VIEW_HARD_LIMIT",
+                            "CONTEXT_VIEW_MEDIA_OVER_BUDGET",
+                        }:
+                            raise
+                        return await self._fail_context_budget(
+                            request, owner, run, exc.code
+                        )
                     source_refs = [self._preset_ref()]
                 # Recall and Context projection can take time. Recheck just
                 # before dispatch so a replacement signalled during either
