@@ -44,7 +44,7 @@ from forest.kernel_package_catalog_snapshot import (
     package_catalog_page_service,
 )
 from forest.model_contract import ModelCapabilities
-from forest.multi_bot_supervisor import MultiBotSupervisor
+from forest.multi_bot_supervisor import MultiBotSupervisor, _BotRunner
 from forest.official_bot_provisioning import (
     OfficialBotProvisioner,
     OfficialBotSettingsResolver,
@@ -2109,16 +2109,43 @@ async def test_deployment_catalog_keeps_bot_identity_intent_and_observation_sepa
         lease,
         bot_id="bot/alpha",
         observed_state="STARTING",
+        expected_intent_revision=alpha["intent_revision"],
     )
     online = await repository.observe(
         lease,
         bot_id="bot/alpha",
         observed_state="ONLINE",
+        expected_intent_revision=alpha["intent_revision"],
         graph_id="graph/alpha/1",
     )
     assert online["revision"] == starting["revision"] + 1
     assert (await repository.inspect("bot/alpha"))["graph_id"] == "graph/alpha/1"
     assert (await repository.inspect("bot/beta"))["observed_state"] is None
+
+    offline = await repository.set_desired(
+        operation_id="runtime/alpha/offline-after-start",
+        bot_id="bot/alpha", desired_state="OFFLINE",
+        expected_revision=alpha["intent_revision"],
+    )
+    with pytest.raises(ForestError) as changed:
+        await repository.observe(
+            lease, bot_id="bot/alpha", observed_state="ONLINE",
+            expected_intent_revision=alpha["intent_revision"],
+            graph_id="graph/alpha/stale",
+        )
+    assert changed.value.code == "BOT_INTENT_CHANGED"
+    assert (await repository.inspect("bot/alpha"))["graph_id"] == "graph/alpha/1"
+    await repository.set_desired(
+        operation_id="runtime/alpha/online-again", bot_id="bot/alpha",
+        desired_state="ONLINE", expected_revision=offline["intent_revision"],
+    )
+    with pytest.raises(ForestError) as changed_again:
+        await repository.observe(
+            lease, bot_id="bot/alpha", observed_state="ONLINE",
+            expected_intent_revision=alpha["intent_revision"],
+            graph_id="graph/alpha/old-run",
+        )
+    assert changed_again.value.code == "BOT_INTENT_CHANGED"
 
     with pytest.raises(ForestError) as caught:
         await repository.claim_supervisor("host/two", "incarnation/two")
@@ -3851,6 +3878,77 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
     finally:
         await supervisor.close()
     assert instances["bot/beta"].closed is True
+
+
+@pytest.mark.postgres
+async def test_multi_bot_supervisor_discards_start_when_intent_changes(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    profile = await _storage_profile(repository, "bot/retracted", "retracted")
+    bootstrap = await _bootstrap_profile(repository, profile, "retracted")
+    bot = await repository.register_ready(
+        operation_id="provision/retracted", bot_id="bot/retracted",
+        display_name="Retracted", storage_profile_ref=profile.profile_ref,
+        bootstrap_profile_ref=bootstrap.profile_ref,
+        bootstrap_manifest_digest=bootstrap.manifest_digest,
+    )
+    bot = await repository.set_desired(
+        operation_id="runtime/retracted/online", bot_id=bot["bot_id"],
+        desired_state="ONLINE", expected_revision=bot["intent_revision"],
+    )
+    secrets = DeploymentSecretAuthority(
+        repository.store, active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    storage_profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+    starting = asyncio.Event()
+    finish_start = asyncio.Event()
+    closed = asyncio.Event()
+
+    class FakeHost:
+        def __init__(self, settings):
+            self.registry = SimpleNamespace(
+                graph_identity=SimpleNamespace(graph_id="graph/" + settings.bot_id)
+            )
+
+        async def start(self):
+            starting.set()
+            await finish_start.wait()
+
+        async def close(self):
+            closed.set()
+
+    supervisor = MultiBotSupervisor(
+        repository, storage_profiles=storage_profiles,
+        settings_resolver=lambda current, storage: SimpleNamespace(
+            bot_id=current["bot_id"], dsn=storage.dsn,
+        ), host_factory=FakeHost,
+    )
+    lease = await repository.claim_supervisor("host/retracted", "incarnation/retracted")
+    supervisor.lease = lease
+    runner = _BotRunner(asyncio.Event())
+    task = asyncio.create_task(supervisor._run_bot(bot, runner))
+    try:
+        await asyncio.wait_for(starting.wait(), timeout=5)
+        await repository.set_desired(
+            operation_id="runtime/retracted/offline", bot_id=bot["bot_id"],
+            desired_state="OFFLINE", expected_revision=bot["intent_revision"],
+        )
+        finish_start.set()
+        await asyncio.wait_for(task, timeout=5)
+        current = await repository.inspect(bot["bot_id"])
+        assert current["desired_state"] == "OFFLINE"
+        assert current["observed_state"] == "OFFLINE"
+        assert current["error_code"] is None
+        assert closed.is_set()
+        assert runner.host is None
+        assert not runner.management_accepting
+    finally:
+        finish_start.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        await repository.release_supervisor(lease)
 
 
 @pytest.mark.postgres

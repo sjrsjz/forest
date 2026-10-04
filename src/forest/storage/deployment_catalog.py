@@ -439,6 +439,7 @@ class DeploymentCatalogRepository:
         *,
         bot_id: str,
         observed_state: str,
+        expected_intent_revision: int | None = None,
         graph_id: str | None = None,
         error_code: str | None = None,
         retry_seconds: int = 5,
@@ -456,6 +457,13 @@ class DeploymentCatalogRepository:
             raise ForestError("DEPLOYMENT_INPUT_INVALID", "Runtime error code is invalid", 422)
         if type(retry_seconds) is not int or not 1 <= retry_seconds <= 3600:
             raise ForestError("DEPLOYMENT_INPUT_INVALID", "Retry delay is invalid", 422)
+        if observed_state in {"STARTING", "ONLINE"} and (
+            type(expected_intent_revision) is not int
+            or expected_intent_revision < 1
+        ):
+            raise ForestError(
+                "DEPLOYMENT_INPUT_INVALID", "Runtime intent fence is required", 422
+            )
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._verify_lease_in(conn, lease)
             exists = await (
@@ -466,6 +474,22 @@ class DeploymentCatalogRepository:
             ).fetchone()
             if exists is None:
                 raise ForestError("BOT_NOT_FOUND", "Ready Bot identity does not exist", 404)
+            if observed_state in {"STARTING", "ONLINE"}:
+                intent = await (
+                    await conn.execute(
+                        "SELECT desired_state,revision FROM forest_deployment.runtime_intents "
+                        "WHERE bot_id=%s FOR UPDATE", (bot_id,),
+                    )
+                ).fetchone()
+                if (
+                    intent is None
+                    or intent["desired_state"] != "ONLINE"
+                    or intent["revision"] != expected_intent_revision
+                ):
+                    raise ForestError(
+                        "BOT_INTENT_CHANGED",
+                        "Bot runtime intent changed during startup", 409,
+                    )
             saved = await (
                 await conn.execute(
                     "INSERT INTO forest_deployment.runtime_observations("

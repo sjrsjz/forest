@@ -56,6 +56,7 @@ async def test_failed_bot_drains_admitted_management_before_closing_host():
         "bot_id": "bot/test",
         "storage_profile_ref": "storage/test",
         "storage_generation": 1,
+        "intent_revision": 2,
     }
     supervisor._runners[bot["bot_id"]] = runner
     task = asyncio.create_task(supervisor._run_bot(bot, runner))
@@ -72,6 +73,64 @@ async def test_failed_bot_drains_admitted_management_before_closing_host():
         assert close_called.is_set()
         assert failed.is_set()
         assert observed == ["STARTING", "ONLINE", "FAILED"]
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_stop_during_start_never_publishes_online_observation():
+    starting = asyncio.Event()
+    finish_start = asyncio.Event()
+    observed = []
+    closed = asyncio.Event()
+
+    class Catalog:
+        async def observe(self, _lease, *, observed_state, **_kwargs):
+            observed.append(observed_state)
+
+    class StorageProfiles:
+        async def resolve(self, **_kwargs):
+            return SimpleNamespace(dsn="postgresql://test")
+
+    class Host:
+        def __init__(self, _settings):
+            self.registry = SimpleNamespace(
+                graph_identity=SimpleNamespace(graph_id="graph/test")
+            )
+            self._supervision_task = None
+
+        async def start(self):
+            starting.set()
+            await finish_start.wait()
+
+        async def close(self):
+            closed.set()
+
+    supervisor = MultiBotSupervisor(
+        Catalog(), storage_profiles=StorageProfiles(),
+        settings_resolver=lambda bot, storage: SimpleNamespace(
+            bot_id=bot["bot_id"], dsn=storage.dsn,
+        ), host_factory=Host,
+    )
+    supervisor.lease = object()
+    runner = _BotRunner(asyncio.Event())
+    bot = {
+        "bot_id": "bot/test",
+        "storage_profile_ref": "storage/test",
+        "storage_generation": 1,
+        "intent_revision": 2,
+    }
+    task = asyncio.create_task(supervisor._run_bot(bot, runner))
+    try:
+        await asyncio.wait_for(starting.wait(), timeout=2)
+        runner.stop.set()
+        finish_start.set()
+        await asyncio.wait_for(task, timeout=2)
+        assert closed.is_set()
+        assert observed == ["STARTING", "STOPPING", "OFFLINE"]
+        assert runner.host is None
+        assert not runner.management_accepting
     finally:
         if not task.done():
             task.cancel()

@@ -50,6 +50,8 @@ OFFLINE → STARTING → ONLINE → PAUSING → PAUSED
 
 目录状态不能冒充 RuntimeGraph 已 ACTIVE，运行状态也不能重命名或删除目录身份。两条状态机通过稳定引用和类型化供应/启动操作协调，不共享一行 status，也不允许 WebUI 用一个“保存 Bot”事务同时覆盖所有模块。
 
+部署监督器从内核目录领取 Bot 启动意图时冻结 `intent_revision`。提交 STARTING 或 ONLINE 观察必须在同一数据库事务内锁定并复核该 Bot 的当前意图仍为 ONLINE 且修订未变；若启动期间管理员改为 OFFLINE，或经历 OFFLINE 后又改回 ONLINE，旧启动只能关闭并记录 OFFLINE，不能发布旧图为 ONLINE 或把正常撤回记作启动失败。Bot 身份和意图的权威仍在内核，`deployment.bot-catalog` 只经受限端口提交修改。
+
 供应计划通过模块描述符验证所选模块、独立存储和必需依赖；Memory 不是内核强制模块，只有所选 RuntimeGraph 声明它为必需依赖时才阻止该图启动。普通暂停由 `kernel.runtime` 关闭 `data_admission`，停止创建新 Run 与业务任务，保留绑定接收、Inbox、持久 Job 记录以及 `control_admission`，因此管理员仍可在群里查询、取消或恢复。已运行工作按 pause 的类型化参数选择排空或取消，不能含糊地假定已停止。恢复按明确积压/过期策略消费，并使用最新 `maintenance_epoch`；旧重载不能覆盖新暂停。真正停止会反向排空 RuntimeGraph 并关闭其连接，不删除记忆，也不保证该 Binding 仍能接收群管理命令。
 
 删除由 `deployment.bot-catalog` 通过受限内核端口发起持久协调操作：依次请求 `kernel.runtime` 冻结接入，各 owner 取消或对账执行、撤权、清理索引及媒体并执行存储保留政策，最后由内核 Bot 目录 authority 标记 DELETED。每个 participant 只改自己的 namespace；任一步失败都保留可恢复状态。`bot_id` 不再复用，备份恢复也不能复制出同时有效的相同身份。

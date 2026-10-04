@@ -266,7 +266,8 @@ class MultiBotSupervisor:
                 if runner.stop.is_set():
                     return
                 await self.catalog.observe(
-                    self.lease, bot_id=bot_id, observed_state="STARTING"
+                    self.lease, bot_id=bot_id, observed_state="STARTING",
+                    expected_intent_revision=bot["intent_revision"],
                 )
                 storage = await self.storage_profiles.resolve(
                     profile_ref=bot["storage_profile_ref"],
@@ -288,15 +289,17 @@ class MultiBotSupervisor:
                 host = self.host_factory(settings)
                 await host.start()
                 graph_id = host.registry.graph_identity.graph_id
-            await self.catalog.observe(
-                self.lease,
-                bot_id=bot_id,
-                observed_state="ONLINE",
-                graph_id=graph_id,
-            )
             if not runner.stop.is_set():
-                runner.host = host
-                runner.management_accepting = True
+                await self.catalog.observe(
+                    self.lease,
+                    bot_id=bot_id,
+                    observed_state="ONLINE",
+                    expected_intent_revision=bot["intent_revision"],
+                    graph_id=graph_id,
+                )
+                if not runner.stop.is_set():
+                    runner.host = host
+                    runner.management_accepting = True
             stop_task = asyncio.create_task(
                 runner.stop.wait(), name="bot-stop-wait/" + bot_id
             )
@@ -350,6 +353,11 @@ class MultiBotSupervisor:
                 except Exception:
                     pass
             code = exc.code if isinstance(exc, ForestError) else "BOT_RUNTIME_FAILED"
+            if code == "BOT_INTENT_CHANGED":
+                await self.catalog.observe(
+                    self.lease, bot_id=bot_id, observed_state="OFFLINE"
+                )
+                return
             try:
                 await self.catalog.observe(
                     self.lease,
