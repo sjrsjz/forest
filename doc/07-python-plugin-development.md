@@ -247,3 +247,7 @@ forest plugin import hello.zip
 - 框架验证跨 Bot 独立状态、旧代迟到写被拒、已提交回复意图继续对账、资源回到基线，以及长任务的 checkpoint 恢复。
 - 框架验证普通群消息未被 Pass/Consumed 丢弃、多个触发在下一模型调用前只推进到最后触发记录、无触发时静默归档/裁剪且 LLM 调用为零、新 Run 首次调用冻结视图且同一 Run 后续只扩展、WAIT/RELOAD 保持同群独占，并在归档/召回中正确保存逐条作者及来源群。
 - SDK 的简单写法与显式完整 Component 必须通过同一份 02/03/04/06 契约测试；便利层不能形成另一条不受监督的运行路径。
+
+## 官方 Bot 级能力授予
+
+普通包的 components.capabilities.requests 只能列出该包已声明的自身服务、领域操作、状态、事件或任务端口；部署批准必须与此请求集合准确一致。宿主随代码交付的官方 Bot 包可另在 components.capabilities.official_bot_grants 中声明 capability 与显式 delegable 布尔值，资源始终由内核绑定为当前 Bot，包不得填写任意 Bot ID。只有官方 bootstrap 路径会将该声明纳入带策略修订的 GrantSet；普通安装包只要出现此字段就会在数据库访问前被拒绝，ZIP 导入或 manifest 自报不能取得官方身份。该声明属于内容寻址工件，热重载时按准确包摘要重新装配授予；BotHost 不维护按组件名分派的授权表。

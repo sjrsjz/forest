@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.job-scheduler"
-version = "1.0.4"
+version = "1.0.5"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "job_scheduler:JobScheduler"
@@ -37,6 +37,11 @@ requests = [
   "domain.query:job.cancellation-requested",
   "domain.command:jobs.enqueue",
   "domain.command:jobs.cancel"
+]
+official_bot_grants = [
+  { capability = "job.read", delegable = false },
+  { capability = "job.run", delegable = false },
+  { capability = "job.cancel", delegable = false },
 ]
 
 [[components.contribution_directories]]

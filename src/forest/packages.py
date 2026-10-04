@@ -254,7 +254,22 @@ MANIFEST_SCHEMA = {
                     "capabilities": {
                         "type": "object",
                         "additionalProperties": False,
-                        "properties": {"requests": {"type": "array", "items": {"type": "string"}}},
+                        "properties": {
+                            "requests": {"type": "array", "items": {"type": "string"}},
+                            "official_bot_grants": {
+                                "type": "array",
+                                "maxItems": 16,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": False,
+                                    "required": ["capability", "delegable"],
+                                    "properties": {
+                                        "capability": {"type": "string"},
+                                        "delegable": {"type": "boolean"},
+                                    },
+                                },
+                            },
+                        },
                     },
                     "contribution_directories": {
                         "type": "array",
@@ -2228,6 +2243,20 @@ def _manifest(files: dict[str, bytes]) -> dict:
         _fail(
             "UNSUPPORTED_CAPABILITY",
             "Capabilities must name an explicitly declared payload, state, service, event, or job operation",
+        )
+    official_bot_grants = component.get("capabilities", {}).get("official_bot_grants", ())
+    granted_names = [item["capability"] for item in official_bot_grants]
+    if (
+        (
+            "official_bot_grants" in component.get("capabilities", {})
+            and component["scope"] != "bot"
+        )
+        or any(IDENTIFIER.fullmatch(name) is None for name in granted_names)
+        or len(granted_names) != len(set(granted_names))
+    ):
+        _fail(
+            "INVALID_OFFICIAL_BOT_GRANTS",
+            "Official Bot grants require Bot scope and unique capability names",
         )
     for relative, source in files.items():
         if relative.endswith(".py"):

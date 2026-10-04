@@ -66,6 +66,25 @@ async def test_installed_package_rejects_official_sql_before_database_access(tmp
     assert rejected.value.code == "PACKAGE_STORAGE_TRUST_REQUIRED"
 
 
+@pytest.mark.asyncio
+async def test_installed_package_cannot_claim_official_bot_grants(tmp_path):
+    catalog = PackageCatalog(tmp_path / "catalog")
+    source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/job_scheduler"
+    snapshot = catalog.build(source_root)
+    requested = tuple(snapshot.component["capabilities"]["requests"])
+    with pytest.raises(ForestError) as rejected:
+        await bootstrap_installed_package(
+            snapshot.digest,
+            catalog,
+            None,
+            None,
+            kernel=None,
+            initial_configuration={},
+            approved_capabilities=requested,
+        )
+    assert rejected.value.code == "PACKAGE_OFFICIAL_GRANTS_FORBIDDEN"
+
+
 def source(tmp_path):
     path = tmp_path / "source"
     shutil.copytree(EXAMPLE, path)

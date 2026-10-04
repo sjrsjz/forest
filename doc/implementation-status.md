@@ -778,3 +778,5 @@ READY 官方包候选预检（2026-10-04）：官方包运行图在执行 schema
 Worker Host 配置重建状态查询直连领域端口（2026-10-04）：配置重建状态本来就是同包 SQL 领域查询，原管理入口却先调 Python Worker 的纯转发服务，使热替换压力下读请求可能超过 Worker 调用期限。现将 management query 直接绑定 component.configuration-rebuild.read，删除冗余转发服务并提升包版本。包契约测试 96 passed、1 skipped；隔离 PostgreSQL 的 Embedding Secret 轮换、图替换和重启核对 1 passed（184.74 秒）；Ruff 通过。状态读取超时已在该用例消失，但完整候选图装配仍然缓慢，后续需单独缩短装配时长。
 
 官方候选包有界并发捕获（2026-10-04）：隔离热替换分段计时显示首次官方包捕获约 25.8 秒、首次装配约 53.9 秒；第二次捕获约 22.0 秒、第二次装配约 36.6 秒。BotHost 现用至多四个线程并发构建 16 个自动安装包的内容寻址快照，完整等待并检查全部结果，再按原顺序逐包装配；Worker Host 自身捕获也移出事件循环。每次替换仍重新读取源码并验证准确摘要，未引入时间戳缓存。隔离 PostgreSQL 的 Worker Host 自身热重载在此调整后两次通过（102.88 秒、最终版 103.11 秒；对照串行版 118.06 秒）；Ruff 与差异检查通过。包 Generation 的 schema、配置和授权装配仍是串行，整体热替换仍偏慢。
+
+官方 Bot 授权归包（2026-10-04）：Memory、Agent、Job Scheduler、Delivery、Shell 五个 builtin 包在各自 manifest 中声明 Bot 级能力及是否可委派，通用包装配器按当前 Bot ID 和内核策略修订创建 GrantSet；删除 BotHost 按组件名硬编码的授权表及 additional_grants 旁路。普通安装包即使提交带 official_bot_grants 的内容寻址工件，也会在数据库访问前被拒绝。包目录 97 passed、1 skipped；隔离 PostgreSQL 的完整 Bot 热重载 1 passed、Job Scheduler 的准确授权及热重载 1 passed；Ruff 通过。五个官方包版本随 manifest 变更提升，预发布旧冻结 Profile 与运行图在继续使用前需按新包摘要重建或显式更新，在线旧实例未切换。

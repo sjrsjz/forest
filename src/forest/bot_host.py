@@ -53,7 +53,6 @@ from forest.runtime_modules import (
 )
 from forest.shell_management_authority import ShellManagementAuthorization
 from forest.standalone_bot_bootstrap import standalone_creation_components
-from forest.storage.authorization_authority import CapabilityGrant
 from forest.storage.bot_store import BotStore
 from forest.storage.schema_bundles import SchemaBundleInstaller
 from forest.vector_index_effect_driver import milvus_vector_index_effect_driver_factory
@@ -559,26 +558,6 @@ class BotHost:
             credential_resolver=resolve_onebot_secret,
             **adapter_driver_options,
         )
-        bootstrap_grants = {
-            "memory_graph": (
-                CapabilityGrant("embedding.invoke", "bot", self.store.bot_id, delegable=True),
-            ),
-            "agent_runtime": (
-                CapabilityGrant("provider.invoke", "bot", self.store.bot_id, delegable=True),
-            ),
-            "job_scheduler": (
-                CapabilityGrant("job.read", "bot", self.store.bot_id),
-                CapabilityGrant("job.run", "bot", self.store.bot_id),
-                CapabilityGrant("job.cancel", "bot", self.store.bot_id),
-            ),
-            "delivery": (
-                CapabilityGrant("delivery.intent", "bot", self.store.bot_id),
-                CapabilityGrant("delivery.send", "bot", self.store.bot_id, delegable=True),
-            ),
-            "shell_command": (
-                CapabilityGrant("management.invoke", "bot", self.store.bot_id, delegable=True),
-            ),
-        }
         configuration_validators = {
             "process_executor": process_executor_configuration_validator_factory(),
         }
@@ -661,7 +640,6 @@ class BotHost:
                 initial_configuration=initial_configuration,
                 effect_driver_registry=automatic_effect_drivers,
                 configuration_validator_factory=configuration_validators.get(source.name),
-                additional_grants=bootstrap_grants.get(source.name, ()),
             )
             automatic.append(provisioned.descriptor)
         official_descriptors = (

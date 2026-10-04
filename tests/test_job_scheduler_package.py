@@ -15,7 +15,6 @@ from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog
 from forest.runtime_modules import ModuleLifecycleState, RuntimeModuleRegistry
-from forest.storage.authorization_authority import CapabilityGrant
 
 
 @pytest.mark.postgres
@@ -32,12 +31,15 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
         installer,
         kernel=kernel,
         initial_configuration={"protocol": "forest.job.scheduler/1"},
-        additional_grants=(
-            CapabilityGrant("job.read", "bot", store.bot_id),
-            CapabilityGrant("job.run", "bot", store.bot_id),
-            CapabilityGrant("job.cancel", "bot", store.bot_id),
-        ),
     )
+    assert {
+        (grant.capability, grant.resource_kind, grant.resource_id, grant.delegable)
+        for grant in package.grants.entries
+        if grant.capability.startswith("job.")
+    } == {
+        (capability, "bot", store.bot_id, False)
+        for capability in ("job.read", "job.run", "job.cancel")
+    }
     observer = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/component_worker_host",
         catalog,
@@ -55,6 +57,7 @@ async def test_job_scheduler_package_executes_graph_frozen_type_and_reloads(
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
         resolve_management_action_preflight=(

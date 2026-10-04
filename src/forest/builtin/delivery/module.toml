@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.4.2"
+version = "0.4.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -41,6 +41,10 @@ requests = [
   "uow.execute:delivery.observe",
   "uow.execute:delivery.release",
   "uow.execute:delivery.abandon"
+]
+official_bot_grants = [
+  { capability = "delivery.intent", delegable = false },
+  { capability = "delivery.send", delegable = true },
 ]
 
 [[components.requires]]

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.shell-command"
-version = "1.2.2"
+version = "1.2.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "shell_command:ShellCommand"
@@ -43,6 +43,7 @@ requests = [
   "uow.execute:shell.complete",
   "uow.execute:shell.complete-rejection"
 ]
+official_bot_grants = [{ capability = "management.invoke", delegable = true }]
 
 [[components.contribution_directories]]
 kind = "shell-commands"

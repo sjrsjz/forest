@@ -286,6 +286,12 @@ def _installed_package_layout(
             "Bot package assembly requires a Bot-scoped component",
             422,
         )
+    if "official_bot_grants" in component.get("capabilities", {}):
+        raise ForestError(
+            "PACKAGE_OFFICIAL_GRANTS_FORBIDDEN",
+            "Installed packages cannot declare official Bot grants",
+            403,
+        )
     requested = frozenset(component.get("capabilities", {}).get("requests", ()))
     if (
         not isinstance(approved_capabilities, tuple)
@@ -585,7 +591,6 @@ async def bootstrap_builtin_package(
     resolved_contracts: dict[str, str] | None = None,
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     configuration_validator_factory: Callable[[str], Callable] | None = None,
-    additional_grants: tuple[CapabilityGrant, ...] = (),
 ) -> ProvisionedPackageModule:
     """Build and provision one builtin through the same immutable package path."""
 
@@ -596,7 +601,6 @@ async def bootstrap_builtin_package(
         resolved_contracts=resolved_contracts,
         effect_driver_registry=effect_driver_registry,
         configuration_validator_factory=configuration_validator_factory,
-        additional_grants=additional_grants,
     )
 
 
@@ -610,7 +614,6 @@ async def bootstrap_builtin_snapshot(
     resolved_contracts: dict[str, str] | None = None,
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     configuration_validator_factory: Callable[[str], Callable] | None = None,
-    additional_grants: tuple[CapabilityGrant, ...] = (),
 ) -> ProvisionedPackageModule:
     """Provision the exact captured official artifact inspected by its caller."""
 
@@ -623,7 +626,6 @@ async def bootstrap_builtin_snapshot(
         resolved_contracts=resolved_contracts,
         effect_driver_registry=effect_driver_registry,
         configuration_validator_factory=configuration_validator_factory,
-        additional_grants=additional_grants,
         trust_level="official",
     )
 
@@ -805,7 +807,6 @@ async def _bootstrap_package_snapshot(
     resolved_contracts: dict[str, str] | None = None,
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     configuration_validator_factory: Callable[[str], Callable] | None = None,
-    additional_grants: tuple[CapabilityGrant, ...] = (),
     approved_capabilities: tuple[str, ...] | None = None,
     trust_level: str,
 ) -> ProvisionedPackageModule:
@@ -881,7 +882,16 @@ async def _bootstrap_package_snapshot(
                 CapabilityGrant(capability, "component", component_id)
                 for capability in requested
             ),
-            *additional_grants,
+            *(
+                CapabilityGrant(
+                    item["capability"], "bot", store.bot_id,
+                    delegable=item["delegable"],
+                )
+                for item in snapshot.component.get("capabilities", {}).get(
+                    "official_bot_grants", ()
+                )
+                if trust_level == "official"
+            ),
         ),
         expected_policy_revision=policy_revision,
     )
