@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.74.2"
+version = "1.75.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -274,9 +274,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.64.0"
+schema_version = "3.65.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "bfd66ae618afe3194b32039aad5648df59c880c5b8c2078e94b3273a31b806ce"
+baseline_sha256 = "cc308d729200b0cfe3a01148d48204d0f44f949525666e1feedbb6ae20f056e7"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -322,6 +322,13 @@ contract = "1.0"
 function = "memory_query_sources"
 input_schema = "schemas/query-sources-input.json"
 output_schema = "schemas/query-sources-output.json"
+
+[[components.domain_queries]]
+name = "memory.query-source-facets"
+contract = "1.0"
+function = "memory_query_source_embedding_facets"
+input_schema = "schemas/query-source-facets-input.json"
+output_schema = "schemas/query-source-facets-output.json"
 
 [[components.domain_queries]]
 name = "memory.query-forget-selection"
@@ -443,6 +450,14 @@ timeout_s = 10
 [[components.management_queries]]
 id = "memory.sources.query"
 port = "memory.query-sources"
+default_limit = 50
+max_limit = 100
+timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.source-facets.query"
+port = "memory.query-source-facets"
+required_role = "ADMIN"
 default_limit = 50
 max_limit = 100
 timeout_s = 10

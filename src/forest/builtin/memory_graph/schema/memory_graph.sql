@@ -1263,6 +1263,9 @@ CREATE INDEX embedding_facets_ready_source_idx ON embedding_facets(
 CREATE INDEX embedding_facets_unknown_source_idx ON embedding_facets(
     bot_id,source_unit_id
 ) WHERE purpose='DOCUMENT' AND state='UNKNOWN';
+CREATE INDEX embedding_facets_source_page_idx ON embedding_facets(
+    bot_id,source_unit_id,source_revision,facet_id
+) WHERE purpose='DOCUMENT';
 CREATE INDEX embedding_facets_query_idx ON embedding_facets(
     bot_id,query_id,purpose,state,facet_id
 );
@@ -8584,6 +8587,81 @@ BEGIN
             'filter_digest',filter_digest,
             'items',items,'has_more',more,
             'next_cursor',CASE WHEN more THEN cursor_value ELSE NULL END));
+END;
+$$;
+
+CREATE FUNCTION memory_query_source_embedding_facets(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_unit text := input->>'source_unit_id';
+    requested_state text := input->>'state';
+    after_facet text := input->>'after_facet_id';
+    page_limit integer := COALESCE((input->>'limit')::integer,50);
+    source_row record;
+    items jsonb;
+    more boolean;
+    next_after text;
+BEGIN
+    IF jsonb_typeof(input) IS DISTINCT FROM 'object'
+       OR input - ARRAY['source_unit_id','state','after_facet_id','limit']::text[]
+           <> '{}'::jsonb
+       OR requested_unit IS NULL OR octet_length(requested_unit) NOT BETWEEN 1 AND 256
+       OR (requested_state IS NOT NULL AND requested_state NOT IN
+           ('PENDING','PREPARED','DISPATCHED','EMBEDDED','READY','UNKNOWN',
+            'FAILED','SUPPRESSED'))
+       OR (after_facet IS NOT NULL AND octet_length(after_facet) NOT BETWEEN 1 AND 256)
+       OR page_limit NOT BETWEEN 1 AND 100 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Source facet query is invalid','status',422));
+    END IF;
+    SELECT u.source_id,u.source_revision,u.trunk_id,s.external_group_id,
+        u.author_subject_ref INTO source_row
+    FROM __forest_module_schema__.source_units u
+    JOIN __forest_module_schema__.memory_sources s
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+    WHERE u.bot_id=requested_bot AND u.source_unit_id=requested_unit;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_SOURCE_NOT_FOUND',
+                'message','Source unit does not exist','status',404));
+    END IF;
+    WITH page AS (
+        SELECT f.facet_id,f.part_id,f.modality,f.state,f.failure_code,
+            f.created_at,f.current_attempt_id AS attempt_id,
+            a.claim_id,a.state AS attempt_state,a.effect_operation_id,
+            a.executor_generation_id,a.dispatched_at,a.settled_at,
+            r.budget_day::text AS budget_day,
+            r.state AS reservation_state,r.reserved_tokens,r.charged_tokens,
+            r.error_code AS reservation_error_code
+        FROM __forest_module_schema__.embedding_facets f
+        LEFT JOIN __forest_module_schema__.embedding_batch_attempts a
+          ON a.bot_id=f.bot_id AND a.attempt_id=f.current_attempt_id
+        LEFT JOIN __forest_module_schema__.embedding_budget_reservations r
+          ON r.bot_id=a.bot_id AND r.reservation_id=a.reservation_id
+        WHERE f.bot_id=requested_bot AND f.source_unit_id=requested_unit
+          AND f.source_revision=source_row.source_revision AND f.purpose='DOCUMENT'
+          AND (requested_state IS NULL OR f.state=requested_state)
+          AND (after_facet IS NULL OR f.facet_id>after_facet)
+        ORDER BY f.facet_id LIMIT page_limit+1
+    ), visible AS (
+        SELECT * FROM page ORDER BY facet_id LIMIT page_limit
+    )
+    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.facet_id)
+                     FROM visible v),'[]'::jsonb),
+           (SELECT count(*)>page_limit FROM page),
+           (SELECT v.facet_id FROM visible v ORDER BY v.facet_id DESC LIMIT 1)
+    INTO items,more,next_after;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'source_unit_id',requested_unit,'source_id',source_row.source_id,
+            'source_revision',source_row.source_revision,
+            'trunk_id',source_row.trunk_id,
+            'external_group_id',source_row.external_group_id,
+            'author_subject_ref',source_row.author_subject_ref,
+            'items',items,'has_more',more,
+            'next_after',CASE WHEN more THEN next_after ELSE NULL END));
 END;
 $$;
 

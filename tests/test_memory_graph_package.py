@@ -1015,6 +1015,31 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
                 selected_unknown["result"]["value"]["items"]] == ["unit/newest"]
         assert [item["unknown_document_facet_count"] for item in
                 fresh["result"]["value"]["items"]] == [1, 0, 0]
+        first_facet = await (await reader.execute(
+            sql.SQL("SELECT {}.memory_query_source_embedding_facets(%s,%s) AS result").format(
+                namespace
+            ),
+            (Jsonb({"bot_id": store.bot_id}),
+             Jsonb({"source_unit_id": "unit/newest", "limit": 1})),
+        )).fetchone()
+        facet_page = first_facet["result"]["value"]
+        Draft202012Validator(package.snapshot.schema(
+            "schemas/query-source-facets-output.json"
+        )).validate(facet_page)
+        assert [item["state"] for item in facet_page["items"]] == ["READY"]
+        assert facet_page["has_more"] is True
+        second_facet = await (await reader.execute(
+            sql.SQL("SELECT {}.memory_query_source_embedding_facets(%s,%s) AS result").format(
+                namespace
+            ),
+            (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                "source_unit_id": "unit/newest", "state": "UNKNOWN",
+                "after_facet_id": facet_page["next_after"],
+            })),
+        )).fetchone()
+        assert [item["facet_id"] for item in
+                second_facet["result"]["value"]["items"]] == ["facet/newest/1"]
+        assert second_facet["result"]["value"]["items"][0]["attempt_id"] is None
         for coverage, expected in (
             ("PARTIAL", "unit/newest"),
             ("NO_FACETS", "unit/late"),
@@ -2947,6 +2972,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )
@@ -4008,6 +4034,38 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 ) for row in facet_states)
                 assert all((row["result_payload_id"] == "payload/embedding-result")
                            == (result_ref is not None) for row in facet_states)
+            if resolution == "UNKNOWN":
+                async with store.pool.connection() as conn:
+                    details = await (await conn.execute(sql.SQL(
+                        "SELECT {}.memory_query_source_embedding_facets(%s,%s) AS result"
+                    ).format(sql.Identifier(namespace)), (
+                        Jsonb({"bot_id": store.bot_id}),
+                        Jsonb({"source_unit_id": "unit/event/captured", "state": "UNKNOWN"}),
+                    ))).fetchone()
+                detail_page = details["result"]["value"]
+                Draft202012Validator(package.snapshot.schema(
+                    "schemas/query-source-facets-output.json"
+                )).validate(detail_page)
+                assert len(detail_page["items"]) == 2
+                assert {item["modality"] for item in detail_page["items"]} == {
+                    "TEXT", "IMAGE"
+                }
+                assert all(item["attempt_id"] == "attempt/embedding/claim"
+                           and item["claim_id"] == claim_id
+                           and item["attempt_state"] == "UNKNOWN"
+                           and item["effect_operation_id"] == "effect/embedding/claim"
+                           and item["reservation_state"] == "UNKNOWN"
+                           and item["reserved_tokens"] > 0
+                           and item["budget_day"] is not None
+                           for item in detail_page["items"])
+                managed = await instance.management_contract.query_authorized(
+                    "memory.source-facets.query",
+                    {"source_unit_id": "unit/event/captured", "state": "UNKNOWN"},
+                    authorization=SimpleNamespace(
+                        actor_ref="admin/one", web_subject_ref="admin/one"
+                    ),
+                )
+                assert managed == detail_page
             return
 
         identity = instance.generation_identity
