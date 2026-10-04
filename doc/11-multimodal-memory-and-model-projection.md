@@ -1,6 +1,6 @@
 # 多模态记忆、图片召回与模型输入投影详细设计
 
-本文定义 Forest 的文本与图片完整记忆链路，以及实际调用的 LLM 不支持图片时的出站投影。它补充 [04 记忆设计](04-bot-agent-memory.md)、[08 群聊交互](08-group-context-interaction.md)和 [10 多主干记忆图](10-multi-trunk-memory-graph.md)。以下接口与验收条件均为待实现设计，不代表已集成某个模型供应商。
+本文定义 Forest 的文本与图片完整记忆链路，以及实际调用的 LLM 不支持图片时的出站投影。它补充 [04 记忆设计](04-bot-agent-memory.md)、[08 群聊交互](08-group-context-interaction.md)和 [10 多主干记忆图](10-multi-trunk-memory-graph.md)。这些是模块间的实现契约；当前落地与逐项验收证据见[实施状态](implementation-status.md)，不能把契约文字当成未验收路径已通过的证明。
 
 ## 1. 必须同时成立的约束
 
