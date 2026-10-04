@@ -192,6 +192,8 @@ Embedding 返回 `EmbeddingEncodeObservation`：固定 request/attempt、空间�
 
 热替换时，Memory claim 固定准确 Embedding Generation 与契约版本。交接前失败可按相同 facet 创建新 attempt；交接后失去结果必须保持 `UNKNOWN` 并向原 Generation/外部 effect 查询，不能换 endpoint 重发。Embedding endpoint 或凭据轮换会建立新 Generation，但只有声明与 Bot 已冻结 `EmbeddingSpaceIdentity` 完全兼容时才可进入 RuntimeGraph；模型种类、修订、维度、预处理、归一化或对齐语义变化仍必须拒绝。
 
+生产 Supervisor 给 Bot Host 注入受限的部署 Secret 解析端口。Effect Driver 在准确包 Generation 启动时，按该 Generation 已冻结的配置引用读取凭据；端口同时核对 Provider、Embedding、向量索引或 OneBot 各自固定的 Secret 用途，包 Worker 不接触明文。因此配置换代可以改用同用途的新 Secret 引用，不再被创建 Bot 时的 bootstrap 引用锁死。同一引用的 Secret 版本更新不会改写已经运行的网络客户端；须热重载相应组件，使新 Generation 读取当前版本。没有部署 Secret 端口的本地单 Bot 启动仍只能使用其启动配置中提供的引用与明文。
+
 `QUEUED / WAIT_MEDIA / ENCODING / READY / RETRYABLE_FAILURE / UNSUPPORTED / SUPPRESSED` 是索引工件状态，独立于媒体状态和来源是否可见。积压、预算耗尽和模型暂不可用进入可恢复状态；源删除后进入 SUPPRESSED，不继续向旧索引写入。
 
 领取编码前固定实际媒体物化版本、blob_digest 和全部变换，纳入 encoded_media_manifest 与缓存键。仅有 media_id 或“图片稍后可用”的占位不能命中一个有效图片向量；媒体尚未获取时也不能先编码空值，随后以相同 cache key 偷换成真实图片。

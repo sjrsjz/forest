@@ -323,6 +323,7 @@ class BotHost:
         vector_index_client_factory=None,
         media_client_factory=None,
         websocket_client_factory=None,
+        credential_resolver=None,
         package_catalog=None,
         package_registry_reader=None,
     ) -> None:
@@ -346,6 +347,7 @@ class BotHost:
         self._vector_index_client_factory = vector_index_client_factory
         self._media_client_factory = media_client_factory
         self._websocket_client_factory = websocket_client_factory
+        self._credential_resolver = credential_resolver
         self.package_catalog = package_catalog or PackageCatalog(
             Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
         )
@@ -374,6 +376,18 @@ class BotHost:
     def notify(self) -> None:
         if self.registry is not None:
             self.registry.notify_work()
+
+    async def _resolve_effect_credential(
+        self, secret_ref: str, *, purpose: str, initial_ref: str,
+        initial_value: str, error_code: str,
+    ) -> str:
+        if self._credential_resolver is not None:
+            if not secret_ref and purpose == "vector.index.credential":
+                return ""
+            return await self._credential_resolver(secret_ref, purpose)
+        if secret_ref != initial_ref:
+            raise ForestError(error_code, "Credential reference differs", 409)
+        return initial_value
 
     def resolve_management_action_preflight(
         self, identifier: str, *, component_id: str, package_digest: str,
@@ -413,13 +427,12 @@ class BotHost:
             max_output_tokens=self.settings.model_max_output_tokens,
         )
         async def resolve_provider_secret(secret_ref, _revision):
-            if secret_ref != self.settings.model_credential_ref:
-                raise ForestError(
-                    "PROVIDER_CREDENTIAL_UNAVAILABLE",
-                    "Provider credential reference differs",
-                    409,
-                )
-            return self.settings.model_api_key
+            return await self._resolve_effect_credential(
+                secret_ref, purpose="provider.chat-completions.credential",
+                initial_ref=self.settings.model_credential_ref,
+                initial_value=self.settings.model_api_key,
+                error_code="PROVIDER_CREDENTIAL_UNAVAILABLE",
+            )
 
         provider_driver_options = {}
         if self._model_client_factory is not None:
@@ -464,13 +477,12 @@ class BotHost:
             "dimensions": self.settings.embedding_dimensions,
         }
         async def resolve_embedding_secret(secret_ref, _revision):
-            if secret_ref != self.settings.embedding_credential_ref:
-                raise ForestError(
-                    "EMBEDDING_CREDENTIAL_UNAVAILABLE",
-                    "Embedding credential reference differs",
-                    409,
-                )
-            return self.settings.embedding_api_key
+            return await self._resolve_effect_credential(
+                secret_ref, purpose="embedding.multimodal.credential",
+                initial_ref=self.settings.embedding_credential_ref,
+                initial_value=self.settings.embedding_api_key,
+                error_code="EMBEDDING_CREDENTIAL_UNAVAILABLE",
+            )
 
         embedding_driver_options = {}
         if self._embedding_client_factory is not None:
@@ -484,13 +496,12 @@ class BotHost:
         )
 
         async def resolve_vector_index_token(secret_ref, _revision):
-            if secret_ref != self.settings.vector_index_credential_ref:
-                raise ForestError(
-                    "VECTOR_INDEX_CREDENTIAL_UNAVAILABLE",
-                    "Vector index credential reference differs",
-                    409,
-                )
-            return self.settings.vector_index_token
+            return await self._resolve_effect_credential(
+                secret_ref, purpose="vector.index.credential",
+                initial_ref=self.settings.vector_index_credential_ref,
+                initial_value=self.settings.vector_index_token,
+                error_code="VECTOR_INDEX_CREDENTIAL_UNAVAILABLE",
+            )
 
         vector_index_driver_options = {}
         if self._vector_index_client_factory is not None:
@@ -528,13 +539,12 @@ class BotHost:
             expected_deletion_epoch=await self._kernel.payload.epoch(),
         )
         async def resolve_onebot_secret(secret_ref, _configuration_revision):
-            if secret_ref != self.settings.onebot_secret_ref:
-                raise ForestError(
-                    "ONEBOT_CREDENTIAL_UNAVAILABLE",
-                    "OneBot credential reference differs",
-                    409,
-                )
-            return self.settings.onebot_access_token
+            return await self._resolve_effect_credential(
+                secret_ref, purpose="adapter.onebot.access-token",
+                initial_ref=self.settings.onebot_secret_ref,
+                initial_value=self.settings.onebot_access_token,
+                error_code="ONEBOT_CREDENTIAL_UNAVAILABLE",
+            )
 
         adapter_driver_options = {}
         if self._websocket_client_factory is not None:

@@ -1424,6 +1424,128 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
 
 
 @pytest.mark.postgres
+async def test_embedding_configuration_can_rotate_its_secret_reference(tmp_path):
+    dsn = os.environ.get("FOREST_TEST_DSN")
+    if not dsn:
+        pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
+    name = "forest_secret_rotation_" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    parsed = urlsplit(dsn)
+    uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
+    settings = BotSettings(
+        bot_id="bot-secret-rotation", dsn=uri,
+        model_base_url="http://127.0.0.1:8000/v1", model_api_key="old-model-key",
+        model="test-model", model_deployment_id="provider.chat-completions/test",
+        model_max_output_tokens=1024, model_input_modalities=("text",),
+        embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
+        embedding_api_key="old-embedding-key",
+        embedding_deployment_id="embedding.multimodal/qiyu-vl/test",
+        embedding_model_revision="test-revision/1",
+        embedding_model="Qwen/Qwen3-VL-Embedding-8B", embedding_dimensions=4096,
+        onebot_self_id="123456789", onebot_websocket_url="ws://127.0.0.1:3001/",
+        onebot_access_token="old-onebot-token", allowed_group_ids=("933179609",),
+        group_trigger_mode="MENTION", private_enabled=True,
+        shell_administrator_ids=("42",), agent_system_prompt="Secret rotation fixture.",
+    )
+    rotated_ref = "secret://embedding.multimodal/rotated"
+    resolved = []
+
+    async def resolve_secret(secret_ref, purpose):
+        resolved.append((secret_ref, purpose))
+        if purpose == "embedding.multimodal.credential" and secret_ref == rotated_ref:
+            return "new-embedding-key"
+        return {
+            (settings.model_credential_ref, "provider.chat-completions.credential"):
+                "old-model-key",
+            (settings.embedding_credential_ref, "embedding.multimodal.credential"):
+                "old-embedding-key",
+            (settings.onebot_secret_ref, "adapter.onebot.access-token"):
+                "old-onebot-token",
+        }[(secret_ref, purpose)]
+
+    class RecordingEmbeddingClient(FakeEmbeddingClient):
+        credentials = []
+
+        def __init__(self, endpoint, credential, profile, **limits):
+            super().__init__(endpoint, credential, profile, **limits)
+            self.credentials.append(credential)
+
+    async def create_websocket(_url, _token, **_limits):
+        return FakeWebSocketClient(settings.onebot_self_id)
+
+    host = BotHost(
+        settings,
+        credential_resolver=resolve_secret,
+        model_client_factory=FakeModelClient,
+        embedding_client_factory=RecordingEmbeddingClient,
+        media_client_factory=FakeMediaClient,
+        vector_index_client_factory=FakeMilvusClient,
+        websocket_client_factory=create_websocket,
+        package_catalog=PackageCatalog(tmp_path / "secret-rotation-packages"),
+    )
+    try:
+        await host.start()
+        try:
+            assert RecordingEmbeddingClient.credentials[-1] == "old-embedding-key"
+            graph = host.registry.graph_identity
+            embedding = host.registry.get("embedding.multimodal")
+            current = await embedding.management_contract.read()
+            changed = {
+                **current["desired"]["value"],
+                "credential_ref": rotated_ref,
+            }
+            plan = await embedding.management_contract.plan(
+                operation_id="test:embedding-secret-plan",
+                expected_desired_revision=current["desired"]["revision"],
+                value=changed,
+            )
+            committed = await embedding.management_contract.apply(
+                operation_id="test:embedding-secret-apply",
+                plan_id=plan["plan_id"],
+                expected_desired_revision=current["desired"]["revision"],
+                authorization=SimpleNamespace(
+                    target_graph_revision=graph.graph_revision,
+                    web_subject_ref="subject/test-admin",
+                ),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            request_id = committed["rebuild"]["request_id"]
+            async with asyncio.timeout(180):
+                while True:
+                    try:
+                        result = await host.registry.get(
+                            "component.worker-host"
+                        ).management_contract.query(
+                            "configuration-rebuild", {"request_id": request_id}
+                        )
+                    except ForestError as error:
+                        if error.status != 409:
+                            raise
+                        await asyncio.sleep(0.2)
+                        continue
+                    if result["state"] in {"EFFECTIVE", "REBUILD_FAILED"}:
+                        break
+                    await asyncio.sleep(0.2)
+            assert result["state"] == "EFFECTIVE", result
+            assert host.registry.graph_identity.graph_revision > graph.graph_revision
+            assert RecordingEmbeddingClient.credentials[-1] == "new-embedding-key"
+            assert (rotated_ref, "embedding.multimodal.credential") in resolved
+            effective = await host.registry.get(
+                "embedding.multimodal"
+            ).management_contract.read()
+            assert effective["effective"]["value"]["profile"] == (
+                current["effective"]["value"]["profile"]
+            )
+        finally:
+            await host.close()
+    finally:
+        assert name.startswith("forest_secret_rotation_") and len(name) == 55
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        await admin.close()
+
+
+@pytest.mark.postgres
 async def test_worker_host_can_reload_its_own_generation(tmp_path):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:

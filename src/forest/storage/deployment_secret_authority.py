@@ -219,6 +219,16 @@ class DeploymentSecretAuthority:
     async def resolve_text(self, secret_ref: str) -> str:
         return self._decode_text(await self.resolve(secret_ref))
 
+    async def resolve_text_for_purpose(self, secret_ref: str, purpose: str) -> str:
+        """Resolve one current secret through a purpose-limited native port."""
+
+        _bounded(purpose, "purpose", 256)
+        async with self.store.pool.connection() as conn:
+            row = await self._current_in(conn, secret_ref)
+        if row["purpose"] != purpose:
+            raise ForestError("SECRET_PURPOSE_CONFLICT", "Secret purpose differs", 409)
+        return self._decode_text(await self._decrypt(secret_ref, row))
+
     async def resolve_text_in(self, conn, secret_ref: str) -> str:
         return self._decode_text(await self.resolve_in(conn, secret_ref))
 

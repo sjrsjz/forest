@@ -191,6 +191,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         return BotHost(
             bot_settings, package_catalog=package_catalog,
             package_registry_reader=read_deployment_packages,
+            credential_resolver=secrets.resolve_text_for_purpose,
         )
 
     settings_resolver = OfficialBotSettingsResolver(secrets=secrets)

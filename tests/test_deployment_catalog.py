@@ -2218,6 +2218,14 @@ async def test_deployment_secret_rotation_is_encrypted_cas_and_write_only(
     assert first.version == first.revision == 1
     assert not hasattr(first, "plaintext")
     assert await secrets.resolve_text(first.secret_ref) == "model-secret-value"
+    assert await secrets.resolve_text_for_purpose(
+        first.secret_ref, "provider.chat-completions.credential"
+    ) == "model-secret-value"
+    with pytest.raises(ForestError) as wrong_purpose:
+        await secrets.resolve_text_for_purpose(
+            first.secret_ref, "embedding.multimodal.credential"
+        )
+    assert wrong_purpose.value.code == "SECRET_PURPOSE_CONFLICT"
 
     second = await secrets.put(
         operation_id="secret/model/2",
@@ -2228,6 +2236,9 @@ async def test_deployment_secret_rotation_is_encrypted_cas_and_write_only(
     )
     assert second.version == second.revision == 2
     assert await secrets.resolve(second.secret_ref) == b"rotated-model-secret"
+    assert await secrets.resolve_text_for_purpose(
+        second.secret_ref, "provider.chat-completions.credential"
+    ) == "rotated-model-secret"
     with pytest.raises(ForestError) as caught:
         await secrets.put(
             operation_id="secret/model/stale",
