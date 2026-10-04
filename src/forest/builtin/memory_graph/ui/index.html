@@ -98,7 +98,7 @@
     const rows=$('facet-rows');rows.replaceChildren();
     for(const item of page.items){
       const box=document.createElement('div');box.className='relation detail';
-      box.textContent=`${item.modality} · ${item.state} · ${item.facet_id} · part ${item.part_id} · ${stamp(item.created_at)}\n批次 ${item.claim_id??'—'} · attempt ${item.attempt_id??'—'} · ${item.attempt_state??'—'} · effect ${item.effect_operation_id??'—'}\n预算 ${item.budget_day??'—'} · ${item.reservation_state??'—'} · 预留 ${item.reserved_tokens??'—'} token · 实耗 ${item.charged_tokens??'—'} · 错误 ${item.failure_code??item.reservation_error_code??'—'}`;
+      box.textContent=`${item.modality} · ${item.state} · ${item.facet_id} · part ${item.part_id} · ${stamp(item.created_at)}\n批次 ${item.claim_id??'—'} · attempt ${item.attempt_id??'—'} · ${item.attempt_state??'—'} · effect ${item.effect_operation_id??'—'}\n预算 ${item.budget_day??'—'} · ${item.reservation_state??'—'} · 估计预留 ${item.reserved_tokens??'—'} token · 实耗 ${item.charged_tokens??'—'} · 错误 ${item.failure_code??item.reservation_error_code??'—'}`;
       rows.append(box);
     }
     if(!page.items.length)rows.textContent='没有匹配的当前修订文档 facet。';

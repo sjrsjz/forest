@@ -89,8 +89,28 @@ frame.addEventListener('load',()=>{
       value={protocol:'forest.memory-forget-batch-enqueued/1',request_id:'batch:smoke'};
     }
     else if(data.operation_id==='memory.trunks.list')value={items:[]};
-    else if(data.operation_id==='memory.sources.query')value={items:[],has_more:false,
+    else if(data.operation_id==='memory.sources.query')value={items:[{
+      source_unit_id:'unit/unknown',source_id:'group-source-1',trunk_id:'trunk-1',
+      source_kind:'GROUP',platform:'onebot',realm_id:'qq',
+      external_group_id:'933179609',author_subject_ref:'qq:author-1',
+      unit_kind:'MESSAGE',modality:'IMAGE',occurred_at:'2026-09-28T00:00:00Z',
+      source_order_seq:1,part_count:1,eligibility_state:'ELIGIBLE',source_status:'ACTIVE',
+      document_facet_count:1,ready_document_facet_count:0,
+      failed_document_facet_count:0,unknown_document_facet_count:1,
+      index_coverage:'NOT_READY'}],has_more:false,
       snapshot_accepted_at:'2026-09-28T00:00:00Z'};
+    else if(data.operation_id==='memory.source-facets.query')value={
+      source_unit_id:'unit/unknown',source_id:'group-source-1',source_revision:1,
+      trunk_id:'trunk-1',external_group_id:'933179609',
+      author_subject_ref:'qq:author-1',has_more:false,next_after:null,items:[{
+        facet_id:'facet/unknown',part_id:'part/image',modality:'IMAGE',state:'UNKNOWN',
+        failure_code:null,created_at:'2026-09-28T00:00:00Z',
+        attempt_id:'attempt/unknown',claim_id:'claim/unknown',attempt_state:'UNKNOWN',
+        effect_operation_id:'effect/unknown',executor_generation_id:'generation/embedding',
+        dispatched_at:'2026-09-28T00:00:01Z',settled_at:'2026-09-28T00:00:02Z',
+        budget_day:'2026-09-28',reservation_state:'UNKNOWN',
+        reserved_tokens:32768,charged_tokens:null,
+        reservation_error_code:'EMBEDDING_RESULT_UNKNOWN'}]};
     else if(data.operation_id==='memory.forget.selection')value={
       selection_id:'selection:smoke',member_count:2,
       member_digest:'sha256:'+'a'.repeat(64),
@@ -188,6 +208,13 @@ frame.addEventListener('load',()=>{
                 page.goto(f"http://127.0.0.1:{server.server_port}/")
                 page.wait_for_function("window.ready")
                 frame = page.frame_locator("#memory")
+                expect(frame.locator('#source-rows')).to_contain_text('UNKNOWN 1')
+                frame.locator('#source-rows button', has_text='嵌入').click()
+                expect(frame.locator('#facet-rows')).to_contain_text('attempt/unknown')
+                expect(frame.locator('#facet-rows')).to_contain_text('估计预留 32768 token')
+                assert any(call['operation_id'] == 'memory.source-facets.query'
+                           and call['value']['state'] == 'UNKNOWN'
+                           for call in page.evaluate('window.calls'))
                 frame.locator('[data-tab="trial"]').click()
                 frame.locator("#trial-query").fill("trial:smoke")
                 frame.locator("#trial-get").click()

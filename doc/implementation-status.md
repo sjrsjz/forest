@@ -787,4 +787,4 @@ Memory UNKNOWN 来源可见性（2026-10-04）：Memory 包来源分页返回当
 
 Memory 完整图与稀疏来源实测（2026-10-04）：含新版 Memory 包的完整 Bot 图完成 Embedding 凭据引用换代和 Generation 热重载，隔离 PostgreSQL 用例 1 passed（159.69 秒）。另在独立临时 Bot 库写入 100,000 条合格来源、一个旧来源的 UNKNOWN 文档 facet，ANALYZE 后同一连接各查询预热一次并测五次：普通首页 50 条中位 2.34 ms、UNKNOWN 筛选 1 条中位 1.33 ms、UNKNOWN 与不匹配来源条件组合空结果中位 1.20 ms；临时库已删除。该数据只证明稀疏 UNKNOWN 的当前有界候选路径与完整图热替换可用，不代表百万级、密集 UNKNOWN、真实浏览器或在线 Bot 已验收。
 
-Memory 嵌入批次只读诊断（2026-10-04）：Memory 包 1.75.0、私有 SQL 3.65.0 新增按来源当前修订和 facet ID 分页的 `memory.source-facets.query` 管理端口，关联 facet、批次 attempt、Effect 身份及预算 reservation；包自带界面可从来源行展开，并明确批次预算不可按 facet 累加。隔离 PostgreSQL 的来源游标/响应 schema 与真实图文 UNKNOWN Effect/预算观察用例 2 passed，后一用例又通过实际 Generation 管理端口读回相同事实。此功能只读，不授权重试；真实浏览器交互、在线实例切换与 UNKNOWN 人工重试政策仍未完成。
+Memory 嵌入批次只读诊断（2026-10-04）：Memory 包 1.75.1、私有 SQL 3.65.0 新增按来源当前修订和 facet ID 分页的 `memory.source-facets.query` 管理端口，关联 facet、批次 attempt、Effect 身份及预算 reservation；包自带界面可从来源行展开，并明确批次预算不可按 facet 累加。隔离 PostgreSQL 的来源游标/响应 schema 与真实图文 UNKNOWN Effect/预算观察用例 2 passed，后一用例又通过实际 Generation 管理端口读回相同事实；本机 Edge 管理 MessageChannel 冒烟覆盖从 UNKNOWN 来源行进入嵌入详情，以及原有图文试验和批量遗忘 UI。此功能只读，不授权重试；在线实例切换与 UNKNOWN 人工重试政策仍未完成。
