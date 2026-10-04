@@ -820,6 +820,106 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "high_watermark_media_bytes": 1024,
             "retain_media_bytes": 512,
         })
+        with pytest.raises(RollbackProbe):
+            async with store.pool.connection() as conn, conn.transaction():
+                await conn.execute(
+                    sql.SQL("UPDATE {}.conversation_lanes SET active_session_ref=%s,"
+                            "active_run_ref=%s WHERE bot_id=%s AND conversation_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    ("session/handoff", "run/handoff", store.bot_id,
+                     actor["conversation_id"]),
+                )
+
+                async def prepare(anchor, prior, operation_id):
+                    return (await (await conn.execute(
+                        sql.SQL("SELECT {}.conversation_prepare_context_compaction("
+                                "%s::jsonb,%s::jsonb) AS result")
+                        .format(sql.Identifier(namespace)),
+                        (Jsonb({
+                            "bot_id": store.bot_id,
+                            "operation_id": operation_id,
+                            "participant_input_digest": "sha256:" + "0" * 64,
+                        }), Jsonb({
+                            "protocol": "forest.uow-step/1",
+                            "input": {**pre_run_input, "anchor": anchor},
+                            "prior": prior,
+                        })),
+                    )).fetchone())["result"]
+
+                assert (await prepare(
+                    pre_run_input["anchor"], {}, "conversation/pre-run/active"
+                ))["value"]["status"] == "SKIP"
+                anchor = {
+                    **pre_run_input["anchor"],
+                    "protocol": "forest.conversation-handoff-compaction-anchor/1",
+                    "session_ref": "session/handoff", "run_ref": "run/handoff",
+                }
+                agent_proof = {
+                    "protocol": "forest.agent-completed-compaction/1",
+                    "conversation_id": actor["conversation_id"],
+                    "session_ref": "session/handoff", "run_ref": "run/handoff",
+                }
+                handoff_plan = await prepare(
+                    anchor, {"agent": agent_proof}, "conversation/handoff/1"
+                )
+                assert handoff_plan["ok"] is True
+                assert [unit["context_revision"] for unit in
+                        handoff_plan["value"]["commit"]["units"]] == [1, 2]
+                stale_proof = await prepare(
+                    anchor, {"agent": {**agent_proof, "run_ref": "run/other"}},
+                    "conversation/handoff/stale-proof",
+                )
+                assert stale_proof["error"]["code"] == (
+                    "CONTEXT_COMPACTION_INPUT_INVALID"
+                )
+                compaction_id = handoff_plan["value"]["commit"]["compaction_id"]
+                archived_payload = await kernel.payload.put_bytes_in(
+                    conn,
+                    owner_component_id="conversation.scheduler",
+                    owner_kind="context.archive",
+                    owner_id=compaction_id,
+                    media_type="application/json",
+                    content=b'{"protocol":"forest.context-archive-reference/1"}',
+                    expected_deletion_epoch=await kernel.payload.epoch_in(conn),
+                )
+                committed_handoff = await (await conn.execute(
+                    sql.SQL("SELECT {}.conversation_commit_context_compaction("
+                            "%s::jsonb,%s::jsonb) AS result")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                        "protocol": "forest.uow-step/1",
+                        "input": {**pre_run_input, "anchor": anchor},
+                        "prior": {
+                            "agent": agent_proof,
+                            "prepare": handoff_plan["value"],
+                            "payload": {
+                                "protocol": "forest.payload-json-put/1",
+                                "status": "WRITTEN",
+                                "payload": {
+                                    "payload_id": archived_payload.payload_id,
+                                    "digest": archived_payload.content_digest,
+                                    "owner_component_id": "conversation.scheduler",
+                                    "owner_kind": "context.archive",
+                                    "owner_id": compaction_id,
+                                },
+                            },
+                        },
+                    })),
+                )).fetchone()
+                assert committed_handoff["result"]["ok"] is True
+                assert committed_handoff["result"]["value"]["status"] == "COMPACTED"
+                active = await (await conn.execute(
+                    sql.SQL("SELECT context_view_unit_count,context_archived_unit_count "
+                            "FROM {}.conversation_lanes WHERE bot_id=%s "
+                            "AND conversation_id=%s")
+                    .format(sql.Identifier(namespace)),
+                    (store.bot_id, actor["conversation_id"]),
+                )).fetchone()
+                assert active == {
+                    "context_view_unit_count": 1,
+                    "context_archived_unit_count": 2,
+                }
+                raise RollbackProbe
         async with store.pool.connection() as conn, conn.transaction():
             media_only_plan = await (
                 await conn.execute(

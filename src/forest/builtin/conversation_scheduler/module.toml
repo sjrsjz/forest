@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.27.0"
+version = "4.28.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -49,6 +49,7 @@ requests = [
   "uow.execute:conversation.commit-silent-input",
   "uow.execute:conversation.prefill-trigger-input",
   "uow.execute:conversation.compact-before-run",
+  "uow.execute:conversation.compact-before-handoff",
   "uow.execute:conversation.commit-final-reply",
   "uow.execute:conversation.session-handoff",
   "uow.execute:conversation.commit-terminal-run",
@@ -91,9 +92,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.22.0"
+schema_version = "4.23.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "393aa82b9760ece47ad28b235c643d96deedb04125bfdec3c8efc36329cdf898"
+baseline_sha256 = "b3d230fee4c89e4181a3c52ba7fa46567b354889241ea70138256e6db9212a06"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -280,6 +281,21 @@ input_schema = "schemas/pre-run-compaction-input.json"
 output_schema = "schemas/pre-run-compaction-output.json"
 timeout_s = 20
 steps = [
+  { id = "prepare", component_id = "conversation.scheduler", participant = "conversation.prepare-context-compaction" },
+  { id = "payload", component_id = "kernel.payload", participant = "payload.put-json-from-prior", input_path = "/payload" },
+  { id = "commit", component_id = "conversation.scheduler", participant = "conversation.commit-context-compaction" },
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.qualify-archive", input_path = "/memory" }
+]
+
+[[components.unit_of_work_plans]]
+name = "conversation.compact-before-handoff"
+contract = "1.0"
+input_schema = "schemas/handoff-compaction-input.json"
+output_schema = "schemas/pre-run-compaction-output.json"
+timeout_s = 20
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.verify-completed-compaction", input_path = "/anchor" },
   { id = "prepare", component_id = "conversation.scheduler", participant = "conversation.prepare-context-compaction" },
   { id = "payload", component_id = "kernel.payload", participant = "payload.put-json-from-prior", input_path = "/payload" },
   { id = "commit", component_id = "conversation.scheduler", participant = "conversation.commit-context-compaction" },

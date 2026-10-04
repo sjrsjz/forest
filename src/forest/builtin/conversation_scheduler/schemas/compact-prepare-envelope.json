@@ -16,8 +16,9 @@
     "input": {"type": "object"},
     "prior": {
       "type": "object",
-      "maxProperties": 3,
+      "maxProperties": 4,
       "properties": {
+        "agent": {"type": "object", "required": ["protocol", "conversation_id", "session_ref", "run_ref"]},
         "select": {"type": "object", "required": ["status", "conversation_id"]},
         "payload_epoch": {"type": "object", "required": ["protocol", "deletion_epoch"]},
         "qualify": {"type": "object", "required": ["protocol", "qualified_count", "pending_count"]}

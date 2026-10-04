@@ -6118,6 +6118,49 @@ BEGIN
     );
 END;
 $$;
+CREATE FUNCTION agent_verify_completed_compaction(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    anchor jsonb := envelope->'input';
+    run_row record;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
+       OR anchor->>'protocol' IS DISTINCT FROM 'forest.conversation-handoff-compaction-anchor/1'
+       OR anchor->>'conversation_id' IS NULL
+       OR anchor->>'session_ref' IS NULL
+       OR anchor->>'run_ref' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_COMPACTION_BOUNDARY_INVALID',
+                'message','Completed-run compaction boundary is invalid','status',422));
+    END IF;
+    SELECT r.run_id,r.session_id,r.conversation_ref,r.state,r.terminal_at,
+           s.state AS session_state,s.active_run_id
+    INTO run_row
+    FROM __forest_module_schema__.agent_runs r
+    JOIN __forest_module_schema__.agent_sessions s
+      ON s.bot_id=r.bot_id AND s.session_id=r.session_id
+    WHERE r.bot_id=context->>'bot_id' AND r.run_id=anchor->>'run_ref'
+    FOR SHARE OF r,s;
+    IF run_row.run_id IS NULL
+       OR run_row.session_id IS DISTINCT FROM anchor->>'session_ref'
+       OR run_row.conversation_ref IS DISTINCT FROM anchor->>'conversation_id'
+       OR run_row.state IS DISTINCT FROM 'COMPLETED'
+       OR run_row.terminal_at IS NULL
+       OR run_row.session_state IS DISTINCT FROM 'ACTIVE'
+       OR run_row.active_run_id IS DISTINCT FROM anchor->>'run_ref' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_COMPACTION_BOUNDARY_CLOSED',
+                'message','Run is not the completed active Session boundary','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.agent-completed-compaction/1',
+            'conversation_id',run_row.conversation_ref,
+            'session_ref',run_row.session_id,'run_ref',run_row.run_id));
+END;
+$$;
+
 CREATE FUNCTION agent_verify_requeue(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE

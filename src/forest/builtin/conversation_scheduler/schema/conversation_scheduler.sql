@@ -2441,6 +2441,8 @@ DECLARE
     selected jsonb := envelope#>'{prior,select}';
     anchor jsonb := body->'anchor';
     pre_run boolean := anchor IS NOT NULL;
+    handoff boolean := COALESCE(
+        anchor->>'protocol'='forest.conversation-handoff-compaction-anchor/1',false);
     policy jsonb := body->'context_view';
     requested_bot text := context->>'bot_id';
     requested_operation text := context->>'operation_id';
@@ -2475,10 +2477,22 @@ BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR (selected IS NULL AND NOT pre_run) OR policy IS NULL
        OR (pre_run AND (selected IS NOT NULL
-           OR anchor->>'protocol' IS DISTINCT FROM 'forest.conversation-pre-run-anchor/1'
+           OR anchor->>'protocol' NOT IN (
+               'forest.conversation-pre-run-anchor/1',
+               'forest.conversation-handoff-compaction-anchor/1')
            OR anchor->>'conversation_id' IS DISTINCT FROM anchor#>>'{actor,conversation_id}'
            OR anchor#>>'{actor,owner_id}' IS NULL
            OR anchor#>>'{actor,epoch}' !~ '^[1-9][0-9]*$'))
+       OR (handoff AND (
+           anchor->>'session_ref' IS NULL OR anchor->>'run_ref' IS NULL
+           OR envelope#>>'{prior,agent,protocol}' IS DISTINCT FROM
+              'forest.agent-completed-compaction/1'
+           OR envelope#>>'{prior,agent,conversation_id}' IS DISTINCT FROM
+              anchor->>'conversation_id'
+           OR envelope#>>'{prior,agent,session_ref}' IS DISTINCT FROM
+              anchor->>'session_ref'
+           OR envelope#>>'{prior,agent,run_ref}' IS DISTINCT FROM
+              anchor->>'run_ref'))
        OR requested_operation IS NULL
        OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
        OR high_watermark NOT BETWEEN 2 AND 1000000
@@ -2622,7 +2636,14 @@ BEGIN
             )
         );
     END IF;
-    IF pre_run AND lane.active_session_ref IS NOT NULL THEN
+    IF handoff AND (
+        lane.active_session_ref IS DISTINCT FROM anchor->>'session_ref'
+        OR lane.active_run_ref IS DISTINCT FROM anchor->>'run_ref') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_HANDOFF_BOUNDARY_CLOSED',
+                'message','Conversation moved beyond the completed Run','status',409));
+    END IF;
+    IF pre_run AND NOT handoff AND lane.active_session_ref IS NOT NULL THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object(
@@ -2683,7 +2704,7 @@ BEGIN
                     ))
                 )
             ) OR (
-              lane.active_session_ref IS NOT NULL AND (
+              lane.active_session_ref IS NOT NULL AND NOT handoff AND (
                   EXISTS (
                       SELECT 1 FROM __forest_module_schema__.input_batches b
                       WHERE b.bot_id=a.bot_id AND b.input_batch_id=a.input_batch_id
@@ -2822,6 +2843,8 @@ DECLARE
     selected jsonb := envelope#>'{prior,select}';
     anchor jsonb := envelope#>'{input,anchor}';
     pre_run boolean := anchor IS NOT NULL;
+    handoff boolean := COALESCE(
+        anchor->>'protocol'='forest.conversation-handoff-compaction-anchor/1',false);
     plan jsonb := envelope#>'{prior,prepare}';
     payload_result jsonb := envelope#>'{prior,payload}';
     commit_value jsonb;
@@ -2839,6 +2862,15 @@ BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR (selected IS NULL AND NOT pre_run) OR plan IS NULL OR payload_result IS NULL
        OR (pre_run AND selected IS NOT NULL)
+       OR (handoff AND (
+           envelope#>>'{prior,agent,protocol}' IS DISTINCT FROM
+              'forest.agent-completed-compaction/1'
+           OR envelope#>>'{prior,agent,conversation_id}' IS DISTINCT FROM
+              anchor->>'conversation_id'
+           OR envelope#>>'{prior,agent,session_ref}' IS DISTINCT FROM
+              anchor->>'session_ref'
+           OR envelope#>>'{prior,agent,run_ref}' IS DISTINCT FROM
+              anchor->>'run_ref'))
        OR plan->>'protocol' IS DISTINCT FROM 'forest.payload-json-plan/1'
        OR payload_result->>'protocol' IS DISTINCT FROM 'forest.payload-json-put/1' THEN
         RETURN jsonb_build_object(
@@ -2898,6 +2930,9 @@ BEGIN
           AND conversation_id=commit_value->>'conversation_id'
         FOR UPDATE;
         IF lane IS NULL
+           OR (handoff AND (
+               lane.active_session_ref IS DISTINCT FROM anchor->>'session_ref'
+               OR lane.active_run_ref IS DISTINCT FROM anchor->>'run_ref'))
            OR lane.context_view_revision IS DISTINCT FROM
               (commit_value->>'base_view_revision')::bigint
            OR lane.context_view_unit_count <

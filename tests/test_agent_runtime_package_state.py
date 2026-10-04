@@ -536,6 +536,47 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "protocol_failure": None,
         }
 
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                namespace = package.descriptor.storage.spec.namespace
+                for expected, target in (
+                    ("PREPARING_MODEL", "MODEL_PENDING"),
+                    ("MODEL_PENDING", "PARSING"),
+                    ("PARSING", "SAFE_BOUNDARY"),
+                    ("SAFE_BOUNDARY", "FINAL_READY"),
+                    ("FINAL_READY", "COMPLETED"),
+                ):
+                    await conn.execute(
+                        sql.SQL("UPDATE {}.agent_runs SET state=%s,"
+                                "terminal_at=CASE WHEN %s='COMPLETED' THEN "
+                                "clock_timestamp() ELSE terminal_at END "
+                                "WHERE bot_id=%s AND run_id=%s AND state=%s")
+                        .format(sql.Identifier(namespace)),
+                        (target, target, store.bot_id, "run/agent-package/1", expected),
+                    )
+                proof = await (await conn.execute(
+                    sql.SQL("SELECT {}.agent_verify_completed_compaction("
+                            "%s::jsonb,%s::jsonb) AS value")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                        "protocol": "forest.uow-step/1",
+                        "caller": {"component_id": "conversation.scheduler"},
+                        "input": {
+                            "protocol": "forest.conversation-handoff-compaction-anchor/1",
+                            "conversation_id": "conversation/onebot/group/933179609",
+                            "session_ref": "session/agent-package/1",
+                            "run_ref": "run/agent-package/1",
+                        },
+                    })),
+                )).fetchone()
+                assert proof["value"]["value"] == {
+                    "protocol": "forest.agent-completed-compaction/1",
+                    "conversation_id": "conversation/onebot/group/933179609",
+                    "session_ref": "session/agent-package/1",
+                    "run_ref": "run/agent-package/1",
+                }
+                raise _RollbackVerification
+
         budget_start = {
             **start_envelope,
             "input": {

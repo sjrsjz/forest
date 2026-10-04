@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "caller", "input", "prior"],
+  "properties": {
+    "protocol": {"const": "forest.uow-step/1"},
+    "caller": {
+      "type": "object", "additionalProperties": false,
+      "required": ["component_id", "generation_id"],
+      "properties": {
+        "component_id": {"const": "conversation.scheduler"},
+        "generation_id": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol", "conversation_id", "actor", "session_ref", "run_ref"],
+      "properties": {
+        "protocol": {"const": "forest.conversation-handoff-compaction-anchor/1"},
+        "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "actor": {
+          "type": "object", "additionalProperties": false,
+          "required": ["conversation_id", "owner_id", "epoch"],
+          "properties": {
+            "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "epoch": {"type": "integer", "minimum": 1}
+          }
+        },
+        "session_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+        "run_ref": {"type": "string", "minLength": 1, "maxLength": 256}
+      }
+    },
+    "prior": {"type": "object", "maxProperties": 0}
+  }
+}

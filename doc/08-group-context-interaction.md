@@ -503,9 +503,9 @@ Conversation 的 Context 快照 v3 现在固定 `media_cost_revision`、活动�
 
 这仍只是受管媒体文件字节界，不是解码后像素内存、tokenizer 估算或完整冻结必要集合 ViewPlan。快照目前用活动媒体高水位和 4096 个活动单元作为发布硬界；必留单元使活动视图超界时会明确拒绝本次模型请求。Agent 仅将 Context 的 `CONTEXT_VIEW_HARD_LIMIT` 与 `CONTEXT_VIEW_MEDIA_OVER_BUDGET` 视为不可再归档的确定性失败：在模型请求尚未准备、运行所有权和输入修订均未改变时，写入失败 checkpoint，并终结 Agent Run/Session；Conversation 随后按既有终态事务结算该群触发，避免反复领取。其他快照错误仍按可恢复错误处理。RAG 证据图片改由 Memory 检索策略的 `max_retrieval_media_bytes` 冻结选择，Agent 只核对证据并投影；预算省略保留来源片及明确原因。此上限与 Context 活动历史窗口分别计量，尚未形成统一模型请求的本地 token/传输估算。后续必须由 Conversation/Context 持久冻结带估算版本和必要集合的完整单元选择，并对 Memory 证据与历史的合并传输硬界给出明确失败策略，不能把本次快照协议升级称作完整 ViewPlan 已落地。
 
-新 Session 的首个 Run 在 `agent.execute` 选择触发 InputBatch 之前，由 `conversation.scheduler` 持有 Actor 围栏执行 `conversation.compact-before-run`。这个独立 UnitOfWork 使用 Conversation 包自身的视图策略，按“确定性计划 → 归档 Payload → 视图提交 → Memory 归档资格”顺序原子提交；它不虚构 InputBatch，也不把裁剪策略交给 Agent 或 Provider。已提交的归档按操作身份重放；若重试时 Session 已启动且本操作未归档，则跳过新裁剪，由 Agent 读取已经存在的 Run。随后 Agent 在同一 Actor 围栏下选择输入，`context_view_revision` 因而是裁剪后的版本。Run 中途的模型安全点只接入新输入，不重新选择历史窗口；后续 Run 的 Session 交接仍须明确设计安全裁剪边界，不能沿用前一个 Run 的固定视图假装已经裁剪。
+新 Session 的首个 Run 在 `agent.execute` 选择触发 InputBatch 之前，由 `conversation.scheduler` 持有 Actor 围栏执行 `conversation.compact-before-run`。这个独立 UnitOfWork 使用 Conversation 包自身的视图策略，按“确定性计划 → 归档 Payload → 视图提交 → Memory 归档资格”顺序原子提交；它不虚构 InputBatch，也不把裁剪策略交给 Agent 或 Provider。已提交的归档按操作身份重放；若重试时 Session 已启动且本操作未归档，则跳过新裁剪，由 Agent 读取已经存在的 Run。随后 Agent 在同一 Actor 围栏下选择输入，`context_view_revision` 因而是裁剪后的版本。Run 中途的模型安全点只接入新输入，不重新选择历史窗口。当前 Run 完成且正式回复已经提交后，`conversation.compact-before-handoff` 先由 Agent participant 证明该 Run 是活动 Session 中已完成的 Run，再在同一事务中按 Actor/Session/Run 围栏归档连续旧前缀；此安全边界允许移出该已完成 Run 的单元，但仍保留未决触发。后继 Run 随后的 `SESSION_END` 选择冻结新视图版本，活动 Run 工作期间的普通维护仍保护整个 Session，不能改动它已冻结的视图。
 
-预运行归档每笔至多移出 64 个完整单元，调度器在一次 Actor 领取内可连续提交至多 8 笔；开始下一笔前还要检查预运行时间预算，为同一工作处理器内最长 540 秒的 Agent 调用留出余量。每笔操作身份包含 Run、Actor epoch 和分段序号，重放同笔不重复归档，新领取也不被旧回执卡住。达到分段或时间界后仍需归档时，调度器结算为 `WAIT_CONTEXT` 并短暂延期，释放 Actor 供同群后续领取继续；归档返回 `SKIPPED` 才进入 Agent。未决触发或活动 Session 保护的后缀仍可能使归档停在硬界以上，此时后续快照明确拒绝，不能冒称已完成预算收敛；必要集合超界的有界终结策略仍待实现。
+边界归档每笔至多移出 64 个完整单元，调度器在一次 Actor 领取内可连续提交至多 8 笔；开始下一笔前还要检查时间预算，为同一工作处理器内最长 540 秒的 Agent 调用留出余量。每笔操作身份包含 Run、Actor epoch 和分段序号，重放同笔不重复归档，新领取也不被旧回执卡住。达到分段或时间界后仍需归档时，调度器结算为 `WAIT_CONTEXT` 并短暂延期，释放 Actor 供同群后续领取继续；归档返回 `SKIPPED` 才进入 Agent 或后继选择。未决触发仍可能使归档停在硬界以上，此时后续快照明确拒绝，Agent 按确定性 Context 硬界失败结算，不能冒称已完成预算收敛。
 
 高流量下合并同会话尚未执行的维护唤醒，维护desired/processed水位；合并只影响本地工作批量，不能遗漏任何来源。采用裁剪高/低水位避免每条消息反复重算，大对象使用缓存token计数与受监督本地计算。系统指令、作者/群来源标题、必留内容和输出预留先计费；超窗时减少普通原文/Evidence项，不能剥掉来源标题凑预算。待答触发必要原文仍放不下就走上述明确失败策略，不自动发摘要请求，也不自动调更昂贵模型。
 
@@ -615,5 +615,7 @@ Bot 已提交的最终回复通过 ModelTurn 入 Context；平台再次推送同
 | GI-34 | 文本模型运行和多次裁剪后切回视觉模型 | 文本请求省略不造成持久删图；仍在合法窗口或获权召回的原媒体可被视觉请求物化 |
 | GI-35 | 130 条已分类消息中，第 30 与 130 条分别由不同用户触发 | Context 以 64 条为上限预填，预填不领取触发；最终批次仍包含第 130 条，两个触发及其各自身份共同归属同一 Run |
 | GI-36 | 预填事务已提交而调用响应丢失，随后新消息又入队 | 相同 operation 重放原批次；新 operation 从已提交游标继续，最终切口只在下一次合法安全点冻结 |
+| GI-37 | 已完成 Run 的回复提交后，同 Session 存在旧输入和待处理新触发 | Agent 证明完成边界；交接前只归档连续旧前缀，未决触发不丢失；后继 Run 读取新 `context_view_revision` |
+| GI-38 | Run 尚未完成、Session 已交接或 Actor 已换代时尝试交接裁剪 | Agent/Conversation 围栏拒绝旧请求；活动模型的固定视图不被普通维护改写 |
 
 除上述场景外，性质检查应持续验证输入范围恰好覆盖连续前缀、触发状态不由消费游标推导、单群唯一 Session/有效提交者、所有输出可追溯到固定输入批次。可交换的 Bot 全局记忆操作另按[06 的性质验收](06-concurrent-convergence.md#10-性质验证与并发时序验收)执行，不能把消息顺序、授权仲裁或模型文本误当作可交换更新。

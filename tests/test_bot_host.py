@@ -4757,6 +4757,45 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 item.storage.spec.namespace for item in host.registry.descriptors
                 if item.component_id == "agent.runtime"
             )
+            if scenario == "success":
+                conversation_schema = next(
+                    item.storage.spec.namespace for item in host.registry.descriptors
+                    if item.component_id == "conversation.scheduler"
+                )
+                try:
+                    async with asyncio.timeout(20):
+                        while True:
+                            async with host.store.pool.connection() as conn:
+                                session = await (await conn.execute(
+                                    sql.SQL("SELECT state FROM {}.agent_sessions "
+                                            "WHERE bot_id=%s ORDER BY created_at DESC LIMIT 1")
+                                    .format(sql.Identifier(agent_schema)),
+                                    (settings.bot_id,),
+                                )).fetchone()
+                                lane = await (await conn.execute(
+                                    sql.SQL("SELECT active_session_ref FROM {}.conversation_lanes "
+                                            "WHERE bot_id=%s")
+                                    .format(sql.Identifier(conversation_schema)),
+                                    (settings.bot_id,),
+                                )).fetchone()
+                            if (session is not None and session["state"] == "CLOSED"
+                                    and lane is not None
+                                    and lane["active_session_ref"] is None):
+                                break
+                            await asyncio.sleep(0.1)
+                except TimeoutError as exc:
+                    async with host.store.pool.connection() as conn:
+                        settlements = await (await conn.execute(
+                            sql.SQL("SELECT input_payload->'outcome' AS outcome "
+                                    "FROM {}.conversation_agent_work_settlements "
+                                    "ORDER BY created_at DESC LIMIT 5")
+                            .format(sql.Identifier(conversation_schema)),
+                        )).fetchall()
+                    raise AssertionError(
+                        f"Session handoff did not close: session={session}, lane={lane}, "
+                        f"settlements={settlements}, "
+                        f"worker_failure={host.registry.get('conversation.scheduler')._owned_work.failure}"
+                    ) from exc
             async with host.store.pool.connection() as conn:
                 delivered_attempt = await (await conn.execute(sql.SQL(
                     "SELECT r.request_id,a.attempt_id,a.effect_operation_ref "

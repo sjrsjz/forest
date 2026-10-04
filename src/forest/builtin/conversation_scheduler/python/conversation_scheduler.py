@@ -650,21 +650,35 @@ class ConversationScheduler(Plugin):
             return False
         return True
 
-    async def _compact_before_run(self, work, ctx):
+    async def _compact_before_run(self, work, ctx, *, completed=None):
         actor = work["actor"]
         started_at = time.monotonic()
+        if completed is None:
+            anchor = {
+                "protocol": "forest.conversation-pre-run-anchor/1",
+                "conversation_id": work["conversation_id"],
+                "actor": actor,
+            }
+            plan_name = "conversation.compact-before-run"
+            operation_kind = "compact-before-run"
+        else:
+            anchor = {
+                "protocol": "forest.conversation-handoff-compaction-anchor/1",
+                "conversation_id": work["conversation_id"],
+                "actor": actor,
+                "session_ref": completed["session_ref"],
+                "run_ref": completed["run_ref"],
+            }
+            plan_name = "conversation.compact-before-handoff"
+            operation_kind = "compact-before-handoff"
         for segment_index in range(self.MAX_PRE_RUN_COMPACTION_SEGMENTS):
             # Keep room for the 540 s Agent service within this 600 s handler.
             if segment_index and time.monotonic() - started_at >= 20:
                 return False
             result = await ctx.uow.call(
-                "conversation.compact-before-run",
+                plan_name,
                 {
-                    "anchor": {
-                        "protocol": "forest.conversation-pre-run-anchor/1",
-                        "conversation_id": work["conversation_id"],
-                        "actor": actor,
-                    },
+                    "anchor": anchor,
                     "context_view": self._context_view,
                     "payload": {
                         "protocol": "forest.payload-json-from-prior/1",
@@ -674,7 +688,8 @@ class ConversationScheduler(Plugin):
                     "memory": {},
                 },
                 operation_id=ctx.operations.stable(
-                    f"compact-before-run:{work['run_ref']}:{actor['epoch']}:{segment_index}"
+                    f"{operation_kind}:{anchor.get('run_ref',work['run_ref'])}:"
+                    f"{actor['epoch']}:{segment_index}"
                 ),
             )
             if (result.get("protocol") != "forest.context-pre-run-compaction/1"
@@ -752,6 +767,10 @@ class ConversationScheduler(Plugin):
                     continue
                 return self._defer("COMPLETED", "session_handoff_pending", 0.1)
             if status == "COMPLETED":
+                if not await self._compact_before_run(
+                    work, ctx, completed=execution
+                ):
+                    return self._defer("WAIT_CONTEXT", "CONTEXT_HANDOFF_MORE", 0.5)
                 handoff = await self._handoff(work, execution, new_run_deadline, ctx)
                 if handoff["action"] == "WAIT_INPUT":
                     return self._defer("WAIT_INPUT", "classification_prefix_pending", 0.25)
