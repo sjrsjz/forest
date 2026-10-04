@@ -1447,6 +1447,7 @@ async def test_embedding_configuration_can_rotate_its_secret_reference(tmp_path)
         onebot_access_token="", allowed_group_ids=("933179609",),
         group_trigger_mode="MENTION", private_enabled=True,
         shell_administrator_ids=("42",), agent_system_prompt="Secret rotation fixture.",
+        bootstrap_package_digests=(("embedding.multimodal", "sha256:" + "f" * 64),),
     )
     rotated_ref = "secret://embedding.multimodal/rotated"
     resolved = []
@@ -1540,6 +1541,13 @@ async def test_embedding_configuration_can_rotate_its_secret_reference(tmp_path)
             )
         finally:
             await host.close()
+        pinned_provisioner = BotHost(
+            settings,
+            package_catalog=PackageCatalog(tmp_path / "secret-rotation-packages"),
+        )
+        with pytest.raises(ForestError) as rejected:
+            await pinned_provisioner.provision()
+        assert rejected.value.code == "BOOTSTRAP_PACKAGE_DIGEST_MISMATCH"
     finally:
         assert name.startswith("forest_secret_rotation_") and len(name) == 55
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))

@@ -147,6 +147,7 @@ def official_bootstrap_contributions(
                 schema=schema,
                 initial_value=initial_value,
                 surface=_bootstrap_surface(component_id, label),
+                package_digest=snapshot.digest,
                 order=declaration["order"],
             )
         )
@@ -194,7 +195,9 @@ class OfficialBotSettingsResolver:
             official_bootstrap_contributions()
         )
 
-    async def resolve(self, *, profile, storage) -> BotSettings:
+    async def resolve(
+        self, *, profile, storage, verify_current_package: bool = True,
+    ) -> BotSettings:
         if (
             profile.bot_id != storage.bot_id
             or profile.storage_profile_ref != storage.profile_ref
@@ -211,11 +214,19 @@ class OfficialBotSettingsResolver:
             registry=self.bootstrap_registry,
         )
         expected_digests = official_bootstrap_schema_digests(self.bootstrap_registry)
+        expected_packages = self.bootstrap_registry.package_digests()
         for component_id, item in components.items():
             if item.schema_digest != expected_digests[component_id]:
                 raise ForestError(
                     "OFFICIAL_BOOTSTRAP_SCHEMA_MISMATCH",
                     "Bootstrap component schema differs from the installed module",
+                    409,
+                    details={"component_id": component_id},
+                )
+            if verify_current_package and item.package_digest != expected_packages[component_id]:
+                raise ForestError(
+                    "OFFICIAL_BOOTSTRAP_PACKAGE_MISMATCH",
+                    "Bootstrap package differs from the captured install catalog",
                     409,
                     details={"component_id": component_id},
                 )
@@ -330,6 +341,10 @@ class OfficialBotSettingsResolver:
             vector_index_token="",
             vector_index_credential_ref=vector_index["credential_ref"],
             vector_index_timeout_seconds=vector_index["timeout_seconds"],
+            bootstrap_package_digests=tuple(sorted(
+                (component_id, item.package_digest)
+                for component_id, item in components.items()
+            )),
         )
 
     async def _verify_secret(self, secret_ref: str, purpose: str) -> None:
@@ -380,7 +395,9 @@ class OfficialBotCatalogSettingsResolver:
                 "Ready Bot bootstrap manifest differs",
                 409,
             )
-        return await self.settings_resolver.resolve(profile=profile, storage=storage)
+        return await self.settings_resolver.resolve(
+            profile=profile, storage=storage, verify_current_package=False
+        )
 
 
 class OfficialBotProvisioner:

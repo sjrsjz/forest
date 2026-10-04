@@ -209,6 +209,7 @@ class BotSettings:
     vector_index_token: str = ""
     vector_index_credential_ref: str = ""
     vector_index_timeout_seconds: float = 10
+    bootstrap_package_digests: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_environment(cls) -> "BotSettings":
@@ -417,7 +418,8 @@ class BotHost:
             return await assess_worker_capacity_in(self._kernel, conn, capacity)
 
     async def _assemble_candidate(
-        self, activation_id: str | None = None
+        self, activation_id: str | None = None,
+        *, bootstrap_package_digests: dict[str, str] | None = None,
     ) -> BotGraphCandidate:
         capabilities = self.settings.model_capabilities or ModelCapabilities(
             deployment_id=self.settings.model_deployment_id,
@@ -662,7 +664,28 @@ class BotHost:
             ),
         })
         automatic = []
-        for source in auto_install_builtin_sources():
+        expected_packages = bootstrap_package_digests or {}
+        automatic_sources = auto_install_builtin_sources()
+        if expected_packages:
+            captured_ids = set()
+            for source in automatic_sources:
+                snapshot = self.package_catalog.build(source)
+                captured_ids.add(snapshot.component["id"])
+                expected = expected_packages.get(snapshot.component["id"])
+                if expected is not None and snapshot.digest != expected:
+                    raise ForestError(
+                        "BOOTSTRAP_PACKAGE_DIGEST_MISMATCH",
+                        "Bot bootstrap package differs from its frozen profile",
+                        409,
+                        details={"component_id": snapshot.component["id"]},
+                    )
+            if set(expected_packages) - captured_ids:
+                raise ForestError(
+                    "BOOTSTRAP_PACKAGE_MISSING",
+                    "A frozen Bot bootstrap package is absent from the install catalog",
+                    409,
+                )
+        for source in automatic_sources:
             provisioned = await bootstrap_builtin_package(
                 source,
                 self.package_catalog,
@@ -676,6 +699,14 @@ class BotHost:
                 configuration_validator_factory=configuration_validators.get(source.name),
                 additional_grants=bootstrap_grants.get(source.name, ()),
             )
+            expected = expected_packages.get(provisioned.snapshot.component["id"])
+            if expected is not None and provisioned.snapshot.digest != expected:
+                raise ForestError(
+                    "BOOTSTRAP_PACKAGE_DIGEST_MISMATCH",
+                    "Bot bootstrap package changed during installation",
+                    409,
+                    details={"component_id": provisioned.snapshot.component["id"]},
+                )
             automatic.append(provisioned.descriptor)
         official_descriptors = (
             worker_host.descriptor,
@@ -763,7 +794,9 @@ class BotHost:
         await self.store.open()
         try:
             self._kernel = await bootstrap_kernel(self.store, self.schema_bundle_installer)
-            assembled = await self._assemble_candidate()
+            assembled = await self._assemble_candidate(
+                bootstrap_package_digests=dict(self.settings.bootstrap_package_digests)
+            )
             return tuple(
                 descriptor.component_id for descriptor in assembled.registry.descriptors
             )

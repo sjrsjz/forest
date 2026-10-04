@@ -27,6 +27,7 @@ _PLAINTEXT_SECRET_FIELDS = {
 class BootstrapComponent:
     component_id: str
     schema_digest: str
+    package_digest: str
     config_digest: str
     config: dict
 
@@ -58,6 +59,7 @@ class DeploymentBootstrapProfileAuthority:
         storage_generation: int,
         components: dict[str, dict],
         schema_digests: dict[str, str],
+        package_digests: dict[str, str],
         authorization=None,
         conn=None,
     ) -> BootstrapProfile:
@@ -70,8 +72,11 @@ class DeploymentBootstrapProfileAuthority:
             raise ForestError("BOOTSTRAP_PROFILE_INVALID", "Storage generation is invalid", 422)
         if (
             not isinstance(components, dict)
+            or not isinstance(schema_digests, dict)
+            or not isinstance(package_digests, dict)
             or not 1 <= len(components) <= 64
             or set(components) != set(schema_digests)
+            or set(components) != set(package_digests)
         ):
             raise ForestError("BOOTSTRAP_PROFILE_INVALID", "Component manifest is invalid", 422)
         facts = []
@@ -79,11 +84,14 @@ class DeploymentBootstrapProfileAuthority:
         for component_id in sorted(components):
             config = components[component_id]
             schema_digest = schema_digests[component_id]
+            package_digest = package_digests[component_id]
             if (
                 _IDENTIFIER.fullmatch(component_id) is None
                 or not isinstance(config, dict)
                 or not isinstance(schema_digest, str)
                 or not re.fullmatch(r"sha256:[a-f0-9]{64}", schema_digest)
+                or not isinstance(package_digest, str)
+                or not re.fullmatch(r"sha256:[a-f0-9]{64}", package_digest)
             ):
                 raise ForestError("BOOTSTRAP_PROFILE_INVALID", "Component seed is invalid", 422)
             self._inspect(config, secret_refs=secret_refs)
@@ -101,6 +109,7 @@ class DeploymentBootstrapProfileAuthority:
                 {
                     "component_id": component_id,
                     "schema_digest": schema_digest,
+                    "package_digest": package_digest,
                     "config_digest": digest_json(config),
                     "config": config,
                 }
@@ -158,12 +167,13 @@ class DeploymentBootstrapProfileAuthority:
             for fact in facts:
                 await conn.execute(
                     "INSERT INTO forest_deployment.bootstrap_profile_components("
-                    "profile_ref,component_id,schema_digest,config_digest,config) "
-                    "VALUES (%s,%s,%s,%s,%s::jsonb)",
+                    "profile_ref,component_id,schema_digest,package_digest,config_digest,config) "
+                    "VALUES (%s,%s,%s,%s,%s,%s::jsonb)",
                     (
                         profile_ref,
                         fact["component_id"],
                         fact["schema_digest"],
+                        fact["package_digest"],
                         fact["config_digest"],
                         json.dumps(fact["config"], ensure_ascii=False),
                     ),
@@ -199,7 +209,8 @@ class DeploymentBootstrapProfileAuthority:
         ).fetchall()
         components = tuple(
             BootstrapComponent(
-                row["component_id"], row["schema_digest"], row["config_digest"], row["config"]
+                row["component_id"], row["schema_digest"], row["package_digest"],
+                row["config_digest"], row["config"]
             )
             for row in rows
         )
@@ -220,6 +231,7 @@ class DeploymentBootstrapProfileAuthority:
                     {
                         "component_id": item.component_id,
                         "schema_digest": item.schema_digest,
+                        "package_digest": item.package_digest,
                         "config_digest": item.config_digest,
                         "config": item.config,
                     }

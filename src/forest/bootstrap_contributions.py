@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Callable
@@ -23,12 +24,15 @@ class BootstrapConfigurationContribution:
     schema: dict
     initial_value: dict
     surface: RuntimeManagementContribution
+    package_digest: str
     order: int = 100
     validator: Callable[[dict], object] | None = None
 
     def __post_init__(self) -> None:
         if self.surface.scope_kinds != ("deployment",):
             raise ValueError("Bootstrap contribution surface must belong to deployment scope")
+        if re.fullmatch(r"sha256:[a-f0-9]{64}", self.package_digest) is None:
+            raise ValueError("Bootstrap contribution package digest is invalid")
         if type(self.order) is not int or not -10_000 <= self.order <= 10_000:
             raise ValueError("Bootstrap contribution order is invalid")
         if not self.description.strip() or any(ord(char) < 32 for char in self.description):
@@ -51,6 +55,7 @@ class BootstrapConfigurationContribution:
             "description": self.description,
             "order": self.order,
             "schema_digest": self.schema_digest,
+            "package_digest": self.package_digest,
             "configuration_schema": deepcopy(self.schema),
             "initial_value": deepcopy(self.initial_value),
             "surface": self.surface.as_fact(public=True)["surface"],
@@ -79,6 +84,11 @@ class BootstrapConfigurationRegistry:
     def schema_digests(self) -> dict[str, str]:
         return {
             item.component_id: item.schema_digest for item in self.contributions
+        }
+
+    def package_digests(self) -> dict[str, str]:
+        return {
+            item.component_id: item.package_digest for item in self.contributions
         }
 
     def validate_components(self, components: object) -> dict[str, dict]:

@@ -370,6 +370,7 @@ CREATE TABLE forest_deployment.bootstrap_profile_components (
     profile_ref text NOT NULL REFERENCES forest_deployment.bootstrap_profiles(profile_ref),
     component_id text NOT NULL CHECK (component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
     schema_digest text NOT NULL CHECK (schema_digest ~ '^sha256:[a-f0-9]{64}$'),
+    package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[a-f0-9]{64}$'),
     config_digest text NOT NULL CHECK (config_digest ~ '^sha256:[a-f0-9]{64}$'),
     config jsonb NOT NULL CHECK (jsonb_typeof(config)='object'),
     PRIMARY KEY (profile_ref,component_id)

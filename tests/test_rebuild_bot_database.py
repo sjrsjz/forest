@@ -98,6 +98,10 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
                 "adapter.onebot.access-token",
                 "onebot-probe-token",
             ),
+            "secret://vector.index/rebuild": (
+                "vector.index.credential",
+                "vector-probe-token",
+            ),
         }
         for index, (secret_ref, (purpose, plaintext)) in enumerate(values.items(), 1):
             await secrets.put(
@@ -119,6 +123,10 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
             contribution.component_id: contribution.initial_value
             for contribution in official_bootstrap_contributions()
         }
+        components["vector.index"] = {
+            **components["vector.index"],
+            "credential_ref": "secret://vector.index/rebuild",
+        }
         bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
         bootstrap = await bootstrap_profiles.create(
             operation_id="bootstrap/rebuild/create",
@@ -128,6 +136,10 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
             storage_generation=storage.storage_generation,
             components=components,
             schema_digests=official_bootstrap_schema_digests(),
+            package_digests={
+                item.component_id: item.package_digest
+                for item in official_bootstrap_contributions()
+            },
         )
         await catalog.register_ready(
             operation_id="catalog/rebuild/ready",
@@ -236,6 +248,10 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
         assert result["vector_collection_reset"] is True
         assert ("has", expected_collection) in vector_calls
         assert ("drop", expected_collection) in vector_calls
+        assert all(
+            call[2] == "vector-probe-token"
+            for call in vector_calls if call[0] == "connect"
+        )
         target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
         marker = await (
             await target.execute("SELECT to_regclass('public.pre_rebuild_marker') AS marker")

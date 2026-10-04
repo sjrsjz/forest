@@ -2376,6 +2376,7 @@ async def test_bootstrap_profile_is_component_scoped_immutable_and_secret_ref_on
         component_id: "sha256:" + str(index) * 64
         for index, component_id in enumerate(components, 1)
     }
+    packages = {component_id: "sha256:" + "c" * 64 for component_id in components}
     created = await profiles.create(
         operation_id="bootstrap-profile/profile/1",
         profile_ref="bootstrap-profile/profile/1",
@@ -2384,6 +2385,7 @@ async def test_bootstrap_profile_is_component_scoped_immutable_and_secret_ref_on
         storage_generation=1,
         components=components,
         schema_digests=schemas,
+        package_digests=packages,
     )
     replay = await profiles.create(
         operation_id="bootstrap-profile/profile/1",
@@ -2393,10 +2395,12 @@ async def test_bootstrap_profile_is_component_scoped_immutable_and_secret_ref_on
         storage_generation=1,
         components=components,
         schema_digests=schemas,
+        package_digests=packages,
     )
     assert replay == created
     assert [item.component_id for item in created.components] == sorted(components)
     assert all(item.config_digest.startswith("sha256:") for item in created.components)
+    assert {item.component_id: item.package_digest for item in created.components} == packages
 
     with pytest.raises(ForestError) as caught:
         await profiles.create(
@@ -2407,6 +2411,7 @@ async def test_bootstrap_profile_is_component_scoped_immutable_and_secret_ref_on
             storage_generation=1,
             components={"provider.chat-completions": {"model_api_key": "forbidden"}},
             schema_digests={"provider.chat-completions": "sha256:" + "f" * 64},
+            package_digests={"provider.chat-completions": "sha256:" + "c" * 64},
         )
     assert caught.value.code == "BOOTSTRAP_SECRET_PLAINTEXT_FORBIDDEN"
 
@@ -2426,6 +2431,7 @@ async def _bootstrap_profile(repository, storage, name: str):
         storage_generation=storage.storage_generation,
         components={"conversation.trigger-policy": {"allowed_group_ids": ["933179609"]}},
         schema_digests={"conversation.trigger-policy": "sha256:" + "a" * 64},
+        package_digests={"conversation.trigger-policy": "sha256:" + "c" * 64},
     )
 
 
@@ -2817,6 +2823,10 @@ async def test_official_provisioner_materializes_module_authorities_without_star
             storage_generation=storage.storage_generation,
             components=components,
             schema_digests=official_bootstrap_schema_digests(),
+            package_digests={
+                item.component_id: item.package_digest
+                for item in official_bootstrap_contributions()
+            },
         )
         jobs = DeploymentProvisioningJobAuthority(repository.store)
         await jobs.enqueue(

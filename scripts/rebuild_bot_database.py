@@ -80,10 +80,12 @@ def verify_package_catalog_write_access() -> None:
         ) from exc
 
 
-async def verify_vector_collection_access(settings, collection_name: str) -> None:
+async def verify_vector_collection_access(
+    settings, collection_name: str, *, token: str,
+) -> None:
     client = AsyncMilvusClient(
         uri=settings.vector_index_endpoint,
-        token=settings.vector_index_token,
+        token=token,
         timeout=settings.vector_index_timeout_seconds,
     )
     try:
@@ -93,10 +95,12 @@ async def verify_vector_collection_access(settings, collection_name: str) -> Non
         await client.close()
 
 
-async def reset_vector_collection(settings, collection_name: str) -> bool:
+async def reset_vector_collection(
+    settings, collection_name: str, *, token: str,
+) -> bool:
     client = AsyncMilvusClient(
         uri=settings.vector_index_endpoint,
-        token=settings.vector_index_token,
+        token=token,
         timeout=settings.vector_index_timeout_seconds,
     )
     try:
@@ -195,9 +199,18 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
 
         guard_task = asyncio.create_task(renew_guard(), name="bot-database-rebuild-lease")
         try:
+            async def vector_token() -> str:
+                if not bot_settings.vector_index_credential_ref:
+                    return ""
+                return await secrets.resolve_text_for_purpose(
+                    bot_settings.vector_index_credential_ref, "vector.index.credential"
+                )
+
             try:
-                await verify_vector_collection_access(bot_settings, collection_name)
-            except (TimeoutError, MilvusException, OSError) as exc:
+                await verify_vector_collection_access(
+                    bot_settings, collection_name, token=await vector_token()
+                )
+            except (TimeoutError, MilvusException, OSError, ForestError) as exc:
                 raise ForestError(
                     "BOT_REBUILD_VECTOR_PREFLIGHT_FAILED",
                     "Vector index is unavailable; Bot database was not rebuilt",
@@ -234,7 +247,15 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                 settings_resolver=resolver,
                 database_allocator=allocator,
             )(
-                claim=SimpleNamespace(bot_id=bot_id),
+                claim=SimpleNamespace(
+                    deployment_id=settings.deployment_id,
+                    job_id="development-rebuild/" + bot_id,
+                    bot_id=bot_id,
+                    storage_profile_ref=storage.profile_ref,
+                    storage_generation=storage.storage_generation,
+                    bootstrap_profile_ref=profile.profile_ref,
+                    bootstrap_manifest_digest=profile.manifest_digest,
+                ),
                 storage=storage,
                 profile=profile,
             )
@@ -266,9 +287,9 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                 )
             try:
                 collection_existed = await reset_vector_collection(
-                    bot_settings, collection_name
+                    bot_settings, collection_name, token=await vector_token()
                 )
-            except (TimeoutError, MilvusException, OSError) as exc:
+            except (TimeoutError, MilvusException, OSError, ForestError) as exc:
                 raise ForestError(
                     "BOT_REBUILD_VECTOR_RESET_FAILED",
                     "Bot database was rebuilt, but its derived vector collection was not reset",

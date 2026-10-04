@@ -280,7 +280,9 @@ class BootstrapProfileKernelCommand:
     async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
         saved = await self.profiles.create(
             operation_id=operation_id, conn=conn,
-            schema_digests=self.registry.schema_digests(), **prepared,
+            schema_digests=self.registry.schema_digests(),
+            package_digests=self.registry.package_digests(),
+            **prepared,
         )
         return {
             "profile_ref": saved.profile_ref,

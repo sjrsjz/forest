@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from forest.bootstrap_contributions import (
@@ -8,7 +10,10 @@ from forest.bootstrap_contributions import (
 )
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
-from forest.official_bot_provisioning import official_bootstrap_contributions
+from forest.official_bot_provisioning import (
+    OfficialBotSettingsResolver,
+    official_bootstrap_contributions,
+)
 from forest.runtime_modules import RuntimeManagementContribution
 
 
@@ -25,6 +30,7 @@ def _contribution(component_id: str = "example.component"):
             "additionalProperties": False,
         },
         initial_value={"enabled": True},
+        package_digest="sha256:" + "a" * 64,
         surface=RuntimeManagementContribution(
             "bootstrap-" + component_id,
             "Example",
@@ -77,3 +83,43 @@ def test_official_package_seeds_bind_vector_index_to_embedding_space():
     with pytest.raises(ForestError) as rejected:
         registry.validate_components(invalid)
     assert rejected.value.code == "BOOTSTRAP_COMPONENT_CONFIGURATION_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_profile_rejects_package_change_even_when_schema_is_unchanged():
+    registry = BootstrapConfigurationRegistry(official_bootstrap_contributions())
+    components = tuple(
+        SimpleNamespace(
+            component_id=item.component_id,
+            config=item.initial_value,
+            schema_digest=item.schema_digest,
+            package_digest="sha256:" + "f" * 64
+            if item.component_id == "provider.chat-completions"
+            else item.package_digest,
+        )
+        for item in registry.contributions
+    )
+    profile = SimpleNamespace(
+        bot_id="bot/test", storage_profile_ref="storage/test", storage_generation=1,
+        components=components,
+    )
+    storage = SimpleNamespace(
+        bot_id="bot/test", profile_ref="storage/test", storage_generation=1,
+        dsn="postgresql://localhost/forest_test",
+    )
+    class Secrets:
+        async def resolve_text_for_purpose(self, _ref, _purpose):
+            return "test-key"
+
+    resolver = OfficialBotSettingsResolver(secrets=Secrets(), bootstrap_registry=registry)
+
+    with pytest.raises(ForestError) as rejected:
+        await resolver.resolve(profile=profile, storage=storage)
+    assert rejected.value.code == "OFFICIAL_BOOTSTRAP_PACKAGE_MISMATCH"
+
+    resumed = await resolver.resolve(
+        profile=profile, storage=storage, verify_current_package=False
+    )
+    assert ("provider.chat-completions", "sha256:" + "f" * 64) in (
+        resumed.bootstrap_package_digests
+    )
