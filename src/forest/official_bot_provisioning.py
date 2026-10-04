@@ -301,7 +301,7 @@ class OfficialBotSettingsResolver:
 
     async def _verify_secret(self, secret_ref: str, purpose: str) -> None:
         try:
-            await self.secrets.resolve_text_for_purpose(secret_ref, purpose)
+            await self.secrets.verify_reference_for_purpose(secret_ref, purpose)
         except ForestError as error:
             if error.code == "SECRET_PURPOSE_CONFLICT":
                 raise ForestError(

@@ -219,6 +219,27 @@ class DeploymentSecretAuthority:
     async def resolve_text(self, secret_ref: str) -> str:
         return self._decode_text(await self.resolve(secret_ref))
 
+    async def verify_reference_for_purpose(self, secret_ref: str, purpose: str) -> None:
+        """Check an install-time Secret reference without accessing plaintext."""
+
+        if not isinstance(secret_ref, str) or _SECRET_REF.fullmatch(secret_ref) is None:
+            raise ForestError("SECRET_INPUT_INVALID", "Secret reference is invalid", 422)
+        _bounded(purpose, "purpose", 256)
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT s.purpose FROM forest_deployment.secret_slots s "
+                    "JOIN forest_deployment.secret_versions v "
+                    "ON v.secret_ref=s.secret_ref AND v.version=s.current_version "
+                    "WHERE s.secret_ref=%s",
+                    (secret_ref,),
+                )
+            ).fetchone()
+        if row is None:
+            raise ForestError("SECRET_NOT_FOUND", "Secret reference does not exist", 404)
+        if row["purpose"] != purpose:
+            raise ForestError("SECRET_PURPOSE_CONFLICT", "Secret purpose differs", 409)
+
     async def resolve_text_for_purpose(self, secret_ref: str, purpose: str) -> str:
         """Resolve one current secret through a purpose-limited native port."""
 

@@ -109,8 +109,8 @@ async def test_profile_rejects_package_change_even_when_schema_is_unchanged():
         dsn="postgresql://localhost/forest_test",
     )
     class Secrets:
-        async def resolve_text_for_purpose(self, _ref, _purpose):
-            return "test-key"
+        async def verify_reference_for_purpose(self, _ref, _purpose):
+            return None
 
     resolver = OfficialBotSettingsResolver(secrets=Secrets(), bootstrap_registry=registry)
 
@@ -168,9 +168,9 @@ async def test_package_creation_constraints_bind_secret_purpose_and_origin():
     calls = []
 
     class Secrets:
-        async def resolve_text_for_purpose(self, reference, purpose):
+        async def verify_reference_for_purpose(self, reference, purpose):
             calls.append((reference, purpose))
-            return "test-key"
+            return None
 
     resolver = OfficialBotSettingsResolver(secrets=Secrets(), bootstrap_registry=registry)
     await resolver.resolve(profile=profile, storage=storage)

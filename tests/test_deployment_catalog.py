@@ -2248,6 +2248,21 @@ async def test_deployment_secret_rotation_is_encrypted_cas_and_write_only(
     assert await secrets.resolve_text_for_purpose(
         first.secret_ref, "provider.chat-completions.credential"
     ) == "model-secret-value"
+    metadata_only = DeploymentSecretAuthority(
+        repository.store,
+        active_key_id="master/test/1",
+        key_resolver=lambda _key_id: (_ for _ in ()).throw(
+            AssertionError("Secret verification must not request a decryption key")
+        ),
+    )
+    await metadata_only.verify_reference_for_purpose(
+        first.secret_ref, "provider.chat-completions.credential"
+    )
+    with pytest.raises(ForestError) as wrong_reference_purpose:
+        await metadata_only.verify_reference_for_purpose(
+            first.secret_ref, "embedding.multimodal.credential"
+        )
+    assert wrong_reference_purpose.value.code == "SECRET_PURPOSE_CONFLICT"
     with pytest.raises(ForestError) as wrong_purpose:
         await secrets.resolve_text_for_purpose(
             first.secret_ref, "embedding.multimodal.credential"
