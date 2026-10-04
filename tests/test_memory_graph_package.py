@@ -4066,6 +4066,26 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                     ),
                 )
                 assert managed == detail_page
+                inspected = await instance.management_contract.query_authorized(
+                    "memory.embedding-attempt.inspect",
+                    {"attempt_id": "attempt/embedding/claim"},
+                    authorization=SimpleNamespace(
+                        actor_ref="admin/one", web_subject_ref="admin/one"
+                    ),
+                )
+                Draft202012Validator(package.snapshot.schema(
+                    "schemas/inspect-embedding-attempt-output.json"
+                )).validate(inspected)
+                assert inspected["attempt_state"] == "UNKNOWN"
+                assert inspected["reservation_state"] == "UNKNOWN"
+                assert inspected["item_count"] == 2
+                assert [item["item_index"] for item in inspected["items"]] == [0, 1]
+                assert {item["modality"] for item in inspected["items"]} == {
+                    "TEXT", "IMAGE"
+                }
+                assert all(item["current_attempt_id"] == inspected["attempt_id"]
+                           and item["external_group_id"] == "933179609"
+                           for item in inspected["items"])
             return
 
         identity = instance.generation_identity

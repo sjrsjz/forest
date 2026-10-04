@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.75.1"
+version = "1.76.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -274,9 +274,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.65.0"
+schema_version = "3.66.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "cc308d729200b0cfe3a01148d48204d0f44f949525666e1feedbb6ae20f056e7"
+baseline_sha256 = "ff89469622e34c976f4ca61014aedfaf01da4475a1b03e10dd7b4f2153f851ba"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -329,6 +329,13 @@ contract = "1.0"
 function = "memory_query_source_embedding_facets"
 input_schema = "schemas/query-source-facets-input.json"
 output_schema = "schemas/query-source-facets-output.json"
+
+[[components.domain_queries]]
+name = "memory.inspect-embedding-attempt"
+contract = "1.0"
+function = "memory_inspect_embedding_attempt"
+input_schema = "schemas/inspect-embedding-attempt-input.json"
+output_schema = "schemas/inspect-embedding-attempt-output.json"
 
 [[components.domain_queries]]
 name = "memory.query-forget-selection"
@@ -460,6 +467,12 @@ port = "memory.query-source-facets"
 required_role = "ADMIN"
 default_limit = 50
 max_limit = 100
+timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.embedding-attempt.inspect"
+port = "memory.inspect-embedding-attempt"
+required_role = "ADMIN"
 timeout_s = 10
 
 [[components.management_queries]]

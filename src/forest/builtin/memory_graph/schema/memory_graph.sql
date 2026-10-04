@@ -8665,6 +8665,78 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_inspect_embedding_attempt(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_attempt text := input->>'attempt_id';
+    attempt_row record;
+    members jsonb;
+BEGIN
+    IF jsonb_typeof(input) IS DISTINCT FROM 'object'
+       OR input - ARRAY['attempt_id']::text[] <> '{}'::jsonb
+       OR requested_attempt IS NULL
+       OR octet_length(requested_attempt) NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_INPUT_INVALID',
+                'message','Embedding attempt inspection input is invalid','status',422));
+    END IF;
+    SELECT a.attempt_id,a.claim_id,c.purpose,c.item_count,
+           a.state AS attempt_state,a.effect_operation_id,
+           a.executor_generation_id,a.dispatched_at,a.settled_at,
+           r.budget_day::text AS budget_day,r.state AS reservation_state,
+           r.reserved_tokens,r.charged_tokens
+    INTO attempt_row
+    FROM __forest_module_schema__.embedding_batch_attempts a
+    JOIN __forest_module_schema__.embedding_claims c
+      ON c.bot_id=a.bot_id AND c.claim_id=a.claim_id
+    LEFT JOIN __forest_module_schema__.embedding_budget_reservations r
+      ON r.bot_id=a.bot_id AND r.reservation_id=a.reservation_id
+    WHERE a.bot_id=requested_bot AND a.attempt_id=requested_attempt;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_NOT_FOUND',
+                'message','Embedding attempt does not exist','status',404));
+    END IF;
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'item_index',ci.item_index,'facet_id',f.facet_id,
+        'modality',f.modality,'state',f.state,
+        'current_attempt_id',f.current_attempt_id,
+        'source_unit_id',f.source_unit_id,'source_revision',f.source_revision,
+        'trunk_id',u.trunk_id,'external_group_id',s.external_group_id,
+        'author_subject_ref',u.author_subject_ref
+    ) ORDER BY ci.item_index),'[]'::jsonb)
+    INTO members
+    FROM __forest_module_schema__.embedding_claim_items ci
+    JOIN __forest_module_schema__.embedding_facets f
+      ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+    LEFT JOIN __forest_module_schema__.source_units u
+      ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+     AND u.source_revision=f.source_revision
+    LEFT JOIN __forest_module_schema__.memory_sources s
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+    WHERE ci.bot_id=requested_bot AND ci.claim_id=attempt_row.claim_id;
+    IF jsonb_array_length(members) IS DISTINCT FROM attempt_row.item_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_MEMBERSHIP_INVALID',
+                'message','Embedding attempt membership is incomplete','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.memory-embedding-attempt/1',
+            'attempt_id',attempt_row.attempt_id,'claim_id',attempt_row.claim_id,
+            'purpose',attempt_row.purpose,'attempt_state',attempt_row.attempt_state,
+            'effect_operation_id',attempt_row.effect_operation_id,
+            'executor_generation_id',attempt_row.executor_generation_id,
+            'dispatched_at',attempt_row.dispatched_at,'settled_at',attempt_row.settled_at,
+            'budget_day',attempt_row.budget_day,
+            'reservation_state',attempt_row.reservation_state,
+            'reserved_tokens',attempt_row.reserved_tokens,
+            'charged_tokens',attempt_row.charged_tokens,
+            'item_count',attempt_row.item_count,'items',members));
+END;
+$$;
+
 CREATE FUNCTION memory_freeze_forget_selection(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE

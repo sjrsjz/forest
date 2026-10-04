@@ -197,6 +197,8 @@ Memory 包的持久域绑定任务在运行时通过冻结的 `embedding.profile
 
 Memory 的每日嵌入账本以 UTC 日期和 Bot ID 为键。每个稳定 batch 在派发前先通过包内事务预留一次请求和配置的 token 估计额；同一 batch 只能持有一个 reservation，日账本行锁让并发 Worker 合流。明确未发送时释放占额，收到带 usage 的结果时以实际 token 数结算，不确定是否已发送时把请求数和估计额移入 UNKNOWN 占额且不得自动重发。估计 token 不能证明服务端的精确计费；若实耗超过预留，账本记实耗并停止后续超额预留。过期 reservation 必须先以 effect 证据对账，不能仅凭时间将它释放。
 
+管理诊断按准确 attempt ID 读取同一批最多 32 个 facet 及其当前状态、原始群主干和作者；预算 reservation 只属于整个批次，界面展示一次，不能把成员行的预留额相加。该端口只读，既不释放 UNKNOWN 占额，也不把结果不明的外部请求当作明确未发送。
+
 一次召回先把当前 InputBatch 的文本/图片 parts 发布为 QUERY `ref_id`，Milvus ANN 只返回 DOCUMENT `ref_id` 与相似度。`memory.graph` 随后在冻结可见性时间点回 PostgreSQL 批量验证 `READY`、space、来源修订、`ELIGIBLE`、删除 epoch 和当前 InputBatch 切口；未通过者被丢弃。各查询 facet 的候选用 RRF 只确定直接种子顺序，向量相似度不再与图激活值混成一个分数。直接种子的激活值统一为 `1.0`，再沿同主干前后邻接边和 `ASSOCIATES_WITH` 边执行最大乘积扩散；最终 EvidenceBundle 始终从 PostgreSQL 事实库物化，并逐项附原始群聊、主干、作者和命中路径。
 
 重建先读取冻结有效源集、构造候选节点和边、验证主干约束与来源清单，再检查 scope head、删除屏障和代际 fence，最后一次发布 graph head。若源集继续增长，按持久 desired/processed 水位追赶；覆盖不足必须在快照元数据里显式标记，不得把“已处理最大位置”冒充无缺口完成。
