@@ -782,3 +782,5 @@ Worker Host 配置重建状态查询直连领域端口（2026-10-04）：配置�
 官方 Bot 授权归包（2026-10-04）：Memory、Agent、Job Scheduler、Delivery、Shell 五个 builtin 包在各自 manifest 中声明 Bot 级能力及是否可委派，通用包装配器按当前 Bot ID 和内核策略修订创建 GrantSet；删除 BotHost 按组件名硬编码的授权表及 additional_grants 旁路。普通安装包即使提交带 official_bot_grants 的内容寻址工件，也会在数据库访问前被拒绝。包目录 97 passed、1 skipped；隔离 PostgreSQL 的完整 Bot 热重载 1 passed、Job Scheduler 的准确授权及热重载 1 passed；Ruff 通过。五个官方包版本随 manifest 变更提升，预发布旧冻结 Profile 与运行图在继续使用前需按新包摘要重建或显式更新，在线旧实例未切换。
 
 原生 Effect 配置安全校验按种类绑定（2026-10-04）：BotHost 不再按 process_executor 目录名注入配置校验工厂；宿主的 PackageEffectDriverRegistry 将 process.native 驱动和同一配置安全解析器绑定，通用包装配器按工件声明的 effect_services.kind 选择并组合校验器，创建、配置提交与 Generation prepare 仍走该校验边界。删除旧工厂 API 与组件名映射；普通插件不能以此执行宿主 Python 代码。本地原生进程测试 3 passed、4 skipped，隔离 PostgreSQL 的完整 Bot 热重载 1 passed（103.79 秒），Ruff 通过。Effect Driver 工厂注册本身仍由 BotHost 装配，后续仍需收敛其宿主端口组织。
+
+Memory UNKNOWN 来源可见性（2026-10-04）：Memory 包来源分页返回当前修订的 UNKNOWN 文档 facet 数，新增服务端 `only_unknown_facets` 筛选及部分索引有界候选路径；WebUI 显示数量并提供筛选。筛选只是只读诊断，不会重新派发可能已计费的 Effect，现有预算仍把 UNKNOWN 请求和估计 token 计入日上限。隔离 PostgreSQL 来源分页/快照/覆盖回归 1 passed，Ruff、JS 语法和差异检查通过。人工重试与成本收敛政策仍待确定；此版本尚未切到在线实例。

@@ -1260,6 +1260,9 @@ CREATE INDEX embedding_facets_source_idx ON embedding_facets(
 CREATE INDEX embedding_facets_ready_source_idx ON embedding_facets(
     bot_id,source_unit_id
 ) WHERE purpose='DOCUMENT' AND state='READY';
+CREATE INDEX embedding_facets_unknown_source_idx ON embedding_facets(
+    bot_id,source_unit_id
+) WHERE purpose='DOCUMENT' AND state='UNKNOWN';
 CREATE INDEX embedding_facets_query_idx ON embedding_facets(
     bot_id,query_id,purpose,state,facet_id
 );
@@ -8379,6 +8382,7 @@ RETURNS TABLE (
     eligibility_state text, source_status text, source_revision bigint,
     author_payload_id text, document_facet_count integer,
     ready_document_facet_count integer, failed_document_facet_count integer,
+    unknown_document_facet_count integer,
     index_coverage text)
 -- Keep this function inlineable: source pagination must push ORDER BY/LIMIT
 -- into the indexed source scan before calculating facet coverage.
@@ -8389,6 +8393,7 @@ LANGUAGE sql STABLE AS $$
         u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
         u.eligibility_state,s.status,u.source_revision,u.author_payload_id,
         coverage.facet_count,coverage.ready_count,coverage.failed_count,
+        coverage.unknown_count,
         coverage.index_coverage
     FROM __forest_module_schema__.source_units u
     JOIN __forest_module_schema__.memory_sources s
@@ -8397,6 +8402,7 @@ LANGUAGE sql STABLE AS $$
         SELECT pg_catalog.count(*)::integer AS facet_count,
                pg_catalog.count(*) FILTER (WHERE f.state='READY')::integer AS ready_count,
                pg_catalog.count(*) FILTER (WHERE f.state='FAILED')::integer AS failed_count,
+               pg_catalog.count(*) FILTER (WHERE f.state='UNKNOWN')::integer AS unknown_count,
                CASE WHEN pg_catalog.count(*)=0 THEN 'NO_FACETS'
                     WHEN pg_catalog.count(*) FILTER (WHERE f.state='READY')=pg_catalog.count(*)
                         THEN 'COMPLETE'
@@ -8436,6 +8442,8 @@ LANGUAGE sql STABLE AS $$
       AND (filters->>'unit_kind' IS NULL OR u.unit_kind=filters->>'unit_kind')
       AND (filters->>'index_coverage' IS NULL OR
            coverage.index_coverage=filters->>'index_coverage')
+      AND (filters->>'only_unknown_facets' IS DISTINCT FROM 'true' OR
+           coverage.unknown_count>0)
       AND (filters->>'source_order_from' IS NULL OR
            u.source_order_seq>=(filters->>'source_order_from')::bigint)
       AND (filters->>'source_order_to' IS NULL OR
@@ -8465,7 +8473,8 @@ DECLARE
     selected_state text := COALESCE(input->>'eligibility_state','ELIGIBLE');
     selected_source_status text := COALESCE(input->>'source_status','ACTIVE');
     selected_index_coverage text := input->>'index_coverage';
-    ready_source_ids text[];
+    selected_unknown boolean := input->>'only_unknown_facets'='true';
+    candidate_source_ids text[];
     items jsonb;
     more boolean;
     cursor_value jsonb;
@@ -8479,6 +8488,8 @@ BEGIN
        selected_source_status NOT IN ('ACTIVE','RETIRED') OR
        (selected_index_coverage IS NOT NULL AND selected_index_coverage NOT IN
            ('NO_FACETS','NOT_READY','PARTIAL','COMPLETE')) OR
+       (input ? 'only_unknown_facets' AND
+           jsonb_typeof(input->'only_unknown_facets')<>'boolean') OR
        (input ? 'group_source_ids' AND (cardinality(selected_sources)=0 OR
           cardinality(selected_sources)>256)) OR
        (input ? 'source_order_from' AND NOT (input ? 'source_id')) OR
@@ -8493,11 +8504,21 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
                 'message','Source page limit or cursor is invalid','status',422));
     END IF;
-    -- COMPLETE and PARTIAL require a READY document facet. Enumerate a bounded
-    -- set of source IDs first; a larger set uses the ordered source scan below.
-    IF selected_index_coverage IN ('COMPLETE','PARTIAL') THEN
+    -- Rare facet filters start from a bounded partial index. If the candidate
+    -- set is large, use the ordered source scan rather than materializing it.
+    IF selected_unknown THEN
         SELECT array_agg(candidate.source_unit_id)
-        INTO ready_source_ids
+        INTO candidate_source_ids
+        FROM (
+            SELECT DISTINCT f.source_unit_id
+            FROM __forest_module_schema__.embedding_facets f
+            WHERE f.bot_id=context->>'bot_id'
+              AND f.purpose='DOCUMENT' AND f.state='UNKNOWN'
+            ORDER BY f.source_unit_id LIMIT 8193
+        ) candidate;
+    ELSIF selected_index_coverage IN ('COMPLETE','PARTIAL') THEN
+        SELECT array_agg(candidate.source_unit_id)
+        INTO candidate_source_ids
         FROM (
             SELECT DISTINCT f.source_unit_id
             FROM __forest_module_schema__.embedding_facets f
@@ -8506,15 +8527,16 @@ BEGIN
             ORDER BY f.source_unit_id LIMIT 8193
         ) candidate;
     END IF;
-    IF selected_index_coverage IN ('COMPLETE','PARTIAL') AND
-       COALESCE(cardinality(ready_source_ids),0)<=8192 THEN
+    IF (selected_unknown OR selected_index_coverage IN ('COMPLETE','PARTIAL')) AND
+       COALESCE(cardinality(candidate_source_ids),0)<=8192 THEN
         WITH page AS (
             SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
                 u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
                 u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
                 u.eligibility_state,u.source_status,u.document_facet_count,
-                u.ready_document_facet_count,u.failed_document_facet_count,u.index_coverage
-            FROM unnest(COALESCE(ready_source_ids,ARRAY[]::text[])) candidate(source_unit_id)
+                u.ready_document_facet_count,u.failed_document_facet_count,
+                u.unknown_document_facet_count,u.index_coverage
+            FROM unnest(COALESCE(candidate_source_ids,ARRAY[]::text[])) candidate(source_unit_id)
             JOIN __forest_module_schema__.memory_filtered_source_units(
                 context->>'bot_id',input,snapshot_time,snapshot_value) u
               ON u.source_unit_id=candidate.source_unit_id
@@ -8538,7 +8560,8 @@ BEGIN
                 u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
                 u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
                 u.eligibility_state,u.source_status,u.document_facet_count,
-                u.ready_document_facet_count,u.failed_document_facet_count,u.index_coverage
+                u.ready_document_facet_count,u.failed_document_facet_count,
+                u.unknown_document_facet_count,u.index_coverage
             FROM __forest_module_schema__.memory_filtered_source_units(
                 context->>'bot_id',input,snapshot_time,snapshot_value) u
             WHERE after_time IS NULL OR

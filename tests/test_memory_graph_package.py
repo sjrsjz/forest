@@ -924,7 +924,7 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
                 f"payload/{name}", digest, f"unit/{name}",
             ))
         for name, index, state in (
-            ("newest", 0, "READY"), ("newest", 1, "PENDING"),
+            ("newest", 0, "READY"), ("newest", 1, "UNKNOWN"),
             ("oldest", 0, "READY"),
         ):
             facet_id = f"facet/{name}/{index}"
@@ -962,7 +962,10 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
             assert [item["source_unit_id"] for item in first["items"]] == ["unit/newest"]
             assert (first["items"][0]["index_coverage"],
                     first["items"][0]["ready_document_facet_count"],
-                    first["items"][0]["document_facet_count"]) == ("PARTIAL", 1, 2)
+                    first["items"][0]["document_facet_count"],
+                    first["items"][0]["unknown_document_facet_count"]) == (
+                        "PARTIAL", 1, 2, 1
+                    )
             assert first["has_more"] is True
         cursor = {
             "limit": 1,
@@ -1004,6 +1007,14 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
         assert [item["source_unit_id"] for item in fresh["result"]["value"]["items"]] == [
             "unit/newest", "unit/late", "unit/oldest"
         ]
+        selected_unknown = await (await reader.execute(
+            sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+            (Jsonb({"bot_id": store.bot_id}), Jsonb({"only_unknown_facets": True})),
+        )).fetchone()
+        assert [item["source_unit_id"] for item in
+                selected_unknown["result"]["value"]["items"]] == ["unit/newest"]
+        assert [item["unknown_document_facet_count"] for item in
+                fresh["result"]["value"]["items"]] == [1, 0, 0]
         for coverage, expected in (
             ("PARTIAL", "unit/newest"),
             ("NO_FACETS", "unit/late"),
