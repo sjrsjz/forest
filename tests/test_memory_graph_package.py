@@ -1555,6 +1555,78 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
     assert recovered_batch["value"]["result"] == applied
 
 
+@pytest.mark.postgres
+async def test_expired_facet_preparation_claims_recover_in_bounded_batches(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "facet-recovery-packages"),
+        store, installer, kernel=kernel, initial_configuration=_configuration(),
+        resolved_contracts={},
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    digest = "sha256:" + "a" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_domains("
+            "bot_id,initialization_operation_id,input_digest,space_id,"
+            "embedding_model_kind,model_revision_digest,dimensions,max_batch_items,"
+            "normalization,fusion_policy_revision) VALUES "
+            "(%s,'domain/facet-recovery',%s,'space/facet-recovery',"
+            "'TEXT_IMAGE',%s,4096,8,'L2','facets/1')"
+        ).format(namespace), (store.bot_id, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_sources("
+            "bot_id,source_id,registration_operation_id,input_digest,source_kind,"
+            "identity_incarnation,identity_digest) VALUES "
+            "(%s,'source/facet-recovery','register/facet-recovery',%s,"
+            "'DOCUMENT',1,%s)"
+        ).format(namespace), (store.bot_id, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.source_units("
+            "bot_id,source_unit_id,capture_operation_id,input_digest,source_id,"
+            "source_order_seq,source_revision,unit_kind,modality,part_count,"
+            "content_manifest_digest,author_subject_ref,author_payload_id,"
+            "author_payload_digest,author_owner_component_id,author_owner_kind,"
+            "author_owner_id,accepted_deletion_epoch,eligibility_state,eligible_at,"
+            "occurred_at) SELECT %s,'unit/facet/'||lpad(n::text,3,'0'),"
+            "'capture/facet/'||n,%s,'source/facet-recovery',n,1,'MESSAGE','TEXT',1,"
+            "%s,'author/test','payload/author',%s,'conversation.scheduler',"
+            "'context.input','input/facet/'||n,0,'ELIGIBLE',clock_timestamp(),"
+            "clock_timestamp() FROM generate_series(1,70) AS n"
+        ).format(namespace), (store.bot_id, digest, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.facet_preparation_work("
+            "bot_id,source_unit_id,state,claim_token,lease_deadline,attempt_count) "
+            "SELECT %s,'unit/facet/'||lpad(n::text,3,'0'),"
+            "'CLAIMED','stale/'||n,clock_timestamp()-interval '1 second',1 "
+            "FROM generate_series(1,70) AS n"
+        ).format(namespace), (store.bot_id,))
+
+    for round_no, remaining in enumerate((38, 6, 0), 1):
+        async with store.pool.connection() as conn, conn.transaction():
+            claim = (await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_claim_facet_preparation(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id}),
+                Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                       "claim_token": f"new/{round_no}", "lease_seconds": 90}),
+            ))).fetchone())["result"]
+        assert claim["ok"] and claim["value"] is not None
+        async with store.pool.connection() as conn:
+            counts = await (await conn.execute(sql.SQL(
+                "SELECT count(*) FILTER (WHERE left(claim_token,6)='stale/') "
+                "AS still_expired, count(*) FILTER (WHERE "
+                "last_error_code='MEMORY_FACET_LEASE_EXPIRED') AS recovered "
+                "FROM {}.facet_preparation_work WHERE bot_id=%s"
+            ).format(namespace), (store.bot_id,))).fetchone()
+        assert counts["still_expired"] == remaining
+        assert counts["recovered"] == 70 - remaining
+
+
 def _configuration():
     return {
         "protocol": "forest.memory.graph/2",

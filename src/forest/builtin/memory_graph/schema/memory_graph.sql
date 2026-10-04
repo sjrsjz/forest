@@ -1274,6 +1274,9 @@ CREATE INDEX embedding_facets_work_idx ON embedding_facets(
 CREATE INDEX facet_preparation_work_idx ON facet_preparation_work(
     bot_id,state,next_attempt_at,source_unit_id
 );
+CREATE INDEX facet_preparation_expired_idx ON facet_preparation_work(
+    bot_id,lease_deadline,source_unit_id
+) WHERE state='CLAIMED';
 CREATE INDEX embedding_facets_source_idx ON embedding_facets(
     bot_id,source_unit_id,source_revision,part_id,purpose,state
 );
@@ -4673,11 +4676,20 @@ BEGIN
     IF domain_row IS NULL THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
     END IF;
-    UPDATE __forest_module_schema__.facet_preparation_work
+    WITH expired AS MATERIALIZED (
+        SELECT bot_id,source_unit_id
+        FROM __forest_module_schema__.facet_preparation_work
+        WHERE bot_id=requested_bot AND state='CLAIMED'
+          AND lease_deadline<=clock_timestamp()
+        ORDER BY lease_deadline,source_unit_id
+        FOR UPDATE SKIP LOCKED LIMIT 32
+    )
+    UPDATE __forest_module_schema__.facet_preparation_work w
     SET state='PENDING',claim_token=NULL,lease_deadline=NULL,
         next_attempt_at=clock_timestamp(),updated_at=clock_timestamp(),
         last_error_code='MEMORY_FACET_LEASE_EXPIRED'
-    WHERE bot_id=requested_bot AND state='CLAIMED' AND lease_deadline<=clock_timestamp();
+    FROM expired e
+    WHERE w.bot_id=e.bot_id AND w.source_unit_id=e.source_unit_id;
     SELECT w.* INTO work_row FROM __forest_module_schema__.facet_preparation_work w
     WHERE w.bot_id=requested_bot AND w.state='PENDING'
       AND w.next_attempt_at<=clock_timestamp()

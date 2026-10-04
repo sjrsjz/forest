@@ -189,7 +189,7 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 Memory 包的持久域绑定任务在运行时通过冻结的 `embedding.profile.bind` 服务读取实际模型身份，逐字段对照自己的不可变配置，再以包拥有的 UnitOfWork 写入 `memory_domains`。相同空间的重试幂等，身份不一致显式冲突；绑定失败按持久租约退避重试，不在归档事务中调用 Embedding 服务，也不阻塞消息归档。这一步只绑定身份，不调用嵌入模型 API。
 
-归档事务首次把源单元提升为 `ELIGIBLE` 时，仅幂等登记 `facet_preparation_work`。Memory 自有的持久 Worker 在域绑定完成后按源单元租约读取有界的 part 分页，使用固定 `unicode-codepoints-2048-128/1` 规则把非空文本切成 2048 字符、重叠 128 字符的片段，并为每张图片保留一个独立 facet。facet ID 包含来源、修订、part、原始内容摘要、空间和跨度；每批最多 64 个，经包内 UnitOfWork 再次核验归档资格、原始 payload 引用和空间后写入 `PENDING`。崩溃重试复用相同批次操作 ID，不会把重复消息写成多份 facet。这一步尚不发起嵌入或向量索引请求；后续派发仍必须先通过预算预留和删除屏障。
+归档事务首次把源单元提升为 `ELIGIBLE` 时，仅幂等登记 `facet_preparation_work`。Memory 自有的持久 Worker 在域绑定完成后按源单元租约读取有界的 part 分页；过期租约按到期时间经索引和 `SKIP LOCKED` 每次最多回收 32 条，连续领取收敛积压，避免单次领取更新全部历史任务。Worker 使用固定 `unicode-codepoints-2048-128/1` 规则把非空文本切成 2048 字符、重叠 128 字符的片段，并为每张图片保留一个独立 facet。facet ID 包含来源、修订、part、原始内容摘要、空间和跨度；每批最多 64 个，经包内 UnitOfWork 再次核验归档资格、原始 payload 引用和空间后写入 `PENDING`。崩溃重试复用相同批次操作 ID，不会把重复消息写成多份 facet。这一步尚不发起嵌入或向量索引请求；后续派发仍必须先通过预算预留和删除屏障。
 
 `memory.read-embedding-candidates` 只读地返回最早的最多 32 个待嵌入文档 facet，并从当前仍有效的来源、原始 part 和已归档 occurrence 中构造精确 payload、文本跨度或图片尺寸、主干、会话及作者。它返回的是候选快照，**不是 claim，也不授权网络派发**。`memory_claim_embedding_batch` 在 Memory 写事务中以行锁排他选取，复核当前来源资格和空间，把已接纳来源的删除 epoch 高水位、facet 快照与租约固定为一个 claim；它不能直接读取 Kernel Payload 私有删除时钟，也不能伪造尚未绑定的 Provider Generation。Worker 绑定实际 Provider、物化请求后，在 `memory.prepare-embedding-effect` 事务中依次捕获 Kernel Payload 删除 epoch、预留预算、签发授权、准备 Kernel Effect permit，并由 Memory 最后复核 claim、原始来源和同事务产物后登记批次 attempt；任何一步失败整体回滚。后续独立 handoff 事务还必须再次复核删除屏障，并原子推进 Kernel Effect 与 Memory 为已派发态。崩溃恢复只能根据持久 Effect/Memory 事实决定重试或 UNKNOWN；已 handoff 的 at-most-once 请求不能因为租约过期而再次发送。
 
