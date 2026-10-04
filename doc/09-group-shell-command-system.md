@@ -125,7 +125,7 @@ RECEIVED -> QUALIFIED -> QUEUED -> CLAIMED -> EXECUTING
                                       -> UNKNOWN
 ```
 
-请求只允许一个有效 claim，带 owner、lease epoch 和截止时间。宿主崩溃后，新 owner 根据 operation receipt 恢复；已接纳的外部效果不能因 ACK 丢失而换 operation 重放。UNKNOWN 必须经查询或人工 resolution 收敛。
+请求只允许一个有效 claim，带 owner、lease epoch 和截止时间。宿主崩溃后，新 owner 根据 operation receipt 恢复；已接纳的外部效果不能因 ACK 丢失而换 operation 重放。目标命令调用返回 `CALL_TIMEOUT`、`SERVICE_OPERATION_IN_PROGRESS` 或 `SERVICE_OPERATION_UNKNOWN` 时，Shell 只能登记并回执 `UNKNOWN`，不能把可能已经发生的效果报告为 `FAILED`。UNKNOWN 必须经查询或人工 resolution 收敛。
 
 执行者从冻结 RouteGraph 解析原 Generation，验证该代仍可完成已入场工作，再调用准确 management contract。新路由发布不会重新解释旧参数；旧代撤下后若不能安全完成，请求以明确 `GENERATION_RETIRED` 终结，不能偷偷交给不兼容的新 handler。
 

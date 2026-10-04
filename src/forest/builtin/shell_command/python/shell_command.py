@@ -288,9 +288,21 @@ class ShellCommand(Plugin):
             )
             text = result["text"]
         except ForestError as error:
-            state = "FAILED"
+            state = (
+                "UNKNOWN"
+                if error.code in {
+                    "CALL_TIMEOUT",
+                    "SERVICE_OPERATION_IN_PROGRESS",
+                    "SERVICE_OPERATION_UNKNOWN",
+                }
+                else "FAILED"
+            )
             error_code = error.code
-            text = "Forest 管理命令执行失败；请查看审计记录。"
+            text = (
+                "Forest 管理命令执行状态未知；请查看审计记录。"
+                if state == "UNKNOWN"
+                else "Forest 管理命令执行失败；请查看审计记录。"
+            )
         except Exception:
             state = "UNKNOWN"
             error_code = "SHELL_EXECUTION_UNKNOWN"
