@@ -16,7 +16,6 @@ from uuid import uuid4
 from forest.bootstrap_materialization import materialize_bootstrap_configuration
 from forest.builtin_packages import (
     auto_install_builtin_sources,
-    bootstrap_builtin_package,
     bootstrap_builtin_snapshot,
     bootstrap_installed_package,
 )
@@ -466,9 +465,12 @@ class BotHost:
             credential_resolver=resolve_provider_secret,
             **provider_driver_options,
         )
-        worker_host = await bootstrap_builtin_package(
-            Path(str(files("forest").joinpath("builtin/component_worker_host"))),
-            self.package_catalog,
+        worker_host_source = Path(str(files("forest").joinpath("builtin/component_worker_host")))
+        worker_host_snapshot = await asyncio.to_thread(
+            self.package_catalog.build, worker_host_source
+        )
+        worker_host = await bootstrap_builtin_snapshot(
+            worker_host_snapshot,
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
@@ -602,10 +604,21 @@ class BotHost:
         })
         automatic = []
         expected_packages = bootstrap_package_digests or {}
-        automatic_sources = tuple(
-            (source, self.package_catalog.build(source))
-            for source in auto_install_builtin_sources()
+        capture_slots = asyncio.Semaphore(4)
+
+        async def capture(source):
+            async with capture_slots:
+                snapshot = await asyncio.to_thread(self.package_catalog.build, source)
+                return source, snapshot
+
+        captured = await asyncio.gather(
+            *(capture(source) for source in auto_install_builtin_sources()),
+            return_exceptions=True,
         )
+        for result in captured:
+            if isinstance(result, BaseException):
+                raise result
+        automatic_sources = tuple(captured)
         if isinstance(bootstrap_settings, BotBootstrapSettings):
             profile_components = dict(bootstrap_settings.components)
         elif isinstance(bootstrap_settings, BotSettings):
