@@ -199,6 +199,8 @@ Memory 的每日嵌入账本以 UTC 日期和 Bot ID 为键。每个稳定 batch
 
 管理诊断按准确 attempt ID 读取同一批最多 32 个 facet 及其当前状态、原始群主干和作者；预算 reservation 只属于整个批次，界面展示一次，不能把成员行的预留额相加。该端口只读，既不释放 UNKNOWN 占额，也不把结果不明的外部请求当作明确未发送。
 
+对于供应商无法对账的 `UNKNOWN`，系统不自动重发。管理员可在批次诊断中明确确认潜在重复计费，并提交准确 attempt ID、当前可重试 facet 的有序清单与独立操作 ID。`memory.graph` 在当前 Generation 的 Web 授权事务内复核旧 attempt、已结算 claim、仍为 `UNKNOWN` 的旧预算、来源资格及冻结嵌入空间；成员清单变化或同一旧 attempt 已有重试操作则拒绝。成功时只把仍有效的旧 facet 重新排队，旧 attempt 与预算保持 `UNKNOWN` 终态；普通 claim 路径另建 attempt 并再次遵守每日预算。旧效果的迟到观察不能改写新 attempt，来源诊断保留最近旧 `UNKNOWN` attempt 的只读引用，操作 ID 重放返回原回执。该入口不是对旧费用的核销，也不提供绕过成本上限的管理员特权。
+
 一次召回先把当前 InputBatch 的文本/图片 parts 发布为 QUERY `ref_id`，Milvus ANN 只返回 DOCUMENT `ref_id` 与相似度。`memory.graph` 随后在冻结可见性时间点回 PostgreSQL 批量验证 `READY`、space、来源修订、`ELIGIBLE`、删除 epoch 和当前 InputBatch 切口；未通过者被丢弃。各查询 facet 的候选用 RRF 只确定直接种子顺序，向量相似度不再与图激活值混成一个分数。直接种子的激活值统一为 `1.0`，再沿同主干前后邻接边和 `ASSOCIATES_WITH` 边执行最大乘积扩散；最终 EvidenceBundle 始终从 PostgreSQL 事实库物化，并逐项附原始群聊、主干、作者和命中路径。
 
 重建先读取冻结有效源集、构造候选节点和边、验证主干约束与来源清单，再检查 scope head、删除屏障和代际 fence，最后一次发布 graph head。若源集继续增长，按持久 desired/processed 水位追赶；覆盖不足必须在快照元数据里显式标记，不得把“已处理最大位置”冒充无缺口完成。

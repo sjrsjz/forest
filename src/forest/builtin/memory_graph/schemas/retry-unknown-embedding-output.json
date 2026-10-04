@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "operation_id", "attempt_id", "state", "requeued_count", "previous_budget_state", "previous_reserved_tokens"],
+  "properties": {
+    "protocol": {"const": "forest.memory-embedding-unknown-retry/1"},
+    "operation_id": {"type": "string"},
+    "attempt_id": {"type": "string"},
+    "state": {"const": "REQUEUED"},
+    "requeued_count": {"type": "integer", "minimum": 1, "maximum": 32},
+    "previous_budget_state": {"const": "UNKNOWN"},
+    "previous_reserved_tokens": {"type": "integer", "minimum": 1}
+  }
+}

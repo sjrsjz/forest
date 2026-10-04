@@ -11,7 +11,7 @@
     "author_subject_ref": {"type": "string"},
     "items": {"type": "array", "maxItems": 100, "items": {
       "type": "object", "additionalProperties": false,
-      "required": ["facet_id", "part_id", "modality", "state", "failure_code", "created_at", "attempt_id", "claim_id", "attempt_state", "effect_operation_id", "executor_generation_id", "dispatched_at", "settled_at", "budget_day", "reservation_state", "reserved_tokens", "charged_tokens", "reservation_error_code"],
+      "required": ["facet_id", "part_id", "modality", "state", "failure_code", "created_at", "attempt_id", "last_unknown_attempt_id", "claim_id", "attempt_state", "effect_operation_id", "executor_generation_id", "dispatched_at", "settled_at", "budget_day", "reservation_state", "reserved_tokens", "charged_tokens", "reservation_error_code"],
       "properties": {
         "facet_id": {"type": "string"},
         "part_id": {"type": "string"},
@@ -20,6 +20,7 @@
         "failure_code": {"type": ["string", "null"]},
         "created_at": {"type": "string", "format": "date-time"},
         "attempt_id": {"type": ["string", "null"]},
+        "last_unknown_attempt_id": {"type": ["string", "null"]},
         "claim_id": {"type": ["string", "null"]},
         "attempt_state": {"type": ["string", "null"]},
         "effect_operation_id": {"type": ["string", "null"]},

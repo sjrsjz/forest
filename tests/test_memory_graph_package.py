@@ -4078,6 +4078,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 )).validate(inspected)
                 assert inspected["attempt_state"] == "UNKNOWN"
                 assert inspected["reservation_state"] == "UNKNOWN"
+                assert inspected["retry_operation_id"] is None
                 assert inspected["item_count"] == 2
                 assert [item["item_index"] for item in inspected["items"]] == [0, 1]
                 assert {item["modality"] for item in inspected["items"]} == {
@@ -4085,7 +4086,103 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 }
                 assert all(item["current_attempt_id"] == inspected["attempt_id"]
                            and item["external_group_id"] == "933179609"
+                           and item["retry_eligible"]
                            for item in inspected["items"])
+                web_actor = SimpleNamespace(
+                    actor_ref="admin/one", web_subject_ref="admin/one",
+                    target_generation_id=generation_id,
+                )
+
+                async def accept_retry_ticket(_conn, *, ticket, **_kwargs):
+                    assert ticket is not None
+
+                retry_payload = {
+                    "attempt_id": inspected["attempt_id"],
+                    "expected_facet_ids": [
+                        item["facet_id"] for item in inspected["items"]
+                    ],
+                    "acknowledge_possible_duplicate_charge": True,
+                }
+                with pytest.raises(ForestError) as stale:
+                    await instance.management_contract.action(
+                        "memory.embedding-unknown.retry",
+                        operation_id="web:embedding-retry-stale",
+                        payload={**retry_payload, "expected_facet_ids": ["wrong"]},
+                        authorization=web_actor,
+                        authorization_guard=accept_retry_ticket,
+                    )
+                assert stale.value.code == "MEMORY_EMBEDDING_RETRY_MEMBERS_CHANGED"
+                first_retry, concurrent_replay = await asyncio.gather(
+                    *(
+                        instance.management_contract.action(
+                            "memory.embedding-unknown.retry",
+                            operation_id="web:embedding-retry-valid",
+                            payload=retry_payload,
+                            authorization=web_actor,
+                            authorization_guard=accept_retry_ticket,
+                        )
+                        for _ in range(2)
+                    )
+                )
+                assert first_retry == concurrent_replay
+                retried = first_retry
+                assert retried["state"] == "REQUEUED"
+                assert retried["requeued_count"] == 2
+                assert retried["previous_budget_state"] == "UNKNOWN"
+                assert await instance.management_contract.action(
+                    "memory.embedding-unknown.retry",
+                    operation_id="web:embedding-retry-valid",
+                    payload=retry_payload,
+                    authorization=web_actor,
+                    authorization_guard=accept_retry_ticket,
+                ) == retried
+                with pytest.raises(ForestError) as duplicate:
+                    await instance.management_contract.action(
+                        "memory.embedding-unknown.retry",
+                        operation_id="web:embedding-retry-other",
+                        payload=retry_payload,
+                        authorization=web_actor,
+                        authorization_guard=accept_retry_ticket,
+                    )
+                assert duplicate.value.code == "MEMORY_EMBEDDING_RETRY_BOUNDARY_CLOSED"
+                async with store.pool.connection() as conn:
+                    state = await (await conn.execute(sql.SQL(
+                        "SELECT a.state AS attempt_state,r.state AS budget_state,"
+                        "r.reserved_tokens,(SELECT count(*) FROM {}.embedding_facets f "
+                        "WHERE f.bot_id=%s AND f.state='PENDING' "
+                        "AND f.current_attempt_id IS NULL) AS pending_count "
+                        "FROM {}.embedding_batch_attempts a "
+                        "JOIN {}.embedding_budget_reservations r "
+                        "ON r.bot_id=a.bot_id AND r.reservation_id=a.reservation_id "
+                        "WHERE a.bot_id=%s AND a.attempt_id=%s"
+                    ).format(
+                        sql.Identifier(namespace), sql.Identifier(namespace),
+                        sql.Identifier(namespace),
+                    ), (
+                        store.bot_id, store.bot_id, inspected["attempt_id"]
+                    ))).fetchone()
+                assert state["attempt_state"] == "UNKNOWN"
+                assert state["budget_state"] == "UNKNOWN"
+                assert state["reserved_tokens"] == retried["previous_reserved_tokens"]
+                assert state["pending_count"] == 2
+                historical = await instance.management_contract.query_authorized(
+                    "memory.embedding-attempt.inspect",
+                    {"attempt_id": inspected["attempt_id"]},
+                    authorization=web_actor,
+                )
+                assert historical["retry_operation_id"] == "web:embedding-retry-valid"
+                assert historical["retry_requested_by"] == "admin/one"
+                assert historical["retry_created_at"] is not None
+                assert all(not item["retry_eligible"] for item in historical["items"])
+                recovered = await instance.management_contract.query_authorized(
+                    "memory.source-facets.query",
+                    {"source_unit_id": "unit/event/captured", "state": "PENDING"},
+                    authorization=web_actor,
+                )
+                assert len(recovered["items"]) == 2
+                assert all(item["attempt_id"] is None
+                           and item["last_unknown_attempt_id"] == inspected["attempt_id"]
+                           for item in recovered["items"])
             return
 
         identity = instance.generation_identity

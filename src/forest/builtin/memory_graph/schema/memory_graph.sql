@@ -1013,6 +1013,19 @@ ALTER TABLE embedding_batch_attempts ADD CONSTRAINT embedding_batch_reservation_
     FOREIGN KEY (bot_id,reservation_id,claim_id)
     REFERENCES embedding_budget_reservations(bot_id,reservation_id,batch_ref);
 
+CREATE TABLE embedding_unknown_retry_operations (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    attempt_id text NOT NULL,
+    requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
+    result_payload jsonb NOT NULL CHECK (jsonb_typeof(result_payload)='object'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id),
+    UNIQUE (bot_id,attempt_id),
+    FOREIGN KEY (bot_id,attempt_id) REFERENCES embedding_batch_attempts(bot_id,attempt_id)
+);
+
 CREATE TABLE retrieval_bundles (
     bot_id text NOT NULL,
     bundle_id text NOT NULL CHECK (octet_length(bundle_id) BETWEEN 1 AND 256),
@@ -4278,6 +4291,15 @@ BEGIN
         'EMBEDDED','UNKNOWN','FAILED','PENDING','SUPPRESSED'
     ) THEN RETURN NEW; END IF;
     IF OLD.state='EMBEDDED' AND NEW.state IN ('READY','SUPPRESSED') THEN RETURN NEW; END IF;
+    IF OLD.state='UNKNOWN' AND NEW.state='PENDING'
+       AND OLD.current_attempt_id IS NOT NULL AND NEW.current_attempt_id IS NULL
+       AND ROW(NEW.attempt_count,NEW.index_ref_id,NEW.vector_digest,
+               NEW.result_payload_id,NEW.result_payload_digest,NEW.published_at,
+               NEW.failure_code)
+           IS NOT DISTINCT FROM
+           ROW(OLD.attempt_count,OLD.index_ref_id,OLD.vector_digest,
+               OLD.result_payload_id,OLD.result_payload_digest,OLD.published_at,
+               OLD.failure_code) THEN RETURN NEW; END IF;
     IF OLD.state IN ('READY','UNKNOWN','FAILED') AND NEW.state='SUPPRESSED' THEN RETURN NEW; END IF;
     IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
     RAISE EXCEPTION 'Invalid embedding facet transition' USING ERRCODE='55000';
@@ -8647,9 +8669,21 @@ BEGIN
         ORDER BY f.facet_id LIMIT page_limit+1
     ), visible AS (
         SELECT * FROM page ORDER BY facet_id LIMIT page_limit
+    ), annotated AS (
+        SELECT v.*,history.attempt_id AS last_unknown_attempt_id
+        FROM visible v
+        LEFT JOIN LATERAL (
+            SELECT a.attempt_id
+            FROM __forest_module_schema__.embedding_claim_items ci
+            JOIN __forest_module_schema__.embedding_batch_attempts a
+              ON a.bot_id=ci.bot_id AND a.claim_id=ci.claim_id
+            WHERE ci.bot_id=requested_bot AND ci.facet_id=v.facet_id
+              AND a.state='UNKNOWN'
+            ORDER BY a.settled_at DESC,a.attempt_id DESC LIMIT 1
+        ) history ON true
     )
     SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.facet_id)
-                     FROM visible v),'[]'::jsonb),
+                     FROM annotated v),'[]'::jsonb),
            (SELECT count(*)>page_limit FROM page),
            (SELECT v.facet_id FROM visible v ORDER BY v.facet_id DESC LIMIT 1)
     INTO items,more,next_after;
@@ -8681,17 +8715,22 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_INPUT_INVALID',
                 'message','Embedding attempt inspection input is invalid','status',422));
     END IF;
-    SELECT a.attempt_id,a.claim_id,c.purpose,c.item_count,
+    SELECT a.attempt_id,a.claim_id,c.purpose,c.space_id,c.item_count,
            a.state AS attempt_state,a.effect_operation_id,
            a.executor_generation_id,a.dispatched_at,a.settled_at,
            r.budget_day::text AS budget_day,r.state AS reservation_state,
-           r.reserved_tokens,r.charged_tokens
+           r.reserved_tokens,r.charged_tokens,
+           retry.operation_id AS retry_operation_id,
+           retry.requested_by AS retry_requested_by,
+           retry.created_at AS retry_created_at
     INTO attempt_row
     FROM __forest_module_schema__.embedding_batch_attempts a
     JOIN __forest_module_schema__.embedding_claims c
       ON c.bot_id=a.bot_id AND c.claim_id=a.claim_id
     LEFT JOIN __forest_module_schema__.embedding_budget_reservations r
       ON r.bot_id=a.bot_id AND r.reservation_id=a.reservation_id
+    LEFT JOIN __forest_module_schema__.embedding_unknown_retry_operations retry
+      ON retry.bot_id=a.bot_id AND retry.attempt_id=a.attempt_id
     WHERE a.bot_id=requested_bot AND a.attempt_id=requested_attempt;
     IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
@@ -8702,6 +8741,15 @@ BEGIN
         'item_index',ci.item_index,'facet_id',f.facet_id,
         'modality',f.modality,'state',f.state,
         'current_attempt_id',f.current_attempt_id,
+        'retry_eligible',(
+            attempt_row.attempt_state='UNKNOWN'
+            AND attempt_row.reservation_state='UNKNOWN'
+            AND attempt_row.purpose='DOCUMENT'
+            AND f.state='UNKNOWN' AND f.current_attempt_id=requested_attempt
+            AND f.space_id=attempt_row.space_id
+            AND d.space_id=attempt_row.space_id
+            AND u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE'
+        ),
         'source_unit_id',f.source_unit_id,'source_revision',f.source_revision,
         'trunk_id',u.trunk_id,'external_group_id',s.external_group_id,
         'author_subject_ref',u.author_subject_ref
@@ -8715,6 +8763,8 @@ BEGIN
      AND u.source_revision=f.source_revision
     LEFT JOIN __forest_module_schema__.memory_sources s
       ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+    LEFT JOIN __forest_module_schema__.memory_domains d
+      ON d.bot_id=f.bot_id
     WHERE ci.bot_id=requested_bot AND ci.claim_id=attempt_row.claim_id;
     IF jsonb_array_length(members) IS DISTINCT FROM attempt_row.item_count THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
@@ -8733,7 +8783,133 @@ BEGIN
             'reservation_state',attempt_row.reservation_state,
             'reserved_tokens',attempt_row.reserved_tokens,
             'charged_tokens',attempt_row.charged_tokens,
+            'retry_operation_id',attempt_row.retry_operation_id,
+            'retry_requested_by',attempt_row.retry_requested_by,
+            'retry_created_at',attempt_row.retry_created_at,
             'item_count',attempt_row.item_count,'items',members));
+END;
+$$;
+
+CREATE FUNCTION memory_retry_unknown_embedding(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_attempt text := input->>'attempt_id';
+    requested_actor text := input->>'requested_by';
+    requested_digest text := 'sha256:' ||
+        encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    existing __forest_module_schema__.embedding_unknown_retry_operations%ROWTYPE;
+    attempt_row record;
+    selected_ids jsonb;
+    selected_count integer;
+    updated_count integer;
+    result_value jsonb;
+BEGIN
+    IF requested_bot IS NULL OR requested_operation IS NULL
+       OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR requested_attempt IS NULL OR octet_length(requested_attempt) NOT BETWEEN 1 AND 256
+       OR requested_actor IS NULL OR octet_length(requested_actor) NOT BETWEEN 1 AND 256
+       OR jsonb_typeof(input) IS DISTINCT FROM 'object'
+       OR input - ARRAY['attempt_id','expected_facet_ids',
+                        'acknowledge_possible_duplicate_charge','requested_by']::text[]
+          <> '{}'::jsonb
+       OR input->>'acknowledge_possible_duplicate_charge' IS DISTINCT FROM 'true'
+       OR jsonb_typeof(input->'expected_facet_ids') IS DISTINCT FROM 'array'
+       OR jsonb_array_length(input->'expected_facet_ids') NOT BETWEEN 1 AND 32 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_RETRY_INPUT_INVALID',
+                'message','Unknown embedding retry input is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/embedding-unknown-retry/' || requested_bot || '/' ||
+        requested_operation,0));
+    SELECT * INTO existing
+    FROM __forest_module_schema__.embedding_unknown_retry_operations
+    WHERE bot_id=requested_bot AND operation_id=requested_operation FOR UPDATE;
+    IF FOUND THEN
+        IF existing.input_digest=requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+                'value',existing.result_payload);
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_RETRY_OPERATION_CONFLICT',
+                'message','Retry operation was reused with different input','status',409));
+    END IF;
+    SELECT a.attempt_id,a.claim_id,a.state AS attempt_state,c.state AS claim_state,
+           c.purpose,c.space_id,r.state AS reservation_state,r.reserved_tokens
+    INTO attempt_row
+    FROM __forest_module_schema__.embedding_batch_attempts a
+    JOIN __forest_module_schema__.embedding_claims c
+      ON c.bot_id=a.bot_id AND c.claim_id=a.claim_id
+    JOIN __forest_module_schema__.embedding_budget_reservations r
+      ON r.bot_id=a.bot_id AND r.reservation_id=a.reservation_id
+    WHERE a.bot_id=requested_bot AND a.attempt_id=requested_attempt
+    FOR UPDATE OF a,c,r;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_NOT_FOUND',
+                'message','Embedding attempt does not exist','status',404));
+    END IF;
+    SELECT * INTO existing
+    FROM __forest_module_schema__.embedding_unknown_retry_operations
+    WHERE bot_id=requested_bot AND attempt_id=requested_attempt;
+    IF FOUND OR attempt_row.attempt_state<>'UNKNOWN'
+       OR attempt_row.claim_state<>'SETTLED'
+       OR attempt_row.purpose<>'DOCUMENT'
+       OR attempt_row.reservation_state<>'UNKNOWN' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_RETRY_BOUNDARY_CLOSED',
+                'message','Unknown embedding attempt cannot be requeued','status',409));
+    END IF;
+    SELECT COALESCE(jsonb_agg(facet_id ORDER BY item_index),'[]'::jsonb),count(*)
+    INTO selected_ids,selected_count
+    FROM (
+        SELECT ci.item_index,f.facet_id
+        FROM __forest_module_schema__.embedding_claim_items ci
+        JOIN __forest_module_schema__.embedding_facets f
+          ON f.bot_id=ci.bot_id AND f.facet_id=ci.facet_id
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=f.bot_id AND u.source_unit_id=f.source_unit_id
+         AND u.source_revision=f.source_revision AND u.eligibility_state='ELIGIBLE'
+        JOIN __forest_module_schema__.memory_sources s
+          ON s.bot_id=u.bot_id AND s.source_id=u.source_id AND s.status='ACTIVE'
+        JOIN __forest_module_schema__.memory_domains d
+          ON d.bot_id=f.bot_id AND d.space_id=f.space_id
+        WHERE ci.bot_id=requested_bot AND ci.claim_id=attempt_row.claim_id
+          AND f.state='UNKNOWN' AND f.current_attempt_id=requested_attempt
+          AND f.purpose='DOCUMENT' AND f.space_id=attempt_row.space_id
+        ORDER BY ci.item_index FOR UPDATE OF f,u,s
+    ) eligible;
+    IF selected_count=0 OR selected_ids IS DISTINCT FROM input->'expected_facet_ids' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_RETRY_MEMBERS_CHANGED',
+                'message','Unknown embedding members changed','status',409));
+    END IF;
+    -- The original attempt and UNKNOWN budget stay terminal. The ordinary
+    -- claim path will create a new attempt and reserve new daily budget.
+    UPDATE __forest_module_schema__.embedding_facets
+    SET state='PENDING',current_attempt_id=NULL,
+        next_attempt_at=clock_timestamp(),updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND facet_id IN (
+        SELECT jsonb_array_elements_text(selected_ids)
+    ) AND state='UNKNOWN' AND current_attempt_id=requested_attempt;
+    GET DIAGNOSTICS updated_count = ROW_COUNT;
+    IF updated_count<>selected_count THEN
+        RAISE EXCEPTION 'Unknown embedding retry lost locked members' USING ERRCODE='55000';
+    END IF;
+    result_value := jsonb_build_object(
+        'protocol','forest.memory-embedding-unknown-retry/1',
+        'operation_id',requested_operation,'attempt_id',requested_attempt,
+        'state','REQUEUED','requeued_count',selected_count,
+        'previous_budget_state','UNKNOWN',
+        'previous_reserved_tokens',attempt_row.reserved_tokens);
+    INSERT INTO __forest_module_schema__.embedding_unknown_retry_operations(
+        bot_id,operation_id,input_digest,attempt_id,requested_by,result_payload)
+    VALUES(requested_bot,requested_operation,requested_digest,requested_attempt,
+        requested_actor,result_value);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',result_value);
 END;
 $$;
 

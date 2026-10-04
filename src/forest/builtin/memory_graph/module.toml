@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.76.0"
+version = "1.77.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -274,9 +274,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.66.0"
+schema_version = "3.67.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "ff89469622e34c976f4ca61014aedfaf01da4475a1b03e10dd7b4f2153f851ba"
+baseline_sha256 = "cf23d9d4c2765fe1b5bc9ce34cc9e12af155d96f6938b4d8b515934e86df1ca4"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -406,6 +406,13 @@ contract = "1.0"
 function = "memory_enqueue_management_forget"
 input_schema = "schemas/forget-management-action-input.json"
 output_schema = "schemas/forget-management-enqueued-output.json"
+
+[[components.domain_commands]]
+name = "memory.retry-unknown-embedding"
+contract = "1.0"
+function = "memory_retry_unknown_embedding"
+input_schema = "schemas/retry-unknown-embedding-input.json"
+output_schema = "schemas/retry-unknown-embedding-output.json"
 
 [[components.domain_commands]]
 name = "memory.enqueue-management-forget-batch"
@@ -554,6 +561,13 @@ port = "memory.enqueue-management-forget"
 priority = "P0"
 actor_field = "requested_by"
 authorization_path = "/plan"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "memory.embedding-unknown.retry"
+port = "memory.retry-unknown-embedding"
+priority = "P1"
+actor_field = "requested_by"
 timeout_s = 15
 
 [[components.management_actions]]
