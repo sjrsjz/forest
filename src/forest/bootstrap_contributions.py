@@ -15,6 +15,41 @@ from forest.runtime_modules import RuntimeManagementContribution
 
 
 @dataclass(frozen=True)
+class BootstrapPackageSurface:
+    """Opaque-origin setup UI captured from one exact package artifact."""
+
+    component_id: str
+    package_digest: str
+    artifact_sha256: str
+    scope_kinds: tuple[str, ...] = ("deployment",)
+
+    @property
+    def contribution_id(self) -> str:
+        return "bootstrap-" + self.component_id
+
+    def __post_init__(self) -> None:
+        if re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.component_id) is None:
+            raise ValueError("Bootstrap UI component identity is invalid")
+        if re.fullmatch(r"sha256:[a-f0-9]{64}", self.package_digest) is None:
+            raise ValueError("Bootstrap UI package digest is invalid")
+        if re.fullmatch(r"[a-f0-9]{64}", self.artifact_sha256) is None:
+            raise ValueError("Bootstrap UI artifact digest is invalid")
+
+    def as_fact(self, *, public: bool = False) -> dict:
+        surface = {
+            "protocol": "forest.bootstrap-ui/1",
+            "artifact": (
+                f"/management/v1/bootstrap-ui/{self.component_id}/"
+                f"{self.package_digest.removeprefix('sha256:')}/{self.artifact_sha256}"
+            ),
+            "sha256": self.artifact_sha256,
+        }
+        if public:
+            surface["kind"] = "sandboxed-bootstrap"
+        return {"surface": surface}
+
+
+@dataclass(frozen=True)
 class BootstrapConfigurationContribution:
     """One installable component's schema, initial value, and setup surface."""
 
@@ -23,7 +58,7 @@ class BootstrapConfigurationContribution:
     description: str
     schema: dict
     initial_value: dict
-    surface: RuntimeManagementContribution
+    surface: RuntimeManagementContribution | BootstrapPackageSurface
     package_digest: str
     order: int = 100
     validator: Callable[[dict], object] | None = None
@@ -33,6 +68,11 @@ class BootstrapConfigurationContribution:
             raise ValueError("Bootstrap contribution surface must belong to deployment scope")
         if re.fullmatch(r"sha256:[a-f0-9]{64}", self.package_digest) is None:
             raise ValueError("Bootstrap contribution package digest is invalid")
+        if isinstance(self.surface, BootstrapPackageSurface) and (
+            self.surface.component_id != self.component_id
+            or self.surface.package_digest != self.package_digest
+        ):
+            raise ValueError("Bootstrap UI differs from its contribution package")
         if type(self.order) is not int or not -10_000 <= self.order <= 10_000:
             raise ValueError("Bootstrap contribution order is invalid")
         if not self.description.strip() or any(ord(char) < 32 for char in self.description):

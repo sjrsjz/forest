@@ -127,6 +127,7 @@ MANIFEST_SCHEMA = {
                             "order": {"type": "integer", "minimum": -10000, "maximum": 10000},
                             "schema": {"type": "string"},
                             "initial_value": {"type": "string"},
+                            "ui_entrypoint": {"type": "string"},
                         },
                     },
                     "auto_install": {"type": "boolean"},
@@ -1185,6 +1186,32 @@ def _management_ui(files: dict[str, bytes], component: dict) -> dict | None:
     }
 
 
+def _bootstrap_ui(files: dict[str, bytes], component: dict) -> tuple[str, bytes] | None:
+    declaration = component.get("bootstrap_contribution")
+    reference = None if declaration is None else declaration.get("ui_entrypoint")
+    if reference is None:
+        return None
+    path = PurePosixPath(reference)
+    if (
+        not reference.startswith("ui/")
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.suffix.lower() != ".html"
+        or reference not in files
+    ):
+        _fail("INVALID_BOOTSTRAP_UI", "Bootstrap UI must be a packaged ui/*.html file")
+    content = files[reference]
+    if not content or len(content) > MAX_MANAGEMENT_UI_BYTES:
+        _fail("INVALID_BOOTSTRAP_UI", "Bootstrap UI exceeds its byte limit")
+    try:
+        html = content.decode("utf-8")
+    except UnicodeError as exc:
+        raise ForestError("INVALID_BOOTSTRAP_UI", "Bootstrap UI must be UTF-8 HTML", 422) from exc
+    if "\x00" in html or not re.search(r"<!doctype\s+html|<html(?:\s|>)", html, re.IGNORECASE):
+        _fail("INVALID_BOOTSTRAP_UI", "Bootstrap UI must be a complete HTML document")
+    return reference, content
+
+
 def storage_bundle_digest(spec: StorageBundleSpec, execution_profile: str) -> str:
     """Bind installed storage to its schema, independently of runtime code."""
 
@@ -1402,6 +1429,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_BOOTSTRAP_CONTRIBUTION",
                 "Creation-time schema and initial value must describe an object",
             )
+        _bootstrap_ui(files, component)
     replacement_facts_schema = component.get("lifecycle", {}).get(
         "replacement_facts_schema"
     )
@@ -2209,6 +2237,15 @@ class PackageSnapshot:
         schema = _schema(files, declaration["schema"])
         initial_value = json.loads(files[declaration["initial_value"]])
         return declaration.copy(), schema, initial_value
+
+    def bootstrap_ui(self) -> tuple[bytes, str] | None:
+        """Return exact packaged setup HTML and its content hash."""
+
+        result = _bootstrap_ui(self._verified_files(), self.component)
+        if result is None:
+            return None
+        _reference, content = result
+        return content, hashlib.sha256(content).hexdigest()
 
     def management_ui(self) -> tuple[dict, bytes] | None:
         files = self._verified_files()

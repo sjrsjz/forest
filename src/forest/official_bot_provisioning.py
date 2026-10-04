@@ -14,6 +14,7 @@ from psycopg_pool import PoolTimeout
 from forest.bootstrap_contributions import (
     BootstrapConfigurationContribution,
     BootstrapConfigurationRegistry,
+    BootstrapPackageSurface,
 )
 from forest.bot_host import BotHost, BotSettings
 from forest.builtin_packages import (
@@ -139,6 +140,14 @@ def official_bootstrap_contributions(
         declaration, schema, initial_value = captured
         component_id = snapshot.component["id"]
         label = declaration["label"]
+        ui = snapshot.bootstrap_ui()
+        surface = (
+            _bootstrap_surface(component_id, label)
+            if ui is None
+            else BootstrapPackageSurface(
+                component_id, snapshot.digest, ui[1]
+            )
+        )
         contributions.append(
             BootstrapConfigurationContribution(
                 component_id=component_id,
@@ -146,7 +155,7 @@ def official_bootstrap_contributions(
                 description=declaration["description"],
                 schema=schema,
                 initial_value=initial_value,
-                surface=_bootstrap_surface(component_id, label),
+                surface=surface,
                 package_digest=snapshot.digest,
                 order=declaration["order"],
             )

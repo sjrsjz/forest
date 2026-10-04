@@ -309,6 +309,8 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     deployment_audit=deployment_audit,
                     allowed_origin=settings.management_origin,
                     bot_supervisor=supervisor,
+                    bootstrap_registry=bootstrap_registry,
+                    bootstrap_package_catalog=package_catalog,
                 ),
                 host=settings.management_host,
                 port=settings.management_port,

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.32.1"
+version = "4.32.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -21,6 +21,7 @@ description = "Core system-prompt preset injected into every Agent run."
 order = 60
 schema = "schemas/bootstrap-config.json"
 initial_value = "bootstrap-setup.json"
+ui_entrypoint = "ui/bootstrap.html"
 
 [components.resources]
 max_frame_bytes = 262144

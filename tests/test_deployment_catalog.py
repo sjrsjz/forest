@@ -3046,6 +3046,9 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
     )
     package_catalog = PackageCatalog(tmp_path / "webui-deployment-packages")
+    agent_setup_snapshot = package_catalog.build(
+        Path(__file__).parents[1] / "src/forest/builtin/agent_runtime"
+    )
     audit_snapshot = package_catalog.build(
         Path(__file__).parents[1] / "src/forest/builtin/deployment_audit"
     )
@@ -3100,6 +3103,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
         deployment_audit=deployment_audit,
         allowed_origin="http://forest.test",
+        bootstrap_registry=bootstrap_registry,
+        bootstrap_package_catalog=package_catalog,
     )
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://forest.test"
@@ -3359,7 +3364,21 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         catalog_body = bootstrap_catalog.json()
         assert catalog_body["protocol"] == "forest.bootstrap-configuration-catalog/1"
         assert len(catalog_body["items"]) == 7
-        assert all(item["surface"]["kind"] == "trusted-module" for item in catalog_body["items"])
+        assert sum(item["surface"]["kind"] == "trusted-module" for item in catalog_body["items"]) == 6
+        agent_setup = next(
+            item for item in catalog_body["items"] if item["component_id"] == "agent.runtime"
+        )
+        assert agent_setup["package_digest"] == agent_setup_snapshot.digest
+        assert agent_setup["surface"]["kind"] == "sandboxed-bootstrap"
+        asset = await client.get(agent_setup["surface"]["artifact"])
+        assert asset.status_code == 200
+        assert "sandbox allow-scripts allow-forms" in asset.headers["content-security-policy"]
+        assert "Agent 核心提示词" in asset.text
+        artifact_path = agent_setup["surface"]["artifact"]
+        missing_asset = await client.get(
+            artifact_path[:-1] + ("0" if artifact_path[-1] != "0" else "1")
+        )
+        assert missing_asset.status_code == 404
         assert all(item["schema_digest"].startswith("sha256:") for item in catalog_body["items"])
         assert (await client.get("/static/bootstrap-component.js")).status_code == 200
         assert 'textarea name="components"' not in provisioning_ui.text

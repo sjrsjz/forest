@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from forest.bootstrap_contributions import BootstrapPackageSurface
 from forest.errors import ForestError
 from forest.management_gateway import ConfigurationApplyInput, ConfigurationPlanInput
 from forest.management_scopes import (
@@ -59,6 +60,8 @@ def create_deployment_management_app(
     deployment_registry_provider=None,
     deployment_graph_changes=None,
     deployment_change_previewer=None,
+    bootstrap_registry=None,
+    bootstrap_package_catalog=None,
 ) -> FastAPI:
     parsed_origin = urlsplit(allowed_origin)
     if (
@@ -159,6 +162,47 @@ def create_deployment_management_app(
     async def runtime_projection(gateway) -> dict:
         result = await gateway.runtime()
         return {**result, "scopes": await scopes.list_scopes()}
+
+    @app.get(
+        "/management/v1/bootstrap-ui/{component_id}/{package_digest}/{artifact_sha256}"
+    )
+    async def bootstrap_ui(
+        component_id: str, package_digest: str, artifact_sha256: str, request: Request
+    ):
+        await authenticated(request, admin=True)
+        if bootstrap_registry is None or bootstrap_package_catalog is None:
+            raise ForestError("BOOTSTRAP_UI_UNAVAILABLE", "Bootstrap UI catalog is unavailable", 503)
+        contribution = next(
+            (
+                item for item in bootstrap_registry.contributions
+                if item.component_id == component_id
+            ),
+            None,
+        )
+        surface = None if contribution is None else contribution.surface
+        if (
+            not isinstance(surface, BootstrapPackageSurface)
+            or contribution.package_digest != "sha256:" + package_digest
+            or surface.artifact_sha256 != artifact_sha256
+        ):
+            raise ForestError("BOOTSTRAP_UI_NOT_FOUND", "Bootstrap UI artifact is not current", 404)
+        snapshot = bootstrap_package_catalog.get(contribution.package_digest)
+        captured = snapshot.bootstrap_ui()
+        if captured is None or captured[1] != artifact_sha256:
+            raise ForestError("BOOTSTRAP_UI_NOT_FOUND", "Bootstrap UI artifact differs", 404)
+        return Response(
+            captured[0],
+            media_type="text/html; charset=utf-8",
+            headers={
+                "x-frame-options": "SAMEORIGIN",
+                "content-security-policy": (
+                    "sandbox allow-scripts allow-forms; default-src 'none'; "
+                    "script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                    "img-src data:; connect-src 'none'; font-src 'none'; "
+                    "frame-ancestors 'self'; base-uri 'none'; form-action 'none'"
+                ),
+            },
+        )
 
     @app.get("/", include_in_schema=False)
     async def index():
