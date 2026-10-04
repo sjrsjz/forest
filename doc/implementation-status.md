@@ -10,6 +10,8 @@ Worker Host 选择任务重领（2026-10-04）：`component.worker-host` 1.6.22 
 
 Worker Host 完整热换代复验（2026-10-04）：独立 `BotHost` 用例原先未绑定部署包目录只读端口，在首个工件查询即返回 `PACKAGE_CATALOG_UNAVAILABLE`；测试现显式以同一内容寻址 `PackageCatalog` 提供只读 page/artifact 端口，不向生产宿主增加旁路。当前源码的隔离 PostgreSQL 完整用例 `test_worker_host_shell_reload_preserves_unaffected_generations` 为 1 passed（388.02 秒），覆盖组件重载、外部 Counter 工件热加入与停用、选择任务及内核替换回执、未受影响 Generation 保留。它使用假的 OneBot、模型、Embedding、Media 和 Milvus 客户端；没有真实 QQ 发送或在线实例切换，也未专门模拟选择任务提交后的进程崩溃。
 
+Memory 管理遗忘积压收敛（2026-10-04）：`memory.graph` 1.77.2、私有 SQL 3.68.0 将每次领取前对全部过期 RUNNING 工作的无界更新改为至多 32 项的有序 `SKIP LOCKED` 核对，并为过期扫描建立部分索引；每项只读取一次已提交遗忘回执。另以独立的 16 项上限和 60 秒复核间隔处理 UNKNOWN：只有读到不可变提交回执才转为 SUCCEEDED，暂时无证据不改判。隔离 PostgreSQL 的完整冻结选择、逐批 P0 执行与租约丢失恢复用例增加 70 项过期工作，三轮分别收敛 32、32、6 项，并验证已提交的 UNKNOWN 工作恢复结果，`1 passed`（25.82 秒）。这验证领取事务的边界和多轮收敛，不等于百万来源选择、大批次 Payload 闭包压力或真实进程崩溃验收；在线实例未切换。
+
 本页保留按实施先后写下的阶段记录；早期段落中的“尚未”只描述当时状态，当前结论以第 8 节的切换清单和末尾最新验收记录为准。
 
 ## 1. 判定标准

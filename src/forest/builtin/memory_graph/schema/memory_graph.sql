@@ -386,6 +386,7 @@ CREATE TABLE management_forget_work (
         state IN ('QUEUED','RUNNING','SUCCEEDED','FAILED','UNKNOWN')),
     claim_token text CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
     lease_deadline timestamptz,
+    reconcile_checked_at timestamptz,
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 3),
     result_payload jsonb,
     error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
@@ -405,6 +406,12 @@ CREATE TABLE management_forget_work (
 );
 CREATE INDEX management_forget_claim_idx
     ON management_forget_work(bot_id,state,created_at,request_id);
+CREATE INDEX management_forget_expired_idx
+    ON management_forget_work(bot_id,lease_deadline,request_id)
+    WHERE state='RUNNING';
+CREATE INDEX management_forget_unknown_reconcile_idx
+    ON management_forget_work(bot_id,reconcile_checked_at,request_id)
+    WHERE state='UNKNOWN';
 
 CREATE TABLE management_forget_settlements (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
@@ -6708,18 +6715,57 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_FORGET_CLAIM_INVALID',
                 'message','Management forget claim is invalid','status',422));
     END IF;
+    WITH expired AS MATERIALIZED (
+        SELECT bot_id,request_id,work_kind,attempt_count
+        FROM __forest_module_schema__.management_forget_work
+        WHERE bot_id=requested_bot AND state='RUNNING'
+          AND lease_deadline<=clock_timestamp()
+        ORDER BY lease_deadline,request_id
+        FOR UPDATE SKIP LOCKED LIMIT 32
+    ), resolved AS MATERIALIZED (
+        SELECT e.bot_id,e.request_id,e.attempt_count,
+               __forest_module_schema__.memory_committed_forget_result(
+                   e.bot_id,e.work_kind,e.request_id) AS committed_result
+        FROM expired e
+    )
     UPDATE __forest_module_schema__.management_forget_work w
-    SET state=CASE WHEN __forest_module_schema__.memory_committed_forget_result(
-            w.bot_id,w.work_kind,w.request_id) IS NOT NULL
-            THEN 'SUCCEEDED' WHEN attempt_count<3 THEN 'QUEUED' ELSE 'UNKNOWN' END,
+    SET state=CASE WHEN r.committed_result IS NOT NULL
+            THEN 'SUCCEEDED' WHEN r.attempt_count<3 THEN 'QUEUED' ELSE 'UNKNOWN' END,
         claim_token=NULL,lease_deadline=NULL,
-        result_payload=__forest_module_schema__.memory_committed_forget_result(
-            w.bot_id,w.work_kind,w.request_id),
-        error_code=CASE WHEN __forest_module_schema__.memory_committed_forget_result(
-            w.bot_id,w.work_kind,w.request_id) IS NOT NULL
-            OR attempt_count<3 THEN NULL ELSE 'MEMORY_FORGET_OUTCOME_UNKNOWN' END,
+        result_payload=r.committed_result,
+        error_code=CASE WHEN r.committed_result IS NOT NULL
+            OR r.attempt_count<3 THEN NULL ELSE 'MEMORY_FORGET_OUTCOME_UNKNOWN' END,
+        reconcile_checked_at=CASE WHEN r.committed_result IS NULL
+            AND r.attempt_count>=3 THEN clock_timestamp()
+            ELSE w.reconcile_checked_at END,
         updated_at=clock_timestamp()
-    WHERE bot_id=requested_bot AND state='RUNNING' AND lease_deadline<=clock_timestamp();
+    FROM resolved r
+    WHERE w.bot_id=r.bot_id AND w.request_id=r.request_id;
+    WITH pending AS MATERIALIZED (
+        SELECT bot_id,request_id,work_kind
+        FROM __forest_module_schema__.management_forget_work
+        WHERE bot_id=requested_bot AND state='UNKNOWN'
+          AND (reconcile_checked_at IS NULL OR
+               reconcile_checked_at<=clock_timestamp()-interval '60 seconds')
+        ORDER BY reconcile_checked_at NULLS FIRST,request_id
+        FOR UPDATE SKIP LOCKED LIMIT 16
+    ), resolved AS MATERIALIZED (
+        SELECT p.bot_id,p.request_id,
+               __forest_module_schema__.memory_committed_forget_result(
+                   p.bot_id,p.work_kind,p.request_id) AS committed_result
+        FROM pending p
+    )
+    UPDATE __forest_module_schema__.management_forget_work w
+    SET state=CASE WHEN r.committed_result IS NOT NULL THEN 'SUCCEEDED'
+                   ELSE 'UNKNOWN' END,
+        result_payload=r.committed_result,
+        error_code=CASE WHEN r.committed_result IS NOT NULL THEN NULL
+                        ELSE w.error_code END,
+        reconcile_checked_at=clock_timestamp(),
+        updated_at=CASE WHEN r.committed_result IS NOT NULL
+                        THEN clock_timestamp() ELSE w.updated_at END
+    FROM resolved r
+    WHERE w.bot_id=r.bot_id AND w.request_id=r.request_id;
     SELECT * INTO work_row FROM __forest_module_schema__.management_forget_work
     WHERE bot_id=requested_bot AND state='QUEUED'
     ORDER BY created_at,request_id FOR UPDATE SKIP LOCKED LIMIT 1;
@@ -6799,6 +6845,8 @@ BEGIN
         error_code=CASE WHEN next_state='SUCCEEDED' THEN NULL
                         WHEN next_state='UNKNOWN' THEN 'MEMORY_FORGET_OUTCOME_UNKNOWN'
                         ELSE input#>>'{outcome,error,code}' END,
+        reconcile_checked_at=CASE WHEN next_state='UNKNOWN'
+            THEN clock_timestamp() ELSE reconcile_checked_at END,
         updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND request_id=work_row.request_id;
     result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,

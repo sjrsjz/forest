@@ -1226,6 +1226,7 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         scope_kind="bot", bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
         schema_bundle_installer=installer, generation_authority=kernel.runtime,
+        authority_lease=lambda **_kwargs: lease,
     )
     registry = RuntimeModuleRegistry(host, _isolated_memory_descriptors(kernel, package))
     await registry.start()
@@ -1497,6 +1498,61 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
             assert browser_progress["progress_state"] == "COMPLETE"
     finally:
         assert await registry.close() == []
+
+    # Expired work is reconciled in bounded transactions, then fully converges.
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.management_forget_work("
+            "bot_id,request_id,input_digest,source_unit_id,requested_by,plan,"
+            "state,claim_token,lease_deadline,attempt_count) "
+            "SELECT %s,'expired/'||lpad(n::text,3,'0'),%s,'unit/late',"
+            "'admin/one','{{}}'::jsonb,'RUNNING','expired-claim/'||n,"
+            "clock_timestamp()-interval '1 second',3 "
+            "FROM generate_series(1,70) AS n"
+        ).format(namespace), (store.bot_id, digest))
+    for round_no, expected in enumerate((32, 64, 70), 1):
+        claim = await invoke("memory_claim_management_forget", {
+            "bot_id": store.bot_id,
+        }, {
+            "protocol": "forest.owned-work-claim-request/1",
+            "claim_token": f"expired/reconcile/{round_no}",
+            "lease_seconds": 90,
+        })
+        assert claim["ok"] and claim["value"] is None
+        async with store.pool.connection() as conn:
+            counts = await (await conn.execute(sql.SQL(
+                "SELECT count(*) FILTER (WHERE state='UNKNOWN') AS unknown_count,"
+                "count(*) FILTER (WHERE state='RUNNING') AS running_count "
+                "FROM {}.management_forget_work "
+                "WHERE bot_id=%s AND left(request_id,8)='expired/'"
+            ).format(namespace), (store.bot_id,))).fetchone()
+        assert counts["unknown_count"] == expected
+        assert counts["running_count"] == 70 - expected
+
+    # A result committed after an UNKNOWN observation is recovered from the
+    # immutable batch operation rather than remaining uncertain forever.
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "UPDATE {}.management_forget_work SET state='UNKNOWN',"
+            "result_payload=NULL,error_code='MEMORY_FORGET_OUTCOME_UNKNOWN',"
+            "reconcile_checked_at=clock_timestamp()-interval '2 hours' "
+            "WHERE bot_id=%s AND request_id=%s"
+        ).format(namespace), (store.bot_id, "batch/selection-apply"))
+    claim = await invoke("memory_claim_management_forget", {
+        "bot_id": store.bot_id,
+    }, {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "unknown/positive-evidence",
+        "lease_seconds": 90,
+    })
+    assert claim["ok"] and claim["value"] is None
+    recovered_batch = await invoke("memory_query_management_forget_batch", {
+        "bot_id": store.bot_id,
+    }, {
+        "request_id": "batch/selection-apply", "requested_by": "admin/one",
+    })
+    assert recovered_batch["value"]["state"] == "SUCCEEDED"
+    assert recovered_batch["value"]["result"] == applied
 
 
 def _configuration():
