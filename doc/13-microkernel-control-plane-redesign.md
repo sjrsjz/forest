@@ -1,5 +1,6 @@
 # 微内核运行时与控制面重构详细设计
 
+
 > **权威性：运行时与控制面详细设计。** 本文展开[00 架构总契约](00-architecture-contract.md)。后续代码、测试和历史 Git 记录若与本文冲突，应删除或重写冲突实现；已删除的 P0–P5 纵向切片不得恢复为规格。不得为 Forest 未发布期间的错误对象模型增加兼容层。本文所称 Agent 始终是可替换的单执行链模块，不是内核调度主体，也不存在产品子 Agent。
 
 ## 1. 修正的问题
@@ -294,6 +295,8 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 未声明 UI、UI 协议不兼容、资源校验失败或脚本崩溃时，控制台使用通用 schema 表单。自定义 UI 是呈现插件，不是配置权威，也不能成为模块可运行的必要条件。
 
 需要图片等二进制输入的管理 operation 使用通用的 `asset.open`、`asset.chunk`、`asset.finish` 消息；它们属于管理通道的受限资源传输，不是模块自定义 HTTP API。宿主在 `open` 固定 scope、Bot、管理员、模块 Generation、允许的 operation、大小/块数上限和 TTL；每块按序号、长度与上传会话校验，`finish` 验证总长度、内容摘要与媒体类型后生成短期 Payload 引用。只有对应的管理 action 能消费该引用，且必须在签票和接纳时重新检查归属、过期和摘要。宿主对未完成上传和过期资产回收，模块卸载或 Generation 更替使未消费的引用失效；已接纳工作按模块 owned-work 协议处理。iframe 仍无直连网络、Cookie、跨模块资产访问或底层 Payload 写权限。
+
+READY Bot 的启动参数只含经目录、Storage Profile 和 Bootstrap manifest 对照的 Bot 身份与 DSN。启动、重启和热重载从各模块 desired 配置账本读取当前值，并按当前包的运行期 schema 摘要和值验证；创建期 schema 只参与首次供应，不得校验 READY Bot，也不得用旧 Profile 的设置重写配置账本。若当前包 schema 与账本验证摘要不同，明确拒绝候选代，须走模块配置计划/换代或开发期重建，不能自动把旧创建配置解释成新版本。
 
 ## 6. 路由、授权和 dispatch trace
 

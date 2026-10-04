@@ -211,6 +211,7 @@ class BotSettings:
     vector_index_timeout_seconds: float = 10
     bootstrap_package_digests: tuple[tuple[str, str], ...] = ()
 
+
     @classmethod
     def from_environment(cls) -> "BotSettings":
         groups = tuple(
@@ -310,6 +311,14 @@ class BotSettings:
         )
 
 
+@dataclass(frozen=True)
+class BotRuntimeSettings:
+    """READY Bot launch identity; module configuration lives in each module ledger."""
+
+    bot_id: str
+    dsn: str
+
+
 class BotHost:
     """Own generic process resources for one immutable runtime graph."""
 
@@ -317,7 +326,7 @@ class BotHost:
 
     def __init__(
         self,
-        settings: BotSettings,
+        settings: BotSettings | BotRuntimeSettings,
         *,
         model_client_factory=None,
         embedding_client_factory=None,
@@ -328,6 +337,11 @@ class BotHost:
         package_catalog=None,
         package_registry_reader=None,
     ) -> None:
+        if isinstance(settings, BotRuntimeSettings) and credential_resolver is None:
+            raise ForestError(
+                "BOT_RUNTIME_CREDENTIAL_RESOLVER_REQUIRED",
+                "READY Bot host requires the purpose-scoped Secret port", 422,
+            )
         self.settings = settings
         self.store = BotStore(settings.dsn, settings.bot_id)
         self.schema_bundle_installer = SchemaBundleInstaller(self.store)
@@ -417,22 +431,114 @@ class BotHost:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await assess_worker_capacity_in(self._kernel, conn, capacity)
 
+    async def _bootstrap_overrides(self, settings: BotSettings) -> dict[str, dict]:
+        """Translate creation settings once; runtime assembly reads module ledgers."""
+
+        capabilities = settings.model_capabilities or ModelCapabilities(
+            deployment_id=settings.model_deployment_id,
+            model=settings.model,
+            capability_revision="operator-declared/1",
+            input_modalities=settings.model_input_modalities,
+            max_output_tokens=settings.model_max_output_tokens,
+        )
+        embedding_profile = {
+            "deployment_id": settings.embedding_deployment_id,
+            "model_revision": settings.embedding_model_revision,
+            "model": settings.embedding_model,
+            "dimensions": settings.embedding_dimensions,
+        }
+        preset_system = settings.agent_preset_system or (
+            (settings.agent_system_prompt,) if settings.agent_system_prompt else ()
+        )
+        preset_owner_id = "preset/agent.runtime/default"
+        preset_payload = await self._kernel.payload.put_bytes(
+            owner_component_id="agent.runtime",
+            owner_kind="preset.context",
+            owner_id=preset_owner_id,
+            media_type="application/json",
+            content=json.dumps(
+                {"system": list(preset_system)},
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8"),
+            expected_deletion_epoch=await self._kernel.payload.epoch(),
+        )
+        return {
+            "provider_chat_completions": {
+                "base_url": settings.model_base_url,
+                "credential_ref": settings.model_credential_ref,
+                "timeout_seconds": settings.model_timeout_seconds,
+                "max_connections": settings.model_max_connections,
+                "capabilities": capabilities.as_dict(),
+            },
+            "embedding_multimodal": {
+                "endpoint": settings.embedding_endpoint,
+                "credential_ref": settings.embedding_credential_ref,
+                "timeout_seconds": settings.embedding_timeout_seconds,
+                "max_connections": settings.embedding_max_connections,
+                "profile": embedding_profile,
+            },
+            "vector_index_milvus": {
+                "space_id": EmbeddingProfile(**embedding_profile).space_id,
+                "dimensions": settings.embedding_dimensions,
+                "endpoint": settings.vector_index_endpoint,
+                "credential_ref": settings.vector_index_credential_ref,
+                "timeout_seconds": settings.vector_index_timeout_seconds,
+            },
+            "trigger_policy": {
+                "allowed_group_ids": list(settings.allowed_group_ids),
+                "group_trigger_mode": settings.group_trigger_mode,
+                "private_enabled": settings.private_enabled,
+            },
+            "adapter_onebot": {
+                "bindings": [
+                    {
+                        "binding_ref": "binding/main",
+                        "binding_epoch": 1,
+                        "self_id": settings.onebot_self_id,
+                        "credential_ref": settings.onebot_secret_ref,
+                        "websocket_url": settings.onebot_websocket_url,
+                        "timeout_seconds": 30,
+                        "event_capacity": 512,
+                        "pending_capacity": 64,
+                        "enabled": True,
+                    }
+                ],
+            },
+            "memory_graph": {
+                "embedding": {
+                    "model_kind": "TEXT_IMAGE",
+                    **embedding_profile,
+                    "normalization": "L2",
+                },
+            },
+            "agent_runtime": {
+                "preset": {
+                    "payload_id": preset_payload.payload_id,
+                    "digest": preset_payload.content_digest,
+                    "owner_id": preset_owner_id,
+                },
+                "output_tokens": settings.model_max_output_tokens,
+            },
+            "shell_command": {
+                "administrator_principals": [
+                    "qq:" + value for value in settings.shell_administrator_ids
+                ],
+            },
+        }
+
     async def _assemble_candidate(
         self, activation_id: str | None = None,
         *, bootstrap_package_digests: dict[str, str] | None = None,
+        bootstrap_settings: BotSettings | None = None,
     ) -> BotGraphCandidate:
-        capabilities = self.settings.model_capabilities or ModelCapabilities(
-            deployment_id=self.settings.model_deployment_id,
-            model=self.settings.model,
-            capability_revision="operator-declared/1",
-            input_modalities=self.settings.model_input_modalities,
-            max_output_tokens=self.settings.model_max_output_tokens,
-        )
+        initial_settings = self.settings if isinstance(self.settings, BotSettings) else None
         async def resolve_provider_secret(secret_ref, _revision):
             return await self._resolve_effect_credential(
                 secret_ref, purpose="provider.chat-completions.credential",
-                initial_ref=self.settings.model_credential_ref,
-                initial_value=self.settings.model_api_key,
+                initial_ref=initial_settings.model_credential_ref if initial_settings else "",
+                initial_value=initial_settings.model_api_key if initial_settings else "",
                 error_code="PROVIDER_CREDENTIAL_UNAVAILABLE",
             )
 
@@ -452,7 +558,10 @@ class BotHost:
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
-            initial_configuration={"protocol": "forest.component-worker-host/1"},
+            initial_configuration=(
+                {"protocol": "forest.component-worker-host/1"}
+                if bootstrap_settings is not None else None
+            ),
         )
         candidate_reader = ComponentSelectionReader(self.store, worker_host.snapshot)
         active_reader = self.selection_reader or candidate_reader
@@ -472,17 +581,11 @@ class BotHost:
                         "Candidate selection query differs from the active selection ledger",
                         409,
                     )
-        embedding_profile = {
-            "deployment_id": self.settings.embedding_deployment_id,
-            "model_revision": self.settings.embedding_model_revision,
-            "model": self.settings.embedding_model,
-            "dimensions": self.settings.embedding_dimensions,
-        }
         async def resolve_embedding_secret(secret_ref, _revision):
             return await self._resolve_effect_credential(
                 secret_ref, purpose="embedding.multimodal.credential",
-                initial_ref=self.settings.embedding_credential_ref,
-                initial_value=self.settings.embedding_api_key,
+                initial_ref=initial_settings.embedding_credential_ref if initial_settings else "",
+                initial_value=initial_settings.embedding_api_key if initial_settings else "",
                 error_code="EMBEDDING_CREDENTIAL_UNAVAILABLE",
             )
 
@@ -500,8 +603,8 @@ class BotHost:
         async def resolve_vector_index_token(secret_ref, _revision):
             return await self._resolve_effect_credential(
                 secret_ref, purpose="vector.index.credential",
-                initial_ref=self.settings.vector_index_credential_ref,
-                initial_value=self.settings.vector_index_token,
+                initial_ref=initial_settings.vector_index_credential_ref if initial_settings else "",
+                initial_value=initial_settings.vector_index_token if initial_settings else "",
                 error_code="VECTOR_INDEX_CREDENTIAL_UNAVAILABLE",
             )
 
@@ -523,28 +626,11 @@ class BotHost:
             payloads=self._kernel.payload,
             **media_driver_options,
         )
-        preset_system = self.settings.agent_preset_system or (
-            (self.settings.agent_system_prompt,) if self.settings.agent_system_prompt else ()
-        )
-        preset_owner_id = "preset/agent.runtime/default"
-        preset_payload = await self._kernel.payload.put_bytes(
-            owner_component_id="agent.runtime",
-            owner_kind="preset.context",
-            owner_id=preset_owner_id,
-            media_type="application/json",
-            content=json.dumps(
-                {"system": list(preset_system)},
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode("utf-8"),
-            expected_deletion_epoch=await self._kernel.payload.epoch(),
-        )
         async def resolve_onebot_secret(secret_ref, _configuration_revision):
             return await self._resolve_effect_credential(
                 secret_ref, purpose="adapter.onebot.access-token",
-                initial_ref=self.settings.onebot_secret_ref,
-                initial_value=self.settings.onebot_access_token,
+                initial_ref=initial_settings.onebot_secret_ref if initial_settings else "",
+                initial_value=initial_settings.onebot_access_token if initial_settings else "",
                 error_code="ONEBOT_CREDENTIAL_UNAVAILABLE",
             )
 
@@ -557,69 +643,10 @@ class BotHost:
             credential_resolver=resolve_onebot_secret,
             **adapter_driver_options,
         )
-        bootstrap_overrides = {
-            "provider_chat_completions": {
-                "base_url": self.settings.model_base_url,
-                "credential_ref": self.settings.model_credential_ref,
-                "timeout_seconds": self.settings.model_timeout_seconds,
-                "max_connections": self.settings.model_max_connections,
-                "capabilities": capabilities.as_dict(),
-            },
-            "embedding_multimodal": {
-                "endpoint": self.settings.embedding_endpoint,
-                "credential_ref": self.settings.embedding_credential_ref,
-                "timeout_seconds": self.settings.embedding_timeout_seconds,
-                "max_connections": self.settings.embedding_max_connections,
-                "profile": embedding_profile,
-            },
-            "vector_index_milvus": {
-                "space_id": EmbeddingProfile(**embedding_profile).space_id,
-                "dimensions": self.settings.embedding_dimensions,
-                "endpoint": self.settings.vector_index_endpoint,
-                "credential_ref": self.settings.vector_index_credential_ref,
-                "timeout_seconds": self.settings.vector_index_timeout_seconds,
-            },
-            "trigger_policy": {
-                "allowed_group_ids": list(self.settings.allowed_group_ids),
-                "group_trigger_mode": self.settings.group_trigger_mode,
-                "private_enabled": self.settings.private_enabled,
-            },
-            "adapter_onebot": {
-                "bindings": [
-                    {
-                        "binding_ref": "binding/main",
-                        "binding_epoch": 1,
-                        "self_id": self.settings.onebot_self_id,
-                        "credential_ref": self.settings.onebot_secret_ref,
-                        "websocket_url": self.settings.onebot_websocket_url,
-                        "timeout_seconds": 30,
-                        "event_capacity": 512,
-                        "pending_capacity": 64,
-                        "enabled": True,
-                    }
-                ],
-            },
-            "memory_graph": {
-                "embedding": {
-                    "model_kind": "TEXT_IMAGE",
-                    **embedding_profile,
-                    "normalization": "L2",
-                },
-            },
-            "agent_runtime": {
-                "preset": {
-                    "payload_id": preset_payload.payload_id,
-                    "digest": preset_payload.content_digest,
-                    "owner_id": preset_owner_id,
-                },
-                "output_tokens": self.settings.model_max_output_tokens,
-            },
-            "shell_command": {
-                "administrator_principals": [
-                    "qq:" + value for value in self.settings.shell_administrator_ids
-                ],
-            },
-        }
+        bootstrap_overrides = (
+            await self._bootstrap_overrides(bootstrap_settings)
+            if bootstrap_settings is not None else {}
+        )
         bootstrap_grants = {
             "memory_graph": (
                 CapabilityGrant("embedding.invoke", "bot", self.store.bot_id, delegable=True),
@@ -692,8 +719,10 @@ class BotHost:
                 self.store,
                 self.schema_bundle_installer,
                 kernel=self._kernel,
-                initial_configuration=official_builtin_configuration(
-                    source.name, overrides=bootstrap_overrides.get(source.name)
+                initial_configuration=(
+                    official_builtin_configuration(
+                        source.name, overrides=bootstrap_overrides.get(source.name)
+                    ) if bootstrap_settings is not None else None
                 ),
                 effect_driver_registry=automatic_effect_drivers,
                 configuration_validator_factory=configuration_validators.get(source.name),
@@ -747,7 +776,11 @@ class BotHost:
             self._kernel = await bootstrap_kernel(self.store, self.schema_bundle_installer)
             self.generation_authority = self._kernel.runtime
             self._replacement_lock = asyncio.Lock()
-            assembled = await self._assemble_candidate()
+            assembled = await self._assemble_candidate(
+                bootstrap_settings=(
+                    self.settings if isinstance(self.settings, BotSettings) else None
+                )
+            )
             registry = assembled.registry
             self._lease = await self._kernel.runtime.claim_host(
                 self._host_id, self._incarnation, ttl=_HOST_LEASE_TTL
@@ -789,13 +822,19 @@ class BotHost:
     async def provision(self) -> tuple[str, ...]:
         """Install module authorities and revision-one configuration without starting I/O."""
 
+        if not isinstance(self.settings, BotSettings):
+            raise ForestError(
+                "BOT_BOOTSTRAP_SETTINGS_REQUIRED",
+                "READY Bot launch identity cannot provision initial configuration", 409,
+            )
         if self.registry is not None or self._lease is not None:
             raise ForestError("BOT_HOST_ALREADY_ACTIVE", "Active Bot host cannot provision", 409)
         await self.store.open()
         try:
             self._kernel = await bootstrap_kernel(self.store, self.schema_bundle_installer)
             assembled = await self._assemble_candidate(
-                bootstrap_package_digests=dict(self.settings.bootstrap_package_digests)
+                bootstrap_package_digests=dict(self.settings.bootstrap_package_digests),
+                bootstrap_settings=self.settings,
             )
             return tuple(
                 descriptor.component_id for descriptor in assembled.registry.descriptors

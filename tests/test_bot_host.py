@@ -25,7 +25,7 @@ from psycopg import sql
 from pymilvus import AsyncMilvusClient
 
 from forest.adapters.onebot import SendResult
-from forest.bot_host import BotGraphCandidate, BotHost, BotSettings
+from forest.bot_host import BotGraphCandidate, BotHost, BotRuntimeSettings, BotSettings
 from forest.builtin_packages import bootstrap_installed_package
 from forest.component_selection import ComponentSelectionSnapshot
 from forest.deployment_management_app import create_deployment_management_app
@@ -1541,6 +1541,25 @@ async def test_embedding_configuration_can_rotate_its_secret_reference(tmp_path)
             )
         finally:
             await host.close()
+        resumed_host = BotHost(
+            BotRuntimeSettings(bot_id=settings.bot_id, dsn=uri),
+            credential_resolver=resolve_secret,
+            model_client_factory=FakeModelClient,
+            embedding_client_factory=RecordingEmbeddingClient,
+            media_client_factory=FakeMediaClient,
+            vector_index_client_factory=FakeMilvusClient,
+            websocket_client_factory=create_websocket,
+            package_catalog=PackageCatalog(tmp_path / "secret-rotation-packages"),
+        )
+        try:
+            await resumed_host.start()
+            assert RecordingEmbeddingClient.credentials[-1] == "new-embedding-key"
+            resumed = await resumed_host.registry.get(
+                "embedding.multimodal"
+            ).management_contract.read()
+            assert resumed["effective"]["value"]["credential_ref"] == rotated_ref
+        finally:
+            await resumed_host.close()
         pinned_provisioner = BotHost(
             settings,
             package_catalog=PackageCatalog(tmp_path / "secret-rotation-packages"),

@@ -11,6 +11,7 @@ from forest.bootstrap_contributions import (
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
+    OfficialBotCatalogSettingsResolver,
     OfficialBotSettingsResolver,
     official_bootstrap_contributions,
 )
@@ -117,9 +118,28 @@ async def test_profile_rejects_package_change_even_when_schema_is_unchanged():
         await resolver.resolve(profile=profile, storage=storage)
     assert rejected.value.code == "OFFICIAL_BOOTSTRAP_PACKAGE_MISMATCH"
 
-    resumed = await resolver.resolve(
-        profile=profile, storage=storage, verify_current_package=False
+@pytest.mark.asyncio
+async def test_ready_bot_launch_uses_profile_only_as_provenance():
+    profile = SimpleNamespace(
+        bot_id="bot/test", storage_profile_ref="storage/test", storage_generation=1,
+        manifest_digest="sha256:" + "a" * 64,
+        components=(),
     )
-    assert ("provider.chat-completions", "sha256:" + "f" * 64) in (
-        resumed.bootstrap_package_digests
+
+    class Profiles:
+        async def load(self, _reference):
+            return profile
+
+    storage = SimpleNamespace(
+        bot_id="bot/test", profile_ref="storage/test", storage_generation=1,
+        dsn="postgresql://localhost/forest_test",
     )
+    launch = await OfficialBotCatalogSettingsResolver(
+        bootstrap_profiles=Profiles(),
+    )(
+        {"bot_id": "bot/test", "bootstrap_profile_ref": "bootstrap/test",
+         "bootstrap_manifest_digest": profile.manifest_digest},
+        storage,
+    )
+    assert (launch.bot_id, launch.dsn) == (storage.bot_id, storage.dsn)
+    assert not hasattr(launch, "agent_preset_system")

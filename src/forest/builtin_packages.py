@@ -544,7 +544,7 @@ async def bootstrap_builtin_package(
     installer,
     *,
     kernel,
-    initial_configuration: dict[str, Any],
+    initial_configuration: dict[str, Any] | None,
     resolved_contracts: dict[str, str] | None = None,
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     configuration_validator_factory: Callable[[str], Callable] | None = None,
@@ -801,11 +801,32 @@ async def _bootstrap_package_snapshot(
             value=initial_configuration,
             validation_digest=schema_digest,
         )
-    elif trust_level != "installed":
-        raise ValueError("Official package configuration is required")
+    elif trust_level == "official":
+        try:
+            desired = await configuration.desired_checked()
+        except ForestError as error:
+            if error.code != "MODULE_CONFIGURATION_UNINITIALIZED":
+                raise
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_REQUIRED",
+                "Official package configuration must be initialized before runtime assembly",
+                409,
+            ) from error
+        if (
+            desired.validation_digest != schema_digest
+            or not Draft202012Validator(configuration_schema).is_valid(desired.value)
+        ):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+                "Official package configuration was not validated for this artifact schema",
+                409,
+                details={"component_id": component_id},
+            )
+        if configuration_validator is not None:
+            await configuration_validator(desired.value)
     if trust_level == "installed":
         await _installed_desired(layout, configuration)
-    else:
+    elif initial_configuration is not None:
         await configuration.assert_immutable(initial_configuration)
     requested = tuple(snapshot.component.get("capabilities", {}).get("requests", ()))
     policy_revision = await kernel.authorization.revision()

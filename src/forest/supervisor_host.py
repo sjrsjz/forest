@@ -209,7 +209,6 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         storage_profiles=storage_profiles,
         settings_resolver=OfficialBotCatalogSettingsResolver(
             bootstrap_profiles=bootstrap_profiles,
-            settings_resolver=settings_resolver,
         ),
         host_factory=bot_host_factory,
         host_id="deployment-host/" + settings.deployment_id,

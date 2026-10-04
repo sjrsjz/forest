@@ -16,7 +16,7 @@ from forest.bootstrap_contributions import (
     BootstrapConfigurationRegistry,
     BootstrapPackageSurface,
 )
-from forest.bot_host import BotHost, BotSettings
+from forest.bot_host import BotHost, BotRuntimeSettings, BotSettings
 from forest.builtin_packages import (
     auto_install_builtin_sources,
     official_builtin_configuration_schema,
@@ -204,9 +204,7 @@ class OfficialBotSettingsResolver:
             official_bootstrap_contributions()
         )
 
-    async def resolve(
-        self, *, profile, storage, verify_current_package: bool = True,
-    ) -> BotSettings:
+    async def resolve(self, *, profile, storage) -> BotSettings:
         if (
             profile.bot_id != storage.bot_id
             or profile.storage_profile_ref != storage.profile_ref
@@ -232,7 +230,7 @@ class OfficialBotSettingsResolver:
                     409,
                     details={"component_id": component_id},
                 )
-            if verify_current_package and item.package_digest != expected_packages[component_id]:
+            if item.package_digest != expected_packages[component_id]:
                 raise ForestError(
                     "OFFICIAL_BOOTSTRAP_PACKAGE_MISMATCH",
                     "Bootstrap package differs from the captured install catalog",
@@ -392,11 +390,10 @@ class OfficialBotSettingsResolver:
 class OfficialBotCatalogSettingsResolver:
     """Resolve the immutable bootstrap provenance carried by a READY catalog row."""
 
-    def __init__(self, *, bootstrap_profiles, settings_resolver) -> None:
+    def __init__(self, *, bootstrap_profiles) -> None:
         self.bootstrap_profiles = bootstrap_profiles
-        self.settings_resolver = settings_resolver
 
-    async def __call__(self, bot: dict, storage) -> BotSettings:
+    async def __call__(self, bot: dict, storage) -> BotRuntimeSettings:
         profile = await self.bootstrap_profiles.load(bot["bootstrap_profile_ref"])
         if profile.manifest_digest != bot["bootstrap_manifest_digest"]:
             raise ForestError(
@@ -404,9 +401,18 @@ class OfficialBotCatalogSettingsResolver:
                 "Ready Bot bootstrap manifest differs",
                 409,
             )
-        return await self.settings_resolver.resolve(
-            profile=profile, storage=storage, verify_current_package=False
-        )
+        if (
+            profile.bot_id != bot["bot_id"]
+            or profile.bot_id != storage.bot_id
+            or profile.storage_profile_ref != storage.profile_ref
+            or profile.storage_generation != storage.storage_generation
+        ):
+            raise ForestError(
+                "BOOTSTRAP_PROFILE_SCOPE_MISMATCH",
+                "Bootstrap profile differs from resolved Bot storage",
+                409,
+            )
+        return BotRuntimeSettings(bot_id=profile.bot_id, dsn=storage.dsn)
 
 
 class OfficialBotProvisioner:
