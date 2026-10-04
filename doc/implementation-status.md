@@ -2,6 +2,8 @@
 
 > 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。**Bot 运行图** 已切为微内核包图；部署审计、Bot 目录、Secret、账号、包目录和供应 WebUI 已切为真实可热替换部署包，旧 `deployment_management.py` 伪组件与固定字符串 Generation 已删除。供应执行器和部分控制面操作仍在宿主内核装配，host 作用域包图尚未落地。图文记忆主链已有隔离 Bot、真实 VL 嵌入端点、PostgreSQL 与 Milvus 的跨群召回和管理试验验证。获准群的真实 QQ 入站到回复、真实浏览器结合供应商的端到端链路、百万级混合负载及长期运行仍未验收，因此 Forest 仍不可发布。
 
+包构建性能复核（2026-10-04）：`PackageCatalog.build()` 现在仅对源目录的完整字节快照建立有界进程内缓存；缓存命中仍通过已登记摘要重新校验不可变工件，源内容变化则执行原有双次捕获与完整验证。隔离 PostgreSQL 的 Embedding Secret 换代用例中，热图替换约从 39.46 秒降至 32.69 秒，完整用例从 171.75 秒降至 153.81 秒；这只是同机两次测量，不代表通用吞吐承诺。包目录用例为 99 passed、1 skipped，Ruff 通过。Bot 身份与期望运行状态仍由部署内核持有，`deployment.bot-catalog` 仅通过受限端口提供管理入口；此次未切换在线实例。
+
 本页保留按实施先后写下的阶段记录；早期段落中的“尚未”只描述当时状态，当前结论以第 8 节的切换清单和末尾最新验收记录为准。
 
 ## 1. 判定标准

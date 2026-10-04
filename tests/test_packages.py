@@ -548,6 +548,28 @@ def test_storage_bundle_is_content_addressed_package_content(tmp_path):
     assert caught.value.code == "PACKAGE_TAMPERED"
 
 
+def test_build_cache_rechecks_source_bytes_and_artifact(tmp_path):
+    root = source(tmp_path)
+    catalog = PackageCatalog(tmp_path / "catalog")
+    snapshot = catalog.build(root)
+    assert catalog.build(root).digest == snapshot.digest
+
+    source_file = root / "python" / "counter.py"
+    original = source_file.read_bytes()
+    source_file.write_bytes(original + b"\n# changed without a version bump\n")
+    with pytest.raises(ForestError) as changed:
+        catalog.build(root)
+    assert changed.value.code == "PACKAGE_VERSION_CONFLICT"
+
+    source_file.write_bytes(original)
+    artifact_file = snapshot.module_root / "counter.py"
+    artifact_file.chmod(0o600)
+    artifact_file.write_text("# tampered after publication\n", encoding="utf-8")
+    with pytest.raises(ForestError) as tampered:
+        catalog.build(root)
+    assert tampered.value.code == "PACKAGE_TAMPERED"
+
+
 def test_generic_uow_cannot_claim_configuration_rebuild_authority(tmp_path):
     root = source(tmp_path)
     with (root / "module.toml").open("a", encoding="utf-8") as stream:

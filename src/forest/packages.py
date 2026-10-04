@@ -18,11 +18,14 @@ import stat
 import sys
 import tomllib
 import zipfile
+from collections import OrderedDict
 from collections.abc import Callable
 from contextlib import closing
+from copy import deepcopy
 from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
+from threading import Lock
 from uuid import uuid4
 
 from jsonschema import Draft202012Validator
@@ -1076,13 +1079,15 @@ def _prepared_source(source_files: dict[str, bytes]) -> dict[str, bytes]:
     return files
 
 
-def _validated_source(source: Path) -> tuple[Path, dict[str, bytes], dict[str, bytes], dict]:
+def _validated_source(
+    source: Path, *, first_capture: dict[str, bytes] | None = None,
+) -> tuple[Path, dict[str, bytes], dict[str, bytes], dict]:
     try:
         _reject_link(source.lstat())
         source = source.resolve(strict=True)
     except OSError as exc:
         raise ForestError("INVALID_PACKAGE_PATH", "Package source is unavailable", 422) from exc
-    source_files = _capture(source)
+    source_files = _capture(source) if first_capture is None else first_capture
     captured = _prepared_source(source_files)
     manifest = _manifest(captured)
     if captured != _prepared_source(_capture(source)):
@@ -2411,16 +2416,54 @@ class PackageSnapshot:
 class PackageCatalog:
     def __init__(self, root: Path) -> None:
         self.root = private_directory(root)
+        self._build_cache: OrderedDict[tuple[Path, bool], tuple[str, str]] = OrderedDict()
+        self._build_cache_lock = Lock()
 
-    def _source_files(self, source: Path) -> tuple[dict[str, bytes], dict[str, bytes]]:
-        source, source_files, captured, _ = _validated_source(source)
+    def _source_files(
+        self, source: Path, *, first_capture: dict[str, bytes] | None = None,
+    ) -> tuple[dict[str, bytes], dict[str, bytes], dict]:
+        source, source_files, captured, manifest = _validated_source(
+            source, first_capture=first_capture,
+        )
         catalog_root = self.root.resolve()
         if catalog_root == source or catalog_root.is_relative_to(source):
             _fail("INVALID_PACKAGE_PATH", "Artifact catalog cannot be inside the source package")
-        return source_files, captured
+        return source_files, captured, manifest
 
     def build(self, source: Path, *, development: bool = False) -> PackageSnapshot:
-        source_files, captured = self._source_files(source)
+        source = Path(source)
+        try:
+            _reject_link(source.lstat())
+            resolved = source.resolve(strict=True)
+        except OSError as exc:
+            raise ForestError(
+                "INVALID_PACKAGE_PATH", "Package source is unavailable", 422,
+            ) from exc
+        catalog_root = self.root.resolve()
+        if catalog_root == resolved or catalog_root.is_relative_to(resolved):
+            _fail("INVALID_PACKAGE_PATH", "Artifact catalog cannot be inside the source package")
+        first_capture = _capture(resolved)
+        fingerprint = digest_json({
+            name: hashlib.sha256(value).hexdigest()
+            for name, value in first_capture.items()
+        })
+        key = (resolved, development)
+        with self._build_cache_lock:
+            cached = self._build_cache.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            try:
+                snapshot = self.get(cached[1])
+            except ForestError as exc:
+                if exc.code != "PACKAGE_NOT_FOUND":
+                    raise
+            else:
+                with self._build_cache_lock:
+                    if self._build_cache.get(key) == cached:
+                        self._build_cache.move_to_end(key)
+                return snapshot
+        source_files, captured, manifest = self._source_files(
+            resolved, first_capture=first_capture,
+        )
         if development:
             source_digest = digest_json(
                 {name: hashlib.sha256(value).hexdigest() for name, value in source_files.items()}
@@ -2433,7 +2476,7 @@ class PackageCatalog:
                 if line.lstrip().startswith("["):
                     break
                 if re.match(r"\s*version\s*=", line):
-                    base = _manifest(captured)["version"].split("+", 1)[0]
+                    base = manifest["version"].split("+", 1)[0]
                     lines[index] = f'version = "{base}+dev.{source_digest}"\n'
                     replaced = True
                     break
@@ -2442,7 +2485,14 @@ class PackageCatalog:
             captured["module.toml"] = "".join(lines).encode("utf-8")
             if "checksums.json" in captured:
                 captured = with_checksums(captured)
-        return self._publish(captured)
+            manifest = _manifest(captured)
+        snapshot = self._publish(captured, manifest=manifest)
+        with self._build_cache_lock:
+            self._build_cache[key] = (fingerprint, snapshot.digest)
+            self._build_cache.move_to_end(key)
+            if len(self._build_cache) > 64:
+                self._build_cache.popitem(last=False)
+        return snapshot
 
     def build_official(self, source: Path) -> PackageSnapshot:
         """Register a host-supplied official deployment source as a trusted artifact.
@@ -2451,8 +2501,8 @@ class PackageCatalog:
         an artifact's own manifest cannot grant itself official SQL execution.
         """
 
-        _source_files, captured = self._source_files(source)
-        component = _manifest(captured)["components"][0]
+        _source_files, captured, manifest = self._source_files(source)
+        component = manifest["components"][0]
         storage = component.get("storage")
         if (
             component["scope"] != "deployment"
@@ -2462,7 +2512,7 @@ class PackageCatalog:
                 "OFFICIAL_PACKAGE_SOURCE_INVALID",
                 "Official deployment source must declare deployment scope and trusted storage",
             )
-        snapshot = self._publish(captured)
+        snapshot = self._publish(captured, manifest=manifest)
         with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
             db.execute("PRAGMA synchronous=FULL")
             db.execute(
@@ -2514,8 +2564,8 @@ class PackageCatalog:
         if check_manifest is not None:
             # Deployment namespace policy must reject before the local artifact
             # registry reserves an immutable package_id/version pair.
-            check_manifest(manifest)
-        return self._publish(captured, bind_version=bind_version)
+            check_manifest(deepcopy(manifest))
+        return self._publish(captured, manifest=manifest, bind_version=bind_version)
 
     def import_archive_idempotent(
         self,
@@ -2563,9 +2613,10 @@ class PackageCatalog:
             captured = archive_files(data)
             manifest = _manifest(captured)
             if check_manifest is not None:
-                check_manifest(manifest)
+                check_manifest(deepcopy(manifest))
             return self._publish(
-                captured, import_operation=(operation_id, actor_ref, archive_sha256),
+                captured, manifest=manifest,
+                import_operation=(operation_id, actor_ref, archive_sha256),
                 locked_db=db,
             )
 
@@ -2825,7 +2876,7 @@ class PackageCatalog:
             return db.execute(query, parameters).fetchall()
 
     def _publish(
-        self, captured: dict[str, bytes], *, bind_version: bool = True,
+        self, captured: dict[str, bytes], *, manifest: dict, bind_version: bool = True,
         import_operation: tuple[str, str, str] | None = None,
         locked_db: sqlite3.Connection | None = None,
     ) -> PackageSnapshot:
@@ -2834,10 +2885,9 @@ class PackageCatalog:
                 self._prepare_catalog_tables(db, imports=import_operation is not None)
                 db.execute("BEGIN IMMEDIATE")
                 return self._publish(
-                    captured, bind_version=bind_version,
+                    captured, manifest=manifest, bind_version=bind_version,
                     import_operation=import_operation, locked_db=db,
                 )
-        manifest = _manifest(captured)
         digest = digest_json(
             {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
         )
