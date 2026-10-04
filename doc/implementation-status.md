@@ -8,6 +8,8 @@ Bot 运行意图与启动观察围栏（2026-10-04）：部署监督器启动 Bo
 
 Worker Host 选择任务重领（2026-10-04）：`component.worker-host` 1.6.22 在发现当前选择快照已变化时，先查询内核是否已接受原替换 operation；若已接受，按原冻结输入重放幂等请求并结算原任务，只有内核确认请求不存在才记 `SUPERSEDED`。任务执行 deadline 和 claim lease 随新增的内核核对调用相应增至 35/60 秒。本地两项恢复路径测试、包工件校验、隔离 PostgreSQL 的选择账本用例及 Ruff 通过；本轮未运行完整 Bot 热换代，也未部署在线实例。
 
+Worker Host 完整热换代复验（2026-10-04）：独立 `BotHost` 用例原先未绑定部署包目录只读端口，在首个工件查询即返回 `PACKAGE_CATALOG_UNAVAILABLE`；测试现显式以同一内容寻址 `PackageCatalog` 提供只读 page/artifact 端口，不向生产宿主增加旁路。当前源码的隔离 PostgreSQL 完整用例 `test_worker_host_shell_reload_preserves_unaffected_generations` 为 1 passed（388.02 秒），覆盖组件重载、外部 Counter 工件热加入与停用、选择任务及内核替换回执、未受影响 Generation 保留。它使用假的 OneBot、模型、Embedding、Media 和 Milvus 客户端；没有真实 QQ 发送或在线实例切换，也未专门模拟选择任务提交后的进程崩溃。
+
 本页保留按实施先后写下的阶段记录；早期段落中的“尚未”只描述当时状态，当前结论以第 8 节的切换清单和末尾最新验收记录为准。
 
 ## 1. 判定标准

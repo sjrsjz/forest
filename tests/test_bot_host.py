@@ -844,6 +844,17 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
     async def create_websocket(_url, _token, **_limits):
         return FakeWebSocketClient(settings.onebot_self_id)
 
+    package_catalog = PackageCatalog(tmp_path / "reload-packages")
+
+    async def read_package_registry(query_id, payload):
+        if query_id == "packages":
+            return await asyncio.to_thread(package_catalog.page, **payload)
+        if query_id == "artifact":
+            return await asyncio.to_thread(
+                package_catalog.artifact, payload["package_digest"]
+            )
+        raise AssertionError(f"Unexpected package catalog query: {query_id}")
+
     host = BotHost(
         settings,
         model_client_factory=FakeModelClient,
@@ -851,7 +862,8 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
         media_client_factory=FakeMediaClient,
         vector_index_client_factory=FakeMilvusClient,
         websocket_client_factory=create_websocket,
-        package_catalog=PackageCatalog(tmp_path / "reload-packages"),
+        package_catalog=package_catalog,
+        package_registry_reader=read_package_registry,
     )
     try:
         await host.start()
