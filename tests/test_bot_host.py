@@ -2693,7 +2693,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             region = await query_stage(
                 recall_query["query_id"], "region/recall-before-forget", stage="region"
             )
-            assert region["policy_revision"] == "qiyu-graph-region/1"
+            assert region["policy_revision"] == "qiyu-graph-region/2"
             assert region["read_count"] <= 32
             assert recall_unit not in {node["source_unit_id"] for node in region["nodes"]}
             seed_node = next(node for node in region["nodes"] if node["is_seed"])
@@ -2748,7 +2748,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert materialized[0]["evidence_count"] == 1
             assert materialized[0]["missing_count"] == 0
             document = json.loads(await host._kernel.payload.read_bytes(materialized[0]["evidence_ref"]["payload_id"]))
-            assert document["protocol"] == "forest.memory-evidence/1"
+            assert document["protocol"] == "forest.memory-evidence/2"
             assert document["current_source"]["external_group_id"] == "933179609"
             unit_evidence = document["evidence"][0]
             assert unit_evidence["author_subject_ref"] == "qq:20001"

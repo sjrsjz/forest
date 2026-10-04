@@ -2665,6 +2665,7 @@ BEGIN
         node_value := node_value||jsonb_build_object('matched_part_ids',matched_parts);
         SELECT COALESCE(jsonb_agg(jsonb_build_object(
             'part_id',p.part_id,'part_index',p.part_index,'part_kind',p.part_kind,'media_type',p.media_type,
+            'byte_length',p.byte_length,
             'width',p.width,'height',p.height,'payload',jsonb_build_object(
                 'payload_id',p.payload_id,'digest',p.payload_digest,
                 'owner_component_id',p.payload_owner_component_id,'owner_kind',p.payload_owner_kind,
@@ -2813,6 +2814,7 @@ DECLARE
     index_value integer;
     current_source jsonb;
     max_chars integer;
+    max_media_bytes integer;
 BEGIN
     SELECT * INTO bundle_row FROM __forest_module_schema__.retrieval_bundles
     WHERE bot_id=context->>'bot_id' AND query_id=input->>'query_id';
@@ -2824,6 +2826,7 @@ BEGIN
     check_value := __forest_module_schema__.memory_read_matched_seeds(context,input);
     IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
     max_chars := (check_value#>>'{value,policy,max_retrieval_chars}')::integer;
+    max_media_bytes := (check_value#>>'{value,policy,max_retrieval_media_bytes}')::integer;
     SELECT jsonb_build_object('source_id',s.source_id,'source_kind',s.source_kind,
         'platform',s.platform,'realm_id',s.realm_id,'external_group_id',s.external_group_id,
         'trunk_id',s.trunk_id) INTO current_source
@@ -2850,6 +2853,7 @@ BEGIN
         'input_kind',(SELECT input_kind FROM __forest_module_schema__.memory_queries
             WHERE bot_id=bundle_row.bot_id AND query_id=bundle_row.query_id),
         'current_source',current_source,'max_retrieval_chars',max_chars,
+        'max_retrieval_media_bytes',max_media_bytes,
         'truncated',bundle_row.truncated,'association_sampled',bundle_row.association_sampled,
         'read_count',bundle_row.read_count,'evidence_ref',projection_row.evidence_ref,
         'item_indexes',COALESCE(to_jsonb(projection_row.item_indexes),'[]'::jsonb),

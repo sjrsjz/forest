@@ -174,8 +174,9 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
     value = _decode(_encode(value), limit=MAX_REQUEST_BYTES)
     required = {"protocol", "bot_id", "query_id", "bundle_id", "graph_snapshot_ref",
                 "current_source", "evidence", "content_truncated", "missing_count",
-                "truncated", "association_sampled", "read_count", "max_retrieval_chars"}
-    if not isinstance(value, dict) or set(value) != required or value["protocol"] != "forest.memory-evidence/1":
+                "truncated", "association_sampled", "read_count", "max_retrieval_chars",
+                "max_retrieval_media_bytes", "selected_media_bytes"}
+    if not isinstance(value, dict) or set(value) != required or value["protocol"] != "forest.memory-evidence/2":
         raise _error("MODEL_INPUT_INVALID", "Memory evidence is not its native publication")
     if value["bot_id"] != snapshot["bot_id"]:
         raise _error("MODEL_SOURCE_INVALID", "Memory evidence belongs to another Bot")
@@ -202,13 +203,16 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
         if type(value[name]) is not bool:
             raise _error("MODEL_INPUT_INVALID", "Memory completeness flags are invalid")
     for name, maximum in (("missing_count", 64), ("read_count", 64),
-                          ("max_retrieval_chars", 1_000_000)):
+                          ("max_retrieval_chars", 1_000_000),
+                          ("max_retrieval_media_bytes", 33_554_432),
+                          ("selected_media_bytes", 33_554_432)):
         if type(value[name]) is not int or not 0 <= value[name] <= maximum:
             raise _error("MODEL_INPUT_INVALID", "Memory completeness count is invalid")
     reference = {name: value[name] for name in (
         "bundle_id", "query_id", "graph_snapshot_ref", "current_source",
         "content_truncated", "missing_count", "truncated", "association_sampled",
-        "read_count", "max_retrieval_chars",
+        "read_count", "max_retrieval_chars", "max_retrieval_media_bytes",
+        "selected_media_bytes",
     )}
     reference.update(status="READY", renderer_revision=MEMORY_EVIDENCE_REVISION)
     fields = {"source_unit_id", "source_revision", "source_id", "trunk_id", "source_kind",
@@ -218,6 +222,7 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
               "is_current_source", "matched_part_ids", "author_identity", "parts",
               "content_truncated"}
     normalized, seen = [], {unit["unit_id"] for unit in units}
+    selected_image_bytes = 0
     for row in rows:
         if not isinstance(row, dict) or set(row) != fields:
             raise _error("MODEL_INPUT_INVALID", "Memory evidence item shape is invalid")
@@ -280,7 +285,8 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
                     raise _error("MODEL_INPUT_INVALID", "Memory text part is invalid")
                 projected_parts.append({"part_id": part_id, "type": "text", "text": part["text"]})
             elif part.get("kind") == "image" and set(part) == {
-                    "part_id", "part_index", "kind", "media_ref", "media_type", "width", "height"}:
+                    "part_id", "part_index", "kind", "media_ref", "media_type", "width",
+                    "height", "byte_length", "projection_state"}:
                 image_ref = part["media_ref"]
                 if (not isinstance(image_ref, dict) or set(image_ref) != {
                         "payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"}
@@ -291,9 +297,17 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
                         or type(part["width"]) is not int or not 0 < part["width"] <= 100000
                         or type(part["height"]) is not int or not 0 < part["height"] <= 100000):
                     raise _error("MODEL_INPUT_INVALID", "Memory image reference is invalid")
+                if (type(part["byte_length"]) is not int
+                        or not 0 < part["byte_length"] <= 33_554_432
+                        or type(part["projection_state"]) is not str
+                        or part["projection_state"] not in {"READY", "OMITTED_BUDGET"}):
+                    raise _error("MODEL_INPUT_INVALID", "Memory image selection is invalid")
+                if part["projection_state"] == "READY":
+                    selected_image_bytes += part["byte_length"]
                 projected_parts.append({"part_id": part_id, "type": "image",
                                         "media_ref": image_ref["payload_id"],
-                                        "media_revision": revision, "media_payload": image_ref})
+                                        "media_revision": revision, "media_payload": image_ref,
+                                        "projection_state": part["projection_state"]})
             else:
                 raise _error("MODEL_INPUT_INVALID", "Memory part kind is invalid")
         if row["is_current_source"] != (source["source_id"] == current["source_id"]):
@@ -310,6 +324,9 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
                            "parts": projected_parts, "current_conversation": current,
                            "relationship_to_current_conversation": relation,
                            "retrieval": retrieval})
+    if (selected_image_bytes != value["selected_media_bytes"]
+            or selected_image_bytes > value["max_retrieval_media_bytes"]):
+        raise _error("MODEL_INPUT_INVALID", "Memory image selection total is invalid")
     return reference, normalized
 
 
@@ -474,6 +491,8 @@ class _Projection:
                     reason = "MODEL_IMAGE_UNSUPPORTED"
                 elif target_role not in self.capabilities.image_roles:
                     reason = "MODEL_ROLE_IMAGE_UNSUPPORTED"
+                elif memory and part["projection_state"] == "OMITTED_BUDGET":
+                    reason = "MEMORY_IMAGE_BUDGET"
                 media_ref = part.get("media_ref")
                 if memory:
                     image = self.memory_image(unit, part, part_id)

@@ -501,7 +501,7 @@ ViewPlan固定有序源集、覆盖范围、基础context_view_revision、contex
 
 Conversation 的 Context 快照 v3 现在固定 `media_cost_revision`、活动媒体字节数，以及每个活动单元已物化图片的片序号、媒体修订、尺寸、字节数和受管 Payload 引用。Agent 核对这些事实与原始图片 part 一致，只读取快照中 READY 的资产；PENDING 片保持显式状态。Context 历史图片不再由 Agent 按最近 32 张或 12 MiB 静默截断；解析端口的单次 256 项上限由分批调用满足，超出快照可发布界时明确失败。相同 Run 的下一次模型调用重新取得安全点快照，迟到图片可在那时进入，但不得修改已冻结的请求。模型不支持图片时，能力投影仍按原规则去图，不改变 Context 快照。
 
-这仍只是受管媒体文件字节界，不是解码后像素内存、tokenizer 估算或完整冻结必要集合 ViewPlan。快照目前用活动媒体高水位和 4096 个活动单元作为发布硬界；必留单元使活动视图超界时会明确拒绝本次模型请求。召回证据图片仍有 Agent 内的 12 MiB 选择上限，尚需把证据选择责任与必要集合、传输硬界分别收口。后续必须由 Conversation/Context 持久冻结带估算版本和必要集合的完整单元选择，并为 RAG 证据另定义有界选择协议，不能把本次快照协议升级称作完整 ViewPlan 已落地。
+这仍只是受管媒体文件字节界，不是解码后像素内存、tokenizer 估算或完整冻结必要集合 ViewPlan。快照目前用活动媒体高水位和 4096 个活动单元作为发布硬界；必留单元使活动视图超界时会明确拒绝本次模型请求。RAG 证据图片改由 Memory 检索策略的 `max_retrieval_media_bytes` 冻结选择，Agent 只核对证据并投影；预算省略保留来源片及明确原因。此上限与 Context 活动历史窗口分别计量，尚未形成统一模型请求的本地 token/传输估算。后续必须由 Conversation/Context 持久冻结带估算版本和必要集合的完整单元选择，并对 Memory 证据与历史的合并传输硬界给出明确失败策略，不能把本次快照协议升级称作完整 ViewPlan 已落地。
 
 新 Session 的首个 Run 在 `agent.execute` 选择触发 InputBatch 之前，由 `conversation.scheduler` 持有 Actor 围栏执行 `conversation.compact-before-run`。这个独立 UnitOfWork 使用 Conversation 包自身的视图策略，按“确定性计划 → 归档 Payload → 视图提交 → Memory 归档资格”顺序原子提交；它不虚构 InputBatch，也不把裁剪策略交给 Agent 或 Provider。已提交的归档按操作身份重放；若重试时 Session 已启动且本操作未归档，则跳过新裁剪，由 Agent 读取已经存在的 Run。随后 Agent 在同一 Actor 围栏下选择输入，`context_view_revision` 因而是裁剪后的版本。Run 中途的模型安全点只接入新输入，不重新选择历史窗口；后续 Run 的 Session 交接仍须明确设计安全裁剪边界，不能沿用前一个 Run 的固定视图假装已经裁剪。
 

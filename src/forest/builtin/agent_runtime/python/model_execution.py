@@ -318,18 +318,21 @@ class ModelExecution:
                     "AGENT_MEMORY_FENCE_MISMATCH", "Memory evidence belongs to another query", 409
                 )
             if "image" in target.input_modalities:
-                memory_image_budget = 12 * 1024 * 1024
+                selected_media_bytes = 0
                 for unit in evidence.get("evidence", ()):
                     for part in unit.get("parts", ()):
                         if part.get("kind") != "image":
                             continue
+                        if part["projection_state"] != "READY":
+                            continue
                         reference = part["media_ref"]
-                        if memory_image_budget <= 0:
-                            continue
                         content = await self.ctx.payloads.read_bytes(reference)
-                        if len(content) > memory_image_budget:
-                            continue
-                        memory_image_budget -= len(content)
+                        if len(content) != part["byte_length"]:
+                            raise ForestError(
+                                "AGENT_MEMORY_MEDIA_MISMATCH",
+                                "Memory image differs from the frozen evidence", 409,
+                            )
+                        selected_media_bytes += len(content)
                         image = MediaSnapshot(
                             bot_id, reference["payload_id"], unit["source_revision"],
                             unit["source_unit_id"], part["part_id"],
@@ -338,6 +341,11 @@ class ModelExecution:
                         )
                         images[(unit["source_unit_id"], part["part_id"])] = image
                         images[reference["payload_id"]] = image
+                if selected_media_bytes != evidence["selected_media_bytes"]:
+                    raise ForestError(
+                        "AGENT_MEMORY_MEDIA_MISMATCH",
+                        "Memory evidence media total differs from its publication", 409,
+                    )
         model_input = {
             "protocol": "forest.agent-model-input/1",
             "request_id": request_id,

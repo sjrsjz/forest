@@ -237,12 +237,18 @@ def native_evidence(*, parts=None):
                {"part_id": "text", "part_index": 0, "kind": "text",
                 "text": "recalled", "truncated": False}],
            }
-    return {"protocol": "forest.memory-evidence/1", "bot_id": "bot-a",
+    selected_media_bytes = sum(
+        part["byte_length"] for part in row["parts"]
+        if part["kind"] == "image" and part["projection_state"] == "READY"
+    )
+    return {"protocol": "forest.memory-evidence/2", "bot_id": "bot-a",
             "query_id": "query-a", "bundle_id": "bundle-a",
             "graph_snapshot_ref": "memory-query:query-a", "current_source": current,
             "evidence": [row], "content_truncated": False, "missing_count": 0,
             "truncated": False, "association_sampled": True,
-            "read_count": 1, "max_retrieval_chars": 1024}
+            "read_count": 1, "max_retrieval_chars": 1024,
+            "max_retrieval_media_bytes": 12582912,
+            "selected_media_bytes": selected_media_bytes}
 
 
 def test_native_memory_evidence_retains_cross_group_source_and_path():
@@ -295,7 +301,8 @@ def test_native_memory_image_obeys_bound_model_modality():
                  "owner_id": "source-unit-a/image"}
     evidence = native_evidence(parts=[
         {"part_id": "image", "part_index": 0, "kind": "image",
-         "media_ref": reference, "media_type": "image/png", "width": 1, "height": 1}])
+         "media_ref": reference, "media_type": "image/png", "width": 1, "height": 1,
+         "byte_length": len(picture.content), "projection_state": "READY"}])
     evidence["evidence"][0]["matched_part_ids"] = ["image"]
     evidence["evidence"][0].update(is_seed=True, path_parent_source_unit_id=None,
                                    path_edge_id=None)
@@ -309,6 +316,31 @@ def test_native_memory_image_obeys_bound_model_modality():
     assert "data:image/png;base64," in visual.body.decode()
     assert visual.manifest["source_manifest"][0]["source"]["channel_id"] == "group-b"
     assert _learning_candidates(visual.manifest)[0]["part_ids"] == ["image"]
+
+
+def test_memory_budget_omission_is_visible_and_cannot_claim_selected_pixels():
+    value = snapshot()
+    value["conversation"] = {
+        "conversation_id": "onebot:group:group-a",
+        "group_source_id": "onebot:group:group-a",
+        "platform": "onebot-v11", "channel_kind": "group", "channel_id": "group-a",
+    }
+    picture = image(source="source-unit-a", part="image", ref="image-a")
+    reference = {"payload_id": "image-a", "digest": picture.blob_digest,
+                 "owner_component_id": "media.capture", "owner_kind": "media.image",
+                 "owner_id": "source-unit-a/image"}
+    evidence = native_evidence(parts=[
+        {"part_id": "image", "part_index": 0, "kind": "image",
+         "media_ref": reference, "media_type": "image/png", "width": 1, "height": 1,
+         "byte_length": len(picture.content), "projection_state": "OMITTED_BUDGET"},
+    ])
+    request = prepared(value, capabilities(input_modalities=("text", "image")),
+                       evidence=evidence)
+    assert request.manifest["omitted_part_refs"][0]["reason"] == "MEMORY_IMAGE_BUDGET"
+    assert b"image_url" not in request.body
+    evidence["selected_media_bytes"] = len(picture.content)
+    with pytest.raises(ForestError, match="Memory image selection total"):
+        prepared(value, capabilities(input_modalities=("text", "image")), evidence=evidence)
 
 
 def test_nested_attribution_drops_media_fields_and_rejects_untyped_ids():

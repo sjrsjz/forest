@@ -34,13 +34,13 @@
             "min_graph_relevance",
             "max_graph_nodes",
             "max_association_edges_per_node",
-            "max_retrieval_chars",
+            "max_retrieval_chars", "max_retrieval_media_bytes",
             "sequence_weight",
             "association_weight"
           ],
           "properties": {
             "policy_revision": {
-              "const": "qiyu-graph-region/1"
+              "const": "qiyu-graph-region/2"
             },
             "seed_limit": {
               "type": "integer",
@@ -76,6 +76,11 @@
               "type": "integer",
               "minimum": 256,
               "maximum": 1000000
+            },
+            "max_retrieval_media_bytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 33554432
             },
             "sequence_weight": {
               "type": "number",

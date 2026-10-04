@@ -182,7 +182,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             },
             "fusion_policy_revision": "independent-facets/1",
             "retrieval": {
-                "policy_revision": "qiyu-graph-region/1",
+                "policy_revision": "qiyu-graph-region/2",
                 "seed_limit": 4,
                 "candidate_limit_per_facet": 64,
                 "min_similarity": 0.35,
@@ -190,6 +190,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "max_graph_nodes": 32,
                 "max_association_edges_per_node": 32,
                 "max_retrieval_chars": 24000,
+                "max_retrieval_media_bytes": 12582912,
                 "sequence_weight": 0.55,
                 "association_weight": 0.9,
             },

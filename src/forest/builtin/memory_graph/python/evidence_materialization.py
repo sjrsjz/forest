@@ -45,11 +45,14 @@ async def materialize(ctx, query_id, digest):
         selected = []
         missing_count = 0
         remaining_chars = state["max_retrieval_chars"]
+        remaining_media_bytes = state["max_retrieval_media_bytes"]
+        selected_media_bytes = 0
         content_truncated = False
         for index in range(state["result_count"]):
             after = -1
             node = None
             parts = []
+            media_omitted = False
             parents = []
             for _ in range(MAX_PARTS_PER_UNIT // 32):
                 page = await ctx.queries.call("memory.read-retrieval-parts", {
@@ -73,8 +76,21 @@ async def materialize(ctx, query_id, digest):
                         truncated = len(kept) != len(text)
                         parts.append({**common, "kind": "text", "text": kept, "truncated": truncated})
                     else:
+                        byte_length = part["byte_length"]
+                        if type(byte_length) is not int or not 0 < byte_length <= 33554432:
+                            raise ForestError(
+                                "MEMORY_EVIDENCE_INVALID", "Source image length is invalid", 409,
+                            )
+                        include_media = byte_length <= remaining_media_bytes
+                        if include_media:
+                            remaining_media_bytes -= byte_length
+                            selected_media_bytes += byte_length
+                        else:
+                            media_omitted = True
                         parts.append({**common, "kind": "image", "media_ref": part["payload"],
-                                      "media_type": part["media_type"], "width": part["width"], "height": part["height"]})
+                                      "media_type": part["media_type"], "width": part["width"],
+                                      "height": part["height"], "byte_length": byte_length,
+                                      "projection_state": "READY" if include_media else "OMITTED_BUDGET"})
                 if not page["has_more"]:
                     break
                 after = page["last_part_index"]
@@ -82,7 +98,10 @@ async def materialize(ctx, query_id, digest):
                 missing_count += 1
                 continue
             # Truncation is determined by the final part page, plus text cuts.
-            unit_truncated = any(part.get("truncated", False) for part in parts) or page["has_more"]
+            unit_truncated = (
+                media_omitted or any(part.get("truncated", False) for part in parts)
+                or page["has_more"]
+            )
             dependency_refs = []
             dependency_after = None
             for _ in range((MAX_DEPENDENCIES + 31) // 32):
@@ -115,13 +134,15 @@ async def materialize(ctx, query_id, digest):
             content_truncated |= unit_truncated
         trial_input = state["input_kind"] == "ADMIN_TRIAL"
         document = {
-            "protocol": "forest.memory-trial-evidence/1" if trial_input else "forest.memory-evidence/1",
+            "protocol": "forest.memory-trial-evidence/1" if trial_input else "forest.memory-evidence/2",
             "bot_id": ctx.identity["bot_id"],
             "query_id": query_id, "bundle_id": bundle_id, "graph_snapshot_ref": "memory-query:" + query_id,
             "current_source": state["current_source"],
             "content_truncated": content_truncated, "missing_count": missing_count,
             "truncated": state["truncated"], "association_sampled": state["association_sampled"],
             "read_count": state["read_count"], "max_retrieval_chars": state["max_retrieval_chars"],
+            "max_retrieval_media_bytes": state["max_retrieval_media_bytes"],
+            "selected_media_bytes": selected_media_bytes,
         }
         if trial_input:
             document["input_kind"] = "ADMIN_TRIAL"

@@ -14,17 +14,21 @@ def _ref(name):
 
 
 def _context(*, images=1, dependencies=3, query_parts=1, text=b"abc", budget=256,
+             media_budget=12582912,
              author_bytes=None, input_kind="SOURCE_UNIT"):
     documents = {}
     ancestry = {}
     published = []
-    raw_parts = [{"part_id": "text", "part_index": 0, "part_kind": "TEXT", "payload": _ref("text")}]
+    raw_parts = [{"part_id": "text", "part_index": 0, "part_kind": "TEXT",
+                  "byte_length": len(text), "payload": _ref("text")}]
     raw_parts.extend({"part_id": f"image/{i}", "part_index": i + 1, "part_kind": "IMAGE",
-                      "payload": _ref(f"image/{i}"), "media_type": "image/png", "width": 10, "height": 10}
+                      "payload": _ref(f"image/{i}"), "media_type": "image/png",
+                      "byte_length": 1024, "width": 10, "height": 10}
                      for i in range(images))
     node = {"source_unit_id": "unit/test", "author_payload": _ref("author"), "part_count": len(raw_parts)}
     state = {"evidence_ref": None, "bundle_id": "retrieval/test", "result_count": 1,
              "input_kind": input_kind, "max_retrieval_chars": budget,
+             "max_retrieval_media_bytes": media_budget,
              "current_source": None if input_kind == "ADMIN_TRIAL" else {"source_id": "group/query"},
              "truncated": False, "association_sampled": False, "read_count": 1}
 
@@ -82,10 +86,27 @@ async def test_evidence_cuts_unicode_text_and_keeps_images_with_source_dependenc
     assert unit["parts"][0]["text"] == "图" * 256
     assert unit["parts"][0]["truncated"] and document["content_truncated"]
     assert unit["parts"][1]["kind"] == "image"
+    assert unit["parts"][1]["projection_state"] == "READY"
+    assert document["selected_media_bytes"] == 1024
     assert unit["author_identity"]["display_name_at_event"] == "Original name"
     parents = {parent for group in ancestry.values() for parent in group}
     assert {"text", "image/0", "query/0", "anchor/0", "anchor/1", "anchor/2"} <= parents
     assert len(published) == 1
+
+
+@pytest.mark.asyncio
+async def test_media_budget_is_frozen_in_ranked_evidence_without_losing_source_parts():
+    ctx, documents, _ancestry, _published = _context(images=3, media_budget=2048)
+    result = await materialize(ctx, "query/test", digest_json)
+    document = documents[result["evidence_ref"]["payload_id"]]
+    images = [part for part in document["evidence"][0]["parts"] if part["kind"] == "image"]
+    assert [part["projection_state"] for part in images] == [
+        "READY", "READY", "OMITTED_BUDGET",
+    ]
+    assert [part["byte_length"] for part in images] == [1024, 1024, 1024]
+    assert document["max_retrieval_media_bytes"] == 2048
+    assert document["selected_media_bytes"] == 2048
+    assert document["content_truncated"]
 
 
 @pytest.mark.asyncio
