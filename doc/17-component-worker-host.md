@@ -95,6 +95,8 @@ Worker Host 提交内核替换请求时，冻结所接受选择操作的全局�
 
 选择任务重领时，只用当前选择快照判断是否已被较新意图覆盖；它始终用原操作的 `expected_graph_revision` 和稳定 operation ID 请求内核。内核先查不可变请求账本，已有同输入请求直接重放，即使当前 Graph 已发布新修订也如此；尚无旧请求时才检查 Graph revision 并拒绝过期提交。Worker Host 不得在调用内核前用当前 Graph revision 拦截重放，否则“内核已提交、包任务未结算”的崩溃窗口会被误判为永久失败。
 
+重领时若当前选择快照已经不同，Worker Host 先按原 operation ID 查询内核替换请求：已有请求则用冻结输入调用同一请求端口，读取其幂等回执并结算为已提交；只有内核明确返回不存在才将旧选择任务结算为 `SUPERSEDED`。内核查询暂时失败必须重试，不能据此推断请求不存在。该核对只修复已提交但包内尚未结算的恢复窗口；候选发布仍由数据库选择围栏拒绝过期快照。
+
 包内管理页可读取显式选择快照，并分别查询选择任务和内核替换的结算结果；它不把 SUBMITTED 当成 Graph 已发布。只读 module.validate 使用精确工件摘要、批准能力、目标配置 revision、选择 revision 和 Graph revision，借用正式 Registry 的描述符、启动依赖与保留依赖规则产生影响集合和计划摘要；验证期间不安装 schema、不创建 grant、不推进配置或选择账本。管理 action 的 	ransaction_preflight 在授权写事务内重算这些事实，不能仅把内部 component.selection.enable/disable SQL 端口登记为 Web 或 Shell action。部署级包安装权威负责内容寻址工件与版本登记；Bot 级预验证只读该目录和目标配置账本。
 
 提交时，Web authority 验证 Web 票据，Shell authority 验证执行 claim；两者随后在同一选择写入事务内核对计划摘要、当前选择修订，以及冻结的 Graph、工件和目标配置事实，再由 Worker Host 私有命令写入选择操作与任务。任何事实变化返回冲突并要求重新验证；不同 action 键分别约束 enable 与 disable。群 Shell 保留自身优先级和当前管理员身份检查。内核只传递冻结凭据，不解释包策略；宿主最终预热与发布继续以数据库围栏核对准确快照。

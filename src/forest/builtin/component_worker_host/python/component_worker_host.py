@@ -367,12 +367,26 @@ class ComponentWorkerHost(Plugin):
     async def submit_selection(self, task, ctx):
         work = task["payload"]
         try:
+            operation_id = "component-selection:" + work["request_id"]
             current = await ctx.queries.call("component.selection.snapshot", {})
             if current != work["snapshot"]:
-                return {
-                    "disposition": "SUPERSEDED", "receipt": None,
-                    "error_code": "COMPONENT_SELECTION_CHANGED",
-                }
+                try:
+                    await ctx.services.call(
+                        "runtime.graph-replacement.status",
+                        {
+                            "protocol": "forest.runtime-graph-replacement-status-request/1",
+                            "operation_id": operation_id,
+                        },
+                        operation_id=ctx.operations.stable("read-selection-replacement"),
+                        timeout=10,
+                    )
+                except ForestError as error:
+                    if error.code == "RUNTIME_REPLACEMENT_NOT_FOUND":
+                        return {
+                            "disposition": "SUPERSEDED", "receipt": None,
+                            "error_code": "COMPONENT_SELECTION_CHANGED",
+                        }
+                    raise
             # Kernel replays this exact operation before checking a new Graph revision.
             encoded = json.dumps(
                 work["snapshot"], sort_keys=True, separators=(",", ":"),
@@ -382,7 +396,7 @@ class ComponentWorkerHost(Plugin):
                 "runtime.graph-replacement.request",
                 {
                     "protocol": "forest.runtime-graph-replacement-request/3",
-                    "operation_id": "component-selection:" + work["request_id"],
+                    "operation_id": operation_id,
                     "expected_graph_revision": work["expected_graph_revision"],
                     "requested_by": work["requested_by"],
                     "target_component_id": work["component_id"],

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.21"
+version = "1.6.22"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -512,9 +512,9 @@ output_schema = "schemas/selection-work-output.json"
 max_concurrency = 1
 poll_interval_ms = 200
 claim_timeout_s = 5
-handler_timeout_s = 20
+handler_timeout_s = 35
 settle_timeout_s = 5
-lease_seconds = 45
+lease_seconds = 60
 
 [[components.owned_work_handlers]]
 name = "component.configuration-rebuild.pending"
