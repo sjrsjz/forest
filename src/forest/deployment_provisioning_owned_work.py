@@ -119,7 +119,8 @@ class DeploymentProvisioningOwnedWorkAuthority:
                             )
                         else:
                             await self.jobs.fail(
-                                lease, claimed, error_code=error["code"], conn=conn
+                                lease, claimed, error_code=error["code"],
+                                retryable=error["retryable"], conn=conn,
                             )
                     else:
                         raise ForestError(

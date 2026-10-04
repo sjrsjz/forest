@@ -278,18 +278,21 @@ class DeploymentProvisioningJobAuthority:
         claim: DeploymentProvisioningClaim,
         *,
         error_code: str,
+        retryable: bool = True,
         retry_seconds: int = 5,
         conn=None,
     ) -> dict:
         self._validate_claim(claim)
         if not isinstance(error_code, str) or _ERROR.fullmatch(error_code) is None:
             error_code = "BOT_PROVISIONING_FAILED"
+        if type(retryable) is not bool:
+            raise ForestError("PROVISIONING_INPUT_INVALID", "Retry policy is invalid", 422)
         if type(retry_seconds) is not int or not 1 <= retry_seconds <= 3600:
             raise ForestError("PROVISIONING_INPUT_INVALID", "Retry delay is invalid", 422)
         async with self.store.transaction(conn) as conn:
             await self._verify_supervisor_in(conn, supervisor)
             current = await self._owned_in(conn, claim)
-            terminal = current["attempt_no"] >= current["max_attempts"]
+            terminal = not retryable or current["attempt_no"] >= current["max_attempts"]
             row = await (
                 await conn.execute(
                     "UPDATE forest_deployment.provisioning_jobs SET state=%s,lease_owner=NULL,"
@@ -330,6 +333,97 @@ class DeploymentProvisioningJobAuthority:
                 )
             ).fetchone()
             return dict(row)
+
+    async def reconcile_ready(
+        self, *, operation_id: str, job_id: str, expected_revision: int,
+        proof: dict, catalog, conn=None,
+    ) -> dict:
+        """Publish READY only from an immutable receipt in the dedicated Bot DB."""
+        _text(operation_id, "operation_id", 256)
+        _text(job_id, "job_id", 256)
+        if type(expected_revision) is not int or expected_revision < 1:
+            raise ForestError("PROVISIONING_INPUT_INVALID", "Job revision is invalid", 422)
+        if catalog.store is not self.store or not isinstance(proof, dict):
+            raise ForestError("PROVISIONING_INPUT_INVALID", "Receipt authority is invalid", 422)
+        fields = (
+            "bot_id", "deployment_id", "job_id", "storage_profile_ref",
+            "storage_generation", "bootstrap_profile_ref", "bootstrap_manifest_digest",
+        )
+        if any(key not in proof for key in fields):
+            raise ForestError("PROVISIONING_PROOF_INVALID", "Receipt is incomplete", 409)
+        input_digest = digest_json({
+            "job_id": job_id, "expected_revision": expected_revision,
+            "proof": {key: proof[key] for key in fields},
+        })
+        async with self.store.transaction(conn) as conn:
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                (f"forest.deployment.provisioning-operation/{operation_id}",),
+            )
+            replay = await (
+                await conn.execute(
+                    "SELECT o.input_digest,j.* FROM forest_deployment.provisioning_operations o "
+                    "JOIN forest_deployment.provisioning_jobs j USING(job_id) "
+                    "WHERE o.operation_id=%s", (operation_id,),
+                )
+            ).fetchone()
+            if replay is not None:
+                if replay["input_digest"] != input_digest:
+                    raise ForestError(
+                        "PROVISIONING_OPERATION_CONFLICT",
+                        "Provisioning operation input differs", 409,
+                    )
+                return dict(replay)
+            row = await (
+                await conn.execute(
+                    "SELECT * FROM forest_deployment.provisioning_jobs "
+                    "WHERE job_id=%s FOR UPDATE", (job_id,),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError("PROVISIONING_JOB_NOT_FOUND", "Provisioning Job not found", 404)
+            if row["revision"] != expected_revision:
+                raise ForestError(
+                    "PROVISIONING_REVISION_CONFLICT", "Provisioning Job changed", 409,
+                    details={"revision": row["revision"]},
+                )
+            if row["state"] != "BLOCKED_UNKNOWN":
+                raise ForestError(
+                    "PROVISIONING_NOT_RECONCILABLE",
+                    "Only blocked provisioning Jobs accept materialization proof", 409,
+                )
+            if (
+                proof["deployment_id"] != self.store.deployment_id
+                or any(proof[key] != row[key] for key in fields if key != "deployment_id")
+            ):
+                raise ForestError(
+                    "PROVISIONING_PROOF_MISMATCH",
+                    "Bot materialization receipt differs from the frozen Job", 409,
+                )
+            await catalog.register_ready(
+                operation_id=f"provision-ready/{job_id}",
+                bot_id=row["bot_id"], display_name=row["display_name"],
+                storage_profile_ref=row["storage_profile_ref"],
+                storage_generation=row["storage_generation"],
+                bootstrap_profile_ref=row["bootstrap_profile_ref"],
+                bootstrap_manifest_digest=row["bootstrap_manifest_digest"],
+                conn=conn,
+            )
+            saved = await (
+                await conn.execute(
+                    "UPDATE forest_deployment.provisioning_jobs SET state='SUCCEEDED',"
+                    "last_error_code=NULL,completed_at=clock_timestamp(),"
+                    "revision=revision+1,updated_at=clock_timestamp() "
+                    "WHERE job_id=%s RETURNING *", (job_id,),
+                )
+            ).fetchone()
+            await conn.execute(
+                "INSERT INTO forest_deployment.provisioning_operations("
+                "operation_id,operation_kind,input_digest,job_id,resulting_revision) "
+                "VALUES (%s,'RECONCILE',%s,%s,%s)",
+                (operation_id, input_digest, job_id, saved["revision"]),
+            )
+            return dict(saved)
 
     async def cancel(
         self,

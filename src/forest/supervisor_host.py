@@ -19,6 +19,7 @@ from forest.deployment_kernel_management import (
     BootstrapProfileKernelCommand,
     LocalStorageProfileKernelCommand,
     ProvisioningJobKernelCommand,
+    ProvisioningReconcileKernelCommand,
     SecretPutKernelCommand,
     StorageProfileKernelCommand,
     WebAccountKernelCommand,
@@ -258,6 +259,10 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                         jobs, kind, notify=notify_deployment_work,
                     ) for kind in ProvisioningJobKernelCommand._METHODS
                 },
+                ("deployment.provisioning", "deployment.provisioning-reconcile"):
+                    ProvisioningReconcileKernelCommand(
+                        jobs, catalog, storage_profiles, bootstrap_profiles, provisioner,
+                    ),
             },
         )
         deployment_runtime.kernel_owned_work_authorities["deployment.provisioning"] = (

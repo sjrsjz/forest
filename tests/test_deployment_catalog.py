@@ -25,6 +25,7 @@ from forest.deployment_kernel_management import (
     DeploymentKernelManagementAuthority,
     LocalStorageProfileKernelCommand,
     ProvisioningJobKernelCommand,
+    ProvisioningReconcileKernelCommand,
     SecretPutKernelCommand,
     StorageProfileKernelCommand,
     WebAccountKernelCommand,
@@ -2513,6 +2514,54 @@ async def test_expired_provisioning_claim_blocks_unknown_result(deployment_catal
     assert blocked["attempt_no"] == 1
     assert blocked["last_error_code"] == "PROVISIONING_CLAIM_EXPIRED"
     assert await jobs.claim(supervisor, worker_id="worker/retry") is None
+    with pytest.raises(ForestError) as mismatch:
+        await jobs.reconcile_ready(
+            operation_id="provisioning/expired-job/reconcile",
+            job_id=claim.job_id,
+            expected_revision=blocked["revision"],
+            proof={
+                "deployment_id": repository.store.deployment_id,
+                "job_id": claim.job_id,
+                "bot_id": claim.bot_id,
+                "storage_profile_ref": claim.storage_profile_ref,
+                "storage_generation": claim.storage_generation,
+                "bootstrap_profile_ref": claim.bootstrap_profile_ref,
+                "bootstrap_manifest_digest": "sha256:" + "0" * 64,
+            },
+            catalog=repository,
+        )
+    assert mismatch.value.code == "PROVISIONING_PROOF_MISMATCH"
+    assert (await jobs.inspect(claim.job_id))["state"] == "BLOCKED_UNKNOWN"
+    with pytest.raises(ForestError) as absent:
+        await repository.inspect(claim.bot_id)
+    assert absent.value.code == "BOT_NOT_FOUND"
+
+
+@pytest.mark.postgres
+async def test_deterministic_provisioning_failure_does_not_retry(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    storage = await _storage_profile(repository, "bot/nonretryable", "nonretryable")
+    profile = await _bootstrap_profile(repository, storage, "nonretryable")
+    jobs = DeploymentProvisioningJobAuthority(repository.store)
+    await jobs.enqueue(
+        operation_id="provisioning/nonretryable/enqueue",
+        job_id="provisioning/nonretryable/1",
+        bot_id=storage.bot_id,
+        display_name="Nonretryable",
+        storage_profile_ref=storage.profile_ref,
+        storage_generation=storage.storage_generation,
+        bootstrap_profile_ref=profile.profile_ref,
+    )
+    supervisor = await repository.claim_supervisor("host/nonretryable", "incarnation/nonretryable")
+    claim = await jobs.claim(supervisor, worker_id="worker/nonretryable")
+    assert claim is not None
+    failed = await jobs.fail(
+        supervisor, claim, error_code="PROVISIONING_INPUT_TAMPERED", retryable=False,
+    )
+    assert failed["state"] == "FAILED"
+    assert failed["attempt_no"] == 1
+    assert await jobs.claim(supervisor, worker_id="worker/again") is None
 
 
 @pytest.mark.postgres
@@ -2755,6 +2804,14 @@ async def test_official_provisioner_materializes_module_authorities_without_star
             components=components,
             schema_digests=official_bootstrap_schema_digests(),
         )
+        jobs = DeploymentProvisioningJobAuthority(repository.store)
+        await jobs.enqueue(
+            operation_id="provisioning/official/enqueue",
+            job_id="provisioning/official/1", bot_id="bot/official",
+            display_name="Official", storage_profile_ref=storage.profile_ref,
+            storage_generation=storage.storage_generation,
+            bootstrap_profile_ref=bootstrap.profile_ref,
+        )
         resolver = OfficialBotSettingsResolver(secrets=secrets)
         resolved_storage = await storage_profiles.resolve(
             profile_ref=storage.profile_ref,
@@ -2762,14 +2819,51 @@ async def test_official_provisioner_materializes_module_authorities_without_star
             expected_storage_generation=storage.storage_generation,
         )
         resolved_profile = await bootstrap_profiles.load(bootstrap.profile_ref)
-        await OfficialBotProvisioner(
+        provisioner = OfficialBotProvisioner(
             settings_resolver=resolver,
             database_allocator=allocator,
-        )(
-            claim=SimpleNamespace(bot_id="bot/official"),
+        )
+        await provisioner(
+            claim=SimpleNamespace(
+                bot_id="bot/official", deployment_id=repository.store.deployment_id,
+                job_id="provisioning/official/1",
+                storage_profile_ref=storage.profile_ref,
+                storage_generation=storage.storage_generation,
+                bootstrap_profile_ref=bootstrap.profile_ref,
+                bootstrap_manifest_digest=bootstrap.manifest_digest,
+            ),
             storage=resolved_storage,
             profile=resolved_profile,
         )
+        proof = await provisioner.read_materialization_receipt(storage=resolved_storage)
+        assert proof["job_id"] == "provisioning/official/1"
+        assert proof["bootstrap_manifest_digest"] == bootstrap.manifest_digest
+        supervisor = await repository.claim_supervisor("host/official", "incarnation/official")
+        claim = await jobs.claim(supervisor, worker_id="worker/official")
+        assert claim is not None
+        blocked = await jobs.block_unknown(
+            supervisor, claim, error_code="PROVISIONING_RESULT_UNKNOWN"
+        )
+        command = ProvisioningReconcileKernelCommand(
+            jobs, repository, storage_profiles, bootstrap_profiles, provisioner,
+        )
+        prepared = await command.prepare(
+            {"job_id": claim.job_id, "expected_revision": blocked["revision"]},
+            operation_id="provisioning/official/reconcile",
+        )
+        async with repository.store.transaction() as conn:
+            settled = await command.execute_in(
+                conn, prepared, operation_id="provisioning/official/reconcile"
+            )
+        assert settled["state"] == "SUCCEEDED"
+        async with repository.store.transaction() as conn:
+            replay = await command.execute_in(
+                conn, prepared, operation_id="provisioning/official/reconcile"
+            )
+        assert replay == settled
+        bot = await repository.inspect("bot/official")
+        assert bot["supply_state"] == "READY"
+        assert bot["desired_state"] == "OFFLINE"
 
         target = BotStore(target_dsn, "bot/official")
         await target.open()
@@ -2887,6 +2981,11 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                     jobs, kind, notify=supervisor.notify,
                 ) for kind in ProvisioningJobKernelCommand._METHODS
             },
+            ("deployment.provisioning", "deployment.provisioning-reconcile"):
+                ProvisioningReconcileKernelCommand(
+                    jobs, repository, storage_profiles, bootstrap_profiles,
+                    SimpleNamespace(read_materialization_receipt=None),
+                ),
         },
     )
     deployment_runtime.kernel_owned_work_authorities["deployment.provisioning"] = (
@@ -3377,6 +3476,13 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert cancelled.status_code == 200, cancelled.text
         assert cancelled.json()["state"] == "CANCELLED"
+        not_reconcilable = await client.post(
+            provisioning_base + "actions/provisioning.reconcile",
+            headers={**headers, "idempotency-key": "provisioning-web-reconcile-cancelled"},
+            json={"job_id": "provisioning/web/1", "expected_revision": 2},
+        )
+        assert not_reconcilable.status_code == 409
+        assert not_reconcilable.json()["code"] == "PROVISIONING_NOT_RECONCILABLE"
         package_storage = await _storage_profile(
             repository, "bot/package-worker", "package-worker"
         )

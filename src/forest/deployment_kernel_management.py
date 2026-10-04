@@ -333,3 +333,61 @@ class ProvisioningJobKernelCommand:
     def after_commit(self, result: dict) -> None:
         if self.notify is not None:
             self.notify()
+
+
+class ProvisioningReconcileKernelCommand:
+    """Resolve a blocked Job only after reading the dedicated Bot DB receipt."""
+
+    def __init__(self, jobs, catalog, storage_profiles, bootstrap_profiles, provisioner):
+        self.jobs = jobs
+        self.catalog = catalog
+        self.storage_profiles = storage_profiles
+        self.bootstrap_profiles = bootstrap_profiles
+        self.provisioner = provisioner
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        row = await self.jobs.inspect(payload["job_id"])
+        if row["state"] not in {"BLOCKED_UNKNOWN", "SUCCEEDED"}:
+            raise ForestError(
+                "PROVISIONING_NOT_RECONCILABLE",
+                "Only blocked provisioning Jobs accept materialization proof", 409,
+            )
+        storage = await self.storage_profiles.resolve(
+            profile_ref=row["storage_profile_ref"],
+            expected_bot_id=row["bot_id"],
+            expected_storage_generation=row["storage_generation"],
+        )
+        profile = await self.bootstrap_profiles.load(row["bootstrap_profile_ref"])
+        if (
+            profile.bot_id != row["bot_id"]
+            or profile.storage_profile_ref != row["storage_profile_ref"]
+            or profile.storage_generation != row["storage_generation"]
+            or profile.manifest_digest != row["bootstrap_manifest_digest"]
+        ):
+            raise ForestError(
+                "PROVISIONING_INPUT_TAMPERED",
+                "Frozen Bootstrap profile differs from the Job", 409,
+            )
+        proof = await self.provisioner.read_materialization_receipt(storage=storage)
+        if proof is None:
+            raise ForestError(
+                "PROVISIONING_PROOF_ABSENT",
+                "Bot database has no completed materialization receipt", 409,
+            )
+        return {**payload, "proof": proof}
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        saved = await self.jobs.reconcile_ready(
+            operation_id=operation_id,
+            job_id=prepared["job_id"],
+            expected_revision=prepared["expected_revision"],
+            proof=prepared["proof"],
+            catalog=self.catalog,
+            conn=conn,
+        )
+        return {
+            key: saved[key] for key in (
+                "job_id", "bot_id", "state", "revision", "attempt_no",
+                "max_attempts", "last_error_code",
+            )
+        }

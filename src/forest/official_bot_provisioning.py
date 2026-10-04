@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+import psycopg
 from jsonschema import Draft202012Validator
+from psycopg_pool import PoolTimeout
 
 from forest.bootstrap_contributions import BootstrapConfigurationContribution
 from forest.bot_host import BotHost, BotSettings
@@ -16,6 +18,8 @@ from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.model_contract import ModelCapabilities
 from forest.runtime_modules import RuntimeManagementContribution
+from forest.storage.bot_provisioning_receipt import BotProvisioningReceiptAuthority
+from forest.storage.bot_store import BotStore
 
 PROVIDER_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("provider_chat_completions")
 EMBEDDING_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("embedding_multimodal")
@@ -567,6 +571,21 @@ class OfficialBotProvisioner:
         self.host_factory = host_factory
         self.database_allocator = database_allocator
 
+    async def read_materialization_receipt(self, *, storage) -> dict | None:
+        if self.database_allocator is not None:
+            self.database_allocator.validate_target(storage.bot_id, storage.dsn)
+        receipt_store = BotStore(storage.dsn, storage.bot_id)
+        try:
+            await receipt_store.open()
+            return await BotProvisioningReceiptAuthority(receipt_store).read()
+        except (psycopg.Error, PoolTimeout) as exc:
+            raise ForestError(
+                "PROVISIONING_PROOF_UNAVAILABLE",
+                "Bot materialization proof could not be read", 503,
+            ) from exc
+        finally:
+            await receipt_store.close()
+
     async def __call__(self, *, claim, storage, profile) -> None:
         if claim.bot_id != profile.bot_id or claim.bot_id != storage.bot_id:
             raise ForestError(
@@ -582,3 +601,11 @@ class OfficialBotProvisioner:
             )
         host = self.host_factory(settings)
         await host.provision()
+        receipt_store = BotStore(storage.dsn, claim.bot_id)
+        try:
+            await receipt_store.open()
+            await BotProvisioningReceiptAuthority(receipt_store).record(
+                claim=claim, storage=storage, profile=profile,
+            )
+        finally:
+            await receipt_store.close()

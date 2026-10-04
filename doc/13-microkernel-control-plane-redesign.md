@@ -187,6 +187,8 @@ Adapter→Shell 的准确 service handle 由 `adapter.onebot` 的 `requires` 声
 
 包私有持久工作使用 `owned_work_handlers`，不是宿主回调或通用 Scheduler Job。声明冻结唯一 work 名、claim/settle JSONB 函数、包内 `@job` handler、业务输入/输出 schema、`max_concurrency`、`poll_interval_ms`、claim/handler/settle deadline 与 lease；无续期声明时 lease 必须覆盖 handler 和 settle 的最大时间。claim 函数接收由宿主生成的唯一 claim token，只能在 active Generation fence 的事务中从本包 namespace 领取一项，并返回固定 `forest.owned-work-claim/1` envelope，其中包含 work ID、token、attempt、稳定 operation、因果根和业务 payload。Package Adapter 以该稳定 operation 进入持久服务调用账本后投递准确 Worker handler；Worker 重放只会重取原调用结果或以相同 operation 重放其受管 Effect。settle 函数接收成功结果或类型化失败，必须在 member fence 下按 token 幂等推进本包状态；包自行决定重试时间和终态，Adapter 不按错误字符串修改队列表。
 
+如果持久工作属于内核的基础身份账本，包可用 `authority = "kernel"` 声明准确受限端口，省去包私有 claim/settle SQL；内核端口在同一部署事务里执行相同的 Generation 围栏和 claim token 校验，且必须声明续租。它不授予包读取任意内核表的能力，也不允许宿主另起一条业务执行循环。
+
 长任务可额外声明 `renew_function`、`renew_interval_s` 与 `renew_timeout_s`。Adapter 在调用账本准入、Worker 执行和结果账本提交期间，按准确 claim token 调用包私有 `owned_renew`；函数必须验证当前领取者和租约后返回固定确认。lease 必须大于续期间隔、续期 deadline 和 settle deadline 之和，保证最后一次成功续期后仍有结算窗口。续期失败时 Adapter 取消在途调用、停止该 Generation 的领取，不写普通失败结算；外部效果可能已发生，后续只能按原 operation 对账。续期函数不能通过新 claim 或租约过期来推断旧效果未发生。部署供应 Job 仍只有内核权威账本；后续包化应以其受限 claim/renew/settle 端口接入，不能复制包私有队列表来冒充供应 Job。
 
 `owned_work_handlers` 使 Package Adapter 自动声明 `FREEZE_DRAIN`：候选 start 只创建等待中的通用泵，整张 RuntimeGraph 发布并统一开门后才允许 claim。冻结先同步关闭本地 gate，而持久 graph admission 已在此前关闭，因此越过本地检查的竞争 claim 仍会被数据库 active fence 拒绝；drain 等待已经计入的 claim、Worker 调用、嵌套 Effect、调用账本终态和包 settle 全部结束。崩溃时未 settle 项只能由包 lease 过期规则重新出现；新的 Generation 使用同一稳定 work operation 查询原调用账本，不能凭超时假定旧 handler 未执行。
@@ -247,9 +249,9 @@ Job。浏览器不得提交 `schema_digests`，也不得用一个六组件 JSON 
 
 本地 Storage 供应必须在同一个部署数据库事务里接纳 Web 回执、写入 DSN Secret 和创建 Storage Profile；Profile 冲突、Secret 用途错误或输入冲突都回滚整笔事务，不能留下孤立 DSN。该内核命令先按操作 ID 合流并在同一连接读取 Secret 状态；成功重放直接使用已提交的 Profile 回执，不重新生成随机数据库密码。`deployment.provisioning` 包声明管理操作、Job 分页查询与 UI；主密钥、数据库分配器及 Bot 基础身份和运行意图仍由内核受限端口持有。供应 Job 的排队、领取、续租、重试和结算只能有一份权威账本，不能为了把执行器迁入包而再造一套包私有 claim，同时保留宿主的旧 claim 循环。
 
-供应执行必须在准确的 `deployment.provisioning` Generation 生命周期内准入。冻结旧代后不得再领取新 Job；已领取工作、嵌套效果和结算须排空或留下明确的 `UNKNOWN` 对账事实，不能由租约超时推断“没有建库”并盲目重试。Worker 只取得 Bot ID、不可变 Storage/Bootstrap Profile 引用、摘要和有界操作身份，不取得 DSN、主密钥或其他 Secret 明文。物理建库由内核受限端口执行；Bot 模块基线装配由通用 RuntimeGraph/Generation 生命周期设施按冻结贡献目录完成，不能让宿主按业务组件 ID 拼装模块。两个端口均按冻结 Profile 与目标 Bot 身份核验，不接受任意数据库名或包路径。建库成功但 READY 尚未提交时，同一 Job 的恢复只能复用该数据库；READY 已提交后的重放只能读回原 Bot 身份与结果，不能重建或产生第二个 Bot。
+供应执行必须在准确的 `deployment.provisioning` Generation 生命周期内准入。冻结旧代后不得再领取新 Job；已领取工作、嵌套效果和结算须排空或留下明确的 `UNKNOWN` 对账事实，不能由租约超时推断“没有建库”并盲目重试。Worker 只取得 Bot ID、不可变 Storage/Bootstrap Profile 引用、摘要和有界操作身份，不取得 DSN、主密钥或其他 Secret 明文。物理建库由内核受限端口执行；Bot 模块基线装配由通用 RuntimeGraph/Generation 生命周期设施按冻结贡献目录完成，不能让宿主按业务组件 ID 拼装模块。两个端口均按冻结 Profile 与目标 Bot 身份核验，不接受任意数据库名或包路径。物化端口在所有模块基线安装成功后，向该 Bot 的 `kernel.runtime` 存储写入与部署 ID、Job ID、Storage/Bootstrap 引用及摘要精确绑定的不可变完成回执；它是跨库恢复的正面证据。建库成功但 READY 尚未提交时，同一 Job 的恢复只能复用该数据库；READY 已提交后的重放只能读回原 Bot 身份与结果，不能重建或产生第二个 Bot。
 
-`READY` 发布与 `OFFLINE` 意图必须在一个部署事务内线性化，并验证当前供应 claim、准确 Generation 和 Profile 摘要。当前 `deployment.provisioning` 包通过声明的 `owned_work_handlers` 持有 Worker handler；内核只持有唯一 Job 账本、Generation 围栏和受限物理建库端口。claim 在同一事务内验证 active Generation 并领取 Job；续租、结算在 member Generation 围栏下复核准确 claim；READY/OFFLINE 发布与 Job 成功终态在同一事务提交。未知外部结果保持 `BLOCKED_UNKNOWN`，不能仅凭租约过期自动重发。`MultiBotSupervisor` 只管理 Bot 运行意图与实例，不再执行供应 Job。
+`READY` 发布与 `OFFLINE` 意图必须在一个部署事务内线性化，并验证当前供应 claim、准确 Generation 和 Profile 摘要。当前 `deployment.provisioning` 包通过声明的 `owned_work_handlers` 持有 Worker handler；内核只持有唯一 Job 账本、Generation 围栏和受限物理建库端口。claim 在同一事务内验证 active Generation 并领取 Job；续租、结算在 member Generation 围栏下复核准确 claim；READY/OFFLINE 发布与 Job 成功终态在同一事务提交。未知外部结果保持 `BLOCKED_UNKNOWN`，不能仅凭租约过期自动重发。管理员的 `provisioning.reconcile` 只读取原 Bot 库的不可变完成回执，复核冻结 Job、当前修订和受权 CONTROL Generation 后，才在一个部署事务中补发 READY/OFFLINE 并结算原 Job；缺失或不符的回执不能被“人工确认”代替。`MultiBotSupervisor` 只管理 Bot 运行意图与实例，不再执行供应 Job。
 
 创建期 UI 使用与运行期管理贡献相同的受控 surface 身份。内置模块可以共享宿主提供的 schema 表单
 renderer，模块也可以发布自己的 template/module/style；两者都只能返回该组件的配置值，不能选择

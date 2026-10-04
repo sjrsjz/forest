@@ -51,6 +51,7 @@ def main() -> None:
                 {"action_id": "bootstrap.create"},
                 {"action_id": "storage.create-local"},
                 {"action_id": "provisioning.enqueue"},
+                {"action_id": "provisioning.reconcile"},
             ],
         },
         "management_contributions": [{
@@ -73,6 +74,7 @@ def main() -> None:
     submissions: list[dict] = []
     storage_submissions: list[dict] = []
     job_submissions: list[dict] = []
+    reconciliations: list[dict] = []
 
     class Handler(BaseHTTPRequestHandler):
         def _respond(self, body: bytes, content_type: str) -> None:
@@ -123,8 +125,11 @@ def main() -> None:
             if self.path.endswith("/queries/provisioning.jobs.list"):
                 return self._json({"items": [{
                     "job_id": item["job_id"], "bot_id": item["bot_id"],
-                    "state": "QUEUED", "revision": 1, "attempt_no": 0,
-                    "max_attempts": item["max_attempts"], "last_error_code": None,
+                    "state": item.get("state", "QUEUED"),
+                    "revision": item.get("revision", 1),
+                    "attempt_no": item.get("attempt_no", 0),
+                    "max_attempts": item["max_attempts"],
+                    "last_error_code": item.get("last_error_code"),
                 } for item in job_submissions], "next_after": None})
             if self.path.endswith("/queries/provisioning.bootstrap-catalog"):
                 return self._json(catalog)
@@ -143,6 +148,19 @@ def main() -> None:
                     "job_id": value["job_id"], "bot_id": value["bot_id"],
                     "state": "QUEUED", "revision": 1, "attempt_no": 0,
                     "max_attempts": value["max_attempts"], "last_error_code": None,
+                })
+            if self.path.endswith("/actions/provisioning.reconcile"):
+                reconciliations.append(value)
+                job = next(item for item in job_submissions if item["job_id"] == value["job_id"])
+                assert job["state"] == "BLOCKED_UNKNOWN"
+                assert value["expected_revision"] == job["revision"]
+                job.update(state="SUCCEEDED", revision=job["revision"] + 1,
+                           last_error_code=None)
+                return self._json({
+                    "job_id": job["job_id"], "bot_id": job["bot_id"],
+                    "state": job["state"], "revision": job["revision"],
+                    "attempt_no": job["attempt_no"],
+                    "max_attempts": job["max_attempts"], "last_error_code": None,
                 })
             self.send_error(404)
 
@@ -204,6 +222,22 @@ def main() -> None:
                 enqueue.locator('[type="submit"]').click()
                 expect(frame.locator("#items .row")).to_have_count(1)
                 assert len(job_submissions) == 1
+                job_submissions.append({
+                    "job_id": "provisioning/blocked", "bot_id": "bot/blocked",
+                    "state": "BLOCKED_UNKNOWN", "revision": 4, "attempt_no": 1,
+                    "max_attempts": 3,
+                    "last_error_code": "PROVISIONING_CLAIM_EXPIRED",
+                })
+                frame.locator("#refresh").click()
+                blocked = frame.locator("#items .row").filter(
+                    has_text="provisioning/blocked"
+                )
+                expect(blocked).to_be_visible()
+                blocked.get_by_role("button", name="核对物化").click()
+                expect(blocked).to_contain_text("SUCCEEDED")
+                assert reconciliations == [{
+                    "job_id": "provisioning/blocked", "expected_revision": 4,
+                }]
                 assert page.url == f"http://127.0.0.1:{server.server_port}/"
                 assert not errors, errors
             finally:

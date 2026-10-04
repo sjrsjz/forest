@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-provisioning"
-version = "2.0.0"
+version = "2.1.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_provisioning:DeploymentProvisioning"
@@ -132,6 +132,13 @@ kind = "deployment.provisioning-cancel"
 input_schema = "schemas/cancel-input.json"
 output_schema = "schemas/job-output.json"
 
+[[components.kernel_commands]]
+name = "deployment.provisioning.reconcile"
+contract = "1.0"
+kind = "deployment.provisioning-reconcile"
+input_schema = "schemas/reconcile-input.json"
+output_schema = "schemas/job-output.json"
+
 [[components.management_queries]]
 id = "provisioning.jobs.list"
 port = "deployment.provisioning.jobs.page"
@@ -175,3 +182,9 @@ id = "provisioning.cancel"
 port = "deployment.provisioning.cancel"
 priority = "P0"
 timeout_s = 15
+
+[[components.management_actions]]
+id = "provisioning.reconcile"
+port = "deployment.provisioning.reconcile"
+priority = "P0"
+timeout_s = 30

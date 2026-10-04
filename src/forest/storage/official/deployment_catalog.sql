@@ -423,7 +423,7 @@ CREATE TABLE forest_deployment.provisioning_jobs (
 
 CREATE TABLE forest_deployment.provisioning_operations (
     operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
-    operation_kind text NOT NULL CHECK (operation_kind IN ('ENQUEUE','CANCEL')),
+    operation_kind text NOT NULL CHECK (operation_kind IN ('ENQUEUE','CANCEL','RECONCILE')),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     job_id text NOT NULL REFERENCES forest_deployment.provisioning_jobs(job_id),
     resulting_revision bigint NOT NULL CHECK (resulting_revision > 0),

@@ -143,6 +143,30 @@ CREATE TABLE service_operations (
     CHECK ((outcome_payload_id IS NULL) = (outcome_owner_id IS NULL))
 );
 
+CREATE TABLE provisioning_receipts (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    deployment_id text NOT NULL CHECK (octet_length(deployment_id) BETWEEN 1 AND 128),
+    job_id text NOT NULL UNIQUE CHECK (octet_length(job_id) BETWEEN 1 AND 256),
+    storage_profile_ref text NOT NULL CHECK (octet_length(storage_profile_ref) BETWEEN 1 AND 512),
+    storage_generation bigint NOT NULL CHECK (storage_generation > 0),
+    bootstrap_profile_ref text NOT NULL CHECK (octet_length(bootstrap_profile_ref) BETWEEN 1 AND 512),
+    bootstrap_manifest_digest text NOT NULL CHECK (
+        bootstrap_manifest_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    completed_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE FUNCTION reject_provisioning_receipt_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'Bot provisioning receipt is immutable';
+END;
+$$;
+
+CREATE TRIGGER provisioning_receipt_immutable
+    BEFORE UPDATE OR DELETE ON provisioning_receipts
+    FOR EACH ROW EXECUTE FUNCTION reject_provisioning_receipt_change();
+
 CREATE INDEX service_operations_status ON service_operations(
     bot_id, component_id, status, deadline_at
 );
