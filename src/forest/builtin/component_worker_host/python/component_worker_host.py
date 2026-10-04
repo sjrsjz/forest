@@ -210,10 +210,6 @@ class ComponentWorkerHost(Plugin):
             "updated_at": saved["updated_at"],
         }
 
-    @service("component.host.configuration-rebuild", semantics="read")
-    async def configuration_rebuild_status(self, payload, ctx):
-        return await ctx.queries.call("component.configuration-rebuild.read", payload)
-
     @service("component.host.selection-application", semantics="read")
     async def selection_application_status(self, payload, ctx):
         saved = await ctx.queries.call("component.selection-application.read", payload)
