@@ -236,14 +236,8 @@ def parse_process_executor_configuration(value: object) -> dict[str, ExecutionPr
     return parsed
 
 
-def process_executor_configuration_validator_factory():
-    def create(_namespace: str):
-        async def validate(value: object) -> None:
-            parse_process_executor_configuration(value)
-
-        return validate
-
-    return create
+async def validate_process_executor_configuration(value: object) -> None:
+    parse_process_executor_configuration(value)
 
 
 class NativeProcessEffectDriver:

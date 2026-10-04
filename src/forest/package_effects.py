@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from forest.errors import ForestError
@@ -88,6 +88,26 @@ class PackageEffectDriverRegistry:
     """Deployment-owned allowlist of effect kinds; packages select by declaration."""
 
     factories: Mapping[str, PackageEffectDriverFactory]
+    configuration_validators: Mapping[str, Callable[[object], Awaitable[None]]] = field(
+        default_factory=dict
+    )
+
+    def configuration_validator(
+        self, declarations: tuple[dict, ...]
+    ) -> Callable[[object], Awaitable[None]] | None:
+        validators = tuple(
+            self.configuration_validators[kind]
+            for kind in dict.fromkeys(item["kind"] for item in declarations)
+            if kind in self.configuration_validators
+        )
+        if not validators:
+            return None
+
+        async def validate(value: object) -> None:
+            for validator in validators:
+                await validator(value)
+
+        return validate
 
     def resolve(self, declarations: tuple[dict, ...]) -> dict[str, PackageEffectDriverFactory]:
         resolved: dict[str, PackageEffectDriverFactory] = {}

@@ -44,7 +44,7 @@ from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog
 from forest.process_executor_effect_driver import (
     native_process_effect_driver_factory,
-    process_executor_configuration_validator_factory,
+    validate_process_executor_configuration,
 )
 from forest.runtime_modules import (
     RuntimeModuleDescriptor,
@@ -558,29 +558,31 @@ class BotHost:
             credential_resolver=resolve_onebot_secret,
             **adapter_driver_options,
         )
-        configuration_validators = {
-            "process_executor": process_executor_configuration_validator_factory(),
-        }
-        automatic_effect_drivers = PackageEffectDriverRegistry({
-            "chat-completions.http": provider_effect_factory,
-            "chat-completions.result-lookup": provider_effect_factory,
-            "embedding.multimodal.http": embedding_effect_factory,
-            "vector-index.milvus": vector_index_effect_factory,
-            "media.public-image": media_effect_factory,
-            "onebot.websocket-v11": onebot_effect_factory,
-            "kernel.payload-bytes": kernel_payload_json_effect_driver_factory(
-                runtime=self._kernel.runtime,
-                payloads=self._kernel.payload,
-            ),
-            "kernel.payload-json": kernel_payload_json_effect_driver_factory(
-                runtime=self._kernel.runtime,
-                payloads=self._kernel.payload,
-            ),
-            "process.native": native_process_effect_driver_factory(
-                runtime=self._kernel.runtime,
-                payloads=self._kernel.payload,
-            ),
-        })
+        automatic_effect_drivers = PackageEffectDriverRegistry(
+            {
+                "chat-completions.http": provider_effect_factory,
+                "chat-completions.result-lookup": provider_effect_factory,
+                "embedding.multimodal.http": embedding_effect_factory,
+                "vector-index.milvus": vector_index_effect_factory,
+                "media.public-image": media_effect_factory,
+                "onebot.websocket-v11": onebot_effect_factory,
+                "kernel.payload-bytes": kernel_payload_json_effect_driver_factory(
+                    runtime=self._kernel.runtime,
+                    payloads=self._kernel.payload,
+                ),
+                "kernel.payload-json": kernel_payload_json_effect_driver_factory(
+                    runtime=self._kernel.runtime,
+                    payloads=self._kernel.payload,
+                ),
+                "process.native": native_process_effect_driver_factory(
+                    runtime=self._kernel.runtime,
+                    payloads=self._kernel.payload,
+                ),
+            },
+            configuration_validators={
+                "process.native": validate_process_executor_configuration,
+            },
+        )
         automatic = []
         expected_packages = bootstrap_package_digests or {}
         capture_slots = asyncio.Semaphore(4)
@@ -639,7 +641,6 @@ class BotHost:
                 kernel=self._kernel,
                 initial_configuration=initial_configuration,
                 effect_driver_registry=automatic_effect_drivers,
-                configuration_validator_factory=configuration_validators.get(source.name),
             )
             automatic.append(provisioned.descriptor)
         official_descriptors = (

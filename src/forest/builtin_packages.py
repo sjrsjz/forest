@@ -590,7 +590,6 @@ async def bootstrap_builtin_package(
     initial_configuration: dict[str, Any] | None,
     resolved_contracts: dict[str, str] | None = None,
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
-    configuration_validator_factory: Callable[[str], Callable] | None = None,
 ) -> ProvisionedPackageModule:
     """Build and provision one builtin through the same immutable package path."""
 
@@ -600,7 +599,6 @@ async def bootstrap_builtin_package(
         initial_configuration=initial_configuration,
         resolved_contracts=resolved_contracts,
         effect_driver_registry=effect_driver_registry,
-        configuration_validator_factory=configuration_validator_factory,
     )
 
 
@@ -613,7 +611,6 @@ async def bootstrap_builtin_snapshot(
     initial_configuration: dict[str, Any] | None,
     resolved_contracts: dict[str, str] | None = None,
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
-    configuration_validator_factory: Callable[[str], Callable] | None = None,
 ) -> ProvisionedPackageModule:
     """Provision the exact captured official artifact inspected by its caller."""
 
@@ -625,7 +622,6 @@ async def bootstrap_builtin_snapshot(
         initial_configuration=initial_configuration,
         resolved_contracts=resolved_contracts,
         effect_driver_registry=effect_driver_registry,
-        configuration_validator_factory=configuration_validator_factory,
         trust_level="official",
     )
 
@@ -806,7 +802,6 @@ async def _bootstrap_package_snapshot(
     initial_configuration: dict[str, Any] | None,
     resolved_contracts: dict[str, str] | None = None,
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
-    configuration_validator_factory: Callable[[str], Callable] | None = None,
     approved_capabilities: tuple[str, ...] | None = None,
     trust_level: str,
 ) -> ProvisionedPackageModule:
@@ -830,10 +825,8 @@ async def _bootstrap_package_snapshot(
         payloads=kernel.payload,
         immutable_paths=tuple(snapshot.component.get("config_immutable_paths", ())),
     )
-    configuration_validator = (
-        configuration_validator_factory(configuration_storage.spec.namespace)
-        if configuration_validator_factory is not None
-        else None
+    configuration_validator = effect_driver_registry.configuration_validator(
+        tuple(snapshot.component.get("effect_services", ()))
     )
     schema_digest = digest_json(configuration_schema)
     if trust_level == "official" and initial_configuration is None:

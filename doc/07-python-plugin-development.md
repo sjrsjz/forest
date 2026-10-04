@@ -251,3 +251,5 @@ forest plugin import hello.zip
 ## 官方 Bot 级能力授予
 
 普通包的 components.capabilities.requests 只能列出该包已声明的自身服务、领域操作、状态、事件或任务端口；部署批准必须与此请求集合准确一致。宿主随代码交付的官方 Bot 包可另在 components.capabilities.official_bot_grants 中声明 capability 与显式 delegable 布尔值，资源始终由内核绑定为当前 Bot，包不得填写任意 Bot ID。只有官方 bootstrap 路径会将该声明纳入带策略修订的 GrantSet；普通安装包只要出现此字段就会在数据库访问前被拒绝，ZIP 导入或 manifest 自报不能取得官方身份。该声明属于内容寻址工件，热重载时按准确包摘要重新装配授予；BotHost 不维护按组件名分派的授权表。
+
+原生 Effect Driver 可在宿主驱动注册表中附带配置安全校验器。包通过 effect_services.kind 选择驱动种类；通用包装配器按该声明组合校验器，在创建期、配置提交与 Generation 准备中使用同一边界，不按组件目录名分派。校验器属于宿主提供的受信任驱动代码，普通插件不得以 manifest 路径要求宿主加载自身 Python 函数；包内运行时 schema 仍负责公开配置形状。

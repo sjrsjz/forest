@@ -10,9 +10,11 @@ import pytest
 from forest.errors import ForestError
 from forest.native_exec_helper import seccomp_available
 from forest.package_capabilities import PackageJobCallScope
+from forest.package_effects import PackageEffectDriverRegistry
 from forest.process_executor_effect_driver import (
     NativeProcessEffectDriver,
     parse_process_executor_configuration,
+    validate_process_executor_configuration,
 )
 from forest.runtime_contracts import RuntimeServiceInvocation
 
@@ -149,6 +151,21 @@ def test_profile_parser_rejects_dynamic_path_and_invalid_argument_schema(tmp_pat
         parse_process_executor_configuration(
             {"protocol": "forest.process.executor/1", "profiles": [value]}
         )
+
+
+async def test_native_effect_kind_keeps_its_configuration_safety_validator():
+    registry = PackageEffectDriverRegistry(
+        {}, configuration_validators={
+            "process.native": validate_process_executor_configuration,
+        },
+    )
+    validator = registry.configuration_validator(({"kind": "process.native"},))
+    assert validator is not None
+    await validator({"protocol": "forest.process.executor/1", "profiles": []})
+    with pytest.raises(ForestError) as rejected:
+        await validator({"protocol": "forest.process.executor/1", "profiles": [{}]})
+    assert rejected.value.code == "PROCESS_EXECUTOR_CONFIGURATION_INVALID"
+    assert registry.configuration_validator(({"kind": "unrelated"},)) is None
 
 
 @pytest.mark.skipif(os.name != "posix", reason="native resource guard is exercised in Linux")
