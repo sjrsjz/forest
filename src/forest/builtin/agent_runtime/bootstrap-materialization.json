@@ -1,0 +1,18 @@
+{
+  "protocol": "forest.bootstrap-materialization/1",
+  "base": "seed",
+  "overlay": {
+    "preset": {
+      "$payload_json": {
+        "owner_kind": "preset.context",
+        "owner_id": "preset/agent.runtime/default",
+        "value": {
+          "system": {"$bootstrap": "agent.runtime#/preset_system"}
+        }
+      }
+    },
+    "output_tokens": {
+      "$bootstrap": "provider.chat-completions#/capabilities/max_output_tokens"
+    }
+  }
+}

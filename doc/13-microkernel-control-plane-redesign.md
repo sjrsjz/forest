@@ -298,6 +298,8 @@ UI 目录属于包内容摘要，和 Python、schema 一起完成静态捕获、
 
 READY Bot 的启动参数只含经目录、Storage Profile 和 Bootstrap manifest 对照的 Bot 身份与 DSN。启动、重启和热重载从各模块 desired 配置账本读取当前值，并按当前包的运行期 schema 摘要和值验证；创建期 schema 只参与首次供应，不得校验 READY Bot，也不得用旧 Profile 的设置重写配置账本。若当前包 schema 与账本验证摘要不同，明确拒绝候选代，须走模块配置计划/换代或开发期重建，不能自动把旧创建配置解释成新版本。
 
+首次物化从准确包工件读取 `bootstrap_materialization` 声明。无声明时，带创建期贡献的包直接采用本组件冻结 Profile 值，不带贡献的包采用包内 `bootstrap_config` 种子。需要转换的包声明 `forest.bootstrap-materialization/1` 的 `base` 和顶层 `overlay`：`$bootstrap` 只按组件 ID 与 JSON Pointer 读取冻结 Profile，`$payload_json` 只以当前包组件为 owner 写入 JSON Payload 并返回受控引用。模板、引用、深度和文件大小在包捕获时校验；物化结果再按准确包的运行期配置 schema 校验。Agent 的 preset、OneBot 的 bindings 和 Memory 的 Embedding Profile 使用各自包模板，宿主不按这三个业务组件名生成初值。跨组件的一致性与 Secret 用途仍由供应解析预检，后续应归入包贡献的约束声明；这部分当前尚未完全包化。
+
 ## 6. 路由、授权和 dispatch trace
 
 注册表把命令、消息处理器、服务、事件和任务统一编译为 RouteGraph。路由节点包含契约、提供组件、代际、优先级、并发预算和所需能力；边表示所有权、同步依赖解析和事件投递。

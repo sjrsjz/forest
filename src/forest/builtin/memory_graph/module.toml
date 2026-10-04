@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.73.0"
+version = "1.74.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -12,6 +12,7 @@ state_schema = 1
 reload_mode = "drain"
 config_schema = "schemas/config.json"
 bootstrap_config = "bootstrap.json"
+bootstrap_materialization = "bootstrap-materialization.json"
 auto_install = true
 configuration_apply = "worker-host/1"
 config_immutable_paths = ["/embedding"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tomllib
+from copy import deepcopy
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
@@ -16,7 +17,7 @@ from forest.bootstrap_contributions import (
     BootstrapConfigurationRegistry,
     BootstrapPackageSurface,
 )
-from forest.bot_host import BotHost, BotRuntimeSettings, BotSettings
+from forest.bot_host import BotBootstrapSettings, BotHost, BotRuntimeSettings
 from forest.builtin_packages import (
     auto_install_builtin_sources,
     official_builtin_configuration_schema,
@@ -194,7 +195,7 @@ def validate_official_bootstrap_components(
 
 
 class OfficialBotSettingsResolver:
-    """Resolve one frozen official profile into runtime settings without retaining plaintext."""
+    """Validate a frozen Profile and pass its inputs to package-owned materializers."""
 
     def __init__(
         self, *, secrets, bootstrap_registry: BootstrapConfigurationRegistry | None = None,
@@ -204,7 +205,7 @@ class OfficialBotSettingsResolver:
             official_bootstrap_contributions()
         )
 
-    async def resolve(self, *, profile, storage) -> BotSettings:
+    async def resolve(self, *, profile, storage) -> BotBootstrapSettings:
         if (
             profile.bot_id != storage.bot_id
             or profile.storage_profile_ref != storage.profile_ref
@@ -255,7 +256,7 @@ class OfficialBotSettingsResolver:
             "output_token_parameter",
             "tool_image_mapping",
         }
-        provider, capabilities = validate_provider_configuration(
+        provider, _capabilities = validate_provider_configuration(
             {
                 **provider_seed,
                 "capabilities": {
@@ -280,11 +281,10 @@ class OfficialBotSettingsResolver:
                 "Vector index and embedding spaces differ",
                 409,
             )
-        trigger = validate_trigger_policy_configuration(
+        validate_trigger_policy_configuration(
             components["conversation.trigger-policy"].config
         )
         shell = validate_shell_configuration(components["shell.command"].config)
-        agent = components["agent.runtime"].config
         onebot = components["adapter.onebot"].config
         if shell["binding_ref"] != onebot["binding_id"]:
             raise ForestError(
@@ -309,45 +309,13 @@ class OfficialBotSettingsResolver:
         await self._verify_secret(
             onebot["access_token_ref"], "adapter.onebot.access-token"
         )
-        return BotSettings(
+        return BotBootstrapSettings(
             bot_id=profile.bot_id,
             dsn=storage.dsn,
-            model_base_url=provider["base_url"],
-            model_api_key="",
-            model=capabilities.model,
-            model_deployment_id=capabilities.deployment_id,
-            model_max_output_tokens=capabilities.max_output_tokens,
-            model_input_modalities=capabilities.input_modalities,
-            embedding_endpoint=embedding["endpoint"],
-            embedding_api_key="",
-            embedding_deployment_id=embedding_profile.deployment_id,
-            embedding_model_revision=embedding_profile.model_revision,
-            embedding_model=embedding_profile.model,
-            embedding_dimensions=embedding_profile.dimensions,
-            onebot_self_id=onebot["self_id"],
-            onebot_websocket_url=onebot["websocket_url"],
-            onebot_access_token="",
-            allowed_group_ids=trigger["allowed_group_ids"],
-            group_trigger_mode=trigger["group_trigger_mode"],
-            private_enabled=trigger["private_enabled"],
-            shell_administrator_ids=tuple(
-                principal.removeprefix("qq:")
-                for principal in shell["administrator_principals"]
-            ),
-            agent_system_prompt="",
-            model_credential_ref=provider["credential_ref"],
-            embedding_credential_ref=embedding["credential_ref"],
-            onebot_secret_ref=onebot["access_token_ref"],
-            agent_preset_system=tuple(agent["preset_system"]),
-            model_timeout_seconds=provider["timeout_seconds"],
-            model_max_connections=provider["max_connections"],
-            embedding_timeout_seconds=embedding["timeout_seconds"],
-            embedding_max_connections=embedding["max_connections"],
-            model_capabilities=capabilities,
-            vector_index_endpoint=vector_index["endpoint"],
-            vector_index_token="",
-            vector_index_credential_ref=vector_index["credential_ref"],
-            vector_index_timeout_seconds=vector_index["timeout_seconds"],
+            components=tuple(sorted(
+                (component_id, deepcopy(item.config))
+                for component_id, item in components.items()
+            )),
             bootstrap_package_digests=tuple(sorted(
                 (component_id, item.package_digest)
                 for component_id, item in components.items()

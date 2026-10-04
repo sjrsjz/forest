@@ -1,0 +1,19 @@
+{
+  "protocol": "forest.bootstrap-materialization/1",
+  "base": "seed",
+  "overlay": {
+    "bindings": [
+      {
+        "binding_ref": {"$bootstrap": "adapter.onebot#/binding_id"},
+        "binding_epoch": 1,
+        "self_id": {"$bootstrap": "adapter.onebot#/self_id"},
+        "credential_ref": {"$bootstrap": "adapter.onebot#/access_token_ref"},
+        "websocket_url": {"$bootstrap": "adapter.onebot#/websocket_url"},
+        "timeout_seconds": 30,
+        "event_capacity": 512,
+        "pending_capacity": 64,
+        "enabled": true
+      }
+    ]
+  }
+}

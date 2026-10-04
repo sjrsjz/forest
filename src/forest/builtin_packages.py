@@ -590,6 +590,30 @@ async def bootstrap_builtin_package(
     """Build and provision one builtin through the same immutable package path."""
 
     snapshot = catalog.build(source)
+    return await bootstrap_builtin_snapshot(
+        snapshot, store, installer, kernel=kernel,
+        initial_configuration=initial_configuration,
+        resolved_contracts=resolved_contracts,
+        effect_driver_registry=effect_driver_registry,
+        configuration_validator_factory=configuration_validator_factory,
+        additional_grants=additional_grants,
+    )
+
+
+async def bootstrap_builtin_snapshot(
+    snapshot: PackageSnapshot,
+    store,
+    installer,
+    *,
+    kernel,
+    initial_configuration: dict[str, Any] | None,
+    resolved_contracts: dict[str, str] | None = None,
+    effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
+    configuration_validator_factory: Callable[[str], Callable] | None = None,
+    additional_grants: tuple[CapabilityGrant, ...] = (),
+) -> ProvisionedPackageModule:
+    """Provision the exact captured official artifact inspected by its caller."""
+
     return await _bootstrap_package_snapshot(
         snapshot,
         store,

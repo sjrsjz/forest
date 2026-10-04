@@ -81,30 +81,30 @@ def verify_package_catalog_write_access() -> None:
 
 
 async def verify_vector_collection_access(
-    settings, collection_name: str, *, token: str,
+    vector_config: dict, collection_name: str, *, token: str,
 ) -> None:
     client = AsyncMilvusClient(
-        uri=settings.vector_index_endpoint,
+        uri=vector_config["endpoint"],
         token=token,
-        timeout=settings.vector_index_timeout_seconds,
+        timeout=vector_config["timeout_seconds"],
     )
     try:
-        async with asyncio.timeout(settings.vector_index_timeout_seconds):
+        async with asyncio.timeout(vector_config["timeout_seconds"]):
             await client.has_collection(collection_name=collection_name)
     finally:
         await client.close()
 
 
 async def reset_vector_collection(
-    settings, collection_name: str, *, token: str,
+    vector_config: dict, collection_name: str, *, token: str,
 ) -> bool:
     client = AsyncMilvusClient(
-        uri=settings.vector_index_endpoint,
+        uri=vector_config["endpoint"],
         token=token,
-        timeout=settings.vector_index_timeout_seconds,
+        timeout=vector_config["timeout_seconds"],
     )
     try:
-        async with asyncio.timeout(settings.vector_index_timeout_seconds):
+        async with asyncio.timeout(vector_config["timeout_seconds"]):
             existed = await client.has_collection(collection_name=collection_name)
             if existed:
                 await client.drop_collection(collection_name=collection_name)
@@ -142,11 +142,12 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                 409,
             )
         resolver = OfficialBotSettingsResolver(secrets=secrets)
-        bot_settings = await resolver.resolve(profile=profile, storage=storage)
-        vector_space = next(
-            item.config["space_id"] for item in profile.components
+        await resolver.resolve(profile=profile, storage=storage)
+        vector_config = next(
+            item.config for item in profile.components
             if item.component_id == "vector.index"
         )
+        vector_space = vector_config["space_id"]
         collection_name = vector_collection_name(bot_id, vector_space)
         allocator = LocalPostgresDatabaseAllocator(settings.dsn)
         allocator.validate_target(bot_id, storage.dsn)
@@ -200,15 +201,15 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
         guard_task = asyncio.create_task(renew_guard(), name="bot-database-rebuild-lease")
         try:
             async def vector_token() -> str:
-                if not bot_settings.vector_index_credential_ref:
+                if not vector_config["credential_ref"]:
                     return ""
                 return await secrets.resolve_text_for_purpose(
-                    bot_settings.vector_index_credential_ref, "vector.index.credential"
+                    vector_config["credential_ref"], "vector.index.credential"
                 )
 
             try:
                 await verify_vector_collection_access(
-                    bot_settings, collection_name, token=await vector_token()
+                    vector_config, collection_name, token=await vector_token()
                 )
             except (TimeoutError, MilvusException, OSError, ForestError) as exc:
                 raise ForestError(
@@ -287,7 +288,7 @@ async def rebuild(*, bot_id: str, execute: bool, confirmation: str | None) -> di
                 )
             try:
                 collection_existed = await reset_vector_collection(
-                    bot_settings, collection_name, token=await vector_token()
+                    vector_config, collection_name, token=await vector_token()
                 )
             except (TimeoutError, MilvusException, OSError, ForestError) as exc:
                 raise ForestError(

@@ -27,6 +27,7 @@ from uuid import uuid4
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from forest.bootstrap_materialization import validate_materialization_spec
 from forest.command_contract import (
     IDENTIFIER as COMMAND_IDENTIFIER,
 )
@@ -117,6 +118,7 @@ MANIFEST_SCHEMA = {
                     "scope": {"enum": ["bot", "deployment", "host"]},
                     "configuration_apply": {"const": "worker-host/1"},
                     "bootstrap_config": {"type": "string"},
+                    "bootstrap_materialization": {"type": "string"},
                     "bootstrap_contribution": {
                         "type": "object",
                         "additionalProperties": False,
@@ -1212,6 +1214,37 @@ def _bootstrap_ui(files: dict[str, bytes], component: dict) -> tuple[str, bytes]
     return reference, content
 
 
+def _bootstrap_materialization(files: dict[str, bytes], component: dict) -> dict | None:
+    reference = component.get("bootstrap_materialization")
+    if reference is None:
+        return None
+    path = PurePosixPath(reference)
+    if (
+        component["scope"] != "bot"
+        or component.get("auto_install") is not True
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.suffix != ".json"
+        or reference not in files
+        or len(files[reference]) > 262_144
+    ):
+        _fail(
+            "INVALID_BOOTSTRAP_MATERIALIZATION",
+            "Materialization must name a bounded JSON file in an auto-installed Bot package",
+        )
+    try:
+        spec = json.loads(files[reference])
+        json.dumps(spec, allow_nan=False)
+    except (UnicodeError, ValueError, TypeError) as exc:
+        raise ForestError(
+            "INVALID_BOOTSTRAP_MATERIALIZATION",
+            "Bootstrap materialization is not JSON", 422,
+        ) from exc
+    return validate_materialization_spec(
+        spec, has_contribution=component.get("bootstrap_contribution") is not None
+    )
+
+
 def storage_bundle_digest(spec: StorageBundleSpec, execution_profile: str) -> str:
     """Bind installed storage to its schema, independently of runtime code."""
 
@@ -1430,6 +1463,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "Creation-time schema and initial value must describe an object",
             )
         _bootstrap_ui(files, component)
+    _bootstrap_materialization(files, component)
     replacement_facts_schema = component.get("lifecycle", {}).get(
         "replacement_facts_schema"
     )
@@ -2237,6 +2271,11 @@ class PackageSnapshot:
         schema = _schema(files, declaration["schema"])
         initial_value = json.loads(files[declaration["initial_value"]])
         return declaration.copy(), schema, initial_value
+
+    def bootstrap_materialization(self) -> dict | None:
+        """Read a validated creation-to-runtime template from the exact artifact."""
+
+        return _bootstrap_materialization(self._verified_files(), self.component)
 
     def bootstrap_ui(self) -> tuple[bytes, str] | None:
         """Return exact packaged setup HTML and its content hash."""

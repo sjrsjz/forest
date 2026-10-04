@@ -2846,12 +2846,8 @@ async def test_official_provisioner_materializes_module_authorities_without_star
         resolved_settings = await resolver.resolve(
             profile=resolved_profile, storage=resolved_storage
         )
-        assert (
-            resolved_settings.model_api_key,
-            resolved_settings.embedding_api_key,
-            resolved_settings.vector_index_token,
-            resolved_settings.onebot_access_token,
-        ) == ("", "", "", "")
+        assert set(dict(resolved_settings.components)) == set(components)
+        assert not hasattr(resolved_settings, "model_api_key")
         provisioner = OfficialBotProvisioner(
             settings_resolver=resolver,
             database_allocator=allocator,

@@ -13,9 +13,11 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
+from forest.bootstrap_materialization import materialize_bootstrap_configuration
 from forest.builtin_packages import (
     auto_install_builtin_sources,
     bootstrap_builtin_package,
+    bootstrap_builtin_snapshot,
     bootstrap_installed_package,
     official_builtin_configuration,
 )
@@ -319,6 +321,16 @@ class BotRuntimeSettings:
     dsn: str
 
 
+@dataclass(frozen=True)
+class BotBootstrapSettings:
+    """Frozen package-owned creation inputs for one first materialization."""
+
+    bot_id: str
+    dsn: str
+    components: tuple[tuple[str, dict], ...]
+    bootstrap_package_digests: tuple[tuple[str, str], ...]
+
+
 class BotHost:
     """Own generic process resources for one immutable runtime graph."""
 
@@ -326,7 +338,7 @@ class BotHost:
 
     def __init__(
         self,
-        settings: BotSettings | BotRuntimeSettings,
+        settings: BotSettings | BotBootstrapSettings | BotRuntimeSettings,
         *,
         model_client_factory=None,
         embedding_client_factory=None,
@@ -531,7 +543,7 @@ class BotHost:
     async def _assemble_candidate(
         self, activation_id: str | None = None,
         *, bootstrap_package_digests: dict[str, str] | None = None,
-        bootstrap_settings: BotSettings | None = None,
+        bootstrap_settings: BotSettings | BotBootstrapSettings | None = None,
     ) -> BotGraphCandidate:
         initial_settings = self.settings if isinstance(self.settings, BotSettings) else None
         async def resolve_provider_secret(secret_ref, _revision):
@@ -645,7 +657,11 @@ class BotHost:
         )
         bootstrap_overrides = (
             await self._bootstrap_overrides(bootstrap_settings)
-            if bootstrap_settings is not None else {}
+            if isinstance(bootstrap_settings, BotSettings) else {}
+        )
+        profile_components = (
+            dict(bootstrap_settings.components)
+            if isinstance(bootstrap_settings, BotBootstrapSettings) else None
         )
         bootstrap_grants = {
             "memory_graph": (
@@ -692,11 +708,13 @@ class BotHost:
         })
         automatic = []
         expected_packages = bootstrap_package_digests or {}
-        automatic_sources = auto_install_builtin_sources()
+        automatic_sources = tuple(
+            (source, self.package_catalog.build(source))
+            for source in auto_install_builtin_sources()
+        )
         if expected_packages:
             captured_ids = set()
-            for source in automatic_sources:
-                snapshot = self.package_catalog.build(source)
+            for _source, snapshot in automatic_sources:
                 captured_ids.add(snapshot.component["id"])
                 expected = expected_packages.get(snapshot.component["id"])
                 if expected is not None and snapshot.digest != expected:
@@ -712,30 +730,28 @@ class BotHost:
                     "A frozen Bot bootstrap package is absent from the install catalog",
                     409,
                 )
-        for source in automatic_sources:
-            provisioned = await bootstrap_builtin_package(
-                source,
-                self.package_catalog,
+        for source, snapshot in automatic_sources:
+            if profile_components is not None:
+                initial_configuration = await materialize_bootstrap_configuration(
+                    snapshot, profile_components,
+                    payloads=self._kernel.payload,
+                )
+            elif bootstrap_settings is not None:
+                initial_configuration = official_builtin_configuration(
+                    source.name, overrides=bootstrap_overrides.get(source.name)
+                )
+            else:
+                initial_configuration = None
+            provisioned = await bootstrap_builtin_snapshot(
+                snapshot,
                 self.store,
                 self.schema_bundle_installer,
                 kernel=self._kernel,
-                initial_configuration=(
-                    official_builtin_configuration(
-                        source.name, overrides=bootstrap_overrides.get(source.name)
-                    ) if bootstrap_settings is not None else None
-                ),
+                initial_configuration=initial_configuration,
                 effect_driver_registry=automatic_effect_drivers,
                 configuration_validator_factory=configuration_validators.get(source.name),
                 additional_grants=bootstrap_grants.get(source.name, ()),
             )
-            expected = expected_packages.get(provisioned.snapshot.component["id"])
-            if expected is not None and provisioned.snapshot.digest != expected:
-                raise ForestError(
-                    "BOOTSTRAP_PACKAGE_DIGEST_MISMATCH",
-                    "Bot bootstrap package changed during installation",
-                    409,
-                    details={"component_id": provisioned.snapshot.component["id"]},
-                )
             automatic.append(provisioned.descriptor)
         official_descriptors = (
             worker_host.descriptor,
@@ -822,7 +838,7 @@ class BotHost:
     async def provision(self) -> tuple[str, ...]:
         """Install module authorities and revision-one configuration without starting I/O."""
 
-        if not isinstance(self.settings, BotSettings):
+        if not isinstance(self.settings, (BotSettings, BotBootstrapSettings)):
             raise ForestError(
                 "BOT_BOOTSTRAP_SETTINGS_REQUIRED",
                 "READY Bot launch identity cannot provision initial configuration", 409,
