@@ -127,26 +127,6 @@ def _official_bootstrap_source(package_name: str):
     )
 
 
-def auto_install_builtin_sources() -> tuple[Path, ...]:
-    """Discover official packages admitted to manifest-driven Bot assembly."""
-
-    root = files("forest").joinpath("builtin")
-    selected = []
-    for source in root.iterdir():
-        manifest_file = source.joinpath("module.toml")
-        if not source.is_dir() or not manifest_file.is_file():
-            continue
-        manifest = tomllib.loads(manifest_file.read_text(encoding="utf-8"))
-        components = manifest.get("components", ())
-        if (
-            len(components) == 1
-            and components[0].get("auto_install") is True
-            and components[0].get("scope") == "bot"
-        ):
-            selected.append((components[0]["id"], Path(str(source))))
-    return tuple(source for _, source in sorted(selected))
-
-
 def official_builtin_configuration(package_name: str, *, overrides: dict | None = None) -> dict:
     """Read an official package's declarative bootstrap seed, before Bot assembly."""
 

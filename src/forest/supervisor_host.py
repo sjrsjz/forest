@@ -26,7 +26,6 @@ from forest.deployment_kernel_management import (
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_package_controller import DeploymentPackageController
-from forest.deployment_packages import auto_install_deployment_sources
 from forest.deployment_provisioning_driver import DeploymentProvisioningEffectDriver
 from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwnedWorkAuthority
 from forest.deployment_runtime import DeploymentRuntimeScope
@@ -39,7 +38,7 @@ from forest.official_bot_provisioning import (
     OfficialBotSettingsResolver,
     official_bootstrap_contributions,
 )
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, auto_install_official_sources
 from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
@@ -284,7 +283,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         )
         deployment_controller = DeploymentPackageController(
             deployment_runtime, package_catalog,
-            official_sources=auto_install_deployment_sources(),
+            official_sources=auto_install_official_sources("deployment"),
         )
         await deployment_controller.start()
         import uvicorn

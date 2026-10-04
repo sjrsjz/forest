@@ -21,6 +21,7 @@ import zipfile
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -60,6 +61,27 @@ IDENTIFIER = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
 SQL_FUNCTION = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 ENTRYPOINT = re.compile(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*:[a-zA-Z_]\w*\Z")
 VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?\Z")
+
+
+def auto_install_official_sources(scope: str) -> tuple[Path, ...]:
+    """Find packaged official components that opt into one runtime scope."""
+
+    if scope not in {"bot", "deployment"}:
+        raise ValueError("Official auto-install scope is invalid")
+    root = files("forest").joinpath("builtin")
+    selected = []
+    for source in root.iterdir():
+        manifest_file = source.joinpath("module.toml")
+        if not source.is_dir() or not manifest_file.is_file():
+            continue
+        manifest = tomllib.loads(manifest_file.read_text(encoding="utf-8"))
+        components = manifest.get("components", ())
+        if len(components) != 1:
+            continue
+        component = components[0]
+        if component.get("auto_install") is True and component.get("scope") == scope:
+            selected.append((component["id"], Path(str(source))))
+    return tuple(source for _, source in sorted(selected))
 
 
 def _valid_json_pointer(value: object, *, wildcards: bool = False) -> bool:

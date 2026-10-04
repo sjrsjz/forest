@@ -15,7 +15,6 @@ from uuid import uuid4
 
 from forest.bootstrap_materialization import materialize_bootstrap_configuration
 from forest.builtin_packages import (
-    auto_install_builtin_sources,
     bootstrap_builtin_snapshot,
     bootstrap_installed_package,
 )
@@ -41,7 +40,7 @@ from forest.media_capture_effect_driver import media_image_fetch_effect_driver_f
 from forest.model_contract import ModelCapabilities
 from forest.onebot_transport_effect_driver import onebot_transport_effect_driver_factory
 from forest.package_effects import PackageEffectDriverRegistry
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, auto_install_official_sources
 from forest.process_executor_effect_driver import (
     native_process_effect_driver_factory,
     validate_process_executor_configuration,
@@ -593,7 +592,7 @@ class BotHost:
                 return source, snapshot
 
         captured = await asyncio.gather(
-            *(capture(source) for source in auto_install_builtin_sources()),
+            *(capture(source) for source in auto_install_official_sources("bot")),
             return_exceptions=True,
         )
         for result in captured:

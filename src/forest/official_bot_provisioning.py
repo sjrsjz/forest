@@ -19,13 +19,12 @@ from forest.bootstrap_contributions import (
 )
 from forest.bot_host import BotBootstrapSettings, BotHost, BotRuntimeSettings
 from forest.builtin_packages import (
-    auto_install_builtin_sources,
     official_builtin_configuration_schema,
 )
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.model_contract import ModelCapabilities
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, auto_install_official_sources
 from forest.runtime_modules import RuntimeManagementContribution
 from forest.storage.bot_provisioning_receipt import BotProvisioningReceiptAuthority
 from forest.storage.bot_store import BotStore
@@ -126,7 +125,7 @@ def official_bootstrap_contributions(
         with TemporaryDirectory(prefix="forest-bootstrap-") as directory:
             return official_bootstrap_contributions(PackageCatalog(Path(directory)))
     contributions = []
-    for source in auto_install_builtin_sources():
+    for source in auto_install_official_sources("bot"):
         manifest = tomllib.loads((source / "module.toml").read_text(encoding="utf-8"))
         if "bootstrap_contribution" not in manifest["components"][0]:
             continue
