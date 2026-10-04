@@ -27,6 +27,8 @@ class ConversationScheduler(Plugin):
                 "retain_units",
                 "high_watermark_payload_bytes",
                 "retain_payload_bytes",
+                "high_watermark_media_bytes",
+                "retain_media_bytes",
                 "policy_revision",
             }
             or type(view["high_watermark_units"]) is not int
@@ -37,7 +39,11 @@ class ConversationScheduler(Plugin):
             or type(view["retain_payload_bytes"]) is not int
             or not 1024 <= view["high_watermark_payload_bytes"] <= 134_217_728
             or not 1 <= view["retain_payload_bytes"] < view["high_watermark_payload_bytes"]
-            or view["policy_revision"] != "context-view-payload-window-v2"
+            or type(view["high_watermark_media_bytes"]) is not int
+            or type(view["retain_media_bytes"]) is not int
+            or not 1024 <= view["high_watermark_media_bytes"] <= 134_217_728
+            or not 1 <= view["retain_media_bytes"] < view["high_watermark_media_bytes"]
+            or view["policy_revision"] != "context-view-multimodal-window-v3"
         ):
             raise ForestError(
                 "CONVERSATION_CONFIGURATION_INVALID",
@@ -58,6 +64,21 @@ class ConversationScheduler(Plugin):
                 "owner_id",
             )
         }
+
+    @service(
+        "conversation.media-cost.record",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/media-cost-input.json",
+        output_schema="schemas/media-cost-output.json",
+    )
+    async def record_media_cost(self, payload, ctx):
+        return await ctx.commands.call(
+            "conversation.media-cost.write", payload,
+            operation_id=ctx.operations.stable(
+                "media-cost:" + payload["event_id"] + ":" + payload["part_id"]
+            ),
+        )
 
     @service(
         "conversation.context.prefill",

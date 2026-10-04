@@ -144,6 +144,8 @@
         "retain_units",
         "high_watermark_payload_bytes",
         "retain_payload_bytes",
+        "high_watermark_media_bytes",
+        "retain_media_bytes",
         "policy_revision"
       ],
       "properties": {
@@ -159,8 +161,10 @@
         },
         "high_watermark_payload_bytes": {"type": "integer", "minimum": 1024, "maximum": 134217728},
         "retain_payload_bytes": {"type": "integer", "minimum": 1, "maximum": 134217727},
+        "high_watermark_media_bytes": {"type": "integer", "minimum": 1024, "maximum": 134217728},
+        "retain_media_bytes": {"type": "integer", "minimum": 1, "maximum": 134217727},
         "policy_revision": {
-          "const": "context-view-payload-window-v2"
+          "const": "context-view-multimodal-window-v3"
         }
       },
       "additionalProperties": false

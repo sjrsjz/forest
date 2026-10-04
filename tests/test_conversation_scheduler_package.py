@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -60,7 +61,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "retain_units": 1,
                 "high_watermark_payload_bytes": 524288,
                 "retain_payload_bytes": 262144,
-                "policy_revision": "context-view-payload-window-v2",
+                "high_watermark_media_bytes": 12582912,
+                "retain_media_bytes": 6291456,
+                "policy_revision": "context-view-multimodal-window-v3",
             },
         },
         resolved_contracts={},
@@ -739,6 +742,49 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 ).format(sql.Identifier(namespace)),
                 (len(content_bytes), store.bot_id, actor["conversation_id"]),
             )
+        media_ref = "media:" + hashlib.sha256(b"onebot-message/1\0" + b"0").hexdigest()
+        saved_media = await kernel.payload.put_bytes(
+            owner_component_id="media.capture",
+            owner_kind="media.asset",
+            owner_id=media_ref,
+            media_type="image/png",
+            content=b"x" * 2048,
+            expected_deletion_epoch=await kernel.payload.epoch(),
+        )
+        media_fact = {
+            "conversation_id": actor["conversation_id"],
+            "event_id": event_id,
+            "ingress_seq": 1,
+            "part_id": "part:image:0",
+            "part_index": 0,
+            "media_ref": media_ref,
+            "media_revision": 1,
+            "payload": {
+                "payload_id": saved_media.payload_id,
+                "digest": saved_media.content_digest,
+                "owner_component_id": "media.capture",
+                "owner_kind": "media.asset",
+                "owner_id": media_ref,
+            },
+            "byte_length": 2048,
+            "width": 1,
+            "height": 1,
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            fact_result = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_record_media_cost("
+                            "%s::jsonb,%s::jsonb) AS value")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({
+                        "bot_id": store.bot_id,
+                        "component_id": "conversation.scheduler",
+                        "port_kind": "command",
+                        "port_name": "conversation.media-cost.write",
+                    }), Jsonb(media_fact)),
+                )
+            ).fetchone()
+        assert fact_result["value"]["value"] == {"recorded": True}
         compact_plan = next(
             item for item in instance.component["unit_of_work_plans"]
             if item["name"] == "conversation.compact-before-run"
@@ -755,7 +801,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "retain_units": 256,
                 "high_watermark_payload_bytes": 1024,
                 "retain_payload_bytes": 512,
-                "policy_revision": "context-view-payload-window-v2",
+                "high_watermark_media_bytes": 12582912,
+                "retain_media_bytes": 6291456,
+                "policy_revision": "context-view-multimodal-window-v3",
             },
             "payload": {
                 "protocol": "forest.payload-json-from-prior/1",
@@ -764,6 +812,32 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "payload_epoch": {"protocol": "forest.payload-epoch-capture/1"},
             "memory": {},
         }
+        media_only_input = copy.deepcopy(pre_run_input)
+        media_only_input["context_view"].update({
+            "high_watermark_payload_bytes": 524288,
+            "retain_payload_bytes": 262144,
+            "high_watermark_media_bytes": 1024,
+            "retain_media_bytes": 512,
+        })
+        async with store.pool.connection() as conn, conn.transaction():
+            media_only_plan = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_prepare_context_compaction("
+                            "%s::jsonb,%s::jsonb) AS value")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({
+                        "bot_id": store.bot_id,
+                        "operation_id": "conversation/pre-run/media-only",
+                        "participant_input_digest": "sha256:" + "0" * 64,
+                    }), Jsonb({
+                        "protocol": "forest.uow-step/1",
+                        "input": media_only_input,
+                        "prior": {},
+                    })),
+                )
+            ).fetchone()
+        assert media_only_plan["value"]["value"]["commit"]["archived_unit_count"] == 1
+        assert media_only_plan["value"]["value"]["commit"]["archived_media_bytes"] == 2048
         # An unresolved trigger in the bounded oldest window pins the archive
         # prefix.  Later eligible units must stay in the active view.
         with pytest.raises(RollbackProbe):
@@ -884,7 +958,8 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 await conn.execute(
                     sql.SQL(
                         "SELECT context_view_revision,context_view_unit_count,"
-                        "context_view_payload_bytes,context_archived_unit_count "
+                        "context_view_payload_bytes,context_view_media_bytes,"
+                        "context_archived_unit_count "
                         "FROM {}.conversation_lanes "
                         "WHERE bot_id=%s AND conversation_id=%s"
                     ).format(sql.Identifier(namespace)),
@@ -895,6 +970,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "context_view_revision": 1,
             "context_view_unit_count": 1,
             "context_view_payload_bytes": len(content_bytes),
+            "context_view_media_bytes": 0,
             "context_archived_unit_count": 2,
         }
         async with store.pool.connection() as conn, conn.transaction():
@@ -1067,6 +1143,48 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     parent_call_id=f"call:ingress/silent-{index}",
                     timeout_seconds=10,
                 )
+            if index == 2:
+                early_media_ref = "media:" + hashlib.sha256(
+                    b"onebot-message/silent-2\0" + b"0"
+                ).hexdigest()
+                early_media = await kernel.payload.put_bytes(
+                    owner_component_id="media.capture",
+                    owner_kind="media.asset",
+                    owner_id=early_media_ref,
+                    media_type="image/png",
+                    content=b"x" * 2048,
+                    expected_deletion_epoch=await kernel.payload.epoch(),
+                )
+                async with store.pool.connection() as conn, conn.transaction():
+                    await conn.execute(
+                        sql.SQL("SELECT {}.conversation_record_media_cost("
+                                "%s::jsonb,%s::jsonb)")
+                        .format(sql.Identifier(namespace)),
+                        (Jsonb({
+                            "bot_id": store.bot_id,
+                            "component_id": "conversation.scheduler",
+                            "port_kind": "command",
+                            "port_name": "conversation.media-cost.write",
+                        }), Jsonb({
+                            "conversation_id": "conversation/onebot/group/silent",
+                            "event_id": next_event_id,
+                            "ingress_seq": 2,
+                            "part_id": "part:image:0",
+                            "part_index": 0,
+                            "media_ref": early_media_ref,
+                            "media_revision": 1,
+                            "payload": {
+                                "payload_id": early_media.payload_id,
+                                "digest": early_media.content_digest,
+                                "owner_component_id": "media.capture",
+                                "owner_kind": "media.asset",
+                                "owner_id": early_media_ref,
+                            },
+                            "byte_length": 2048,
+                            "width": 1,
+                            "height": 1,
+                        })),
+                    )
             next_classification = copy.deepcopy(silent_classification)
             next_classification["input"].update({"event_id": next_event_id})
             async with store.pool.connection() as conn, conn.transaction():
@@ -1080,6 +1198,22 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     parent_call_id=f"call:ingress/silent-{index}",
                     timeout_seconds=10,
                 )
+            if index == 2:
+                for _attempt in range(100):
+                    async with store.pool.connection() as conn:
+                        early_lane = await (
+                            await conn.execute(
+                                sql.SQL("SELECT context_applied_seq,"
+                                        "context_view_media_bytes FROM {}.conversation_lanes "
+                                        "WHERE bot_id=%s AND conversation_id=%s")
+                                .format(sql.Identifier(namespace)),
+                                (store.bot_id, "conversation/onebot/group/silent"),
+                            )
+                        ).fetchone()
+                    if early_lane["context_applied_seq"] == 2:
+                        break
+                    await asyncio.sleep(0.05)
+                assert early_lane["context_view_media_bytes"] == 2048
 
         compacted = None
         for _attempt in range(100):
@@ -1152,6 +1286,68 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 owner_id=archive["compaction_id"],
             )
         assert verified.content_digest == archive["archive_payload_digest"]
+        # A late image for an archived input is recorded without charging the
+        # active window.  The active input's cost is charged once on replay.
+        for index, expected_active_bytes in ((1, 0), (3, 2048)):
+            raw_event = f"onebot-message/silent-{index}"
+            media_ref = "media:" + hashlib.sha256(
+                (raw_event + "\0" + "0").encode()
+            ).hexdigest()
+            saved = await kernel.payload.put_bytes(
+                owner_component_id="media.capture",
+                owner_kind="media.asset",
+                owner_id=media_ref,
+                media_type="image/png",
+                content=b"x" * 2048,
+                expected_deletion_epoch=await kernel.payload.epoch(),
+            )
+            fact = {
+                "conversation_id": "conversation/onebot/group/silent",
+                "event_id": f"event/onebot/silent-{index}",
+                "ingress_seq": index,
+                "part_id": "part:image:0",
+                "part_index": 0,
+                "media_ref": media_ref,
+                "media_revision": 1,
+                "payload": {
+                    "payload_id": saved.payload_id,
+                    "digest": saved.content_digest,
+                    "owner_component_id": "media.capture",
+                    "owner_kind": "media.asset",
+                    "owner_id": media_ref,
+                },
+                "byte_length": 2048,
+                "width": 1,
+                "height": 1,
+            }
+            command_context = {
+                "bot_id": store.bot_id,
+                "component_id": "conversation.scheduler",
+                "port_kind": "command",
+                "port_name": "conversation.media-cost.write",
+            }
+            async with store.pool.connection() as conn, conn.transaction():
+                for _ in range(2):
+                    recorded = await (
+                        await conn.execute(
+                            sql.SQL("SELECT {}.conversation_record_media_cost("
+                                    "%s::jsonb,%s::jsonb) AS value")
+                            .format(sql.Identifier(namespace)),
+                            (Jsonb(command_context), Jsonb(fact)),
+                        )
+                    ).fetchone()
+                    assert recorded["value"]["value"] == {"recorded": True}
+                lane_cost = await (
+                    await conn.execute(
+                        sql.SQL("SELECT context_view_media_bytes,media_cost_revision "
+                                "FROM {}.conversation_lanes WHERE bot_id=%s "
+                                "AND conversation_id=%s")
+                        .format(sql.Identifier(namespace)),
+                        (store.bot_id, fact["conversation_id"]),
+                    )
+                ).fetchone()
+            assert lane_cost["context_view_media_bytes"] == expected_active_bytes
+            assert lane_cost["media_cost_revision"] == index // 2 + 2
         async with store.pool.connection() as conn, conn.transaction():
             snapshot_actor = await (
                 await conn.execute(

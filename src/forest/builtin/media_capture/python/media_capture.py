@@ -108,6 +108,36 @@ class MediaCapture(Plugin):
             return {"disposition": "RETRY", "memory_published": False}
 
         ready = [part for part in current["parts"] if part["state"] == "READY"]
+        for part in ready:
+            if part["part_kind"] != "IMAGE":
+                continue
+            try:
+                await ctx.services.call(
+                    "conversation.media-cost.record",
+                    {
+                        "conversation_id": current["conversation_ref"],
+                        "event_id": current["event_ref"],
+                        "ingress_seq": current["ingress_seq"],
+                        "part_id": part["part_id"],
+                        "part_index": part["part_index"],
+                        "media_ref": part["media_ref"],
+                        "media_revision": 1,
+                        "payload": part["payload"],
+                        "byte_length": part["byte_length"],
+                        "width": part["width"],
+                        "height": part["height"],
+                    },
+                    operation_id=ctx.operations.stable(
+                        "conversation-media-cost:" + part["part_id"]
+                    ),
+                    timeout=30,
+                )
+            except ForestError as error:
+                if error.status >= 500 or error.code in {
+                    "RUNTIME_SERVICE_ROUTE_STALE", "RUNTIME_GENERATION_NOT_ACTIVE",
+                }:
+                    return {"disposition": "RETRY", "memory_published": False}
+                raise
         if not ready:
             await ctx.services.call(
                 "memory.source.unavailable",

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.24.0"
+version = "4.25.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -41,6 +41,7 @@ order = 10
 requests = [
   "payload.write",
   "payload.read",
+  "domain.command:conversation.media-cost.write",
   "service.call:agent.execute",
   "service.call:agent.execution.policy",
   "domain.query:conversation.context-page",
@@ -68,6 +69,13 @@ required = true
 startup_dependency = true
 
 [[components.provides]]
+name = "conversation.media-cost.record"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/media-cost-input.json"
+output_schema = "schemas/media-cost-output.json"
+
+[[components.provides]]
 name = "conversation.context.snapshot"
 contract = "2.0"
 semantics = "idempotent"
@@ -83,9 +91,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.20.0"
+schema_version = "4.21.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "e6c3ed4742d08b02a8afdb8151957f7e06d85c7148b48dcb77bb95898cc3b444"
+baseline_sha256 = "a0a5d61e23d2660992384f961602038986ddc2fd343416b4ac865133b38a2cc1"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -117,6 +125,20 @@ contract = "1.0"
 function = "conversation_list_claim_anomalies"
 input_schema = "schemas/claim-anomalies-input.json"
 output_schema = "schemas/claim-anomalies-output.json"
+
+[[components.domain_commands]]
+name = "conversation.media-cost.write"
+contract = "1.0"
+function = "conversation_record_media_cost"
+input_schema = "schemas/media-cost-input.json"
+output_schema = "schemas/media-cost-output.json"
+
+[[components.domain_commands.payload_refs]]
+path = "/payload"
+byte_length_path = "/byte_length"
+owner_component = "media.capture"
+owner_kind = "media.asset"
+owner_id_path = "/media_ref"
 
 [[components.domain_commands]]
 name = "conversation.request-requeue"

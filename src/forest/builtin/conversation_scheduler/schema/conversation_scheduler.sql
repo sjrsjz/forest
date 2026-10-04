@@ -17,6 +17,12 @@ CREATE TABLE conversation_lanes (
     context_view_unit_count bigint NOT NULL DEFAULT 0 CHECK (context_view_unit_count >= 0),
     context_view_payload_bytes bigint NOT NULL DEFAULT 0
         CHECK (context_view_payload_bytes >= 0),
+    context_view_media_bytes bigint NOT NULL DEFAULT 0
+        CHECK (context_view_media_bytes >= 0),
+    media_cost_revision bigint NOT NULL DEFAULT 0 CHECK (media_cost_revision >= 0),
+    maintenance_media_cost_revision bigint CHECK (
+        maintenance_media_cost_revision IS NULL OR maintenance_media_cost_revision >= 0
+    ),
     context_archived_unit_count bigint NOT NULL DEFAULT 0
         CHECK (context_archived_unit_count >= 0),
     maintenance_generation_id text CHECK (
@@ -62,10 +68,11 @@ CREATE TABLE conversation_lanes (
     CHECK (resume_not_before IS NULL OR active_session_ref IS NOT NULL),
     CHECK (
         (maintenance_generation_id IS NULL AND maintenance_context_revision IS NULL
-         AND maintenance_view_revision IS NULL)
+         AND maintenance_view_revision IS NULL AND maintenance_media_cost_revision IS NULL)
         OR (maintenance_generation_id IS NOT NULL
             AND maintenance_context_revision IS NOT NULL
-            AND maintenance_view_revision IS NOT NULL)
+            AND maintenance_view_revision IS NOT NULL
+            AND maintenance_media_cost_revision IS NOT NULL)
     )
 );
 
@@ -442,6 +449,119 @@ CREATE TABLE context_units (
 CREATE UNIQUE INDEX context_input_event_idx
     ON context_units(bot_id, conversation_id, event_id) WHERE kind='INPUT';
 
+-- Media arrives after ingress.  The inbox identity is immutable; this fact
+-- records the verified asset cost without changing the original message.
+CREATE TABLE context_media_costs (
+    bot_id text NOT NULL,
+    conversation_id text NOT NULL,
+    event_id text NOT NULL,
+    part_index integer NOT NULL CHECK (part_index >= 0),
+    media_ref text NOT NULL CHECK (media_ref ~ '^media:[a-f0-9]{64}$'),
+    media_revision bigint NOT NULL CHECK (media_revision = 1),
+    payload_digest text NOT NULL CHECK (payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 8388608),
+    width integer NOT NULL CHECK (width > 0),
+    height integer NOT NULL CHECK (height > 0),
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,conversation_id,event_id,part_index),
+    UNIQUE (bot_id,media_ref,media_revision),
+    FOREIGN KEY (bot_id,conversation_id,event_id)
+        REFERENCES inbox_messages(bot_id,conversation_id,event_id)
+);
+
+CREATE INDEX context_media_costs_event_idx
+    ON context_media_costs(bot_id,conversation_id,event_id);
+
+CREATE FUNCTION conversation_record_media_cost(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_conversation text := input->>'conversation_id';
+    requested_event text := input->>'event_id';
+    requested_index integer := (input->>'part_index')::integer;
+    requested_revision bigint := (input->>'media_revision')::bigint;
+    message record;
+    previous record;
+    active_unit boolean;
+    expected_ref text;
+BEGIN
+    IF context->>'component_id' IS DISTINCT FROM 'conversation.scheduler'
+       OR context->>'port_name' IS DISTINCT FROM 'conversation.media-cost.write'
+       OR context->>'port_kind' IS DISTINCT FROM 'command'
+       OR requested_bot IS NULL OR requested_conversation IS NULL
+       OR requested_event IS NULL OR requested_index IS NULL OR requested_index<0
+       OR requested_revision<>1
+       OR input->>'part_id' IS DISTINCT FROM 'part:image:'||requested_index::text
+       OR input#>>'{payload,owner_component_id}' IS DISTINCT FROM 'media.capture'
+       OR input#>>'{payload,owner_kind}' IS DISTINCT FROM 'media.asset'
+       OR input#>>'{payload,owner_id}' IS DISTINCT FROM input->>'media_ref' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MEDIA_COST_INVALID',
+                'message','Media cost identity is invalid','status',422));
+    END IF;
+    PERFORM 1 FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONVERSATION_NOT_FOUND',
+                'message','Conversation lane does not exist','status',404));
+    END IF;
+    SELECT source_component_id,source_event_ref,ingress_seq INTO message
+    FROM __forest_module_schema__.inbox_messages
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND event_id=requested_event;
+    expected_ref := 'media:'||encode(sha256(
+        convert_to(message.source_event_ref,'UTF8') || decode('00','hex') ||
+        convert_to(requested_index::text,'UTF8')),'hex');
+    IF message.source_component_id IS DISTINCT FROM 'adapter.onebot'
+       OR message.ingress_seq IS DISTINCT FROM (input->>'ingress_seq')::bigint
+       OR input->>'media_ref' IS DISTINCT FROM expected_ref THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MEDIA_SOURCE_MISMATCH',
+                'message','Media asset does not belong to this message','status',409));
+    END IF;
+    SELECT * INTO previous FROM __forest_module_schema__.context_media_costs
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND event_id=requested_event AND part_index=requested_index;
+    IF FOUND THEN
+        IF previous.media_ref IS DISTINCT FROM input->>'media_ref'
+           OR previous.media_revision IS DISTINCT FROM requested_revision
+           OR previous.payload_digest IS DISTINCT FROM input#>>'{payload,digest}'
+           OR previous.byte_length IS DISTINCT FROM (input->>'byte_length')::integer
+           OR previous.width IS DISTINCT FROM (input->>'width')::integer
+           OR previous.height IS DISTINCT FROM (input->>'height')::integer THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','CONTEXT_MEDIA_COST_CONFLICT',
+                    'message','Media cost fact differs from its first publication','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('recorded',true));
+    END IF;
+    INSERT INTO __forest_module_schema__.context_media_costs(
+        bot_id,conversation_id,event_id,part_index,media_ref,media_revision,
+        payload_digest,byte_length,width,height
+    ) VALUES (requested_bot,requested_conversation,requested_event,requested_index,
+        input->>'media_ref',requested_revision,input#>>'{payload,digest}',
+        (input->>'byte_length')::integer,(input->>'width')::integer,
+        (input->>'height')::integer);
+    SELECT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.active_context_units a
+        JOIN __forest_module_schema__.context_units u
+          ON u.bot_id=a.bot_id AND u.conversation_id=a.conversation_id
+         AND u.unit_id=a.unit_id
+        WHERE a.bot_id=requested_bot AND a.conversation_id=requested_conversation
+          AND u.event_id=requested_event
+    ) INTO active_unit;
+    UPDATE __forest_module_schema__.conversation_lanes
+    SET context_view_media_bytes=context_view_media_bytes+
+            CASE WHEN active_unit THEN (input->>'byte_length')::integer ELSE 0 END,
+        media_cost_revision=media_cost_revision+1,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('recorded',true));
+END;
+$$;
+
 CREATE TABLE context_append_operations (
     bot_id text NOT NULL,
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
@@ -483,8 +603,11 @@ CREATE TABLE context_compactions (
     archive_payload_digest text NOT NULL CHECK (archive_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
     archived_unit_count bigint NOT NULL CHECK (archived_unit_count > 0),
     archived_payload_bytes bigint NOT NULL CHECK (archived_payload_bytes > 0),
+    archived_media_bytes bigint NOT NULL CHECK (archived_media_bytes >= 0),
     resulting_view_unit_count bigint NOT NULL CHECK (resulting_view_unit_count >= 0),
     resulting_view_payload_bytes bigint NOT NULL CHECK (resulting_view_payload_bytes >= 0),
+    resulting_view_media_bytes bigint NOT NULL CHECK (resulting_view_media_bytes >= 0),
+    base_media_cost_revision bigint NOT NULL CHECK (base_media_cost_revision >= 0),
     cumulative_archived_unit_count bigint NOT NULL
         CHECK (cumulative_archived_unit_count >= archived_unit_count),
     first_context_revision bigint NOT NULL CHECK (first_context_revision > 0),
@@ -502,6 +625,7 @@ CREATE TABLE context_compaction_units (
     conversation_id text NOT NULL,
     compaction_id text NOT NULL,
     archived_index bigint NOT NULL CHECK (archived_index >= 0),
+    media_byte_length bigint NOT NULL DEFAULT 0 CHECK (media_byte_length >= 0),
     unit_id text NOT NULL,
     context_revision bigint NOT NULL CHECK (context_revision > 0),
     unit_index integer NOT NULL CHECK (unit_index >= 0),
@@ -2091,6 +2215,16 @@ BEGIN
               AND selection_start IS NOT NULL
               AND ingress_seq BETWEEN selection_start AND selection_end
         ),0),
+        context_view_media_bytes=context_view_media_bytes+COALESCE((
+            SELECT sum(m.byte_length)
+            FROM __forest_module_schema__.context_media_costs m
+            JOIN __forest_module_schema__.inbox_messages i
+              ON i.bot_id=m.bot_id AND i.conversation_id=m.conversation_id
+             AND i.event_id=m.event_id
+            WHERE i.bot_id=requested_bot AND i.conversation_id=requested_conversation
+              AND selection_start IS NOT NULL
+              AND i.ingress_seq BETWEEN selection_start AND selection_end
+        ),0),
         active_session_ref=CASE
             WHEN requested_boundary='SESSION_END' AND selection_kind='SILENT_DRAIN'
                 THEN NULL
@@ -2297,6 +2431,8 @@ DECLARE
     retain_units integer := (policy->>'retain_units')::integer;
     high_watermark_bytes bigint := (policy->>'high_watermark_payload_bytes')::bigint;
     retain_bytes bigint := (policy->>'retain_payload_bytes')::bigint;
+    high_watermark_media_bytes bigint := (policy->>'high_watermark_media_bytes')::bigint;
+    retain_media_bytes bigint := (policy->>'retain_media_bytes')::bigint;
     policy_revision text := policy->>'policy_revision';
     lane record;
     replay record;
@@ -2304,6 +2440,7 @@ DECLARE
     units jsonb;
     archived_count bigint;
     archived_bytes bigint;
+    archived_media_bytes bigint;
     first_revision bigint;
     last_revision bigint;
     source_set_digest text;
@@ -2311,6 +2448,7 @@ DECLARE
     cumulative_count bigint;
     resulting_count bigint;
     resulting_bytes bigint;
+    resulting_media_bytes bigint;
     compaction_id text;
     archive_value jsonb;
     commit_value jsonb;
@@ -2328,7 +2466,9 @@ BEGIN
        OR retain_units NOT BETWEEN 1 AND high_watermark-1
        OR high_watermark_bytes NOT BETWEEN 1024 AND 134217728
        OR retain_bytes NOT BETWEEN 1 AND high_watermark_bytes-1
-       OR policy_revision IS DISTINCT FROM 'context-view-payload-window-v2' THEN
+       OR high_watermark_media_bytes NOT BETWEEN 1024 AND 134217728
+       OR retain_media_bytes NOT BETWEEN 1 AND high_watermark_media_bytes-1
+       OR policy_revision IS DISTINCT FROM 'context-view-multimodal-window-v3' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -2384,6 +2524,7 @@ BEGIN
             'unit_index',u.unit_index,
             'payload_digest',u.payload_digest,
             'payload_byte_length',u.payload_byte_length,
+            'media_byte_length',cu.media_byte_length,
             'author_payload_digest',u.author_payload_digest,
             'event_id',u.event_id,
             'input_batch_id',u.input_batch_id
@@ -2418,8 +2559,11 @@ BEGIN
             'policy_revision',replay.policy_revision,
             'archived_unit_count',replay.archived_unit_count,
             'archived_payload_bytes',replay.archived_payload_bytes,
+            'archived_media_bytes',replay.archived_media_bytes,
             'resulting_view_unit_count',replay.resulting_view_unit_count,
             'resulting_view_payload_bytes',replay.resulting_view_payload_bytes,
+            'resulting_view_media_bytes',replay.resulting_view_media_bytes,
+            'base_media_cost_revision',replay.base_media_cost_revision,
             'cumulative_archived_unit_count',replay.cumulative_archived_unit_count,
             'first_context_revision',replay.first_context_revision,
             'last_context_revision',replay.last_context_revision,'units',units
@@ -2468,7 +2612,8 @@ BEGIN
         );
     END IF;
     IF lane.context_view_unit_count <= high_watermark
-       AND lane.context_view_payload_bytes <= high_watermark_bytes THEN
+       AND lane.context_view_payload_bytes <= high_watermark_bytes
+       AND lane.context_view_media_bytes <= high_watermark_media_bytes THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object(
@@ -2490,7 +2635,12 @@ BEGIN
         );
     END IF;
     WITH oldest AS MATERIALIZED (
-        SELECT u.*
+        SELECT u.*,COALESCE((
+            SELECT sum(m.byte_length)
+            FROM __forest_module_schema__.context_media_costs m
+            WHERE m.bot_id=u.bot_id AND m.conversation_id=u.conversation_id
+              AND m.event_id=u.event_id
+        ),0)::bigint AS media_byte_length
         FROM __forest_module_schema__.active_context_units a
         JOIN __forest_module_schema__.context_units u
           ON u.bot_id=a.bot_id AND u.conversation_id=a.conversation_id
@@ -2540,13 +2690,15 @@ BEGIN
         ORDER BY m.archive_order
     ), ranked AS (
         SELECT eligible.*,
-               sum(payload_byte_length) OVER (ORDER BY archive_order) AS prefix_bytes
+               sum(payload_byte_length) OVER (ORDER BY archive_order) AS prefix_bytes,
+               sum(media_byte_length) OVER (ORDER BY archive_order) AS prefix_media_bytes
         FROM eligible
     ), cutoff AS (
         SELECT COALESCE(
             min(archive_order) FILTER (WHERE
                 lane.context_view_unit_count-archive_order<=retain_units
-                AND lane.context_view_payload_bytes-prefix_bytes<=retain_bytes),
+                AND lane.context_view_payload_bytes-prefix_bytes<=retain_bytes
+                AND lane.context_view_media_bytes-prefix_media_bytes<=retain_media_bytes),
             max(archive_order)
         ) AS last_order FROM ranked
     ), candidates AS (
@@ -2558,12 +2710,15 @@ BEGIN
                'unit_id',unit_id,'context_revision',context_revision,
                'unit_index',unit_index,'payload_digest',payload_digest,
                'payload_byte_length',payload_byte_length,
+               'media_byte_length',media_byte_length,
                'author_payload_digest',author_payload_digest,'event_id',event_id,
                'input_batch_id',input_batch_id
            ) ORDER BY context_revision,unit_index),'[]'::jsonb),
            count(*)::bigint,COALESCE(sum(payload_byte_length),0)::bigint,
+           COALESCE(sum(media_byte_length),0)::bigint,
            min(context_revision),max(context_revision)
-    INTO units,archived_count,archived_bytes,first_revision,last_revision
+    INTO units,archived_count,archived_bytes,archived_media_bytes,
+         first_revision,last_revision
     FROM candidates;
     IF archived_count=0 THEN
         RETURN jsonb_build_object(
@@ -2579,6 +2734,7 @@ BEGIN
     published_view_revision := lane.context_view_revision+1;
     resulting_count := lane.context_view_unit_count-archived_count;
     resulting_bytes := lane.context_view_payload_bytes-archived_bytes;
+    resulting_media_bytes := lane.context_view_media_bytes-archived_media_bytes;
     cumulative_count := lane.context_archived_unit_count+archived_count;
     compaction_id := 'compaction:' || encode(sha256(convert_to(jsonb_build_array(
         requested_bot,requested_conversation,published_view_revision,
@@ -2605,8 +2761,11 @@ BEGIN
         'source_set_digest',source_set_digest,'policy_revision',policy_revision,
         'archived_unit_count',archived_count,
         'archived_payload_bytes',archived_bytes,
+        'archived_media_bytes',archived_media_bytes,
         'resulting_view_unit_count',resulting_count,
         'resulting_view_payload_bytes',resulting_bytes,
+        'resulting_view_media_bytes',resulting_media_bytes,
+        'base_media_cost_revision',lane.media_cost_revision,
         'cumulative_archived_unit_count',cumulative_count,
         'first_context_revision',first_revision,'last_context_revision',last_revision,
         'units',units
@@ -2653,6 +2812,8 @@ DECLARE
     existing record;
     unit_count integer;
     payload_bytes bigint;
+    media_bytes bigint;
+    media_cost_mismatches integer;
     event_refs jsonb;
     result_value jsonb;
 BEGIN
@@ -2723,7 +2884,11 @@ BEGIN
            OR lane.context_view_unit_count <
               (commit_value->>'archived_unit_count')::bigint
            OR lane.context_view_payload_bytes <
-              (commit_value->>'archived_payload_bytes')::bigint THEN
+              (commit_value->>'archived_payload_bytes')::bigint
+           OR lane.media_cost_revision IS DISTINCT FROM
+              (commit_value->>'base_media_cost_revision')::bigint
+           OR lane.context_view_media_bytes <
+              (commit_value->>'archived_media_bytes')::bigint THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object(
@@ -2740,10 +2905,29 @@ BEGIN
          AND u.conversation_id=commit_value->>'conversation_id'
          AND u.unit_id=item->>'unit_id'
          AND u.payload_byte_length=(item->>'payload_byte_length')::integer;
+        SELECT COALESCE(sum(actual.media_bytes),0)::bigint,
+               count(*) FILTER (WHERE actual.media_bytes IS DISTINCT FROM
+                   (item->>'media_byte_length')::bigint)::integer
+        INTO media_bytes,media_cost_mismatches
+        FROM jsonb_array_elements(commit_value->'units') item
+        JOIN __forest_module_schema__.context_units u
+          ON u.bot_id=requested_bot
+         AND u.conversation_id=commit_value->>'conversation_id'
+         AND u.unit_id=item->>'unit_id'
+        CROSS JOIN LATERAL (
+            SELECT COALESCE(sum(m.byte_length),0)::bigint AS media_bytes
+            FROM __forest_module_schema__.context_media_costs m
+            WHERE m.bot_id=u.bot_id AND m.conversation_id=u.conversation_id
+              AND m.event_id=u.event_id
+        ) actual;
         IF unit_count<>(commit_value->>'archived_unit_count')::bigint
            OR payload_bytes<>(commit_value->>'archived_payload_bytes')::bigint
+           OR media_cost_mismatches<>0
+           OR media_bytes<>(commit_value->>'archived_media_bytes')::bigint
            OR lane.context_view_payload_bytes-payload_bytes <>
-              (commit_value->>'resulting_view_payload_bytes')::bigint THEN
+              (commit_value->>'resulting_view_payload_bytes')::bigint
+           OR lane.context_view_media_bytes-media_bytes <>
+              (commit_value->>'resulting_view_media_bytes')::bigint THEN
             RETURN jsonb_build_object(
                 'protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object(
@@ -2756,8 +2940,9 @@ BEGIN
             bot_id,conversation_id,compaction_id,operation_id,input_digest,
             base_view_revision,published_view_revision,source_set_digest,policy_revision,
             archive_payload_id,archive_payload_digest,archived_unit_count,
-            archived_payload_bytes,resulting_view_unit_count,
-            resulting_view_payload_bytes,cumulative_archived_unit_count,
+            archived_payload_bytes,archived_media_bytes,resulting_view_unit_count,
+            resulting_view_payload_bytes,resulting_view_media_bytes,
+            base_media_cost_revision,cumulative_archived_unit_count,
             first_context_revision,last_context_revision
         ) VALUES (
             requested_bot,commit_value->>'conversation_id',commit_value->>'compaction_id',
@@ -2768,21 +2953,26 @@ BEGIN
             payload_ref->>'payload_id',payload_ref->>'digest',
             (commit_value->>'archived_unit_count')::bigint,
             (commit_value->>'archived_payload_bytes')::bigint,
+            (commit_value->>'archived_media_bytes')::bigint,
             (commit_value->>'resulting_view_unit_count')::bigint,
             (commit_value->>'resulting_view_payload_bytes')::bigint,
+            (commit_value->>'resulting_view_media_bytes')::bigint,
+            (commit_value->>'base_media_cost_revision')::bigint,
             (commit_value->>'cumulative_archived_unit_count')::bigint,
             (commit_value->>'first_context_revision')::bigint,
             (commit_value->>'last_context_revision')::bigint
         );
         INSERT INTO __forest_module_schema__.context_compaction_units(
             bot_id,conversation_id,compaction_id,archived_index,unit_id,
-            context_revision,unit_index,payload_digest,author_payload_digest
+            context_revision,unit_index,payload_digest,author_payload_digest,
+            media_byte_length
         )
         SELECT requested_bot,commit_value->>'conversation_id',
                commit_value->>'compaction_id',u.ordinality-1,u.item->>'unit_id',
                (u.item->>'context_revision')::bigint,
                (u.item->>'unit_index')::integer,u.item->>'payload_digest',
-               u.item->>'author_payload_digest'
+               u.item->>'author_payload_digest',
+               (u.item->>'media_byte_length')::bigint
         FROM jsonb_array_elements(commit_value->'units')
              WITH ORDINALITY AS u(item,ordinality);
         DELETE FROM __forest_module_schema__.active_context_units a
@@ -2808,6 +2998,8 @@ BEGIN
             context_view_unit_count=(commit_value->>'resulting_view_unit_count')::bigint,
             context_view_payload_bytes=
                 (commit_value->>'resulting_view_payload_bytes')::bigint,
+            context_view_media_bytes=
+                (commit_value->>'resulting_view_media_bytes')::bigint,
             context_archived_unit_count=
                 (commit_value->>'cumulative_archived_unit_count')::bigint,
             updated_at=clock_timestamp()
@@ -3078,7 +3270,8 @@ BEGIN
                OR l.maintenance_retry_at<=clock_timestamp())
           AND (l.maintenance_generation_id IS DISTINCT FROM requested_generation
                OR l.maintenance_context_revision IS DISTINCT FROM l.context_revision
-               OR l.maintenance_view_revision IS DISTINCT FROM l.context_view_revision)
+               OR l.maintenance_view_revision IS DISTINCT FROM l.context_view_revision
+               OR l.maintenance_media_cost_revision IS DISTINCT FROM l.media_cost_revision)
           AND NOT EXISTS (
               SELECT 1 FROM __forest_module_schema__.conversation_triggers t
               WHERE t.bot_id=l.bot_id AND t.conversation_id=l.conversation_id
@@ -3183,6 +3376,7 @@ BEGIN
             maintenance_context_revision=lane.context_revision,
             maintenance_view_revision=lane.context_view_revision-
                 CASE WHEN maintenance_result->>'status'='COMPACTED' THEN 1 ELSE 0 END,
+            maintenance_media_cost_revision=lane.media_cost_revision,
             maintenance_retry_at=NULL,updated_at=clock_timestamp()
         WHERE bot_id=requested_bot AND conversation_id=requested_work;
     ELSE

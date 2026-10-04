@@ -4127,6 +4127,24 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         if scenario == "visual":
             assert b"image_url" in prepared.body
             assert manifest["media_transform_refs"]
+            conversation_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "conversation.scheduler"
+            )
+            async with host.store.pool.connection() as conn:
+                media_cost = await (await conn.execute(
+                    sql.SQL("SELECT count(*) AS items,sum(byte_length) AS bytes "
+                            "FROM {}.context_media_costs WHERE bot_id=%s")
+                    .format(sql.Identifier(conversation_schema)), (settings.bot_id,),
+                )).fetchone()
+                active_media = await (await conn.execute(
+                    sql.SQL("SELECT max(context_view_media_bytes) AS bytes "
+                            "FROM {}.conversation_lanes WHERE bot_id=%s")
+                    .format(sql.Identifier(conversation_schema)), (settings.bot_id,),
+                )).fetchone()
+            assert media_cost["items"] >= 1
+            assert media_cost["bytes"] >= len(b"fake-png-bytes")
+            assert active_media["bytes"] >= len(b"fake-png-bytes")
         else:
             assert b"image_url" not in prepared.body
         if scenario == "long-model-lease":
@@ -4890,7 +4908,9 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
                 "retain_units": 1,
                 "high_watermark_payload_bytes": 524288,
                 "retain_payload_bytes": 262144,
-                "policy_revision": "context-view-payload-window-v2",
+                "high_watermark_media_bytes": 12582912,
+                "retain_media_bytes": 6291456,
+                "policy_revision": "context-view-multimodal-window-v3",
             },
         }
         plan = await configuration.plan(
