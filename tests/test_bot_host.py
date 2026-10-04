@@ -43,6 +43,7 @@ from forest.runtime_contracts import (
     RuntimeServiceInvocation,
 )
 from forest.runtime_modules import ModuleLifecycleState
+from forest.schema_bundles import module_schema_namespace
 from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_store import DeploymentStore
@@ -1419,6 +1420,44 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
             await host.close()
     finally:
         assert name.startswith("forest_reload_") and len(name) == 46
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        await admin.close()
+
+
+@pytest.mark.postgres
+async def test_ready_bot_rejects_missing_official_config_before_package_install(tmp_path):
+    dsn = os.environ.get("FOREST_TEST_DSN")
+    if not dsn:
+        pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
+    name = "forest_ready_config_" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    parsed = urlsplit(dsn)
+    uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
+
+    async def resolve_secret(_reference, _purpose):
+        return "test-key"
+
+    host = BotHost(
+        BotRuntimeSettings(bot_id="bot-ready-config", dsn=uri),
+        credential_resolver=resolve_secret,
+        package_catalog=PackageCatalog(tmp_path / "ready-config-packages"),
+    )
+    try:
+        with pytest.raises(ForestError) as rejected:
+            await host.start()
+        assert rejected.value.code == "PACKAGE_CONFIGURATION_REQUIRED"
+        async with await psycopg.AsyncConnection.connect(uri) as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT 1 FROM pg_namespace WHERE nspname=%s",
+                    (module_schema_namespace("forest.component.worker-host"),),
+                )
+            ).fetchone()
+            assert row is None
+    finally:
+        await host.close()
+        assert name.startswith("forest_ready_config_") and len(name) == 52
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()
 

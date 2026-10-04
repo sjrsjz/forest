@@ -393,6 +393,43 @@ async def _installed_desired(
     return desired
 
 
+async def _official_desired(
+    configuration: ModuleConfigurationRepository,
+    schema: dict,
+    schema_digest: str,
+    validator: Callable | None,
+) -> EffectiveModuleConfiguration:
+    try:
+        desired = await configuration.desired_checked()
+    except ForestError as error:
+        if error.code != "MODULE_CONFIGURATION_UNINITIALIZED":
+            raise
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_REQUIRED",
+            "Official package configuration must be initialized before runtime assembly",
+            409,
+        ) from error
+    except (InvalidSchemaName, UndefinedTable) as error:
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_REQUIRED",
+            "Official package configuration must be initialized before runtime assembly",
+            409,
+        ) from error
+    if (
+        desired.validation_digest != schema_digest
+        or not Draft202012Validator(schema).is_valid(desired.value)
+    ):
+        raise ForestError(
+            "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
+            "Official package configuration was not validated for this artifact schema",
+            409,
+            details={"component_id": configuration.component_id},
+        )
+    if validator is not None:
+        await validator(desired.value)
+    return desired
+
+
 async def _inspect_installed_snapshot(
     snapshot: PackageSnapshot,
     store,
@@ -761,19 +798,6 @@ async def _bootstrap_package_snapshot(
         storage = layout.storage
     else:
         raise ValueError("Package trust level is invalid")
-    if trust_level == "installed" and storage is not None:
-        await installer.install(
-            storage.spec,
-            storage.baseline,
-            storage.package_digest,
-            execution_profile=storage.execution_profile,
-        )
-    await installer.install(
-        configuration_storage.spec,
-        configuration_storage.baseline,
-        configuration_storage.package_digest,
-        execution_profile=configuration_storage.execution_profile,
-    )
     configuration = ModuleConfigurationRepository(
         store,
         component_id=component_id,
@@ -787,6 +811,23 @@ async def _bootstrap_package_snapshot(
         else None
     )
     schema_digest = digest_json(configuration_schema)
+    if trust_level == "official" and initial_configuration is None:
+        await _official_desired(
+            configuration, configuration_schema, schema_digest, configuration_validator
+        )
+    if trust_level == "installed" and storage is not None:
+        await installer.install(
+            storage.spec,
+            storage.baseline,
+            storage.package_digest,
+            execution_profile=storage.execution_profile,
+        )
+    await installer.install(
+        configuration_storage.spec,
+        configuration_storage.baseline,
+        configuration_storage.package_digest,
+        execution_profile=configuration_storage.execution_profile,
+    )
     if initial_configuration is not None:
         if not Draft202012Validator(configuration_schema).is_valid(initial_configuration):
             raise ForestError(
@@ -802,28 +843,9 @@ async def _bootstrap_package_snapshot(
             validation_digest=schema_digest,
         )
     elif trust_level == "official":
-        try:
-            desired = await configuration.desired_checked()
-        except ForestError as error:
-            if error.code != "MODULE_CONFIGURATION_UNINITIALIZED":
-                raise
-            raise ForestError(
-                "PACKAGE_CONFIGURATION_REQUIRED",
-                "Official package configuration must be initialized before runtime assembly",
-                409,
-            ) from error
-        if (
-            desired.validation_digest != schema_digest
-            or not Draft202012Validator(configuration_schema).is_valid(desired.value)
-        ):
-            raise ForestError(
-                "PACKAGE_CONFIGURATION_SCHEMA_MISMATCH",
-                "Official package configuration was not validated for this artifact schema",
-                409,
-                details={"component_id": component_id},
-            )
-        if configuration_validator is not None:
-            await configuration_validator(desired.value)
+        await _official_desired(
+            configuration, configuration_schema, schema_digest, configuration_validator
+        )
     if trust_level == "installed":
         await _installed_desired(layout, configuration)
     elif initial_configuration is not None:
