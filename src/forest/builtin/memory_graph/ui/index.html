@@ -73,6 +73,7 @@
   const trialImageUrls=new Set();
   function clearTrialImages(){for(const url of trialImageUrls)URL.revokeObjectURL(url);trialImageUrls.clear();}
   const pending=new Map(),$=id=>document.getElementById(id);
+  const randomId=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
   const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',type,nonce,...payload});
   const request=(type,operation_id,value,idempotency_key)=>new Promise((resolve,reject)=>{const request_id=`memory-ui:${++sequence}`;pending.set(request_id,{resolve,reject});send(type,{request_id,operation_id,value,...(idempotency_key?{idempotency_key}:{})});});
   const call=(operation_id,value)=>request('query',operation_id,value);
@@ -100,7 +101,7 @@
     if(!value||!$('retry-confirm').checked||value.attempt_state!=='UNKNOWN'||value.reservation_state!=='UNKNOWN')throw Error('请先核对 UNKNOWN 批次并确认可能重复计费');
     const expected_facet_ids=value.items.filter(item=>item.retry_eligible).map(item=>item.facet_id);
     if(!expected_facet_ids.length)throw Error('当前批次没有可重新排队的成员');
-    retryKey??=`memory-unknown-retry:${crypto.randomUUID()}`;
+    retryKey??=`memory-unknown-retry:${randomId()}`;
     $('retry-action').disabled=true;
     try{
       const result=await action('memory.embedding-unknown.retry',{
@@ -314,7 +315,7 @@
     $('trial-next').disabled=!page.has_more;
   }
   async function startTrial(){
-    const query_id=$('trial-query').value.trim()||`trial:${crypto.randomUUID()}`;
+    const query_id=$('trial-query').value.trim()||`trial:${randomId()}`;
     if(new TextEncoder().encode(query_id).byteLength>256)throw Error('试验 ID 过长');
     $('trial-query').value=query_id;
     const files=Array.from($('trial-images').files);
@@ -386,7 +387,7 @@
     if(filters.eligibility_state==='SUPPRESSED')
       throw Error('已抑制来源不能纳入批量遗忘选择');
     const selection_id=$('batch-selection-id').value.trim()||
-      `forget-selection:${crypto.randomUUID()}`;
+      `forget-selection:${randomId()}`;
     $('batch-selection-id').value=selection_id;
     $('batch-select').disabled=true;
     try{
@@ -416,7 +417,7 @@
        Number($('batch-after').value)!==after_ordinal||
        Number($('batch-size').value)!==batch_size)return;
     batchPlan={selection_id,after_ordinal,batch_size,plan,
-      idempotency_key:`forget-batch:${crypto.randomUUID()}`};
+      idempotency_key:`forget-batch:${randomId()}`};
     $('batch-impact').textContent=
       `成员 ${plan.first_ordinal}–${plan.last_ordinal}（${plan.batch_member_count} 个）\n`+
       `来源 ${plan.source_unit_count} · Payload ${plan.selected_payload_count} · 向量删除 ${plan.vector_deletion_count}\n`+

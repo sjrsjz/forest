@@ -26,6 +26,7 @@
 (()=>{'use strict';
   let port,nonce,sequence=0,pending=new Map(),nextAfter=null,activeSearch='';
   const $=id=>document.getElementById(id),items=$('items'),status=$('status');
+  const randomId=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
   const send=(type,payload={})=>port?.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
   const resize=()=>send('resize',{height:Math.min(document.documentElement.scrollHeight,620)});
   const request=(type,operation_id,value,idempotency_key)=>new Promise((resolve,reject)=>{
@@ -48,7 +49,7 @@
       try{
         await request('action','bot.set-desired',{
           bot_id:item.bot_id,desired_state:item.desired_state==='ONLINE'?'OFFLINE':'ONLINE',
-          expected_revision:item.intent_revision},crypto.randomUUID());
+          expected_revision:item.intent_revision},randomId());
         await load(false);
       }catch(error){status.textContent=error.message;button.disabled=false;}
     };

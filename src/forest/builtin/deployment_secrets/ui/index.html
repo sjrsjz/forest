@@ -31,6 +31,7 @@
 (()=>{'use strict';
   let port,nonce,sequence=0,pending=new Map(),nextAfter=null,activeSearch='';
   const $=id=>document.getElementById(id),items=$('items'),status=$('status');
+  const randomId=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
   const send=(type,payload={})=>port?.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
   const resize=()=>send('resize',{height:Math.min(document.documentElement.scrollHeight,680)});
   const request=(type,operation_id,value,idempotency_key)=>new Promise((resolve,reject)=>{
@@ -70,7 +71,7 @@
       expected_revision:Number(form.elements.expected_revision.value)};
     form.querySelector('button').disabled=true;
     status.textContent='等待宿主输入新值…';
-    try{await request('secret-action','secret.put',input,crypto.randomUUID());status.textContent='已写入新版本';await load(false);}
+    try{await request('secret-action','secret.put',input,randomId());status.textContent='已写入新版本';await load(false);}
     catch(error){status.textContent=error.message;}
     finally{form.querySelector('button').disabled=false;}
   };

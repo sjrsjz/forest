@@ -13,10 +13,11 @@ button,input,select{border:1px solid #365b49;border-radius:6px;background:#17342
 </main><script>
 (()=>{'use strict';let port,nonce,sequence=0,pending=new Map(),after=null,activeSearch='';
 const $=id=>document.getElementById(id),items=$('items'),status=$('status');
+const randomId=()=>Array.from(crypto.getRandomValues(new Uint8Array(16)),byte=>byte.toString(16).padStart(2,'0')).join('');
 const send=(type,payload={})=>port?.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
 const resize=()=>send('resize',{height:Math.min(document.documentElement.scrollHeight,720)});
 const request=(type,operation_id,value,idempotency_key)=>new Promise((resolve,reject)=>{const request_id='account-ui-'+(++sequence);pending.set(request_id,{resolve,reject});send(type,{request_id,operation_id,value,...(idempotency_key?{idempotency_key}:{})});});
-const act=(type,id,value)=>request(type,id,value,crypto.randomUUID());
+const act=(type,id,value)=>request(type,id,value,randomId());
 function row(item){const form=document.createElement('form');form.className='row';
   const identity=document.createElement('div');identity.className='identity';const name=document.createElement('strong');name.textContent=item.username;const ref=document.createElement('code');ref.textContent=`${item.subject_id} · rev ${item.revision}`;identity.append(name,ref);
   const label=(text,control)=>{const node=document.createElement('label');node.append(text,control);return node;};
