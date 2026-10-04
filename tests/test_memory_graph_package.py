@@ -2440,6 +2440,15 @@ async def test_trial_parts_are_isolated_from_source_membership_and_generation(
             "'settlement/trial',%s,'embedding-result/trial',%s,"
             "clock_timestamp(),clock_timestamp())"
         ).format(namespace), (store.bot_id, digest, digest, digest))
+        await conn.execute(sql.SQL(
+            "UPDATE {}.embedding_claims SET state='ATTEMPT_BOUND' "
+            "WHERE bot_id=%s AND claim_id='claim/current-trial'"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "UPDATE {}.embedding_claims SET state='SETTLED',"
+            "settled_at=clock_timestamp() "
+            "WHERE bot_id=%s AND claim_id='claim/current-trial'"
+        ).format(namespace), (store.bot_id,))
         for state in ("PREPARED", "DISPATCHED", "EMBEDDED"):
             await conn.execute(sql.SQL(
                 "UPDATE {}.embedding_facets SET state=%s,current_attempt_id='attempt/trial',"
@@ -3809,6 +3818,15 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                     ),
                 )
             ).fetchone()
+            claim_state = await (
+                await conn.execute(
+                    sql.SQL("SELECT state FROM {}.embedding_claims "
+                            "WHERE bot_id=%s AND claim_id=%s").format(
+                        sql.Identifier(namespace)
+                    ),
+                    (store.bot_id, claim_id),
+                )
+            ).fetchone()
             attempt_members = await (
                 await conn.execute(
                     sql.SQL(
@@ -3820,6 +3838,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
             ).fetchone()
         assert attempt_members["n"] == 2
         assert prepared_attempt["result"]["value"]["facet_count"] == 2
+        assert claim_state["state"] == "ATTEMPT_BOUND"
 
         if resolution == "ABANDON":
             budget_input = {
@@ -4030,7 +4049,8 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                     )
                 ).fetchone()
             assert settled["result"]["value"]["work_id"] == claim_id
-            assert persisted == {"claim_state": "CLAIMED", "attempt_state": "DISPATCHED"}
+            assert persisted == {"claim_state": "ATTEMPT_BOUND",
+                                 "attempt_state": "DISPATCHED"}
 
         if resolution != "HANDOFF":
             observed_state = {

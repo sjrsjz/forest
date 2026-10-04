@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。**Bot 运行图** 已切为微内核包图；部署审计、Bot 目录、Secret、账号、包目录和供应 WebUI 已切为真实可热替换部署包，旧 `deployment_management.py` 伪组件与固定字符串 Generation 已删除。供应执行器和部分控制面操作仍在宿主内核装配，host 作用域包图尚未落地。图文记忆主链已有隔离 Bot、真实 VL 嵌入端点、PostgreSQL 与 Milvus 的跨群召回和管理试验验证。获准群的真实 QQ 入站到回复、真实浏览器结合供应商的端到端链路、百万级混合负载及长期运行仍未验收，因此 Forest 仍不可发布。
+> 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。**Bot 运行图** 已切为微内核包图；部署审计、Bot 目录、Secret、账号、包目录和供应 WebUI 已切为真实可热替换部署包，旧 `deployment_management.py` 伪组件与固定字符串 Generation 已删除。供应 Job 的领取与执行由 `deployment.provisioning` 包持有，物理建库、Bot 装配和部分控制面受限端口仍由宿主内核装配；host 作用域包图尚未落地。图文记忆主链已有隔离 Bot、真实 VL 嵌入端点、PostgreSQL 与 Milvus 的跨群召回和管理试验验证。获准群的真实 QQ 入站到回复、真实浏览器结合供应商的端到端链路、百万级混合负载及长期运行仍未验收，因此 Forest 仍不可发布。
 
 包构建性能复核（2026-10-04）：`PackageCatalog.build()` 现在仅对源目录的完整字节快照建立有界进程内缓存；缓存命中仍通过已登记摘要重新校验不可变工件，源内容变化则执行原有双次捕获与完整验证。隔离 PostgreSQL 的 Embedding Secret 换代用例中，热图替换约从 39.46 秒降至 32.69 秒，完整用例从 171.75 秒降至 153.81 秒；这只是同机两次测量，不代表通用吞吐承诺。包目录用例为 99 passed、1 skipped，Ruff 通过。Bot 身份与期望运行状态仍由部署内核持有，`deployment.bot-catalog` 仅通过受限端口提供管理入口；此次未切换在线实例。
 
@@ -15,6 +15,8 @@ Memory 管理遗忘积压收敛（2026-10-04）：`memory.graph` 1.77.2、私有
 Memory facet 准备积压收敛（2026-10-04）：`memory.graph` 1.77.3、私有 SQL 3.69.0 将每次领取前重置全部过期 `facet_preparation_work` 的无界更新改为至多 32 项的有序 `SKIP LOCKED` 回收，新增部分索引支撑到期扫描。独立 PostgreSQL 用例写入 70 个真实来源单元与过期领取记录，三次领取分别回收 32、32、6 项且每次仍可领取一项待处理工作；与既有完整来源捕获、归档及 facet 准备链路合跑为 `6 passed`（116.67 秒）。没有模拟进程崩溃或真实图文来源体量，在线实例未切换。
 
 Memory 嵌入领取过期收敛（2026-10-04）：`memory.graph` 1.77.4、私有 SQL 3.70.0 将每次领取前对全部过期、无批次 attempt 的 embedding claim 的无界更新改为按到期时间至多 32 项的 `SKIP LOCKED` 批次；有 attempt 的 claim 继续由恢复工作和 Effect 证据处理。隔离 PostgreSQL 图像批次用例增加 70 条过期 claim，三轮分别转为 EXPIRED 32、32、6 条，同时保持另一个有效 claim 为 CLAIMED，`1 passed`（20.26 秒）。这证明更新事务的行数边界，不证明大量带 attempt 的旧 claim 下反连接扫描成本有界；在线实例未切换。
+
+Memory 嵌入 claim 阶段归一（2026-10-04）：`memory.graph` 1.77.5、私有 SQL 3.71.0 令 `CLAIMED` 只表示尚无批次 attempt；准备事务在写入唯一 attempt 的同一事务把 claim 推进到 `ATTEMPT_BOUND`，后者维持到明确未发送或最终观察结算。到期领取只扫描 `CLAIMED` 的有界索引范围，无需对大量旧 attempt 做反连接排除；恢复 Worker 只找已过期的 `ATTEMPT_BOUND`，试验清扫同时识别两个活动阶段。隔离 PostgreSQL 的来源图文准备、hand-off、结果观察、恢复、试验输入及过期清理相关用例 `7 passed`（137.54 秒）；到期试验删除与清扫游标另有 `2 passed`（32.92 秒）。未做百万级混合压力和进程崩溃验证，在线实例未切换。
 
 本页保留按实施先后写下的阶段记录；早期段落中的“尚未”只描述当时状态，当前结论以第 8 节的切换清单和末尾最新验收记录为准。
 

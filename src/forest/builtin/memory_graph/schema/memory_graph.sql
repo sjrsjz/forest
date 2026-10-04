@@ -858,7 +858,9 @@ CREATE TABLE embedding_claims (
     item_limit integer NOT NULL CHECK (item_limit BETWEEN 1 AND 32),
     item_count integer NOT NULL CHECK (item_count BETWEEN 0 AND item_limit),
     claim_payload jsonb NOT NULL,
-    state text NOT NULL DEFAULT 'CLAIMED' CHECK (state IN ('CLAIMED','EXPIRED','SETTLED')),
+    state text NOT NULL DEFAULT 'CLAIMED' CHECK (
+        state IN ('CLAIMED','ATTEMPT_BOUND','EXPIRED','SETTLED')
+    ),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     settled_at timestamptz,
     PRIMARY KEY (bot_id,claim_id),
@@ -3843,11 +3845,7 @@ BEGIN
         UPDATE __forest_module_schema__.embedding_claims c
         SET state='EXPIRED'
         WHERE c.bot_id=requested_bot AND c.claim_id=ANY(claim_ids)
-          AND c.state='CLAIMED' AND c.lease_deadline<=clock_timestamp()
-          AND NOT EXISTS (
-              SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts a
-              WHERE a.bot_id=c.bot_id AND a.claim_id=c.claim_id
-          );
+          AND c.state='CLAIMED' AND c.lease_deadline<=clock_timestamp();
         IF EXISTS (
             SELECT 1 FROM __forest_module_schema__.embedding_claim_items ci
             JOIN __forest_module_schema__.embedding_facets f
@@ -3857,7 +3855,7 @@ BEGIN
         ) OR EXISTS (
             SELECT 1 FROM __forest_module_schema__.embedding_claims c
             WHERE c.bot_id=requested_bot AND c.claim_id=ANY(claim_ids)
-              AND c.state='CLAIMED'
+              AND c.state IN ('CLAIMED','ATTEMPT_BOUND')
         ) OR EXISTS (
             SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts a
             WHERE a.bot_id=requested_bot AND a.attempt_id=ANY(attempt_ids)
@@ -4439,10 +4437,16 @@ BEGIN
            OLD.item_limit,OLD.item_count,OLD.claim_payload,OLD.created_at) THEN
         RAISE EXCEPTION 'Embedding claim identity is immutable' USING ERRCODE='55000';
     END IF;
-    IF OLD.state='CLAIMED' AND NEW.state='EXPIRED' AND NEW.settled_at IS NULL THEN
+    IF OLD.state='CLAIMED' AND NEW.state='ATTEMPT_BOUND'
+       AND NEW.settled_at IS NULL THEN
         RETURN NEW;
     END IF;
-    IF OLD.state='CLAIMED' AND NEW.state='SETTLED' AND NEW.settled_at IS NOT NULL THEN
+    IF OLD.state IN ('CLAIMED','ATTEMPT_BOUND')
+       AND NEW.state='EXPIRED' AND NEW.settled_at IS NULL THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.state='ATTEMPT_BOUND' AND NEW.state='SETTLED'
+       AND NEW.settled_at IS NOT NULL THEN
         RETURN NEW;
     END IF;
     IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
@@ -5438,6 +5442,9 @@ BEGIN
         permit_value->>'fence_id',(permit_value->>'fence_epoch')::bigint,
         epoch_number,wire_value->>'payload_id',wire_value->>'digest',
         body->>'reservation_id',(permit_value->>'deadline_at')::timestamptz);
+    UPDATE __forest_module_schema__.embedding_claims
+    SET state='ATTEMPT_BOUND'
+    WHERE bot_id=requested_bot AND claim_id=requested_claim;
     UPDATE __forest_module_schema__.embedding_facets f
     SET state='PREPARED',current_attempt_id=requested_attempt,
         attempt_count=attempt_count+1,updated_at=clock_timestamp()
@@ -5499,7 +5506,7 @@ BEGIN
     SELECT space_id INTO domain_space FROM __forest_module_schema__.memory_domains
     WHERE bot_id=requested_bot;
     IF claim_row IS NULL OR attempt_row IS NULL
-       OR claim_row.state<>'CLAIMED'
+       OR claim_row.state<>'ATTEMPT_BOUND'
        OR claim_row.lease_deadline<=clock_timestamp()
        OR claim_row.space_id IS DISTINCT FROM domain_space
        OR claim_row.source_epoch_high_watermark>epoch_number
@@ -5612,7 +5619,7 @@ BEGIN
     SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
     WHERE bot_id=requested_bot AND claim_id=requested_claim FOR UPDATE;
     IF attempt_row.state<>'PREPARED' OR claim_row IS NULL
-       OR claim_row.state NOT IN ('CLAIMED','EXPIRED') THEN
+       OR claim_row.state<>'ATTEMPT_BOUND' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_ATTEMPT_NOT_ABANDONABLE',
                 'message','Only a prepared embedding attempt can be abandoned','status',409));
@@ -5634,10 +5641,8 @@ BEGIN
     IF updated_count<>claim_row.item_count THEN
         RAISE EXCEPTION 'Embedding claim membership changed under lock' USING ERRCODE='55000';
     END IF;
-    IF claim_row.state='CLAIMED' THEN
-        UPDATE __forest_module_schema__.embedding_claims
-        SET state='EXPIRED' WHERE bot_id=requested_bot AND claim_id=requested_claim;
-    END IF;
+    UPDATE __forest_module_schema__.embedding_claims
+    SET state='EXPIRED' WHERE bot_id=requested_bot AND claim_id=requested_claim;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('protocol','forest.memory-embedding-abandoned/1',
             'claim_id',requested_claim,'attempt_id',requested_attempt,
@@ -5742,7 +5747,7 @@ BEGIN
     SELECT * INTO claim_row FROM __forest_module_schema__.embedding_claims
     WHERE bot_id=requested_bot AND claim_id=requested_claim FOR UPDATE;
     IF attempt_row.state<>'DISPATCHED' OR claim_row IS NULL
-       OR claim_row.state<>'CLAIMED' THEN
+       OR claim_row.state<>'ATTEMPT_BOUND' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_OBSERVATION_STALE',
                 'message','Embedding observation boundary is closed','status',409));
@@ -7835,10 +7840,6 @@ BEGIN
         FROM __forest_module_schema__.embedding_claims c
         WHERE c.bot_id=requested_bot AND c.state='CLAIMED'
           AND c.lease_deadline<=clock_timestamp()
-          AND NOT EXISTS (
-              SELECT 1 FROM __forest_module_schema__.embedding_batch_attempts a
-              WHERE a.bot_id=c.bot_id AND a.claim_id=c.claim_id
-          )
         ORDER BY c.lease_deadline,c.claim_id
         FOR UPDATE OF c SKIP LOCKED LIMIT 32
     )
@@ -7916,7 +7917,8 @@ BEGIN
               JOIN __forest_module_schema__.embedding_claims c
                 ON c.bot_id=ci.bot_id AND c.claim_id=ci.claim_id
               WHERE ci.bot_id=f.bot_id AND ci.facet_id=f.facet_id
-                AND c.state='CLAIMED' AND c.lease_deadline>clock_timestamp()
+                AND c.state IN ('CLAIMED','ATTEMPT_BOUND')
+                AND c.lease_deadline>clock_timestamp()
           )
         ORDER BY CASE f.purpose WHEN 'QUERY' THEN 0 ELSE 1 END,
                  f.created_at,f.facet_id LIMIT domain_batch_limit
@@ -8035,7 +8037,7 @@ BEGIN
     JOIN __forest_module_schema__.embedding_claims c
       ON c.bot_id=a.bot_id AND c.claim_id=a.claim_id
     WHERE a.bot_id=requested_bot AND a.state IN ('PREPARED','DISPATCHED')
-      AND c.state='CLAIMED' AND c.lease_deadline<=clock_timestamp()
+      AND c.state='ATTEMPT_BOUND' AND c.lease_deadline<=clock_timestamp()
     ORDER BY c.lease_deadline,a.attempt_id LIMIT 32
     ON CONFLICT (bot_id,claim_id) DO NOTHING;
     SELECT w.* INTO work_row
