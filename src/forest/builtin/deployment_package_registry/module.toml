@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-package-registry"
-version = "1.6.0"
+version = "1.6.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_package_registry:DeploymentPackageRegistry"
@@ -8,6 +8,7 @@ entrypoint = "deployment_package_registry:DeploymentPackageRegistry"
 [[components]]
 id = "deployment.package-registry"
 scope = "deployment"
+auto_install = true
 state_schema = 1
 reload_mode = "drain"
 config_schema = "schemas/config.json"

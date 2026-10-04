@@ -138,7 +138,11 @@ def auto_install_builtin_sources() -> tuple[Path, ...]:
             continue
         manifest = tomllib.loads(manifest_file.read_text(encoding="utf-8"))
         components = manifest.get("components", ())
-        if len(components) == 1 and components[0].get("auto_install") is True:
+        if (
+            len(components) == 1
+            and components[0].get("auto_install") is True
+            and components[0].get("scope") == "bot"
+        ):
             selected.append((components[0]["id"], Path(str(source))))
     return tuple(source for _, source in sorted(selected))
 

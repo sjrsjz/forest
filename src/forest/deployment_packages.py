@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import tomllib
 from dataclasses import dataclass
 from importlib.resources import files
+from pathlib import Path
 
 from jsonschema import Draft202012Validator
 
@@ -24,6 +26,25 @@ from forest.runtime_modules import (
 )
 from forest.schema_bundles import StorageBundleSpec
 from forest.storage.deployment_module_configuration import DeploymentModuleConfigurationRepository
+
+
+def auto_install_deployment_sources() -> tuple[Path, ...]:
+    """Discover official deployment components through their own manifests."""
+
+    root = files("forest").joinpath("builtin")
+    selected = []
+    for source in root.iterdir():
+        manifest_file = source.joinpath("module.toml")
+        if not source.is_dir() or not manifest_file.is_file():
+            continue
+        manifest = tomllib.loads(manifest_file.read_text(encoding="utf-8"))
+        components = manifest.get("components", ())
+        if len(components) != 1:
+            continue
+        component = components[0]
+        if component.get("auto_install") is True and component.get("scope") == "deployment":
+            selected.append((component["id"], Path(str(source))))
+    return tuple(source for _, source in sorted(selected))
 
 
 @dataclass(frozen=True)

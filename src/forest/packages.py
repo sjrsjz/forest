@@ -1444,11 +1444,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
     _schema(files, component.get("config_schema"))
     bootstrap_config = component.get("bootstrap_config")
     if component.get("auto_install") and (
-        bootstrap_config is None or component["scope"] != "bot"
+        bootstrap_config is None or component["scope"] not in {"bot", "deployment"}
     ):
         _fail(
             "INVALID_BOOTSTRAP_CONFIGURATION",
-            "Automatically installed builtins need a seed and Bot scope",
+            "Automatically installed builtins need a seed and Bot or deployment scope",
         )
     if bootstrap_config is not None:
         parts = PurePosixPath(bootstrap_config)

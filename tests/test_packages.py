@@ -17,8 +17,9 @@ import pytest
 from jsonschema import Draft202012Validator
 
 from forest import packages
-from forest.builtin_packages import bootstrap_installed_package
+from forest.builtin_packages import auto_install_builtin_sources, bootstrap_installed_package
 from forest.cli import run_plugin_command
+from forest.deployment_packages import auto_install_deployment_sources
 from forest.errors import ForestError
 from forest.kernel_package_catalog_snapshot import (
     package_catalog_artifact_service,
@@ -28,6 +29,19 @@ from forest.packages import PackageCatalog
 from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "counter"
+
+
+def test_official_auto_install_catalogs_are_scope_separated(tmp_path):
+    bot_sources = auto_install_builtin_sources()
+    deployment_sources = auto_install_deployment_sources()
+    assert bot_sources and deployment_sources
+    assert set(bot_sources).isdisjoint(deployment_sources)
+    catalog = PackageCatalog(tmp_path / "official-auto-install")
+    assert all(catalog.build(source).component["scope"] == "bot" for source in bot_sources)
+    assert all(
+        catalog.build(source).component["scope"] == "deployment"
+        for source in deployment_sources
+    )
 
 
 @pytest.mark.asyncio

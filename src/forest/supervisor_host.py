@@ -7,7 +7,6 @@ import json
 import os
 import signal
 from dataclasses import dataclass, field
-from importlib.resources import files
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
@@ -27,6 +26,7 @@ from forest.deployment_kernel_management import (
 from forest.deployment_management_app import create_deployment_management_app
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_package_controller import DeploymentPackageController
+from forest.deployment_packages import auto_install_deployment_sources
 from forest.deployment_provisioning_driver import DeploymentProvisioningEffectDriver
 from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwnedWorkAuthority
 from forest.deployment_runtime import DeploymentRuntimeScope
@@ -284,14 +284,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         )
         deployment_controller = DeploymentPackageController(
             deployment_runtime, package_catalog,
-            official_sources=(
-                Path(str(files("forest").joinpath("builtin/deployment_audit"))),
-                Path(str(files("forest").joinpath("builtin/deployment_bot_catalog"))),
-                Path(str(files("forest").joinpath("builtin/deployment_secrets"))),
-                Path(str(files("forest").joinpath("builtin/deployment_accounts"))),
-                Path(str(files("forest").joinpath("builtin/deployment_provisioning"))),
-                Path(str(files("forest").joinpath("builtin/deployment_package_registry"))),
-            ),
+            official_sources=auto_install_deployment_sources(),
         )
         await deployment_controller.start()
         import uvicorn
