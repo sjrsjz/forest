@@ -79,7 +79,8 @@
         "source_error_code": {
           "enum": [
             "CONTEXT_VIEW_HARD_LIMIT",
-            "CONTEXT_VIEW_MEDIA_OVER_BUDGET"
+            "CONTEXT_VIEW_MEDIA_OVER_BUDGET",
+            "CONTEXT_VIEW_DECODED_OVER_BUDGET"
           ]
         },
         "checkpoint_id": {

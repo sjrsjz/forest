@@ -2384,7 +2384,11 @@ BEGIN
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'agent.runtime'
        OR context->>'participant_input_digest' !~ '^sha256:[a-f0-9]{64}$'
        OR requested_checkpoint IS NULL
-       OR source_code NOT IN ('CONTEXT_VIEW_HARD_LIMIT','CONTEXT_VIEW_MEDIA_OVER_BUDGET')
+       OR source_code NOT IN (
+           'CONTEXT_VIEW_HARD_LIMIT',
+           'CONTEXT_VIEW_MEDIA_OVER_BUDGET',
+           'CONTEXT_VIEW_DECODED_OVER_BUDGET'
+       )
        OR checkpoint_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
        OR checkpoint_value->>'owner_kind' IS DISTINCT FROM 'checkpoint.state'
        OR checkpoint_value->>'owner_id' IS DISTINCT FROM requested_checkpoint THEN

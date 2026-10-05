@@ -14,7 +14,7 @@
     },
     "input_revision": {"type": "integer", "minimum": 1},
     "step_seq": {"type": "integer", "minimum": 1},
-    "source_error_code": {"enum": ["CONTEXT_VIEW_HARD_LIMIT", "CONTEXT_VIEW_MEDIA_OVER_BUDGET"]},
+    "source_error_code": {"enum": ["CONTEXT_VIEW_HARD_LIMIT", "CONTEXT_VIEW_MEDIA_OVER_BUDGET", "CONTEXT_VIEW_DECODED_OVER_BUDGET"]},
     "checkpoint_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "checkpoint_state": {
       "type": "object", "additionalProperties": false,

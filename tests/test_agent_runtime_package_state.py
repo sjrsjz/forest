@@ -618,12 +618,12 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         budget_checkpoint = await _payload(
             kernel, owner_kind="checkpoint.state",
             owner_id="checkpoint/context-budget/1",
-            value=b'{"phase":"FAILED","source_error_code":"CONTEXT_VIEW_HARD_LIMIT"}',
+            value=b'{"phase":"FAILED","source_error_code":"CONTEXT_VIEW_DECODED_OVER_BUDGET"}',
         )
         budget_input = {
             "owner": _owner_ref(budget_owner),
             "input_revision": 1, "step_seq": 1,
-            "source_error_code": "CONTEXT_VIEW_HARD_LIMIT",
+            "source_error_code": "CONTEXT_VIEW_DECODED_OVER_BUDGET",
             "checkpoint_id": budget_checkpoint.owner_id,
             "checkpoint_state": budget_checkpoint.canonical(),
         }
