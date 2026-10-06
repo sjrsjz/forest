@@ -491,6 +491,12 @@ material、缺失 active 引用和超过上限的 key 数，且 key material 不
 
 换代 Worker 在 Supervisor lease 下领取该请求，从持久包目录装配准确工件，并核对请求绑定的配置修订和 Payload 摘要后预热候选 Graph；不得读取届时的最新 `desired` 代替请求值。受影响的旧组件按正常热替换协议停止接单、排空和释放资源；未受影响的 Generation 继续保留。候选发布时，配置 `effective` 修订和 Graph 头、Generation 状态在**同一事务**提交；发布前失败保留旧图和旧 `effective`，请求记录错误，发布后按图和配置激活事实核对。重启恢复按活动 Graph 中冻结的配置修订装配，待处理或失败的 `desired` 只能作为管理状态显示。普通安装包与官方包遵守同一配置协议，但官方物理端口的授予仍取决于独立的官方来源事实；配置值不能扩大能力。此预发布实现已由隔离 PostgreSQL 的真实 ASGI/Worker 链路验证；在线旧数据库基线与真实浏览器交互尚未切换验收。
 
+### 7.3 Host 包配置与换代的独立事务边界
+
+Host 作用域使用稳定 `host_id`、独立数据库、租约、Graph/Generation、模块配置和持久 Graph change request；不借用 deployment 的图头或配置表。部署 Web 会话权威只能签发绑定准确 Host、目标 Generation/Graph、操作 ID、动作、输入摘要、计划摘要和管理员角色的短期票据。Host 入口独立验证签名及目标，在本地事务中写不可变 Web 回执，复核当前 Graph 与 Host lease，并将配置 `desired` 修订和换代请求原子提交。同键重放只接受相同冻结输入；并发不同请求依靠修订 CAS 和组件未结算请求围栏合流。Host 控制器必须按请求冻结的配置与工件装配候选图，在 Host 数据库的图发布事务中推进 `effective`，随后凭准确发布证明结算请求。
+
+部署会话数据库与 Host 数据库之间没有分布式 ACID。签名票据是跨库委托凭证，Host 本地回执是可审计的接纳事实；网关不能把“票据已签发”报告成“Host 变更已提交”，重试须用同一操作 ID 查询 Host 回执或请求。Host 包编译器、控制器、Web provider 与生产 Supervisor 接入完成前，上述持久底座不得被描述为可用的 Host 管理功能。
+
 ## 8. 完成判据
 
 - 目标代码中不存在 `BindingRuntime` 类型或兼容别名；`BotRuntimeSupervisor` 不直接构造或保存 Agent、Memory、Shell、Job、Delivery 或具体平台客户端。

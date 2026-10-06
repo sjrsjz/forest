@@ -23,10 +23,13 @@ from forest.packages import digest_json, storage_bundle_digest
 from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.schema_bundles import StorageBundleSpec
 from forest.storage.host_generation import HostGenerationAuthority
+from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority, HostLease
 from forest.storage.host_module_configuration import HostModuleConfigurationRepository
 from forest.storage.host_schema_bundles import HostSchemaBundleInstaller
 from forest.storage.host_store import HostStore
+from forest.storage.host_web_authority import HostWebAuthorityRepository
+from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 
 @pytest.mark.postgres
@@ -185,24 +188,133 @@ $$;
         with pytest.raises(ForestError) as conflict:
             await ledger.begin(competing, route, {"value": 2})
         assert conflict.value.code == "SERVICE_OPERATION_CONFLICT"
+        tickets = WebAuthorityTicketAuthority(
+            issuer_id="deployment/test", active_key_id="key/host-test",
+            key_resolver=lambda _key_id: bytes(range(32)),
+        )
+        receipts = HostWebAuthorityRepository(first_store, ticket_authority=tickets)
+        session = SimpleNamespace(
+            subject=SimpleNamespace(subject_id="web/admin", role="ADMIN"),
+            session_ref="session/host-test", session_revision=1,
+        )
+
+        async def issue(action_key, operation_id, input_digest, plan_digest=None):
+            return await tickets.issue(
+                session=session, target_scope_kind="host", target_scope_id=host_id,
+                target_component_id="host.sample",
+                target_generation_id=graph.generations["host.sample"],
+                target_graph_revision=graph.graph_revision,
+                target_operation_ref=operation_id, action_key=action_key,
+                input_digest=input_digest, plan_digest=plan_digest,
+            )
+
+        async def authorize_in(conn, *, ticket, component_id, operation_id, action_key,
+                               input_digest, plan_digest=None):
+            await tickets.verify(
+                ticket, target_scope_kind="host", target_scope_id=host_id,
+                target_component_id=component_id,
+                target_generation_id=graph.generations["host.sample"],
+                target_graph_revision=graph.graph_revision,
+                target_operation_ref=operation_id, action_key=action_key,
+                input_digest=input_digest, plan_digest=plan_digest,
+                required_role="ADMIN",
+            )
+            return await receipts.accept_in(conn, ticket=ticket)
+
+        plan_body = {"expected_desired_revision": 1, "value": {"value": "second"}}
+        plan_ticket = await issue(
+            "configuration.plan", "plan/host.sample/2", digest_json(plan_body),
+        )
         plan = await configuration.plan(
-            operation_id="plan/host.sample/2", expected_desired_revision=1,
-            value={"value": "second"}, validation_digest=validation_digest,
+            operation_id=plan_ticket.target_operation_ref, expected_desired_revision=1,
+            value=plan_body["value"], validation_digest=validation_digest,
+            authorization=plan_ticket, authorization_guard=authorize_in,
         )
-        second_config = await configuration.apply(
-            operation_id="apply/host.sample/2", plan_id=plan["plan_id"],
-            expected_desired_revision=1,
+        apply_body = {"plan_id": plan["plan_id"], "expected_desired_revision": 1}
+        apply_ticket = await issue(
+            "configuration.apply", "apply/host.sample/2", digest_json(apply_body),
+            digest_json({"plan_id": plan["plan_id"]}),
         )
+
+        async def authorize_apply(conn):
+            return await authorize_in(
+                conn, ticket=apply_ticket, component_id="host.sample",
+                operation_id=apply_ticket.target_operation_ref,
+                action_key="configuration.apply", input_digest=apply_ticket.input_digest,
+                plan_digest=apply_ticket.plan_digest,
+            )
+
+        changes = HostGraphChangeAuthority(first_store, ticket_authority=tickets)
+        with pytest.raises(ForestError) as forged:
+            await changes.enqueue_configuration(
+                lease=lease,
+                ticket=replace(apply_ticket, signature="hmac-sha256:" + "0" * 64),
+                configuration=configuration, plan_id=plan["plan_id"],
+                expected_desired_revision=1, validation_digest=validation_digest,
+                authorize_in=authorize_apply,
+            )
+        assert forged.value.code == "WEB_AUTHORITY_TICKET_SIGNATURE_INVALID"
+        assert (await configuration.desired()).revision == 1
+        committed = await changes.enqueue_configuration(
+            lease=lease, ticket=apply_ticket, configuration=configuration,
+            plan_id=plan["plan_id"], expected_desired_revision=1,
+            validation_digest=validation_digest, authorize_in=authorize_apply,
+        )
+        second_config = committed["configuration"]
+        change_request = await changes.claim(lease)
+        assert change_request["operation_id"] == apply_ticket.target_operation_ref
+        assert change_request["state"] == "RUNNING"
         assert (await configuration.effective()).revision == 1
         newer_binding = replace(
             binding, config_revision=second_config.revision,
             config_payload_id=second_config.payload_id,
             config_payload_digest=second_config.payload_digest,
         )
-        newer = await generations.prepare_graph(lease, [newer_binding], str(uuid4()))
+        newer = await generations.prepare_graph(
+            lease, [newer_binding], change_request["activation_id"],
+        )
         assert await generations.publish_graph(
             lease, newer, configuration_activators={"host.sample": configuration},
         ) == newer.graph_revision
+        proof = await changes.published_graph(change_request)
+        assert proof["graph_id"] == newer.graph_id
+        assert (await changes.settle(
+            lease, operation_id=change_request["operation_id"], graph=proof,
+        ))["state"] == "SUCCEEDED"
+        replace_body = {
+            "component_id": "host.sample", "package_digest": package_digest,
+            "expected_graph_revision": newer.graph_revision,
+            "plan_digest": digest_json({"replace": "host.sample"}),
+        }
+        replace_ticket = await tickets.issue(
+            session=session, target_scope_kind="host", target_scope_id=host_id,
+            target_component_id="$runtime", target_generation_id=newer.graph_id,
+            target_graph_revision=newer.graph_revision,
+            target_operation_ref="replace/host.sample/probe", action_key="module.replace",
+            input_digest=digest_json(replace_body),
+        )
+
+        async def authorize_replace(conn):
+            await tickets.verify(
+                replace_ticket, target_scope_kind="host", target_scope_id=host_id,
+                target_component_id="$runtime", target_generation_id=newer.graph_id,
+                target_graph_revision=newer.graph_revision,
+                target_operation_ref=replace_ticket.target_operation_ref,
+                action_key="module.replace", input_digest=replace_ticket.input_digest,
+                required_role="ADMIN",
+            )
+            return await receipts.accept_in(conn, ticket=replace_ticket)
+
+        queued = await changes.enqueue_web(
+            lease=lease, ticket=replace_ticket, body=replace_body,
+            authorize_in=authorize_replace,
+        )
+        assert queued["state"] == "QUEUED"
+        replacement_claim = await changes.claim(lease)
+        assert replacement_claim["operation_id"] == queued["operation_id"]
+        assert (await changes.settle(
+            lease, operation_id=queued["operation_id"], error_code="TEST_PROBE_REJECTED",
+        ))["state"] == "FAILED"
         assert (await configuration.effective(include_value=True)).value == {"value": "second"}
         assert await generations.current_graph() == newer
         selection_graph, selection = await generations.active_package_selection()
