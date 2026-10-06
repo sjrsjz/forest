@@ -65,7 +65,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "retain_media_bytes": 6291456,
                 "high_watermark_decoded_bytes": 134217728,
                 "retain_decoded_bytes": 67108864,
-                "policy_revision": "context-view-multimodal-window-v4",
+                "high_watermark_estimated_tokens": 24576,
+                "retain_estimated_tokens": 16384,
+                "utf8_bytes_per_estimated_token": 2,
+                "unit_overhead_estimated_tokens": 16,
+                "policy_revision": "context-view-multimodal-window-v5",
             },
         },
         resolved_contracts={},
@@ -853,7 +857,11 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "retain_media_bytes": 6291456,
                 "high_watermark_decoded_bytes": 134217728,
                 "retain_decoded_bytes": 67108864,
-                "policy_revision": "context-view-multimodal-window-v4",
+                "high_watermark_estimated_tokens": 24576,
+                "retain_estimated_tokens": 16384,
+                "utf8_bytes_per_estimated_token": 2,
+                "unit_overhead_estimated_tokens": 16,
+                "policy_revision": "context-view-multimodal-window-v5",
             },
             "payload": {
                 "protocol": "forest.payload-json-from-prior/1",
@@ -869,6 +877,35 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "high_watermark_media_bytes": 1024,
             "retain_media_bytes": 512,
         })
+        token_only_input = copy.deepcopy(pre_run_input)
+        token_only_input["context_view"].update({
+            "high_watermark_payload_bytes": 524288,
+            "retain_payload_bytes": 262144,
+            "high_watermark_estimated_tokens": 1024,
+            "retain_estimated_tokens": 512,
+        })
+        with pytest.raises(RollbackProbe):
+            async with store.pool.connection() as conn, conn.transaction():
+                token_plan = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.conversation_prepare_context_compaction("
+                                "%s::jsonb,%s::jsonb) AS result")
+                        .format(sql.Identifier(namespace)),
+                        (Jsonb({
+                            "bot_id": store.bot_id,
+                            "operation_id": "conversation/pre-run/token-only",
+                            "participant_input_digest": "sha256:" + "0" * 64,
+                        }), Jsonb({
+                            "protocol": "forest.uow-step/1",
+                            "input": token_only_input,
+                            "prior": {},
+                        })),
+                    )
+                ).fetchone()
+                assert token_plan["result"]["ok"] is True
+                assert [unit["context_revision"] for unit in
+                        token_plan["result"]["value"]["commit"]["units"]] == [1, 2]
+                raise RollbackProbe
         with pytest.raises(RollbackProbe):
             async with store.pool.connection() as conn, conn.transaction():
                 await conn.execute(
@@ -1559,10 +1596,10 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     ),
                 )
             ).fetchone()
-        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 5)]
+        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 6)]
         route = FrozenServiceRoute(
             service_id="conversation.context.snapshot",
-            version=5,
+            version=6,
             caller_component_id="kernel.runtime",
             provider_component_id="conversation.scheduler",
             provider_generation_id=instance.generation_identity.generation_id,
@@ -1590,7 +1627,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ),
             {},
         )
-        assert snapshot["protocol"] == "forest.conversation-context-snapshot/5"
+        assert snapshot["protocol"] == "forest.conversation-context-snapshot/6"
         assert snapshot["run_ref"] is None
         assert snapshot["claimed_trigger_count"] == 0
         assert snapshot["context_view_media_bytes"] == 2048
@@ -1613,6 +1650,12 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         ]
         assert page["units"][1]["author_subject_ref"] == "qq:43"
         assert page["units"][1]["media_parts"][0]["byte_length"] == 2048
+        estimator = snapshot["token_estimator"]
+        assert manifest["token_estimator"] == estimator
+        assert estimator["revision"] == "utf8-payload-plus-unit-v1"
+        assert estimator["estimated_history_tokens"] == (
+            (page["units"][1]["payload_byte_length"] + 1) // 2 + 16
+        )
 
         instance.freeze_owned_admission()
         await instance.drain_owned_work()

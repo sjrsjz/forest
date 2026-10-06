@@ -48,7 +48,7 @@
     },
     "context_view": {
       "type": "object",
-      "required": ["high_watermark_units", "retain_units", "high_watermark_payload_bytes", "retain_payload_bytes", "high_watermark_media_bytes", "retain_media_bytes", "high_watermark_decoded_bytes", "retain_decoded_bytes", "policy_revision"],
+      "required": ["high_watermark_units", "retain_units", "high_watermark_payload_bytes", "retain_payload_bytes", "high_watermark_media_bytes", "retain_media_bytes", "high_watermark_decoded_bytes", "retain_decoded_bytes", "high_watermark_estimated_tokens", "retain_estimated_tokens", "utf8_bytes_per_estimated_token", "unit_overhead_estimated_tokens", "policy_revision"],
       "properties": {
         "high_watermark_units": {"type": "integer", "minimum": 2, "maximum": 1000000},
         "retain_units": {"type": "integer", "minimum": 1, "maximum": 999999},
@@ -58,7 +58,11 @@
         "retain_media_bytes": {"type": "integer", "minimum": 1, "maximum": 134217727},
         "high_watermark_decoded_bytes": {"type": "integer", "minimum": 1024, "maximum": 536870912},
         "retain_decoded_bytes": {"type": "integer", "minimum": 1, "maximum": 536870911},
-        "policy_revision": {"const": "context-view-multimodal-window-v4"}
+        "high_watermark_estimated_tokens": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+        "retain_estimated_tokens": {"type": "integer", "minimum": 1, "maximum": 1048575},
+        "utf8_bytes_per_estimated_token": {"type": "integer", "minimum": 1, "maximum": 16},
+        "unit_overhead_estimated_tokens": {"type": "integer", "minimum": 0, "maximum": 256},
+        "policy_revision": {"const": "context-view-multimodal-window-v5"}
       },
       "additionalProperties": false
     }

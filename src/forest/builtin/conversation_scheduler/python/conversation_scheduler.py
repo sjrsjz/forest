@@ -34,6 +34,10 @@ class ConversationScheduler(Plugin):
                 "retain_media_bytes",
                 "high_watermark_decoded_bytes",
                 "retain_decoded_bytes",
+                "high_watermark_estimated_tokens",
+                "retain_estimated_tokens",
+                "utf8_bytes_per_estimated_token",
+                "unit_overhead_estimated_tokens",
                 "policy_revision",
             }
             or type(view["high_watermark_units"]) is not int
@@ -52,7 +56,15 @@ class ConversationScheduler(Plugin):
             or type(view["retain_decoded_bytes"]) is not int
             or not 1024 <= view["high_watermark_decoded_bytes"] <= 536_870_912
             or not 1 <= view["retain_decoded_bytes"] < view["high_watermark_decoded_bytes"]
-            or view["policy_revision"] != "context-view-multimodal-window-v4"
+            or type(view["high_watermark_estimated_tokens"]) is not int
+            or type(view["retain_estimated_tokens"]) is not int
+            or not 1024 <= view["high_watermark_estimated_tokens"] <= 1_048_576
+            or not 1 <= view["retain_estimated_tokens"] < view["high_watermark_estimated_tokens"]
+            or type(view["utf8_bytes_per_estimated_token"]) is not int
+            or not 1 <= view["utf8_bytes_per_estimated_token"] <= 16
+            or type(view["unit_overhead_estimated_tokens"]) is not int
+            or not 0 <= view["unit_overhead_estimated_tokens"] <= 256
+            or view["policy_revision"] != "context-view-multimodal-window-v5"
         ):
             raise ForestError(
                 "CONVERSATION_CONFIGURATION_INVALID",
@@ -224,7 +236,7 @@ class ConversationScheduler(Plugin):
             level += 1
         return nodes, level
 
-    @service("conversation.context.snapshot", semantics="idempotent", contract="5.0")
+    @service("conversation.context.snapshot", semantics="idempotent", contract="6.0")
     async def context_snapshot(self, payload, ctx):
         actor = payload["actor"]
         run_ref = payload.get("run_ref")
@@ -333,6 +345,25 @@ class ConversationScheduler(Plugin):
                 "CONTEXT_SNAPSHOT_PAYLOAD_COST_CONFLICT",
                 "Conversation Payload facts differ from the active window", 409,
             )
+        bytes_per_token = self._context_view["utf8_bytes_per_estimated_token"]
+        token_estimator = {
+            "revision": "utf8-payload-plus-unit-v1",
+            "utf8_bytes_per_estimated_token": bytes_per_token,
+            "unit_overhead_estimated_tokens": self._context_view[
+                "unit_overhead_estimated_tokens"
+            ],
+            "history_budget_tokens": self._context_view["high_watermark_estimated_tokens"],
+            "estimated_history_tokens": (
+                (payload_bytes + bytes_per_token - 1) // bytes_per_token
+                + metadata["total_units"]
+                * self._context_view["unit_overhead_estimated_tokens"]
+            ),
+        }
+        if token_estimator["estimated_history_tokens"] > token_estimator["history_budget_tokens"]:
+            raise ForestError(
+                "CONTEXT_VIEW_HARD_LIMIT",
+                "Required Context exceeds the local history token estimate", 413,
+            )
         if payload_bytes > self._context_view["high_watermark_payload_bytes"]:
             raise ForestError(
                 "CONTEXT_VIEW_HARD_LIMIT",
@@ -385,10 +416,11 @@ class ConversationScheduler(Plugin):
             )
             pages.append(self._exact(saved))
         roots, tree_depth = await self._snapshot_tree(pages, ctx)
-        owner_id = ctx.operations.stable("context-snapshot-manifest:v5")
+        owner_id = ctx.operations.stable("context-snapshot-manifest:v6")
         document = {
-            "protocol": "forest.conversation-context-snapshot/5",
+            "protocol": "forest.conversation-context-snapshot/6",
             **metadata,
+            "token_estimator": token_estimator,
             "required_trigger_unit_ids": required_trigger_unit_ids,
             "unit_count": unit_count,
             "tree_depth": tree_depth,
@@ -401,8 +433,9 @@ class ConversationScheduler(Plugin):
             parents=roots,
         )
         return {
-            "protocol": "forest.conversation-context-snapshot/5",
+            "protocol": "forest.conversation-context-snapshot/6",
             "conversation_id": metadata["conversation_id"],
+            "token_estimator": token_estimator,
             "run_ref": metadata["run_ref"],
             "claimed_trigger_count": metadata["claimed_trigger_count"],
             "context_applied_seq": metadata["context_applied_seq"],

@@ -2516,6 +2516,10 @@ DECLARE
     retain_media_bytes bigint := (policy->>'retain_media_bytes')::bigint;
     high_watermark_decoded_bytes bigint := (policy->>'high_watermark_decoded_bytes')::bigint;
     retain_decoded_bytes bigint := (policy->>'retain_decoded_bytes')::bigint;
+    high_watermark_estimated_tokens bigint := (policy->>'high_watermark_estimated_tokens')::bigint;
+    retain_estimated_tokens bigint := (policy->>'retain_estimated_tokens')::bigint;
+    utf8_bytes_per_estimated_token bigint := (policy->>'utf8_bytes_per_estimated_token')::bigint;
+    unit_overhead_estimated_tokens bigint := (policy->>'unit_overhead_estimated_tokens')::bigint;
     policy_revision text := policy->>'policy_revision';
     lane record;
     replay record;
@@ -2567,7 +2571,11 @@ BEGIN
        OR retain_media_bytes NOT BETWEEN 1 AND high_watermark_media_bytes-1
        OR high_watermark_decoded_bytes NOT BETWEEN 1024 AND 536870912
        OR retain_decoded_bytes NOT BETWEEN 1 AND high_watermark_decoded_bytes-1
-       OR policy_revision IS DISTINCT FROM 'context-view-multimodal-window-v4' THEN
+       OR high_watermark_estimated_tokens NOT BETWEEN 1024 AND 1048576
+       OR retain_estimated_tokens NOT BETWEEN 1 AND high_watermark_estimated_tokens-1
+       OR utf8_bytes_per_estimated_token NOT BETWEEN 1 AND 16
+       OR unit_overhead_estimated_tokens NOT BETWEEN 0 AND 256
+       OR policy_revision IS DISTINCT FROM 'context-view-multimodal-window-v5' THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -2723,7 +2731,11 @@ BEGIN
     IF lane.context_view_unit_count <= high_watermark
        AND lane.context_view_payload_bytes <= high_watermark_bytes
        AND lane.context_view_media_bytes <= high_watermark_media_bytes
-       AND lane.context_view_decoded_bytes <= high_watermark_decoded_bytes THEN
+       AND lane.context_view_decoded_bytes <= high_watermark_decoded_bytes
+       AND (lane.context_view_payload_bytes + utf8_bytes_per_estimated_token-1)
+           /utf8_bytes_per_estimated_token
+           + lane.context_view_unit_count*unit_overhead_estimated_tokens
+           <= high_watermark_estimated_tokens THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object(
@@ -2816,7 +2828,12 @@ BEGIN
                 lane.context_view_unit_count-archive_order<=retain_units
                 AND lane.context_view_payload_bytes-prefix_bytes<=retain_bytes
                 AND lane.context_view_media_bytes-prefix_media_bytes<=retain_media_bytes
-                AND lane.context_view_decoded_bytes-prefix_decoded_bytes<=retain_decoded_bytes),
+                AND lane.context_view_decoded_bytes-prefix_decoded_bytes<=retain_decoded_bytes
+                AND (lane.context_view_payload_bytes-prefix_bytes
+                     + utf8_bytes_per_estimated_token-1)
+                    /utf8_bytes_per_estimated_token
+                    + (lane.context_view_unit_count-archive_order)
+                      *unit_overhead_estimated_tokens<=retain_estimated_tokens),
             max(archive_order)
         ) AS last_order FROM ranked
     ), candidates AS (

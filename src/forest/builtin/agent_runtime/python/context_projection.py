@@ -20,6 +20,7 @@ _MANIFEST_FIELDS = {
     "run_ref",
     "claimed_trigger_count",
     "required_trigger_unit_ids",
+    "token_estimator",
     "context_applied_seq",
     "classified_through_seq",
     "context_revision",
@@ -276,7 +277,7 @@ class ContextSnapshotReader:
     async def load(self, envelope: dict, *, expected: dict) -> dict:
         if (
             not isinstance(envelope, dict)
-            or envelope.get("protocol") != "forest.conversation-context-snapshot/5"
+            or envelope.get("protocol") != "forest.conversation-context-snapshot/6"
             or set(expected)
             != {
                 "conversation_id",
@@ -324,6 +325,26 @@ class ContextSnapshotReader:
                 "AGENT_CONTEXT_REQUIRED_CONFLICT",
                 "Conversation trigger count differs from its snapshot", 409,
             )
+        token_estimator = manifest.get("token_estimator")
+        if (
+            not isinstance(token_estimator, dict)
+            or token_estimator != envelope.get("token_estimator")
+            or set(token_estimator) != {
+                "revision", "utf8_bytes_per_estimated_token",
+                "unit_overhead_estimated_tokens", "history_budget_tokens",
+                "estimated_history_tokens",
+            }
+            or token_estimator["revision"] != "utf8-payload-plus-unit-v1"
+            or not _integer(token_estimator["utf8_bytes_per_estimated_token"], minimum=1, maximum=16)
+            or not _integer(token_estimator["unit_overhead_estimated_tokens"], maximum=256)
+            or not _integer(token_estimator["history_budget_tokens"], minimum=1024, maximum=1_048_576)
+            or not _integer(token_estimator["estimated_history_tokens"], maximum=200_000_000)
+            or token_estimator["estimated_history_tokens"] > token_estimator["history_budget_tokens"]
+        ):
+            raise ForestError(
+                "AGENT_CONTEXT_TOKEN_ESTIMATE_INVALID",
+                "Conversation token estimate differs from its immutable snapshot", 409,
+            )
         for name in (
             "media_cost_revision", "context_view_media_bytes",
             "context_view_decoded_bytes",
@@ -345,6 +366,7 @@ class ContextSnapshotReader:
         active_offset = 0
         media_bytes = 0
         decoded_bytes = 0
+        active_payload_bytes = 0
         required_trigger_unit_ids = []
         archive_seen = False
         for page_index, page in enumerate(pages):
@@ -384,7 +406,13 @@ class ContextSnapshotReader:
                         )
                     archive_seen = True
                 else:
+                    if not _integer(unit.get("payload_byte_length"), minimum=1, maximum=1_048_576):
+                        raise ForestError(
+                            "AGENT_CONTEXT_PAGE_INVALID",
+                            "Context Payload byte length is invalid", 409,
+                        )
                     active_offset += 1
+                    active_payload_bytes += unit["payload_byte_length"]
                 if unit["required_for_run"]:
                     if is_archive or unit.get("kind") != "INPUT":
                         raise ForestError(
@@ -418,6 +446,11 @@ class ContextSnapshotReader:
             or manifest["required_trigger_unit_ids"] != required_trigger_unit_ids
             or len(required_trigger_unit_ids) != manifest["claimed_trigger_count"]
             or len(set(required_trigger_unit_ids)) != len(required_trigger_unit_ids)
+            or token_estimator["estimated_history_tokens"] != (
+                (active_payload_bytes + token_estimator["utf8_bytes_per_estimated_token"] - 1)
+                // token_estimator["utf8_bytes_per_estimated_token"]
+                + active_offset * token_estimator["unit_overhead_estimated_tokens"]
+            )
         ):
             raise ForestError(
                 "AGENT_CONTEXT_COUNT_CONFLICT",

@@ -4990,7 +4990,11 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
                 "retain_media_bytes": 6291456,
                 "high_watermark_decoded_bytes": 134217728,
                 "retain_decoded_bytes": 67108864,
-                "policy_revision": "context-view-multimodal-window-v4",
+                "high_watermark_estimated_tokens": 24576,
+                "retain_estimated_tokens": 16384,
+                "utf8_bytes_per_estimated_token": 2,
+                "unit_overhead_estimated_tokens": 16,
+                "policy_revision": "context-view-multimodal-window-v5",
             },
         }
         plan = await configuration.plan(
