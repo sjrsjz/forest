@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host 持久身份与租约底座（2026-10-07）：新增独立 `HostStore`、`forest_host` 基线和 `HostIdentityAuthority`。Host 数据库只接受稳定 `host/<32 hex>` 身份；首次安装要求空专用数据库，之后按基线摘要和对象清单复核。进程 incarnation 租约以数据库行锁和单调 owner epoch 合流，旧 incarnation 不能续租或通过资源写入前的 `verify_in` 围栏。隔离 PostgreSQL 用例覆盖重复初始化、同 incarnation 重入、并发拒绝、重启接管、旧租约失效及错误 host 身份拒绝（1 passed），Ruff 通过。这只是 host authority 的基础切片：尚未接入生产 Supervisor、host Generation 包图、Web scope 或 `host.storage`，在线实例未切换；host 数据库的物理部署配置仍需在接入时固定。
+
 稳定宿主身份引导（2026-10-07）：生产 Supervisor 不再由 deployment_id 派生 host_id。Compose 的隔离 initialize 服务在受保护卷中首次生成不透明 `host/<128-bit>` 身份并在后续启动复用；Supervisor 只从单一显式环境值或只读身份文件读取，缺失、冲突或格式错误均拒绝启动。每次进程启动的 incarnation 仍独立生成并只用于租约围栏。隔离 Linux 卷连续三次初始化后，host ID 字节不变，文件保持 UID/GID 10001 与 0400；Supervisor 配置与本地生命周期共 11 项测试、隔离 PostgreSQL 重建集成用例 1 项及多 Bot 生命周期 4 项、Ruff 与 Compose 解析通过。host 作用域 Generation 包图及 host.storage 仍待实现，在线实例未切换。
 
 Web Bot 工作区按需发现（2026-10-07）：部署管理 runtime 只返回部署 scope，不再在每次页面刷新时展开全部 Bot 目录；`deployment.bot-catalog` 继续提供有界分页列表，并将规范 Bot ID 交给壳层。壳层通过带会话和 CSRF 的 `scopes/resolve` 向内核解析单个在线 Bot scope，再由目标 Bot gateway 重新验证可用性与操作权限。当前 Bot scope 仅随其自身 runtime 返回；目录 UI 可打开工作区，`?bot=<Bot ID>` 可直达。Web API 用例 4 passed、1 skipped，真实 Edge 浏览器冒烟 1 passed；隔离 PostgreSQL 的部署目录用例先有 25 passed、2 项旧版号夹具失败，修正夹具后两项复跑通过，Supervisor 生命周期与 scope 索引用例另有 4 passed。Ruff 与脚本语法检查通过。本次未切换在线实例。
