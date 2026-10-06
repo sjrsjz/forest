@@ -33,8 +33,10 @@ EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "counter"
 def test_official_auto_install_catalogs_are_scope_separated(tmp_path):
     bot_sources = auto_install_official_sources("bot")
     deployment_sources = auto_install_official_sources("deployment")
+    host_sources = auto_install_official_sources("host")
     assert bot_sources and deployment_sources
     assert set(bot_sources).isdisjoint(deployment_sources)
+    assert set(host_sources).isdisjoint((*bot_sources, *deployment_sources))
     catalog = PackageCatalog(tmp_path / "official-auto-install")
     assert all(catalog.build(source).component["scope"] == "bot" for source in bot_sources)
     assert all(
@@ -124,6 +126,43 @@ def test_deployment_official_provenance_is_not_a_manifest_claim(tmp_path):
 
     assert catalog.build_official(source_root).digest == artifact.digest
     assert PackageCatalog(tmp_path / "official").get_official_deployment(artifact.digest).digest == artifact.digest
+
+
+def test_host_official_provenance_is_scope_fenced(tmp_path):
+    root = tmp_path / "host-source"
+    shutil.copytree(
+        Path(__file__).resolve().parents[1] / "src/forest/builtin/deployment_audit", root,
+    )
+    manifest = root / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'scope = "deployment"', 'scope = "host"'
+        ), encoding="utf-8",
+    )
+    catalog = PackageCatalog(tmp_path / "host-catalog")
+    artifact = catalog.build(root)
+    assert artifact.component["scope"] == "host"
+    assert not catalog.is_official_host(artifact.digest)
+    with pytest.raises(ForestError) as untrusted:
+        catalog.get_official_host(artifact.digest)
+    assert untrusted.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
+    with pytest.raises(ForestError) as wrong_scope:
+        catalog.build_official(root)
+    assert wrong_scope.value.code == "OFFICIAL_PACKAGE_SOURCE_INVALID"
+
+    assert catalog.build_official(root, scope="host").digest == artifact.digest
+    assert catalog.is_official_host(artifact.digest)
+    assert not catalog.is_official_deployment(artifact.digest)
+    with pytest.raises(ForestError) as wrong_registry:
+        catalog.get_official_deployment(artifact.digest)
+    assert wrong_registry.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
+
+    imported = PackageCatalog(tmp_path / "host-imported")
+    imported.import_archive(catalog.export_archive(artifact.digest))
+    assert not imported.is_official_host(artifact.digest)
+    with pytest.raises(ForestError) as imported_untrusted:
+        imported.get_official_host(artifact.digest)
+    assert imported_untrusted.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
 
 
 @pytest.mark.asyncio

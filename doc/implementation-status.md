@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host 官方包来源围栏（2026-10-07）：包 manifest 与自动安装发现现接纳 host scope；可信源码登记按 deployment/host 分开记录官方工件来源，普通 build/ZIP 导入只产生未受信工件，跨 scope 查询也不能借另一侧登记取得官方权限。临时 host 包工件验证了同一摘要在 host 登记前拒绝、登记后接纳、deployment 官方查询仍拒绝以及 ZIP 再导入不继承来源；包目录完整回归 100 passed、1 skipped，Ruff 通过。尚无 host builtin 的生产装配或 host Generation，不能据此开放 host 管理操作。
+
 Host 持久身份与租约底座（2026-10-07）：新增独立 `HostStore`、`forest_host` 基线和 `HostIdentityAuthority`。Host 数据库只接受稳定 `host/<32 hex>` 身份；首次安装要求空专用数据库，之后按基线摘要和对象清单复核。进程 incarnation 租约以数据库行锁和单调 owner epoch 合流，旧 incarnation 不能续租或通过资源写入前的 `verify_in` 围栏。隔离 PostgreSQL 用例覆盖重复初始化、同 incarnation 重入、并发拒绝、重启接管、旧租约失效及错误 host 身份拒绝（1 passed），Ruff 通过。这只是 host authority 的基础切片：尚未接入生产 Supervisor、host Generation 包图、Web scope 或 `host.storage`，在线实例未切换；host 数据库的物理部署配置仍需在接入时固定。
 
 稳定宿主身份引导（2026-10-07）：生产 Supervisor 不再由 deployment_id 派生 host_id。Compose 的隔离 initialize 服务在受保护卷中首次生成不透明 `host/<128-bit>` 身份并在后续启动复用；Supervisor 只从单一显式环境值或只读身份文件读取，缺失、冲突或格式错误均拒绝启动。每次进程启动的 incarnation 仍独立生成并只用于租约围栏。隔离 Linux 卷连续三次初始化后，host ID 字节不变，文件保持 UID/GID 10001 与 0400；Supervisor 配置与本地生命周期共 11 项测试、隔离 PostgreSQL 重建集成用例 1 项及多 Bot 生命周期 4 项、Ruff 与 Compose 解析通过。host 作用域 Generation 包图及 host.storage 仍待实现，在线实例未切换。

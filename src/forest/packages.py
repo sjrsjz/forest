@@ -69,7 +69,7 @@ VERSION = re.compile(r"\d+\.\d+\.\d+(?:[-+][a-zA-Z0-9.-]+)?\Z")
 def auto_install_official_sources(scope: str) -> tuple[Path, ...]:
     """Find packaged official components that opt into one runtime scope."""
 
-    if scope not in {"bot", "deployment"}:
+    if scope not in {"bot", "deployment", "host"}:
         raise ValueError("Official auto-install scope is invalid")
     root = files("forest").joinpath("builtin")
     selected = []
@@ -1471,11 +1471,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
     _schema(files, component.get("config_schema"))
     bootstrap_config = component.get("bootstrap_config")
     if component.get("auto_install") and (
-        bootstrap_config is None or component["scope"] not in {"bot", "deployment"}
+        bootstrap_config is None or component["scope"] not in {"bot", "deployment", "host"}
     ):
         _fail(
             "INVALID_BOOTSTRAP_CONFIGURATION",
-            "Automatically installed builtins need a seed and Bot or deployment scope",
+            "Automatically installed builtins need a seed and runtime scope",
         )
     if bootstrap_config is not None:
         parts = PurePosixPath(bootstrap_config)
@@ -2494,60 +2494,89 @@ class PackageCatalog:
                 self._build_cache.popitem(last=False)
         return snapshot
 
-    def build_official(self, source: Path) -> PackageSnapshot:
-        """Register a host-supplied official deployment source as a trusted artifact.
+    @staticmethod
+    def _official_table(scope: str) -> str:
+        try:
+            return {
+                "deployment": "official_deployment_artifacts",
+                "host": "official_host_artifacts",
+            }[scope]
+        except (KeyError, TypeError) as exc:
+            raise ForestError(
+                "OFFICIAL_PACKAGE_SOURCE_INVALID", "Official control scope is invalid", 422,
+            ) from exc
+
+    def build_official(self, source: Path, *, scope: str = "deployment") -> PackageSnapshot:
+        """Register a host-supplied control-scope source as a trusted artifact.
 
         This authority is deliberately separate from ZIP import and ordinary build:
         an artifact's own manifest cannot grant itself official SQL execution.
         """
 
+        table = self._official_table(scope)
         _source_files, captured, manifest = self._source_files(source)
         component = manifest["components"][0]
         storage = component.get("storage")
         if (
-            component["scope"] != "deployment"
+            component["scope"] != scope
             or (storage is not None and storage.get("execution_profile") != "official")
         ):
             _fail(
                 "OFFICIAL_PACKAGE_SOURCE_INVALID",
-                "Official deployment source must declare deployment scope and trusted storage",
+                "Official source must declare its control scope and trusted storage",
             )
         snapshot = self._publish(captured, manifest=manifest)
         with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
             db.execute("PRAGMA synchronous=FULL")
             db.execute(
-                "CREATE TABLE IF NOT EXISTS official_deployment_artifacts "
+                f"CREATE TABLE IF NOT EXISTS {table} "
                 "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
             )
             db.execute(
-                "INSERT OR IGNORE INTO official_deployment_artifacts VALUES (?,?)",
+                f"INSERT OR IGNORE INTO {table} VALUES (?,?)",
                 (snapshot.digest, component["id"]),
             )
         return snapshot
 
-    def get_official_deployment(self, digest: str) -> PackageSnapshot:
-        """Open only artifacts admitted by the trusted host source path."""
+    def _get_official(self, digest: str, scope: str) -> PackageSnapshot:
+        """Open only artifacts admitted for this exact control scope."""
 
+        table = self._official_table(scope)
         snapshot = self.get(digest)
         rows = self._rows(
-            "SELECT component_id FROM official_deployment_artifacts WHERE digest=?",
+            f"SELECT component_id FROM {table} WHERE digest=?",
             (digest,),
-            table="official_deployment_artifacts",
+            table=table,
         )
-        if len(rows) != 1 or rows[0][0] != snapshot.component["id"]:
+        if (snapshot.component["scope"] != scope or len(rows) != 1
+                or rows[0][0] != snapshot.component["id"]):
             _fail(
                 "OFFICIAL_PACKAGE_NOT_REGISTERED",
-                "Deployment artifact has no host-issued official provenance",
+                "Artifact has no host-issued official provenance for its scope",
             )
         return snapshot
 
-    def is_official_deployment(self, digest: str) -> bool:
+    def _is_official(self, digest: str, scope: str) -> bool:
+        table = self._official_table(scope)
         snapshot = self.get(digest)
         rows = self._rows(
-            "SELECT component_id FROM official_deployment_artifacts WHERE digest=?",
-            (digest,), table="official_deployment_artifacts",
+            f"SELECT component_id FROM {table} WHERE digest=?",
+            (digest,), table=table,
         )
-        return len(rows) == 1 and rows[0][0] == snapshot.component["id"]
+        return (snapshot.component["scope"] == scope and len(rows) == 1
+                and rows[0][0] == snapshot.component["id"])
+
+    def get_official_deployment(self, digest: str) -> PackageSnapshot:
+        return self._get_official(digest, "deployment")
+
+    def is_official_deployment(self, digest: str) -> bool:
+        return self._is_official(digest, "deployment")
+
+    def get_official_host(self, digest: str) -> PackageSnapshot:
+        return self._get_official(digest, "host")
+
+    def is_official_host(self, digest: str) -> bool:
+        return self._is_official(digest, "host")
 
     def import_archive(
         self,
