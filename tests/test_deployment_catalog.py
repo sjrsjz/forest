@@ -174,7 +174,7 @@ async def test_deployment_configuration_revision_activates_with_real_generation(
     await catalog.initialize()
     source = (
         files("forest.storage.official")
-        .joinpath("deployment_module_configuration.sql")
+        .joinpath("control_module_configuration.sql")
         .read_bytes()
     )
     spec = StorageBundleSpec(

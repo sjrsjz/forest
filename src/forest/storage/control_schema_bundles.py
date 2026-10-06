@@ -115,6 +115,13 @@ class ControlScopeSchemaBundleInstaller:
                 rendered = source.replace(
                     _MODULE_SCHEMA_TOKEN, sql.Identifier(spec.namespace).as_string(conn)
                 )
+                if execution_profile == "official":
+                    for token, identifier in (
+                        ("__scope_schema__", schema),
+                        ("__scope_identity_table__", identity_table),
+                        ("__scope_id_column__", identity_column),
+                    ):
+                        rendered = rendered.replace(token, sql.Identifier(identifier).as_string(conn))
                 await conn.execute(rendered)
                 count = await (await conn.execute(
                     "SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n "

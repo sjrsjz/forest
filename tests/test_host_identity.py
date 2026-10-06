@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 from dataclasses import replace
+from importlib.resources import files
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -16,11 +17,12 @@ from psycopg import sql
 from forest.errors import ForestError
 from forest.host_service_ledger import HostPackageServiceOperationLedger
 from forest.package_capabilities import PackageCallScope, PackageServiceRoute
-from forest.packages import storage_bundle_digest
+from forest.packages import digest_json, storage_bundle_digest
 from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.schema_bundles import StorageBundleSpec
 from forest.storage.host_generation import HostGenerationAuthority
 from forest.storage.host_identity import HostIdentityAuthority, HostLease
+from forest.storage.host_module_configuration import HostModuleConfigurationRepository
 from forest.storage.host_schema_bundles import HostSchemaBundleInstaller
 from forest.storage.host_store import HostStore
 
@@ -58,6 +60,28 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
         assert installed["namespace"] == spec.namespace
         assert await installer.install(spec, baseline, digest) == installed
         assert (await first.initialize())["host_id"] == host_id
+        config_sql = files("forest.storage.official").joinpath(
+            "control_module_configuration.sql"
+        ).read_bytes()
+        config_spec = StorageBundleSpec(
+            component_id="host.sample", schema_id="host.sample.configuration",
+            schema_version="1.0.0", baseline_sha256=hashlib.sha256(config_sql).hexdigest(),
+            repository_contract="forest.control-configuration.repository/1", scope="host",
+        )
+        config_storage_digest = storage_bundle_digest(config_spec, "official")
+        await installer.install(
+            config_spec, config_sql, config_storage_digest, execution_profile="official",
+        )
+        configuration = HostModuleConfigurationRepository(
+            first_store, component_id="host.sample", namespace=config_spec.namespace,
+        )
+        validation_digest = digest_json({"protocol": "host.sample-configuration/1"})
+        first_config = await configuration.ensure_initialized(
+            operation_id="bootstrap/host.sample", value={"value": "first"},
+            validation_digest=validation_digest,
+        )
+        assert (await configuration.desired_checked()).value == {"value": "first"}
+        assert (await first.initialize())["host_id"] == host_id
         wrong_spec = StorageBundleSpec(
             component_id="host.sample", schema_id="host.sample.wrong-scope",
             schema_version="1.0.0", baseline_sha256=hashlib.sha256(baseline).hexdigest(),
@@ -76,30 +100,29 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
             driver="python-worker", trust_level="official",
             descriptor_digest=package_digest, route_contract_digest=package_digest,
             management_contract_digest=package_digest, management_ui_digest=package_digest,
-            config_revision=1, config_payload_id="config/host.sample/1",
-            config_payload_digest=package_digest, instance_id="instance/host.sample",
+            config_revision=first_config.revision, config_payload_id=first_config.payload_id,
+            config_payload_digest=first_config.payload_digest,
+            instance_id="instance/host.sample",
             worker_incarnation="worker/host.sample", state_schema=1,
             state_contract_digest=package_digest, capability_grants_digest=package_digest,
             data_admission=True, control_admission=True,
             storage=RuntimeStorageBinding(
-                schema_id=spec.schema_id, schema_version=spec.schema_version,
-                namespace=spec.namespace, baseline_sha256=spec.baseline_sha256,
-                package_digest=digest, repository_contract=spec.repository_contract,
-                execution_profile="declarative",
+                schema_id=config_spec.schema_id, schema_version=config_spec.schema_version,
+                namespace=config_spec.namespace, baseline_sha256=config_spec.baseline_sha256,
+                package_digest=config_storage_digest,
+                repository_contract=config_spec.repository_contract,
+                execution_profile="official",
             ),
         )
-
-        class Configuration:
-            async def activate_in(self, conn, **_kwargs):
-                await conn.execute("SELECT 1")
 
         generations = HostGenerationAuthority(first_store)
         graph = await generations.prepare_graph(lease, [binding], str(uuid4()))
         assert graph == await generations.prepare_graph(lease, [binding], graph.activation_id)
         assert await generations.current_graph() is None
         assert await generations.publish_graph(
-            lease, graph, configuration_activators={"host.sample": Configuration()},
+            lease, graph, configuration_activators={"host.sample": configuration},
         ) == graph.graph_revision
+        assert await configuration.effective() == first_config
         assert await generations.current_graph() == graph
         assert (await generations.verify_active_generation(
             component_id="host.sample", generation_id=graph.generations["host.sample"],
@@ -129,13 +152,25 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
         with pytest.raises(ForestError) as conflict:
             await ledger.begin(competing, route, {"value": 2})
         assert conflict.value.code == "SERVICE_OPERATION_CONFLICT"
+        plan = await configuration.plan(
+            operation_id="plan/host.sample/2", expected_desired_revision=1,
+            value={"value": "second"}, validation_digest=validation_digest,
+        )
+        second_config = await configuration.apply(
+            operation_id="apply/host.sample/2", plan_id=plan["plan_id"],
+            expected_desired_revision=1,
+        )
+        assert (await configuration.effective()).revision == 1
         newer_binding = replace(
-            binding, config_revision=2, config_payload_id="config/host.sample/2",
+            binding, config_revision=second_config.revision,
+            config_payload_id=second_config.payload_id,
+            config_payload_digest=second_config.payload_digest,
         )
         newer = await generations.prepare_graph(lease, [newer_binding], str(uuid4()))
         assert await generations.publish_graph(
-            lease, newer, configuration_activators={"host.sample": Configuration()},
+            lease, newer, configuration_activators={"host.sample": configuration},
         ) == newer.graph_revision
+        assert (await configuration.effective(include_value=True)).value == {"value": "second"}
         assert await generations.current_graph() == newer
         selection_graph, selection = await generations.active_package_selection()
         assert selection_graph == newer

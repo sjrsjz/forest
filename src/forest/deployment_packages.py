@@ -41,7 +41,7 @@ class _BuiltinGrantSet:
 
 def _configuration_storage(component_id: str) -> tuple[StorageBundleSpec, bytes]:
     baseline = files("forest.storage.official").joinpath(
-        "deployment_module_configuration.sql"
+        "control_module_configuration.sql"
     ).read_bytes()
     schema_id = "forest.deployment.config." + hashlib.sha256(
         component_id.encode()
@@ -176,7 +176,7 @@ async def bootstrap_builtin_deployment_package(
                 "Official deployment storage must use the trusted SQL profile", 422,
             )
         common_sql = files("forest.storage.official").joinpath(
-            "deployment_module_configuration.sql"
+            "control_module_configuration.sql"
         ).read_bytes()
         baseline = common_sql + b"\n" + owned_sql
         spec = StorageBundleSpec(

@@ -1,6 +1,5 @@
 # Forest 实现状态
-Host 服务操作账本（2026-10-07）：host 与 deployment 的包 owned-work 现在共用同一套按固定 scope 映射的持久幂等账本；host 基线新增操作表。真实 PostgreSQL 验证 host 重放、冲突与旧代际拒绝，以及 deployment 目录完整回归 27 passed；Ruff 通过。Host 包配置、RuntimeScope 与生产装配仍未接通，host 数据库基线再次变化，未上线的临时 host 库须重建。
-
+Host 控制域配置与操作账本（2026-10-07）：Host 与 deployment 共用配置修订、幂等计划/应用、不可变路径及图发布时 effective 激活的状态机，也共用包 owned-work 的持久幂等操作账本。受信任 SQL 模板由安装器按固定 scope 渲染身份表和身份列，普通包不能选择渲染目标。隔离 PostgreSQL 验证 Host 配置首发、第二图原子激活、操作重放与旧代际拒绝；deployment 完整回归 27 passed，条件渲染后两种 scope 定向用例 3 passed，Ruff 通过。Host RuntimeScope、官方包 bootstrap 与生产 Supervisor 尚未接通；本轮未更改在线实例。
 
 Host Generation 持久图账本（2026-10-07）：`forest_host` 独立基线新增 graph clock、图、Generation 与成员关系，Host 租约增加单库 singleton 围栏；host/deployment 现在通过固定 schema 与身份列映射共用一套图发布状态机，SQL 仅渲染源码中的受控标识符占位符，不从包输入拼接表名。隔离 PostgreSQL 的 Host 用例覆盖首发、同 activation 重放、包选择、第二图替换后 route epoch 递增、旧 Generation 失去入站资格和进程换主后旧 owner epoch 被拒绝（1 passed）；共享状态机的完整 deployment 目录回归 27 passed，明确覆盖现有包替换与恢复路径。Host module registry、包配置/服务权威、Web scope 和生产 Supervisor 接入仍未实现，故尚不能宣称 Host 热重载已可用；Host 基线再次变化，临时 Host 数据库需重建。
 
