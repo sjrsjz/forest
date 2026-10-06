@@ -631,6 +631,12 @@ class PostgresPackageDomainAuthority:
         ):
             ledger = sql.Identifier("forest_deployment", "schema_bundles")
             owner_column = "deployment_id"
+        elif scope.scope_kind == "host" and (
+            scope.scope_id == getattr(self.store, "host_id", None)
+            and scope.bot_id is None
+        ):
+            ledger = sql.Identifier("forest_host", "schema_bundles")
+            owner_column = "host_id"
         else:
             raise ForestError(
                 "DOMAIN_STORAGE_FENCE_MISMATCH",

@@ -7,6 +7,7 @@ import hashlib
 import os
 from dataclasses import replace
 from importlib.resources import files
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -15,8 +16,9 @@ import pytest
 from psycopg import sql
 
 from forest.errors import ForestError
-from forest.host_service_ledger import HostPackageServiceOperationLedger
+from forest.host_runtime import HostRuntimeScope
 from forest.package_capabilities import PackageCallScope, PackageServiceRoute
+from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.packages import digest_json, storage_bundle_digest
 from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.schema_bundles import StorageBundleSpec
@@ -62,7 +64,16 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
         assert (await first.initialize())["host_id"] == host_id
         config_sql = files("forest.storage.official").joinpath(
             "control_module_configuration.sql"
-        ).read_bytes()
+        ).read_bytes() + b"""
+CREATE FUNCTION host_sample_probe(call_context jsonb, request jsonb) RETURNS jsonb
+LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT jsonb_build_object(
+        'protocol', 'forest.domain-result/1', 'ok', true,
+        'value', jsonb_build_object('host_id', call_context->>'scope_id',
+                                    'value', request->>'value')
+    )
+$$;
+"""
         config_spec = StorageBundleSpec(
             component_id="host.sample", schema_id="host.sample.configuration",
             schema_version="1.0.0", baseline_sha256=hashlib.sha256(config_sql).hexdigest(),
@@ -115,7 +126,11 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
             ),
         )
 
-        generations = HostGenerationAuthority(first_store)
+        runtime = HostRuntimeScope(
+            first_store, SimpleNamespace(authority_lease=lambda **_values: lease),
+        )
+        assert runtime.authority_lease() == lease
+        generations = runtime.generation_authority
         graph = await generations.prepare_graph(lease, [binding], str(uuid4()))
         assert graph == await generations.prepare_graph(lease, [binding], graph.activation_id)
         assert await generations.current_graph() is None
@@ -128,7 +143,7 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
             component_id="host.sample", generation_id=graph.generations["host.sample"],
             admission_lane="CONTROL",
         ))["route_epoch"] == 1
-        ledger = HostPackageServiceOperationLedger(first_store, generations)
+        ledger = runtime.service_operation_ledger
         route = PackageServiceRoute(
             service_id="owned-work.host.sample.probe", graph_id=graph.graph_id,
             graph_revision=graph.graph_revision, admission_lane="DATA", owned_work=True,
@@ -141,6 +156,24 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
             call_id="call:host-ledger", call_operation_id="owned:host-ledger",
             causal_root_kind="package.owned-work", causal_root_id="owned:host-ledger",
         )
+        domain = PostgresPackageDomainAuthority(
+            first_store, generations, component_id="host.sample",
+            runtime_package_digest=package_digest, storage_spec=config_spec,
+            storage_package_digest=config_storage_digest,
+            storage_execution_profile="official",
+        )
+        assert await domain.invoke_query(
+            call, {"name": "host.sample.probe", "function": "host_sample_probe"},
+            {"value": "visible"}, parent_call_id="call:host-ledger",
+            timeout_seconds=5,
+        ) == {"host_id": host_id, "value": "visible"}
+        with pytest.raises(ForestError) as foreign_scope:
+            await domain.invoke_query(
+                replace(call, scope_id="host/" + uuid4().hex),
+                {"name": "host.sample.probe", "function": "host_sample_probe"},
+                {}, parent_call_id="call:host-ledger", timeout_seconds=5,
+            )
+        assert foreign_scope.value.code == "DOMAIN_STORAGE_FENCE_MISMATCH"
         assert (await ledger.begin(call, route, {"value": 1})).execute
         competing = replace(call, call_id="call:host-ledger-competing")
         in_progress = await ledger.begin(competing, route, {"value": 1})

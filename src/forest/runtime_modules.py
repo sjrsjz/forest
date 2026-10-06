@@ -1357,6 +1357,8 @@ class RuntimeModuleRegistry:
             "STORAGE_SEALED",
             "STALE_DEPLOYMENT_SUPERVISOR",
             "DEPLOYMENT_RUNTIME_UNAVAILABLE",
+            "STALE_HOST_SUPERVISOR",
+            "HOST_RUNTIME_UNAVAILABLE",
         }
 
     async def _record_current_states(self, lease, *, failure_code=None, components=None):
