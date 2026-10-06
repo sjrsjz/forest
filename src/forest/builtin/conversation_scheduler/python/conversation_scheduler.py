@@ -43,7 +43,7 @@ class ConversationScheduler(Plugin):
             }
             or type(view["high_watermark_units"]) is not int
             or type(view["retain_units"]) is not int
-            or not 2 <= view["high_watermark_units"] <= 1_000_000
+            or not 2 <= view["high_watermark_units"] <= 4096
             or not 1 <= view["retain_units"] < view["high_watermark_units"]
             or type(view["high_watermark_payload_bytes"]) is not int
             or type(view["retain_payload_bytes"]) is not int

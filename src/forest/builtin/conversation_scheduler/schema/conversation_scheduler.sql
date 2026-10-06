@@ -2532,7 +2532,7 @@ BEGIN
             RETURN false;
         END IF;
     END LOOP;
-    RETURN (policy->>'high_watermark_units')::bigint BETWEEN 2 AND 1000000
+    RETURN (policy->>'high_watermark_units')::bigint BETWEEN 2 AND 4096
        AND (policy->>'retain_units')::bigint BETWEEN 1 AND
            (policy->>'high_watermark_units')::bigint-1
        AND (policy->>'high_watermark_payload_bytes')::bigint BETWEEN 1024 AND 134217728

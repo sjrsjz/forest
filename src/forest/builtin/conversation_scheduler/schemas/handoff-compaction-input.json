@@ -88,12 +88,12 @@
         "high_watermark_units": {
           "type": "integer",
           "minimum": 2,
-          "maximum": 1000000
+          "maximum": 4096
         },
         "retain_units": {
           "type": "integer",
           "minimum": 1,
-          "maximum": 999999
+          "maximum": 4095
         },
         "high_watermark_payload_bytes": {
           "type": "integer",

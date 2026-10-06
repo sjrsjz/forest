@@ -495,6 +495,8 @@ Conversation Context 快照 v7 在当前 Actor 围栏内绑定 `run_ref`，从 C
 
 Conversation 为活动 Run 建立不可变的 context_run_view_profiles 账本：首次预运行裁剪、触发预填或模型快照在 Actor/Session/Run 围栏内通过受限命令绑定当前策略；此后同一 Run 的每次快照和裁剪都读取该账本，即使 Worker 配置热重载也不重新解释预算。快照 v7 的 manifest 和服务回执同时携带策略摘要，Agent 核对两者一致；未绑定 Run 的诊断快照使用当前策略且摘要为 null。静默维护和已完成 Session 的交接前裁剪使用当时配置，后继 Run 在自己的首次绑定处固定策略。完整 ViewPlan 还需要把固定提示词、工具、Memory 证据与输出预留纳入同一预算。
 
+单次快照最多发布 4096 个活动 Context 单元，可另带一个归档引用；Conversation 配置的单元高水位因此最多为 4096。Agent 在该视图之后最多附加 256 个模型回合及各自配对的工具结果，所以模型投影的结构上界为 4609 个单元。它们是单次物化的资源界，不限制 Inbox、不可变 Context 事实或长期归档中的消息总量，也不能代替完整 ViewPlan 的总预算选择。
+
 ### 8.2 确定性视图发布与合流
 
 先可靠写 Archive 及来源映射，再以 `context_compactions` 发布裁剪视图。裁剪器只计算确定性的 ViewPlan：保留单元、移出单元、归档引用、token计数和来源覆盖，不能输出自然语言摘要。Context 发布经Actor/会话协调事务；后台任务不能修改正在使用的共享消息数组。可靠归档已完成但Embedding/图邻接仍滞后时，裁剪可以完成，召回显式报告索引水位。

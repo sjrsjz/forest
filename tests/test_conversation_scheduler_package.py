@@ -414,10 +414,15 @@ async def test_conversation_package_owns_ingress_and_classification_participants
 
             first_view = await bind_run_view("run/1", original_view)
             replay_view = await bind_run_view("run/1", changed_view)
+            oversized_view = await bind_run_view(
+                "run/1", {**original_view, "high_watermark_units": 4097,
+                          "retain_units": 2048}
+            )
             fenced_view = await bind_run_view("run/other", original_view)
         assert first_view["ok"] is True, first_view
         assert first_view["value"]["profile"] == original_view
         assert replay_view == first_view
+        assert oversized_view["error"]["code"] == "CONTEXT_RUN_VIEW_INVALID"
         assert fenced_view["error"]["code"] == "CONTEXT_RUN_VIEW_FENCE_CHANGED"
         async with store.pool.connection() as conn:
             row = await (

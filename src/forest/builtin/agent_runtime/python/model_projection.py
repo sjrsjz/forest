@@ -38,6 +38,9 @@ from forest.model_contract import _encode as _contract_encode
 PROJECTION_REVISION = "forest-model-view-v2"
 MEMORY_EVIDENCE_REVISION = "forest-memory-evidence-v1"
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+# Conversation publishes at most 4096 active units and one archive reference.
+# One Agent Run can add at most 256 model turns and their paired tool results.
+_MAX_FROZEN_MODEL_UNITS = 4096 + 1 + 2 * 256
 
 
 def _encode(value: Any, *, limit: int = MAX_REQUEST_BYTES) -> bytes:
@@ -107,7 +110,7 @@ def _attribution(value: Any, *, author: bool = False) -> dict:
 
 def _canonical_units(snapshot: dict) -> list[dict]:
     units = snapshot.get("units")
-    if not isinstance(units, list) or not 1 <= len(units) <= 2048:
+    if not isinstance(units, list) or not 1 <= len(units) <= _MAX_FROZEN_MODEL_UNITS:
         raise _error("MODEL_INPUT_INVALID", "Input snapshot requires bounded ordered units")
     result, seen = [], set()
     for unit in units:

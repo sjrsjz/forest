@@ -99,6 +99,12 @@ def prepared(value=None, caps=None, *, media=None, tools=(), stream=True, **kwar
                                  stream=stream, **kwargs)
 
 
+def test_projection_accepts_conversation_snapshot_beyond_old_agent_unit_limit():
+    window = snapshot(*(unit(f"message-{index}", text="x") for index in range(2049)))
+    request = prepared(window)
+    assert len(request.manifest["source_manifest"]) == 2049
+
+
 def image(source="u1", part="1", ref="media-a", revision=1):
     content = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jD1sAAAAASUVORK5CYII=")
     return MediaSnapshot("bot-a", ref, revision, source, part, "image/png", content,
