@@ -255,14 +255,22 @@ $$;
             )
         assert forged.value.code == "WEB_AUTHORITY_TICKET_SIGNATURE_INVALID"
         assert (await configuration.desired()).revision == 1
-        committed = await changes.enqueue_configuration(
-            lease=lease, ticket=apply_ticket, configuration=configuration,
+        configuration_runtime = HostRuntimeScope(
+            first_store, SimpleNamespace(authority_lease=lambda **_values: lease),
+            graph_change_authority=changes,
+        )
+        committed = await configuration_runtime.apply_configuration(
+            configuration, operation_id=apply_ticket.target_operation_ref,
             plan_id=plan["plan_id"], expected_desired_revision=1,
-            validation_digest=validation_digest, authorize_in=authorize_apply,
+            authorization=apply_ticket, authorization_guard=authorize_in,
+            validation_digest=validation_digest,
         )
         second_config = committed["configuration"]
         change_request = await changes.claim(lease)
         assert change_request["operation_id"] == apply_ticket.target_operation_ref
+        assert committed["rebuild"] == {
+            "request_id": apply_ticket.target_operation_ref, "state": "QUEUED",
+        }
         assert change_request["state"] == "RUNNING"
         assert (await configuration.effective()).revision == 1
         newer_binding = replace(

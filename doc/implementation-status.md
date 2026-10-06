@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host 配置应用端口（2026-10-07）：deployment 与 Host RuntimeScope 现在共用一条窄配置应用命令，只把 Web 票据、计划身份和预期修订交给各自持久 Graph change authority；Host 已可通过该端口原子写入配置 desired 修订与换代请求。隔离 PostgreSQL 的 Host 完整用例及 deployment 配置换代定向用例共 3 passed，Ruff 通过。Host 包描述符编译、实际控制器、Web provider 与生产 Supervisor 尚未接线，此端口不是可用的 Host 管理功能。
+
 Host 持久换代请求与 Web 回执（2026-10-07）：`forest_host` 独立基线已拥有 Graph change request 和不可变 Web authority receipt；Host 接纳时验证管理员签票，并在同一 Host 数据库事务中提交配置 desired 修订、回执与 `CONFIGURE` 请求。请求的领取、租约、图发布证明和结算与 deployment 使用同一受控 scope 状态机。隔离 PostgreSQL 的 Host 用例覆盖伪造签票拒绝、原子应用、换代后成功结算及模块替换请求失败结算（1 passed），deployment 完整回归 27 passed，Ruff 通过。签票只跨库传递委托，部署会话库与 Host 库没有跨库 ACID；Host 包编译、控制器、Web provider 和生产 Supervisor 仍未接线，不能宣称 Host 管理已可使用。Host 基线改变后临时数据库须重建。
 Host 运行时 SQL 端口（2026-10-07）：新增仅持有 Host 租约、Generation、schema 安装与包操作账本的 HostRuntimeScope；包 Domain authority 现在按准确 host_id 和已安装 bundle 核对 Host 私有 SQL。隔离 PostgreSQL 的 Host 图用例真实调用包函数并拒绝伪造的其他 Host scope，deployment 包 SQL 查询与存储围栏定向回归 2 passed，Ruff 通过。Host 包编译、可热替换控制器、Web scope 和生产 Supervisor 仍未接通，不能据此宣称 Host builtin 已投入运行。
 

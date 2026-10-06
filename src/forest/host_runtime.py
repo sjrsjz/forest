@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from forest.control_runtime_configuration import ControlRuntimeConfigurationPort
 from forest.errors import ForestError
 from forest.host_service_ledger import HostPackageServiceOperationLedger
 from forest.storage.host_generation import HostGenerationAuthority
@@ -9,13 +10,14 @@ from forest.storage.host_identity import HostLease
 from forest.storage.host_schema_bundles import HostSchemaBundleInstaller
 
 
-class HostRuntimeScope:
+class HostRuntimeScope(ControlRuntimeConfigurationPort):
     scope_kind = "host"
 
-    def __init__(self, store, supervisor) -> None:
+    def __init__(self, store, supervisor, *, graph_change_authority=None) -> None:
         self.store = store
         self.scope_id = store.host_id
         self.supervisor = supervisor
+        self.graph_change_authority = graph_change_authority
         self.generation_authority = HostGenerationAuthority(store)
         self.schema_bundle_installer = HostSchemaBundleInstaller(store)
         self.service_operation_ledger = HostPackageServiceOperationLedger(
