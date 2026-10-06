@@ -14,6 +14,8 @@ import pytest
 from psycopg import sql
 
 from forest.errors import ForestError
+from forest.host_service_ledger import HostPackageServiceOperationLedger
+from forest.package_capabilities import PackageCallScope, PackageServiceRoute
 from forest.packages import storage_bundle_digest
 from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.schema_bundles import StorageBundleSpec
@@ -78,7 +80,7 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
             config_payload_digest=package_digest, instance_id="instance/host.sample",
             worker_incarnation="worker/host.sample", state_schema=1,
             state_contract_digest=package_digest, capability_grants_digest=package_digest,
-            data_admission=False, control_admission=True,
+            data_admission=True, control_admission=True,
             storage=RuntimeStorageBinding(
                 schema_id=spec.schema_id, schema_version=spec.schema_version,
                 namespace=spec.namespace, baseline_sha256=spec.baseline_sha256,
@@ -103,6 +105,30 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
             component_id="host.sample", generation_id=graph.generations["host.sample"],
             admission_lane="CONTROL",
         ))["route_epoch"] == 1
+        ledger = HostPackageServiceOperationLedger(first_store, generations)
+        route = PackageServiceRoute(
+            service_id="owned-work.host.sample.probe", graph_id=graph.graph_id,
+            graph_revision=graph.graph_revision, admission_lane="DATA", owned_work=True,
+            parent_call_id=None, timeout_seconds=10,
+        )
+        call = PackageCallScope(
+            bot_id=None, scope_kind="host", scope_id=host_id,
+            component_id="host.sample", generation_id=graph.generations["host.sample"],
+            instance_id="instance/host.sample", worker_incarnation="worker/host.sample",
+            call_id="call:host-ledger", call_operation_id="owned:host-ledger",
+            causal_root_kind="package.owned-work", causal_root_id="owned:host-ledger",
+        )
+        assert (await ledger.begin(call, route, {"value": 1})).execute
+        competing = replace(call, call_id="call:host-ledger-competing")
+        in_progress = await ledger.begin(competing, route, {"value": 1})
+        assert in_progress.error.code == "SERVICE_OPERATION_IN_PROGRESS"
+        await ledger.succeed(call, route, {"value": "done"})
+        assert (await ledger.begin(competing, route, {"value": 1})).result == {
+            "value": "done",
+        }
+        with pytest.raises(ForestError) as conflict:
+            await ledger.begin(competing, route, {"value": 2})
+        assert conflict.value.code == "SERVICE_OPERATION_CONFLICT"
         newer_binding = replace(
             binding, config_revision=2, config_payload_id="config/host.sample/2",
         )
@@ -125,6 +151,14 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
                 admission_lane="CONTROL",
             )
         assert old_generation.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
+        with pytest.raises(ForestError) as stale_operation:
+            await ledger.begin(
+                replace(call, call_id="call:host-ledger-stale",
+                        call_operation_id="owned:host-ledger-stale",
+                        causal_root_id="owned:host-ledger-stale"),
+                route, {},
+            )
+        assert stale_operation.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
         with pytest.raises(ForestError) as busy:
             await first.claim(second_incarnation)
         assert busy.value.code == "HOST_SUPERVISOR_BUSY"

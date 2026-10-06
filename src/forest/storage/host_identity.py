@@ -124,7 +124,7 @@ class HostIdentityAuthority:
         if ({row["relname"] for row in relations}
                 != {"host_identity", "schema_bundles", "runtime_graph_clock",
                     "runtime_graphs", "runtime_generations", "runtime_graph_members",
-                    "supervisor_lease"}
+                    "package_service_operations", "supervisor_lease"}
                 or {row["proname"] for row in functions} != {"reject_identity_change"}
                 or {row["tgname"] for row in triggers} != {"host_identity_immutable"}
                 or [row["host_id"] for row in lease] != [self.store.host_id]
