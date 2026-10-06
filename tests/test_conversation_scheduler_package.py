@@ -59,9 +59,12 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         "retain_decoded_bytes": 67108864,
         "high_watermark_estimated_tokens": 24576,
         "retain_estimated_tokens": 16384,
+        "model_view_budget_tokens": 32768,
+        "model_view_media_bytes": 25165824,
+        "model_view_decoded_bytes": 268435456,
         "utf8_bytes_per_estimated_token": 2,
         "unit_overhead_estimated_tokens": 16,
-        "policy_revision": "context-view-multimodal-window-v5",
+        "policy_revision": "context-view-multimodal-window-v6",
     }
     package = await bootstrap_builtin_package(
         Path(str(files("forest").joinpath("builtin/conversation_scheduler"))),
@@ -897,9 +900,12 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "retain_decoded_bytes": 67108864,
                 "high_watermark_estimated_tokens": 24576,
                 "retain_estimated_tokens": 16384,
+                "model_view_budget_tokens": 32768,
+                "model_view_media_bytes": 25165824,
+                "model_view_decoded_bytes": 268435456,
                 "utf8_bytes_per_estimated_token": 2,
                 "unit_overhead_estimated_tokens": 16,
-                "policy_revision": "context-view-multimodal-window-v5",
+                "policy_revision": "context-view-multimodal-window-v6",
             },
             "payload": {
                 "protocol": "forest.payload-json-from-prior/1",

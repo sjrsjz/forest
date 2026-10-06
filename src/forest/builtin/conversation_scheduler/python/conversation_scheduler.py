@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from model_view_planning import publish_model_view
+
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service
 
@@ -37,6 +39,9 @@ class ConversationScheduler(Plugin):
                 "retain_decoded_bytes",
                 "high_watermark_estimated_tokens",
                 "retain_estimated_tokens",
+                "model_view_budget_tokens",
+                "model_view_media_bytes",
+                "model_view_decoded_bytes",
                 "utf8_bytes_per_estimated_token",
                 "unit_overhead_estimated_tokens",
                 "policy_revision",
@@ -61,11 +66,17 @@ class ConversationScheduler(Plugin):
             or type(view["retain_estimated_tokens"]) is not int
             or not 1024 <= view["high_watermark_estimated_tokens"] <= 1_048_576
             or not 1 <= view["retain_estimated_tokens"] < view["high_watermark_estimated_tokens"]
+            or type(view["model_view_budget_tokens"]) is not int
+            or not 1024 <= view["model_view_budget_tokens"] <= 1_048_576
+            or type(view["model_view_media_bytes"]) is not int
+            or not 1024 <= view["model_view_media_bytes"] <= 268_435_456
+            or type(view["model_view_decoded_bytes"]) is not int
+            or not 1024 <= view["model_view_decoded_bytes"] <= 1_073_741_824
             or type(view["utf8_bytes_per_estimated_token"]) is not int
             or not 1 <= view["utf8_bytes_per_estimated_token"] <= 16
             or type(view["unit_overhead_estimated_tokens"]) is not int
             or not 0 <= view["unit_overhead_estimated_tokens"] <= 256
-            or view["policy_revision"] != "context-view-multimodal-window-v5"
+            or view["policy_revision"] != "context-view-multimodal-window-v6"
         ):
             raise ForestError(
                 "CONVERSATION_CONFIGURATION_INVALID",
@@ -475,6 +486,16 @@ class ConversationScheduler(Plugin):
             "unit_count": unit_count,
             "snapshot": self._exact(saved),
         }
+
+    @service(
+        "conversation.model-view.plan",
+        semantics="idempotent",
+        contract="1.0",
+        input_schema="schemas/model-view-plan-input.json",
+        output_schema="schemas/model-view-publish-output.json",
+    )
+    async def model_view_plan(self, payload, ctx):
+        return await publish_model_view(self, payload, ctx)
 
     @job("conversation.silent-drain")
     async def silent_drain(self, task, ctx):

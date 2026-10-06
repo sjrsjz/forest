@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from context_projection import ContextSnapshotReader, claim_summaries
 from model_execution import ModelExecution
+from model_view_quote import select_model_view
 from tool_execution import ToolExecution
 from turn_recording import TurnRecorder, stable, tool_directory
 
@@ -609,7 +610,10 @@ class AgentExecution:
             error_code="AGENT_CANCELLED_BY_ADMIN",
         )
 
-    async def _model_snapshot(self, request: dict, run: dict, step_seq: int) -> dict:
+    async def _model_snapshot(
+        self, request: dict, run: dict, step_seq: int, *,
+        preset_context: list[str], tools: list[dict], evidence_ref: dict | None,
+    ) -> dict:
         envelope = await self.ctx.services.call(
             "conversation.context.snapshot",
             {"actor": request["actor"], "session_ref": request["session_ref"],
@@ -632,11 +636,18 @@ class AgentExecution:
                 "context_view_revision": run["progress"]["context_view_revision"],
             },
         )
-        return await reader.model_view(
+        model_snapshot = await reader.model_view(
             snapshot,
             run=run,
             history=await self._history(run["run_id"]),
             logical_step_id=f"{run['run_id']}:step:{step_seq}",
+        )
+        return await select_model_view(
+            self.ctx, request=request, run=run, step_seq=step_seq,
+            raw_snapshot=snapshot, model_snapshot=model_snapshot,
+            preset_ref=self._preset_ref(), preset_context=preset_context,
+            tools=tools, evidence_ref=evidence_ref,
+            output_tokens=self.config["output_tokens"],
         )
 
     @staticmethod
@@ -1195,18 +1206,22 @@ class AgentExecution:
                             await self._cancel_superseded_recall(run, step_seq)
                             continue
                     try:
-                        snapshot = await self._model_snapshot(request, run, step_seq)
+                        snapshot = await self._model_snapshot(
+                            request, run, step_seq, preset_context=preset_context,
+                            tools=declarations, evidence_ref=evidence_ref,
+                        )
                     except ForestError as exc:
                         if exc.code not in {
                             "CONTEXT_VIEW_HARD_LIMIT",
                             "CONTEXT_VIEW_MEDIA_OVER_BUDGET",
                             "CONTEXT_VIEW_DECODED_OVER_BUDGET",
+                            "CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED",
                         }:
                             raise
                         return await self._fail_unsendable_input(
                             request, owner, run, exc.code
                         )
-                    source_refs = [self._preset_ref()]
+                    source_refs = [self._preset_ref(), snapshot["model_view_plan_ref"]]
                 # Recall and Context projection can take time. Recheck just
                 # before dispatch so a replacement signalled during either
                 # operation does not start another model effect.

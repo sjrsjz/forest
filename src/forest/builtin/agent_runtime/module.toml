@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.44.0"
+version = "4.45.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -56,6 +56,7 @@ requests = [
   "service.call:provider.model.result.lookup",
   "service.call:runtime.effect-executor-outcome",
   "service.call:conversation.context.snapshot",
+  "service.call:conversation.model-view.plan",
   "service.call:conversation.context.prefill",
   "service.call:media.context.resolve",
   "service.call:memory.query.begin",
@@ -132,6 +133,12 @@ required = true
 startup_dependency = false
 
 [[components.requires]]
+name = "conversation.model-view.plan"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
+
+[[components.requires]]
 name = "conversation.context.prefill"
 contract = ">=1.0,<2.0"
 required = true
@@ -201,9 +208,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.30.0"
+schema_version = "2.31.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "d78314fb01c71e1fc5fc8e8b72285365e16c765907224eaba8d8d4c3af75f93f"
+baseline_sha256 = "7359418a7149e99e7f9bdb35300e35a3dd70f9060fcaa953436af62000214730"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"

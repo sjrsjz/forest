@@ -2389,6 +2389,7 @@ BEGIN
            'CONTEXT_VIEW_HARD_LIMIT',
            'CONTEXT_VIEW_MEDIA_OVER_BUDGET',
            'CONTEXT_VIEW_DECODED_OVER_BUDGET',
+           'CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED',
            'MODEL_INPUT_BYTES_EXCEEDED'
        )
        OR checkpoint_value->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'

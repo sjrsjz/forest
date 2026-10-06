@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.35.0"
+version = "4.36.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -47,6 +47,7 @@ requests = [
   "service.call:agent.execute",
   "service.call:agent.execution.policy",
   "domain.query:conversation.context-page",
+  "domain.query:conversation.model-view.prior",
   "domain.query:conversation.read-requeue-request",
   "uow.execute:conversation.commit-silent-input",
   "uow.execute:conversation.prefill-trigger-input",
@@ -86,6 +87,13 @@ input_schema = "schemas/context-snapshot-input.json"
 output_schema = "schemas/context-snapshot-output.json"
 
 [[components.provides]]
+name = "conversation.model-view.plan"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/model-view-plan-input.json"
+output_schema = "schemas/model-view-publish-output.json"
+
+[[components.provides]]
 name = "conversation.context.prefill"
 contract = "1.0"
 semantics = "idempotent"
@@ -94,9 +102,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.30.0"
+schema_version = "4.31.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "bcba23f36071afe2ee94e551d696b0a8a3f1867373e9882892fcdefc4b9ff0a2"
+baseline_sha256 = "eda1614cf6bd0c0016ba06fc6f45c4eaedc92cb907c13e84ccb5b33f9f264cfc"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -107,6 +115,13 @@ contract = "4.0"
 function = "conversation_context_page"
 input_schema = "schemas/context-page-input.json"
 output_schema = "schemas/context-page-output.json"
+
+[[components.domain_queries]]
+name = "conversation.model-view.prior"
+contract = "1.0"
+function = "conversation_model_view_prior"
+input_schema = "schemas/model-view-prior-input.json"
+output_schema = "schemas/model-view-prior-output.json"
 
 [[components.domain_queries]]
 name = "conversation.read-requeue-request"

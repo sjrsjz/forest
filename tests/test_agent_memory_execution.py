@@ -531,8 +531,8 @@ async def test_replacement_parks_before_next_model_call(
             signal[0] = True
             return "READY", "query/1", None
 
-        async def model_snapshot(*_args):
-            return {}
+        async def model_snapshot(*_args, **_kwargs):
+            return {"model_view_plan_ref": {"payload_id": "plan/1"}}
 
         monkeypatch.setattr(agent, "_acquire_input", acquire_input)
         monkeypatch.setattr(agent, "_recall", recall)

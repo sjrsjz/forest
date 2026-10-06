@@ -17,7 +17,7 @@
 </head>
 <body>
 <div class="app">
-  <header><div><strong>群会话调度</strong> <span id="revision" class="muted"></span></div><nav><button data-tab="runs" class="active">领取组</button><button data-tab="settings">上下文窗口</button></nav></header>
+  <header><div><strong>群会话调度</strong> <span id="revision" class="muted"></span></div><nav><button data-tab="runs" class="active">领取组</button><button data-tab="settings">上下文预算</button></nav></header>
   <section id="runs">
     <p class="hint muted">已创建的 Run 须失败或取消且无未决效果才能重排；尚未创建 Run 的预填领取组可在重新取得会话所有权后重排。活动 Run 不会被强制停止。</p>
     <div class="toolbar"><input id="conversation-filter" class="flex" placeholder="精确 Conversation ID，可留空"><input id="reason" value="OPERATOR_REQUEUE" maxlength="128" aria-label="重排原因代码"><label><input id="anomalies" type="checkbox">只看异常组</label><button id="search">查询</button><button id="refresh">刷新</button></div>
@@ -28,6 +28,7 @@
   <section id="settings" class="hidden">
     <p class="hint muted">窗口阈值由 Conversation Context 自行执行；更改草稿后通过宿主计划检查并应用。</p>
     <div class="field-row"><label>高水位单元数<input id="high" type="number" min="2" max="4096"></label><label>裁剪后保留单元数<input id="retain" type="number" min="1" max="4095"></label><label>高水位内容字节数<input id="high-bytes" type="number" min="1024" max="134217728"></label><label>裁剪后内容字节数<input id="retain-bytes" type="number" min="1" max="134217727"></label><button id="plan" disabled>检查配置计划</button></div>
+    <div class="field-row"><label>模型调用总估算 token<input id="model-tokens" type="number" min="1024" max="1048576"></label><label>模型视图媒体字节<input id="model-media" type="number" min="1024" max="268435456"></label><label>模型视图解码估算字节<input id="model-decoded" type="number" min="1024" max="1073741824"></label></div>
   </section>
   <div id="status" class="status" role="status"></div>
 </div>
@@ -42,8 +43,13 @@
   const status=value=>{$('status').textContent=value||'';};
   const cell=(row,value)=>{const node=row.insertCell();node.textContent=value??'—';return node;};
   function show(tab){for(const id of ['runs','settings'])$(id).classList.toggle('hidden',id!==tab);document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
-  function renderSettings(){if(!draft)return;$('high').value=draft.context_view.high_watermark_units;$('retain').value=draft.context_view.retain_units;$('high-bytes').value=draft.context_view.high_watermark_payload_bytes;$('retain-bytes').value=draft.context_view.retain_payload_bytes;}
-  function updateDraft(){const high=Number($('high').value),retain=Number($('retain').value),highBytes=Number($('high-bytes').value),retainBytes=Number($('retain-bytes').value);if(!Number.isSafeInteger(high)||!Number.isSafeInteger(retain)||high<2||high>4096||retain<1||retain>=high||!Number.isSafeInteger(highBytes)||!Number.isSafeInteger(retainBytes)||highBytes<1024||highBytes>134217728||retainBytes<1||retainBytes>=highBytes)throw Error('上下文窗口阈值无效');Object.assign(draft.context_view,{high_watermark_units:high,retain_units:retain,high_watermark_payload_bytes:highBytes,retain_payload_bytes:retainBytes});send('set-draft',{value:draft});}
+  function renderSettings(){if(!draft)return;const view=draft.context_view;$('high').value=view.high_watermark_units;$('retain').value=view.retain_units;$('high-bytes').value=view.high_watermark_payload_bytes;$('retain-bytes').value=view.retain_payload_bytes;$('model-tokens').value=view.model_view_budget_tokens;$('model-media').value=view.model_view_media_bytes;$('model-decoded').value=view.model_view_decoded_bytes;}
+  function updateDraft(){
+    const high=Number($('high').value),retain=Number($('retain').value),highBytes=Number($('high-bytes').value),retainBytes=Number($('retain-bytes').value);
+    const modelTokens=Number($('model-tokens').value),modelMedia=Number($('model-media').value),modelDecoded=Number($('model-decoded').value);
+    if(!Number.isSafeInteger(high)||!Number.isSafeInteger(retain)||high<2||high>4096||retain<1||retain>=high||!Number.isSafeInteger(highBytes)||!Number.isSafeInteger(retainBytes)||highBytes<1024||highBytes>134217728||retainBytes<1||retainBytes>=highBytes||!Number.isSafeInteger(modelTokens)||modelTokens<1024||modelTokens>1048576||!Number.isSafeInteger(modelMedia)||modelMedia<1024||modelMedia>268435456||!Number.isSafeInteger(modelDecoded)||modelDecoded<1024||modelDecoded>1073741824)throw Error('上下文预算无效');
+    Object.assign(draft.context_view,{high_watermark_units:high,retain_units:retain,high_watermark_payload_bytes:highBytes,retain_payload_bytes:retainBytes,model_view_budget_tokens:modelTokens,model_view_media_bytes:modelMedia,model_view_decoded_bytes:modelDecoded});send('set-draft',{value:draft});
+  }
   async function load(next=false){
     const anomalyMode=$('anomalies').checked,input={limit:20};
     const exact=$('conversation-filter').value.trim();if(exact)input.conversation_id=exact;

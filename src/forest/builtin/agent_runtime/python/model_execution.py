@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 from agent_protocol import ProtocolRepairView
 from model_projection import prepare_model_request
+from model_view_quote import verify_model_view
 from turn_recording import stable
 
 from forest.errors import ForestError
@@ -213,6 +214,11 @@ class ModelExecution:
         request_kind: str,
     ) -> dict:
         graph_id, graph_revision, bot_id = self._identity()
+        if repair is None:
+            await verify_model_view(
+                self.ctx, snapshot=snapshot, preset_context=preset_context,
+                tools=tools, evidence_ref=evidence_ref, output_tokens=output_tokens,
+            )
         profile, target = await self._profile(request_id)
         capabilities = profile["capabilities"]
         images = {}

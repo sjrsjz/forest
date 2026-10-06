@@ -189,3 +189,25 @@ async def test_model_view_plan_publication_fences_and_replays(clean_authority, t
         revision=1, source=two_sources, bitmap="10",
     )
     assert (await publish(fourth_context, fourth))["ok"] is True
+    query_context = {
+        "bot_id": store.bot_id,
+        "component_id": "conversation.scheduler",
+        "port_name": "conversation.model-view.prior",
+        "port_kind": "query",
+    }
+    async with store.pool.connection() as conn:
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT {}.conversation_model_view_prior("
+                        "%s::jsonb,%s::jsonb) AS result").format(sql.Identifier(namespace)),
+                (Jsonb(query_context), Jsonb({
+                    "actor": actor, "session_ref": "session/one", "run_ref": "run/one",
+                })),
+            )
+        ).fetchone()
+    assert row["result"]["ok"] is True
+    assert row["result"]["value"] == {
+        "found": True, "step_seq": 4, "selected_bitmap": "10",
+        "considered_count": 2, "source_set_digest": two_sources,
+        "plan": fourth["plan"],
+    }

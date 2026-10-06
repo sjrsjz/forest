@@ -164,9 +164,12 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 "retain_decoded_bytes": 67108864,
                 "high_watermark_estimated_tokens": 24576,
                 "retain_estimated_tokens": 16384,
+                "model_view_budget_tokens": 32768,
+                "model_view_media_bytes": 25165824,
+                "model_view_decoded_bytes": 268435456,
                 "utf8_bytes_per_estimated_token": 2,
                 "unit_overhead_estimated_tokens": 16,
-                "policy_revision": "context-view-multimodal-window-v5",
+                "policy_revision": "context-view-multimodal-window-v6",
             },
         },
         resolved_contracts={},
@@ -623,12 +626,12 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         budget_checkpoint = await _payload(
             kernel, owner_kind="checkpoint.state",
             owner_id="checkpoint/context-budget/1",
-            value=b'{"phase":"FAILED","source_error_code":"CONTEXT_VIEW_DECODED_OVER_BUDGET"}',
+            value=b'{"phase":"FAILED","source_error_code":"CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED"}',
         )
         budget_input = {
             "owner": _owner_ref(budget_owner),
             "input_revision": 1, "step_seq": 1,
-            "source_error_code": "CONTEXT_VIEW_DECODED_OVER_BUDGET",
+            "source_error_code": "CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED",
             "checkpoint_id": budget_checkpoint.owner_id,
             "checkpoint_state": budget_checkpoint.canonical(),
         }

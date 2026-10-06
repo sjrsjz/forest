@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {"type": "object", "properties": {"found": {"const": false}}, "required": ["found"], "additionalProperties": false},
+    {
+      "type": "object",
+      "required": ["found", "step_seq", "selected_bitmap", "considered_count", "source_set_digest", "plan"],
+      "properties": {
+        "found": {"const": true},
+        "step_seq": {"type": "integer", "minimum": 1, "maximum": 256},
+        "selected_bitmap": {"type": "string", "maxLength": 4096, "pattern": "^[01]*$"},
+        "considered_count": {"type": "integer", "minimum": 0, "maximum": 4096},
+        "source_set_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "plan": {
+          "type": "object",
+          "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+          "properties": {
+            "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+            "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+            "owner_component_id": {"const": "conversation.scheduler"},
+            "owner_kind": {"const": "model.view.plan"},
+            "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

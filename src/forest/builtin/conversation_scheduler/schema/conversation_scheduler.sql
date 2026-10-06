@@ -643,8 +643,10 @@ CREATE TABLE context_model_view_plans (
     ),
     quote_payload_id text NOT NULL CHECK (octet_length(quote_payload_id) BETWEEN 1 AND 256),
     quote_payload_digest text NOT NULL CHECK (quote_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    quote_payload_owner_id text NOT NULL CHECK (octet_length(quote_payload_owner_id) BETWEEN 1 AND 512),
     plan_payload_id text NOT NULL CHECK (octet_length(plan_payload_id) BETWEEN 1 AND 256),
     plan_payload_digest text NOT NULL CHECK (plan_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    plan_payload_owner_id text NOT NULL CHECK (octet_length(plan_payload_owner_id) BETWEEN 1 AND 512),
     published_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,conversation_id,run_ref,step_seq),
     UNIQUE (bot_id,operation_id),
@@ -2554,6 +2556,7 @@ DECLARE
         'high_watermark_media_bytes','retain_media_bytes',
         'high_watermark_decoded_bytes','retain_decoded_bytes',
         'high_watermark_estimated_tokens','retain_estimated_tokens',
+        'model_view_budget_tokens','model_view_media_bytes','model_view_decoded_bytes',
         'utf8_bytes_per_estimated_token','unit_overhead_estimated_tokens'
     ];
     field text;
@@ -2562,7 +2565,7 @@ BEGIN
        OR NOT (policy ?& array_append(names,'policy_revision'))
        OR policy - array_append(names,'policy_revision') <> '{}'::jsonb
        OR policy->>'policy_revision' IS DISTINCT FROM
-          'context-view-multimodal-window-v5' THEN
+          'context-view-multimodal-window-v6' THEN
         RETURN false;
     END IF;
     FOREACH field IN ARRAY names LOOP
@@ -2586,6 +2589,9 @@ BEGIN
        AND (policy->>'high_watermark_estimated_tokens')::bigint BETWEEN 1024 AND 1048576
        AND (policy->>'retain_estimated_tokens')::bigint BETWEEN 1 AND
            (policy->>'high_watermark_estimated_tokens')::bigint-1
+       AND (policy->>'model_view_budget_tokens')::bigint BETWEEN 1024 AND 1048576
+       AND (policy->>'model_view_media_bytes')::bigint BETWEEN 1024 AND 268435456
+       AND (policy->>'model_view_decoded_bytes')::bigint BETWEEN 1024 AND 1073741824
        AND (policy->>'utf8_bytes_per_estimated_token')::bigint BETWEEN 1 AND 16
        AND (policy->>'unit_overhead_estimated_tokens')::bigint BETWEEN 0 AND 256;
 EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
@@ -2856,19 +2862,74 @@ BEGIN
         bot_id,conversation_id,session_ref,run_ref,step_seq,operation_id,input_digest,
         context_revision,context_view_revision,media_cost_revision,context_applied_seq,
         profile_digest,source_set_digest,considered_count,selected_bitmap,prior_plan_digest,
-        quote_payload_id,quote_payload_digest,plan_payload_id,plan_payload_digest
+        quote_payload_id,quote_payload_digest,quote_payload_owner_id,
+        plan_payload_id,plan_payload_digest,plan_payload_owner_id
     ) VALUES (
         requested_bot,requested_conversation,requested_session,requested_run,
         requested_step,requested_operation,requested_digest,
         lane.context_revision,lane.context_view_revision,lane.media_cost_revision,
         lane.context_applied_seq,requested_profile_digest,actual_source_digest,
         cardinality(source_ids),requested_bitmap,input->>'prior_plan_digest',
-        quote_ref->>'payload_id',quote_ref->>'digest',
-        plan_ref->>'payload_id',plan_ref->>'digest'
+        quote_ref->>'payload_id',quote_ref->>'digest',quote_ref->>'owner_id',
+        plan_ref->>'payload_id',plan_ref->>'digest',plan_ref->>'owner_id'
     );
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('plan',plan_ref,'step_seq',requested_step,
             'source_set_digest',actual_source_digest));
+END;
+$$;
+
+CREATE FUNCTION conversation_model_view_prior(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    actor jsonb := input->'actor';
+    requested_conversation text := actor->>'conversation_id';
+    requested_session text := input->>'session_ref';
+    requested_run text := input->>'run_ref';
+    lane record;
+    prior record;
+BEGIN
+    IF context->>'component_id' IS DISTINCT FROM 'conversation.scheduler'
+       OR context->>'port_name' IS DISTINCT FROM 'conversation.model-view.prior'
+       OR context->>'port_kind' IS DISTINCT FROM 'query'
+       OR requested_bot IS NULL OR requested_conversation IS NULL
+       OR requested_session IS NULL OR requested_run IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PRIOR_INVALID',
+                'message','Model view prior query is invalid','status',422));
+    END IF;
+    SELECT * INTO lane FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
+    IF lane.conversation_id IS NULL
+       OR lane.actor_owner_id IS DISTINCT FROM actor->>'owner_id'
+       OR lane.actor_epoch IS DISTINCT FROM (actor->>'epoch')::bigint
+       OR lane.actor_expires_at IS NULL OR lane.actor_expires_at<=clock_timestamp()
+       OR lane.active_session_ref IS DISTINCT FROM requested_session
+       OR lane.active_run_ref IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PRIOR_FENCE_CHANGED',
+                'message','Model view Run fence changed','status',409));
+    END IF;
+    SELECT * INTO prior FROM __forest_module_schema__.context_model_view_plans
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND run_ref=requested_run ORDER BY step_seq DESC LIMIT 1;
+    IF prior.plan_payload_id IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('found',false));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'found',true,'step_seq',prior.step_seq,
+            'selected_bitmap',prior.selected_bitmap,
+            'considered_count',prior.considered_count,
+            'source_set_digest',prior.source_set_digest,
+            'plan',jsonb_build_object(
+                'payload_id',prior.plan_payload_id,
+                'digest',prior.plan_payload_digest,
+                'owner_component_id','conversation.scheduler',
+                'owner_kind','model.view.plan',
+                'owner_id',prior.plan_payload_owner_id)));
 END;
 $$;
 
