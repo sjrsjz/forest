@@ -873,3 +873,6 @@ Context 单次窗口硬界对齐（2026-10-06）：conversation.scheduler 4.34.0
 
 
 多步 Agent 工具续轮验收（2026-10-07）：`agent.runtime` 4.47.0 的官方 Bot grant 增加可委派的 `tool.invoke`，用于按准确工具目标 Generation 签发有期限的 Kernel Effect 票据；先前只有 `provider.invoke`，使真实 ToolCall 停在 `PROPOSED`，Conversation 反复以 `CAPABILITY_DENIED` 结算。隔离 PostgreSQL 的完整 BotHost 场景现验证：首轮模型调用 `memory_recall_exact` 成功，工具因果记录入账；同一群在首轮工作期间到达的普通消息、新触发及触发后的尾部消息均先分类入队，没有同群并发响应；下一次模型调用仍属原 Run，包含首轮模型/工具记录和截至最后一条新触发的消息，保留不同 QQ 作者，排除其后的尾部消息；最终仅发送一次回复，静默阶段再将尾部消息排入 Context。该场景 `1 passed`，使用模拟 OneBot、模型和向量服务，未接触在线 Bot 或真实 QQ；长时高负载与真实供应商验收仍在 active goal 中。
+
+
+跨群图文联想整链验收（2026-10-07）：扩展隔离 BotHost 的真实 QiYu VL 大图召回用例：群 933179609 的图文来源由 Conversation 静默裁剪自动归档，TEXT/IMAGE 文档 facet 经真实嵌入端点与 Milvus 达到 READY；群 933179610 的图片提问命中原群 IMAGE facet 并进入聊天模型的有来源请求。模拟模型完成回复后，Memory 在最终回复事务中为实际投影的直接种子登记 `PENDING_ARCHIVE` 联想日志；再向提问群注入一条普通消息，由静默裁剪归档原触发源，日志自动提升为 `PROMOTED`，目标种子的 `ASSOCIATES_WITH` 关系两端为准确跨群源单元，`cross_trunk=true`。同一次用例随后完成管理员图文召回试验，`1 passed in 150.82s`；测试数据库和独立 Milvus 集合均已清理。OneBot 与聊天模型仍为替身，没有向真实 QQ 发送消息；这证明包间自动学习和提升闭环，不证明在线实例或数月负载。

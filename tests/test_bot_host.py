@@ -5260,6 +5260,57 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
         }
         assert b"image_url" in prepared.body
 
+        trigger_unit = "onebot-unit:" + hashlib.sha256(b"binding/main\x0097102").hexdigest()
+        async with asyncio.timeout(60):
+            while True:
+                async with host.store.pool.connection() as conn:
+                    journal = await (await conn.execute(
+                        sql.SQL(
+                            "SELECT trigger_source_unit_id,seed_source_unit_id,state "
+                            "FROM {}.association_journal WHERE bot_id=%s"
+                        ).format(sql.Identifier(namespace)), (settings.bot_id,),
+                    )).fetchall()
+                if clients[-1].sent and journal:
+                    break
+                await asyncio.sleep(0.2)
+        assert len(clients[-1].sent) == 1
+        assert any(
+            item["trigger_source_unit_id"] == trigger_unit
+            and item["seed_source_unit_id"] == document_unit
+            and item["state"] == "PENDING_ARCHIVE"
+            for item in journal
+        )
+
+        await ingest(933179610, 20003, 97103, "Conversation after reply.",
+                     mention=False, image=False)
+        async with asyncio.timeout(90):
+            while True:
+                async with host.store.pool.connection() as conn:
+                    journal = await (await conn.execute(
+                        sql.SQL(
+                            "SELECT state,contribution_id FROM {}.association_journal "
+                            "WHERE bot_id=%s AND trigger_source_unit_id=%s "
+                            "AND seed_source_unit_id=%s"
+                        ).format(sql.Identifier(namespace)),
+                        (settings.bot_id, trigger_unit, document_unit),
+                    )).fetchone()
+                    relation = await (await conn.execute(
+                        sql.SQL(
+                            "SELECT relation_kind,left_id,right_id,cross_trunk "
+                            "FROM {}.relation_contributions WHERE bot_id=%s "
+                            "AND contribution_id=%s"
+                        ).format(sql.Identifier(namespace)),
+                        (settings.bot_id, journal["contribution_id"] if journal else None),
+                    )).fetchone()
+                if journal and journal["state"] == "PROMOTED" and relation:
+                    break
+                await asyncio.sleep(0.2)
+        assert relation["relation_kind"] == "ASSOCIATES_WITH"
+        assert {relation["left_id"], relation["right_id"]} == {
+            trigger_unit, document_unit,
+        }
+        assert relation["cross_trunk"] is True
+
         trial_id = "trial/cross-vl-image"
         trial_actor = "subject/cross-vl-admin"
         generation_id = memory.generation_identity.generation_id
