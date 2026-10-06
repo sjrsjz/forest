@@ -6,10 +6,12 @@
     "context_revision", "context_view_revision", "source_component_id",
     "binding_ref", "platform", "channel_kind", "channel_ref", "thread_ref",
     "context_view_unit_count", "context_view_payload_bytes", "context_view_media_bytes", "context_view_decoded_bytes", "media_cost_revision", "context_archived_unit_count", "archive",
-    "offset", "next_offset", "total_units", "units"
+    "run_ref", "claimed_trigger_count", "offset", "next_offset", "total_units", "units"
   ],
   "properties": {
     "conversation_id": {"type": "string"},
+    "run_ref": {"type": ["string", "null"]},
+    "claimed_trigger_count": {"type": "integer", "minimum": 0},
     "context_applied_seq": {"type": "integer", "minimum": 0},
     "classified_through_seq": {"type": "integer", "minimum": 0},
     "context_revision": {"type": "integer", "minimum": 0},
@@ -78,13 +80,14 @@
         "ingress_seq", "payload_id", "payload_digest", "payload_byte_length", "payload_owner_component_id",
         "payload_owner_kind", "payload_owner_id", "author_payload_id",
         "author_payload_digest", "author_owner_component_id", "author_owner_kind",
-        "author_owner_id", "author_subject_ref", "trigger_decision", "media_parts"
+        "author_owner_id", "author_subject_ref", "trigger_decision", "required_for_run", "media_parts"
       ],
       "properties": {
         "conversation_id": {"type": "string"}, "unit_id": {"type": "string"},
         "context_revision": {"type": "integer", "minimum": 1},
         "unit_index": {"type": "integer", "minimum": 0},
         "kind": {"enum": ["INPUT", "AGENT_STEP", "REPLY", "CONTROL", "EFFECT"]},
+        "required_for_run": {"type": "boolean"},
         "source_component_id": {"type": "string"}, "source_kind": {"type": "string"},
         "source_id": {"type": "string"}, "input_batch_id": {"$ref": "#/$defs/nullable_string"},
         "event_id": {"$ref": "#/$defs/nullable_string"},

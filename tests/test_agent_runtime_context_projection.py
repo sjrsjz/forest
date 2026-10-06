@@ -96,6 +96,7 @@ async def test_agent_package_interleaves_run_history_at_input_revision_boundary(
             "author_owner_component_id": author["owner_component_id"],
             "author_owner_kind": author["owner_kind"],
             "author_owner_id": author["owner_id"],
+            "media_parts": [],
         }
 
     snapshot = {
@@ -103,6 +104,9 @@ async def test_agent_package_interleaves_run_history_at_input_revision_boundary(
         "context_applied_seq": 2,
         "context_revision": 2,
         "context_view_revision": 0,
+        "media_cost_revision": 0,
+        "context_view_media_bytes": 0,
+        "required_trigger_unit_ids": ["first", "second"],
         "binding_ref": "binding:onebot:1",
         "platform": "onebot",
         "channel_kind": "GROUP",
@@ -164,7 +168,7 @@ async def test_agent_package_interleaves_run_history_at_input_revision_boundary(
     ]
     assert view["units"][0]["author"]["principal_ref"] == "qq:100"
     assert view["units"][2]["author"]["principal_ref"] == "qq:200"
-    assert view["required_unit_ids"] == ["second"]
+    assert view["required_unit_ids"] == ["first", "second"]
     assert [item["last_trigger_ref"] for item in view["trigger_claims"]] == [
         "trigger:1", "trigger:2"
     ]

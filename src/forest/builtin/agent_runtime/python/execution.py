@@ -612,12 +612,12 @@ class AgentExecution:
     async def _model_snapshot(self, request: dict, run: dict, step_seq: int) -> dict:
         envelope = await self.ctx.services.call(
             "conversation.context.snapshot",
-            {"actor": request["actor"]},
+            {"actor": request["actor"], "run_ref": run["run_id"]},
             operation_id=stable(
                 "context-snapshot", run["run_id"],
                 run["progress"]["input_revision"], step_seq,
             ),
-            contract_major=4,
+            contract_major=5,
             timeout=120,
         )
         reader = ContextSnapshotReader(self.ctx, bot_id=self.ctx.identity["bot_id"])
@@ -625,6 +625,7 @@ class AgentExecution:
             envelope,
             expected={
                 "conversation_id": run["conversation_ref"],
+                "run_ref": run["run_id"],
                 "context_applied_seq": run["progress"]["selected_input_end_seq"],
                 "context_revision": run["progress"]["context_revision"],
                 "context_view_revision": run["progress"]["context_view_revision"],

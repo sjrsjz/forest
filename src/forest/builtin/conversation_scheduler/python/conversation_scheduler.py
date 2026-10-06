@@ -196,6 +196,7 @@ class ConversationScheduler(Plugin):
             "author_owner_id": None,
             "author_subject_ref": None,
             "trigger_decision": None,
+            "required_for_run": False,
             "media_parts": [],
         }
 
@@ -223,24 +224,30 @@ class ConversationScheduler(Plugin):
             level += 1
         return nodes, level
 
-    @service("conversation.context.snapshot", semantics="idempotent", contract="4.0")
+    @service("conversation.context.snapshot", semantics="idempotent", contract="5.0")
     async def context_snapshot(self, payload, ctx):
         actor = payload["actor"]
+        run_ref = payload.get("run_ref")
         offset = 0
         metadata = None
         payload_bytes = None
         raw_pages = []
         archive_present = False
         while True:
+            page_request = {"actor": actor, "offset": offset, "limit": 32}
+            if run_ref is not None:
+                page_request["run_ref"] = run_ref
             page = await ctx.queries.call(
                 "conversation.context-page",
-                {"actor": actor, "offset": offset, "limit": 32},
-                contract_major=3,
+                page_request,
+                contract_major=4,
             )
             current_metadata = {
                 key: page[key]
                 for key in (
                     "conversation_id",
+                    "run_ref",
+                    "claimed_trigger_count",
                     "context_applied_seq",
                     "classified_through_seq",
                     "context_revision",
@@ -294,6 +301,21 @@ class ConversationScheduler(Plugin):
                 )
             offset = next_offset
         unit_count = metadata["total_units"] + int(archive_present)
+        required_trigger_unit_ids = [
+            unit["unit_id"]
+            for _, units in raw_pages
+            for unit in units
+            if unit["required_for_run"]
+        ]
+        if (
+            len(required_trigger_unit_ids) != metadata["claimed_trigger_count"]
+            or len(set(required_trigger_unit_ids)) != len(required_trigger_unit_ids)
+            or (run_ref is None and required_trigger_unit_ids)
+        ):
+            raise ForestError(
+                "CONTEXT_REQUIRED_TRIGGER_CONFLICT",
+                "Claimed triggers differ from active Context units", 409,
+            )
         if metadata["context_view_unit_count"] != metadata["total_units"]:
             raise ForestError(
                 "CONTEXT_SNAPSHOT_COUNT_CONFLICT",
@@ -363,10 +385,11 @@ class ConversationScheduler(Plugin):
             )
             pages.append(self._exact(saved))
         roots, tree_depth = await self._snapshot_tree(pages, ctx)
-        owner_id = ctx.operations.stable("context-snapshot-manifest:v4")
+        owner_id = ctx.operations.stable("context-snapshot-manifest:v5")
         document = {
-            "protocol": "forest.conversation-context-snapshot/4",
+            "protocol": "forest.conversation-context-snapshot/5",
             **metadata,
+            "required_trigger_unit_ids": required_trigger_unit_ids,
             "unit_count": unit_count,
             "tree_depth": tree_depth,
             "roots": roots,
@@ -378,8 +401,10 @@ class ConversationScheduler(Plugin):
             parents=roots,
         )
         return {
-            "protocol": "forest.conversation-context-snapshot/4",
+            "protocol": "forest.conversation-context-snapshot/5",
             "conversation_id": metadata["conversation_id"],
+            "run_ref": metadata["run_ref"],
+            "claimed_trigger_count": metadata["claimed_trigger_count"],
             "context_applied_seq": metadata["context_applied_seq"],
             "context_revision": metadata["context_revision"],
             "context_view_revision": metadata["context_view_revision"],

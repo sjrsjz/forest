@@ -17,6 +17,9 @@ _REF_FIELDS = {
 _MANIFEST_FIELDS = {
     "protocol",
     "conversation_id",
+    "run_ref",
+    "claimed_trigger_count",
+    "required_trigger_unit_ids",
     "context_applied_seq",
     "classified_through_seq",
     "context_revision",
@@ -273,10 +276,11 @@ class ContextSnapshotReader:
     async def load(self, envelope: dict, *, expected: dict) -> dict:
         if (
             not isinstance(envelope, dict)
-            or envelope.get("protocol") != "forest.conversation-context-snapshot/4"
+            or envelope.get("protocol") != "forest.conversation-context-snapshot/5"
             or set(expected)
             != {
                 "conversation_id",
+                "run_ref",
                 "context_applied_seq",
                 "context_revision",
                 "context_view_revision",
@@ -306,6 +310,20 @@ class ContextSnapshotReader:
                     "Conversation snapshot differs from the durable Agent input fence",
                     409,
                 )
+        if (
+            manifest.get("claimed_trigger_count") != envelope.get("claimed_trigger_count")
+            or not _integer(manifest.get("claimed_trigger_count"), maximum=4096)
+            or not isinstance(manifest.get("required_trigger_unit_ids"), list)
+            or len(manifest["required_trigger_unit_ids"]) > 4096
+            or any(
+                not isinstance(unit_id, str) or not 1 <= len(unit_id) <= 256
+                for unit_id in manifest["required_trigger_unit_ids"]
+            )
+        ):
+            raise ForestError(
+                "AGENT_CONTEXT_REQUIRED_CONFLICT",
+                "Conversation trigger count differs from its snapshot", 409,
+            )
         for name in (
             "media_cost_revision", "context_view_media_bytes",
             "context_view_decoded_bytes",
@@ -327,6 +345,7 @@ class ContextSnapshotReader:
         active_offset = 0
         media_bytes = 0
         decoded_bytes = 0
+        required_trigger_unit_ids = []
         archive_seen = False
         for page_index, page in enumerate(pages):
             if (
@@ -351,6 +370,11 @@ class ContextSnapshotReader:
                         "AGENT_CONTEXT_PAGE_INVALID", "Context unit is invalid", 409
                     )
                 is_archive = unit.get("source_kind") == "context.archive"
+                if type(unit.get("required_for_run")) is not bool:
+                    raise ForestError(
+                        "AGENT_CONTEXT_REQUIRED_CONFLICT",
+                        "Context unit has no frozen Run requirement", 409,
+                    )
                 if is_archive:
                     if archive_seen or page_index != 0 or unit_index != 0:
                         raise ForestError(
@@ -361,6 +385,13 @@ class ContextSnapshotReader:
                     archive_seen = True
                 else:
                     active_offset += 1
+                if unit["required_for_run"]:
+                    if is_archive or unit.get("kind") != "INPUT":
+                        raise ForestError(
+                            "AGENT_CONTEXT_REQUIRED_CONFLICT",
+                            "Only claimed trigger inputs can be required", 409,
+                        )
+                    required_trigger_unit_ids.append(unit.get("unit_id"))
                 _unit_ref(unit, "payload")
                 _unit_ref(unit, "author")
                 media_parts = unit.get("media_parts")
@@ -384,6 +415,9 @@ class ContextSnapshotReader:
             or manifest["context_view_unit_count"] != active_offset
             or manifest["context_view_media_bytes"] != media_bytes
             or manifest["context_view_decoded_bytes"] != decoded_bytes
+            or manifest["required_trigger_unit_ids"] != required_trigger_unit_ids
+            or len(required_trigger_unit_ids) != manifest["claimed_trigger_count"]
+            or len(set(required_trigger_unit_ids)) != len(required_trigger_unit_ids)
         ):
             raise ForestError(
                 "AGENT_CONTEXT_COUNT_CONFLICT",
@@ -514,6 +548,7 @@ class ContextSnapshotReader:
             "context_view_revision": snapshot["context_view_revision"],
             "media_cost_revision": snapshot["media_cost_revision"],
             "context_view_media_bytes": snapshot["context_view_media_bytes"],
+            "required_trigger_unit_ids": snapshot["required_trigger_unit_ids"],
             "source_manifest": snapshot["snapshot"],
             "units": projected,
         }
@@ -734,27 +769,7 @@ class ContextSnapshotReader:
                 500,
             )
 
-        latest_revision = progress["input_revision"]
-        latest_trigger_seqs = {
-            item["last_trigger_ingress_seq"]
-            for item in inputs
-            if item["input_revision"] == latest_revision
-        }
-        required = [
-            unit["unit_id"]
-            for unit in context_units
-            if unit.get("ingress_seq") in latest_trigger_seqs
-        ]
-        if not required and context_units:
-            latest_batches = {
-                item["input_batch_ref"]
-                for item in inputs
-                if item["input_revision"] == latest_revision
-            }
-            latest = [
-                unit for unit in context_units if unit.get("input_batch_id") in latest_batches
-            ]
-            required = [(latest or context_units)[-1]["unit_id"]]
+        required = base["required_trigger_unit_ids"]
         conversation = {
             **source_base,
             "source_event_id": f"conversation:{snapshot['conversation_id']}",

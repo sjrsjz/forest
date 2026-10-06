@@ -679,6 +679,9 @@ CREATE INDEX inbox_classification_idx
     ON inbox_messages(bot_id, conversation_id, ingress_seq, classification_state);
 CREATE INDEX trigger_pending_idx
     ON conversation_triggers(bot_id, conversation_id, status, ingress_seq, trigger_id);
+CREATE INDEX trigger_claimed_run_idx
+    ON conversation_triggers(bot_id, conversation_id, claimed_run_ref, event_id)
+    WHERE status='CLAIMED';
 CREATE INDEX active_trigger_claim_group_idx
     ON trigger_claim_groups(bot_id,conversation_id,claim_ref)
     WHERE claim_state='ACTIVE';
@@ -2301,6 +2304,7 @@ DECLARE
     actor jsonb := input->'actor';
     requested_bot text := context->>'bot_id';
     requested_conversation text := actor->>'conversation_id';
+    requested_run text := input->>'run_ref';
     requested_owner text := actor->>'owner_id';
     requested_epoch bigint := (actor->>'epoch')::bigint;
     requested_offset integer := (input->>'offset')::integer;
@@ -2312,11 +2316,13 @@ DECLARE
     total_units bigint;
     returned_count integer;
     next_offset integer := NULL;
+    claimed_trigger_count integer := 0;
 BEGIN
     IF actor IS NULL OR requested_conversation IS NULL OR requested_owner IS NULL
        OR requested_epoch IS NULL OR requested_epoch<1
        OR requested_offset IS NULL OR requested_offset<0 OR requested_offset>1000000
-       OR requested_limit IS NULL OR requested_limit<1 OR requested_limit>32 THEN
+       OR requested_limit IS NULL OR requested_limit<1 OR requested_limit>32
+       OR (requested_run IS NOT NULL AND octet_length(requested_run) NOT BETWEEN 1 AND 256) THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(
@@ -2349,6 +2355,23 @@ BEGIN
             )
         );
     END IF;
+    IF requested_run IS NOT NULL
+       AND lane.active_run_ref IS DISTINCT FROM requested_run THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONTEXT_SNAPSHOT_RUN_FENCE_CHANGED',
+                'message','Conversation Run differs from the requested snapshot','status',409
+            )
+        );
+    END IF;
+    IF requested_run IS NOT NULL THEN
+        SELECT count(*) INTO claimed_trigger_count
+        FROM __forest_module_schema__.conversation_triggers t
+        WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
+          AND t.claimed_session_ref=lane.active_session_ref
+          AND t.claimed_run_ref=requested_run AND t.status='CLAIMED';
+    END IF;
     SELECT * INTO compaction
     FROM __forest_module_schema__.context_compactions
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation
@@ -2373,6 +2396,13 @@ BEGIN
         'author_owner_id',u.author_owner_id,
         'author_subject_ref',u.author_subject_ref,
         'trigger_decision',u.trigger_decision,
+        'required_for_run',requested_run IS NOT NULL AND EXISTS (
+            SELECT 1 FROM __forest_module_schema__.conversation_triggers t
+            WHERE t.bot_id=u.bot_id AND t.conversation_id=u.conversation_id
+              AND t.event_id=u.event_id AND t.status='CLAIMED'
+              AND t.claimed_session_ref=lane.active_session_ref
+              AND t.claimed_run_ref=requested_run
+        ),
         'media_parts',COALESCE((
             SELECT jsonb_agg(jsonb_build_object(
                 'part_index',m.part_index,'media_ref',m.media_ref,
@@ -2437,6 +2467,8 @@ BEGIN
         'protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object(
             'conversation_id',requested_conversation,
+            'run_ref',requested_run,
+            'claimed_trigger_count',claimed_trigger_count,
             'context_applied_seq',lane.context_applied_seq,
             'classified_through_seq',lane.classified_through_seq,
             'context_revision',lane.context_revision,

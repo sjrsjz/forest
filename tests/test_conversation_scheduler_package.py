@@ -407,6 +407,28 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             "author_subject_ref": "qq:42",
             "trigger_decision": "TRIGGER",
         }
+        async with store.pool.connection() as conn:
+            page = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_context_page(%s::jsonb,%s::jsonb) AS value")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                        "actor": actor, "run_ref": "run/1", "offset": 0, "limit": 32,
+                    })),
+                )
+            ).fetchone()
+            stale = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.conversation_context_page(%s::jsonb,%s::jsonb) AS value")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                        "actor": actor, "run_ref": "run/other", "offset": 0, "limit": 32,
+                    })),
+                )
+            ).fetchone()
+        assert page["value"]["value"]["claimed_trigger_count"] == 1
+        assert page["value"]["value"]["units"][0]["required_for_run"] is True
+        assert stale["value"]["error"]["code"] == "CONTEXT_SNAPSHOT_RUN_FENCE_CHANGED"
 
         authority_envelope = {
             "protocol": "forest.uow-step/1",
@@ -1537,10 +1559,10 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     ),
                 )
             ).fetchone()
-        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 4)]
+        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 5)]
         route = FrozenServiceRoute(
             service_id="conversation.context.snapshot",
-            version=4,
+            version=5,
             caller_component_id="kernel.runtime",
             provider_component_id="conversation.scheduler",
             provider_generation_id=instance.generation_identity.generation_id,
@@ -1568,7 +1590,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ),
             {},
         )
-        assert snapshot["protocol"] == "forest.conversation-context-snapshot/4"
+        assert snapshot["protocol"] == "forest.conversation-context-snapshot/5"
+        assert snapshot["run_ref"] is None
+        assert snapshot["claimed_trigger_count"] == 0
         assert snapshot["context_view_media_bytes"] == 2048
         assert snapshot["context_view_decoded_bytes"] == 4
         assert snapshot["context_view_revision"] == 1
@@ -1577,6 +1601,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             await kernel.payload.read_bytes(snapshot["snapshot"]["payload_id"])
         )
         assert manifest["archive"]["compaction_id"] == archive["compaction_id"]
+        assert manifest["required_trigger_unit_ids"] == []
         assert manifest["tree_depth"] == 0
         assert len(manifest["roots"]) == 1
         page = json.loads(
@@ -2109,6 +2134,23 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         assert final["trigger_claim"]["ref"] == claim_ref
         assert final["trigger_claim"]["last_trigger_ref"] == "prefill-trigger/130"
         assert final["trigger_claim"]["last_trigger_ingress_seq"] == 130
+        async with store.pool.connection() as conn:
+            pages = []
+            for offset in range(0, 130, 32):
+                row = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.conversation_context_page(%s::jsonb,%s::jsonb) AS value")
+                        .format(sql.Identifier(namespace)),
+                        (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                            "actor": prefill_actor, "run_ref": "prefill-run",
+                            "offset": offset, "limit": 32,
+                        })),
+                    )
+                ).fetchone()
+                assert row["value"]["ok"] is True
+                pages.append(row["value"]["value"])
+        assert all(page["claimed_trigger_count"] == 130 for page in pages)
+        assert sum(unit["required_for_run"] for page in pages for unit in page["units"]) == 130
         async with store.pool.connection() as conn:
             segments = await (
                 await conn.execute(
