@@ -54,6 +54,10 @@ class HostIdentityAuthority:
                             "INSERT INTO forest_host.supervisor_lease(host_id) VALUES (%s)",
                             (self.store.host_id,),
                         )
+                        await conn.execute(
+                            "INSERT INTO forest_host.runtime_graph_clock(host_id) VALUES (%s)",
+                            (self.store.host_id,),
+                        )
                     row = await (await conn.execute(
                         "SELECT * FROM forest_host.host_identity WHERE singleton FOR SHARE"
                     )).fetchone()
@@ -104,6 +108,9 @@ class HostIdentityAuthority:
         lease = await (await conn.execute(
             "SELECT host_id FROM forest_host.supervisor_lease"
         )).fetchall()
+        clocks = await (await conn.execute(
+            "SELECT host_id FROM forest_host.runtime_graph_clock"
+        )).fetchall()
         registered = await (await conn.execute(
             "SELECT namespace::text AS namespace FROM forest_host.schema_bundles "
             "WHERE host_id=%s", (self.store.host_id,),
@@ -115,10 +122,13 @@ class HostIdentityAuthority:
             "AND nspname NOT LIKE 'pg_toast_temp_%'"
         )).fetchall()
         if ({row["relname"] for row in relations}
-                != {"host_identity", "schema_bundles", "supervisor_lease"}
+                != {"host_identity", "schema_bundles", "runtime_graph_clock",
+                    "runtime_graphs", "runtime_generations", "runtime_graph_members",
+                    "supervisor_lease"}
                 or {row["proname"] for row in functions} != {"reject_identity_change"}
                 or {row["tgname"] for row in triggers} != {"host_identity_immutable"}
                 or [row["host_id"] for row in lease] != [self.store.host_id]
+                or [row["host_id"] for row in clocks] != [self.store.host_id]
                 or {row["nspname"] for row in namespaces}
                 != {"forest_host", *(row["namespace"] for row in registered)}):
             raise ForestError("HOST_SCHEMA_TAMPERED", "Host schema inventory differs", 409)

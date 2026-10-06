@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+from dataclasses import replace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -14,7 +15,9 @@ from psycopg import sql
 
 from forest.errors import ForestError
 from forest.packages import storage_bundle_digest
+from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.schema_bundles import StorageBundleSpec
+from forest.storage.host_generation import HostGenerationAuthority
 from forest.storage.host_identity import HostIdentityAuthority, HostLease
 from forest.storage.host_schema_bundles import HostSchemaBundleInstaller
 from forest.storage.host_store import HostStore
@@ -63,6 +66,65 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
         assert wrong_bundle.value.code == "INVALID_STORAGE_BUNDLE"
         lease = await first.claim(first_incarnation)
         assert (await first.claim(first_incarnation)).owner_epoch == lease.owner_epoch
+
+        package_digest = "sha256:" + "1" * 64
+        binding = PreparedGenerationBinding(
+            component_id="host.sample", requires=(), package_id="host.sample",
+            package_version="1.0.0", package_digest=package_digest,
+            driver="python-worker", trust_level="official",
+            descriptor_digest=package_digest, route_contract_digest=package_digest,
+            management_contract_digest=package_digest, management_ui_digest=package_digest,
+            config_revision=1, config_payload_id="config/host.sample/1",
+            config_payload_digest=package_digest, instance_id="instance/host.sample",
+            worker_incarnation="worker/host.sample", state_schema=1,
+            state_contract_digest=package_digest, capability_grants_digest=package_digest,
+            data_admission=False, control_admission=True,
+            storage=RuntimeStorageBinding(
+                schema_id=spec.schema_id, schema_version=spec.schema_version,
+                namespace=spec.namespace, baseline_sha256=spec.baseline_sha256,
+                package_digest=digest, repository_contract=spec.repository_contract,
+                execution_profile="declarative",
+            ),
+        )
+
+        class Configuration:
+            async def activate_in(self, conn, **_kwargs):
+                await conn.execute("SELECT 1")
+
+        generations = HostGenerationAuthority(first_store)
+        graph = await generations.prepare_graph(lease, [binding], str(uuid4()))
+        assert graph == await generations.prepare_graph(lease, [binding], graph.activation_id)
+        assert await generations.current_graph() is None
+        assert await generations.publish_graph(
+            lease, graph, configuration_activators={"host.sample": Configuration()},
+        ) == graph.graph_revision
+        assert await generations.current_graph() == graph
+        assert (await generations.verify_active_generation(
+            component_id="host.sample", generation_id=graph.generations["host.sample"],
+            admission_lane="CONTROL",
+        ))["route_epoch"] == 1
+        newer_binding = replace(
+            binding, config_revision=2, config_payload_id="config/host.sample/2",
+        )
+        newer = await generations.prepare_graph(lease, [newer_binding], str(uuid4()))
+        assert await generations.publish_graph(
+            lease, newer, configuration_activators={"host.sample": Configuration()},
+        ) == newer.graph_revision
+        assert await generations.current_graph() == newer
+        selection_graph, selection = await generations.active_package_selection()
+        assert selection_graph == newer
+        assert selection["host.sample"]["package_digest"] == package_digest
+        assert selection["host.sample"]["configuration"]["revision"] == 2
+        assert (await generations.verify_active_generation(
+            component_id="host.sample", generation_id=newer.generations["host.sample"],
+            admission_lane="CONTROL",
+        ))["route_epoch"] == 2
+        with pytest.raises(ForestError) as old_generation:
+            await generations.verify_active_generation(
+                component_id="host.sample", generation_id=graph.generations["host.sample"],
+                admission_lane="CONTROL",
+            )
+        assert old_generation.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
         with pytest.raises(ForestError) as busy:
             await first.claim(second_incarnation)
         assert busy.value.code == "HOST_SUPERVISOR_BUSY"
@@ -83,6 +145,15 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
             await first.release(lease)
             successor = await second.claim(second_incarnation)
             assert successor.owner_epoch == lease.owner_epoch + 1
+            with pytest.raises(ForestError) as stale_graph:
+                await generations.prepare_graph(lease, [binding], str(uuid4()))
+            assert stale_graph.value.code == "STALE_HOST_SUPERVISOR"
+            with pytest.raises(ForestError) as old_owner:
+                await HostGenerationAuthority(second_store).verify_active_generation(
+                    component_id="host.sample", generation_id=newer.generations["host.sample"],
+                    admission_lane="CONTROL",
+                )
+            assert old_owner.value.code == "RUNTIME_GENERATION_NOT_ACTIVE"
             with pytest.raises(ForestError) as stale:
                 await first.renew(lease)
             assert stale.value.code == "STALE_HOST_LEASE"
