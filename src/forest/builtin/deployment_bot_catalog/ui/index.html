@@ -12,7 +12,7 @@
     button{cursor:pointer}button:disabled{opacity:.5;cursor:default}input{min-width:180px;flex:1}
     .list{max-height:430px;overflow:auto}.row{display:grid;grid-template-columns:minmax(200px,2fr) 110px 110px 90px minmax(110px,1fr) auto;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid #203e30;min-width:730px}
     .row code,.row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.identity{display:flex;flex-direction:column;min-width:0}.identity small{color:#91ac9a}
-    .footer{justify-content:space-between;border-top:1px solid #29493a}
+    .footer{justify-content:space-between;border-top:1px solid #29493a}.actions{display:flex;gap:6px}
   </style>
 </head>
 <body>
@@ -53,7 +53,11 @@
         await load(false);
       }catch(error){status.textContent=error.message;button.disabled=false;}
     };
-    row.append(button);items.append(row);
+    const open=document.createElement('button');open.type='button';open.textContent='打开工作区';
+    open.disabled=item.supply_state!=='READY'||item.observed_state!=='ONLINE';
+    open.onclick=()=>send('open-scope',{scope_kind:'bot',source_id:item.bot_id});
+    const actions=document.createElement('div');actions.className='actions';actions.append(open,button);
+    row.append(actions);items.append(row);
   }
   async function load(append){
     const search=$('search').value.trim();

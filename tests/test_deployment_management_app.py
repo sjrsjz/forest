@@ -540,18 +540,26 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
                 }],
             }]
 
+    class BrowserGenerationAuthority(_GenerationAuthority):
+        async def status(self):
+            return {
+                "bot_id": "bot/browser-smoke", "graph_state": "ACTIVE",
+                "graph_id": "graph/browser-smoke",
+            }
+
     host = SimpleNamespace(
         settings=SimpleNamespace(bot_id="bot/browser-smoke"),
         registry=Registry(),
-        generation_authority=_GenerationAuthority(),
+        generation_authority=BrowserGenerationAuthority(),
         _kernel=SimpleNamespace(
             configurations={"kernel.authorization": _PolicyConfiguration()},
         ),
     )
 
     class Supervisor:
-        async def management_scopes(self):
-            return ({
+        async def resolve_management_scope(self, bot_id):
+            assert bot_id == "bot/browser-smoke"
+            return {
                 "scope_id": "browser-smoke",
                 "scope_kind": "bot",
                 "bot_id": "bot/browser-smoke",
@@ -559,7 +567,7 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
                 "available": True,
                 "desired_state": "ONLINE",
                 "observed_state": "ONLINE",
-            },)
+            }
 
         @asynccontextmanager
         async def management_host(self, scope_id):
@@ -610,7 +618,8 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
                 page.locator('#login-form [name="password"]').fill("correct-password")
                 page.locator("#login-form button").click()
                 expect(page.locator("#console")).to_be_visible()
-                page.locator("#scope-select").select_option("bot:browser-smoke")
+                page.goto(origin + "/?bot=bot%2Fbrowser-smoke")
+                expect(page.locator("#scope-select")).to_have_value("bot:browser-smoke")
                 page.locator("#module-nav button").filter(has_text="memory.graph").click()
                 frame = page.frame_locator("iframe.package-ui-frame")
                 expect(frame.locator('[data-tab="trial"]')).to_be_visible()
@@ -764,9 +773,9 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
     host.registry = _Registry(SimpleNamespace(management_contract=contract))
 
     class Supervisor:
-        async def management_scopes(self):
-            return (
-                {
+        async def resolve_management_scope(self, bot_id):
+            assert bot_id == "bot/managed"
+            return {
                     "scope_id": "bot-scope-test",
                     "scope_kind": "bot",
                     "bot_id": "bot/managed",
@@ -774,8 +783,7 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
                     "available": True,
                     "desired_state": "ONLINE",
                     "observed_state": "ONLINE",
-                },
-            )
+                }
 
         @asynccontextmanager
         async def management_host(self, scope_id):
@@ -838,12 +846,20 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
         deployment = await client.get("/management/v1/runtime")
         assert [scope["scope_id"] for scope in deployment.json()["scopes"]] == [
             "deployment",
-            "bot-scope-test",
         ]
+        resolved = await client.post(
+            "/management/v1/scopes/resolve", headers=headers,
+            json={"scope_kind": "bot", "source_id": "bot/managed"},
+        )
+        assert resolved.status_code == 200
+        assert resolved.json()["scope_id"] == "bot-scope-test"
         runtime = await client.get(
             "/management/v1/scopes/bot/bot-scope-test/runtime"
         )
         assert runtime.json()["runtime"]["bot_id"] == "bot/managed"
+        assert [scope["scope_id"] for scope in runtime.json()["scopes"]] == [
+            "deployment", "bot-scope-test",
+        ]
         assert [item["component_id"] for item in runtime.json()["modules"]] == [
             "test.component"
         ]

@@ -61,6 +61,7 @@ class MultiBotSupervisor:
         self._closing = False
         self._wake = asyncio.Event()
         self._runners: dict[str, _BotRunner] = {}
+        self._scope_bots: dict[str, str] = {}
         self._renewal_task: asyncio.Task | None = None
         self._reconcile_task: asyncio.Task | None = None
 
@@ -108,34 +109,24 @@ class MultiBotSupervisor:
     def management_scope_id(bot_id: str) -> str:
         return "bot-" + hashlib.sha256(bot_id.encode("utf-8")).hexdigest()[:32]
 
-    async def management_scopes(self) -> tuple[dict, ...]:
-        scopes = []
-        for bot in await self.catalog.list_bots():
-            runner = self._runners.get(bot["bot_id"])
-            scopes.append(
-                {
-                    "scope_id": self.management_scope_id(bot["bot_id"]),
-                    "scope_kind": "bot",
-                    "bot_id": bot["bot_id"],
-                    "label": bot["display_name"],
-                    "available": (
-                        runner is not None
-                        and runner.host is not None
-                        and runner.management_accepting
-                    ),
-                    "desired_state": bot["desired_state"],
-                    "observed_state": bot["observed_state"],
-                }
-            )
-        return tuple(scopes)
+    async def resolve_management_scope(self, bot_id: str) -> dict:
+        bot = await self.catalog.inspect(bot_id)
+        scope_id = self.management_scope_id(bot_id)
+        async with self.management_host(scope_id):
+            return {
+                "scope_id": scope_id,
+                "scope_kind": "bot",
+                "bot_id": bot_id,
+                "label": bot["display_name"],
+                "available": True,
+                "desired_state": bot["desired_state"],
+                "observed_state": bot["observed_state"],
+            }
 
     @asynccontextmanager
     async def management_host(self, scope_id: str):
-        selected = None
-        for bot_id, runner in self._runners.items():
-            if self.management_scope_id(bot_id) == scope_id:
-                selected = runner
-                break
+        bot_id = self._scope_bots.get(scope_id)
+        selected = self._runners.get(bot_id) if bot_id is not None else None
         if selected is None:
             raise ForestError("BOT_MANAGEMENT_SCOPE_NOT_FOUND", "Bot scope does not exist", 404)
         async with selected.management_condition:
@@ -168,6 +159,7 @@ class MultiBotSupervisor:
                 return_exceptions=True,
             )
         self._runners.clear()
+        self._scope_bots.clear()
         for name in ("_reconcile_task", "_renewal_task"):
             task = getattr(self, name)
             setattr(self, name, None)
@@ -239,6 +231,7 @@ class MultiBotSupervisor:
                                 name="bot-runtime/" + bot["bot_id"],
                             )
                             self._runners[bot["bot_id"]] = runner
+                            self._scope_bots[self.management_scope_id(bot["bot_id"])] = bot["bot_id"]
                         runner.last_seen_cycle = cycle
                     if len(page) < 256:
                         break
@@ -280,6 +273,7 @@ class MultiBotSupervisor:
         for bot_id, runner in tuple(self._runners.items()):
             if runner.task is not None and runner.task.done():
                 self._runners.pop(bot_id, None)
+                self._scope_bots.pop(self.management_scope_id(bot_id), None)
                 failure = runner.task.exception()
                 if failure is not None:
                     raise failure

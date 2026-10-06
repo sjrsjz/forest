@@ -896,7 +896,7 @@ priority = "P1"
         untrusted_manifest = untrusted_source / "module.toml"
         untrusted_manifest.write_text(
             untrusted_manifest.read_text(encoding="utf-8").replace(
-                'version = "1.6.0"', 'version = "1.6.2"', 1
+                'version = "1.6.1"', 'version = "1.6.2"', 1
             ), encoding="utf-8",
         )
         untrusted = package_catalog.build(untrusted_source)
@@ -912,7 +912,7 @@ priority = "P1"
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.6.0"', 'version = "1.6.1"', 1
+                'version = "1.6.1"', 'version = "1.6.2"', 1
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(next_source)
@@ -1435,7 +1435,7 @@ async def test_deployment_package_controller_restores_selected_artifact_after_re
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.0.0"', 'version = "1.0.1"', 1
+                'version = "1.0.1"', 'version = "1.0.2"', 1
             ),
             encoding="utf-8",
         )
@@ -1553,7 +1553,7 @@ async def test_deployment_package_controller_restores_selected_artifact_after_re
         ) == {"records": [], "next_before": None}
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.0.1"', 'version = "1.0.2"', 1
+                'version = "1.0.2"', 'version = "1.0.3"', 1
             ),
             encoding="utf-8",
         )
@@ -3918,9 +3918,8 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
         assert [item["bot_id"] for item in first_page + second_page] == [
             "bot/alpha", "bot/beta"
         ]
-        scopes = {item["bot_id"]: item for item in await supervisor.management_scopes()}
-        assert scopes["bot/alpha"]["available"] is True
-        assert scopes["bot/beta"]["available"] is True
+        assert (await supervisor.resolve_management_scope("bot/alpha"))["available"] is True
+        assert (await supervisor.resolve_management_scope("bot/beta"))["available"] is True
         beta_scope = supervisor.management_scope_id("bot/beta")
         async with supervisor.management_host(beta_scope) as managed_host:
             assert managed_host is instances["bot/beta"]
@@ -3937,8 +3936,11 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
             supervisor.notify()
 
             async def alpha_withdrawn():
-                rows = {item["bot_id"]: item for item in await supervisor.management_scopes()}
-                return rows["bot/alpha"]["available"] is False
+                try:
+                    await supervisor.resolve_management_scope("bot/alpha")
+                except ForestError as error:
+                    return error.code == "BOT_MANAGEMENT_UNAVAILABLE"
+                return False
 
             await _eventually(alpha_withdrawn)
             assert instances["bot/alpha"].closed is False
@@ -3953,8 +3955,8 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
         assert instances["bot/alpha"].closed is True
         assert instances["bot/beta"].closed is False
         assert (await repository.inspect("bot/beta"))["observed_state"] == "ONLINE"
-        scopes = {item["bot_id"]: item for item in await supervisor.management_scopes()}
-        assert scopes["bot/alpha"]["available"] is False
+        with pytest.raises(ForestError):
+            await supervisor.resolve_management_scope("bot/alpha")
         with pytest.raises(ForestError) as unavailable:
             async with supervisor.management_host(supervisor.management_scope_id("bot/alpha")):
                 pass

@@ -49,6 +49,12 @@ class SetupCompleteInput(BaseModel):
     password: str = Field(min_length=12, max_length=1024)
 
 
+class ScopeResolveInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    scope_kind: str = Field(min_length=1, max_length=64)
+    source_id: str = Field(min_length=1, max_length=128)
+
+
 def create_deployment_management_app(
     *,
     deployment_id: str,
@@ -159,9 +165,14 @@ def create_deployment_management_app(
             )
         return session
 
-    async def runtime_projection(gateway) -> dict:
-        result = await gateway.runtime()
-        return {**result, "scopes": await scopes.list_scopes()}
+    async def runtime_projection(
+        gateway, *, current_scope: dict | None = None, runtime_result: dict | None = None
+    ) -> dict:
+        result = runtime_result if runtime_result is not None else await gateway.runtime()
+        listed = await scopes.list_scopes()
+        if current_scope is not None:
+            listed.append(current_scope)
+        return {**result, "scopes": listed}
 
     @app.get(
         "/management/v1/bootstrap-ui/{component_id}/{package_digest}/{artifact_sha256}"
@@ -287,11 +298,27 @@ def create_deployment_management_app(
         async with scopes.gateway("deployment", "deployment", session) as gateway:
             return await runtime_projection(gateway)
 
+    @app.post("/management/v1/scopes/resolve")
+    async def resolve_scope(request: Request, body: ScopeResolveInput):
+        session = await authenticated(request, csrf=True)
+        return await scopes.resolve(body.scope_kind, body.source_id, session)
+
     @app.get("/management/v1/scopes/{scope_kind}/{scope_id}/runtime")
     async def scoped_runtime(scope_kind: str, scope_id: str, request: Request):
         session = await authenticated(request)
         async with scopes.gateway(scope_kind, scope_id, session) as gateway:
-            return await runtime_projection(gateway)
+            current_scope = None
+            if scope_kind == "bot":
+                runtime = await gateway.runtime()
+                current_scope = await scopes.resolve(
+                    "bot", runtime["runtime"]["bot_id"], session
+                )
+                if current_scope["scope_id"] != scope_id:
+                    raise ForestError("MANAGEMENT_SCOPE_NOT_FOUND", "Management scope does not exist", 404)
+            return await runtime_projection(
+                gateway, current_scope=current_scope,
+                runtime_result=runtime if scope_kind == "bot" else None,
+            )
 
     @app.get(
         "/management/v1/scopes/{scope_kind}/{scope_id}/modules/"

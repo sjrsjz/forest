@@ -1,6 +1,8 @@
 # Forest 实现状态
 
-多 Bot 监督器分页调和（2026-10-07）：部署内核提供仅包含 READY 且期望 ONLINE Bot 的键集分页读取，Supervisor 每轮分批发现运行目标，不再每秒全量装入 OFFLINE 目录；跨页意图竞态下，未见的已有 Runner 会在撤下前定点复核，关闭期间不再创建新实例。隔离 PostgreSQL 的双 Bot 独立生命周期与启动中意图撤回用例通过（2 passed）。Web scope 列表仍全量展开目录，host 作用域包图仍未落地；部署内核 SQL 基线变更要求未上线库重建，本轮未切换在线实例。
+Web Bot 工作区按需发现（2026-10-07）：部署管理 runtime 只返回部署 scope，不再在每次页面刷新时展开全部 Bot 目录；`deployment.bot-catalog` 继续提供有界分页列表，并将规范 Bot ID 交给壳层。壳层通过带会话和 CSRF 的 `scopes/resolve` 向内核解析单个在线 Bot scope，再由目标 Bot gateway 重新验证可用性与操作权限。当前 Bot scope 仅随其自身 runtime 返回；目录 UI 可打开工作区，`?bot=<Bot ID>` 可直达。Web API 用例 4 passed、1 skipped，真实 Edge 浏览器冒烟 1 passed；隔离 PostgreSQL 的部署目录用例先有 25 passed、2 项旧版号夹具失败，修正夹具后两项复跑通过，Supervisor 生命周期与 scope 索引用例另有 4 passed。Ruff 与脚本语法检查通过。本次未切换在线实例。
+
+多 Bot 监督器分页调和（2026-10-07）：部署内核提供仅包含 READY 且期望 ONLINE Bot 的键集分页读取，Supervisor 每轮分批发现运行目标，不再每秒全量装入 OFFLINE 目录；跨页意图竞态下，未见的已有 Runner 会在撤下前定点复核，关闭期间不再创建新实例。隔离 PostgreSQL 的双 Bot 独立生命周期与启动中意图撤回用例通过（2 passed）。Web scope 已改为按需解析单个 Bot，host 作用域包图仍未落地；部署内核 SQL 基线变更要求未上线库重建，本轮未切换在线实例。
 
 部署供应 Job 有界恢复（2026-10-07）：内核唯一 Job 账本的 claim 端口不再无界更新所有过期 RUNNING 和耗尽重试记录；两类状态各从到期部分索引以 `SKIP LOCKED` 每轮最多处理 32 条，过期 RUNNING 保持 `BLOCKED_UNKNOWN` 而不盲目重试物理建库。隔离 PostgreSQL 以 66 条历史 Job 验证分两轮排空，并复验租约过期与 READY 原子发布（3 passed）。部署内核 SQL 基线已改变，未上线部署数据库须重建；本轮未切换在线实例。
 

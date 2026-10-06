@@ -54,6 +54,28 @@ function notice(message) {
   $('notice').classList.toggle('hidden', !message);
 }
 
+async function openScope(scopeKind, sourceId, epoch = null) {
+  const scope = await api('/management/v1/scopes/resolve', {
+    method: 'POST', body: JSON.stringify({scope_kind: scopeKind, source_id: sourceId}),
+  });
+  if (epoch !== null && epoch !== workspaceEpoch) return;
+  apiBase = scopeBase(scope);
+  await refresh();
+}
+
+async function openBotScopeFromUrl() {
+  const url = new URL(location.href);
+  const botId = url.searchParams.get('bot');
+  if (!botId) return;
+  url.searchParams.delete('bot');
+  history.replaceState(null, '', url);
+  try {
+    await openScope('bot', botId);
+  } catch (error) {
+    notice(error.message);
+  }
+}
+
 async function watchConfigurationRebuild(requestId, componentId, revision, scope, epoch) {
   const endpoint = '/management/v1/modules/component.worker-host/queries/configuration-rebuild';
   const deadline = Date.now() + 180000;
@@ -252,6 +274,14 @@ async function mountSandboxedPackage(root, row, contribution, epoch) {
           },
           configuration,
         });
+      } else if (message.type === 'open-scope') {
+        if (typeof message.scope_kind !== 'string'
+          || !/^[a-z][a-z0-9.-]{0,63}$/.test(message.scope_kind)
+          || typeof message.source_id !== 'string'
+          || message.source_id.length < 1 || message.source_id.length > 128) {
+          throw new Error('Invalid scope request');
+        }
+        await openScope(message.scope_kind, message.source_id, epoch);
       } else if (message.type === 'set-draft') {
         if (!message.value || Array.isArray(message.value) || typeof message.value !== 'object') {
           throw new Error('模块 UI 草稿必须是对象');
@@ -615,7 +645,8 @@ function renderScopes(rows) {
   scopes = rows;
   $('scope-picker').classList.remove('hidden');
   const select = $('scope-select');
-  const selected = select.value || scopeKey(scopes[0]);
+  const selected = scopeKey(scopes.find(scope => scopeBase(scope) === apiBase)
+    || scopes.find(scope => scopeKey(scope) === select.value) || scopes[0]);
   select.replaceChildren();
   for (const scope of scopes) {
     const option = document.createElement('option');
@@ -947,6 +978,7 @@ $('login-form').onsubmit = async event => {
     });
     currentRole = session.subject.role;
     await refresh();
+    await openBotScopeFromUrl();
     $('login').classList.add('hidden');
     $('console').classList.remove('hidden');
     $('login-error').textContent = '';
@@ -969,6 +1001,7 @@ async function start() {
     const session = await api('/management/v1/auth/session');
     currentRole = session.subject.role;
     await refresh();
+    await openBotScopeFromUrl();
     $('console').classList.remove('hidden');
     return;
   } catch (_error) {

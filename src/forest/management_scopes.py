@@ -645,7 +645,10 @@ class BotManagementScopeProvider:
         self.ticket_authority = ticket_authority
 
     async def list_scopes(self) -> tuple[dict, ...]:
-        return await self.supervisor.management_scopes()
+        return ()
+
+    async def resolve(self, bot_id: str) -> dict:
+        return await self.supervisor.resolve_management_scope(bot_id)
 
     @asynccontextmanager
     async def gateway(self, scope_id: str):
@@ -695,6 +698,22 @@ class ManagementScopeRegistry:
                 seen.add(identity)
                 result.append(row)
         return result
+
+    async def resolve(self, scope_kind: str, source_id: str, session) -> dict:
+        principal = getattr(session, "subject", session)
+        if getattr(principal, "role", None) not in {"ADMIN", "AUDITOR"}:
+            raise ForestError("MANAGEMENT_AUTHORIZATION_DENIED", "Role is invalid", 403)
+        provider = self.providers.get(scope_kind)
+        if provider is None or not hasattr(provider, "resolve"):
+            raise ForestError("MANAGEMENT_SCOPE_NOT_FOUND", "Management scope does not exist", 404)
+        row = await provider.resolve(source_id)
+        if (row.get("scope_kind") != scope_kind
+            or row.get("bot_id") != source_id
+            or not isinstance(row.get("scope_id"), str)
+            or _SCOPE_ID.fullmatch(row["scope_id"]) is None
+            or row.get("available") is not True):
+            raise ForestError("MANAGEMENT_SCOPE_PROVIDER_INVALID", "Invalid resolved scope", 500)
+        return row
 
     @asynccontextmanager
     async def gateway(self, scope_kind: str, scope_id: str, session):
