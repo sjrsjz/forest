@@ -3133,7 +3133,7 @@ def package_runtime_descriptor(
     ):
         raise ForestError(
             "KERNEL_MANAGEMENT_AUTHORITY_UNAVAILABLE",
-            "Kernel management ports require official deployment authority", 403,
+            "Kernel management ports require an official scope authority", 403,
         )
     effect_driver_factories = dict(effect_driver_factories or {})
     declared_effect_services = {

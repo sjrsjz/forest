@@ -16,6 +16,7 @@ import pytest
 from psycopg import sql
 
 from forest.errors import ForestError
+from forest.host_kernel_management import HostKernelManagementAuthority, HostKernelQueryAuthority
 from forest.host_runtime import HostRuntimeScope
 from forest.package_capabilities import PackageCallScope, PackageServiceRoute
 from forest.package_domain_authority import PostgresPackageDomainAuthority
@@ -76,6 +77,7 @@ LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
                                     'value', request->>'value')
     )
 $$;
+CREATE TABLE host_sample_native (value text NOT NULL);
 """
         config_spec = StorageBundleSpec(
             component_id="host.sample", schema_id="host.sample.configuration",
@@ -170,6 +172,74 @@ $$;
             {"value": "visible"}, parent_call_id="call:host-ledger",
             timeout_seconds=5,
         ) == {"host_id": host_id, "value": "visible"}
+        class NativeRead:
+            async def query(self, payload):
+                return {"host_id": host_id, "value": payload["value"]}
+
+        query_decl = {"name": "host.sample.native-read", "kind": "native-read"}
+        query_authority = HostKernelQueryAuthority(
+            first_store, generations, component_id="host.sample",
+            ports=(query_decl,), handlers={("host.sample", "native-read"): NativeRead()},
+        )
+        native_scope = SimpleNamespace(
+            scope_kind="host", scope_id=host_id, component_id="host.sample",
+            bot_id=None, generation_id=graph.generations["host.sample"],
+            call_operation_id="native/host.sample/1",
+        )
+        assert await query_authority.invoke_query(
+            native_scope, query_decl, {"value": "visible"},
+            parent_call_id="call:native-read", timeout_seconds=5,
+        ) == {"host_id": host_id, "value": "visible"}
+        with pytest.raises(ForestError) as wrong_native_scope:
+            await query_authority.invoke_query(
+                SimpleNamespace(**{**vars(native_scope), "scope_id": "host/" + uuid4().hex}),
+                query_decl, {}, parent_call_id="call:wrong-scope", timeout_seconds=5,
+            )
+        assert wrong_native_scope.value.code == "KERNEL_MANAGEMENT_BINDING_INVALID"
+
+        class NativeWrite:
+            async def prepare(self, payload, *, operation_id):
+                return payload["value"]
+
+            async def execute_in(self, conn, prepared, *, operation_id):
+                await conn.execute(
+                    sql.SQL("INSERT INTO {}.host_sample_native(value) VALUES (%s)").format(
+                        sql.Identifier(config_spec.namespace)
+                    ), (prepared,),
+                )
+                return {"value": prepared}
+
+        command_decl = {"name": "host.sample.native-write", "kind": "native-write"}
+        command_authority = HostKernelManagementAuthority(
+            first_store, generations, component_id="host.sample",
+            ports=(command_decl,), handlers={("host.sample", "native-write"): NativeWrite()},
+        )
+
+        async def before_native_write(_conn):
+            return None
+
+        native_args = {
+            "parent_call_id": "call:native-write", "timeout_seconds": 5,
+            "before_write": before_native_write, "management_authorization": object(),
+        }
+        with pytest.raises(ForestError) as rejected_native:
+            await command_authority.invoke_management_action(
+                native_scope, command_decl, {"value": "rolled-back"},
+                result_validator=lambda _result: False, **native_args,
+            )
+        assert rejected_native.value.code == "MODULE_MANAGEMENT_OUTPUT_INVALID"
+        assert await command_authority.invoke_management_action(
+            native_scope, command_decl, {"value": "committed"},
+            result_validator=lambda result: result == {"value": "committed"},
+            **native_args,
+        ) == {"value": "committed"}
+        async with first_store.pool.connection() as conn:
+            rows = await conn.execute(
+                sql.SQL("SELECT value FROM {}.host_sample_native").format(
+                    sql.Identifier(config_spec.namespace)
+                )
+            )
+            assert [row["value"] for row in await rows.fetchall()] == ["committed"]
         with pytest.raises(ForestError) as foreign_scope:
             await domain.invoke_query(
                 replace(call, scope_id="host/" + uuid4().hex),

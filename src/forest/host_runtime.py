@@ -13,11 +13,19 @@ from forest.storage.host_schema_bundles import HostSchemaBundleInstaller
 class HostRuntimeScope(ControlRuntimeConfigurationPort):
     scope_kind = "host"
 
-    def __init__(self, store, supervisor, *, graph_change_authority=None) -> None:
+    def __init__(
+        self, store, supervisor, *, graph_change_authority=None,
+        kernel_management_handlers=None, kernel_query_handlers=None,
+        effect_driver_factories=None,
+    ) -> None:
         self.store = store
         self.scope_id = store.host_id
         self.supervisor = supervisor
         self.graph_change_authority = graph_change_authority
+        self.kernel_management_handlers = dict(kernel_management_handlers or {})
+        self.kernel_query_handlers = dict(kernel_query_handlers or {})
+        self.kernel_owned_work_authorities = {}
+        self.effect_driver_factories = dict(effect_driver_factories or {})
         self.generation_authority = HostGenerationAuthority(store)
         self.schema_bundle_installer = HostSchemaBundleInstaller(store)
         self.service_operation_ledger = HostPackageServiceOperationLedger(
