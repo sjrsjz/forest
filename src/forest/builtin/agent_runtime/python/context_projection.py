@@ -217,6 +217,7 @@ class ContextSnapshotReader:
         self.bot_id = bot_id
         self._seen: set[str] = set()
         self._node_count = 0
+        self._history_cache: dict[tuple[str, str], dict] = {}
 
     async def _read(self, reference: dict, kind: str) -> dict:
         exact = _exact_ref(reference, component="conversation.scheduler")
@@ -639,8 +640,27 @@ class ContextSnapshotReader:
         run: dict,
         history: dict,
         logical_step_id: str,
+        selected_context_unit_ids: frozenset[str] | None = None,
     ) -> dict:
         """Interleave Conversation Context with this Run's committed causal history."""
+        if selected_context_unit_ids is not None:
+            active_ids = {
+                unit["unit_id"] for unit in snapshot["units"]
+                if unit.get("source_kind") != "context.archive"
+            }
+            if not selected_context_unit_ids <= active_ids:
+                raise ForestError(
+                    "AGENT_MODEL_VIEW_PLAN_INVALID",
+                    "Selected Context source is absent from the frozen snapshot", 409,
+                )
+            snapshot = {
+                **snapshot,
+                "units": [
+                    unit for unit in snapshot["units"]
+                    if unit.get("source_kind") == "context.archive"
+                    or unit["unit_id"] in selected_context_unit_ids
+                ],
+            }
         base = await self.project(snapshot)
         progress = run.get("progress")
         inputs = run.get("inputs")
@@ -688,12 +708,21 @@ class ContextSnapshotReader:
                     refs.append(self._history_ref(row, "tool"))
                     roles.append((row, "tool"))
 
+        async def history_document(reference: dict) -> dict:
+            key = (reference["payload_id"], reference["digest"])
+            document = self._history_cache.get(key)
+            if document is None:
+                document = _json_object(
+                    await self.ctx.payloads.read_bytes(reference), "Agent history"
+                )
+                self._history_cache[key] = document
+            return document
+
         documents = []
         for start in range(0, len(refs), 8):
-            bodies = await asyncio.gather(
-                *(self.ctx.payloads.read_bytes(ref) for ref in refs[start : start + 8])
-            )
-            documents.extend(_json_object(body, "Agent history") for body in bodies)
+            documents.extend(await asyncio.gather(
+                *(history_document(ref) for ref in refs[start : start + 8])
+            ))
         bodies_by_role = {
             (row["turn_id"], role): document
             for (row, role), document in zip(roles, documents, strict=True)

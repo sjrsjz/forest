@@ -11,7 +11,7 @@ import pytest
 from forest.packages import digest_json
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
-from model_view_quote import select_model_view, verify_model_view
+from model_view_quote import quote_and_read_plan, verify_model_view
 
 
 @pytest.mark.asyncio
@@ -78,22 +78,26 @@ async def test_agent_filters_only_conversation_members_and_preserves_causal_hist
         "bot_id": "bot/1", "run_id": "run/1", "input_revision": 1,
         "context_snapshot_ref": snapshot_ref,
         "required_unit_ids": ["ctx:2"],
-        "units": [
-            {"unit_id": "ctx:1", "role": "user"},
-            {"unit_id": "ctx:2", "role": "user"},
-            {"unit_id": "agent-turn:1", "role": "assistant"},
-        ],
+        "units": [{"unit_id": "agent-turn:1", "role": "assistant"}],
     }
-    selected = await select_model_view(
+    selection = await quote_and_read_plan(
         ctx, request={"actor": {"conversation_id": "conversation/1"},
                       "session_ref": "session/1"},
         run={"conversation_ref": "conversation/1", "run_id": "run/1"},
-        step_seq=1, raw_snapshot=raw, model_snapshot=view,
+        step_seq=1, raw_snapshot=raw, fixed_view=view,
         preset_ref=preset_ref, preset_context=["persona"], tools=[],
         evidence_ref=None, output_tokens=1024,
     )
-    assert [unit["unit_id"] for unit in selected["units"]] == ["ctx:2", "agent-turn:1"]
-    assert selected["model_view_plan_ref"] == plan_ref
+    assert selection["selected_unit_ids"] == ["ctx:2"]
+    assert bodies["quote/1"]["fixed_units"] == [{"unit_id": "agent-turn:1", "role": "assistant"}]
+    selected = {
+        **view,
+        "units": [{"unit_id": "ctx:2", "role": "user"}, *view["units"]],
+        "model_view_plan_ref": selection["plan_ref"],
+        "model_view_quote_ref": selection["quote_ref"],
+        "model_view_selected_unit_ids": selection["selected_unit_ids"],
+        "model_view_omitted_unit_ids": selection["omitted_unit_ids"],
+    }
     await verify_model_view(
         ctx, snapshot=selected, preset_context=["persona"], tools=[],
         evidence_ref=None, output_tokens=1024,

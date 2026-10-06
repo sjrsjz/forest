@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from context_projection import ContextSnapshotReader, claim_summaries
 from model_execution import ModelExecution
-from model_view_quote import select_model_view
+from model_view_quote import quote_and_read_plan
 from tool_execution import ToolExecution
 from turn_recording import TurnRecorder, stable, tool_directory
 
@@ -636,19 +636,31 @@ class AgentExecution:
                 "context_view_revision": run["progress"]["context_view_revision"],
             },
         )
-        model_snapshot = await reader.model_view(
+        history = await self._history(run["run_id"])
+        logical_step_id = f"{run['run_id']}:step:{step_seq}"
+        fixed_view = await reader.model_view(
             snapshot,
             run=run,
-            history=await self._history(run["run_id"]),
-            logical_step_id=f"{run['run_id']}:step:{step_seq}",
+            history=history,
+            logical_step_id=logical_step_id,
+            selected_context_unit_ids=frozenset(),
         )
-        return await select_model_view(
+        plan = await quote_and_read_plan(
             self.ctx, request=request, run=run, step_seq=step_seq,
-            raw_snapshot=snapshot, model_snapshot=model_snapshot,
+            raw_snapshot=snapshot, fixed_view=fixed_view,
             preset_ref=self._preset_ref(), preset_context=preset_context,
             tools=tools, evidence_ref=evidence_ref,
             output_tokens=self.config["output_tokens"],
         )
+        model_snapshot = await reader.model_view(
+            snapshot, run=run, history=history, logical_step_id=logical_step_id,
+            selected_context_unit_ids=frozenset(plan["selected_unit_ids"]),
+        )
+        model_snapshot["model_view_plan_ref"] = plan["plan_ref"]
+        model_snapshot["model_view_quote_ref"] = plan["quote_ref"]
+        model_snapshot["model_view_selected_unit_ids"] = plan["selected_unit_ids"]
+        model_snapshot["model_view_omitted_unit_ids"] = plan["omitted_unit_ids"]
+        return model_snapshot
 
     @staticmethod
     def _memory_query_id(run: dict, step_seq: int) -> str:

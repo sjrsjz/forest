@@ -22,9 +22,9 @@ def _exact(reference: dict) -> dict:
     )}
 
 
-async def select_model_view(
+async def quote_and_read_plan(
     ctx, *, request: dict, run: dict, step_seq: int, raw_snapshot: dict,
-    model_snapshot: dict, preset_ref: dict, preset_context: list[str],
+    fixed_view: dict, preset_ref: dict, preset_context: list[str],
     tools: list[dict], evidence_ref: dict | None, output_tokens: int,
 ) -> dict:
     """Quote causal sources; only Conversation chooses Context membership."""
@@ -32,9 +32,9 @@ async def select_model_view(
         unit["unit_id"] for unit in raw_snapshot["units"]
         if unit.get("source_kind") != "context.archive"
     }
-    fixed_units = [
-        unit for unit in model_snapshot["units"] if unit["unit_id"] not in active_ids
-    ]
+    fixed_units = fixed_view["units"]
+    if any(unit["unit_id"] in active_ids for unit in fixed_units):
+        raise ForestError("AGENT_MODEL_VIEW_QUOTE_INVALID", "Fixed quote contains Context history", 409)
     evidence = await ctx.payloads.read_json(evidence_ref) if evidence_ref else None
     declarations = [{"type": "function", "function": tool} for tool in tools]
     quote = {
@@ -48,8 +48,8 @@ async def select_model_view(
         "context_view_revision": raw_snapshot["context_view_revision"],
         "context_applied_seq": raw_snapshot["context_applied_seq"],
         "media_cost_revision": raw_snapshot["media_cost_revision"],
-        "context_snapshot": model_snapshot["context_snapshot_ref"],
-        "input_revision": model_snapshot["input_revision"],
+        "context_snapshot": fixed_view["context_snapshot_ref"],
+        "input_revision": fixed_view["input_revision"],
         "core_prompt": compose_core_instructions(declarations),
         "preset_context": preset_context,
         "tools": tools,
@@ -59,7 +59,7 @@ async def select_model_view(
         "output_tokens": output_tokens,
     }
     owner_id = f"model-view:{run['run_id']}:step:{step_seq}:{_digest(quote)}"
-    parents = [model_snapshot["context_snapshot_ref"], preset_ref]
+    parents = [fixed_view["context_snapshot_ref"], preset_ref]
     if evidence_ref:
         parents.append(evidence_ref)
     stored = await ctx.payloads.put_json(
@@ -81,7 +81,7 @@ async def select_model_view(
         not isinstance(plan, dict)
         or plan.get("protocol") != "forest.model-view-plan/1"
         or plan.get("quote") != quote_ref
-        or plan.get("context_snapshot") != model_snapshot["context_snapshot_ref"]
+        or plan.get("context_snapshot") != fixed_view["context_snapshot_ref"]
         or plan.get("run_ref") != run["run_id"]
         or plan.get("step_seq") != step_seq
         or plan.get("context_revision") != raw_snapshot["context_revision"]
@@ -98,17 +98,14 @@ async def select_model_view(
         raise ForestError("AGENT_MODEL_VIEW_PLAN_INVALID", "Conversation membership repeats a source", 409)
     if set(selected) | set(omitted) != active_ids or set(selected) & set(omitted):
         raise ForestError("AGENT_MODEL_VIEW_PLAN_INVALID", "Conversation membership differs from the snapshot", 409)
-    if not set(model_snapshot["required_unit_ids"]) <= set(selected):
+    if not set(fixed_view["required_unit_ids"]) <= set(selected):
         raise ForestError("AGENT_MODEL_VIEW_PLAN_INVALID", "Required triggers are absent", 409)
-    model_snapshot["units"] = [
-        unit for unit in model_snapshot["units"]
-        if unit["unit_id"] not in active_ids or unit["unit_id"] in selected
-    ]
-    model_snapshot["model_view_plan_ref"] = plan_ref
-    model_snapshot["model_view_quote_ref"] = quote_ref
-    model_snapshot["model_view_selected_unit_ids"] = selected
-    model_snapshot["model_view_omitted_unit_ids"] = omitted
-    return model_snapshot
+    return {
+        "plan_ref": plan_ref,
+        "quote_ref": quote_ref,
+        "selected_unit_ids": selected,
+        "omitted_unit_ids": omitted,
+    }
 
 
 async def verify_model_view(

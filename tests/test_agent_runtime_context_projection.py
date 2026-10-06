@@ -172,3 +172,31 @@ async def test_agent_package_interleaves_run_history_at_input_revision_boundary(
     assert [item["last_trigger_ref"] for item in view["trigger_claims"]] == [
         "trigger:1", "trigger:2"
     ]
+
+    old = {"text": "optional old context"}
+    old_author = {"display_name": "Carol", "external_user_id": "300"}
+    values["payload:old"] = old
+    values["payload:old-author"] = old_author
+    snapshot["units"].insert(0, unit(
+        "old", None, 0,
+        _ref("payload:old", old, "conversation.scheduler", "context.input", "event:old"),
+        _ref("payload:old-author", old_author, "adapter.onebot", "author.identity", "qq:300"),
+        "qq:300",
+    ))
+    selected_context = _Context(values)
+    read_bytes = selected_context.payloads.read_bytes
+
+    async def selected_read(reference):
+        assert reference["payload_id"] not in {"payload:old", "payload:old-author"}
+        return await read_bytes(reference)
+
+    selected_context.payloads.read_bytes = selected_read
+    selected_view = await ContextSnapshotReader(
+        selected_context, bot_id="bot:1"
+    ).model_view(
+        snapshot, run=run, history=history, logical_step_id="model-request:2",
+        selected_context_unit_ids=frozenset({"first", "second"}),
+    )
+    assert [item["unit_id"] for item in selected_view["units"]] == [
+        "first", "agent-turn:turn:1", "second",
+    ]
