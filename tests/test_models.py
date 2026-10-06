@@ -13,14 +13,28 @@ from pathlib import Path
 import pytest
 
 from forest.errors import ForestError
-from forest.model_contract import MediaSnapshot, ModelCapabilities
+from forest.model_contract import MAX_REQUEST_BYTES, MediaSnapshot, ModelCapabilities
+from forest.model_contract import _encode as _contract_encode
 from forest.model_transport import ChatCompletionsClient
 from forest.official_bot_provisioning import validate_provider_configuration
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 from agent_protocol import ProtocolRepairView
 from model_execution import _learning_candidates
+from model_projection import _encode as _input_encode
 from model_projection import prepare_model_request
+
+
+def test_model_json_byte_bound_is_distinct_from_invalid_json():
+    with pytest.raises(ForestError) as exceeded:
+        _input_encode({"text": "x" * MAX_REQUEST_BYTES})
+    assert exceeded.value.code == "MODEL_INPUT_BYTES_EXCEEDED"
+    with pytest.raises(ForestError) as invalid:
+        _input_encode({"value": float("nan")})
+    assert invalid.value.code == "MODEL_INPUT_INVALID"
+    with pytest.raises(ForestError) as shared:
+        _contract_encode({"text": "x" * 32}, limit=16)
+    assert shared.value.code == "MODEL_INPUT_INVALID"
 
 
 def unit(identifier="u1", text="hello", *, user="alice", group="group-a", parts=None, role="user"):

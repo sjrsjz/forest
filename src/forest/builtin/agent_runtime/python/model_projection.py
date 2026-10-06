@@ -30,14 +30,20 @@ from forest.model_contract import (
     PreparedModelRequest,
     _calls,
     _decode,
-    _encode,
     _error,
     _identifier,
 )
+from forest.model_contract import _encode as _contract_encode
 
 PROJECTION_REVISION = "forest-model-view-v2"
 MEMORY_EVIDENCE_REVISION = "forest-memory-evidence-v1"
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
+
+
+def _encode(value: Any, *, limit: int = MAX_REQUEST_BYTES) -> bytes:
+    return _contract_encode(
+        value, limit=limit, size_error_code="MODEL_INPUT_BYTES_EXCEEDED"
+    )
 
 
 def _tools(value: Sequence[dict], capabilities: ModelCapabilities) -> list[dict]:

@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -630,14 +631,14 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         with pytest.raises(ForestError) as stale_budget:
             await _lease_operation(
                 store, participant, generation_id,
-                "agent.fail-context-budget-record",
+                "agent.fail-unsendable-input-record",
                 {**budget_input, "input_revision": 2},
                 "agent-context-budget/package/stale",
             )
-        assert stale_budget.value.code == "AGENT_CONTEXT_BUDGET_BOUNDARY_CLOSED"
+        assert stale_budget.value.code == "AGENT_UNSENDABLE_INPUT_BOUNDARY_CLOSED"
         settled_budget = await _lease_operation(
             store, participant, generation_id,
-            "agent.fail-context-budget-record", budget_input,
+            "agent.fail-unsendable-input-record", budget_input,
             "agent-context-budget/package/1",
         )
         assert settled_budget == {
@@ -710,6 +711,73 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                     timeout_seconds=10,
                 )
         assert mismatched_reason.value.code == "AGENT_RUN_NOT_TERMINAL"
+
+        wire_start = copy.deepcopy(budget_start)
+        wire_start["input"].update(
+            conversation_ref="conversation/onebot/group/wire-bound",
+            session_id="session/agent-package/wire-bound",
+            run_id="run/agent-package/wire-bound",
+        )
+        wire_batch = wire_start["input"]["input_batch"]
+        wire_batch.update(
+            input_batch_ref="input-batch/agent-package/wire-bound",
+            input_batch_digest=digest_json({"batch": "wire-bound"}),
+            source_manifest_digest=digest_json({"source": "wire-bound"}),
+            trigger_claim={
+                "ref": "claim:" + "4" * 64, "count": 1,
+                "last_trigger_ref": "trigger/wire-bound",
+                "last_trigger_ingress_seq": 1,
+                "digest": digest_json({"claim": "wire-bound"}),
+            },
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            await participant.invoke_in(
+                conn, "agent.start-run-record", wire_start,
+                operation_id="agent-run-start/package/wire-bound",
+                causal_root_kind="conversation.run",
+                causal_root_id="run/agent-package/wire-bound",
+                parent_call_id="call:agent-package/wire-bound/start",
+                timeout_seconds=10,
+            )
+        wire_owner = await _lease_operation(
+            store, participant, generation_id, "agent.acquire-run-record",
+            {"run_id": "run/agent-package/wire-bound",
+             "owner_id": "agent-worker/wire-bound", "lease_seconds": 120},
+            "agent-run-acquire/package/wire-bound",
+        )
+        wire_checkpoint = await _payload(
+            kernel, owner_kind="checkpoint.state",
+            owner_id="checkpoint/wire-bound/1",
+            value=b'{"phase":"FAILED","source_error_code":"MODEL_INPUT_BYTES_EXCEEDED"}',
+        )
+        wire_terminal = await _lease_operation(
+            store, participant, generation_id,
+            "agent.fail-unsendable-input-record", {
+                "owner": _owner_ref(wire_owner),
+                "input_revision": 1, "step_seq": 1,
+                "source_error_code": "MODEL_INPUT_BYTES_EXCEEDED",
+                "checkpoint_id": wire_checkpoint.owner_id,
+                "checkpoint_state": wire_checkpoint.canonical(),
+            },
+            "agent-unsendable-input/package/wire-bound",
+        )
+        assert wire_terminal == {
+            "run_id": "run/agent-package/wire-bound",
+            "state": "FAILED", "error_code": "AGENT_MODEL_INPUT_BYTES_EXCEEDED",
+        }
+        wire_run = await instance.management_contract.query(
+            "agent.run", {"run_id": "run/agent-package/wire-bound"}
+        )
+        assert wire_run["current"]["model_request_id"] is None
+        wire_sessions = await instance.management_contract.query(
+            "agent.sessions.page", {
+                "conversation_ref": "conversation/onebot/group/wire-bound",
+                "state": "FAILED", "limit": 1,
+            }
+        )
+        assert wire_sessions["items"][0]["terminal_reason_code"] == (
+            "AGENT_MODEL_INPUT_BYTES_EXCEEDED"
+        )
 
         model_start = {
             **start_envelope,

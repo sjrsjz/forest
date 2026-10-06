@@ -5,6 +5,6 @@
   "properties": {
     "run_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "state": {"const": "FAILED"},
-    "error_code": {"const": "AGENT_CONTEXT_REQUIRED_OVER_BUDGET"}
+    "error_code": {"enum": ["AGENT_CONTEXT_REQUIRED_OVER_BUDGET", "AGENT_MODEL_INPUT_BYTES_EXCEEDED"]}
   }
 }

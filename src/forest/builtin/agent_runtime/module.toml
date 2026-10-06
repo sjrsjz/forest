@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.39.1"
+version = "4.40.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -79,7 +79,7 @@ requests = [
   "uow.execute:agent.renew-run-lease",
   "uow.execute:agent.release-run-lease",
   "uow.execute:agent.fail-exhausted-model",
-  "uow.execute:agent.fail-context-budget",
+  "uow.execute:agent.fail-unsendable-input",
   "uow.execute:agent.cancel-run",
   "uow.execute:agent.cancel-prepared",
   "uow.execute:agent.block-frozen-model",
@@ -201,9 +201,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.29.1"
+schema_version = "2.30.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "d4d4a3a1379b717786e2ec3ce934db5fd415db554de2ed5396a75ae805d4f643"
+baseline_sha256 = "d78314fb01c71e1fc5fc8e8b72285365e16c765907224eaba8d8d4c3af75f93f"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -472,11 +472,11 @@ owner_kind = "checkpoint.state"
 owner_id_path = "/input/checkpoint_id"
 
 [[components.unit_of_work_participants]]
-name = "agent.fail-context-budget-record"
+name = "agent.fail-unsendable-input-record"
 contract = "1.0"
-function = "agent_fail_context_budget"
-input_schema = "schemas/fail-context-budget-envelope.json"
-output_schema = "schemas/fail-context-budget-output.json"
+function = "agent_fail_unsendable_input"
+input_schema = "schemas/fail-unsendable-input-envelope.json"
+output_schema = "schemas/fail-unsendable-input-output.json"
 
 [[components.unit_of_work_participants.payload_refs]]
 path = "/input/checkpoint_state"
@@ -818,13 +818,13 @@ steps = [
 ]
 
 [[components.unit_of_work_plans]]
-name = "agent.fail-context-budget"
+name = "agent.fail-unsendable-input"
 contract = "1.0"
-input_schema = "schemas/fail-context-budget-input.json"
-output_schema = "schemas/fail-context-budget-output.json"
+input_schema = "schemas/fail-unsendable-input-input.json"
+output_schema = "schemas/fail-unsendable-input-output.json"
 timeout_s = 10
 steps = [
-  { id = "agent", component_id = "agent.runtime", participant = "agent.fail-context-budget-record" }
+  { id = "agent", component_id = "agent.runtime", participant = "agent.fail-unsendable-input-record" }
 ]
 
 [[components.unit_of_work_plans]]

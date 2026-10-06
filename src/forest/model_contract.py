@@ -27,15 +27,16 @@ def _error(code: str, message: str) -> ForestError:
     return ForestError(code, message, 422)
 
 
-def _encode(value: Any, *, limit: int = MAX_REQUEST_BYTES) -> bytes:
+def _encode(value: Any, *, limit: int = MAX_REQUEST_BYTES,
+            size_error_code: str = "MODEL_INPUT_INVALID") -> bytes:
     try:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
                              allow_nan=False).encode("utf-8")
-        if len(encoded) > limit:
-            raise ValueError("size")
-        return encoded
     except (ValueError, TypeError, RecursionError, UnicodeError) as exc:
-        raise _error("MODEL_INPUT_INVALID", "Model data exceeds finite JSON bounds") from exc
+        raise _error("MODEL_INPUT_INVALID", "Model data is not finite JSON") from exc
+    if len(encoded) > limit:
+        raise _error(size_error_code, "Model data exceeds its byte bound")
+    return encoded
 
 
 def _decode(data: bytes | str, *, limit: int = MAX_RESPONSE_BYTES) -> Any:
