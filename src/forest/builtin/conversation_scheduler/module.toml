@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.32.0"
+version = "4.33.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -42,6 +42,7 @@ requests = [
   "payload.write",
   "payload.read",
   "domain.command:conversation.media-cost.write",
+  "domain.command:conversation.run-view.bind",
   "service.call:agent.execute",
   "service.call:agent.execution.policy",
   "domain.query:conversation.context-page",
@@ -78,7 +79,7 @@ output_schema = "schemas/media-cost-output.json"
 
 [[components.provides]]
 name = "conversation.context.snapshot"
-contract = "6.0"
+contract = "7.0"
 semantics = "idempotent"
 input_schema = "schemas/context-snapshot-input.json"
 output_schema = "schemas/context-snapshot-output.json"
@@ -92,9 +93,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.27.0"
+schema_version = "4.28.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "4c0039276f24c734f137d9f9b1f62a9bc121821d08bbe97380a314d16c16341f"
+baseline_sha256 = "59483f90be162de65b6ed57df4585b1e189b545b18d089a6de1e1f88afa4edc9"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -140,6 +141,13 @@ byte_length_path = "/byte_length"
 owner_component = "media.capture"
 owner_kind = "media.asset"
 owner_id_path = "/media_ref"
+
+[[components.domain_commands]]
+name = "conversation.run-view.bind"
+contract = "1.0"
+function = "conversation_bind_run_view_profile"
+input_schema = "schemas/run-view-bind-input.json"
+output_schema = "schemas/run-view-bind-output.json"
 
 [[components.domain_commands]]
 name = "conversation.request-requeue"

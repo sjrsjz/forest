@@ -48,6 +48,21 @@ async def test_conversation_package_owns_ingress_and_classification_participants
 ):
     store, installer = clean_authority
     kernel = await bootstrap_kernel(store, installer)
+    view_config = {
+        "high_watermark_units": 2,
+        "retain_units": 1,
+        "high_watermark_payload_bytes": 524288,
+        "retain_payload_bytes": 262144,
+        "high_watermark_media_bytes": 12582912,
+        "retain_media_bytes": 6291456,
+        "high_watermark_decoded_bytes": 134217728,
+        "retain_decoded_bytes": 67108864,
+        "high_watermark_estimated_tokens": 24576,
+        "retain_estimated_tokens": 16384,
+        "utf8_bytes_per_estimated_token": 2,
+        "unit_overhead_estimated_tokens": 16,
+        "policy_revision": "context-view-multimodal-window-v5",
+    }
     package = await bootstrap_builtin_package(
         Path(str(files("forest").joinpath("builtin/conversation_scheduler"))),
         PackageCatalog(tmp_path / "conversation-packages"),
@@ -56,21 +71,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         kernel=kernel,
         initial_configuration={
             "protocol": "forest.conversation.scheduler/2",
-            "context_view": {
-                "high_watermark_units": 2,
-                "retain_units": 1,
-                "high_watermark_payload_bytes": 524288,
-                "retain_payload_bytes": 262144,
-                "high_watermark_media_bytes": 12582912,
-                "retain_media_bytes": 6291456,
-                "high_watermark_decoded_bytes": 134217728,
-                "retain_decoded_bytes": 67108864,
-                "high_watermark_estimated_tokens": 24576,
-                "retain_estimated_tokens": 16384,
-                "utf8_bytes_per_estimated_token": 2,
-                "unit_overhead_estimated_tokens": 16,
-                "policy_revision": "context-view-multimodal-window-v5",
-            },
+            "context_view": view_config,
         },
         resolved_contracts={},
     )
@@ -386,6 +387,38 @@ async def test_conversation_package_owns_ingress_and_classification_participants
         assert selected["session_ref"] == "session/1"
         assert selected["run_ref"] == "run/1"
         assert selected["selected_input_end_seq"] == 1
+        run_view_context = {
+            "bot_id": store.bot_id,
+            "component_id": "conversation.scheduler",
+            "port_kind": "command",
+            "port_name": "conversation.run-view.bind",
+        }
+        original_view = dict(view_config)
+        changed_view = {
+            **original_view,
+            "high_watermark_estimated_tokens": 4096,
+            "retain_estimated_tokens": 2048,
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            async def bind_run_view(run_ref: str, profile: dict) -> dict:
+                row = await (await conn.execute(
+                    sql.SQL("SELECT {}.conversation_bind_run_view_profile("
+                            "%s::jsonb,%s::jsonb) AS value")
+                    .format(sql.Identifier(namespace)),
+                    (Jsonb(run_view_context), Jsonb({
+                        "actor": actor, "session_ref": "session/1",
+                        "run_ref": run_ref, "profile": profile,
+                    })),
+                )).fetchone()
+                return row["value"]
+
+            first_view = await bind_run_view("run/1", original_view)
+            replay_view = await bind_run_view("run/1", changed_view)
+            fenced_view = await bind_run_view("run/other", original_view)
+        assert first_view["ok"] is True, first_view
+        assert first_view["value"]["profile"] == original_view
+        assert replay_view == first_view
+        assert fenced_view["error"]["code"] == "CONTEXT_RUN_VIEW_FENCE_CHANGED"
         async with store.pool.connection() as conn:
             row = await (
                 await conn.execute(
@@ -1596,10 +1629,10 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                     ),
                 )
             ).fetchone()
-        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 6)]
+        endpoint = instance.runtime_service_handlers()[("conversation.context.snapshot", 7)]
         route = FrozenServiceRoute(
             service_id="conversation.context.snapshot",
-            version=6,
+            version=7,
             caller_component_id="kernel.runtime",
             provider_component_id="conversation.scheduler",
             provider_generation_id=instance.generation_identity.generation_id,
@@ -1627,8 +1660,9 @@ async def test_conversation_package_owns_ingress_and_classification_participants
             ),
             {},
         )
-        assert snapshot["protocol"] == "forest.conversation-context-snapshot/6"
+        assert snapshot["protocol"] == "forest.conversation-context-snapshot/7"
         assert snapshot["run_ref"] is None
+        assert snapshot["view_profile_digest"] is None
         assert snapshot["claimed_trigger_count"] == 0
         assert snapshot["context_view_media_bytes"] == 2048
         assert snapshot["context_view_decoded_bytes"] == 4

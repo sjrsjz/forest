@@ -2,13 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "required": [
-    "protocol", "conversation_id", "run_ref", "claimed_trigger_count", "token_estimator", "context_applied_seq", "context_revision",
+    "protocol", "conversation_id", "run_ref", "view_profile_digest", "claimed_trigger_count", "token_estimator", "context_applied_seq", "context_revision",
     "context_view_revision", "media_cost_revision", "context_view_media_bytes", "context_view_decoded_bytes", "unit_count", "snapshot"
   ],
   "properties": {
-    "protocol": {"const": "forest.conversation-context-snapshot/6"},
+    "protocol": {"const": "forest.conversation-context-snapshot/7"},
     "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "run_ref": {"type": ["string", "null"]},
+    "view_profile_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
     "claimed_trigger_count": {"type": "integer", "minimum": 0},
     "token_estimator": {
       "type": "object",

@@ -605,6 +605,19 @@ CREATE TABLE context_append_operations (
     )
 );
 
+CREATE TABLE context_run_view_profiles (
+    bot_id text NOT NULL,
+    conversation_id text NOT NULL,
+    session_ref text NOT NULL CHECK (octet_length(session_ref) BETWEEN 1 AND 256),
+    run_ref text NOT NULL CHECK (octet_length(run_ref) BETWEEN 1 AND 256),
+    profile jsonb NOT NULL CHECK (jsonb_typeof(profile)='object'),
+    profile_digest text NOT NULL CHECK (profile_digest ~ '^sha256:[a-f0-9]{64}$'),
+    bound_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,conversation_id,run_ref),
+    FOREIGN KEY (bot_id,conversation_id)
+        REFERENCES conversation_lanes(bot_id,conversation_id)
+);
+
 CREATE TABLE context_compactions (
     bot_id text NOT NULL,
     conversation_id text NOT NULL,
@@ -1082,6 +1095,9 @@ CREATE TRIGGER context_append_operations_immutable
     BEFORE UPDATE OR DELETE ON context_append_operations
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_compactions_immutable BEFORE UPDATE OR DELETE ON context_compactions
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+CREATE TRIGGER context_run_view_profiles_immutable
+    BEFORE UPDATE OR DELETE ON context_run_view_profiles
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_compaction_units_immutable
     BEFORE UPDATE OR DELETE ON context_compaction_units
@@ -2490,6 +2506,119 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION conversation_context_view_valid(policy jsonb)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog AS $$
+DECLARE
+    names text[] := ARRAY[
+        'high_watermark_units','retain_units',
+        'high_watermark_payload_bytes','retain_payload_bytes',
+        'high_watermark_media_bytes','retain_media_bytes',
+        'high_watermark_decoded_bytes','retain_decoded_bytes',
+        'high_watermark_estimated_tokens','retain_estimated_tokens',
+        'utf8_bytes_per_estimated_token','unit_overhead_estimated_tokens'
+    ];
+    field text;
+BEGIN
+    IF jsonb_typeof(policy) IS DISTINCT FROM 'object'
+       OR NOT (policy ?& array_append(names,'policy_revision'))
+       OR policy - array_append(names,'policy_revision') <> '{}'::jsonb
+       OR policy->>'policy_revision' IS DISTINCT FROM
+          'context-view-multimodal-window-v5' THEN
+        RETURN false;
+    END IF;
+    FOREACH field IN ARRAY names LOOP
+        IF jsonb_typeof(policy->field) IS DISTINCT FROM 'number'
+           OR NOT ((policy->>field) ~ '^(0|[1-9][0-9]*)$') THEN
+            RETURN false;
+        END IF;
+    END LOOP;
+    RETURN (policy->>'high_watermark_units')::bigint BETWEEN 2 AND 1000000
+       AND (policy->>'retain_units')::bigint BETWEEN 1 AND
+           (policy->>'high_watermark_units')::bigint-1
+       AND (policy->>'high_watermark_payload_bytes')::bigint BETWEEN 1024 AND 134217728
+       AND (policy->>'retain_payload_bytes')::bigint BETWEEN 1 AND
+           (policy->>'high_watermark_payload_bytes')::bigint-1
+       AND (policy->>'high_watermark_media_bytes')::bigint BETWEEN 1024 AND 134217728
+       AND (policy->>'retain_media_bytes')::bigint BETWEEN 1 AND
+           (policy->>'high_watermark_media_bytes')::bigint-1
+       AND (policy->>'high_watermark_decoded_bytes')::bigint BETWEEN 1024 AND 536870912
+       AND (policy->>'retain_decoded_bytes')::bigint BETWEEN 1 AND
+           (policy->>'high_watermark_decoded_bytes')::bigint-1
+       AND (policy->>'high_watermark_estimated_tokens')::bigint BETWEEN 1024 AND 1048576
+       AND (policy->>'retain_estimated_tokens')::bigint BETWEEN 1 AND
+           (policy->>'high_watermark_estimated_tokens')::bigint-1
+       AND (policy->>'utf8_bytes_per_estimated_token')::bigint BETWEEN 1 AND 16
+       AND (policy->>'unit_overhead_estimated_tokens')::bigint BETWEEN 0 AND 256;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN false;
+END;
+$$;
+
+CREATE FUNCTION conversation_bind_run_view_profile(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    actor jsonb := input->'actor';
+    requested_conversation text := actor->>'conversation_id';
+    requested_owner text := actor->>'owner_id';
+    requested_epoch bigint := (actor->>'epoch')::bigint;
+    requested_session text := input->>'session_ref';
+    requested_run text := input->>'run_ref';
+    policy jsonb := input->'profile';
+    digest_value text;
+    lane record;
+    frozen record;
+BEGIN
+    IF context->>'component_id' IS DISTINCT FROM 'conversation.scheduler'
+       OR context->>'port_name' IS DISTINCT FROM 'conversation.run-view.bind'
+       OR context->>'port_kind' IS DISTINCT FROM 'command'
+       OR requested_bot IS NULL OR requested_conversation IS NULL
+       OR octet_length(requested_conversation) NOT BETWEEN 1 AND 256
+       OR requested_owner IS NULL OR octet_length(requested_owner) NOT BETWEEN 1 AND 256
+       OR requested_epoch IS NULL OR requested_epoch<1
+       OR requested_session IS NULL OR octet_length(requested_session) NOT BETWEEN 1 AND 256
+       OR requested_run IS NULL OR octet_length(requested_run) NOT BETWEEN 1 AND 256
+       OR NOT __forest_module_schema__.conversation_context_view_valid(policy) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_RUN_VIEW_INVALID',
+                'message','Run view binding is invalid','status',422));
+    END IF;
+    SELECT * INTO lane FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation FOR UPDATE;
+    IF lane IS NULL OR lane.actor_owner_id IS DISTINCT FROM requested_owner
+       OR lane.actor_epoch IS DISTINCT FROM requested_epoch
+       OR lane.actor_expires_at IS NULL OR lane.actor_expires_at<=clock_timestamp()
+       OR (lane.active_session_ref IS NOT NULL
+           AND lane.active_session_ref IS DISTINCT FROM requested_session)
+       OR (lane.active_run_ref IS NOT NULL
+           AND lane.active_run_ref IS DISTINCT FROM requested_run) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_RUN_VIEW_FENCE_CHANGED',
+                'message','Run view actor or session fence changed','status',409));
+    END IF;
+    SELECT * INTO frozen FROM __forest_module_schema__.context_run_view_profiles
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND run_ref=requested_run;
+    IF frozen IS NOT NULL THEN
+        IF frozen.session_ref IS DISTINCT FROM requested_session THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','CONTEXT_RUN_VIEW_FENCE_CHANGED',
+                    'message','Run view belongs to another Session','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('profile',frozen.profile,
+                'profile_digest',frozen.profile_digest));
+    END IF;
+    digest_value := 'sha256:'||encode(sha256(convert_to(policy::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.context_run_view_profiles(
+        bot_id,conversation_id,session_ref,run_ref,profile,profile_digest
+    ) VALUES(requested_bot,requested_conversation,requested_session,requested_run,
+             policy,digest_value);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('profile',policy,'profile_digest',digest_value));
+END;
+$$;
+
 CREATE FUNCTION conversation_prepare_context_compaction(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -2563,19 +2692,7 @@ BEGIN
               anchor->>'run_ref'))
        OR requested_operation IS NULL
        OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
-       OR high_watermark NOT BETWEEN 2 AND 1000000
-       OR retain_units NOT BETWEEN 1 AND high_watermark-1
-       OR high_watermark_bytes NOT BETWEEN 1024 AND 134217728
-       OR retain_bytes NOT BETWEEN 1 AND high_watermark_bytes-1
-       OR high_watermark_media_bytes NOT BETWEEN 1024 AND 134217728
-       OR retain_media_bytes NOT BETWEEN 1 AND high_watermark_media_bytes-1
-       OR high_watermark_decoded_bytes NOT BETWEEN 1024 AND 536870912
-       OR retain_decoded_bytes NOT BETWEEN 1 AND high_watermark_decoded_bytes-1
-       OR high_watermark_estimated_tokens NOT BETWEEN 1024 AND 1048576
-       OR retain_estimated_tokens NOT BETWEEN 1 AND high_watermark_estimated_tokens-1
-       OR utf8_bytes_per_estimated_token NOT BETWEEN 1 AND 16
-       OR unit_overhead_estimated_tokens NOT BETWEEN 0 AND 256
-       OR policy_revision IS DISTINCT FROM 'context-view-multimodal-window-v5' THEN
+       OR NOT __forest_module_schema__.conversation_context_view_valid(policy) THEN
         RETURN jsonb_build_object(
             'protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object(

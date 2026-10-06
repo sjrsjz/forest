@@ -18,6 +18,7 @@ _MANIFEST_FIELDS = {
     "protocol",
     "conversation_id",
     "run_ref",
+    "view_profile_digest",
     "claimed_trigger_count",
     "required_trigger_unit_ids",
     "token_estimator",
@@ -277,7 +278,7 @@ class ContextSnapshotReader:
     async def load(self, envelope: dict, *, expected: dict) -> dict:
         if (
             not isinstance(envelope, dict)
-            or envelope.get("protocol") != "forest.conversation-context-snapshot/6"
+            or envelope.get("protocol") != "forest.conversation-context-snapshot/7"
             or set(expected)
             != {
                 "conversation_id",
@@ -311,6 +312,21 @@ class ContextSnapshotReader:
                     "Conversation snapshot differs from the durable Agent input fence",
                     409,
                 )
+        profile_digest = manifest.get("view_profile_digest")
+        if (
+            profile_digest != envelope.get("view_profile_digest")
+            or (expected["run_ref"] is None and profile_digest is not None)
+            or (expected["run_ref"] is not None and (
+                not isinstance(profile_digest, str)
+                or len(profile_digest) != 71
+                or not profile_digest.startswith("sha256:")
+                or any(character not in "0123456789abcdef" for character in profile_digest[7:])
+            ))
+        ):
+            raise ForestError(
+                "AGENT_CONTEXT_FENCE_MISMATCH",
+                "Conversation Run view profile identity is invalid", 409,
+            )
         if (
             manifest.get("claimed_trigger_count") != envelope.get("claimed_trigger_count")
             or not _integer(manifest.get("claimed_trigger_count"), maximum=4096)

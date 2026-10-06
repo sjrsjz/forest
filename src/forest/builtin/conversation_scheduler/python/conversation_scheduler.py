@@ -1,4 +1,5 @@
 import hashlib
+import json
 import time
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -73,6 +74,20 @@ class ConversationScheduler(Plugin):
             )
         self._context_view = view
 
+    async def _bound_view(self, ctx, actor, session_ref, run_ref):
+        current = self._context_view
+        policy_digest = hashlib.sha256(
+            json.dumps(current, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return await ctx.commands.call(
+            "conversation.run-view.bind",
+            {"actor": actor, "session_ref": session_ref,
+             "run_ref": run_ref, "profile": current},
+            operation_id=ctx.operations.stable(
+                "run-view-profile:" + run_ref + ":" + policy_digest
+            ),
+        )
+
     @staticmethod
     def _exact(reference):
         return {
@@ -110,6 +125,11 @@ class ConversationScheduler(Plugin):
     )
     async def prefill_trigger_context(self, payload, ctx):
         request = payload
+        view = self._context_view
+        if request["boundary"] != "SESSION_END":
+            view = (await self._bound_view(
+                ctx, request["actor"], request["session_ref"], request["run_ref"]
+            ))["profile"]
         selection = {
             "actor": request["actor"],
             "boundary": request["boundary"],
@@ -122,7 +142,7 @@ class ConversationScheduler(Plugin):
             "conversation.prefill-trigger-input",
             {
                 "selection": selection,
-                "context_view": self._context_view,
+                "context_view": view,
                 "payload": {
                     "protocol": "forest.payload-json-from-prior/1",
                     "prior_step_id": "prepare",
@@ -236,10 +256,16 @@ class ConversationScheduler(Plugin):
             level += 1
         return nodes, level
 
-    @service("conversation.context.snapshot", semantics="idempotent", contract="6.0")
+    @service("conversation.context.snapshot", semantics="idempotent", contract="7.0")
     async def context_snapshot(self, payload, ctx):
         actor = payload["actor"]
         run_ref = payload.get("run_ref")
+        view = self._context_view
+        view_profile_digest = None
+        if run_ref is not None:
+            bound = await self._bound_view(ctx, actor, payload["session_ref"], run_ref)
+            view = bound["profile"]
+            view_profile_digest = bound["profile_digest"]
         offset = 0
         metadata = None
         payload_bytes = None
@@ -345,18 +371,18 @@ class ConversationScheduler(Plugin):
                 "CONTEXT_SNAPSHOT_PAYLOAD_COST_CONFLICT",
                 "Conversation Payload facts differ from the active window", 409,
             )
-        bytes_per_token = self._context_view["utf8_bytes_per_estimated_token"]
+        bytes_per_token = view["utf8_bytes_per_estimated_token"]
         token_estimator = {
             "revision": "utf8-payload-plus-unit-v1",
             "utf8_bytes_per_estimated_token": bytes_per_token,
-            "unit_overhead_estimated_tokens": self._context_view[
+            "unit_overhead_estimated_tokens": view[
                 "unit_overhead_estimated_tokens"
             ],
-            "history_budget_tokens": self._context_view["high_watermark_estimated_tokens"],
+            "history_budget_tokens": view["high_watermark_estimated_tokens"],
             "estimated_history_tokens": (
                 (payload_bytes + bytes_per_token - 1) // bytes_per_token
                 + metadata["total_units"]
-                * self._context_view["unit_overhead_estimated_tokens"]
+                * view["unit_overhead_estimated_tokens"]
             ),
         }
         if token_estimator["estimated_history_tokens"] > token_estimator["history_budget_tokens"]:
@@ -364,7 +390,7 @@ class ConversationScheduler(Plugin):
                 "CONTEXT_VIEW_HARD_LIMIT",
                 "Required Context exceeds the local history token estimate", 413,
             )
-        if payload_bytes > self._context_view["high_watermark_payload_bytes"]:
+        if payload_bytes > view["high_watermark_payload_bytes"]:
             raise ForestError(
                 "CONTEXT_VIEW_HARD_LIMIT",
                 "Required Context Payload exceeds the configured model-view bound", 413,
@@ -378,7 +404,7 @@ class ConversationScheduler(Plugin):
                 "CONTEXT_SNAPSHOT_MEDIA_COST_CONFLICT",
                 "Conversation media facts differ from the active window", 409,
             )
-        if media_bytes > self._context_view["high_watermark_media_bytes"]:
+        if media_bytes > view["high_watermark_media_bytes"]:
             raise ForestError(
                 "CONTEXT_VIEW_MEDIA_OVER_BUDGET",
                 "Required Context media exceeds the configured model-view bound", 413,
@@ -394,7 +420,7 @@ class ConversationScheduler(Plugin):
                 "CONTEXT_SNAPSHOT_DECODED_COST_CONFLICT",
                 "Conversation decoded media facts differ from the active window", 409,
             )
-        if decoded_bytes > self._context_view["high_watermark_decoded_bytes"]:
+        if decoded_bytes > view["high_watermark_decoded_bytes"]:
             raise ForestError(
                 "CONTEXT_VIEW_DECODED_OVER_BUDGET",
                 "Required Context decoded media exceeds the model-view bound", 413,
@@ -416,10 +442,11 @@ class ConversationScheduler(Plugin):
             )
             pages.append(self._exact(saved))
         roots, tree_depth = await self._snapshot_tree(pages, ctx)
-        owner_id = ctx.operations.stable("context-snapshot-manifest:v6")
+        owner_id = ctx.operations.stable("context-snapshot-manifest:v7")
         document = {
-            "protocol": "forest.conversation-context-snapshot/6",
+            "protocol": "forest.conversation-context-snapshot/7",
             **metadata,
+            "view_profile_digest": view_profile_digest,
             "token_estimator": token_estimator,
             "required_trigger_unit_ids": required_trigger_unit_ids,
             "unit_count": unit_count,
@@ -433,8 +460,9 @@ class ConversationScheduler(Plugin):
             parents=roots,
         )
         return {
-            "protocol": "forest.conversation-context-snapshot/6",
+            "protocol": "forest.conversation-context-snapshot/7",
             "conversation_id": metadata["conversation_id"],
+            "view_profile_digest": view_profile_digest,
             "token_estimator": token_estimator,
             "run_ref": metadata["run_ref"],
             "claimed_trigger_count": metadata["claimed_trigger_count"],
@@ -754,7 +782,11 @@ class ConversationScheduler(Plugin):
     async def _compact_before_run(self, work, ctx, *, completed=None):
         actor = work["actor"]
         started_at = time.monotonic()
+        view = self._context_view
         if completed is None:
+            view = (await self._bound_view(
+                ctx, actor, work["session_ref"], work["run_ref"]
+            ))["profile"]
             anchor = {
                 "protocol": "forest.conversation-pre-run-anchor/1",
                 "conversation_id": work["conversation_id"],
@@ -780,7 +812,7 @@ class ConversationScheduler(Plugin):
                 plan_name,
                 {
                     "anchor": anchor,
-                    "context_view": self._context_view,
+                    "context_view": view,
                     "payload": {
                         "protocol": "forest.payload-json-from-prior/1",
                         "prior_step_id": "prepare",
