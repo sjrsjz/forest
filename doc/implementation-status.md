@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+稳定宿主身份引导（2026-10-07）：生产 Supervisor 不再由 deployment_id 派生 host_id。Compose 的隔离 initialize 服务在受保护卷中首次生成不透明 `host/<128-bit>` 身份并在后续启动复用；Supervisor 只从单一显式环境值或只读身份文件读取，缺失、冲突或格式错误均拒绝启动。每次进程启动的 incarnation 仍独立生成并只用于租约围栏。隔离 Linux 卷连续三次初始化后，host ID 字节不变，文件保持 UID/GID 10001 与 0400；Supervisor 配置与本地生命周期共 11 项测试、隔离 PostgreSQL 重建集成用例 1 项及多 Bot 生命周期 4 项、Ruff 与 Compose 解析通过。host 作用域 Generation 包图及 host.storage 仍待实现，在线实例未切换。
+
 Web Bot 工作区按需发现（2026-10-07）：部署管理 runtime 只返回部署 scope，不再在每次页面刷新时展开全部 Bot 目录；`deployment.bot-catalog` 继续提供有界分页列表，并将规范 Bot ID 交给壳层。壳层通过带会话和 CSRF 的 `scopes/resolve` 向内核解析单个在线 Bot scope，再由目标 Bot gateway 重新验证可用性与操作权限。当前 Bot scope 仅随其自身 runtime 返回；目录 UI 可打开工作区，`?bot=<Bot ID>` 可直达。Web API 用例 4 passed、1 skipped，真实 Edge 浏览器冒烟 1 passed；隔离 PostgreSQL 的部署目录用例先有 25 passed、2 项旧版号夹具失败，修正夹具后两项复跑通过，Supervisor 生命周期与 scope 索引用例另有 4 passed。Ruff 与脚本语法检查通过。本次未切换在线实例。
 
 多 Bot 监督器分页调和（2026-10-07）：部署内核提供仅包含 READY 且期望 ONLINE Bot 的键集分页读取，Supervisor 每轮分批发现运行目标，不再每秒全量装入 OFFLINE 目录；跨页意图竞态下，未见的已有 Runner 会在撤下前定点复核，关闭期间不再创建新实例。隔离 PostgreSQL 的双 Bot 独立生命周期与启动中意图撤回用例通过（2 passed）。Web scope 已改为按需解析单个 Bot，host 作用域包图仍未落地；部署内核 SQL 基线变更要求未上线库重建，本轮未切换在线实例。

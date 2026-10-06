@@ -140,6 +140,7 @@ services:
         condition: service_healthy
     environment:
       FOREST_DEPLOYMENT_ID: ${FOREST_DEPLOYMENT_ID:-forest/default}
+      FOREST_HOST_ID_FILE: /run/forest-secrets/host_id
       FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE: /run/forest-secrets/postgres_password
       FOREST_DEPLOYMENT_DATABASE_HOST: postgres
       FOREST_DEPLOYMENT_DATABASE_NAME: forest_deployment

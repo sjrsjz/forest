@@ -36,10 +36,10 @@ class MultiBotSupervisor:
         self,
         catalog,
         *,
+        host_id: str,
         storage_profiles,
         settings_resolver,
         host_factory=BotHost,
-        host_id: str | None = None,
         incarnation: str | None = None,
         poll_seconds: float = 1.0,
         max_starting: int = 2,
@@ -52,7 +52,9 @@ class MultiBotSupervisor:
         self.storage_profiles = storage_profiles
         self.settings_resolver = settings_resolver
         self.host_factory = host_factory
-        self.host_id = host_id or "deployment-host/" + str(uuid4())
+        if not isinstance(host_id, str) or not host_id or len(host_id.encode("utf-8")) > 256:
+            raise ValueError("host_id must identify one stable host")
+        self.host_id = host_id
         self.incarnation = incarnation or "incarnation/" + str(uuid4())
         self.poll_seconds = poll_seconds
         self._start_slots = asyncio.Semaphore(max_starting)

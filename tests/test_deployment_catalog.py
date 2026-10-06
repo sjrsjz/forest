@@ -4008,7 +4008,7 @@ async def test_multi_bot_supervisor_discards_start_when_intent_changes(deploymen
         repository, storage_profiles=storage_profiles,
         settings_resolver=lambda current, storage: SimpleNamespace(
             bot_id=current["bot_id"], dsn=storage.dsn,
-        ), host_factory=FakeHost,
+        ), host_factory=FakeHost, host_id="host/retracted",
     )
     lease = await repository.claim_supervisor("host/retracted", "incarnation/retracted")
     supervisor.lease = lease

@@ -8,13 +8,14 @@ import pytest
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
-from forest.supervisor_host import SupervisorSettings
+from forest.supervisor_host import SupervisorSettings, _host_id
 
 
 def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, monkeypatch):
     master = tmp_path / "keyring"
     web_bootstrap = tmp_path / "web-bootstrap"
     password = tmp_path / "postgres"
+    host_id = tmp_path / "host-id"
     master.write_text(
         json.dumps(
             {
@@ -43,6 +44,9 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
         encoding="utf-8",
     )
     password.write_text("database-password", encoding="utf-8")
+    host_id.write_text("host/0123456789abcdef0123456789abcdef", encoding="ascii")
+    monkeypatch.delenv("FOREST_HOST_ID", raising=False)
+    monkeypatch.setenv("FOREST_HOST_ID_FILE", str(host_id))
     monkeypatch.delenv("FOREST_DEPLOYMENT_DSN", raising=False)
     monkeypatch.setenv("FOREST_DEPLOYMENT_MASTER_KEYRING_FILE", str(master))
     monkeypatch.setenv("FOREST_DEPLOYMENT_WEB_BOOTSTRAP_FILE", str(web_bootstrap))
@@ -61,6 +65,29 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
     assert settings.master_keyring.resolve("master/test/1") == b"a" * 32
     assert settings.web_bootstrap.setup_id == "setup/0123456789abcdef"
     assert settings.web_bootstrap.pairing_code == "p" * 48
+    assert settings.host_id == "host/0123456789abcdef0123456789abcdef"
+
+
+def test_supervisor_host_identity_has_one_explicit_stable_source(tmp_path, monkeypatch):
+    monkeypatch.delenv("FOREST_HOST_ID", raising=False)
+    monkeypatch.delenv("FOREST_HOST_ID_FILE", raising=False)
+    with pytest.raises(ForestError) as missing:
+        _host_id()
+    assert missing.value.code == "SUPERVISOR_HOST_ID_REQUIRED"
+
+    identity = tmp_path / "host-id"
+    identity.write_text("host/0123456789abcdef0123456789abcdef", encoding="ascii")
+    monkeypatch.setenv("FOREST_HOST_ID_FILE", str(identity))
+    monkeypatch.setenv("FOREST_HOST_ID", "host/abcdef0123456789abcdef0123456789")
+    with pytest.raises(ForestError) as conflicting:
+        _host_id()
+    assert conflicting.value.code == "SUPERVISOR_HOST_ID_REQUIRED"
+
+    monkeypatch.delenv("FOREST_HOST_ID", raising=False)
+    identity.write_text("deployment-host/deployment-id", encoding="ascii")
+    with pytest.raises(ForestError) as invalid:
+        _host_id()
+    assert invalid.value.code == "SUPERVISOR_HOST_ID_INVALID"
 
 
 @pytest.mark.parametrize(

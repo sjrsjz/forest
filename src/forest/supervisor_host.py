@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -98,9 +99,32 @@ def _deployment_dsn() -> str:
     )
 
 
+def _host_id() -> str:
+    inline = os.environ.get("FOREST_HOST_ID")
+    path = os.environ.get("FOREST_HOST_ID_FILE")
+    if bool(inline) == bool(path):
+        raise ForestError(
+            "SUPERVISOR_HOST_ID_REQUIRED",
+            "Exactly one stable host identity source is required", 422,
+        )
+    if path:
+        try:
+            inline = Path(path).read_text(encoding="ascii")
+        except (OSError, UnicodeError):
+            raise ForestError(
+                "SUPERVISOR_HOST_ID_UNAVAILABLE", "Host identity is unavailable", 503
+            ) from None
+    if re.fullmatch(r"host/[a-f0-9]{32}", inline or "") is None:
+        raise ForestError(
+            "SUPERVISOR_HOST_ID_INVALID", "Host identity is invalid", 422
+        )
+    return inline
+
+
 @dataclass(frozen=True)
 class SupervisorSettings:
     deployment_id: str
+    host_id: str
     dsn: str = field(repr=False)
     master_keyring: DeploymentMasterKeyring = field(repr=False)
     web_bootstrap: DeploymentWebBootstrap = field(repr=False)
@@ -140,6 +164,7 @@ class SupervisorSettings:
             )
         return cls(
             deployment_id=os.environ.get("FOREST_DEPLOYMENT_ID", "forest/default"),
+            host_id=_host_id(),
             dsn=_deployment_dsn(),
             master_keyring=keyring,
             web_bootstrap=web_bootstrap,
@@ -210,7 +235,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             bootstrap_profiles=bootstrap_profiles,
         ),
         host_factory=bot_host_factory,
-        host_id="deployment-host/" + settings.deployment_id,
+        host_id=settings.host_id,
         incarnation=incarnation,
         poll_seconds=settings.poll_seconds,
         max_starting=settings.max_starting,

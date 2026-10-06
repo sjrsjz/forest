@@ -448,7 +448,7 @@ UI 生命周期同样分层。目录贡献可以调用壳层提供的通用 `ope
 
 备份与恢复的目标模块边界固定如下。`deployment.backup` 拥有跨 deployment 与多个 Bot cut 的备份集合、创建 Job、列表/详情、只读验证、外部容器导入及备份容器下载；它通过受限端口调用各 Bot 的一致性切口和宿主 artifact store，不取得 Bot 业务写权限。`deployment.restore` 拥有从已验证备份创建 SEALED 候选、候选校验、激活计划、storage head 切换与激活 Job；它只能消费 `deployment.backup` 发布的不可变备份引用，不能自行读取任意文件路径。二者是独立模块、独立 Generation 和独立操作命名空间，恢复失败不能阻断新备份，备份模块也不能绕过恢复计划直接替换活动 Bot。
 
-`host.storage` 拥有本宿主持有的 artifact、隔离数据库和历史 storage generation 的物理清单、容量、回收计划、回收 Job 与重试；它不拥有备份的逻辑可恢复性或 Bot storage head。deployment 模块只向它提交内容寻址资源引用和预期 owner marker，host 模块在删除前复核稳定 `host_id`、当前 incarnation、资源 fence、名称/所有者标记和“未被 storage head/活动 Job 引用”。这些操作只有在持久 host identity、host provider 和 host module registry 都成立后才能启用；不得为了尽快删除页面而临时创建语义错误的 `deployment.storage`，也不得把进程重启产生的 incarnation 当成稳定 scope ID。
+`host.storage` 拥有本宿主持有的 artifact、隔离数据库和历史 storage generation 的物理清单、容量、回收计划、回收 Job 与重试；它不拥有备份的逻辑可恢复性或 Bot storage head。deployment 模块只向它提交内容寻址资源引用和预期 owner marker，host 模块在删除前复核独立于 deployment_id 且跨重启持久的 `host_id`、当前 incarnation、资源 fence、名称/所有者标记和“未被 storage head/活动 Job 引用”。这些操作只有在持久 host identity、host provider 和 host module registry 都成立后才能启用；不得为了尽快删除页面而临时创建语义错误的 `deployment.storage`，也不得把进程重启产生的 incarnation 当成稳定 scope ID。
 
 稳定操作名也在此固定。`deployment.backup` 使用 `backups`、`backup`、`backup.create`、`backup.archive`、`imports`、`import`、`import.reserve`、`import.artifact`、`import.finalize`、`verifications`、`verification`、`verification.create`；`deployment.restore` 使用 `stages`、`stage`、`stage.create`、`activation.plan`、`activations`、`activation`、`activation.apply`、`activation.retry`；`host.storage` 使用 `generations`、`cleanup.plan`、`cleanups`、`cleanup`、`cleanup.apply`、`cleanup.retry`。大文件只经 upload/download artifact 传输。计划、应用、重试分别保留独立 action，不能由一个带 `mode` 的总 action 动态选择 authority。
 

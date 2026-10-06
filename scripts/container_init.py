@@ -3,6 +3,7 @@
 Runs once as root with no network access. The application runs as UID 10001;
 the Alpine PostgreSQL image's postgres account uses GID 70. The generated
 database password is readable by these two identities and is never printed.
+The stable host identity is generated once in the same protected volume.
 """
 
 from __future__ import annotations
@@ -43,10 +44,11 @@ def prepare_secrets(path: Path) -> None:
     info = directory_info(path)
     if info.st_uid not in {0, APP_UID}:
         raise RuntimeError("Secret volume belongs to another service account")
-    permitted = {".initialize.lock", "postgres_password", *APPLICATION_SECRET_NAMES}
+    permitted = {".initialize.lock", "postgres_password", "host_id", *APPLICATION_SECRET_NAMES}
     if any(
         item.name not in permitted
         and not item.name.startswith(".password-")
+        and not item.name.startswith(".host-id-")
         and not item.name.startswith(".secret-")
         for item in path.iterdir()
     ):
@@ -93,6 +95,34 @@ def prepare_secrets(path: Path) -> None:
                     output.flush()
                     os.fsync(output.fileno())
                 os.replace(temporary, secret_path)
+                fsync_directory(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        host_path = path / "host_id"
+        if host_path.exists() or host_path.is_symlink():
+            saved = host_path.lstat()
+            if (
+                not stat.S_ISREG(saved.st_mode)
+                or saved.st_nlink != 1
+                or saved.st_uid != APP_UID
+                or saved.st_gid != APP_GID
+                or stat.S_IMODE(saved.st_mode) != 0o400
+                or re.fullmatch(rb"host/[a-f0-9]{32}", host_path.read_bytes()) is None
+            ):
+                raise RuntimeError("Existing host identity is invalid")
+        else:
+            temporary = path / f".host-id-{secrets.token_hex(12)}"
+            descriptor = os.open(
+                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    output.write(("host/" + secrets.token_hex(16)).encode("ascii"))
+                    os.fchown(output.fileno(), APP_UID, APP_GID)
+                    os.fchmod(output.fileno(), 0o400)
+                    output.flush()
+                    os.fsync(output.fileno())
+                os.replace(temporary, host_path)
                 fsync_directory(path)
             finally:
                 temporary.unlink(missing_ok=True)

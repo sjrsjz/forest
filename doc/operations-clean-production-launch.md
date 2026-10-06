@@ -95,7 +95,8 @@ docker run --rm --no-healthcheck --network forest-clean_default `
   --mount type=volume,source=forest-clean_forest_secrets,target=/run/forest-secrets,readonly `
   --mount type=volume,source=forest-clean_forest_packages,target=/var/lib/forest-packages `
   --mount "type=bind,source=$PWD\scripts\rebuild_bot_database.py,target=/tmp/rebuild_bot_database.py,readonly" `
-  -e FOREST_DEPLOYMENT_ID=forest/default `
+  -e FOREST_DEPLOYMENT_ID=forest/default
+FOREST_HOST_ID_FILE=/run/secrets/host_id `
   -e FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE=/run/forest-secrets/postgres_password `
   -e FOREST_DEPLOYMENT_DATABASE_HOST=postgres `
   -e FOREST_DEPLOYMENT_DATABASE_NAME=forest_deployment `
@@ -162,6 +163,8 @@ FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN=http://127.0.0.1:8081
 FOREST_SUPERVISOR_POLL_SECONDS=1
 FOREST_SUPERVISOR_MAX_STARTING=2
 ```
+
+Compose 初始化器会在受保护卷首次生成稳定 `host_id`，Supervisor 通过 `FOREST_HOST_ID_FILE=/run/forest-secrets/host_id` 读取；重启只更换 incarnation，不会更换宿主身份。非 Compose 启动必须设置且只能设置 `FOREST_HOST_ID`（`host/` 后接 32 位十六进制随机值）或 `FOREST_HOST_ID_FILE` 之一，并持久保存同一身份文件；不得用 deployment ID 或容器进程 ID 代替。
 
 主密钥 keyring 是单行、可打印 ASCII JSON，协议固定为 `forest.deployment-master-keyring/1`；包含 `active_key_id` 和最多 32 个 `key_id → Base64(32 bytes)` 条目。active key 只加密新 Secret 版本，历史密文和账号操作凭据指纹按自身保存的 key ID 复核，因此轮换时必须提交“全部仍被引用的旧 key + 新 key”，再把 active 指向新 key 并重启 Supervisor。不得在确认没有引用前删除旧 key。keyring、数据库口令和首次管理员密码都不进入环境变量、日志或对象 repr。Supervisor 从 READY Bot 固化的 storage/bootstrap profile 构造各自 `BotHost`；profile 中只保存 Secret 引用，凭据不会写入 Bot catalog。供应时只安装模块 authority 和 revision 1，不启动 Agent、Provider 或 OneBot 网络资源；供应 Job 成功发布 READY 后，Supervisor 才依据 runtime intent 启停 Bot。
 

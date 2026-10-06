@@ -49,6 +49,7 @@ async def test_failed_bot_drains_admitted_management_before_closing_host():
             bot_id=bot["bot_id"], dsn=storage.dsn
         ),
         host_factory=Host,
+        host_id="host/lifecycle-test",
     )
     supervisor.lease = object()
     runner = _BotRunner(asyncio.Event())
@@ -59,6 +60,7 @@ async def test_failed_bot_drains_admitted_management_before_closing_host():
         "intent_revision": 2,
     }
     supervisor._runners[bot["bot_id"]] = runner
+    supervisor._scope_bots[supervisor.management_scope_id(bot["bot_id"])] = bot["bot_id"]
     task = asyncio.create_task(supervisor._run_bot(bot, runner))
     try:
         await asyncio.wait_for(online.wait(), timeout=2)
@@ -111,7 +113,7 @@ async def test_stop_during_start_never_publishes_online_observation():
         Catalog(), storage_profiles=StorageProfiles(),
         settings_resolver=lambda bot, storage: SimpleNamespace(
             bot_id=bot["bot_id"], dsn=storage.dsn,
-        ), host_factory=Host,
+        ), host_factory=Host, host_id="host/lifecycle-test",
     )
     supervisor.lease = object()
     runner = _BotRunner(asyncio.Event())

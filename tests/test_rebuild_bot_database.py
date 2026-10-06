@@ -165,6 +165,8 @@ async def test_pre_release_rebuild_replaces_only_the_derived_bot_database(
     monkeypatch.setenv("FOREST_PACKAGE_CATALOG_ROOT", str(tmp_path / "packages"))
     monkeypatch.setenv("FOREST_DEPLOYMENT_DSN", deployment_dsn)
     monkeypatch.setenv("FOREST_DEPLOYMENT_ID", "deployment/rebuild-test")
+    monkeypatch.setenv("FOREST_HOST_ID", "host/0123456789abcdef0123456789abcdef")
+    monkeypatch.delenv("FOREST_HOST_ID_FILE", raising=False)
     monkeypatch.setenv("FOREST_DEPLOYMENT_MASTER_KEYRING_FILE", str(keyring_path))
     monkeypatch.setenv("FOREST_DEPLOYMENT_WEB_BOOTSTRAP_FILE", str(web_bootstrap_path))
     monkeypatch.setenv("FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN", "http://127.0.0.1:8081")
