@@ -8522,6 +8522,8 @@ LANGUAGE sql STABLE AS $$
            (u.eligible_xid IS NOT NULL AND
             pg_catalog.pg_visible_in_snapshot(u.eligible_xid,snapshot_value)))
       AND (filters->>'trunk_id' IS NULL OR u.trunk_id=filters->>'trunk_id')
+      AND (filters->>'source_unit_id' IS NULL OR
+           u.source_unit_id=filters->>'source_unit_id')
       AND (filters->>'source_id' IS NULL OR u.source_id=filters->>'source_id')
       AND (NOT filters ? 'group_source_ids' OR
            (s.source_kind='GROUP' AND u.source_id IN (
@@ -8605,7 +8607,9 @@ BEGIN
     END IF;
     -- Rare facet filters start from a bounded partial index. If the candidate
     -- set is large, use the ordered source scan rather than materializing it.
-    IF selected_unknown THEN
+    IF input ? 'source_unit_id' THEN
+        candidate_source_ids := ARRAY[input->>'source_unit_id'];
+    ELSIF selected_unknown THEN
         SELECT array_agg(candidate.source_unit_id)
         INTO candidate_source_ids
         FROM (
@@ -8626,8 +8630,9 @@ BEGIN
             ORDER BY f.source_unit_id LIMIT 8193
         ) candidate;
     END IF;
-    IF (selected_unknown OR selected_index_coverage IN ('COMPLETE','PARTIAL')) AND
-       COALESCE(cardinality(candidate_source_ids),0)<=8192 THEN
+    IF input ? 'source_unit_id' OR
+       ((selected_unknown OR selected_index_coverage IN ('COMPLETE','PARTIAL')) AND
+        COALESCE(cardinality(candidate_source_ids),0)<=8192) THEN
         WITH page AS (
             SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
                 u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,

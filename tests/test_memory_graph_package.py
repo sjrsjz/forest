@@ -1035,6 +1035,33 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
         assert [item["source_unit_id"] for item in fresh["result"]["value"]["items"]] == [
             "unit/newest", "unit/late", "unit/oldest"
         ]
+        exact = await (
+            await reader.execute(
+                sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+                (Jsonb({"bot_id": store.bot_id}),
+                 Jsonb({"source_unit_id": "unit/oldest"})),
+            )
+        ).fetchone()
+        assert [item["source_unit_id"] for item in exact["result"]["value"]["items"]] == [
+            "unit/oldest"
+        ]
+        missing = await (
+            await reader.execute(
+                sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+                (Jsonb({"bot_id": store.bot_id}),
+                 Jsonb({"source_unit_id": "unit/absent"})),
+            )
+        ).fetchone()
+        assert missing["result"]["value"]["items"] == []
+        exact_unknown = await (
+            await reader.execute(
+                sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+                (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                    "source_unit_id": "unit/oldest", "only_unknown_facets": True,
+                })),
+            )
+        ).fetchone()
+        assert exact_unknown["result"]["value"]["items"] == []
         selected_unknown = await (await reader.execute(
             sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
             (Jsonb({"bot_id": store.bot_id}), Jsonb({"only_unknown_facets": True})),
