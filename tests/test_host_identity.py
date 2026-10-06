@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -12,7 +13,10 @@ import pytest
 from psycopg import sql
 
 from forest.errors import ForestError
+from forest.packages import storage_bundle_digest
+from forest.schema_bundles import StorageBundleSpec
 from forest.storage.host_identity import HostIdentityAuthority, HostLease
+from forest.storage.host_schema_bundles import HostSchemaBundleInstaller
 from forest.storage.host_store import HostStore
 
 
@@ -36,6 +40,27 @@ async def test_host_identity_is_stable_and_incarnation_lease_is_fenced():
         identity = await first.initialize()
         assert identity["host_id"] == host_id
         assert (await first.initialize())["baseline_sha256"] == identity["baseline_sha256"]
+        baseline = b"CREATE TABLE host_state (value text NOT NULL);"
+        spec = StorageBundleSpec(
+            component_id="host.sample", schema_id="host.sample.state",
+            schema_version="1.0.0", baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+            repository_contract="host.sample/1", scope="host",
+        )
+        installer = HostSchemaBundleInstaller(first_store)
+        digest = storage_bundle_digest(spec, "declarative")
+        installed = await installer.install(spec, baseline, digest)
+        assert installed["host_id"] == host_id
+        assert installed["namespace"] == spec.namespace
+        assert await installer.install(spec, baseline, digest) == installed
+        assert (await first.initialize())["host_id"] == host_id
+        wrong_spec = StorageBundleSpec(
+            component_id="host.sample", schema_id="host.sample.wrong-scope",
+            schema_version="1.0.0", baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+            repository_contract="host.sample/1", scope="deployment",
+        )
+        with pytest.raises(ForestError) as wrong_bundle:
+            await installer.install(wrong_spec, baseline, digest)
+        assert wrong_bundle.value.code == "INVALID_STORAGE_BUNDLE"
         lease = await first.claim(first_incarnation)
         assert (await first.claim(first_incarnation)).owner_epoch == lease.owner_epoch
         with pytest.raises(ForestError) as busy:

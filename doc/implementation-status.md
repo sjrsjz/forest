@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host 包私有存储账本（2026-10-07）：`forest_host` 基线新增只接受 host scope 的 `schema_bundles`，Host 身份初始化按已登记包 namespace 校验数据库清单。部署和 Host 的安装器现在共用固定 scope→内核 schema/身份列映射的安装逻辑，按各自身份、包摘要、SQL 基线、namespace 和原子事务围栏安装；Host 安装器拒绝 deployment bundle。隔离 PostgreSQL 验证 Host 首装/重放/跨 scope 拒绝、安装后身份清单复核，并回归原有 deployment bundle 及官方 audit 包真实 Generation（3 passed）；Ruff 通过。Host Generation 账本、运行时装配与生产入口仍未接通，在线实例未切换；由于 Host 基线变更，未上线的临时 Host 数据库须重建。
+
 Host 官方包来源围栏（2026-10-07）：包 manifest 与自动安装发现现接纳 host scope；可信源码登记按 deployment/host 分开记录官方工件来源，普通 build/ZIP 导入只产生未受信工件，跨 scope 查询也不能借另一侧登记取得官方权限。临时 host 包工件验证了同一摘要在 host 登记前拒绝、登记后接纳、deployment 官方查询仍拒绝以及 ZIP 再导入不继承来源；包目录完整回归 100 passed、1 skipped，Ruff 通过。尚无 host builtin 的生产装配或 host Generation，不能据此开放 host 管理操作。
 
 Host 持久身份与租约底座（2026-10-07）：新增独立 `HostStore`、`forest_host` 基线和 `HostIdentityAuthority`。Host 数据库只接受稳定 `host/<32 hex>` 身份；首次安装要求空专用数据库，之后按基线摘要和对象清单复核。进程 incarnation 租约以数据库行锁和单调 owner epoch 合流，旧 incarnation 不能续租或通过资源写入前的 `verify_in` 围栏。隔离 PostgreSQL 用例覆盖重复初始化、同 incarnation 重入、并发拒绝、重启接管、旧租约失效及错误 host 身份拒绝（1 passed），Ruff 通过。这只是 host authority 的基础切片：尚未接入生产 Supervisor、host Generation 包图、Web scope 或 `host.storage`，在线实例未切换；host 数据库的物理部署配置仍需在接入时固定。
