@@ -210,6 +210,7 @@ class RecordingModelClient(FakeModelClient):
     requests = []
     first_gate = None
     reply_text = None
+    reply_factory = None
     not_sent_attempts = 0
 
     async def dispatch(self, prepared, *, permitcheck):
@@ -223,10 +224,15 @@ class RecordingModelClient(FakeModelClient):
                 "NOT_SENT", prepared.request_id, prepared.transport_attempt_id,
                 prepared.payload_digest, error_code="TEST_MODEL_NOT_SENT",
             )
-        if type(self).reply_text is not None:
+        reply_text = (
+            type(self).reply_factory(prepared, len(type(self).requests))
+            if type(self).reply_factory is not None
+            else type(self).reply_text
+        )
+        if reply_text is not None:
             return ModelResult(
                 "RESPONDED", prepared.request_id, prepared.transport_attempt_id,
-                prepared.payload_digest, text=type(self).reply_text,
+                prepared.payload_digest, text=reply_text,
                 usage_json='{"total_tokens":12}', finish_reason="stop",
                 provider_response_id="fake-provider-response",
                 provider_model="test-model",
@@ -3668,7 +3674,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
+    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -3719,7 +3725,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
     clients = []
     RecordingModelClient.requests = []
     RecordingModelClient.first_gate = (
-        asyncio.Event() if scenario in {"cross-group", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "long-model-lease"} else None
+        asyncio.Event() if scenario in {"cross-group", "tool-continuation", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "long-model-lease"} else None
     )
     RecordingModelClient.not_sent_attempts = (
         3 if scenario in {"requeue", "transport-exhausted"} else 2 if scenario == "reload-full"
@@ -3732,6 +3738,30 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         '</content></block></blocks></payload></valid_agent_protocol_content_block>'
         if scenario in {"success", "result-ledger-recovery", "result-payload-recovery", "cross-group", "prepared-crash"} else None
     )
+    RecordingModelClient.reply_factory = None
+    if scenario == "tool-continuation":
+        def tool_then_answer(prepared, invocation_number):
+            if invocation_number == 1:
+                trigger_ref = prepared.manifest["trigger_claims"][0]["last_trigger_ref"]
+                arguments = json.dumps({
+                    "authority_trigger_id": trigger_ref,
+                    "arguments": {"source_unit_ids": ["missing-test-source"]},
+                }, separators=(",", ":"))
+                return (
+                    '<valid_agent_protocol_content_block block_type="ModelTurn">'
+                    '<payload><blocks><block block_type="FunctionCall">'
+                    '<function name="memory_recall_exact"><arguments encoding="json">'
+                    + arguments + '</arguments></function></block></blocks></payload>'
+                    '</valid_agent_protocol_content_block>'
+                )
+            return (
+                '<valid_agent_protocol_content_block block_type="ModelTurn">'
+                '<payload><blocks><block block_type="Assistant"><content><text>'
+                'Forest tool continuation fixture</text></content></block></blocks>'
+                '</payload></valid_agent_protocol_content_block>'
+            )
+
+        RecordingModelClient.reply_factory = tool_then_answer
 
     async def create_websocket(_url, _token, **_limits):
         client = FakeWebSocketClient(settings.onebot_self_id)
@@ -4147,6 +4177,123 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             assert active_media["bytes"] >= len(b"fake-png-bytes")
         else:
             assert b"image_url" not in prepared.body
+        if scenario == "tool-continuation":
+            for message_id, user_id, body, mention in (
+                (90002, 20002, "Ordinary before next trigger", False),
+                (90003, 20003, "Queued next trigger", True),
+                (90004, 20004, "Ordinary tail after trigger", False),
+            ):
+                await clients[-1].handler(json.dumps({
+                    "self_id": int(settings.onebot_self_id),
+                    "post_type": "message", "message_type": "group",
+                    "sub_type": "normal",
+                    "time": int(datetime.now(timezone.utc).timestamp()),
+                    "message_id": message_id, "user_id": user_id,
+                    "group_id": 933179609,
+                    "sender": {"user_id": user_id, "nickname": f"Member {user_id}",
+                               "card": "", "role": "member"},
+                    "message": [
+                        *([{"type": "at", "data": {"qq": settings.onebot_self_id}}]
+                          if mention else []),
+                        {"type": "text", "data": {"text": body}},
+                    ],
+                }).encode())
+            conversation_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "conversation.scheduler"
+            )
+            async with asyncio.timeout(30):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        lane = await (await conn.execute(
+                            sql.SQL("SELECT classified_through_seq FROM {}.conversation_lanes "
+                                    "WHERE bot_id=%s").format(sql.Identifier(conversation_schema)),
+                            (settings.bot_id,),
+                        )).fetchone()
+                    if lane is not None and lane["classified_through_seq"] >= 4:
+                        break
+                    await asyncio.sleep(0.1)
+            assert len(RecordingModelClient.requests) == 1
+            assert b"Queued next trigger" not in prepared.body
+            RecordingModelClient.first_gate.set()
+            try:
+                async with asyncio.timeout(70):
+                    while len(RecordingModelClient.requests) < 2:
+                        await asyncio.sleep(0.1)
+            except TimeoutError as exc:
+                agent_schema = next(
+                    item.storage.spec.namespace for item in host.registry.descriptors
+                    if item.component_id == "agent.runtime"
+                )
+                async with host.store.pool.connection() as conn:
+                    async def rows(namespace, query):
+                        return await (await conn.execute(
+                            sql.SQL(query).format(sql.Identifier(namespace)),
+                        )).fetchall()
+
+                    diagnostics = {
+                        "runs": await rows(agent_schema,
+                            "SELECT state,error_code,next_step_seq,input_revision FROM {}.agent_runs"),
+                        "requests": await rows(agent_schema,
+                            "SELECT state,step_seq,request_kind FROM {}.model_requests"),
+                        "turns": await rows(agent_schema,
+                            "SELECT step_seq,terminal FROM {}.model_turns"),
+                        "tools": await rows(agent_schema,
+                            "SELECT state,error_code,tool_name FROM {}.tool_calls"),
+                        "protocol_failures": await rows(agent_schema,
+                            "SELECT error_code FROM {}.protocol_failures"),
+                        "plans": await rows(conversation_schema,
+                            "SELECT step_seq,selected_bitmap FROM {}.context_model_view_plans"),
+                        "settlements": await rows(conversation_schema,
+                            "SELECT input_payload->'outcome' AS outcome "
+                            "FROM {}.conversation_agent_work_settlements "
+                            "ORDER BY created_at DESC LIMIT 5"),
+                    }
+                raise AssertionError(f"Tool continuation stalled: {diagnostics}") from exc
+            assert len(RecordingModelClient.requests) == 2
+            continuation = RecordingModelClient.requests[1]
+            continuation.verify()
+            assert continuation.manifest["run_id"] == prepared.manifest["run_id"]
+            assert continuation.manifest["model_view_plan_ref"] != manifest["model_view_plan_ref"]
+            assert b"Ordinary before next trigger" in continuation.body
+            assert b"Queued next trigger" in continuation.body
+            assert b"Ordinary tail after trigger" not in continuation.body
+            sources = continuation.manifest["source_manifest"]
+            assert {"qq:20001", "qq:20002", "qq:20003"} <= {
+                item["author"]["principal_ref"] for item in sources
+            }
+            assert any(item["source"]["source_kind"] == "agent.model-turn" for item in sources)
+            assert any(item["source"]["source_kind"] == "agent.tool-result" for item in sources)
+            async with host.store.pool.connection() as conn:
+                plans = await (await conn.execute(
+                    sql.SQL("SELECT step_seq,selected_bitmap FROM {}.context_model_view_plans "
+                            "WHERE bot_id=%s ORDER BY step_seq")
+                    .format(sql.Identifier(conversation_schema)),
+                    (settings.bot_id,),
+                )).fetchall()
+            assert [row["step_seq"] for row in plans] == [1, 2]
+            assert all(
+                old == "0" or new == "1"
+                for old, new in zip(plans[0]["selected_bitmap"],
+                                    plans[1]["selected_bitmap"], strict=False)
+            )
+            async with asyncio.timeout(35):
+                while not clients[-1].sent:
+                    await asyncio.sleep(0.1)
+            assert len(clients[-1].sent) == 1
+            assert b"Forest tool continuation fixture" in clients[-1].sent[0].wire_body
+            async with asyncio.timeout(35):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        lane = await (await conn.execute(
+                            sql.SQL("SELECT context_applied_seq FROM {}.conversation_lanes "
+                                    "WHERE bot_id=%s").format(sql.Identifier(conversation_schema)),
+                            (settings.bot_id,),
+                        )).fetchone()
+                    if lane is not None and lane["context_applied_seq"] >= 4:
+                        break
+                    await asyncio.sleep(0.1)
+            assert len(RecordingModelClient.requests) == 2
         if scenario == "long-model-lease":
             agent_schema = next(
                 item.storage.spec.namespace for item in host.registry.descriptors
@@ -4900,6 +5047,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             RecordingModelClient.first_gate.set()
         RecordingModelClient.first_gate = None
         RecordingModelClient.reply_text = None
+        RecordingModelClient.reply_factory = None
         RecordingModelClient.not_sent_attempts = 0
         await host.close()
         if real_transport:
