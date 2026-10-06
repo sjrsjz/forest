@@ -670,6 +670,8 @@ END;
 $$;
 
 CREATE INDEX bots_supply_idx ON forest_deployment.bots(supply_state,created_at,bot_id);
+CREATE INDEX runtime_intents_online_browse_idx
+    ON forest_deployment.runtime_intents(bot_id) WHERE desired_state='ONLINE';
 CREATE INDEX observations_retry_idx
     ON forest_deployment.runtime_observations(observed_state,retry_not_before,bot_id);
 CREATE INDEX provisioning_claim_idx

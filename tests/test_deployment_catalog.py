@@ -3911,6 +3911,13 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
 
         await _eventually(both_online)
         assert set(instances) == {"bot/alpha", "bot/beta"}
+        first_page = await repository.list_online_bots_page(limit=1)
+        second_page = await repository.list_online_bots_page(
+            after_bot_id=first_page[-1]["bot_id"], limit=1
+        )
+        assert [item["bot_id"] for item in first_page + second_page] == [
+            "bot/alpha", "bot/beta"
+        ]
         scopes = {item["bot_id"]: item for item in await supervisor.management_scopes()}
         assert scopes["bot/alpha"]["available"] is True
         assert scopes["bot/beta"]["available"] is True
@@ -3940,6 +3947,9 @@ async def test_multi_bot_supervisor_reconciles_independent_hosts(deployment_cata
             return (await repository.inspect("bot/alpha"))["observed_state"] == "OFFLINE"
 
         await _eventually(alpha_offline)
+        assert [item["bot_id"] for item in await repository.list_online_bots_page()] == [
+            "bot/beta"
+        ]
         assert instances["bot/alpha"].closed is True
         assert instances["bot/beta"].closed is False
         assert (await repository.inspect("bot/beta"))["observed_state"] == "ONLINE"

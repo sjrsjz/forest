@@ -21,6 +21,7 @@ _ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 @dataclass
 class _BotRunner:
     stop: asyncio.Event
+    last_seen_cycle: int = 0
     task: asyncio.Task | None = None
     host: object | None = None
     management_accepting: bool = False
@@ -211,28 +212,53 @@ class MultiBotSupervisor:
 
     async def _reconcile(self) -> None:
         try:
+            cycle = 0
             while not self._closing:
+                cycle += 1
                 self._reap()
                 now = datetime.now(timezone.utc)
-                for bot in await self.catalog.list_bots():
-                    runner = self._runners.get(bot["bot_id"])
-                    should_run = (
-                        bot["supply_state"] == "READY"
-                        and bot["desired_state"] == "ONLINE"
-                        and not (
+                after_bot_id = None
+                while True:
+                    page = await self.catalog.list_online_bots_page(
+                        after_bot_id=after_bot_id
+                    )
+                    if self._closing:
+                        return
+                    for bot in page:
+                        if (
                             bot["observed_state"] == "FAILED"
                             and bot["retry_not_before"] is not None
                             and bot["retry_not_before"] > now
-                        )
-                    )
-                    if should_run and runner is None:
-                        stop = asyncio.Event()
-                        runner = _BotRunner(stop)
-                        runner.task = asyncio.create_task(
-                            self._run_bot(bot, runner), name="bot-runtime/" + bot["bot_id"]
-                        )
-                        self._runners[bot["bot_id"]] = runner
-                    elif not should_run and runner is not None:
+                        ):
+                            continue
+                        runner = self._runners.get(bot["bot_id"])
+                        if runner is None:
+                            runner = _BotRunner(asyncio.Event())
+                            runner.task = asyncio.create_task(
+                                self._run_bot(bot, runner),
+                                name="bot-runtime/" + bot["bot_id"],
+                            )
+                            self._runners[bot["bot_id"]] = runner
+                        runner.last_seen_cycle = cycle
+                    if len(page) < 256:
+                        break
+                    after_bot_id = page[-1]["bot_id"]
+                for bot_id, runner in self._runners.items():
+                    if runner.last_seen_cycle != cycle:
+                        latest = await self.catalog.inspect(bot_id)
+                        if self._closing:
+                            return
+                        if (
+                            latest["supply_state"] == "READY"
+                            and latest["desired_state"] == "ONLINE"
+                            and not (
+                                latest["observed_state"] == "FAILED"
+                                and latest["retry_not_before"] is not None
+                                and latest["retry_not_before"] > now
+                            )
+                        ):
+                            runner.last_seen_cycle = cycle
+                            continue
                         runner.management_accepting = False
                         runner.host = None
                         runner.stop.set()

@@ -537,6 +537,30 @@ class DeploymentCatalogRepository:
             ).fetchall()
             return tuple(dict(row) for row in rows)
 
+    async def list_online_bots_page(
+        self, *, after_bot_id: str | None = None, limit: int = 256,
+    ) -> tuple[dict, ...]:
+        if after_bot_id is not None:
+            _bounded(after_bot_id, "after_bot_id", 128)
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ForestError("DEPLOYMENT_INPUT_INVALID", "Bot page limit is invalid", 422)
+        after_clause = " AND i.bot_id>%s" if after_bot_id is not None else ""
+        parameters = (after_bot_id, limit) if after_bot_id is not None else (limit,)
+        async with self.store.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT b.*,i.desired_state,i.revision AS intent_revision,"
+                    "o.observed_state,o.graph_id,o.error_code,o.retry_not_before,"
+                    "o.revision AS observation_revision FROM forest_deployment.runtime_intents i "
+                    "JOIN forest_deployment.bots b USING(bot_id) "
+                    "LEFT JOIN forest_deployment.runtime_observations o USING(bot_id) "
+                    "WHERE i.desired_state='ONLINE' AND b.supply_state='READY' "
+                    + after_clause + " ORDER BY i.bot_id LIMIT %s",
+                    parameters,
+                )
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
+
     async def inspect(self, bot_id: str) -> dict:
         _bounded(bot_id, "bot_id", 128)
         async with self.store.pool.connection() as conn:

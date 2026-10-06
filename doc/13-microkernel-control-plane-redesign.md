@@ -414,7 +414,7 @@ deployment/host 管理服务也有描述符、工件身份和
 关闭宿主时先撤下目录再反向排空。`deployment.audit` 只拥有部署审计脱敏查询与 UI，由部署数据库事务在查询前后复核管理员会话。账号身份、密码摘要、登录会话和最后一名管理员保护由内核持有；`deployment.accounts` 包拥有有界账号目录查询、操作声明和 UI，经受限内核命令提交创建、变更、改密与撤销会话，并保留自我降权后的幂等回执恢复。部署显示名称和会话 TTL 由 `deployment.configuration` 声明 schema、读取、计划、提交与 UI，登录/会话壳层只消费其生效投影。备份、Bot 目录和存储供应分别属于 deployment/host 服务；不能把某个临时 `ManagementRuntime` 字段列表当作最终注册表，
 也不能为了共用 transport 给 deployment 操作伪造 Bot ID 或 Bot ticket。
 
-切换部署作用域时，先把 PackageSnapshot 的 `deployment`/`host` scope 与相应存储作用域绑定到真实部署/宿主 authority，再建立各自的配置、授权、服务路由和 Generation 图；Bot 装配器必须继续拒绝跨 scope 工件。部署网关的模块目录、授权目标与每次操作必须读取同一张 ACTIVE 图的真实 Generation/revision，关闭或换代时先阻止新调用并排空已准入调用。`deployment_management.py` 伪组件及其合成的 `deployment/<component>/1` Generation 已删除；管理网关只接受包图中的真实部署组件。Bot 实体的基础身份与期望运行状态由内核目录持有，builtin 包只能通过受限端口查询或提交管理操作；包卸载不得删除 Bot 身份或改变运行意图。
+切换部署作用域时，先把 PackageSnapshot 的 `deployment`/`host` scope 与相应存储作用域绑定到真实部署/宿主 authority，再建立各自的配置、授权、服务路由和 Generation 图；Bot 装配器必须继续拒绝跨 scope 工件。部署网关的模块目录、授权目标与每次操作必须读取同一张 ACTIVE 图的真实 Generation/revision，关闭或换代时先阻止新调用并排空已准入调用。`deployment_management.py` 伪组件及其合成的 `deployment/<component>/1` Generation 已删除；管理网关只接受包图中的真实部署组件。Bot 实体的基础身份与期望运行状态由内核目录持有，builtin 包只能通过受限端口查询或提交管理操作；包卸载不得删除 Bot 身份或改变运行意图。Supervisor 周期调和仅沿内核 ONLINE 意图索引按 Bot ID 键集分页读取 READY 身份，不能每轮装入全部 OFFLINE Bot；跨页读不是同一快照，已有 Runner 若在某轮未见，须定点复核当前身份与意图后才撤下，启动和 ONLINE 观察仍以意图修订事务围栏为准。
 
 部署数据库以自身 `forest_deployment.schema_bundles` 登记 deployment 包的不可变 SQL 命名空间，登记行必须绑定真实 `deployment_id`、schema ID、scope、包摘要和基线摘要。Bot 的 `forest_kernel.schema_bundles` 只接受 Bot 包；Domain authority 按准确的调用 scope 选择数据库和账本，绝不把 deployment ID 填入 Bot ID 字段。host 包如需持久存储，必须先有独立的 host 存储 authority 和 Generation 围栏，不能暂借部署或 Bot 账本。部署基线若发生不兼容改动，未上线阶段直接重建部署数据库，不为旧宿主对象添加迁移兼容层。
 
