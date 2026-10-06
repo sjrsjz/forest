@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": ["plan", "step_seq", "source_set_digest"],
+  "properties": {
+    "plan": {
+      "type": "object",
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+        "owner_component_id": {"const": "conversation.scheduler"},
+        "owner_kind": {"const": "model.view.plan"},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "step_seq": {"type": "integer", "minimum": 1, "maximum": 256},
+    "source_set_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"}
+  },
+  "additionalProperties": false
+}

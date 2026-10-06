@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "actor", "session_ref", "run_ref", "step_seq", "context_revision",
+    "context_view_revision", "media_cost_revision", "context_applied_seq",
+    "profile_digest", "source_set_digest", "selected_bitmap",
+    "prior_plan_digest", "quote_owner_id", "plan_owner_id", "quote", "plan"
+  ],
+  "properties": {
+    "actor": {
+      "type": "object",
+      "required": ["conversation_id", "owner_id", "epoch"],
+      "properties": {
+        "conversation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "epoch": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "session_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "run_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "step_seq": {"type": "integer", "minimum": 1, "maximum": 256},
+    "context_revision": {"type": "integer", "minimum": 0},
+    "context_view_revision": {"type": "integer", "minimum": 0},
+    "media_cost_revision": {"type": "integer", "minimum": 0},
+    "context_applied_seq": {"type": "integer", "minimum": 0},
+    "profile_digest": {"$ref": "#/$defs/digest"},
+    "source_set_digest": {"$ref": "#/$defs/digest"},
+    "selected_bitmap": {"type": "string", "maxLength": 4096, "pattern": "^[01]*$"},
+    "prior_plan_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
+    "quote_owner_id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "plan_owner_id": {"type": "string", "minLength": 1, "maxLength": 512},
+    "quote": {"$ref": "#/$defs/quote"},
+    "plan": {"$ref": "#/$defs/plan"}
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
+    "quote": {
+      "type": "object",
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"const": "agent.runtime"},
+        "owner_kind": {"const": "model.view.quote"},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "additionalProperties": false
+    },
+    "plan": {
+      "type": "object",
+      "required": ["payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"],
+      "properties": {
+        "payload_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "digest": {"$ref": "#/$defs/digest"},
+        "owner_component_id": {"const": "conversation.scheduler"},
+        "owner_kind": {"const": "model.view.plan"},
+        "owner_id": {"type": "string", "minLength": 1, "maxLength": 512}
+      },
+      "additionalProperties": false
+    }
+  }
+}

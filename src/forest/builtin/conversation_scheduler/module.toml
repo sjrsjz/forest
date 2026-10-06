@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.34.0"
+version = "4.35.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -43,6 +43,7 @@ requests = [
   "payload.read",
   "domain.command:conversation.media-cost.write",
   "domain.command:conversation.run-view.bind",
+  "domain.command:conversation.model-view.publish",
   "service.call:agent.execute",
   "service.call:agent.execution.policy",
   "domain.query:conversation.context-page",
@@ -93,9 +94,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.29.0"
+schema_version = "4.30.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "15a93151ebf614445655a1abc23a6169d11c7227ce5b443b4e59ca3f144a0911"
+baseline_sha256 = "bcba23f36071afe2ee94e551d696b0a8a3f1867373e9882892fcdefc4b9ff0a2"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -148,6 +149,25 @@ contract = "1.0"
 function = "conversation_bind_run_view_profile"
 input_schema = "schemas/run-view-bind-input.json"
 output_schema = "schemas/run-view-bind-output.json"
+
+[[components.domain_commands]]
+name = "conversation.model-view.publish"
+contract = "1.0"
+function = "conversation_publish_model_view_plan"
+input_schema = "schemas/model-view-publish-input.json"
+output_schema = "schemas/model-view-publish-output.json"
+
+[[components.domain_commands.payload_refs]]
+path = "/quote"
+owner_component = "agent.runtime"
+owner_kind = "model.view.quote"
+owner_id_path = "/quote_owner_id"
+
+[[components.domain_commands.payload_refs]]
+path = "/plan"
+owner_component = "conversation.scheduler"
+owner_kind = "model.view.plan"
+owner_id_path = "/plan_owner_id"
 
 [[components.domain_commands]]
 name = "conversation.request-requeue"

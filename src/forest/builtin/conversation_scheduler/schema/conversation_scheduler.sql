@@ -618,6 +618,42 @@ CREATE TABLE context_run_view_profiles (
         REFERENCES conversation_lanes(bot_id,conversation_id)
 );
 
+CREATE TABLE context_model_view_plans (
+    bot_id text NOT NULL,
+    conversation_id text NOT NULL,
+    session_ref text NOT NULL CHECK (octet_length(session_ref) BETWEEN 1 AND 256),
+    run_ref text NOT NULL CHECK (octet_length(run_ref) BETWEEN 1 AND 256),
+    step_seq integer NOT NULL CHECK (step_seq BETWEEN 1 AND 256),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    context_revision bigint NOT NULL CHECK (context_revision >= 0),
+    context_view_revision bigint NOT NULL CHECK (context_view_revision >= 0),
+    media_cost_revision bigint NOT NULL CHECK (media_cost_revision >= 0),
+    context_applied_seq bigint NOT NULL CHECK (context_applied_seq >= 0),
+    profile_digest text NOT NULL CHECK (profile_digest ~ '^sha256:[a-f0-9]{64}$'),
+    source_set_digest text NOT NULL CHECK (source_set_digest ~ '^sha256:[a-f0-9]{64}$'),
+    considered_count integer NOT NULL CHECK (considered_count BETWEEN 0 AND 4096),
+    selected_bitmap text NOT NULL CHECK (
+        octet_length(selected_bitmap) BETWEEN 0 AND 4096
+        AND selected_bitmap ~ '^[01]*$'
+        AND octet_length(selected_bitmap)=considered_count
+    ),
+    prior_plan_digest text CHECK (
+        prior_plan_digest IS NULL OR prior_plan_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    quote_payload_id text NOT NULL CHECK (octet_length(quote_payload_id) BETWEEN 1 AND 256),
+    quote_payload_digest text NOT NULL CHECK (quote_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    plan_payload_id text NOT NULL CHECK (octet_length(plan_payload_id) BETWEEN 1 AND 256),
+    plan_payload_digest text NOT NULL CHECK (plan_payload_digest ~ '^sha256:[a-f0-9]{64}$'),
+    published_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,conversation_id,run_ref,step_seq),
+    UNIQUE (bot_id,operation_id),
+    FOREIGN KEY (bot_id,conversation_id)
+        REFERENCES conversation_lanes(bot_id,conversation_id),
+    FOREIGN KEY (bot_id,conversation_id,run_ref)
+        REFERENCES context_run_view_profiles(bot_id,conversation_id,run_ref)
+);
+
 CREATE TABLE context_compactions (
     bot_id text NOT NULL,
     conversation_id text NOT NULL,
@@ -1098,6 +1134,9 @@ CREATE TRIGGER context_compactions_immutable BEFORE UPDATE OR DELETE ON context_
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_run_view_profiles_immutable
     BEFORE UPDATE OR DELETE ON context_run_view_profiles
+    FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
+CREATE TRIGGER context_model_view_plans_immutable
+    BEFORE UPDATE OR DELETE ON context_model_view_plans
     FOR EACH ROW EXECUTE FUNCTION reject_scheduler_fact_change();
 CREATE TRIGGER context_compaction_units_immutable
     BEFORE UPDATE OR DELETE ON context_compaction_units
@@ -2616,6 +2655,220 @@ BEGIN
              policy,digest_value);
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('profile',policy,'profile_digest',digest_value));
+END;
+$$;
+
+CREATE FUNCTION conversation_publish_model_view_plan(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_digest text := context->>'input_digest';
+    actor jsonb := input->'actor';
+    requested_conversation text := actor->>'conversation_id';
+    requested_session text := input->>'session_ref';
+    requested_run text := input->>'run_ref';
+    requested_step integer := (input->>'step_seq')::integer;
+    requested_bitmap text := input->>'selected_bitmap';
+    requested_source_digest text := input->>'source_set_digest';
+    requested_profile_digest text := input->>'profile_digest';
+    quote_ref jsonb := input->'quote';
+    plan_ref jsonb := input->'plan';
+    lane record;
+    frozen record;
+    replay record;
+    prior record;
+    source_ids text[];
+    required_bitmap text;
+    required_count integer;
+    claimed_count integer;
+    actual_source_digest text;
+    prefix_digest text;
+    position integer;
+    owner_prefix text;
+    quote_suffix text;
+    plan_suffix text;
+BEGIN
+    IF context->>'component_id' IS DISTINCT FROM 'conversation.scheduler'
+       OR context->>'port_name' IS DISTINCT FROM 'conversation.model-view.publish'
+       OR context->>'port_kind' IS DISTINCT FROM 'command'
+       OR requested_bot IS NULL OR requested_operation IS NULL
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_conversation IS NULL OR requested_session IS NULL
+       OR requested_run IS NULL OR requested_step IS NULL
+       OR requested_step NOT BETWEEN 1 AND 256
+       OR requested_bitmap IS NULL OR octet_length(requested_bitmap)>4096
+       OR requested_bitmap !~ '^[01]*$'
+       OR requested_source_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_profile_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR quote_ref->>'owner_component_id' IS DISTINCT FROM 'agent.runtime'
+       OR quote_ref->>'owner_kind' IS DISTINCT FROM 'model.view.quote'
+       OR quote_ref->>'owner_id' IS DISTINCT FROM input->>'quote_owner_id'
+       OR plan_ref->>'owner_component_id' IS DISTINCT FROM 'conversation.scheduler'
+       OR plan_ref->>'owner_kind' IS DISTINCT FROM 'model.view.plan'
+       OR plan_ref->>'owner_id' IS DISTINCT FROM input->>'plan_owner_id' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_INVALID',
+                'message','Model view publication is invalid','status',422));
+    END IF;
+    owner_prefix := 'model-view:'||requested_run||':step:'||requested_step::text||':';
+    quote_suffix := substr(input->>'quote_owner_id',length(owner_prefix)+1);
+    plan_suffix := substr(input->>'plan_owner_id',length(owner_prefix)+1);
+    IF left(input->>'quote_owner_id',length(owner_prefix)) IS DISTINCT FROM owner_prefix
+       OR left(input->>'plan_owner_id',length(owner_prefix)) IS DISTINCT FROM owner_prefix
+       OR octet_length(quote_suffix) IS DISTINCT FROM 64
+       OR octet_length(plan_suffix) IS DISTINCT FROM 64
+       OR quote_suffix !~ '^[a-f0-9]+$' OR plan_suffix !~ '^[a-f0-9]+$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_INVALID',
+                'message','Model view candidate identity is invalid','status',422));
+    END IF;
+    SELECT * INTO replay FROM __forest_module_schema__.context_model_view_plans
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF replay.operation_id IS NOT NULL THEN
+        IF replay.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_OPERATION_CONFLICT',
+                    'message','Model view operation changed its input','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('plan',plan_ref,'step_seq',replay.step_seq,
+                'source_set_digest',replay.source_set_digest));
+    END IF;
+    SELECT * INTO lane FROM __forest_module_schema__.conversation_lanes
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation FOR UPDATE;
+    SELECT * INTO replay FROM __forest_module_schema__.context_model_view_plans
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF replay.operation_id IS NOT NULL THEN
+        IF replay.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_OPERATION_CONFLICT',
+                    'message','Model view operation changed its input','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('plan',plan_ref,'step_seq',replay.step_seq,
+                'source_set_digest',replay.source_set_digest));
+    END IF;
+    IF lane.conversation_id IS NULL
+       OR lane.actor_owner_id IS DISTINCT FROM actor->>'owner_id'
+       OR lane.actor_epoch IS DISTINCT FROM (actor->>'epoch')::bigint
+       OR lane.actor_expires_at IS NULL OR lane.actor_expires_at<=clock_timestamp()
+       OR lane.active_session_ref IS DISTINCT FROM requested_session
+       OR lane.active_run_ref IS DISTINCT FROM requested_run
+       OR lane.context_revision IS DISTINCT FROM (input->>'context_revision')::bigint
+       OR lane.context_view_revision IS DISTINCT FROM (input->>'context_view_revision')::bigint
+       OR lane.media_cost_revision IS DISTINCT FROM (input->>'media_cost_revision')::bigint
+       OR lane.context_applied_seq IS DISTINCT FROM (input->>'context_applied_seq')::bigint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_FENCE_CHANGED',
+                'message','Model view source or Run fence changed','status',409));
+    END IF;
+    SELECT * INTO frozen FROM __forest_module_schema__.context_run_view_profiles
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND run_ref=requested_run;
+    IF frozen.run_ref IS NULL OR frozen.session_ref IS DISTINCT FROM requested_session
+       OR frozen.profile_digest IS DISTINCT FROM requested_profile_digest THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_POLICY_CHANGED',
+                'message','Frozen Run view policy differs','status',409));
+    END IF;
+    SELECT * INTO replay FROM __forest_module_schema__.context_model_view_plans
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND run_ref=requested_run AND step_seq=requested_step;
+    IF replay.operation_id IS NOT NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_STEP_CONFLICT',
+                'message','Model step already has another plan','status',409));
+    END IF;
+    SELECT COALESCE(array_agg(item.unit_id ORDER BY item.context_revision,item.unit_index),ARRAY[]::text[]),
+           COALESCE(string_agg(CASE WHEN item.required THEN '1' ELSE '0' END,''
+               ORDER BY item.context_revision,item.unit_index),''),
+           count(*) FILTER (WHERE item.required)
+    INTO source_ids,required_bitmap,required_count
+    FROM (
+        SELECT a.unit_id,a.context_revision,a.unit_index,
+            EXISTS (SELECT 1 FROM __forest_module_schema__.conversation_triggers t
+                JOIN __forest_module_schema__.context_units u
+                  ON u.bot_id=a.bot_id AND u.conversation_id=a.conversation_id
+                 AND u.unit_id=a.unit_id
+                WHERE t.bot_id=a.bot_id AND t.conversation_id=a.conversation_id
+                  AND t.event_id=u.event_id AND t.status='CLAIMED'
+                  AND t.claimed_session_ref=requested_session
+                  AND t.claimed_run_ref=requested_run) AS required
+        FROM __forest_module_schema__.active_context_units a
+        WHERE a.bot_id=requested_bot AND a.conversation_id=requested_conversation
+    ) item;
+    SELECT count(*) INTO claimed_count FROM __forest_module_schema__.conversation_triggers t
+    WHERE t.bot_id=requested_bot AND t.conversation_id=requested_conversation
+      AND t.status='CLAIMED' AND t.claimed_session_ref=requested_session
+      AND t.claimed_run_ref=requested_run;
+    actual_source_digest := 'sha256:'||encode(sha256(convert_to(
+        array_to_string(source_ids,chr(31)),'UTF8')),'hex');
+    IF cardinality(source_ids)<>octet_length(requested_bitmap)
+       OR cardinality(source_ids)<>lane.context_view_unit_count
+       OR actual_source_digest IS DISTINCT FROM requested_source_digest
+       OR required_count IS DISTINCT FROM claimed_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_SOURCE_CHANGED',
+                'message','Active or required source set changed','status',409));
+    END IF;
+    FOR position IN 1..cardinality(source_ids) LOOP
+        IF substr(required_bitmap,position,1)='1'
+           AND substr(requested_bitmap,position,1)<>'1' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_REQUIRED_MISSING',
+                    'message','A claimed trigger is omitted','status',409));
+        END IF;
+    END LOOP;
+    SELECT * INTO prior FROM __forest_module_schema__.context_model_view_plans
+    WHERE bot_id=requested_bot AND conversation_id=requested_conversation
+      AND run_ref=requested_run
+    ORDER BY step_seq DESC LIMIT 1;
+    IF prior.plan_payload_id IS NULL THEN
+        IF input->>'prior_plan_digest' IS NOT NULL THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_PARENT_CHANGED',
+                    'message','Model view parent is absent','status',409));
+        END IF;
+    ELSE
+        prefix_digest := 'sha256:'||encode(sha256(convert_to(
+            array_to_string(source_ids[1:prior.considered_count],chr(31)),'UTF8')),'hex');
+        IF prior.step_seq>=requested_step
+           OR prior.plan_payload_digest IS DISTINCT FROM input->>'prior_plan_digest'
+           OR prior.source_set_digest IS DISTINCT FROM prefix_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_PARENT_CHANGED',
+                    'message','Frozen model view parent changed','status',409));
+        END IF;
+        FOR position IN 1..prior.considered_count LOOP
+            IF (substr(prior.selected_bitmap,position,1)='1'
+                AND substr(requested_bitmap,position,1)<>'1')
+               OR (substr(prior.selected_bitmap,position,1)='0'
+                   AND substr(requested_bitmap,position,1)='1'
+                   AND substr(required_bitmap,position,1)<>'1') THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','CONTEXT_MODEL_VIEW_PLAN_RESELECTED',
+                        'message','Old history membership changed','status',409));
+            END IF;
+        END LOOP;
+    END IF;
+    INSERT INTO __forest_module_schema__.context_model_view_plans(
+        bot_id,conversation_id,session_ref,run_ref,step_seq,operation_id,input_digest,
+        context_revision,context_view_revision,media_cost_revision,context_applied_seq,
+        profile_digest,source_set_digest,considered_count,selected_bitmap,prior_plan_digest,
+        quote_payload_id,quote_payload_digest,plan_payload_id,plan_payload_digest
+    ) VALUES (
+        requested_bot,requested_conversation,requested_session,requested_run,
+        requested_step,requested_operation,requested_digest,
+        lane.context_revision,lane.context_view_revision,lane.media_cost_revision,
+        lane.context_applied_seq,requested_profile_digest,actual_source_digest,
+        cardinality(source_ids),requested_bitmap,input->>'prior_plan_digest',
+        quote_ref->>'payload_id',quote_ref->>'digest',
+        plan_ref->>'payload_id',plan_ref->>'digest'
+    );
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('plan',plan_ref,'step_seq',requested_step,
+            'source_set_digest',actual_source_digest));
 END;
 $$;
 
