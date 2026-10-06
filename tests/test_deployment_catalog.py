@@ -2597,6 +2597,65 @@ async def test_expired_provisioning_claim_blocks_unknown_result(deployment_catal
 
 
 @pytest.mark.postgres
+async def test_provisioning_recovery_is_bounded_and_drains_successive_batches(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    jobs = DeploymentProvisioningJobAuthority(repository.store)
+    supervisor = await repository.claim_supervisor(
+        "host/recovery-batches", "incarnation/recovery-batches"
+    )
+    async with repository.store.transaction() as conn:
+        await conn.execute(
+            "INSERT INTO forest_deployment.storage_profiles("
+            "profile_ref,bot_id,storage_generation,dsn_secret_ref) "
+            "SELECT 'storage/recovery/'||i,'bot/recovery/'||i,1,"
+            "'secret://recovery/postgresql-dsn' FROM generate_series(1,66) i"
+        )
+        await conn.execute(
+            "INSERT INTO forest_deployment.bootstrap_profiles("
+            "profile_ref,bot_id,storage_profile_ref,storage_generation,manifest_digest) "
+            "SELECT 'bootstrap/recovery/'||i,'bot/recovery/'||i,"
+            "'storage/recovery/'||i,1,%s FROM generate_series(1,66) i",
+            ("sha256:" + "a" * 64,),
+        )
+        await conn.execute(
+            "INSERT INTO forest_deployment.provisioning_jobs("
+            "job_id,bot_id,display_name,storage_profile_ref,storage_generation,"
+            "bootstrap_profile_ref,bootstrap_manifest_digest,state,attempt_no,"
+            "max_attempts,lease_owner,lease_expires_at,retry_not_before) "
+            "SELECT 'provisioning/recovery/'||i,'bot/recovery/'||i,'Recovery '||i,"
+            "'storage/recovery/'||i,1,'bootstrap/recovery/'||i,%s,"
+            "CASE WHEN i<=33 THEN 'RUNNING' ELSE 'RETRY_WAIT' END,1,1,"
+            "CASE WHEN i<=33 THEN 'worker/stale' END,"
+            "CASE WHEN i<=33 THEN clock_timestamp()-interval '1 second' END,"
+            "CASE WHEN i>33 THEN clock_timestamp()-interval '1 second' END "
+            "FROM generate_series(1,66) i",
+            ("sha256:" + "a" * 64,),
+        )
+
+    assert await jobs.claim(supervisor, worker_id="worker/recovery") is None
+    async with repository.store.pool.connection() as conn:
+        rows = await (await conn.execute(
+            "SELECT state,count(*) AS count FROM forest_deployment.provisioning_jobs "
+            "GROUP BY state"
+        )).fetchall()
+    assert {row["state"]: row["count"] for row in rows} == {
+        "RUNNING": 1, "RETRY_WAIT": 1, "BLOCKED_UNKNOWN": 32, "FAILED": 32,
+    }
+    assert await jobs.claim(supervisor, worker_id="worker/recovery") is None
+    async with repository.store.pool.connection() as conn:
+        rows = await (await conn.execute(
+            "SELECT state,count(*) AS count FROM forest_deployment.provisioning_jobs "
+            "GROUP BY state"
+        )).fetchall()
+    assert {row["state"]: row["count"] for row in rows} == {
+        "BLOCKED_UNKNOWN": 33, "FAILED": 33,
+    }
+
+
+@pytest.mark.postgres
 async def test_deterministic_provisioning_failure_does_not_retry(deployment_catalog):
     repository = deployment_catalog
     await repository.initialize()

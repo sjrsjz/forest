@@ -12,6 +12,7 @@ from forest.packages import digest_json
 from forest.storage.deployment_catalog import DeploymentSupervisorLease
 
 _ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
+_RECOVERY_BATCH_LIMIT = 32
 
 
 def _text(value: object, field: str, limit: int) -> str:
@@ -184,18 +185,26 @@ class DeploymentProvisioningJobAuthority:
         async with self.store.transaction(conn) as conn:
             await self._verify_supervisor_in(conn, supervisor)
             await conn.execute(
-                "UPDATE forest_deployment.provisioning_jobs SET state='BLOCKED_UNKNOWN',"
+                "WITH expired AS (SELECT job_id FROM forest_deployment.provisioning_jobs "
+                "WHERE state='RUNNING' AND lease_expires_at<=clock_timestamp() "
+                "ORDER BY lease_expires_at,job_id FOR UPDATE SKIP LOCKED LIMIT %s) "
+                "UPDATE forest_deployment.provisioning_jobs j SET state='BLOCKED_UNKNOWN',"
                 "last_error_code='PROVISIONING_CLAIM_EXPIRED',lease_owner=NULL,"
                 "lease_expires_at=NULL,retry_not_before=NULL,revision=revision+1,"
-                "updated_at=clock_timestamp() WHERE state='RUNNING' "
-                "AND lease_expires_at<=clock_timestamp()"
+                "updated_at=clock_timestamp() FROM expired e WHERE j.job_id=e.job_id",
+                (_RECOVERY_BATCH_LIMIT,),
             )
             await conn.execute(
-                "UPDATE forest_deployment.provisioning_jobs SET state='FAILED',"
+                "WITH exhausted AS (SELECT job_id FROM forest_deployment.provisioning_jobs "
+                "WHERE state='RETRY_WAIT' AND attempt_no>=max_attempts "
+                "AND retry_not_before<=clock_timestamp() "
+                "ORDER BY retry_not_before,job_id FOR UPDATE SKIP LOCKED LIMIT %s) "
+                "UPDATE forest_deployment.provisioning_jobs j SET state='FAILED',"
                 "last_error_code='PROVISIONING_ATTEMPTS_EXHAUSTED',lease_owner=NULL,"
                 "lease_expires_at=NULL,retry_not_before=NULL,completed_at=clock_timestamp(),"
-                "revision=revision+1,updated_at=clock_timestamp() WHERE attempt_no>=max_attempts "
-                "AND state='RETRY_WAIT' AND retry_not_before<=clock_timestamp()"
+                "revision=revision+1,updated_at=clock_timestamp() FROM exhausted e "
+                "WHERE j.job_id=e.job_id",
+                (_RECOVERY_BATCH_LIMIT,),
             )
             row = await (
                 await conn.execute(

@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+部署供应 Job 有界恢复（2026-10-07）：内核唯一 Job 账本的 claim 端口不再无界更新所有过期 RUNNING 和耗尽重试记录；两类状态各从到期部分索引以 `SKIP LOCKED` 每轮最多处理 32 条，过期 RUNNING 保持 `BLOCKED_UNKNOWN` 而不盲目重试物理建库。隔离 PostgreSQL 以 66 条历史 Job 验证分两轮排空，并复验租约过期与 READY 原子发布（3 passed）。部署内核 SQL 基线已改变，未上线部署数据库须重建；本轮未切换在线实例。
+
 Memory 来源单元精确定位（2026-10-07）：`memory.graph` 包的来源查询与批量遗忘选择现在接受 `source_unit_id` 精确条件，WebUI 可直接用关系证据或日志中的单元 ID 定位；查询仍按 Bot、资格、状态与快照游标核验，正文和图片继续由 Kernel Payload 持有。包版本为 1.78.1、存储基线为 3.72.1；隔离 PostgreSQL 的来源分页与精确定位用例通过（1 passed），未切换在线实例。正文关键词检索仍需独立的受控索引投影。
 
 > 本页只记录当前工作树事实，不定义目标架构。架构约束以 [00 架构总契约](00-architecture-contract.md)、[13 微内核控制面重构](13-microkernel-control-plane-redesign.md)和[15 单 Agent 生产执行](15-single-agent-production-execution.md)为准。**Bot 运行图** 已切为微内核包图；部署审计、Bot 目录、Secret、账号、包目录和供应 WebUI 已切为真实可热替换部署包，旧 `deployment_management.py` 伪组件与固定字符串 Generation 已删除。供应 Job 的领取与执行由 `deployment.provisioning` 包持有，物理建库、Bot 装配和部分控制面受限端口仍由宿主内核装配；host 作用域包图尚未落地。图文记忆主链已有隔离 Bot、真实 VL 嵌入端点、PostgreSQL 与 Milvus 的跨群召回和管理试验验证。获准群的真实 QQ 入站到回复、真实浏览器结合供应商的端到端链路、百万级混合负载及长期运行仍未验收，因此 Forest 仍不可发布。

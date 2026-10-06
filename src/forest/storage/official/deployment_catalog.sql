@@ -674,6 +674,12 @@ CREATE INDEX observations_retry_idx
     ON forest_deployment.runtime_observations(observed_state,retry_not_before,bot_id);
 CREATE INDEX provisioning_claim_idx
     ON forest_deployment.provisioning_jobs(state,retry_not_before,created_at,job_id);
+CREATE INDEX provisioning_expired_running_idx
+    ON forest_deployment.provisioning_jobs(lease_expires_at,job_id)
+    WHERE state='RUNNING';
+CREATE INDEX provisioning_exhausted_retry_idx
+    ON forest_deployment.provisioning_jobs(retry_not_before,job_id)
+    WHERE state='RETRY_WAIT' AND attempt_no>=max_attempts;
 
 INSERT INTO forest_deployment.supervisor_lease(singleton) VALUES (true);
 
