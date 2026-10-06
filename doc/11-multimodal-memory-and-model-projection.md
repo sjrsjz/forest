@@ -298,7 +298,7 @@ manifest 的 source_manifest 描述批准进入请求的文本/图片及其必�
 2. 解析本次真正使用的 Provider、模型修订与能力快照；该快照不包含 Context 预算或裁剪策略。
 3. 从规范事实构建独立 ModelView；对所有角色、历史消息、引用/转发、工具结果、RAG 证据及嵌套内容逐段执行允许模态规则。
 4. 移除不支持的内容段，保留真实作者、来源头、文本和工具协议结构；记录被省略段和原因。
-5. 完整投影 Context 已发布的活动视图和 Memory 已选定的证据；serializer 不估算 token 预算，不删除单元、不截断证据。需要缩小历史时，Agent 只能在新 Run 的首次调用前请求 Context 所有者发布持久 ViewPlan；需要原图变换时保存具体派生引用，不得自动调用 LLM 摘要补洞。
+5. 完整投影 Context 已发布的本步骤 ViewPlan 和 Memory 已选定的证据；serializer 不估算 token 预算，不删除单元、不截断证据。Agent 在新 Run 首次调用前提交不可变成本报价，请求 Context 所有者选择历史；后续模型调用只请求追加因果后缀的新版本，不重选旧历史。需要原图变换时保存具体派生引用，不得自动调用 LLM 摘要补洞。
 
 6. 事务外按冻结来源与当前授权物化媒体，由 adapter 使用固定序列化版本构建精确 API 请求体；此时可申请仅覆盖本次需要的短效媒体 URL。计算请求体字节的 payload_digest，不记录令牌明文，也不在此时发出模型调用。
 7. 短事务重验权限、删除状态、输入切口、运行 fence、能力和媒体物化绑定，为该精确载荷签发限时发送许可，并原子保存语义 manifest 与不可变 transport attempt。锁内不下载媒体、不签 URL、不做编码或网络请求。
@@ -342,7 +342,7 @@ Memory 检索策略 `qiyu-graph-region/2` 为证据物化增加 `max_retrieval_m
 
 ## 11. ContextView、缓存与重试
 
-规范活动视图由独立且版本化的 `context_view_profile` 管理年龄、条目、估算 token/字节和媒体引用上限；预算算法、低水位、pin 与归档选择都属于 Context 模块。空闲 `SILENT_DRAIN` 持续执行这套持久维护；Agent 在新 Run 第一次调用模型前冻结当前 ViewPlan，此后同一 Run 只追加有界因果单元。Provider 能力和请求 manifest 不包含这套策略。
+规范活动视图由独立且版本化的 `context_view_profile` 管理年龄、条目、估算 token/字节和媒体引用上限；持续维护的高低水位与一次模型请求的 `model_view_budget` 分别配置。预算算法、pin、历史选择与归档都属于 Context 模块。空闲 `SILENT_DRAIN` 持续执行持久维护；Agent 在新 Run 第一次调用模型前取得已发布 ViewPlan，此后同一 Run 只追加有界因果单元。Provider 能力和请求 manifest 不包含这套策略。
 
 持久 ViewPlan 可以依据既定策略将旧的完整源单元移出活动窗口，保留可靠归档与必要 pin；不能因为当前 LLM 不支持图片而从事实或规范活动视图删除图像段。每请求投影只允许做由目标 API 能力必然要求的模态转换，例如文本模型用明确缺失标记替代图片；不得再按 token/image 估算选择历史或 RAG 证据。原始触发的图片 pin、持久 Context 裁剪记录与本请求 omitted_part_refs 是三类不同事实，不能相互替代。
 

@@ -137,7 +137,7 @@ Before sending, silently verify one root, valid block order, complete XML, escap
 </forest_agent_protocol>
 ```
 
-PresetContext 只允许宿主生成的 Bot 人格、语气和行为约束，具有独立 revision/digest；它不进入群 Context、归档、嵌入或记忆，也不能为 token 预算局部裁剪。CorePrompt 与 PresetContext 合计超过模型硬窗口时，请求以 `MODEL_FIXED_PREFIX_TOO_LARGE` 失败。
+PresetContext 只允许宿主生成的 Bot 人格、语气和行为约束，具有独立 revision/digest；它不进入群 Context、归档、嵌入或记忆，也不能为 token 预算局部裁剪。CorePrompt 与 PresetContext 作为必要成本提交 Conversation 的模型视图报价；若固定前缀和其他必要内容超过冻结的 Context 模型视图预算，由 Context 明确失败，不由 Provider 按自己的估计拒绝。
 
 Provider 输出先按字节、事件数和 UTF-8 限制收敛，再由禁用 DTD/entity 的有界 XML parser 校验唯一根、字面量 `payload/blocks` 容器、节点深度、属性、mixed content、block 顺序和 JSON 参数；不存在标签别名或兼容归一化。第一个完整 FunctionCall 之后的尾部一律不可信。格式错误最多允许一次独立的协议重写 attempt：原 request/attempt、解析错误码、候选摘要和有界原候选先作为不可变失败事实提交，Run 进入 `REPAIR_READY`；Agent Protocol 从这些事实确定性生成 `ProtocolRepairView`，只含固定协议语法、校验错误、候选摘要、有界原候选和工具声明。它不得读取或投影 ContextView、PresetContext、Memory evidence、媒体，也不得领取新消息；其职责只是保留候选原意并重写成合法 ModelTurn。修复请求声明 `request_kind=REPAIR` 并准确引用原失败请求，Agent 冻结修复投影与 wire，Provider 只验证引用并发送。进程可在两次调用之间退出并从该边界恢复。修复输出仍由同一严格 parser 校验；再次失败时 Run 进入 `FAILED/AGENT_PROTOCOL_FAILED`，其已领取 trigger 由 Conversation 的幂等失败操作终结并释放 lane。所有非法候选都不进入聊天 Context。流式 delta 只是未提交预览，群聊只能发送完整解析并经最终事务提交的 Assistant。
 
@@ -187,7 +187,7 @@ Run 状态机不负责释放整个群的响应资格：WAIT_TOOL、WAIT_APPROVAL
 
 1. 在当前会话唯一 Session 下取得执行 lease，选择并持久化下一 InputBatch 的固定切口。初次触发和忙时接入均包含从 context_applied_seq 之后直到最后待触发记录的所有消息，不能只取触发文本。
 2. 输入批次独立追加 Context、更新输入水位并 claim 对应触发；执行正常裁剪，固定本次 context_revision/context_view_revision/input_revision。输入已提交不等于触发已回应。
-3. 从冻结输入的合法 text/image parts 构造记忆查询，召回 Bot 全局多模态证据；按实际模型能力投影已由 Context 定稿的历史、证据及工具结果。事务外构建精确载荷，最终许可事务保存语义 ModelRequestManifest 与传输 ModelTransportAttempt 后发送，详见[11](11-multimodal-memory-and-model-projection.md)。Provider 不接收 Context 预算或裁剪策略。图片嵌入/查询能力不因对话 LLM 仅支持文本而失效，运行中的请求不随新消息或迟到图片变化。
+3. 从冻结输入的合法 text/image parts 构造记忆查询，由 Memory 选择并冻结 Bot 全局多模态证据；Agent 向 Conversation 报价 CorePrompt、Preset、工具、已提交 Run 因果组、Memory 证据和输出预留，由 Context 定稿历史成员，再按实际模型能力投影已发布的视图。事务外构建精确载荷，最终许可事务保存语义 ModelRequestManifest 与传输 ModelTransportAttempt 后发送，详见[08](08-group-context-interaction.md)和[11](11-multimodal-memory-and-model-projection.md)。Provider 不接收 Context 预算或裁剪策略。图片嵌入/查询能力不因对话 LLM 仅支持文本而失效，运行中的请求不随新消息或迟到图片变化。
 4. 按 `forest-agent-protocol/v1` 将输出解析为一个原子 ModelTurn。协议错误最多进行一次有界修复；合法 FunctionCall 按其具体请求主体校验参数、权限、预算、幂等与目标，提交意图并等待结果或保存 checkpoint。模型不得直接产生可信 ControlProposal；管理控制继续走确定性 Shell/管理服务。
 5. 模型流和工具结果闭合后形成安全边界。完整步骤先保存有序 RunStep/checkpoint；若有新触发，在下一输入批次追加之前或同一事务中 flush 前序尚未发布的完整步骤，再按新切口接入消息。未闭合的工具调用与流之间禁止插入新群消息。
 6. 新 Run 首次模型调用前冻结模型视图；同一 Run 的后续安全边界只接入截至最后新触发记录的因果后缀，不重新裁剪或重选历史。没有新触发时不吸收普通尾部，仅按当前任务决定是否继续调用模型。空闲期的持久 Context 维护由 `SILENT_DRAIN` 独立执行。

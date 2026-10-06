@@ -191,7 +191,7 @@ Provider 支持结构化 metadata 时保留相应字段；只接受常规消息�
 
 ### 3.3 按LLM能力投影，完整上下文保留图片
 
-CanonicalContext、归档及 Evidence 保存有序 text/image ContentPart 和逐 part 来源。新 Run 第一次调用 API 前，Agent 请求 Context 冻结已经按自身策略维护的 ContextView，再完成获权多模态召回，最后按实际模型能力构造独立 ModelInputProjection。Provider 只接收投影结果，不接收 Context 预算、裁剪配置或候选历史。不能先按文本 LLM 去图再把删后的文本当作记忆查询的唯一输入；图片仍可以直接用于嵌入和召回。
+CanonicalContext、归档及 Evidence 保存有序 text/image ContentPart 和逐 part 来源。新 Run 第一次调用 API 前，Agent 从已持久输入完成获权多模态召回，连同固定提示词、工具、Run 因果历史与输出预留向 Context 报价；Context 冻结已经按自身策略维护的 ContextView 中本次可见的历史成员，Agent 最后按实际模型能力构造独立 ModelInputProjection。Provider 只接收投影结果，不接收 Context 预算、裁剪配置或候选历史。不能先按文本 LLM 去图再把删后的文本当作记忆查询的唯一输入；图片仍可以直接用于嵌入和召回。
 
 若实际模型不支持图片，递归去掉所有角色中的image parts以及被声明为媒体载荷的URL/base64/file字段，包括历史轮次、引用内容、检索证据与工具结果；保留合法文本、作者/群来源、工具call_id和结果配对。可以保留纯文本“此处有图片，未提供给当前模型”的事实标记，不把图片地址或编码转写成文本来假装已完成投影。明确来自原文的普通文字URL按文本处理，不靠泛化字符串删除破坏用户内容。
 
@@ -474,7 +474,7 @@ async def silent_drain_or_close(conversation_id, actor_fence, operation_id):
 
 持久 ViewPlan 按明确 `context_view_profile_ref` 管理完整多模态近期窗口、归档引用和本地资源预算，不随当前 LLM 是否支持图片而改变保存语义。Context 是历史选择与裁剪的唯一所有者；Provider 只按目标能力序列化已经定稿的 ModelInputProjection，不能读取 `context_view_profile_ref`，也不能删减历史或 RAG 证据。模型或能力变化只重建当次能力投影，不把去图结果写回 `context_compactions`。正常持久裁剪仍可按既定保留策略整体移出已归档旧单元，但“不支持模态”不能成为删除原图或永久移出图片的理由。
 
-确定性选择先计固定开销与必留集合，再按 Context 提交顺序从近到远选择完整可选单元；同序号按稳定 unit_id 决胜，不按 Worker 读取完成先后选择。ViewPlan 使用 `context_view_profile` 的估算算法和高低水位，触发裁剪后以配置低水位为目标；第一个可选旧单元放不下时停止扩展旧窗口，整组移出，不切断 call/result 配对。预算估算只在 Context 内按固定版本完成，不调用远端模型，也不进入 Provider manifest。
+确定性选择先计固定开销与必留集合，再按 Context 提交顺序从近到远选择完整可选单元；同序号按稳定 unit_id 决胜，不按 Worker 读取完成先后选择。持久归档使用活动 Context 的高低水位，Run 模型视图选择使用独立的 `model_view_budget`；第一个可选旧单元放不下时停止扩展旧窗口，整组省略，不切断 call/result 配对。预算估算只在 Context 内按固定版本完成，不调用远端模型，也不进入 Provider manifest。
 
 完整归档覆盖清单保存在事实库；Prompt只保留有界的归档提示及manifest引用，不随历史增长逐条累积占位。多个省略范围可引用同一不可变manifest，准确映射仍可按权限查询。证据来源头、近期原文和必要原文全部计入实际预算，不能因引用在数据库里而声称对应正文已进入模型。
 
@@ -496,6 +496,18 @@ Conversation Context 快照 v7 在当前 Actor 围栏内绑定 `run_ref`，从 C
 Conversation 为活动 Run 建立不可变的 context_run_view_profiles 账本：首次预运行裁剪、触发预填或模型快照在 Actor/Session/Run 围栏内通过受限命令绑定当前策略；此后同一 Run 的每次快照和裁剪都读取该账本，即使 Worker 配置热重载也不重新解释预算。快照 v7 的 manifest 和服务回执同时携带策略摘要，Agent 核对两者一致；未绑定 Run 的诊断快照使用当前策略且摘要为 null。静默维护和已完成 Session 的交接前裁剪使用当时配置，后继 Run 在自己的首次绑定处固定策略。完整 ViewPlan 还需要把固定提示词、工具、Memory 证据与输出预留纳入同一预算。
 
 单次快照最多发布 4096 个活动 Context 单元，可另带一个归档引用；Conversation 配置的单元高水位因此最多为 4096。Agent 在该视图之后最多附加 256 个模型回合及各自配对的工具结果，所以模型投影的结构上界为 4609 个单元。它们是单次物化的资源界，不限制 Inbox、不可变 Context 事实或长期归档中的消息总量，也不能代替完整 ViewPlan 的总预算选择。
+
+#### 模型视图报价、所有权与发布顺序（目标契约）
+
+`context_view_profile` 区分两种预算：持续维护的活动 Context 高低水位只决定何时归档；`model_view_budget` 是一次模型调用的本地估算总界，输入和输出预留共同占用它。模型视图的估算版本、总预算、输出预留、文本/图片计量和选择规则都由 Conversation 包配置并在 Run 首次绑定时冻结；Provider 的容量声明和用量计费均不参与历史选择。模型输入真实 JSON 字节传输硬界仍由 Agent 的序列化投影核对。
+
+Agent 在每次模型安全点经受限端口提交 `ModelViewQuote`，只陈述不可变成本事实：精确的 Run/步骤与 `input_revision`、当前 CorePrompt 和 PresetContext 的引用、工具声明的有序引用、已提交的 Run 因果组及其内容引用、Memory 本次已选证据引用、修复反馈引用、输出 token 预留和各来源的规范序列化版本。Agent 不在报价中给出“可用历史额度”、要移除的 Context 单元或超限裁决；Memory 仍负责本次召回证据的成员和来源归因。引用对应不可变受管 Payload，Conversation 读取受限引用并按自己冻结的算法核算正文、来源标题、工具 call/result 配对、媒体文件及解码资源；不能只相信调用者提交的一个 token 整数。引用无效、来源不符或事实已被删除屏障禁止时拒绝报价。
+
+Conversation 在当前 Actor/Session/Run 围栏内读取完整活动 Context 与已归档来源范围，核对所有待答触发的必要原文，再先计 CorePrompt、Preset、工具、Run 因果组、Memory 证据、来源标题和输出预留；这些是本次报价的固定/必要成本。首次调用选择必留 Context 单元后，按 Context 提交顺序从近到远纳入能完整放下的可选单元，并冻结所选 ID 与省略范围。同一 Run 的下一次模型调用仅扩展新接入的 Context 因果后缀及新完成的工具/模型因果组；先前已选历史成员不得因预算或热重载而重新选择。必要集合加固定成本越界时，Context 返回确定性失败，不删除触发、截断工具配对或把超额估算交给 Provider 拒绝。
+
+候选计划先在 Conversation 所有的受管 Payload 中写入不可变页树与 `ViewPlan` manifest；然后以稳定 operation ID 提交 `context.view-plan.publish`。发布事务锁住群 lane 与该 Run 的计划行，复核 Actor/Session/Run、输入与 Context 修订、`context_view_revision`、`media_cost_revision`、冻结策略摘要、必留触发集合、报价引用摘要及删除 epoch，再登记精确的已选单元、因果组和省略范围并返回已提交 manifest 引用。候选 Payload 写成但 CAS 失败时只能成为待回收孤儿，不能被 Agent 使用；重试要重新读取事实与报价。相同 operation ID 和相同输入返回同一已发布计划，不同输入冲突。事务提交后的 Agent 只消费发布的 `ViewPlan`；其 `ModelRequestManifest` 记录计划摘要和能力投影结果，不再自行决定历史保留/省略。
+
+`ViewPlan` 每个模型步骤固定一个已发布版本，并以先前版本的摘要串接；晚到媒体、删除或新输入只能影响尚未发布的下一步骤，不能改写已经用于外部模型调用的版本。发布事务后的真实投影如越过传输硬界，应在任何模型 Effect 前按现有不可发送输入终态结算，保留该计划作为诊断事实。归档仍先可靠落库，再把省略范围指向不可变来源覆盖；省略标记不能伪称模型看过原文。上述报价和计划协议是待实现目标，当前 v7 快照与活动水位并未提供这些保证。
 
 ### 8.2 确定性视图发布与合流
 
