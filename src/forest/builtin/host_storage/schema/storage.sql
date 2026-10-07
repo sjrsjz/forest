@@ -30,6 +30,35 @@ CREATE TABLE realization_operations (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+CREATE TABLE materialization_work (
+    resource_id text PRIMARY KEY REFERENCES physical_generations(resource_id),
+    request_operation_id text NOT NULL UNIQUE CHECK (octet_length(request_operation_id) BETWEEN 1 AND 256),
+    request_digest text NOT NULL CHECK (request_digest ~ '^sha256:[a-f0-9]{64}$'),
+    credential_ref text NOT NULL CHECK (octet_length(credential_ref) BETWEEN 10 AND 512),
+    state text NOT NULL DEFAULT 'PENDING'
+        CHECK (state IN ('PENDING','CLAIMED','SUCCEEDED','FAILED')),
+    claim_token text UNIQUE CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    lease_deadline timestamptz,
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    last_error_code text,
+    result_payload jsonb,
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK ((state='CLAIMED')=(claim_token IS NOT NULL AND lease_deadline IS NOT NULL))
+);
+CREATE INDEX materialization_work_pending_idx
+    ON materialization_work(state,next_attempt_at,resource_id) WHERE state='PENDING';
+CREATE INDEX materialization_work_expired_idx
+    ON materialization_work(lease_deadline,resource_id) WHERE state='CLAIMED';
+
+CREATE TABLE materialization_settlements (
+    claim_token text PRIMARY KEY CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    resource_id text NOT NULL REFERENCES physical_generations(resource_id),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE FUNCTION host_storage_reserve(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -172,6 +201,232 @@ BEGIN
         operation_id,resource_id,input_digest,result_payload)
     VALUES(requested_operation,item.resource_id,context->>'input_digest',result_value);
     RETURN result_value;
+END;
+$$;
+
+CREATE FUNCTION host_storage_enqueue_materialization(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_resource text := input->>'resource_id';
+    requested_operation text := context->>'operation_id';
+    item __forest_module_schema__.physical_generations%ROWTYPE;
+    work __forest_module_schema__.materialization_work%ROWTYPE;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR context->>'port_kind' IS DISTINCT FROM 'command'
+       OR context->>'port_name' IS DISTINCT FROM 'host.storage.materialization-enqueue-record'
+       OR requested_resource !~ '^resource/[a-f0-9-]{36}$'
+       OR requested_operation IS NULL OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR context->>'input_digest' !~ '^sha256:[a-f0-9]{64}$'
+       OR input->>'credential_ref' IS NULL
+       OR octet_length(input->>'credential_ref') NOT BETWEEN 10 AND 512 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_MATERIALIZATION_INVALID',
+                'message','Host materialization request is invalid','status',422));
+    END IF;
+    SELECT * INTO item FROM __forest_module_schema__.physical_generations
+    WHERE resource_id=requested_resource FOR UPDATE;
+    IF NOT FOUND OR item.host_id IS DISTINCT FROM context->>'scope_id'
+       OR item.kind<>'POSTGRES_DATABASE' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RESOURCE_UNAVAILABLE',
+                'message','Host reservation is unavailable','status',409));
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.materialization_work
+    WHERE resource_id=requested_resource FOR UPDATE;
+    IF FOUND THEN
+        IF work.request_operation_id IS DISTINCT FROM requested_operation
+           OR work.request_digest IS DISTINCT FROM context->>'input_digest' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_MATERIALIZATION_CONFLICT',
+                    'message','Resource has another materialization request','status',409));
+        END IF;
+    ELSE
+        IF item.state<>'RESERVED' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_RESOURCE_UNAVAILABLE',
+                    'message','Reservation is no longer pending','status',409));
+        END IF;
+        INSERT INTO __forest_module_schema__.materialization_work(
+            resource_id,request_operation_id,request_digest,credential_ref)
+        VALUES(requested_resource,requested_operation,context->>'input_digest',
+            input->>'credential_ref') RETURNING * INTO work;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('resource_id',work.resource_id,'state',work.state,
+            'attempt_count',work.attempt_count,'last_error_code',work.last_error_code));
+END;
+$$;
+
+CREATE FUNCTION host_storage_claim_materialization(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work __forest_module_schema__.materialization_work%ROWTYPE;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_CLAIM_INVALID',
+                'message','Materialization claim is invalid','status',422));
+    END IF;
+    WITH expired AS MATERIALIZED (
+        SELECT w.resource_id FROM __forest_module_schema__.materialization_work w
+        JOIN __forest_module_schema__.physical_generations p
+          ON p.resource_id=w.resource_id
+        WHERE p.host_id=context->>'scope_id' AND w.state='CLAIMED'
+          AND w.lease_deadline<=clock_timestamp()
+        ORDER BY w.lease_deadline,w.resource_id
+        FOR UPDATE OF w SKIP LOCKED LIMIT 32
+    )
+    UPDATE __forest_module_schema__.materialization_work w
+    SET state='PENDING',claim_token=NULL,lease_deadline=NULL,
+        next_attempt_at=clock_timestamp(),last_error_code='HOST_STORAGE_LEASE_EXPIRED',
+        updated_at=clock_timestamp()
+    FROM expired e WHERE w.resource_id=e.resource_id;
+    SELECT w.* INTO work FROM __forest_module_schema__.materialization_work w
+    JOIN __forest_module_schema__.physical_generations p
+      ON p.resource_id=w.resource_id
+    WHERE p.host_id=context->>'scope_id' AND w.state='PENDING'
+      AND w.next_attempt_at<=clock_timestamp()
+    ORDER BY w.next_attempt_at,w.resource_id
+    FOR UPDATE OF w SKIP LOCKED LIMIT 1;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    UPDATE __forest_module_schema__.materialization_work
+    SET state='CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1,updated_at=clock_timestamp()
+    WHERE resource_id=work.resource_id RETURNING * INTO work;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-claim/1',
+            'work_id',work.resource_id,'claim_token',work.claim_token,
+            'attempt',work.attempt_count,
+            'operation_id','host-materialize:'||encode(sha256(convert_to(
+                work.resource_id||'/'||work.attempt_count,'UTF8')),'hex'),
+            'causal_root_kind','host.storage.materialization',
+            'causal_root_id',work.resource_id,
+            'payload',jsonb_build_object('resource_id',work.resource_id,
+                'credential_ref',work.credential_ref)));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_CLAIM_INVALID',
+            'message','Materialization claim is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION host_storage_settle_materialization(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    work __forest_module_schema__.materialization_work%ROWTYPE;
+    replay __forest_module_schema__.materialization_settlements%ROWTYPE;
+    item __forest_module_schema__.physical_generations%ROWTYPE;
+    outcome jsonb := input->'outcome';
+    result_value jsonb;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_SETTLEMENT_INVALID',
+                'message','Materialization settlement is invalid','status',422));
+    END IF;
+    SELECT * INTO replay FROM __forest_module_schema__.materialization_settlements
+    WHERE claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF replay.input_payload=input THEN RETURN replay.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_SETTLEMENT_CONFLICT',
+                'message','Claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.materialization_work
+    WHERE resource_id=input->>'work_id' FOR UPDATE;
+    IF NOT FOUND OR work.state<>'CLAIMED'
+       OR work.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_CLAIM_LOST',
+                'message','Materialization claim is no longer current','status',409));
+    END IF;
+    SELECT * INTO item FROM __forest_module_schema__.physical_generations
+    WHERE resource_id=work.resource_id AND host_id=context->>'scope_id' FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RESOURCE_UNAVAILABLE',
+                'message','Host reservation is unavailable','status',409));
+    END IF;
+    IF outcome->>'status'='SUCCEEDED' THEN
+        IF item.state<>'ACTIVE'
+           OR outcome#>>'{result,protocol}' IS DISTINCT FROM 'forest.host-storage-realized/1'
+           OR outcome#>>'{result,resource_id}' IS DISTINCT FROM work.resource_id
+           OR outcome#>>'{result,host_id}' IS DISTINCT FROM item.host_id
+           OR (outcome#>>'{result,revision}')::bigint IS DISTINCT FROM item.revision THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_SETTLEMENT_INVALID',
+                    'message','Realization receipt differs from Host ledger','status',409));
+        END IF;
+        UPDATE __forest_module_schema__.materialization_work
+        SET state='SUCCEEDED',claim_token=NULL,lease_deadline=NULL,
+            last_error_code=NULL,result_payload=outcome->'result',updated_at=clock_timestamp()
+        WHERE resource_id=work.resource_id;
+    ELSE
+        UPDATE __forest_module_schema__.materialization_work
+        SET state=CASE WHEN outcome#>>'{error,retryable}'='true'
+                        OR outcome#>>'{error,unknown}'='true'
+                       THEN 'PENDING' ELSE 'FAILED' END,
+            claim_token=NULL,lease_deadline=NULL,
+            next_attempt_at=clock_timestamp()+
+                (LEAST(power(2,LEAST(work.attempt_count,8)),300)*interval '1 second'),
+            last_error_code=COALESCE(outcome#>>'{error,code}',
+                'HOST_STORAGE_MATERIALIZATION_UNKNOWN'),updated_at=clock_timestamp()
+        WHERE resource_id=work.resource_id;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work.resource_id));
+    INSERT INTO __forest_module_schema__.materialization_settlements(
+        claim_token,resource_id,input_payload,result_payload)
+    VALUES(input->>'claim_token',work.resource_id,input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_SETTLEMENT_INVALID',
+            'message','Materialization settlement is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION host_storage_materialization_status(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    work __forest_module_schema__.materialization_work%ROWTYPE;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR context->>'port_kind' IS DISTINCT FROM 'query'
+       OR context->>'port_name' IS DISTINCT FROM 'host.storage.materialization-status-read'
+       OR input->>'resource_id' !~ '^resource/[a-f0-9-]{36}$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_QUERY_INVALID',
+                'message','Materialization status query is invalid','status',422));
+    END IF;
+    SELECT w.* INTO work FROM __forest_module_schema__.materialization_work w
+    JOIN __forest_module_schema__.physical_generations p
+      ON p.resource_id=w.resource_id
+    WHERE w.resource_id=input->>'resource_id' AND p.host_id=context->>'scope_id';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_MATERIALIZATION_NOT_FOUND',
+                'message','Materialization request was not found','status',404));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('resource_id',work.resource_id,'state',work.state,
+            'attempt_count',work.attempt_count,'last_error_code',work.last_error_code));
 END;
 $$;
 

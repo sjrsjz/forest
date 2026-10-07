@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 from pathlib import Path
@@ -11,6 +12,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
@@ -19,6 +21,7 @@ from forest.host_storage_postgres_effect import HostPostgresMaterializationEffec
 from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
+from forest.schema_bundles import module_schema_namespace
 from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
 
@@ -57,6 +60,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
     supervisor = HostSupervisor(HostIdentityAuthority(store))
     controller = None
     created_physical = None
+    queued_physical = None
     try:
         await supervisor.start()
         source = tmp_path / "host-storage"
@@ -220,7 +224,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.3.0"', 'version = "0.3.1"', 1,
+                'version = "0.4.0"', 'version = "0.4.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -332,6 +336,113 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
                   "credential_ref": "secret/storage/test"},), {},
             )
         assert unmarked_active.value.code == "HOST_STORAGE_DATABASE_MISMATCH"
+
+        queued_payload = {**payload, "storage_generation": 2}
+        queued_reservation = await new_endpoint.invoke_routed(
+            new_route,
+            RuntimeServiceInvocation(
+                "reserve/storage/queued", 10, "test.host-storage", "bot/storage",
+            ),
+            (queued_payload,), {},
+        )
+        queued_page = await current.get("host.storage").management_contract.query(
+            "generations", {"bot_id": "bot/storage", "state": "RESERVED"},
+        )
+        queued_row = next(item for item in queued_page["items"]
+                          if item["resource_id"] == queued_reservation["resource_id"])
+        queued_physical = (queued_row["physical_name"], queued_row["role_name"])
+        enqueue_route = FrozenServiceRoute(
+            service_id="host.storage.materialization.enqueue", version=1,
+            caller_component_id="host.test-bridge",
+            provider_component_id="host.storage",
+            provider_generation_id=new_graph.generations["host.storage"],
+            graph_id=new_graph.graph_id, graph_revision=new_graph.graph_revision,
+            admission_lane="DATA", owned_work=False,
+        )
+        enqueue = current.get("host.storage").runtime_service_handlers()[
+            ("host.storage.materialization.enqueue", 1)
+        ]
+        current.get("host.storage").freeze_owned_admission()
+        await current.get("host.storage").drain_owned_work()
+        request = {
+            "resource_id": queued_reservation["resource_id"],
+            "credential_ref": "secret/storage/test",
+        }
+        async def enqueue_request(operation_id, value):
+            return await enqueue.invoke_routed(
+                enqueue_route,
+                RuntimeServiceInvocation(
+                    operation_id, 10, "test.host-storage", "bot/storage",
+                ),
+                (value,), {},
+            )
+
+        accepted, replay = await asyncio.gather(
+            enqueue_request("materialize/queued", request),
+            enqueue_request("materialize/queued", request),
+        )
+        assert replay == accepted
+        assert accepted["resource_id"] == queued_reservation["resource_id"]
+        assert accepted["state"] == "PENDING"
+        with pytest.raises(ForestError) as conflicting_request:
+            await enqueue_request(
+                "materialize/another-request",
+                {**request, "credential_ref": "secret/storage/other"},
+            )
+        assert conflicting_request.value.code == "HOST_STORAGE_MATERIALIZATION_CONFLICT"
+        assert await current.get("host.storage").management_contract.query(
+            "materialization.status", {"resource_id": queued_reservation["resource_id"]},
+        ) == accepted
+        async with store.pool.connection() as conn, conn.transaction():
+            abandoned = (await (await conn.execute(
+                sql.SQL("SELECT {}.host_storage_claim_materialization(%s::jsonb,%s::jsonb) "
+                        "AS result").format(sql.Identifier(
+                    module_schema_namespace("forest.host.storage")
+                )),
+                (Jsonb({"scope_kind": "host", "scope_id": host_id,
+                        "component_id": "host.storage"}),
+                 Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                        "claim_token": "abandoned/queued", "lease_seconds": 3})),
+            )).fetchone())["result"]
+        assert abandoned["ok"] and abandoned["value"]["work_id"] == queued_reservation["resource_id"]
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "0.4.1"', 'version = "0.4.2"', 1,
+            ), encoding="utf-8",
+        )
+        resumed_package = catalog.build_official(source, scope="host")
+        current = await controller.replace(
+            "host.storage", resumed_package.digest,
+            expected_graph_revision=new_graph.graph_revision,
+        )
+        async with asyncio.timeout(20):
+            while True:
+                async with store.pool.connection() as conn:
+                    work = (await (await conn.execute(
+                        sql.SQL("SELECT state,attempt_count,result_payload,last_error_code "
+                                "FROM {}.materialization_work WHERE resource_id=%s").format(
+                            sql.Identifier(module_schema_namespace("forest.host.storage"))
+                        ), (queued_reservation["resource_id"],),
+                    )).fetchone())
+                if work["state"] == "SUCCEEDED":
+                    break
+                if work["state"] == "FAILED":
+                    pytest.fail(f"Host materialization failed: {work['last_error_code']}")
+                await asyncio.sleep(0.1)
+        assert work["attempt_count"] == 2
+        assert work["result_payload"]["state"] == "ACTIVE"
+        assert await current.get("host.storage").management_contract.query(
+            "materialization.status", {"resource_id": queued_reservation["resource_id"]},
+        ) == {
+            "resource_id": queued_reservation["resource_id"],
+            "state": "SUCCEEDED", "attempt_count": 2, "last_error_code": None,
+        }
+        active_page = await current.get("host.storage").management_contract.query(
+            "generations", {"bot_id": "bot/storage", "state": "ACTIVE"},
+        )
+        assert queued_reservation["resource_id"] in {
+            item["resource_id"] for item in active_page["items"]
+        }
     finally:
         if controller is not None:
             await controller.close()
@@ -345,6 +456,13 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
             ))
             await admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(
                 sql.Identifier(created_physical[1])
+            ))
+        if queued_physical is not None:
+            await admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                sql.Identifier(queued_physical[0])
+            ))
+            await admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(
+                sql.Identifier(queued_physical[1])
             ))
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
             sql.Identifier(database)

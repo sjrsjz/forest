@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.host-storage"
-version = "0.3.0"
+version = "0.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "host_storage:HostStorage"
@@ -19,13 +19,13 @@ max_frame_bytes = 262144
 max_inflight = 4
 max_queue_items = 16
 max_state_inflight = 2
-max_owned_tasks = 1
+max_owned_tasks = 2
 max_owned_resources = 1
 
 [components.lifecycle]
 prepare_timeout_s = 10
 start_timeout_s = 10
-drain_timeout_s = 30
+drain_timeout_s = 300
 stop_timeout_s = 10
 
 [components.capabilities]
@@ -33,6 +33,8 @@ requests = [
   "domain.query:host.storage.generations.read",
   "domain.command:host.storage.reserve-record",
   "domain.command:host.storage.realize-record",
+  "domain.command:host.storage.materialization-enqueue-record",
+  "domain.query:host.storage.materialization-status-read",
   "service.call:host.storage.postgres.materialize",
 ]
 
@@ -78,11 +80,28 @@ internal_command = "host.storage.realize-record"
 input_schema = "schemas/materialize-output.json"
 output_schema = "schemas/realize-output.json"
 
+[[components.provides]]
+name = "host.storage.materialization.enqueue"
+contract = "1.0"
+semantics = "idempotent"
+visibility = "public"
+internal_command = "host.storage.materialization-enqueue-record"
+input_schema = "schemas/materialize-input.json"
+output_schema = "schemas/materialization-enqueue-output.json"
+
+[[components.provides]]
+name = "host.storage.materialization.status"
+contract = "1.0"
+semantics = "read"
+visibility = "public"
+input_schema = "schemas/materialization-status-input.json"
+output_schema = "schemas/materialization-enqueue-output.json"
+
 [components.storage]
 schema_id = "forest.host.storage"
-schema_version = "1.1.0"
+schema_version = "1.2.0"
 baseline = "schema/storage.sql"
-baseline_sha256 = "070017f6b90f993c1831467db14a2dfe31017dcd820feff67c975e5d6769464b"
+baseline_sha256 = "fa3fe5e6c7969d2fb52fb1f6e5ca0b604614c8c909ad00759de66ac818009b8b"
 scope = "host"
 repository_contract = "forest.host-storage.repository/1"
 execution_profile = "official"
@@ -93,6 +112,13 @@ contract = "1.0"
 function = "host_storage_generations"
 input_schema = "schemas/generations-input.json"
 output_schema = "schemas/generations-output.json"
+
+[[components.domain_queries]]
+name = "host.storage.materialization-status-read"
+contract = "1.0"
+function = "host_storage_materialization_status"
+input_schema = "schemas/materialization-status-input.json"
+output_schema = "schemas/materialization-enqueue-output.json"
 
 [[components.domain_commands]]
 name = "host.storage.reserve-record"
@@ -108,9 +134,36 @@ function = "host_storage_realize"
 input_schema = "schemas/materialize-output.json"
 output_schema = "schemas/realize-output.json"
 
+[[components.domain_commands]]
+name = "host.storage.materialization-enqueue-record"
+contract = "1.0"
+function = "host_storage_enqueue_materialization"
+input_schema = "schemas/materialize-input.json"
+output_schema = "schemas/materialization-enqueue-output.json"
+
+[[components.owned_work_handlers]]
+name = "host.storage.materialize"
+contract = "1.0"
+handler = "host.storage.materialize"
+claim_function = "host_storage_claim_materialization"
+settle_function = "host_storage_settle_materialization"
+input_schema = "schemas/materialize-input.json"
+output_schema = "schemas/realize-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 10
+handler_timeout_s = 240
+settle_timeout_s = 10
+lease_seconds = 270
+
 [[components.management_queries]]
 id = "generations"
 port = "host.storage.generations"
 default_limit = 50
 max_limit = 100
+timeout_s = 10
+
+[[components.management_queries]]
+id = "materialization.status"
+port = "host.storage.materialization.status"
 timeout_s = 10

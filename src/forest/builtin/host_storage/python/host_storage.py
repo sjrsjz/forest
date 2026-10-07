@@ -1,7 +1,7 @@
 """Host-owned physical resource ledger; physical Effects remain separate."""
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, service
+from forest.sdk import Plugin, job, service
 
 
 class HostStorage(Plugin):
@@ -17,6 +17,10 @@ class HostStorage(Plugin):
     async def generations(self, payload, ctx):
         return await ctx.queries.call("host.storage.generations.read", payload)
 
+    @service("host.storage.materialization.status", semantics="read")
+    async def materialization_status(self, payload, ctx):
+        return await ctx.queries.call("host.storage.materialization-status-read", payload)
+
     @service("host.storage.reserve", semantics="idempotent")
     async def reserve(self, payload, ctx):
         return await ctx.commands.call(
@@ -29,4 +33,22 @@ class HostStorage(Plugin):
         return await ctx.commands.call(
             "host.storage.realize-record", payload,
             operation_id=ctx.operations.stable("realize:v1"),
+        )
+
+    @service("host.storage.materialization.enqueue", semantics="idempotent")
+    async def enqueue_materialization(self, payload, ctx):
+        return await ctx.commands.call(
+            "host.storage.materialization-enqueue-record", payload,
+            operation_id=ctx.operations.stable("materialization-enqueue:v1"),
+        )
+
+    @job("host.storage.materialize")
+    async def materialize(self, task, ctx):
+        receipt = await ctx.services.call(
+            "host.storage.postgres.materialize", task["payload"],
+            operation_id=ctx.operations.stable("physical-materialize:v1"),
+        )
+        return await ctx.commands.call(
+            "host.storage.realize-record", receipt,
+            operation_id=ctx.operations.stable("materialization-realize:v1"),
         )
