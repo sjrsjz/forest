@@ -364,15 +364,12 @@ class OfficialBotProvisioner:
     """Materialize official module authorities without starting the runtime graph."""
 
     def __init__(
-        self, *, settings_resolver, host_factory=BotHost, database_allocator=None
+        self, *, settings_resolver, host_factory=BotHost
     ) -> None:
         self.settings_resolver = settings_resolver
         self.host_factory = host_factory
-        self.database_allocator = database_allocator
 
     async def read_materialization_receipt(self, *, storage) -> dict | None:
-        if self.database_allocator is not None:
-            self.database_allocator.validate_target(storage.bot_id, storage.dsn)
         receipt_store = BotStore(storage.dsn, storage.bot_id)
         try:
             await receipt_store.open()
@@ -393,11 +390,6 @@ class OfficialBotProvisioner:
                 409,
             )
         settings = await self.settings_resolver.resolve(profile=profile, storage=storage)
-        if self.database_allocator is not None:
-            await self.database_allocator.ensure_database(
-                bot_id=claim.bot_id,
-                target_dsn=storage.dsn,
-            )
         host = self.host_factory(settings)
         await host.provision()
         receipt_store = BotStore(storage.dsn, claim.bot_id)

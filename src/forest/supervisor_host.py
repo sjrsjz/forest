@@ -24,7 +24,6 @@ from forest.deployment_kernel_management import (
     ProvisioningJobsKernelQuery,
     ProvisioningReconcileKernelCommand,
     SecretPutKernelCommand,
-    StorageProfileKernelCommand,
     StorageRequestKernelCommand,
     StorageRequestsKernelQuery,
     WebAccountKernelCommand,
@@ -370,8 +369,6 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     ("deployment.accounts", kind): WebAccountKernelCommand(web_identity, kind)
                     for kind in WebAccountKernelCommand._METHODS
                 },
-                ("deployment.provisioning", "deployment.storage-create"):
-                    StorageProfileKernelCommand(storage_profiles),
                 ("deployment.storage-orchestrator", "deployment.storage-request"):
                     StorageRequestKernelCommand(storage_requests, host_id=settings.host_id),
                 ("deployment.provisioning", "deployment.bootstrap-create"):

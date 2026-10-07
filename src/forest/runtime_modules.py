@@ -2209,29 +2209,37 @@ class RuntimeModuleRegistry:
         async with self._lifecycle_lock:
             if self._closed:
                 return []
+            drain_owned = (
+                self._replacement_operation_id is None
+                and not self._replacement_owned_frozen
+                and not self._replacement_quiesced
+            )
+            frozen = ()
+            if drain_owned:
+                owned = tuple(
+                    item
+                    for item in self.order
+                    if item not in self._transferred_components
+                    and (item not in self._retained_components or self._retained_committed)
+                )
+                frozen = self._freeze_owned_admission(components=owned)
             lease = None
             superseded = False
             if self.generation_authority is not None and self.graph_identity is not None:
+                lease = self._lease(allow_closing=True)
                 try:
-                    lease = self._lease(allow_closing=True)
                     await self.generation_authority.freeze_graph_admission(
                         lease, self.graph_identity
                     )
                 except ForestError as exc:
-                    if (
-                        exc.code == "RUNTIME_GRAPH_NOT_CURRENT"
-                    ):
-                        # A newer graph published under the same HostLease has
-                        # already fenced this graph from new work. Keep the
-                        # lease so this owner can drain its process-local
-                        # resources and persist their terminal lifecycle facts.
+                    if exc.code == "RUNTIME_GRAPH_NOT_CURRENT":
+                        # A newer graph already fenced this owner. Drain its
+                        # process-local work and retain its historical facts.
                         superseded = True
                     elif not self._lost_persistence_authority(exc):
                         raise
                     else:
-                        # A fenced owner must still release process-local resources.
-                        # Its persistent graph remains historical until the current
-                        # owner atomically replaces or retires it.
+                        # A fenced owner must still release local resources.
                         lease = None
             if not any(
                 item not in self._retained_sources
@@ -2240,19 +2248,8 @@ class RuntimeModuleRegistry:
                 self.contract_router.deactivate()
             errors = []
             released_sources: dict[RuntimeModuleRegistry, set[str]] = {}
-            if (
-                self._replacement_operation_id is None
-                and not self._replacement_owned_frozen
-                and not self._replacement_quiesced
-            ):
+            if drain_owned:
                 try:
-                    owned = tuple(
-                        item
-                        for item in self.order
-                        if item not in self._transferred_components
-                        and (item not in self._retained_components or self._retained_committed)
-                    )
-                    frozen = self._freeze_owned_admission(components=owned)
                     await self._drain_frozen_owned_work(frozen)
                 except Exception as exc:
                     errors.append(exc)

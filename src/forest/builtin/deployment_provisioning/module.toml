@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-provisioning"
-version = "2.3.0"
+version = "2.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_provisioning:DeploymentProvisioning"
@@ -82,13 +82,6 @@ input_schema = "schemas/bootstrap-catalog-input.json"
 output_schema = "schemas/bootstrap-catalog-output.json"
 
 [[components.kernel_commands]]
-name = "deployment.provisioning.storage-create"
-contract = "1.0"
-kind = "deployment.storage-create"
-input_schema = "schemas/storage-input.json"
-output_schema = "schemas/storage-output.json"
-
-[[components.kernel_commands]]
 name = "deployment.provisioning.bootstrap-create"
 contract = "1.0"
 kind = "deployment.bootstrap-create"
@@ -129,12 +122,6 @@ port = "deployment.provisioning.bootstrap.catalog"
 default_limit = 64
 max_limit = 64
 timeout_s = 10
-
-[[components.management_actions]]
-id = "storage.create"
-port = "deployment.provisioning.storage-create"
-priority = "P0"
-timeout_s = 15
 
 [[components.management_actions]]
 id = "bootstrap.create"

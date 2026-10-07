@@ -1,4 +1,4 @@
-"""Exercise the shipped provisioning package and host Bootstrap broker in Edge."""
+"""Exercise the storage and provisioning package workspaces in Edge."""
 
 from __future__ import annotations
 
@@ -24,6 +24,10 @@ def main() -> None:
     static = root / "src/forest/management_static"
     ui = (root / "src/forest/builtin/deployment_provisioning/ui/index.html").read_bytes()
     digest = hashlib.sha256(ui).hexdigest()
+    storage_ui = (
+        root / "src/forest/builtin/deployment_storage_orchestrator/ui/index.html"
+    ).read_bytes()
+    storage_digest = hashlib.sha256(storage_ui).hexdigest()
     catalog = {
         "protocol": "forest.bootstrap-configuration-catalog/1",
         "items": BootstrapConfigurationRegistry(official_bootstrap_contributions()).facts(),
@@ -33,6 +37,10 @@ def main() -> None:
     ).read_text(encoding="utf-8"))
     Draft202012Validator(schema).validate(catalog)
     artifact = f"/management/v1/modules/deployment.provisioning/management-ui/{digest}"
+    storage_artifact = (
+        "/management/v1/modules/deployment.storage-orchestrator/management-ui/"
+        + storage_digest
+    )
     module = {
         "component_id": "deployment.provisioning",
         "generation_id": "generation/provisioning/1",
@@ -49,7 +57,6 @@ def main() -> None:
             ],
             "actions": [
                 {"action_id": "bootstrap.create"},
-                {"action_id": "storage.create-local"},
                 {"action_id": "provisioning.enqueue"},
                 {"action_id": "provisioning.reconcile"},
             ],
@@ -60,16 +67,40 @@ def main() -> None:
                         "sha256": digest},
         }],
     }
+    storage_module = {
+        "component_id": "deployment.storage-orchestrator",
+        "generation_id": "generation/storage-orchestrator/1",
+        "state": "ACTIVE",
+        "artifact": {
+            "scope": "deployment", "trust_level": "official",
+            "package_digest": "sha256:" + "c" * 64, "package_version": "1.0.0",
+        },
+        "management_contract": {
+            "queries": [{"query_id": "storage.requests.page"}],
+            "actions": [{"action_id": "storage.request"}],
+        },
+        "management_contributions": [{
+            "label": "Host 存储",
+            "surface": {"kind": "sandboxed-package", "artifact": storage_artifact,
+                        "sha256": storage_digest},
+        }],
+    }
     runtime = {
         "runtime": {
             "scope_kind": "deployment", "scope_id": "deployment/test",
             "graph_state": "ACTIVE", "graph_id": "graph/test", "graph_revision": 1,
         },
-        "modules": [module],
+        "modules": [module, storage_module],
     }
     configuration = {
         "desired": {"value": {"protocol": "forest.deployment-provisioning/1"}, "revision": 1},
         "effective": {"value": {"protocol": "forest.deployment-provisioning/1"}, "revision": 1},
+    }
+    storage_configuration = {
+        "desired": {"value": {"protocol": "forest.deployment-storage-orchestrator/1"},
+                    "revision": 1},
+        "effective": {"value": {"protocol": "forest.deployment-storage-orchestrator/1"},
+                      "revision": 1},
     }
     submissions: list[dict] = []
     storage_submissions: list[dict] = []
@@ -81,7 +112,7 @@ def main() -> None:
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
-            if self.path == artifact:
+            if self.path in {artifact, storage_artifact}:
                 self.send_header(
                     "Content-Security-Policy",
                     "sandbox allow-scripts allow-forms; default-src 'none'; "
@@ -108,12 +139,16 @@ def main() -> None:
                         "text/css" if path.suffix == ".css" else "text/html")
             elif self.path == artifact:
                 body, kind = ui, "text/html; charset=utf-8"
+            elif self.path == storage_artifact:
+                body, kind = storage_ui, "text/html; charset=utf-8"
             elif self.path == "/management/v1/auth/session":
                 return self._json({"subject": {"role": "ADMIN"}})
             elif self.path == "/management/v1/runtime":
                 return self._json(runtime)
             elif self.path == "/management/v1/modules/deployment.provisioning/configuration":
                 return self._json(configuration)
+            elif self.path == "/management/v1/modules/deployment.storage-orchestrator/configuration":
+                return self._json(storage_configuration)
             else:
                 self.send_error(404)
                 return
@@ -133,15 +168,34 @@ def main() -> None:
                 } for item in job_submissions], "next_after": None})
             if self.path.endswith("/queries/provisioning.bootstrap-catalog"):
                 return self._json(catalog)
+            if self.path.endswith("/queries/storage.requests.page"):
+                return self._json({
+                    "items": [{
+                        "request_id": item["request_id"], "bot_id": item["bot_id"],
+                        "profile_ref": item["profile_ref"], "state": "PENDING",
+                        "attempt_count": 0, "last_error_code": None,
+                    } for item in storage_submissions],
+                    "next_after": None,
+                })
             if self.path.endswith("/actions/bootstrap.create"):
                 submissions.append(value)
                 return self._json({
                     "profile_ref": value["profile_ref"], "bot_id": value["bot_id"],
                     "manifest_digest": "sha256:" + "b" * 64,
                 })
-            if self.path.endswith("/actions/storage.create-local"):
-                storage_submissions.append(value)
-                return self._json(value)
+            if self.path.endswith("/actions/storage.request"):
+                saved = {
+                    **value,
+                    "request_id": "storage-request/" + hashlib.sha256(
+                        value["bot_id"].encode()
+                    ).hexdigest(),
+                }
+                storage_submissions.append(saved)
+                return self._json({
+                    "request_id": saved["request_id"],
+                    "bot_id": saved["bot_id"],
+                    "profile_ref": saved["profile_ref"],
+                })
             if self.path.endswith("/actions/provisioning.enqueue"):
                 job_submissions.append(value)
                 return self._json({
@@ -185,32 +239,24 @@ def main() -> None:
                     has_text="deployment.provisioning"
                 ).click()
                 frame = page.frame_locator(".package-ui-frame")
-                frame.locator('[data-tab="bootstrap"]').click()
-                frame.locator("#edit-components").click()
-                dialog = page.locator("dialog.bootstrap-editor-dialog")
-                expect(dialog).to_be_visible()
-                expect(dialog.locator(".bootstrap-editor-panel")).to_have_count(7)
-                dialog.locator('button[type="submit"]').click()
-                expect(frame.locator("#component-status")).to_contain_text("7 个模块")
-                form = frame.locator("#bootstrap")
-                form.locator('[name="bot_id"]').fill("bot/browser")
-                form.locator('[name="profile_ref"]').fill("bootstrap-profile/browser")
-                form.locator('[name="storage_profile_ref"]').fill("storage-profile/browser")
-                form.locator('[name="storage_generation"]').fill("1")
-                form.locator('[type="submit"]').click()
-                expect(frame.locator("#status")).to_contain_text("已冻结")
-                assert len(submissions) == 1
-                assert set(submissions[0]["components"]) == {
-                    item["component_id"] for item in catalog["items"]
-                }
-                frame.locator('[data-tab="storage"]').click()
-                storage = frame.locator("#storage")
+                expect(frame.locator("#status")).to_contain_text("已连接")
+                page.locator("#module-nav button").filter(
+                    has_text="deployment.storage-orchestrator"
+                ).click()
+                expect(frame.locator("#status")).to_contain_text("已连接")
+                frame.locator("summary").click()
+                storage = frame.locator("#create")
                 storage.locator('[name="bot_id"]').fill("bot/browser")
                 storage.locator('[name="profile_ref"]').fill("storage-profile/browser")
                 storage.locator('[name="dsn_secret_ref"]').fill("secret://browser/storage")
+                storage.locator('[name="credential_ref"]').fill("secret://browser/password")
                 storage.locator('[type="submit"]').click()
-                expect(frame.locator("#status")).to_contain_text("已创建")
+                expect(frame.locator("#status")).to_contain_text("已冻结")
                 assert len(storage_submissions) == 1
+                page.locator("#module-nav button").filter(
+                    has_text="deployment.provisioning"
+                ).click()
+                expect(frame.locator("#status")).to_contain_text("已连接")
                 frame.locator('[data-tab="enqueue"]').click()
                 enqueue = frame.locator("#enqueue")
                 enqueue.locator('[name="job_id"]').fill("provisioning/browser")

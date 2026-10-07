@@ -82,31 +82,11 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 若 Delivery 工作区出现 UNKNOWN，先从平台或 Provider 查询原发送 attempt，再进入 Bot 作用域的“发送结果核对”。选中记录后核对 Intent、Part、Attempt 与 Effect 引用，提交结论、证据类型和外部查询引用。确认未发送并重新排队会唤醒 Delivery Worker；确认已发送或最终未发送会终结原链。不要通过新建消息、重启 Bot 或修改数据库解除阻塞。
 
-Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supervisor`，镜像默认命令也是 `forest supervisor`。PostgreSQL 首次初始化创建 `forest_deployment`，以及由无超级用户 `forest_host` role 持有的独立 `forest_host`；Host role 不能连接 deployment 库。供应器为每个 Bot 按 Bot ID 派生稳定库名和无特权 login role，为该 role 生成随机口令，只允许在同一批准集群创建，并复核 role flags 与数据库 owner。Bot 运行时不持有 deployment 超级用户凭据。Supervisor 的健康检查只探测 loopback 管理监听，不读取 Web 凭据。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
+Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supervisor`，镜像默认命令也是 `forest supervisor`。PostgreSQL 首次初始化创建 `forest_deployment`，以及由无超级用户 `forest_host` role 持有的独立 `forest_host`；Host role 不能连接 deployment 库。管理员先在 Secret 模块登记专属 PostgreSQL role 口令，再由 `deployment.storage-orchestrator` 冻结请求；`host.storage` 按其资源账本分配物理数据库名、无特权 login role 与 owner marker，并在 Host 物化及 pin 后原子发布 deployment DSN Secret/profile。Bot 运行时不持有 deployment 超级用户凭据。Supervisor 的健康检查只探测 loopback 管理监听，不读取 Web 凭据。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
 
-若 deployment catalog、加密 Secret 与冻结 Bootstrap profile 已经有效，只需要重建某个开发期 Bot 库，则先正常停止 Supervisor 并等待其 lease 过期，再在候选镜像中挂载只读 Secret 卷、可写 package catalog 卷和 `scripts/rebuild_bot_database.py`，并设置 `FOREST_PACKAGE_CATALOG_ROOT=/var/lib/forest-packages`。执行模式会在删库前验证 package catalog 可写，并在取得独占 Supervisor lease 后探测精确 Milvus 集合是否可访问；探测失败时报告数据库未重建。脚本默认只输出派生库名、role、profile 摘要、精确的向量集合名和 lease 状态；真正执行必须同时给出 `--execute` 和与派生结果逐字相同的 `--confirm-database`。它只允许删除由 Bot ID 派生、owner 也准确匹配的数据库，然后直接从现有 authority 安装当前 22 个 baseline；数据库验证通过后，删除同一 Bot 与冻结 `space_id` 派生的 Milvus 集合，避免无权威引用的旧向量占据召回候选。向量清理失败会明确报告数据库已重建，必须排除故障后重试或清理精确集合，再启动 Supervisor。不修改 READY catalog、已完成 Provisioning Job、Secret 或 Bootstrap profile，不包含列迁移、双写或兼容读取。重建后必须得到 22 个 schema bundle 且没有 RuntimeGraph head，之后才可重启 Supervisor 发布新图。
+旧的单 Bot 数据库重建脚本已经退役。它按 Bot ID 推导数据库名并直接删除数据库，无法核对 `host.storage` 的资源身份、owner marker、pin 和引用水位，不能用于当前 Host 管理的 profile。现在没有受支持的单 Bot 原位删库重建操作；遇到损坏应保持 Host/deployment 账本及物理资源原状，先导出准确证据和备份，待 Host 解 pin、回收与替换 generation 协议完成后再操作。预发布阶段若决定整体重置环境，应先停止 Supervisor，备份需要保留的 PostgreSQL、Milvus 和 Secret，再把 deployment、Host、Bot 物理库及向量集合视作同一批环境重建，重新经 WebUI 创建 Secret、存储请求与 Bot 供应事实。不能只删 Bot 库而保留指向它的 READY catalog/profile 与 Host pin。
 
-重建前的 `pg_dump` 只保存 PostgreSQL 权威事实，不包含 Milvus 向量。执行集合删除后，该备份可供审计和提取原始来源，但不能单独恢复旧的 `READY` 向量召回；若需要可回滚的完整记忆，应另行保存同一集合或重新嵌入，并明确处理外部调用费用。
-
-重建 sidecar 使用以下卷和环境；先省略末尾两个执行参数做 dry-run，核对派生库名和 lease，再将 dry-run 返回的 `database_name` 赋给 `$databaseName` 后提交执行。`forest-clean` 是本地 Compose 项目名，换环境时应替换成实际项目名。
-
-```powershell
-docker run --rm --no-healthcheck --network forest-clean_default `
-  --mount type=volume,source=forest-clean_forest_secrets,target=/run/forest-secrets,readonly `
-  --mount type=volume,source=forest-clean_forest_packages,target=/var/lib/forest-packages `
-  --mount "type=bind,source=$PWD\scripts\rebuild_bot_database.py,target=/tmp/rebuild_bot_database.py,readonly" `
-  -e FOREST_DEPLOYMENT_ID=forest/default
-  -e FOREST_HOST_ID_FILE=/run/forest-secrets/host_id `
-  -e FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE=/run/forest-secrets/postgres_password `
-  -e FOREST_DEPLOYMENT_DATABASE_HOST=postgres `
-  -e FOREST_DEPLOYMENT_DATABASE_NAME=forest_deployment `
-  -e FOREST_DEPLOYMENT_MASTER_KEYRING_FILE=/run/forest-secrets/deployment_master_keyring `
-  -e FOREST_DEPLOYMENT_WEB_BOOTSTRAP_FILE=/run/forest-secrets/deployment_web_bootstrap `
-  -e FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN=http://127.0.0.1:8080 `
-  -e FOREST_PACKAGE_CATALOG_ROOT=/var/lib/forest-packages `
-  forest:local python /tmp/rebuild_bot_database.py --bot-id forest-main `
-  --execute --confirm-database $databaseName
-```
+`pg_dump` 只保存 PostgreSQL 权威事实，不包含 Milvus 向量。整体重置前如需可回滚的完整记忆，应另行保存同一向量集合或重新嵌入，并明确处理外部调用费用。
 
 长时实网验收使用 `scripts/observe_live_bot.py`，并在候选镜像、同一 deployment 网络和 Supervisor 的只读 Secret mount 中运行。该探针只输出 RuntimeGraph、工作项和 Memory 状态计数及错误代码，不读取或输出凭据、Payload 正文、群消息、作者身份或媒体内容。每个样本使用 Bot 数据库的只读 repeatable-read 事务，检查 22 个 schema bundle、22 个当前图成员及最新生命周期、超过 deadline 且再宽限指定秒数仍未结算的 Embedding batch attempt/预算预留，以及同一 Agent session 是否出现多个未终结 Run；`conversation_claims` 仅按活动领取组与群 lane 汇总，单个无 Run 的预填组是合法状态，多个活动组或与 lane 的 Session/Run 不对齐则报 `CONVERSATION_CLAIM_ALIGNMENT_INVALID`，该只读检查不执行自动重排；`memory.facet_states` 区分用途和状态，`memory.attempt_failures` 汇总失败代码，`DOCUMENT.UNKNOWN/FAILED` 作为长期记忆覆盖缺口报告违反项。`latest_ingress_decisions` 按每个会话最新一条消息汇总触发决策及原因码，利用 `(bot_id,conversation_id,ingress_seq)` 索引定位，不扫描全量历史；它是排障快照，不是累计触发计数。deployment 状态和管理端 HTTP 同期采样。OneBot 连接是模块运行时资源，当前持久化 schema 不提供 Binding/Client 在线事实；该数据库探针不能单独证明 WebSocket 在线，实网验收还需由适配器运行状态和低频端到端消息确认。若 Bot 库缺少当前候选基线的 `embedding_batch_attempts`，探针会以 `BOT_SCHEMA_INCOMPATIBLE` 失败，应先在隔离库安装候选基线，不能把旧在线库的结果当作新版本验收。任一样本出现违反项时最终退出码为 1，完整时段无违反项才退出 0。sidecar 不提供管理 HTTP，运行时应加 `--no-healthcheck`，避免继承 runtime 镜像的 Supervisor healthcheck：
 
@@ -171,7 +151,7 @@ Compose 初始化器会在受保护卷首次生成稳定 `host_id`，Supervisor 
 
 Compose 中无需设置 `FOREST_DEPLOYMENT_DSN` 或 `FOREST_HOST_DSN`：Supervisor 分别从 `/run/forest-secrets/postgres_password` 和 `/run/forest-secrets/host_postgres_password` 构造指向两个独立库的 DSN。显式 DSN 仅供非 Compose 部署。旧预发布 PostgreSQL 卷缺少 Host role、库或受保护口令时不会自动补迁移；须先备份并按预发布重建流程重建该卷，再启动此版本 Supervisor。默认 `docker compose up -d` 启动 `initialize`、`postgres` 和 `supervisor`；Compose 中不存在绕过部署控制面的单 Bot 服务。
 
-Supervisor 同时启动多作用域 WebUI。页面从 deployment provider 动态发现 Bot 目录、Secret、Provisioning 与管理账号工作区；可以写入不回显的版本化 Secret、管理 ADMIN/AUDITOR 账号及会话、创建只暴露引用的本地 PostgreSQL storage profile，并从 Bootstrap Contributor 目录逐模块设置 Provider、VL Embedding、触发策略、Shell、Agent 和 OneBot 后冻结 profile、加入供应队列。登录使用 HttpOnly、SameSite 服务端会话；POST 同时校验精确 Origin 和 CSRF，角色在 HTTP 入口与目标作用域网关复核。Bot 进入 ONLINE 后，壳层作用域选择器通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不复制 Agent、Memory、OneBot 或 Job 页面。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。
+Supervisor 同时启动多作用域 WebUI。页面从 deployment provider 动态发现 Bot 目录、Secret、Provisioning 与管理账号工作区；可以写入不回显的版本化 Secret、管理 ADMIN/AUDITOR 账号及会话、在 Host 存储模块提交建库请求，待结算后使用对应 storage profile，并从 Bootstrap Contributor 目录逐模块设置 Provider、VL Embedding、触发策略、Shell、Agent 和 OneBot 后冻结 profile、加入供应队列。登录使用 HttpOnly、SameSite 服务端会话；POST 同时校验精确 Origin 和 CSRF，角色在 HTTP 入口与目标作用域网关复核。Bot 进入 ONLINE 后，壳层作用域选择器通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不复制 Agent、Memory、OneBot 或 Job 页面。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。
 
 ## 仍需补齐的能力
 

@@ -171,78 +171,6 @@ class WebAccountKernelCommand:
         return subject.as_dict()
 
 
-class LocalStorageProfileKernelCommand:
-    """Atomically bind one locally allocated DSN Secret to its profile."""
-
-    def __init__(self, secrets, storage_profiles, allocator) -> None:
-        self.secrets = secrets
-        self.storage_profiles = storage_profiles
-        self.allocator = allocator
-
-    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
-        if self.allocator is None:
-            raise ForestError(
-                "STORAGE_ALLOCATION_UNAVAILABLE",
-                "Local PostgreSQL allocation is unavailable", 409,
-            )
-        return dict(payload)
-
-    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
-        await conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-            (f"forest.deployment.local-storage/{operation_id}",),
-        )
-        for key in (
-            f"forest.deployment.storage-request/bot/"
-            f"{prepared['bot_id']}/{prepared['storage_generation']}",
-            f"forest.deployment.storage-request/profile/{prepared['profile_ref']}",
-            f"forest.deployment.storage-request/dsn/{prepared['dsn_secret_ref']}",
-        ):
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,),
-            )
-        await conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-            (f"forest.deployment.secret-operation/{operation_id}/dsn",),
-        )
-        profile_operation_id = operation_id + "/profile"
-        replay = await (
-            await conn.execute(
-                "SELECT 1 FROM forest_deployment.storage_profile_operations "
-                "WHERE operation_id=%s",
-                (profile_operation_id,),
-            )
-        ).fetchone()
-        if replay is None:
-            secret_ref = prepared["dsn_secret_ref"]
-            try:
-                secret = await self.secrets.metadata_in(conn, secret_ref)
-            except ForestError as exc:
-                if exc.code != "SECRET_NOT_FOUND":
-                    raise
-                target_dsn = self.allocator.new_target_dsn(prepared["bot_id"])
-                await self.secrets.put_in(
-                    conn, operation_id=operation_id + "/dsn",
-                    secret_ref=secret_ref, purpose="storage.postgresql.dsn",
-                    plaintext=target_dsn.encode(), expected_revision=0,
-                )
-            else:
-                if secret.purpose != "storage.postgresql.dsn":
-                    raise ForestError(
-                        "STORAGE_PROFILE_SECRET_PURPOSE_INVALID",
-                        "Storage profile requires a PostgreSQL DSN secret", 409,
-                    )
-                target_dsn = await self.secrets.resolve_text_in(conn, secret_ref)
-                self.allocator.validate_target(prepared["bot_id"], target_dsn)
-        saved = await self.storage_profiles.create(
-            operation_id=profile_operation_id, conn=conn,
-            profile_ref=prepared["profile_ref"], bot_id=prepared["bot_id"],
-            storage_generation=prepared["storage_generation"],
-            dsn_secret_ref=prepared["dsn_secret_ref"],
-        )
-        return asdict(saved)
-
-
 class BootstrapProfileKernelCommand:
     """Freeze module-owned Bootstrap seeds under the deployment transaction."""
 
@@ -269,23 +197,6 @@ class BootstrapProfileKernelCommand:
             "bot_id": saved.bot_id,
             "manifest_digest": saved.manifest_digest,
         }
-
-
-class StorageProfileKernelCommand:
-    def __init__(self, profiles) -> None:
-        self.profiles = profiles
-
-    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
-        return dict(payload)
-
-    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
-        saved = await self.profiles.create(
-            operation_id=operation_id, conn=conn,
-            profile_ref=prepared["profile_ref"], bot_id=prepared["bot_id"],
-            storage_generation=prepared["storage_generation"],
-            dsn_secret_ref=prepared["dsn_secret_ref"],
-        )
-        return asdict(saved)
 
 
 class ProvisioningJobKernelCommand:

@@ -26,12 +26,10 @@ from forest.deployment_kernel_management import (
     BotCatalogKernelQuery,
     BotSetDesiredKernelCommand,
     DeploymentKernelManagementAuthority,
-    LocalStorageProfileKernelCommand,
     ProvisioningJobKernelCommand,
     ProvisioningJobsKernelQuery,
     ProvisioningReconcileKernelCommand,
     SecretPutKernelCommand,
-    StorageProfileKernelCommand,
     StorageRequestKernelCommand,
     StorageRequestsKernelQuery,
     WebAccountKernelCommand,
@@ -64,7 +62,6 @@ from forest.package_capabilities import (
 )
 from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.packages import PackageCatalog, digest_json, storage_bundle_digest
-from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
@@ -371,7 +368,9 @@ async def test_deployment_package_registry_runs_as_reloadable_generation(
 ):
     repository = deployment_catalog
     await repository.initialize()
-    lease = await repository.claim_supervisor("host/package-registry", "incarnation/package-registry")
+    lease = await repository.claim_supervisor(
+        "host/package-registry", "incarnation/package-registry", lease_seconds=300,
+    )
     package_catalog = PackageCatalog(tmp_path / "packages")
     runtime = DeploymentRuntimeScope(
         repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
@@ -2390,27 +2389,24 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
         "STORAGE_REQUEST_CONFLICT", "STORAGE_PROFILE_REQUEST_PENDING",
     }
 
-    local = LocalStorageProfileKernelCommand(
-        secrets, profiles,
-        SimpleNamespace(
-            new_target_dsn=lambda _bot_id: (
-                "postgresql://forest:password@localhost/forest_local_race"
-            ),
-            validate_target=lambda _bot_id, _dsn: None,
-        ),
+    await secrets.put(
+        operation_id="host-intent/local-race-dsn",
+        secret_ref="secret://local-race/dsn",
+        purpose="storage.postgresql.dsn",
+        plaintext=b"postgresql://forest:password@localhost/forest_local_race",
+        expected_revision=0,
     )
-
-    async def create_local_race():
-        async with repository.store.transaction() as conn:
-            return await local.execute_in(conn, {
-                "profile_ref": "storage-profile/local-race/1",
-                "bot_id": "bot/local-race", "storage_generation": 1,
-                "dsn_secret_ref": "secret://local-race/dsn",
-            }, operation_id="host-intent/local-race")
+    async def create_profile_race():
+        return await profiles.create(
+            operation_id="host-intent/profile-race",
+            profile_ref="storage-profile/local-race/1",
+            bot_id="bot/local-race", storage_generation=1,
+            dsn_secret_ref="secret://local-race/dsn",
+        )
 
     await role_password("secret://host-intent/local-password")
-    local_race = await asyncio.wait_for(asyncio.gather(
-        create_local_race(),
+    profile_race = await asyncio.wait_for(asyncio.gather(
+        create_profile_race(),
         requests.request(
             operation_id="host-intent/local-race-request",
             **{**target, "bot_id": "bot/local-race",
@@ -2420,7 +2416,7 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
         ),
         return_exceptions=True,
     ), timeout=10)
-    failures = [result for result in local_race if isinstance(result, Exception)]
+    failures = [result for result in profile_race if isinstance(result, Exception)]
     assert len(failures) == 1
     assert isinstance(failures[0], ForestError)
     assert failures[0].code in {
@@ -3307,14 +3303,24 @@ async def test_official_provisioner_materializes_module_authorities_without_star
     repository = deployment_catalog
     await repository.initialize()
     root_dsn = os.environ["FOREST_TEST_DSN"]
-    allocator = LocalPostgresDatabaseAllocator(root_dsn)
-    target_name = allocator.database_name("bot/official")
-    target_role = allocator.role_name("bot/official")
-    target_dsn = allocator.new_target_dsn("bot/official")
+    suffix = uuid4().hex[:24]
+    target_name = "forest_bot_" + suffix
+    target_role = "forest_role_" + suffix
+    password = "forest-official-target-role-password"
+    parsed = urlsplit(root_dsn)
+    endpoint = parsed.hostname + (f":{parsed.port}" if parsed.port else "")
+    target_dsn = urlunsplit(parsed._replace(
+        netloc=f"{target_role}:{password}@{endpoint}", path="/" + target_name,
+    ))
     admin = await psycopg.AsyncConnection.connect(root_dsn, autocommit=True)
     await admin.execute(
-        sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(target_name))
+        sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+            sql.Identifier(target_role), sql.Literal(password),
+        )
     )
+    await admin.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(
+        sql.Identifier(target_name), sql.Identifier(target_role),
+    ))
     key = bytes(range(32))
     secrets = DeploymentSecretAuthority(
         repository.store,
@@ -3444,10 +3450,7 @@ async def test_official_provisioner_materializes_module_authorities_without_star
         )
         assert set(dict(resolved_settings.components)) == set(components)
         assert not hasattr(resolved_settings, "model_api_key")
-        provisioner = OfficialBotProvisioner(
-            settings_resolver=resolver,
-            database_allocator=allocator,
-        )
+        provisioner = OfficialBotProvisioner(settings_resolver=resolver)
         await provisioner(
             claim=SimpleNamespace(
                 bot_id="bot/official", deployment_id=repository.store.deployment_id,
@@ -3597,8 +3600,6 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                 ("deployment.accounts", kind): WebAccountKernelCommand(web_identity, kind)
                 for kind in WebAccountKernelCommand._METHODS
             },
-            ("deployment.provisioning", "deployment.storage-create"):
-                StorageProfileKernelCommand(storage_profiles),
             ("deployment.provisioning", "deployment.bootstrap-create"):
                 BootstrapProfileKernelCommand(bootstrap_profiles, bootstrap_registry),
             **{
@@ -3739,6 +3740,14 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         } == {
             "account.create": "password", "account.update": None,
             "account.password": "password", "account.sessions.revoke": None,
+        }
+        provisioning_module = next(
+            item for item in body["modules"]
+            if item["component_id"] == "deployment.provisioning"
+        )
+        assert "storage.create" not in {
+            item["action_id"]
+            for item in provisioning_module["management_contract"]["actions"]
         }
         audit_module = next(
             item for item in body["modules"] if item["component_id"] == "deployment.audit"
@@ -3905,54 +3914,12 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             plaintext=allocated_dsn.encode(),
             expected_revision=0,
         )
-        storage = await client.post(
-            "/management/v1/scopes/deployment/deployment/modules/"
-            "deployment.provisioning/actions/storage.create",
-            headers={**headers, "idempotency-key": "storage-web-1"},
-            json={
-                "profile_ref": "storage-profile/web/1",
-                "bot_id": "bot/web",
-                "storage_generation": 1,
-                "dsn_secret_ref": "secret://web/storage",
-            },
+        await storage_profiles.create(
+            operation_id="storage-profile/web/create",
+            profile_ref="storage-profile/web/1", bot_id="bot/web",
+            storage_generation=1, dsn_secret_ref="secret://web/storage",
         )
-        assert storage.status_code == 200
-        assert storage.json() == {
-            "profile_ref": "storage-profile/web/1",
-            "bot_id": "bot/web",
-            "storage_generation": 1,
-            "dsn_secret_ref": "secret://web/storage",
-        }
-        assert "hidden-password" not in storage.text
         assert await secrets.resolve_text("secret://web/storage") == allocated_dsn
-        replayed_storage = await client.post(
-            "/management/v1/scopes/deployment/deployment/modules/"
-            "deployment.provisioning/actions/storage.create",
-            headers={**headers, "idempotency-key": "storage-web-1"},
-            json={
-                "profile_ref": "storage-profile/web/1",
-                "bot_id": "bot/web",
-                "storage_generation": 1,
-                "dsn_secret_ref": "secret://web/storage",
-            },
-        )
-        assert replayed_storage.json() == storage.json()
-        rejected_storage = await client.post(
-            "/management/v1/scopes/deployment/deployment/modules/"
-            "deployment.provisioning/actions/storage.create",
-            headers={**headers, "idempotency-key": "storage-web-conflict"},
-            json={
-                "profile_ref": "storage-profile/web/1",
-                "bot_id": "bot/web/other",
-                "storage_generation": 1,
-                "dsn_secret_ref": "secret://web/storage",
-            },
-        )
-        assert rejected_storage.status_code == 409, rejected_storage.text
-        assert rejected_storage.json()["code"] == "STORAGE_PROFILE_EXISTS"
-        with pytest.raises(ForestError) as absent_secret:
-            await secrets.metadata("secret://web/orphan")
-        assert absent_secret.value.code == "SECRET_NOT_FOUND"
         bootstrap_catalog = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
             "deployment.provisioning/queries/provisioning.bootstrap-catalog",
@@ -4066,11 +4033,6 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                 deployment_registry.graph_identity.generations["deployment.secrets"],
                 "secret.put",
             ),
-            (
-                "deployment.provisioning",
-                deployment_registry.graph_identity.generations["deployment.provisioning"],
-                "storage.create",
-            ),
         ]
         audit_page = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
@@ -4084,7 +4046,6 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "account.create",
             "bot.set-desired",
             "secret.put",
-            "storage.create",
             "bootstrap.create",
         }
         assert {item["producer_component_id"] for item in audit_records} == {
@@ -4256,39 +4217,6 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert updated_after_reload.status_code == 200, updated_after_reload.text
         assert updated_after_reload.json()["revision"] == 4
-        concurrent_storage_path = (
-            "/management/v1/scopes/deployment/deployment/modules/"
-            "deployment.provisioning/actions/storage.create"
-        )
-        await secrets.put(
-            operation_id="web/concurrent-dsn",
-            secret_ref="secret://web/concurrent",
-            purpose="storage.postgresql.dsn",
-            plaintext=allocated_dsn.encode(),
-            expected_revision=0,
-        )
-        concurrent_storage_payload = {
-            "profile_ref": "storage-profile/web/concurrent",
-            "bot_id": "bot/web", "storage_generation": 2,
-            "dsn_secret_ref": "secret://web/concurrent",
-        }
-        concurrent_storage = await asyncio.gather(*(
-            client.post(
-                concurrent_storage_path,
-                headers={**headers, "idempotency-key": "storage-web-concurrent"},
-                json=concurrent_storage_payload,
-            ) for _ in range(2)
-        ))
-        assert [response.status_code for response in concurrent_storage] == [200, 200]
-        assert concurrent_storage[0].json() == concurrent_storage[1].json()
-        async with repository.store.pool.connection() as conn:
-            versions = await (
-                await conn.execute(
-                    "SELECT count(*) AS count FROM forest_deployment.secret_versions "
-                    "WHERE secret_ref=%s", ("secret://web/concurrent",),
-                )
-            ).fetchone()
-        assert versions["count"] == 1
         drain_storage = await _storage_profile(
             repository, "bot/package-drain", "package-drain"
         )
