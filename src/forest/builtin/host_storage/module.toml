@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.host-storage"
-version = "0.1.0"
+version = "0.2.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "host_storage:HostStorage"
@@ -32,6 +32,7 @@ stop_timeout_s = 10
 requests = [
   "domain.query:host.storage.generations.read",
   "domain.command:host.storage.reserve-record",
+  "service.call:host.storage.postgres.materialize",
 ]
 
 [components.management_ui]
@@ -58,6 +59,14 @@ visibility = "public"
 internal_command = "host.storage.reserve-record"
 input_schema = "schemas/reserve-input.json"
 output_schema = "schemas/reserve-output.json"
+
+[[components.effect_services]]
+name = "host.storage.postgres.materialize"
+contract = "1.0"
+kind = "host.postgresql-materializer"
+semantics = "idempotent"
+input_schema = "schemas/materialize-input.json"
+output_schema = "schemas/materialize-output.json"
 
 [components.storage]
 schema_id = "forest.host.storage"

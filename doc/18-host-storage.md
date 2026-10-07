@@ -1,36 +1,39 @@
 # Host 物理存储所有权与回收协议
 
-本文规定 `host.storage` 的实现边界。它是可热重载的 Host scope builtin 包，不是部署后台的存储页面。现有 `LocalPostgresDatabaseAllocator` 直接从 deployment 进程创建 Bot 数据库，且没有 Host 物理资源账本；在这条路径被替换、历史预发布资源被重建或明确登记之前，不能把 `host.storage` 的空清单当成真实库存，也不能开放回收。
+`host.storage` 是 Host scope 的可热重载 builtin 包，负责 Bot 等资源在本机的**物理所有权账本**。它不是 deployment 的存储配置页，也不能从数据库命名规则推断自己拥有某个旧资源。当前 deployment 中的 `LocalPostgresDatabaseAllocator` 仍能直接建库；在这条旧路径移除且旧资源经过准确登记或重建之前，Host 清单不完整，不允许开启自动回收。
 
-## 所有权和接口
+## 权威与边界
 
-| 项目 | 契约 |
+| 参与者 | 持有的权威 |
 | --- | --- |
-| owner | `host.storage` 持有本 Host 的物理资源清单、预留/兑现/回收 Job 和操作账本；Host 内核只持有稳定 `host_id`、租约、Graph/Generation 与授权。deployment 持有 Bot 身份、逻辑 storage profile/head、备份/恢复 Job 和引用冻结事实。 |
-| namespace / repository | Host 独立 PostgreSQL 库内的 `forest.host.storage` 模块 schema，repository contract `forest.host-storage.repository/1`。历史资源记录不随 Worker Generation 卸载；包 schema 变更须经预发布重建或显式版本协议，不准由 Worker 启动时暗改。 |
-| provides | 管理查询 `generations`、`cleanup.plan`、`cleanups`、`cleanup`；管理动作 `cleanup.apply`、`cleanup.retry`。内部契约提供 `reserve`、`realize`、`detach` 与 `hold.release`，每个动作有独立输入 schema 和操作 ID，不设带 `mode` 的总入口。 |
-| requires | Host 内核身份/租约和 Generation 校验；仅被授予准确 Host 包的原生 PostgreSQL、artifact、向量集合维护 Effect；deployment 通过有界跨 scope 请求提供逻辑引用与冻结证明。Worker 不取得超级用户 DSN、文件路径或其他作用域数据库连接。 |
-| UnitOfWork | 单条 Host 请求的操作账本、资源修订、Effect 意图和 Web 回执在 Host 库同一事务提交。物理动作由持久 owned-work 领取，完成后凭外部事实结算；deployment/Host 两库之间没有分布式事务。 |
-| management | 页面、筛选、来源/所有者、容量、计划与 Job 状态随包 Generation 发布。只读页按 `(kind, state, owner, resource_id)` 的服务端索引和稳定键集分页，不全量物化资源。所有入口经过 scope provider 与准确 Generation。 |
-| concurrency | 每个资源用 `resource_id`、资源修订、Host lease epoch、Effect operation ID、外部 owner marker 与物理名称围栏。同键同输入重放返回原结果；同键异输入拒绝；不同请求争用同一资源按修订 CAS 合流。 |
-| deletion | 卸载包只排空其 Worker、owned-work 和原生 Effect，不能删除资源账本或实体。资源删除必须经过独立 `cleanup.plan`、`cleanup.apply`、`cleanup.retry`；任一步 UNKNOWN 保留原记录供核对。 |
+| Host 内核 | 稳定 `host_id`、租约、Graph/Generation、路由与授权；不持有各模块的物理资源清单。 |
+| deployment | Bot 身份、逻辑 storage profile/head、供给 Job、备份/恢复 Job，以及各引用的冻结事实。 |
+| `host.storage` | 本 Host 的 `resource_id`、预留操作账本、物理名称、owner marker、物理状态与后续回收计划。账本位于 Host 独立数据库内该包的私有 schema，随 Worker 热替换保留。 |
+| Host 原生 Effect | 根据 `host.storage` 的准确资源记录执行受限 PostgreSQL 操作。包 Worker 不接触维护凭据、超级用户 DSN 或其他作用域数据库连接。 |
 
-`resource_id` 是只生成一次的随机资源引用；Host 账本将它与稳定 Host 身份、资源种类、逻辑 owner、storage generation 和预留操作绑定，不含进程 incarnation。记录至少冻结 `host_id`、`deployment_id`、`bot_id`（可空）、`storage_generation`、`kind`、物理名称、角色/容器标识、随机 owner marker、修订、生命周期状态和创建操作 ID。预留服务只返回资源引用与状态，不返回 owner marker；后者只供 Host 原生物理 Effect 核验。首批资源种类是 `POSTGRES_DATABASE`；artifact 和 Milvus collection 只有在相应原生 Effect 与引用冻结协议实现后才可加入同一清单，不能仅凭扫描或命名规则宣称拥有。
+包提供 `host.storage.reserve` 幂等服务和 `generations` 键集分页查询，声明 `host.storage.postgres.materialize` 原生 Effect。预留服务只返回资源引用及状态，不返回随机 owner marker。物理 Effect 输入仅有 `resource_id` 与受保护的 `credential_ref`；它从 Host 私有账本读取数据库名、专属 role、Host 身份和 marker，不能由调用者指定 SQL 对象名。
 
-## PostgreSQL 分配与跨库合流
+每个资源记录冻结 `host_id`、`deployment_id`、`bot_id`、`storage_generation`、种类、数据库名、role 名、随机 marker、修订和状态。`resource_id` 只生成一次；同一 `(operation_id, input_digest)` 重放返回原结果，同一操作 ID 异输入拒绝，同一逻辑 storage generation 的第二次预留拒绝。不同请求竞争同一资源由数据库唯一约束和事务锁合流。包 schema 的改变必须按包版本协议预发布；Worker 启动不得暗改 schema。
 
-deployment 供应 Job 在本库持久化一个稳定的 Host 分配请求引用，然后经受限跨 scope Contract Router 送达 `host.storage.reserve`。Host 在自己的事务内预留准确数据库名和 owner marker，并持久化物理创建 Effect；部署方不能再持有可直接执行 `CREATE DATABASE` 的分配器。Host 原生 Effect 使用单独受保护的维护凭据，在准确名称的 advisory lock 下创建无特权 Bot role/数据库，并将包含 `resource_id`、`host_id` 和 marker 的标记写到物理数据库；重复执行先复核角色权限、数据库 owner 与标记。若目标已存在但标记不同，拒绝接管。Effect 的结果为持久 receipt，Host 的 `realize` 在事务内推进资源状态；deployment 只凭该 receipt 继续冻结 storage profile 和供应 Bot。
+## PostgreSQL 物理创建
 
-崩溃可能发生在任意两个库的提交之间。Host 请求由 `(deployment_id, operation_id, input_digest)` 幂等合流；deployment Job 保留请求 ID 并在恢复时查询 Host receipt，不能重新生成密码、marker 或另一个数据库。物理创建结果 UNKNOWN 时先查询准确名称、角色和 marker，再结算或进入人工核对；不得盲目再次创建。Host 资源状态和 deployment profile/head 是不同权威，WebUI 必须分别标明，不能用其中一个状态推断另一边已提交。
+物理 Effect 在执行前校验准确 Host 租约与包 Generation，按数据库名取得 PostgreSQL session advisory lock，再按如下顺序处理：
 
-## 冻结引用与回收
+1. 在一个事务内创建无超级用户、无建库/建角色/复制/BYPASSRLS 权限的专属 login role，并把包含 `resource_id`、`host_id`、随机 marker 的归属证据写入 role 注释。已有 role 必须同时匹配标记与权限；合法重试可更新密码。
+2. 在事务外创建以该 role 为 owner 的数据库。PostgreSQL 不允许在普通事务内执行 `CREATE DATABASE`，因此不能假装建库和标记是原子动作。
+3. 核对数据库 owner 与注释。若数据库存在而注释缺失，只有在资源仍处于 `RESERVED`、专属 role 已有准确 marker 且 owner 匹配时，才补写数据库注释；任何其他标记或 owner 都拒绝接管。
+4. 再次验证 Host 租约与 Generation，返回不含凭据和原始 marker 的 receipt。数据库错误报告为需要按准确标记核对的 `UNKNOWN`，不能据此盲目分配另一个库。
 
-deployment 在准备回收时，先以资源 fence 把目标 storage generation 标为不可再附着，禁止新的 Bot head、备份/恢复 Job 或下载租约引用；已有引用须结束或显式转移。该冻结操作产生绑定 `resource_id`、逻辑 owner、fence、引用水位和有效期的证明。Host 接受证明时持久化回收计划并复核自身资源状态；实际删除前再次通过同一受限端口核对冻结仍有效、没有活动引用，且物理名称、角色、owner marker、Host lease epoch 与计划完全一致。只读“当前无引用”不足以允许删除，因为检查后可能出现新引用。
+物理动作与 Host 账本跨两个 PostgreSQL 数据库，不能共享事务。角色先写归属标记，使“角色已创建但数据库未创建”和“数据库已创建但注释未写入”两个崩溃窗口都能按同一资源核对。session advisory lock 约束并发重放；租约/Generation 校验约束新请求与热替换，但外部动作可能在校验后失去租约，所以它必须始终按准确名字和 marker 幂等核对。操作 receipt 不能代替 Host 账本中的 `ACTIVE` 结算。
 
-回收 Job 对 PostgreSQL 数据库先停止新的连接并等待既有连接排空，再删除准确数据库及其专属 role；失败或连接未排空保持可重试状态。每个外部步骤前后写入持久 Effect 意图/观察，UNKNOWN 以实际数据库和 marker 核对，不用 `DROP ... IF EXISTS` 的成功返回冒充原动作完成。artifact 与 Milvus 的回收各自使用种类专属标记和原生 Effect，不共享数据库删除实现。
+## 跨作用域供给与回收
 
-## 启用门槛
+目标协议是：deployment 在自身事务中持久化稳定的 Host 请求引用；受限跨 scope 路由调用 `reserve`；Host 持久 owned-work 领取物理 Effect 并记录意图和观察；Host `realize` 在账本事务中把已核实的 receipt 结算为 `ACTIVE`；deployment 再冻结逻辑 profile/head 并供给 Bot。崩溃后以原请求 ID 和准确资源引用查询并重放，绝不重新生成 marker 或另一个库；role 密码通过受控 secret ref 解析并可受控轮换。Host 的物理状态与 deployment 的逻辑引用状态是两种权威，WebUI 必须分别显示，不能用一方状态推断另一方已提交。
 
-生产 Host Graph 可以在具备真实 Host builtin 后启动，但 `host.storage` 的 `generations` 不能宣称完整，直到现有 deployment 直建库路径被移除、所有新资源先预留再创建、旧预发布资源被重建或按准确 marker 登记。回收动作还须等待冻结引用端口、物理标记核验和 UNKNOWN 对账均通过真实 PostgreSQL 验证。部署 Web provider 必须以 Host 签名票据和本地回执打开包的管理契约；壳层不得直接实现这些动作。
+回收须另有协议：deployment 先对目标 storage generation 施加禁止新引用的 fence，证明 Bot head、备份/恢复 Job 和下载租约均已结束或转移；Host 持久化回收计划，并在每次物理删除前重新验证 fence、引用水位、租约、资源修订、精确数据库名、role 和 marker。目标存在而归属不符时拒绝删除；外部结果未知时保留账本供核对。包卸载或热替换只排空 Worker、owned-work 与 Effect，不能删除账本或物理资源。其他资源种类（artifact、Milvus collection）必须各有原生标记和 Effect，不能复用 PostgreSQL 删除逻辑。
 
-当前预发布实现（2026-10-07）：`host.storage` 已有包私有预留账本、`generations` 键集查询、自带管理 UI 和声明式内部幂等服务；隔离 PostgreSQL 验证了同键重放、异键冲突、查询和 Worker 热替换后的原键重放。包故意不自动安装，资源仍只可能处于 `RESERVED`：物理创建 Effect、deployment 跨 scope 投递、ACTIVE 结算、引用冻结及回收尚未实现，不能启用生产 Host Graph 或把页面用作完整库存。
+## 预发布实现状态（2026-10-07）
+
+`host.storage` 包版本 `0.2.0`，故意设置 `auto_install=false`。已有私有预留账本、`generations` 查询、自带管理 UI、声明式内部幂等服务和 PostgreSQL 原生物理 Effect。隔离 PostgreSQL 验证涵盖预留重放/冲突、真正建库、角色与数据库标记、缺失数据库标记的恢复、错误归属标记拒绝，以及 Worker 热替换后继续核对。
+
+目前原生 Effect 只在隔离测试中绑定维护 DSN 与凭据解析器；生产 Host Graph 尚未装配它，也没有 Host 持久 owned-work、`realize`/`ACTIVE` 结算、deployment 跨 scope 投递、冻结引用与安全回收。现有 deployment 直接建库路径仍在。因而不能启用生产 `host.storage`、把它的 UI 清单视为全量物理库存，或据此执行删除。下一步应先完成 Host 持久工作与结算，再切断旧分配器并重建/准确登记预发布资源。

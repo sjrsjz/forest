@@ -15,6 +15,7 @@ from psycopg import sql
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
 from forest.host_runtime import HostRuntimeScope
+from forest.host_storage_postgres_effect import HostPostgresMaterializationEffect
 from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
@@ -55,6 +56,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
     await store.open()
     supervisor = HostSupervisor(HostIdentityAuthority(store))
     controller = None
+    created_physical = None
     try:
         await supervisor.start()
         source = tmp_path / "host-storage"
@@ -63,8 +65,26 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
         catalog = PackageCatalog(tmp_path / "catalog")
+
+        async def credential(ref: str, purpose: str) -> str:
+            assert ref == "secret/storage/test"
+            assert purpose == "storage.postgresql.password"
+            return "forest-host-storage-password-for-tests"
+
+        def physical_factory(configuration, revision, identity, declaration):
+            return HostPostgresMaterializationEffect(
+                configuration, revision, identity, declaration,
+                store=store, supervisor=supervisor, maintenance_dsn=dsn,
+                credential_resolver=credential,
+            )
+
         controller = HostPackageController(
-            HostRuntimeScope(store, supervisor), catalog,
+            HostRuntimeScope(
+                store, supervisor,
+                effect_driver_factories={
+                    "host.postgresql-materializer": physical_factory,
+                },
+            ), catalog,
             official_sources=(source,),
         )
         registry = await controller.start()
@@ -112,11 +132,77 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert page["items"][0]["resource_id"] == first["resource_id"]
         assert page["items"][0]["physical_name"].startswith("forest_bot_")
         assert "owner_marker" not in page["items"][0]
+        created_physical = (
+            page["items"][0]["physical_name"],
+            page["items"][0]["role_name"],
+        )
+        physical_route = FrozenServiceRoute(
+            service_id="host.storage.postgres.materialize", version=1,
+            caller_component_id="host.storage",
+            provider_component_id="host.storage",
+            provider_generation_id=graph.generations["host.storage"],
+            graph_id=graph.graph_id, graph_revision=graph.graph_revision,
+            admission_lane="DATA", owned_work=False,
+        )
+        materialize = member.runtime_service_handlers()[
+            ("host.storage.postgres.materialize", 1)
+        ]
+        receipt = await materialize.invoke_routed(
+            physical_route,
+            RuntimeServiceInvocation(
+                "materialize/storage/1", 10, "test.host-storage", "bot/storage",
+            ),
+            ({"resource_id": first["resource_id"],
+              "credential_ref": "secret/storage/test"},), {},
+        )
+        assert receipt["physical_name"] == created_physical[0]
+        assert receipt["role_name"] == created_physical[1]
+        assert receipt["owner_marker_digest"].startswith("sha256:")
+        database_row = await (
+            await admin.execute(
+                "SELECT pg_get_userbyid(datdba) AS owner,"
+                "shobj_description(oid,'pg_database') AS marker "
+                "FROM pg_database WHERE datname=%s", (created_physical[0],),
+            )
+        ).fetchone()
+        assert database_row[0] == created_physical[1]
+        assert first["resource_id"] in database_row[1]
+        await admin.execute(sql.SQL("COMMENT ON DATABASE {} IS NULL").format(
+            sql.Identifier(created_physical[0])
+        ))
+        assert await materialize.invoke_routed(
+            physical_route,
+            RuntimeServiceInvocation(
+                "materialize/storage/reconcile", 10, "test.host-storage", "bot/storage",
+            ),
+            ({"resource_id": first["resource_id"],
+              "credential_ref": "secret/storage/test"},), {},
+        ) == receipt
+        database_row = await (
+            await admin.execute(
+                "SELECT shobj_description(oid,'pg_database') "
+                "FROM pg_database WHERE datname=%s", (created_physical[0],),
+            )
+        ).fetchone()
+        assert first["resource_id"] in database_row[0]
+        await admin.execute(sql.SQL("COMMENT ON DATABASE {} IS 'another owner'").format(
+            sql.Identifier(created_physical[0])
+        ))
+        with pytest.raises(ForestError) as mismatched:
+            await materialize.invoke_routed(
+                physical_route,
+                RuntimeServiceInvocation(
+                    "materialize/storage/mismatch", 10, "test.host-storage", "bot/storage",
+                ),
+                ({"resource_id": first["resource_id"],
+                  "credential_ref": "secret/storage/test"},), {},
+            )
+        assert mismatched.value.code == "HOST_STORAGE_DATABASE_MISMATCH"
 
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.1.0"', 'version = "0.1.1"', 1,
+                'version = "0.2.0"', 'version = "0.2.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -147,11 +233,54 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
             ),
             (payload,), {},
         ) == first
+        new_physical_route = FrozenServiceRoute(
+            service_id="host.storage.postgres.materialize", version=1,
+            caller_component_id="host.storage",
+            provider_component_id="host.storage",
+            provider_generation_id=new_graph.generations["host.storage"],
+            graph_id=new_graph.graph_id, graph_revision=new_graph.graph_revision,
+            admission_lane="DATA", owned_work=False,
+        )
+        new_materialize = current.get("host.storage").runtime_service_handlers()[
+            ("host.storage.postgres.materialize", 1)
+        ]
+        with pytest.raises(ForestError) as mismatch_after_reload:
+            await new_materialize.invoke_routed(
+                new_physical_route,
+                RuntimeServiceInvocation(
+                    "materialize/storage/new-generation", 10,
+                    "test.host-storage", "bot/storage",
+                ),
+                ({"resource_id": first["resource_id"],
+                  "credential_ref": "secret/storage/test"},), {},
+            )
+        assert mismatch_after_reload.value.code == "HOST_STORAGE_DATABASE_MISMATCH"
+        await admin.execute(sql.SQL("COMMENT ON DATABASE {} IS NULL").format(
+            sql.Identifier(created_physical[0])
+        ))
+        assert await new_materialize.invoke_routed(
+            new_physical_route,
+            RuntimeServiceInvocation(
+                "materialize/storage/new-generation-reconcile", 10,
+                "test.host-storage", "bot/storage",
+            ),
+            ({"resource_id": first["resource_id"],
+              "credential_ref": "secret/storage/test"},), {},
+        ) == receipt
     finally:
         if controller is not None:
             await controller.close()
         await supervisor.close()
         await store.close()
+        if created_physical is not None:
+            assert created_physical[0].startswith("forest_bot_")
+            assert created_physical[1].startswith("forest_role_")
+            await admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                sql.Identifier(created_physical[0])
+            ))
+            await admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(
+                sql.Identifier(created_physical[1])
+            ))
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
             sql.Identifier(database)
         ))
