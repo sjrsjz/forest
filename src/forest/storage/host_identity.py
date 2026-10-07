@@ -124,6 +124,7 @@ class HostIdentityAuthority:
         if ({row["relname"] for row in relations}
                 != {"host_identity", "schema_bundles", "runtime_graph_clock",
                     "runtime_graphs", "runtime_generations", "runtime_graph_members",
+                    "runtime_package_selection",
                     "package_service_operations", "runtime_graph_change_requests",
                     "web_authority_receipts", "supervisor_lease"}
                 or {row["proname"] for row in functions}

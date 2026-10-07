@@ -457,6 +457,20 @@ class ControlGenerationAuthority:
                 "active_revision=%s WHERE __scope_id_column__=%s",
                 (graph.graph_id, graph.graph_revision, self.scope_id),
             )
+            await self._execute(conn,
+                "DELETE FROM __scope_schema__.runtime_package_selection "
+                "WHERE __scope_id_column__=%s", (self.scope_id,),
+            )
+            for item in members:
+                binding = item["binding"]
+                await self._execute(conn,
+                    "INSERT INTO __scope_schema__.runtime_package_selection("
+                    "__scope_id_column__,component_id,package_digest,"
+                    "configuration,graph_revision) VALUES (%s,%s,%s,%s,%s)",
+                    (self.scope_id, item["component_id"],
+                     binding["package"]["package_digest"],
+                     Jsonb(binding["configuration"]), graph.graph_revision),
+                )
             return graph.graph_revision
 
     async def current_graph(self) -> RuntimeGenerationGraph | None:
@@ -487,11 +501,41 @@ class ControlGenerationAuthority:
             )
 
     async def active_package_selection(self) -> tuple[RuntimeGenerationGraph | None, dict[str, dict]]:
-        """Read each active artifact and its frozen configuration binding."""
+        """Read published selection even after the live Graph has retired."""
 
         graph = await self.current_graph()
         if graph is None:
-            return None, {}
+            async with self.store.pool.connection() as conn, conn.transaction():
+                clock = await self._clock_in(conn)
+                if clock["active_graph_id"] is not None:
+                    raise ForestError("RUNTIME_GRAPH_NOT_CURRENT", "RuntimeGraph changed", 409)
+                rows = await (
+                    await self._execute(conn,
+                        "SELECT component_id,package_digest,configuration,graph_revision "
+                        "FROM __scope_schema__.runtime_package_selection "
+                        "WHERE __scope_id_column__=%s ORDER BY component_id",
+                        (self.scope_id,),
+                    )
+                ).fetchall()
+                if any(
+                    row["graph_revision"] != clock["active_revision"]
+                    or not isinstance(row["configuration"], dict)
+                    or type(row["configuration"].get("revision")) is not int
+                    or row["configuration"]["revision"] < 1
+                    or not isinstance(row["configuration"].get("payload_id"), str)
+                    or not isinstance(row["configuration"].get("payload_digest"), str)
+                    for row in rows
+                ):
+                    raise ForestError(
+                        "RUNTIME_GENERATION_BINDING_INVALID",
+                        "Published package selection is invalid", 409,
+                    )
+                return None, {
+                    row["component_id"]: {
+                        "package_digest": row["package_digest"],
+                        "configuration": row["configuration"],
+                    } for row in rows
+                }
         async with self.store.pool.connection() as conn, conn.transaction():
             clock = await self._clock_in(conn)
             if clock["active_graph_id"] != graph.graph_id or (

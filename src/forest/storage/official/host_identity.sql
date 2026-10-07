@@ -91,6 +91,15 @@ ALTER TABLE forest_host.runtime_graph_clock
     ADD FOREIGN KEY (host_id,active_graph_id)
     REFERENCES forest_host.runtime_graphs(host_id,graph_id);
 
+CREATE TABLE forest_host.runtime_package_selection (
+    host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
+    component_id text NOT NULL CHECK (component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
+    package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[a-f0-9]{64}$'),
+    configuration jsonb NOT NULL,
+    graph_revision bigint NOT NULL CHECK (graph_revision > 0),
+    PRIMARY KEY (host_id,component_id)
+);
+
 CREATE TABLE forest_host.package_service_operations (
     host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
     component_id text NOT NULL,

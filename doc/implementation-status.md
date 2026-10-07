@@ -4,7 +4,7 @@ Host 存储口令冻结（2026-10-07）：deployment 存储请求必须引用已
 
 生产 Host Graph 装配（2026-10-07）：Supervisor 在取得 Host 租约后启动 HostRuntimeScope 与 HostPackageController，官方 `host.storage` 现随 Host Graph 首发；原生 PostgreSQL Effect 通过受控 deployment SecretAuthority 解析专属 role 密码，并使用与现有本地 allocator 相同的 PostgreSQL 维护 endpoint。Host Graph 的持久换代调和、致命状态监视和逆序排空进入 Supervisor 生命周期。此步只激活 Host 包的准确新资源账本，不迁移旧本地分配器已有资源，也不启用物理回收；跨 scope 供给调度、Host Web 管理 provider、最终 settlement 生产调用及旧分配器切断仍待完成。尚未把此组合根认作已验收的生产供给链。
 
-控制 Graph 生命周期待修正：目前 `ControlPackageController.close()` 会退役当前 Graph，恢复路径从活动 Graph 反推出包选择；因此优雅停机后非默认包选择会丢失。现有热替换恢复用例为了保留选择让两个控制器短暂同时引用一个活动 Graph，在 Windows 上偶发 owned-work 提前终止。完整 catalog 回归先出现该失败，单项复核一次失败、一次通过，随后全套复跑 `29 passed`。下一阶段要把期望包选择从活动 Graph 生命周期中独立持久化，并用独占租约验证真正的停机重启，不能把一次通过视为修复。
+控制 Graph 期望选择恢复（2026-10-07）：deployment 与 Host 基线新增各自的 `runtime_package_selection`，每次 Graph 发布时在同一事务中刷新包工件摘要、冻结配置与图修订；Graph 退役仅停止运行代，不删除期望选择。控制器在无活动 Graph 时从独立选择账本恢复，再发布新的 Generation。deployment 包目录及 Host storage 用例均改成先关闭旧控制器、再启动新控制器，真实 PostgreSQL 定向回归 `2 passed`，避免两个控制器同时持有一个活动 Graph。deployment catalog、Host 包编译与存储、Host 身份和 Supervisor 配置相关完整回归 `43 passed`；该账本仍属于控制内核，不归任何业务 builtin。
 
 Host 存储最终结算的隔离验证（2026-10-07）：新增受信任 deployment 内核 authority，在有效 Supervisor 租约和不可变 Host pin 下核对实际 role 密码摘要，以同一 deployment 事务写入加密 DSN Secret 与 immutable storage profile。同请求并发结算合流；错误口令、失效租约、不同 endpoint 重放和预留 DSN ref 的普通写入均拒绝。管理命令显式传递 profile 字段，内部 pin 参数不进入包输入；Secret、请求、profile 与最终结算统一资源锁顺序。独立双数据库的真实 Host 桥用例通过，deployment catalog 全套 `29 passed`。这条 authority 仍只在隔离装配中调用；role 凭据的生产权威、共享的 Host endpoint 绑定、生产 Host Graph 与供给调度接线尚未完成，旧本地分配器仍在生产路径上。
 

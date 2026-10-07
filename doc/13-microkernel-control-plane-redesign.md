@@ -485,17 +485,23 @@ material、缺失 active 引用和超过上限的 key 数，且 key material 不
 
 ### 7.2 部署包配置换代协议（预发布实现）
 
-部署包的 WebUI 和 JSON Schema 由包贡献；通用管理契约提供配置读取、计划和应用。内核只持有授权、Graph/Generation、持久换代请求和原子发布机制，不解释包的配置值。部署配置仓库持有不可变修订、计划及 `desired/effective` 双水位。恢复启动和普通包图变更沿用活动 Graph 冻结的 `effective` 修订；配置与实际 Worker Generation 的冻结输入必须一致，不能在重启时把未发布的 `desired` 当成已发布的 `effective`。
+部署包的 WebUI 和 JSON Schema 由包贡献；通用管理契约提供配置读取、计划和应用。内核只持有授权、Graph/Generation、持久换代请求和原子发布机制，不解释包的配置值。部署配置仓库持有不可变修订、计划及 `desired/effective` 双水位。恢复启动从控制内核的独立包选择账本读取最近一次已发布的 `effective` 修订，普通包图变更沿用当前活动 Graph 冻结的修订；配置与实际 Worker Generation 的冻结输入必须一致，不能在重启时把未发布的 `desired` 当成已发布的 `effective`。
 
 计划阶段校验包声明的 schema 和不可变字段，保存输入摘要、schema 摘要、预期配置修订及目标 Generation/Graph 身份，不改变活动 Graph。应用阶段在同一个部署数据库事务内复核精确 CONTROL Generation、图修订、Web 签票与审计回执；锁定配置头和图头，拒绝过期计划，按操作 ID 幂等推进 `desired`，并写入绑定**准确配置修订、Payload 摘要、来源图、包摘要**的持久 `CONFIGURE` 换代请求。一个组件已有未结算换代请求时拒绝另一笔新应用；同一操作的重放返回原请求，不生成第二个修订。事务提交后 Supervisor 才能领取请求。
 
-换代 Worker 在 Supervisor lease 下领取该请求，从持久包目录装配准确工件，并核对请求绑定的配置修订和 Payload 摘要后预热候选 Graph；不得读取届时的最新 `desired` 代替请求值。受影响的旧组件按正常热替换协议停止接单、排空和释放资源；未受影响的 Generation 继续保留。候选发布时，配置 `effective` 修订和 Graph 头、Generation 状态在**同一事务**提交；发布前失败保留旧图和旧 `effective`，请求记录错误，发布后按图和配置激活事实核对。重启恢复按活动 Graph 中冻结的配置修订装配，待处理或失败的 `desired` 只能作为管理状态显示。普通安装包与官方包遵守同一配置协议，但官方物理端口的授予仍取决于独立的官方来源事实；配置值不能扩大能力。此预发布实现已由隔离 PostgreSQL 的真实 ASGI/Worker 链路验证；在线旧数据库基线与真实浏览器交互尚未切换验收。
+换代 Worker 在 Supervisor lease 下领取该请求，从持久包目录装配准确工件，并核对请求绑定的配置修订和 Payload 摘要后预热候选 Graph；不得读取届时的最新 `desired` 代替请求值。受影响的旧组件按正常热替换协议停止接单、排空和释放资源；未受影响的 Generation 继续保留。候选发布时，配置 `effective` 修订和 Graph 头、Generation 状态在**同一事务**提交；发布前失败保留旧图和旧 `effective`，请求记录错误，发布后按图和配置激活事实核对。重启恢复按独立包选择账本中最近一次已发布的配置修订装配，待处理或失败的 `desired` 只能作为管理状态显示。普通安装包与官方包遵守同一配置协议，但官方物理端口的授予仍取决于独立的官方来源事实；配置值不能扩大能力。此预发布实现已由隔离 PostgreSQL 的真实 ASGI/Worker 链路验证；在线旧数据库基线与真实浏览器交互尚未切换验收。
 
 ### 7.3 Host 包配置与换代的独立事务边界
 
 Host 作用域使用稳定 `host_id`、独立数据库、租约、Graph/Generation、模块配置和持久 Graph change request；不借用 deployment 的图头或配置表。部署 Web 会话权威只能签发绑定准确 Host、目标 Generation/Graph、操作 ID、动作、输入摘要、计划摘要和管理员角色的短期票据。Host 入口独立验证签名及目标，在本地事务中写不可变 Web 回执，复核当前 Graph 与 Host lease，并将配置 `desired` 修订和换代请求原子提交。同键重放只接受相同冻结输入；并发不同请求依靠修订 CAS 和组件未结算请求围栏合流。Host 控制器必须按请求冻结的配置与工件装配候选图，在 Host 数据库的图发布事务中推进 `effective`，随后凭准确发布证明结算请求。
 
-部署会话数据库与 Host 数据库之间没有分布式 ACID。签名票据是跨库委托凭证，Host 本地回执是可审计的接纳事实；网关不能把“票据已签发”报告成“Host 变更已提交”，重试须用同一操作 ID 查询 Host 回执或请求。Host 包图在生产组合根启动、Web provider 接入并启用实际 Host builtin 前，上述持久底座不得被描述为可用的 Host 管理功能。
+部署会话数据库与 Host 数据库之间没有分布式 ACID。签名票据是跨库委托凭证，Host 本地回执是可审计的接纳事实；网关不能把“票据已签发”报告成“Host 变更已提交”，重试须用同一操作 ID 查询 Host 回执或请求。Host 包图现已在生产组合根启动，但 Web provider、完整供给链与安全回收尚未接通；上述持久底座仍不得被描述为可用的 Host 管理功能。
+
+### 7.4 控制域包选择与 Graph 生命周期
+
+deployment 与 Host 内核各自持有 `runtime_package_selection` 作为期望包成员的持久事实，记录组件 ID、准确工件摘要、已发布配置绑定和发布图修订。该表不是包私有状态，也不表示 Worker 当前仍在运行。Graph 发布事务必须同时刷新整套选择、配置 `effective`、Generation 和路由头；发布失败则全部回滚。普通包不能直接写选择账本，只能通过受限 Graph 变更和配置端口提交。
+
+优雅停机退役当前 Graph、排空 Worker 和关闭进程资源，但保留最近一次已发布的选择。新 Supervisor 在新租约下读取选择并装配新 Generation；首次启动且没有已发布选择时才使用官方默认包。若持久选择的修订、配置绑定或工件摘要不自洽，启动失败，不回退默认包。deployment 与 Host 在各自数据库内独立执行此协议；一个控制器不得与旧控制器同时持有同一活动 Graph 来模拟重启。
 
 ## 8. 完成判据
 

@@ -533,6 +533,17 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert queued_reservation["resource_id"] in {
             item["resource_id"] for item in active_page["items"]
         }
+        await controller.close()
+        controller = HostPackageController(
+            HostRuntimeScope(
+                store, supervisor,
+                effect_driver_factories={
+                    "host.postgresql-materializer": physical_factory,
+                },
+            ), catalog, official_sources=(source,),
+        )
+        restored = await controller.start()
+        assert restored.get("host.storage").snapshot.digest == resumed_package.digest
     finally:
         if controller is not None:
             await controller.close()

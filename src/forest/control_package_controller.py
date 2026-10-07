@@ -190,7 +190,7 @@ class ControlPackageController:
                     component_id: self._selected_snapshot(binding["package_digest"])
                     for component_id, binding in selected.items()
                 }
-                if graph is not None
+                if graph is not None or selected
                 else defaults
             )
             if not snapshots or any(

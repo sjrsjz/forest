@@ -951,6 +951,7 @@ priority = "P1"
             "packages", {"limit": 16},
         )
         assert any(item["package_digest"] == replacement.digest for item in page["items"])
+        await controller.close()
         restarted = DeploymentPackageController(
             runtime, package_catalog, official_sources=(audit_source, registry_source),
         )
