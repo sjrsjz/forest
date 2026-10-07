@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["resource_id", "host_id", "deployment_id", "bot_id", "storage_generation", "kind", "physical_name", "role_name", "state", "revision"],
+  "properties": {
+    "resource_id": {"type": "string", "pattern": "^resource/[a-f0-9-]{36}$"},
+    "host_id": {"type": "string", "pattern": "^host/[a-f0-9]{32}$"},
+    "deployment_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "bot_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "storage_generation": {"type": "integer", "minimum": 1},
+    "kind": {"const": "POSTGRES_DATABASE"},
+    "physical_name": {"type": "string", "pattern": "^forest_bot_[a-f0-9]{24}$"},
+    "role_name": {"type": "string", "pattern": "^forest_role_[a-f0-9]{24}$"},
+    "state": {"enum": ["RESERVED", "ACTIVE", "RETIRED", "DELETED"]},
+    "revision": {"type": "integer", "minimum": 1}
+  }
+}

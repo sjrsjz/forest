@@ -410,7 +410,10 @@ BEGIN
        OR context->>'component_id' IS DISTINCT FROM 'host.storage'
        OR context->>'port_kind' IS DISTINCT FROM 'query'
        OR context->>'port_name' IS DISTINCT FROM 'host.storage.materialization-status-read'
-       OR input->>'resource_id' !~ '^resource/[a-f0-9-]{36}$' THEN
+       OR input->>'resource_id' !~ '^resource/[a-f0-9-]{36}$'
+       OR input->>'deployment_id' IS NULL
+       OR input->>'bot_id' IS NULL
+       OR input->>'storage_generation' IS NULL THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','HOST_STORAGE_QUERY_INVALID',
                 'message','Materialization status query is invalid','status',422));
@@ -418,7 +421,9 @@ BEGIN
     SELECT w.* INTO work FROM __forest_module_schema__.materialization_work w
     JOIN __forest_module_schema__.physical_generations p
       ON p.resource_id=w.resource_id
-    WHERE w.resource_id=input->>'resource_id' AND p.host_id=context->>'scope_id';
+    WHERE w.resource_id=input->>'resource_id' AND p.host_id=context->>'scope_id'
+      AND p.deployment_id=input->>'deployment_id' AND p.bot_id=input->>'bot_id'
+      AND p.storage_generation=(input->>'storage_generation')::bigint;
     IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','HOST_STORAGE_MATERIALIZATION_NOT_FOUND',
@@ -427,6 +432,45 @@ BEGIN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('resource_id',work.resource_id,'state',work.state,
             'attempt_count',work.attempt_count,'last_error_code',work.last_error_code));
+END;
+$$;
+
+CREATE FUNCTION host_storage_resource(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    item __forest_module_schema__.physical_generations%ROWTYPE;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR context->>'port_kind' IS DISTINCT FROM 'query'
+       OR context->>'port_name' IS DISTINCT FROM 'host.storage.resource-read'
+       OR input->>'resource_id' !~ '^resource/[a-f0-9-]{36}$'
+       OR input->>'deployment_id' IS NULL
+       OR input->>'bot_id' IS NULL
+       OR input->>'storage_generation' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_QUERY_INVALID',
+                'message','Host resource query is invalid','status',422));
+    END IF;
+    SELECT * INTO item FROM __forest_module_schema__.physical_generations
+    WHERE resource_id=input->>'resource_id' AND host_id=context->>'scope_id'
+      AND deployment_id=input->>'deployment_id' AND bot_id=input->>'bot_id'
+      AND storage_generation=(input->>'storage_generation')::bigint;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RESOURCE_NOT_FOUND',
+                'message','Host resource was not found','status',404));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('resource_id',item.resource_id,'host_id',item.host_id,
+            'deployment_id',item.deployment_id,'bot_id',item.bot_id,
+            'storage_generation',item.storage_generation,'kind',item.kind,
+            'physical_name',item.physical_name,'role_name',item.role_name,
+            'state',item.state,'revision',item.revision));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_QUERY_INVALID',
+            'message','Host resource query is invalid','status',422));
 END;
 $$;
 

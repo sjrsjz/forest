@@ -21,6 +21,10 @@ class HostStorage(Plugin):
     async def materialization_status(self, payload, ctx):
         return await ctx.queries.call("host.storage.materialization-status-read", payload)
 
+    @service("host.storage.resource", semantics="read")
+    async def resource(self, payload, ctx):
+        return await ctx.queries.call("host.storage.resource-read", payload)
+
     @service("host.storage.reserve", semantics="idempotent")
     async def reserve(self, payload, ctx):
         return await ctx.commands.call(

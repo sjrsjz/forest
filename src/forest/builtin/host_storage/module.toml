@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.host-storage"
-version = "0.4.0"
+version = "0.5.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "host_storage:HostStorage"
@@ -35,6 +35,7 @@ requests = [
   "domain.command:host.storage.realize-record",
   "domain.command:host.storage.materialization-enqueue-record",
   "domain.query:host.storage.materialization-status-read",
+  "domain.query:host.storage.resource-read",
   "service.call:host.storage.postgres.materialize",
 ]
 
@@ -94,14 +95,22 @@ name = "host.storage.materialization.status"
 contract = "1.0"
 semantics = "read"
 visibility = "public"
-input_schema = "schemas/materialization-status-input.json"
+input_schema = "schemas/resource-lookup-input.json"
 output_schema = "schemas/materialization-enqueue-output.json"
+
+[[components.provides]]
+name = "host.storage.resource"
+contract = "1.0"
+semantics = "read"
+visibility = "public"
+input_schema = "schemas/resource-lookup-input.json"
+output_schema = "schemas/resource-lookup-output.json"
 
 [components.storage]
 schema_id = "forest.host.storage"
-schema_version = "1.2.0"
+schema_version = "1.3.0"
 baseline = "schema/storage.sql"
-baseline_sha256 = "fa3fe5e6c7969d2fb52fb1f6e5ca0b604614c8c909ad00759de66ac818009b8b"
+baseline_sha256 = "9d69f2b597eb2912e9d5bad5c4c3779b2af60fbf5aaa8a47cbd4c4556b9f96a5"
 scope = "host"
 repository_contract = "forest.host-storage.repository/1"
 execution_profile = "official"
@@ -117,8 +126,15 @@ output_schema = "schemas/generations-output.json"
 name = "host.storage.materialization-status-read"
 contract = "1.0"
 function = "host_storage_materialization_status"
-input_schema = "schemas/materialization-status-input.json"
+input_schema = "schemas/resource-lookup-input.json"
 output_schema = "schemas/materialization-enqueue-output.json"
+
+[[components.domain_queries]]
+name = "host.storage.resource-read"
+contract = "1.0"
+function = "host_storage_resource"
+input_schema = "schemas/resource-lookup-input.json"
+output_schema = "schemas/resource-lookup-output.json"
 
 [[components.domain_commands]]
 name = "host.storage.reserve-record"
@@ -166,4 +182,9 @@ timeout_s = 10
 [[components.management_queries]]
 id = "materialization.status"
 port = "host.storage.materialization.status"
+timeout_s = 10
+
+[[components.management_queries]]
+id = "resource"
+port = "host.storage.resource"
 timeout_s = 10

@@ -224,7 +224,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.4.0"', 'version = "0.4.1"', 1,
+                'version = "0.5.0"', 'version = "0.5.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -368,6 +368,23 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
             "resource_id": queued_reservation["resource_id"],
             "credential_ref": "secret/storage/test",
         }
+        lookup = {
+            "resource_id": queued_reservation["resource_id"],
+            "deployment_id": queued_reservation["deployment_id"],
+            "bot_id": queued_reservation["bot_id"],
+            "storage_generation": queued_reservation["storage_generation"],
+        }
+        reserved_resource = await current.get("host.storage").management_contract.query(
+            "resource", lookup,
+        )
+        assert reserved_resource["physical_name"] == queued_physical[0]
+        assert reserved_resource["role_name"] == queued_physical[1]
+        assert reserved_resource["state"] == "RESERVED"
+        with pytest.raises(ForestError) as other_owner:
+            await current.get("host.storage").management_contract.query(
+                "resource", {**lookup, "deployment_id": "another-deployment"},
+            )
+        assert other_owner.value.code == "HOST_STORAGE_RESOURCE_NOT_FOUND"
         async def enqueue_request(operation_id, value):
             return await enqueue.invoke_routed(
                 enqueue_route,
@@ -391,8 +408,13 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
             )
         assert conflicting_request.value.code == "HOST_STORAGE_MATERIALIZATION_CONFLICT"
         assert await current.get("host.storage").management_contract.query(
-            "materialization.status", {"resource_id": queued_reservation["resource_id"]},
+            "materialization.status", lookup,
         ) == accepted
+        with pytest.raises(ForestError) as other_status:
+            await current.get("host.storage").management_contract.query(
+                "materialization.status", {**lookup, "bot_id": "another-bot"},
+            )
+        assert other_status.value.code == "HOST_STORAGE_MATERIALIZATION_NOT_FOUND"
         async with store.pool.connection() as conn, conn.transaction():
             abandoned = (await (await conn.execute(
                 sql.SQL("SELECT {}.host_storage_claim_materialization(%s::jsonb,%s::jsonb) "
@@ -407,7 +429,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert abandoned["ok"] and abandoned["value"]["work_id"] == queued_reservation["resource_id"]
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.4.1"', 'version = "0.4.2"', 1,
+                'version = "0.5.1"', 'version = "0.5.2"', 1,
             ), encoding="utf-8",
         )
         resumed_package = catalog.build_official(source, scope="host")
@@ -432,7 +454,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert work["attempt_count"] == 2
         assert work["result_payload"]["state"] == "ACTIVE"
         assert await current.get("host.storage").management_contract.query(
-            "materialization.status", {"resource_id": queued_reservation["resource_id"]},
+            "materialization.status", lookup,
         ) == {
             "resource_id": queued_reservation["resource_id"],
             "state": "SUCCEEDED", "attempt_count": 2, "last_error_code": None,
@@ -440,6 +462,11 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         active_page = await current.get("host.storage").management_contract.query(
             "generations", {"bot_id": "bot/storage", "state": "ACTIVE"},
         )
+        active_resource = await current.get("host.storage").management_contract.query(
+            "resource", lookup,
+        )
+        assert active_resource["state"] == "ACTIVE"
+        assert active_resource["physical_name"] == queued_physical[0]
         assert queued_reservation["resource_id"] in {
             item["resource_id"] for item in active_page["items"]
         }
