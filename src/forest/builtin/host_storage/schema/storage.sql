@@ -71,6 +71,19 @@ CREATE TABLE resource_reference_pins (
     UNIQUE (deployment_id,profile_ref)
 );
 
+CREATE TABLE resource_reference_releases (
+    resource_id text PRIMARY KEY REFERENCES resource_reference_pins(resource_id),
+    operation_id text NOT NULL UNIQUE CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    retirement_operation_id text NOT NULL CHECK (octet_length(retirement_operation_id) BETWEEN 1 AND 256),
+    revocation_operation_id text NOT NULL CHECK (octet_length(revocation_operation_id) BETWEEN 1 AND 256),
+    profile_ref text NOT NULL CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
+    pinned_resource_revision bigint NOT NULL CHECK (pinned_resource_revision >= 2),
+    resource_revision bigint NOT NULL CHECK (resource_revision > pinned_resource_revision),
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE FUNCTION host_storage_reserve(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -510,6 +523,100 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','HOST_STORAGE_REFERENCE_INVALID',
             'message','Host reference pin is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION host_storage_release_reference(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_operation text := context->>'operation_id';
+    requested_resource text := input->>'resource_id';
+    item __forest_module_schema__.physical_generations%ROWTYPE;
+    pin __forest_module_schema__.resource_reference_pins%ROWTYPE;
+    replay __forest_module_schema__.resource_reference_releases%ROWTYPE;
+    result_value jsonb;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR context->>'port_kind' IS DISTINCT FROM 'command'
+       OR context->>'port_name' IS DISTINCT FROM 'host.storage.reference-release-record'
+       OR requested_operation IS NULL OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR context->>'input_digest' !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_resource !~ '^resource/[a-f0-9-]{36}$'
+       OR input->>'deployment_id' IS NULL OR input->>'bot_id' IS NULL
+       OR input->>'storage_generation' IS NULL
+       OR input->>'profile_ref' IS NULL
+       OR octet_length(input->>'profile_ref') NOT BETWEEN 1 AND 512
+       OR input->>'pinned_resource_revision' IS NULL
+       OR input->>'retirement_operation_id' IS NULL
+       OR octet_length(input->>'retirement_operation_id') NOT BETWEEN 1 AND 256
+       OR input->>'revocation_operation_id' IS NULL
+       OR octet_length(input->>'revocation_operation_id') NOT BETWEEN 1 AND 256
+       OR (input->>'bot_revision')::bigint < 1
+       OR (input->>'intent_revision')::bigint < 1
+       OR (input->>'observation_revision')::bigint < 1 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RELEASE_INVALID',
+                'message','Host reference release is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'host.storage.reference.release/'||requested_operation,0));
+    SELECT * INTO replay FROM __forest_module_schema__.resource_reference_releases
+    WHERE operation_id=requested_operation FOR UPDATE;
+    IF FOUND THEN
+        IF replay.resource_id IS DISTINCT FROM requested_resource
+           OR replay.input_digest IS DISTINCT FROM context->>'input_digest' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_RELEASE_CONFLICT',
+                    'message','Release operation input differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',replay.result_payload);
+    END IF;
+    SELECT * INTO item FROM __forest_module_schema__.physical_generations
+    WHERE resource_id=requested_resource FOR UPDATE;
+    IF NOT FOUND OR item.host_id IS DISTINCT FROM context->>'scope_id'
+       OR item.deployment_id IS DISTINCT FROM input->>'deployment_id'
+       OR item.bot_id IS DISTINCT FROM input->>'bot_id'
+       OR item.storage_generation IS DISTINCT FROM (input->>'storage_generation')::bigint
+       OR item.state IS DISTINCT FROM 'ACTIVE' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RESOURCE_UNAVAILABLE',
+                'message','Active Host resource is unavailable for release','status',409));
+    END IF;
+    SELECT * INTO pin FROM __forest_module_schema__.resource_reference_pins
+    WHERE resource_id=requested_resource FOR SHARE;
+    IF NOT FOUND OR pin.deployment_id IS DISTINCT FROM item.deployment_id
+       OR pin.profile_ref IS DISTINCT FROM input->>'profile_ref'
+       OR pin.resource_revision IS DISTINCT FROM (input->>'pinned_resource_revision')::bigint
+       OR pin.resource_revision IS DISTINCT FROM item.revision THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RELEASE_PIN_MISMATCH',
+                'message','Host reference pin differs from release','status',409));
+    END IF;
+    UPDATE __forest_module_schema__.physical_generations
+    SET state='RETIRED',revision=revision+1,updated_at=clock_timestamp()
+    WHERE resource_id=item.resource_id RETURNING * INTO item;
+    result_value := jsonb_build_object(
+        'resource_id',item.resource_id,'host_id',item.host_id,
+        'deployment_id',item.deployment_id,'bot_id',item.bot_id,
+        'storage_generation',item.storage_generation,
+        'profile_ref',pin.profile_ref,'state',item.state,
+        'resource_revision',item.revision,
+        'revocation_operation_id',input->>'revocation_operation_id');
+    INSERT INTO __forest_module_schema__.resource_reference_releases(
+        resource_id,operation_id,input_digest,retirement_operation_id,
+        revocation_operation_id,profile_ref,pinned_resource_revision,
+        resource_revision,result_payload)
+    VALUES(item.resource_id,requested_operation,context->>'input_digest',
+        input->>'retirement_operation_id',input->>'revocation_operation_id',
+        pin.profile_ref,pin.resource_revision,item.revision,result_value);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',result_value);
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_RELEASE_INVALID',
+            'message','Host reference release is invalid','status',422));
 END;
 $$;
 

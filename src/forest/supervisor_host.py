@@ -312,7 +312,8 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         max_starting=settings.max_starting,
     )
     host_storage_bridge = DeploymentHostStorageBridge(
-        requests=storage_requests, deployment_supervisor=supervisor,
+        requests=storage_requests, profiles=storage_profiles,
+        deployment_supervisor=supervisor,
         host_supervisor=host_supervisor,
         host_controller_provider=lambda: host_controller,
     )

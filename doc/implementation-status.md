@@ -961,3 +961,5 @@ Context 单次窗口硬界对齐（2026-10-06）：conversation.scheduler 4.34.0
 
 
 跨群图文联想整链验收（2026-10-07）：扩展隔离 BotHost 的真实 QiYu VL 大图召回用例：群 933179609 的图文来源由 Conversation 静默裁剪自动归档，TEXT/IMAGE 文档 facet 经真实嵌入端点与 Milvus 达到 READY；群 933179610 的图片提问命中原群 IMAGE facet 并进入聊天模型的有来源请求。模拟模型完成回复后，Memory 在最终回复事务中为实际投影的直接种子登记 `PENDING_ARCHIVE` 联想日志；再向提问群注入一条普通消息，由静默裁剪归档原触发源，日志自动提升为 `PROMOTED`，目标种子的 `ASSOCIATES_WITH` 关系两端为准确跨群源单元，`cross_trunk=true`。同一次用例随后完成管理员图文召回试验，`1 passed in 150.82s`；测试数据库和独立 Milvus 集合均已清理。OneBot 与聊天模型仍为替身，没有向真实 QQ 发送消息；这证明包间自动学习和提升闭环，不证明在线实例或数月负载。
+
+Host 引用释放（2026-10-08）：`host.storage` 0.8.0 / 私有 SQL 1.6.0 增加 `host.storage.reference.release` 及不可变 release 记录。deployment 桥先在当前 Supervisor 租约下重查 profile 撤销与 Bot 静止证明，Host 包再核对原 pin 与资源修订，把 `ACTIVE` 资源记为 `RETIRED`；同键并发重放保留单条 release，原 pin 不删除。隔离 PostgreSQL 的桥与 Host 包用例 `4 passed`，包含包热重载、撤销前拒绝、释放后状态与账本核对。修正了一个旧 Host 测试对“已开放数据库丢失 owner marker 后可自动认领”的错误预期，真实 Effect 仍拒绝这种不安全状态。该阶段没有物理删库、role 停用或 Secret 失效；后续回收须在物理 Effect 处再次核对所有权与 admission fence。

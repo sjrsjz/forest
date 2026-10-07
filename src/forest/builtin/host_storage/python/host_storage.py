@@ -32,6 +32,13 @@ class HostStorage(Plugin):
             operation_id=ctx.operations.stable("reference-pin:v1"),
         )
 
+    @service("host.storage.reference.release", semantics="idempotent")
+    async def release_reference(self, payload, ctx):
+        return await ctx.commands.call(
+            "host.storage.reference-release-record", payload,
+            operation_id=ctx.operations.stable("reference-release:v1"),
+        )
+
     @service("host.storage.reserve", semantics="idempotent")
     async def reserve(self, payload, ctx):
         return await ctx.commands.call(

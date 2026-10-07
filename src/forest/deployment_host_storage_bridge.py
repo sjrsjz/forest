@@ -10,10 +10,11 @@ class DeploymentHostStorageBridge:
     """Advance one frozen request through Host-owned storage services."""
 
     def __init__(
-        self, *, requests, deployment_supervisor, host_supervisor,
+        self, *, requests, profiles, deployment_supervisor, host_supervisor,
         host_controller_provider,
     ) -> None:
         self.requests = requests
+        self.profiles = profiles
         self.deployment_supervisor = deployment_supervisor
         self.host_supervisor = host_supervisor
         self.host_controller_provider = host_controller_provider
@@ -83,6 +84,44 @@ class DeploymentHostStorageBridge:
             request_id=request_id, pin_receipt=pin, resource=resource,
         )
 
+    async def release_reference(self, request_id: str) -> dict:
+        """Forward only the currently rechecked deployment revocation."""
+        request = await self.requests.read(request_id)
+        self._require_host(request)
+        pinned = await self.requests.pinned_resource(request_id)
+        if pinned is None:
+            raise ForestError(
+                "STORAGE_REQUEST_NOT_PINNED", "Host resource has no deployment pin", 409,
+            )
+        revoked = await self.profiles.revocation_for_release(
+            self.deployment_supervisor.authority_lease(), request_id,
+        )
+        if (
+            revoked["profile_ref"] != request.profile_ref
+            or revoked["bot_id"] != request.bot_id
+            or revoked["storage_generation"] != request.storage_generation
+            or revoked["host_id"] != request.host_id
+            or revoked["resource_id"] != pinned.resource_id
+            or pinned.host_id != request.host_id
+        ):
+            raise ForestError(
+                "STORAGE_PROFILE_RETIREMENT_MISMATCH",
+                "Revocation differs from the pinned Host resource", 409,
+            )
+        return await self._invoke_host(
+            request, "host.storage.reference.release", "release",
+            {
+                **self._resource_lookup(request, pinned.resource_id),
+                "profile_ref": request.profile_ref,
+                "pinned_resource_revision": pinned.resource_revision,
+                "retirement_operation_id": revoked["retirement_operation_id"],
+                "revocation_operation_id": revoked["operation_id"],
+                "bot_revision": revoked["bot_revision"],
+                "intent_revision": revoked["intent_revision"],
+                "observation_revision": revoked["observation_revision"],
+            },
+        )
+
     @staticmethod
     def _resource_lookup(request, resource_id: str) -> dict:
         return {
@@ -109,6 +148,7 @@ class DeploymentHostStorageBridge:
             ("host.storage.materialization.enqueue", "materialize"),
             ("host.storage.materialization.status", "status"),
             ("host.storage.reference.pin", "pin"),
+            ("host.storage.reference.release", "release"),
             ("host.storage.resource", "resource"),
         }:
             raise ValueError("Host storage bridge service is not declared")

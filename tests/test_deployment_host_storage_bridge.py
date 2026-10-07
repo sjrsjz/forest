@@ -131,6 +131,9 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         await controller.start()
         bridge = DeploymentHostStorageBridge(
             requests=requests,
+            profiles=DeploymentStorageProfileAuthority(
+                deployment_store, secrets=secrets,
+            ),
             deployment_supervisor=SimpleNamespace(
                 authority_lease=lambda: replace(lease, owner_epoch=lease.owner_epoch + 1),
             ),
@@ -154,7 +157,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.7.0"', 'version = "0.7.1"', 1,
+                'version = "0.8.0"', 'version = "0.8.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -231,7 +234,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         previous_graph = controller.registry.graph_identity
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.7.1"', 'version = "0.7.2"', 1,
+                'version = "0.8.1"', 'version = "0.8.2"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -380,6 +383,9 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             bootstrap_profile_ref=bootstrap.profile_ref,
             bootstrap_manifest_digest=bootstrap.manifest_digest,
         )
+        with pytest.raises(ForestError) as not_revoked:
+            await bridge.release_reference(frozen.request_id)
+        assert not_revoked.value.code == "STORAGE_PROFILE_NOT_REVOKED"
         with pytest.raises(ForestError) as not_retired:
             await profiles.revoke(
                 lease, operation_id="bridge/revoke-too-early",
@@ -448,6 +454,40 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
                 bootstrap_profile_ref=bootstrap.profile_ref,
             )
         assert job_after_revoke.value.code == "STORAGE_PROFILE_REVOKED"
+
+        released, release_replay = await asyncio.gather(
+            bridge.release_reference(frozen.request_id),
+            bridge.release_reference(frozen.request_id),
+        )
+        assert released == release_replay
+        assert released["resource_id"] == reserved_id
+        assert released["state"] == "RETIRED"
+        assert released["resource_revision"] == pinned.resource_revision + 1
+        assert released["revocation_operation_id"] == revoked["operation_id"]
+        assert await bridge.release_reference(frozen.request_id) == released
+        resource = await controller.registry.get("host.storage").management_contract.query(
+            "resource", {
+                "resource_id": reserved_id,
+                "deployment_id": frozen.deployment_id,
+                "bot_id": frozen.bot_id,
+                "storage_generation": frozen.storage_generation,
+            },
+        )
+        assert resource["state"] == "RETIRED"
+        async with host_store.pool.connection() as conn:
+            release_history = await (
+                await conn.execute(
+                    sql.SQL("SELECT (SELECT count(*) FROM {}.resource_reference_pins "
+                            "WHERE resource_id=%s) AS pins, "
+                            "(SELECT count(*) FROM {}.resource_reference_releases "
+                            "WHERE resource_id=%s) AS releases").format(
+                        sql.Identifier(module_schema_namespace("forest.host.storage")),
+                        sql.Identifier(module_schema_namespace("forest.host.storage")),
+                    ),
+                    (reserved_id, reserved_id),
+                )
+            ).fetchone()
+        assert release_history == {"pins": 1, "releases": 1}
 
         automatic_claim = await dispatch.claim(lease)
         assert automatic_claim.request_id == automatic.request_id

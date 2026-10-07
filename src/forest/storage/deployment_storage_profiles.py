@@ -296,6 +296,40 @@ class DeploymentStorageProfileAuthority:
             ).fetchone()
             return dict(saved)
 
+    async def revocation_for_release(self, lease, request_id: str) -> dict:
+        """Recheck one immutable revocation before crossing into Host scope."""
+        _bounded(request_id, "request_id", 256)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await verify_deployment_supervisor_in(
+                conn, lease, self.store.deployment_id,
+            )
+            saved = await (
+                await conn.execute(
+                    "SELECT * FROM forest_deployment.storage_profile_revocations "
+                    "WHERE request_id=%s FOR SHARE", (request_id,),
+                )
+            ).fetchone()
+            if saved is None:
+                raise ForestError(
+                    "STORAGE_PROFILE_NOT_REVOKED",
+                    "Host storage request has no committed revocation", 409,
+                )
+            witness = await DeploymentCatalogRepository(
+                self.store
+            ).retirement_quiescence_in(conn, saved["bot_id"])
+            if (
+                witness["retirement_operation_id"] != saved["retirement_operation_id"]
+                or witness["bot_revision"] != saved["bot_revision"]
+                or witness["intent_revision"] != saved["intent_revision"]
+                or witness["storage_profile_ref"] != saved["profile_ref"]
+                or witness["storage_generation"] != saved["storage_generation"]
+            ):
+                raise ForestError(
+                    "STORAGE_PROFILE_RETIREMENT_MISMATCH",
+                    "Revocation no longer matches the Bot retirement fence", 409,
+                )
+            return dict(saved)
+
     async def resolve(
         self,
         *,

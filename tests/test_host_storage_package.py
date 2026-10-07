@@ -223,17 +223,23 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         ).fetchone()
         assert database_row[0] == created_physical[1]
         assert first["resource_id"] in database_row[1]
+        original_marker = database_row[1]
         await admin.execute(sql.SQL("COMMENT ON DATABASE {} IS NULL").format(
             sql.Identifier(created_physical[0])
         ))
-        assert await materialize.invoke_routed(
-            physical_route,
-            RuntimeServiceInvocation(
-                "materialize/storage/reconcile", 10, "test.host-storage", "bot/storage",
-            ),
-            ({"resource_id": first["resource_id"],
-              "credential_ref": "secret/storage/test"},), {},
-        ) == receipt
+        with pytest.raises(ForestError) as unmarked:
+            await materialize.invoke_routed(
+                physical_route,
+                RuntimeServiceInvocation(
+                    "materialize/storage/reconcile", 10, "test.host-storage", "bot/storage",
+                ),
+                ({"resource_id": first["resource_id"],
+                  "credential_ref": "secret/storage/test"},), {},
+            )
+        assert unmarked.value.code == "HOST_STORAGE_DATABASE_MISMATCH"
+        await admin.execute(sql.SQL("COMMENT ON DATABASE {} IS {}").format(
+            sql.Identifier(created_physical[0]), sql.Literal(original_marker),
+        ))
         database_row = await (
             await admin.execute(
                 "SELECT shobj_description(oid,'pg_database') "
@@ -258,7 +264,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.7.0"', 'version = "0.7.1"', 1,
+                'version = "0.8.0"', 'version = "0.8.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -311,8 +317,8 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
                   "credential_ref": "secret/storage/test"},), {},
             )
         assert mismatch_after_reload.value.code == "HOST_STORAGE_DATABASE_MISMATCH"
-        await admin.execute(sql.SQL("COMMENT ON DATABASE {} IS NULL").format(
-            sql.Identifier(created_physical[0])
+        await admin.execute(sql.SQL("COMMENT ON DATABASE {} IS {}").format(
+            sql.Identifier(created_physical[0]), sql.Literal(original_marker),
         ))
         assert await new_materialize.invoke_routed(
             new_physical_route,
@@ -441,7 +447,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert abandoned["ok"] and abandoned["value"]["work_id"] == queued_reservation["resource_id"]
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.7.1"', 'version = "0.7.2"', 1,
+                'version = "0.8.1"', 'version = "0.8.2"', 1,
             ), encoding="utf-8",
         )
         resumed_package = catalog.build_official(source, scope="host")
