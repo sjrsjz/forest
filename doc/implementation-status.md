@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host 物理存储边界核查（2026-10-07）：[详细协议](18-host-storage.md) 固定 `host.storage` 的 owner、私有 namespace、repository、受限端口、跨库请求合流、物理标记、租约与回收围栏。当前 `LocalPostgresDatabaseAllocator` 仍由 deployment 进程直接创建 Bot 数据库，且 Host 库没有对应物理资源账本；这与完整 Host 库存/回收语义冲突。下一步必须以 Host 持久请求和原生物理 Effect 替换这条路径，再启动 `host.storage` 图并开放回收，不能用空清单或临时 `deployment.storage` 页面代替。此项仅完成设计与冲突定位，未实现 Host 物理分配。
+
 Bot 目录权威收口（2026-10-07）：内核部署目录继续独占 Bot 基础身份、供应状态、期望运行状态、监督观察和幂等操作账本；可热重载的 `deployment.bot-catalog` 包只发布分页目录 UI 与管理契约。目录分页改经 `deployment.bot-catalog-page` kernel Query，运行意图改经 `deployment.bot-set-desired` kernel Command，删除包内跨 schema 读写内核表的 SQL 中转层；后者仍在 Web 回执预检、ACTIVE Generation 校验和同事务约束内调用目录 authority。隔离 PostgreSQL WebUI 回归验证分页、ONLINE 修改、幂等重放与过期修订冲突（1 passed），目录身份/意图独立用例另 1 passed；临时测试容器已删除。创建、重命名、供应重试与删除的目录管理能力尚未补齐，不能将此轮收口视为完整 Bot 目录管理。
 
 Host 独立数据库与生产租约装配（2026-10-07）：Compose 首次初始化现生成独立 Host 数据库口令，由 PostgreSQL 初始化脚本创建无超级用户的 `forest_host` role 与专用库，并撤销该 role 对 deployment 库的连接资格。生产 Supervisor 配置分别隐藏两条 DSN，进程同时打开 deployment 与 Host store，先领取 Host incarnation lease，并把 Host 续租任务纳入进程失效监视；关闭时释放两个 scope 的租约。隔离 Compose 项目实际验证 Host 库 owner、role flags 与 deployment CONNECT 拒绝，配置/租约本地用例 10 passed，Ruff 与 Compose 解析通过；测试项目及其凭据卷已删除。旧预发布卷不能静默补初始化，须按文档重建。Host 包图尚未在生产组合根启动，Web provider 与 `host.storage` 仍待接线；在线实例未切换。

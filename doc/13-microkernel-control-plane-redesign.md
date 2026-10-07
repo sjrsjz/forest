@@ -448,7 +448,7 @@ UI 生命周期同样分层。目录贡献可以调用壳层提供的通用 `ope
 
 备份与恢复的目标模块边界固定如下。`deployment.backup` 拥有跨 deployment 与多个 Bot cut 的备份集合、创建 Job、列表/详情、只读验证、外部容器导入及备份容器下载；它通过受限端口调用各 Bot 的一致性切口和宿主 artifact store，不取得 Bot 业务写权限。`deployment.restore` 拥有从已验证备份创建 SEALED 候选、候选校验、激活计划、storage head 切换与激活 Job；它只能消费 `deployment.backup` 发布的不可变备份引用，不能自行读取任意文件路径。二者是独立模块、独立 Generation 和独立操作命名空间，恢复失败不能阻断新备份，备份模块也不能绕过恢复计划直接替换活动 Bot。
 
-`host.storage` 拥有本宿主持有的 artifact、隔离数据库和历史 storage generation 的物理清单、容量、回收计划、回收 Job 与重试；它不拥有备份的逻辑可恢复性或 Bot storage head。deployment 模块只向它提交内容寻址资源引用和预期 owner marker，host 模块在删除前复核独立于 deployment_id 且跨重启持久的 `host_id`、当前 incarnation、资源 fence、名称/所有者标记和“未被 storage head/活动 Job 引用”。这些操作只有在持久 host identity、host provider 和 host module registry 都成立后才能启用；不得为了尽快删除页面而临时创建语义错误的 `deployment.storage`，也不得把进程重启产生的 incarnation 当成稳定 scope ID。
+`host.storage` 拥有本宿主持有的 artifact、隔离数据库和历史 storage generation 的物理清单、容量、回收计划、回收 Job 与重试；它不拥有备份的逻辑可恢复性或 Bot storage head。deployment 模块只向它提交内容寻址资源引用和预期 owner marker，host 模块在删除前复核独立于 deployment_id 且跨重启持久的 `host_id`、当前 incarnation、资源 fence、名称/所有者标记和“未被 storage head/活动 Job 引用”。具体 owner、repository、跨库合流和回收围栏见 [Host 物理存储协议](18-host-storage.md)。这些操作只有在持久 host identity、host provider 和 host module registry 都成立后才能启用；不得为了尽快删除页面而临时创建语义错误的 `deployment.storage`，也不得把进程重启产生的 incarnation 当成稳定 scope ID。
 
 稳定操作名也在此固定。`deployment.backup` 使用 `backups`、`backup`、`backup.create`、`backup.archive`、`imports`、`import`、`import.reserve`、`import.artifact`、`import.finalize`、`verifications`、`verification`、`verification.create`；`deployment.restore` 使用 `stages`、`stage`、`stage.create`、`activation.plan`、`activations`、`activation`、`activation.apply`、`activation.retry`；`host.storage` 使用 `generations`、`cleanup.plan`、`cleanups`、`cleanup`、`cleanup.apply`、`cleanup.retry`。大文件只经 upload/download artifact 传输。计划、应用、重试分别保留独立 action，不能由一个带 `mode` 的总 action 动态选择 authority。
 
@@ -481,7 +481,7 @@ material、缺失 active 引用和超过上限的 key 数，且 key material 不
 
 `deployment.package-registry` 现在有独立的官方包和真实 deployment Generation：包内 Worker 声明 `packages` 与 `artifact` 管理查询及自带 UI，按 `bot/deployment/host` scope 筛选全部署工件；宿主通过与该 Generation 绑定的受限 `deployment.catalog.*` 原生目录端口访问物理工件目录。官方来源由宿主显式登记的工件摘要证明；不拥有业务 SQL 的官方包只安装标准配置账本，不能借无存储声明绕过来源围栏。普通 ZIP 包既不能取得原生目录端口，也不能因模仿官方组件 ID 获得官方 trust。Bot Worker Host 的包候选内核桥只接受 Bot 范围请求，再经部署控制器解析当前活动目录 Generation 的只读模块查询；替换、排空或缺失期间不回退读取物理目录，返回明确不可用。它仍是有限的跨 scope 管理查询桥，尚未成为通用跨 scope Contract Router。模块现在分别声明 ZIP 下载与上传 artifact：上传在读取正文前登记 Web 签票回执与部署审计并持有准确 Generation 的排空租约，逐块核对 32 MiB 上限、长度和 SHA-256 后由幂等目录端口发布，重复键依物理目录回执合流；热替换等待已有上传完成并拒绝旧代际新请求。当前仍以有界字节数组把上传 ZIP 交给目录端口，下载也未使用通用工件句柄；模块已有私有导入状态账本、成功结算与筛选查询；物理发布前的确定性失败已有类型化结算；发布阶段的确定性失败分类、备份等更大工件的流式传输尚未完成；跨库自动恢复已由该包的 owned-work 和目录关闭围栏处理。
 
-`deployment.bot-catalog` 已由宿主伪组件迁为官方可热替换包。内核持有 `bots`、`runtime_intents`、`runtime_observations` 和幂等操作账本；包不复制 Bot 身份或运行意图。内核的 `bot_catalog_page` 只返回有界分页投影，`bot_set_desired` 以操作 ID、输入摘要和期望修订在一个事务内合流；包私有 SQL 仅作端口绑定与上下文校验。管理 Action 先核对当前 CONTROL Generation，再在同一 PostgreSQL 事务内写 Web 签票回执与审计，内核端口再次匹配操作、摘要、组件与 Generation 后才推进意图。宿主的内部调度调用和包管理调用共用内核意图更新规则，旧宿主 Bot 目录页面和契约已经删除。部署基线已变，未上线实例须重建部署数据库；不保留旧基线迁移兼容层。
+`deployment.bot-catalog` 已由宿主伪组件迁为官方可热替换包。内核持有 `bots`、`runtime_intents`、`runtime_observations` 和幂等操作账本；包不复制 Bot 身份或运行意图。内核的 `bot_catalog_page` 只返回有界分页投影，`bot_set_desired` 以操作 ID、输入摘要和期望修订在一个事务内合流；包不再安装目录 SQL 中转层，分页和运行意图分别声明为受限 kernel Query 与 Command；Worker 不取得目录表读写权限。管理 Action 先核对当前 CONTROL Generation，再在同一 PostgreSQL 事务内写 Web 签票回执与审计，内核 Command 在同一事务内调用目录 authority，操作 ID、输入摘要和期望修订由该 authority 校验后才推进意图。宿主的内部调度调用和包管理调用共用内核意图更新规则，旧宿主 Bot 目录页面和契约已经删除。部署基线已变，未上线实例须重建部署数据库；不保留旧基线迁移兼容层。
 
 ### 7.2 部署包配置换代协议（预发布实现）
 
@@ -495,7 +495,7 @@ material、缺失 active 引用和超过上限的 key 数，且 key material 不
 
 Host 作用域使用稳定 `host_id`、独立数据库、租约、Graph/Generation、模块配置和持久 Graph change request；不借用 deployment 的图头或配置表。部署 Web 会话权威只能签发绑定准确 Host、目标 Generation/Graph、操作 ID、动作、输入摘要、计划摘要和管理员角色的短期票据。Host 入口独立验证签名及目标，在本地事务中写不可变 Web 回执，复核当前 Graph 与 Host lease，并将配置 `desired` 修订和换代请求原子提交。同键重放只接受相同冻结输入；并发不同请求依靠修订 CAS 和组件未结算请求围栏合流。Host 控制器必须按请求冻结的配置与工件装配候选图，在 Host 数据库的图发布事务中推进 `effective`，随后凭准确发布证明结算请求。
 
-部署会话数据库与 Host 数据库之间没有分布式 ACID。签名票据是跨库委托凭证，Host 本地回执是可审计的接纳事实；网关不能把“票据已签发”报告成“Host 变更已提交”，重试须用同一操作 ID 查询 Host 回执或请求。Host 包编译器、控制器、Web provider 与生产 Supervisor 接入完成前，上述持久底座不得被描述为可用的 Host 管理功能。
+部署会话数据库与 Host 数据库之间没有分布式 ACID。签名票据是跨库委托凭证，Host 本地回执是可审计的接纳事实；网关不能把“票据已签发”报告成“Host 变更已提交”，重试须用同一操作 ID 查询 Host 回执或请求。Host 包图在生产组合根启动、Web provider 接入并启用实际 Host builtin 前，上述持久底座不得被描述为可用的 Host 管理功能。
 
 ## 8. 完成判据
 
