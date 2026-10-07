@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+本机旧存储 [只读盘点](legacy-storage-inventory-2026-10-07.md) 已确认四组无 Host marker 的旧 Bot 数据库/role 仍分别被三个 deployment 库的 READY Bot 引用，相关 Supervisor 仍在运行。当前不能逐库回收或把旧资源视为 Host 已接管；切换需整体重建，或先补足单 Bot 引用 fence 与回收协议。
+
 生产组合根已为 Host Graph 接入与部署 Web 同源的签名票据校验器和会话复核。此前漏传该必需依赖会使 `run_supervisor` 在启动阶段直接失败；隔离 PostgreSQL 的生产组合根验收现验证了实际启动、Host 存储结算、Bot READY 和 OFFLINE 初始意图。
 
 供应包公开的 `storage.create` 管理动作及其任意 DSN/profile 输入已经移除；生产 Bot 存储只能通过 `deployment.storage-orchestrator` 提交 Host 请求，待 Host pin 与 deployment 原子结算后才发布 profile。`DeploymentStorageProfileAuthority.create` 仅留作受信任内核/隔离测试构造入口，不再绑定 WebUI 或包命令。
