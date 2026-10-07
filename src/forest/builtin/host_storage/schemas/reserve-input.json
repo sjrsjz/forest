@@ -1,0 +1,1 @@
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"deployment_id":{"type":"string","minLength":1,"maxLength":128},"bot_id":{"type":"string","minLength":1,"maxLength":128},"storage_generation":{"type":"integer","minimum":1,"maximum":9007199254740991}},"required":["deployment_id","bot_id","storage_generation"],"additionalProperties":false}

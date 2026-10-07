@@ -171,11 +171,19 @@ async def bootstrap_builtin_control_package(
     action_commands = {
         item["port"] for item in component.get("management_actions", ())
     } - kernel_action_ports
+    internal_commands = {
+        item["internal_command"] for item in component.get("provides", ())
+        if "internal_command" in item
+    }
     declared_commands = {
         item["name"] for item in component.get("domain_commands", ())
     }
     if component["scope"] != scope_kind or component.get("configuration_apply") or (
-        declared_commands != artifact_commands | action_commands
+        declared_commands != artifact_commands | action_commands | internal_commands
+        or any(
+            item["semantics"] != "read" and "internal_command" not in item
+            for item in component.get("provides", ())
+        )
         or any(
             (component["id"], item["kind"])
             not in runtime.kernel_management_handlers
@@ -187,7 +195,6 @@ async def bootstrap_builtin_control_package(
             for item in kernel_queries
         )
         or (owned_work and not kernel_work and not component.get("storage"))
-        or any(item["semantics"] != "read" for item in component.get("provides", ()))
     ):
         raise ForestError(
             f"{scope_kind.upper()}_PACKAGE_PORT_UNAVAILABLE",

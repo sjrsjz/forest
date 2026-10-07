@@ -345,6 +345,7 @@ MANIFEST_SCHEMA = {
                                     "enum": ["at-most-once", "idempotent", "read"]
                                 },
                                 "visibility": {"enum": ["public", "management"]},
+                                "internal_command": {"type": "string"},
                             },
                         },
                     },
@@ -1772,6 +1773,29 @@ def _manifest(files: dict[str, bytes]) -> dict:
         any(item.get("authority", "package") == "package" for item in owned_work_handlers)
     ) and component.get("storage") is None:
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority ports require package storage")
+    internal_commands = [
+        service["internal_command"] for service in services
+        if "internal_command" in service
+    ]
+    commands_by_name = {item["name"]: item for item in domain_commands}
+    if internal_commands and (
+        component["scope"] not in {"deployment", "host"}
+        or len(internal_commands) != len(set(internal_commands))
+        or any(
+            service["semantics"] != "idempotent"
+            or service.get("visibility", "public") != "public"
+            or service["internal_command"] not in commands_by_name
+            or any(
+                service[field] != commands_by_name[service["internal_command"]][field]
+                for field in ("input_schema", "output_schema")
+            )
+            for service in services if "internal_command" in service
+        )
+    ):
+        _fail(
+            "INVALID_CONTROL_INTERNAL_COMMAND",
+            "Control internal service must bind one exact private idempotent Command",
+        )
     functions = [
         item["function"] for item in (*domain_queries, *domain_commands, *unit_of_work_participants)
     ] + [

@@ -1,0 +1,90 @@
+manifest_version = 1
+package_id = "forest.host-storage"
+version = "0.1.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "host_storage:HostStorage"
+
+[[components]]
+id = "host.storage"
+scope = "host"
+auto_install = false
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+bootstrap_config = "bootstrap.json"
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 4
+max_queue_items = 16
+max_state_inflight = 2
+max_owned_tasks = 1
+max_owned_resources = 1
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 30
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = [
+  "domain.query:host.storage.generations.read",
+  "domain.command:host.storage.reserve-record",
+]
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "host.storage.workspace"
+label = "Host 物理存储"
+group = "host"
+order = 10
+
+[[components.provides]]
+name = "host.storage.generations"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/generations-input.json"
+output_schema = "schemas/generations-output.json"
+
+[[components.provides]]
+name = "host.storage.reserve"
+contract = "1.0"
+semantics = "idempotent"
+visibility = "public"
+internal_command = "host.storage.reserve-record"
+input_schema = "schemas/reserve-input.json"
+output_schema = "schemas/reserve-output.json"
+
+[components.storage]
+schema_id = "forest.host.storage"
+schema_version = "1.0.0"
+baseline = "schema/storage.sql"
+baseline_sha256 = "04e02806b5e4bb602cdd47c1b7fdb2c85460dbe36d8edfd815817f9c7c4453b9"
+scope = "host"
+repository_contract = "forest.host-storage.repository/1"
+execution_profile = "official"
+
+[[components.domain_queries]]
+name = "host.storage.generations.read"
+contract = "1.0"
+function = "host_storage_generations"
+input_schema = "schemas/generations-input.json"
+output_schema = "schemas/generations-output.json"
+
+[[components.domain_commands]]
+name = "host.storage.reserve-record"
+contract = "1.0"
+function = "host_storage_reserve"
+input_schema = "schemas/reserve-input.json"
+output_schema = "schemas/reserve-output.json"
+
+[[components.management_queries]]
+id = "generations"
+port = "host.storage.generations"
+default_limit = 50
+max_limit = 100
+timeout_s = 10

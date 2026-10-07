@@ -1,6 +1,8 @@
 # Forest 实现状态
 
-Host 物理存储边界核查（2026-10-07）：[详细协议](18-host-storage.md) 固定 `host.storage` 的 owner、私有 namespace、repository、受限端口、跨库请求合流、物理标记、租约与回收围栏。当前 `LocalPostgresDatabaseAllocator` 仍由 deployment 进程直接创建 Bot 数据库，且 Host 库没有对应物理资源账本；这与完整 Host 库存/回收语义冲突。下一步必须以 Host 持久请求和原生物理 Effect 替换这条路径，再启动 `host.storage` 图并开放回收，不能用空清单或临时 `deployment.storage` 页面代替。此项仅完成设计与冲突定位，未实现 Host 物理分配。
+Host 存储预留账本（2026-10-07）：新增未自动安装的真实 `host.storage` builtin，拥有独立 Host 模块 schema、资源预留操作账本、按 owner/状态筛选的有界键集查询、自带 UI，以及明确映射到包私有 Command 的内部幂等服务。control 包编译器只允许官方包把这种服务绑定到准确私有 Command，普通安装包不能借声明取得 SQL 写端口。隔离 PostgreSQL 中，真实 Host Worker 完成预留、同键重放、不同输入与逻辑资源冲突、查询、热替换后原键重放（1 passed）；Ruff 和包校验通过，临时数据库容器已删除。物理创建 Effect、deployment 跨 scope 桥、ACTIVE 结算、冻结引用和回收尚未实现；生产 Host Graph 尚不启动，页面不能代表完整物理库存。
+
+Host 物理存储边界核查（2026-10-07）：[详细协议](18-host-storage.md) 固定 `host.storage` 的 owner、私有 namespace、repository、受限端口、跨库请求合流、物理标记、租约与回收围栏。当前 `LocalPostgresDatabaseAllocator` 仍由 deployment 进程直接创建 Bot 数据库，旧路径不会写入新建的 Host 模块预留账本；这与完整 Host 库存/回收语义冲突。下一步必须以 Host 持久请求和原生物理 Effect 替换这条路径，再启动 `host.storage` 图并开放回收，不能用空清单或临时 `deployment.storage` 页面代替。
 
 Bot 目录权威收口（2026-10-07）：内核部署目录继续独占 Bot 基础身份、供应状态、期望运行状态、监督观察和幂等操作账本；可热重载的 `deployment.bot-catalog` 包只发布分页目录 UI 与管理契约。目录分页改经 `deployment.bot-catalog-page` kernel Query，运行意图改经 `deployment.bot-set-desired` kernel Command，删除包内跨 schema 读写内核表的 SQL 中转层；后者仍在 Web 回执预检、ACTIVE Generation 校验和同事务约束内调用目录 authority。隔离 PostgreSQL WebUI 回归验证分页、ONLINE 修改、幂等重放与过期修订冲突（1 passed），目录身份/意图独立用例另 1 passed；临时测试容器已删除。创建、重命名、供应重试与删除的目录管理能力尚未补齐，不能将此轮收口视为完整 Bot 目录管理。
 

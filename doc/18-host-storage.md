@@ -15,7 +15,7 @@
 | concurrency | 每个资源用 `resource_id`、资源修订、Host lease epoch、Effect operation ID、外部 owner marker 与物理名称围栏。同键同输入重放返回原结果；同键异输入拒绝；不同请求争用同一资源按修订 CAS 合流。 |
 | deletion | 卸载包只排空其 Worker、owned-work 和原生 Effect，不能删除资源账本或实体。资源删除必须经过独立 `cleanup.plan`、`cleanup.apply`、`cleanup.retry`；任一步 UNKNOWN 保留原记录供核对。 |
 
-`resource_id` 由稳定 Host 身份、资源种类、逻辑 owner、storage generation 和一次不可重用的预留 ID 决定，不含进程 incarnation。记录至少冻结 `host_id`、`deployment_id`、`bot_id`（可空）、`storage_generation`、`kind`、物理名称、角色/容器标识、随机 owner marker、修订、生命周期状态和创建操作 ID。首批资源种类是 `POSTGRES_DATABASE`；artifact 和 Milvus collection 只有在相应原生 Effect 与引用冻结协议实现后才可加入同一清单，不能仅凭扫描或命名规则宣称拥有。
+`resource_id` 是只生成一次的随机资源引用；Host 账本将它与稳定 Host 身份、资源种类、逻辑 owner、storage generation 和预留操作绑定，不含进程 incarnation。记录至少冻结 `host_id`、`deployment_id`、`bot_id`（可空）、`storage_generation`、`kind`、物理名称、角色/容器标识、随机 owner marker、修订、生命周期状态和创建操作 ID。预留服务只返回资源引用与状态，不返回 owner marker；后者只供 Host 原生物理 Effect 核验。首批资源种类是 `POSTGRES_DATABASE`；artifact 和 Milvus collection 只有在相应原生 Effect 与引用冻结协议实现后才可加入同一清单，不能仅凭扫描或命名规则宣称拥有。
 
 ## PostgreSQL 分配与跨库合流
 
@@ -32,3 +32,5 @@ deployment 在准备回收时，先以资源 fence 把目标 storage generation 
 ## 启用门槛
 
 生产 Host Graph 可以在具备真实 Host builtin 后启动，但 `host.storage` 的 `generations` 不能宣称完整，直到现有 deployment 直建库路径被移除、所有新资源先预留再创建、旧预发布资源被重建或按准确 marker 登记。回收动作还须等待冻结引用端口、物理标记核验和 UNKNOWN 对账均通过真实 PostgreSQL 验证。部署 Web provider 必须以 Host 签名票据和本地回执打开包的管理契约；壳层不得直接实现这些动作。
+
+当前预发布实现（2026-10-07）：`host.storage` 已有包私有预留账本、`generations` 键集查询、自带管理 UI 和声明式内部幂等服务；隔离 PostgreSQL 验证了同键重放、异键冲突、查询和 Worker 热替换后的原键重放。包故意不自动安装，资源仍只可能处于 `RESERVED`：物理创建 Effect、deployment 跨 scope 投递、ACTIVE 结算、引用冻结及回收尚未实现，不能启用生产 Host Graph 或把页面用作完整库存。
