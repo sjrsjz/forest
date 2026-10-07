@@ -370,6 +370,7 @@ CREATE TABLE forest_deployment.storage_request_pins (
     host_id text NOT NULL CHECK (host_id ~ '^host/[a-f0-9]{32}$'),
     profile_ref text NOT NULL CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
     resource_revision bigint NOT NULL CHECK (resource_revision >= 2),
+    credential_digest text NOT NULL CHECK (credential_digest ~ '^sha256:[a-f0-9]{64}$'),
     physical_name text NOT NULL CHECK (physical_name ~ '^forest_bot_[a-f0-9]{24}$'),
     role_name text NOT NULL CHECK (role_name ~ '^forest_role_[a-f0-9]{24}$'),
     pinned_at timestamptz NOT NULL DEFAULT clock_timestamp(),

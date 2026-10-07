@@ -39,13 +39,6 @@ class HostStorage(Plugin):
             operation_id=ctx.operations.stable("reserve:v1"),
         )
 
-    @service("host.storage.realize", semantics="idempotent")
-    async def realize(self, payload, ctx):
-        return await ctx.commands.call(
-            "host.storage.realize-record", payload,
-            operation_id=ctx.operations.stable("realize:v1"),
-        )
-
     @service("host.storage.materialization.enqueue", semantics="idempotent")
     async def enqueue_materialization(self, payload, ctx):
         return await ctx.commands.call(

@@ -162,7 +162,9 @@ BEGIN
        OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
        OR context->>'input_digest' !~ '^sha256:[a-f0-9]{64}$'
        OR requested_resource !~ '^resource/[a-f0-9-]{36}$'
-       OR input->>'protocol' IS DISTINCT FROM 'forest.host-storage-materialization/1' THEN
+       OR input->>'protocol' IS DISTINCT FROM 'forest.host-storage-materialization/1'
+       OR input->>'credential_digest' IS NULL
+       OR input->>'credential_digest' !~ '^sha256:[a-f0-9]{64}$' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','HOST_STORAGE_REALIZE_INVALID',
                 'message','Host storage realization is invalid','status',422));
@@ -208,7 +210,8 @@ BEGIN
     result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('protocol','forest.host-storage-realized/1',
             'resource_id',item.resource_id,'host_id',item.host_id,
-            'state',item.state,'revision',item.revision));
+            'state',item.state,'revision',item.revision,
+            'credential_digest',input->>'credential_digest'));
     INSERT INTO __forest_module_schema__.realization_operations(
         operation_id,resource_id,input_digest,result_payload)
     VALUES(requested_operation,item.resource_id,context->>'input_digest',result_value);
@@ -378,7 +381,9 @@ BEGIN
            OR outcome#>>'{result,protocol}' IS DISTINCT FROM 'forest.host-storage-realized/1'
            OR outcome#>>'{result,resource_id}' IS DISTINCT FROM work.resource_id
            OR outcome#>>'{result,host_id}' IS DISTINCT FROM item.host_id
-           OR (outcome#>>'{result,revision}')::bigint IS DISTINCT FROM item.revision THEN
+           OR (outcome#>>'{result,revision}')::bigint IS DISTINCT FROM item.revision
+           OR outcome#>>'{result,credential_digest}' IS NULL
+           OR outcome#>>'{result,credential_digest}' !~ '^sha256:[a-f0-9]{64}$' THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','HOST_STORAGE_SETTLEMENT_INVALID',
                     'message','Realization receipt differs from Host ledger','status',409));
@@ -419,6 +424,7 @@ DECLARE
     requested_operation text := context->>'operation_id';
     requested_resource text := input->>'resource_id';
     item __forest_module_schema__.physical_generations%ROWTYPE;
+    work __forest_module_schema__.materialization_work%ROWTYPE;
     replay __forest_module_schema__.resource_reference_pins%ROWTYPE;
     result_value jsonb;
 BEGIN
@@ -467,6 +473,14 @@ BEGIN
             'error',jsonb_build_object('code','HOST_STORAGE_RESOURCE_UNAVAILABLE',
                 'message','Active Host resource is unavailable for reference','status',409));
     END IF;
+    SELECT * INTO work FROM __forest_module_schema__.materialization_work
+    WHERE resource_id=item.resource_id AND state='SUCCEEDED';
+    IF NOT FOUND OR work.result_payload->>'credential_digest' IS NULL
+       OR work.result_payload->>'credential_digest' !~ '^sha256:[a-f0-9]{64}$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RESOURCE_UNAVAILABLE',
+                'message','Active Host resource has no credential witness','status',409));
+    END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'host.storage.reference.profile/'||item.deployment_id||'/'||(input->>'profile_ref'),0));
     SELECT * INTO replay FROM __forest_module_schema__.resource_reference_pins
@@ -483,7 +497,8 @@ BEGIN
         'deployment_id',item.deployment_id,'bot_id',item.bot_id,
         'storage_generation',item.storage_generation,
         'profile_ref',input->>'profile_ref','state','PINNED',
-        'resource_revision',item.revision);
+        'resource_revision',item.revision,
+        'credential_digest',work.result_payload->>'credential_digest');
     INSERT INTO __forest_module_schema__.resource_reference_pins(
         resource_id,deployment_id,operation_id,input_digest,profile_ref,
         resource_revision,result_payload)

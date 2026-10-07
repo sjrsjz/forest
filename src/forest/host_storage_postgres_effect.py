@@ -145,6 +145,7 @@ class HostPostgresMaterializationEffect:
             "physical_name": row["physical_name"],
             "role_name": row["role_name"],
             "owner_marker_digest": "sha256:" + hashlib.sha256(marker.encode()).hexdigest(),
+            "credential_digest": "sha256:" + hashlib.sha256(password.encode()).hexdigest(),
         }
 
     async def _ensure_physical(self, row: dict, marker: str, password: str) -> None:

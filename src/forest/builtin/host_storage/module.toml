@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.host-storage"
-version = "0.6.0"
+version = "0.7.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "host_storage:HostStorage"
@@ -74,15 +74,6 @@ input_schema = "schemas/materialize-input.json"
 output_schema = "schemas/materialize-output.json"
 
 [[components.provides]]
-name = "host.storage.realize"
-contract = "1.0"
-semantics = "idempotent"
-visibility = "public"
-internal_command = "host.storage.realize-record"
-input_schema = "schemas/materialize-output.json"
-output_schema = "schemas/realize-output.json"
-
-[[components.provides]]
 name = "host.storage.materialization.enqueue"
 contract = "1.0"
 semantics = "idempotent"
@@ -118,9 +109,9 @@ output_schema = "schemas/reference-pin-output.json"
 
 [components.storage]
 schema_id = "forest.host.storage"
-schema_version = "1.4.0"
+schema_version = "1.5.0"
 baseline = "schema/storage.sql"
-baseline_sha256 = "9e26037b96210d1d14793e1a7f4ceccc8b8eb84c677f5ac654382fa3cf8881e7"
+baseline_sha256 = "5c7c044f0f5f8e8ab142f5cb3629b794a4472671fd0200883fe904c0ec746d32"
 scope = "host"
 repository_contract = "forest.host-storage.repository/1"
 execution_profile = "official"
@@ -178,6 +169,7 @@ output_schema = "schemas/reference-pin-output.json"
 name = "host.storage.materialize"
 contract = "1.0"
 handler = "host.storage.materialize"
+private_commands = ["host.storage.realize-record"]
 claim_function = "host_storage_claim_materialization"
 settle_function = "host_storage_settle_materialization"
 input_schema = "schemas/materialize-input.json"

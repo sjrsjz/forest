@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 from dataclasses import replace
@@ -121,7 +122,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.6.0"', 'version = "0.6.1"', 1,
+                'version = "0.7.0"', 'version = "0.7.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -192,7 +193,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         previous_graph = controller.registry.graph_identity
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.6.1"', 'version = "0.6.2"', 1,
+                'version = "0.7.1"', 'version = "0.7.2"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -210,6 +211,9 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         assert pinned.resource_id == reserved_id
         assert pinned.host_id == host_id
         assert pinned.resource_revision == resource["revision"]
+        assert pinned.credential_digest == "sha256:" + hashlib.sha256(
+            b"forest-host-storage-bridge-password-for-tests"
+        ).hexdigest()
         assert (pinned.physical_name, pinned.role_name) == created_physical
         assert await bridge.pin_reference(frozen.request_id) == pinned
         assert await requests.pinned_resource(frozen.request_id) == pinned

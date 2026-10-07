@@ -175,11 +175,19 @@ async def bootstrap_builtin_control_package(
         item["internal_command"] for item in component.get("provides", ())
         if "internal_command" in item
     }
+    private_work_commands = {
+        name for item in owned_work for name in item.get("private_commands", ())
+    }
     declared_commands = {
         item["name"] for item in component.get("domain_commands", ())
     }
     if component["scope"] != scope_kind or component.get("configuration_apply") or (
-        declared_commands != artifact_commands | action_commands | internal_commands
+        declared_commands != (
+            artifact_commands | action_commands | internal_commands | private_work_commands
+        )
+        or bool(private_work_commands & (
+            artifact_commands | action_commands | internal_commands
+        ))
         or bool(internal_commands & (artifact_commands | action_commands))
         or any(
             item["semantics"] != "read" and "internal_command" not in item

@@ -11,7 +11,7 @@
 | `host.storage` | 本 Host 的 `resource_id`、预留操作账本、物理名称、owner marker、物理状态与后续回收计划。账本位于 Host 独立数据库内该包的私有 schema，随 Worker 热替换保留。 |
 | Host 原生 Effect | 根据 `host.storage` 的准确资源记录执行受限 PostgreSQL 操作。包 Worker 不接触维护凭据、超级用户 DSN 或其他作用域数据库连接。 |
 
-包提供 `host.storage.reserve`、`host.storage.materialization.enqueue`、`host.storage.realize` 幂等服务、`host.storage.materialization.status` 与 `host.storage.resource` 精确查询，以及 `generations` 键集分页查询，声明 `host.storage.postgres.materialize` 原生 Effect。两个精确查询都要求 `resource_id`、`deployment_id`、`bot_id`、`storage_generation` 同时匹配；资源查询只返回数据库名、role、状态与修订，不返回密码或 owner marker。预留服务也只返回资源引用及状态，不返回随机 owner marker。物理 Effect 输入仅有 `resource_id` 与受保护的 `credential_ref`；它从 Host 私有账本读取数据库名、专属 role、Host 身份和 marker，不能由调用者指定 SQL 对象名。`realize` 接受 Effect 的完整 receipt，在 Host 私有事务中重算 marker 摘要并核对资源、Host、数据库和 role 后，才把 `RESERVED` 推进为 `ACTIVE`；操作账本保留同键重放的原回执。
+包公开 `host.storage.reserve`、`host.storage.materialization.enqueue`、`host.storage.reference.pin` 幂等服务、`host.storage.materialization.status` 与 `host.storage.resource` 精确查询，以及 `generations` 键集分页查询；`host.storage.postgres.materialize` 是原生 Effect。两个精确查询都要求 `resource_id`、`deployment_id`、`bot_id`、`storage_generation` 同时匹配；资源查询只返回数据库名、role、状态与修订，不返回密码或 owner marker。预留服务也只返回资源引用及状态，不返回随机 owner marker。物理 Effect 输入仅有 `resource_id` 与受保护的 `credential_ref`；它从 Host 私有账本读取数据库名、专属 role、Host 身份和 marker，不能由调用者指定 SQL 对象名。包内持久任务独占私有 `realize-record` 命令：它接受 Effect receipt，在 Host 私有事务中重算 marker 摘要并核对资源、Host、数据库和 role 后，才把 `RESERVED` 推进为 `ACTIVE`；该命令不发布为跨组件服务。操作账本保留同键重放的原回执。
 
 每个资源记录冻结 `host_id`、`deployment_id`、`bot_id`、`storage_generation`、种类、数据库名、role 名、随机 marker、修订和状态。`resource_id` 只生成一次；同一 `(operation_id, input_digest)` 重放返回原结果，同一操作 ID 异输入拒绝，同一逻辑 storage generation 的第二次预留拒绝。不同请求竞争同一资源由数据库唯一约束和事务锁合流。包 schema 的改变必须按包版本协议预发布；Worker 启动不得暗改 schema。
 
@@ -34,7 +34,7 @@
 
 当前 `storage.create-local` 在 deployment 事务中先生成 DSN Secret 和 immutable storage profile；`OfficialBotProvisioner` 随后的 Job 才调用 `LocalPostgresDatabaseAllocator.ensure_database`。直接把 allocator 换成 Host 服务调用会让 profile 在 Host 接纳或物理结算前就可供 bootstrap/Job 引用，也会把跨数据库网络调用放进 deployment 事务，因此不能沿用这条事务顺序。
 
-目标切换必须分成以下已提交步骤，所有重试使用最初冻结的请求身份：
+目标切换分成以下顺序步骤，所有重试使用最初冻结的请求身份；已实现范围见下文状态：
 
 1. deployment 事务只冻结 `request_id`、目标 `host_id`、`deployment_id`、`bot_id`、`storage_generation`、预期 `profile_ref` 与凭据引用，不创建可用的 storage profile。请求 ID 与同一逻辑 storage generation 的唯一约束要在本库合流并发写；不同输入的同键请求拒绝。
 2. 跨 scope 桥以冻结的 deployment 身份投递准确请求。Host `reserve` 返回的资源 ID 必须在 deployment 持久化后才能继续；`materialization.enqueue`、`materialization.status` 和 `resource` 均按同一资源和 owner 元组重放。桥不能相信调用者自行填写的 `deployment_id`，必须从 deployment 权威行绑定。Host 状态未知时保留原资源引用等待核对，不重新预留。
@@ -53,6 +53,6 @@ deployment 另有不可变的请求到 Host `resource_id` 绑定事实。受信�
 
 隔离装配现有受限 `DeploymentHostStorageBridge`：它只从已冻结的 deployment 请求构造 Host `reserve`、`materialization.enqueue`、`materialization.status`、`reference.pin` 与 `resource` 输入，不接受包 Worker 自填 Host 归属；每项调用有固定的 `request_id` 派生操作身份。Host 预留成功而 deployment 租约失效后热替换 Host 包，原请求重放仍绑定唯一 `resource_id`；随后对同一资源重复入队合流，查询准确归属直到 Host owned-work 将其物化为 `ACTIVE`。Host pin 成功而 deployment 写入前再次失租时，热替换后按同一操作身份重放，Host 只保留一个 pin，deployment 将 pin 与准确资源查询一起持久化。真实双数据库回归 `1 passed`，deployment catalog 全套 `30 passed`。生产组合根尚未启动 Host 包 Graph 或调度此桥，profile 结算与安全回收仍待接线；预发布 deployment 基线变更后需重建对应测试库。
 
-`host.storage` 包版本 `0.6.0`，故意设置 `auto_install=false`。包私有表保存每个物理资源的一条物化请求、凭据引用、领取租约、尝试次数、结算结果和幂等回执；Worker 从包内持久队列领取后先调用受 Generation 围栏约束的 PostgreSQL 原生 Effect，再用原有 `realize` 命令核对物理标记并提交 `ACTIVE`。租约过期仅重领同一个 `resource_id`；Effect 按准确 role、数据库和 owner marker 复核，不能借重试分配新名字。精确资源与工作状态查询供后续跨 scope 桥按冻结归属查询；桥本身仍须把调用方 deployment 身份绑定到输入，不能把输入字段当作授权。独立 PostgreSQL 回归覆盖预留、角色与数据库标记、错误归属拒绝、热替换前冻结领取、旧领取失租、新代重领后结算及错误 owner 查询拒绝（`2 passed`）；这仍是隔离装配，不是生产 Host Graph。
+`host.storage` 包版本 `0.7.0`、私有 SQL `1.5.0`，仍设置 `auto_install=false`。包私有表保存每个物理资源的一条物化请求、凭据引用、领取租约、尝试次数、结算结果和幂等回执；Worker 从包内持久队列领取后调用受 Generation 围栏约束的 PostgreSQL 原生 Effect，再由仅供包内任务声明的私有 `realize-record` 命令核对物理标记并提交 `ACTIVE`。Effect 对实际写入 role 的密码计算 SHA-256 摘要，摘要随实现回执、持久工作结算和 Host pin 冻结；deployment pin 账本也保存同一摘要，最终 DSN 结算必须以强随机密码核对，不能把摘要当作保密口令或允许弱口令。租约过期仅重领同一个 `resource_id`；Effect 按准确 role、数据库和 owner marker 复核，不能借重试分配新名字。包内私有命令由持久任务声明并经编译器核对，不开放旧 `host.storage.realize` 服务。精确资源与工作状态查询供跨 scope 桥按冻结归属查询；桥本身仍须把调用方 deployment 身份绑定到输入。独立 PostgreSQL 的 Host 包及双库桥回归 `3 passed`，包目录与 Host 编译器回归 `100 passed, 2 skipped`；这仍是隔离装配，不是生产 Host Graph。
 
 目前原生 Effect 仍只在隔离测试中绑定维护 DSN 与凭据解析器；生产 Host Graph 尚未装配它。deployment 跨 scope 持久投递、冻结逻辑引用与安全回收仍缺失，现有 deployment 直接建库路径也还在。因而不能启用生产 `host.storage`、把它的 UI 清单视为全量物理库存，或据此执行删除。下一步须确定 role 凭据权威并接通跨 scope 供给，再切断旧分配器，重建或准确登记预发布资源。

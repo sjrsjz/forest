@@ -21,6 +21,7 @@ _PROFILE_REF = re.compile(r"storage-profile/[A-Za-z0-9][A-Za-z0-9._/-]{0,495}\Z"
 _SECRET_REF = re.compile(r"secret://[A-Za-z0-9][A-Za-z0-9._/-]{0,501}\Z")
 _PHYSICAL_NAME = re.compile(r"forest_bot_[a-f0-9]{24}\Z")
 _ROLE_NAME = re.compile(r"forest_role_[a-f0-9]{24}\Z")
+_DIGEST = re.compile(r"sha256:[a-f0-9]{64}\Z")
 
 
 def _bounded(value: object, field: str, limit: int) -> str:
@@ -59,6 +60,7 @@ class StoragePinnedResource:
     resource_id: str
     host_id: str
     resource_revision: int
+    credential_digest: str
     physical_name: str
     role_name: str
 
@@ -280,6 +282,7 @@ class DeploymentStorageRequestAuthority:
         pin_keys = {
             "resource_id", "host_id", "deployment_id", "bot_id",
             "storage_generation", "profile_ref", "state", "resource_revision",
+            "credential_digest",
         }
         resource_keys = {
             "resource_id", "host_id", "deployment_id", "bot_id",
@@ -296,6 +299,8 @@ class DeploymentStorageRequestAuthority:
             or _HOST_ID.fullmatch(pin_receipt["host_id"]) is None
             or type(pin_receipt["resource_revision"]) is not int
             or pin_receipt["resource_revision"] < 2
+            or not isinstance(pin_receipt["credential_digest"], str)
+            or _DIGEST.fullmatch(pin_receipt["credential_digest"]) is None
             or pin_receipt["state"] != "PINNED"
             or resource["state"] != "ACTIVE"
             or resource["kind"] != "POSTGRES_DATABASE"
@@ -351,8 +356,9 @@ class DeploymentStorageRequestAuthority:
             ).fetchone()
             expected = (
                 pin_receipt["resource_id"], pin_receipt["host_id"],
-                pin_receipt["resource_revision"], resource["physical_name"],
-                resource["role_name"],
+                pin_receipt["resource_revision"],
+                pin_receipt["credential_digest"],
+                resource["physical_name"], resource["role_name"],
             )
             if replay is not None:
                 if self._pin_values(replay) != expected:
@@ -364,8 +370,8 @@ class DeploymentStorageRequestAuthority:
                 await conn.execute(
                     "INSERT INTO forest_deployment.storage_request_pins("
                     "request_id,resource_id,deployment_id,host_id,profile_ref,"
-                    "resource_revision,physical_name,role_name) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    "resource_revision,credential_digest,physical_name,role_name) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                     (request_id, expected[0], request["deployment_id"],
                      expected[1], request["profile_ref"], *expected[2:]),
                 )
@@ -390,7 +396,7 @@ class DeploymentStorageRequestAuthority:
     def _pin_values(row) -> tuple:
         return (
             row["resource_id"], row["host_id"], row["resource_revision"],
-            row["physical_name"], row["role_name"],
+            row["credential_digest"], row["physical_name"], row["role_name"],
         )
 
     @staticmethod

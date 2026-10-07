@@ -721,6 +721,11 @@ MANIFEST_SCHEMA = {
                                 "drain_policy": {
                                     "enum": ["inflight", "backlog"]
                                 },
+                                "private_commands": {
+                                    "type": "array", "maxItems": 8,
+                                    "uniqueItems": True,
+                                    "items": {"type": "string"},
+                                },
                             },
                         },
                     },
@@ -1585,6 +1590,18 @@ def _manifest(files: dict[str, bytes]) -> dict:
     shell_commands = component.get("shell_commands", [])
     agent_tools = component.get("agent_tools", [])
     owned_work_handlers = component.get("owned_work_handlers", [])
+    private_work_commands = [
+        name for work in owned_work_handlers
+        for name in work.get("private_commands", ())
+    ]
+    if (
+        len(private_work_commands) != len(set(private_work_commands))
+        or any(name not in {item["name"] for item in component.get("domain_commands", ())}
+               for name in private_work_commands)
+        or any(work.get("authority", "package") != "package"
+               and work.get("private_commands") for work in owned_work_handlers)
+    ):
+        _fail("INVALID_OWNED_WORK", "Private work commands must belong to one package worker")
     commands = component.get("commands", [])
     message_handlers = component.get("message_handlers", [])
     if component.get("message_handler_takeover", "none") == "compatible" and not message_handlers:

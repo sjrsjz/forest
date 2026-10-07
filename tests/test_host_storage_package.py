@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 from pathlib import Path
@@ -19,11 +20,34 @@ from forest.host_package_controller import HostPackageController
 from forest.host_runtime import HostRuntimeScope
 from forest.host_storage_postgres_effect import HostPostgresMaterializationEffect
 from forest.host_supervisor import HostSupervisor
-from forest.packages import PackageCatalog
+from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
+
+
+async def _realize_private(store, host_id, operation_id, receipt):
+    """Exercise the package-private Command without publishing it as a service."""
+    context = {
+        "scope_kind": "host", "scope_id": host_id,
+        "component_id": "host.storage", "port_kind": "command",
+        "port_name": "host.storage.realize-record",
+        "operation_id": operation_id, "input_digest": digest_json(receipt),
+    }
+    async with store.pool.connection() as conn, conn.transaction():
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT {}.host_storage_realize(%s::jsonb,%s::jsonb) AS result")
+                .format(sql.Identifier(module_schema_namespace("forest.host.storage"))),
+                (Jsonb(context), Jsonb(receipt)),
+            )
+        ).fetchone()
+    outcome = row["result"]
+    if not outcome["ok"]:
+        error = outcome["error"]
+        raise ForestError(error["code"], error["message"], error["status"])
+    return outcome["value"]
 
 
 def test_host_storage_internal_write_binding_rejects_another_command(tmp_path):
@@ -42,6 +66,24 @@ def test_host_storage_internal_write_binding_rejects_another_command(tmp_path):
     with pytest.raises(ForestError) as rejected:
         PackageCatalog(tmp_path / "catalog").build(source)
     assert rejected.value.code == "INVALID_CONTROL_INTERNAL_COMMAND"
+
+
+def test_host_storage_private_work_command_must_be_declared(tmp_path):
+    source = tmp_path / "altered"
+    shutil.copytree(
+        Path(__file__).parents[1] / "src/forest/builtin/host_storage", source,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    manifest = source / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'private_commands = ["host.storage.realize-record"]',
+            'private_commands = ["host.storage.missing-command"]',
+        ), encoding="utf-8",
+    )
+    with pytest.raises(ForestError) as rejected:
+        PackageCatalog(tmp_path / "catalog").build(source)
+    assert rejected.value.code == "INVALID_OWNED_WORK"
 
 
 @pytest.mark.postgres
@@ -93,6 +135,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         )
         registry = await controller.start()
         member = registry.get("host.storage")
+        assert ("host.storage.realize", 1) not in member.runtime_service_handlers()
         assert await member.management_contract.query("generations", {}) == {
             "items": [], "next_after": None,
         }
@@ -162,22 +205,13 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert receipt["physical_name"] == created_physical[0]
         assert receipt["role_name"] == created_physical[1]
         assert receipt["owner_marker_digest"].startswith("sha256:")
-        realize_route = FrozenServiceRoute(
-            service_id="host.storage.realize", version=1,
-            caller_component_id="host.test-bridge",
-            provider_component_id="host.storage",
-            provider_generation_id=graph.generations["host.storage"],
-            graph_id=graph.graph_id, graph_revision=graph.graph_revision,
-            admission_lane="DATA", owned_work=False,
-        )
-        realize = member.runtime_service_handlers()[("host.storage.realize", 1)]
+        assert receipt["credential_digest"] == "sha256:" + hashlib.sha256(
+            b"forest-host-storage-password-for-tests"
+        ).hexdigest()
         with pytest.raises(ForestError) as forged:
-            await realize.invoke_routed(
-                realize_route,
-                RuntimeServiceInvocation(
-                    "realize/storage/forged", 10, "test.host-storage", "bot/storage",
-                ),
-                ({**receipt, "owner_marker_digest": "sha256:" + "0" * 64},), {},
+            await _realize_private(
+                store, host_id, "realize/storage/forged",
+                {**receipt, "owner_marker_digest": "sha256:" + "0" * 64},
             )
         assert forged.value.code == "HOST_STORAGE_RECEIPT_MISMATCH"
         database_row = await (
@@ -224,7 +258,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.6.0"', 'version = "0.6.1"', 1,
+                'version = "0.7.0"', 'version = "0.7.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -289,36 +323,14 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
             ({"resource_id": first["resource_id"],
               "credential_ref": "secret/storage/test"},), {},
         ) == receipt
-        new_realize_route = FrozenServiceRoute(
-            service_id="host.storage.realize", version=1,
-            caller_component_id="host.test-bridge",
-            provider_component_id="host.storage",
-            provider_generation_id=new_graph.generations["host.storage"],
-            graph_id=new_graph.graph_id, graph_revision=new_graph.graph_revision,
-            admission_lane="DATA", owned_work=False,
-        )
-        new_realize = current.get("host.storage").runtime_service_handlers()[
-            ("host.storage.realize", 1)
-        ]
-        realized = await new_realize.invoke_routed(
-            new_realize_route,
-            RuntimeServiceInvocation(
-                "realize/storage/1", 10, "test.host-storage", "bot/storage",
-            ),
-            (receipt,), {},
-        )
+        realized = await _realize_private(store, host_id, "realize/storage/1", receipt)
         assert realized == {
             "protocol": "forest.host-storage-realized/1",
             "resource_id": first["resource_id"],
             "host_id": host_id, "state": "ACTIVE", "revision": 2,
+            "credential_digest": receipt["credential_digest"],
         }
-        assert await new_realize.invoke_routed(
-            new_realize_route,
-            RuntimeServiceInvocation(
-                "realize/storage/1", 10, "test.host-storage", "bot/storage",
-            ),
-            (receipt,), {},
-        ) == realized
+        assert await _realize_private(store, host_id, "realize/storage/1", receipt) == realized
         assert (await current.get("host.storage").management_contract.query(
             "generations", {"bot_id": "bot/storage", "state": "ACTIVE"},
         ))["items"][0]["revision"] == 2
@@ -429,7 +441,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert abandoned["ok"] and abandoned["value"]["work_id"] == queued_reservation["resource_id"]
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.6.1"', 'version = "0.6.2"', 1,
+                'version = "0.7.1"', 'version = "0.7.2"', 1,
             ), encoding="utf-8",
         )
         resumed_package = catalog.build_official(source, scope="host")
@@ -498,6 +510,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert pinned["resource_id"] == queued_reservation["resource_id"]
         assert pinned["state"] == "PINNED"
         assert pinned["resource_revision"] == active_resource["revision"]
+        assert pinned["credential_digest"] == receipt["credential_digest"]
         with pytest.raises(ForestError) as other_pin:
             await pin_request(
                 "pin/other-profile", {**pin_input, "profile_ref": "storage-profile/other"},
