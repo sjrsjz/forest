@@ -5,3 +5,4 @@ src/forest/builtin/**/*.sql text eol=lf
 src/forest/builtin/**/*.html text eol=lf
 src/forest/builtin/**/*.css text eol=lf
 src/forest/builtin/**/*.js text eol=lf
+scripts/*.sh text eol=lf

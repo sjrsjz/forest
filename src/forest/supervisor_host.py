@@ -32,6 +32,7 @@ from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwne
 from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
+from forest.host_supervisor import HostSupervisor
 from forest.multi_bot_supervisor import MultiBotSupervisor
 from forest.official_bot_provisioning import (
     OfficialBotCatalogSettingsResolver,
@@ -51,6 +52,8 @@ from forest.storage.deployment_storage_profiles import DeploymentStorageProfileA
 from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
+from forest.storage.host_identity import HostIdentityAuthority
+from forest.storage.host_store import HostStore
 
 
 def _required(name: str) -> str:
@@ -99,6 +102,32 @@ def _deployment_dsn() -> str:
     )
 
 
+def _host_dsn() -> str:
+    configured = os.environ.get("FOREST_HOST_DSN")
+    if configured:
+        return configured
+    password_path = Path(_required("FOREST_HOST_DATABASE_PASSWORD_FILE"))
+    try:
+        password = password_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        raise ForestError(
+            "SUPERVISOR_DATABASE_CREDENTIAL_UNAVAILABLE",
+            "Host database credential is unavailable", 503,
+        ) from None
+    host = os.environ.get("FOREST_HOST_DATABASE_HOST", "postgres")
+    port = _positive_int("FOREST_HOST_DATABASE_PORT", 5432, 1, 65535)
+    database = os.environ.get("FOREST_HOST_DATABASE_NAME", "forest_host")
+    user = os.environ.get("FOREST_HOST_DATABASE_USER", "forest_host")
+    if not password or not host or not database or not user:
+        raise ForestError(
+            "SUPERVISOR_CONFIGURATION_INVALID", "Host database identity is invalid", 422,
+        )
+    return (
+        f"postgresql://{quote(user, safe='')}:{quote(password, safe='')}@"
+        f"{host}:{port}/{quote(database, safe='')}"
+    )
+
+
 def _host_id() -> str:
     inline = os.environ.get("FOREST_HOST_ID")
     path = os.environ.get("FOREST_HOST_ID_FILE")
@@ -126,6 +155,7 @@ class SupervisorSettings:
     deployment_id: str
     host_id: str
     dsn: str = field(repr=False)
+    host_dsn: str = field(repr=False)
     master_keyring: DeploymentMasterKeyring = field(repr=False)
     web_bootstrap: DeploymentWebBootstrap = field(repr=False)
     poll_seconds: float = 1.0
@@ -166,6 +196,7 @@ class SupervisorSettings:
             deployment_id=os.environ.get("FOREST_DEPLOYMENT_ID", "forest/default"),
             host_id=_host_id(),
             dsn=_deployment_dsn(),
+            host_dsn=_host_dsn(),
             master_keyring=keyring,
             web_bootstrap=web_bootstrap,
             poll_seconds=poll_seconds,
@@ -179,7 +210,16 @@ class SupervisorSettings:
 async def run_supervisor(settings: SupervisorSettings) -> None:
     store = DeploymentStore(settings.dsn, settings.deployment_id)
     await store.open()
+    host_store = HostStore(settings.host_dsn, settings.host_id)
+    try:
+        await host_store.open()
+    except BaseException:
+        await store.close()
+        raise
     incarnation = "incarnation/" + str(uuid4())
+    host_supervisor = HostSupervisor(
+        HostIdentityAuthority(host_store), incarnation=incarnation,
+    )
     secrets = DeploymentSecretAuthority(
         store,
         active_key_id=settings.master_keyring.active_key_id,
@@ -260,6 +300,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     stop_task = None
     fatal_task = None
     try:
+        await host_supervisor.start()
         await supervisor.start()
         await web_identity.initialize_setup(settings.web_bootstrap)
         deployment_runtime = DeploymentRuntimeScope(
@@ -365,6 +406,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         )
         tasks = (
             stop_task, fatal_task, management_task, graph_change_task,
+            *host_supervisor.owned_tasks(),
             *supervisor.owned_tasks(),
         )
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
@@ -390,4 +432,10 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             try:
                 await supervisor.close()
             finally:
-                await store.close()
+                try:
+                    await host_supervisor.close()
+                finally:
+                    try:
+                        await host_store.close()
+                    finally:
+                        await store.close()

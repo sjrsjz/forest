@@ -44,7 +44,10 @@ def prepare_secrets(path: Path) -> None:
     info = directory_info(path)
     if info.st_uid not in {0, APP_UID}:
         raise RuntimeError("Secret volume belongs to another service account")
-    permitted = {".initialize.lock", "postgres_password", "host_id", *APPLICATION_SECRET_NAMES}
+    permitted = {
+        ".initialize.lock", "postgres_password", "host_postgres_password",
+        "host_id", *APPLICATION_SECRET_NAMES,
+    }
     if any(
         item.name not in permitted
         and not item.name.startswith(".password-")
@@ -60,44 +63,45 @@ def prepare_secrets(path: Path) -> None:
         if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_nlink != 1 or lock_info.st_uid != 0:
             raise RuntimeError("Invalid secret initialization lock")
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        secret_path = path / "postgres_password"
-        if secret_path.exists() or secret_path.is_symlink():
-            saved = secret_path.lstat()
-            if (
-                not stat.S_ISREG(saved.st_mode)
-                or saved.st_nlink != 1
-                or saved.st_uid != APP_UID
-                or saved.st_gid != POSTGRES_GID
-                or stat.S_IMODE(saved.st_mode) != 0o440
-            ):
-                raise RuntimeError(
-                    "Existing database credential has unexpected ownership or permissions"
+        for name in ("postgres_password", "host_postgres_password"):
+            secret_path = path / name
+            if secret_path.exists() or secret_path.is_symlink():
+                saved = secret_path.lstat()
+                if (
+                    not stat.S_ISREG(saved.st_mode)
+                    or saved.st_nlink != 1
+                    or saved.st_uid != APP_UID
+                    or saved.st_gid != POSTGRES_GID
+                    or stat.S_IMODE(saved.st_mode) != 0o440
+                ):
+                    raise RuntimeError(
+                        f"Existing {name} credential has unexpected ownership or permissions"
+                    )
+                password = secret_path.read_bytes()
+                if not re.fullmatch(rb"[A-Za-z0-9_-]{64}", password):
+                    raise RuntimeError(
+                        f"Existing {name} credential is invalid; restore recovery material"
+                    )
+            else:
+                if Path("/var/lib/forest-postgres/pgdata/PG_VERSION").exists():
+                    raise RuntimeError(
+                        f"{name} is missing for an existing deployment; restore protected recovery material"
+                    )
+                temporary = path / f".password-{secrets.token_hex(12)}"
+                descriptor = os.open(
+                    temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
                 )
-            password = secret_path.read_bytes()
-            if not re.fullmatch(rb"[A-Za-z0-9_-]{64}", password):
-                raise RuntimeError(
-                    "Existing database credential is invalid; restore recovery material"
-                )
-        else:
-            if Path("/var/lib/forest-postgres/pgdata/PG_VERSION").exists():
-                raise RuntimeError(
-                    "Database credential is missing for an existing deployment; restore protected recovery material"
-                )
-            temporary = path / f".password-{secrets.token_hex(12)}"
-            descriptor = os.open(
-                temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
-            )
-            try:
-                with os.fdopen(descriptor, "wb") as output:
-                    output.write(secrets.token_urlsafe(48).encode("ascii"))
-                    os.fchown(output.fileno(), APP_UID, POSTGRES_GID)
-                    os.fchmod(output.fileno(), 0o440)
-                    output.flush()
-                    os.fsync(output.fileno())
-                os.replace(temporary, secret_path)
-                fsync_directory(path)
-            finally:
-                temporary.unlink(missing_ok=True)
+                try:
+                    with os.fdopen(descriptor, "wb") as output:
+                        output.write(secrets.token_urlsafe(48).encode("ascii"))
+                        os.fchown(output.fileno(), APP_UID, POSTGRES_GID)
+                        os.fchmod(output.fileno(), 0o440)
+                        output.flush()
+                        os.fsync(output.fileno())
+                    os.replace(temporary, secret_path)
+                    fsync_directory(path)
+                finally:
+                    temporary.unlink(missing_ok=True)
         host_path = path / "host_id"
         if host_path.exists() or host_path.is_symlink():
             saved = host_path.lstat()

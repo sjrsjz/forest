@@ -15,6 +15,7 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
     master = tmp_path / "keyring"
     web_bootstrap = tmp_path / "web-bootstrap"
     password = tmp_path / "postgres"
+    host_password = tmp_path / "host-postgres"
     host_id = tmp_path / "host-id"
     master.write_text(
         json.dumps(
@@ -44,6 +45,7 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
         encoding="utf-8",
     )
     password.write_text("database-password", encoding="utf-8")
+    host_password.write_text("host-database-password", encoding="utf-8")
     host_id.write_text("host/0123456789abcdef0123456789abcdef", encoding="ascii")
     monkeypatch.delenv("FOREST_HOST_ID", raising=False)
     monkeypatch.setenv("FOREST_HOST_ID_FILE", str(host_id))
@@ -53,12 +55,19 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
     monkeypatch.setenv("FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN", "http://127.0.0.1:8080")
     monkeypatch.setenv("FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE", str(password))
     monkeypatch.setenv("FOREST_DEPLOYMENT_DATABASE_HOST", "postgres")
+    monkeypatch.delenv("FOREST_HOST_DSN", raising=False)
+    monkeypatch.setenv("FOREST_HOST_DATABASE_PASSWORD_FILE", str(host_password))
+    monkeypatch.setenv("FOREST_HOST_DATABASE_HOST", "postgres")
     settings = SupervisorSettings.from_environment()
     assert settings.dsn == (
         "postgresql://forest:database-password@postgres:5432/forest_deployment"
     )
+    assert settings.host_dsn == (
+        "postgresql://forest_host:host-database-password@postgres:5432/forest_host"
+    )
     rendered = repr(settings)
     assert "database-password" not in rendered
+    assert "host-database-password" not in rendered
     assert "p" * 48 not in rendered
     assert repr(bytes(range(32))) not in rendered
     assert settings.master_keyring.active_key_id == "master/test/2"

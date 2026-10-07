@@ -50,6 +50,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - forest_secrets:/run/forest-secrets:ro
+      - ./scripts/postgres_init_host.sh:/docker-entrypoint-initdb.d/10-host.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U forest -d forest_deployment"]
       interval: 5s
@@ -144,6 +145,9 @@ services:
       FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE: /run/forest-secrets/postgres_password
       FOREST_DEPLOYMENT_DATABASE_HOST: postgres
       FOREST_DEPLOYMENT_DATABASE_NAME: forest_deployment
+      FOREST_HOST_DATABASE_PASSWORD_FILE: /run/forest-secrets/host_postgres_password
+      FOREST_HOST_DATABASE_HOST: postgres
+      FOREST_HOST_DATABASE_NAME: forest_host
       FOREST_DEPLOYMENT_MASTER_KEYRING_FILE: /run/forest-secrets/deployment_master_keyring
       FOREST_DEPLOYMENT_WEB_BOOTSTRAP_FILE: /run/forest-secrets/deployment_web_bootstrap
       FOREST_DEPLOYMENT_MANAGEMENT_HOST: 0.0.0.0
