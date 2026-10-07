@@ -7,6 +7,7 @@ import inspect
 import re
 from dataclasses import dataclass
 from os import urandom
+from urllib.parse import unquote, urlsplit
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -70,6 +71,7 @@ class DeploymentSecretAuthority:
     async def put_in(
         self, conn, *, operation_id: str, secret_ref: str, purpose: str,
         plaintext: bytes, expected_revision: int,
+        pinned_request_id: str | None = None,
     ) -> SecretMetadata:
         """Commit one kernel-owned Secret write in the caller's fenced transaction."""
         _bounded(operation_id, "operation_id", 256)
@@ -95,11 +97,11 @@ class DeploymentSecretAuthority:
         )
         await conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-            (f"forest.deployment.secret-operation/{operation_id}",),
+            (f"forest.deployment.storage-request/dsn/{secret_ref}",),
         )
         await conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-            (f"forest.deployment.storage-request/dsn/{secret_ref}",),
+            (f"forest.deployment.secret-operation/{operation_id}",),
         )
         await conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
@@ -107,16 +109,66 @@ class DeploymentSecretAuthority:
         )
         reservation = await (
             await conn.execute(
-                "SELECT 1 FROM forest_deployment.storage_requests "
+                "SELECT request_id FROM forest_deployment.storage_requests "
                 "WHERE deployment_id=%s AND dsn_secret_ref=%s LIMIT 1",
                 (self.store.deployment_id, secret_ref),
             )
         ).fetchone()
-        if reservation is not None:
+        if reservation is not None and (
+            reservation["request_id"] != pinned_request_id
+            or purpose != "storage.postgresql.dsn"
+            or expected_revision != 0
+        ):
             raise ForestError(
                 "STORAGE_REQUEST_DSN_RESERVED",
                 "Host storage request reserves this DSN Secret reference", 409,
             )
+        if pinned_request_id is not None:
+            pinned = None
+            if reservation is not None:
+                pinned = await (
+                    await conn.execute(
+                        "SELECT credential_digest,physical_name,role_name "
+                        "FROM forest_deployment.storage_request_pins "
+                        "WHERE request_id=%s FOR SHARE", (pinned_request_id,),
+                    )
+                ).fetchone()
+            if pinned is None:
+                raise ForestError(
+                    "STORAGE_REQUEST_NOT_PINNED",
+                    "Host storage request has no pinned resource", 409,
+                )
+            try:
+                dsn = urlsplit(plaintext.decode("utf-8"))
+                _ = dsn.port
+                password = unquote(dsn.password or "")
+                valid_dsn = (
+                    dsn.scheme in {"postgres", "postgresql"}
+                    and dsn.hostname is not None
+                    and unquote(dsn.username or "") == pinned["role_name"]
+                    and dsn.path == "/" + pinned["physical_name"]
+                    and dsn.fragment == ""
+                    and "sha256:" + hashlib.sha256(password.encode()).hexdigest()
+                    == pinned["credential_digest"]
+                )
+            except (UnicodeError, ValueError):
+                valid_dsn = False
+            if not valid_dsn:
+                raise ForestError(
+                    "STORAGE_SETTLEMENT_MISMATCH",
+                    "Pinned role, database or credential differs from DSN", 409,
+                )
+            occupied = await (
+                await conn.execute(
+                    "SELECT 1 FROM forest_deployment.secret_slots "
+                    "WHERE secret_ref=%s", (secret_ref,),
+                )
+            ).fetchone()
+            if occupied is not None:
+                raise ForestError(
+                    "STORAGE_REQUEST_DSN_SETTLED",
+                    "Pinned storage DSN Secret is already written", 409,
+                )
         replay = await (
             await conn.execute(
                 "SELECT v.*,s.purpose,s.revision FROM forest_deployment.secret_versions v "

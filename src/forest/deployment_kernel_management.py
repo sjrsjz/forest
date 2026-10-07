@@ -161,10 +161,6 @@ class LocalStorageProfileKernelCommand:
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
             (f"forest.deployment.local-storage/{operation_id}",),
         )
-        await conn.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-            (f"forest.deployment.secret-operation/{operation_id}/dsn",),
-        )
         for key in (
             f"forest.deployment.storage-request/bot/"
             f"{prepared['bot_id']}/{prepared['storage_generation']}",
@@ -174,6 +170,10 @@ class LocalStorageProfileKernelCommand:
             await conn.execute(
                 "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,),
             )
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"forest.deployment.secret-operation/{operation_id}/dsn",),
+        )
         profile_operation_id = operation_id + "/profile"
         replay = await (
             await conn.execute(
@@ -204,7 +204,10 @@ class LocalStorageProfileKernelCommand:
                 target_dsn = await self.secrets.resolve_text_in(conn, secret_ref)
                 self.allocator.validate_target(prepared["bot_id"], target_dsn)
         saved = await self.storage_profiles.create(
-            operation_id=profile_operation_id, conn=conn, **prepared,
+            operation_id=profile_operation_id, conn=conn,
+            profile_ref=prepared["profile_ref"], bot_id=prepared["bot_id"],
+            storage_generation=prepared["storage_generation"],
+            dsn_secret_ref=prepared["dsn_secret_ref"],
         )
         return asdict(saved)
 
@@ -246,7 +249,10 @@ class StorageProfileKernelCommand:
 
     async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
         saved = await self.profiles.create(
-            operation_id=operation_id, conn=conn, **prepared,
+            operation_id=operation_id, conn=conn,
+            profile_ref=prepared["profile_ref"], bot_id=prepared["bot_id"],
+            storage_generation=prepared["storage_generation"],
+            dsn_secret_ref=prepared["dsn_secret_ref"],
         )
         return asdict(saved)
 

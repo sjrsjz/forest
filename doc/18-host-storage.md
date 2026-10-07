@@ -47,6 +47,8 @@ role 密码由谁持有、如何构造最终 DSN，取决于凭据权威选择�
 
 ## 预发布实现状态（2026-10-07）
 
+deployment 现有隔离的 `DeploymentStorageSettlementAuthority`：它只接受已冻结请求及 pin，在有效 Supervisor 租约下核对 Host Effect 所写 role 密码的 SHA-256 证据，以同一 deployment 事务创建加密 DSN Secret 和 immutable storage profile。已提交的准确 DSN/profile 是结算事实，同请求并发重放合流，无须再建第二张状态表；密码、租约或重放 endpoint 不匹配时拒绝。预留 DSN ref 的普通 Secret/profile 写端口不能抢占，包管理输入也不能提供内部 `pinned_request_id`。隔离双数据库真实登录验证通过。最终 role 密码由哪个权威持有、如何与 Host 原生 Effect 和 settlement 共享同一不可变 PostgreSQL endpoint，仍需在生产装配前确定；此 authority 不在生产调度路径中。
+
 deployment 基础 schema 现可持久化不可变的 Host 存储请求：`request_id` 从 deployment、Bot 与 storage generation 派生，同一逻辑键的相同输入合流，不同 Host/profile/凭据引用冲突。请求只冻结目标，不写 DSN Secret 或可用 profile。请求创建、旧 profile 创建及 DSN Secret 写入共享逻辑键围栏；已预留的 DSN ref 不能被旧写端口抢占。该 authority 目前只供内部调用；隔离装配已有 Host 桥，但管理动作、生产调度与最终结算尚未接线，不能把请求视为已供应的数据库。
 
 deployment 另有不可变的请求到 Host `resource_id` 绑定事实。受信任的跨 scope 桥必须先按请求身份调用 Host `reserve`，再凭有效 deployment Supervisor 租约写入准确资源；绑定只核对并保存资源与归属，不把 Host 回执中的可变 `state`/`revision` 固定为资源身份。同一资源的 `RESERVED` 与后续 `ACTIVE` 回执可重放合流；同请求换资源、跨请求复用资源或归属不符均拒绝。另一个不可变 pin 事实以复合外键绑定同一请求与资源，记录 Host、资源修订、物理数据库和 role 名称；只有 Host pin 回执与准确资源查询都匹配冻结请求、且资源查询仍为 ACTIVE 时才能写入。生产桥尚未接线，这些事实本身也不发布可供 Bot 使用的 profile。

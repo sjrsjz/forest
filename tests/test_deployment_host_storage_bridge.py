@@ -17,6 +17,7 @@ import pytest
 from psycopg import sql
 
 from forest.deployment_host_storage_bridge import DeploymentHostStorageBridge
+from forest.deployment_storage_settlement import DeploymentStorageSettlementAuthority
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
 from forest.host_runtime import HostRuntimeScope
@@ -25,6 +26,8 @@ from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
+from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
+from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_storage_requests import DeploymentStorageRequestAuthority
 from forest.storage.deployment_store import DeploymentStore
 from forest.storage.host_identity import HostIdentityAuthority
@@ -189,7 +192,6 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
                 )
             ).fetchone()
         assert pinned_count["count"] == 1
-
         previous_graph = controller.registry.graph_identity
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
@@ -228,6 +230,102 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
                 )
             ).fetchone()
         assert pinned_count["count"] == 1
+        secrets = DeploymentSecretAuthority(
+            deployment_store, active_key_id="bridge-test-key",
+            key_resolver=lambda _key_id: b"b" * 32,
+        )
+        profiles = DeploymentStorageProfileAuthority(deployment_store, secrets=secrets)
+        settlement = DeploymentStorageSettlementAuthority(
+            deployment_store, secrets=secrets, profiles=profiles,
+            host_id=host_id, maintenance_dsn=dsn,
+        )
+        async with deployment_store.transaction() as conn:
+            with pytest.raises(ForestError) as wrong_pinned_dsn:
+                await secrets.put_in(
+                    conn, operation_id=frozen.request_id + "/dsn",
+                    secret_ref=frozen.dsn_secret_ref,
+                    purpose="storage.postgresql.dsn",
+                    plaintext=urlunsplit(urlsplit(settlement._target_dsn(
+                        created_physical[1], created_physical[0],
+                        "forest-host-storage-bridge-password-for-tests",
+                    ))._replace(path="/wrong_database")).encode(),
+                    expected_revision=0,
+                    pinned_request_id=frozen.request_id,
+                )
+        assert wrong_pinned_dsn.value.code == "STORAGE_SETTLEMENT_MISMATCH"
+        with pytest.raises(ForestError) as wrong_password:
+            await settlement.finalize(
+                lease, request_id=frozen.request_id,
+                password="another-password-with-sufficient-length-for-test",
+            )
+        assert wrong_password.value.code == "STORAGE_SETTLEMENT_MISMATCH"
+        with pytest.raises(ForestError) as stale_settlement:
+            await settlement.finalize(
+                replace(lease, owner_epoch=lease.owner_epoch + 1),
+                request_id=frozen.request_id,
+                password="forest-host-storage-bridge-password-for-tests",
+            )
+        assert stale_settlement.value.code == "STALE_DEPLOYMENT_SUPERVISOR"
+        with pytest.raises(ForestError) as unpublished:
+            await profiles.metadata(frozen.profile_ref)
+        assert unpublished.value.code == "STORAGE_PROFILE_NOT_FOUND"
+
+        settled, concurrent_settlement = await asyncio.gather(
+            settlement.finalize(
+                lease, request_id=frozen.request_id,
+                password="forest-host-storage-bridge-password-for-tests",
+            ),
+            settlement.finalize(
+                lease, request_id=frozen.request_id,
+                password="forest-host-storage-bridge-password-for-tests",
+            ),
+        )
+        assert concurrent_settlement == settled
+        assert settled.profile_ref == frozen.profile_ref
+        assert settled.dsn_secret_ref == frozen.dsn_secret_ref
+        assert await profiles.metadata(frozen.profile_ref) == settled
+        secret_metadata = await secrets.metadata(frozen.dsn_secret_ref)
+        assert secret_metadata.purpose == "storage.postgresql.dsn"
+        assert secret_metadata.version == 1
+        target_dsn = await secrets.resolve_text(frozen.dsn_secret_ref)
+        target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
+        try:
+            actual = await (await target.execute(
+                "SELECT current_user AS role_name,current_database() AS database_name",
+            )).fetchone()
+            assert actual == created_physical[::-1]
+        finally:
+            await target.close()
+        with pytest.raises(ForestError) as ordinary_rewrite:
+            await secrets.put(
+                operation_id="bridge/rewrite-dsn",
+                secret_ref=frozen.dsn_secret_ref,
+                purpose="storage.postgresql.dsn",
+                plaintext=target_dsn.encode(), expected_revision=0,
+            )
+        assert ordinary_rewrite.value.code == "STORAGE_REQUEST_DSN_RESERVED"
+        async with deployment_store.transaction() as conn:
+            with pytest.raises(ForestError) as privileged_rewrite:
+                await secrets.put_in(
+                    conn, operation_id="bridge/rewrite-pinned-dsn",
+                    secret_ref=frozen.dsn_secret_ref,
+                    purpose="storage.postgresql.dsn",
+                    plaintext=target_dsn.encode(), expected_revision=0,
+                    pinned_request_id=frozen.request_id,
+                )
+        assert privileged_rewrite.value.code == "STORAGE_REQUEST_DSN_SETTLED"
+        alternate_endpoint = DeploymentStorageSettlementAuthority(
+            deployment_store, secrets=secrets, profiles=profiles,
+            host_id=host_id,
+            maintenance_dsn=dsn.replace("@127.0.0.1:", "@localhost:"),
+        )
+        with pytest.raises(ForestError) as changed_endpoint:
+            await alternate_endpoint.finalize(
+                lease, request_id=frozen.request_id,
+                password="forest-host-storage-bridge-password-for-tests",
+            )
+        assert changed_endpoint.value.code == "STORAGE_SETTLEMENT_CONFLICT"
+
     finally:
         if controller is not None:
             await controller.close()

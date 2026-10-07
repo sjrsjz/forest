@@ -58,6 +58,7 @@ class DeploymentStorageProfileAuthority:
         dsn_secret_ref: str,
         authorization=None,
         conn=None,
+        pinned_request_id: str | None = None,
     ) -> StorageProfileMetadata:
         _bounded(operation_id, "operation_id", 256)
         _bounded(bot_id, "bot_id", 128)
@@ -103,18 +104,41 @@ class DeploymentStorageProfileAuthority:
                 return self._metadata(replay)
             pending = await (
                 await conn.execute(
-                    "SELECT 1 FROM forest_deployment.storage_requests "
+                    "SELECT request_id,bot_id,storage_generation,profile_ref,"
+                    "dsn_secret_ref FROM forest_deployment.storage_requests "
                     "WHERE deployment_id=%s AND ((bot_id=%s AND storage_generation=%s) "
-                    "OR profile_ref=%s OR dsn_secret_ref=%s) LIMIT 1",
+                    "OR profile_ref=%s OR dsn_secret_ref=%s)",
                     (self.store.deployment_id, bot_id, storage_generation,
                      profile_ref, dsn_secret_ref),
                 )
-            ).fetchone()
-            if pending is not None:
+            ).fetchall()
+            matching_request = (
+                len(pending) == 1
+                and pending[0]["request_id"] == pinned_request_id
+                and pending[0]["bot_id"] == bot_id
+                and pending[0]["storage_generation"] == storage_generation
+                and pending[0]["profile_ref"] == profile_ref
+                and pending[0]["dsn_secret_ref"] == dsn_secret_ref
+            )
+            if pending and not matching_request:
                 raise ForestError(
                     "STORAGE_PROFILE_REQUEST_PENDING",
                     "Host storage request already owns this identity", 409,
                 )
+            if pinned_request_id is not None:
+                pinned = None
+                if matching_request:
+                    pinned = await (
+                        await conn.execute(
+                            "SELECT 1 FROM forest_deployment.storage_request_pins "
+                            "WHERE request_id=%s FOR SHARE", (pinned_request_id,),
+                        )
+                    ).fetchone()
+                if pinned is None:
+                    raise ForestError(
+                        "STORAGE_REQUEST_NOT_PINNED",
+                        "Host storage request has no pinned resource", 409,
+                    )
             secret = await self.secrets.metadata_in(conn, dsn_secret_ref)
             if secret.purpose != "storage.postgresql.dsn":
                 raise ForestError(
