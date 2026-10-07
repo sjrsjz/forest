@@ -359,7 +359,23 @@ CREATE INDEX deployment_storage_requests_created_idx
 CREATE TABLE forest_deployment.storage_request_resources (
     request_id text PRIMARY KEY REFERENCES forest_deployment.storage_requests(request_id),
     resource_id text NOT NULL UNIQUE CHECK (resource_id ~ '^resource/[a-f0-9-]{36}$'),
-    bound_at timestamptz NOT NULL DEFAULT clock_timestamp()
+    bound_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (request_id,resource_id)
+);
+
+CREATE TABLE forest_deployment.storage_request_pins (
+    request_id text PRIMARY KEY,
+    resource_id text NOT NULL UNIQUE CHECK (resource_id ~ '^resource/[a-f0-9-]{36}$'),
+    deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
+    host_id text NOT NULL CHECK (host_id ~ '^host/[a-f0-9]{32}$'),
+    profile_ref text NOT NULL CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
+    resource_revision bigint NOT NULL CHECK (resource_revision >= 2),
+    physical_name text NOT NULL CHECK (physical_name ~ '^forest_bot_[a-f0-9]{24}$'),
+    role_name text NOT NULL CHECK (role_name ~ '^forest_role_[a-f0-9]{24}$'),
+    pinned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (request_id,resource_id)
+        REFERENCES forest_deployment.storage_request_resources(request_id,resource_id),
+    UNIQUE (deployment_id,profile_ref)
 );
 
 CREATE TABLE forest_deployment.storage_profiles (
@@ -817,6 +833,10 @@ CREATE TRIGGER deployment_storage_request_immutable
 
 CREATE TRIGGER deployment_storage_resource_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.storage_request_resources
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_storage_pin_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.storage_request_pins
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
 CREATE TRIGGER deployment_storage_profile_operation_immutable

@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-跨 scope Host 存储桥（2026-10-07）：受信任进程内 `DeploymentHostStorageBridge` 只从 deployment 不可变请求读取 Host、Bot、generation 与凭据引用，按固定 `request_id/reserve` 调用当前 Host 包 Generation 的预留服务，再凭有效 deployment Supervisor 租约写不可变资源绑定。桥按同一绑定以 `request_id/materialize` 幂等入队，并通过准确归属元组读取物化状态。独立双 PostgreSQL 库测试故意让 Host 预留成功后 deployment 绑定因失效租约失败，再热替换 Host 包并重试；同一资源 ID 被找回，重复入队合流，Host owned-work 最终创建专属 role 与数据库并结算为 ACTIVE（`1 passed`）。它尚未装配到生产 Supervisor，也未执行 pin 或 profile 提交。
+跨 scope Host 存储桥与 pin 事实（2026-10-07）：受信任进程内 `DeploymentHostStorageBridge` 只从 deployment 冻结请求读取 Host、Bot、generation、profile 和凭据引用，以稳定操作身份调用当前 Host 包 Generation 的预留、物化入队、状态、pin 及准确资源查询。deployment 基线新增不可变 `storage_request_pins`，复合外键固定原请求与资源，由有效 Supervisor 租约围栏；只接受相互一致的 PINNED 回执和 ACTIVE 资源查询，持久记录修订、数据库名与 role。独立双 PostgreSQL 用例覆盖两次跨库窗口：预留成功后 deployment 绑定失租，及 Host pin 成功后 deployment 记账失租；每次热替换 Host 包后按原操作重放，均只保留一个资源或 pin，并在部署本库完成准确绑定（`1 passed`）。deployment catalog 全套 `30 passed`。生产 Supervisor 尚未装配 Host Graph 或调度此桥，DSN Secret/profile 提交、旧分配器切断及安全回收仍未实现；本次基线变更要求重建预发布 deployment 测试库。
 
 Host 资源绑定事实（2026-10-07）：deployment 基础 schema 新增不可变 `storage_request_resources`，由有效 deployment Supervisor 租约围栏，只接受与已冻结请求归属完全一致的 Host reserve 回执。绑定仅保存 `request_id`→`resource_id`；同一资源的 `RESERVED`/`ACTIVE` 状态漂移重放合流，换资源、跨请求复用和失效租约拒绝。原有重复的 Supervisor 租约 SQL 校验收敛为一个权威函数。独立 PostgreSQL 的 deployment catalog 全套 `29 passed`，Ruff 与差异检查通过。生产 Host Graph、受信任跨 scope 桥、物化及 pin 到 profile 结算仍未接线，不能据此认定数据库可用。
 

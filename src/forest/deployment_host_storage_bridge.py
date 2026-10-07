@@ -56,13 +56,41 @@ class DeploymentHostStorageBridge:
             )
         return await self._invoke_host(
             request, "host.storage.materialization.status", "status",
-            {
-                "resource_id": binding.resource_id,
-                "deployment_id": request.deployment_id,
-                "bot_id": request.bot_id,
-                "storage_generation": request.storage_generation,
-            },
+            self._resource_lookup(request, binding.resource_id),
         )
+
+    async def pin_reference(self, request_id: str):
+        request = await self.requests.read(request_id)
+        self._require_host(request)
+        existing = await self.requests.pinned_resource(request_id)
+        if existing is not None:
+            return existing
+        binding = await self.requests.resource_binding(request_id)
+        if binding is None:
+            raise ForestError(
+                "STORAGE_RESOURCE_NOT_BOUND", "Host resource is not bound", 409,
+            )
+        lookup = self._resource_lookup(request, binding.resource_id)
+        pin = await self._invoke_host(
+            request, "host.storage.reference.pin", "pin",
+            {**lookup, "profile_ref": request.profile_ref},
+        )
+        resource = await self._invoke_host(
+            request, "host.storage.resource", "resource", lookup,
+        )
+        return await self.requests.bind_pin(
+            self.deployment_supervisor.authority_lease(),
+            request_id=request_id, pin_receipt=pin, resource=resource,
+        )
+
+    @staticmethod
+    def _resource_lookup(request, resource_id: str) -> dict:
+        return {
+            "resource_id": resource_id,
+            "deployment_id": request.deployment_id,
+            "bot_id": request.bot_id,
+            "storage_generation": request.storage_generation,
+        }
 
     def _require_host(self, request) -> None:
         host_lease = self.host_supervisor.authority_lease()
@@ -80,6 +108,8 @@ class DeploymentHostStorageBridge:
             ("host.storage.reserve", "reserve"),
             ("host.storage.materialization.enqueue", "materialize"),
             ("host.storage.materialization.status", "status"),
+            ("host.storage.reference.pin", "pin"),
+            ("host.storage.resource", "resource"),
         }:
             raise ValueError("Host storage bridge service is not declared")
         registry = self.host_controller_provider().registry

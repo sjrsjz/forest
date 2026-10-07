@@ -22,6 +22,7 @@ from forest.host_runtime import HostRuntimeScope
 from forest.host_storage_postgres_effect import HostPostgresMaterializationEffect
 from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog
+from forest.schema_bundles import module_schema_namespace
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_storage_requests import DeploymentStorageRequestAuthority
 from forest.storage.deployment_store import DeploymentStore
@@ -169,6 +170,60 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         )
         assert resource["state"] == "ACTIVE"
         assert (resource["physical_name"], resource["role_name"]) == created_physical
+        bridge.deployment_supervisor = SimpleNamespace(
+            authority_lease=lambda: replace(lease, owner_epoch=lease.owner_epoch + 1),
+        )
+        with pytest.raises(ForestError) as stale_pin:
+            await bridge.pin_reference(frozen.request_id)
+        assert stale_pin.value.code == "STALE_DEPLOYMENT_SUPERVISOR"
+        assert await requests.pinned_resource(frozen.request_id) is None
+        async with host_store.pool.connection() as conn:
+            pinned_count = await (
+                await conn.execute(
+                    sql.SQL("SELECT count(*) AS count FROM {}.resource_reference_pins "
+                            "WHERE resource_id=%s").format(
+                        sql.Identifier(module_schema_namespace("forest.host.storage")),
+                    ),
+                    (reserved_id,),
+                )
+            ).fetchone()
+        assert pinned_count["count"] == 1
+
+        previous_graph = controller.registry.graph_identity
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "0.6.1"', 'version = "0.6.2"', 1,
+            ), encoding="utf-8",
+        )
+        replacement = catalog.build_official(source, scope="host")
+        await controller.replace(
+            "host.storage", replacement.digest,
+            expected_graph_revision=previous_graph.graph_revision,
+        )
+        bridge.deployment_supervisor = SimpleNamespace(authority_lease=lambda: lease)
+        pinned, concurrent_pin = await asyncio.gather(
+            bridge.pin_reference(frozen.request_id),
+            bridge.pin_reference(frozen.request_id),
+        )
+        assert concurrent_pin == pinned
+        assert pinned.request_id == frozen.request_id
+        assert pinned.resource_id == reserved_id
+        assert pinned.host_id == host_id
+        assert pinned.resource_revision == resource["revision"]
+        assert (pinned.physical_name, pinned.role_name) == created_physical
+        assert await bridge.pin_reference(frozen.request_id) == pinned
+        assert await requests.pinned_resource(frozen.request_id) == pinned
+        async with host_store.pool.connection() as conn:
+            pinned_count = await (
+                await conn.execute(
+                    sql.SQL("SELECT count(*) AS count FROM {}.resource_reference_pins "
+                            "WHERE resource_id=%s").format(
+                        sql.Identifier(module_schema_namespace("forest.host.storage")),
+                    ),
+                    (reserved_id,),
+                )
+            ).fetchone()
+        assert pinned_count["count"] == 1
     finally:
         if controller is not None:
             await controller.close()
