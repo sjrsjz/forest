@@ -47,6 +47,16 @@ class BotCatalogKernelQuery:
         return await self.catalog.catalog_page(**payload)
 
 
+class RetirementJobsKernelQuery:
+    """Project kernel Bot identities with their sole retirement Job."""
+
+    def __init__(self, jobs) -> None:
+        self.jobs = jobs
+
+    async def query(self, payload: dict) -> dict:
+        return await self.jobs.page(**payload)
+
+
 class ProvisioningJobsKernelQuery:
     """Expose the kernel-owned provisioning ledger through a bounded page port."""
 
@@ -84,6 +94,29 @@ class BotSetDesiredKernelCommand:
         return await self.catalog.set_desired_in(
             conn, operation_id=operation_id, **prepared,
         )
+
+
+class BotBeginRetirementKernelCommand:
+    """Freeze Bot startup and admit its kernel Job under one Web transaction."""
+
+    def __init__(self, catalog, *, notify=None) -> None:
+        self.catalog = catalog
+        self.notify = notify
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        return dict(payload)
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        await self.catalog.require_host_pin_for_retirement_in(
+            conn, prepared["bot_id"],
+        )
+        return await self.catalog.begin_retirement_in(
+            conn, operation_id=operation_id, **prepared,
+        )
+
+    def after_commit(self, result: dict) -> None:
+        if self.notify is not None:
+            self.notify()
 
 
 class StorageRequestKernelCommand:

@@ -1,0 +1,130 @@
+manifest_version = 1
+package_id = "forest.deployment-retirement"
+version = "1.0.0"
+kernel_api = ">=1.0,<2.0"
+runtime = "python-worker"
+entrypoint = "deployment_retirement:DeploymentRetirement"
+
+[[components]]
+id = "deployment.retirement"
+scope = "deployment"
+auto_install = true
+state_schema = 1
+reload_mode = "drain"
+config_schema = "schemas/config.json"
+bootstrap_config = "bootstrap.json"
+provides = []
+
+[components.resources]
+max_frame_bytes = 262144
+max_inflight = 4
+max_queue_items = 16
+max_state_inflight = 2
+max_owned_tasks = 1
+max_owned_resources = 1
+
+[components.lifecycle]
+prepare_timeout_s = 10
+start_timeout_s = 10
+drain_timeout_s = 300
+stop_timeout_s = 10
+
+[components.capabilities]
+requests = [
+  "service.call:deployment.retirement.quiescence",
+  "service.call:deployment.retirement.revoke",
+  "service.call:deployment.retirement.release",
+  "service.call:deployment.retirement.reclaim",
+  "service.call:deployment.retirement.status",
+]
+
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "deployment.retirement.workspace"
+label = "Bot 退役"
+group = "deployment"
+order = 35
+
+[[components.kernel_queries]]
+name = "deployment.retirement.jobs.page"
+contract = "1.0"
+kind = "deployment.retirement-jobs-page"
+input_schema = "schemas/page-input.json"
+output_schema = "schemas/page-output.json"
+
+[[components.kernel_commands]]
+name = "deployment.retirement.begin"
+contract = "1.0"
+kind = "deployment.bot-begin-retirement"
+input_schema = "schemas/begin-input.json"
+output_schema = "schemas/begin-output.json"
+
+[[components.management_queries]]
+id = "retirement.jobs.list"
+port = "deployment.retirement.jobs.page"
+default_limit = 50
+max_limit = 100
+timeout_s = 10
+
+[[components.management_actions]]
+id = "bot.retire"
+port = "deployment.retirement.begin"
+priority = "P0"
+timeout_s = 15
+
+[[components.effect_services]]
+name = "deployment.retirement.quiescence"
+contract = "1.0"
+kind = "deployment.retirement-port"
+semantics = "read"
+input_schema = "schemas/claim-input.json"
+output_schema = "schemas/quiescence-output.json"
+
+[[components.effect_services]]
+name = "deployment.retirement.revoke"
+contract = "1.0"
+kind = "deployment.retirement-port"
+semantics = "idempotent"
+input_schema = "schemas/claim-input.json"
+output_schema = "schemas/resource-output.json"
+
+[[components.effect_services]]
+name = "deployment.retirement.release"
+contract = "1.0"
+kind = "deployment.retirement-port"
+semantics = "idempotent"
+input_schema = "schemas/claim-input.json"
+output_schema = "schemas/resource-output.json"
+
+[[components.effect_services]]
+name = "deployment.retirement.reclaim"
+contract = "1.0"
+kind = "deployment.retirement-port"
+semantics = "idempotent"
+input_schema = "schemas/claim-input.json"
+output_schema = "schemas/resource-output.json"
+
+[[components.effect_services]]
+name = "deployment.retirement.status"
+contract = "1.0"
+kind = "deployment.retirement-port"
+semantics = "read"
+input_schema = "schemas/claim-input.json"
+output_schema = "schemas/status-output.json"
+
+[[components.owned_work_handlers]]
+name = "deployment.retirement.execute"
+contract = "1.0"
+authority = "kernel"
+handler = "deployment.retirement.execute"
+input_schema = "schemas/claim-input.json"
+output_schema = "schemas/job-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 10
+handler_timeout_s = 240
+settle_timeout_s = 20
+lease_seconds = 120
+renew_interval_s = 30
+renew_timeout_s = 10

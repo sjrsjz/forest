@@ -17,6 +17,8 @@ import pytest
 from psycopg import sql
 
 from forest.deployment_host_storage_bridge import DeploymentHostStorageBridge
+from forest.deployment_retirement_owned_work import DeploymentRetirementOwnedWorkAuthority
+from forest.deployment_retirement_ports import DeploymentRetirementPort
 from forest.deployment_storage_ports import DeploymentStoragePortEffectDriver
 from forest.deployment_storage_settlement import DeploymentStorageSettlementAuthority
 from forest.errors import ForestError
@@ -33,6 +35,7 @@ from forest.schema_bundles import module_schema_namespace
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
+from forest.storage.deployment_retirement_jobs import DeploymentRetirementJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_dispatch import DeploymentStorageDispatchAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
@@ -461,14 +464,22 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         )
         assert retired["supply_state"] == "DELETING"
         lease = await catalog_authority.renew_supervisor(lease, lease_seconds=120)
+        retirement_jobs = DeploymentRetirementJobAuthority(deployment_store)
+        retirement_claim = await retirement_jobs.claim(
+            lease, worker_id="claim:bridge-retirement", lease_seconds=600,
+        )
+        assert retirement_claim.operation_id == "bridge/retirement-begin"
+        revoke_operation_id = "retire-revoke/" + hashlib.sha256(
+            retirement_claim.operation_id.encode("utf-8")
+        ).hexdigest()
         revoked, replayed = await asyncio.gather(
             profiles.revoke(
-                lease, operation_id="bridge/profile-revoke",
+                lease, operation_id=revoke_operation_id,
                 profile_ref=frozen.profile_ref, bot_id=frozen.bot_id,
                 expected_bot_revision=retired["revision"],
             ),
             profiles.revoke(
-                lease, operation_id="bridge/profile-revoke",
+                lease, operation_id=revoke_operation_id,
                 profile_ref=frozen.profile_ref, bot_id=frozen.bot_id,
                 expected_bot_revision=retired["revision"],
             ),
@@ -477,6 +488,53 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         assert revoked["resource_id"] == reserved_id
         assert revoked["retirement_operation_id"] == "bridge/retirement-begin"
         assert revoked["observation_revision"] is None
+        async def accept_retirement_generation(_conn, _lease, **_options):
+            return None
+
+        retirement_identity = SimpleNamespace(
+            component_id="deployment.retirement",
+            generation_id="generation/bridge-retirement",
+        )
+        retirement_runtime = SimpleNamespace(
+            scope_id=deployment_store.deployment_id,
+            store=deployment_store,
+            authority_lease=lambda: lease,
+            generation_authority=SimpleNamespace(
+                verify_owned_work_in=accept_retirement_generation,
+            ),
+        )
+        retirement_scope = SimpleNamespace(
+            scope_kind="deployment", scope_id=deployment_store.deployment_id,
+            component_id="deployment.retirement",
+            generation_id=retirement_identity.generation_id,
+        )
+        retirement_payload = {
+            "operation_id": retirement_claim.operation_id,
+            "bot_id": retirement_claim.bot_id,
+            "claim_token": retirement_claim.lease_owner,
+            "attempt_no": retirement_claim.attempt_no,
+        }
+        retirement_ports = {}
+        for name, semantics in (
+            ("quiescence", "read"), ("revoke", "idempotent"),
+            ("release", "idempotent"), ("reclaim", "idempotent"),
+            ("status", "read"),
+        ):
+            port = DeploymentRetirementPort(
+                {}, 1, retirement_identity,
+                {"name": "deployment.retirement." + name,
+                 "kind": "deployment.retirement-port", "semantics": semantics},
+                runtime=retirement_runtime, jobs=retirement_jobs,
+                catalog=catalog_authority, profiles=profiles, bridge=bridge,
+            )
+            await port.start()
+            retirement_ports[name] = port
+        assert await retirement_ports["quiescence"].invoke(
+            retirement_payload, scope=retirement_scope, invocation=None,
+        ) == {"state": "QUIESCENT"}
+        assert await retirement_ports["revoke"].invoke(
+            retirement_payload, scope=retirement_scope, invocation=None,
+        ) == {"request_id": frozen.request_id, "resource_id": reserved_id}
         assert await profiles.metadata(frozen.profile_ref) == settled
         with pytest.raises(ForestError) as denied_resolve:
             await profiles.resolve(
@@ -559,6 +617,30 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         assert released["resource_revision"] == pinned.resource_revision + 1
         assert released["revocation_operation_id"] == revoked["operation_id"]
         assert await bridge.release_reference(frozen.request_id) == released
+        assert await retirement_ports["release"].invoke(
+            retirement_payload, scope=retirement_scope, invocation=None,
+        ) == {"request_id": frozen.request_id, "resource_id": reserved_id}
+        retirement_settle_request = {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": retirement_claim.operation_id,
+            "claim_token": retirement_claim.lease_owner,
+            "attempt": retirement_claim.attempt_no,
+            "outcome": {"status": "SUCCEEDED", "result": {
+                "bot_id": retired["bot_id"], "state": "READY_TO_PUBLISH",
+                "request_id": frozen.request_id, "resource_id": reserved_id,
+            }},
+        }
+        retirement_authority = DeploymentRetirementOwnedWorkAuthority(
+            retirement_runtime, retirement_jobs, catalog_authority, bridge,
+        )
+        with pytest.raises(ForestError) as premature_retirement:
+            await retirement_authority.invoke_owned_work(
+                "settle", retirement_scope,
+                {"authority": "kernel", "name": "deployment.retirement.execute"},
+                retirement_settle_request, timeout_seconds=20,
+            )
+        assert premature_retirement.value.code == "HOST_STORAGE_RECLAIM_NOT_FOUND"
+        assert (await catalog_authority.inspect(frozen.bot_id))["supply_state"] == "DELETING"
         resource = await controller.registry.get("host.storage").management_contract.query(
             "resource", {
                 "resource_id": reserved_id,
@@ -648,6 +730,31 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         assert lose_reclaim_receipt["once"] is False
         assert reclaim_status["attempt_count"] >= 3
         assert await bridge.enqueue_reclamation(frozen.request_id) == reclaim_status
+        lease = await catalog_authority.renew_supervisor(lease, lease_seconds=300)
+        assert await retirement_ports["reclaim"].invoke(
+            retirement_payload, scope=retirement_scope, invocation=None,
+        ) == {"request_id": frozen.request_id, "resource_id": reserved_id}
+        assert (await retirement_ports["status"].invoke(
+            retirement_payload, scope=retirement_scope, invocation=None,
+        ))["state"] == "SUCCEEDED"
+        settled_retirement = await retirement_authority.invoke_owned_work(
+            "settle", retirement_scope,
+            {"authority": "kernel", "name": "deployment.retirement.execute"},
+            retirement_settle_request, timeout_seconds=20,
+        )
+        assert settled_retirement == {
+            "protocol": "forest.owned-work-settled/1",
+            "work_id": retirement_claim.operation_id,
+        }
+        assert (await catalog_authority.inspect(frozen.bot_id))["supply_state"] == "DELETED"
+        async with deployment_store.pool.connection() as conn:
+            retirement_row = await (
+                await conn.execute(
+                    "SELECT state FROM forest_deployment.retirement_jobs "
+                    "WHERE operation_id=%s", (retirement_claim.operation_id,),
+                )
+            ).fetchone()
+        assert retirement_row["state"] == "SUCCEEDED"
         reclaimed = await controller.registry.get("host.storage").management_contract.query(
             "resource", {
                 "resource_id": reserved_id,

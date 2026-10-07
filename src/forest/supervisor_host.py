@@ -18,11 +18,13 @@ from forest.deployment_host_storage_bridge import DeploymentHostStorageBridge
 from forest.deployment_kernel_management import (
     BootstrapCatalogKernelQuery,
     BootstrapProfileKernelCommand,
+    BotBeginRetirementKernelCommand,
     BotCatalogKernelQuery,
     BotSetDesiredKernelCommand,
     ProvisioningJobKernelCommand,
     ProvisioningJobsKernelQuery,
     ProvisioningReconcileKernelCommand,
+    RetirementJobsKernelQuery,
     SecretPutKernelCommand,
     StorageRequestKernelCommand,
     StorageRequestsKernelQuery,
@@ -33,6 +35,8 @@ from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_package_controller import DeploymentPackageController
 from forest.deployment_provisioning_driver import DeploymentProvisioningEffectDriver
 from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwnedWorkAuthority
+from forest.deployment_retirement_owned_work import DeploymentRetirementOwnedWorkAuthority
+from forest.deployment_retirement_ports import DeploymentRetirementPort
 from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.deployment_storage_owned_work import DeploymentStorageOwnedWorkAuthority
 from forest.deployment_storage_ports import DeploymentStoragePortEffectDriver
@@ -59,6 +63,7 @@ from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProf
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_graph_changes import DeploymentGraphChangeAuthority
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
+from forest.storage.deployment_retirement_jobs import DeploymentRetirementJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_dispatch import DeploymentStorageDispatchAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
@@ -272,6 +277,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     )
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
+    retirement_jobs = DeploymentRetirementJobAuthority(store)
     package_catalog = PackageCatalog(
         Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
     )
@@ -379,6 +385,8 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             kernel_query_handlers={
                 ("deployment.bot-catalog", "deployment.bot-catalog-page"):
                     BotCatalogKernelQuery(catalog),
+                ("deployment.retirement", "deployment.retirement-jobs-page"):
+                    RetirementJobsKernelQuery(retirement_jobs),
                 ("deployment.provisioning", "deployment.provisioning-jobs-page"):
                     ProvisioningJobsKernelQuery(jobs),
                 ("deployment.provisioning", "deployment.bootstrap-catalog"):
@@ -389,6 +397,10 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             kernel_management_handlers={
                 ("deployment.bot-catalog", "deployment.bot-set-desired"):
                     BotSetDesiredKernelCommand(catalog),
+                ("deployment.retirement", "deployment.bot-begin-retirement"):
+                    BotBeginRetirementKernelCommand(
+                        catalog, notify=notify_deployment_work,
+                    ),
                 ("deployment.secrets", "deployment.secret-put"):
                     SecretPutKernelCommand(secrets),
                 **{
@@ -413,6 +425,11 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         deployment_runtime.kernel_owned_work_authorities["deployment.provisioning"] = (
             DeploymentProvisioningOwnedWorkAuthority(deployment_runtime, jobs, catalog)
         )
+        deployment_runtime.kernel_owned_work_authorities["deployment.retirement"] = (
+            DeploymentRetirementOwnedWorkAuthority(
+                deployment_runtime, retirement_jobs, catalog, host_storage_bridge,
+            )
+        )
         deployment_runtime.kernel_owned_work_authorities[
             "deployment.storage-orchestrator"
         ] = DeploymentStorageOwnedWorkAuthority(deployment_runtime, storage_dispatch)
@@ -424,6 +441,16 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 runtime=deployment_runtime, jobs=jobs,
                 storage_profiles=storage_profiles,
                 bootstrap_profiles=bootstrap_profiles, provisioner=provisioner,
+            )
+        )
+        deployment_runtime.effect_driver_factories[
+            "deployment.retirement-port"
+        ] = lambda configuration, revision, identity, declaration: (
+            DeploymentRetirementPort(
+                configuration, revision, identity, declaration,
+                runtime=deployment_runtime, jobs=retirement_jobs,
+                catalog=catalog, profiles=storage_profiles,
+                bridge=host_storage_bridge,
             )
         )
         deployment_runtime.effect_driver_factories[

@@ -27,6 +27,49 @@ class DeploymentRetirementJobAuthority:
     def __init__(self, store) -> None:
         self.store = store
 
+    async def page(self, *, limit: int = 50, after: str | None = None,
+                   search: str | None = None, supply_state: str | None = None) -> dict:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ForestError("RETIREMENT_QUERY_INVALID", "Page size is invalid", 422)
+        for value in (after, search):
+            if value is not None and (
+                not isinstance(value, str) or len(value.encode("utf-8")) > 128
+            ):
+                raise ForestError("RETIREMENT_QUERY_INVALID", "Filter is invalid", 422)
+        if supply_state not in {None, "READY", "DELETING", "DELETED"}:
+            raise ForestError("RETIREMENT_QUERY_INVALID", "State is invalid", 422)
+        async with self.store.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT b.bot_id,b.display_name,b.supply_state,b.revision,"
+                    "i.desired_state,j.operation_id,j.state AS job_state,"
+                    "j.attempt_no,j.last_error_code,"
+                    "EXISTS(SELECT 1 FROM forest_deployment.storage_requests r "
+                    "JOIN forest_deployment.storage_request_pins p ON "
+                    "p.request_id=r.request_id AND p.profile_ref=r.profile_ref "
+                    "AND p.host_id=r.host_id AND p.deployment_id=r.deployment_id "
+                    "WHERE r.bot_id=b.bot_id "
+                    "AND r.storage_generation=b.storage_generation "
+                    "AND r.profile_ref=b.storage_profile_ref "
+                    "AND r.deployment_id=%s) AS host_pinned "
+                    "FROM forest_deployment.bots b "
+                    "JOIN forest_deployment.runtime_intents i USING(bot_id) "
+                    "LEFT JOIN forest_deployment.retirement_jobs j USING(bot_id) "
+                    "WHERE (%s::text IS NULL OR b.bot_id>%s) "
+                    "AND (%s::text IS NULL OR b.supply_state=%s) "
+                    "AND (%s::text IS NULL OR b.bot_id ILIKE '%%'||%s||'%%' "
+                    "OR b.display_name ILIKE '%%'||%s||'%%') "
+                    "ORDER BY b.bot_id LIMIT %s",
+                    (self.store.deployment_id, after, after, supply_state, supply_state,
+                     search, search, search, limit + 1),
+                )
+            ).fetchall()
+        items = [dict(row) for row in rows[:limit]]
+        return {
+            "items": items,
+            "next_after": items[-1]["bot_id"] if len(rows) > limit else None,
+        }
+
     async def claim(self, supervisor, *, worker_id: str, lease_seconds: int, conn=None):
         if not isinstance(worker_id, str) or not 1 <= len(worker_id.encode()) <= 256:
             raise ForestError("RETIREMENT_INPUT_INVALID", "Worker identity is invalid", 422)

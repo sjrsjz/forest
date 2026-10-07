@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root { color-scheme:dark; font:14px/1.45 system-ui,sans-serif; color:#dcebe2; background:#0d1712 }
+    * { box-sizing:border-box }
+    body { margin:0; padding:10px }
+    main { border:1px solid #29493a; border-radius:9px; background:#102019; overflow:hidden }
+    header,.filters,.footer { display:flex; align-items:center; gap:8px; padding:9px 12px; flex-wrap:wrap }
+    header,.filters { border-bottom:1px solid #29493a }
+    h2 { font-size:16px; margin:0 auto 0 0 }
+    small,#status { color:#91ac9a }
+    button,input,select { border:1px solid #365b49; border-radius:6px; background:#173426; color:#e9f7ef; padding:7px 10px }
+    button { cursor:pointer }
+    button:disabled { opacity:.5; cursor:default }
+    input { flex:1; min-width:160px }
+    .scroll { max-height:390px; overflow:auto }
+    .row { display:grid; grid-template-columns:minmax(180px,2fr) 100px 100px 100px minmax(160px,1fr) 76px; gap:8px; align-items:center; padding:8px 12px; border-top:1px solid #29493a; min-width:700px }
+    .row:first-child { border-top:0 }
+    .name { display:flex; flex-direction:column; min-width:0 }
+    .name strong,.name small,.row code { overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+    .footer { justify-content:space-between; border-top:1px solid #29493a }
+  </style>
+</head>
+<body>
+<main>
+  <header><h2>Bot 退役</h2><span id="status" role="status">等待连接</span><button id="refresh" type="button">刷新</button></header>
+  <form id="filter" class="filters">
+    <input name="search" placeholder="按 Bot ID 或名称筛选" aria-label="筛选 Bot">
+    <select name="supply_state" aria-label="供给状态">
+      <option value="">全部状态</option><option>READY</option><option>DELETING</option><option>DELETED</option>
+    </select>
+    <button type="submit">查询</button>
+  </form>
+  <div class="row"><strong>Bot</strong><strong>供给</strong><strong>期望运行</strong><strong>退役 Job</strong><strong>错误</strong><strong>操作</strong></div>
+  <div id="items" class="scroll"></div>
+  <div class="footer"><span id="count">等待连接</span><button id="more" type="button" hidden>下一页</button></div>
+</main>
+<script>
+(() => {
+  'use strict';
+  let port, nonce, sequence = 0, after = null, filter = {};
+  const pending = new Map();
+  const $ = id => document.getElementById(id);
+  const send = (type, payload = {}) => port?.postMessage({protocol:'forest.management-ui-channel/1', nonce, type, ...payload});
+  const resize = () => send('resize', {height:Math.min(document.documentElement.scrollHeight,620)});
+  const status = value => { $('status').textContent = value; };
+  const randomId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)),
+    byte => byte.toString(16).padStart(2,'0')).join('');
+  const request = (type, operation_id, value, idempotency_key) => new Promise((resolve,reject) => {
+    const request_id = 'retirement-' + (++sequence);
+    pending.set(request_id,{resolve,reject});
+    send(type,{request_id,operation_id,value,...(idempotency_key ? {idempotency_key} : {})});
+  });
+  function row(item) {
+    const element = document.createElement('div');
+    element.className = 'row';
+    const identity = document.createElement('span');
+    identity.className = 'name';
+    const name = document.createElement('strong'); name.textContent = item.display_name;
+    const id = document.createElement('small'); id.textContent = item.bot_id;
+    identity.append(name,id); element.append(identity);
+    for (const value of [item.supply_state,item.desired_state,
+      item.job_state || (item.host_pinned ? '—' : '无 Host pin'),item.last_error_code || '—']) {
+      const cell = document.createElement('code'); cell.textContent = value; element.append(cell);
+    }
+    const button = document.createElement('button');
+    button.type = 'button'; button.textContent = '退役';
+    button.disabled = item.supply_state !== 'READY' || !item.host_pinned;
+    if (!item.host_pinned) button.title = '缺少准确的 Host 存储 pin，需先采纳或重建资源';
+    button.onclick = async () => {
+      button.disabled = true; status('正在冻结 Bot 并创建退役任务…');
+      try {
+        await request('action','bot.retire',{
+          bot_id:item.bot_id,expected_revision:item.revision,
+        },randomId());
+        status('退役任务已入队'); await load(false);
+      } catch (error) { status(error.message); button.disabled = false; }
+    };
+    element.append(button);
+    return element;
+  }
+  async function load(append) {
+    if (!append) {
+      after = null;
+      const values = Object.fromEntries(new FormData($('filter')));
+      filter = {
+        ...(values.search.trim() ? {search:values.search.trim()} : {}),
+        ...(values.supply_state ? {supply_state:values.supply_state} : {}),
+      };
+      $('items').replaceChildren();
+    }
+    $('more').disabled = true;
+    try {
+      const page = await request('query','retirement.jobs.list',{
+        limit:50,...filter,...(append && after ? {after} : {}),
+      });
+      for (const item of page.items) $('items').append(row(item));
+      after = page.next_after;
+      $('more').hidden = !after;
+      $('count').textContent = `已显示 ${$('items').children.length} 个 Bot`;
+      resize();
+    } catch (error) { status(error.message); }
+    finally { $('more').disabled = false; }
+  }
+  $('filter').onsubmit = event => { event.preventDefault(); load(false); };
+  $('refresh').onclick = () => load(false);
+  $('more').onclick = () => load(true);
+  addEventListener('message', event => {
+    const message = event.data || {};
+    if (event.source !== parent || !event.ports[0] ||
+        message.protocol !== 'forest.management-ui-connect/1' ||
+        message.type !== 'connect' || typeof message.nonce !== 'string') return;
+    port = event.ports[0]; nonce = message.nonce;
+    port.onmessage = event => {
+      const value = event.data || {};
+      if (value.protocol !== 'forest.management-ui-channel/1' || value.nonce !== nonce) return;
+      if (value.type === 'initialize') { status('已连接'); resize(); load(false); return; }
+      const entry = pending.get(value.request_id);
+      if (entry) {
+        pending.delete(value.request_id);
+        if (value.type === 'query-result' || value.type === 'action-result') entry.resolve(value.value);
+        else entry.reject(Error(value.message || '操作失败'));
+      } else if (value.type === 'error') status(value.message || '操作失败');
+    };
+    port.start(); send('ready');
+  },{once:true});
+})();
+</script>
+</body>
+</html>

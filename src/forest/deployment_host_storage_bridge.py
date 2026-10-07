@@ -142,6 +142,19 @@ class DeploymentHostStorageBridge:
             self._resource_lookup(request, pinned.resource_id),
         )
 
+    async def resource_status(self, request_id: str) -> dict:
+        """Read the exact Host resource bound to a frozen deployment pin."""
+        request = await self.requests.read(request_id)
+        pinned = await self.requests.pinned_resource(request_id)
+        if pinned is None:
+            raise ForestError(
+                "STORAGE_REQUEST_NOT_PINNED", "Host resource has no deployment pin", 409,
+            )
+        return await self._invoke_host(
+            request, "host.storage.resource", "resource",
+            self._resource_lookup(request, pinned.resource_id),
+        )
+
     @staticmethod
     def _resource_lookup(request, resource_id: str) -> dict:
         return {

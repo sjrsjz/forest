@@ -23,12 +23,14 @@ from forest.builtin_packages import official_builtin_configuration
 from forest.deployment_kernel_management import (
     BootstrapCatalogKernelQuery,
     BootstrapProfileKernelCommand,
+    BotBeginRetirementKernelCommand,
     BotCatalogKernelQuery,
     BotSetDesiredKernelCommand,
     DeploymentKernelManagementAuthority,
     ProvisioningJobKernelCommand,
     ProvisioningJobsKernelQuery,
     ProvisioningReconcileKernelCommand,
+    RetirementJobsKernelQuery,
     SecretPutKernelCommand,
     StorageRequestKernelCommand,
     StorageRequestsKernelQuery,
@@ -39,6 +41,8 @@ from forest.deployment_package_controller import DeploymentPackageController
 from forest.deployment_packages import bootstrap_builtin_deployment_package
 from forest.deployment_provisioning_driver import DeploymentProvisioningEffectDriver
 from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwnedWorkAuthority
+from forest.deployment_retirement_owned_work import DeploymentRetirementOwnedWorkAuthority
+from forest.deployment_retirement_ports import DeploymentRetirementPort
 from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.deployment_storage_owned_work import DeploymentStorageOwnedWorkAuthority
 from forest.embeddings import EmbeddingProfile
@@ -2025,6 +2029,42 @@ async def _storage_profile(repository, bot_id: str, name: str):
     )
 
 
+async def _synthetic_host_pin(repository, profile, name: str):
+    """Local admission fixture; physical Host proof is tested in the bridge suite."""
+    request_id = "storage-request/" + hashlib.sha256(name.encode()).hexdigest()
+    resource_id = "resource/" + str(uuid4())
+    host_id = "host/" + uuid4().hex
+    credential_digest = "sha256:" + "c" * 64
+    async with repository.store.transaction() as conn:
+        await conn.execute(
+            "INSERT INTO forest_deployment.storage_requests("
+            "request_id,deployment_id,host_id,bot_id,storage_generation,"
+            "profile_ref,dsn_secret_ref,credential_ref,credential_version,"
+            "credential_digest,input_digest) VALUES "
+            "(%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s)",
+            (request_id, repository.store.deployment_id, host_id,
+             profile.bot_id, profile.storage_generation, profile.profile_ref,
+             profile.dsn_secret_ref, f"secret://{name}/credential",
+             credential_digest, "sha256:" + "d" * 64),
+        )
+        await conn.execute(
+            "INSERT INTO forest_deployment.storage_request_resources("
+            "request_id,resource_id) VALUES (%s,%s)",
+            (request_id, resource_id),
+        )
+        await conn.execute(
+            "INSERT INTO forest_deployment.storage_request_pins("
+            "request_id,resource_id,deployment_id,host_id,profile_ref,"
+            "resource_revision,credential_digest,physical_name,role_name) "
+            "VALUES (%s,%s,%s,%s,%s,2,%s,%s,%s)",
+            (request_id, resource_id, repository.store.deployment_id,
+             host_id, profile.profile_ref, credential_digest,
+             "forest_bot_" + uuid4().hex[:24],
+             "forest_role_" + uuid4().hex[:24]),
+        )
+    return request_id, resource_id
+
+
 @pytest.mark.postgres
 async def test_storage_dispatch_is_exclusive_recoverable_and_lease_fenced(deployment_catalog):
     repository = deployment_catalog
@@ -2801,7 +2841,7 @@ async def test_bot_retirement_fences_startup_and_allows_stop_observations(
 
 @pytest.mark.postgres
 async def test_retirement_job_claim_is_unique_and_stale_claim_cannot_settle(
-    deployment_catalog,
+    deployment_catalog, tmp_path,
 ):
     repository = deployment_catalog
     await repository.initialize()
@@ -2815,11 +2855,42 @@ async def test_retirement_job_claim_is_unique_and_stale_claim_cannot_settle(
     )
     lease = await repository.claim_supervisor("host/retirement-job", "incarnation/job")
     jobs = DeploymentRetirementJobAuthority(repository.store)
-    assert await jobs.claim(lease, worker_id="worker/one", lease_seconds=30) is None
-    await repository.begin_retirement(
-        operation_id="retire/job", bot_id=bot["bot_id"],
-        expected_revision=bot["revision"],
+    package = PackageCatalog(tmp_path / "retirement-package").build(
+        Path(__file__).parents[1] / "src/forest/builtin/deployment_retirement"
     )
+    assert package.component["id"] == "deployment.retirement"
+    assert package.management_ui() is not None
+    assert await jobs.claim(lease, worker_id="worker/one", lease_seconds=30) is None
+    query = RetirementJobsKernelQuery(jobs)
+    before = (await query.query({"search": "retirement-job"}))["items"][0]
+    assert before["job_state"] is None and before["host_pinned"] is False
+    notified = []
+    command = BotBeginRetirementKernelCommand(
+        repository, notify=lambda: notified.append(True),
+    )
+    with pytest.raises(ForestError) as unpinned:
+        async with repository.store.transaction() as conn:
+            await command.execute_in(
+                conn, {"bot_id": bot["bot_id"], "expected_revision": bot["revision"]},
+                operation_id="retire/legacy-rejected",
+            )
+    assert unpinned.value.code == "BOT_RETIREMENT_REQUIRES_HOST_PIN"
+    assert (await repository.inspect(bot["bot_id"]))["supply_state"] == "READY"
+    await _synthetic_host_pin(repository, profile, "retirement-job")
+    assert (await query.query({"search": "retirement-job"}))["items"][0][
+        "host_pinned"
+    ] is True
+    async with repository.store.transaction() as conn:
+        started = await command.execute_in(
+            conn, {"bot_id": bot["bot_id"], "expected_revision": bot["revision"]},
+            operation_id="retire/job",
+        )
+    command.after_commit(started)
+    assert notified == [True]
+    assert started == {"bot_id": bot["bot_id"], "bot_revision": bot["revision"] + 1}
+    assert (await query.query({"supply_state": "DELETING"}))["items"][0][
+        "job_state"
+    ] == "QUEUED"
     first = await jobs.claim(lease, worker_id="worker/one", lease_seconds=30)
     assert first.operation_id == "retire/job"
     assert first.bot_id == bot["bot_id"]
@@ -2839,6 +2910,267 @@ async def test_retirement_job_claim_is_unique_and_stale_claim_cannot_settle(
             attempt_no=1,
         )
     assert stale.value.code == "STALE_RETIREMENT_CLAIM"
+
+
+@pytest.mark.postgres
+async def test_retirement_builtin_resumes_waiting_job_after_hot_replace(
+    deployment_catalog, tmp_path,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    secrets = DeploymentSecretAuthority(
+        repository.store, active_key_id="master/retirement/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+    profile = await _storage_profile(repository, "bot/retirement-reload", "retirement-reload")
+    bootstrap = await _bootstrap_profile(repository, profile, "retirement-reload")
+    bot = await repository.register_ready(
+        operation_id="provision/retirement-reload", bot_id="bot/retirement-reload",
+        display_name="Retirement Reload", storage_profile_ref=profile.profile_ref,
+        bootstrap_profile_ref=bootstrap.profile_ref,
+        bootstrap_manifest_digest=bootstrap.manifest_digest,
+    )
+    online = await repository.set_desired(
+        operation_id="online/retirement-reload", bot_id=bot["bot_id"],
+        desired_state="ONLINE", expected_revision=bot["intent_revision"],
+    )
+    lease = await repository.claim_supervisor(
+        "host/retirement-reload", "incarnation/retirement-reload", lease_seconds=300,
+    )
+    await repository.observe(
+        lease, bot_id=bot["bot_id"], observed_state="STARTING",
+        expected_intent_revision=online["intent_revision"],
+    )
+    await repository.begin_retirement(
+        operation_id="retire/retirement-reload", bot_id=bot["bot_id"],
+        expected_revision=bot["revision"],
+    )
+    jobs = DeploymentRetirementJobAuthority(repository.store)
+    bridge = SimpleNamespace()
+    runtime = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
+        kernel_query_handlers={
+            ("deployment.retirement", "deployment.retirement-jobs-page"):
+                RetirementJobsKernelQuery(jobs),
+        },
+        kernel_management_handlers={
+            ("deployment.retirement", "deployment.bot-begin-retirement"):
+                BotBeginRetirementKernelCommand(repository),
+        },
+    )
+    runtime.kernel_owned_work_authorities["deployment.retirement"] = (
+        DeploymentRetirementOwnedWorkAuthority(runtime, jobs, repository, bridge)
+    )
+    generations = []
+
+    def retirement_port(configuration, revision, identity, declaration):
+        generations.append(identity.generation_id)
+        return DeploymentRetirementPort(
+            configuration, revision, identity, declaration,
+            runtime=runtime, jobs=jobs, catalog=repository,
+            profiles=profiles, bridge=bridge,
+        )
+
+    runtime.effect_driver_factories["deployment.retirement-port"] = retirement_port
+    source = Path(__file__).parents[1] / "src/forest/builtin/deployment_retirement"
+    package_catalog = PackageCatalog(tmp_path / "retirement-hot-reload")
+    controller = DeploymentPackageController(
+        runtime, package_catalog, official_sources=(source,),
+    )
+    try:
+        graph = await controller.start()
+        page = await graph.get("deployment.retirement").management_contract.query(
+            "retirement.jobs.list", {"search": "retirement-reload", "limit": 10},
+        )
+        assert page["items"][0]["bot_id"] == bot["bot_id"]
+        async with asyncio.timeout(15):
+            while True:
+                row = (await jobs.page(search="retirement-reload"))["items"][0]
+                if row["job_state"] == "RETRY_WAIT":
+                    break
+                await asyncio.sleep(0.1)
+        assert row["last_error_code"] == "BOT_RETIREMENT_NOT_QUIESCENT"
+        replacement_source = tmp_path / "retirement-replacement"
+        shutil.copytree(source, replacement_source)
+        manifest = replacement_source / "module.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.0"', 'version = "1.0.1"', 1,
+            ), encoding="utf-8",
+        )
+        replacement = package_catalog.build_official(replacement_source)
+        await controller.replace(
+            "deployment.retirement", replacement.digest,
+            expected_graph_revision=graph.graph_identity.graph_revision,
+        )
+        await repository.observe(lease, bot_id=bot["bot_id"], observed_state="STOPPING")
+        await repository.observe(lease, bot_id=bot["bot_id"], observed_state="OFFLINE")
+        async with asyncio.timeout(25):
+            while True:
+                row = (await jobs.page(search="retirement-reload"))["items"][0]
+                if row["job_state"] == "BLOCKED_UNKNOWN":
+                    break
+                await asyncio.sleep(0.1)
+        assert row["last_error_code"] == "STORAGE_PROFILE_NOT_HOST_OWNED"
+        assert len(set(generations)) == 2
+    finally:
+        await controller.close()
+
+
+@pytest.mark.postgres
+async def test_retirement_webui_action_admits_one_kernel_job(deployment_catalog, tmp_path):
+    repository = deployment_catalog
+    await repository.initialize()
+    secrets = DeploymentSecretAuthority(
+        repository.store, active_key_id="master/retirement-web/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+    profile = await _storage_profile(repository, "bot/retirement-web", "retirement-web")
+    bootstrap = await _bootstrap_profile(repository, profile, "retirement-web")
+    bot = await repository.register_ready(
+        operation_id="provision/retirement-web", bot_id="bot/retirement-web",
+        display_name="Retirement Web", storage_profile_ref=profile.profile_ref,
+        bootstrap_profile_ref=bootstrap.profile_ref,
+        bootstrap_manifest_digest=bootstrap.manifest_digest,
+    )
+    await _synthetic_host_pin(repository, profile, "retirement-web")
+    legacy_profile = await _storage_profile(repository, "bot/legacy-web", "legacy-web")
+    legacy_bootstrap = await _bootstrap_profile(repository, legacy_profile, "legacy-web")
+    legacy = await repository.register_ready(
+        operation_id="provision/legacy-web", bot_id="bot/legacy-web",
+        display_name="Legacy Web", storage_profile_ref=legacy_profile.profile_ref,
+        bootstrap_profile_ref=legacy_bootstrap.profile_ref,
+        bootstrap_manifest_digest=legacy_bootstrap.manifest_digest,
+    )
+    identity = DeploymentWebIdentityAuthority(
+        repository.store, active_key_id="master/retirement-web/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    now = datetime.now(timezone.utc)
+    await identity.initialize_setup(SimpleNamespace(
+        setup_id="setup/retirement-web-1", pairing_code="r" * 48,
+        issued_at=now, expires_at=now + timedelta(hours=1),
+    ))
+    await identity.complete_setup(
+        pairing_code="r" * 48, username="admin", display_name="Administrator",
+        password="retirement-web-password",
+    )
+    lease = await repository.claim_supervisor(
+        "host/retirement-web", "incarnation/retirement-web", lease_seconds=300,
+    )
+    jobs = DeploymentRetirementJobAuthority(repository.store)
+    class UnavailableHostBridge:
+        async def release_reference(self, _request_id):
+            raise ForestError(
+                "HOST_STORAGE_GENERATION_UNAVAILABLE", "Host storage is offline", 503,
+            )
+
+    bridge = UnavailableHostBridge()
+    package_catalog = PackageCatalog(tmp_path / "retirement-web-packages")
+    runtime = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
+        package_catalog=package_catalog,
+        kernel_query_handlers={
+            ("deployment.retirement", "deployment.retirement-jobs-page"):
+                RetirementJobsKernelQuery(jobs),
+        },
+        kernel_management_handlers={
+            ("deployment.retirement", "deployment.bot-begin-retirement"):
+                BotBeginRetirementKernelCommand(repository),
+        },
+    )
+    runtime.kernel_owned_work_authorities["deployment.retirement"] = (
+        DeploymentRetirementOwnedWorkAuthority(runtime, jobs, repository, bridge)
+    )
+    runtime.effect_driver_factories["deployment.retirement-port"] = (
+        lambda configuration, revision, generation, declaration: DeploymentRetirementPort(
+            configuration, revision, generation, declaration,
+            runtime=runtime, jobs=jobs, catalog=repository,
+            profiles=profiles, bridge=bridge,
+        )
+    )
+    source = Path(__file__).parents[1] / "src/forest/builtin/deployment_retirement"
+    controller = DeploymentPackageController(
+        runtime, package_catalog, official_sources=(source,),
+    )
+    try:
+        graph = await controller.start()
+        snapshot = package_catalog.build(source)
+        app = create_deployment_management_app(
+            deployment_id="deployment/test",
+            deployment_registry_provider=lambda: graph,
+            identity_authority=identity,
+            deployment_web_receipts=DeploymentWebAuthorityRepository(repository.store),
+            deployment_audit=DeploymentAuditRepository(repository.store),
+            allowed_origin="http://forest.test",
+            bootstrap_registry=BootstrapConfigurationRegistry(
+                official_bootstrap_contributions()
+            ),
+            bootstrap_package_catalog=package_catalog,
+        )
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://forest.test",
+        ) as client:
+            login = await client.post(
+                "/management/v1/auth/login",
+                headers={"origin": "http://forest.test"},
+                json={"username": "admin", "password": "retirement-web-password"},
+            )
+            assert login.status_code == 200
+            headers = {
+                "origin": "http://forest.test",
+                "x-forest-csrf": client.cookies["forest_management_csrf"],
+            }
+            ui = await client.get(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                f"deployment.retirement/management-ui/{snapshot.management_ui()[0]['sha256']}",
+                headers=headers,
+            )
+            assert ui.status_code == 200
+            assert "retirement.jobs.list" in ui.text
+            path = (
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.retirement/queries/retirement.jobs.list"
+            )
+            page = await client.post(path, headers=headers, json={"search": "retirement-web"})
+            assert page.status_code == 200, page.text
+            assert page.json()["items"][0]["revision"] == bot["revision"]
+            assert page.json()["items"][0]["host_pinned"] is True
+            rejected_legacy = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.retirement/actions/bot.retire",
+                headers={**headers, "idempotency-key": "retirement-legacy-rejected"},
+                json={"bot_id": legacy["bot_id"],
+                      "expected_revision": legacy["revision"]},
+            )
+            assert rejected_legacy.status_code == 409
+            assert rejected_legacy.json()["code"] == "BOT_RETIREMENT_REQUIRES_HOST_PIN"
+            assert (await repository.inspect(legacy["bot_id"]))["supply_state"] == "READY"
+            action = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.retirement/actions/bot.retire",
+                headers={**headers, "idempotency-key": "retirement-web-once"},
+                json={"bot_id": bot["bot_id"], "expected_revision": bot["revision"]},
+            )
+            assert action.status_code == 200, action.text
+            assert action.json() == {
+                "bot_id": bot["bot_id"], "bot_revision": bot["revision"] + 1,
+            }
+            replay = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.retirement/actions/bot.retire",
+                headers={**headers, "idempotency-key": "retirement-web-once"},
+                json={"bot_id": bot["bot_id"], "expected_revision": bot["revision"]},
+            )
+            assert replay.json() == action.json()
+        assert (await repository.inspect(bot["bot_id"]))["supply_state"] == "DELETING"
+        assert (await jobs.page(search="retirement-web"))["items"][0][
+            "operation_id"
+        ] is not None
+    finally:
+        await controller.close()
 
 
 @pytest.mark.postgres

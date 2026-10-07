@@ -477,6 +477,28 @@ class DeploymentCatalogRepository:
         )
         return {"bot_id": bot_id, "bot_revision": saved["revision"]}
 
+    async def require_host_pin_for_retirement_in(self, conn, bot_id: str) -> None:
+        """Reject a management retirement whose physical ownership is unknown."""
+        _bounded(bot_id, "bot_id", 128)
+        pinned = await (
+            await conn.execute(
+                "SELECT 1 FROM forest_deployment.bots b "
+                "JOIN forest_deployment.storage_requests r ON "
+                "r.bot_id=b.bot_id AND r.storage_generation=b.storage_generation "
+                "AND r.profile_ref=b.storage_profile_ref "
+                "JOIN forest_deployment.storage_request_pins p ON "
+                "p.request_id=r.request_id AND p.profile_ref=r.profile_ref "
+                "AND p.host_id=r.host_id AND p.deployment_id=r.deployment_id "
+                "WHERE b.bot_id=%s AND r.deployment_id=%s",
+                (bot_id, self.store.deployment_id),
+            )
+        ).fetchone()
+        if pinned is None:
+            raise ForestError(
+                "BOT_RETIREMENT_REQUIRES_HOST_PIN",
+                "Bot storage has no exact Host ownership pin", 409,
+            )
+
     async def begin_retirement(
         self, *, operation_id: str, bot_id: str, expected_revision: int,
         authorization=None,
