@@ -4621,6 +4621,15 @@ async def test_memory_package_qualifies_exact_conversation_batch(
             "external_group_id": "933179609",
             "author_subject_ref": "qq:42",
         }]
+        evidence_page = await instance.management_contract.query(
+            "memory.relations.evidence",
+            {"relation_id": "relation/topic/test", "contribution_id": "contribution/test",
+             "snapshot_xid": relations["snapshot_xid"]},
+        )
+        assert evidence_page["total_count"] == 1
+        assert evidence_page["items"][0]["source_unit_id"] == "unit/event/captured"
+        assert evidence_page["items"][0]["evidence_index"] == 0
+        assert not evidence_page["has_more"]
 
         async with store.pool.connection() as conn:
             occurrence = await (

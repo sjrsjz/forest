@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["relation_id", "contribution_id", "snapshot_xid"],
+  "properties": {
+    "relation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "contribution_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "snapshot_xid": {"type": "string", "minLength": 3, "maxLength": 65536},
+    "after_evidence_index": {"type": "integer", "minimum": 0, "maximum": 63},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 16}
+  }
+}

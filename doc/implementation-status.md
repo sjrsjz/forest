@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Memory 关系证据分页（2026-10-07）：`memory.graph` 1.79.0、私有 SQL 3.73.0 新增 `memory.relations.evidence` 管理查询。关系列表和多跳邻域继续以固定快照展示首批证据；超过首批 16/4 条时，页面按关系 ID、贡献 ID 与同一快照逐页读取最多 16 条，逐条标出群、主干、来源与作者。每页按当前资格和来源状态重新校验整条关系，撤回后旧快照不再泄露证据。隔离 PostgreSQL 测试验证了 20 条证据跨页、来源标记、Bot 隔离、非法快照、撤回拒读和正式管理契约路由。相关大用例首次运行 4/5 通过，`NOT_SENT` 场景在新增查询之前的嵌入 facet 领取处失败；单独复跑通过。在线实例未切换。
+
 Memory 数据库回归复核（2026-10-07）：在独立 PostgreSQL 容器中连续运行 `test_memory_graph_package`、`test_memory_graph_retrieval`、`test_memory_graph_relation_scale`、`test_memory_graph_neighbours`、`test_memory_embedding_work`、`test_memory_association` 与 `test_memory_evidence_materialization`，结果 `42 passed`（362.12 秒）。这覆盖上轮修正的试验夹具以及图关系、邻接、嵌入工作与证据物化的同轮回归；容器已清理。该结果不替代在线 QQ、长周期负载或生产存储切换验收。
 
 Host 存储预留账本（2026-10-07）：新增未自动安装的真实 `host.storage` builtin，拥有独立 Host 模块 schema、资源预留操作账本、按 owner/状态筛选的有界键集查询、自带 UI，以及明确映射到包私有 Command 的内部幂等服务。control 包编译器只允许官方包把这种服务绑定到准确私有 Command，普通安装包不能借声明取得 SQL 写端口。隔离 PostgreSQL 中，真实 Host Worker 完成预留、同键重放、不同输入与逻辑资源冲突、查询、热替换后原键重放（1 passed）；Ruff 和包校验通过，临时数据库容器已删除。物理创建 Effect、deployment 跨 scope 桥、ACTIVE 结算、冻结引用和回收尚未实现；生产 Host Graph 尚不启动，页面不能代表完整物理库存。

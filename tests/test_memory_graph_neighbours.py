@@ -633,11 +633,63 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         assert sampled_a != sampled_b
         print(f"20k-edge neighbour sample: {elapsed:.3f}s")
 
+        async with conn.transaction():
+            await execute(
+                "INSERT INTO {}.relation_contributions (bot_id,contribution_id,operation_id,"
+                "input_digest,relation_id,relation_kind,left_kind,left_id,right_kind,right_id,"
+                "origin_kind,weight_micros,admitted_deletion_epoch,cross_trunk) VALUES "
+                "(%s,'evidence/paged','op/evidence/paged',%s,'relation/evidence/paged',"
+                "'ASSOCIATES_WITH','SOURCE_UNIT','seed','SOURCE_UNIT','n00','RULE',500000,0,true)",
+                (store.bot_id, digest),
+            )
+            await execute(
+                "INSERT INTO {}.relation_evidence (bot_id,contribution_id,evidence_index,"
+                "source_unit_id,source_revision,part_id) "
+                "SELECT %s,'evidence/paged',n,'n'||lpad(n::text,2,'0'),1,'text' "
+                "FROM generate_series(0,19) n",
+                (store.bot_id,),
+            )
+        snapshot = (await (await conn.execute("SELECT pg_current_snapshot()::text AS snapshot")).fetchone())["snapshot"]
+        evidence_validator = Draft202012Validator(
+            package.snapshot.schema("schemas/query-relation-evidence-output.json")
+        )
+
+        async def relation_evidence(values, *, bot_id=store.bot_id):
+            row = await (await execute(
+                "SELECT {}.memory_query_relation_evidence(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": bot_id}), Jsonb({
+                    "relation_id": "relation/evidence/paged", "contribution_id": "evidence/paged",
+                    "snapshot_xid": snapshot, **values,
+                })),
+            )).fetchone()
+            return row["result"]
+
+        first_evidence = await relation_evidence({"limit": 16})
+        assert first_evidence["ok"], first_evidence
+        evidence_validator.validate(first_evidence["value"])
+        assert len(first_evidence["value"]["items"]) == 16
+        assert first_evidence["value"]["total_count"] == 20
+        assert first_evidence["value"]["has_more"]
+        second_evidence = await relation_evidence({
+            "after_evidence_index": first_evidence["value"]["next_after"], "limit": 16,
+        })
+        assert second_evidence["ok"], second_evidence
+        evidence_validator.validate(second_evidence["value"])
+        assert [item["evidence_index"] for item in second_evidence["value"]["items"]] == [16, 17, 18, 19]
+        assert not second_evidence["value"]["has_more"]
+        assert second_evidence["value"]["next_after"] is None
+        assert all(item["external_group_id"] == "group/b" and item["trunk_id"] == "trunk/b"
+                   and item["author_subject_ref"] == "qq:author/b"
+                   for item in second_evidence["value"]["items"])
+        assert (await relation_evidence({}, bot_id="another-bot"))["error"]["code"] == "MEMORY_RELATION_NOT_VISIBLE"
+        assert (await relation_evidence({"snapshot_xid": "invalid"}))["error"]["code"] == "MEMORY_QUERY_INVALID"
+
         await execute(
             "UPDATE {}.source_units SET eligibility_state='SUPPRESSED',"
             "eligibility_revision=eligibility_revision+1 WHERE bot_id=%s AND source_unit_id='n01'",
             (store.bot_id,),
         )
+        assert (await relation_evidence({}))["error"]["code"] == "MEMORY_RELATION_NOT_VISIBLE"
         assert "edge/1" not in selected(await neighbours("query/new", limit=128))
         await execute(
             "UPDATE {}.memory_sources SET status='RETIRED' WHERE bot_id=%s AND source_id='b'",

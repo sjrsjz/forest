@@ -9660,6 +9660,100 @@ RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     SELECT __forest_module_schema__.memory_query_relations(context,input)
 $$;
 
+CREATE FUNCTION memory_query_relation_evidence(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_relation text := input->>'relation_id';
+    requested_contribution text := input->>'contribution_id';
+    requested_after integer := COALESCE((input->>'after_evidence_index')::integer,-1);
+    page_limit integer := COALESCE((input->>'limit')::integer,16);
+    snapshot_value pg_snapshot;
+    total_count integer;
+    items jsonb;
+    last_index integer;
+    more boolean;
+BEGIN
+    snapshot_value := (input->>'snapshot_xid')::pg_snapshot;
+    IF requested_bot IS NULL OR requested_relation IS NULL OR
+       requested_contribution IS NULL OR snapshot_value IS NULL OR
+       requested_after NOT BETWEEN -1 AND 63 OR page_limit NOT BETWEEN 1 AND 16 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Relation evidence request is invalid','status',422));
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.relation_contributions c
+        WHERE c.bot_id=requested_bot AND c.relation_id=requested_relation
+          AND c.contribution_id=requested_contribution AND c.active
+          AND pg_visible_in_snapshot(c.created_xid,snapshot_value)
+          AND (c.left_kind<>'SOURCE_UNIT' OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_units u
+            JOIN __forest_module_schema__.memory_sources s
+              ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+            WHERE u.bot_id=c.bot_id AND u.source_unit_id=c.left_id
+              AND u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE'
+              AND pg_visible_in_snapshot(u.eligible_xid,snapshot_value)
+          ))
+          AND (c.right_kind<>'SOURCE_UNIT' OR EXISTS (
+            SELECT 1 FROM __forest_module_schema__.source_units u
+            JOIN __forest_module_schema__.memory_sources s
+              ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+            WHERE u.bot_id=c.bot_id AND u.source_unit_id=c.right_id
+              AND u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE'
+              AND pg_visible_in_snapshot(u.eligible_xid,snapshot_value)
+          ))
+          AND NOT EXISTS (
+            SELECT 1 FROM __forest_module_schema__.relation_evidence e
+            JOIN __forest_module_schema__.source_units u
+              ON u.bot_id=e.bot_id AND u.source_unit_id=e.source_unit_id
+            JOIN __forest_module_schema__.memory_sources s
+              ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+            WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
+              AND (u.eligibility_state<>'ELIGIBLE' OR s.status<>'ACTIVE'
+                   OR NOT pg_visible_in_snapshot(u.eligible_xid,snapshot_value))
+          )
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_NOT_VISIBLE',
+                'message','Relation is not visible at the requested snapshot','status',404));
+    END IF;
+    SELECT count(*) INTO total_count
+    FROM __forest_module_schema__.relation_evidence e
+    WHERE e.bot_id=requested_bot AND e.contribution_id=requested_contribution;
+    SELECT COALESCE(jsonb_agg(to_jsonb(page) ORDER BY page.evidence_index),'[]'::jsonb),
+           max(page.evidence_index)
+    INTO items,last_index
+    FROM (
+        SELECT e.evidence_index,e.source_unit_id,e.source_revision,e.part_id,
+            u.trunk_id,s.source_id,s.source_kind,s.platform,s.realm_id,
+            s.external_group_id,u.author_subject_ref
+        FROM __forest_module_schema__.relation_evidence e
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=e.bot_id AND u.source_unit_id=e.source_unit_id
+        JOIN __forest_module_schema__.memory_sources s
+          ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+        WHERE e.bot_id=requested_bot AND e.contribution_id=requested_contribution
+          AND e.evidence_index>requested_after
+        ORDER BY e.evidence_index LIMIT page_limit
+    ) page;
+    SELECT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.relation_evidence e
+        WHERE e.bot_id=requested_bot AND e.contribution_id=requested_contribution
+          AND e.evidence_index>last_index
+    ) INTO more;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('relation_id',requested_relation,
+            'contribution_id',requested_contribution,'snapshot_xid',snapshot_value::text,
+            'total_count',total_count,'items',items,'has_more',more,
+            'next_after',CASE WHEN more THEN last_index ELSE NULL END));
+EXCEPTION WHEN invalid_text_representation THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+            'message','Relation snapshot is invalid','status',422));
+END;
+$$;
+
 CREATE FUNCTION memory_query_neighbourhood(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
