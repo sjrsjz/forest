@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host 资源引用固定（2026-10-07）：`host.storage` 0.6.0 / 私有 SQL 1.4.0 新增 Host 私有不可变 profile pin 账本与受限幂等服务。只有归属元组完全匹配、owned-work 已结算的 ACTIVE 资源可以固定到一个 deployment/profile；同操作并发重放复用回执，改用其他 profile 或归属会拒绝。真实 PostgreSQL 包回归 `2 passed`。production Host Graph、跨 scope 桥及 deployment 本库 profile 提交仍未接入该回执，pin 解绑定和安全回收也未实现，因此旧本地分配器尚不能切断，Host 清单不能作为全量库存。
+
 Host 持久物化工作（2026-10-07）：`host.storage` 0.5.0、私有 SQL 1.3.0 由包内 owned-work 持有 `resource_id`、凭据引用、租约、尝试次数和结果。Worker 通过原生 PostgreSQL Effect 与包内 `realize` 命令结算；精确资源和工作状态只读端口同时核对资源、deployment、Bot 与 storage generation，返回物理名称与状态但不返回凭据或 owner marker。隔离 PostgreSQL 的真实包回归 `2 passed`，包括并发同键入队合流、异请求冲突、错误归属拒读、旧代冻结后入队、遗留领取租约到期、新代重领同一资源并建库结算；没有生成第二个物理名字。生产 Host Graph、部署跨 scope 持久投递、口令权威、逻辑引用冻结和安全回收仍未接通，旧 `LocalPostgresDatabaseAllocator` 仍在生产路径上，不能把 Host 清单当成全量物理库存。以下 Host 条目按开发阶段记录，现况以本段为准。
 
 Memory 关系证据分页（2026-10-07）：`memory.graph` 1.79.1、私有 SQL 3.73.1 新增 `memory.relations.evidence` 管理查询。关系列表和多跳邻域继续以固定快照展示首批证据；超过首批 16/4 条时，页面按关系 ID、贡献 ID 与同一快照逐页读取最多 16 条，逐条标出群、主干、来源与作者。每页按当前资格和来源状态重新校验整条关系，撤回后旧快照不再泄露证据。来源列表与关系列表的快照解析也移到函数体内，非法快照返回领域错误而非裸 SQL 异常。隔离 PostgreSQL 测试验证了 20 条证据跨页、来源标记、Bot 隔离、非法快照、撤回拒读和正式管理契约路由。相关大用例首次运行 4/5 通过，`NOT_SENT` 场景在新增查询之前的嵌入 facet 领取处失败；单独复跑通过。在线实例未切换。

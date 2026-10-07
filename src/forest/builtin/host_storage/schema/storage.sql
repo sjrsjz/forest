@@ -59,6 +59,18 @@ CREATE TABLE materialization_settlements (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+CREATE TABLE resource_reference_pins (
+    resource_id text PRIMARY KEY REFERENCES physical_generations(resource_id),
+    deployment_id text NOT NULL CHECK (octet_length(deployment_id) BETWEEN 1 AND 128),
+    operation_id text NOT NULL UNIQUE CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    profile_ref text NOT NULL CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
+    resource_revision bigint NOT NULL CHECK (resource_revision >= 2),
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (deployment_id,profile_ref)
+);
+
 CREATE FUNCTION host_storage_reserve(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -398,6 +410,91 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','HOST_STORAGE_SETTLEMENT_INVALID',
             'message','Materialization settlement is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION host_storage_pin_reference(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_operation text := context->>'operation_id';
+    requested_resource text := input->>'resource_id';
+    item __forest_module_schema__.physical_generations%ROWTYPE;
+    replay __forest_module_schema__.resource_reference_pins%ROWTYPE;
+    result_value jsonb;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR context->>'port_kind' IS DISTINCT FROM 'command'
+       OR context->>'port_name' IS DISTINCT FROM 'host.storage.reference-pin-record'
+       OR requested_operation IS NULL OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR context->>'input_digest' !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_resource !~ '^resource/[a-f0-9-]{36}$'
+       OR input->>'deployment_id' IS NULL OR input->>'bot_id' IS NULL
+       OR input->>'storage_generation' IS NULL
+       OR input->>'profile_ref' IS NULL
+       OR octet_length(input->>'profile_ref') NOT BETWEEN 1 AND 512 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_REFERENCE_INVALID',
+                'message','Host reference pin is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'host.storage.reference.operation/'||requested_operation,0));
+    SELECT * INTO replay FROM __forest_module_schema__.resource_reference_pins
+    WHERE operation_id=requested_operation FOR UPDATE;
+    IF FOUND THEN
+        IF replay.resource_id IS DISTINCT FROM requested_resource
+           OR replay.input_digest IS DISTINCT FROM context->>'input_digest' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_REFERENCE_CONFLICT',
+                    'message','Reference operation differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',replay.result_payload);
+    END IF;
+    SELECT * INTO item FROM __forest_module_schema__.physical_generations
+    WHERE resource_id=requested_resource FOR UPDATE;
+    IF NOT FOUND OR item.host_id IS DISTINCT FROM context->>'scope_id'
+       OR item.deployment_id IS DISTINCT FROM input->>'deployment_id'
+       OR item.bot_id IS DISTINCT FROM input->>'bot_id'
+       OR item.storage_generation IS DISTINCT FROM (input->>'storage_generation')::bigint
+       OR item.state<>'ACTIVE'
+       OR NOT EXISTS (
+           SELECT 1 FROM __forest_module_schema__.materialization_work w
+           WHERE w.resource_id=item.resource_id AND w.state='SUCCEEDED'
+             AND (w.result_payload->>'revision')::bigint=item.revision
+       ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RESOURCE_UNAVAILABLE',
+                'message','Active Host resource is unavailable for reference','status',409));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'host.storage.reference.profile/'||item.deployment_id||'/'||(input->>'profile_ref'),0));
+    SELECT * INTO replay FROM __forest_module_schema__.resource_reference_pins
+    WHERE resource_id=requested_resource
+       OR (deployment_id=item.deployment_id AND profile_ref=input->>'profile_ref')
+    FOR UPDATE;
+    IF FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_REFERENCE_CONFLICT',
+                'message','Resource or profile already has another reference','status',409));
+    END IF;
+    result_value := jsonb_build_object(
+        'resource_id',item.resource_id,'host_id',item.host_id,
+        'deployment_id',item.deployment_id,'bot_id',item.bot_id,
+        'storage_generation',item.storage_generation,
+        'profile_ref',input->>'profile_ref','state','PINNED',
+        'resource_revision',item.revision);
+    INSERT INTO __forest_module_schema__.resource_reference_pins(
+        resource_id,deployment_id,operation_id,input_digest,profile_ref,
+        resource_revision,result_payload)
+    VALUES(item.resource_id,item.deployment_id,requested_operation,
+        context->>'input_digest',input->>'profile_ref',item.revision,result_value);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',result_value);
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_REFERENCE_INVALID',
+            'message','Host reference pin is invalid','status',422));
 END;
 $$;
 

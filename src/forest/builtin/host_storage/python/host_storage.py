@@ -25,6 +25,13 @@ class HostStorage(Plugin):
     async def resource(self, payload, ctx):
         return await ctx.queries.call("host.storage.resource-read", payload)
 
+    @service("host.storage.reference.pin", semantics="idempotent")
+    async def pin_reference(self, payload, ctx):
+        return await ctx.commands.call(
+            "host.storage.reference-pin-record", payload,
+            operation_id=ctx.operations.stable("reference-pin:v1"),
+        )
+
     @service("host.storage.reserve", semantics="idempotent")
     async def reserve(self, payload, ctx):
         return await ctx.commands.call(

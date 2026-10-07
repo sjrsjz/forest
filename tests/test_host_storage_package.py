@@ -224,7 +224,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.5.0"', 'version = "0.5.1"', 1,
+                'version = "0.6.0"', 'version = "0.6.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -429,7 +429,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert abandoned["ok"] and abandoned["value"]["work_id"] == queued_reservation["resource_id"]
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.5.1"', 'version = "0.5.2"', 1,
+                'version = "0.6.1"', 'version = "0.6.2"', 1,
             ), encoding="utf-8",
         )
         resumed_package = catalog.build_official(source, scope="host")
@@ -467,6 +467,56 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         )
         assert active_resource["state"] == "ACTIVE"
         assert active_resource["physical_name"] == queued_physical[0]
+        final_graph = current.graph_identity
+        pin_route = FrozenServiceRoute(
+            service_id="host.storage.reference.pin", version=1,
+            caller_component_id="host.test-bridge",
+            provider_component_id="host.storage",
+            provider_generation_id=final_graph.generations["host.storage"],
+            graph_id=final_graph.graph_id, graph_revision=final_graph.graph_revision,
+            admission_lane="DATA", owned_work=False,
+        )
+        pin = current.get("host.storage").runtime_service_handlers()[
+            ("host.storage.reference.pin", 1)
+        ]
+
+        async def pin_request(operation_id, value):
+            return await pin.invoke_routed(
+                pin_route,
+                RuntimeServiceInvocation(
+                    operation_id, 10, "test.host-storage", "bot/storage",
+                ),
+                (value,), {},
+            )
+
+        pin_input = {**lookup, "profile_ref": "storage-profile/queued"}
+        pinned, pin_replay = await asyncio.gather(
+            pin_request("pin/queued", pin_input),
+            pin_request("pin/queued", pin_input),
+        )
+        assert pinned == pin_replay
+        assert pinned["resource_id"] == queued_reservation["resource_id"]
+        assert pinned["state"] == "PINNED"
+        assert pinned["resource_revision"] == active_resource["revision"]
+        with pytest.raises(ForestError) as other_pin:
+            await pin_request(
+                "pin/other-profile", {**pin_input, "profile_ref": "storage-profile/other"},
+            )
+        assert other_pin.value.code == "HOST_STORAGE_REFERENCE_CONFLICT"
+        with pytest.raises(ForestError) as other_owner_pin:
+            await pin_request(
+                "pin/other-owner", {**pin_input, "deployment_id": "another-deployment"},
+            )
+        assert other_owner_pin.value.code == "HOST_STORAGE_RESOURCE_UNAVAILABLE"
+        with pytest.raises(ForestError) as manual_pin:
+            await pin_request("pin/manual", {
+                "resource_id": first["resource_id"],
+                "deployment_id": payload["deployment_id"],
+                "bot_id": payload["bot_id"],
+                "storage_generation": payload["storage_generation"],
+                "profile_ref": "storage-profile/manual",
+            })
+        assert manual_pin.value.code == "HOST_STORAGE_RESOURCE_UNAVAILABLE"
         assert queued_reservation["resource_id"] in {
             item["resource_id"] for item in active_page["items"]
         }

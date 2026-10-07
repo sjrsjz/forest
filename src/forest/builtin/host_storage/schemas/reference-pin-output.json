@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["resource_id", "host_id", "deployment_id", "bot_id", "storage_generation", "profile_ref", "state", "resource_revision"],
+  "properties": {
+    "resource_id": {"type": "string", "pattern": "^resource/[a-f0-9-]{36}$"},
+    "host_id": {"type": "string", "pattern": "^host/[a-f0-9]{32}$"},
+    "deployment_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "bot_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "storage_generation": {"type": "integer", "minimum": 1},
+    "profile_ref": {"type": "string", "minLength": 1, "maxLength": 512},
+    "state": {"const": "PINNED"},
+    "resource_revision": {"type": "integer", "minimum": 2}
+  }
+}
