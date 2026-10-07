@@ -99,8 +99,24 @@ class DeploymentSecretAuthority:
         )
         await conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"forest.deployment.storage-request/dsn/{secret_ref}",),
+        )
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
             (f"forest.deployment.secret/{secret_ref}",),
         )
+        reservation = await (
+            await conn.execute(
+                "SELECT 1 FROM forest_deployment.storage_requests "
+                "WHERE deployment_id=%s AND dsn_secret_ref=%s LIMIT 1",
+                (self.store.deployment_id, secret_ref),
+            )
+        ).fetchone()
+        if reservation is not None:
+            raise ForestError(
+                "STORAGE_REQUEST_DSN_RESERVED",
+                "Host storage request reserves this DSN Secret reference", 409,
+            )
         replay = await (
             await conn.execute(
                 "SELECT v.*,s.purpose,s.revision FROM forest_deployment.secret_versions v "

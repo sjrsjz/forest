@@ -76,6 +76,7 @@ from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJo
 from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInstaller
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority, SecretMetadata
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_storage_requests import DeploymentStorageRequestAuthority
 from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
@@ -2020,6 +2021,175 @@ async def _storage_profile(repository, bot_id: str, name: str):
 
 
 @pytest.mark.postgres
+async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    requests = DeploymentStorageRequestAuthority(repository.store)
+    target = {
+        "host_id": "host/" + "a" * 32,
+        "bot_id": "bot/host-intent",
+        "storage_generation": 1,
+        "profile_ref": "storage-profile/host-intent/1",
+        "dsn_secret_ref": "secret://host-intent/dsn",
+        "credential_ref": "secret://host-intent/password",
+    }
+    first, replay = await asyncio.gather(
+        requests.request(operation_id="host-intent/first", **target),
+        requests.request(operation_id="host-intent/retry", **target),
+    )
+    assert first == replay == await requests.read(first.request_id)
+    assert first.state == "REQUESTED"
+    async with repository.store.pool.connection() as conn:
+        assert (await (await conn.execute(
+            "SELECT count(*) AS count FROM forest_deployment.storage_requests",
+        )).fetchone())["count"] == 1
+        assert (await (await conn.execute(
+            "SELECT count(*) AS count FROM forest_deployment.storage_profiles",
+        )).fetchone())["count"] == 0
+        assert (await (await conn.execute(
+            "SELECT count(*) AS count FROM forest_deployment.secret_slots",
+        )).fetchone())["count"] == 0
+    with pytest.raises(ForestError) as changed:
+        await requests.request(
+            operation_id="host-intent/changed",
+            **{**target, "host_id": "host/" + "b" * 32},
+        )
+    assert changed.value.code == "STORAGE_REQUEST_CONFLICT"
+    for changed_field in ("profile_ref", "dsn_secret_ref"):
+        candidate = {
+            **target, "bot_id": f"bot/other-{changed_field}",
+            "profile_ref": f"storage-profile/other-{changed_field}/1",
+            "dsn_secret_ref": f"secret://other-{changed_field}/dsn",
+        }
+        candidate[changed_field] = target[changed_field]
+        with pytest.raises(ForestError) as duplicate:
+            await requests.request(
+                operation_id=f"host-intent/duplicate-{changed_field}",
+                **candidate,
+            )
+        assert duplicate.value.code == "STORAGE_REQUEST_CONFLICT"
+
+    secrets = DeploymentSecretAuthority(
+        repository.store, active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    with pytest.raises(ForestError) as premature_dsn:
+        await secrets.put(
+            operation_id="host-intent/dsn-written",
+            secret_ref=target["dsn_secret_ref"], purpose="storage.postgresql.dsn",
+            plaintext=b"postgresql://forest:password@localhost/forest_host_intent",
+            expected_revision=0,
+        )
+    assert premature_dsn.value.code == "STORAGE_REQUEST_DSN_RESERVED"
+    profiles = DeploymentStorageProfileAuthority(repository.store, secrets=secrets)
+    with pytest.raises(ForestError) as premature:
+        await profiles.create(
+            operation_id="host-intent/premature-profile",
+            profile_ref=target["profile_ref"], bot_id=target["bot_id"],
+            storage_generation=target["storage_generation"],
+            dsn_secret_ref=target["dsn_secret_ref"],
+        )
+    assert premature.value.code == "STORAGE_PROFILE_REQUEST_PENDING"
+
+    existing = await _storage_profile(repository, "bot/existing", "existing-host-intent")
+    with pytest.raises(ForestError) as occupied:
+        await requests.request(
+            operation_id="host-intent/existing-profile",
+            **{**target, "bot_id": existing.bot_id,
+               "profile_ref": "storage-profile/existing-other/1",
+               "dsn_secret_ref": "secret://existing-other/dsn"},
+        )
+    assert occupied.value.code == "STORAGE_REQUEST_CONFLICT"
+
+    competing = {
+        **target, "bot_id": "bot/host-intent-race",
+        "profile_ref": "storage-profile/host-intent-race/1",
+        "dsn_secret_ref": "secret://host-intent/race-dsn",
+    }
+    outcomes = await asyncio.gather(
+        requests.request(operation_id="host-intent/race-request", **competing),
+        secrets.put(
+            operation_id="host-intent/race-secret",
+            secret_ref=competing["dsn_secret_ref"],
+            purpose="storage.postgresql.dsn",
+            plaintext=b"postgresql://forest:password@localhost/forest_race",
+            expected_revision=0,
+        ),
+        return_exceptions=True,
+    )
+    failures = [result for result in outcomes if isinstance(result, Exception)]
+    assert len(failures) == 1
+    assert isinstance(failures[0], ForestError)
+    assert failures[0].code in {
+        "STORAGE_REQUEST_CONFLICT", "STORAGE_REQUEST_DSN_RESERVED",
+    }
+
+    await secrets.put(
+        operation_id="host-intent/legacy-secret",
+        secret_ref="secret://host-intent/legacy-dsn",
+        purpose="storage.postgresql.dsn",
+        plaintext=b"postgresql://forest:password@localhost/forest_legacy",
+        expected_revision=0,
+    )
+    legacy_race = await asyncio.gather(
+        profiles.create(
+            operation_id="host-intent/legacy-profile",
+            profile_ref="storage-profile/host-intent-legacy/1",
+            bot_id="bot/host-intent-legacy", storage_generation=1,
+            dsn_secret_ref="secret://host-intent/legacy-dsn",
+        ),
+        requests.request(
+            operation_id="host-intent/legacy-race-request",
+            **{**target, "bot_id": "bot/host-intent-legacy",
+               "profile_ref": "storage-profile/host-intent-host/1",
+               "dsn_secret_ref": "secret://host-intent/host-dsn"},
+        ),
+        return_exceptions=True,
+    )
+    failures = [result for result in legacy_race if isinstance(result, Exception)]
+    assert len(failures) == 1
+    assert isinstance(failures[0], ForestError)
+    assert failures[0].code in {
+        "STORAGE_REQUEST_CONFLICT", "STORAGE_PROFILE_REQUEST_PENDING",
+    }
+
+    local = LocalStorageProfileKernelCommand(
+        secrets, profiles,
+        SimpleNamespace(
+            new_target_dsn=lambda _bot_id: (
+                "postgresql://forest:password@localhost/forest_local_race"
+            ),
+            validate_target=lambda _bot_id, _dsn: None,
+        ),
+    )
+
+    async def create_local_race():
+        async with repository.store.transaction() as conn:
+            return await local.execute_in(conn, {
+                "profile_ref": "storage-profile/local-race/1",
+                "bot_id": "bot/local-race", "storage_generation": 1,
+                "dsn_secret_ref": "secret://local-race/dsn",
+            }, operation_id="host-intent/local-race")
+
+    local_race = await asyncio.wait_for(asyncio.gather(
+        create_local_race(),
+        requests.request(
+            operation_id="host-intent/local-race-request",
+            **{**target, "bot_id": "bot/local-race",
+               "profile_ref": "storage-profile/host-local-race/1",
+               "dsn_secret_ref": "secret://host-local-race/dsn"},
+        ),
+        return_exceptions=True,
+    ), timeout=10)
+    failures = [result for result in local_race if isinstance(result, Exception)]
+    assert len(failures) == 1
+    assert isinstance(failures[0], ForestError)
+    assert failures[0].code in {
+        "STORAGE_REQUEST_CONFLICT", "STORAGE_PROFILE_REQUEST_PENDING",
+    }
+
+
+@pytest.mark.postgres
 async def test_deployment_catalog_keeps_bot_identity_intent_and_observation_separate(
     deployment_catalog,
 ):
@@ -2614,7 +2784,7 @@ async def test_provisioning_recovery_is_bounded_and_drains_successive_batches(
             "INSERT INTO forest_deployment.storage_profiles("
             "profile_ref,bot_id,storage_generation,dsn_secret_ref) "
             "SELECT 'storage/recovery/'||i,'bot/recovery/'||i,1,"
-            "'secret://recovery/postgresql-dsn' FROM generate_series(1,66) i"
+            "'secret://recovery/postgresql-dsn/'||i FROM generate_series(1,66) i"
         )
         await conn.execute(
             "INSERT INTO forest_deployment.bootstrap_profiles("

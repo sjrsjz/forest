@@ -161,6 +161,19 @@ class LocalStorageProfileKernelCommand:
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
             (f"forest.deployment.local-storage/{operation_id}",),
         )
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"forest.deployment.secret-operation/{operation_id}/dsn",),
+        )
+        for key in (
+            f"forest.deployment.storage-request/bot/"
+            f"{prepared['bot_id']}/{prepared['storage_generation']}",
+            f"forest.deployment.storage-request/profile/{prepared['profile_ref']}",
+            f"forest.deployment.storage-request/dsn/{prepared['dsn_secret_ref']}",
+        ):
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,),
+            )
         profile_operation_id = operation_id + "/profile"
         replay = await (
             await conn.execute(

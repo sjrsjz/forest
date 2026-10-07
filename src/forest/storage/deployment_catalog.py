@@ -160,6 +160,7 @@ class DeploymentCatalogRepository:
             "operations",
             "secret_slots",
             "secret_versions",
+            "storage_requests",
             "storage_profiles",
             "storage_profile_operations",
             "bootstrap_profiles",

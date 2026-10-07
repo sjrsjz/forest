@@ -337,13 +337,34 @@ CREATE INDEX deployment_audit_actor_idx
 CREATE INDEX web_login_throttles_expiry_idx
     ON forest_deployment.web_login_throttles(updated_at);
 
+CREATE TABLE forest_deployment.storage_requests (
+    request_id text PRIMARY KEY CHECK (request_id ~ '^storage-request/[a-f0-9]{64}$'),
+    deployment_id text NOT NULL REFERENCES forest_deployment.deployment_identity(deployment_id),
+    host_id text NOT NULL CHECK (host_id ~ '^host/[a-f0-9]{32}$'),
+    bot_id text NOT NULL CHECK (octet_length(bot_id) BETWEEN 1 AND 128),
+    storage_generation bigint NOT NULL CHECK (storage_generation > 0),
+    profile_ref text NOT NULL CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
+    dsn_secret_ref text NOT NULL CHECK (octet_length(dsn_secret_ref) BETWEEN 10 AND 512),
+    credential_ref text NOT NULL CHECK (octet_length(credential_ref) BETWEEN 10 AND 512),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    UNIQUE (deployment_id,bot_id,storage_generation),
+    UNIQUE (deployment_id,profile_ref),
+    UNIQUE (deployment_id,dsn_secret_ref)
+);
+
+CREATE INDEX deployment_storage_requests_created_idx
+    ON forest_deployment.storage_requests(deployment_id,created_at,request_id);
+
 CREATE TABLE forest_deployment.storage_profiles (
     profile_ref text PRIMARY KEY CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
     bot_id text NOT NULL CHECK (octet_length(bot_id) BETWEEN 1 AND 128),
     storage_generation bigint NOT NULL CHECK (storage_generation > 0),
     dsn_secret_ref text NOT NULL CHECK (octet_length(dsn_secret_ref) BETWEEN 10 AND 512),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-    UNIQUE (profile_ref,bot_id,storage_generation)
+    UNIQUE (profile_ref,bot_id,storage_generation),
+    UNIQUE (bot_id,storage_generation),
+    UNIQUE (dsn_secret_ref)
 );
 
 CREATE TABLE forest_deployment.storage_profile_operations (
@@ -782,6 +803,10 @@ CREATE TRIGGER deployment_secret_version_immutable
 
 CREATE TRIGGER deployment_storage_profile_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.storage_profiles
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_storage_request_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.storage_requests
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
 CREATE TRIGGER deployment_storage_profile_operation_immutable

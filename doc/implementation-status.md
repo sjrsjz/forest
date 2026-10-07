@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host 存储请求意图（2026-10-07）：deployment 基础 schema 新增不可变 `storage_requests`，按 deployment/Bot/storage generation 派生稳定 request ID；相同输入跨操作并发合流，不同 Host、profile、DSN ref 或凭据 ref 冲突。请求阶段既不生成 DSN Secret 也不发布 profile；请求、旧 profile 创建和 Secret 写入共用逻辑键围栏，避免双方并发抢占同一目标。真实 PostgreSQL 回归覆盖同键重放、异输入冲突、请求与 Secret/ref、旧 profile 及旧本地创建命令的并发互斥；deployment catalog 全套 `28 passed`，Supervisor/管理服务非数据库用例另 `13 passed, 1 skipped`。此账本尚未开放 Web 动作或 Host 跨 scope 桥，也未实现 Host pin 到 profile 的结算。
+
 供给 Job 查询所有权收口（2026-10-07）：`deployment.provisioning` 2.2.0 的管理分页改经受限 `deployment.provisioning-jobs-page` Kernel Query，由持有 Job 表的 `DeploymentProvisioningJobAuthority` 执行有界键集查询；删除包 Worker 读服务、跨 schema 的包私有 SQL 与空余 storage bundle。真实 PostgreSQL 的完整管理 API 用例 `1 passed`，覆盖供给包装配、Job 入队、筛选查询、取消和审计。该改动不触碰 Bot 身份或运行意图权威，也未完成 Host 建库切换。
 
 Host 资源引用固定（2026-10-07）：`host.storage` 0.6.0 / 私有 SQL 1.4.0 新增 Host 私有不可变 profile pin 账本与受限幂等服务。只有归属元组完全匹配、owned-work 已结算的 ACTIVE 资源可以固定到一个 deployment/profile；同操作并发重放复用回执，改用其他 profile 或归属会拒绝。真实 PostgreSQL 包回归 `2 passed`。production Host Graph、跨 scope 桥及 deployment 本库 profile 提交仍未接入该回执，pin 解绑定和安全回收也未实现，因此旧本地分配器尚不能切断，Host 清单不能作为全量库存。

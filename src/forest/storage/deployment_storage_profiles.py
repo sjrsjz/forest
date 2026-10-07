@@ -77,10 +77,14 @@ class DeploymentStorageProfileAuthority:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                (f"forest.deployment.storage-profile/{profile_ref}",),
-            )
+            for key in (
+                f"forest.deployment.storage-request/bot/{bot_id}/{storage_generation}",
+                f"forest.deployment.storage-request/profile/{profile_ref}",
+                f"forest.deployment.storage-request/dsn/{dsn_secret_ref}",
+            ):
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,),
+                )
             replay = await (
                 await conn.execute(
                     "SELECT o.input_digest,p.* FROM forest_deployment.storage_profile_operations o "
@@ -97,6 +101,20 @@ class DeploymentStorageProfileAuthority:
                         409,
                     )
                 return self._metadata(replay)
+            pending = await (
+                await conn.execute(
+                    "SELECT 1 FROM forest_deployment.storage_requests "
+                    "WHERE deployment_id=%s AND ((bot_id=%s AND storage_generation=%s) "
+                    "OR profile_ref=%s OR dsn_secret_ref=%s) LIMIT 1",
+                    (self.store.deployment_id, bot_id, storage_generation,
+                     profile_ref, dsn_secret_ref),
+                )
+            ).fetchone()
+            if pending is not None:
+                raise ForestError(
+                    "STORAGE_PROFILE_REQUEST_PENDING",
+                    "Host storage request already owns this identity", 409,
+                )
             secret = await self.secrets.metadata_in(conn, dsn_secret_ref)
             if secret.purpose != "storage.postgresql.dsn":
                 raise ForestError(
@@ -106,8 +124,10 @@ class DeploymentStorageProfileAuthority:
                 )
             existing = await (
                 await conn.execute(
-                    "SELECT 1 FROM forest_deployment.storage_profiles WHERE profile_ref=%s",
-                    (profile_ref,),
+                    "SELECT 1 FROM forest_deployment.storage_profiles "
+                    "WHERE profile_ref=%s OR (bot_id=%s AND storage_generation=%s) "
+                    "OR dsn_secret_ref=%s LIMIT 1",
+                    (profile_ref, bot_id, storage_generation, dsn_secret_ref),
                 )
             ).fetchone()
             if existing is not None:
