@@ -1,5 +1,9 @@
 # Forest 实现状态
 
+跨 scope Host 预留桥（2026-10-07）：新增受信任进程内 `DeploymentHostStorageReservationBridge`，只从 deployment 不可变请求读取 Host、Bot、generation，以固定 `request_id/reserve` 调用当前 Host 包 Generation 的 `host.storage.reserve`，随后凭有效 deployment Supervisor 租约写不可变资源绑定。独立双 PostgreSQL 库测试故意让 Host 预留成功后 deployment 绑定因失效租约失败，再热替换 Host 包并重试；同一资源 ID 被找回，Host 账本仍只有一条预留（`1 passed`）。它尚未装配到生产 Supervisor，也未执行物化、pin 或 profile 提交。
+
+Host 资源绑定事实（2026-10-07）：deployment 基础 schema 新增不可变 `storage_request_resources`，由有效 deployment Supervisor 租约围栏，只接受与已冻结请求归属完全一致的 Host reserve 回执。绑定仅保存 `request_id`→`resource_id`；同一资源的 `RESERVED`/`ACTIVE` 状态漂移重放合流，换资源、跨请求复用和失效租约拒绝。原有重复的 Supervisor 租约 SQL 校验收敛为一个权威函数。独立 PostgreSQL 的 deployment catalog 全套 `29 passed`，Ruff 与差异检查通过。生产 Host Graph、受信任跨 scope 桥、物化及 pin 到 profile 结算仍未接线，不能据此认定数据库可用。
+
 Host 存储请求意图（2026-10-07）：deployment 基础 schema 新增不可变 `storage_requests`，按 deployment/Bot/storage generation 派生稳定 request ID；相同输入跨操作并发合流，不同 Host、profile、DSN ref 或凭据 ref 冲突。请求阶段既不生成 DSN Secret 也不发布 profile；请求、旧 profile 创建和 Secret 写入共用逻辑键围栏，避免双方并发抢占同一目标。真实 PostgreSQL 回归覆盖同键重放、异输入冲突、请求与 Secret/ref、旧 profile 及旧本地创建命令的并发互斥；deployment catalog 全套 `28 passed`，Supervisor/管理服务非数据库用例另 `13 passed, 1 skipped`。此账本尚未开放 Web 动作或 Host 跨 scope 桥，也未实现 Host pin 到 profile 的结算。
 
 供给 Job 查询所有权收口（2026-10-07）：`deployment.provisioning` 2.2.0 的管理分页改经受限 `deployment.provisioning-jobs-page` Kernel Query，由持有 Job 表的 `DeploymentProvisioningJobAuthority` 执行有界键集查询；删除包 Worker 读服务、跨 schema 的包私有 SQL 与空余 storage bundle。真实 PostgreSQL 的完整管理 API 用例 `1 passed`，覆盖供给包装配、Job 入队、筛选查询、取消和审计。该改动不触碰 Bot 身份或运行意图权威，也未完成 Host 建库切换。

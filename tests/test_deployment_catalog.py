@@ -2038,7 +2038,6 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
         requests.request(operation_id="host-intent/retry", **target),
     )
     assert first == replay == await requests.read(first.request_id)
-    assert first.state == "REQUESTED"
     async with repository.store.pool.connection() as conn:
         assert (await (await conn.execute(
             "SELECT count(*) AS count FROM forest_deployment.storage_requests",
@@ -2187,6 +2186,78 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
     assert failures[0].code in {
         "STORAGE_REQUEST_CONFLICT", "STORAGE_PROFILE_REQUEST_PENDING",
     }
+
+
+@pytest.mark.postgres
+async def test_host_storage_resource_binding_is_immutable_and_lease_fenced(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    requests = DeploymentStorageRequestAuthority(repository.store)
+    intent = await requests.request(
+        operation_id="host-bind/request",
+        host_id="host/" + "a" * 32,
+        bot_id="bot/host-bind", storage_generation=1,
+        profile_ref="storage-profile/host-bind/1",
+        dsn_secret_ref="secret://host-bind/dsn",
+        credential_ref="secret://host-bind/password",
+    )
+    assert await requests.resource_binding(intent.request_id) is None
+    lease = await repository.claim_supervisor(
+        "host/" + "a" * 32, "incarnation/host-bind",
+    )
+    receipt = {
+        "resource_id": "resource/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        "host_id": intent.host_id,
+        "deployment_id": intent.deployment_id,
+        "bot_id": intent.bot_id,
+        "storage_generation": intent.storage_generation,
+        "state": "RESERVED", "revision": 1,
+    }
+    from_reserved, from_active = await asyncio.gather(
+        requests.bind_resource(lease, request_id=intent.request_id, receipt=receipt),
+        requests.bind_resource(
+            lease, request_id=intent.request_id,
+            receipt={**receipt, "state": "ACTIVE", "revision": 2},
+        ),
+    )
+    assert from_reserved == from_active
+    assert from_reserved.resource_id == receipt["resource_id"]
+    assert await requests.resource_binding(intent.request_id) == from_reserved
+    with pytest.raises(ForestError) as mismatch:
+        await requests.bind_resource(
+            lease, request_id=intent.request_id,
+            receipt={**receipt, "bot_id": "bot/another"},
+        )
+    assert mismatch.value.code == "STORAGE_RESOURCE_MISMATCH"
+    with pytest.raises(ForestError) as changed:
+        await requests.bind_resource(
+            lease, request_id=intent.request_id,
+            receipt={**receipt,
+                     "resource_id": "resource/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"},
+        )
+    assert changed.value.code == "STORAGE_RESOURCE_CONFLICT"
+    other = await requests.request(
+        operation_id="host-bind/other-request",
+        host_id=intent.host_id,
+        bot_id="bot/host-bind-other", storage_generation=1,
+        profile_ref="storage-profile/host-bind-other/1",
+        dsn_secret_ref="secret://host-bind-other/dsn",
+        credential_ref="secret://host-bind-other/password",
+    )
+    with pytest.raises(ForestError) as duplicate_resource:
+        await requests.bind_resource(
+            lease, request_id=other.request_id,
+            receipt={**receipt, "bot_id": other.bot_id},
+        )
+    assert duplicate_resource.value.code == "STORAGE_RESOURCE_CONFLICT"
+    with pytest.raises(ForestError) as stale:
+        await requests.bind_resource(
+            replace(lease, owner_epoch=lease.owner_epoch + 1),
+            request_id=intent.request_id, receipt=receipt,
+        )
+    assert stale.value.code == "STALE_DEPLOYMENT_SUPERVISOR"
 
 
 @pytest.mark.postgres

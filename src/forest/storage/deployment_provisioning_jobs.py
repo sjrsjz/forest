@@ -9,7 +9,10 @@ from datetime import datetime
 from forest.deployment_action_authorization import authorize_deployment_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.storage.deployment_catalog import DeploymentSupervisorLease
+from forest.storage.deployment_catalog import (
+    DeploymentSupervisorLease,
+    verify_deployment_supervisor_in,
+)
 
 _ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
 _RECOVERY_BATCH_LIMIT = 32
@@ -619,21 +622,10 @@ class DeploymentProvisioningJobAuthority:
         return row
 
     async def _verify_supervisor_in(self, conn, lease: DeploymentSupervisorLease) -> None:
-        if (
-            type(lease) is not DeploymentSupervisorLease
-            or lease.deployment_id != self.store.deployment_id
-        ):
-            raise ForestError("PROVISIONING_INPUT_INVALID", "Supervisor lease is invalid", 422)
-        row = await (
-            await conn.execute(
-                "SELECT 1 FROM forest_deployment.supervisor_lease WHERE singleton "
-                "AND host_id=%s AND incarnation=%s AND owner_epoch=%s "
-                "AND expires_at>clock_timestamp() FOR SHARE",
-                (lease.host_id, lease.incarnation, lease.owner_epoch),
-            )
-        ).fetchone()
-        if row is None:
-            raise ForestError("STALE_DEPLOYMENT_SUPERVISOR", "Supervisor lease is stale", 409)
+        await verify_deployment_supervisor_in(
+            conn, lease, self.store.deployment_id,
+            invalid_code="PROVISIONING_INPUT_INVALID",
+        )
 
     def _claim(self, row) -> DeploymentProvisioningClaim:
         return DeploymentProvisioningClaim(

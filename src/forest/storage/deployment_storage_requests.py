@@ -9,8 +9,14 @@ from dataclasses import dataclass
 from forest.deployment_action_authorization import authorize_deployment_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.storage.deployment_catalog import (
+    DeploymentSupervisorLease,
+    verify_deployment_supervisor_in,
+)
 
 _HOST_ID = re.compile(r"host/[a-f0-9]{32}\Z")
+_RESOURCE_ID = re.compile(r"resource/[a-f0-9-]{36}\Z")
+_REQUEST_ID = re.compile(r"storage-request/[a-f0-9]{64}\Z")
 _PROFILE_REF = re.compile(r"storage-profile/[A-Za-z0-9][A-Za-z0-9._/-]{0,495}\Z")
 _SECRET_REF = re.compile(r"secret://[A-Za-z0-9][A-Za-z0-9._/-]{0,501}\Z")
 
@@ -37,7 +43,12 @@ class StorageRequest:
     profile_ref: str
     dsn_secret_ref: str
     credential_ref: str
-    state: str = "REQUESTED"
+
+
+@dataclass(frozen=True)
+class StorageResourceBinding:
+    request_id: str
+    resource_id: str
 
 
 class DeploymentStorageRequestAuthority:
@@ -145,9 +156,7 @@ class DeploymentStorageRequestAuthority:
             return self._request(saved)
 
     async def read(self, request_id: str) -> StorageRequest:
-        if not isinstance(request_id, str) or not re.fullmatch(
-            r"storage-request/[a-f0-9]{64}", request_id,
-        ):
+        if not isinstance(request_id, str) or _REQUEST_ID.fullmatch(request_id) is None:
             raise ForestError("STORAGE_REQUEST_INVALID", "Request ID is invalid", 422)
         async with self.store.pool.connection() as conn:
             row = await (
@@ -160,6 +169,96 @@ class DeploymentStorageRequestAuthority:
         if row is None:
             raise ForestError("STORAGE_REQUEST_NOT_FOUND", "Storage request not found", 404)
         return self._request(row)
+
+    async def bind_resource(
+        self, supervisor: DeploymentSupervisorLease, *, request_id: str,
+        receipt: dict, conn=None,
+    ) -> StorageResourceBinding:
+        """Persist only the immutable Host resource identity from a trusted bridge."""
+        expected_keys = {
+            "resource_id", "host_id", "deployment_id", "bot_id",
+            "storage_generation", "state", "revision",
+        }
+        if (
+            not isinstance(request_id, str) or _REQUEST_ID.fullmatch(request_id) is None
+            or type(receipt) is not dict or set(receipt) != expected_keys
+            or not isinstance(receipt["resource_id"], str)
+            or _RESOURCE_ID.fullmatch(receipt["resource_id"]) is None
+            or type(receipt["state"]) is not str
+            or receipt["state"] not in {"RESERVED", "ACTIVE"}
+            or type(receipt["revision"]) is not int
+            or receipt["revision"] < 1
+            or type(receipt["storage_generation"]) is not int
+        ):
+            raise ForestError("STORAGE_RESOURCE_RECEIPT_INVALID", "Host receipt is invalid", 422)
+        resource_id = receipt["resource_id"]
+        async with self.store.transaction(conn) as conn:
+            await verify_deployment_supervisor_in(
+                conn, supervisor, self.store.deployment_id,
+            )
+            for key in (
+                f"forest.deployment.storage-binding/request/{request_id}",
+                f"forest.deployment.storage-binding/resource/{resource_id}",
+            ):
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,),
+                )
+            request = await (
+                await conn.execute(
+                    "SELECT * FROM forest_deployment.storage_requests "
+                    "WHERE request_id=%s AND deployment_id=%s FOR SHARE",
+                    (request_id, self.store.deployment_id),
+                )
+            ).fetchone()
+            if request is None:
+                raise ForestError(
+                    "STORAGE_REQUEST_NOT_FOUND", "Storage request not found", 404,
+                )
+            if (
+                receipt["deployment_id"] != request["deployment_id"]
+                or receipt["host_id"] != request["host_id"]
+                or receipt["bot_id"] != request["bot_id"]
+                or receipt["storage_generation"] != request["storage_generation"]
+            ):
+                raise ForestError(
+                    "STORAGE_RESOURCE_MISMATCH", "Host resource belongs to another request", 409,
+                )
+            binding = await (
+                await conn.execute(
+                    "SELECT request_id,resource_id FROM "
+                    "forest_deployment.storage_request_resources "
+                    "WHERE request_id=%s OR resource_id=%s FOR SHARE",
+                    (request_id, resource_id),
+                )
+            ).fetchone()
+            if binding is not None:
+                if binding["request_id"] != request_id or binding["resource_id"] != resource_id:
+                    raise ForestError(
+                        "STORAGE_RESOURCE_CONFLICT",
+                        "Request or Host resource is already bound differently", 409,
+                    )
+                return StorageResourceBinding(request_id, resource_id)
+            await conn.execute(
+                "INSERT INTO forest_deployment.storage_request_resources("
+                "request_id,resource_id) VALUES (%s,%s)",
+                (request_id, resource_id),
+            )
+            return StorageResourceBinding(request_id, resource_id)
+
+    async def resource_binding(self, request_id: str) -> StorageResourceBinding | None:
+        if not isinstance(request_id, str) or _REQUEST_ID.fullmatch(request_id) is None:
+            raise ForestError("STORAGE_REQUEST_INVALID", "Request ID is invalid", 422)
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT b.request_id,b.resource_id FROM "
+                    "forest_deployment.storage_request_resources b "
+                    "JOIN forest_deployment.storage_requests r USING(request_id) "
+                    "WHERE r.deployment_id=%s AND b.request_id=%s",
+                    (self.store.deployment_id, request_id),
+                )
+            ).fetchone()
+        return None if row is None else StorageResourceBinding(**row)
 
     @staticmethod
     def _request(row) -> StorageRequest:

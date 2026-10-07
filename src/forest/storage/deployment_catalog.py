@@ -39,6 +39,25 @@ class DeploymentSupervisorLease:
     expires_at: datetime
 
 
+async def verify_deployment_supervisor_in(
+    conn, lease: DeploymentSupervisorLease, deployment_id: str,
+    *, invalid_code: str = "DEPLOYMENT_INPUT_INVALID",
+) -> None:
+    """Fence a control-plane write to the current Supervisor incarnation."""
+    if type(lease) is not DeploymentSupervisorLease or lease.deployment_id != deployment_id:
+        raise ForestError(invalid_code, "Supervisor lease is invalid", 422)
+    row = await (
+        await conn.execute(
+            "SELECT 1 FROM forest_deployment.supervisor_lease WHERE singleton "
+            "AND host_id=%s AND incarnation=%s AND owner_epoch=%s "
+            "AND expires_at>clock_timestamp() FOR SHARE",
+            (lease.host_id, lease.incarnation, lease.owner_epoch),
+        )
+    ).fetchone()
+    if row is None:
+        raise ForestError("STALE_DEPLOYMENT_SUPERVISOR", "Supervisor lease is stale", 409)
+
+
 class DeploymentCatalogRepository:
     """Own stable Bot identities, runtime intent and supervisor observations."""
 
@@ -161,6 +180,7 @@ class DeploymentCatalogRepository:
             "secret_slots",
             "secret_versions",
             "storage_requests",
+            "storage_request_resources",
             "storage_profiles",
             "storage_profile_operations",
             "bootstrap_profiles",
@@ -636,21 +656,7 @@ class DeploymentCatalogRepository:
         )
 
     async def _verify_lease_in(self, conn, lease: DeploymentSupervisorLease) -> None:
-        if (
-            type(lease) is not DeploymentSupervisorLease
-            or lease.deployment_id != self.store.deployment_id
-        ):
-            raise ForestError("DEPLOYMENT_INPUT_INVALID", "Supervisor lease is invalid", 422)
-        row = await (
-            await conn.execute(
-                "SELECT 1 FROM forest_deployment.supervisor_lease WHERE singleton "
-                "AND host_id=%s AND incarnation=%s AND owner_epoch=%s "
-                "AND expires_at>clock_timestamp() FOR SHARE",
-                (lease.host_id, lease.incarnation, lease.owner_epoch),
-            )
-        ).fetchone()
-        if row is None:
-            raise ForestError("STALE_DEPLOYMENT_SUPERVISOR", "Supervisor lease is stale", 409)
+        await verify_deployment_supervisor_in(conn, lease, self.store.deployment_id)
 
     def _lease(self, row) -> DeploymentSupervisorLease:
         return DeploymentSupervisorLease(
