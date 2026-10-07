@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Memory 数据库回归复核（2026-10-07）：在独立 PostgreSQL 容器中连续运行 `test_memory_graph_package`、`test_memory_graph_retrieval`、`test_memory_graph_relation_scale`、`test_memory_graph_neighbours`、`test_memory_embedding_work`、`test_memory_association` 与 `test_memory_evidence_materialization`，结果 `42 passed`（362.12 秒）。这覆盖上轮修正的试验夹具以及图关系、邻接、嵌入工作与证据物化的同轮回归；容器已清理。该结果不替代在线 QQ、长周期负载或生产存储切换验收。
+
 Host 存储预留账本（2026-10-07）：新增未自动安装的真实 `host.storage` builtin，拥有独立 Host 模块 schema、资源预留操作账本、按 owner/状态筛选的有界键集查询、自带 UI，以及明确映射到包私有 Command 的内部幂等服务。control 包编译器只允许官方包把这种服务绑定到准确私有 Command，普通安装包不能借声明取得 SQL 写端口。隔离 PostgreSQL 中，真实 Host Worker 完成预留、同键重放、不同输入与逻辑资源冲突、查询、热替换后原键重放（1 passed）；Ruff 和包校验通过，临时数据库容器已删除。物理创建 Effect、deployment 跨 scope 桥、ACTIVE 结算、冻结引用和回收尚未实现；生产 Host Graph 尚不启动，页面不能代表完整物理库存。
 
 Host 物理存储边界核查（2026-10-07）：[详细协议](18-host-storage.md) 固定 `host.storage` 的 owner、私有 namespace、repository、受限端口、跨库请求合流、物理标记、租约与回收围栏。当前 `LocalPostgresDatabaseAllocator` 仍由 deployment 进程直接创建 Bot 数据库，旧路径不会写入新建的 Host 模块预留账本；这与完整 Host 库存/回收语义冲突。下一步必须以 Host 持久请求和原生物理 Effect 替换这条路径，再启动 `host.storage` 图并开放回收，不能用空清单或临时 `deployment.storage` 页面代替。
