@@ -164,7 +164,10 @@ class HostPostgresMaterializationEffect:
                         await conn.execute(
                             "SELECT rolsuper,rolinherit,rolcreaterole,rolcreatedb,"
                             "rolcanlogin,rolreplication,rolbypassrls,"
-                            "shobj_description(oid,'pg_authid') AS marker "
+                            "shobj_description(oid,'pg_authid') AS marker, "
+                            "EXISTS (SELECT 1 FROM pg_auth_members "
+                            "WHERE roleid=pg_authid.oid OR member=pg_authid.oid) "
+                            "AS has_members "
                             "FROM pg_authid WHERE rolname=%s", (role,),
                         )
                     ).fetchone()
@@ -178,6 +181,7 @@ class HostPostgresMaterializationEffect:
                         ))
                     elif (
                         saved_role["marker"] != marker
+                        or saved_role["has_members"]
                         or any(saved_role[key] != value for key, value in _ROLE_FLAGS.items())
                     ):
                         raise ForestError(
@@ -190,7 +194,9 @@ class HostPostgresMaterializationEffect:
                         ))
                 database = await self._database(conn, name)
                 if database is None:
-                    await conn.execute(sql.SQL("CREATE DATABASE {} OWNER {}").format(
+                    await conn.execute(sql.SQL(
+                        "CREATE DATABASE {} OWNER {} CONNECTION LIMIT 0"
+                    ).format(
                         sql.Identifier(name), sql.Identifier(role),
                     ))
                     database = await self._database(conn, name)
@@ -201,12 +207,38 @@ class HostPostgresMaterializationEffect:
                         "HOST_STORAGE_DATABASE_MISMATCH",
                         "Physical PostgreSQL database has another owner or marker", 409,
                     )
+                if database["foreign_grants"] or (
+                    database["marker"] is not None and database["public_grants"]
+                ) or database["connection_limit"] not in {0, -1} or (
+                    database["connection_limit"] == 0 and row["state"] != "RESERVED"
+                ):
+                    raise ForestError(
+                        "HOST_STORAGE_DATABASE_MISMATCH",
+                        "Physical PostgreSQL database access differs from its reservation", 409,
+                    )
                 if database["marker"] is None:
+                    if database["connection_limit"] != 0:
+                        raise ForestError(
+                            "HOST_STORAGE_DATABASE_MISMATCH",
+                            "Unmarked PostgreSQL database is not admission-fenced", 409,
+                        )
+                    await conn.execute(sql.SQL(
+                        "REVOKE ALL PRIVILEGES ON DATABASE {} FROM PUBLIC"
+                    ).format(sql.Identifier(name)))
                     await conn.execute(sql.SQL("COMMENT ON DATABASE {} IS {}").format(
                         sql.Identifier(name), sql.Literal(marker),
                     ))
+                if database["connection_limit"] == 0:
+                    await conn.execute(sql.SQL(
+                        "ALTER DATABASE {} CONNECTION LIMIT -1"
+                    ).format(sql.Identifier(name)))
                 confirmed = await self._database(conn, name)
-                if confirmed is None or confirmed["owner"] != role or confirmed["marker"] != marker:
+                if (
+                    confirmed is None or confirmed["owner"] != role
+                    or confirmed["marker"] != marker
+                    or confirmed["public_grants"] or confirmed["foreign_grants"]
+                    or confirmed["connection_limit"] != -1
+                ):
                     raise ForestError(
                         "HOST_STORAGE_DATABASE_MISMATCH",
                         "Physical PostgreSQL marker could not be confirmed", 409,
@@ -226,7 +258,15 @@ class HostPostgresMaterializationEffect:
         return await (
             await conn.execute(
                 "SELECT pg_get_userbyid(datdba) AS owner,"
-                "shobj_description(oid,'pg_database') AS marker "
+                "shobj_description(oid,'pg_database') AS marker, "
+                "datconnlimit AS connection_limit, "
+                "EXISTS (SELECT 1 FROM aclexplode(COALESCE(datacl, "
+                "acldefault('d',datdba))) AS grant_row "
+                "WHERE grant_row.grantee=0) AS public_grants, "
+                "EXISTS (SELECT 1 FROM aclexplode(COALESCE(datacl, "
+                "acldefault('d',datdba))) AS grant_row "
+                "WHERE grant_row.grantee<>0 AND grant_row.grantee<>datdba) "
+                "AS foreign_grants "
                 "FROM pg_database WHERE datname=%s", (name,),
             )
         ).fetchone()

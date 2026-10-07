@@ -100,6 +100,9 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
     supervisor_task = asyncio.create_task(run_supervisor(settings))
     store = DeploymentStore(deployment_dsn, deployment_id)
     physical: list[tuple[str, str]] = []
+    probe_role = "forest_probe_" + suffix
+    probe_password = "forest-acl-probe-password"
+    probe_created = False
     try:
         async def management_ready():
             try:
@@ -254,6 +257,23 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
             assert row == (urlsplit(target_dsn).username, urlsplit(target_dsn).path[1:])
         finally:
             await target.close()
+        await admin.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+            sql.Identifier(probe_role), sql.Literal(probe_password),
+        ))
+        probe_created = True
+        probe = await psycopg.AsyncConnection.connect(
+            host=parsed.hostname, port=parsed.port or 5432,
+            user=probe_role, password=probe_password, dbname="postgres",
+        )
+        await probe.close()
+        with pytest.raises(
+            psycopg.OperationalError, match="permission denied for database"
+        ):
+            await psycopg.AsyncConnection.connect(
+                host=parsed.hostname, port=parsed.port or 5432,
+                user=probe_role, password=probe_password,
+                dbname=urlsplit(target_dsn).path[1:],
+            )
 
         for name, purpose in (
             ("model", "provider.chat-completions.credential"),
@@ -396,6 +416,10 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
             ))
             await admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(
                 sql.Identifier(role_name),
+            ))
+        if probe_created:
+            await admin.execute(sql.SQL("DROP ROLE {}").format(
+                sql.Identifier(probe_role),
             ))
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
             sql.Identifier(host_name),

@@ -1,4 +1,5 @@
 # Forest 实现状态
+Host 物理 PostgreSQL 创建现增加连接围栏：新库先以连接上限零创建，再撤销 `PUBLIC` 数据库权限、写入归属标记，最后开放连接；重放校验数据库 ACL、连接限制和专属 role 的成员关系。隔离 PostgreSQL 的生产 Supervisor 验收 `1 passed`：Bot 凭据能进入专属库，有效的其他登录角色只能进入公共测试库，无法连接 Bot 库。安全退役和物理回收仍待实现。
 
 Host Web 管理作用域现由生产 Supervisor 注册到多作用域控制台。浏览器使用无斜杠的 `host-<id>` 路由，签名票据与 Host 回执始终绑定完整 `host/<id>`；`host.storage` 自带页面、资源分页和配置计划/应用均经 Host 自身 Graph/Generation 校验。隔离 PostgreSQL 的真实管理 HTTP 已验证 Host 页面、ACTIVE 清单、配置提交后包换代继续可查询，并继续完成 Bot READY 供给。通用控制域操作授权已去除 Deployment 专属命名；Host 写入在 Host 库同事务保存 Web 回执，部署作用域仍保留独立审计记录。
 
