@@ -66,6 +66,7 @@ from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthorit
 from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
+from forest.storage.host_web_authority import HostWebAuthorityRepository
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 
@@ -247,14 +248,17 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     web_receipts = DeploymentWebAuthorityRepository(store)
     deployment_audit = DeploymentAuditRepository(store)
     graph_changes = DeploymentGraphChangeAuthority(store)
+    host_ticket_authority = WebAuthorityTicketAuthority(
+        issuer_id=settings.deployment_id,
+        active_key_id=web_identity.active_key_id,
+        key_resolver=web_identity.key_resolver,
+        session_validator=web_identity.revalidate_session,
+    )
     host_graph_changes = HostGraphChangeAuthority(
-        host_store,
-        ticket_authority=WebAuthorityTicketAuthority(
-            issuer_id=settings.deployment_id,
-            active_key_id=web_identity.active_key_id,
-            key_resolver=web_identity.key_resolver,
-            session_validator=web_identity.revalidate_session,
-        ),
+        host_store, ticket_authority=host_ticket_authority,
+    )
+    host_web_receipts = HostWebAuthorityRepository(
+        host_store, ticket_authority=host_ticket_authority,
     )
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)
     storage_requests = DeploymentStorageRequestAuthority(store, secrets=secrets)
@@ -434,6 +438,11 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     deployment_registry_provider=lambda: deployment_controller.registry,
                     deployment_graph_changes=graph_changes,
                     deployment_change_previewer=deployment_controller.preview_change,
+                    host_id=settings.host_id,
+                    host_controller=host_controller,
+                    host_web_receipts=host_web_receipts,
+                    host_graph_changes=host_graph_changes,
+                    host_change_previewer=host_controller.preview_change,
                     identity_authority=web_identity,
                     deployment_web_receipts=web_receipts,
                     deployment_audit=deployment_audit,

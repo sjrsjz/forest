@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 
 from psycopg.types.json import Jsonb
 
-from forest.deployment_action_authorization import authorize_deployment_action_in
+from forest.control_action_authorization import authorize_control_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.security import hash_password, random_token, verify_password
@@ -355,7 +355,7 @@ class DeploymentWebIdentityAuthority:
         )
         subject_id = "web-subject/" + hashlib.sha256(username.encode()).hexdigest()[:32]
         async with self._account_transaction(conn) as conn:
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id
             )
             await conn.execute(
@@ -443,7 +443,7 @@ class DeploymentWebIdentityAuthority:
             [subject_id, display_name, role, enabled, expected_revision]
         )
         async with self._account_transaction(conn) as conn:
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id
             )
             await conn.execute(
@@ -540,7 +540,7 @@ class DeploymentWebIdentityAuthority:
             else await asyncio.to_thread(hash_password, password)
         )
         async with self._account_transaction(conn) as conn:
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id
             )
             await conn.execute(
@@ -628,7 +628,7 @@ class DeploymentWebIdentityAuthority:
             raise ForestError("WEB_IDENTITY_INPUT_INVALID", "Account revision is invalid", 422)
         input_digest = digest_json([subject_id, expected_revision])
         async with self._account_transaction(conn) as conn:
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id
             )
             await conn.execute(

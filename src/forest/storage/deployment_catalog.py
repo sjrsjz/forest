@@ -10,7 +10,7 @@ from importlib.resources import files
 
 import psycopg
 
-from forest.deployment_action_authorization import authorize_deployment_action_in
+from forest.control_action_authorization import authorize_control_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 
@@ -402,7 +402,7 @@ class DeploymentCatalogRepository:
         authorization=None,
     ) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id
             )
             result = await self.set_desired_in(

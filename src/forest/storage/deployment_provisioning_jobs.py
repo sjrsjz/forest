@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 
-from forest.deployment_action_authorization import authorize_deployment_action_in
+from forest.control_action_authorization import authorize_control_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.deployment_catalog import (
@@ -93,7 +93,7 @@ class DeploymentProvisioningJobAuthority:
         }
         input_digest = digest_json(request)
         async with self.store.transaction(conn) as conn:
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id
             )
             await conn.execute(
@@ -452,7 +452,7 @@ class DeploymentProvisioningJobAuthority:
             raise ForestError("PROVISIONING_INPUT_INVALID", "Job revision is invalid", 422)
         input_digest = digest_json([job_id, expected_revision])
         async with self.store.transaction(conn) as conn:
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id
             )
             await conn.execute(

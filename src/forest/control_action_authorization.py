@@ -1,4 +1,4 @@
-"""Transaction-bound authorization context for deployment management actions."""
+"""Transaction-bound authorization context for control-scope management actions."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from forest.web_authority_ticket import WebAuthorityTicket
 
 
 @dataclass(frozen=True)
-class DeploymentActionAuthorization:
+class ControlActionAuthorization:
     ticket: WebAuthorityTicket
     guard: Callable[..., Awaitable[dict]]
     component_id: str
@@ -31,13 +31,16 @@ class DeploymentActionAuthorization:
         )
 
 
-async def authorize_deployment_action_in(conn, authorization, *, operation_id: str) -> None:
+async def authorize_control_action_in(conn, authorization, *, operation_id: str) -> None:
     if authorization is None:
         return
-    if not isinstance(authorization, DeploymentActionAuthorization):
+    if (
+        not isinstance(authorization, ControlActionAuthorization)
+        or authorization.operation_id != operation_id
+    ):
         raise ForestError(
             "WEB_AUTHORITY_TRANSACTION_REQUIRED",
-            "Deployment action lacks its target transaction authorization guard",
+            "Control action lacks its target transaction authorization guard",
             503,
         )
     await authorization.accept_in(conn)

@@ -151,7 +151,7 @@ Compose 初始化器会在受保护卷首次生成稳定 `host_id`，Supervisor 
 
 Compose 中无需设置 `FOREST_DEPLOYMENT_DSN` 或 `FOREST_HOST_DSN`：Supervisor 分别从 `/run/forest-secrets/postgres_password` 和 `/run/forest-secrets/host_postgres_password` 构造指向两个独立库的 DSN。显式 DSN 仅供非 Compose 部署。旧预发布 PostgreSQL 卷缺少 Host role、库或受保护口令时不会自动补迁移；须先备份并按预发布重建流程重建该卷，再启动此版本 Supervisor。默认 `docker compose up -d` 启动 `initialize`、`postgres` 和 `supervisor`；Compose 中不存在绕过部署控制面的单 Bot 服务。
 
-Supervisor 同时启动多作用域 WebUI。页面从 deployment provider 动态发现 Bot 目录、Secret、Provisioning 与管理账号工作区；可以写入不回显的版本化 Secret、管理 ADMIN/AUDITOR 账号及会话、在 Host 存储模块提交建库请求，待结算后使用对应 storage profile，并从 Bootstrap Contributor 目录逐模块设置 Provider、VL Embedding、触发策略、Shell、Agent 和 OneBot 后冻结 profile、加入供应队列。登录使用 HttpOnly、SameSite 服务端会话；POST 同时校验精确 Origin 和 CSRF，角色在 HTTP 入口与目标作用域网关复核。Bot 进入 ONLINE 后，壳层作用域选择器通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不复制 Agent、Memory、OneBot 或 Job 页面。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。
+Supervisor 同时启动多作用域 WebUI，并把 Host Graph 作为独立作用域注册；Host 包自带资源清单与模块配置页经 Host Web 回执授权。页面从 deployment provider 动态发现 Bot 目录、Secret、Provisioning 与管理账号工作区；可以写入不回显的版本化 Secret、管理 ADMIN/AUDITOR 账号及会话、在 Host 存储模块提交建库请求，待结算后使用对应 storage profile，并从 Bootstrap Contributor 目录逐模块设置 Provider、VL Embedding、触发策略、Shell、Agent 和 OneBot 后冻结 profile、加入供应队列。登录使用 HttpOnly、SameSite 服务端会话；POST 同时校验精确 Origin 和 CSRF，角色在 HTTP 入口与目标作用域网关复核。Bot 进入 ONLINE 后，壳层作用域选择器通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不复制 Agent、Memory、OneBot 或 Job 页面。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。
 
 ## 仍需补齐的能力
 

@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from httpx import AsyncClient
 from psycopg import sql
 
 from forest.bootstrap_contributions import BootstrapConfigurationRegistry
@@ -36,6 +37,7 @@ from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_storage_requests import DeploymentStorageRequestAuthority
 from forest.storage.deployment_store import DeploymentStore
+from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
 from forest.supervisor_host import SupervisorSettings, run_supervisor
 
 
@@ -112,6 +114,14 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
 
         await _until(management_ready, supervisor_task, seconds=90)
         await store.open()
+        web_identity = DeploymentWebIdentityAuthority(
+            store, active_key_id=key_id, key_resolver=keyring.resolve,
+        )
+        await web_identity.complete_setup(
+            pairing_code="p" * 48,
+            username="admin", display_name="Administrator",
+            password="supervisor-acceptance-admin-password",
+        )
         secrets = DeploymentSecretAuthority(
             store, active_key_id=key_id, key_resolver=keyring.resolve,
         )
@@ -146,6 +156,95 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
                 raise
 
         storage = await _until(settled_profile, supervisor_task, seconds=120)
+        async with AsyncClient(
+            base_url=f"http://127.0.0.1:{management_port}", timeout=15,
+            trust_env=False,
+        ) as client:
+            login = await client.post(
+                "/management/v1/auth/login",
+                headers={"origin": settings.management_origin},
+                json={"username": "admin",
+                      "password": "supervisor-acceptance-admin-password"},
+            )
+            assert login.status_code == 200, login.text
+            headers = {
+                "origin": settings.management_origin,
+                "x-forest-csrf": client.cookies["forest_management_csrf"],
+            }
+            root = await client.get("/management/v1/runtime", headers=headers)
+            assert root.status_code == 200, root.text
+            host_scope = next(
+                row for row in root.json()["scopes"]
+                if row["scope_kind"] == "host"
+            )
+            assert host_scope["source_id"] == host_id
+            resolved_host = await client.post(
+                "/management/v1/scopes/resolve", headers=headers,
+                json={"scope_kind": "host", "source_id": host_id},
+            )
+            assert resolved_host.status_code == 200, resolved_host.text
+            assert resolved_host.json()["scope_id"] == host_scope["scope_id"]
+            host_base = (
+                f"/management/v1/scopes/host/{host_scope['scope_id']}"
+            )
+            host_runtime = await client.get(host_base + "/runtime", headers=headers)
+            assert host_runtime.status_code == 200, host_runtime.text
+            assert host_runtime.json()["runtime"]["scope_id"] == host_id
+            host_module = next(
+                row for row in host_runtime.json()["modules"]
+                if row["component_id"] == "host.storage"
+            )
+            package_ui = next(
+                item["surface"] for item in host_module["management_contributions"]
+                if item["surface"]["kind"] == "sandboxed-package"
+            )
+            artifact_sha = package_ui["sha256"]
+            host_ui = await client.get(
+                host_base + f"/modules/host.storage/management-ui/{artifact_sha}",
+                headers=headers,
+            )
+            assert host_ui.status_code == 200, host_ui.text
+            inventory = await client.post(
+                host_base + "/modules/host.storage/queries/generations",
+                headers=headers, json={"bot_id": request.bot_id},
+            )
+            assert inventory.status_code == 200, inventory.text
+            assert len(inventory.json()["items"]) == 1
+            assert inventory.json()["items"][0]["state"] == "ACTIVE"
+            configuration_path = host_base + "/modules/host.storage/configuration"
+            configuration = await client.get(configuration_path, headers=headers)
+            assert configuration.status_code == 200, configuration.text
+            desired = configuration.json()["desired"]
+            planned = await client.post(
+                configuration_path + "/plans",
+                headers={**headers, "idempotency-key": "host-storage-plan"},
+                json={"expected_desired_revision": desired["revision"],
+                      "value": desired["value"]},
+            )
+            assert planned.status_code == 200, planned.text
+            applied = await client.post(
+                configuration_path + "/apply",
+                headers={**headers, "idempotency-key": "host-storage-apply"},
+                json={"plan_id": planned.json()["plan_id"],
+                      "expected_desired_revision": desired["revision"]},
+            )
+            assert applied.status_code == 200, applied.text
+            old_revision = host_runtime.json()["runtime"]["graph_revision"]
+
+            async def host_reloaded():
+                observed = await client.get(host_base + "/runtime", headers=headers)
+                if observed.status_code != 200:
+                    return None
+                revision = observed.json()["runtime"]["graph_revision"]
+                return revision if revision > old_revision else None
+
+            await _until(host_reloaded, supervisor_task, seconds=60)
+            after_reload = await client.post(
+                host_base + "/modules/host.storage/queries/generations",
+                headers=headers, json={"bot_id": request.bot_id},
+            )
+            assert after_reload.status_code == 200, after_reload.text
+            assert after_reload.json()["items"][0]["state"] == "ACTIVE"
         target_dsn = await secrets.resolve_text(dsn_ref)
         target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
         try:

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
-from forest.deployment_action_authorization import authorize_deployment_action_in
+from forest.control_action_authorization import authorize_control_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 
@@ -75,7 +75,7 @@ class DeploymentStorageProfileAuthority:
             }
         )
         async with self.store.transaction(conn) as conn:
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id
             )
             for key in (

@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host Web 管理作用域现由生产 Supervisor 注册到多作用域控制台。浏览器使用无斜杠的 `host-<id>` 路由，签名票据与 Host 回执始终绑定完整 `host/<id>`；`host.storage` 自带页面、资源分页和配置计划/应用均经 Host 自身 Graph/Generation 校验。隔离 PostgreSQL 的真实管理 HTTP 已验证 Host 页面、ACTIVE 清单、配置提交后包换代继续可查询，并继续完成 Bot READY 供给。通用控制域操作授权已去除 Deployment 专属命名；Host 写入在 Host 库同事务保存 Web 回执，部署作用域仍保留独立审计记录。
+
 本机旧存储 [只读盘点](legacy-storage-inventory-2026-10-07.md) 已确认四组无 Host marker 的旧 Bot 数据库/role 仍分别被三个 deployment 库的 READY Bot 引用，相关 Supervisor 仍在运行。当前不能逐库回收或把旧资源视为 Host 已接管；切换需整体重建，或先补足单 Bot 引用 fence 与回收协议。
 
 生产组合根已为 Host Graph 接入与部署 Web 同源的签名票据校验器和会话复核。此前漏传该必需依赖会使 `run_supervisor` 在启动阶段直接失败；隔离 PostgreSQL 的生产组合根验收现验证了实际启动、Host 存储结算、Bot READY 和 OFFLINE 初始意图。

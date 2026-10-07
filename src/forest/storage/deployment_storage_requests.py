@@ -6,7 +6,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from forest.deployment_action_authorization import authorize_deployment_action_in
+from forest.control_action_authorization import authorize_control_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.storage.deployment_catalog import (
@@ -100,7 +100,7 @@ class DeploymentStorageRequestAuthority:
             f"{deployment_id}\0{bot_id}\0{storage_generation}".encode("utf-8")
         ).hexdigest()
         async with self.store.transaction(conn) as conn:
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id,
             )
             for key in (

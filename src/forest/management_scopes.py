@@ -9,7 +9,7 @@ import secrets
 from contextlib import asynccontextmanager
 from typing import Callable
 
-from forest.deployment_action_authorization import DeploymentActionAuthorization
+from forest.control_action_authorization import ControlActionAuthorization
 from forest.errors import ForestError
 from forest.management_gateway import ManagementGateway
 from forest.packages import digest_json
@@ -18,11 +18,12 @@ _SCOPE_KIND = re.compile(r"[a-z][a-z0-9.-]{0,63}\Z")
 _SCOPE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 
 
-class DeploymentManagementGateway:
+class ControlManagementGateway:
     def __init__(
         self,
         *,
-        deployment_id: str,
+        scope_kind: str,
+        control_id: str,
         ticket_authority=None,
         web_receipts=None,
         audit=None,
@@ -30,7 +31,13 @@ class DeploymentManagementGateway:
         graph_change_authority=None,
         graph_change_previewer: Callable | None = None,
     ) -> None:
-        self.deployment_id = deployment_id
+        if scope_kind not in {"deployment", "host"}:
+            raise ValueError("Control management scope is invalid")
+        self.scope_kind = scope_kind
+        self.control_id = control_id
+        self.authorization_scope_id = (
+            "deployment" if scope_kind == "deployment" else control_id
+        )
         self.ticket_authority = ticket_authority
         self.web_receipts = web_receipts
         self.audit = audit
@@ -53,7 +60,7 @@ class DeploymentManagementGateway:
         graph = registry.graph_identity
         if graph is None or registry.states[component_id] != "ACTIVE":
             raise ForestError(
-                "RUNTIME_GENERATION_NOT_ACTIVE", "Deployment module is unavailable", 409
+                "RUNTIME_GENERATION_NOT_ACTIVE", "Control module is unavailable", 409
             )
         return graph.generations[component_id], graph.graph_revision, registry.get(component_id)
 
@@ -68,12 +75,12 @@ class DeploymentManagementGateway:
             return (
                 (graph.graph_id, graph.graph_revision)
                 if graph is not None
-                else ("deployment/control-plane/1", 1)
+                else (f"{self.scope_kind}/control-plane/1", 1)
             )
         if registry is not None and component_id in registry.states:
             if graph is None or registry.states[component_id] != "ACTIVE":
                 raise ForestError(
-                    "RUNTIME_GENERATION_NOT_ACTIVE", "Deployment module is unavailable", 409
+                    "RUNTIME_GENERATION_NOT_ACTIVE", "Control module is unavailable", 409
                 )
             return graph.generations[component_id], graph.graph_revision
         raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Component does not exist", 404)
@@ -93,7 +100,7 @@ class DeploymentManagementGateway:
         ):
             raise ForestError(
                 "WEB_AUTHORITY_TICKET_TARGET_MISMATCH",
-                "Deployment RuntimeGraph changed during authorization",
+                "Control RuntimeGraph changed during authorization",
                 403,
             )
 
@@ -101,8 +108,8 @@ class DeploymentManagementGateway:
         generation_id, graph_revision = self.authorization_target("$runtime")
         await self._authorize(
             authorization,
-            target_scope_kind="deployment",
-            target_scope_id="deployment",
+            target_scope_kind=self.scope_kind,
+            target_scope_id=self.authorization_scope_id,
             target_component_id="$runtime",
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,
@@ -114,19 +121,19 @@ class DeploymentManagementGateway:
         registry = self.runtime_registry
         graph = registry.graph_identity if registry is not None else None
         return {
-            "protocol": "forest.deployment-management-runtime/1",
+            "protocol": f"forest.{self.scope_kind}-management-runtime/1",
             "runtime": (
                 {
-                    "scope_kind": "deployment",
-                    "scope_id": self.deployment_id,
+                    "scope_kind": self.scope_kind,
+                    "scope_id": self.control_id,
                     "graph_state": "ACTIVE",
                     "graph_id": graph.graph_id,
                     "graph_revision": graph.graph_revision,
                 }
                 if graph is not None
                 else {
-                    "scope_kind": "deployment",
-                    "scope_id": self.deployment_id,
+                    "scope_kind": self.scope_kind,
+                    "scope_id": self.control_id,
                     "graph_state": "CONTROL_PLANE",
                     "graph_id": generation_id,
                 }
@@ -138,8 +145,8 @@ class DeploymentManagementGateway:
         generation_id, graph_revision, module = self._require_package_binding(component_id)
         await self._authorize(
             authorization,
-            target_scope_kind="deployment",
-            target_scope_id="deployment",
+            target_scope_kind=self.scope_kind,
+            target_scope_id=self.authorization_scope_id,
             target_component_id=component_id,
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,
@@ -164,8 +171,8 @@ class DeploymentManagementGateway:
         generation_id, graph_revision, module = binding
         await self._authorize(
             authorization,
-            target_scope_kind="deployment",
-            target_scope_id="deployment",
+            target_scope_kind=self.scope_kind,
+            target_scope_id=self.authorization_scope_id,
             target_component_id=component_id,
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,
@@ -192,7 +199,7 @@ class DeploymentManagementGateway:
         role = contract.artifact_required_role(artifact_id)
         await self._authorize(
             authorization,
-            target_scope_kind="deployment", target_scope_id="deployment",
+            target_scope_kind=self.scope_kind, target_scope_id=self.authorization_scope_id,
             target_component_id=component_id,
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,
@@ -228,7 +235,7 @@ class DeploymentManagementGateway:
                 )
             await self._authorize(
                 authorization,
-                target_scope_kind="deployment", target_scope_id="deployment",
+                target_scope_kind=self.scope_kind, target_scope_id=self.authorization_scope_id,
                 target_component_id=component_id,
                 target_generation_id=generation_id,
                 target_graph_revision=graph_revision,
@@ -236,10 +243,12 @@ class DeploymentManagementGateway:
                 action_key=f"artifact.{artifact_id}.upload",
                 input_digest=digest_json(body), required_role=role,
             )
-            if self.web_receipts is None or self.audit is None:
+            if self.web_receipts is None or (
+                self.scope_kind == "deployment" and self.audit is None
+            ):
                 raise ForestError(
                     "WEB_AUTHORITY_TRANSACTION_REQUIRED",
-                    "Artifact upload requires deployment Web receipt and audit storage", 503,
+                    "Artifact upload requires control-scope Web receipt storage", 503,
                 )
             async with self.web_receipts.store.pool.connection() as conn, conn.transaction():
                 await self._authorize_mutation_in(
@@ -341,8 +350,8 @@ class DeploymentManagementGateway:
         generation_id, graph_revision, module = self._require_package_binding(component_id)
         await self._authorize(
             authorization,
-            target_scope_kind="deployment",
-            target_scope_id="deployment",
+            target_scope_kind=self.scope_kind,
+            target_scope_id=self.authorization_scope_id,
             target_component_id=component_id,
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,
@@ -366,8 +375,8 @@ class DeploymentManagementGateway:
         generation_id, graph_revision, module = self._require_package_binding(component_id)
         await self._authorize(
             authorization,
-            target_scope_kind="deployment",
-            target_scope_id="deployment",
+            target_scope_kind=self.scope_kind,
+            target_scope_id=self.authorization_scope_id,
             target_component_id=component_id,
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,
@@ -405,8 +414,8 @@ class DeploymentManagementGateway:
             generation_id, graph_revision = self.authorization_target("$runtime")
             await self._authorize(
                 authorization,
-                target_scope_kind="deployment",
-                target_scope_id="deployment",
+                target_scope_kind=self.scope_kind,
+                target_scope_id=self.authorization_scope_id,
                 target_component_id="$runtime",
                 target_generation_id=generation_id,
                 target_graph_revision=graph_revision,
@@ -418,12 +427,14 @@ class DeploymentManagementGateway:
             if query_id == "module.change.preview":
                 if self.graph_change_previewer is None:
                     raise ForestError(
-                        "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Graph preview is unavailable", 503
+                        f"{self.scope_kind.upper()}_RUNTIME_UNAVAILABLE",
+                        "Graph preview is unavailable", 503,
                     )
                 return await self.graph_change_previewer(**body)
             if self.graph_change_authority is None:
                 raise ForestError(
-                    "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Replacement authority is unavailable", 503
+                    f"{self.scope_kind.upper()}_RUNTIME_UNAVAILABLE",
+                    "Replacement authority is unavailable", 503,
                 )
             return await self.graph_change_authority.get(body["operation_id"])
         generation_id, graph_revision, module = self._require_package_binding(component_id)
@@ -435,8 +446,8 @@ class DeploymentManagementGateway:
         )
         await self._authorize(
             authorization,
-            target_scope_kind="deployment",
-            target_scope_id="deployment",
+            target_scope_kind=self.scope_kind,
+            target_scope_id=self.authorization_scope_id,
             target_component_id=component_id,
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,
@@ -465,25 +476,28 @@ class DeploymentManagementGateway:
                 )
             if self.graph_change_authority is None:
                 raise ForestError(
-                    "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Replacement authority is unavailable", 503
+                    f"{self.scope_kind.upper()}_RUNTIME_UNAVAILABLE",
+                    "Replacement authority is unavailable", 503,
                 )
             registry = self.runtime_registry
             if registry is None:
                 raise ForestError(
-                    "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Deployment Registry is unavailable", 503
+                    f"{self.scope_kind.upper()}_RUNTIME_UNAVAILABLE",
+                    "Control Registry is unavailable", 503,
                 )
             generation_id, graph_revision = self.authorization_target("$runtime")
             if not isinstance(body, dict) or set(body) != {
                 "component_id", "package_digest", "expected_graph_revision", "plan_digest"
             }:
                 raise ForestError(
-                    "DEPLOYMENT_GRAPH_CHANGE_INPUT_INVALID", "Graph change fields differ", 422
+                    f"{self.scope_kind.upper()}_GRAPH_CHANGE_INPUT_INVALID",
+                    "Graph change fields differ", 422,
                 )
             input_digest = digest_json(body)
             await self._authorize(
                 authorization,
-                target_scope_kind="deployment",
-                target_scope_id="deployment",
+                target_scope_kind=self.scope_kind,
+                target_scope_id=self.authorization_scope_id,
                 target_component_id="$runtime",
                 target_generation_id=generation_id,
                 target_graph_revision=graph_revision,
@@ -496,7 +510,8 @@ class DeploymentManagementGateway:
             if await self.graph_change_authority.find(operation_id) is None:
                 if self.graph_change_previewer is None:
                     raise ForestError(
-                        "DEPLOYMENT_RUNTIME_UNAVAILABLE", "Graph preview is unavailable", 503
+                        f"{self.scope_kind.upper()}_RUNTIME_UNAVAILABLE",
+                        "Graph preview is unavailable", 503,
                     )
                 try:
                     preview = await self.graph_change_previewer(
@@ -511,10 +526,10 @@ class DeploymentManagementGateway:
                 else:
                     if body["plan_digest"] != preview["plan_digest"]:
                         raise ForestError(
-                            "DEPLOYMENT_GRAPH_CHANGE_PLAN_CONFLICT",
+                            f"{self.scope_kind.upper()}_GRAPH_CHANGE_PLAN_CONFLICT",
                             "Submitted Graph plan differs from the current candidate", 409,
                         )
-            guard = DeploymentActionAuthorization(
+            guard = ControlActionAuthorization(
                 authorization,
                 self._authorize_mutation_in,
                 "$runtime",
@@ -533,8 +548,8 @@ class DeploymentManagementGateway:
         input_digest = digest_json(body)
         await self._authorize(
             authorization,
-            target_scope_kind="deployment",
-            target_scope_id="deployment",
+            target_scope_kind=self.scope_kind,
+            target_scope_id=self.authorization_scope_id,
             target_component_id=component_id,
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,
@@ -563,17 +578,19 @@ class DeploymentManagementGateway:
         input_digest: str,
         plan_digest: str | None,
     ) -> dict:
-        if self.ticket_authority is None or self.web_receipts is None or self.audit is None:
+        if self.ticket_authority is None or self.web_receipts is None or (
+            self.scope_kind == "deployment" and self.audit is None
+        ):
             raise ForestError(
                 "WEB_AUTHORITY_TRANSACTION_REQUIRED",
-                "Deployment Web authority receipt storage is unavailable",
+                "Control Web authority receipt storage is unavailable",
                 503,
             )
         generation_id, graph_revision = self.authorization_target(component_id)
         await self.ticket_authority.verify(
             ticket,
-            target_scope_kind="deployment",
-            target_scope_id="deployment",
+            target_scope_kind=self.scope_kind,
+            target_scope_id=self.authorization_scope_id,
             target_component_id=component_id,
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,
@@ -584,7 +601,8 @@ class DeploymentManagementGateway:
             required_role="ADMIN",
         )
         receipt = await self.web_receipts.accept_in(conn, ticket=ticket)
-        await self.audit.append_web_action_in(conn, ticket=ticket, receipt=receipt)
+        if self.audit is not None:
+            await self.audit.append_web_action_in(conn, ticket=ticket, receipt=receipt)
         return receipt
 
     def _require_package_binding(self, component_id: str):
@@ -609,13 +627,25 @@ class DeploymentManagementGateway:
             )
         return "web:" + digest_json(
             [
-                "forest.deployment-management-operation/1",
-                self.deployment_id,
+                f"forest.{self.scope_kind}-management-operation/1",
+                self.control_id,
                 component_id,
                 action_id,
                 key,
             ]
         )
+
+
+class DeploymentManagementGateway(ControlManagementGateway):
+    def __init__(self, *, deployment_id: str, **kwargs) -> None:
+        super().__init__(
+            scope_kind="deployment", control_id=deployment_id, **kwargs,
+        )
+
+
+class HostManagementGateway(ControlManagementGateway):
+    def __init__(self, *, host_id: str, **kwargs) -> None:
+        super().__init__(scope_kind="host", control_id=host_id, **kwargs)
 
 
 class DeploymentManagementScopeProvider:
@@ -631,7 +661,7 @@ class DeploymentManagementScopeProvider:
             {
                 "scope_id": self.scope_id,
                 "scope_kind": self.scope_kind,
-                "bot_id": self.deployment_id,
+                "source_id": self.deployment_id,
                 "label": self.deployment_id,
                 "available": True,
                 "desired_state": None,
@@ -643,6 +673,39 @@ class DeploymentManagementScopeProvider:
     async def gateway(self, scope_id: str):
         if scope_id != self.scope_id:
             raise ForestError("MANAGEMENT_SCOPE_NOT_FOUND", "Management scope does not exist", 404)
+        yield self._gateway
+
+
+class HostManagementScopeProvider:
+    scope_kind = "host"
+
+    def __init__(self, *, host_id: str, gateway: HostManagementGateway) -> None:
+        if not re.fullmatch(r"host/[a-f0-9]{32}", host_id):
+            raise ValueError("Host management identity is invalid")
+        self.host_id = host_id
+        self.scope_id = "host-" + host_id.removeprefix("host/")
+        self._gateway = gateway
+
+    async def list_scopes(self) -> tuple[dict, ...]:
+        return (await self.resolve(self.host_id),)
+
+    async def resolve(self, source_id: str) -> dict:
+        if source_id != self.host_id:
+            raise ForestError("MANAGEMENT_SCOPE_NOT_FOUND", "Host scope does not exist", 404)
+        return {
+            "scope_id": self.scope_id,
+            "scope_kind": self.scope_kind,
+            "source_id": self.host_id,
+            "label": self.host_id,
+            "available": True,
+            "desired_state": None,
+            "observed_state": "CONTROL_PLANE",
+        }
+
+    @asynccontextmanager
+    async def gateway(self, scope_id: str):
+        if scope_id != self.scope_id:
+            raise ForestError("MANAGEMENT_SCOPE_NOT_FOUND", "Host scope does not exist", 404)
         yield self._gateway
 
 
@@ -719,7 +782,7 @@ class ManagementScopeRegistry:
             raise ForestError("MANAGEMENT_SCOPE_NOT_FOUND", "Management scope does not exist", 404)
         row = await provider.resolve(source_id)
         if (row.get("scope_kind") != scope_kind
-            or row.get("bot_id") != source_id
+            or row.get("source_id") != source_id
             or not isinstance(row.get("scope_id"), str)
             or _SCOPE_ID.fullmatch(row["scope_id"]) is None
             or row.get("available") is not True):
@@ -798,7 +861,9 @@ class _AuthorizedGateway:
         ticket = await self.ticket_authority.issue(
             session=self.session,
             target_scope_kind=self.scope_kind,
-            target_scope_id=self.scope_id,
+            target_scope_id=getattr(
+                self.gateway, "authorization_scope_id", self.scope_id,
+            ),
             target_component_id=component_id,
             target_generation_id=generation_id,
             target_graph_revision=graph_revision,

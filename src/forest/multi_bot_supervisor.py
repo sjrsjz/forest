@@ -118,6 +118,7 @@ class MultiBotSupervisor:
             return {
                 "scope_id": scope_id,
                 "scope_kind": "bot",
+                "source_id": bot_id,
                 "bot_id": bot_id,
                 "label": bot["display_name"],
                 "available": True,

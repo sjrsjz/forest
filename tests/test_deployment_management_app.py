@@ -562,6 +562,7 @@ def test_real_browser_loads_memory_and_worker_host_through_authenticated_http():
             return {
                 "scope_id": "browser-smoke",
                 "scope_kind": "bot",
+                "source_id": "bot/browser-smoke",
                 "bot_id": "bot/browser-smoke",
                 "label": "Browser smoke",
                 "available": True,
@@ -778,6 +779,7 @@ async def test_deployment_gateway_routes_one_online_bot_scope_without_merging_re
             return {
                     "scope_id": "bot-scope-test",
                     "scope_kind": "bot",
+                    "source_id": "bot/managed",
                     "bot_id": "bot/managed",
                     "label": "Managed",
                     "available": True,

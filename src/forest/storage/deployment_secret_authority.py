@@ -12,7 +12,7 @@ from urllib.parse import unquote, urlsplit
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from forest.deployment_action_authorization import authorize_deployment_action_in
+from forest.control_action_authorization import authorize_control_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
 
@@ -59,7 +59,7 @@ class DeploymentSecretAuthority:
         authorization=None,
     ) -> SecretMetadata:
         async with self.store.pool.connection() as conn, conn.transaction():
-            await authorize_deployment_action_in(
+            await authorize_control_action_in(
                 conn, authorization, operation_id=operation_id
             )
             return await self.put_in(

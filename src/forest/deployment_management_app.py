@@ -23,6 +23,8 @@ from forest.management_scopes import (
     BotManagementScopeProvider,
     DeploymentManagementGateway,
     DeploymentManagementScopeProvider,
+    HostManagementGateway,
+    HostManagementScopeProvider,
     ManagementScopeRegistry,
 )
 from forest.packages import MAX_ARCHIVE_BYTES
@@ -66,6 +68,11 @@ def create_deployment_management_app(
     deployment_registry_provider=None,
     deployment_graph_changes=None,
     deployment_change_previewer=None,
+    host_id: str | None = None,
+    host_controller=None,
+    host_web_receipts=None,
+    host_graph_changes=None,
+    host_change_previewer=None,
     bootstrap_registry=None,
     bootstrap_package_catalog=None,
 ) -> FastAPI:
@@ -101,6 +108,20 @@ def create_deployment_management_app(
             gateway=deployment_gateway,
         )
     ]
+    if host_controller is not None:
+        if host_id is None or host_web_receipts is None:
+            raise ValueError("Host management requires identity and Web receipt authority")
+        providers.append(HostManagementScopeProvider(
+            host_id=host_id,
+            gateway=HostManagementGateway(
+                host_id=host_id,
+                ticket_authority=ticket_authority,
+                web_receipts=host_web_receipts,
+                runtime_registry_provider=lambda: host_controller.registry,
+                graph_change_authority=host_graph_changes,
+                graph_change_previewer=host_change_previewer,
+            ),
+        ))
     if bot_supervisor is not None:
         providers.append(
             BotManagementScopeProvider(
