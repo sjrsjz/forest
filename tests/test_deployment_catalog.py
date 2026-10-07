@@ -73,6 +73,7 @@ from forest.storage.deployment_generation import DeploymentGenerationAuthority
 from forest.storage.deployment_graph_changes import DeploymentGraphChangeAuthority
 from forest.storage.deployment_module_configuration import DeploymentModuleConfigurationRepository
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
+from forest.storage.deployment_retirement_jobs import DeploymentRetirementJobAuthority
 from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInstaller
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority, SecretMetadata
 from forest.storage.deployment_storage_dispatch import DeploymentStorageDispatchAuthority
@@ -2704,6 +2705,18 @@ async def test_bot_retirement_fences_startup_and_allows_stop_observations(
     assert retired["supply_state"] == "DELETING"
     assert retired["desired_state"] == "OFFLINE"
     assert retired["intent_revision"] > online["intent_revision"]
+    async with repository.store.pool.connection() as conn:
+        retirement_jobs = await (
+            await conn.execute(
+                "SELECT operation_id,bot_id,state,attempt_no FROM "
+                "forest_deployment.retirement_jobs WHERE bot_id=%s",
+                (bot["bot_id"],),
+            )
+        ).fetchall()
+    assert [dict(job) for job in retirement_jobs] == [{
+        "operation_id": "runtime/retiring/retire",
+        "bot_id": bot["bot_id"], "state": "QUEUED", "attempt_no": 0,
+    }]
     assert await repository.list_online_bots_page() == ()
     with pytest.raises(ForestError) as still_running:
         await repository.retirement_quiescence(bot["bot_id"])
@@ -2784,6 +2797,48 @@ async def test_bot_retirement_fences_startup_and_allows_stop_observations(
             expected_bot_revision=unused_retired["revision"],
         )
     assert legacy_profile.value.code == "STORAGE_PROFILE_NOT_HOST_OWNED"
+
+
+@pytest.mark.postgres
+async def test_retirement_job_claim_is_unique_and_stale_claim_cannot_settle(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    profile = await _storage_profile(repository, "bot/retirement-job", "retirement-job")
+    bootstrap = await _bootstrap_profile(repository, profile, "retirement-job")
+    bot = await repository.register_ready(
+        operation_id="provision/retirement-job", bot_id="bot/retirement-job",
+        display_name="Retirement Job", storage_profile_ref=profile.profile_ref,
+        bootstrap_profile_ref=bootstrap.profile_ref,
+        bootstrap_manifest_digest=bootstrap.manifest_digest,
+    )
+    lease = await repository.claim_supervisor("host/retirement-job", "incarnation/job")
+    jobs = DeploymentRetirementJobAuthority(repository.store)
+    assert await jobs.claim(lease, worker_id="worker/one", lease_seconds=30) is None
+    await repository.begin_retirement(
+        operation_id="retire/job", bot_id=bot["bot_id"],
+        expected_revision=bot["revision"],
+    )
+    first = await jobs.claim(lease, worker_id="worker/one", lease_seconds=30)
+    assert first.operation_id == "retire/job"
+    assert first.bot_id == bot["bot_id"]
+    assert first.attempt_no == 1
+    assert await jobs.claim(lease, worker_id="worker/two", lease_seconds=30) is None
+    renewed = await jobs.renew(lease, first, lease_seconds=60)
+    assert renewed.lease_expires_at >= first.lease_expires_at
+    waiting = await jobs.retry(
+        lease, renewed, error_code="BOT_RETIREMENT_NOT_QUIESCENT",
+        retry_seconds=5,
+    )
+    assert waiting["state"] == "RETRY_WAIT"
+    assert waiting["attempt_no"] == 1
+    with pytest.raises(ForestError) as stale:
+        await jobs.held_claim(
+            lease, operation_id="retire/job", claim_token="worker/one",
+            attempt_no=1,
+        )
+    assert stale.value.code == "STALE_RETIREMENT_CLAIM"
 
 
 @pytest.mark.postgres

@@ -178,6 +178,7 @@ class DeploymentCatalogRepository:
             "runtime_intents",
             "runtime_observations",
             "operations",
+            "retirement_jobs",
             "secret_slots",
             "secret_versions",
             "storage_requests",
@@ -207,6 +208,7 @@ class DeploymentCatalogRepository:
             "guard_revisioned_change",
             "guard_secret_slot_change",
             "guard_provisioning_job_change",
+            "guard_retirement_job_change",
             "guard_web_account_change",
             "guard_web_session_change",
             "guard_web_setup_change",
@@ -468,6 +470,10 @@ class DeploymentCatalogRepository:
         await self._save_operation(
             conn, operation_id, "BEGIN_RETIREMENT", input_digest, bot_id,
             saved["revision"],
+        )
+        await conn.execute(
+            "INSERT INTO forest_deployment.retirement_jobs(operation_id,bot_id) "
+            "VALUES (%s,%s)", (operation_id,bot_id),
         )
         return {"bot_id": bot_id, "bot_revision": saved["revision"]}
 

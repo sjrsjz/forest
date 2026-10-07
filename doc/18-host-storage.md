@@ -76,3 +76,13 @@ PostgreSQL 物化 Effect 先从 Host 私有账本取得准确资源，再以物�
 `host.storage` 0.9.0 的私有 `reclamation_work` 按资源唯一地冻结原 release 修订和撤销操作，拥有 `PENDING → CLAIMED → SUCCEEDED/FAILED` 工作状态、领取租约、尝试号及结算账本；原生 Effect 不保存第二份队列。包 Worker 调用准确 `host.storage.postgres.reclaim` 后，私有 finish 命令只接受当前 claim 的物理回执；数据库与 role 都核对为不存在时，资源才从 `RETIRED` 原子推进为 `DELETED`。若进程在 `DROP` 后、finish 前失去回执，新尝试只对这份已持久准入的工作核对缺失对象；若 finish 已提交而 settle 未提交，新领取复用相同资源的最终事实。不同领取 token 不能用旧回执结算。
 
 Effect 对仍存在的对象逐项核对精确数据库名、role、owner、marker、权限和归属；异主对象或缺失 marker 明确阻断。它先把 role 改为 `NOLOGIN` 并把数据库连接数限制为零，再等待现有连接排空；不会用 `FORCE` 杀会话。数据库和 role 的删除按原资源名在同一物理 advisory lock 下收敛，外部结果不明时只重查原工作，不新建另一回收目标。隔离 PostgreSQL 已覆盖占用连接时保持数据库、Host 包热替换、连接排空后的 `DROP`，以及物理删除成功后丢失首次回执的恢复。当前桥仅提供内部显式 `enqueue_reclamation`/状态端口；部署包的管理员退役入口、完整自动工作流、旧库重建及在线实例验证仍未完成，不能对旧预发布资源批量回收。
+
+### deployment 退役工作流边界
+
+管理员的退役操作应由独立的 `deployment.retirement` builtin 声明管理动作与界面。部署内核在同一事务中把 Bot 从 `READY` 围栏为 `DELETING/OFFLINE`、记录不可变 `BEGIN_RETIREMENT` 操作并创建唯一的内核退役 Job；Bot 身份和运行意图仍只由内核持有。退役包只拥有 Worker、动作入口、状态投影与顺序决策，不复制 Bot 目录，也不维护第二套 Job 队列。claim、续租、结算受当前 deployment Supervisor 租约及准确 package Generation 约束；冻结旧代后不领取新 Job，已领工作在原代排空或留下可恢复事实。
+
+Worker 的稳定顺序为 `等待 Bot 静止 → 撤销准确 profile → 释放 Host pin → 显式入队 Host 回收 → 等待 Host 物理工作成功 → 发布 Bot DELETED`。每一步只通过声明的窄端口执行，不把整条顺序放进宿主 `advance` 函数；所有跨库调用从最初的退役操作和冻结 storage request 派生稳定身份。`DELETING` 禁止新 Bot 启动，静止证明要求无运行图且观察为 `OFFLINE`；等待静止和 Host `BUSY` 是有界重领，不是退役失败。profile 撤销与 Host release 都保留不可变回执，下一次尝试先读既有事实。无 Host pin 的旧资源、归属 marker 冲突、被其他引用占用及无法证明的外部结果进入明确阻断，不能猜测删除成功或换一个资源重试。
+
+最后一步的受限内核端口必须先从 Host 读取精确资源的 `DELETED` 与回收工作 `SUCCEEDED`，复核对应 deployment revocation、原 Host pin 与 release，再在一个 deployment 事务中锁住 Bot、当前 Job claim、Supervisor 租约及仍为 `DELETING/OFFLINE` 的静止事实，将 Bot 发布为 `DELETED` 并把 Job 结算成功。若跨库读取后 deployment 事务输掉围栏，重试只读取单调的 Host 完成事实；Bot 与 Job 的最终状态必须同事务提交，不允许出现只有一方成功的中间态。旧 Bot 身份与审计记录继续保留且不可复用。
+
+目前内核已在开启退役的同一事务里创建唯一 Job，并提供受 Supervisor 租约约束的 claim、续租、重试、阻断和本地原子完成端口；SQL 限制初始操作、状态迁移与成功前的 Bot 状态。独立 builtin Worker、声明式窄 Effect、Host 最终事实核对、管理动作及旧资源重建仍未接线，因此当前 Host 桥接口不能直接作为管理页面的完整退役动作。

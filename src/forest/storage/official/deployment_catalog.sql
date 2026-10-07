@@ -575,6 +575,37 @@ CREATE TABLE forest_deployment.operations (
 CREATE UNIQUE INDEX bot_retirement_once ON forest_deployment.operations(bot_id)
     WHERE operation_kind='BEGIN_RETIREMENT';
 
+-- Bot identity and runtime intent are kernel facts. The retirement package
+-- leases this one kernel Job rather than maintaining a second queue.
+CREATE TABLE forest_deployment.retirement_jobs (
+    operation_id text PRIMARY KEY REFERENCES forest_deployment.operations(operation_id),
+    bot_id text NOT NULL UNIQUE REFERENCES forest_deployment.bots(bot_id),
+    state text NOT NULL DEFAULT 'QUEUED'
+        CHECK (state IN ('QUEUED','RUNNING','RETRY_WAIT','BLOCKED_UNKNOWN','SUCCEEDED')),
+    attempt_no integer NOT NULL DEFAULT 0 CHECK (attempt_no >= 0),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0),
+    lease_owner text,
+    lease_epoch bigint NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
+    lease_expires_at timestamptz,
+    retry_not_before timestamptz,
+    last_error_code text CHECK (
+        last_error_code IS NULL OR last_error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'
+    ),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    completed_at timestamptz,
+    CHECK ((state='RUNNING') = (lease_owner IS NOT NULL)),
+    CHECK ((state='RUNNING') = (lease_expires_at IS NOT NULL)),
+    CHECK ((state='RETRY_WAIT') = (retry_not_before IS NOT NULL)),
+    CHECK ((state='SUCCEEDED') = (completed_at IS NOT NULL)),
+    CHECK (state<>'SUCCEEDED' OR lease_owner IS NULL)
+);
+CREATE INDEX retirement_claim_idx
+    ON forest_deployment.retirement_jobs(state,retry_not_before,created_at,operation_id);
+CREATE INDEX retirement_expired_running_idx
+    ON forest_deployment.retirement_jobs(lease_expires_at,operation_id)
+    WHERE state='RUNNING';
+
 CREATE TABLE forest_deployment.storage_profile_revocations (
     profile_ref text PRIMARY KEY REFERENCES forest_deployment.storage_profiles(profile_ref),
     operation_id text NOT NULL UNIQUE CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
@@ -971,6 +1002,69 @@ END;
 CREATE TRIGGER provisioning_job_change_guard
     BEFORE UPDATE OR DELETE ON forest_deployment.provisioning_jobs
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_provisioning_job_change();
+
+CREATE FUNCTION forest_deployment.guard_retirement_job_change() RETURNS trigger LANGUAGE plpgsql AS '
+DECLARE
+    operation_matches boolean;
+    bot_deleted boolean;
+BEGIN
+    IF TG_OP = ''INSERT'' THEN
+        SELECT true INTO operation_matches FROM forest_deployment.operations o
+        WHERE o.operation_id=NEW.operation_id AND o.operation_kind=''BEGIN_RETIREMENT''
+          AND o.bot_id=NEW.bot_id;
+        IF operation_matches IS DISTINCT FROM true OR NEW.state<>''QUEUED''
+           OR NEW.attempt_no<>0 OR NEW.lease_epoch<>0 OR NEW.revision<>1 THEN
+            RAISE EXCEPTION ''retirement Job must start from its Bot fence'';
+        END IF;
+        RETURN NEW;
+    END IF;
+    IF TG_OP = ''DELETE'' OR ROW(NEW.operation_id,NEW.bot_id,NEW.created_at)
+       IS DISTINCT FROM ROW(OLD.operation_id,OLD.bot_id,OLD.created_at) THEN
+        RAISE EXCEPTION ''retirement job identity is immutable'';
+    END IF;
+    IF OLD.state = ''SUCCEEDED'' THEN
+        RAISE EXCEPTION ''completed retirement job is immutable'';
+    END IF;
+    IF NOT (
+        (OLD.state IN (''QUEUED'',''RETRY_WAIT'') AND NEW.state=''RUNNING''
+            AND NEW.attempt_no=OLD.attempt_no+1
+            AND NEW.lease_epoch=OLD.lease_epoch+1)
+        OR (OLD.state=''RUNNING'' AND NEW.state=''RUNNING''
+            AND NEW.attempt_no=OLD.attempt_no
+            AND NEW.lease_epoch=OLD.lease_epoch
+            AND NEW.lease_owner=OLD.lease_owner
+            AND NEW.lease_expires_at>=OLD.lease_expires_at)
+        OR (OLD.state=''RUNNING'' AND NEW.state IN
+            (''RETRY_WAIT'',''BLOCKED_UNKNOWN'',''SUCCEEDED'')
+            AND NEW.attempt_no=OLD.attempt_no
+            AND NEW.lease_epoch=OLD.lease_epoch)
+    ) THEN
+        RAISE EXCEPTION ''retirement Job transition is invalid'';
+    END IF;
+    IF NEW.state=''SUCCEEDED'' THEN
+        SELECT b.supply_state=''DELETED'' INTO bot_deleted
+        FROM forest_deployment.bots b WHERE b.bot_id=NEW.bot_id;
+        IF bot_deleted IS DISTINCT FROM true THEN
+            RAISE EXCEPTION ''retirement Job cannot finish before Bot deletion'';
+        END IF;
+    END IF;
+    IF ROW(NEW.state,NEW.attempt_no,NEW.lease_owner,NEW.lease_epoch,
+           NEW.retry_not_before,NEW.last_error_code,NEW.completed_at)
+       IS NOT DISTINCT FROM ROW(OLD.state,OLD.attempt_no,OLD.lease_owner,
+           OLD.lease_epoch,OLD.retry_not_before,OLD.last_error_code,OLD.completed_at) THEN
+        IF NEW.revision <> OLD.revision THEN
+            RAISE EXCEPTION ''retirement lease renewal cannot advance revision'';
+        END IF;
+    ELSIF NEW.revision <> OLD.revision + 1 THEN
+        RAISE EXCEPTION ''retirement job revision must advance once'';
+    END IF;
+    RETURN NEW;
+END;
+';
+
+CREATE TRIGGER retirement_job_change_guard
+    BEFORE INSERT OR UPDATE OR DELETE ON forest_deployment.retirement_jobs
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_retirement_job_change();
 
 CREATE FUNCTION forest_deployment.guard_bot_change() RETURNS trigger LANGUAGE plpgsql AS '
 BEGIN
