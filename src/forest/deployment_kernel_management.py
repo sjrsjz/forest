@@ -57,6 +57,16 @@ class ProvisioningJobsKernelQuery:
         return await self.jobs.page(**payload)
 
 
+class StorageRequestsKernelQuery:
+    """Page frozen Host storage requests without exposing role credentials."""
+
+    def __init__(self, dispatch) -> None:
+        self.dispatch = dispatch
+
+    async def query(self, payload: dict) -> dict:
+        return await self.dispatch.page(**payload)
+
+
 class DeploymentKernelManagementAuthority(ControlKernelManagementAuthority):
     scope_kind = "deployment"
 
@@ -74,6 +84,27 @@ class BotSetDesiredKernelCommand:
         return await self.catalog.set_desired_in(
             conn, operation_id=operation_id, **prepared,
         )
+
+
+class StorageRequestKernelCommand:
+    """Freeze one Host storage intent and its delivery row under Web admission."""
+
+    def __init__(self, requests, *, host_id: str) -> None:
+        self.requests = requests
+        self.host_id = host_id
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        return dict(payload)
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        request = await self.requests.request(
+            operation_id=operation_id, conn=conn, host_id=self.host_id, **prepared,
+        )
+        return {
+            "request_id": request.request_id,
+            "bot_id": request.bot_id,
+            "profile_ref": request.profile_ref,
+        }
 
 
 class _PreparedSecretPut:

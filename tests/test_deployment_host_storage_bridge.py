@@ -17,6 +17,7 @@ import pytest
 from psycopg import sql
 
 from forest.deployment_host_storage_bridge import DeploymentHostStorageBridge
+from forest.deployment_storage_driver import DeploymentStorageAdvanceEffectDriver
 from forest.deployment_storage_settlement import DeploymentStorageSettlementAuthority
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
@@ -27,6 +28,7 @@ from forest.packages import PackageCatalog
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
+from forest.storage.deployment_storage_dispatch import DeploymentStorageDispatchAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_storage_requests import DeploymentStorageRequestAuthority
 from forest.storage.deployment_store import DeploymentStore
@@ -57,6 +59,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
     host_supervisor = HostSupervisor(HostIdentityAuthority(host_store))
     controller = None
     created_physical = None
+    additional_physical = None
     try:
         await host_supervisor.start()
         catalog_authority = DeploymentCatalogRepository(deployment_store)
@@ -82,6 +85,23 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             profile_ref="storage-profile/bridge/1",
             dsn_secret_ref="secret://bridge/dsn",
             credential_ref="secret://bridge/password",
+        )
+        dispatch = DeploymentStorageDispatchAuthority(deployment_store)
+        claim = await dispatch.claim(lease)
+        assert claim.request_id == frozen.request_id
+        await secrets.put(
+            operation_id="bridge/automatic-password",
+            secret_ref="secret://bridge/automatic-password",
+            purpose="storage.postgresql.password",
+            plaintext=b"forest-automatic-storage-password-for-tests",
+            expected_revision=0,
+        )
+        automatic = await requests.request(
+            operation_id="bridge/automatic-request",
+            host_id=host_id, bot_id="bot/bridge-automatic", storage_generation=1,
+            profile_ref="storage-profile/bridge-automatic/1",
+            dsn_secret_ref="secret://bridge/automatic-dsn",
+            credential_ref="secret://bridge/automatic-password",
         )
         source = tmp_path / "host-storage"
         shutil.copytree(
@@ -294,6 +314,8 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         assert settled.profile_ref == frozen.profile_ref
         assert settled.dsn_secret_ref == frozen.dsn_secret_ref
         assert await profiles.metadata(frozen.profile_ref) == settled
+        assert (await dispatch.settle(lease, claim, outcome="SETTLED"))["state"] == "SETTLED"
+        assert (await dispatch.read(frozen.request_id))["state"] == "SETTLED"
         secret_metadata = await secrets.metadata(frozen.dsn_secret_ref)
         assert secret_metadata.purpose == "storage.postgresql.dsn"
         assert secret_metadata.version == 1
@@ -336,6 +358,68 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             )
         assert changed_endpoint.value.code == "STORAGE_SETTLEMENT_CONFLICT"
 
+        automatic_claim = await dispatch.claim(lease)
+        assert automatic_claim.request_id == automatic.request_id
+
+        async def accept_generation(_conn, _lease, **_options):
+            return None
+
+        identity = SimpleNamespace(
+            component_id="deployment.storage-orchestrator",
+            generation_id="generation/bridge-test",
+        )
+        runtime = SimpleNamespace(
+            scope_id=deployment_store.deployment_id,
+            store=deployment_store,
+            authority_lease=lambda: lease,
+            generation_authority=SimpleNamespace(
+                verify_owned_work_in=accept_generation,
+            ),
+        )
+        driver = DeploymentStorageAdvanceEffectDriver(
+            {}, 1, identity,
+            {"name": "deployment.storage-orchestrator.advance",
+             "kind": "deployment.host-storage-advance", "semantics": "idempotent"},
+            runtime=runtime, dispatch=dispatch, requests=requests,
+            profiles=profiles, secrets=secrets, bridge=bridge,
+            settlement=settlement,
+        )
+        await driver.start()
+        scope = SimpleNamespace(
+            scope_kind="deployment", scope_id=deployment_store.deployment_id,
+            component_id=identity.component_id, generation_id=identity.generation_id,
+        )
+        payload = {
+            "request_id": automatic.request_id,
+            "claim_token": automatic_claim.claim_token,
+            "attempt_no": automatic_claim.attempt_no,
+        }
+        async with asyncio.timeout(30):
+            while True:
+                result = await driver.invoke(payload, scope=scope, invocation=None)
+                if result["state"] == "SETTLED":
+                    break
+                assert result["state"] == "WAITING"
+                await asyncio.sleep(0.1)
+        await dispatch.settle(lease, automatic_claim, outcome="SETTLED")
+        assert (await profiles.metadata(automatic.profile_ref)).bot_id == automatic.bot_id
+        resource = await controller.registry.get("host.storage").management_contract.query(
+            "generations", {"bot_id": automatic.bot_id},
+        )
+        additional_physical = (
+            resource["items"][0]["physical_name"],
+            resource["items"][0]["role_name"],
+        )
+        target_dsn = await secrets.resolve_text(automatic.dsn_secret_ref)
+        target = await psycopg.AsyncConnection.connect(target_dsn, autocommit=True)
+        try:
+            actual = await (await target.execute(
+                "SELECT current_user AS role_name,current_database() AS database_name",
+            )).fetchone()
+            assert actual == additional_physical[::-1]
+        finally:
+            await target.close()
+
     finally:
         if controller is not None:
             await controller.close()
@@ -350,6 +434,15 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             ))
             await admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(
                 sql.Identifier(created_physical[1]),
+            ))
+        if additional_physical is not None:
+            assert additional_physical[0].startswith("forest_bot_")
+            assert additional_physical[1].startswith("forest_role_")
+            await admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                sql.Identifier(additional_physical[0]),
+            ))
+            await admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(
+                sql.Identifier(additional_physical[1]),
             ))
         assert host_name.startswith("forest_host_")
         assert deployment_name.startswith("forest_deployment_")

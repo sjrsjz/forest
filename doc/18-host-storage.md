@@ -1,6 +1,6 @@
 # Host 物理存储所有权与回收协议
 
-`host.storage` 是 Host scope 的可热重载 builtin 包，负责 Bot 等资源在本机的**物理所有权账本**。它不是 deployment 的存储配置页，也不能从数据库命名规则推断自己拥有某个旧资源。生产 Host Graph 现会启动此包，但当前 deployment 中的 `LocalPostgresDatabaseAllocator` 仍能直接建库；在这条旧路径移除且旧资源经过准确登记或重建之前，Host 清单不完整，不允许开启自动回收。
+`host.storage` 是 Host scope 的可热重载 builtin 包，负责 Bot 等资源在本机的**物理所有权账本**。它不是 deployment 的存储配置页，也不能从数据库命名规则推断自己拥有某个旧资源。生产 Host Graph 会启动此包；生产 Bot 供给器现只消费已经提交的 profile，不再自行建库。预发布旧路径产生的资源仍需准确登记或重建；在 Host 清单完整之前，不允许开启自动回收。
 
 ## 权威与边界
 
@@ -28,11 +28,11 @@
 
 ## 跨作用域供给与回收
 
-目标协议是：deployment 在自身事务中持久化稳定的 Host 请求引用；受限跨 scope 路由调用 `reserve`；Host 持久 owned-work 领取物理 Effect 并记录意图和观察；Host `realize` 在账本事务中把已核实的 receipt 结算为 `ACTIVE`；deployment 再冻结逻辑 profile/head 并供给 Bot。崩溃后以原请求 ID 和准确资源引用查询并重放，绝不重新生成 marker 或另一个库；role 密码通过受控 Secret ref 解析；同一 storage generation 的凭据版本冻结，轮换须走新 generation 的物理与 DSN 切换协议。Host 的物理状态与 deployment 的逻辑引用状态是两种权威，WebUI 必须分别显示，不能用一方状态推断另一方已提交。
+当前协议是：deployment 内核在冻结请求的同一事务中建立投递账本；可热重载的 `deployment.storage-orchestrator` 包通过声明式 owned-work 领取该请求，调用受限原生 Effect 按准确请求引用访问 Host；Host 持久 owned-work 领取物理 Effect 并记录意图和观察；Host `realize` 在账本事务中把已核实的 receipt 结算为 `ACTIVE`；deployment 验证并 pin 引用，再原子发布 DSN Secret 与逻辑 profile。投递账本的 `PENDING`、`SETTLED`、`BLOCKED` 不是 Host 物理状态：仅在准确 profile 已提交后才能标 `SETTLED`。崩溃后以原请求 ID 和准确资源引用查询并重放，绝不重新生成 marker 或另一个库；role 密码通过受控 Secret ref 解析；同一 storage generation 的凭据版本冻结，轮换须走新 generation 的物理与 DSN 切换协议。Host 的物理状态与 deployment 的逻辑引用状态是两种权威，WebUI 必须分别显示，不能用一方状态推断另一方已提交。
 
 ### Bot storage profile 切换顺序
 
-当前 `storage.create-local` 在 deployment 事务中先生成 DSN Secret 和 immutable storage profile；`OfficialBotProvisioner` 随后的 Job 才调用 `LocalPostgresDatabaseAllocator.ensure_database`。直接把 allocator 换成 Host 服务调用会让 profile 在 Host 接纳或物理结算前就可供 bootstrap/Job 引用，也会把跨数据库网络调用放进 deployment 事务，因此不能沿用这条事务顺序。
+旧 `storage.create-local` 曾在 deployment 事务中先生成 DSN Secret 和 immutable storage profile，随后由 `OfficialBotProvisioner` 调用 `LocalPostgresDatabaseAllocator.ensure_database`。该入口已从生产包 UI/端口与生产组合根移除。直接把 allocator 换成 Host 服务调用会让 profile 在 Host 接纳或物理结算前就可供 bootstrap/Job 引用，也会把跨数据库网络调用放进 deployment 事务，因此新路径采用下述分阶段协议。
 
 目标切换分成以下顺序步骤，所有重试使用最初冻结的请求身份；已实现范围见下文状态：
 
@@ -46,6 +46,8 @@
 回收须另有协议：deployment 先对目标 storage generation 施加禁止新引用的 fence，证明 Bot head、备份/恢复 Job 和下载租约均已结束或转移；Host 持久化回收计划，并在每次物理删除前重新验证 fence、引用水位、租约、资源修订、精确数据库名、role 和 marker。目标存在而归属不符时拒绝删除；外部结果未知时保留账本供核对。包卸载或热替换只排空 Worker、owned-work 与 Effect，不能删除账本或物理资源。其他资源种类（artifact、Milvus collection）必须各有原生标记和 Effect，不能复用 PostgreSQL 删除逻辑。
 
 ## 预发布实现状态（2026-10-07）
+
+本节后续段落保留各阶段事实；当前装配以此段为准。deployment 内核持有 Bot 基础身份、期望运行意图、冻结的 Host 请求及投递租约；`deployment.storage-orchestrator` 1.0.0 是独立的可热重载 builtin，持有 Worker 工作处理入口、模块自带 WebUI 与受限管理端口，但不复制 Bot 目录。管理动作只冻结请求并由内核注入目标 Host；请求和 `storage_request_dispatch` 在同一事务创建。Worker 从内核账本排他领取、续租，调用幂等原生 Effect，经 `DeploymentHostStorageBridge` 预留/入队/查询/pin，再由 `DeploymentStorageSettlementAuthority` 原子发布 DSN Secret 与 profile。等待 Host 时按原请求延后重领；异常结果记录错误，明确阻断进入 `BLOCKED`；成功结算必须核对准确已提交的 profile。生产 `OfficialBotProvisioner` 已不再调用旧本地分配器，供应包旧 `storage.create-local` UI/端口已移除。独立 PostgreSQL 已验证请求并发领取与 fencing、真实双库桥结算，以及包 Worker 热替换后从同一账本继续处理；这些分别验证，不等于完整生产 Supervisor 的端到端 Host 建库与 Bot 供应验收。当前仍需完成该验收、旧预发布物理资源对账/重建、安全回收，以及删除只在测试使用的旧 allocator/本地管理命令。
 
 role 密码现为每个请求的专属 deployment Secret：请求创建必须先核对 Secret 的 `storage.postgresql.password` 用途、口令长度与格式；生成端负责提供强随机值，在同一事务中冻结版本与摘要；请求与 Secret 写入共享凭据引用围栏，胜出的版本成为不可变事实，之后的新轮换写入拒绝。Host pin 的凭据摘要必须等于该请求摘要，最终结算再次核对冻结版本、Host pin 和实际口令。完整轮换要另建 storage generation，不能直接修改正在被物理 role 和 immutable DSN 引用的 Secret。预发布 deployment 基线变动，需重建测试库。
 

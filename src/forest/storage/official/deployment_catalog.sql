@@ -368,6 +368,30 @@ CREATE TABLE forest_deployment.storage_requests (
 CREATE INDEX deployment_storage_requests_created_idx
     ON forest_deployment.storage_requests(deployment_id,created_at,request_id);
 
+CREATE TABLE forest_deployment.storage_request_dispatch (
+    request_id text PRIMARY KEY REFERENCES forest_deployment.storage_requests(request_id),
+    state text NOT NULL DEFAULT 'PENDING'
+        CHECK (state IN ('PENDING','SETTLED','BLOCKED')),
+    attempt_count bigint NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at timestamptz DEFAULT clock_timestamp(),
+    claim_token text,
+    claim_owner_epoch bigint CHECK (claim_owner_epoch IS NULL OR claim_owner_epoch > 0),
+    claim_expires_at timestamptz,
+    last_error_code text CHECK (
+        last_error_code IS NULL OR last_error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'
+    ),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK (
+        (claim_token IS NULL AND claim_owner_epoch IS NULL AND claim_expires_at IS NULL)
+        OR (claim_token IS NOT NULL AND claim_owner_epoch IS NOT NULL
+            AND claim_expires_at IS NOT NULL)
+    ),
+    CHECK ((state='PENDING' AND next_attempt_at IS NOT NULL)
+        OR (state<>'PENDING' AND next_attempt_at IS NULL))
+);
+CREATE INDEX deployment_storage_request_dispatch_due_idx
+    ON forest_deployment.storage_request_dispatch(state,next_attempt_at,request_id);
+
 CREATE TABLE forest_deployment.storage_request_resources (
     request_id text PRIMARY KEY REFERENCES forest_deployment.storage_requests(request_id),
     resource_id text NOT NULL UNIQUE CHECK (resource_id ~ '^resource/[a-f0-9-]{36}$'),

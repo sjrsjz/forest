@@ -181,6 +181,7 @@ class DeploymentCatalogRepository:
             "secret_slots",
             "secret_versions",
             "storage_requests",
+            "storage_request_dispatch",
             "storage_request_resources",
             "storage_request_pins",
             "storage_profiles",

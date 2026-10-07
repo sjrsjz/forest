@@ -192,6 +192,10 @@ class DeploymentStorageRequestAuthority:
                      input_digest),
                 )
             ).fetchone()
+            await conn.execute(
+                "INSERT INTO forest_deployment.storage_request_dispatch(request_id) "
+                "VALUES (%s)", (request_id,),
+            )
             return self._request(saved)
 
     async def read(self, request_id: str) -> StorageRequest:

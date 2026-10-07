@@ -32,6 +32,8 @@ from forest.deployment_kernel_management import (
     ProvisioningReconcileKernelCommand,
     SecretPutKernelCommand,
     StorageProfileKernelCommand,
+    StorageRequestKernelCommand,
+    StorageRequestsKernelQuery,
     WebAccountKernelCommand,
 )
 from forest.deployment_management_app import create_deployment_management_app
@@ -40,6 +42,7 @@ from forest.deployment_packages import bootstrap_builtin_deployment_package
 from forest.deployment_provisioning_driver import DeploymentProvisioningEffectDriver
 from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwnedWorkAuthority
 from forest.deployment_runtime import DeploymentRuntimeScope
+from forest.deployment_storage_owned_work import DeploymentStorageOwnedWorkAuthority
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.kernel_package_catalog_snapshot import (
@@ -75,6 +78,7 @@ from forest.storage.deployment_module_configuration import DeploymentModuleConfi
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_schema_bundles import DeploymentSchemaBundleInstaller
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority, SecretMetadata
+from forest.storage.deployment_storage_dispatch import DeploymentStorageDispatchAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_storage_requests import DeploymentStorageRequestAuthority
 from forest.storage.deployment_store import DeploymentStore
@@ -2022,6 +2026,184 @@ async def _storage_profile(repository, bot_id: str, name: str):
 
 
 @pytest.mark.postgres
+async def test_storage_dispatch_is_exclusive_recoverable_and_lease_fenced(deployment_catalog):
+    repository = deployment_catalog
+    await repository.initialize()
+    secrets = DeploymentSecretAuthority(
+        repository.store, active_key_id="master/dispatch/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    await secrets.put(
+        operation_id="dispatch/password",
+        secret_ref="secret://dispatch/password",
+        purpose="storage.postgresql.password",
+        plaintext=b"forest-storage-dispatch-password-for-tests",
+        expected_revision=0,
+    )
+    requests = DeploymentStorageRequestAuthority(repository.store, secrets=secrets)
+    frozen = await requests.request(
+        operation_id="dispatch/request", host_id="host/" + "d" * 32,
+        bot_id="bot/dispatch", storage_generation=1,
+        profile_ref="storage-profile/dispatch/1",
+        dsn_secret_ref="secret://dispatch/dsn",
+        credential_ref="secret://dispatch/password",
+    )
+    lease = await repository.claim_supervisor("host/dispatch", "incarnation/dispatch")
+    dispatch = DeploymentStorageDispatchAuthority(repository.store)
+    first, duplicate = await asyncio.gather(dispatch.claim(lease), dispatch.claim(lease))
+    assert (first is None) != (duplicate is None)
+    claim = first or duplicate
+    assert claim.request_id == frozen.request_id and claim.attempt_no == 1
+    assert (await dispatch.read(frozen.request_id))["state"] == "PENDING"
+    with pytest.raises(ForestError) as early:
+        await dispatch.settle(lease, claim, outcome="SETTLED")
+    assert early.value.code == "STORAGE_DISPATCH_NOT_SETTLED"
+    with pytest.raises(ForestError) as stale_supervisor:
+        await dispatch.renew(replace(lease, owner_epoch=lease.owner_epoch + 1), claim)
+    assert stale_supervisor.value.code == "STALE_DEPLOYMENT_SUPERVISOR"
+    await dispatch.renew(lease, claim)
+    await dispatch.settle(
+        lease, claim, outcome="WAITING", retry_seconds=1,
+        error_code="HOST_STORAGE_PENDING",
+    )
+    assert await dispatch.claim(lease) is None
+    await asyncio.sleep(1.05)
+    next_claim = await dispatch.claim(lease)
+    assert next_claim.request_id == frozen.request_id and next_claim.attempt_no == 2
+    with pytest.raises(ForestError) as stale_claim:
+        await dispatch.settle(lease, claim, outcome="BLOCKED", error_code="OLD_CLAIM")
+    assert stale_claim.value.code == "STORAGE_DISPATCH_CLAIM_LOST"
+    await dispatch.settle(
+        lease, next_claim, outcome="BLOCKED", error_code="HOST_UNAVAILABLE",
+    )
+    assert await dispatch.claim(lease) is None
+    status = await dispatch.read(frozen.request_id)
+    assert status["state"] == "BLOCKED" and status["attempt_count"] == 2
+    assert status["last_error_code"] == "HOST_UNAVAILABLE"
+
+
+@pytest.mark.postgres
+async def test_storage_orchestrator_worker_resumes_after_hot_replace(
+    deployment_catalog, tmp_path,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    secrets = DeploymentSecretAuthority(
+        repository.store, active_key_id="master/orchestrator/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    await secrets.put(
+        operation_id="orchestrator/password",
+        secret_ref="secret://orchestrator/password",
+        purpose="storage.postgresql.password",
+        plaintext=b"forest-orchestrator-password-for-tests",
+        expected_revision=0,
+    )
+    requests = DeploymentStorageRequestAuthority(repository.store, secrets=secrets)
+    frozen = await requests.request(
+        operation_id="orchestrator/request", host_id="host/" + "e" * 32,
+        bot_id="bot/orchestrator", storage_generation=1,
+        profile_ref="storage-profile/orchestrator/1",
+        dsn_secret_ref="secret://orchestrator/dsn",
+        credential_ref="secret://orchestrator/password",
+    )
+    lease = await repository.claim_supervisor("host/orchestrator", "incarnation/orchestrator")
+    dispatch = DeploymentStorageDispatchAuthority(repository.store)
+    runtime = DeploymentRuntimeScope(
+        repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
+        kernel_query_handlers={
+            ("deployment.storage-orchestrator", "deployment.storage-requests-page"):
+                StorageRequestsKernelQuery(dispatch),
+        },
+        kernel_management_handlers={
+            ("deployment.storage-orchestrator", "deployment.storage-request"):
+                StorageRequestKernelCommand(requests, host_id="host/" + "e" * 32),
+        },
+    )
+    runtime.kernel_owned_work_authorities["deployment.storage-orchestrator"] = (
+        DeploymentStorageOwnedWorkAuthority(runtime, dispatch)
+    )
+    mode = "WAITING"
+    generations = []
+
+    class StorageEffect:
+        def __init__(self, identity):
+            self.identity = identity
+            generations.append(identity.generation_id)
+
+        async def start(self):
+            pass
+
+        async def quiesce(self):
+            pass
+
+        async def resume(self):
+            pass
+
+        async def close(self):
+            pass
+
+        async def invoke(self, payload, *, scope, invocation):
+            assert scope.generation_id == self.identity.generation_id
+            assert payload["request_id"] == frozen.request_id
+            return {
+                "request_id": frozen.request_id, "state": mode,
+                **({"error_code": "TEST_BLOCKED"} if mode == "BLOCKED" else {}),
+            }
+
+    runtime.effect_driver_factories["deployment.host-storage-advance"] = (
+        lambda _configuration, _revision, identity, _declaration: StorageEffect(identity)
+    )
+    source = Path(__file__).parents[1] / "src/forest/builtin/deployment_storage_orchestrator"
+    package_catalog = PackageCatalog(tmp_path / "storage-catalog")
+    controller = DeploymentPackageController(
+        runtime, package_catalog, official_sources=(source,),
+    )
+    try:
+        graph = await controller.start()
+        page = await graph.get("deployment.storage-orchestrator").management_contract.query(
+            "storage.requests.page", {"bot_id": frozen.bot_id, "limit": 10},
+        )
+        assert [item["request_id"] for item in page["items"]] == [frozen.request_id]
+        assert page["next_after"] is None
+        async with asyncio.timeout(15):
+            while True:
+                async with repository.store.pool.connection() as conn:
+                    row = await (await conn.execute(
+                        "SELECT attempt_count,claim_token FROM "
+                        "forest_deployment.storage_request_dispatch WHERE request_id=%s",
+                        (frozen.request_id,),
+                    )).fetchone()
+                if row["attempt_count"] >= 1 and row["claim_token"] is None:
+                    break
+                await asyncio.sleep(0.1)
+        assert (await dispatch.read(frozen.request_id))["state"] == "PENDING"
+        replacement_source = tmp_path / "storage-replacement"
+        shutil.copytree(source, replacement_source)
+        manifest = replacement_source / "module.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.0"', 'version = "1.0.1"', 1,
+            ), encoding="utf-8",
+        )
+        replacement = package_catalog.build_official(replacement_source)
+        mode = "BLOCKED"
+        await controller.replace(
+            "deployment.storage-orchestrator", replacement.digest,
+            expected_graph_revision=graph.graph_identity.graph_revision,
+        )
+        async with asyncio.timeout(15):
+            while (await dispatch.read(frozen.request_id))["state"] != "BLOCKED":
+                await asyncio.sleep(0.1)
+        status = await dispatch.read(frozen.request_id)
+        assert status["attempt_count"] >= 2
+        assert status["last_error_code"] == "TEST_BLOCKED"
+        assert len(set(generations)) == 2
+    finally:
+        await controller.close()
+
+
+@pytest.mark.postgres
 async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment_catalog):
     repository = deployment_catalog
     await repository.initialize()
@@ -2066,6 +2248,9 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
     async with repository.store.pool.connection() as conn:
         assert (await (await conn.execute(
             "SELECT count(*) AS count FROM forest_deployment.storage_requests",
+        )).fetchone())["count"] == 1
+        assert (await (await conn.execute(
+            "SELECT count(*) AS count FROM forest_deployment.storage_request_dispatch",
         )).fetchone())["count"] == 1
         assert (await (await conn.execute(
             "SELECT count(*) AS count FROM forest_deployment.storage_profiles",
@@ -3390,10 +3575,6 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     )
     supervisor = SimpleNamespace(notify=lambda: None)
     allocated_dsn = "postgresql://forest:hidden-password@postgres/forest_bot_web"
-    allocator = SimpleNamespace(
-        new_target_dsn=lambda _bot_id: allocated_dsn,
-        validate_target=lambda _bot_id, _target_dsn: None,
-    )
     bootstrap_registry = BootstrapConfigurationRegistry(official_bootstrap_contributions())
     deployment_audit = DeploymentAuditRepository(repository.store)
     lease = await repository.claim_supervisor("host/webui", "incarnation/webui")
@@ -3416,8 +3597,6 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                 ("deployment.accounts", kind): WebAccountKernelCommand(web_identity, kind)
                 for kind in WebAccountKernelCommand._METHODS
             },
-            ("deployment.provisioning", "deployment.storage-create-local"):
-                LocalStorageProfileKernelCommand(secrets, storage_profiles, allocator),
             ("deployment.provisioning", "deployment.storage-create"):
                 StorageProfileKernelCommand(storage_profiles),
             ("deployment.provisioning", "deployment.bootstrap-create"):
@@ -3719,9 +3898,16 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         )
         assert "never-return-this" not in listed.text
         assert "never-return-this" not in listed.text
+        await secrets.put(
+            operation_id="web/storage-dsn",
+            secret_ref="secret://web/storage",
+            purpose="storage.postgresql.dsn",
+            plaintext=allocated_dsn.encode(),
+            expected_revision=0,
+        )
         storage = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
-            "deployment.provisioning/actions/storage.create-local",
+            "deployment.provisioning/actions/storage.create",
             headers={**headers, "idempotency-key": "storage-web-1"},
             json={
                 "profile_ref": "storage-profile/web/1",
@@ -3741,7 +3927,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert await secrets.resolve_text("secret://web/storage") == allocated_dsn
         replayed_storage = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
-            "deployment.provisioning/actions/storage.create-local",
+            "deployment.provisioning/actions/storage.create",
             headers={**headers, "idempotency-key": "storage-web-1"},
             json={
                 "profile_ref": "storage-profile/web/1",
@@ -3753,13 +3939,13 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert replayed_storage.json() == storage.json()
         rejected_storage = await client.post(
             "/management/v1/scopes/deployment/deployment/modules/"
-            "deployment.provisioning/actions/storage.create-local",
+            "deployment.provisioning/actions/storage.create",
             headers={**headers, "idempotency-key": "storage-web-conflict"},
             json={
                 "profile_ref": "storage-profile/web/1",
-                "bot_id": "bot/web",
+                "bot_id": "bot/web/other",
                 "storage_generation": 1,
-                "dsn_secret_ref": "secret://web/orphan",
+                "dsn_secret_ref": "secret://web/storage",
             },
         )
         assert rejected_storage.status_code == 409, rejected_storage.text
@@ -3883,7 +4069,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             (
                 "deployment.provisioning",
                 deployment_registry.graph_identity.generations["deployment.provisioning"],
-                "storage.create-local",
+                "storage.create",
             ),
         ]
         audit_page = await client.post(
@@ -3898,7 +4084,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             "account.create",
             "bot.set-desired",
             "secret.put",
-            "storage.create-local",
+            "storage.create",
             "bootstrap.create",
         }
         assert {item["producer_component_id"] for item in audit_records} == {
@@ -4072,7 +4258,14 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert updated_after_reload.json()["revision"] == 4
         concurrent_storage_path = (
             "/management/v1/scopes/deployment/deployment/modules/"
-            "deployment.provisioning/actions/storage.create-local"
+            "deployment.provisioning/actions/storage.create"
+        )
+        await secrets.put(
+            operation_id="web/concurrent-dsn",
+            secret_ref="secret://web/concurrent",
+            purpose="storage.postgresql.dsn",
+            plaintext=allocated_dsn.encode(),
+            expected_revision=0,
         )
         concurrent_storage_payload = {
             "profile_ref": "storage-profile/web/concurrent",

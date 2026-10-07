@@ -14,17 +14,19 @@ from uuid import uuid4
 
 from forest.bootstrap_contributions import BootstrapConfigurationRegistry
 from forest.bot_host import BotHost
+from forest.deployment_host_storage_bridge import DeploymentHostStorageBridge
 from forest.deployment_kernel_management import (
     BootstrapCatalogKernelQuery,
     BootstrapProfileKernelCommand,
     BotCatalogKernelQuery,
     BotSetDesiredKernelCommand,
-    LocalStorageProfileKernelCommand,
     ProvisioningJobKernelCommand,
     ProvisioningJobsKernelQuery,
     ProvisioningReconcileKernelCommand,
     SecretPutKernelCommand,
     StorageProfileKernelCommand,
+    StorageRequestKernelCommand,
+    StorageRequestsKernelQuery,
     WebAccountKernelCommand,
 )
 from forest.deployment_management_app import create_deployment_management_app
@@ -33,6 +35,9 @@ from forest.deployment_package_controller import DeploymentPackageController
 from forest.deployment_provisioning_driver import DeploymentProvisioningEffectDriver
 from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwnedWorkAuthority
 from forest.deployment_runtime import DeploymentRuntimeScope
+from forest.deployment_storage_driver import DeploymentStorageAdvanceEffectDriver
+from forest.deployment_storage_owned_work import DeploymentStorageOwnedWorkAuthority
+from forest.deployment_storage_settlement import DeploymentStorageSettlementAuthority
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
@@ -47,14 +52,15 @@ from forest.official_bot_provisioning import (
     official_bootstrap_contributions,
 )
 from forest.packages import PackageCatalog, auto_install_official_sources
-from forest.postgres_database_allocator import LocalPostgresDatabaseAllocator
 from forest.storage.deployment_audit import DeploymentAuditRepository
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_graph_changes import DeploymentGraphChangeAuthority
 from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
+from forest.storage.deployment_storage_dispatch import DeploymentStorageDispatchAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
+from forest.storage.deployment_storage_requests import DeploymentStorageRequestAuthority
 from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
@@ -243,6 +249,12 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     graph_changes = DeploymentGraphChangeAuthority(store)
     host_graph_changes = HostGraphChangeAuthority(host_store)
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)
+    storage_requests = DeploymentStorageRequestAuthority(store, secrets=secrets)
+    storage_dispatch = DeploymentStorageDispatchAuthority(store)
+    storage_settlement = DeploymentStorageSettlementAuthority(
+        store, secrets=secrets, profiles=storage_profiles,
+        host_id=settings.host_id, maintenance_dsn=settings.dsn,
+    )
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
     package_catalog = PackageCatalog(
@@ -272,10 +284,8 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     settings_resolver = OfficialBotSettingsResolver(
         secrets=secrets, bootstrap_registry=bootstrap_registry
     )
-    database_allocator = LocalPostgresDatabaseAllocator(settings.dsn)
     provisioner = OfficialBotProvisioner(
         settings_resolver=settings_resolver,
-        database_allocator=database_allocator,
     )
     supervisor = MultiBotSupervisor(
         catalog,
@@ -288,6 +298,11 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         incarnation=incarnation,
         poll_seconds=settings.poll_seconds,
         max_starting=settings.max_starting,
+    )
+    host_storage_bridge = DeploymentHostStorageBridge(
+        requests=storage_requests, deployment_supervisor=supervisor,
+        host_supervisor=host_supervisor,
+        host_controller_provider=lambda: host_controller,
     )
 
     def notify_deployment_work():
@@ -343,6 +358,8 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     ProvisioningJobsKernelQuery(jobs),
                 ("deployment.provisioning", "deployment.bootstrap-catalog"):
                     BootstrapCatalogKernelQuery(bootstrap_registry),
+                ("deployment.storage-orchestrator", "deployment.storage-requests-page"):
+                    StorageRequestsKernelQuery(storage_dispatch),
             },
             kernel_management_handlers={
                 ("deployment.bot-catalog", "deployment.bot-set-desired"):
@@ -353,10 +370,10 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     ("deployment.accounts", kind): WebAccountKernelCommand(web_identity, kind)
                     for kind in WebAccountKernelCommand._METHODS
                 },
-                ("deployment.provisioning", "deployment.storage-create-local"):
-                    LocalStorageProfileKernelCommand(secrets, storage_profiles, database_allocator),
                 ("deployment.provisioning", "deployment.storage-create"):
                     StorageProfileKernelCommand(storage_profiles),
+                ("deployment.storage-orchestrator", "deployment.storage-request"):
+                    StorageRequestKernelCommand(storage_requests, host_id=settings.host_id),
                 ("deployment.provisioning", "deployment.bootstrap-create"):
                     BootstrapProfileKernelCommand(bootstrap_profiles, bootstrap_registry),
                 **{
@@ -373,6 +390,9 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         deployment_runtime.kernel_owned_work_authorities["deployment.provisioning"] = (
             DeploymentProvisioningOwnedWorkAuthority(deployment_runtime, jobs, catalog)
         )
+        deployment_runtime.kernel_owned_work_authorities[
+            "deployment.storage-orchestrator"
+        ] = DeploymentStorageOwnedWorkAuthority(deployment_runtime, storage_dispatch)
         deployment_runtime.effect_driver_factories[
             "deployment.provisioning-materializer"
         ] = lambda configuration, revision, identity, declaration: (
@@ -381,6 +401,17 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 runtime=deployment_runtime, jobs=jobs,
                 storage_profiles=storage_profiles,
                 bootstrap_profiles=bootstrap_profiles, provisioner=provisioner,
+            )
+        )
+        deployment_runtime.effect_driver_factories[
+            "deployment.host-storage-advance"
+        ] = lambda configuration, revision, identity, declaration: (
+            DeploymentStorageAdvanceEffectDriver(
+                configuration, revision, identity, declaration,
+                runtime=deployment_runtime, dispatch=storage_dispatch,
+                requests=storage_requests, profiles=storage_profiles,
+                secrets=secrets, bridge=host_storage_bridge,
+                settlement=storage_settlement,
             )
         )
         deployment_controller = DeploymentPackageController(

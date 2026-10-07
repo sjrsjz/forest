@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bot_id", "storage_generation", "profile_ref", "dsn_secret_ref", "credential_ref"],
+  "properties": {
+    "bot_id": {"type": "string", "minLength": 1, "maxLength": 128},
+    "storage_generation": {"type": "integer", "minimum": 1},
+    "profile_ref": {"type": "string", "pattern": "^storage-profile/[A-Za-z0-9][A-Za-z0-9._/-]{0,495}$"},
+    "dsn_secret_ref": {"type": "string", "pattern": "^secret://[A-Za-z0-9][A-Za-z0-9._/-]{0,501}$"},
+    "credential_ref": {"type": "string", "pattern": "^secret://[A-Za-z0-9][A-Za-z0-9._/-]{0,501}$"}
+  }
+}

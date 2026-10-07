@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host 存储投递与 builtin 编排切换（2026-10-07）：deployment 内核继续独占 Bot 基础身份、期望运行意图、冻结存储请求与投递租约。新 `deployment.storage-orchestrator` 1.0.0 是独立可热重载 builtin：包 Worker 领取请求，经受限原生 Effect 调用 Host reserve/入队/状态/pin 与最终 settlement；管理 UI 自带提交请求和筛选分页，Host 身份由内核管理命令注入，role 密码正文只在 Secret authority/Host Effect 之间流转。请求与 `storage_request_dispatch` 同事务建立；领取有 Supervisor/Generation/claim fencing，Host 尚未完成则延后重领，准确 profile 提交后才可标记 `SETTLED`。生产 Bot 供给器已停止调用本地 allocator，供应包旧 `storage.create-local` UI/端口移除。独立 PostgreSQL 定向验证覆盖并发领取、旧 claim/租约拒绝、真实双库结算与包 Worker 热替换接续；完整生产 Supervisor 的 Host 建库到 Bot 供给尚未端到端验收，旧预发布物理资源仍未对账或回收，测试专用旧 allocator/本地管理命令尚未删除。以下早期条目保留当时状态，不能覆盖本段现况。
+
 Host 存储口令冻结（2026-10-07）：deployment 存储请求必须引用已有且用途正确的专属 role 口令 Secret；生成端须提供强随机值，内核校验长度与格式，在本库事务内冻结版本和 SHA-256 摘要；同一凭据引用不能被两个请求共享。请求与 Secret 写端口按同一凭据键合流，冻结后拒绝新轮换，Host pin 摘要必须吻合请求，最终 settlement 再检查版本与摘要。双数据库桥与请求/轮换并发定向回归通过，完整 deployment catalog 回归 `29 passed`。该规则为预发布基线变更，现有测试库须重建。实际生产供给与 storage generation 切换仍未接线。
 
 生产 Host Graph 装配（2026-10-07）：Supervisor 在取得 Host 租约后启动 HostRuntimeScope 与 HostPackageController，官方 `host.storage` 现随 Host Graph 首发；原生 PostgreSQL Effect 通过受控 deployment SecretAuthority 解析专属 role 密码，并使用与现有本地 allocator 相同的 PostgreSQL 维护 endpoint。Host Graph 的持久换代调和、致命状态监视和逆序排空进入 Supervisor 生命周期。此步只激活 Host 包的准确新资源账本，不迁移旧本地分配器已有资源，也不启用物理回收；跨 scope 供给调度、Host Web 管理 provider、最终 settlement 生产调用及旧分配器切断仍待完成。尚未把此组合根认作已验收的生产供给链。
