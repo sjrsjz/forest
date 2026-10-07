@@ -1903,6 +1903,7 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
         scope_kind="bot", bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
         schema_bundle_installer=installer, generation_authority=kernel.runtime,
+        authority_lease=lambda **_kwargs: lease,
     )
     registry = RuntimeModuleRegistry(host, _isolated_memory_descriptors(kernel, package))
     await registry.start()
