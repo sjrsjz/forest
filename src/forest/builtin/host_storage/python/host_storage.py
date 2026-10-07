@@ -23,3 +23,10 @@ class HostStorage(Plugin):
             "host.storage.reserve-record", payload,
             operation_id=ctx.operations.stable("reserve:v1"),
         )
+
+    @service("host.storage.realize", semantics="idempotent")
+    async def realize(self, payload, ctx):
+        return await ctx.commands.call(
+            "host.storage.realize-record", payload,
+            operation_id=ctx.operations.stable("realize:v1"),
+        )

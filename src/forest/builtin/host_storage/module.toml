@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.host-storage"
-version = "0.2.0"
+version = "0.3.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "host_storage:HostStorage"
@@ -32,6 +32,7 @@ stop_timeout_s = 10
 requests = [
   "domain.query:host.storage.generations.read",
   "domain.command:host.storage.reserve-record",
+  "domain.command:host.storage.realize-record",
   "service.call:host.storage.postgres.materialize",
 ]
 
@@ -68,11 +69,20 @@ semantics = "idempotent"
 input_schema = "schemas/materialize-input.json"
 output_schema = "schemas/materialize-output.json"
 
+[[components.provides]]
+name = "host.storage.realize"
+contract = "1.0"
+semantics = "idempotent"
+visibility = "public"
+internal_command = "host.storage.realize-record"
+input_schema = "schemas/materialize-output.json"
+output_schema = "schemas/realize-output.json"
+
 [components.storage]
 schema_id = "forest.host.storage"
-schema_version = "1.0.0"
+schema_version = "1.1.0"
 baseline = "schema/storage.sql"
-baseline_sha256 = "04e02806b5e4bb602cdd47c1b7fdb2c85460dbe36d8edfd815817f9c7c4453b9"
+baseline_sha256 = "070017f6b90f993c1831467db14a2dfe31017dcd820feff67c975e5d6769464b"
 scope = "host"
 repository_contract = "forest.host-storage.repository/1"
 execution_profile = "official"
@@ -90,6 +100,13 @@ contract = "1.0"
 function = "host_storage_reserve"
 input_schema = "schemas/reserve-input.json"
 output_schema = "schemas/reserve-output.json"
+
+[[components.domain_commands]]
+name = "host.storage.realize-record"
+contract = "1.0"
+function = "host_storage_realize"
+input_schema = "schemas/materialize-output.json"
+output_schema = "schemas/realize-output.json"
 
 [[components.management_queries]]
 id = "generations"

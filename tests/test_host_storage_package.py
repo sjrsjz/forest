@@ -158,6 +158,24 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert receipt["physical_name"] == created_physical[0]
         assert receipt["role_name"] == created_physical[1]
         assert receipt["owner_marker_digest"].startswith("sha256:")
+        realize_route = FrozenServiceRoute(
+            service_id="host.storage.realize", version=1,
+            caller_component_id="host.test-bridge",
+            provider_component_id="host.storage",
+            provider_generation_id=graph.generations["host.storage"],
+            graph_id=graph.graph_id, graph_revision=graph.graph_revision,
+            admission_lane="DATA", owned_work=False,
+        )
+        realize = member.runtime_service_handlers()[("host.storage.realize", 1)]
+        with pytest.raises(ForestError) as forged:
+            await realize.invoke_routed(
+                realize_route,
+                RuntimeServiceInvocation(
+                    "realize/storage/forged", 10, "test.host-storage", "bot/storage",
+                ),
+                ({**receipt, "owner_marker_digest": "sha256:" + "0" * 64},), {},
+            )
+        assert forged.value.code == "HOST_STORAGE_RECEIPT_MISMATCH"
         database_row = await (
             await admin.execute(
                 "SELECT pg_get_userbyid(datdba) AS owner,"
@@ -202,7 +220,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.2.0"', 'version = "0.2.1"', 1,
+                'version = "0.3.0"', 'version = "0.3.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -267,6 +285,53 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
             ({"resource_id": first["resource_id"],
               "credential_ref": "secret/storage/test"},), {},
         ) == receipt
+        new_realize_route = FrozenServiceRoute(
+            service_id="host.storage.realize", version=1,
+            caller_component_id="host.test-bridge",
+            provider_component_id="host.storage",
+            provider_generation_id=new_graph.generations["host.storage"],
+            graph_id=new_graph.graph_id, graph_revision=new_graph.graph_revision,
+            admission_lane="DATA", owned_work=False,
+        )
+        new_realize = current.get("host.storage").runtime_service_handlers()[
+            ("host.storage.realize", 1)
+        ]
+        realized = await new_realize.invoke_routed(
+            new_realize_route,
+            RuntimeServiceInvocation(
+                "realize/storage/1", 10, "test.host-storage", "bot/storage",
+            ),
+            (receipt,), {},
+        )
+        assert realized == {
+            "protocol": "forest.host-storage-realized/1",
+            "resource_id": first["resource_id"],
+            "host_id": host_id, "state": "ACTIVE", "revision": 2,
+        }
+        assert await new_realize.invoke_routed(
+            new_realize_route,
+            RuntimeServiceInvocation(
+                "realize/storage/1", 10, "test.host-storage", "bot/storage",
+            ),
+            (receipt,), {},
+        ) == realized
+        assert (await current.get("host.storage").management_contract.query(
+            "generations", {"bot_id": "bot/storage", "state": "ACTIVE"},
+        ))["items"][0]["revision"] == 2
+        await admin.execute(sql.SQL("COMMENT ON DATABASE {} IS NULL").format(
+            sql.Identifier(created_physical[0])
+        ))
+        with pytest.raises(ForestError) as unmarked_active:
+            await new_materialize.invoke_routed(
+                new_physical_route,
+                RuntimeServiceInvocation(
+                    "materialize/storage/active-unmarked", 10,
+                    "test.host-storage", "bot/storage",
+                ),
+                ({"resource_id": first["resource_id"],
+                  "credential_ref": "secret/storage/test"},), {},
+            )
+        assert unmarked_active.value.code == "HOST_STORAGE_DATABASE_MISMATCH"
     finally:
         if controller is not None:
             await controller.close()

@@ -22,6 +22,14 @@ CREATE INDEX physical_generations_page
 CREATE INDEX physical_generations_owner_page
     ON physical_generations (host_id,deployment_id,bot_id,resource_id);
 
+CREATE TABLE realization_operations (
+    operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    resource_id text NOT NULL REFERENCES physical_generations(resource_id),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE FUNCTION host_storage_reserve(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -92,6 +100,78 @@ BEGIN
             'deployment_id',item.deployment_id,'bot_id',item.bot_id,
             'storage_generation',item.storage_generation,'state',item.state,
             'revision',item.revision));
+END;
+$$;
+
+CREATE FUNCTION host_storage_realize(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_operation text := context->>'operation_id';
+    requested_resource text := input->>'resource_id';
+    item __forest_module_schema__.physical_generations%ROWTYPE;
+    replay __forest_module_schema__.realization_operations%ROWTYPE;
+    expected_marker_digest text;
+    result_value jsonb;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR context->>'port_kind' IS DISTINCT FROM 'command'
+       OR context->>'port_name' IS DISTINCT FROM 'host.storage.realize-record'
+       OR requested_operation IS NULL
+       OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR context->>'input_digest' !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_resource !~ '^resource/[a-f0-9-]{36}$'
+       OR input->>'protocol' IS DISTINCT FROM 'forest.host-storage-materialization/1' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_REALIZE_INVALID',
+                'message','Host storage realization is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'host.storage.realize/'||(context->>'scope_id')||'/'||requested_operation,0));
+    SELECT * INTO replay FROM __forest_module_schema__.realization_operations
+    WHERE operation_id=requested_operation;
+    IF FOUND THEN
+        IF replay.resource_id IS DISTINCT FROM requested_resource
+           OR replay.input_digest IS DISTINCT FROM context->>'input_digest' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_REALIZE_OPERATION_CONFLICT',
+                    'message','Realization operation input differs','status',409));
+        END IF;
+        RETURN replay.result_payload;
+    END IF;
+    SELECT * INTO item FROM __forest_module_schema__.physical_generations
+    WHERE resource_id=requested_resource FOR UPDATE;
+    IF NOT FOUND OR item.host_id IS DISTINCT FROM context->>'scope_id'
+       OR item.kind IS DISTINCT FROM 'POSTGRES_DATABASE'
+       OR item.state NOT IN ('RESERVED','ACTIVE') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RESOURCE_UNAVAILABLE',
+                'message','Host PostgreSQL reservation is unavailable','status',409));
+    END IF;
+    expected_marker_digest := 'sha256:' || encode(sha256(convert_to(
+        'forest.host-storage/1|'||item.resource_id||'|'||item.host_id||'|'
+            ||item.owner_marker,'UTF8')),'hex');
+    IF input->>'host_id' IS DISTINCT FROM item.host_id
+       OR input->>'physical_name' IS DISTINCT FROM item.physical_name
+       OR input->>'role_name' IS DISTINCT FROM item.role_name
+       OR input->>'owner_marker_digest' IS DISTINCT FROM expected_marker_digest THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECEIPT_MISMATCH',
+                'message','Physical PostgreSQL receipt differs from reservation','status',409));
+    END IF;
+    IF item.state='RESERVED' THEN
+        UPDATE __forest_module_schema__.physical_generations
+        SET state='ACTIVE',revision=revision+1,updated_at=clock_timestamp()
+        WHERE resource_id=item.resource_id RETURNING * INTO item;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.host-storage-realized/1',
+            'resource_id',item.resource_id,'host_id',item.host_id,
+            'state',item.state,'revision',item.revision));
+    INSERT INTO __forest_module_schema__.realization_operations(
+        operation_id,resource_id,input_digest,result_payload)
+    VALUES(requested_operation,item.resource_id,context->>'input_digest',result_value);
+    RETURN result_value;
 END;
 $$;
 
