@@ -411,6 +411,79 @@ class DeploymentCatalogRepository:
             )
             return await self._bot_in(conn, result["bot_id"])
 
+    async def begin_retirement_in(
+        self, conn, *, operation_id: str, bot_id: str, expected_revision: int,
+    ) -> dict:
+        """Atomically stop new admission and invalidate a running startup fence."""
+        _bounded(operation_id, "operation_id", 256)
+        _bounded(bot_id, "bot_id", 128)
+        if (
+            type(expected_revision) is not int
+            or not 1 <= expected_revision <= 9223372036854775807
+        ):
+            raise ForestError("DEPLOYMENT_INPUT_INVALID", "Bot revision is invalid", 422)
+        input_digest = digest_json({
+            "bot_id": bot_id, "expected_revision": expected_revision,
+        })
+        prior = await self._operation(conn, operation_id, input_digest)
+        if prior is not None:
+            if prior["operation_kind"] != "BEGIN_RETIREMENT" or prior["bot_id"] != bot_id:
+                raise ForestError(
+                    "DEPLOYMENT_OPERATION_CONFLICT", "Operation identity differs", 409,
+                )
+            return {"bot_id": bot_id, "bot_revision": prior["resulting_revision"]}
+        bot = await (
+            await conn.execute(
+                "SELECT supply_state,revision FROM forest_deployment.bots "
+                "WHERE bot_id=%s FOR UPDATE", (bot_id,),
+            )
+        ).fetchone()
+        if bot is None:
+            raise ForestError("BOT_NOT_FOUND", "Bot identity does not exist", 404)
+        if bot["supply_state"] != "READY":
+            raise ForestError(
+                "BOT_NOT_READY", "Bot retirement has already started", 409,
+            )
+        if bot["revision"] != expected_revision:
+            raise ForestError(
+                "BOT_REVISION_CONFLICT", "Bot identity changed", 409,
+            )
+        intent = await (
+            await conn.execute(
+                "UPDATE forest_deployment.runtime_intents SET desired_state='OFFLINE',"
+                "revision=revision+1,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s RETURNING revision", (bot_id,),
+            )
+        ).fetchone()
+        if intent is None:
+            raise ForestError("BOT_NOT_FOUND", "Bot runtime intent does not exist", 404)
+        saved = await (
+            await conn.execute(
+                "UPDATE forest_deployment.bots SET supply_state='DELETING',"
+                "revision=revision+1,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s RETURNING revision", (bot_id,),
+            )
+        ).fetchone()
+        await self._save_operation(
+            conn, operation_id, "BEGIN_RETIREMENT", input_digest, bot_id,
+            saved["revision"],
+        )
+        return {"bot_id": bot_id, "bot_revision": saved["revision"]}
+
+    async def begin_retirement(
+        self, *, operation_id: str, bot_id: str, expected_revision: int,
+        authorization=None,
+    ) -> dict:
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await authorize_control_action_in(
+                conn, authorization, operation_id=operation_id,
+            )
+            result = await self.begin_retirement_in(
+                conn, operation_id=operation_id, bot_id=bot_id,
+                expected_revision=expected_revision,
+            )
+            return await self._bot_in(conn, result["bot_id"])
+
     async def claim_supervisor(
         self, host_id: str, incarnation: str, *, lease_seconds: int = 30
     ) -> DeploymentSupervisorLease:
@@ -517,14 +590,22 @@ class DeploymentCatalogRepository:
             )
         async with self.store.pool.connection() as conn, conn.transaction():
             await self._verify_lease_in(conn, lease)
-            exists = await (
+            bot = await (
                 await conn.execute(
-                    "SELECT 1 FROM forest_deployment.bots WHERE bot_id=%s AND supply_state='READY'",
+                    "SELECT supply_state FROM forest_deployment.bots "
+                    "WHERE bot_id=%s FOR SHARE",
                     (bot_id,),
                 )
             ).fetchone()
-            if exists is None:
-                raise ForestError("BOT_NOT_FOUND", "Ready Bot identity does not exist", 404)
+            if bot is None or bot["supply_state"] == "DELETED":
+                raise ForestError("BOT_NOT_FOUND", "Bot identity does not exist", 404)
+            if (
+                bot["supply_state"] == "DELETING"
+                and observed_state in {"STARTING", "ONLINE"}
+            ):
+                raise ForestError(
+                    "BOT_INTENT_CHANGED", "Bot retirement invalidated startup", 409,
+                )
             if observed_state in {"STARTING", "ONLINE"}:
                 intent = await (
                     await conn.execute(

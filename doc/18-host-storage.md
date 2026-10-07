@@ -47,6 +47,8 @@
 
 回收须另有协议：deployment 先对目标 storage generation 施加禁止新引用的 fence，证明 Bot head、备份/恢复 Job 和下载租约均已结束或转移；Host 持久化回收计划，并在每次物理删除前重新验证 fence、引用水位、租约、资源修订、精确数据库名、role 和 marker。目标存在而归属不符时拒绝删除；外部结果未知时保留账本供核对。包卸载或热替换只排空 Worker、owned-work 与 Effect，不能删除账本或物理资源。其他资源种类（artifact、Milvus collection）必须各有原生标记和 Effect，不能复用 PostgreSQL 删除逻辑。
 
+Bot 退役的第一道 deployment 内核围栏现已实现：`begin_retirement` 在锁住 Bot 身份行和运行意图后，把 `READY` 变为 `DELETING`、把期望状态强制写成 `OFFLINE` 并递增意图修订；同一操作重放合流，另一操作不能再次开启退役。普通运行意图命令在非 `READY` 状态拒绝；Supervisor 的 `STARTING/ONLINE` 观测与退役并发时按 Bot 行锁排序，失效的启动被拒绝，`STOPPING/OFFLINE/FAILED` 仍可记录。此状态只表示禁止重新启动，不证明旧运行图已关闭，也不授权解除 Host pin 或删除物理库。退役确认、其他引用的撤销和物理回收仍须后续协议完成。
+
 ## 预发布实现状态（2026-10-07）
 
 生产 Supervisor 已把 Host 作为独立 Web 管理作用域发布。`host.storage` 是 Host Graph 内可热重载的 builtin 包，自带资源清单、配置入口和私有 owned-work；Host Web 票据、回执与 Graph 校验均绑定完整 `host_id`。隔离 PostgreSQL 的实际 HTTP、包换代和 Supervisor 端到端验收已覆盖 Host 建库、pin/结算、Bot READY 与 OFFLINE 初始意图。

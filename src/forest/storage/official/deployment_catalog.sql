@@ -563,12 +563,16 @@ CREATE TABLE forest_deployment.runtime_observations (
 
 CREATE TABLE forest_deployment.operations (
     operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
-    operation_kind text NOT NULL CHECK (operation_kind IN ('REGISTER_READY','SET_DESIRED')),
+    operation_kind text NOT NULL CHECK (operation_kind IN (
+        'REGISTER_READY','SET_DESIRED','BEGIN_RETIREMENT'
+    )),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     bot_id text NOT NULL REFERENCES forest_deployment.bots(bot_id),
     resulting_revision bigint NOT NULL CHECK (resulting_revision > 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+CREATE UNIQUE INDEX bot_retirement_once ON forest_deployment.operations(bot_id)
+    WHERE operation_kind='BEGIN_RETIREMENT';
 
 -- The kernel owns Bot identity and runtime intent. Official deployment packages
 -- may only project this state or submit an authenticated intent change here.
@@ -621,6 +625,7 @@ CREATE FUNCTION forest_deployment.bot_set_desired(
 ) RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
     prior forest_deployment.operations%ROWTYPE;
+    current_supply text;
     current_revision bigint;
     saved_revision bigint;
 BEGIN
@@ -660,6 +665,18 @@ BEGIN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object('bot_id',prior.bot_id,
                 'intent_revision',prior.resulting_revision));
+    END IF;
+    SELECT supply_state INTO current_supply FROM forest_deployment.bots
+        WHERE bot_id=requested_bot FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','BOT_NOT_FOUND',
+                'message','Bot identity does not exist','status',404));
+    END IF;
+    IF current_supply<>'READY' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','BOT_NOT_READY',
+                'message','Retiring Bot cannot accept runtime intent','status',409));
     END IF;
     SELECT revision INTO current_revision FROM forest_deployment.runtime_intents
         WHERE bot_id=requested_bot FOR UPDATE;
@@ -942,8 +959,9 @@ BEGIN
     ) THEN
         RAISE EXCEPTION ''bot identity is immutable'';
     END IF;
-    IF OLD.supply_state = ''DELETED'' THEN
-        RAISE EXCEPTION ''deleted bot identity cannot be reused'';
+    IF NOT ((OLD.supply_state = ''READY'' AND NEW.supply_state = ''DELETING'')
+        OR (OLD.supply_state = ''DELETING'' AND NEW.supply_state = ''DELETED'')) THEN
+        RAISE EXCEPTION ''bot supply state transition is invalid'';
     END IF;
     IF NEW.revision <> OLD.revision + 1 THEN
         RAISE EXCEPTION ''bot revision must advance once'';

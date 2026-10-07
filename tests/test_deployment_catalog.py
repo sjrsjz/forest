@@ -2655,6 +2655,80 @@ async def test_deployment_catalog_keeps_bot_identity_intent_and_observation_sepa
 
 
 @pytest.mark.postgres
+async def test_bot_retirement_fences_startup_and_allows_stop_observations(
+    deployment_catalog,
+):
+    repository = deployment_catalog
+    await repository.initialize()
+    profile = await _storage_profile(repository, "bot/retiring", "retiring")
+    bootstrap = await _bootstrap_profile(repository, profile, "retiring")
+    bot = await repository.register_ready(
+        operation_id="provision/retiring", bot_id="bot/retiring",
+        display_name="Retiring", storage_profile_ref=profile.profile_ref,
+        bootstrap_profile_ref=bootstrap.profile_ref,
+        bootstrap_manifest_digest=bootstrap.manifest_digest,
+    )
+    online = await repository.set_desired(
+        operation_id="runtime/retiring/online", bot_id=bot["bot_id"],
+        desired_state="ONLINE", expected_revision=bot["intent_revision"],
+    )
+    lease = await repository.claim_supervisor("host/retirement", "incarnation/retirement")
+    await repository.observe(
+        lease, bot_id=bot["bot_id"], observed_state="STARTING",
+        expected_intent_revision=online["intent_revision"],
+    )
+    raced_online, retired = await asyncio.gather(
+        repository.observe(
+            lease, bot_id=bot["bot_id"], observed_state="ONLINE",
+            expected_intent_revision=online["intent_revision"],
+            graph_id="graph/retiring/1",
+        ),
+        repository.begin_retirement(
+            operation_id="runtime/retiring/retire", bot_id=bot["bot_id"],
+            expected_revision=bot["revision"],
+        ),
+        return_exceptions=True,
+    )
+    assert retired["supply_state"] == "DELETING"
+    assert retired["desired_state"] == "OFFLINE"
+    assert retired["intent_revision"] > online["intent_revision"]
+    assert await repository.list_online_bots_page() == ()
+    if isinstance(raced_online, Exception):
+        assert isinstance(raced_online, ForestError)
+        assert raced_online.code == "BOT_INTENT_CHANGED"
+    else:
+        assert raced_online["observed_state"] == "ONLINE"
+    with pytest.raises(ForestError) as stale_start:
+        await repository.observe(
+            lease, bot_id=bot["bot_id"], observed_state="ONLINE",
+            expected_intent_revision=online["intent_revision"],
+            graph_id="graph/retiring/stale",
+        )
+    assert stale_start.value.code == "BOT_INTENT_CHANGED"
+    with pytest.raises(ForestError) as blocked:
+        await repository.set_desired(
+            operation_id="runtime/retiring/restart", bot_id=bot["bot_id"],
+            desired_state="ONLINE", expected_revision=retired["intent_revision"],
+        )
+    assert blocked.value.code == "BOT_NOT_READY"
+    assert await repository.begin_retirement(
+        operation_id="runtime/retiring/retire", bot_id=bot["bot_id"],
+        expected_revision=bot["revision"],
+    ) == retired
+    with pytest.raises(ForestError) as duplicate:
+        await repository.begin_retirement(
+            operation_id="runtime/retiring/another", bot_id=bot["bot_id"],
+            expected_revision=bot["revision"],
+        )
+    assert duplicate.value.code == "BOT_NOT_READY"
+    await repository.observe(lease, bot_id=bot["bot_id"], observed_state="STOPPING")
+    stopped = await repository.observe(
+        lease, bot_id=bot["bot_id"], observed_state="OFFLINE",
+    )
+    assert stopped["observed_state"] == "OFFLINE"
+
+
+@pytest.mark.postgres
 async def test_deployment_failure_backoff_is_fenced_and_visible(deployment_catalog):
     repository = deployment_catalog
     await repository.initialize()
