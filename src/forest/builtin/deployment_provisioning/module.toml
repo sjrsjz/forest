@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-provisioning"
-version = "2.1.4"
+version = "2.2.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_provisioning:DeploymentProvisioning"
@@ -13,6 +13,7 @@ state_schema = 1
 reload_mode = "drain"
 config_schema = "schemas/config.json"
 bootstrap_config = "bootstrap.json"
+provides = []
 
 [components.resources]
 max_frame_bytes = 262144
@@ -30,7 +31,6 @@ stop_timeout_s = 10
 
 [components.capabilities]
 requests = [
-  "domain.query:deployment.provisioning.jobs.read",
   "service.call:deployment.provisioning.materialize",
 ]
 
@@ -42,14 +42,6 @@ label = "Bot 供应"
 group = "deployment"
 order = 30
 bootstrap_catalog_query = "provisioning.bootstrap-catalog"
-
-[[components.provides]]
-name = "deployment.provisioning.jobs.page"
-contract = "1.0"
-semantics = "read"
-visibility = "management"
-input_schema = "schemas/jobs-page-input.json"
-output_schema = "schemas/jobs-page-output.json"
 
 [[components.effect_services]]
 name = "deployment.provisioning.materialize"
@@ -75,19 +67,10 @@ lease_seconds = 120
 renew_interval_s = 30
 renew_timeout_s = 10
 
-[components.storage]
-schema_id = "forest.deployment.provisioning-ui"
-schema_version = "1.1.0"
-baseline = "schema/provisioning.sql"
-baseline_sha256 = "6ae3677cbd60a9deec79fa5980dad2d3ba5bd5c7da7766590eb162f711c53ad8"
-scope = "deployment"
-repository_contract = "forest.deployment-provisioning-ui.repository/1"
-execution_profile = "official"
-
-[[components.domain_queries]]
-name = "deployment.provisioning.jobs.read"
+[[components.kernel_queries]]
+name = "deployment.provisioning.jobs.page"
 contract = "1.0"
-function = "deployment_provisioning_jobs_page"
+kind = "deployment.provisioning-jobs-page"
 input_schema = "schemas/jobs-page-input.json"
 output_schema = "schemas/jobs-page-output.json"
 

@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+供给 Job 查询所有权收口（2026-10-07）：`deployment.provisioning` 2.2.0 的管理分页改经受限 `deployment.provisioning-jobs-page` Kernel Query，由持有 Job 表的 `DeploymentProvisioningJobAuthority` 执行有界键集查询；删除包 Worker 读服务、跨 schema 的包私有 SQL 与空余 storage bundle。真实 PostgreSQL 的完整管理 API 用例 `1 passed`，覆盖供给包装配、Job 入队、筛选查询、取消和审计。该改动不触碰 Bot 身份或运行意图权威，也未完成 Host 建库切换。
+
 Host 资源引用固定（2026-10-07）：`host.storage` 0.6.0 / 私有 SQL 1.4.0 新增 Host 私有不可变 profile pin 账本与受限幂等服务。只有归属元组完全匹配、owned-work 已结算的 ACTIVE 资源可以固定到一个 deployment/profile；同操作并发重放复用回执，改用其他 profile 或归属会拒绝。真实 PostgreSQL 包回归 `2 passed`。production Host Graph、跨 scope 桥及 deployment 本库 profile 提交仍未接入该回执，pin 解绑定和安全回收也未实现，因此旧本地分配器尚不能切断，Host 清单不能作为全量库存。
 
 Host 持久物化工作（2026-10-07）：`host.storage` 0.5.0、私有 SQL 1.3.0 由包内 owned-work 持有 `resource_id`、凭据引用、租约、尝试次数和结果。Worker 通过原生 PostgreSQL Effect 与包内 `realize` 命令结算；精确资源和工作状态只读端口同时核对资源、deployment、Bot 与 storage generation，返回物理名称与状态但不返回凭据或 owner marker。隔离 PostgreSQL 的真实包回归 `2 passed`，包括并发同键入队合流、异请求冲突、错误归属拒读、旧代冻结后入队、遗留领取租约到期、新代重领同一资源并建库结算；没有生成第二个物理名字。生产 Host Graph、部署跨 scope 持久投递、口令权威、逻辑引用冻结和安全回收仍未接通，旧 `LocalPostgresDatabaseAllocator` 仍在生产路径上，不能把 Host 清单当成全量物理库存。以下 Host 条目按开发阶段记录，现况以本段为准。

@@ -47,6 +47,16 @@ class BotCatalogKernelQuery:
         return await self.catalog.catalog_page(**payload)
 
 
+class ProvisioningJobsKernelQuery:
+    """Expose the kernel-owned provisioning ledger through a bounded page port."""
+
+    def __init__(self, jobs) -> None:
+        self.jobs = jobs
+
+    async def query(self, payload: dict) -> dict:
+        return await self.jobs.page(**payload)
+
+
 class DeploymentKernelManagementAuthority(ControlKernelManagementAuthority):
     scope_kind = "deployment"
 

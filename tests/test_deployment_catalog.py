@@ -28,6 +28,7 @@ from forest.deployment_kernel_management import (
     DeploymentKernelManagementAuthority,
     LocalStorageProfileKernelCommand,
     ProvisioningJobKernelCommand,
+    ProvisioningJobsKernelQuery,
     ProvisioningReconcileKernelCommand,
     SecretPutKernelCommand,
     StorageProfileKernelCommand,
@@ -3093,6 +3094,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         kernel_query_handlers={
             ("deployment.bot-catalog", "deployment.bot-catalog-page"):
                 BotCatalogKernelQuery(repository),
+            ("deployment.provisioning", "deployment.provisioning-jobs-page"):
+                ProvisioningJobsKernelQuery(jobs),
             ("deployment.provisioning", "deployment.bootstrap-catalog"):
                 BootstrapCatalogKernelQuery(bootstrap_registry),
         },

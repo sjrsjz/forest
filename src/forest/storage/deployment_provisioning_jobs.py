@@ -559,6 +559,39 @@ class DeploymentProvisioningJobAuthority:
             ).fetchall()
             return tuple(dict(row) for row in rows)
 
+    async def page(
+        self, *, limit: int = 50, after: str | None = None,
+        bot_id: str | None = None, state: str | None = None,
+    ) -> dict:
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ForestError("PROVISIONING_QUERY_INVALID", "Page limit is invalid", 422)
+        if after is not None:
+            _text(after, "after", 256)
+        if bot_id is not None:
+            _text(bot_id, "bot_id", 128)
+        if state is not None and state not in {
+            "QUEUED", "RUNNING", "RETRY_WAIT", "BLOCKED_UNKNOWN",
+            "SUCCEEDED", "FAILED", "CANCELLED",
+        }:
+            raise ForestError("PROVISIONING_QUERY_INVALID", "Job state is invalid", 422)
+        async with self.store.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT job_id,bot_id,state,revision,attempt_no,max_attempts,"
+                    "last_error_code FROM forest_deployment.provisioning_jobs "
+                    "WHERE (%s::text IS NULL OR job_id>%s) "
+                    "AND (%s::text IS NULL OR bot_id=%s) "
+                    "AND (%s::text IS NULL OR state=%s) "
+                    "ORDER BY job_id LIMIT %s",
+                    (after, after, bot_id, bot_id, state, state, limit + 1),
+                )
+            ).fetchall()
+        items = [dict(row) for row in rows[:limit]]
+        return {
+            "items": items,
+            "next_after": items[-1]["job_id"] if len(rows) > limit else None,
+        }
+
     async def _finish_in(self, conn, claim, *, state: str, error_code: str | None):
         await self._owned_in(conn, claim)
         return await (

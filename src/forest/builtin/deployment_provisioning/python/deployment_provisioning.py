@@ -1,7 +1,7 @@
-"""Reloadable provisioning Job projection; durable writes use exact kernel ports."""
+"""Reloadable provisioning Job executor; Job state stays in the kernel authority."""
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, job, service
+from forest.sdk import Plugin, job
 
 
 class DeploymentProvisioning(Plugin):
@@ -12,10 +12,6 @@ class DeploymentProvisioning(Plugin):
                 "DEPLOYMENT_PROVISIONING_CONFIGURATION_INVALID",
                 "Provisioning configuration is invalid", 422,
             )
-
-    @service("deployment.provisioning.jobs.page", semantics="read")
-    async def jobs(self, payload, ctx):
-        return await ctx.queries.call("deployment.provisioning.jobs.read", payload)
 
     @job("deployment.provisioning.execute")
     async def execute_job(self, task, ctx):

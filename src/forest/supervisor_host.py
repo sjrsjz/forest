@@ -21,6 +21,7 @@ from forest.deployment_kernel_management import (
     BotSetDesiredKernelCommand,
     LocalStorageProfileKernelCommand,
     ProvisioningJobKernelCommand,
+    ProvisioningJobsKernelQuery,
     ProvisioningReconcileKernelCommand,
     SecretPutKernelCommand,
     StorageProfileKernelCommand,
@@ -311,6 +312,8 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             kernel_query_handlers={
                 ("deployment.bot-catalog", "deployment.bot-catalog-page"):
                     BotCatalogKernelQuery(catalog),
+                ("deployment.provisioning", "deployment.provisioning-jobs-page"):
+                    ProvisioningJobsKernelQuery(jobs),
                 ("deployment.provisioning", "deployment.bootstrap-catalog"):
                     BootstrapCatalogKernelQuery(bootstrap_registry),
             },
