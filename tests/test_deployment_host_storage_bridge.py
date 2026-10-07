@@ -22,7 +22,10 @@ from forest.deployment_storage_settlement import DeploymentStorageSettlementAuth
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
 from forest.host_runtime import HostRuntimeScope
-from forest.host_storage_postgres_effect import HostPostgresMaterializationEffect
+from forest.host_storage_postgres_effect import (
+    HostPostgresMaterializationEffect,
+    HostPostgresReclamationEffect,
+)
 from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
@@ -113,6 +116,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         )
         catalog = PackageCatalog(tmp_path / "catalog")
         physical_effects = []
+        lose_reclaim_receipt = {"once": True}
 
         def physical_factory(configuration, revision, identity, declaration):
             effect = HostPostgresMaterializationEffect(
@@ -124,11 +128,32 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             physical_effects.append(effect)
             return effect
 
+        def reclaim_factory(configuration, revision, identity, declaration):
+            class DropThenLoseReceipt(HostPostgresReclamationEffect):
+                async def invoke(self, payload, *, scope, invocation):
+                    receipt = await super().invoke(
+                        payload, scope=scope, invocation=invocation,
+                    )
+                    if lose_reclaim_receipt["once"]:
+                        lose_reclaim_receipt["once"] = False
+                        raise ForestError(
+                            "HOST_STORAGE_TEST_RECEIPT_LOST",
+                            "Injected loss after physical deletion", 503,
+                        )
+                    return receipt
+
+            return DropThenLoseReceipt(
+                configuration, revision, identity, declaration,
+                store=host_store, supervisor=host_supervisor,
+                maintenance_dsn=dsn,
+            )
+
         controller = HostPackageController(
             HostRuntimeScope(
                 host_store, host_supervisor,
                 effect_driver_factories={
                     "host.postgresql-materializer": physical_factory,
+                    "host.postgresql-reclaimer": reclaim_factory,
                 },
             ), catalog, official_sources=(source,),
         )
@@ -161,7 +186,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.8.1"', 'version = "0.8.2"', 1,
+                'version = "0.9.0"', 'version = "0.9.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -238,7 +263,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         previous_graph = controller.registry.graph_identity
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.8.2"', 'version = "0.8.3"', 1,
+                'version = "0.9.1"', 'version = "0.9.2"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -557,6 +582,90 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
                 )
             ).fetchone()
         assert release_history == {"pins": 1, "releases": 1}
+
+        graph = controller.registry.graph_identity
+        forbidden_reclaim = FrozenServiceRoute(
+            service_id="host.storage.reclaim.enqueue", version=1,
+            caller_component_id="host.untrusted",
+            provider_component_id="host.storage",
+            provider_generation_id=graph.generations["host.storage"],
+            graph_id=graph.graph_id, graph_revision=graph.graph_revision,
+            admission_lane="DATA", owned_work=False,
+        )
+        reclaim_endpoint = controller.registry.get("host.storage").runtime_service_handlers()[
+            ("host.storage.reclaim.enqueue", 1)
+        ]
+        with pytest.raises(ForestError) as forbidden:
+            await reclaim_endpoint.invoke_routed(
+                forbidden_reclaim,
+                RuntimeServiceInvocation("forged-reclaim", 15, "host.untrusted", reserved_id),
+                (released,), {},
+            )
+        assert forbidden.value.code == "RUNTIME_SERVICE_CALLER_DENIED"
+
+        held_connection = await psycopg.AsyncConnection.connect(target_dsn)
+        try:
+            enqueued, replayed_reclaim = await asyncio.gather(
+                bridge.enqueue_reclamation(frozen.request_id),
+                bridge.enqueue_reclamation(frozen.request_id),
+            )
+            assert enqueued["resource_id"] == reserved_id
+            assert replayed_reclaim["resource_id"] == reserved_id
+            async with asyncio.timeout(30):
+                while True:
+                    reclaim_status = await bridge.reclamation_status(frozen.request_id)
+                    if reclaim_status["last_error_code"] == "HOST_STORAGE_RECLAIM_BUSY":
+                        break
+                    assert reclaim_status["state"] in {"PENDING", "CLAIMED"}
+                    await asyncio.sleep(0.1)
+            still_present = await (
+                await admin.execute(
+                    "SELECT 1 FROM pg_database WHERE datname=%s",
+                    (created_physical[0],),
+                )
+            ).fetchone()
+            assert still_present is not None
+            previous_graph = controller.registry.graph_identity
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    'version = "0.9.2"', 'version = "0.9.3"', 1,
+                ), encoding="utf-8",
+            )
+            replacement = catalog.build_official(source, scope="host")
+            await controller.replace(
+                "host.storage", replacement.digest,
+                expected_graph_revision=previous_graph.graph_revision,
+            )
+        finally:
+            await held_connection.close()
+        async with asyncio.timeout(30):
+            while True:
+                reclaim_status = await bridge.reclamation_status(frozen.request_id)
+                if reclaim_status["state"] == "SUCCEEDED":
+                    break
+                assert reclaim_status["state"] in {"PENDING", "CLAIMED"}
+                await asyncio.sleep(0.1)
+        assert lose_reclaim_receipt["once"] is False
+        assert reclaim_status["attempt_count"] >= 3
+        assert await bridge.enqueue_reclamation(frozen.request_id) == reclaim_status
+        reclaimed = await controller.registry.get("host.storage").management_contract.query(
+            "resource", {
+                "resource_id": reserved_id,
+                "deployment_id": frozen.deployment_id,
+                "bot_id": frozen.bot_id,
+                "storage_generation": frozen.storage_generation,
+            },
+        )
+        assert reclaimed["state"] == "DELETED"
+        assert reclaimed["revision"] == released["resource_revision"] + 1
+        physical_rows = await (
+            await admin.execute(
+                "SELECT (SELECT count(*) FROM pg_database WHERE datname=%s) AS databases,"
+                "(SELECT count(*) FROM pg_roles WHERE rolname=%s) AS roles",
+                created_physical,
+            )
+        ).fetchone()
+        assert physical_rows == (0, 0)
 
         automatic_claim = await dispatch.claim(lease)
         assert automatic_claim.request_id == automatic.request_id

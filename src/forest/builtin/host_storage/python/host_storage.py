@@ -39,6 +39,17 @@ class HostStorage(Plugin):
             operation_id=ctx.operations.stable("reference-release:v1"),
         )
 
+    @service("host.storage.reclaim.enqueue", semantics="idempotent")
+    async def enqueue_reclamation(self, payload, ctx):
+        return await ctx.commands.call(
+            "host.storage.reclaim-enqueue-record", payload,
+            operation_id=ctx.operations.stable("reclaim-enqueue:v1"),
+        )
+
+    @service("host.storage.reclaim.status", semantics="read")
+    async def reclamation_status(self, payload, ctx):
+        return await ctx.queries.call("host.storage.reclaim-status-read", payload)
+
     @service("host.storage.reserve", semantics="idempotent")
     async def reserve(self, payload, ctx):
         return await ctx.commands.call(
@@ -62,4 +73,15 @@ class HostStorage(Plugin):
         return await ctx.commands.call(
             "host.storage.realize-record", receipt,
             operation_id=ctx.operations.stable("materialization-realize:v1"),
+        )
+
+    @job("host.storage.reclaim")
+    async def reclaim(self, task, ctx):
+        receipt = await ctx.services.call(
+            "host.storage.postgres.reclaim", task["payload"],
+            operation_id=ctx.operations.stable("physical-reclaim:v1"),
+        )
+        return await ctx.commands.call(
+            "host.storage.reclaim-finish-record", receipt,
+            operation_id=ctx.operations.stable("reclaim-finish:v1"),
         )

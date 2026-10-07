@@ -122,6 +122,26 @@ class DeploymentHostStorageBridge:
             },
         )
 
+    async def enqueue_reclamation(self, request_id: str) -> dict:
+        """Admit Host-owned physical work only from a current deployment fence."""
+        request = await self.requests.read(request_id)
+        released = await self.release_reference(request_id)
+        return await self._invoke_host(
+            request, "host.storage.reclaim.enqueue", "reclaim", released,
+        )
+
+    async def reclamation_status(self, request_id: str) -> dict:
+        request = await self.requests.read(request_id)
+        pinned = await self.requests.pinned_resource(request_id)
+        if pinned is None:
+            raise ForestError(
+                "STORAGE_REQUEST_NOT_PINNED", "Host resource has no deployment pin", 409,
+            )
+        return await self._invoke_host(
+            request, "host.storage.reclaim.status", "reclaim-status",
+            self._resource_lookup(request, pinned.resource_id),
+        )
+
     @staticmethod
     def _resource_lookup(request, resource_id: str) -> dict:
         return {
@@ -149,6 +169,8 @@ class DeploymentHostStorageBridge:
             ("host.storage.materialization.status", "status"),
             ("host.storage.reference.pin", "pin"),
             ("host.storage.reference.release", "release"),
+            ("host.storage.reclaim.enqueue", "reclaim"),
+            ("host.storage.reclaim.status", "reclaim-status"),
             ("host.storage.resource", "resource"),
         }:
             raise ValueError("Host storage bridge service is not declared")

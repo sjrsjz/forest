@@ -84,6 +84,44 @@ CREATE TABLE resource_reference_releases (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+CREATE TABLE reclamation_work (
+    resource_id text PRIMARY KEY REFERENCES physical_generations(resource_id),
+    operation_id text NOT NULL UNIQUE CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    release_revision bigint NOT NULL CHECK (release_revision >= 3),
+    revocation_operation_id text NOT NULL CHECK (octet_length(revocation_operation_id) BETWEEN 1 AND 256),
+    state text NOT NULL DEFAULT 'PENDING'
+        CHECK (state IN ('PENDING','CLAIMED','SUCCEEDED','FAILED')),
+    claim_token text UNIQUE CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    lease_deadline timestamptz,
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    last_error_code text,
+    result_payload jsonb,
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK ((state='CLAIMED')=(claim_token IS NOT NULL AND lease_deadline IS NOT NULL))
+);
+CREATE INDEX reclamation_work_pending_idx
+    ON reclamation_work(next_attempt_at,resource_id) WHERE state='PENDING';
+CREATE INDEX reclamation_work_expired_idx
+    ON reclamation_work(lease_deadline,resource_id) WHERE state='CLAIMED';
+
+CREATE TABLE reclamation_finalizations (
+    resource_id text PRIMARY KEY REFERENCES reclamation_work(resource_id),
+    operation_id text NOT NULL UNIQUE CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE TABLE reclamation_settlements (
+    claim_token text PRIMARY KEY CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    resource_id text NOT NULL REFERENCES reclamation_work(resource_id),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 CREATE FUNCTION host_storage_reserve(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -734,5 +772,341 @@ BEGIN
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('items',rows,'next_after',next_cursor));
+END;
+$$;
+
+CREATE FUNCTION host_storage_enqueue_reclamation(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_resource text := input->>'resource_id';
+    requested_operation text := context->>'operation_id';
+    item __forest_module_schema__.physical_generations%ROWTYPE;
+    released __forest_module_schema__.resource_reference_releases%ROWTYPE;
+    work __forest_module_schema__.reclamation_work%ROWTYPE;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR context->>'port_kind' IS DISTINCT FROM 'command'
+       OR context->>'port_name' IS DISTINCT FROM 'host.storage.reclaim-enqueue-record'
+       OR requested_resource !~ '^resource/[a-f0-9-]{36}$'
+       OR requested_operation IS NULL OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR context->>'input_digest' !~ '^sha256:[a-f0-9]{64}$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_INVALID',
+                'message','Host reclamation request is invalid','status',422));
+    END IF;
+    SELECT * INTO item FROM __forest_module_schema__.physical_generations
+    WHERE resource_id=requested_resource FOR UPDATE;
+    IF NOT FOUND OR item.host_id IS DISTINCT FROM context->>'scope_id'
+       OR item.state NOT IN ('RETIRED','DELETED')
+       OR item.deployment_id IS DISTINCT FROM input->>'deployment_id'
+       OR item.bot_id IS DISTINCT FROM input->>'bot_id'
+       OR item.storage_generation IS DISTINCT FROM (input->>'storage_generation')::bigint
+       OR item.revision IS DISTINCT FROM (
+          (input->>'resource_revision')::bigint +
+          (CASE WHEN item.state='DELETED' THEN 1 ELSE 0 END))
+       OR input->>'state' IS DISTINCT FROM 'RETIRED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_RESOURCE_MISMATCH',
+                'message','Retired Host resource differs from reclamation request','status',409));
+    END IF;
+    SELECT * INTO released FROM __forest_module_schema__.resource_reference_releases
+    WHERE resource_id=item.resource_id FOR SHARE;
+    IF NOT FOUND OR released.resource_revision IS DISTINCT FROM (input->>'resource_revision')::bigint
+       OR released.revocation_operation_id IS DISTINCT FROM input->>'revocation_operation_id'
+       OR released.profile_ref IS DISTINCT FROM input->>'profile_ref'
+       OR released.result_payload IS DISTINCT FROM input THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_RELEASE_MISMATCH',
+                'message','Host release differs from reclamation request','status',409));
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.reclamation_work
+    WHERE resource_id=requested_resource FOR UPDATE;
+    IF FOUND THEN
+        IF work.operation_id IS DISTINCT FROM requested_operation
+           OR work.input_digest IS DISTINCT FROM context->>'input_digest' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_CONFLICT',
+                    'message','Resource already has another reclamation work','status',409));
+        END IF;
+    ELSE
+        IF item.state IS DISTINCT FROM 'RETIRED' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_RESOURCE_MISMATCH',
+                    'message','Deleted resource has no original reclamation work','status',409));
+        END IF;
+        IF NOT EXISTS (
+            SELECT 1 FROM __forest_module_schema__.materialization_work m
+            WHERE m.resource_id=item.resource_id AND m.state='SUCCEEDED'
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_RESOURCE_MISMATCH',
+                    'message','Resource materialization did not settle','status',409));
+        END IF;
+        INSERT INTO __forest_module_schema__.reclamation_work(
+            resource_id,operation_id,input_digest,release_revision,revocation_operation_id)
+        VALUES(item.resource_id,requested_operation,context->>'input_digest',
+            item.revision,released.revocation_operation_id) RETURNING * INTO work;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('resource_id',work.resource_id,'state',work.state,
+            'attempt_count',work.attempt_count,'last_error_code',work.last_error_code));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_INVALID',
+            'message','Host reclamation request is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION host_storage_reclaim_status(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    work __forest_module_schema__.reclamation_work%ROWTYPE;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR context->>'port_kind' IS DISTINCT FROM 'query'
+       OR context->>'port_name' IS DISTINCT FROM 'host.storage.reclaim-status-read'
+       OR input->>'resource_id' !~ '^resource/[a-f0-9-]{36}$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_QUERY_INVALID',
+                'message','Reclamation status query is invalid','status',422));
+    END IF;
+    SELECT w.* INTO work FROM __forest_module_schema__.reclamation_work w
+    JOIN __forest_module_schema__.physical_generations p ON p.resource_id=w.resource_id
+    WHERE w.resource_id=input->>'resource_id' AND p.host_id=context->>'scope_id'
+      AND p.deployment_id=input->>'deployment_id' AND p.bot_id=input->>'bot_id'
+      AND p.storage_generation=(input->>'storage_generation')::bigint;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_NOT_FOUND',
+                'message','Host reclamation work was not found','status',404));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('resource_id',work.resource_id,'state',work.state,
+            'attempt_count',work.attempt_count,'last_error_code',work.last_error_code));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_QUERY_INVALID',
+            'message','Reclamation status query is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION host_storage_claim_reclamation(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work __forest_module_schema__.reclamation_work%ROWTYPE;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_CLAIM_INVALID',
+                'message','Reclamation claim is invalid','status',422));
+    END IF;
+    WITH expired AS MATERIALIZED (
+        SELECT w.resource_id FROM __forest_module_schema__.reclamation_work w
+        JOIN __forest_module_schema__.physical_generations p ON p.resource_id=w.resource_id
+        WHERE p.host_id=context->>'scope_id' AND w.state='CLAIMED'
+          AND w.lease_deadline<=clock_timestamp()
+        ORDER BY w.lease_deadline,w.resource_id
+        FOR UPDATE OF w SKIP LOCKED LIMIT 32
+    )
+    UPDATE __forest_module_schema__.reclamation_work w
+    SET state='PENDING',claim_token=NULL,lease_deadline=NULL,
+        next_attempt_at=clock_timestamp(),last_error_code='HOST_STORAGE_RECLAIM_LEASE_EXPIRED',
+        updated_at=clock_timestamp()
+    FROM expired e WHERE w.resource_id=e.resource_id;
+    SELECT w.* INTO work FROM __forest_module_schema__.reclamation_work w
+    JOIN __forest_module_schema__.physical_generations p ON p.resource_id=w.resource_id
+    WHERE p.host_id=context->>'scope_id' AND p.state IN ('RETIRED','DELETED')
+      AND w.state='PENDING' AND w.next_attempt_at<=clock_timestamp()
+    ORDER BY w.next_attempt_at,w.resource_id
+    FOR UPDATE OF w SKIP LOCKED LIMIT 1;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    UPDATE __forest_module_schema__.reclamation_work
+    SET state='CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1,updated_at=clock_timestamp()
+    WHERE resource_id=work.resource_id RETURNING * INTO work;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-claim/1',
+            'work_id',work.resource_id,'claim_token',work.claim_token,
+            'attempt',work.attempt_count,
+            'operation_id','host-reclaim:'||encode(sha256(convert_to(
+                work.resource_id||'/'||work.attempt_count,'UTF8')),'hex'),
+            'causal_root_kind','host.storage.reclamation',
+            'causal_root_id',work.resource_id,
+            'payload',jsonb_build_object('resource_id',work.resource_id,
+                'release_revision',work.release_revision,
+                'revocation_operation_id',work.revocation_operation_id,
+                'claim_token',work.claim_token,'attempt',work.attempt_count)));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_CLAIM_INVALID',
+            'message','Reclamation claim is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION host_storage_finish_reclamation(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    work __forest_module_schema__.reclamation_work%ROWTYPE;
+    item __forest_module_schema__.physical_generations%ROWTYPE;
+    saved __forest_module_schema__.reclamation_finalizations%ROWTYPE;
+    expected_marker_digest text;
+    result_value jsonb;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR context->>'port_kind' IS DISTINCT FROM 'command'
+       OR context->>'port_name' IS DISTINCT FROM 'host.storage.reclaim-finish-record'
+       OR input->>'protocol' IS DISTINCT FROM 'forest.host-storage-physical-reclaimed/1'
+       OR input->>'resource_id' !~ '^resource/[a-f0-9-]{36}$'
+       OR input->>'database_absent' IS DISTINCT FROM 'true'
+       OR input->>'role_absent' IS DISTINCT FROM 'true' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_RECEIPT_INVALID',
+                'message','Physical reclamation receipt is invalid','status',422));
+    END IF;
+    SELECT * INTO item FROM __forest_module_schema__.physical_generations
+    WHERE resource_id=input->>'resource_id' FOR UPDATE;
+    SELECT * INTO work FROM __forest_module_schema__.reclamation_work
+    WHERE resource_id=input->>'resource_id' FOR UPDATE;
+    IF item.resource_id IS NULL OR item.host_id IS DISTINCT FROM context->>'scope_id'
+       OR item.state NOT IN ('RETIRED','DELETED')
+       OR work.resource_id IS NULL OR work.state IS DISTINCT FROM 'CLAIMED'
+       OR work.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work.attempt_count IS DISTINCT FROM (input->>'attempt')::integer
+       OR work.release_revision IS DISTINCT FROM (input->>'release_revision')::bigint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_CLAIM_LOST',
+                'message','Reclamation claim or resource is no longer current','status',409));
+    END IF;
+    expected_marker_digest := 'sha256:'||encode(sha256(convert_to(
+        'forest.host-storage/1|'||item.resource_id||'|'||item.host_id||'|'
+            ||item.owner_marker,'UTF8')),'hex');
+    IF input->>'host_id' IS DISTINCT FROM item.host_id
+       OR input->>'physical_name' IS DISTINCT FROM item.physical_name
+       OR input->>'role_name' IS DISTINCT FROM item.role_name
+       OR input->>'owner_marker_digest' IS DISTINCT FROM expected_marker_digest THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_RECEIPT_MISMATCH',
+                'message','Physical receipt differs from Host resource','status',409));
+    END IF;
+    SELECT * INTO saved FROM __forest_module_schema__.reclamation_finalizations
+    WHERE resource_id=item.resource_id FOR SHARE;
+    IF FOUND THEN
+        IF saved.input_payload - 'claim_token' - 'attempt'
+           IS DISTINCT FROM input - 'claim_token' - 'attempt' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_RECEIPT_MISMATCH',
+                    'message','Resource was finalized with another physical receipt','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',saved.result_payload);
+    END IF;
+    IF item.state IS DISTINCT FROM 'RETIRED' OR item.revision IS DISTINCT FROM work.release_revision THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_RESOURCE_MISMATCH',
+                'message','Resource is not at its released revision','status',409));
+    END IF;
+    UPDATE __forest_module_schema__.physical_generations
+    SET state='DELETED',revision=revision+1,updated_at=clock_timestamp()
+    WHERE resource_id=item.resource_id RETURNING * INTO item;
+    result_value := jsonb_build_object('protocol','forest.host-storage-reclaimed/1',
+        'resource_id',item.resource_id,'host_id',item.host_id,
+        'state',item.state,'revision',item.revision);
+    INSERT INTO __forest_module_schema__.reclamation_finalizations(
+        resource_id,operation_id,input_payload,result_payload)
+    VALUES(item.resource_id,context->>'operation_id',input,result_value);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',result_value);
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_RECEIPT_INVALID',
+            'message','Physical reclamation receipt is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION host_storage_settle_reclamation(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    work __forest_module_schema__.reclamation_work%ROWTYPE;
+    saved __forest_module_schema__.reclamation_settlements%ROWTYPE;
+    finished __forest_module_schema__.reclamation_finalizations%ROWTYPE;
+    outcome jsonb := input->'outcome';
+    result_value jsonb;
+BEGIN
+    IF context->>'scope_kind' IS DISTINCT FROM 'host'
+       OR context->>'component_id' IS DISTINCT FROM 'host.storage'
+       OR input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_SETTLEMENT_INVALID',
+                'message','Reclamation settlement is invalid','status',422));
+    END IF;
+    SELECT * INTO saved FROM __forest_module_schema__.reclamation_settlements
+    WHERE claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF saved.input_payload=input THEN RETURN saved.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_SETTLEMENT_CONFLICT',
+                'message','Claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.reclamation_work
+    WHERE resource_id=input->>'work_id' FOR UPDATE;
+    IF NOT FOUND OR work.state<>'CLAIMED'
+       OR work.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_CLAIM_LOST',
+                'message','Reclamation claim is no longer current','status',409));
+    END IF;
+    IF outcome->>'status'='SUCCEEDED' THEN
+        SELECT * INTO finished FROM __forest_module_schema__.reclamation_finalizations
+        WHERE resource_id=work.resource_id FOR SHARE;
+        IF NOT FOUND OR finished.result_payload IS DISTINCT FROM outcome->'result'
+           OR NOT EXISTS (
+               SELECT 1 FROM __forest_module_schema__.physical_generations p
+               WHERE p.resource_id=work.resource_id AND p.host_id=context->>'scope_id'
+                 AND p.state='DELETED' AND p.revision=work.release_revision+1
+           ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_SETTLEMENT_INVALID',
+                    'message','Reclamation result differs from finalized resource','status',409));
+        END IF;
+        UPDATE __forest_module_schema__.reclamation_work
+        SET state='SUCCEEDED',claim_token=NULL,lease_deadline=NULL,
+            last_error_code=NULL,result_payload=outcome->'result',updated_at=clock_timestamp()
+        WHERE resource_id=work.resource_id;
+    ELSE
+        UPDATE __forest_module_schema__.reclamation_work
+        SET state=CASE WHEN outcome#>>'{error,retryable}'='true'
+                        OR outcome#>>'{error,unknown}'='true'
+                       THEN 'PENDING' ELSE 'FAILED' END,
+            claim_token=NULL,lease_deadline=NULL,
+            next_attempt_at=clock_timestamp()+
+                (LEAST(power(2,LEAST(work.attempt_count,8)),300)*interval '1 second'),
+            last_error_code=COALESCE(outcome#>>'{error,code}',
+                'HOST_STORAGE_RECLAIM_UNKNOWN'),updated_at=clock_timestamp()
+        WHERE resource_id=work.resource_id;
+    END IF;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work.resource_id));
+    INSERT INTO __forest_module_schema__.reclamation_settlements(
+        claim_token,resource_id,input_payload,result_payload)
+    VALUES(input->>'claim_token',work.resource_id,input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','HOST_STORAGE_RECLAIM_SETTLEMENT_INVALID',
+            'message','Reclamation settlement is invalid','status',422));
 END;
 $$;

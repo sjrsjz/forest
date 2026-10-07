@@ -24,24 +24,10 @@ _ROLE_FLAGS = {
 _NAMESPACE = module_schema_namespace("forest.host.storage")
 
 
-class HostPostgresMaterializationEffect:
-    """Native Effect bound to one host.storage Generation, never to caller SQL names."""
+class _HostPostgresEffect:
+    """Admission shared by exact Host PostgreSQL physical capabilities."""
 
-    def __init__(
-        self, configuration, configuration_revision, identity, declaration, *,
-        store, supervisor, maintenance_dsn: str, credential_resolver,
-    ) -> None:
-        if (
-            identity.component_id != "host.storage"
-            or declaration.get("name") != "host.storage.postgres.materialize"
-            or declaration.get("kind") != "host.postgresql-materializer"
-            or declaration.get("semantics") != "idempotent"
-            or credential_resolver is None
-        ):
-            raise ForestError(
-                "HOST_STORAGE_EFFECT_BINDING_INVALID",
-                "Host PostgreSQL Effect has another binding", 500,
-            )
+    def __init__(self, *, identity, store, supervisor, maintenance_dsn: str) -> None:
         parsed = urlsplit(maintenance_dsn)
         if (
             parsed.scheme not in {"postgres", "postgresql"}
@@ -54,7 +40,6 @@ class HostPostgresMaterializationEffect:
         self._generations = HostGenerationAuthority(store)
         self._host_identity = HostIdentityAuthority(store)
         self._identity = identity
-        self._credential_resolver = credential_resolver
         self._accepting = False
 
     async def start(self) -> None:
@@ -83,6 +68,49 @@ class HostPostgresMaterializationEffect:
             await self._host_identity.verify_in(
                 conn, self._supervisor.authority_lease(),
             )
+
+    @staticmethod
+    async def _database(conn, name: str) -> dict | None:
+        return await (
+            await conn.execute(
+                "SELECT pg_get_userbyid(datdba) AS owner,"
+                "shobj_description(oid,'pg_database') AS marker, "
+                "datconnlimit AS connection_limit, "
+                "EXISTS (SELECT 1 FROM aclexplode(COALESCE(datacl, "
+                "acldefault('d',datdba))) AS grant_row "
+                "WHERE grant_row.grantee=0) AS public_grants, "
+                "EXISTS (SELECT 1 FROM aclexplode(COALESCE(datacl, "
+                "acldefault('d',datdba))) AS grant_row "
+                "WHERE grant_row.grantee<>0 AND grant_row.grantee<>datdba) "
+                "AS foreign_grants "
+                "FROM pg_database WHERE datname=%s", (name,),
+            )
+        ).fetchone()
+
+
+class HostPostgresMaterializationEffect(_HostPostgresEffect):
+    """Native Effect bound to one host.storage Generation, never to caller SQL names."""
+
+    def __init__(
+        self, configuration, configuration_revision, identity, declaration, *,
+        store, supervisor, maintenance_dsn: str, credential_resolver,
+    ) -> None:
+        if (
+            identity.component_id != "host.storage"
+            or declaration.get("name") != "host.storage.postgres.materialize"
+            or declaration.get("kind") != "host.postgresql-materializer"
+            or declaration.get("semantics") != "idempotent"
+            or credential_resolver is None
+        ):
+            raise ForestError(
+                "HOST_STORAGE_EFFECT_BINDING_INVALID",
+                "Host PostgreSQL Effect has another binding", 500,
+            )
+        super().__init__(
+            identity=identity, store=store, supervisor=supervisor,
+            maintenance_dsn=maintenance_dsn,
+        )
+        self._credential_resolver = credential_resolver
 
     async def _reservation(self, resource_id: str) -> dict:
         if not isinstance(resource_id, str) or _RESOURCE.fullmatch(resource_id) is None:
@@ -137,7 +165,6 @@ class HostPostgresMaterializationEffect:
             + row["host_id"] + "|" + row["owner_marker"]
         )
         await self._ensure_physical(row, marker, password)
-        await self._admitted()
         return {
             "protocol": "forest.host-storage-materialization/1",
             "resource_id": row["resource_id"],
@@ -263,20 +290,215 @@ class HostPostgresMaterializationEffect:
                 "PostgreSQL creation outcome requires exact-marker reconciliation", 503,
             ) from None
 
-    @staticmethod
-    async def _database(conn, name: str) -> dict | None:
-        return await (
-            await conn.execute(
-                "SELECT pg_get_userbyid(datdba) AS owner,"
-                "shobj_description(oid,'pg_database') AS marker, "
-                "datconnlimit AS connection_limit, "
-                "EXISTS (SELECT 1 FROM aclexplode(COALESCE(datacl, "
-                "acldefault('d',datdba))) AS grant_row "
-                "WHERE grant_row.grantee=0) AS public_grants, "
-                "EXISTS (SELECT 1 FROM aclexplode(COALESCE(datacl, "
-                "acldefault('d',datdba))) AS grant_row "
-                "WHERE grant_row.grantee<>0 AND grant_row.grantee<>datdba) "
-                "AS foreign_grants "
-                "FROM pg_database WHERE datname=%s", (name,),
+
+class HostPostgresReclamationEffect(_HostPostgresEffect):
+    """Remove only a released, exactly marked Host PostgreSQL resource."""
+
+    def __init__(
+        self, configuration, configuration_revision, identity, declaration, *,
+        store, supervisor, maintenance_dsn: str,
+    ) -> None:
+        if (
+            identity.component_id != "host.storage"
+            or declaration.get("name") != "host.storage.postgres.reclaim"
+            or declaration.get("kind") != "host.postgresql-reclaimer"
+            or declaration.get("semantics") != "idempotent"
+        ):
+            raise ForestError(
+                "HOST_STORAGE_EFFECT_BINDING_INVALID",
+                "Host PostgreSQL reclamation Effect has another binding", 500,
             )
-        ).fetchone()
+        super().__init__(
+            identity=identity, store=store, supervisor=supervisor,
+            maintenance_dsn=maintenance_dsn,
+        )
+
+    async def _work(self, payload: dict) -> dict:
+        resource_id = payload.get("resource_id")
+        if not isinstance(resource_id, str) or _RESOURCE.fullmatch(resource_id) is None:
+            raise ForestError(
+                "HOST_STORAGE_RECLAIM_INVALID", "Reclamation resource is invalid", 422,
+            )
+        async with self._store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT p.*,w.release_revision,w.revocation_operation_id,"
+                        "w.claim_token,w.attempt_count,w.state AS work_state,"
+                        "r.resource_revision AS recorded_release_revision "
+                        "FROM {}.physical_generations p "
+                        "JOIN {}.reclamation_work w ON w.resource_id=p.resource_id "
+                        "JOIN {}.resource_reference_releases r ON r.resource_id=p.resource_id "
+                        "WHERE p.resource_id=%s"
+                    ).format(*([sql.Identifier(_NAMESPACE)] * 3)),
+                    (resource_id,),
+                )
+            ).fetchone()
+        if (
+            row is None or row["host_id"] != self._store.host_id
+            or row["kind"] != "POSTGRES_DATABASE"
+            or row["state"] not in {"RETIRED", "DELETED"}
+            or row["work_state"] != "CLAIMED"
+            or row["release_revision"] != payload.get("release_revision")
+            or row["recorded_release_revision"] != row["release_revision"]
+            or row["revocation_operation_id"] != payload.get("revocation_operation_id")
+            or row["claim_token"] != payload.get("claim_token")
+            or row["attempt_count"] != payload.get("attempt")
+            or row["revision"] != row["release_revision"] + (
+                1 if row["state"] == "DELETED" else 0
+            )
+        ):
+            raise ForestError(
+                "HOST_STORAGE_RECLAIM_CLAIM_LOST",
+                "Reclamation claim or released resource is no longer current", 409,
+            )
+        return row
+
+    async def invoke(self, payload: dict, *, scope, invocation) -> dict:
+        if (
+            scope.scope_kind != "host" or scope.scope_id != self._store.host_id
+            or scope.component_id != "host.storage"
+            or scope.generation_id != self._identity.generation_id
+        ):
+            raise ForestError(
+                "HOST_STORAGE_EFFECT_BINDING_INVALID",
+                "Host reclamation Effect call has another Generation", 409,
+            )
+        await self._admitted()
+        row = await self._work(payload)
+        marker = (
+            "forest.host-storage/1|" + row["resource_id"] + "|"
+            + row["host_id"] + "|" + row["owner_marker"]
+        )
+        await self._delete_physical(row, marker, payload)
+        return {
+            "protocol": "forest.host-storage-physical-reclaimed/1",
+            "resource_id": row["resource_id"],
+            "host_id": row["host_id"],
+            "physical_name": row["physical_name"],
+            "role_name": row["role_name"],
+            "release_revision": row["release_revision"],
+            "owner_marker_digest": "sha256:" + hashlib.sha256(marker.encode()).hexdigest(),
+            "claim_token": payload["claim_token"],
+            "attempt": payload["attempt"],
+            "database_absent": True,
+            "role_absent": True,
+        }
+
+    async def _delete_physical(self, row: dict, marker: str, payload: dict) -> None:
+        name, role = row["physical_name"], row["role_name"]
+        try:
+            conn = await psycopg.AsyncConnection.connect(
+                self._maintenance_dsn, autocommit=True, row_factory=dict_row,
+            )
+            try:
+                await conn.execute(
+                    "SELECT pg_advisory_lock(hashtextextended(%s,0))",
+                    ("forest.host-storage.postgresql/" + name,),
+                )
+                # Materialization uses this same lock and rechecks Host state
+                # after taking it. A stale caller cannot recreate a deleted DB.
+                await self._work(payload)
+                saved_role = await (
+                    await conn.execute(
+                        "SELECT oid,rolsuper,rolinherit,rolcreaterole,rolcreatedb,"
+                        "rolcanlogin,rolreplication,rolbypassrls,"
+                        "shobj_description(oid,'pg_authid') AS marker, "
+                        "EXISTS (SELECT 1 FROM pg_auth_members "
+                        "WHERE roleid=pg_authid.oid OR member=pg_authid.oid) "
+                        "AS has_members "
+                        "FROM pg_authid WHERE rolname=%s", (role,),
+                    )
+                ).fetchone()
+                database = await self._database(conn, name)
+                if database is not None and saved_role is None:
+                    raise ForestError(
+                        "HOST_STORAGE_RECLAIM_PHYSICAL_MISMATCH",
+                        "Database exists without its marked owner role", 409,
+                    )
+                if saved_role is not None and (
+                    saved_role["marker"] != marker or saved_role["has_members"]
+                    or any(saved_role[key] != value for key, value in _ROLE_FLAGS.items()
+                           if key != "rolcanlogin")
+                ):
+                    raise ForestError(
+                        "HOST_STORAGE_RECLAIM_PHYSICAL_MISMATCH",
+                        "PostgreSQL role has another marker or privileges", 409,
+                    )
+                if database is not None and (
+                    database["owner"] != role or database["marker"] != marker
+                    or database["foreign_grants"] or database["public_grants"]
+                    or database["connection_limit"] not in {-1, 0}
+                ):
+                    raise ForestError(
+                        "HOST_STORAGE_RECLAIM_PHYSICAL_MISMATCH",
+                        "PostgreSQL database has another owner, marker or access", 409,
+                    )
+                if saved_role is not None:
+                    other_database = await (
+                        await conn.execute(
+                            "SELECT 1 FROM pg_database WHERE datdba=%s AND datname<>%s LIMIT 1",
+                            (saved_role["oid"], name),
+                        )
+                    ).fetchone()
+                    if other_database is not None:
+                        raise ForestError(
+                            "HOST_STORAGE_RECLAIM_PHYSICAL_MISMATCH",
+                            "Storage role owns another database", 409,
+                        )
+                    if saved_role["rolcanlogin"]:
+                        await conn.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(
+                            sql.Identifier(role),
+                        ))
+                if database is not None:
+                    if database["connection_limit"] != 0:
+                        await conn.execute(sql.SQL(
+                            "ALTER DATABASE {} CONNECTION LIMIT 0"
+                        ).format(sql.Identifier(name)))
+                    active = await (
+                        await conn.execute(
+                            "SELECT 1 FROM pg_stat_activity WHERE datname=%s "
+                            "AND pid<>pg_backend_pid() LIMIT 1", (name,),
+                        )
+                    ).fetchone()
+                    if active is not None:
+                        raise ForestError(
+                            "HOST_STORAGE_RECLAIM_BUSY",
+                            "PostgreSQL database still has active sessions", 503,
+                        )
+                    await conn.execute(sql.SQL("DROP DATABASE {}").format(
+                        sql.Identifier(name),
+                    ))
+                if saved_role is not None:
+                    await conn.execute(sql.SQL("DROP ROLE {}").format(
+                        sql.Identifier(role),
+                    ))
+                remaining_role = await (
+                    await conn.execute(
+                        "SELECT 1 FROM pg_roles WHERE rolname=%s", (role,),
+                    )
+                ).fetchone()
+                if await self._database(conn, name) is not None or remaining_role is not None:
+                    raise ForestError(
+                        "HOST_STORAGE_RECLAIM_PHYSICAL_UNKNOWN",
+                        "PostgreSQL deletion requires reconciliation", 503,
+                    )
+            finally:
+                await conn.close()
+        except ForestError:
+            raise
+        except psycopg.errors.ObjectInUse:
+            raise ForestError(
+                "HOST_STORAGE_RECLAIM_BUSY",
+                "PostgreSQL database still has active sessions", 503,
+            ) from None
+        except psycopg.errors.DependentObjectsStillExist:
+            raise ForestError(
+                "HOST_STORAGE_RECLAIM_PHYSICAL_MISMATCH",
+                "Storage role has dependencies outside the exact database", 409,
+            ) from None
+        except psycopg.Error:
+            raise ForestError(
+                "HOST_STORAGE_RECLAIM_PHYSICAL_UNKNOWN",
+                "PostgreSQL deletion outcome requires exact-marker reconciliation", 503,
+            ) from None

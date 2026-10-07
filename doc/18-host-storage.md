@@ -61,16 +61,18 @@ deployment 内核独占 Bot 基础身份、期望运行意图、冻结的 Host �
 
 Host PostgreSQL Effect 创建库时先限制连接数为零，撤销 `PUBLIC` 数据库权限并写入准确归属 marker，之后才开放连接；已有库或 role 的外部授权与错误归属均拒绝接管。隔离 PostgreSQL 验收已确认 Bot role 可进入专属库，而另一有效登录角色无法连接该库。
 
-本机旧预发布资源仍未纳入 Host 账本，其中四组旧 Bot 库和 role 仍被运行中的 deployment 引用。Bot 退役 fence、profile 撤销与 Host pin 逻辑释放已有受限实现，但自动退役工作流、物理回收和旧资源重建尚未完成；不能把 Host 账本当作全量物理库存，也不能逐库删除旧资源。真实 Compose 长时在线验收仍待完成。
+本机旧预发布资源仍未纳入 Host 账本，其中四组旧 Bot 库和 role 仍被运行中的 deployment 引用。Bot 退役 fence、profile 撤销、Host pin 释放及已登记资源的显式物理回收路径已有受限实现；管理员可用的自动退役工作流和旧资源重建仍未完成。不能把 Host 账本当作全量物理库存，也不能逐库删除旧资源。真实 Compose 长时在线验收仍待完成。
 
 ## Host 引用释放（2026-10-08）
 
 Bot 退役和 profile 撤销由 deployment 内核持有权威。`DeploymentHostStorageBridge.release_reference` 在当前 Supervisor 租约下重新核对不可变撤销事实、`DELETING/OFFLINE` 静止证明、冻结请求及精确 Host pin，随后用固定请求 ID 调用 Host 包的 `host.storage.reference.release`。Host 包以私有 Command 在同一事务中锁定物理 generation 和原 pin，只接受完全一致的 Host、deployment、Bot、storage generation、profile 与资源修订，把账本状态从 `ACTIVE` 推进至 `RETIRED`，并写入不可变的 release 记录；同键重放返回原回执，异键争用拒绝。原 pin 保留供审计。
 
-`RETIRED` 仅表示 Host 账本已解除逻辑引用，不表示数据库、role 或 DSN Secret 已删除或失效。释放端口依赖受信任的内核桥提交经 deployment 核验的撤销事实；Host 包无法独立读取 deployment 数据库。包 manifest 将该服务的 `allowed_callers` 限为 `deployment.storage-bridge`，运行时在处理输入或调用 Worker 前核验封存路由的调用组件；普通 Host 包即使取得通用服务调用能力，也不能直接提交伪造的撤销 payload。物理回收必须另设受限 Effect，在执行前重新核对 deployment fence、Host pin/release、精确 owner marker、role 权限和实际连接状态；本阶段没有自动 DROP。
+`RETIRED` 仅表示 Host 账本已解除逻辑引用，不表示数据库、role 或 DSN Secret 已删除或失效。释放端口依赖受信任的内核桥提交经 deployment 核验的撤销事实；Host 包无法独立读取 deployment 数据库。包 manifest 将该服务的 `allowed_callers` 限为 `deployment.storage-bridge`，运行时在处理输入或调用 Worker 前核验封存路由的调用组件；普通 Host 包即使取得通用服务调用能力，也不能直接提交伪造的撤销 payload。只有受限桥显式调用 `host.storage.reclaim.enqueue`，Host 包才会建立物理回收工作；释放本身不触发 `DROP`。
 
 ### 物理操作与逻辑释放的并发边界
 
-PostgreSQL 物化 Effect 先从 Host 私有账本取得准确资源，再以物理数据库名取得 PostgreSQL session advisory lock。等待锁期间，deployment 可以完成 profile 撤销和 Host pin 释放；因此 Effect **在取得物理锁后、执行任何 CREATE/ALTER 前**重新读取 Host 资源，要求仍为 `RESERVED` 或 `ACTIVE`、Host 身份一致且修订未变化。若已 `RETIRED`，旧调用只能拒绝，不能修改 role 口令或重新开放数据库。持锁期间发生的逻辑释放不让该物化操作成为回收的尾随写入：将来的删除 Effect 必须使用同一物理锁，在锁内读取已提交的 Host release 与资源修订，再执行物理检查和删除。单独在锁外检查一次状态，或只在物理操作结束后检查 Generation，都不能建立这个顺序。
+PostgreSQL 物化 Effect 先从 Host 私有账本取得准确资源，再以物理数据库名取得 PostgreSQL session advisory lock。等待锁期间，deployment 可以完成 profile 撤销和 Host pin 释放；因此 Effect **在取得物理锁后、执行任何 CREATE/ALTER 前**重新读取 Host 资源，要求仍为 `RESERVED` 或 `ACTIVE`、Host 身份一致且修订未变化。若已 `RETIRED`，旧调用只能拒绝，不能修改 role 口令或重新开放数据库。回收 Effect 使用同一物理锁，在锁内重查当前 claim、已提交的 Host release 与资源修订，再检查和删除物理对象。单独在锁外检查一次状态，或只在物理操作结束后检查 Generation，都不能建立这个顺序。已经准入的物理调用在包换代时仍属于旧 Generation 的在途工作，不因 quiesce 后的第二次开放门检查而丢失回执；包排空和私有结算另行核对所有权。
 
-物理回收仍需由 `host.storage` 包拥有持久工作和结算账本，明确绑定不可变 release、资源修订、数据库名、role 名与归属 marker；内核原生 Effect 只执行这一准确资源的物理步骤，不保存业务队列。首次与恢复执行都应在同一物理锁内检查现存对象的 owner、marker、权限和连接状态；对象归属不同即阻断，不以名称相似或缺失 marker 推断可删除。先禁止新连接与 role 登录，再等待现有连接排空；不以 `FORCE` 杀掉仍在使用的会话。`DROP DATABASE` 和 `DROP ROLE` 的阶段结果必须可按原工作身份恢复：崩溃后只允许对已持久准入的准确资源核对缺失对象，不能因一次超时就重新批准另一资源。Host 仅在数据库与 role 均经物理核对为不存在后把 `RETIRED` 结算为 `DELETED`。这些回收工作、原生删除 Effect 与对应验收尚未实现，旧预发布资源不得借本协议自动清理。
+`host.storage` 0.9.0 的私有 `reclamation_work` 按资源唯一地冻结原 release 修订和撤销操作，拥有 `PENDING → CLAIMED → SUCCEEDED/FAILED` 工作状态、领取租约、尝试号及结算账本；原生 Effect 不保存第二份队列。包 Worker 调用准确 `host.storage.postgres.reclaim` 后，私有 finish 命令只接受当前 claim 的物理回执；数据库与 role 都核对为不存在时，资源才从 `RETIRED` 原子推进为 `DELETED`。若进程在 `DROP` 后、finish 前失去回执，新尝试只对这份已持久准入的工作核对缺失对象；若 finish 已提交而 settle 未提交，新领取复用相同资源的最终事实。不同领取 token 不能用旧回执结算。
+
+Effect 对仍存在的对象逐项核对精确数据库名、role、owner、marker、权限和归属；异主对象或缺失 marker 明确阻断。它先把 role 改为 `NOLOGIN` 并把数据库连接数限制为零，再等待现有连接排空；不会用 `FORCE` 杀会话。数据库和 role 的删除按原资源名在同一物理 advisory lock 下收敛，外部结果不明时只重查原工作，不新建另一回收目标。隔离 PostgreSQL 已覆盖占用连接时保持数据库、Host 包热替换、连接排空后的 `DROP`，以及物理删除成功后丢失首次回执的恢复。当前桥仅提供内部显式 `enqueue_reclamation`/状态端口；部署包的管理员退役入口、完整自动工作流、旧库重建及在线实例验证仍未完成，不能对旧预发布资源批量回收。

@@ -41,7 +41,10 @@ from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
 from forest.host_runtime import HostRuntimeScope
-from forest.host_storage_postgres_effect import HostPostgresMaterializationEffect
+from forest.host_storage_postgres_effect import (
+    HostPostgresMaterializationEffect,
+    HostPostgresReclamationEffect,
+)
 from forest.host_supervisor import HostSupervisor
 from forest.multi_bot_supervisor import MultiBotSupervisor
 from forest.official_bot_provisioning import (
@@ -352,6 +355,15 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 store=host_store, supervisor=host_supervisor,
                 maintenance_dsn=settings.dsn,
                 credential_resolver=secrets.resolve_text_for_purpose,
+            )
+        )
+        host_runtime.effect_driver_factories[
+            "host.postgresql-reclaimer"
+        ] = lambda configuration, revision, identity, declaration: (
+            HostPostgresReclamationEffect(
+                configuration, revision, identity, declaration,
+                store=host_store, supervisor=host_supervisor,
+                maintenance_dsn=settings.dsn,
             )
         )
         host_controller = HostPackageController(

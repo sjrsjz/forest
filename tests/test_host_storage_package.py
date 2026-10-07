@@ -18,7 +18,10 @@ from psycopg.types.json import Jsonb
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
 from forest.host_runtime import HostRuntimeScope
-from forest.host_storage_postgres_effect import HostPostgresMaterializationEffect
+from forest.host_storage_postgres_effect import (
+    HostPostgresMaterializationEffect,
+    HostPostgresReclamationEffect,
+)
 from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
@@ -124,11 +127,18 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
                 credential_resolver=credential,
             )
 
+        def reclaim_factory(configuration, revision, identity, declaration):
+            return HostPostgresReclamationEffect(
+                configuration, revision, identity, declaration,
+                store=store, supervisor=supervisor, maintenance_dsn=dsn,
+            )
+
         controller = HostPackageController(
             HostRuntimeScope(
                 store, supervisor,
                 effect_driver_factories={
                     "host.postgresql-materializer": physical_factory,
+                    "host.postgresql-reclaimer": reclaim_factory,
                 },
             ), catalog,
             official_sources=(source,),
@@ -264,7 +274,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.8.1"', 'version = "0.8.2"', 1,
+                'version = "0.9.0"', 'version = "0.9.1"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -447,7 +457,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert abandoned["ok"] and abandoned["value"]["work_id"] == queued_reservation["resource_id"]
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.8.2"', 'version = "0.8.3"', 1,
+                'version = "0.9.1"', 'version = "0.9.2"', 1,
             ), encoding="utf-8",
         )
         resumed_package = catalog.build_official(source, scope="host")
@@ -545,6 +555,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
                 store, supervisor,
                 effect_driver_factories={
                     "host.postgresql-materializer": physical_factory,
+                    "host.postgresql-reclaimer": reclaim_factory,
                 },
             ), catalog, official_sources=(source,),
         )

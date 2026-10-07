@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.host-storage"
-version = "0.8.1"
+version = "0.9.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "host_storage:HostStorage"
@@ -39,6 +39,10 @@ requests = [
   "domain.command:host.storage.reference-pin-record",
   "domain.command:host.storage.reference-release-record",
   "service.call:host.storage.postgres.materialize",
+  "domain.command:host.storage.reclaim-enqueue-record",
+  "domain.command:host.storage.reclaim-finish-record",
+  "domain.query:host.storage.reclaim-status-read",
+  "service.call:host.storage.postgres.reclaim",
 ]
 
 [components.management_ui]
@@ -73,6 +77,14 @@ kind = "host.postgresql-materializer"
 semantics = "idempotent"
 input_schema = "schemas/materialize-input.json"
 output_schema = "schemas/materialize-output.json"
+
+[[components.effect_services]]
+name = "host.storage.postgres.reclaim"
+contract = "1.0"
+kind = "host.postgresql-reclaimer"
+semantics = "idempotent"
+input_schema = "schemas/reclaim-input.json"
+output_schema = "schemas/reclaim-physical-output.json"
 
 [[components.provides]]
 name = "host.storage.materialization.enqueue"
@@ -118,11 +130,29 @@ internal_command = "host.storage.reference-release-record"
 input_schema = "schemas/reference-release-input.json"
 output_schema = "schemas/reference-release-output.json"
 
+[[components.provides]]
+name = "host.storage.reclaim.enqueue"
+contract = "1.0"
+semantics = "idempotent"
+visibility = "public"
+allowed_callers = ["deployment.storage-bridge"]
+internal_command = "host.storage.reclaim-enqueue-record"
+input_schema = "schemas/reference-release-output.json"
+output_schema = "schemas/reclaim-work-output.json"
+
+[[components.provides]]
+name = "host.storage.reclaim.status"
+contract = "1.0"
+semantics = "read"
+visibility = "public"
+input_schema = "schemas/resource-lookup-input.json"
+output_schema = "schemas/reclaim-work-output.json"
+
 [components.storage]
 schema_id = "forest.host.storage"
-schema_version = "1.6.0"
+schema_version = "1.7.0"
 baseline = "schema/storage.sql"
-baseline_sha256 = "853cbd5a0678dd3a55718c238e9bb67a49cfe66e6bd4ff70385693b92aca50c9"
+baseline_sha256 = "346e5d763cbd76e9e20f6b7a7d0bd145b90e5ce26aad44e9314ff6d8c54c7901"
 scope = "host"
 repository_contract = "forest.host-storage.repository/1"
 execution_profile = "official"
@@ -147,6 +177,13 @@ contract = "1.0"
 function = "host_storage_resource"
 input_schema = "schemas/resource-lookup-input.json"
 output_schema = "schemas/resource-lookup-output.json"
+
+[[components.domain_queries]]
+name = "host.storage.reclaim-status-read"
+contract = "1.0"
+function = "host_storage_reclaim_status"
+input_schema = "schemas/resource-lookup-input.json"
+output_schema = "schemas/reclaim-work-output.json"
 
 [[components.domain_commands]]
 name = "host.storage.reserve-record"
@@ -183,6 +220,20 @@ function = "host_storage_release_reference"
 input_schema = "schemas/reference-release-input.json"
 output_schema = "schemas/reference-release-output.json"
 
+[[components.domain_commands]]
+name = "host.storage.reclaim-enqueue-record"
+contract = "1.0"
+function = "host_storage_enqueue_reclamation"
+input_schema = "schemas/reference-release-output.json"
+output_schema = "schemas/reclaim-work-output.json"
+
+[[components.domain_commands]]
+name = "host.storage.reclaim-finish-record"
+contract = "1.0"
+function = "host_storage_finish_reclamation"
+input_schema = "schemas/reclaim-physical-output.json"
+output_schema = "schemas/reclaim-finish-output.json"
+
 [[components.owned_work_handlers]]
 name = "host.storage.materialize"
 contract = "1.0"
@@ -192,6 +243,22 @@ claim_function = "host_storage_claim_materialization"
 settle_function = "host_storage_settle_materialization"
 input_schema = "schemas/materialize-input.json"
 output_schema = "schemas/realize-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 10
+handler_timeout_s = 240
+settle_timeout_s = 10
+lease_seconds = 270
+
+[[components.owned_work_handlers]]
+name = "host.storage.reclaim"
+contract = "1.0"
+handler = "host.storage.reclaim"
+private_commands = ["host.storage.reclaim-finish-record"]
+claim_function = "host_storage_claim_reclamation"
+settle_function = "host_storage_settle_reclamation"
+input_schema = "schemas/reclaim-input.json"
+output_schema = "schemas/reclaim-finish-output.json"
 max_concurrency = 1
 poll_interval_ms = 1000
 claim_timeout_s = 10
@@ -214,4 +281,9 @@ timeout_s = 10
 [[components.management_queries]]
 id = "resource"
 port = "host.storage.resource"
+timeout_s = 10
+
+[[components.management_queries]]
+id = "reclaim.status"
+port = "host.storage.reclaim.status"
 timeout_s = 10
