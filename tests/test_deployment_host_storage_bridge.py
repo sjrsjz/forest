@@ -26,7 +26,9 @@ from forest.host_storage_postgres_effect import HostPostgresMaterializationEffec
 from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog
 from forest.schema_bundles import module_schema_namespace
+from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
+from forest.storage.deployment_provisioning_jobs import DeploymentProvisioningJobAuthority
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_dispatch import DeploymentStorageDispatchAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
@@ -357,6 +359,95 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
                 password="forest-host-storage-bridge-password-for-tests",
             )
         assert changed_endpoint.value.code == "STORAGE_SETTLEMENT_CONFLICT"
+
+        bootstrap = await DeploymentBootstrapProfileAuthority(
+            deployment_store, secrets=secrets,
+        ).create(
+            operation_id="bridge/retirement-bootstrap",
+            profile_ref="bootstrap-profile/bridge/retirement",
+            bot_id=frozen.bot_id, storage_profile_ref=frozen.profile_ref,
+            storage_generation=frozen.storage_generation,
+            components={"conversation.trigger-policy": {
+                "allowed_group_ids": ["933179609"],
+            }},
+            schema_digests={"conversation.trigger-policy": "sha256:" + "a" * 64},
+            package_digests={"conversation.trigger-policy": "sha256:" + "c" * 64},
+        )
+        bot = await catalog_authority.register_ready(
+            operation_id="bridge/retirement-ready", bot_id=frozen.bot_id,
+            display_name="Bridge Retirement",
+            storage_profile_ref=frozen.profile_ref,
+            bootstrap_profile_ref=bootstrap.profile_ref,
+            bootstrap_manifest_digest=bootstrap.manifest_digest,
+        )
+        with pytest.raises(ForestError) as not_retired:
+            await profiles.revoke(
+                lease, operation_id="bridge/revoke-too-early",
+                profile_ref=frozen.profile_ref, bot_id=frozen.bot_id,
+                expected_bot_revision=bot["revision"],
+            )
+        assert not_retired.value.code == "BOT_RETIREMENT_NOT_FENCED"
+        retired = await catalog_authority.begin_retirement(
+            operation_id="bridge/retirement-begin", bot_id=bot["bot_id"],
+            expected_revision=bot["revision"],
+        )
+        assert retired["supply_state"] == "DELETING"
+        lease = await catalog_authority.renew_supervisor(lease, lease_seconds=120)
+        revoked, replayed = await asyncio.gather(
+            profiles.revoke(
+                lease, operation_id="bridge/profile-revoke",
+                profile_ref=frozen.profile_ref, bot_id=frozen.bot_id,
+                expected_bot_revision=retired["revision"],
+            ),
+            profiles.revoke(
+                lease, operation_id="bridge/profile-revoke",
+                profile_ref=frozen.profile_ref, bot_id=frozen.bot_id,
+                expected_bot_revision=retired["revision"],
+            ),
+        )
+        assert replayed == revoked
+        assert revoked["resource_id"] == reserved_id
+        assert revoked["retirement_operation_id"] == "bridge/retirement-begin"
+        assert revoked["observation_revision"] is None
+        assert await profiles.metadata(frozen.profile_ref) == settled
+        with pytest.raises(ForestError) as denied_resolve:
+            await profiles.resolve(
+                profile_ref=frozen.profile_ref, expected_bot_id=frozen.bot_id,
+                expected_storage_generation=frozen.storage_generation,
+            )
+        assert denied_resolve.value.code == "STORAGE_PROFILE_REVOKED"
+        with pytest.raises(ForestError) as duplicate_revoke:
+            await profiles.revoke(
+                lease, operation_id="bridge/profile-revoke-another",
+                profile_ref=frozen.profile_ref, bot_id=frozen.bot_id,
+                expected_bot_revision=retired["revision"],
+            )
+        assert duplicate_revoke.value.code == "STORAGE_PROFILE_REVOCATION_CONFLICT"
+        with pytest.raises(ForestError) as bootstrap_after_revoke:
+            await DeploymentBootstrapProfileAuthority(
+                deployment_store, secrets=secrets,
+            ).create(
+                operation_id="bridge/bootstrap-after-revoke",
+                profile_ref="bootstrap-profile/bridge/after-revoke",
+                bot_id=frozen.bot_id, storage_profile_ref=frozen.profile_ref,
+                storage_generation=frozen.storage_generation,
+                components={"conversation.trigger-policy": {
+                    "allowed_group_ids": ["933179609"],
+                }},
+                schema_digests={"conversation.trigger-policy": "sha256:" + "a" * 64},
+                package_digests={"conversation.trigger-policy": "sha256:" + "c" * 64},
+            )
+        assert bootstrap_after_revoke.value.code == "STORAGE_PROFILE_REVOKED"
+        with pytest.raises(ForestError) as job_after_revoke:
+            await DeploymentProvisioningJobAuthority(deployment_store).enqueue(
+                operation_id="bridge/job-after-revoke",
+                job_id="provisioning/bridge/after-revoke",
+                bot_id=frozen.bot_id, display_name="Retired Bridge",
+                storage_profile_ref=frozen.profile_ref,
+                storage_generation=frozen.storage_generation,
+                bootstrap_profile_ref=bootstrap.profile_ref,
+            )
+        assert job_after_revoke.value.code == "STORAGE_PROFILE_REVOKED"
 
         automatic_claim = await dispatch.claim(lease)
         assert automatic_claim.request_id == automatic.request_id

@@ -116,6 +116,31 @@ class DeploymentProvisioningJobAuthority:
                         409,
                     )
                 return dict(replay)
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("forest.deployment.storage-profile-revoke/profile/" + storage_profile_ref,),
+            )
+            revoked = await (
+                await conn.execute(
+                    "SELECT 1 FROM forest_deployment.storage_profile_revocations "
+                    "WHERE profile_ref=%s", (storage_profile_ref,),
+                )
+            ).fetchone()
+            if revoked is not None:
+                raise ForestError(
+                    "STORAGE_PROFILE_REVOKED", "Storage profile is retired", 409,
+                )
+            registered = await (
+                await conn.execute(
+                    "SELECT 1 FROM forest_deployment.bots WHERE bot_id=%s FOR SHARE",
+                    (bot_id,),
+                )
+            ).fetchone()
+            if registered is not None:
+                raise ForestError(
+                    "PROVISIONING_IDENTITY_EXISTS",
+                    "Bot identity already exists", 409,
+                )
             profile = await (
                 await conn.execute(
                     "SELECT manifest_digest FROM forest_deployment.bootstrap_profiles "

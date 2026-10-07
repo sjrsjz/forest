@@ -2753,12 +2753,25 @@ async def test_bot_retirement_fences_startup_and_allows_stop_observations(
         bootstrap_profile_ref=unused_bootstrap.profile_ref,
         bootstrap_manifest_digest=unused_bootstrap.manifest_digest,
     )
-    await repository.begin_retirement(
+    unused_retired = await repository.begin_retirement(
         operation_id="runtime/never-started/retire", bot_id=unused["bot_id"],
         expected_revision=unused["revision"],
     )
     never_started = await repository.retirement_quiescence(unused["bot_id"])
     assert never_started["observation_revision"] is None
+    secrets = DeploymentSecretAuthority(
+        repository.store, active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    with pytest.raises(ForestError) as legacy_profile:
+        await DeploymentStorageProfileAuthority(
+            repository.store, secrets=secrets,
+        ).revoke(
+            lease, operation_id="runtime/never-started/revoke",
+            profile_ref=unused_profile.profile_ref, bot_id=unused["bot_id"],
+            expected_bot_revision=unused_retired["revision"],
+        )
+    assert legacy_profile.value.code == "STORAGE_PROFILE_NOT_HOST_OWNED"
 
 
 @pytest.mark.postgres

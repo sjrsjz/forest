@@ -149,6 +149,20 @@ class DeploymentBootstrapProfileAuthority:
                         409,
                     )
                 return await self._load_in(conn, replay["profile_ref"])
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("forest.deployment.storage-profile-revoke/profile/" + storage_profile_ref,),
+            )
+            revoked = await (
+                await conn.execute(
+                    "SELECT 1 FROM forest_deployment.storage_profile_revocations "
+                    "WHERE profile_ref=%s", (storage_profile_ref,),
+                )
+            ).fetchone()
+            if revoked is not None:
+                raise ForestError(
+                    "STORAGE_PROFILE_REVOKED", "Storage profile is retired", 409,
+                )
             exists = await (
                 await conn.execute(
                     "SELECT 1 FROM forest_deployment.bootstrap_profiles WHERE profile_ref=%s",

@@ -51,6 +51,8 @@ Bot 退役的第一道 deployment 内核围栏现已实现：`begin_retirement` 
 
 deployment 内核的 `retirement_quiescence` 只读证明要求同一 Bot 的准确退役操作、仍为 `DELETING/OFFLINE` 的身份与意图，以及不存在运行观测或最后观测为无图 ID 的 `OFFLINE`。Supervisor 必须先提交 `STARTING` 才调用 BotHost.start，且只能在 BotHost.close 成功返回后提交 `OFFLINE`；关闭失败即使遇到旧启动意图也记录 `FAILED`，不能伪造静默。证明包含退役操作、Bot/意图/观测修订和 storage generation，仅供后续桥在解除引用前再次核对，不是可持久复用的删库许可。`STARTING/ONLINE/STOPPING/FAILED` 一律阻断证明；未运行过的 Bot 可由空观测证明没有启动。
 
+逻辑 profile 的撤销采用不可变 `storage_profile_revocations` 事实，不删除原 profile、请求或 pin。deployment 当前 Supervisor 租约持有者在同一事务中重查静默证明、准确 Host pin 与仍在执行的供给 Job，按 profile 串行化并写入退役操作、Bot/意图/观测修订、请求、Host 和资源 ID；复合外键将撤销行绑定到原 profile 与 Host pin。此后 `DeploymentStorageProfileAuthority.resolve` 拒绝发放该 profile 的 DSN，历史 metadata 仍可查询；新的 bootstrap 与供给 Job 创建也持有同一 profile 锁并拒绝已撤销资源或已注册的 Bot 身份。同键重放返回同一事实，不同键争用同一 profile 冲突；无 Host pin 的旧 profile 不进入自动回收链。撤销只封闭新的逻辑解析，不能单独证明 Secret 已失效或物理 role 已停止登录；Host pin 释放和物理删除仍须以该事实为输入再次核对。
+
 ## 预发布实现状态（2026-10-07）
 
 生产 Supervisor 已把 Host 作为独立 Web 管理作用域发布。`host.storage` 是 Host Graph 内可热重载的 builtin 包，自带资源清单、配置入口和私有 owned-work；Host Web 票据、回执与 Graph 校验均绑定完整 `host_id`。隔离 PostgreSQL 的实际 HTTP、包换代和 Supervisor 端到端验收已覆盖 Host 建库、pin/结算、Bot READY 与 OFFLINE 初始意图。

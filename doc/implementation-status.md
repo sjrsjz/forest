@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host-backed storage profile 撤销事实已加入 deployment 内核：当前 Supervisor 租约持有者在一个事务内重查退役静默证明、准确 Host pin 与供给 Job 状态，再写入不可变 revocation；复合外键绑定 profile、Bot 与 Host pin。同键并发重放合流，另一操作冲突；正常 profile 解析在撤销后拒绝发放 DSN，历史 metadata 保留。真实双库桥回归 `1 passed`。旧无 Host pin profile 不进入自动回收；Host pin 释放、Secret/role 失效和物理回收仍未实现。新的 bootstrap 与供给 Job 创建入口现在和撤销使用同一 profile 锁，已撤销 profile 或已存在的 Bot 身份不能产生新引用；无 Host pin 的旧 profile 撤销尝试明确拒绝。
+
 退役静默证明已加入 deployment 内核：准确退役操作与 `DELETING/OFFLINE` 围栏必须匹配，最后运行观测只能为空或无图 ID 的 `OFFLINE`，`STARTING/ONLINE/STOPPING/FAILED` 全部阻断。发现并修复 Supervisor 在 BotHost.close 失败且意图已变化时仍写 `OFFLINE` 的漏洞；关闭失败现在写 `BOT_RUNTIME_CLOSE_FAILED`，不会伪造证明。隔离 PostgreSQL 的并发/从未启动用例及 Supervisor 生命周期用例通过。证明目前只读且必须在解除引用前重查，Host pin 释放与物理回收仍未接线。
 
 Bot 退役入口第一道内核围栏已落地：`begin_retirement` 原子地把供给状态改为 `DELETING`、期望状态改为 `OFFLINE` 并提升意图修订；普通意图命令不再接受非 READY Bot。Supervisor 与退役并发的 `STARTING/ONLINE` 观测被旧意图围栏拒绝，停机观测继续允许。隔离 PostgreSQL 的部署目录全套 `32 passed`。此阶段不释放 Host pin、不删库；真实停机确认、其他引用解除、回收和管理 UI 仍未完成。

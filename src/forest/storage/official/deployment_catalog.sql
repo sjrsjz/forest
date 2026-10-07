@@ -412,7 +412,8 @@ CREATE TABLE forest_deployment.storage_request_pins (
     pinned_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     FOREIGN KEY (request_id,resource_id)
         REFERENCES forest_deployment.storage_request_resources(request_id,resource_id),
-    UNIQUE (deployment_id,profile_ref)
+    UNIQUE (deployment_id,profile_ref),
+    UNIQUE (request_id,resource_id,host_id,profile_ref)
 );
 
 CREATE TABLE forest_deployment.storage_profiles (
@@ -573,6 +574,28 @@ CREATE TABLE forest_deployment.operations (
 );
 CREATE UNIQUE INDEX bot_retirement_once ON forest_deployment.operations(bot_id)
     WHERE operation_kind='BEGIN_RETIREMENT';
+
+CREATE TABLE forest_deployment.storage_profile_revocations (
+    profile_ref text PRIMARY KEY REFERENCES forest_deployment.storage_profiles(profile_ref),
+    operation_id text NOT NULL UNIQUE CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    retirement_operation_id text NOT NULL REFERENCES forest_deployment.operations(operation_id),
+    bot_id text NOT NULL REFERENCES forest_deployment.bots(bot_id),
+    storage_generation bigint NOT NULL CHECK (storage_generation > 0),
+    request_id text NOT NULL REFERENCES forest_deployment.storage_request_pins(request_id),
+    resource_id text NOT NULL UNIQUE CHECK (resource_id ~ '^resource/[a-f0-9-]{36}$'),
+    host_id text NOT NULL CHECK (host_id ~ '^host/[a-f0-9]{32}$'),
+    bot_revision bigint NOT NULL CHECK (bot_revision > 1),
+    intent_revision bigint NOT NULL CHECK (intent_revision > 1),
+    observation_revision bigint CHECK (observation_revision IS NULL OR observation_revision > 0),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (profile_ref,bot_id,storage_generation)
+        REFERENCES forest_deployment.storage_profiles(profile_ref,bot_id,storage_generation),
+    FOREIGN KEY (request_id,resource_id,host_id,profile_ref)
+        REFERENCES forest_deployment.storage_request_pins(
+            request_id,resource_id,host_id,profile_ref
+        )
+);
 
 -- The kernel owns Bot identity and runtime intent. Official deployment packages
 -- may only project this state or submit an authenticated intent change here.
@@ -879,6 +902,10 @@ CREATE TRIGGER deployment_secret_version_immutable
 
 CREATE TRIGGER deployment_storage_profile_immutable
     BEFORE UPDATE OR DELETE ON forest_deployment.storage_profiles
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
+
+CREATE TRIGGER deployment_storage_revocation_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.storage_profile_revocations
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
 CREATE TRIGGER deployment_storage_request_immutable

@@ -9,6 +9,10 @@ from urllib.parse import urlsplit
 from forest.control_action_authorization import authorize_control_action_in
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.storage.deployment_catalog import (
+    DeploymentCatalogRepository,
+    verify_deployment_supervisor_in,
+)
 
 _PROFILE_REF = re.compile(r"storage-profile/[A-Za-z0-9][A-Za-z0-9._/-]{0,495}\Z")
 
@@ -176,6 +180,122 @@ class DeploymentStorageProfileAuthority:
     async def metadata(self, profile_ref: str) -> StorageProfileMetadata:
         return self._metadata(await self._row(profile_ref))
 
+    async def revoke(
+        self, lease, *, operation_id: str, profile_ref: str,
+        bot_id: str, expected_bot_revision: int,
+    ) -> dict:
+        """Freeze one Host-backed profile after the Bot runtime has drained."""
+        _bounded(operation_id, "operation_id", 256)
+        _bounded(bot_id, "bot_id", 128)
+        if not isinstance(profile_ref, str) or _PROFILE_REF.fullmatch(profile_ref) is None:
+            raise ForestError("STORAGE_PROFILE_INPUT_INVALID", "Profile reference is invalid", 422)
+        if (
+            type(expected_bot_revision) is not int
+            or not 1 <= expected_bot_revision <= 9223372036854775807
+        ):
+            raise ForestError("STORAGE_PROFILE_INPUT_INVALID", "Bot revision is invalid", 422)
+        input_digest = digest_json({
+            "profile_ref": profile_ref, "bot_id": bot_id,
+            "expected_bot_revision": expected_bot_revision,
+        })
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await verify_deployment_supervisor_in(
+                conn, lease, self.store.deployment_id,
+            )
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("forest.deployment.storage-profile-revoke/" + operation_id,),
+            )
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("forest.deployment.storage-profile-revoke/profile/" + profile_ref,),
+            )
+            replay = await (
+                await conn.execute(
+                    "SELECT * FROM forest_deployment.storage_profile_revocations "
+                    "WHERE operation_id=%s FOR SHARE", (operation_id,),
+                )
+            ).fetchone()
+            if replay is not None:
+                if replay["input_digest"] != input_digest:
+                    raise ForestError(
+                        "STORAGE_PROFILE_REVOCATION_CONFLICT",
+                        "Revocation operation differs", 409,
+                    )
+                return dict(replay)
+            witness = await DeploymentCatalogRepository(
+                self.store
+            ).retirement_quiescence_in(conn, bot_id)
+            if (
+                witness["bot_revision"] != expected_bot_revision
+                or witness["storage_profile_ref"] != profile_ref
+            ):
+                raise ForestError(
+                    "STORAGE_PROFILE_RETIREMENT_MISMATCH",
+                    "Profile differs from the fenced Bot retirement", 409,
+                )
+            pinned = await (
+                await conn.execute(
+                    "SELECT r.request_id,r.deployment_id,r.host_id AS request_host,"
+                    "p.host_id AS pin_host,p.resource_id "
+                    "FROM forest_deployment.storage_requests r "
+                    "JOIN forest_deployment.storage_request_pins p "
+                    "ON p.request_id=r.request_id AND p.profile_ref=r.profile_ref "
+                    "WHERE r.profile_ref=%s AND r.bot_id=%s "
+                    "AND r.storage_generation=%s FOR SHARE OF r,p",
+                    (profile_ref, bot_id, witness["storage_generation"]),
+                )
+            ).fetchone()
+            if pinned is None or (
+                pinned["deployment_id"] != self.store.deployment_id
+                or pinned["request_host"] != pinned["pin_host"]
+            ):
+                raise ForestError(
+                    "STORAGE_PROFILE_NOT_HOST_OWNED",
+                    "Profile has no exact Host pin", 409,
+                )
+            active_job = await (
+                await conn.execute(
+                    "SELECT 1 FROM forest_deployment.provisioning_jobs "
+                    "WHERE bot_id=%s AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED') "
+                    "FOR SHARE", (bot_id,),
+                )
+            ).fetchone()
+            if active_job is not None:
+                raise ForestError(
+                    "STORAGE_PROFILE_REFERENCED",
+                    "Bot provisioning still references the profile", 409,
+                )
+            existing = await (
+                await conn.execute(
+                    "SELECT 1 FROM forest_deployment.storage_profile_revocations "
+                    "WHERE profile_ref=%s FOR SHARE", (profile_ref,),
+                )
+            ).fetchone()
+            if existing is not None:
+                raise ForestError(
+                    "STORAGE_PROFILE_REVOCATION_CONFLICT",
+                    "Profile already has another revocation", 409,
+                )
+            saved = await (
+                await conn.execute(
+                    "INSERT INTO forest_deployment.storage_profile_revocations("
+                    "profile_ref,operation_id,input_digest,retirement_operation_id,"
+                    "bot_id,storage_generation,request_id,resource_id,host_id,"
+                    "bot_revision,intent_revision,observation_revision) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    (
+                        profile_ref, operation_id, input_digest,
+                        witness["retirement_operation_id"], bot_id,
+                        witness["storage_generation"], pinned["request_id"],
+                        pinned["resource_id"], pinned["pin_host"],
+                        witness["bot_revision"], witness["intent_revision"],
+                        witness["observation_revision"],
+                    ),
+                )
+            ).fetchone()
+            return dict(saved)
+
     async def resolve(
         self,
         *,
@@ -192,6 +312,10 @@ class DeploymentStorageProfileAuthority:
                 "STORAGE_PROFILE_SCOPE_MISMATCH",
                 "Storage profile belongs to another Bot or generation",
                 403,
+            )
+        if row["revocation_operation_id"] is not None:
+            raise ForestError(
+                "STORAGE_PROFILE_REVOKED", "Storage profile is retired", 409,
             )
         dsn = await self.secrets.resolve_text(row["dsn_secret_ref"])
         try:
@@ -217,7 +341,10 @@ class DeploymentStorageProfileAuthority:
         async with self.store.pool.connection() as conn:
             row = await (
                 await conn.execute(
-                    "SELECT * FROM forest_deployment.storage_profiles WHERE profile_ref=%s",
+                    "SELECT p.*,r.operation_id AS revocation_operation_id "
+                    "FROM forest_deployment.storage_profiles p "
+                    "LEFT JOIN forest_deployment.storage_profile_revocations r "
+                    "USING(profile_ref) WHERE p.profile_ref=%s",
                     (profile_ref,),
                 )
             ).fetchone()
