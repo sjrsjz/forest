@@ -124,11 +124,16 @@ async def test_stop_during_start_never_publishes_online_observation():
         "intent_revision": 2,
     }
     task = asyncio.create_task(supervisor._run_bot(bot, runner))
+    runner.task = task
+    supervisor._runners[bot["bot_id"]] = runner
     try:
         await asyncio.wait_for(starting.wait(), timeout=2)
+        assert task not in supervisor.owned_tasks()
         runner.stop.set()
         finish_start.set()
         await asyncio.wait_for(task, timeout=2)
+        supervisor._reap()
+        assert not supervisor._runners
         assert closed.is_set()
         assert observed == ["STARTING", "STOPPING", "OFFLINE"]
         assert runner.host is None

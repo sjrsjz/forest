@@ -99,12 +99,12 @@ class MultiBotSupervisor:
         return self.lease
 
     def owned_tasks(self) -> tuple[asyncio.Task, ...]:
+        # Per-Bot runners end normally when intent changes and are reaped by
+        # _reconcile. Only Supervisor-lifetime tasks belong to the process root.
         return tuple(
             task
             for task in (self._renewal_task, self._reconcile_task)
             if task is not None
-        ) + tuple(
-            runner.task for runner in self._runners.values() if runner.task is not None
         )
 
     @staticmethod
