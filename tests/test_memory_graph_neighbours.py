@@ -145,6 +145,13 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
             ).fetchone()
             return row["result"]
 
+        assert (await browse_relations({"snapshot_xid": "invalid"}))["error"]["code"] == "MEMORY_QUERY_INVALID"
+        invalid_sources = (await (await execute(
+            "SELECT {}.memory_query_sources(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": store.bot_id}), Jsonb({"snapshot_xid": "invalid"})),
+        )).fetchone())["result"]
+        assert invalid_sources["error"]["code"] == "MEMORY_QUERY_INVALID"
+
         first_edges = (await browse_relations({"cross_trunk": True, "limit": 5}))["value"]
         assert len(first_edges["items"]) == 5 and first_edges["has_more"]
         assert all(edge["cross_trunk"] and edge["direction"] == "UNDIRECTED"

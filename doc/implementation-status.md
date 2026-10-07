@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-Memory 关系证据分页（2026-10-07）：`memory.graph` 1.79.0、私有 SQL 3.73.0 新增 `memory.relations.evidence` 管理查询。关系列表和多跳邻域继续以固定快照展示首批证据；超过首批 16/4 条时，页面按关系 ID、贡献 ID 与同一快照逐页读取最多 16 条，逐条标出群、主干、来源与作者。每页按当前资格和来源状态重新校验整条关系，撤回后旧快照不再泄露证据。隔离 PostgreSQL 测试验证了 20 条证据跨页、来源标记、Bot 隔离、非法快照、撤回拒读和正式管理契约路由。相关大用例首次运行 4/5 通过，`NOT_SENT` 场景在新增查询之前的嵌入 facet 领取处失败；单独复跑通过。在线实例未切换。
+Memory 关系证据分页（2026-10-07）：`memory.graph` 1.79.1、私有 SQL 3.73.1 新增 `memory.relations.evidence` 管理查询。关系列表和多跳邻域继续以固定快照展示首批证据；超过首批 16/4 条时，页面按关系 ID、贡献 ID 与同一快照逐页读取最多 16 条，逐条标出群、主干、来源与作者。每页按当前资格和来源状态重新校验整条关系，撤回后旧快照不再泄露证据。来源列表与关系列表的快照解析也移到函数体内，非法快照返回领域错误而非裸 SQL 异常。隔离 PostgreSQL 测试验证了 20 条证据跨页、来源标记、Bot 隔离、非法快照、撤回拒读和正式管理契约路由。相关大用例首次运行 4/5 通过，`NOT_SENT` 场景在新增查询之前的嵌入 facet 领取处失败；单独复跑通过。在线实例未切换。
 
 Memory 数据库回归复核（2026-10-07）：在独立 PostgreSQL 容器中连续运行 `test_memory_graph_package`、`test_memory_graph_retrieval`、`test_memory_graph_relation_scale`、`test_memory_graph_neighbours`、`test_memory_embedding_work`、`test_memory_association` 与 `test_memory_evidence_materialization`，结果 `42 passed`（362.12 秒）。这覆盖上轮修正的试验夹具以及图关系、邻接、嵌入工作与证据物化的同轮回归；容器已清理。该结果不替代在线 QQ、长周期负载或生产存储切换验收。
 

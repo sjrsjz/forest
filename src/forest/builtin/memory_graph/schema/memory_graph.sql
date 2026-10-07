@@ -8558,18 +8558,13 @@ $$;
 CREATE FUNCTION memory_query_sources(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
-    page_limit integer := COALESCE((input->>'limit')::integer,50);
-    snapshot_time timestamptz := COALESCE((input->>'snapshot_accepted_at')::timestamptz,clock_timestamp());
-    snapshot_value pg_snapshot := COALESCE((input->>'snapshot_xid')::pg_snapshot,
-        pg_current_snapshot());
-    filter_digest text := 'sha256:' || encode(sha256(convert_to((
-        jsonb_build_array(input - 'limit' - 'snapshot_accepted_at' - 'snapshot_xid'
-            - 'after_occurred_at' - 'after_source_unit_id' - 'cursor_filter_digest',
-            snapshot_value::text,snapshot_time::text)
-    )::text,'UTF8')),'hex');
-    from_time timestamptz := (input->>'occurred_from')::timestamptz;
-    to_time timestamptz := (input->>'occurred_to')::timestamptz;
-    after_time timestamptz := (input->>'after_occurred_at')::timestamptz;
+    page_limit integer;
+    snapshot_time timestamptz;
+    snapshot_value pg_snapshot;
+    filter_digest text;
+    from_time timestamptz;
+    to_time timestamptz;
+    after_time timestamptz;
     selected_sources text[];
     selected_state text := COALESCE(input->>'eligibility_state','ELIGIBLE');
     selected_source_status text := COALESCE(input->>'source_status','ACTIVE');
@@ -8580,6 +8575,17 @@ DECLARE
     more boolean;
     cursor_value jsonb;
 BEGIN
+    page_limit := COALESCE((input->>'limit')::integer,50);
+    snapshot_time := COALESCE((input->>'snapshot_accepted_at')::timestamptz,clock_timestamp());
+    snapshot_value := COALESCE((input->>'snapshot_xid')::pg_snapshot,pg_current_snapshot());
+    filter_digest := 'sha256:' || encode(sha256(convert_to((
+        jsonb_build_array(input - 'limit' - 'snapshot_accepted_at' - 'snapshot_xid'
+            - 'after_occurred_at' - 'after_source_unit_id' - 'cursor_filter_digest',
+            snapshot_value::text,snapshot_time::text)
+    )::text,'UTF8')),'hex');
+    from_time := (input->>'occurred_from')::timestamptz;
+    to_time := (input->>'occurred_to')::timestamptz;
+    after_time := (input->>'after_occurred_at')::timestamptz;
     IF input ? 'group_source_ids' THEN
         SELECT COALESCE(array_agg(value ORDER BY value),ARRAY[]::text[])
         INTO selected_sources FROM jsonb_array_elements_text(input->'group_source_ids');
@@ -8688,6 +8694,11 @@ BEGIN
             'filter_digest',filter_digest,
             'items',items,'has_more',more,
             'next_cursor',CASE WHEN more THEN cursor_value ELSE NULL END));
+EXCEPTION WHEN invalid_text_representation OR invalid_datetime_format
+    OR datetime_field_overflow OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+            'message','Source query input is invalid','status',422));
 END;
 $$;
 
@@ -9515,16 +9526,17 @@ DECLARE
     endpoint_id text := input->>'endpoint_id';
     has_endpoint boolean := input ? 'endpoint_kind' AND input ? 'endpoint_id';
     page_limit integer := COALESCE((input->>'limit')::integer,10);
-    snapshot_value pg_snapshot := COALESCE((input->>'snapshot_xid')::pg_snapshot,
-        pg_current_snapshot());
-    filter_digest text := 'sha256:' || encode(sha256(convert_to(
-        jsonb_build_array(input - 'limit' - 'snapshot_xid' - 'after_relation_id'
-            - 'after_contribution_id' - 'cursor_filter_digest',
-            snapshot_value::text)::text,'UTF8')),'hex');
+    snapshot_value pg_snapshot;
+    filter_digest text;
     items jsonb;
     more boolean;
     cursor_value jsonb;
 BEGIN
+    snapshot_value := COALESCE((input->>'snapshot_xid')::pg_snapshot,pg_current_snapshot());
+    filter_digest := 'sha256:' || encode(sha256(convert_to(
+        jsonb_build_array(input - 'limit' - 'snapshot_xid' - 'after_relation_id'
+            - 'after_contribution_id' - 'cursor_filter_digest',
+            snapshot_value::text)::text,'UTF8')),'hex');
     IF page_limit NOT BETWEEN 1 AND 20 OR
        ((input ? 'endpoint_kind') <> (input ? 'endpoint_id')) OR
        (NOT has_endpoint AND input ? 'direction') OR
