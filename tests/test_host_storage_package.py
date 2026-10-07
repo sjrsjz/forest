@@ -264,7 +264,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.8.0"', 'version = "0.8.1"', 1,
+                'version = "0.8.1"', 'version = "0.8.2"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -447,7 +447,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert abandoned["ok"] and abandoned["value"]["work_id"] == queued_reservation["resource_id"]
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.8.1"', 'version = "0.8.2"', 1,
+                'version = "0.8.2"', 'version = "0.8.3"', 1,
             ), encoding="utf-8",
         )
         resumed_package = catalog.build_official(source, scope="host")

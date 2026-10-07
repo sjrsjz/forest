@@ -346,6 +346,11 @@ MANIFEST_SCHEMA = {
                                 },
                                 "visibility": {"enum": ["public", "management"]},
                                 "internal_command": {"type": "string"},
+                                "allowed_callers": {
+                                    "type": "array", "minItems": 1, "maxItems": 16,
+                                    "uniqueItems": True,
+                                    "items": {"type": "string", "minLength": 1, "maxLength": 128},
+                                },
                             },
                         },
                     },
@@ -1940,6 +1945,14 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 )
     management_query_ports = {item["port"] for item in management_queries}
     for service in services:
+        if any(
+            not IDENTIFIER.fullmatch(caller)
+            for caller in service.get("allowed_callers", ())
+        ):
+            _fail(
+                "INVALID_SERVICE_CALLER_POLICY",
+                "Service allowed_callers must name bounded component IDs",
+            )
         if service.get("visibility", "public") == "management" and (
             service["semantics"] != "read"
             or service["name"] not in management_query_ports

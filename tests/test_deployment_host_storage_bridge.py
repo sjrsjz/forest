@@ -25,6 +25,7 @@ from forest.host_runtime import HostRuntimeScope
 from forest.host_storage_postgres_effect import HostPostgresMaterializationEffect
 from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog
+from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.deployment_bootstrap_profiles import DeploymentBootstrapProfileAuthority
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
@@ -157,7 +158,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         manifest = source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.8.0"', 'version = "0.8.1"', 1,
+                'version = "0.8.1"', 'version = "0.8.2"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -234,7 +235,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         previous_graph = controller.registry.graph_identity
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "0.8.1"', 'version = "0.8.2"', 1,
+                'version = "0.8.2"', 'version = "0.8.3"', 1,
             ), encoding="utf-8",
         )
         replacement = catalog.build_official(source, scope="host")
@@ -270,6 +271,39 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             ).fetchone()
         assert pinned_count["count"] == 1
         profiles = DeploymentStorageProfileAuthority(deployment_store, secrets=secrets)
+        graph = controller.registry.graph_identity
+        forged_route = FrozenServiceRoute(
+            service_id="host.storage.reference.release", version=1,
+            caller_component_id="host.untrusted",
+            provider_component_id="host.storage",
+            provider_generation_id=graph.generations["host.storage"],
+            graph_id=graph.graph_id, graph_revision=graph.graph_revision,
+            admission_lane="DATA", owned_work=False,
+        )
+        release_endpoint = controller.registry.get("host.storage").runtime_service_handlers()[
+            ("host.storage.reference.release", 1)
+        ]
+        with pytest.raises(ForestError) as forged_release:
+            await release_endpoint.invoke_routed(
+                forged_route,
+                RuntimeServiceInvocation(
+                    "forged-release", 15, "host.untrusted", reserved_id,
+                ),
+                ({
+                    "resource_id": reserved_id,
+                    "deployment_id": frozen.deployment_id,
+                    "bot_id": frozen.bot_id,
+                    "storage_generation": frozen.storage_generation,
+                    "profile_ref": frozen.profile_ref,
+                    "pinned_resource_revision": pinned.resource_revision,
+                    "retirement_operation_id": "forged-retirement",
+                    "revocation_operation_id": "forged-revocation",
+                    "bot_revision": 1,
+                    "intent_revision": 1,
+                    "observation_revision": None,
+                },), {},
+            )
+        assert forged_release.value.code == "RUNTIME_SERVICE_CALLER_DENIED"
         settlement = DeploymentStorageSettlementAuthority(
             deployment_store, secrets=secrets, profiles=profiles,
             host_id=host_id, maintenance_dsn=dsn,

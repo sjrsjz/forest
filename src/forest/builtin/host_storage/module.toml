@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.host-storage"
-version = "0.8.0"
+version = "0.8.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "host_storage:HostStorage"
@@ -113,6 +113,7 @@ name = "host.storage.reference.release"
 contract = "1.0"
 semantics = "idempotent"
 visibility = "public"
+allowed_callers = ["deployment.storage-bridge"]
 internal_command = "host.storage.reference-release-record"
 input_schema = "schemas/reference-release-input.json"
 output_schema = "schemas/reference-release-output.json"

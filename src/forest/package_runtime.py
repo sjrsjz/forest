@@ -1140,6 +1140,12 @@ class PackageGenerationAdapter:
             *args,
             **kwargs,
         ):
+            allowed_callers = self._provided_services[service_id].get("allowed_callers")
+            if allowed_callers is not None and route.caller_component_id not in allowed_callers:
+                raise ForestError(
+                    "RUNTIME_SERVICE_CALLER_DENIED",
+                    "The service does not admit this caller component", 403,
+                )
             if args and kwargs or len(args) > 1:
                 raise ForestError(
                     "RUNTIME_SERVICE_INPUT_INVALID",

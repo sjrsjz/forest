@@ -61,10 +61,10 @@ deployment 内核独占 Bot 基础身份、期望运行意图、冻结的 Host �
 
 Host PostgreSQL Effect 创建库时先限制连接数为零，撤销 `PUBLIC` 数据库权限并写入准确归属 marker，之后才开放连接；已有库或 role 的外部授权与错误归属均拒绝接管。隔离 PostgreSQL 验收已确认 Bot role 可进入专属库，而另一有效登录角色无法连接该库。
 
-本机旧预发布资源仍未纳入 Host 账本，其中四组旧 Bot 库和 role 仍被运行中的 deployment 引用。安全退役、pin 释放和物理回收协议尚未实现；在完成引用围栏及旧资源重建前，不能把 Host 账本当作全量物理库存，也不能逐库删除旧资源。真实 Compose 长时在线验收仍待完成。
+本机旧预发布资源仍未纳入 Host 账本，其中四组旧 Bot 库和 role 仍被运行中的 deployment 引用。Bot 退役 fence、profile 撤销与 Host pin 逻辑释放已有受限实现，但自动退役工作流、物理回收和旧资源重建尚未完成；不能把 Host 账本当作全量物理库存，也不能逐库删除旧资源。真实 Compose 长时在线验收仍待完成。
 
 ## Host 引用释放（2026-10-08）
 
 Bot 退役和 profile 撤销由 deployment 内核持有权威。`DeploymentHostStorageBridge.release_reference` 在当前 Supervisor 租约下重新核对不可变撤销事实、`DELETING/OFFLINE` 静止证明、冻结请求及精确 Host pin，随后用固定请求 ID 调用 Host 包的 `host.storage.reference.release`。Host 包以私有 Command 在同一事务中锁定物理 generation 和原 pin，只接受完全一致的 Host、deployment、Bot、storage generation、profile 与资源修订，把账本状态从 `ACTIVE` 推进至 `RETIRED`，并写入不可变的 release 记录；同键重放返回原回执，异键争用拒绝。原 pin 保留供审计。
 
-`RETIRED` 仅表示 Host 账本已解除逻辑引用，不表示数据库、role 或 DSN Secret 已删除或失效。释放端口依赖受信任的内核桥提交经 deployment 核验的撤销事实；Host 包无法独立读取 deployment 数据库，普通包要调用公开服务仍须显式获得相应 `service.call` 能力。物理回收必须另设受限 Effect，在执行前重新核对 deployment fence、Host pin/release、精确 owner marker、role 权限和实际连接状态；本阶段没有自动 DROP。
+`RETIRED` 仅表示 Host 账本已解除逻辑引用，不表示数据库、role 或 DSN Secret 已删除或失效。释放端口依赖受信任的内核桥提交经 deployment 核验的撤销事实；Host 包无法独立读取 deployment 数据库。包 manifest 将该服务的 `allowed_callers` 限为 `deployment.storage-bridge`，运行时在处理输入或调用 Worker 前核验封存路由的调用组件；普通 Host 包即使取得通用服务调用能力，也不能直接提交伪造的撤销 payload。物理回收必须另设受限 Effect，在执行前重新核对 deployment fence、Host pin/release、精确 owner marker、role 权限和实际连接状态；本阶段没有自动 DROP。
