@@ -61,7 +61,7 @@ deployment 内核独占 Bot 基础身份、期望运行意图、冻结的 Host �
 
 Host PostgreSQL Effect 创建库时先限制连接数为零，撤销 `PUBLIC` 数据库权限并写入准确归属 marker，之后才开放连接；已有库或 role 的外部授权与错误归属均拒绝接管。隔离 PostgreSQL 验收已确认 Bot role 可进入专属库，而另一有效登录角色无法连接该库。
 
-本机旧预发布资源仍未纳入 Host 账本，其中四组旧 Bot 库和 role 仍被运行中的 deployment 引用。Bot 退役 fence、profile 撤销、Host pin 释放及已登记资源的显式物理回收路径已有受限实现；管理员可用的自动退役工作流和旧资源重建仍未完成。不能把 Host 账本当作全量物理库存，也不能逐库删除旧资源。真实 Compose 长时在线验收仍待完成。
+本机旧预发布资源仍未纳入 Host 账本，其中四组旧 Bot 库和 role 仍被运行中的 deployment 引用。Bot 退役 fence、profile 撤销、Host pin 释放及已登记资源的显式物理回收路径已有受限实现，管理员可用的自动退役工作流也已接入；旧资源采纳或重建仍未完成。不能把 Host 账本当作全量物理库存，也不能逐库删除旧资源。真实 Compose 长时在线验收仍待完成。
 
 ## Host 引用释放（2026-10-08）
 
@@ -85,4 +85,4 @@ Worker 的稳定顺序为 `等待 Bot 静止 → 撤销准确 profile → 释放
 
 最后一步的受限内核端口必须先从 Host 读取精确资源的 `DELETED` 与回收工作 `SUCCEEDED`，复核对应 deployment revocation、原 Host pin 与 release，再在一个 deployment 事务中锁住 Bot、当前 Job claim、Supervisor 租约及仍为 `DELETING/OFFLINE` 的静止事实，将 Bot 发布为 `DELETED` 并把 Job 结算成功。若跨库读取后 deployment 事务输掉围栏，重试只读取单调的 Host 完成事实；Bot 与 Job 的最终状态必须同事务提交，不允许出现只有一方成功的中间态。旧 Bot 身份与审计记录继续保留且不可复用。
 
-当前实现已把 `deployment.retirement` 作为可热替换的独立 builtin 接线。管理页通过分页只读投影展示 Bot 与唯一 Job，并标明是否存在准确 Host pin；缺少 pin 时按钮不可用，内核命令也在 Web 授权事务内拒绝，不会先把旧 Bot 冻结。`bot.retire` 对 Host 持有的资源一次性冻结 Bot 并创建 Job；Worker 经五个声明式窄端口执行静止检查、profile 撤销、Host release、回收入队和状态读取。结算端口对原 request 重读 Host release、回收工作 `SUCCEEDED` 及资源 `DELETED`，再原子发布 Bot `DELETED` 与 Job `SUCCEEDED`。SQL 限制 Job 初始操作、状态迁移及成功前的 Bot 状态。隔离 PostgreSQL 已验证跨库物理回收前拒绝伪造成功结果、完成后的原子结算、等待 Job 跨退役包热替换续跑，以及 WebUI 的管理员动作与幂等重放。旧资源采纳/重建、阻断 Job 的人工重新准入和在线实例验证仍待完成；当前流程只对新协议下有准确 Host pin 的资源自动退役。
+当前实现已把 `deployment.retirement` 作为可热替换的独立 builtin 接线。管理页通过分页只读投影展示 Bot 与唯一 Job，并标明是否存在准确 Host pin；缺少 pin 时按钮不可用，内核命令也在 Web 授权事务内拒绝，不会先把旧 Bot 冻结。`bot.retire` 对 Host 持有的资源一次性冻结 Bot 并创建 Job；Worker 经五个声明式窄端口执行静止检查、profile 撤销、Host release、回收入队和状态读取。结算端口对原 request 重读 Host release、回收工作 `SUCCEEDED` 及资源 `DELETED`，再原子发布 Bot `DELETED` 与 Job `SUCCEEDED`。SQL 限制 Job 初始操作、状态迁移及成功前的 Bot 状态。`BLOCKED_UNKNOWN` Job 可由管理员在修复阻断原因后用当前 Job 修订号重新准入：`retirement.requeue` 在 Web 授权事务中对同一 Job 做 CAS，将其置为可立即领取的 `RETRY_WAIT`，记录不可变的幂等操作；原退役操作、Bot 和 Host 资源身份均不改变。隔离 PostgreSQL 已验证跨库物理回收前拒绝伪造成功结果、完成后的原子结算、等待 Job 跨退役包热替换续跑，以及 WebUI 的管理员动作与幂等重放。旧资源采纳/重建和在线实例验证仍待完成；当前流程只对新协议下有准确 Host pin 的资源自动退役。

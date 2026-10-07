@@ -25,6 +25,7 @@ from forest.deployment_kernel_management import (
     ProvisioningJobsKernelQuery,
     ProvisioningReconcileKernelCommand,
     RetirementJobsKernelQuery,
+    RetirementRequeueKernelCommand,
     SecretPutKernelCommand,
     StorageRequestKernelCommand,
     StorageRequestsKernelQuery,
@@ -400,6 +401,10 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 ("deployment.retirement", "deployment.bot-begin-retirement"):
                     BotBeginRetirementKernelCommand(
                         catalog, notify=notify_deployment_work,
+                    ),
+                ("deployment.retirement", "deployment.retirement-requeue"):
+                    RetirementRequeueKernelCommand(
+                        retirement_jobs, notify=notify_deployment_work,
                     ),
                 ("deployment.secrets", "deployment.secret-put"):
                     SecretPutKernelCommand(secrets),

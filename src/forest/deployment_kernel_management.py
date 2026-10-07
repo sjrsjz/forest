@@ -119,6 +119,26 @@ class BotBeginRetirementKernelCommand:
             self.notify()
 
 
+class RetirementRequeueKernelCommand:
+    """Re-admit only the same blocked Job under Web receipt and revision CAS."""
+
+    def __init__(self, jobs, *, notify=None) -> None:
+        self.jobs = jobs
+        self.notify = notify
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        return dict(payload)
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        return await self.jobs.requeue(
+            operation_id=operation_id, conn=conn, **prepared,
+        )
+
+    def after_commit(self, result: dict) -> None:
+        if self.notify is not None:
+            self.notify()
+
+
 class StorageRequestKernelCommand:
     """Freeze one Host storage intent and its delivery row under Web admission."""
 

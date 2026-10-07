@@ -67,16 +67,20 @@
       const cell = document.createElement('code'); cell.textContent = value; element.append(cell);
     }
     const button = document.createElement('button');
-    button.type = 'button'; button.textContent = '退役';
-    button.disabled = item.supply_state !== 'READY' || !item.host_pinned;
+    const retry = item.job_state === 'BLOCKED_UNKNOWN';
+    button.type = 'button'; button.textContent = retry ? '重试' : '退役';
+    button.disabled = !item.host_pinned || (retry
+      ? item.supply_state !== 'DELETING' || item.job_revision === null
+      : item.supply_state !== 'READY');
     if (!item.host_pinned) button.title = '缺少准确的 Host 存储 pin，需先采纳或重建资源';
     button.onclick = async () => {
-      button.disabled = true; status('正在冻结 Bot 并创建退役任务…');
+      button.disabled = true;
+      status(retry ? '正在重新准入原退役任务…' : '正在冻结 Bot 并创建退役任务…');
       try {
-        await request('action','bot.retire',{
-          bot_id:item.bot_id,expected_revision:item.revision,
-        },randomId());
-        status('退役任务已入队'); await load(false);
+        await request('action',retry ? 'retirement.requeue' : 'bot.retire',retry
+          ? {bot_id:item.bot_id,expected_job_revision:item.job_revision}
+          : {bot_id:item.bot_id,expected_revision:item.revision},randomId());
+        status(retry ? '原退役任务已重新入队' : '退役任务已入队'); await load(false);
       } catch (error) { status(error.message); button.disabled = false; }
     };
     element.append(button);

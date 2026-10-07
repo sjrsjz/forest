@@ -60,6 +60,13 @@ kind = "deployment.bot-begin-retirement"
 input_schema = "schemas/begin-input.json"
 output_schema = "schemas/begin-output.json"
 
+[[components.kernel_commands]]
+name = "deployment.retirement.requeue"
+contract = "1.0"
+kind = "deployment.retirement-requeue"
+input_schema = "schemas/requeue-input.json"
+output_schema = "schemas/requeue-output.json"
+
 [[components.management_queries]]
 id = "retirement.jobs.list"
 port = "deployment.retirement.jobs.page"
@@ -70,6 +77,12 @@ timeout_s = 10
 [[components.management_actions]]
 id = "bot.retire"
 port = "deployment.retirement.begin"
+priority = "P0"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "retirement.requeue"
+port = "deployment.retirement.requeue"
 priority = "P0"
 timeout_s = 15
 

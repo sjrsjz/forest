@@ -598,13 +598,25 @@ CREATE TABLE forest_deployment.retirement_jobs (
     CHECK ((state='RUNNING') = (lease_expires_at IS NOT NULL)),
     CHECK ((state='RETRY_WAIT') = (retry_not_before IS NOT NULL)),
     CHECK ((state='SUCCEEDED') = (completed_at IS NOT NULL)),
-    CHECK (state<>'SUCCEEDED' OR lease_owner IS NULL)
+    CHECK (state<>'SUCCEEDED' OR lease_owner IS NULL),
+    UNIQUE (operation_id,bot_id)
 );
 CREATE INDEX retirement_claim_idx
     ON forest_deployment.retirement_jobs(state,retry_not_before,created_at,operation_id);
 CREATE INDEX retirement_expired_running_idx
     ON forest_deployment.retirement_jobs(lease_expires_at,operation_id)
     WHERE state='RUNNING';
+
+CREATE TABLE forest_deployment.retirement_requeue_operations (
+    operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    retirement_operation_id text NOT NULL,
+    bot_id text NOT NULL,
+    resulting_revision bigint NOT NULL CHECK (resulting_revision > 1),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (retirement_operation_id,bot_id)
+        REFERENCES forest_deployment.retirement_jobs(operation_id,bot_id)
+);
 
 CREATE TABLE forest_deployment.storage_profile_revocations (
     profile_ref text PRIMARY KEY REFERENCES forest_deployment.storage_profiles(profile_ref),
@@ -1038,6 +1050,9 @@ BEGIN
             (''RETRY_WAIT'',''BLOCKED_UNKNOWN'',''SUCCEEDED'')
             AND NEW.attempt_no=OLD.attempt_no
             AND NEW.lease_epoch=OLD.lease_epoch)
+        OR (OLD.state=''BLOCKED_UNKNOWN'' AND NEW.state=''RETRY_WAIT''
+            AND NEW.attempt_no=OLD.attempt_no
+            AND NEW.lease_epoch=OLD.lease_epoch)
     ) THEN
         RAISE EXCEPTION ''retirement Job transition is invalid'';
     END IF;
@@ -1065,6 +1080,10 @@ END;
 CREATE TRIGGER retirement_job_change_guard
     BEFORE INSERT OR UPDATE OR DELETE ON forest_deployment.retirement_jobs
     FOR EACH ROW EXECUTE FUNCTION forest_deployment.guard_retirement_job_change();
+
+CREATE TRIGGER retirement_requeue_operation_immutable
+    BEFORE UPDATE OR DELETE ON forest_deployment.retirement_requeue_operations
+    FOR EACH ROW EXECUTE FUNCTION forest_deployment.reject_identity_change();
 
 CREATE FUNCTION forest_deployment.guard_bot_change() RETURNS trigger LANGUAGE plpgsql AS '
 BEGIN

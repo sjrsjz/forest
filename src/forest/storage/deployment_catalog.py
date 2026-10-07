@@ -179,6 +179,7 @@ class DeploymentCatalogRepository:
             "runtime_observations",
             "operations",
             "retirement_jobs",
+            "retirement_requeue_operations",
             "secret_slots",
             "secret_versions",
             "storage_requests",

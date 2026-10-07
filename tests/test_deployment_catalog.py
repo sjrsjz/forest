@@ -31,6 +31,7 @@ from forest.deployment_kernel_management import (
     ProvisioningJobsKernelQuery,
     ProvisioningReconcileKernelCommand,
     RetirementJobsKernelQuery,
+    RetirementRequeueKernelCommand,
     SecretPutKernelCommand,
     StorageRequestKernelCommand,
     StorageRequestsKernelQuery,
@@ -2957,6 +2958,8 @@ async def test_retirement_builtin_resumes_waiting_job_after_hot_replace(
         kernel_management_handlers={
             ("deployment.retirement", "deployment.bot-begin-retirement"):
                 BotBeginRetirementKernelCommand(repository),
+            ("deployment.retirement", "deployment.retirement-requeue"):
+                RetirementRequeueKernelCommand(jobs),
         },
     )
     runtime.kernel_owned_work_authorities["deployment.retirement"] = (
@@ -3044,6 +3047,21 @@ async def test_retirement_webui_action_admits_one_kernel_job(deployment_catalog,
         bootstrap_profile_ref=legacy_bootstrap.profile_ref,
         bootstrap_manifest_digest=legacy_bootstrap.manifest_digest,
     )
+    blocked_profile = await _storage_profile(
+        repository, "bot/retirement-blocked-web", "retirement-blocked-web",
+    )
+    blocked_bootstrap = await _bootstrap_profile(
+        repository, blocked_profile, "retirement-blocked-web",
+    )
+    blocked_bot = await repository.register_ready(
+        operation_id="provision/retirement-blocked-web",
+        bot_id="bot/retirement-blocked-web",
+        display_name="Blocked Retirement Web",
+        storage_profile_ref=blocked_profile.profile_ref,
+        bootstrap_profile_ref=blocked_bootstrap.profile_ref,
+        bootstrap_manifest_digest=blocked_bootstrap.manifest_digest,
+    )
+    await _synthetic_host_pin(repository, blocked_profile, "retirement-blocked-web")
     identity = DeploymentWebIdentityAuthority(
         repository.store, active_key_id="master/retirement-web/1",
         key_resolver=lambda _key_id: bytes(range(32)),
@@ -3061,6 +3079,18 @@ async def test_retirement_webui_action_admits_one_kernel_job(deployment_catalog,
         "host/retirement-web", "incarnation/retirement-web", lease_seconds=300,
     )
     jobs = DeploymentRetirementJobAuthority(repository.store)
+    await repository.begin_retirement(
+        operation_id="retire/retirement-blocked-web",
+        bot_id=blocked_bot["bot_id"],
+        expected_revision=blocked_bot["revision"],
+    )
+    blocked_claim = await jobs.claim(
+        lease, worker_id="worker/retirement-blocked-web", lease_seconds=30,
+    )
+    assert blocked_claim.operation_id == "retire/retirement-blocked-web"
+    blocked = await jobs.block_unknown(
+        lease, blocked_claim, error_code="HOST_RESULT_UNKNOWN",
+    )
     class UnavailableHostBridge:
         async def release_reference(self, _request_id):
             raise ForestError(
@@ -3079,6 +3109,8 @@ async def test_retirement_webui_action_admits_one_kernel_job(deployment_catalog,
         kernel_management_handlers={
             ("deployment.retirement", "deployment.bot-begin-retirement"):
                 BotBeginRetirementKernelCommand(repository),
+            ("deployment.retirement", "deployment.retirement-requeue"):
+                RetirementRequeueKernelCommand(jobs),
         },
     )
     runtime.kernel_owned_work_authorities["deployment.retirement"] = (
@@ -3130,6 +3162,7 @@ async def test_retirement_webui_action_admits_one_kernel_job(deployment_catalog,
             )
             assert ui.status_code == 200
             assert "retirement.jobs.list" in ui.text
+            assert "retirement.requeue" in ui.text
             path = (
                 "/management/v1/scopes/deployment/deployment/modules/"
                 "deployment.retirement/queries/retirement.jobs.list"
@@ -3138,6 +3171,46 @@ async def test_retirement_webui_action_admits_one_kernel_job(deployment_catalog,
             assert page.status_code == 200, page.text
             assert page.json()["items"][0]["revision"] == bot["revision"]
             assert page.json()["items"][0]["host_pinned"] is True
+            blocked_page = await client.post(
+                path, headers=headers, json={"search": "retirement-blocked-web"},
+            )
+            assert blocked_page.status_code == 200, blocked_page.text
+            assert blocked_page.json()["items"][0]["job_revision"] == blocked["revision"]
+            assert blocked_page.json()["items"][0]["job_state"] == "BLOCKED_UNKNOWN"
+            requeue_path = (
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.retirement/actions/retirement.requeue"
+            )
+            requeue_payload = {
+                "bot_id": blocked_bot["bot_id"],
+                "expected_job_revision": blocked["revision"],
+            }
+            requeued = await client.post(
+                requeue_path,
+                headers={**headers, "idempotency-key": "retirement-requeue-once"},
+                json=requeue_payload,
+            )
+            assert requeued.status_code == 200, requeued.text
+            assert requeued.json() == {
+                "bot_id": blocked_bot["bot_id"],
+                "retirement_operation_id": blocked_claim.operation_id,
+                "job_revision": blocked["revision"] + 1,
+                "state": "RETRY_WAIT",
+            }
+            requeue_replay = await client.post(
+                requeue_path,
+                headers={**headers, "idempotency-key": "retirement-requeue-once"},
+                json=requeue_payload,
+            )
+            assert requeue_replay.status_code == 200, requeue_replay.text
+            assert requeue_replay.json() == requeued.json()
+            stale_requeue = await client.post(
+                requeue_path,
+                headers={**headers, "idempotency-key": "retirement-requeue-stale"},
+                json=requeue_payload,
+            )
+            assert stale_requeue.status_code == 409, stale_requeue.text
+            assert stale_requeue.json()["code"] == "RETIREMENT_JOB_REVISION_CONFLICT"
             rejected_legacy = await client.post(
                 "/management/v1/scopes/deployment/deployment/modules/"
                 "deployment.retirement/actions/bot.retire",

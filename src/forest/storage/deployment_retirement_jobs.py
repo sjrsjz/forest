@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from forest.errors import ForestError
+from forest.packages import digest_json
 from forest.storage.deployment_catalog import verify_deployment_supervisor_in
 
 _ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,127}\Z")
@@ -43,7 +44,7 @@ class DeploymentRetirementJobAuthority:
                 await conn.execute(
                     "SELECT b.bot_id,b.display_name,b.supply_state,b.revision,"
                     "i.desired_state,j.operation_id,j.state AS job_state,"
-                    "j.attempt_no,j.last_error_code,"
+                    "j.revision AS job_revision,j.attempt_no,j.last_error_code,"
                     "EXISTS(SELECT 1 FROM forest_deployment.storage_requests r "
                     "JOIN forest_deployment.storage_request_pins p ON "
                     "p.request_id=r.request_id AND p.profile_ref=r.profile_ref "
@@ -69,6 +70,96 @@ class DeploymentRetirementJobAuthority:
             "items": items,
             "next_after": items[-1]["bot_id"] if len(rows) > limit else None,
         }
+
+    async def requeue(
+        self, *, operation_id: str, bot_id: str,
+        expected_job_revision: int, conn=None,
+    ) -> dict:
+        """Re-admit one blocked Job without changing its frozen resource identity."""
+        for value, limit in ((operation_id, 256), (bot_id, 128)):
+            if (
+                not isinstance(value, str)
+                or not 1 <= len(value.encode("utf-8")) <= limit
+                or any(ord(char) < 32 or ord(char) == 127 for char in value)
+            ):
+                raise ForestError("RETIREMENT_INPUT_INVALID", "Identity is invalid", 422)
+        if type(expected_job_revision) is not int or expected_job_revision < 1:
+            raise ForestError("RETIREMENT_INPUT_INVALID", "Job revision is invalid", 422)
+        input_digest = digest_json({
+            "bot_id": bot_id, "expected_job_revision": expected_job_revision,
+        })
+        async with self.store.transaction(conn) as conn:
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                ("forest.deployment.retirement-requeue/" + operation_id,),
+            )
+            prior = await (
+                await conn.execute(
+                    "SELECT bot_id,retirement_operation_id,resulting_revision,"
+                    "input_digest FROM forest_deployment.retirement_requeue_operations "
+                    "WHERE operation_id=%s", (operation_id,),
+                )
+            ).fetchone()
+            if prior is not None:
+                if prior["input_digest"] != input_digest or prior["bot_id"] != bot_id:
+                    raise ForestError(
+                        "RETIREMENT_OPERATION_CONFLICT",
+                        "Requeue operation differs", 409,
+                    )
+                return {
+                    "bot_id": bot_id,
+                    "retirement_operation_id": prior["retirement_operation_id"],
+                    "job_revision": prior["resulting_revision"],
+                    "state": "RETRY_WAIT",
+                }
+            job = await (
+                await conn.execute(
+                    "SELECT j.operation_id,j.state,j.revision,b.supply_state,"
+                    "i.desired_state FROM forest_deployment.retirement_jobs j "
+                    "JOIN forest_deployment.bots b USING(bot_id) "
+                    "JOIN forest_deployment.runtime_intents i USING(bot_id) "
+                    "WHERE j.bot_id=%s FOR UPDATE OF j", (bot_id,),
+                )
+            ).fetchone()
+            if job is None:
+                raise ForestError(
+                    "RETIREMENT_JOB_NOT_FOUND", "Retirement Job does not exist", 404,
+                )
+            if job["revision"] != expected_job_revision:
+                raise ForestError(
+                    "RETIREMENT_JOB_REVISION_CONFLICT", "Retirement Job changed", 409,
+                    details={"revision": job["revision"]},
+                )
+            if job["state"] != "BLOCKED_UNKNOWN":
+                raise ForestError(
+                    "RETIREMENT_JOB_NOT_BLOCKED", "Only blocked Jobs can be requeued", 409,
+                )
+            if job["supply_state"] != "DELETING" or job["desired_state"] != "OFFLINE":
+                raise ForestError(
+                    "RETIREMENT_FENCE_MISMATCH", "Bot retirement fence changed", 409,
+                )
+            saved = await (
+                await conn.execute(
+                    "UPDATE forest_deployment.retirement_jobs "
+                    "SET state='RETRY_WAIT',retry_not_before=clock_timestamp(),"
+                    "revision=revision+1,updated_at=clock_timestamp() "
+                    "WHERE operation_id=%s RETURNING revision",
+                    (job["operation_id"],),
+                )
+            ).fetchone()
+            await conn.execute(
+                "INSERT INTO forest_deployment.retirement_requeue_operations("
+                "operation_id,input_digest,retirement_operation_id,bot_id,"
+                "resulting_revision) VALUES (%s,%s,%s,%s,%s)",
+                (operation_id, input_digest, job["operation_id"], bot_id,
+                 saved["revision"]),
+            )
+            return {
+                "bot_id": bot_id,
+                "retirement_operation_id": job["operation_id"],
+                "job_revision": saved["revision"],
+                "state": "RETRY_WAIT",
+            }
 
     async def claim(self, supervisor, *, worker_id: str, lease_seconds: int, conn=None):
         if not isinstance(worker_id, str) or not 1 <= len(worker_id.encode()) <= 256:
