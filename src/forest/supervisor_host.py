@@ -550,9 +550,17 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 raise deployment_controller.fatal_error
             if host_fatal_task in done and host_controller.fatal_error is not None:
                 raise host_controller.fatal_error
-            failed = next(task for task in tasks if task in done)
-            await failed
-            raise RuntimeError("Deployment supervisor task stopped unexpectedly")
+            completed = [task for task in tasks if task in done]
+            for task in completed:
+                if task.cancelled():
+                    raise RuntimeError(
+                        f"Deployment supervisor task {task.get_name()} was cancelled"
+                    )
+                await task
+            raise RuntimeError(
+                "Deployment supervisor task stopped unexpectedly: "
+                + ", ".join(task.get_name() for task in completed)
+            )
     finally:
         for task in (
             stop_task, fatal_task, host_fatal_task,
