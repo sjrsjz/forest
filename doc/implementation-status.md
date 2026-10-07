@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+退役静默证明已加入 deployment 内核：准确退役操作与 `DELETING/OFFLINE` 围栏必须匹配，最后运行观测只能为空或无图 ID 的 `OFFLINE`，`STARTING/ONLINE/STOPPING/FAILED` 全部阻断。发现并修复 Supervisor 在 BotHost.close 失败且意图已变化时仍写 `OFFLINE` 的漏洞；关闭失败现在写 `BOT_RUNTIME_CLOSE_FAILED`，不会伪造证明。隔离 PostgreSQL 的并发/从未启动用例及 Supervisor 生命周期用例通过。证明目前只读且必须在解除引用前重查，Host pin 释放与物理回收仍未接线。
+
 Bot 退役入口第一道内核围栏已落地：`begin_retirement` 原子地把供给状态改为 `DELETING`、期望状态改为 `OFFLINE` 并提升意图修订；普通意图命令不再接受非 READY Bot。Supervisor 与退役并发的 `STARTING/ONLINE` 观测被旧意图围栏拒绝，停机观测继续允许。隔离 PostgreSQL 的部署目录全套 `32 passed`。此阶段不释放 Host pin、不删库；真实停机确认、其他引用解除、回收和管理 UI 仍未完成。
 
 Host 物理 PostgreSQL 创建现增加连接围栏：新库先以连接上限零创建，再撤销 `PUBLIC` 数据库权限、写入归属标记，最后开放连接；重放校验数据库 ACL、连接限制和专属 role 的成员关系。隔离 PostgreSQL 的生产 Supervisor 验收 `1 passed`：Bot 凭据能进入专属库，有效的其他登录角色只能进入公共测试库，无法连接 Bot 库。安全退役和物理回收仍待实现。

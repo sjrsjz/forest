@@ -137,3 +137,48 @@ async def test_stop_during_start_never_publishes_online_observation():
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_retirement_does_not_claim_offline_when_host_close_fails():
+    observed = []
+
+    class Catalog:
+        async def observe(self, _lease, *, observed_state, error_code=None, **_kwargs):
+            observed.append((observed_state, error_code))
+            if observed_state == "ONLINE":
+                raise ForestError("BOT_INTENT_CHANGED", "Bot is retiring", 409)
+
+    class StorageProfiles:
+        async def resolve(self, **_kwargs):
+            return SimpleNamespace(dsn="postgresql://test")
+
+    class Host:
+        def __init__(self, _settings):
+            self.registry = SimpleNamespace(
+                graph_identity=SimpleNamespace(graph_id="graph/test")
+            )
+            self._supervision_task = None
+
+        async def start(self):
+            pass
+
+        async def close(self):
+            raise RuntimeError("close failed")
+
+    supervisor = MultiBotSupervisor(
+        Catalog(), storage_profiles=StorageProfiles(),
+        settings_resolver=lambda bot, storage: SimpleNamespace(
+            bot_id=bot["bot_id"], dsn=storage.dsn,
+        ), host_factory=Host, host_id="host/lifecycle-test",
+    )
+    supervisor.lease = object()
+    runner = _BotRunner(asyncio.Event())
+    bot = {
+        "bot_id": "bot/test", "storage_profile_ref": "storage/test",
+        "storage_generation": 1, "intent_revision": 2,
+    }
+    await asyncio.wait_for(supervisor._run_bot(bot, runner), timeout=2)
+    assert observed == [
+        ("STARTING", None), ("ONLINE", None),
+        ("FAILED", "BOT_RUNTIME_CLOSE_FAILED"),
+    ]

@@ -2693,6 +2693,9 @@ async def test_bot_retirement_fences_startup_and_allows_stop_observations(
     assert retired["desired_state"] == "OFFLINE"
     assert retired["intent_revision"] > online["intent_revision"]
     assert await repository.list_online_bots_page() == ()
+    with pytest.raises(ForestError) as still_running:
+        await repository.retirement_quiescence(bot["bot_id"])
+    assert still_running.value.code == "BOT_RETIREMENT_NOT_QUIESCENT"
     if isinstance(raced_online, Exception):
         assert isinstance(raced_online, ForestError)
         assert raced_online.code == "BOT_INTENT_CHANGED"
@@ -2722,10 +2725,40 @@ async def test_bot_retirement_fences_startup_and_allows_stop_observations(
         )
     assert duplicate.value.code == "BOT_NOT_READY"
     await repository.observe(lease, bot_id=bot["bot_id"], observed_state="STOPPING")
+    with pytest.raises(ForestError) as stopping:
+        await repository.retirement_quiescence(bot["bot_id"])
+    assert stopping.value.code == "BOT_RETIREMENT_NOT_QUIESCENT"
     stopped = await repository.observe(
         lease, bot_id=bot["bot_id"], observed_state="OFFLINE",
     )
     assert stopped["observed_state"] == "OFFLINE"
+    witness = await repository.retirement_quiescence(bot["bot_id"])
+    assert witness == {
+        "protocol": "forest.bot-retirement-quiescence/1",
+        "deployment_id": repository.store.deployment_id,
+        "bot_id": bot["bot_id"],
+        "retirement_operation_id": "runtime/retiring/retire",
+        "bot_revision": retired["revision"],
+        "intent_revision": retired["intent_revision"],
+        "observation_revision": stopped["revision"],
+        "storage_profile_ref": profile.profile_ref,
+        "storage_generation": 1,
+    }
+
+    unused_profile = await _storage_profile(repository, "bot/never-started", "unused")
+    unused_bootstrap = await _bootstrap_profile(repository, unused_profile, "unused")
+    unused = await repository.register_ready(
+        operation_id="provision/never-started", bot_id="bot/never-started",
+        display_name="Never Started", storage_profile_ref=unused_profile.profile_ref,
+        bootstrap_profile_ref=unused_bootstrap.profile_ref,
+        bootstrap_manifest_digest=unused_bootstrap.manifest_digest,
+    )
+    await repository.begin_retirement(
+        operation_id="runtime/never-started/retire", bot_id=unused["bot_id"],
+        expected_revision=unused["revision"],
+    )
+    never_started = await repository.retirement_quiescence(unused["bot_id"])
+    assert never_started["observation_revision"] is None
 
 
 @pytest.mark.postgres

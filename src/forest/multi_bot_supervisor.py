@@ -370,12 +370,15 @@ class MultiBotSupervisor:
                 await runner.management_condition.wait_for(
                     lambda: runner.management_inflight == 0
                 )
+            close_failed = False
             if host is not None:
                 try:
                     await host.close()
                 except Exception:
-                    pass
+                    close_failed = True
             code = exc.code if isinstance(exc, ForestError) else "BOT_RUNTIME_FAILED"
+            if close_failed:
+                code = "BOT_RUNTIME_CLOSE_FAILED"
             if code == "BOT_INTENT_CHANGED":
                 await self.catalog.observe(
                     self.lease, bot_id=bot_id, observed_state="OFFLINE"

@@ -484,6 +484,65 @@ class DeploymentCatalogRepository:
             )
             return await self._bot_in(conn, result["bot_id"])
 
+    async def retirement_quiescence(self, bot_id: str) -> dict:
+        """Read one fenced shutdown witness; callers must recheck before release."""
+        _bounded(bot_id, "bot_id", 128)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    "SELECT b.supply_state,b.revision AS bot_revision,"
+                    "b.storage_profile_ref,b.storage_generation,"
+                    "i.desired_state,i.revision AS intent_revision,"
+                    "op.operation_id AS retirement_operation_id,"
+                    "op.resulting_revision AS retirement_revision "
+                    "FROM forest_deployment.bots b "
+                    "JOIN forest_deployment.runtime_intents i USING(bot_id) "
+                    "LEFT JOIN forest_deployment.operations op ON op.bot_id=b.bot_id "
+                    "AND op.operation_kind='BEGIN_RETIREMENT' "
+                    "WHERE b.bot_id=%s FOR SHARE OF b,i", (bot_id,),
+                )
+            ).fetchone()
+            if row is None:
+                raise ForestError("BOT_NOT_FOUND", "Bot identity does not exist", 404)
+            if (
+                row["supply_state"] != "DELETING"
+                or row["desired_state"] != "OFFLINE"
+                or row["retirement_operation_id"] is None
+                or row["bot_revision"] != row["retirement_revision"]
+            ):
+                raise ForestError(
+                    "BOT_RETIREMENT_NOT_FENCED",
+                    "Bot retirement fence is unavailable", 409,
+                )
+            observation = await (
+                await conn.execute(
+                    "SELECT observed_state,revision,graph_id "
+                    "FROM forest_deployment.runtime_observations "
+                    "WHERE bot_id=%s FOR SHARE", (bot_id,),
+                )
+            ).fetchone()
+            if observation is not None and (
+                observation["observed_state"] != "OFFLINE"
+                or observation["graph_id"] is not None
+            ):
+                raise ForestError(
+                    "BOT_RETIREMENT_NOT_QUIESCENT",
+                    "Bot runtime has no confirmed shutdown", 409,
+                )
+            return {
+                "protocol": "forest.bot-retirement-quiescence/1",
+                "deployment_id": self.store.deployment_id,
+                "bot_id": bot_id,
+                "retirement_operation_id": row["retirement_operation_id"],
+                "bot_revision": row["bot_revision"],
+                "intent_revision": row["intent_revision"],
+                "observation_revision": (
+                    observation["revision"] if observation is not None else None
+                ),
+                "storage_profile_ref": row["storage_profile_ref"],
+                "storage_generation": row["storage_generation"],
+            }
+
     async def claim_supervisor(
         self, host_id: str, incarnation: str, *, lease_seconds: int = 30
     ) -> DeploymentSupervisorLease:

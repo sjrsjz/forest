@@ -49,6 +49,8 @@
 
 Bot 退役的第一道 deployment 内核围栏现已实现：`begin_retirement` 在锁住 Bot 身份行和运行意图后，把 `READY` 变为 `DELETING`、把期望状态强制写成 `OFFLINE` 并递增意图修订；同一操作重放合流，另一操作不能再次开启退役。普通运行意图命令在非 `READY` 状态拒绝；Supervisor 的 `STARTING/ONLINE` 观测与退役并发时按 Bot 行锁排序，失效的启动被拒绝，`STOPPING/OFFLINE/FAILED` 仍可记录。此状态只表示禁止重新启动，不证明旧运行图已关闭，也不授权解除 Host pin 或删除物理库。退役确认、其他引用的撤销和物理回收仍须后续协议完成。
 
+deployment 内核的 `retirement_quiescence` 只读证明要求同一 Bot 的准确退役操作、仍为 `DELETING/OFFLINE` 的身份与意图，以及不存在运行观测或最后观测为无图 ID 的 `OFFLINE`。Supervisor 必须先提交 `STARTING` 才调用 BotHost.start，且只能在 BotHost.close 成功返回后提交 `OFFLINE`；关闭失败即使遇到旧启动意图也记录 `FAILED`，不能伪造静默。证明包含退役操作、Bot/意图/观测修订和 storage generation，仅供后续桥在解除引用前再次核对，不是可持久复用的删库许可。`STARTING/ONLINE/STOPPING/FAILED` 一律阻断证明；未运行过的 Bot 可由空观测证明没有启动。
+
 ## 预发布实现状态（2026-10-07）
 
 生产 Supervisor 已把 Host 作为独立 Web 管理作用域发布。`host.storage` 是 Host Graph 内可热重载的 builtin 包，自带资源清单、配置入口和私有 owned-work；Host Web 票据、回执与 Graph 校验均绑定完整 `host_id`。隔离 PostgreSQL 的实际 HTTP、包换代和 Supervisor 端到端验收已覆盖 Host 建库、pin/结算、Bot READY 与 OFFLINE 初始意图。
