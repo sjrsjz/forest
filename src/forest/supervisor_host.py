@@ -17,6 +17,8 @@ from forest.bot_host import BotHost
 from forest.deployment_kernel_management import (
     BootstrapCatalogKernelQuery,
     BootstrapProfileKernelCommand,
+    BotCatalogKernelQuery,
+    BotSetDesiredKernelCommand,
     LocalStorageProfileKernelCommand,
     ProvisioningJobKernelCommand,
     ProvisioningReconcileKernelCommand,
@@ -307,10 +309,14 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             store, supervisor, package_catalog=package_catalog,
             graph_change_authority=graph_changes,
             kernel_query_handlers={
+                ("deployment.bot-catalog", "deployment.bot-catalog-page"):
+                    BotCatalogKernelQuery(catalog),
                 ("deployment.provisioning", "deployment.bootstrap-catalog"):
                     BootstrapCatalogKernelQuery(bootstrap_registry),
             },
             kernel_management_handlers={
+                ("deployment.bot-catalog", "deployment.bot-set-desired"):
+                    BotSetDesiredKernelCommand(catalog),
                 ("deployment.secrets", "deployment.secret-put"):
                     SecretPutKernelCommand(secrets),
                 **{

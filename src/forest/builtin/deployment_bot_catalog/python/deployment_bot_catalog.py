@@ -1,7 +1,7 @@
 """Reloadable Bot catalog projection; identity and runtime intent remain kernel-owned."""
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, service
+from forest.sdk import Plugin
 
 
 class DeploymentBotCatalog(Plugin):
@@ -12,7 +12,3 @@ class DeploymentBotCatalog(Plugin):
                 "BOT_CATALOG_CONFIGURATION_INVALID",
                 "Bot catalog configuration is invalid", 422,
             )
-
-    @service("deployment.bot-catalog.query", semantics="read")
-    async def page(self, payload, ctx):
-        return await ctx.queries.call("deployment.bot-catalog.page", payload)

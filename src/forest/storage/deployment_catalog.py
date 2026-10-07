@@ -319,14 +319,26 @@ class DeploymentCatalogRepository:
             await self._save_operation(conn, operation_id, "REGISTER_READY", input_digest, bot_id, 1)
             return await self._bot_in(conn, bot_id)
 
-    async def set_desired(
-        self,
-        *,
-        operation_id: str,
-        bot_id: str,
-        desired_state: str,
-        expected_revision: int,
-        authorization=None,
+    async def catalog_page(
+        self, *, limit: int = 50, after: str | None = None,
+        search: str | None = None,
+    ) -> dict:
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT forest_deployment.bot_catalog_page(%s,%s,%s) AS result",
+                    (limit, after, search),
+                )
+            ).fetchone()
+        envelope = row["result"]
+        if envelope["ok"] is not True:
+            error = envelope["error"]
+            raise ForestError(error["code"], error["message"], error["status"])
+        return envelope["value"]
+
+    async def set_desired_in(
+        self, conn, *, operation_id: str, bot_id: str,
+        desired_state: str, expected_revision: int,
     ) -> dict:
         _bounded(operation_id, "operation_id", 256)
         _bounded(bot_id, "bot_id", 128)
@@ -343,22 +355,37 @@ class DeploymentCatalogRepository:
                 "expected_revision": expected_revision,
             }
         )
+        row = await (
+            await conn.execute(
+                "SELECT forest_deployment.bot_set_desired(%s,%s,%s,%s,%s,NULL,NULL) "
+                "AS result",
+                (operation_id, input_digest, bot_id, desired_state, expected_revision),
+            )
+        ).fetchone()
+        envelope = row["result"]
+        if envelope["ok"] is not True:
+            error = envelope["error"]
+            raise ForestError(error["code"], error["message"], error["status"])
+        return envelope["value"]
+
+    async def set_desired(
+        self,
+        *,
+        operation_id: str,
+        bot_id: str,
+        desired_state: str,
+        expected_revision: int,
+        authorization=None,
+    ) -> dict:
         async with self.store.pool.connection() as conn, conn.transaction():
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id
             )
-            result = await (
-                await conn.execute(
-                    "SELECT forest_deployment.bot_set_desired(%s,%s,%s,%s,%s,NULL,NULL) "
-                    "AS result",
-                    (operation_id, input_digest, bot_id, desired_state, expected_revision),
-                )
-            ).fetchone()
-            envelope = result["result"]
-            if envelope["ok"] is not True:
-                error = envelope["error"]
-                raise ForestError(error["code"], error["message"], error["status"])
-            return await self._bot_in(conn, envelope["value"]["bot_id"])
+            result = await self.set_desired_in(
+                conn, operation_id=operation_id, bot_id=bot_id,
+                desired_state=desired_state, expected_revision=expected_revision,
+            )
+            return await self._bot_in(conn, result["bot_id"])
 
     async def claim_supervisor(
         self, host_id: str, incarnation: str, *, lease_seconds: int = 30

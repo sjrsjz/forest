@@ -37,8 +37,33 @@ class BootstrapCatalogKernelQuery:
         }
 
 
+class BotCatalogKernelQuery:
+    """Read the kernel-owned Bot directory through one bounded page port."""
+
+    def __init__(self, catalog) -> None:
+        self.catalog = catalog
+
+    async def query(self, payload: dict) -> dict:
+        return await self.catalog.catalog_page(**payload)
+
+
 class DeploymentKernelManagementAuthority(ControlKernelManagementAuthority):
     scope_kind = "deployment"
+
+
+class BotSetDesiredKernelCommand:
+    """Commit one Bot intent change under the caller's Web receipt and Generation."""
+
+    def __init__(self, catalog) -> None:
+        self.catalog = catalog
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        return dict(payload)
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        return await self.catalog.set_desired_in(
+            conn, operation_id=operation_id, **prepared,
+        )
 
 
 class _PreparedSecretPut:

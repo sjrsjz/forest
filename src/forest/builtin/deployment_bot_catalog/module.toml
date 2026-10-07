@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-bot-catalog"
-version = "1.0.3"
+version = "1.1.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_bot_catalog:DeploymentBotCatalog"
@@ -13,6 +13,7 @@ state_schema = 1
 reload_mode = "drain"
 config_schema = "schemas/config.json"
 bootstrap_config = "bootstrap.json"
+provides = []
 
 [components.resources]
 max_frame_bytes = 262144
@@ -28,9 +29,6 @@ start_timeout_s = 10
 drain_timeout_s = 30
 stop_timeout_s = 10
 
-[components.capabilities]
-requests = ["domain.query:deployment.bot-catalog.page"]
-
 [components.management_ui]
 entrypoint = "ui/index.html"
 protocol = "forest.management-ui/1"
@@ -39,40 +37,23 @@ label = "Bot 运行目录"
 group = "deployment"
 order = 10
 
-[[components.provides]]
-name = "deployment.bot-catalog.query"
-contract = "1.0"
-semantics = "read"
-visibility = "management"
-input_schema = "schemas/page-input.json"
-output_schema = "schemas/page-output.json"
-
-[components.storage]
-schema_id = "forest.deployment.bot-catalog"
-schema_version = "1.0.0"
-baseline = "schema/catalog.sql"
-baseline_sha256 = "944e0f885c8901419be3c545510dd18bceea562d3473f079ba8660879488d871"
-scope = "deployment"
-repository_contract = "forest.deployment-bot-catalog.repository/1"
-execution_profile = "official"
-
-[[components.domain_queries]]
+[[components.kernel_queries]]
 name = "deployment.bot-catalog.page"
 contract = "1.0"
-function = "deployment_bot_catalog_page"
+kind = "deployment.bot-catalog-page"
 input_schema = "schemas/page-input.json"
 output_schema = "schemas/page-output.json"
 
-[[components.domain_commands]]
+[[components.kernel_commands]]
 name = "deployment.bot-catalog.set-desired"
 contract = "1.0"
-function = "deployment_bot_catalog_set_desired"
+kind = "deployment.bot-set-desired"
 input_schema = "schemas/set-desired-input.json"
 output_schema = "schemas/set-desired-output.json"
 
 [[components.management_queries]]
 id = "bots.list"
-port = "deployment.bot-catalog.query"
+port = "deployment.bot-catalog.page"
 default_limit = 50
 max_limit = 100
 timeout_s = 10

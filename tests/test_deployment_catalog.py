@@ -23,6 +23,8 @@ from forest.builtin_packages import official_builtin_configuration
 from forest.deployment_kernel_management import (
     BootstrapCatalogKernelQuery,
     BootstrapProfileKernelCommand,
+    BotCatalogKernelQuery,
+    BotSetDesiredKernelCommand,
     DeploymentKernelManagementAuthority,
     LocalStorageProfileKernelCommand,
     ProvisioningJobKernelCommand,
@@ -3089,10 +3091,14 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     deployment_runtime = DeploymentRuntimeScope(
         repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
         kernel_query_handlers={
+            ("deployment.bot-catalog", "deployment.bot-catalog-page"):
+                BotCatalogKernelQuery(repository),
             ("deployment.provisioning", "deployment.bootstrap-catalog"):
                 BootstrapCatalogKernelQuery(bootstrap_registry),
         },
         kernel_management_handlers={
+            ("deployment.bot-catalog", "deployment.bot-set-desired"):
+                BotSetDesiredKernelCommand(repository),
             ("deployment.secrets", "deployment.secret-put"):
                 SecretPutKernelCommand(secrets),
             **{
