@@ -21,6 +21,7 @@ from forest.host_packages import (
     bootstrap_installed_host_package,
 )
 from forest.host_runtime import HostRuntimeScope
+from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog, digest_json
 from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority
@@ -118,16 +119,18 @@ async def test_host_package_compiles_into_real_generation(tmp_path):
     await store.open()
     controller = None
     change_task = None
+    supervisor = None
     try:
         identity = HostIdentityAuthority(store)
-        await identity.initialize()
-        lease = await identity.claim("incarnation/" + str(uuid4()))
+        supervisor = HostSupervisor(identity)
+        await supervisor.start()
+        lease = supervisor.authority_lease()
         source = tmp_path / "source"
         _host_package(source)
         catalog = PackageCatalog(tmp_path / "catalog")
         snapshot = catalog.build_official(source, scope="host")
         runtime = HostRuntimeScope(
-            store, SimpleNamespace(authority_lease=lambda **_values: lease),
+            store, supervisor,
         )
         with pytest.raises(ForestError) as wrong_compiler:
             await bootstrap_builtin_deployment_package(snapshot, runtime)
@@ -243,6 +246,8 @@ async def test_host_package_compiles_into_real_generation(tmp_path):
                 await change_task
         if controller is not None:
             await controller.close()
+        if supervisor is not None:
+            await supervisor.close()
         await store.close()
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()

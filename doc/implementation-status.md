@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Host 租约所有者（2026-10-07）：新增只负责稳定 Host 身份初始化、incarnation 租约领取/续租/释放和失租传播的 `HostSupervisor`；它不持有包配置或 Graph，Host 包控制器仍是图生命周期权威。真实 PostgreSQL 的 Host Worker 首发、热替换与持久请求用例现通过该监督器取得 lease（1 passed）；另以失租注入验证续租失败后拒绝新权威调用且关闭时容忍已失效租约（1 passed），Ruff 通过。生产进程尚未装配独立 Host 数据库与该监督器，Web provider 和 `host.storage` 也未完成，在线实例未切换。
+
 Host 包图控制器（2026-10-07）：deployment 与 Host 现在复用固定 scope 的 RuntimeGraph 控制器，负责来源包选择、候选预览、预热、发布、旧代际排空和持久请求恢复；deployment 专有包目录查询桥仍留在 deployment 绑定。隔离 PostgreSQL 中，真实 Host Worker 包完成首发、直接替换、签名 Web 请求排队替换及发布证明结算，旧 Graph 修订逐次推进（Host 1 passed）；伪造的计划摘要在入队前拒绝。deployment Web 票据现把 Graph 计划摘要贯通签发、网关校验和同事务回执，完整包目录回归 27 passed，Host 身份/租约用例另 1 passed，Ruff 通过。Host 专用 Supervisor、Web provider 和实际 `host.storage` builtin 尚未接线，不能宣称 Host 管理可从生产 WebUI 使用。
 
 Host 包描述符与原生端口（2026-10-07）：deployment 与 Host 共用固定 scope 的包描述符编译器以及受准确 Generation 围栏的原生 Query/事务型 Command；Host 绑定自身配置 Repository、SQL 安装器、服务操作账本和受限端口。隔离 PostgreSQL 中一个真实 Host Python Worker 包已安装、进入活动 RuntimeGraph，并通过包管理契约调用其只读服务（1 passed）；Host 原生 Command 的校验失败回滚及跨 scope 拒绝、deployment 原生命令回归共 2 passed，deployment 包目录完整回归 27 passed，Ruff 通过。Host 包控制器、持久选择调和、Web provider 与生产 Supervisor 尚未接线，因此 Host builtin 仍未成为可运行产品功能。
