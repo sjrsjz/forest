@@ -490,6 +490,7 @@ class DeploymentManagementGateway:
                 target_operation_ref=operation_id,
                 action_key=action_id,
                 input_digest=input_digest,
+                plan_digest=body["plan_digest"],
                 required_role="ADMIN",
             )
             if await self.graph_change_authority.find(operation_id) is None:
@@ -520,6 +521,7 @@ class DeploymentManagementGateway:
                 action_id,
                 input_digest,
                 operation_id,
+                body["plan_digest"],
             )
             return await self.graph_change_authority.enqueue_web(
                 lease=registry.runtime.authority_lease(),
@@ -590,6 +592,15 @@ class DeploymentManagementGateway:
         if binding is None:
             raise ForestError("RUNTIME_MODULE_NOT_FOUND", "Component does not exist", 404)
         return binding
+
+    def action_plan_digest(self, component_id: str, action_id: str, body: dict) -> str | None:
+        if (
+            component_id == "$runtime"
+            and action_id in {"module.add", "module.replace"}
+            and isinstance(body, dict)
+        ):
+            return body.get("plan_digest")
+        return None
 
     def operation_id(self, component_id: str, action_id: str, key: str | None) -> str:
         if key is None or not 1 <= len(key) <= 128:

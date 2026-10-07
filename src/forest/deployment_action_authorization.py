@@ -17,6 +17,7 @@ class DeploymentActionAuthorization:
     action_key: str
     input_digest: str
     operation_id: str
+    plan_digest: str | None = None
 
     async def accept_in(self, conn) -> dict:
         return await self.guard(
@@ -26,7 +27,7 @@ class DeploymentActionAuthorization:
             operation_id=self.operation_id,
             action_key=self.action_key,
             input_digest=self.input_digest,
-            plan_digest=None,
+            plan_digest=self.plan_digest,
         )
 
 

@@ -84,6 +84,7 @@ class ControlGraphChangeAuthority:
             or ticket.target_component_id != "$runtime"
             or ticket.action_key not in {"module.add", "module.replace"}
             or ticket.input_digest != digest_json(body)
+            or ticket.plan_digest != plan_digest
         ):
             raise ForestError(
                 f"{self.scope.upper()}_GRAPH_CHANGE_INPUT_INVALID", "Graph change input is invalid", 422

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,15 +15,18 @@ from psycopg import sql
 
 from forest.deployment_packages import bootstrap_builtin_deployment_package
 from forest.errors import ForestError
+from forest.host_package_controller import HostPackageController
 from forest.host_packages import (
     bootstrap_builtin_host_package,
     bootstrap_installed_host_package,
 )
 from forest.host_runtime import HostRuntimeScope
-from forest.packages import PackageCatalog
-from forest.runtime_modules import RuntimeModuleRegistry
+from forest.packages import PackageCatalog, digest_json
+from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
+from forest.storage.host_web_authority import HostWebAuthorityRepository
+from forest.web_authority_ticket import WebAuthorityTicketAuthority
 
 
 def _host_package(source: Path) -> None:
@@ -112,7 +116,8 @@ async def test_host_package_compiles_into_real_generation(tmp_path):
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
     store = HostStore(uri, host_id)
     await store.open()
-    registry = None
+    controller = None
+    change_task = None
     try:
         identity = HostIdentityAuthority(store)
         await identity.initialize()
@@ -132,8 +137,11 @@ async def test_host_package_compiles_into_real_generation(tmp_path):
         )
         assert preview.artifact.scope == "host"
         descriptor = await bootstrap_builtin_host_package(snapshot, runtime)
-        registry = RuntimeModuleRegistry(runtime, (descriptor,))
-        await registry.start()
+        assert descriptor.artifact.scope == "host"
+        controller = HostPackageController(
+            runtime, catalog, official_sources=(source,),
+        )
+        registry = await controller.start()
         graph = registry.graph_identity
         assert graph == await runtime.generation_authority.current_graph()
         member = registry.get("host.sample")
@@ -144,9 +152,97 @@ async def test_host_package_compiles_into_real_generation(tmp_path):
         assert await member.management_contract.query("echo", {"value": "live"}) == {
             "value": "live",
         }
+        manifest = source / "module.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.0"', 'version = "1.0.1"', 1,
+            ),
+            encoding="utf-8",
+        )
+        replacement = catalog.build_official(source, scope="host")
+        replaced = await controller.replace(
+            "host.sample", replacement.digest,
+            expected_graph_revision=graph.graph_revision,
+        )
+        assert replaced.graph_identity.graph_revision == graph.graph_revision + 1
+        assert replaced.get("host.sample").snapshot.digest == replacement.digest
+        assert await replaced.get("host.sample").management_contract.query(
+            "echo", {"value": "reloaded"},
+        ) == {"value": "reloaded"}
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.1"', 'version = "1.0.2"', 1,
+            ),
+            encoding="utf-8",
+        )
+        queued_package = catalog.build_official(source, scope="host")
+        preview = await controller.preview_change(
+            operation_kind="REPLACE", component_id="host.sample",
+            package_digest=queued_package.digest,
+            expected_graph_revision=replaced.graph_identity.graph_revision,
+        )
+        body = {
+            "component_id": "host.sample",
+            "package_digest": queued_package.digest,
+            "expected_graph_revision": replaced.graph_identity.graph_revision,
+            "plan_digest": preview["plan_digest"],
+        }
+        tickets = WebAuthorityTicketAuthority(
+            issuer_id="deployment/test", active_key_id="key/host-test",
+            key_resolver=lambda _key_id: bytes(range(32)),
+        )
+        session = SimpleNamespace(
+            subject=SimpleNamespace(subject_id="web/admin", role="ADMIN"),
+            session_ref="session/host-controller", session_revision=1,
+        )
+        ticket = await tickets.issue(
+            session=session, target_scope_kind="host", target_scope_id=host_id,
+            target_component_id="$runtime",
+            target_generation_id=replaced.graph_identity.graph_id,
+            target_graph_revision=replaced.graph_identity.graph_revision,
+            target_operation_ref="replace/host.sample/3", action_key="module.replace",
+            input_digest=digest_json(body), plan_digest=body["plan_digest"],
+        )
+        receipts = HostWebAuthorityRepository(store, ticket_authority=tickets)
+        changes = HostGraphChangeAuthority(store, ticket_authority=tickets)
+
+        async def authorize_in(conn):
+            return await receipts.accept_in(conn, ticket=ticket)
+
+        mismatched_plan = await tickets.issue(
+            session=session, target_scope_kind="host", target_scope_id=host_id,
+            target_component_id="$runtime",
+            target_generation_id=replaced.graph_identity.graph_id,
+            target_graph_revision=replaced.graph_identity.graph_revision,
+            target_operation_ref="replace/host.sample/3", action_key="module.replace",
+            input_digest=digest_json(body), plan_digest=digest_json({"wrong": True}),
+        )
+        with pytest.raises(ForestError) as invalid_plan:
+            await changes.enqueue_web(
+                lease=lease, ticket=mismatched_plan, body=body, authorize_in=authorize_in,
+            )
+        assert invalid_plan.value.code == "HOST_GRAPH_CHANGE_INPUT_INVALID"
+        request = await changes.enqueue_web(
+            lease=lease, ticket=ticket, body=body, authorize_in=authorize_in,
+        )
+        assert request["state"] == "QUEUED"
+        change_task = asyncio.create_task(controller.serve_graph_changes(changes))
+        async with asyncio.timeout(15):
+            while (await changes.get(ticket.target_operation_ref))["state"] == "QUEUED":
+                await asyncio.sleep(0.05)
+            while (await changes.get(ticket.target_operation_ref))["state"] == "RUNNING":
+                await asyncio.sleep(0.05)
+        settled = await changes.get(ticket.target_operation_ref)
+        assert settled["state"] == "SUCCEEDED"
+        assert controller.registry.graph_identity.graph_revision == graph.graph_revision + 2
+        assert controller.registry.get("host.sample").snapshot.digest == queued_package.digest
     finally:
-        if registry is not None:
-            await registry.close()
+        if change_task is not None:
+            change_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await change_task
+        if controller is not None:
+            await controller.close()
         await store.close()
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()

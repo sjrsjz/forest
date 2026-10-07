@@ -370,6 +370,7 @@ CREATE TABLE host_sample_native (value text NOT NULL);
             target_graph_revision=newer.graph_revision,
             target_operation_ref="replace/host.sample/probe", action_key="module.replace",
             input_digest=digest_json(replace_body),
+            plan_digest=replace_body["plan_digest"],
         )
 
         async def authorize_replace(conn):
@@ -379,6 +380,7 @@ CREATE TABLE host_sample_native (value text NOT NULL);
                 target_graph_revision=newer.graph_revision,
                 target_operation_ref=replace_ticket.target_operation_ref,
                 action_key="module.replace", input_digest=replace_ticket.input_digest,
+                plan_digest=replace_body["plan_digest"],
                 required_role="ADMIN",
             )
             return await receipts.accept_in(conn, ticket=replace_ticket)
