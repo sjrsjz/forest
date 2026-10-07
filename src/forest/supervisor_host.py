@@ -34,8 +34,8 @@ from forest.deployment_package_controller import DeploymentPackageController
 from forest.deployment_provisioning_driver import DeploymentProvisioningEffectDriver
 from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwnedWorkAuthority
 from forest.deployment_runtime import DeploymentRuntimeScope
-from forest.deployment_storage_driver import DeploymentStorageAdvanceEffectDriver
 from forest.deployment_storage_owned_work import DeploymentStorageOwnedWorkAuthority
+from forest.deployment_storage_ports import DeploymentStoragePortEffectDriver
 from forest.deployment_storage_settlement import DeploymentStorageSettlementAuthority
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
@@ -415,9 +415,9 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             )
         )
         deployment_runtime.effect_driver_factories[
-            "deployment.host-storage-advance"
+            "deployment.host-storage-port"
         ] = lambda configuration, revision, identity, declaration: (
-            DeploymentStorageAdvanceEffectDriver(
+            DeploymentStoragePortEffectDriver(
                 configuration, revision, identity, declaration,
                 runtime=deployment_runtime, dispatch=storage_dispatch,
                 requests=storage_requests, profiles=storage_profiles,

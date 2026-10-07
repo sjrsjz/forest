@@ -2126,8 +2126,9 @@ async def test_storage_orchestrator_worker_resumes_after_hot_replace(
     generations = []
 
     class StorageEffect:
-        def __init__(self, identity):
+        def __init__(self, identity, declaration):
             self.identity = identity
+            self.name = declaration["name"].rsplit(".", 1)[1]
             generations.append(identity.generation_id)
 
         async def start(self):
@@ -2145,13 +2146,21 @@ async def test_storage_orchestrator_worker_resumes_after_hot_replace(
         async def invoke(self, payload, *, scope, invocation):
             assert scope.generation_id == self.identity.generation_id
             assert payload["request_id"] == frozen.request_id
+            if self.name == "inspect":
+                return {"request_id": frozen.request_id, "state": "PENDING"}
+            if self.name == "enqueue":
+                return {"request_id": frozen.request_id, "state": "ENQUEUED"}
+            assert self.name == "status"
             return {
-                "request_id": frozen.request_id, "state": mode,
-                **({"error_code": "TEST_BLOCKED"} if mode == "BLOCKED" else {}),
+                "request_id": frozen.request_id,
+                "state": "FAILED" if mode == "BLOCKED" else "PENDING",
+                **({"last_error_code": "TEST_BLOCKED"} if mode == "BLOCKED" else {}),
             }
 
-    runtime.effect_driver_factories["deployment.host-storage-advance"] = (
-        lambda _configuration, _revision, identity, _declaration: StorageEffect(identity)
+    runtime.effect_driver_factories["deployment.host-storage-port"] = (
+        lambda _configuration, _revision, identity, declaration: (
+            StorageEffect(identity, declaration)
+        )
     )
     source = Path(__file__).parents[1] / "src/forest/builtin/deployment_storage_orchestrator"
     package_catalog = PackageCatalog(tmp_path / "storage-catalog")
@@ -2182,7 +2191,7 @@ async def test_storage_orchestrator_worker_resumes_after_hot_replace(
         manifest = replacement_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.0.0"', 'version = "1.0.1"', 1,
+                'version = "1.1.0"', 'version = "1.1.1"', 1,
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(replacement_source)
@@ -2191,12 +2200,15 @@ async def test_storage_orchestrator_worker_resumes_after_hot_replace(
             "deployment.storage-orchestrator", replacement.digest,
             expected_graph_revision=graph.graph_identity.graph_revision,
         )
-        async with asyncio.timeout(15):
-            while (await dispatch.read(frozen.request_id))["state"] != "BLOCKED":
-                await asyncio.sleep(0.1)
+        try:
+            async with asyncio.timeout(15):
+                while (await dispatch.read(frozen.request_id))["state"] != "BLOCKED":
+                    await asyncio.sleep(0.1)
+        except TimeoutError:
+            pytest.fail(f"Storage dispatch did not block: {await dispatch.read(frozen.request_id)}")
         status = await dispatch.read(frozen.request_id)
         assert status["attempt_count"] >= 2
-        assert status["last_error_code"] == "TEST_BLOCKED"
+        assert status["last_error_code"] == "HOST_MATERIALIZATION_FAILED"
         assert len(set(generations)) == 2
     finally:
         await controller.close()

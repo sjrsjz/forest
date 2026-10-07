@@ -1,4 +1,4 @@
-"""Reloadable Worker which advances one frozen Host storage request."""
+"""Reloadable Worker which owns the Host storage request protocol."""
 
 from forest.errors import ForestError
 from forest.sdk import Plugin, job
@@ -16,9 +16,48 @@ class DeploymentStorageOrchestrator(Plugin):
 
     @job("deployment.storage-orchestrator.execute")
     async def advance(self, task, ctx):
-        return await ctx.services.call(
-            "deployment.storage-orchestrator.advance",
-            task["payload"],
-            operation_id=ctx.operations.stable("advance:v1"),
-            timeout=220,
+        request = task["payload"]
+        request_id = request["request_id"]
+        inspected = await ctx.services.call(
+            "deployment.storage-orchestrator.inspect", request,
+            operation_id=ctx.operations.stable("inspect:v1"), timeout=15,
         )
+        if inspected["state"] == "SETTLED":
+            return {"request_id": request_id, "state": "SETTLED"}
+        try:
+            await ctx.services.call(
+                "deployment.storage-orchestrator.enqueue", request,
+                operation_id=ctx.operations.stable("enqueue:v1"), timeout=30,
+            )
+            status = await ctx.services.call(
+                "deployment.storage-orchestrator.status", request,
+                operation_id=ctx.operations.stable("status:v1"), timeout=15,
+            )
+        except ForestError as exc:
+            if exc.code in {
+                "STORAGE_REQUEST_HOST_UNAVAILABLE",
+                "HOST_STORAGE_GENERATION_UNAVAILABLE",
+            }:
+                return {
+                    "request_id": request_id,
+                    "state": "WAITING",
+                    "error_code": exc.code,
+                }
+            raise
+        if status["state"] == "FAILED":
+            return {
+                "request_id": request_id,
+                "state": "BLOCKED",
+                "error_code": "HOST_MATERIALIZATION_FAILED",
+            }
+        if status["state"] != "SUCCEEDED":
+            return {"request_id": request_id, "state": "WAITING"}
+        await ctx.services.call(
+            "deployment.storage-orchestrator.pin", request,
+            operation_id=ctx.operations.stable("pin:v1"), timeout=30,
+        )
+        await ctx.services.call(
+            "deployment.storage-orchestrator.finalize", request,
+            operation_id=ctx.operations.stable("finalize:v1"), timeout=30,
+        )
+        return {"request_id": request_id, "state": "SETTLED"}

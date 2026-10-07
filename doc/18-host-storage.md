@@ -57,7 +57,7 @@ deployment 内核的 `retirement_quiescence` 只读证明要求同一 Bot 的准
 
 生产 Supervisor 已把 Host 作为独立 Web 管理作用域发布。`host.storage` 是 Host Graph 内可热重载的 builtin 包，自带资源清单、配置入口和私有 owned-work；Host Web 票据、回执与 Graph 校验均绑定完整 `host_id`。隔离 PostgreSQL 的实际 HTTP、包换代和 Supervisor 端到端验收已覆盖 Host 建库、pin/结算、Bot READY 与 OFFLINE 初始意图。
 
-deployment 内核独占 Bot 基础身份、期望运行意图、冻结的 Host 存储请求与投递租约。`deployment.storage-orchestrator` 作为可热重载 builtin 领取请求，经受限 Effect 与 `DeploymentHostStorageBridge` 完成 Host 预留、物化、精确查询与 pin；`DeploymentStorageSettlementAuthority` 在 deployment 事务内核对冻结凭据、pin 和资源，再发布 DSN Secret 与不可变 storage profile。供给器只消费已提交 profile，不再本地建库。请求、Host 资源绑定和 pin 使用稳定身份与围栏合流，重试不能另建数据库。role 口令以强随机 Secret 冻结，轮换须建立新的 storage generation。
+deployment 内核独占 Bot 基础身份、期望运行意图、冻结的 Host 存储请求与投递租约。`deployment.storage-orchestrator` 的可热重载 Worker 持有 `inspect → enqueue → status → pin → finalize` 顺序与 WAITING/BLOCKED/SETTLED 判定；它逐步调用五个受限原生端口，而不是把整个工作委托给一个宿主 `advance` 执行器。每个原生端口重新验证准确 Generation、Supervisor 租约和投递 claim，仅处理自己负责的 Host 桥接或受保护凭据结算。`DeploymentStorageSettlementAuthority` 在 deployment 事务内核对冻结凭据、pin 和资源，再发布 DSN Secret 与不可变 storage profile。供给器只消费已提交 profile，不再本地建库。请求、Host 资源绑定和 pin 使用稳定身份与围栏合流，重试不能另建数据库。role 口令以强随机 Secret 冻结，轮换须建立新的 storage generation。
 
 Host PostgreSQL Effect 创建库时先限制连接数为零，撤销 `PUBLIC` 数据库权限并写入准确归属 marker，之后才开放连接；已有库或 role 的外部授权与错误归属均拒绝接管。隔离 PostgreSQL 验收已确认 Bot role 可进入专属库，而另一有效登录角色无法连接该库。
 

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-storage-orchestrator"
-version = "1.0.0"
+version = "1.1.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_storage_orchestrator:DeploymentStorageOrchestrator"
@@ -30,7 +30,13 @@ drain_timeout_s = 300
 stop_timeout_s = 10
 
 [components.capabilities]
-requests = ["service.call:deployment.storage-orchestrator.advance"]
+requests = [
+  "service.call:deployment.storage-orchestrator.inspect",
+  "service.call:deployment.storage-orchestrator.enqueue",
+  "service.call:deployment.storage-orchestrator.status",
+  "service.call:deployment.storage-orchestrator.pin",
+  "service.call:deployment.storage-orchestrator.finalize",
+]
 
 [components.management_ui]
 entrypoint = "ui/index.html"
@@ -68,12 +74,44 @@ priority = "P0"
 timeout_s = 20
 
 [[components.effect_services]]
-name = "deployment.storage-orchestrator.advance"
+name = "deployment.storage-orchestrator.inspect"
 contract = "1.0"
-kind = "deployment.host-storage-advance"
+kind = "deployment.host-storage-port"
+semantics = "read"
+input_schema = "schemas/advance-input.json"
+output_schema = "schemas/inspect-output.json"
+
+[[components.effect_services]]
+name = "deployment.storage-orchestrator.enqueue"
+contract = "1.0"
+kind = "deployment.host-storage-port"
 semantics = "idempotent"
 input_schema = "schemas/advance-input.json"
-output_schema = "schemas/advance-output.json"
+output_schema = "schemas/enqueue-output.json"
+
+[[components.effect_services]]
+name = "deployment.storage-orchestrator.status"
+contract = "1.0"
+kind = "deployment.host-storage-port"
+semantics = "read"
+input_schema = "schemas/advance-input.json"
+output_schema = "schemas/status-output.json"
+
+[[components.effect_services]]
+name = "deployment.storage-orchestrator.pin"
+contract = "1.0"
+kind = "deployment.host-storage-port"
+semantics = "idempotent"
+input_schema = "schemas/advance-input.json"
+output_schema = "schemas/pin-output.json"
+
+[[components.effect_services]]
+name = "deployment.storage-orchestrator.finalize"
+contract = "1.0"
+kind = "deployment.host-storage-port"
+semantics = "idempotent"
+input_schema = "schemas/advance-input.json"
+output_schema = "schemas/finalize-output.json"
 
 [[components.owned_work_handlers]]
 name = "deployment.storage-orchestrator.execute"

@@ -17,7 +17,7 @@ import pytest
 from psycopg import sql
 
 from forest.deployment_host_storage_bridge import DeploymentHostStorageBridge
-from forest.deployment_storage_driver import DeploymentStorageAdvanceEffectDriver
+from forest.deployment_storage_ports import DeploymentStoragePortEffectDriver
 from forest.deployment_storage_settlement import DeploymentStorageSettlementAuthority
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
@@ -507,15 +507,22 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
                 verify_owned_work_in=accept_generation,
             ),
         )
-        driver = DeploymentStorageAdvanceEffectDriver(
-            {}, 1, identity,
-            {"name": "deployment.storage-orchestrator.advance",
-             "kind": "deployment.host-storage-advance", "semantics": "idempotent"},
-            runtime=runtime, dispatch=dispatch, requests=requests,
-            profiles=profiles, secrets=secrets, bridge=bridge,
-            settlement=settlement,
-        )
-        await driver.start()
+        ports = {}
+        for name, semantics in (
+            ("inspect", "read"), ("enqueue", "idempotent"),
+            ("status", "read"), ("pin", "idempotent"),
+            ("finalize", "idempotent"),
+        ):
+            port = DeploymentStoragePortEffectDriver(
+                {}, 1, identity,
+                {"name": f"deployment.storage-orchestrator.{name}",
+                 "kind": "deployment.host-storage-port", "semantics": semantics},
+                runtime=runtime, dispatch=dispatch, requests=requests,
+                profiles=profiles, secrets=secrets, bridge=bridge,
+                settlement=settlement,
+            )
+            await port.start()
+            ports[name] = port
         scope = SimpleNamespace(
             scope_kind="deployment", scope_id=deployment_store.deployment_id,
             component_id=identity.component_id, generation_id=identity.generation_id,
@@ -525,13 +532,21 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             "claim_token": automatic_claim.claim_token,
             "attempt_no": automatic_claim.attempt_no,
         }
+        async def call_port(name):
+            return await ports[name].invoke(payload, scope=scope, invocation=None)
+
+        assert (await call_port("inspect"))["state"] == "PENDING"
         async with asyncio.timeout(30):
             while True:
-                result = await driver.invoke(payload, scope=scope, invocation=None)
-                if result["state"] == "SETTLED":
+                assert (await call_port("enqueue"))["state"] == "ENQUEUED"
+                status = await call_port("status")
+                if status["state"] == "SUCCEEDED":
                     break
-                assert result["state"] == "WAITING"
+                assert status["state"] in {"PENDING", "CLAIMED"}
                 await asyncio.sleep(0.1)
+        assert (await call_port("pin"))["state"] == "PINNED"
+        assert (await call_port("finalize"))["state"] == "SETTLED"
+        assert (await call_port("inspect"))["state"] == "SETTLED"
         await dispatch.settle(lease, automatic_claim, outcome="SETTLED")
         assert (await profiles.metadata(automatic.profile_ref)).bot_id == automatic.bot_id
         resource = await controller.registry.get("host.storage").management_contract.query(
