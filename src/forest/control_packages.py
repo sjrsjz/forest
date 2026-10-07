@@ -180,6 +180,7 @@ async def bootstrap_builtin_control_package(
     }
     if component["scope"] != scope_kind or component.get("configuration_apply") or (
         declared_commands != artifact_commands | action_commands | internal_commands
+        or bool(internal_commands & (artifact_commands | action_commands))
         or any(
             item["semantics"] != "read" and "internal_command" not in item
             for item in component.get("provides", ())
