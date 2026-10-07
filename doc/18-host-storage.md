@@ -34,6 +34,6 @@
 
 ## 预发布实现状态（2026-10-07）
 
-`host.storage` 包版本 `0.3.0`，故意设置 `auto_install=false`。已有私有预留/结算账本、`generations` 查询、自带管理 UI、声明式内部幂等服务和 PostgreSQL 原生物理 Effect。隔离 PostgreSQL 的既有 Worker 验证涵盖预留重放/冲突、真正建库、角色与数据库标记、缺失数据库标记的恢复、错误归属标记拒绝，以及 Worker 热替换后继续核对；新增的结算 SQL 已在独立 PostgreSQL 中验证伪造 receipt 拒绝、`ACTIVE` 转移和重放。新增 `realize` 的完整 Worker 路径仍待数据库端口通路恢复后验证。
+`host.storage` 包版本 `0.3.0`，故意设置 `auto_install=false`。已有私有预留/结算账本、`generations` 查询、自带管理 UI、声明式内部幂等服务和 PostgreSQL 原生物理 Effect。独立 PostgreSQL 的真实 Worker 回归现为 `2 passed`：涵盖预留重放/冲突、真正建库、角色与数据库标记、缺失数据库标记的恢复、错误归属标记拒绝、`realize` 结算与重放，以及 Worker 热替换后继续核对。测试容器已清理；这验证的是隔离装配，不是生产 Host Graph。
 
 目前原生 Effect 只在隔离测试中绑定维护 DSN 与凭据解析器；生产 Host Graph 尚未装配它，也没有 Host 持久 owned-work、deployment 跨 scope 投递、冻结引用与安全回收。现有 deployment 直接建库路径仍在。因而不能启用生产 `host.storage`、把它的 UI 清单视为全量物理库存，或据此执行删除。下一步应确定 role 凭据权威，接通 Host 持久工作与跨 scope 供给，再切断旧分配器并重建/准确登记预发布资源。
