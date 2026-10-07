@@ -57,7 +57,8 @@ class DeploymentStorageSettlementAuthority:
             row = await (
                 await conn.execute(
                     "SELECT r.*,p.resource_id,p.host_id AS pinned_host_id,"
-                    "p.credential_digest,p.physical_name,p.role_name "
+                    "p.credential_digest AS pin_credential_digest,"
+                    "p.physical_name,p.role_name "
                     "FROM forest_deployment.storage_requests r "
                     "JOIN forest_deployment.storage_request_pins p USING(request_id) "
                     "WHERE r.deployment_id=%s AND r.request_id=%s FOR SHARE OF r,p",
@@ -72,10 +73,20 @@ class DeploymentStorageSettlementAuthority:
                 row["host_id"] != self.host_id
                 or row["pinned_host_id"] != self.host_id
                 or row["credential_digest"] != credential_digest
+                or row["pin_credential_digest"] != credential_digest
             ):
                 raise ForestError(
                     "STORAGE_SETTLEMENT_MISMATCH",
                     "Host pin and role credential do not match", 409,
+                )
+            frozen_secret = await self.secrets.metadata_in(conn, row["credential_ref"])
+            if (
+                frozen_secret.purpose != "storage.postgresql.password"
+                or frozen_secret.version != row["credential_version"]
+            ):
+                raise ForestError(
+                    "STORAGE_SETTLEMENT_MISMATCH",
+                    "Frozen role credential version differs", 409,
                 )
             dsn = self._target_dsn(row["role_name"], row["physical_name"], password)
             dsn_bytes = dsn.encode("utf-8")

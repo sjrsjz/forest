@@ -35,6 +35,9 @@ from forest.deployment_provisioning_owned_work import DeploymentProvisioningOwne
 from forest.deployment_runtime import DeploymentRuntimeScope
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
+from forest.host_package_controller import HostPackageController
+from forest.host_runtime import HostRuntimeScope
+from forest.host_storage_postgres_effect import HostPostgresMaterializationEffect
 from forest.host_supervisor import HostSupervisor
 from forest.multi_bot_supervisor import MultiBotSupervisor
 from forest.official_bot_provisioning import (
@@ -55,6 +58,7 @@ from forest.storage.deployment_storage_profiles import DeploymentStorageProfileA
 from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
+from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
 
@@ -237,6 +241,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     web_receipts = DeploymentWebAuthorityRepository(store)
     deployment_audit = DeploymentAuditRepository(store)
     graph_changes = DeploymentGraphChangeAuthority(store)
+    host_graph_changes = HostGraphChangeAuthority(host_store)
     storage_profiles = DeploymentStorageProfileAuthority(store, secrets=secrets)
     bootstrap_profiles = DeploymentBootstrapProfileAuthority(store, secrets=secrets)
     jobs = DeploymentProvisioningJobAuthority(store)
@@ -247,6 +252,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         official_bootstrap_contributions(package_catalog)
     )
     deployment_controller = None
+    host_controller = None
 
     async def read_deployment_packages(query_id: str, payload: dict) -> dict:
         if deployment_controller is None:
@@ -294,6 +300,8 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     management_server = None
     management_task = None
     graph_change_task = None
+    host_graph_change_task = None
+    host_fatal_task = None
     loop = asyncio.get_running_loop()
     for event in (signal.SIGINT, signal.SIGTERM):
         try:
@@ -304,6 +312,25 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     fatal_task = None
     try:
         await host_supervisor.start()
+        host_runtime = HostRuntimeScope(
+            host_store, host_supervisor,
+            graph_change_authority=host_graph_changes,
+        )
+        host_runtime.effect_driver_factories[
+            "host.postgresql-materializer"
+        ] = lambda configuration, revision, identity, declaration: (
+            HostPostgresMaterializationEffect(
+                configuration, revision, identity, declaration,
+                store=host_store, supervisor=host_supervisor,
+                maintenance_dsn=settings.dsn,
+                credential_resolver=secrets.resolve_text_for_purpose,
+            )
+        )
+        host_controller = HostPackageController(
+            host_runtime, package_catalog,
+            official_sources=auto_install_official_sources("host"),
+        )
+        await host_controller.start()
         await supervisor.start()
         await web_identity.initialize_setup(settings.web_bootstrap)
         deployment_runtime = DeploymentRuntimeScope(
@@ -410,11 +437,19 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             deployment_controller.serve_graph_changes(graph_changes),
             name="deployment-package-graph-changes",
         )
+        host_graph_change_task = asyncio.create_task(
+            host_controller.serve_graph_changes(host_graph_changes),
+            name="host-package-graph-changes",
+        )
         fatal_task = asyncio.create_task(
             deployment_controller.fatal_event.wait(), name="deployment-package-fatal"
         )
+        host_fatal_task = asyncio.create_task(
+            host_controller.fatal_event.wait(), name="host-package-fatal"
+        )
         tasks = (
-            stop_task, fatal_task, management_task, graph_change_task,
+            stop_task, fatal_task, host_fatal_task, management_task,
+            graph_change_task, host_graph_change_task,
             *host_supervisor.owned_tasks(),
             *supervisor.owned_tasks(),
         )
@@ -422,11 +457,16 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         if not stop.is_set():
             if fatal_task in done and deployment_controller.fatal_error is not None:
                 raise deployment_controller.fatal_error
+            if host_fatal_task in done and host_controller.fatal_error is not None:
+                raise host_controller.fatal_error
             failed = next(task for task in tasks if task in done)
             await failed
             raise RuntimeError("Deployment supervisor task stopped unexpectedly")
     finally:
-        for task in (stop_task, fatal_task, graph_change_task):
+        for task in (
+            stop_task, fatal_task, host_fatal_task,
+            graph_change_task, host_graph_change_task,
+        ):
             if task is not None and not task.done():
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
@@ -439,12 +479,16 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 await deployment_controller.close()
         finally:
             try:
-                await supervisor.close()
+                if host_controller is not None:
+                    await host_controller.close()
             finally:
                 try:
-                    await host_supervisor.close()
+                    await supervisor.close()
                 finally:
                     try:
-                        await host_store.close()
+                        await host_supervisor.close()
                     finally:
-                        await store.close()
+                        try:
+                            await host_store.close()
+                        finally:
+                            await store.close()

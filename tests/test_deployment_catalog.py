@@ -2024,7 +2024,20 @@ async def _storage_profile(repository, bot_id: str, name: str):
 async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment_catalog):
     repository = deployment_catalog
     await repository.initialize()
-    requests = DeploymentStorageRequestAuthority(repository.store)
+    secrets = DeploymentSecretAuthority(
+        repository.store, active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+
+    async def role_password(ref):
+        await secrets.put(
+            operation_id="host-intent/password/" + ref.removeprefix("secret://"),
+            secret_ref=ref, purpose="storage.postgresql.password",
+            plaintext=b"forest-host-intent-password-for-tests",
+            expected_revision=0,
+        )
+
+    requests = DeploymentStorageRequestAuthority(repository.store, secrets=secrets)
     target = {
         "host_id": "host/" + "a" * 32,
         "bot_id": "bot/host-intent",
@@ -2033,11 +2046,22 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
         "dsn_secret_ref": "secret://host-intent/dsn",
         "credential_ref": "secret://host-intent/password",
     }
+    await role_password(target["credential_ref"])
     first, replay = await asyncio.gather(
         requests.request(operation_id="host-intent/first", **target),
         requests.request(operation_id="host-intent/retry", **target),
     )
     assert first == replay == await requests.read(first.request_id)
+    assert first.credential_version == 1
+    with pytest.raises(ForestError) as rotation:
+        await secrets.put(
+            operation_id="host-intent/password-rotation",
+            secret_ref=target["credential_ref"],
+            purpose="storage.postgresql.password",
+            plaintext=b"another-host-intent-password-for-tests",
+            expected_revision=1,
+        )
+    assert rotation.value.code == "STORAGE_REQUEST_CREDENTIAL_FROZEN"
     async with repository.store.pool.connection() as conn:
         assert (await (await conn.execute(
             "SELECT count(*) AS count FROM forest_deployment.storage_requests",
@@ -2047,7 +2071,31 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
         )).fetchone())["count"] == 0
         assert (await (await conn.execute(
             "SELECT count(*) AS count FROM forest_deployment.secret_slots",
-        )).fetchone())["count"] == 0
+        )).fetchone())["count"] == 1
+    race_credential = "secret://host-intent/password-race"
+    await role_password(race_credential)
+    credential_race = {
+        **target, "bot_id": "bot/credential-race",
+        "profile_ref": "storage-profile/credential-race/1",
+        "dsn_secret_ref": "secret://credential-race/dsn",
+        "credential_ref": race_credential,
+    }
+    frozen_race, rotated = await asyncio.gather(
+        requests.request(operation_id="host-intent/credential-race", **credential_race),
+        secrets.put(
+            operation_id="host-intent/credential-race-rotation",
+            secret_ref=race_credential, purpose="storage.postgresql.password",
+            plaintext=b"forest-rotated-credential-race-password",
+            expected_revision=1,
+        ),
+        return_exceptions=True,
+    )
+    assert not isinstance(frozen_race, Exception)
+    assert frozen_race.credential_version == (await secrets.metadata(race_credential)).version
+    if isinstance(rotated, ForestError):
+        assert rotated.code == "STORAGE_REQUEST_CREDENTIAL_FROZEN"
+    else:
+        assert frozen_race.credential_version == 2
     with pytest.raises(ForestError) as changed:
         await requests.request(
             operation_id="host-intent/changed",
@@ -2059,8 +2107,10 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
             **target, "bot_id": f"bot/other-{changed_field}",
             "profile_ref": f"storage-profile/other-{changed_field}/1",
             "dsn_secret_ref": f"secret://other-{changed_field}/dsn",
+            "credential_ref": f"secret://other-{changed_field}/password",
         }
         candidate[changed_field] = target[changed_field]
+        await role_password(candidate["credential_ref"])
         with pytest.raises(ForestError) as duplicate:
             await requests.request(
                 operation_id=f"host-intent/duplicate-{changed_field}",
@@ -2068,10 +2118,6 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
             )
         assert duplicate.value.code == "STORAGE_REQUEST_CONFLICT"
 
-    secrets = DeploymentSecretAuthority(
-        repository.store, active_key_id="master/test/1",
-        key_resolver=lambda _key_id: bytes(range(32)),
-    )
     with pytest.raises(ForestError) as premature_dsn:
         await secrets.put(
             operation_id="host-intent/dsn-written",
@@ -2091,12 +2137,14 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
     assert premature.value.code == "STORAGE_PROFILE_REQUEST_PENDING"
 
     existing = await _storage_profile(repository, "bot/existing", "existing-host-intent")
+    await role_password("secret://existing-other/password")
     with pytest.raises(ForestError) as occupied:
         await requests.request(
             operation_id="host-intent/existing-profile",
             **{**target, "bot_id": existing.bot_id,
                "profile_ref": "storage-profile/existing-other/1",
-               "dsn_secret_ref": "secret://existing-other/dsn"},
+               "dsn_secret_ref": "secret://existing-other/dsn",
+               "credential_ref": "secret://existing-other/password"},
         )
     assert occupied.value.code == "STORAGE_REQUEST_CONFLICT"
 
@@ -2104,7 +2152,9 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
         **target, "bot_id": "bot/host-intent-race",
         "profile_ref": "storage-profile/host-intent-race/1",
         "dsn_secret_ref": "secret://host-intent/race-dsn",
+        "credential_ref": "secret://host-intent/race-password",
     }
+    await role_password(competing["credential_ref"])
     outcomes = await asyncio.gather(
         requests.request(operation_id="host-intent/race-request", **competing),
         secrets.put(
@@ -2130,6 +2180,7 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
         plaintext=b"postgresql://forest:password@localhost/forest_legacy",
         expected_revision=0,
     )
+    await role_password("secret://host-intent/legacy-password")
     legacy_race = await asyncio.gather(
         profiles.create(
             operation_id="host-intent/legacy-profile",
@@ -2141,7 +2192,8 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
             operation_id="host-intent/legacy-race-request",
             **{**target, "bot_id": "bot/host-intent-legacy",
                "profile_ref": "storage-profile/host-intent-host/1",
-               "dsn_secret_ref": "secret://host-intent/host-dsn"},
+               "dsn_secret_ref": "secret://host-intent/host-dsn",
+               "credential_ref": "secret://host-intent/legacy-password"},
         ),
         return_exceptions=True,
     )
@@ -2170,13 +2222,15 @@ async def test_host_storage_intent_coalesces_before_profile_is_usable(deployment
                 "dsn_secret_ref": "secret://local-race/dsn",
             }, operation_id="host-intent/local-race")
 
+    await role_password("secret://host-intent/local-password")
     local_race = await asyncio.wait_for(asyncio.gather(
         create_local_race(),
         requests.request(
             operation_id="host-intent/local-race-request",
             **{**target, "bot_id": "bot/local-race",
                "profile_ref": "storage-profile/host-local-race/1",
-               "dsn_secret_ref": "secret://host-local-race/dsn"},
+               "dsn_secret_ref": "secret://host-local-race/dsn",
+               "credential_ref": "secret://host-intent/local-password"},
         ),
         return_exceptions=True,
     ), timeout=10)
@@ -2194,7 +2248,19 @@ async def test_host_storage_resource_binding_is_immutable_and_lease_fenced(
 ):
     repository = deployment_catalog
     await repository.initialize()
-    requests = DeploymentStorageRequestAuthority(repository.store)
+    secrets = DeploymentSecretAuthority(
+        repository.store, active_key_id="master/test/1",
+        key_resolver=lambda _key_id: bytes(range(32)),
+    )
+    for name in ("host-bind", "host-bind-other"):
+        await secrets.put(
+            operation_id=f"host-bind/password/{name}",
+            secret_ref=f"secret://{name}/password",
+            purpose="storage.postgresql.password",
+            plaintext=b"forest-host-binding-password-for-tests",
+            expected_revision=0,
+        )
+    requests = DeploymentStorageRequestAuthority(repository.store, secrets=secrets)
     intent = await requests.request(
         operation_id="host-bind/request",
         host_id="host/" + "a" * 32,

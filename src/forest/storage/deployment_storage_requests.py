@@ -46,6 +46,8 @@ class StorageRequest:
     profile_ref: str
     dsn_secret_ref: str
     credential_ref: str
+    credential_version: int
+    credential_digest: str
 
 
 @dataclass(frozen=True)
@@ -68,8 +70,9 @@ class StoragePinnedResource:
 class DeploymentStorageRequestAuthority:
     """Coalesce concurrent intents before any Host call or usable profile exists."""
 
-    def __init__(self, store) -> None:
+    def __init__(self, store, *, secrets) -> None:
         self.store = store
+        self.secrets = secrets
 
     async def request(
         self, *, operation_id: str, host_id: str, bot_id: str,
@@ -85,8 +88,9 @@ class DeploymentStorageRequestAuthority:
             or _PROFILE_REF.fullmatch(profile_ref) is None
             or not isinstance(dsn_secret_ref, str)
             or _SECRET_REF.fullmatch(dsn_secret_ref) is None
+            or not isinstance(credential_ref, str)
+            or _SECRET_REF.fullmatch(credential_ref) is None
             or credential_ref == dsn_secret_ref
-            or len(credential_ref.encode("utf-8")) < 10
             or type(storage_generation) is not int
             or not 1 <= storage_generation <= 9223372036854775807
         ):
@@ -95,15 +99,6 @@ class DeploymentStorageRequestAuthority:
         request_id = "storage-request/" + hashlib.sha256(
             f"{deployment_id}\0{bot_id}\0{storage_generation}".encode("utf-8")
         ).hexdigest()
-        input_digest = digest_json({
-            "deployment_id": deployment_id,
-            "host_id": host_id,
-            "bot_id": bot_id,
-            "storage_generation": storage_generation,
-            "profile_ref": profile_ref,
-            "dsn_secret_ref": dsn_secret_ref,
-            "credential_ref": credential_ref,
-        })
         async with self.store.transaction(conn) as conn:
             await authorize_deployment_action_in(
                 conn, authorization, operation_id=operation_id,
@@ -112,10 +107,38 @@ class DeploymentStorageRequestAuthority:
                 f"forest.deployment.storage-request/bot/{bot_id}/{storage_generation}",
                 f"forest.deployment.storage-request/profile/{profile_ref}",
                 f"forest.deployment.storage-request/dsn/{dsn_secret_ref}",
+                f"forest.deployment.storage-request/credential/{credential_ref}",
             ):
                 await conn.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", (key,),
                 )
+            credential = await self.secrets.metadata_in(conn, credential_ref)
+            if credential.purpose != "storage.postgresql.password":
+                raise ForestError(
+                    "STORAGE_REQUEST_CREDENTIAL_INVALID",
+                    "Storage request requires a PostgreSQL role password", 409,
+                )
+            password = await self.secrets.resolve_text_in(conn, credential_ref)
+            if (
+                not 32 <= len(password) <= 256 or not password.isascii()
+                or any(not 33 <= ord(char) <= 126 for char in password)
+            ):
+                raise ForestError(
+                    "STORAGE_REQUEST_CREDENTIAL_INVALID",
+                    "Storage role password is invalid", 422,
+                )
+            credential_digest = "sha256:" + hashlib.sha256(password.encode()).hexdigest()
+            input_digest = digest_json({
+                "deployment_id": deployment_id,
+                "host_id": host_id,
+                "bot_id": bot_id,
+                "storage_generation": storage_generation,
+                "profile_ref": profile_ref,
+                "dsn_secret_ref": dsn_secret_ref,
+                "credential_ref": credential_ref,
+                "credential_version": credential.version,
+                "credential_digest": credential_digest,
+            })
             existing = await (
                 await conn.execute(
                     "SELECT * FROM forest_deployment.storage_requests "
@@ -160,11 +183,13 @@ class DeploymentStorageRequestAuthority:
                 await conn.execute(
                     "INSERT INTO forest_deployment.storage_requests("
                     "request_id,deployment_id,host_id,bot_id,storage_generation,"
-                    "profile_ref,dsn_secret_ref,credential_ref,input_digest) "
-                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
+                    "profile_ref,dsn_secret_ref,credential_ref,"
+                    "credential_version,credential_digest,input_digest) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
                     (request_id, deployment_id, host_id, bot_id,
                      storage_generation, profile_ref, dsn_secret_ref,
-                     credential_ref, input_digest),
+                     credential_ref, credential.version, credential_digest,
+                     input_digest),
                 )
             ).fetchone()
             return self._request(saved)
@@ -344,6 +369,7 @@ class DeploymentStorageRequestAuthority:
                 or request["bot_id"] != pin_receipt["bot_id"]
                 or request["storage_generation"] != pin_receipt["storage_generation"]
                 or request["profile_ref"] != pin_receipt["profile_ref"]
+                or request["credential_digest"] != pin_receipt["credential_digest"]
             ):
                 raise ForestError(
                     "STORAGE_PIN_MISMATCH", "Host pin belongs to another request", 409,
@@ -416,4 +442,6 @@ class DeploymentStorageRequestAuthority:
             profile_ref=row["profile_ref"],
             dsn_secret_ref=row["dsn_secret_ref"],
             credential_ref=row["credential_ref"],
+            credential_version=row["credential_version"],
+            credential_digest=row["credential_digest"],
         )

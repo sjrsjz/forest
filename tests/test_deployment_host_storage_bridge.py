@@ -64,7 +64,18 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         lease = await catalog_authority.claim_supervisor(
             host_id, "incarnation/storage-bridge",
         )
-        requests = DeploymentStorageRequestAuthority(deployment_store)
+        secrets = DeploymentSecretAuthority(
+            deployment_store, active_key_id="bridge-test-key",
+            key_resolver=lambda _key_id: b"b" * 32,
+        )
+        await secrets.put(
+            operation_id="bridge/password-secret",
+            secret_ref="secret://bridge/password",
+            purpose="storage.postgresql.password",
+            plaintext=b"forest-host-storage-bridge-password-for-tests",
+            expected_revision=0,
+        )
+        requests = DeploymentStorageRequestAuthority(deployment_store, secrets=secrets)
         frozen = await requests.request(
             operation_id="bridge/request",
             host_id=host_id, bot_id="bot/bridge", storage_generation=1,
@@ -79,16 +90,12 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         )
         catalog = PackageCatalog(tmp_path / "catalog")
 
-        async def credential(ref, purpose):
-            assert ref == "secret://bridge/password"
-            assert purpose == "storage.postgresql.password"
-            return "forest-host-storage-bridge-password-for-tests"
-
         def physical_factory(configuration, revision, identity, declaration):
             return HostPostgresMaterializationEffect(
                 configuration, revision, identity, declaration,
                 store=host_store, supervisor=host_supervisor,
-                maintenance_dsn=dsn, credential_resolver=credential,
+                maintenance_dsn=dsn,
+                credential_resolver=secrets.resolve_text_for_purpose,
             )
 
         controller = HostPackageController(
@@ -137,6 +144,13 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         binding = await bridge.reserve(frozen.request_id)
         assert binding.resource_id == reserved_id
         assert await bridge.reserve(frozen.request_id) == binding
+        await secrets.put(
+            operation_id="bridge/foreign-password-secret",
+            secret_ref="secret://foreign-host/password",
+            purpose="storage.postgresql.password",
+            plaintext=b"forest-foreign-host-password-for-tests",
+            expected_revision=0,
+        )
         foreign = await requests.request(
             operation_id="bridge/foreign-request",
             host_id="host/" + "f" * 32,
@@ -230,10 +244,6 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
                 )
             ).fetchone()
         assert pinned_count["count"] == 1
-        secrets = DeploymentSecretAuthority(
-            deployment_store, active_key_id="bridge-test-key",
-            key_resolver=lambda _key_id: b"b" * 32,
-        )
         profiles = DeploymentStorageProfileAuthority(deployment_store, secrets=secrets)
         settlement = DeploymentStorageSettlementAuthority(
             deployment_store, secrets=secrets, profiles=profiles,

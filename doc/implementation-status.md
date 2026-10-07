@@ -1,5 +1,11 @@
 # Forest 实现状态
 
+Host 存储口令冻结（2026-10-07）：deployment 存储请求必须引用已有且用途正确的专属 role 口令 Secret；生成端须提供强随机值，内核校验长度与格式，在本库事务内冻结版本和 SHA-256 摘要；同一凭据引用不能被两个请求共享。请求与 Secret 写端口按同一凭据键合流，冻结后拒绝新轮换，Host pin 摘要必须吻合请求，最终 settlement 再检查版本与摘要。双数据库桥与请求/轮换并发定向回归通过，完整 deployment catalog 回归 `29 passed`。该规则为预发布基线变更，现有测试库须重建。实际生产供给与 storage generation 切换仍未接线。
+
+生产 Host Graph 装配（2026-10-07）：Supervisor 在取得 Host 租约后启动 HostRuntimeScope 与 HostPackageController，官方 `host.storage` 现随 Host Graph 首发；原生 PostgreSQL Effect 通过受控 deployment SecretAuthority 解析专属 role 密码，并使用与现有本地 allocator 相同的 PostgreSQL 维护 endpoint。Host Graph 的持久换代调和、致命状态监视和逆序排空进入 Supervisor 生命周期。此步只激活 Host 包的准确新资源账本，不迁移旧本地分配器已有资源，也不启用物理回收；跨 scope 供给调度、Host Web 管理 provider、最终 settlement 生产调用及旧分配器切断仍待完成。尚未把此组合根认作已验收的生产供给链。
+
+控制 Graph 生命周期待修正：目前 `ControlPackageController.close()` 会退役当前 Graph，恢复路径从活动 Graph 反推出包选择；因此优雅停机后非默认包选择会丢失。现有热替换恢复用例为了保留选择让两个控制器短暂同时引用一个活动 Graph，在 Windows 上偶发 owned-work 提前终止。完整 catalog 回归先出现该失败，单项复核一次失败、一次通过，随后全套复跑 `29 passed`。下一阶段要把期望包选择从活动 Graph 生命周期中独立持久化，并用独占租约验证真正的停机重启，不能把一次通过视为修复。
+
 Host 存储最终结算的隔离验证（2026-10-07）：新增受信任 deployment 内核 authority，在有效 Supervisor 租约和不可变 Host pin 下核对实际 role 密码摘要，以同一 deployment 事务写入加密 DSN Secret 与 immutable storage profile。同请求并发结算合流；错误口令、失效租约、不同 endpoint 重放和预留 DSN ref 的普通写入均拒绝。管理命令显式传递 profile 字段，内部 pin 参数不进入包输入；Secret、请求、profile 与最终结算统一资源锁顺序。独立双数据库的真实 Host 桥用例通过，deployment catalog 全套 `29 passed`。这条 authority 仍只在隔离装配中调用；role 凭据的生产权威、共享的 Host endpoint 绑定、生产 Host Graph 与供给调度接线尚未完成，旧本地分配器仍在生产路径上。
 
 Host 物化凭据证据与私有结算端口（2026-10-07）：`host.storage` 0.7.0 / 私有 SQL 1.5.0 的原生 PostgreSQL Effect 在实际写入 role 密码后产生 SHA-256 凭据摘要；包内私有 `realize-record`、持久工作结果、Host pin 回执和 deployment 不可变 pin 事实保存同一摘要，为最终 DSN 结算提供版本核对证据。旧的公开 `host.storage.realize` 服务已删除，包 manifest 将该私有 Command 明确声明为 owned-work handler 专用，控制包编译器验证无重复或跨管理端口抢占。新隔离 PostgreSQL 的 Host 包与双库桥用例 `3 passed`，deployment catalog `29 passed`，包目录及 Host 编译器 `100 passed, 2 skipped`，Ruff 与差异检查通过。摘要只适合对强随机 role 密码做一致性核对；最终凭据权威、DSN Secret/profile 结算和生产 Host Graph 仍未完成，不能据此认定 Bot 新库已可用。Host 与 deployment 预发布数据库基线均已变化，测试库须重建。

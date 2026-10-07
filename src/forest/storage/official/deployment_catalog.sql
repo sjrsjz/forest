@@ -346,11 +346,14 @@ CREATE TABLE forest_deployment.storage_requests (
     profile_ref text NOT NULL CHECK (octet_length(profile_ref) BETWEEN 1 AND 512),
     dsn_secret_ref text NOT NULL CHECK (octet_length(dsn_secret_ref) BETWEEN 10 AND 512),
     credential_ref text NOT NULL CHECK (octet_length(credential_ref) BETWEEN 10 AND 512),
+    credential_version bigint NOT NULL CHECK (credential_version > 0),
+    credential_digest text NOT NULL CHECK (credential_digest ~ '^sha256:[a-f0-9]{64}$'),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     UNIQUE (deployment_id,bot_id,storage_generation),
     UNIQUE (deployment_id,profile_ref),
-    UNIQUE (deployment_id,dsn_secret_ref)
+    UNIQUE (deployment_id,dsn_secret_ref),
+    UNIQUE (deployment_id,credential_ref)
 );
 
 CREATE INDEX deployment_storage_requests_created_idx

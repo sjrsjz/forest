@@ -1,6 +1,6 @@
 # Host 物理存储所有权与回收协议
 
-`host.storage` 是 Host scope 的可热重载 builtin 包，负责 Bot 等资源在本机的**物理所有权账本**。它不是 deployment 的存储配置页，也不能从数据库命名规则推断自己拥有某个旧资源。当前 deployment 中的 `LocalPostgresDatabaseAllocator` 仍能直接建库；在这条旧路径移除且旧资源经过准确登记或重建之前，Host 清单不完整，不允许开启自动回收。
+`host.storage` 是 Host scope 的可热重载 builtin 包，负责 Bot 等资源在本机的**物理所有权账本**。它不是 deployment 的存储配置页，也不能从数据库命名规则推断自己拥有某个旧资源。生产 Host Graph 现会启动此包，但当前 deployment 中的 `LocalPostgresDatabaseAllocator` 仍能直接建库；在这条旧路径移除且旧资源经过准确登记或重建之前，Host 清单不完整，不允许开启自动回收。
 
 ## 权威与边界
 
@@ -28,7 +28,7 @@
 
 ## 跨作用域供给与回收
 
-目标协议是：deployment 在自身事务中持久化稳定的 Host 请求引用；受限跨 scope 路由调用 `reserve`；Host 持久 owned-work 领取物理 Effect 并记录意图和观察；Host `realize` 在账本事务中把已核实的 receipt 结算为 `ACTIVE`；deployment 再冻结逻辑 profile/head 并供给 Bot。崩溃后以原请求 ID 和准确资源引用查询并重放，绝不重新生成 marker 或另一个库；role 密码通过受控 secret ref 解析并可受控轮换。Host 的物理状态与 deployment 的逻辑引用状态是两种权威，WebUI 必须分别显示，不能用一方状态推断另一方已提交。
+目标协议是：deployment 在自身事务中持久化稳定的 Host 请求引用；受限跨 scope 路由调用 `reserve`；Host 持久 owned-work 领取物理 Effect 并记录意图和观察；Host `realize` 在账本事务中把已核实的 receipt 结算为 `ACTIVE`；deployment 再冻结逻辑 profile/head 并供给 Bot。崩溃后以原请求 ID 和准确资源引用查询并重放，绝不重新生成 marker 或另一个库；role 密码通过受控 Secret ref 解析；同一 storage generation 的凭据版本冻结，轮换须走新 generation 的物理与 DSN 切换协议。Host 的物理状态与 deployment 的逻辑引用状态是两种权威，WebUI 必须分别显示，不能用一方状态推断另一方已提交。
 
 ### Bot storage profile 切换顺序
 
@@ -36,25 +36,27 @@
 
 目标切换分成以下顺序步骤，所有重试使用最初冻结的请求身份；已实现范围见下文状态：
 
-1. deployment 事务只冻结 `request_id`、目标 `host_id`、`deployment_id`、`bot_id`、`storage_generation`、预期 `profile_ref` 与凭据引用，不创建可用的 storage profile。请求 ID 与同一逻辑 storage generation 的唯一约束要在本库合流并发写；不同输入的同键请求拒绝。
+1. deployment 事务只冻结 `request_id`、目标 `host_id`、`deployment_id`、`bot_id`、`storage_generation`、预期 `profile_ref`、专属凭据引用、版本与摘要，不创建可用的 storage profile。请求 ID 与同一逻辑 storage generation 的唯一约束要在本库合流并发写；不同输入的同键请求拒绝。
 2. 跨 scope 桥以冻结的 deployment 身份投递准确请求。Host `reserve` 返回的资源 ID 必须在 deployment 持久化后才能继续；`materialization.enqueue`、`materialization.status` 和 `resource` 均按同一资源和 owner 元组重放。桥不能相信调用者自行填写的 `deployment_id`，必须从 deployment 权威行绑定。Host 状态未知时保留原资源引用等待核对，不重新预留。
 3. Host 包的 owned-work 将准确资源推进到 `ACTIVE`。deployment 读取 Host 受限端口核对数据库名、role、Host 身份、owner 元组和修订，但这一次读不能单独充当持久引用围栏。`host.storage.reference.pin` 只接受同一归属且完成 owned-work 结算的 `ACTIVE` 资源，在 Host 私有账本内不可变地绑定预期 `profile_ref` 和资源修订，返回无凭据的签收；同一资源或同一 deployment/profile 的不同请求冲突。Host 回收协议以后必须把该 pin 当成尚未解除的引用，直到 deployment 证明相应 profile 已撤销并完成解绑定协议。
 4. deployment 在一个本库事务中核对冻结请求和 Host 引用证据，写入最终 DSN Secret、immutable storage profile 与请求结算回执。只有这笔事务提交后，bootstrap profile 和 Bot 供给 Job 才能引用该 storage generation；供给器不再执行物理建库。
 
-role 密码由谁持有、如何构造最终 DSN，取决于凭据权威选择；两种方案都不能把明文密码写进 Host 包表、Graph 计划或 Web 回执。以上跨库步骤没有 ACID，恢复逻辑只能从两端已提交的准确事实继续，不能凭超时推断物理动作失败。
+当前生产装配由 deployment SecretAuthority 持有 role 密码，生成端须提供强随机值，Host 原生 Effect 按准确 Secret ref 和用途解析；最终 settlement 也必须从同一冻结版本读取并构造 DSN。明文密码不得写入 Host 包表、Graph 计划或 Web 回执。以上跨库步骤没有 ACID，恢复逻辑只能从两端已提交的准确事实继续，不能凭超时推断物理动作失败。
 
 回收须另有协议：deployment 先对目标 storage generation 施加禁止新引用的 fence，证明 Bot head、备份/恢复 Job 和下载租约均已结束或转移；Host 持久化回收计划，并在每次物理删除前重新验证 fence、引用水位、租约、资源修订、精确数据库名、role 和 marker。目标存在而归属不符时拒绝删除；外部结果未知时保留账本供核对。包卸载或热替换只排空 Worker、owned-work 与 Effect，不能删除账本或物理资源。其他资源种类（artifact、Milvus collection）必须各有原生标记和 Effect，不能复用 PostgreSQL 删除逻辑。
 
 ## 预发布实现状态（2026-10-07）
 
-deployment 现有隔离的 `DeploymentStorageSettlementAuthority`：它只接受已冻结请求及 pin，在有效 Supervisor 租约下核对 Host Effect 所写 role 密码的 SHA-256 证据，以同一 deployment 事务创建加密 DSN Secret 和 immutable storage profile。已提交的准确 DSN/profile 是结算事实，同请求并发重放合流，无须再建第二张状态表；密码、租约或重放 endpoint 不匹配时拒绝。预留 DSN ref 的普通 Secret/profile 写端口不能抢占，包管理输入也不能提供内部 `pinned_request_id`。隔离双数据库真实登录验证通过。最终 role 密码由哪个权威持有、如何与 Host 原生 Effect 和 settlement 共享同一不可变 PostgreSQL endpoint，仍需在生产装配前确定；此 authority 不在生产调度路径中。
+role 密码现为每个请求的专属 deployment Secret：请求创建必须先核对 Secret 的 `storage.postgresql.password` 用途、口令长度与格式；生成端负责提供强随机值，在同一事务中冻结版本与摘要；请求与 Secret 写入共享凭据引用围栏，胜出的版本成为不可变事实，之后的新轮换写入拒绝。Host pin 的凭据摘要必须等于该请求摘要，最终结算再次核对冻结版本、Host pin 和实际口令。完整轮换要另建 storage generation，不能直接修改正在被物理 role 和 immutable DSN 引用的 Secret。预发布 deployment 基线变动，需重建测试库。
 
-deployment 基础 schema 现可持久化不可变的 Host 存储请求：`request_id` 从 deployment、Bot 与 storage generation 派生，同一逻辑键的相同输入合流，不同 Host/profile/凭据引用冲突。请求只冻结目标，不写 DSN Secret 或可用 profile。请求创建、旧 profile 创建及 DSN Secret 写入共享逻辑键围栏；已预留的 DSN ref 不能被旧写端口抢占。该 authority 目前只供内部调用；隔离装配已有 Host 桥，但管理动作、生产调度与最终结算尚未接线，不能把请求视为已供应的数据库。
+deployment 现有隔离的 `DeploymentStorageSettlementAuthority`：它只接受已冻结请求及 pin，在有效 Supervisor 租约下核对 Host Effect 所写 role 密码的 SHA-256 证据，以同一 deployment 事务创建加密 DSN Secret 和 immutable storage profile。已提交的准确 DSN/profile 是结算事实，同请求并发重放合流，无须再建第二张状态表；密码、租约或重放 endpoint 不匹配时拒绝。预留 DSN ref 的普通 Secret/profile 写端口不能抢占，包管理输入也不能提供内部 `pinned_request_id`。隔离双数据库真实登录验证通过。当前生产装配让 Host 原生 Effect 通过受控 deployment SecretAuthority 查询 role 密码，维护 endpoint 与旧本地 allocator 共用；settlement 尚未在生产调度路径中调用，也未固化 endpoint 的跨阶段身份。
+
+deployment 基础 schema 现可持久化不可变的 Host 存储请求：`request_id` 从 deployment、Bot 与 storage generation 派生，同一逻辑键的相同输入合流，不同 Host/profile/凭据引用或版本冲突。请求在同一事务中验证强随机 role 密码 Secret，并冻结其引用、版本与摘要；不写 DSN Secret 或可用 profile。请求创建、旧 profile 创建及 DSN Secret 写入共享逻辑键围栏；已预留的 DSN ref 不能被旧写端口抢占。该 authority 目前只供内部调用；隔离装配已有 Host 桥，但管理动作、生产调度与最终结算尚未接线，不能把请求视为已供应的数据库。
 
 deployment 另有不可变的请求到 Host `resource_id` 绑定事实。受信任的跨 scope 桥必须先按请求身份调用 Host `reserve`，再凭有效 deployment Supervisor 租约写入准确资源；绑定只核对并保存资源与归属，不把 Host 回执中的可变 `state`/`revision` 固定为资源身份。同一资源的 `RESERVED` 与后续 `ACTIVE` 回执可重放合流；同请求换资源、跨请求复用资源或归属不符均拒绝。另一个不可变 pin 事实以复合外键绑定同一请求与资源，记录 Host、资源修订、物理数据库和 role 名称；只有 Host pin 回执与准确资源查询都匹配冻结请求、且资源查询仍为 ACTIVE 时才能写入。生产桥尚未接线，这些事实本身也不发布可供 Bot 使用的 profile。
 
-隔离装配现有受限 `DeploymentHostStorageBridge`：它只从已冻结的 deployment 请求构造 Host `reserve`、`materialization.enqueue`、`materialization.status`、`reference.pin` 与 `resource` 输入，不接受包 Worker 自填 Host 归属；每项调用有固定的 `request_id` 派生操作身份。Host 预留成功而 deployment 租约失效后热替换 Host 包，原请求重放仍绑定唯一 `resource_id`；随后对同一资源重复入队合流，查询准确归属直到 Host owned-work 将其物化为 `ACTIVE`。Host pin 成功而 deployment 写入前再次失租时，热替换后按同一操作身份重放，Host 只保留一个 pin，deployment 将 pin 与准确资源查询一起持久化。真实双数据库回归 `1 passed`，deployment catalog 全套 `30 passed`。生产组合根尚未启动 Host 包 Graph 或调度此桥，profile 结算与安全回收仍待接线；预发布 deployment 基线变更后需重建对应测试库。
+隔离装配现有受限 `DeploymentHostStorageBridge`：它只从已冻结的 deployment 请求构造 Host `reserve`、`materialization.enqueue`、`materialization.status`、`reference.pin` 与 `resource` 输入，不接受包 Worker 自填 Host 归属；每项调用有固定的 `request_id` 派生操作身份。Host 预留成功而 deployment 租约失效后热替换 Host 包，原请求重放仍绑定唯一 `resource_id`；随后对同一资源重复入队合流，查询准确归属直到 Host owned-work 将其物化为 `ACTIVE`。Host pin 成功而 deployment 写入前再次失租时，热替换后按同一操作身份重放，Host 只保留一个 pin，deployment 将 pin 与准确资源查询一起持久化。真实双数据库回归 `1 passed`，deployment catalog 全套 `30 passed`。生产组合根已启动 Host 包 Graph，但尚未调度此桥；profile 结算与安全回收仍待接线；预发布 deployment 基线变更后需重建对应测试库。
 
-`host.storage` 包版本 `0.7.0`、私有 SQL `1.5.0`，仍设置 `auto_install=false`。包私有表保存每个物理资源的一条物化请求、凭据引用、领取租约、尝试次数、结算结果和幂等回执；Worker 从包内持久队列领取后调用受 Generation 围栏约束的 PostgreSQL 原生 Effect，再由仅供包内任务声明的私有 `realize-record` 命令核对物理标记并提交 `ACTIVE`。Effect 对实际写入 role 的密码计算 SHA-256 摘要，摘要随实现回执、持久工作结算和 Host pin 冻结；deployment pin 账本也保存同一摘要，最终 DSN 结算必须以强随机密码核对，不能把摘要当作保密口令或允许弱口令。租约过期仅重领同一个 `resource_id`；Effect 按准确 role、数据库和 owner marker 复核，不能借重试分配新名字。包内私有命令由持久任务声明并经编译器核对，不开放旧 `host.storage.realize` 服务。精确资源与工作状态查询供跨 scope 桥按冻结归属查询；桥本身仍须把调用方 deployment 身份绑定到输入。独立 PostgreSQL 的 Host 包及双库桥回归 `3 passed`，包目录与 Host 编译器回归 `100 passed, 2 skipped`；这仍是隔离装配，不是生产 Host Graph。
+`host.storage` 包版本 `0.7.0`、私有 SQL `1.5.0`，现设置 `auto_install=true`。包私有表保存每个物理资源的一条物化请求、凭据引用、领取租约、尝试次数、结算结果和幂等回执；Worker 从包内持久队列领取后调用受 Generation 围栏约束的 PostgreSQL 原生 Effect，再由仅供包内任务声明的私有 `realize-record` 命令核对物理标记并提交 `ACTIVE`。Effect 对实际写入 role 的密码计算 SHA-256 摘要，摘要随实现回执、持久工作结算和 Host pin 冻结；deployment pin 账本也保存同一摘要，最终 DSN 结算必须以强随机密码核对，不能把摘要当作保密口令或允许弱口令。租约过期仅重领同一个 `resource_id`；Effect 按准确 role、数据库和 owner marker 复核，不能借重试分配新名字。包内私有命令由持久任务声明并经编译器核对，不开放旧 `host.storage.realize` 服务。精确资源与工作状态查询供跨 scope 桥按冻结归属查询；桥本身仍须把调用方 deployment 身份绑定到输入。独立 PostgreSQL 的 Host 包及双库桥回归 `3 passed`，包目录与 Host 编译器回归 `100 passed, 2 skipped`；该包已进入生产 Host Graph，但跨 scope 供给与最终结算仍只在隔离装配中验证。
 
-目前原生 Effect 仍只在隔离测试中绑定维护 DSN 与凭据解析器；生产 Host Graph 尚未装配它。deployment 跨 scope 持久投递、冻结逻辑引用与安全回收仍缺失，现有 deployment 直接建库路径也还在。因而不能启用生产 `host.storage`、把它的 UI 清单视为全量物理库存，或据此执行删除。下一步须确定 role 凭据权威并接通跨 scope 供给，再切断旧分配器，重建或准确登记预发布资源。
+生产 Host Graph 已绑定原生 Effect、deployment Secret 查询和维护 DSN；目前使用与旧本地 allocator 相同的 PostgreSQL endpoint。deployment 跨 scope 持久投递、冻结逻辑引用与安全回收仍缺失，现有 deployment 直接建库路径也还在。因而不能把 `host.storage` 账本视为全量物理库存，也不能据此执行删除。下一步须接通跨 scope 供给，再切断旧分配器，重建或准确登记预发布资源。

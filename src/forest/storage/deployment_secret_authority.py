@@ -101,6 +101,10 @@ class DeploymentSecretAuthority:
         )
         await conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"forest.deployment.storage-request/credential/{secret_ref}",),
+        )
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
             (f"forest.deployment.secret-operation/{operation_id}",),
         )
         await conn.execute(
@@ -181,6 +185,18 @@ class DeploymentSecretAuthority:
             if replay["input_digest"] != input_digest:
                 raise ForestError("SECRET_OPERATION_CONFLICT", "Secret operation differs", 409)
             return self._metadata(replay)
+        credential_request = await (
+            await conn.execute(
+                "SELECT 1 FROM forest_deployment.storage_requests "
+                "WHERE deployment_id=%s AND credential_ref=%s LIMIT 1",
+                (self.store.deployment_id, secret_ref),
+            )
+        ).fetchone()
+        if credential_request is not None:
+            raise ForestError(
+                "STORAGE_REQUEST_CREDENTIAL_FROZEN",
+                "Storage request freezes this role password Secret", 409,
+            )
         slot = await (
             await conn.execute(
                 "SELECT * FROM forest_deployment.secret_slots WHERE secret_ref=%s FOR UPDATE",
