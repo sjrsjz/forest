@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-跨 scope Host 预留桥（2026-10-07）：新增受信任进程内 `DeploymentHostStorageReservationBridge`，只从 deployment 不可变请求读取 Host、Bot、generation，以固定 `request_id/reserve` 调用当前 Host 包 Generation 的 `host.storage.reserve`，随后凭有效 deployment Supervisor 租约写不可变资源绑定。独立双 PostgreSQL 库测试故意让 Host 预留成功后 deployment 绑定因失效租约失败，再热替换 Host 包并重试；同一资源 ID 被找回，Host 账本仍只有一条预留（`1 passed`）。它尚未装配到生产 Supervisor，也未执行物化、pin 或 profile 提交。
+跨 scope Host 存储桥（2026-10-07）：受信任进程内 `DeploymentHostStorageBridge` 只从 deployment 不可变请求读取 Host、Bot、generation 与凭据引用，按固定 `request_id/reserve` 调用当前 Host 包 Generation 的预留服务，再凭有效 deployment Supervisor 租约写不可变资源绑定。桥按同一绑定以 `request_id/materialize` 幂等入队，并通过准确归属元组读取物化状态。独立双 PostgreSQL 库测试故意让 Host 预留成功后 deployment 绑定因失效租约失败，再热替换 Host 包并重试；同一资源 ID 被找回，重复入队合流，Host owned-work 最终创建专属 role 与数据库并结算为 ACTIVE（`1 passed`）。它尚未装配到生产 Supervisor，也未执行 pin 或 profile 提交。
 
 Host 资源绑定事实（2026-10-07）：deployment 基础 schema 新增不可变 `storage_request_resources`，由有效 deployment Supervisor 租约围栏，只接受与已冻结请求归属完全一致的 Host reserve 回执。绑定仅保存 `request_id`→`resource_id`；同一资源的 `RESERVED`/`ACTIVE` 状态漂移重放合流，换资源、跨请求复用和失效租约拒绝。原有重复的 Supervisor 租约 SQL 校验收敛为一个权威函数。独立 PostgreSQL 的 deployment catalog 全套 `29 passed`，Ruff 与差异检查通过。生产 Host Graph、受信任跨 scope 桥、物化及 pin 到 profile 结算仍未接线，不能据此认定数据库可用。
 

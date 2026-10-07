@@ -7,7 +7,7 @@
 | 参与者 | 持有的权威 |
 | --- | --- |
 | Host 内核 | 稳定 `host_id`、租约、Graph/Generation、路由与授权；不持有各模块的物理资源清单。 |
-| deployment | Bot 身份、逻辑 storage profile/head、供给 Job、备份/恢复 Job，以及各引用的冻结事实。 |
+| deployment 内核 | Bot 基础身份、期望运行状态、逻辑 storage profile/head、供给 Job、备份/恢复 Job，以及各引用的冻结事实；builtin 只能通过受限端口提供管理操作。 |
 | `host.storage` | 本 Host 的 `resource_id`、预留操作账本、物理名称、owner marker、物理状态与后续回收计划。账本位于 Host 独立数据库内该包的私有 schema，随 Worker 热替换保留。 |
 | Host 原生 Effect | 根据 `host.storage` 的准确资源记录执行受限 PostgreSQL 操作。包 Worker 不接触维护凭据、超级用户 DSN 或其他作用域数据库连接。 |
 
@@ -47,11 +47,11 @@ role 密码由谁持有、如何构造最终 DSN，取决于凭据权威选择�
 
 ## 预发布实现状态（2026-10-07）
 
-deployment 基础 schema 现可持久化不可变的 Host 存储请求：`request_id` 从 deployment、Bot 与 storage generation 派生，同一逻辑键的相同输入合流，不同 Host/profile/凭据引用冲突。请求只冻结目标，不写 DSN Secret 或可用 profile。请求创建、旧 profile 创建及 DSN Secret 写入共享逻辑键围栏；已预留的 DSN ref 不能被旧写端口抢占。该 authority 目前只供内部调用，尚无管理动作、Host 桥或最终结算；正式接线前不能把请求视为已供应的数据库。
+deployment 基础 schema 现可持久化不可变的 Host 存储请求：`request_id` 从 deployment、Bot 与 storage generation 派生，同一逻辑键的相同输入合流，不同 Host/profile/凭据引用冲突。请求只冻结目标，不写 DSN Secret 或可用 profile。请求创建、旧 profile 创建及 DSN Secret 写入共享逻辑键围栏；已预留的 DSN ref 不能被旧写端口抢占。该 authority 目前只供内部调用；隔离装配已有 Host 桥，但管理动作、生产调度与最终结算尚未接线，不能把请求视为已供应的数据库。
 
-deployment 另有不可变的请求到 Host `resource_id` 绑定事实。受信任的跨 scope 桥必须先按请求身份调用 Host `reserve`，再凭有效 deployment Supervisor 租约写入准确资源；绑定只核对并保存资源与归属，不把 Host 回执中的可变 `state`/`revision` 固定为资源身份。同一资源的 `RESERVED` 与后续 `ACTIVE` 回执可重放合流；同请求换资源、跨请求复用资源或归属不符均拒绝。桥尚未接线，这一绑定本身也不证明物理库已创建或可向 Bot 供给。
+deployment 另有不可变的请求到 Host `resource_id` 绑定事实。受信任的跨 scope 桥必须先按请求身份调用 Host `reserve`，再凭有效 deployment Supervisor 租约写入准确资源；绑定只核对并保存资源与归属，不把 Host 回执中的可变 `state`/`revision` 固定为资源身份。同一资源的 `RESERVED` 与后续 `ACTIVE` 回执可重放合流；同请求换资源、跨请求复用资源或归属不符均拒绝。生产桥尚未接线，这一绑定本身也不证明物理库已创建或可向 Bot 供给。
 
-隔离装配现有受限 `DeploymentHostStorageReservationBridge`：它只从已冻结的 deployment 请求构造 Host `reserve` 输入，使用 `request_id/reserve` 作为跨热替换保持不变的操作身份，取得 Host 回执后写入上述绑定。真实双数据库回归在 Host 预留成功、deployment 租约失效而无法写绑定的窗口中热替换 Host 包；新代使用原请求重放，仅保留一个 `resource_id`。生产组合根尚未启动 Host 包 Graph 或调度此桥，物化、pin 及 profile 结算也仍待接线。
+隔离装配现有受限 `DeploymentHostStorageBridge`：它只从已冻结的 deployment 请求构造 Host `reserve`、`materialization.enqueue` 和 `materialization.status` 输入，不接受包 Worker 自填 Host 归属；每项调用有固定的 `request_id` 派生操作身份。Host 预留成功而 deployment 租约失效后热替换 Host 包，原请求重放仍绑定唯一 `resource_id`；随后对同一资源重复入队合流，查询准确归属直到 Host owned-work 将其物化为 `ACTIVE`。真实双数据库回归 `1 passed`。生产组合根尚未启动 Host 包 Graph 或调度此桥，pin、profile 结算与安全回收仍待接线。
 
 `host.storage` 包版本 `0.6.0`，故意设置 `auto_install=false`。包私有表保存每个物理资源的一条物化请求、凭据引用、领取租约、尝试次数、结算结果和幂等回执；Worker 从包内持久队列领取后先调用受 Generation 围栏约束的 PostgreSQL 原生 Effect，再用原有 `realize` 命令核对物理标记并提交 `ACTIVE`。租约过期仅重领同一个 `resource_id`；Effect 按准确 role、数据库和 owner marker 复核，不能借重试分配新名字。精确资源与工作状态查询供后续跨 scope 桥按冻结归属查询；桥本身仍须把调用方 deployment 身份绑定到输入，不能把输入字段当作授权。独立 PostgreSQL 回归覆盖预留、角色与数据库标记、错误归属拒绝、热替换前冻结领取、旧领取失租、新代重领后结算及错误 owner 查询拒绝（`2 passed`）；这仍是隔离装配，不是生产 Host Graph。
 

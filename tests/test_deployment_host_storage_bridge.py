@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 from dataclasses import replace
@@ -14,7 +15,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from forest.deployment_host_storage_bridge import DeploymentHostStorageReservationBridge
+from forest.deployment_host_storage_bridge import DeploymentHostStorageBridge
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
 from forest.host_runtime import HostRuntimeScope
@@ -50,6 +51,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
     await deployment_store.open()
     host_supervisor = HostSupervisor(HostIdentityAuthority(host_store))
     controller = None
+    created_physical = None
     try:
         await host_supervisor.start()
         catalog_authority = DeploymentCatalogRepository(deployment_store)
@@ -72,8 +74,10 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         )
         catalog = PackageCatalog(tmp_path / "catalog")
 
-        async def credential(_ref, _purpose):
-            return "bridge-test-password"
+        async def credential(ref, purpose):
+            assert ref == "secret://bridge/password"
+            assert purpose == "storage.postgresql.password"
+            return "forest-host-storage-bridge-password-for-tests"
 
         def physical_factory(configuration, revision, identity, declaration):
             return HostPostgresMaterializationEffect(
@@ -91,7 +95,7 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             ), catalog, official_sources=(source,),
         )
         await controller.start()
-        bridge = DeploymentHostStorageReservationBridge(
+        bridge = DeploymentHostStorageBridge(
             requests=requests,
             deployment_supervisor=SimpleNamespace(
                 authority_lease=lambda: replace(lease, owner_epoch=lease.owner_epoch + 1),
@@ -108,6 +112,9 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
         )
         assert len(page["items"]) == 1
         reserved_id = page["items"][0]["resource_id"]
+        created_physical = (
+            page["items"][0]["physical_name"], page["items"][0]["role_name"],
+        )
 
         old_graph = controller.registry.graph_identity
         manifest = source / "module.toml"
@@ -140,13 +147,43 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             "generations", {"bot_id": frozen.bot_id},
         )
         assert [item["resource_id"] for item in page["items"]] == [reserved_id]
-        assert page["items"][0]["state"] == "RESERVED"
+        queued = await bridge.enqueue_materialization(frozen.request_id)
+        assert queued["resource_id"] == reserved_id
+        assert await bridge.enqueue_materialization(frozen.request_id) == queued
+        async with asyncio.timeout(30):
+            while True:
+                status = await bridge.materialization_status(frozen.request_id)
+                if status["state"] == "SUCCEEDED":
+                    break
+                if status["state"] == "FAILED":
+                    pytest.fail(f"Host materialization failed: {status['last_error_code']}")
+                await asyncio.sleep(0.1)
+        assert status["resource_id"] == reserved_id
+        resource = await controller.registry.get("host.storage").management_contract.query(
+            "resource", {
+                "resource_id": reserved_id,
+                "deployment_id": frozen.deployment_id,
+                "bot_id": frozen.bot_id,
+                "storage_generation": frozen.storage_generation,
+            },
+        )
+        assert resource["state"] == "ACTIVE"
+        assert (resource["physical_name"], resource["role_name"]) == created_physical
     finally:
         if controller is not None:
             await controller.close()
         await host_supervisor.close()
         await deployment_store.close()
         await host_store.close()
+        if created_physical is not None:
+            assert created_physical[0].startswith("forest_bot_")
+            assert created_physical[1].startswith("forest_role_")
+            await admin.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(
+                sql.Identifier(created_physical[0]),
+            ))
+            await admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(
+                sql.Identifier(created_physical[1]),
+            ))
         assert host_name.startswith("forest_host_")
         assert deployment_name.startswith("forest_deployment_")
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
