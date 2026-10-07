@@ -159,6 +159,16 @@ class HostPostgresMaterializationEffect:
                     "SELECT pg_advisory_lock(hashtextextended(%s,0))",
                     ("forest.host-storage.postgresql/" + name,),
                 )
+                # A release may commit while this call waits for the physical
+                # lock. Recheck the Host authority after acquiring that lock;
+                # otherwise a stale materializer can recreate retired storage.
+                current = await self._reservation(row["resource_id"])
+                if current["revision"] != row["revision"]:
+                    raise ForestError(
+                        "HOST_STORAGE_RESOURCE_UNAVAILABLE",
+                        "Host PostgreSQL reservation changed while awaiting physical admission", 409,
+                    )
+                row = current
                 async with conn.transaction():
                     saved_role = await (
                         await conn.execute(

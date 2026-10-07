@@ -112,14 +112,17 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
         catalog = PackageCatalog(tmp_path / "catalog")
+        physical_effects = []
 
         def physical_factory(configuration, revision, identity, declaration):
-            return HostPostgresMaterializationEffect(
+            effect = HostPostgresMaterializationEffect(
                 configuration, revision, identity, declaration,
                 store=host_store, supervisor=host_supervisor,
                 maintenance_dsn=dsn,
                 credential_resolver=secrets.resolve_text_for_purpose,
             )
+            physical_effects.append(effect)
+            return effect
 
         controller = HostPackageController(
             HostRuntimeScope(
@@ -489,10 +492,42 @@ async def test_host_reserve_replays_after_deployment_lease_loss_and_hot_reload(t
             )
         assert job_after_revoke.value.code == "STORAGE_PROFILE_REVOKED"
 
-        released, release_replay = await asyncio.gather(
-            bridge.release_reference(frozen.request_id),
-            bridge.release_reference(frozen.request_id),
+        effect = physical_effects[-1]
+        original_reservation = effect._reservation
+        reservation_read = asyncio.Event()
+
+        async def observed_reservation(resource_id):
+            row = await original_reservation(resource_id)
+            reservation_read.set()
+            return row
+
+        effect._reservation = observed_reservation
+        physical_lock = "forest.host-storage.postgresql/" + created_physical[0]
+        await admin.execute(
+            "SELECT pg_advisory_lock(hashtextextended(%s,0))", (physical_lock,),
         )
+        stale_materialization = asyncio.create_task(effect.invoke(
+            {"resource_id": reserved_id, "credential_ref": frozen.credential_ref},
+            scope=SimpleNamespace(
+                scope_kind="host", scope_id=host_id,
+                component_id="host.storage",
+                generation_id=effect._identity.generation_id,
+            ), invocation=None,
+        ))
+        try:
+            await asyncio.wait_for(reservation_read.wait(), 10)
+            released, release_replay = await asyncio.gather(
+                bridge.release_reference(frozen.request_id),
+                bridge.release_reference(frozen.request_id),
+            )
+        finally:
+            await admin.execute(
+                "SELECT pg_advisory_unlock(hashtextextended(%s,0))", (physical_lock,),
+            )
+        with pytest.raises(ForestError) as stale_physical:
+            await stale_materialization
+        assert stale_physical.value.code == "HOST_STORAGE_RESOURCE_UNAVAILABLE"
+        effect._reservation = original_reservation
         assert released == release_replay
         assert released["resource_id"] == reserved_id
         assert released["state"] == "RETIRED"
