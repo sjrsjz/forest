@@ -444,7 +444,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2,<4" },
     { name = "pymilvus", specifier = ">=2.6,<3" },
     { name = "tzdata", specifier = ">=2025.1" },
-    { name = "uvicorn", specifier = ">=0.30,<1" },
+    { name = "uvicorn", specifier = ">=0.52.4,<0.53" },
     { name = "websockets", specifier = ">=15,<16" },
 ]
 

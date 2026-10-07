@@ -7,10 +7,13 @@ import json
 import os
 import re
 import signal
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
 from uuid import uuid4
+
+import uvicorn
 
 from forest.bootstrap_contributions import BootstrapConfigurationRegistry
 from forest.bot_host import BotHost
@@ -77,6 +80,13 @@ from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
 from forest.storage.host_web_authority import HostWebAuthorityRepository
 from forest.web_authority_ticket import WebAuthorityTicketAuthority
+
+
+class _EmbeddedManagementServer(uvicorn.Server):
+    """Leave process signal ownership with the deployment Supervisor."""
+
+    def capture_signals(self):
+        return nullcontext()
 
 
 def _required(name: str) -> str:
@@ -474,9 +484,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             official_sources=auto_install_official_sources("deployment"),
         )
         await deployment_controller.start()
-        import uvicorn
-
-        management_server = uvicorn.Server(
+        management_server = _EmbeddedManagementServer(
             uvicorn.Config(
                 create_deployment_management_app(
                     deployment_id=settings.deployment_id,
@@ -503,7 +511,6 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                 limit_concurrency=64,
             )
         )
-        management_server.install_signal_handlers = lambda: None
         management_task = asyncio.create_task(
             management_server.serve(), name="deployment-management-web"
         )

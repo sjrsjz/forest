@@ -1,14 +1,45 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import signal
 
 import pytest
+import uvicorn
 
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
-from forest.supervisor_host import SupervisorSettings, _host_id
+from forest.supervisor_host import SupervisorSettings, _EmbeddedManagementServer, _host_id
+
+
+async def test_embedded_management_server_does_not_claim_process_signals(monkeypatch):
+    async def app(scope, receive, send):
+        if scope["type"] == "http":
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+    server = _EmbeddedManagementServer(
+        uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="off", log_level="critical")
+    )
+
+    def reject_signal_claim(_signal, _handler):
+        raise AssertionError("Embedded Uvicorn tried to replace a process signal handler")
+
+    with monkeypatch.context() as scoped_patch:
+        scoped_patch.setattr(signal, "signal", reject_signal_claim)
+        task = asyncio.create_task(server.serve())
+        try:
+            async with asyncio.timeout(5):
+                while not server.started:
+                    if task.done():
+                        await task
+                        raise AssertionError("Embedded management server stopped before startup")
+                    await asyncio.sleep(0.01)
+        finally:
+            server.should_exit = True
+            await asyncio.wait_for(task, timeout=5)
 
 
 def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, monkeypatch):
