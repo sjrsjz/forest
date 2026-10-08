@@ -1,6 +1,6 @@
 # 干净生产启动链
 
-本文记录当前可执行的单 Bot 启动切片。它是最小 bootstrap 与冻结 RuntimeGraph 的生产入口，不是新的业务组合根。宿主只持有数据库连接池、schema bundle installer、HostLease 和 `RuntimeModuleRegistry`；Adapter、触发策略、Conversation、Agent、Memory、Provider 与 Delivery 均以平级 Generation 成员运行。
+本文记录多 Bot Supervisor 的生产启动入口，以及独立 `forest bot` 诊断路径。宿主持有进程、数据库连接、HostLease 和 RuntimeGraph 生命周期；Adapter、触发策略、Conversation、Agent、Memory、Provider 与 Delivery 作为 Bot 作用域的平级 Generation 成员运行。Bot 基础身份和期望运行意图归部署内核，管理 builtin 通过受限端口操作。
 
 ## 启动图
 
@@ -84,7 +84,7 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supervisor`，镜像默认命令也是 `forest supervisor`。PostgreSQL 首次初始化创建 `forest_deployment`，以及由无超级用户 `forest_host` role 持有的独立 `forest_host`；Host role 不能连接 deployment 库。管理员先在 Secret 模块登记专属 PostgreSQL role 口令，再由 `deployment.storage-orchestrator` 冻结请求；`host.storage` 按其资源账本分配物理数据库名、无特权 login role 与 owner marker，并在 Host 物化及 pin 后原子发布 deployment DSN Secret/profile。Bot 运行时不持有 deployment 超级用户凭据。Supervisor 的健康检查只探测 loopback 管理监听，不读取 Web 凭据。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
 
-旧的单 Bot 数据库重建脚本已经退役。它按 Bot ID 推导数据库名并直接删除数据库，无法核对 `host.storage` 的资源身份、owner marker、pin 和引用水位，不能用于当前 Host 管理的 profile。现在没有受支持的单 Bot 原位删库重建操作；遇到损坏应保持 Host/deployment 账本及物理资源原状，先导出准确证据和备份，待 Host 解 pin、回收与替换 generation 协议完成后再操作。预发布阶段若决定整体重置环境，应先停止 Supervisor，备份需要保留的 PostgreSQL、Milvus 和 Secret，再把 deployment、Host、Bot 物理库及向量集合视作同一批环境重建，重新经 WebUI 创建 Secret、存储请求与 Bot 供应事实。不能只删 Bot 库而保留指向它的 READY catalog/profile 与 Host pin。
+旧的单 Bot 数据库重建脚本已经退役。它按 Bot ID 推导数据库名并直接删除数据库，无法核对 `host.storage` 的资源身份、owner marker、pin 和引用水位，不能用于当前 Host 管理的 profile。对经当前 Host 物化并持有准确 pin 的 Bot，管理员可提交 `bot.retire`：部署退役包等待 Bot 静止、撤销 profile、释放 pin，Host 包在物理锁和 owner marker 复核下回收数据库及 role，最后同一部署事务将 Bot 与退役 Job 结算为 `DELETED`/`SUCCEEDED`。外部结果不明时 Job 保留 `BLOCKED_UNKNOWN`，只能按准确 Job 修订号重新准入；不得手工删库或推断已成功。退役后用新的 Bot 身份走正常供应流程，当前仍不提供同一 Bot 身份的原位重建。旧预发布资源若没有可证明的 Host marker/pin，不能直接使用自动退役。预发布阶段若决定整体重置环境，应先停止 Supervisor，备份需要保留的 PostgreSQL、Milvus 和 Secret，再把 deployment、Host、Bot 物理库及向量集合视作同一批环境重建，重新经 WebUI 创建 Secret、存储请求与 Bot 供应事实。不能只删 Bot 库而保留指向它的 READY catalog/profile 与 Host pin。
 
 `pg_dump` 只保存 PostgreSQL 权威事实，不包含 Milvus 向量。整体重置前如需可回滚的完整记忆，应另行保存同一向量集合或重新嵌入，并明确处理外部调用费用。
 
