@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.79.3"
+version = "1.79.4"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -466,11 +466,13 @@ output_schema = "schemas/trial-cancel-output.json"
 [[components.management_queries]]
 id = "memory.trunks.list"
 port = "memory.list-trunks"
+audit = "SECURITY"
 timeout_s = 10
 
 [[components.management_queries]]
 id = "memory.sources.query"
 port = "memory.query-sources"
+audit = "SECURITY"
 default_limit = 50
 max_limit = 100
 timeout_s = 10
@@ -479,6 +481,7 @@ timeout_s = 10
 id = "memory.source-facets.query"
 port = "memory.query-source-facets"
 required_role = "ADMIN"
+audit = "SECURITY"
 default_limit = 50
 max_limit = 100
 timeout_s = 10
@@ -487,6 +490,7 @@ timeout_s = 10
 id = "memory.embedding-attempt.inspect"
 port = "memory.inspect-embedding-attempt"
 required_role = "ADMIN"
+audit = "SECURITY"
 timeout_s = 10
 
 [[components.management_queries]]
@@ -494,6 +498,7 @@ id = "memory.forget.selection"
 port = "memory.query-forget-selection"
 required_role = "ADMIN"
 actor_field = "requested_by"
+audit = "SECURITY"
 default_limit = 50
 max_limit = 100
 timeout_s = 15
@@ -503,11 +508,13 @@ id = "memory.forget.batch.preview"
 port = "memory.forget.batch.preview"
 required_role = "ADMIN"
 actor_field = "requested_by"
+audit = "SECURITY"
 timeout_s = 30
 
 [[components.management_queries]]
 id = "memory.relations.query"
 port = "memory.query-relations"
+audit = "SECURITY"
 default_limit = 10
 max_limit = 20
 timeout_s = 10
@@ -515,6 +522,7 @@ timeout_s = 10
 [[components.management_queries]]
 id = "memory.relations.search"
 port = "memory.search-relations"
+audit = "SECURITY"
 default_limit = 10
 max_limit = 20
 timeout_s = 10
@@ -522,6 +530,7 @@ timeout_s = 10
 [[components.management_queries]]
 id = "memory.relations.evidence"
 port = "memory.query-relation-evidence"
+audit = "SECURITY"
 default_limit = 16
 max_limit = 16
 timeout_s = 10
@@ -529,11 +538,13 @@ timeout_s = 10
 [[components.management_queries]]
 id = "memory.relations.neighbourhood"
 port = "memory.query-neighbourhood"
+audit = "SECURITY"
 timeout_s = 12
 
 [[components.management_queries]]
 id = "memory.forget.preview"
 port = "memory.source.forget.preview"
+audit = "SECURITY"
 timeout_s = 30
 
 [[components.management_queries]]
