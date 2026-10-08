@@ -6029,6 +6029,16 @@ DECLARE
     contribution_ref text;
     new_contribution integer;
 BEGIN
+    -- Forget locks source units before it suppresses pending journals. Acquire
+    -- the same source locks first, otherwise promotion can hold the journal
+    -- while its evidence FK waits for a source held by forget (a deadlock).
+    SELECT * INTO journal_row FROM __forest_module_schema__.association_journal
+    WHERE bot_id=requested_bot AND journal_id=requested_journal;
+    IF journal_row IS NULL OR journal_row.state<>'PENDING_ARCHIVE' THEN RETURN false; END IF;
+    PERFORM 1 FROM __forest_module_schema__.source_units
+    WHERE bot_id=requested_bot AND source_unit_id IN (
+        journal_row.trigger_source_unit_id,journal_row.seed_source_unit_id)
+    ORDER BY source_unit_id FOR SHARE;
     SELECT * INTO journal_row FROM __forest_module_schema__.association_journal
     WHERE bot_id=requested_bot AND journal_id=requested_journal FOR UPDATE;
     IF journal_row IS NULL OR journal_row.state<>'PENDING_ARCHIVE' THEN RETURN false; END IF;

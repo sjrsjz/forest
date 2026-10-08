@@ -1,5 +1,6 @@
-"""One committed reply must learn at most one durable cross-trunk relation."""
+"""Cross-trunk association must retain attribution and converge with forget."""
 
+import asyncio
 import hashlib
 from pathlib import Path
 from types import SimpleNamespace
@@ -294,3 +295,98 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
     assert region["nodes"][1]["external_group_id"] == "question"
     assert region["nodes"][1]["path_parent_source_unit_id"] == "seed"
     assert region["nodes"][1]["activation"] == 0.9
+
+    # Forget takes source locks before touching the pending journal. Promotion
+    # must do the same; otherwise its evidence FK and the journal update form
+    # an opposing lock order under concurrent transactions.
+    async with store.pool.connection() as conn:
+        await conn.execute(sql.SQL(
+            "UPDATE {}.source_units SET eligibility_state='ELIGIBLE',"
+            "eligibility_revision=eligibility_revision+1,eligible_at=clock_timestamp() "
+            "WHERE bot_id=%s AND source_unit_id='later'"
+        ).format(schema), (bot,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.association_journal("
+            "bot_id,journal_id,operation_id,input_digest,reply_ref,bundle_id,"
+            "query_id,trigger_ref,trigger_source_unit_id,trigger_source_revision,"
+            "trigger_part_id,seed_source_unit_id,seed_source_revision,seed_part_id,"
+            "seed_rank_score) VALUES "
+            "(%s,'journal/race','reply/race',%s,'reply/race','bundle/test',"
+            "'query/test','trigger/race','later',1,'text','seed',1,'text',0.8)"
+        ).format(schema), (bot, digest))
+
+    entered = asyncio.Event()
+    promoter_pid = None
+
+    async def promote():
+        nonlocal promoter_pid
+        async with store.pool.connection() as promotion_conn:
+            async with promotion_conn.transaction():
+                promoter_pid = (await (await promotion_conn.execute(
+                    "SELECT pg_backend_pid() AS pid"
+                )).fetchone())["pid"]
+                await promotion_conn.execute("SET LOCAL lock_timeout='5s'")
+                entered.set()
+                result = await (await promotion_conn.execute(sql.SQL(
+                    "SELECT {}.memory_promote_association(%s,%s) AS promoted"
+                ).format(schema), (bot, "journal/race"))).fetchone()
+                return result["promoted"]
+
+    async with store.pool.connection() as forgetting_conn:
+        async with forgetting_conn.transaction():
+            blocker_pid = (await (await forgetting_conn.execute(
+                "SELECT pg_backend_pid() AS pid"
+            )).fetchone())["pid"]
+            await forgetting_conn.execute(sql.SQL(
+                "SELECT 1 FROM {}.source_units WHERE bot_id=%s "
+                "AND source_unit_id='later' FOR UPDATE"
+            ).format(schema), (bot,))
+            pending = asyncio.create_task(promote())
+            await entered.wait()
+            async with asyncio.timeout(3):
+                while True:
+                    blockers = (await (await forgetting_conn.execute(
+                        "SELECT pg_blocking_pids(%s) AS pids", (promoter_pid,)
+                    )).fetchone())["pids"]
+                    if blocker_pid in blockers:
+                        break
+                    await asyncio.sleep(0.02)
+            # A promotion holding journal FOR UPDATE would fail this NOWAIT
+            # probe, proving a lock-order cycle before a deadlock timeout.
+            await forgetting_conn.execute(sql.SQL(
+                "SELECT 1 FROM {}.association_journal WHERE bot_id=%s "
+                "AND journal_id='journal/race' FOR UPDATE NOWAIT"
+            ).format(schema), (bot,))
+            forgotten = await (await forgetting_conn.execute(sql.SQL(
+                "SELECT {}.memory_apply_forget_effects(%s,%s,%s,%s,%s,%s) AS value"
+            ).format(schema), (
+                bot, "forget/race", digest, ["payload/later"], 1, ["later"],
+            ))).fetchone()
+            assert forgotten["value"]["suppressed_source_units"] == 1
+    assert await pending is False
+    async with store.pool.connection() as conn:
+        journal_state = (await (await conn.execute(sql.SQL(
+            "SELECT state FROM {}.association_journal WHERE bot_id=%s "
+            "AND journal_id='journal/race'"
+        ).format(schema), (bot,))).fetchone())["state"]
+        active_relation_count = (await (await conn.execute(sql.SQL(
+            "SELECT count(*) AS count FROM {}.relation_contributions "
+            "WHERE bot_id=%s AND active AND (left_id='later' OR right_id='later')"
+        ).format(schema), (bot,))).fetchone())["count"]
+    assert journal_state == "SUPPRESSED"
+    assert active_relation_count == 0
+
+    # The opposite committed order keeps the old journal as history while
+    # retracting the already promoted contribution in the forget transaction.
+    async with store.pool.connection() as conn:
+        retracted = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_apply_forget_effects(%s,%s,%s,%s,%s,%s) AS value"
+        ).format(schema), (
+            bot, "forget/promoted", digest, ["payload/trigger"], 2, ["trigger"],
+        ))).fetchone())["value"]
+        assert retracted["retracted_relations"] == 1
+        active = (await (await conn.execute(sql.SQL(
+            "SELECT count(*) AS count FROM {}.relation_contributions "
+            "WHERE bot_id=%s AND active"
+        ).format(schema), (bot,))).fetchone())["count"]
+        assert active == 0
