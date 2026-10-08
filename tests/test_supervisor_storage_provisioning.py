@@ -214,6 +214,29 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
             assert inventory.status_code == 200, inventory.text
             assert len(inventory.json()["items"]) == 1
             assert inventory.json()["items"][0]["state"] == "ACTIVE"
+            audit_module = next(
+                row for row in host_runtime.json()["modules"]
+                if row["component_id"] == "host.audit"
+            )
+            audit_page = await client.post(
+                host_base + "/modules/host.audit/queries/audit.records.query",
+                headers=headers, json={"limit": 10, "action": "generations"},
+            )
+            assert audit_page.status_code == 200, audit_page.text
+            assert len(audit_page.json()["records"]) == 1
+            assert audit_page.json()["records"][0]["producer_generation_id"] == (
+                host_module["generation_id"]
+            )
+            reads_page = await client.post(
+                host_base + "/modules/host.audit/queries/audit.records.query",
+                headers=headers, json={"limit": 10, "operation_kind": "web.query"},
+            )
+            assert reads_page.status_code == 200, reads_page.text
+            assert all(
+                row["operation_kind"] == "web.query"
+                for row in reads_page.json()["records"]
+            )
+            assert len(reads_page.json()["records"]) >= 3
             host_audit_reader = await psycopg.AsyncConnection.connect(host_dsn, autocommit=True)
             try:
                 rows = await (
@@ -228,6 +251,18 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
                 assert rows[0][1:4] == ("web.query", "generations", "host.component")
                 assert rows[0][4] == host_module["generation_id"]
                 assert rows[0][5] is None
+                own_queries = await (
+                    await host_audit_reader.execute(
+                        "SELECT producer_generation_id,receipt_ticket_id "
+                        "FROM forest_host.audit_records WHERE host_id=%s "
+                        "AND action='audit.records.query'",
+                        (host_id,),
+                    )
+                ).fetchall()
+                assert own_queries == [
+                    (audit_module["generation_id"], None),
+                    (audit_module["generation_id"], None),
+                ]
             finally:
                 await host_audit_reader.close()
             configuration_path = host_base + "/modules/host.storage/configuration"

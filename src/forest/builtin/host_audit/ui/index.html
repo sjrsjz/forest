@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    :root{color-scheme:dark;font:14px/1.45 system-ui,sans-serif;color:#dcebe2;background:#0d1712}
+    *{box-sizing:border-box}body{margin:0;padding:10px}section{border:1px solid #29493a;border-radius:9px;background:#102019;overflow:hidden}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border-bottom:1px solid #29493a}
+    h2{font-size:16px;margin:0}small{color:#91ac9a}form{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr)) auto;gap:8px;padding:10px 12px;border-bottom:1px solid #29493a}
+    label{font-size:12px;color:#91ac9a}input,select,button{width:100%;padding:7px;border:1px solid #365b49;border-radius:6px;background:#09120e;color:#e9f7ef}
+    button{width:auto;cursor:pointer;background:#173426;padding:7px 12px}.wide{grid-column:span 2}.results{max-height:420px;overflow:auto}.row{display:grid;grid-template-columns:150px 90px minmax(150px,1fr) minmax(140px,1fr) minmax(180px,1fr);gap:8px;padding:8px 12px;border-top:1px solid #203e30;min-width:800px}.row:first-child{border-top:0}.row code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.footer{display:flex;justify-content:space-between;align-items:center;padding:9px 12px;color:#91ac9a}#status{min-height:18px;color:#91ac9a}
+    @media(max-width:900px){form{grid-template-columns:repeat(2,minmax(120px,1fr))}.wide{grid-column:span 2}}
+  </style>
+</head>
+<body>
+<section>
+  <header><h2>Host 审计</h2><small>仅显示脱敏元数据，按 Host 范围查询</small></header>
+  <form id="filters">
+    <label>动作<input name="action" placeholder="配置或管理动作"></label>
+    <label>生产者<input name="producer_component_id" placeholder="host.audit"></label>
+    <label>来源<input name="origin_kind" placeholder="web.management"></label>
+    <label>页大小<select name="limit"><option>25</option><option selected>50</option><option>100</option></select></label>
+    <label>主体 ID<input name="actor_id" placeholder="管理员主体"></label>
+    <label>资源 ID<input name="resource_id" placeholder="组件 ID"></label>
+    <label>操作类型<select name="operation_kind"><option value="">全部</option><option value="web.query">读取</option><option value="web.action">写入</option></select></label>
+    <label class="wide">操作 ID<input name="operation_id" placeholder="精确匹配"></label>
+    <button type="submit">查询</button>
+  </form>
+  <div id="rows" class="results"></div>
+  <div class="footer"><span id="status">等待连接</span><button id="more" type="button" hidden>下一页</button></div>
+</section>
+<script>
+(()=>{'use strict';let port,nonce,sequence=0,pending=null,lastFilter=null,nextBefore=null;const form=document.getElementById('filters'),rows=document.getElementById('rows'),status=document.getElementById('status'),more=document.getElementById('more');
+  const send=(type,payload={})=>port?.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
+  const filters=()=>{const value={limit:Number(form.elements.limit.value)};for(const key of ['action','producer_component_id','origin_kind','actor_id','resource_id','operation_id','operation_kind']){const item=form.elements[key].value.trim();if(item)value[key]=item;}if(value.actor_id)value.actor_kind='web.subject';if(value.resource_id)value.resource_kind='host.component';return value;};
+  const cell=(row,text,tag='span')=>{const node=document.createElement(tag);node.textContent=text??'—';row.append(node);};
+  const render=(page,append)=>{if(!append)rows.replaceChildren();for(const item of page.records){const row=document.createElement('div');row.className='row';cell(row,new Date(item.created_at).toLocaleString(),'time');cell(row,item.severity);cell(row,item.action,'code');cell(row,item.actor_id);cell(row,item.resource_id+' · '+item.operation_id);rows.append(row);}nextBefore=page.next_before;more.hidden=!nextBefore;status.textContent=`已载入 ${rows.children.length} 条记录`;send('resize',{height:Math.min(document.documentElement.scrollHeight,620)});};
+  const load=append=>{if(pending)return;const value=append?{...lastFilter,before:nextBefore}:filters();if(!append)lastFilter=value;const request_id=`audit-${++sequence}`;pending={request_id,append};status.textContent='正在查询…';send('query',{request_id,operation_id:'audit.records.query',value});};
+  form.addEventListener('submit',event=>{event.preventDefault();load(false);});more.addEventListener('click',()=>load(true));
+  addEventListener('message',event=>{const message=event.data||{};if(event.source!==parent||!event.ports[0]||message.protocol!=='forest.management-ui-connect/1'||message.type!=='connect'||typeof message.nonce!=='string')return;port=event.ports[0];nonce=message.nonce;port.onmessage=event=>{const value=event.data||{};if(value.protocol!=='forest.management-ui-channel/1'||value.nonce!==nonce)return;if(value.type==='initialize'){send('resize',{height:Math.min(document.documentElement.scrollHeight,620)});load(false);return;}if(pending&&value.request_id===pending.request_id){const current=pending;pending=null;if(value.type==='query-result')render(value.value,current.append);else if(value.type==='operation-error')status.textContent=value.message||'查询失败';}else if(value.type==='error')status.textContent=value.message||'操作失败';};port.start();send('ready');},{once:true});
+})();
+</script>
+</body>
+</html>
