@@ -1638,10 +1638,13 @@ async def test_worker_host_can_reload_its_own_generation(tmp_path):
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
     name = "forest_self_reload_" + uuid4().hex
+    other_name = "forest_self_reload_other_" + uuid4().hex
     admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
     await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(other_name)))
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
+    other_uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + other_name, "", ""))
     settings = BotSettings(
         bot_id="bot-worker-self-reload", dsn=uri,
         model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
@@ -1751,6 +1754,52 @@ async def test_worker_host_can_reload_its_own_generation(tmp_path):
                 if item.component_id == "routing.graph"
             ).artifact.package_digest == updated.digest
             assert pinned.generations["kernel.runtime"] == before.generations["kernel.runtime"]
+            other = BotHost(
+                replace(settings, bot_id="bot-worker-self-reload-other", dsn=other_uri),
+                model_client_factory=FakeModelClient,
+                embedding_client_factory=FakeEmbeddingClient,
+                media_client_factory=FakeMediaClient,
+                vector_index_client_factory=FakeMilvusClient,
+                websocket_client_factory=create_websocket,
+                package_catalog=PackageCatalog(tmp_path / "self-reload-packages"),
+            )
+            try:
+                await other.start()
+                other_before = other.registry.graph_identity
+                other_proposal = {
+                    **proposal,
+                    "package_digest": routing_default.digest,
+                    "manifest_digest": digest_json(routing_default.manifest),
+                    "expected_graph_revision": other_before.graph_revision,
+                }
+                other_contract = other.registry.get(
+                    "component.worker-host"
+                ).management_contract
+                other_validated = await other_contract.query("validate", other_proposal)
+                other_selected = await other_contract.action(
+                    "module.enable", operation_id="selection/pin-other-routing-official",
+                    payload={**other_proposal, "plan_digest": other_validated["plan_digest"]},
+                    authorization=SimpleNamespace(actor_ref="subject/host-admin"),
+                    authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+                )
+                assert other_selected["selection_revision"] == 1
+                async with asyncio.timeout(180):
+                    while other.registry.graph_identity.graph_id == other_before.graph_id:
+                        latest = (await other._kernel.runtime.status())["latest_replacement"]
+                        if latest is not None and latest["state"] == "FAILED":
+                            pytest.fail(f"Other Bot official selection failed: {latest}")
+                        await asyncio.sleep(0.1)
+                assert next(
+                    item for item in other.registry.descriptors
+                    if item.component_id == "routing.graph"
+                ).artifact.package_digest == routing_default.digest
+                assert host.registry.graph_identity == pinned
+                assert next(
+                    item for item in host.registry.descriptors
+                    if item.component_id == "routing.graph"
+                ).artifact.package_digest == updated.digest
+            finally:
+                await other.close()
             before = pinned
             affected = set(host.registry.replacement_closure("component.worker-host"))
             worker_host = host.registry.get("component.worker-host")
@@ -1862,7 +1911,9 @@ async def test_worker_host_can_reload_its_own_generation(tmp_path):
         assert missing_artifact.registry is None
     finally:
         assert name.startswith("forest_self_reload_") and len(name) == 51
+        assert other_name.startswith("forest_self_reload_other_") and len(other_name) == 57
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(other_name)))
         await admin.close()
 
 
