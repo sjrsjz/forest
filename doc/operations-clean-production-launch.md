@@ -153,6 +153,14 @@ Compose 中无需设置 `FOREST_DEPLOYMENT_DSN` 或 `FOREST_HOST_DSN`：Supervis
 
 Supervisor 同时启动多作用域 WebUI，并把 Host Graph 作为独立作用域注册；Host 包自带资源清单与模块配置页经 Host Web 回执授权。页面从 deployment provider 动态发现 Bot 目录、Secret、Provisioning 与管理账号工作区；可以写入不回显的版本化 Secret、管理 ADMIN/AUDITOR 账号及会话、在 Host 存储模块提交建库请求，待结算后使用对应 storage profile，并从 Bootstrap Contributor 目录逐模块设置 Provider、VL Embedding、触发策略、Shell、Agent 和 OneBot 后冻结 profile、加入供应队列。登录使用 HttpOnly、SameSite 服务端会话；POST 同时校验精确 Origin 和 CSRF，角色在 HTTP 入口与目标作用域网关复核。Bot 进入 ONLINE 后，壳层作用域选择器通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不复制 Agent、Memory、OneBot 或 Job 页面。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。
 
+## v14 候选切换边界（2026-10-09）
+
+隔离候选 `forest-live-candidate-v14-supervisor` 与 `forest-live-candidate-v14-pg` 已启动，WebUI 只监听本机 `127.0.0.1:18090`。候选中的 `forest-main` 已完成独立 Host 存储供应，但运行意图仍为 `OFFLINE`；另一只 mock Bot 在模拟 OneBot 上完成启动、停止验收后也已恢复 `OFFLINE`。候选真实 Bot 只许可群 `933179609`，冻结的 VL 模型为 `Qwen/Qwen3-VL-Embedding-8B`、4096 维。旧 `forest-clean-supervisor-1` 仍在线，树莓派 `sjz1@192.168.31.117` 的 `alicebot.service` 为 `active/enabled`。这些状态是切换前快照，不是启动候选真实 Bot 的许可。
+
+切换时先复核上述三方状态及候选凭据、群白名单和 WebUI 运行意图，再让旧 Forest Supervisor 与树莓派 AliceBot 停止向同一个 QQ 身份提供服务；确认旧 OneBot 连接退出后，才把候选 `forest-main` 的期望状态改为 `ONLINE`。只在许可群做低频人工触发，同时记录候选 Bot Graph、OneBot 连接、Agent Run、Delivery 回执和 Memory 状态；`scripts/observe_live_bot.py` 的只读采样不能替代实际群回复检查。切换不迁移旧预发布 Bot 数据库，也不删除旧卷。若候选失败，先将其真实 Bot 改回 `OFFLINE` 并确认连接关闭，再恢复旧 Forest 和树莓派服务；不得让回滚实例与候选同时使用该 QQ 身份。任何 `UNKNOWN` 发送或模型效果仍按各模块的证据协议核对，不靠重复群消息探测。
+
+当前旧 Forest Supervisor 的停机尚未获得执行授权，候选真实 Bot 因此保持离线。执行切换前需重新读取实际容器和服务状态；不要把此快照当成当前运行事实。
+
 ## 仍需补齐的能力
 
 - 树莓派与 PC 之间的长时实网抖动和持续真实流量验证；loopback 断连、action 不确定性、1000 条有界顺序流、过载显式失败、候选发布失败回滚和 owned task 崩溃后的 Supervisor 隔离已经自动化覆盖；
