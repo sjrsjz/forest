@@ -76,6 +76,7 @@ class PackageOwnedWorkSupervisor:
             declaration["name"]: asyncio.Lock() for declaration in declarations
         }
         self._next_claim_at = {declaration["name"]: 0.0 for declaration in declarations}
+        self._signal_revision = 0
         self._drain_empty: set[str] = set()
         self._drained = asyncio.Event()
         self._terminated = asyncio.Event()
@@ -90,7 +91,21 @@ class PackageOwnedWorkSupervisor:
         self.failure: str | None = None
 
     def notify(self) -> None:
+        # A committed write may have created work for any handler in this
+        # Generation. Reprobe promptly; the durable queue remains authoritative.
+        self._signal_revision += 1
+        for name in self._next_claim_at:
+            self._next_claim_at[name] = 0.0
         self.wake.set()
+
+    def _empty_poll_ms(self, declaration: dict) -> int:
+        # Committed writes wake local pumps. A bounded database probe still
+        # recovers missed signals and discovers time-based retries.
+        return (
+            declaration["poll_interval_ms"]
+            if self.draining
+            else max(declaration["poll_interval_ms"], 1000)
+        )
 
     def owned_tasks(self) -> tuple[asyncio.Task, ...]:
         return tuple(self.tasks)
@@ -103,7 +118,7 @@ class PackageOwnedWorkSupervisor:
             self.admission.clear()
         else:
             self.admission.set()
-        self.wake.set()
+        self.notify()
 
     async def drain(self) -> None:
         if not self.tasks or self.closing or self._terminated.is_set():
@@ -145,7 +160,7 @@ class PackageOwnedWorkSupervisor:
         self._drain_empty.clear()
         self._drained.clear()
         self.admission.set()
-        self.wake.set()
+        self.notify()
 
     def _scope(
         self,
@@ -243,17 +258,18 @@ class PackageOwnedWorkSupervisor:
 
         name = declaration["name"]
         async with self._claim_locks[name]:
-            delay = self._next_claim_at[name] - asyncio.get_running_loop().time()
-            if delay > 0:
-                await asyncio.sleep(delay)
+            while (delay := self._next_claim_at[name] - asyncio.get_running_loop().time()) > 0:
+                await self._wait(max(1, int(delay * 1000)))
             if self.drain_policy == "inflight" and not self.admission.is_set():
                 return None
+            signal_revision = self._signal_revision
             claim = await self._claim(declaration)
             now = asyncio.get_running_loop().time()
             self._next_claim_at[name] = (
                 now
                 if claim is not None
-                else now + declaration["poll_interval_ms"] / 1000
+                else 0.0 if self._signal_revision != signal_revision
+                else now + self._empty_poll_ms(declaration) / 1000
             )
             return claim
 
@@ -507,7 +523,7 @@ class PackageOwnedWorkSupervisor:
                     if error.code == "DOMAIN_AUTHORITY_TIMEOUT" and not probe_completed:
                         self._next_claim_at[declaration["name"]] = (
                             asyncio.get_running_loop().time()
-                            + declaration["poll_interval_ms"] / 1000
+                            + self._empty_poll_ms(declaration) / 1000
                         )
                     elif error.code == "RUNTIME_GENERATION_NOT_ACTIVE" and not self.admission.is_set():
                         pass
@@ -533,8 +549,10 @@ class PackageOwnedWorkSupervisor:
                             and self._drain_empty == self._handler_names
                         ):
                             self._drained.set()
-                if claim is None or not self.admission.is_set():
-                    await self._wait(declaration["poll_interval_ms"])
+                if (claim is None or not self.admission.is_set()) and (
+                    self._next_claim_at[declaration["name"]] > 0
+                ):
+                    await self._wait(self._empty_poll_ms(declaration))
         except asyncio.CancelledError:
             raise
         except Exception:

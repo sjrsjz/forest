@@ -627,6 +627,7 @@ async def bootstrap_builtin_snapshot(
     initial_configuration: dict[str, Any] | None,
     resolved_contracts: dict[str, str] | None = None,
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
+    work_notifier: Callable[[], None] | None = None,
 ) -> ProvisionedPackageModule:
     """Provision the exact captured official artifact inspected by its caller."""
 
@@ -638,6 +639,7 @@ async def bootstrap_builtin_snapshot(
         initial_configuration=initial_configuration,
         resolved_contracts=resolved_contracts,
         effect_driver_registry=effect_driver_registry,
+        work_notifier=work_notifier,
         trust_level="official",
     )
 
@@ -652,6 +654,7 @@ async def bootstrap_installed_package(
     initial_configuration: dict[str, Any] | None,
     approved_capabilities: tuple[str, ...],
     resolved_contracts: dict[str, str] | None = None,
+    work_notifier: Callable[[], None] | None = None,
 ) -> ProvisionedPackageModule:
     """Bind an approved artifact to its own initialized configuration ledger."""
 
@@ -669,6 +672,7 @@ async def bootstrap_installed_package(
         initial_configuration=initial_configuration,
         resolved_contracts=resolved_contracts,
         approved_capabilities=approved_capabilities,
+        work_notifier=work_notifier,
         trust_level="installed",
     )
 
@@ -687,6 +691,7 @@ def _compile_package_descriptor(
     configuration_validator,
     trust_level: str,
     plan_only: bool = False,
+    work_notifier: Callable[[], None] | None = None,
 ) -> RuntimeModuleDescriptor:
     component_id = snapshot.component["id"]
     effect_driver_factories = effect_driver_registry.resolve(
@@ -708,6 +713,7 @@ def _compile_package_descriptor(
             storage_package_digest=storage.package_digest,
             storage_execution_profile=storage.execution_profile,
             payloads=kernel.payload,
+            work_notifier=work_notifier,
         )
         if has_domain_authority
         else None
@@ -744,7 +750,7 @@ def _compile_package_descriptor(
         domain_commands=domain_authority,
         unit_of_work_authority=domain_authority,
         unit_of_work_coordinator_factory=package_uow_coordinator_factory(
-            store=store, runtime=kernel.runtime,
+            store=store, runtime=kernel.runtime, work_notifier=work_notifier,
         ),
         configuration_apply_coordinator_factory=lambda target, repository, control: (
             PostgresComponentConfigurationApplyCoordinator(
@@ -820,6 +826,7 @@ async def _bootstrap_package_snapshot(
     effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
     approved_capabilities: tuple[str, ...] | None = None,
     trust_level: str,
+    work_notifier: Callable[[], None] | None = None,
 ) -> ProvisionedPackageModule:
     component_id = snapshot.component["id"]
     if trust_level == "official":
@@ -911,5 +918,6 @@ async def _bootstrap_package_snapshot(
         effect_driver_registry=effect_driver_registry,
         configuration_validator=configuration_validator,
         trust_level=trust_level,
+        work_notifier=work_notifier,
     )
     return ProvisionedPackageModule(snapshot, descriptor, configuration, grants)

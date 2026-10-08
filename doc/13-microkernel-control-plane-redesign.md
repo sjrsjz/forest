@@ -190,6 +190,8 @@ Adapter→Shell 的准确 service handle 由 `adapter.onebot` 的 `requires` 声
 
 包私有持久工作使用 `owned_work_handlers`，不是宿主回调或通用 Scheduler Job。声明冻结唯一 work 名、claim/settle JSONB 函数、包内 `@job` handler、业务输入/输出 schema、`max_concurrency`、`poll_interval_ms`、claim/handler/settle deadline 与 lease；无续期声明时 lease 必须覆盖 handler 和 settle 的最大时间。claim 函数接收由宿主生成的唯一 claim token，只能在 active Generation fence 的事务中从本包 namespace 领取一项，并返回固定 `forest.owned-work-claim/1` envelope，其中包含 work ID、token、attempt、稳定 operation、因果根和业务 payload。Package Adapter 以该稳定 operation 进入持久服务调用账本后投递准确 Worker handler；Worker 重放只会重取原调用结果或以相同 operation 重放其受管 Effect。settle 函数接收成功结果或类型化失败，必须在 member fence 下按 token 幂等推进本包状态；包自行决定重试时间和终态，Adapter 不按错误字符串修改队列表。
 
+Bot 作用域的通用工作通知只在包 Command、管理 Action、owned-work settle 或跨包 UnitOfWork 的事务成功提交后发出，目标是该 Bot 当前 ACTIVE Graph 中声明持久工作的包；通知不包含队列身份或业务载荷。每个 handler 序列化空 claim，空结果后至少间隔 1 秒再兜底探测；`poll_interval_ms` 仍是替换排空和声明间隔的下界。工作泵记录通知修订：若通知与空 claim 重叠，该空结果不能覆盖新通知，下一次必须立即重新探测。领取仍每次进入原权威事务并核对 Generation 与存储，不凭通知假定工作存在；丢通知、进程重启和定时重试由兜底探测恢复。旧图冻结后信号只投给当前图，新图开放准入时立即探测。这是通用调度信号，不在宿主解释包私有队列。
+
 如果持久工作属于内核的基础身份账本，包可用 `authority = "kernel"` 声明准确受限端口，省去包私有 claim/settle SQL；内核端口在同一部署事务里执行相同的 Generation 围栏和 claim token 校验，且必须声明续租。它不授予包读取任意内核表的能力，也不允许宿主另起一条业务执行循环。
 
 长任务可额外声明 `renew_function`、`renew_interval_s` 与 `renew_timeout_s`。Adapter 在调用账本准入、Worker 执行和结果账本提交期间，按准确 claim token 调用包私有 `owned_renew`；函数必须验证当前领取者和租约后返回固定确认。lease 必须大于续期间隔、续期 deadline 和 settle deadline 之和，保证最后一次成功续期后仍有结算窗口。续期失败时 Adapter 取消在途调用、停止该 Generation 的领取，不写普通失败结算；外部效果可能已发生，后续只能按原 operation 对账。续期函数不能通过新 claim 或租约过期来推断旧效果未发生。部署供应 Job 仍只有内核权威账本；后续包化应以其受限 claim/renew/settle 端口接入，不能复制包私有队列表来冒充供应 Job。

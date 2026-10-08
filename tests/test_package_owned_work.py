@@ -129,6 +129,38 @@ async def test_inflight_freeze_during_poll_delay_does_not_start_new_claim():
     assert authority.calls == 0
 
 
+async def test_committed_signal_during_empty_claim_is_not_lost():
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    second_started = asyncio.Event()
+
+    class EmptyAuthority:
+        calls = 0
+
+        async def invoke_owned_work(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                first_started.set()
+                await release_first.wait()
+            else:
+                second_started.set()
+            return None
+
+    authority = EmptyAuthority()
+    supervisor = _supervisor("inflight", authority, [])
+    supervisor.start()
+    supervisor.open_admission()
+    try:
+        await asyncio.wait_for(first_started.wait(), 1)
+        supervisor.notify()
+        release_first.set()
+        await asyncio.wait_for(second_started.wait(), 0.5)
+        await asyncio.sleep(0.05)
+        assert authority.calls == 2
+    finally:
+        await supervisor.close()
+
+
 async def test_renewal_covers_worker_and_result_commit_before_settlement():
     release_delivery = asyncio.Event()
     commit_started = asyncio.Event()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import re
+from collections.abc import Callable
 from typing import Any
 
 import psycopg
@@ -34,6 +35,7 @@ class PostgresPackageDomainAuthority:
         storage_package_digest: str,
         storage_execution_profile: str,
         payloads=None,
+        work_notifier: Callable[[], None] | None = None,
     ) -> None:
         self.store = store
         self.runtime = runtime
@@ -43,6 +45,7 @@ class PostgresPackageDomainAuthority:
         self.storage_package_digest = storage_package_digest
         self.storage_execution_profile = storage_execution_profile
         self.payloads = payloads
+        self.work_notifier = work_notifier
         self.management_assets = ManagementAssetAuthority(payloads) if payloads is not None else None
 
     @staticmethod
@@ -513,7 +516,10 @@ class PostgresPackageDomainAuthority:
                         raise ForestError(
                             code, message, 502,
                         )
-                    return result
+                if kind in {"command", "management_action", "owned_settle"}:
+                    if self.work_notifier is not None:
+                        self.work_notifier()
+                return result
         except ForestError:
             raise
         except TimeoutError as exc:

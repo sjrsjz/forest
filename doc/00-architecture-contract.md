@@ -96,6 +96,8 @@ Forest 是一个可长期运行的重型 Bot **微内核宿主**。核心产品�
 
 `job_type` 是包贡献给 `job.scheduler` 的持久执行端口，不是宿主注册一个业务 Python 回调。Scheduler 独占排队、claim、续租、取消和终态；Package Adapter 把 `DurableJobExecutionRequest` 经冻结服务路由交给声明该类型的准确 Generation，并以 `(job_id, attempt)` 形成稳定操作身份。Job 必须由包内 Worker handler 执行；需要外部副作用时，handler 经单独声明和授权的普通 JSON effect service 调用最小宿主 capability。旧 Generation 排空覆盖已经接纳的 Job、嵌套 effect 与终态提交，候选失败时 Worker 与驱动一并回收。
 
+持久工作泵的空队列探测必须有界退避。Bot 内包 Command、管理 Action、owned-work settle 和跨包 UnitOfWork 只在事务提交后发出同一 Bot 作用域的通用唤醒信号；信号不携带业务 DTO，不改变队列所有权，也不能替代 claim 时的 Generation/存储围栏。工作泵收到信号立即重新探测，信号与进行中的空 claim 交错时不得丢失；无信号时仍定期探测，以发现到期重试和恢复漏通知。热替换期间只有当前 ACTIVE 图接收宿主信号，新图开放 admission 时主动探测。Bot 基础身份与期望运行意图仍由部署内核持有，`deployment.bot-catalog` 仅通过受限端口管理。
+
 ### 2.2 插件热重载是强制生命周期，不是开发辅助
 
 所有普通插件（包括 builtin）必须完整支持 `drain` 热重载。唯一合法路径为：捕获新源码形成不同内容摘要 → 静态校验 manifest/schema/依赖/能力 → 创建新 Worker 与新 Generation → 在无生产写权限下 prepare/start/health → 冻结旧路由准入 → 排空旧代在途调用和持久安全点 → 原子提交新 route/registry/config effective → 本地开放新代 admission → 停止并回收旧 Worker、任务、连接与临时环境。候选在提交前任一步失败时，必须销毁候选并恢复旧代准入；提交后不得把旧对象重新激活为当前代，回退也要创建新的 Generation。

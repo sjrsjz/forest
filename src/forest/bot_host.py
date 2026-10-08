@@ -477,6 +477,7 @@ class BotHost:
             self.store,
             self.schema_bundle_installer,
             kernel=self._kernel,
+            work_notifier=self.notify,
             initial_configuration=(
                 {"protocol": "forest.component-worker-host/1"}
                 if bootstrap_settings is not None else None
@@ -659,6 +660,7 @@ class BotHost:
                 self.store,
                 self.schema_bundle_installer,
                 kernel=self._kernel,
+                work_notifier=self.notify,
                 initial_configuration=initial_configuration,
                 effect_driver_registry=automatic_effect_drivers,
             )
@@ -679,6 +681,7 @@ class BotHost:
                 self.store,
                 self.schema_bundle_installer,
                 kernel=self._kernel,
+                work_notifier=self.notify,
                 initial_configuration=None,
                 approved_capabilities=entry.approved_capabilities,
             )

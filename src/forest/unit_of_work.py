@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -223,11 +223,13 @@ class PostgresPackageUnitOfWorkCoordinator:
         *,
         component_id: str,
         participant_handles: Mapping[str, Any],
+        work_notifier: Callable[[], None] | None = None,
     ) -> None:
         self.store = store
         self.runtime = runtime
         self.component_id = component_id
         self.participant_handles = dict(participant_handles)
+        self.work_notifier = work_notifier
 
     async def execute(
         self,
@@ -324,7 +326,10 @@ class PostgresPackageUnitOfWorkCoordinator:
                             timeout_seconds=remaining,
                         )
                         prior[step["id"]] = result
-                    return prior[declaration["steps"][-1]["id"]]
+                    result = prior[declaration["steps"][-1]["id"]]
+                if self.work_notifier is not None:
+                    self.work_notifier()
+                return result
         except ForestError:
             raise
         except TimeoutError as exc:
@@ -367,13 +372,16 @@ class PostgresPackageUnitOfWorkCoordinator:
         return current
 
 
-def package_uow_coordinator_factory(*, store, runtime):
+def package_uow_coordinator_factory(
+    *, store, runtime, work_notifier: Callable[[], None] | None = None
+):
     def create(component_id: str, participant_handles: Mapping[str, Any]):
         return PostgresPackageUnitOfWorkCoordinator(
             store,
             runtime,
             component_id=component_id,
             participant_handles=participant_handles,
+            work_notifier=work_notifier,
         )
 
     return create
