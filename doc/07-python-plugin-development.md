@@ -195,6 +195,8 @@ Context裁剪使用框架的确定性预算与Archive/ViewPlan接口，不存在
 
 默认加载单位是不可变 Python 包快照，替换单位是受影响 Bot 的组件代际。首版同一包/Bot 放在一个 Worker 时，包内全部组件属于共同进程故障与替换集合；不能声称重载其中一类而保留同进程另一类的执行栈。
 
+Bot 的 `source_kind = "builtin"` 选择记录只决定官方组件是否启用，不固定包摘要；冷启动会从当前发行镜像捕获该官方包，并以新的 Graph/Generation 激活。因此更换镜像后重启所见的版本前进是**冷启动发行升级**，不能计作运行中热重载。`source_kind = "installed"` 的选择记录则固定包与 manifest 摘要；包工件变化必须经明确的选择/发布操作。运行中的 `module.reload` 不靠重启：候选包按当前选择捕获，生命周期协调器同时换代目标及其冻结依赖闭包，保留闭包外 Generation 的身份；旧代排空并释放后才完成交接。Bot 基础身份与期望运行意图仍由部署内核持有，管理 builtin 只通过受限端口操作。
+
 Python 的 reload 不会自动重绑定其他模块持有的旧对象引用，既有类实例也继续使用旧类定义。因此这里的代际替换需要新装载环境和路由交接，不能只调用 reload。相关行为见[Python importlib 官方文档](https://docs.python.org/3.11/library/importlib.html#importlib.reload)。
 
 ```text
