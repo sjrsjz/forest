@@ -19,6 +19,11 @@ from jsonschema import Draft202012Validator
 from forest import packages
 from forest.builtin_packages import bootstrap_installed_package
 from forest.cli import run_plugin_command
+from forest.component_selection import (
+    ComponentSelectionEntry,
+    ComponentSelectionSnapshot,
+    resolve_official_package_snapshots,
+)
 from forest.errors import ForestError
 from forest.kernel_package_catalog_snapshot import (
     package_catalog_artifact_service,
@@ -192,6 +197,49 @@ def test_bot_official_provenance_requires_host_registration(tmp_path):
     assert not catalog.is_official_deployment(official.digest)
     assert not imported.is_official_bot(official.digest)
     assert imported.artifact(official.digest)["official_registered"] is False
+
+
+def test_bot_official_selection_resolves_exact_registered_artifact(tmp_path):
+    source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/memory_graph"
+    catalog = PackageCatalog(tmp_path / "catalog")
+    default = catalog.build_official(source_root, scope="bot")
+    updated_root = tmp_path / "updated-memory"
+    shutil.copytree(source_root, updated_root)
+    manifest_path = updated_root / "module.toml"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            f'version = "{default.manifest["version"]}"',
+            'version = "99.0.0"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    updated = catalog.build_official(updated_root, scope="bot")
+    entry = ComponentSelectionEntry(
+        default.component["id"], "official", updated.digest,
+        packages.digest_json(updated.manifest), (), True, 1,
+    )
+    frozen = {
+        "protocol": "forest.component-selection-snapshot/1",
+        "revision": 1,
+        "entries": [entry.as_dict()],
+    }
+    selection = ComponentSelectionSnapshot(
+        1, (entry,), packages.digest_json(frozen)
+    )
+    assert resolve_official_package_snapshots(
+        selection, (default,), catalog
+    ) == (updated,)
+    untrusted = PackageCatalog(tmp_path / "untrusted")
+    untrusted.import_archive(catalog.export_archive(default.digest))
+    untrusted.import_archive(catalog.export_archive(updated.digest))
+    with pytest.raises(ForestError) as rejected:
+        resolve_official_package_snapshots(selection, (default,), untrusted)
+    assert rejected.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
+    untrusted.build_official(source_root, scope="bot")
+    with pytest.raises(ForestError) as rejected:
+        resolve_official_package_snapshots(selection, (default,), untrusted)
+    assert rejected.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
 
 
 @pytest.mark.asyncio

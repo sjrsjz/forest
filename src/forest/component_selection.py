@@ -35,7 +35,7 @@ class ComponentSelectionEntry:
             }
             or not isinstance(value["component_id"], str)
             or not isinstance(value["source_kind"], str)
-            or value["source_kind"] not in {"builtin", "installed"}
+            or value["source_kind"] not in {"builtin", "official", "installed"}
             or not isinstance(value["approved_capabilities"], list)
             or any(not isinstance(item, str) for item in value["approved_capabilities"])
             or type(value["desired_enabled"]) is not bool
@@ -51,6 +51,12 @@ class ComponentSelectionEntry:
             valid_source = (
                 value["package_digest"] is None
                 and value["manifest_digest"] is None
+                and not value["approved_capabilities"]
+            )
+        elif value["source_kind"] == "official":
+            valid_source = (
+                isinstance(value["package_digest"], str)
+                and isinstance(value["manifest_digest"], str)
                 and not value["approved_capabilities"]
             )
         else:
@@ -131,6 +137,51 @@ class SelectedPackageMembers:
     installed: tuple[ComponentSelectionEntry, ...]
 
 
+def resolve_official_package_snapshots(
+    selection: ComponentSelectionSnapshot,
+    defaults: tuple[PackageSnapshot, ...],
+    catalog: PackageCatalog,
+) -> tuple[PackageSnapshot, ...]:
+    """Resolve every Bot official identity before any selected package is provisioned."""
+
+    by_id = {snapshot.component["id"]: snapshot for snapshot in defaults}
+    if len(by_id) != len(defaults):
+        raise ForestError(
+            "COMPONENT_SELECTION_INVALID", "Official component identities are duplicated", 409
+        )
+    for snapshot in defaults:
+        catalog.get_official_bot(snapshot.digest)
+        if snapshot.manifest["runtime"] != "python-worker":
+            raise ForestError(
+                "COMPONENT_SELECTION_INVALID", "Bot official runtime is invalid", 409
+            )
+    selected = dict(by_id)
+    for entry in selection.entries:
+        if entry.source_kind != "official":
+            continue
+        default = by_id.get(entry.component_id)
+        if default is None:
+            raise ForestError(
+                "COMPONENT_SELECTION_INVALID",
+                "Pinned official component is not in the Bot release",
+                409,
+            )
+        snapshot = catalog.get_official_bot(entry.package_digest)
+        if (
+            snapshot.component["id"] != entry.component_id
+            or snapshot.manifest["package_id"] != default.manifest["package_id"]
+            or snapshot.manifest["runtime"] != "python-worker"
+            or digest_json(snapshot.manifest) != entry.manifest_digest
+        ):
+            raise ForestError(
+                "COMPONENT_SELECTION_ARTIFACT_CHANGED",
+                "Pinned official artifact differs from its selection identity",
+                409,
+            )
+        selected[entry.component_id] = snapshot
+    return tuple(selected[snapshot.component["id"]] for snapshot in defaults)
+
+
 def select_package_members(
     selection: ComponentSelectionSnapshot,
     official_descriptors: tuple[RuntimeModuleDescriptor, ...],
@@ -148,13 +199,37 @@ def select_package_members(
                 "Kernel authorities cannot be selected as packages",
                 409,
             )
-        if entry.source_kind == "builtin":
+        if entry.source_kind == "official" and entry.component_id == "component.worker-host":
+            raise ForestError(
+                "COMPONENT_SELECTION_INVALID",
+                "Selection authority must be bootstrapped from the host release",
+                409,
+            )
+        if entry.source_kind in {"builtin", "official"}:
             if entry.component_id not in official_ids:
                 raise ForestError(
                     "COMPONENT_SELECTION_INVALID",
                     "Builtin component selection is invalid",
                     409,
                 )
+            if entry.source_kind == "official":
+                descriptor = next(
+                    item for item in official_descriptors
+                    if item.component_id == entry.component_id
+                )
+                snapshot = catalog.get_official_bot(entry.package_digest)
+                if (
+                    descriptor.artifact.trust_level != "official"
+                    or descriptor.artifact.package_digest != snapshot.digest
+                    or descriptor.artifact.package_id != snapshot.manifest["package_id"]
+                    or snapshot.component["id"] != entry.component_id
+                    or digest_json(snapshot.manifest) != entry.manifest_digest
+                ):
+                    raise ForestError(
+                        "COMPONENT_SELECTION_ARTIFACT_CHANGED",
+                        "Resolved official component differs from its selection",
+                        409,
+                    )
             if not entry.desired_enabled:
                 disabled.add(entry.component_id)
             continue

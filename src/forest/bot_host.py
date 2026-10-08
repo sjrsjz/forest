@@ -28,6 +28,7 @@ from forest.component_graph_preview import (
 from forest.component_selection import (
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
+    resolve_official_package_snapshots,
     select_package_members,
 )
 from forest.component_selection_commit import resolve_selection_commit_preflight
@@ -627,6 +628,17 @@ class BotHost:
                     "A frozen Bot bootstrap package is absent from the install catalog",
                     409,
                 )
+        resolved_official = resolve_official_package_snapshots(
+            selection,
+            tuple(snapshot for _source, snapshot in automatic_sources),
+            self.package_catalog,
+        )
+        automatic_sources = tuple(
+            (source, snapshot)
+            for (source, _default), snapshot in zip(
+                automatic_sources, resolved_official, strict=True
+            )
+        )
         for source, snapshot in automatic_sources:
             if profile_components is not None:
                 initial_configuration = await materialize_bootstrap_configuration(
