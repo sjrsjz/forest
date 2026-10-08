@@ -155,7 +155,7 @@ Supervisor 同时启动多作用域 WebUI，并把 Host Graph 作为独立作用
 
 ## v15 候选切换边界（2026-10-09）
 
-当前源码构建的隔离候选 `forest-live-candidate-v15-supervisor` 与 `forest-live-candidate-v15-pg` 已启动，WebUI 只监听本机 `127.0.0.1:18091`。候选中的 `forest-main` 与另一只 mock Bot 均经独立 Host 存储供应达到 `READY/OFFLINE`；v15 mock Bot 已在 Docker 内部假 OneBot 上完成 `OFFLINE→ONLINE→OFFLINE`，私有 Graph 为 `STOPPED`，假 OneBot 已移除。真实 `forest-main` 从未发布 Bot Graph。候选真实 Bot 只许可群 `933179609`，冻结的 VL 模型为 `Qwen/Qwen3-VL-Embedding-8B`、4096 维。v14 的 Supervisor 和 PostgreSQL 已停止，卷仍保留；旧 `forest-clean-supervisor-1` 仍在线，树莓派 `sjz1@192.168.31.117` 的 `alicebot.service` 在最近一次只读复核时为 `active/enabled`。这些状态是切换前快照，不是启动候选真实 Bot 的许可。
+当前隔离候选为 forest-live-candidate-v16-supervisor 与 forest-live-candidate-v15-pg，WebUI 只监听本机 127.0.0.1:18091。v16 使用提交 634fe37 的镜像，复用 v15 的独立 Secret、PostgreSQL 与官方包卷；v15 Supervisor 已停止、容器保留。forest-main 与 mock Bot 均为 READY/OFFLINE，真实 Bot 从未发布 Graph。mock Bot 已在 Docker 内部假 OneBot 上完成 v16 冷恢复离线→在线→离线，22 个成员 ACTIVE 时 Embedding 精确采用官方 2.8.1 工件；验收后 Graph STOPPED、假 OneBot 已移除、mock 凭据保持占位值。真实 Bot 只许可群 933179609，冻结的 VL 模型为 Qwen/Qwen3-VL-Embedding-8B、4096 维。旧 forest-clean-supervisor-1 仍在线，不可同时启动候选真实 QQ Bot。
 
 切换时先复核上述三方状态及候选凭据、群白名单和 WebUI 运行意图，再让旧 Forest Supervisor 与树莓派 AliceBot 停止向同一个 QQ 身份提供服务；确认旧 OneBot 连接退出后，才把候选 `forest-main` 的期望状态改为 `ONLINE`。只在许可群做低频人工触发，同时记录候选 Bot Graph、OneBot 连接、Agent Run、Delivery 回执和 Memory 状态；`scripts/observe_live_bot.py` 的只读采样不能替代实际群回复检查。切换不迁移旧预发布 Bot 数据库，也不删除旧卷。若候选失败，先将其真实 Bot 改回 `OFFLINE` 并确认连接关闭，再恢复旧 Forest 和树莓派服务；不得让回滚实例与候选同时使用该 QQ 身份。任何 `UNKNOWN` 发送或模型效果仍按各模块的证据协议核对，不靠重复群消息探测。
 
