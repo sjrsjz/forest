@@ -74,6 +74,8 @@ Bot 目录重命名入口（2026-10-09）：deployment.bot-catalog 1.2.0 通过�
 
 部署候选 v14 离线供应（2026-10-09）：通过该候选的受限管理端口完成一只 mock Bot 和真实配置 forest-main 的供应，两者均为 READY/OFFLINE。真实配置的旧凭据仅从在线旧 Forest 的只读密钥卷与只读数据库连接解密到进程内存，再写入 v14 独立 Secret authority；没有把明文写入项目文件。v14 冻结配置确认允许群 933179609、Provider 模型 deepseek-v4-flash-vision-exp、VL 嵌入模型 Qwen/Qwen3-VL-Embedding-8B 与 4096 维 COSINE 向量索引。对 mock Bot 的真实 WebUI 重命名返回 200，Bot 身份修订 1→2，而运行意图修订保持 1、期望状态保持 OFFLINE。候选管理员已改为便于本机登录的独立密码并验证重新登录；没有启动任何候选 QQ 连接。在线旧 Forest 保持原样。
 
+部署候选 v14 mock 生命周期（2026-10-09）：仅在 Docker 内部启动登录用 OneBot 模拟器，将 mock Bot 的期望状态 OFFLINE→ONLINE，部署观察进入 ONLINE 并发布 Bot Graph；随后切回 OFFLINE，观察与私有 Bot 库中的 Graph 状态分别为 OFFLINE、STOPPED，模拟器已移除。真实配置 forest-main 全程保持 READY/OFFLINE，其私有 Bot 库没有已启动 Graph。该验证只覆盖候选新基线的组件启动和停止，不等于真实 QQ 发消息或长期负载验收。
+
 Host 独立数据库与生产租约装配（2026-10-07）：Compose 首次初始化现生成独立 Host 数据库口令，由 PostgreSQL 初始化脚本创建无超级用户的 `forest_host` role 与专用库，并撤销该 role 对 deployment 库的连接资格。生产 Supervisor 配置分别隐藏两条 DSN，进程同时打开 deployment 与 Host store，先领取 Host incarnation lease，并把 Host 续租任务纳入进程失效监视；关闭时释放两个 scope 的租约。隔离 Compose 项目实际验证 Host 库 owner、role flags 与 deployment CONNECT 拒绝，配置/租约本地用例 10 passed，Ruff 与 Compose 解析通过；测试项目及其凭据卷已删除。旧预发布卷不能静默补初始化，须按文档重建。Host 包图尚未在生产组合根启动，Web provider 与 `host.storage` 仍待接线；在线实例未切换。
 
 Host 租约所有者（2026-10-07）：新增只负责稳定 Host 身份初始化、incarnation 租约领取/续租/释放和失租传播的 `HostSupervisor`；它不持有包配置或 Graph，Host 包控制器仍是图生命周期权威。真实 PostgreSQL 的 Host Worker 首发、热替换与持久请求用例现通过该监督器取得 lease（1 passed）；另以失租注入验证续租失败后拒绝新权威调用且关闭时容忍已失效租约（1 passed），Ruff 通过。Web provider 和 `host.storage` 仍待接线；在线实例未切换。
