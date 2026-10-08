@@ -1846,6 +1846,20 @@ async def test_worker_host_can_reload_its_own_generation(tmp_path):
             ).artifact.package_digest == updated.digest
         finally:
             await restarted.close()
+        updated.root.rename(tmp_path / "removed-pinned-routing-artifact")
+        missing_artifact = BotHost(
+            settings,
+            model_client_factory=FakeModelClient,
+            embedding_client_factory=FakeEmbeddingClient,
+            media_client_factory=FakeMediaClient,
+            vector_index_client_factory=FakeMilvusClient,
+            websocket_client_factory=create_websocket,
+            package_catalog=PackageCatalog(tmp_path / "self-reload-packages"),
+        )
+        with pytest.raises(ForestError) as missing:
+            await missing_artifact.start()
+        assert missing.value.code == "PACKAGE_CHANGED"
+        assert missing_artifact.registry is None
     finally:
         assert name.startswith("forest_self_reload_") and len(name) == 51
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
