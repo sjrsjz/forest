@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.79.2"
+version = "1.79.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -560,6 +560,7 @@ id = "memory.trial.result"
 port = "memory.trial.result"
 required_role = "ADMIN"
 actor_field = "requested_by"
+audit = "SECURITY"
 timeout_s = 30
 
 [[components.management_queries]]
@@ -567,6 +568,7 @@ id = "memory.trial.image"
 port = "memory.trial.image"
 required_role = "ADMIN"
 actor_field = "requested_by"
+audit = "SECURITY"
 timeout_s = 30
 
 [[components.management_actions]]

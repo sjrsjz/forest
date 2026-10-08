@@ -212,6 +212,83 @@ async def test_bot_gateway_applies_exact_web_operation_policy_after_signature_ch
     assert denied.value.code == "WEB_OPERATION_POLICY_DENIED"
 
 
+async def test_bot_audited_query_records_read_before_returning_sensitive_result():
+    class SensitiveContract(_Contract):
+        calls = 0
+
+        def query_audit_severity(self, query_id):
+            assert query_id == "sensitive.query"
+            return "SECURITY"
+
+        async def query(self, query_id, payload):
+            self.calls += 1
+            return {"value": payload["value"]}
+
+    class Audit:
+        blocked = True
+
+        def __init__(self):
+            self.records = []
+
+        async def append(self, envelope):
+            envelope.validate()
+            if self.blocked:
+                raise ForestError("AUDIT_UNAVAILABLE", "Audit storage is unavailable", 503)
+            self.records.append(envelope)
+
+    contract = SensitiveContract(
+        _Configuration(), schema={"type": "object"}, apply_callback=lambda **_: None,
+    )
+    audit = Audit()
+    host = SimpleNamespace(
+        settings=SimpleNamespace(bot_id="bot/managed"),
+        registry=_Registry(SimpleNamespace(management_contract=contract)),
+        _kernel=SimpleNamespace(
+            configurations={"kernel.authorization": _PolicyConfiguration()},
+            audit=audit,
+        ),
+    )
+    signer = WebAuthorityTicketAuthority(
+        issuer_id="deployment/test", active_key_id="master/test/1",
+        key_resolver=lambda _key_id: b"k" * 32,
+    )
+    body = {"value": "private result"}
+    operation_id = "web-read:sensitive-query"
+    ticket = await signer.issue(
+        session=AuthenticatedWebSession(
+            "token-digest", "web-session/test", 1, "csrf-digest",
+            WebSubject("web-subject/test", "admin", "Administrator", "ADMIN", True, 1),
+            datetime.now(timezone.utc) + timedelta(hours=1),
+        ),
+        target_scope_kind="bot", target_scope_id="bot/managed",
+        target_component_id="test.component",
+        target_generation_id="generation/test/1", target_graph_revision=1,
+        target_operation_ref=operation_id, action_key="sensitive.query",
+        input_digest=digest_json(body),
+    )
+    gateway = ManagementGateway(host, ticket_authority=signer)
+    with pytest.raises(ForestError) as unavailable:
+        await gateway.module_query(
+            "test.component", "sensitive.query", body,
+            authorization=ticket, operation_id=operation_id,
+        )
+    assert unavailable.value.code == "AUDIT_UNAVAILABLE"
+    assert contract.calls == 0
+    audit.blocked = False
+    assert await gateway.module_query(
+        "test.component", "sensitive.query", body,
+        authorization=ticket, operation_id=operation_id,
+    ) == {"value": "private result"}
+    assert contract.calls == len(audit.records) == 1
+    record = audit.records[0]
+    assert record.action == "sensitive.query"
+    assert record.operation_kind == "web.query"
+    assert record.operation_id == operation_id
+    assert record.actor_id == "web-subject/test"
+    assert record.call_id is None and record.details_payload_id is None
+    assert "private result" not in repr(record)
+
+
 class _Contract(ModuleConfigurationContract):
     transaction = object()
 

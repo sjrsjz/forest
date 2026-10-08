@@ -526,6 +526,35 @@ class ManagementGateway:
             input_digest=digest_json(body),
             required_role=contract.query_required_role(query_id),
         )
+        audit_severity_for_query = getattr(contract, "query_audit_severity", None)
+        audit_severity = (
+            audit_severity_for_query(query_id)
+            if callable(audit_severity_for_query) else None
+        )
+        if audit_severity is not None:
+            audit = getattr(self.host._kernel, "audit", None)
+            if audit is None:
+                raise ForestError(
+                    "WEB_AUDIT_UNAVAILABLE",
+                    "Audited Bot query requires the Bot audit authority", 503,
+                )
+            audit_id = "audit:web:" + hashlib.sha256(
+                (self.host.settings.bot_id + "\0" + operation_id).encode()
+            ).hexdigest()
+            await audit.append(AuditEnvelope(
+                audit_id=audit_id,
+                action=query_id,
+                severity=audit_severity,
+                producer_component_id=component_id,
+                producer_generation_id=authorization.target_generation_id,
+                origin_kind="web.management",
+                actor_kind="web.subject",
+                actor_id=authorization.web_subject_ref,
+                resource_kind="bot.component",
+                resource_id=component_id,
+                operation_kind="web.query",
+                operation_id=operation_id,
+            ))
         return await contract.query_authorized(
             query_id, body, authorization=authorization
         )

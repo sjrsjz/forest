@@ -1924,10 +1924,12 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "INVALID_MANAGEMENT_OPERATIONS",
                 "Management query default_limit cannot exceed max_limit",
             )
-        if declaration.get("audit") is not None and component["scope"] != "deployment":
+        if declaration.get("audit") is not None and component["scope"] not in {
+            "deployment", "bot",
+        }:
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",
-                "Audited management queries require a deployment audit authority",
+                "Audited management queries require a scoped audit authority",
             )
         actor_field = declaration.get("actor_field")
         if actor_field is not None:

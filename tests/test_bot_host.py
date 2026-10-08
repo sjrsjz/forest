@@ -2989,6 +2989,20 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                         "part_id": picture["part_id"], "offset": 0,
                     },
                 )
+            image_reads = (await host._kernel.audit.scan(
+                action="memory.trial.image", limit=10,
+            ))["records"]
+            result_reads = (await host._kernel.audit.scan(
+                action="memory.trial.result", limit=10,
+            ))["records"]
+            assert len(image_reads) == len(result_reads) == 1
+            for record in (*image_reads, *result_reads):
+                assert record["severity"] == "SECURITY"
+                assert record["producer_component_id"] == "memory.graph"
+                assert record["actor_id"] == "subject/host-admin"
+                assert record["operation_kind"] == "web.query"
+                assert record["call_id"] is None
+                assert record["details_payload_id"] is None
             assert trial_page["total_count"] == 1
             assert trial_page["items"][0]["source_unit_id"] == unit_evidence["source_unit_id"]
             assert trial_page["items"][0]["external_group_id"] == "933179609"

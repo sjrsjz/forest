@@ -306,7 +306,7 @@ deployment scope 的写动作同样不能只在 HTTP 壳验票。票据必须绑
 
 同一事务还由 `deployment.audit` 的写入端口追加稳定 `audit_id` 的脱敏 envelope，记录准确贡献组件/代际、Web 主体、action、顶层 operation 与收据引用，不保存 Secret、密码、请求正文或详情载荷。业务回滚同时撤销收据和审计；相同 operation 重放收敛到原 envelope。审计查询只读该 deployment 的元数据，以 `(created_at,audit_id)` 稳定分页，并在查询开始和返回后复核当前 Web 会话；它不跨库合并 Bot 的 `kernel.audit` 流。
 
-部署包的敏感管理 Query 可在不可变 manifest 中声明 `audit = "SECURITY"`。管理网关在验票后、调用纯只读 Query 前，以本次独立读操作 ID 提交 `web.query` 审计；它不领取写入接纳收据，审计记录表示**获准的读取尝试**，不声称查询成功或业务写入。审计存储不可用时网关不交付查询结果。记录只含主体、组件/代际、Query ID 和读操作 ID，不保存查询输入、Secret 明文或返回数据；同一 HTTP 请求只有一个读操作 ID。未声明安全审计的普通分页 Query 保持原有只读路径，Bot/Host scope 不能在当前协议下声明这一部署审计能力。
+部署包与 Bot 包的敏感管理 Query 可在不可变 manifest 中声明 `audit = "SECURITY"`。管理网关在验票后、调用纯只读 Query 前，以本次独立读操作 ID 向当前作用域的审计权威提交 `web.query`；部署读写入部署审计账本，Bot 读写入该 Bot 的 `kernel.audit`，不跨库伪造同一事务。读审计不领取写入接纳收据，记录表示**获准的读取尝试**，不声称查询成功或业务写入。审计存储不可用时网关不交付查询结果。记录只含主体、组件/代际、Query ID 和读操作 ID，不保存查询输入、Secret 明文、图片或返回数据；同一 HTTP 请求只有一个读操作 ID。未声明安全审计的普通分页 Query 保持原有只读路径；Host scope 尚无对应审计权威，不能声明该能力。
 
 Bot Web operation policy 是 `kernel.authorization` Generation 的版本化模块配置，不放在 deployment 会话库，也不由 Web 壳硬编码。规则只精确匹配 `target_component_id + action_key`，并以启用状态、允许角色子集和可选稳定 Web 主体集合收窄既有角色门禁；不使用通配符、优先级或先后覆盖。未命中规则沿用安全角色模板，规则不能把写操作开放给原本无权的角色。读操作在目标网关读取当前 effective policy；写操作在业务事务内再次读取同一配置。策略 plan/apply 通过配置 revision CAS 和 RuntimeGraph publication 生效，因而策略换代同时使旧 graph revision 的短票失效。
 
