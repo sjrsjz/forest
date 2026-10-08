@@ -32,6 +32,22 @@ class DeploymentAuditRepository:
     async def append_web_action_in(
         self, conn, *, ticket: WebAuthorityTicket, receipt: dict
     ) -> dict:
+        return await self._append_in(
+            conn, ticket=ticket, operation_kind="web.action",
+            receipt_ticket_id=receipt["ticket_id"],
+        )
+
+    async def append_web_query(self, *, ticket: WebAuthorityTicket) -> dict:
+        """Record an authorized read attempt without manufacturing a write receipt."""
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self._append_in(
+                conn, ticket=ticket, operation_kind="web.query", receipt_ticket_id=None,
+            )
+
+    async def _append_in(
+        self, conn, *, ticket: WebAuthorityTicket,
+        operation_kind: str, receipt_ticket_id: str | None,
+    ) -> dict:
         if not isinstance(ticket, WebAuthorityTicket):
             raise ForestError("WEB_AUTHORITY_TICKET_INVALID", "Invalid Web authority ticket", 403)
         audit_id = "audit:" + hashlib.sha256(
@@ -47,9 +63,9 @@ class DeploymentAuditRepository:
             "actor_id": ticket.web_subject_ref,
             "resource_kind": "deployment.component",
             "resource_id": ticket.target_component_id,
-            "operation_kind": "web.action",
+            "operation_kind": operation_kind,
             "operation_id": ticket.target_operation_ref,
-            "receipt_ticket_id": receipt["ticket_id"],
+            "receipt_ticket_id": receipt_ticket_id,
         }
         await conn.execute(
             "INSERT INTO forest_deployment.audit_records("

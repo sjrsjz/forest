@@ -223,6 +223,15 @@ class PackageManagementContract(ModuleConfigurationContract):
             ) from None
         return declaration.get("required_role", "AUDITOR")
 
+    def query_audit_severity(self, query_id: str) -> str | None:
+        try:
+            declaration, _port = self._queries[query_id]
+        except KeyError:
+            raise ForestError(
+                "MODULE_MANAGEMENT_OPERATION_NOT_FOUND", "Package query does not exist", 404
+            ) from None
+        return declaration.get("audit")
+
     async def query(self, query_id: str, payload: dict) -> object:
         return await self.query_authorized(query_id, payload)
 

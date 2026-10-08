@@ -4827,6 +4827,36 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             assert other_result.status_code == 200, other_result.text
             assert other_result.json()["status"] == "NOT_FOUND"
             assert other_result.json()["result"] is None
+        async with repository.store.pool.connection() as conn:
+            read_audits = await (await conn.execute(
+                "SELECT action,actor_id,operation_kind,operation_id,receipt_ticket_id "
+                "FROM forest_deployment.audit_records WHERE deployment_id=%s "
+                "AND action='secret.operation'",
+                (repository.store.deployment_id,),
+            )).fetchall()
+        assert len(read_audits) == 4
+        assert {row["operation_kind"] for row in read_audits} == {"web.query"}
+        assert all(row["receipt_ticket_id"] is None for row in read_audits)
+        assert len({row["operation_id"] for row in read_audits}) == 4
+        assert other_admin.json()["subject_id"] in {
+            row["actor_id"] for row in read_audits
+        }
+
+        original_read_audit = deployment_audit.append_web_query
+
+        async def unavailable_read_audit(*, ticket):
+            raise ForestError("DEPLOYMENT_AUDIT_UNAVAILABLE", "Audit is unavailable", 503)
+
+        deployment_audit.append_web_query = unavailable_read_audit
+        try:
+            not_disclosed = await client.post(
+                operation_path, headers=headers,
+                json={"idempotency_key": "secret-web-1"},
+            )
+        finally:
+            deployment_audit.append_web_query = original_read_audit
+        assert not_disclosed.status_code == 503
+        assert "secret://web/test" not in not_disclosed.text
         assert (await secrets.web_operation_result(
             operation_id=recovered.json()["operation_id"],
             web_subject_ref="web-subject/other",

@@ -772,6 +772,7 @@ MANIFEST_SCHEMA = {
                                 "max_limit": {"type": "integer", "minimum": 1, "maximum": 10000},
                                 "required_role": {"enum": ["ADMIN", "AUDITOR"]},
                                 "actor_field": {"type": "string"},
+                                "audit": {"enum": ["SECURITY"]},
                                 "timeout_s": {
                                     "type": "number",
                                     "exclusiveMinimum": 0,
@@ -1922,6 +1923,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",
                 "Management query default_limit cannot exceed max_limit",
+            )
+        if declaration.get("audit") is not None and component["scope"] != "deployment":
+            _fail(
+                "INVALID_MANAGEMENT_OPERATIONS",
+                "Audited management queries require a deployment audit authority",
             )
         actor_field = declaration.get("actor_field")
         if actor_field is not None:

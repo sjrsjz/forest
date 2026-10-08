@@ -322,9 +322,11 @@ CREATE TABLE forest_deployment.audit_records (
     actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 128),
     resource_kind text NOT NULL CHECK (resource_kind='deployment.component'),
     resource_id text NOT NULL CHECK (octet_length(resource_id) BETWEEN 1 AND 128),
-    operation_kind text NOT NULL CHECK (operation_kind='web.action'),
+    operation_kind text NOT NULL CHECK (operation_kind IN ('web.action','web.query')),
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
-    receipt_ticket_id text NOT NULL,
+    receipt_ticket_id text,
+    CHECK ((operation_kind='web.action' AND receipt_ticket_id IS NOT NULL) OR
+           (operation_kind='web.query' AND receipt_ticket_id IS NULL)),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (deployment_id,audit_id),
     UNIQUE (deployment_id,operation_id),

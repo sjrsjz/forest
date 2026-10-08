@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-secrets"
-version = "1.1.2"
+version = "1.1.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_secrets:DeploymentSecrets"
@@ -89,6 +89,7 @@ id = "secret.operation"
 port = "deployment.secrets.operation-result"
 actor_field = "requested_by"
 required_role = "ADMIN"
+audit = "SECURITY"
 timeout_s = 10
 
 [[components.management_actions]]

@@ -457,6 +457,18 @@ class ControlManagementGateway:
             input_digest=digest_json(body),
             required_role=required_role,
         )
+        audit_severity_for_query = getattr(contract, "query_audit_severity", None)
+        audit_severity = (
+            audit_severity_for_query(query_id)
+            if callable(audit_severity_for_query) else None
+        )
+        if audit_severity is not None:
+            if self.scope_kind != "deployment" or self.audit is None:
+                raise ForestError(
+                    "DEPLOYMENT_AUDIT_UNAVAILABLE",
+                    "Audited management query requires the deployment audit authority", 503,
+                )
+            await self.audit.append_web_query(ticket=authorization)
         return await contract.query_authorized(query_id, body, authorization=authorization)
 
     async def module_action(
