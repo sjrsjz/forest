@@ -1,5 +1,9 @@
 # Forest 实现状态
 
+独立候选部署与官方包热换代（2026-10-09）：以当前源码构建 `forest:runtime-candidate-v13`，使用与旧在线实例隔离的 PostgreSQL、Secret 和包卷启动 Supervisor；本机 WebUI `127.0.0.1:18089` 返回 200。经生产 Web API 完成管理员初始化、Host 存储结算和两个 Bot 供应：模拟 OneBot Bot 与复制旧在线非敏感配置及三类凭据的 `forest-main` 均为 `READY/OFFLINE`。凭据在只读旧库和旧密钥卷中核验密文摘要后，直接写入候选 Secret authority；新旧嵌入 profile 均为 `Qwen/Qwen3-VL-Embedding-8B`、4096 维，真实候选保留 QQ ID `3605196653`、群 `933179609`、DeepSeek 模型身份，但未连接真实 QQ。mock Bot 曾经按运行意图上线并经 OneBot mock 验证完整图启动，验收后恢复 `OFFLINE`。
+
+同一候选包卷中，UID 10001 的无网络、只读根文件系统本地 CLI 使用完整 ZIP 和显式摘要发布 `routing.graph` 2.0.3；目录同时可读官方 2.0.2 与 2.0.3，发布时两个 Bot 的运行意图均未改变。mock Bot 再次上线后，通过 Bot 作用域 Web 预检和 `module.enable` 选择 2.0.3，Graph 修订 3→4，仅 `routing.graph` 的 Generation 改变，`kernel.runtime` 保持原代。Bot 退回离线后的只读 Bot 库审计显示两个 Graph 均 `STOPPED`，新图成员和被替换的旧代均 `DISPOSED`。旧在线 `forest-clean-supervisor-1` 与树莓派 `alicebot.service` 仍运行，真实切换尚未执行。本次没有实网群消息、模型质量或长时负载结论，旧部署数据卷保持原状。
+
 官方 Bot 包本地发布入口（2026-10-08）：`forest plugin publish-official-bot` 以生产包目录所有者的本地进程权限接纳完整 ZIP，要求显式绝对目录和 ZIP/内容/manifest 摘要，仅允许当前发行物自动安装的 Bot 官方组件与原包 ID/运行时，排除自举 Worker Host。目录的 `publish_official_archive` 在单一 SQLite 事务中提交索引、版本和官方来源；身份或摘要不匹配时目录不变，注入官方登记失败时索引回滚。隔离 CLI 用例实际发布不同版本的 `routing.graph`，默认版本仍在目录，普通 ZIP 导入仍无官方来源；定向 3 passed，包目录完整回归在底座改动后 `106 passed, 1 skipped`，Ruff 通过。此入口不授予群聊 Shell/Web/Worker 发布权，也不自动切换任何 Bot；生产目录发布、真实在线 Bot 热换代和长时负载仍未验收。
 
 同一入口在隔离 Linux runtime 镜像中按 Compose 的 UID 10001、无网络、只读根文件系统和独立包卷复验：本地命令发布新版 `routing.graph`，默认与新版两个官方摘要同时可读，目录共两条工件；临时镜像、卷与探针已清理。此验证使用一次性目录，不是现有在线 Supervisor 的真实包卷。

@@ -44,6 +44,8 @@ forest plugin publish-official-bot routing-2.1.0.zip --catalog-dir /var/lib/fore
 
 Linux 运行镜像已在 UID 10001、无网络、只读根文件系统和独立包卷中实际运行本地发布命令，新旧 `routing.graph` 官方工件同时可读；该隔离验收没有修改在线包卷或 Bot 选择。真实生产目录发布、在线热换代和长期负载仍是独立验收项。
 
+2026-10-09 的候选 Supervisor 进一步使用自己的持久包卷和真实 Bot 数据库验证发布与选择分离：本地命令发布官方 `routing.graph` 2.0.3 时，目录保留 2.0.2，两个 Bot 均未改变运行意图；随后仅让连接 Docker 内网 OneBot mock 的 Bot 上线，通过 Bot Web 管理端预检和 `module.enable` 提交选择。Graph 修订 3→4，只有 `routing.graph` Generation 改变；该 Bot 停机后，两代 Graph 均 `STOPPED`，新图全部 Generation 与被替换旧代均 `DISPOSED`。另一个持有真实 QQ 凭据的候选 `forest-main` 始终 `OFFLINE`，旧在线实例及其包卷未改动。这证明隔离候选部署的完整发布/热替换路径，不替代旧在线目录、实网切换或长时负载验收。
+
 工件详情 `/2` 投影该 scope 的 `official_registered`，由目录独立登记计算而不信任 manifest。Worker Host 选择账本、WebUI 和 Shell 输入现接受 `official` 条目；包内 SQL 与各层 schema 要求准确包/manifest 摘要和空批准能力，拒绝对 Worker Host 自身固定摘要。宿主在准备组件前核对官方登记与发行物组件/包身份；预检从所选摘要编译不可执行描述符，提交在同一 Graph/选择/配置围栏内重算计划，发布和冷启动读取同一持久选择事实。
 
 隔离 PostgreSQL 完整 BotHost 用例通过 Web 管理契约验证并提交 `routing.graph` 的另一官方工件，实际 Graph 发布后准确包摘要改变、内核 Generation 保留；Worker Host 随后自热重载，关闭整个 BotHost 再从同一 Bot 数据库和持久包目录冷启动，仍恢复所选摘要。包内选择账本用例验证官方条目的投影与写入相等，并拒绝额外能力和自举组件。上述验收没有发送 QQ，也没有证明官方新版如何进入生产目录。
