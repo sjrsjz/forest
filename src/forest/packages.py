@@ -2863,8 +2863,9 @@ class PackageCatalog:
         component = snapshot.component
         storage = component.get("storage")
         return {
-            "protocol": "forest.package-catalog-artifact/1",
+            "protocol": "forest.package-catalog-artifact/2",
             **self._item(snapshot),
+            "official_registered": self._is_official(snapshot.digest, component["scope"]),
             "configuration_schema_digest": digest_json(
                 snapshot.schema(component["config_schema"])
             ),

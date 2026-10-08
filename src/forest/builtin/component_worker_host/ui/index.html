@@ -179,7 +179,7 @@
       const item=await call('query','artifact',{package_digest:packageDigest});
       if(item.package_digest!==packageDigest)throw new Error('工件摘要与请求不符');
       byId('artifact-identity').textContent=`${item.package_id} ${item.package_version} / ${item.component_id}\n${item.package_digest}`;
-      byId('artifact-runtime').textContent=`${item.runtime} / ${item.scope} / ${item.storage_execution_profile||'无自有存储'}`;
+      byId('artifact-runtime').textContent=`${item.runtime} / ${item.scope} / ${item.storage_execution_profile||'无自有存储'} / ${item.official_registered?'已登记官方来源':'无官方来源登记'}`;
       byId('artifact-schema').textContent=item.configuration_schema_digest;
       byId('artifact-capabilities').textContent=item.requested_capabilities.join('\n')||'无';
       byId('artifact-requires').textContent=item.requires.map(value=>`${value.name} ${value.contract}${value.startup_dependency?' · 启动依赖':''}`).join('\n')||'无';

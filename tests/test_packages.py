@@ -177,6 +177,7 @@ def test_bot_official_provenance_requires_host_registration(tmp_path):
 
     for untrusted in (catalog, imported):
         assert not untrusted.is_official_bot(ordinary.digest)
+        assert untrusted.artifact(ordinary.digest)["official_registered"] is False
         with pytest.raises(ForestError) as rejected:
             untrusted.get_official_bot(ordinary.digest)
         assert rejected.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
@@ -186,9 +187,11 @@ def test_bot_official_provenance_requires_host_registration(tmp_path):
     assert wrong_scope.value.code == "OFFICIAL_PACKAGE_SOURCE_INVALID"
     official = catalog.build_official(source_root, scope="bot")
     assert official.digest == ordinary.digest
+    assert catalog.artifact(official.digest)["official_registered"] is True
     assert PackageCatalog(tmp_path / "bot-catalog").get_official_bot(official.digest).digest == official.digest
     assert not catalog.is_official_deployment(official.digest)
     assert not imported.is_official_bot(official.digest)
+    assert imported.artifact(official.digest)["official_registered"] is False
 
 
 @pytest.mark.asyncio
@@ -348,11 +351,13 @@ def test_catalog_page_verifies_artifacts_and_fences_concurrent_imports(tmp_path)
     }]
     assert page["next_after"] is None
     artifact = catalog.artifact(first.digest)
-    output_schema = json.loads((
-        Path(__file__).resolve().parents[1]
-        / "src/forest/builtin/component_worker_host/schemas/artifact-output.json"
-    ).read_text(encoding="utf-8"))
-    Draft202012Validator(output_schema).validate(artifact)
+    assert artifact["protocol"] == "forest.package-catalog-artifact/2"
+    for owner in ("component_worker_host", "deployment_package_registry"):
+        output_schema = json.loads((
+            Path(__file__).resolve().parents[1]
+            / f"src/forest/builtin/{owner}/schemas/artifact-output.json"
+        ).read_text(encoding="utf-8"))
+        Draft202012Validator(output_schema).validate(artifact)
     assert artifact["package_digest"] == page["items"][0]["package_digest"]
     assert artifact["manifest_digest"] == page["items"][0]["manifest_digest"]
     assert artifact["configuration_schema_digest"] == packages.digest_json(

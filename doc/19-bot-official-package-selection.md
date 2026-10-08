@@ -32,4 +32,6 @@
 
 ## 当前实现与验收缺口
 
+工件详情 `/2` 已投影该 scope 的 `official_registered`，由目录独立登记计算而不信任 manifest；部署目录和 Bot Worker Host 的输出 schema 同步校验它。这是可观察的来源证据，不等于已经开放按 Bot 选择官方版本。
+
 当前代码已将 Bot 官方工件登记与普通工件隔离，BotHost 对自动发现的包走受信任构建，并在真实隔离候选启动中验证过登记事实及 Bot Graph。现有选择条目只有 `builtin` 与 `installed`；`builtin` 仍表示启停和使用当前发行物，尚不能按 Bot 固定另一官方摘要。后续实现应一次贯通 Worker Host SQL/schema、Python 快照校验、候选预检、授权提交、装配、冷启动和 UI；不能先开放 UI 选项却让预检和冷启动使用不同工件。最小验收是两个 Bot 固定同一组件的两个官方摘要，旧 Bot 不随宿主源码变化漂移；切换其中一个 Bot 时另一 Bot 的 Generation 不变，目标换代失败则旧图保留；断开目录工件时冷启动显式失败；普通 ZIP 伪造官方声明始终被拒绝。
