@@ -207,6 +207,46 @@ ALTER TABLE forest_host.runtime_graph_change_requests
     ADD FOREIGN KEY (host_id,receipt_ticket_id)
     REFERENCES forest_host.web_authority_receipts(host_id,ticket_id);
 
+CREATE TABLE forest_host.audit_records (
+    host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
+    audit_id text NOT NULL CHECK (
+        octet_length(audit_id) BETWEEN 1 AND 128
+        AND audit_id ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]*$'
+    ),
+    action text NOT NULL CHECK (
+        octet_length(action) BETWEEN 1 AND 200
+        AND action ~ '^[A-Za-z0-9][A-Za-z0-9_.:-]*$'
+    ),
+    severity text NOT NULL CHECK (severity IN ('INFO','WARNING','ERROR','SECURITY')),
+    producer_component_id text NOT NULL CHECK (
+        octet_length(producer_component_id) BETWEEN 1 AND 128
+    ),
+    producer_generation_id text NOT NULL CHECK (
+        octet_length(producer_generation_id) BETWEEN 1 AND 256
+    ),
+    origin_kind text NOT NULL CHECK (origin_kind='web.management'),
+    actor_kind text NOT NULL CHECK (actor_kind='web.subject'),
+    actor_id text NOT NULL CHECK (octet_length(actor_id) BETWEEN 1 AND 128),
+    resource_kind text NOT NULL CHECK (resource_kind='host.component'),
+    resource_id text NOT NULL CHECK (octet_length(resource_id) BETWEEN 1 AND 128),
+    operation_kind text NOT NULL CHECK (operation_kind IN ('web.action','web.query')),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    receipt_ticket_id text,
+    CHECK ((operation_kind='web.action' AND receipt_ticket_id IS NOT NULL) OR
+           (operation_kind='web.query' AND receipt_ticket_id IS NULL)),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (host_id,audit_id),
+    UNIQUE (host_id,operation_id),
+    FOREIGN KEY (host_id,receipt_ticket_id)
+        REFERENCES forest_host.web_authority_receipts(host_id,ticket_id)
+);
+CREATE INDEX host_audit_time_idx
+    ON forest_host.audit_records(host_id,created_at DESC,audit_id DESC);
+CREATE INDEX host_audit_action_idx
+    ON forest_host.audit_records(host_id,action,created_at DESC,audit_id DESC);
+CREATE INDEX host_audit_actor_idx
+    ON forest_host.audit_records(host_id,actor_kind,actor_id,created_at DESC);
+
 CREATE FUNCTION forest_host.guard_runtime_graph_change() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 BEGIN
@@ -272,3 +312,7 @@ $$;
 CREATE TRIGGER web_authority_receipt_immutable
 BEFORE UPDATE OR DELETE ON forest_host.web_authority_receipts
 FOR EACH ROW EXECUTE FUNCTION forest_host.reject_receipt_change();
+
+CREATE TRIGGER host_audit_record_immutable
+BEFORE UPDATE OR DELETE ON forest_host.audit_records
+FOR EACH ROW EXECUTE FUNCTION forest_host.reject_identity_change();

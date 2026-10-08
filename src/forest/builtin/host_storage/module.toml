@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.host-storage"
-version = "0.9.0"
+version = "0.9.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "host_storage:HostStorage"
@@ -269,6 +269,7 @@ lease_seconds = 270
 [[components.management_queries]]
 id = "generations"
 port = "host.storage.generations"
+audit = "SECURITY"
 default_limit = 50
 max_limit = 100
 timeout_s = 10
@@ -276,14 +277,17 @@ timeout_s = 10
 [[components.management_queries]]
 id = "materialization.status"
 port = "host.storage.materialization.status"
+audit = "SECURITY"
 timeout_s = 10
 
 [[components.management_queries]]
 id = "resource"
 port = "host.storage.resource"
+audit = "SECURITY"
 timeout_s = 10
 
 [[components.management_queries]]
 id = "reclaim.status"
 port = "host.storage.reclaim.status"
+audit = "SECURITY"
 timeout_s = 10

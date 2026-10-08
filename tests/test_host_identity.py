@@ -23,6 +23,7 @@ from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.packages import digest_json, storage_bundle_digest
 from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.schema_bundles import StorageBundleSpec
+from forest.storage.host_audit import HostAuditRepository
 from forest.storage.host_generation import HostGenerationAuthority
 from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority, HostLease
@@ -290,6 +291,34 @@ CREATE TABLE host_sample_native (value text NOT NULL);
                 required_role="ADMIN",
             )
             return await receipts.accept_in(conn, ticket=ticket)
+
+        audit = HostAuditRepository(first_store)
+        query_ticket = await issue(
+            "resource", "query/host.sample/resource",
+            digest_json({"resource_id": "resource/private"}),
+        )
+        recorded = await audit.append_web_query(ticket=query_ticket)
+        assert recorded["resource_kind"] == "host.component"
+        assert recorded["actor_id"] == "web/admin"
+        assert recorded["operation_kind"] == "web.query"
+        assert await audit.append_web_query(ticket=query_ticket) == recorded
+        async with first_store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT operation_kind,receipt_ticket_id FROM forest_host.audit_records "
+                    "WHERE host_id=%s AND operation_id=%s",
+                    (host_id, query_ticket.target_operation_ref),
+                )
+            ).fetchone()
+            assert dict(row) == {"operation_kind": "web.query", "receipt_ticket_id": None}
+            receipt = await (
+                await conn.execute(
+                    "SELECT count(*) AS n FROM forest_host.web_authority_receipts "
+                    "WHERE host_id=%s AND target_operation_ref=%s",
+                    (host_id, query_ticket.target_operation_ref),
+                )
+            ).fetchone()
+            assert receipt["n"] == 0
 
         plan_body = {"expected_desired_revision": 1, "value": {"value": "second"}}
         plan_ticket = await issue(

@@ -1925,7 +1925,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 "Management query default_limit cannot exceed max_limit",
             )
         if declaration.get("audit") is not None and component["scope"] not in {
-            "deployment", "bot",
+            "deployment", "host", "bot",
         }:
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",

@@ -79,6 +79,7 @@ from forest.storage.deployment_storage_requests import DeploymentStorageRequestA
 from forest.storage.deployment_store import DeploymentStore
 from forest.storage.deployment_web_authority import DeploymentWebAuthorityRepository
 from forest.storage.deployment_web_identity import DeploymentWebIdentityAuthority
+from forest.storage.host_audit import HostAuditRepository
 from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
@@ -222,6 +223,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     )
     web_receipts = DeploymentWebAuthorityRepository(store)
     deployment_audit = DeploymentAuditRepository(store)
+    host_audit = HostAuditRepository(host_store)
     graph_changes = DeploymentGraphChangeAuthority(store)
     host_ticket_authority = WebAuthorityTicketAuthority(
         issuer_id=settings.deployment_id,
@@ -452,6 +454,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     host_id=settings.host_id,
                     host_controller=host_controller,
                     host_web_receipts=host_web_receipts,
+                    host_audit=host_audit,
                     host_graph_changes=host_graph_changes,
                     host_change_previewer=host_controller.preview_change,
                     identity_authority=web_identity,

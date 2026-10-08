@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from forest.deployment_management_app import create_deployment_management_app
 from forest.errors import ForestError
 from forest.management_gateway import ManagementGateway
+from forest.management_scopes import HostManagementGateway
 from forest.module_management_contract import ModuleConfigurationContract
 from forest.packages import digest_json
 from forest.storage.deployment_web_identity import (
@@ -1087,3 +1088,75 @@ async def test_asset_routes_forward_bounded_binary_under_bot_web_tickets(monkeyp
         assert calls[1][1] == binary
         assert all(item[2].web_subject_ref == "web-subject/test" for item in calls)
         assert all(item[2].target_generation_id == "generation/asset-1" for item in calls)
+
+
+async def test_host_sensitive_query_audit_precedes_result_delivery():
+    host_id = "host/" + "a" * 32
+    body = {"resource_id": "resource/private"}
+    operation_id = "web-read:host-resource"
+    signer = WebAuthorityTicketAuthority(
+        issuer_id="deployment/test", active_key_id="master/test/1",
+        key_resolver=lambda _key_id: b"k" * 32,
+    )
+    ticket = await signer.issue(
+        session=AuthenticatedWebSession(
+            "token-digest", "web-session/test", 1, "csrf-digest",
+            WebSubject("web-subject/test", "admin", "Administrator", "ADMIN", True, 1),
+            datetime.now(timezone.utc) + timedelta(hours=1),
+        ),
+        target_scope_kind="host", target_scope_id=host_id,
+        target_component_id="host.storage", target_generation_id="generation/host-storage/1",
+        target_graph_revision=1, target_operation_ref=operation_id,
+        action_key="resource", input_digest=digest_json(body),
+    )
+
+    class Contract:
+        calls = 0
+
+        def query_required_role(self, query_id):
+            return "AUDITOR"
+
+        def query_audit_severity(self, query_id):
+            return "SECURITY"
+
+        async def query_authorized(self, query_id, payload, *, authorization):
+            self.calls += 1
+            return {"private": "database and role"}
+
+    class Audit:
+        blocked = True
+        records = []
+
+        async def append_web_query(self, *, ticket):
+            if self.blocked:
+                raise ForestError("HOST_AUDIT_UNAVAILABLE", "Host audit unavailable", 503)
+            self.records.append(ticket)
+
+    contract = Contract()
+    audit = Audit()
+    registry = SimpleNamespace(
+        states={"host.storage": "ACTIVE"},
+        graph_identity=SimpleNamespace(
+            graph_id="graph/host", graph_revision=1,
+            generations={"host.storage": "generation/host-storage/1"},
+        ),
+        get=lambda component_id: SimpleNamespace(management_contract=contract),
+    )
+    gateway = HostManagementGateway(
+        host_id=host_id, ticket_authority=signer, audit=audit,
+        runtime_registry_provider=lambda: registry,
+    )
+    with pytest.raises(ForestError) as unavailable:
+        await gateway.module_query(
+            "host.storage", "resource", body,
+            authorization=ticket, operation_id=operation_id,
+        )
+    assert unavailable.value.code == "HOST_AUDIT_UNAVAILABLE"
+    assert contract.calls == 0
+    audit.blocked = False
+    assert await gateway.module_query(
+        "host.storage", "resource", body,
+        authorization=ticket, operation_id=operation_id,
+    ) == {"private": "database and role"}
+    assert contract.calls == 1
+    assert audit.records == [ticket]

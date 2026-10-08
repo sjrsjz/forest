@@ -214,6 +214,22 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
             assert inventory.status_code == 200, inventory.text
             assert len(inventory.json()["items"]) == 1
             assert inventory.json()["items"][0]["state"] == "ACTIVE"
+            host_audit_reader = await psycopg.AsyncConnection.connect(host_dsn, autocommit=True)
+            try:
+                rows = await (
+                    await host_audit_reader.execute(
+                        "SELECT actor_id,operation_kind,action,resource_kind,"
+                        "producer_generation_id,receipt_ticket_id FROM forest_host.audit_records "
+                        "WHERE host_id=%s AND action='generations'",
+                        (host_id,),
+                    )
+                ).fetchall()
+                assert len(rows) == 1
+                assert rows[0][1:4] == ("web.query", "generations", "host.component")
+                assert rows[0][4] == host_module["generation_id"]
+                assert rows[0][5] is None
+            finally:
+                await host_audit_reader.close()
             configuration_path = host_base + "/modules/host.storage/configuration"
             configuration = await client.get(configuration_path, headers=headers)
             assert configuration.status_code == 200, configuration.text
