@@ -2588,13 +2588,14 @@ class PackageCatalog:
                 "OFFICIAL_PACKAGE_SOURCE_INVALID",
                 "Official source must declare its scope and trusted storage",
             )
-        snapshot = self._publish(captured, manifest=manifest)
         with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
-            db.execute("PRAGMA synchronous=FULL")
+            self._prepare_catalog_tables(db, imports=False)
+            db.execute("BEGIN IMMEDIATE")
             db.execute(
                 f"CREATE TABLE IF NOT EXISTS {table} "
                 "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
             )
+            snapshot = self._publish(captured, manifest=manifest, locked_db=db)
             db.execute(
                 f"INSERT OR IGNORE INTO {table} VALUES (?,?)",
                 (snapshot.digest, component["id"]),

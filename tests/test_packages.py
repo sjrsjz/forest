@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -197,6 +198,27 @@ def test_bot_official_provenance_requires_host_registration(tmp_path):
     assert not catalog.is_official_deployment(official.digest)
     assert not imported.is_official_bot(official.digest)
     assert imported.artifact(official.digest)["official_registered"] is False
+
+
+def test_official_registration_and_artifact_index_commit_together(tmp_path):
+    catalog = PackageCatalog(tmp_path / "official-atomic")
+    index = catalog.root / "catalog.sqlite3"
+    with sqlite3.connect(index) as db:
+        db.execute(
+            "CREATE TABLE official_bot_artifacts "
+            "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
+        )
+        db.execute(
+            "CREATE TRIGGER reject_official BEFORE INSERT ON official_bot_artifacts "
+            "BEGIN SELECT RAISE(ABORT, 'injected official registration failure'); END"
+        )
+    with pytest.raises(sqlite3.IntegrityError):
+        catalog.build_official(EXAMPLE, scope="bot")
+    assert catalog.list() == []
+    with sqlite3.connect(index) as db:
+        db.execute("DROP TRIGGER reject_official")
+    snapshot = catalog.build_official(EXAMPLE, scope="bot")
+    assert catalog.get_official_bot(snapshot.digest).digest == snapshot.digest
 
 
 def test_bot_official_selection_resolves_exact_registered_artifact(tmp_path):
