@@ -3739,7 +3739,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             }
             preview = await selection_contract.query("validate", candidate)
 
-            async def send_shell(message_id, user_id, command):
+            async def send_shell(message_id, user_id, command, extra_segments=()):
                 await clients[-1].handler(json.dumps({
                     "self_id": int(settings.onebot_self_id),
                     "post_type": "message", "message_type": "group",
@@ -3748,7 +3748,10 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     "group_id": 933179609,
                     "sender": {"user_id": user_id, "nickname": "Operator", "card": "",
                                "role": "admin" if user_id == 42 else "member"},
-                    "message": [{"type": "text", "data": {"text": command}}],
+                    "message": [
+                        {"type": "text", "data": {"text": command}},
+                        *extra_segments,
+                    ],
                 }, separators=(",", ":")).encode())
 
             shell_command = (
@@ -3834,6 +3837,41 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                         break
                     await asyncio.sleep(0.1)
             assert rejected["rejection_code"] == "SHELL_PRINCIPAL_DENIED"
+            await send_shell(
+                81004, 42, "#forest core status",
+                ({"type": "at", "data": {"qq": settings.onebot_self_id}},),
+            )
+            conversation_namespace = next(
+                item.storage.spec.namespace for item in restarted.registry.descriptors
+                if item.component_id == "conversation.scheduler"
+            )
+            async with asyncio.timeout(20):
+                while True:
+                    async with restarted.store.pool.connection() as conn:
+                        invalid = await (await conn.execute(
+                            sql.SQL("SELECT state,rejection_code FROM {}.shell_requests "
+                                    "WHERE bot_id=%s AND principal_ref=%s "
+                                    "AND command_id='shell.invalid'").format(
+                                sql.Identifier(shell_namespace)
+                            ),
+                            (settings.bot_id, "qq:42"),
+                        )).fetchone()
+                        classified = await (await conn.execute(
+                            sql.SQL("SELECT classification_state,trigger_decision "
+                                    "FROM {}.inbox_messages WHERE bot_id=%s "
+                                    "AND platform_message_ref=%s").format(
+                                sql.Identifier(conversation_namespace)
+                            ),
+                            (settings.bot_id, "81004"),
+                        )).fetchone()
+                    if invalid is not None and invalid["state"] == "REJECTED" and classified:
+                        break
+                    await asyncio.sleep(0.1)
+            assert invalid["rejection_code"] == "SHELL_SYNTAX_INVALID"
+            assert classified == {
+                "classification_state": "FINAL",
+                "trigger_decision": "CONTROL_COMMAND",
+            }
             disable_graph_revision = restarted.registry.graph_identity.graph_revision
             disable_input = {
                 **candidate,
