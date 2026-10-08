@@ -1,3 +1,4 @@
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -67,7 +68,7 @@ async def test_reserved_shell_prefix_with_line_break_is_rejected_by_shell():
 
 
 @pytest.mark.postgres
-async def test_shell_admission_preserves_parser_rejection_after_authorization(clean_authority):
+async def test_shell_admission_preserves_rejections_and_priority_capacity(clean_authority):
     store, _installer = clean_authority
     schema_name = "shell_priority_test"
     source = Path(__file__).resolve().parents[1] / (
@@ -134,3 +135,83 @@ async def test_shell_admission_preserves_parser_rejection_after_authorization(cl
             assert receipt["ok"] is True
             assert receipt["value"]["state"] == "REJECTION_PENDING"
             assert receipt["value"]["rejection_code"] == expected_code
+
+        for offset, (command_id, service_class) in enumerate((
+            ("core.status", "P0"), ("module.reload", "P1"),
+        ), start=5):
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.shell_command_catalog "
+                    "(shell_generation_id,command_id,command_version,graph_id,graph_revision,"
+                    "argument_schema,argument_schema_digest,management_operation_id,"
+                    "target_scope,service_class,required_capabilities,"
+                    "required_capabilities_digest,output_policy,timeout_seconds,"
+                    "owner_component_id,target_generation_id,target_service_id,"
+                    "target_service_version) VALUES "
+                    "('generation/shell',%s,1,'graph/1',1,%s,%s,'runtime.status',"
+                    "'BOT',%s,%s,%s,'SHORT',10,'component.worker-host',"
+                    "'generation/target','shell.target',1)"
+                ).format(sql.Identifier(schema_name)),
+                (
+                    command_id, Jsonb({"type": "object"}), "sha256:" + "b" * 64,
+                    service_class, Jsonb([]), "sha256:" + "c" * 64,
+                ),
+            )
+            queued = deepcopy(ingress)
+            queued.update({
+                "request_id": f"request/{service_class}",
+                "event_ref": f"event/{service_class}",
+                "principal_ref": "qq:42", "command_id": command_id,
+                "arguments": {}, "rejection": {
+                    "owner_id": f"rejection/{service_class}",
+                    "value": {"text": "rejected"},
+                },
+            })
+            admitted = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.shell_admit_ingress(%s,%s)").format(
+                        sql.Identifier(schema_name)
+                    ),
+                    (Jsonb({
+                        "bot_id": "bot-bundle", "generation_id": "generation/shell",
+                        "input_digest": "sha256:" + format(offset + 1, "064x"),
+                        "operation_id": f"operation/{offset}",
+                    }), Jsonb({"protocol": "forest.uow-step/1", "input": queued})),
+                )
+            ).fetchone()
+            assert admitted["shell_admit_ingress"]["value"]["state"] == "QUEUED"
+
+        class_context = Jsonb({"bot_id": "bot-bundle", "generation_id": "generation/shell"})
+
+        async def call(function, payload):
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.{}(%s,%s)").format(
+                        sql.Identifier(schema_name), sql.Identifier(function)
+                    ),
+                    (class_context, Jsonb(payload)),
+                )
+            ).fetchone()
+            return row[function]
+
+        p1 = await call("shell_claim_work_p1", {
+            "claim_token": "claim/p1", "lease_seconds": 120,
+        })
+        assert p1["value"]["work_id"] == "request/P1"
+        p0 = await call("shell_claim_work_p0", {
+            "claim_token": "claim/p0", "lease_seconds": 120,
+        })
+        assert p0["value"]["work_id"] == "request/P0"
+        assert (await call("shell_claim_work_p1", {
+            "claim_token": "claim/p1-again", "lease_seconds": 120,
+        }))["value"] is None
+        settlement = {
+            "work_id": "request/P0", "claim_token": "claim/p0",
+            "outcome": {"error": {"code": "TEST_EXECUTION_FAILED"}},
+        }
+        wrong_lane = await call("shell_settle_work_p1", settlement)
+        assert wrong_lane["ok"] is False
+        assert wrong_lane["error"]["code"] == "STALE_SHELL_CLAIM"
+        correct_lane = await call("shell_settle_work_p0", settlement)
+        assert correct_lane["ok"] is True
+        assert correct_lane["value"]["work_id"] == "request/P0"

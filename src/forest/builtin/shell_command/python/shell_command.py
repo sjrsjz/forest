@@ -230,6 +230,13 @@ class ShellCommand(Plugin):
 
     @job("shell.command.execute")
     async def execute(self, task, ctx):
+        return await self._execute(task, ctx)
+
+    @job("shell.command.execute-p0")
+    async def execute_p0(self, task, ctx):
+        return await self._execute(task, ctx)
+
+    async def _execute(self, task, ctx):
         work = _plain(task["payload"])
         plan = {
             "request_id": work["request_id"],

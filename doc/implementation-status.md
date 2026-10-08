@@ -1056,3 +1056,5 @@ Bot 空闲工作泵提交唤醒与退避（2026-10-08）：当前源码的隔离
 Shell 保留前缀与混合内容优先级（2026-10-09）：`shell.command` 1.3.2 修正直接命令识别。完整 `#forest` token 之后若含图片、额外 @ 或其他非文本片段，入口仍归 Shell 所有，确定性返回 `SHELL_SYNTAX_INVALID`，不查询命令目录、不执行管理动作，也不回退普通 Agent 分类。未命中 token 的 `#forestX` 保持普通消息。定向测试 7 passed，Ruff 与官方包构建通过；本轮未向真实 QQ 发消息，也未把候选包部署至现有在线 Bot。Bot 身份和期望运行意图继续由部署内核持有，目录 builtin 只通过受限端口操作。
 
 Shell 前缀换行补界（2026-10-09）：`shell.command` 1.3.3 将 `#forest` 后直接换行或其他空白分隔符视为已认领的语法错误，不再落入 Agent 分类；`#forestX` 仍不认领。同版本工件修改被包目录以 `PACKAGE_VERSION_CONFLICT` 拒绝，因此显式提升补丁版本。定向测试 8 passed、Ruff 通过。
+
+Shell 执行槽分级（2026-10-09）：`shell.command` 1.3.5 / 私有 SQL 2.2.2 把已接纳的 P0、P1 请求拆为各自一个 owned-work handler，使用独立的领取和结算 SQL authority。P1 claim 未完成时仍可领取 P0；错误等级的结算即使持有 claim token 也返回 `STALE_SHELL_CLAIM`。拒绝回执保持独立执行槽。隔离 PostgreSQL 定向用例 5 passed，非数据库回归 4 passed，完整 BotHost 链路 1 passed（481.34 秒），包编译与 Ruff 通过；Windows/Linux 官方包摘要相同。未切换在线 Bot，也未发送真实 QQ 消息。Bot 身份与期望运行状态由内核持有，builtin 管理包只使用受限端口。

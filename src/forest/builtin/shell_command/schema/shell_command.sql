@@ -355,19 +355,24 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION shell_claim_work(context jsonb, input jsonb)
+CREATE FUNCTION shell_claim_work_class(context jsonb, input jsonb, claimed_class text)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE item __forest_module_schema__.shell_requests%ROWTYPE;
         token text:=input->>'claim_token'; lease_seconds integer:=(input->>'lease_seconds')::integer;
 BEGIN
+  IF claimed_class NOT IN ('P0','P1') THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','SHELL_WORK_CLASS_INVALID','message','Shell work class is invalid','status',422));
+  END IF;
   UPDATE __forest_module_schema__.shell_requests SET state='UNKNOWN',error_code='SHELL_RESULT_UNKNOWN_AFTER_LEASE',
     completed_at=clock_timestamp(),updated_at=clock_timestamp()
    WHERE bot_id=context->>'bot_id' AND shell_generation_id=context->>'generation_id'
-     AND state IN ('CLAIMED','EXECUTING') AND lease_until<=clock_timestamp();
+     AND service_class=claimed_class AND state IN ('CLAIMED','EXECUTING')
+     AND lease_until<=clock_timestamp();
   SELECT * INTO item FROM __forest_module_schema__.shell_requests
    WHERE bot_id=context->>'bot_id' AND shell_generation_id=context->>'generation_id'
-     AND state='QUEUED' ORDER BY CASE service_class WHEN 'P0' THEN 0 ELSE 1 END,
-       created_at,request_id FOR UPDATE SKIP LOCKED LIMIT 1;
+     AND service_class=claimed_class AND state='QUEUED'
+   ORDER BY created_at,request_id FOR UPDATE SKIP LOCKED LIMIT 1;
   IF NOT FOUND THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
   END IF;
@@ -388,6 +393,16 @@ BEGIN
         'target_generation_id',item.target_generation_id,'target_service_id',item.target_service_id,
         'target_service_version',item.target_service_version,'timeout_seconds',item.timeout_seconds)));
 END;
+$$;
+
+CREATE FUNCTION shell_claim_work_p0(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
+  SELECT __forest_module_schema__.shell_claim_work_class(context,input,'P0');
+$$;
+
+CREATE FUNCTION shell_claim_work_p1(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
+  SELECT __forest_module_schema__.shell_claim_work_class(context,input,'P1');
 $$;
 
 CREATE FUNCTION shell_complete_rejection(context jsonb, envelope jsonb)
@@ -481,23 +496,28 @@ BEGIN
 END;
 $$;
 
-CREATE FUNCTION shell_settle_work(context jsonb, input jsonb)
+CREATE FUNCTION shell_settle_work_class(context jsonb, input jsonb, claimed_class text)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE existing record; item __forest_module_schema__.shell_requests%ROWTYPE; result jsonb;
 BEGIN
+  IF claimed_class NOT IN ('P0','P1') THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','SHELL_WORK_CLASS_INVALID','message','Shell work class is invalid','status',422));
+  END IF;
+  SELECT * INTO item FROM __forest_module_schema__.shell_requests
+   WHERE bot_id=context->>'bot_id' AND request_id=input->>'work_id'
+     AND shell_generation_id=context->>'generation_id' AND claim_token=input->>'claim_token'
+     AND service_class=claimed_class FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+      jsonb_build_object('code','STALE_SHELL_CLAIM','message','Shell claim is no longer owned','status',409));
+  END IF;
   SELECT * INTO existing FROM __forest_module_schema__.shell_work_settlements
    WHERE claim_token=input->>'claim_token';
   IF FOUND THEN
     IF existing.input_payload=input THEN RETURN existing.result_payload; END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
       jsonb_build_object('code','SHELL_SETTLEMENT_CONFLICT','message','Shell claim has another settlement','status',409));
-  END IF;
-  SELECT * INTO item FROM __forest_module_schema__.shell_requests
-   WHERE bot_id=context->>'bot_id' AND request_id=input->>'work_id'
-     AND shell_generation_id=context->>'generation_id' AND claim_token=input->>'claim_token' FOR UPDATE;
-  IF NOT FOUND THEN
-    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
-      jsonb_build_object('code','STALE_SHELL_CLAIM','message','Shell claim is no longer owned','status',409));
   END IF;
   IF item.state IN ('CLAIMED','EXECUTING') THEN
     UPDATE __forest_module_schema__.shell_requests SET state='UNKNOWN',
@@ -511,4 +531,14 @@ BEGIN
     VALUES(input->>'claim_token',input,result);
   RETURN result;
 END;
+$$;
+
+CREATE FUNCTION shell_settle_work_p0(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
+  SELECT __forest_module_schema__.shell_settle_work_class(context,input,'P0');
+$$;
+
+CREATE FUNCTION shell_settle_work_p1(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog AS $$
+  SELECT __forest_module_schema__.shell_settle_work_class(context,input,'P1');
 $$;
