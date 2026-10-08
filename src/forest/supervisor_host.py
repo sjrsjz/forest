@@ -32,6 +32,7 @@ from forest.deployment_kernel_management import (
     ProvisioningReconcileKernelCommand,
     RetirementJobsKernelQuery,
     RetirementRequeueKernelCommand,
+    SecretOperationKernelQuery,
     SecretPutKernelCommand,
     StorageRequestKernelCommand,
     StorageRequestsKernelQuery,
@@ -359,6 +360,8 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     BootstrapCatalogKernelQuery(bootstrap_registry),
                 ("deployment.storage-orchestrator", "deployment.storage-requests-page"):
                     StorageRequestsKernelQuery(storage_dispatch),
+                ("deployment.secrets", "deployment.secret-operation-result"):
+                    SecretOperationKernelQuery(secrets),
             },
             kernel_management_handlers={
                 ("deployment.bot-catalog", "deployment.bot-set-desired"):

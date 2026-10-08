@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-secrets"
-version = "1.0.2"
+version = "1.1.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_secrets:DeploymentSecrets"
@@ -35,7 +35,7 @@ requests = ["domain.query:deployment.secrets.metadata.page"]
 entrypoint = "ui/index.html"
 protocol = "forest.management-ui/1"
 contribution_id = "deployment.secrets.workspace"
-label = "Secret 引用"
+label = "Secret 寮曠敤"
 group = "deployment"
 order = 20
 
@@ -70,11 +70,25 @@ kind = "deployment.secret-put"
 input_schema = "schemas/put-input.json"
 output_schema = "schemas/put-output.json"
 
+[[components.kernel_queries]]
+name = "deployment.secrets.operation-result"
+contract = "1.0"
+kind = "deployment.secret-operation-result"
+input_schema = "schemas/operation-input.json"
+output_schema = "schemas/operation-output.json"
+
 [[components.management_queries]]
 id = "secrets.list"
 port = "deployment.secrets.page"
 default_limit = 50
 max_limit = 100
+timeout_s = 10
+
+[[components.management_queries]]
+id = "secret.operation"
+port = "deployment.secrets.operation-result"
+actor_field = "requested_by"
+required_role = "ADMIN"
 timeout_s = 10
 
 [[components.management_actions]]

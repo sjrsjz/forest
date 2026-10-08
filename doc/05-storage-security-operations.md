@@ -300,7 +300,7 @@ Web 管理主体来自服务端验证的本地账户或显式接入的身份提�
 
 部署库 Web 会话与独立 Bot 的授权不具有跨库原子性。首版采用用途限定的 `WebAuthorityTicket`：可信管理网关在部署库验证未撤销会话后签发，绑定 `ticket_id, issuer/key_revision, web_subject_ref, session_ref/session_revision, target_scope, target_operation_ref, action_key, input_digest, plan_digest, issued_at, expires_at`。票据只在后端传递，初始最大有效期 30 秒；目标在自己的最终许可事务中验证签名、期限、精确目标/输入/计划和当前 Bot policy/fences，再把票据依据记入原操作或配置修订。`target_operation_ref` 预分配且由请求稳定派生，同会话重签的票据可以恢复原操作，不得创建新效果；票据不能替代 Bot 授权，也不让普通 Worker 持有长效 Web 登录权限。
 
-重新登录会产生新的 `session_ref`，不能把新签票伪装成旧会话对同一写操作的再次接纳。丢失 HTTP 回执后的跨会话或跨代际恢复应走独立的只读结果查询：以当前有效会话和原 `operation_ref` 查询，先核对当前 Web 主体与原接纳主体、目标范围及动作，再由操作所属 authority 返回原结果或明确的未完成状态；不能重新执行写端口、不能放宽旧签票回执中的会话、Generation 或 Graph 绑定。此查询必须有有界权限、稳定操作身份和审计，不得仅凭客户端提供的幂等键透露其他主体的操作。当前只有部分模块提供状态查询；通用的跨会话结果查询尚未落地，同键重新提交写请求可能返回 `WEB_AUTHORITY_RECEIPT_CONFLICT`。
+重新登录会产生新的 `session_ref`，不能把新签票伪装成旧会话对同一写操作的再次接纳。丢失 HTTP 回执后的跨会话或跨代际恢复应走独立的只读结果查询：以当前有效会话和原 `operation_ref` 查询，先核对当前 Web 主体与原接纳主体、目标范围及动作，再由操作所属 authority 返回原结果或明确的未完成状态；不能重新执行写端口、不能放宽旧签票回执中的会话、Generation 或 Graph 绑定。此查询必须有有界权限、稳定操作身份和审计，不得仅凭客户端提供的幂等键透露其他主体的操作。`deployment.secrets` 已可按原幂等键派生操作引用，仅向原 Web 主体查询提交后的元数据；其他模块的统一跨会话结果查询尚未落地，同键重新提交写请求仍可能返回 `WEB_AUTHORITY_RECEIPT_CONFLICT`。
 
 deployment scope 的写动作同样不能只在 HTTP 壳验票。票据必须绑定贡献该动作的准确 `deployment/<component_id>/1` 代际；`deployment/control-plane/1` 只表示 `$runtime`。Catalog、Secret、Account、Storage Profile、Bootstrap Profile 与 Provisioning Job authority 在各自业务事务内重新验票，并以 `target_operation_ref` 为唯一语义操作写入 `forest_deployment.web_authority_receipts`。业务 CAS、引用或输入校验失败时收据随事务回滚；幂等重放只能接纳相同 scope、组件、代际、action、输入和计划。由多个可重放子事务组成的动作使用同一个顶层收据身份，不为子步骤伪造新的 Web 操作。
 

@@ -23,6 +23,7 @@
     <label>修订<input name="expected_revision" type="number" min="0" value="0" required></label>
     <button type="submit">输入新值并写入</button>
   </form>
+  <form id="recovery" class="toolbar"><input id="operation-key" placeholder="写入操作键（提交前显示，可复制）" aria-label="Secret 写入操作键" maxlength="128"><button type="submit">查询写入结果</button></form>
   <form id="filter" class="toolbar"><input id="search" placeholder="筛选引用或用途" aria-label="筛选 Secret"><button type="submit">查询</button><small>列表和响应仅显示元数据</small></form>
   <div id="items" class="list"></div>
   <div class="footer"><span id="status">等待连接</span><button id="more" type="button" hidden>下一页</button></div>
@@ -69,11 +70,22 @@
     event.preventDefault();const form=event.currentTarget;
     const input={secret_ref:form.elements.secret_ref.value,purpose:form.elements.purpose.value,
       expected_revision:Number(form.elements.expected_revision.value)};
+    const key=randomId();$('operation-key').value=key;
     form.querySelector('button').disabled=true;
-    status.textContent='等待宿主输入新值…';
-    try{await request('secret-action','secret.put',input,randomId());status.textContent='已写入新版本';await load(false);}
-    catch(error){status.textContent=error.message;}
+    status.textContent=`操作键 ${key}；等待宿主输入新值…`;
+    try{await request('secret-action','secret.put',input,key);await load(false);status.textContent=`已写入新版本；操作键 ${key}`;}
+    catch(error){status.textContent=`${error.message}；可用操作键 ${key} 查询结果`;}
     finally{form.querySelector('button').disabled=false;}
+  };
+  $('recovery').onsubmit=async event=>{
+    event.preventDefault();const key=$('operation-key').value.trim();if(!key)return;
+    status.textContent='正在查询原写入…';
+    try{
+      const result=await request('query','secret.operation',{idempotency_key:key});
+      status.textContent=result.status==='SUCCEEDED'
+        ?`已提交 ${result.result.secret_ref} v${result.result.version}；原操作 ${result.operation_id}`
+        :`未找到已提交的写入；原操作 ${result.operation_id}`;
+    }catch(error){status.textContent=error.message;}
   };
   $('filter').onsubmit=event=>{event.preventDefault();load(false);};
   $('refresh').onclick=()=>load(false);$('more').onclick=()=>load(true);

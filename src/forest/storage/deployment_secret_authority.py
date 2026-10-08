@@ -175,7 +175,8 @@ class DeploymentSecretAuthority:
                 )
         replay = await (
             await conn.execute(
-                "SELECT v.*,s.purpose,s.revision FROM forest_deployment.secret_versions v "
+                "SELECT v.*,s.purpose,v.version AS revision "
+                "FROM forest_deployment.secret_versions v "
                 "JOIN forest_deployment.secret_slots s USING(secret_ref) "
                 "WHERE v.operation_id=%s",
                 (operation_id,),
@@ -254,6 +255,45 @@ class DeploymentSecretAuthority:
             )
         ).fetchone()
         return self._metadata(saved)
+
+    async def web_operation_result(
+        self, *, operation_id: str, web_subject_ref: str,
+    ) -> dict:
+        """Read one original Web Secret result without replaying its write ticket."""
+        _bounded(operation_id, "operation_id", 256)
+        _bounded(web_subject_ref, "web_subject_ref", 128)
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    "SELECT r.target_operation_ref,v.secret_ref,v.version,v.key_id,"
+                    "s.purpose FROM forest_deployment.web_authority_receipts r "
+                    "LEFT JOIN forest_deployment.secret_versions v "
+                    "ON v.operation_id=r.target_operation_ref "
+                    "LEFT JOIN forest_deployment.secret_slots s "
+                    "ON s.secret_ref=v.secret_ref "
+                    "WHERE r.deployment_id=%s AND r.target_operation_ref=%s "
+                    "AND r.web_subject_ref=%s "
+                    "AND r.target_scope_kind='deployment' "
+                    "AND r.target_component_id='deployment.secrets' "
+                    "AND r.action_key='secret.put'",
+                    (self.store.deployment_id, operation_id, web_subject_ref),
+                )
+            ).fetchone()
+        if row is None:
+            return {"status": "NOT_FOUND", "operation_id": operation_id, "result": None}
+        if row["secret_ref"] is None or row["purpose"] is None:
+            raise ForestError(
+                "SECRET_OPERATION_RECEIPT_INCOMPLETE",
+                "Committed Secret write has no result", 503,
+            )
+        return {
+            "status": "SUCCEEDED", "operation_id": operation_id,
+            "result": {
+                "secret_ref": row["secret_ref"], "purpose": row["purpose"],
+                "version": row["version"], "revision": row["version"],
+                "key_id": row["key_id"],
+            },
+        }
 
     async def metadata(self, secret_ref: str) -> SecretMetadata:
         row = await self._current(secret_ref)

@@ -12,6 +12,7 @@ from typing import Callable
 from forest.control_action_authorization import ControlActionAuthorization
 from forest.errors import ForestError
 from forest.management_gateway import ManagementGateway
+from forest.management_operation_identity import control_management_operation_id
 from forest.packages import digest_json
 
 _SCOPE_KIND = re.compile(r"[a-z][a-z0-9.-]{0,63}\Z")
@@ -621,18 +622,8 @@ class ControlManagementGateway:
         return None
 
     def operation_id(self, component_id: str, action_id: str, key: str | None) -> str:
-        if key is None or not 1 <= len(key) <= 128:
-            raise ForestError(
-                "IDEMPOTENCY_KEY_REQUIRED", "A stable Idempotency-Key is required", 422
-            )
-        return "web:" + digest_json(
-            [
-                f"forest.{self.scope_kind}-management-operation/1",
-                self.control_id,
-                component_id,
-                action_id,
-                key,
-            ]
+        return control_management_operation_id(
+            self.scope_kind, self.control_id, component_id, action_id, key,
         )
 
 

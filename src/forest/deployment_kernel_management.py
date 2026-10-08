@@ -15,6 +15,7 @@ from forest.control_kernel_management import (
     ControlKernelQueryAuthority,
 )
 from forest.errors import ForestError
+from forest.management_operation_identity import control_management_operation_id
 from forest.security import hash_password
 
 
@@ -75,6 +76,22 @@ class StorageRequestsKernelQuery:
 
     async def query(self, payload: dict) -> dict:
         return await self.dispatch.page(**payload)
+
+
+class SecretOperationKernelQuery:
+    """Recover a committed Secret write for its authenticated Web subject."""
+
+    def __init__(self, secrets) -> None:
+        self.secrets = secrets
+
+    async def query(self, payload: dict) -> dict:
+        operation_id = control_management_operation_id(
+            "deployment", self.secrets.store.deployment_id,
+            "deployment.secrets", "secret.put", payload["idempotency_key"],
+        )
+        return await self.secrets.web_operation_result(
+            operation_id=operation_id, web_subject_ref=payload["requested_by"],
+        )
 
 
 class DeploymentKernelManagementAuthority(ControlKernelManagementAuthority):

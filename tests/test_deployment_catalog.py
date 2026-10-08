@@ -32,6 +32,7 @@ from forest.deployment_kernel_management import (
     ProvisioningReconcileKernelCommand,
     RetirementJobsKernelQuery,
     RetirementRequeueKernelCommand,
+    SecretOperationKernelQuery,
     SecretPutKernelCommand,
     StorageRequestKernelCommand,
     StorageRequestsKernelQuery,
@@ -3361,6 +3362,13 @@ async def test_deployment_secret_rotation_is_encrypted_cas_and_write_only(
         expected_revision=first.revision,
     )
     assert second.version == second.revision == 2
+    assert await secrets.put(
+        operation_id="secret/model/1",
+        secret_ref=first.secret_ref,
+        purpose=first.purpose,
+        plaintext=b"model-secret-value",
+        expected_revision=0,
+    ) == first
     assert await secrets.resolve(second.secret_ref) == b"rotated-model-secret"
     assert await secrets.resolve_text_for_purpose(
         second.secret_ref, "provider.chat-completions.credential"
@@ -4176,6 +4184,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
     deployment_runtime = DeploymentRuntimeScope(
         repository.store, SimpleNamespace(authority_lease=lambda **_values: lease),
         kernel_query_handlers={
+            ("deployment.secrets", "deployment.secret-operation-result"):
+                SecretOperationKernelQuery(secrets),
             ("deployment.bot-catalog", "deployment.bot-catalog-page"):
                 BotCatalogKernelQuery(repository),
             ("deployment.provisioning", "deployment.provisioning-jobs-page"):
@@ -4751,6 +4761,76 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert rotated.status_code == 200, rotated.text
         assert rotated.json()["revision"] == 2
         assert "replacement-value" not in rotated.text
+        operation_path = (
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.secrets/queries/secret.operation"
+        )
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://forest.test"
+        ) as renewed_client:
+            renewed_login = await renewed_client.post(
+                "/management/v1/auth/login",
+                headers={"origin": "http://forest.test"},
+                json={"username": "admin", "password": "deployment-web-password"},
+            )
+            assert renewed_login.status_code == 200
+            assert renewed_login.json()["session_ref"] != login.json()["session_ref"]
+            renewed_headers = {
+                "origin": "http://forest.test",
+                "x-forest-csrf": renewed_client.cookies["forest_management_csrf"],
+            }
+            recovered = await renewed_client.post(
+                operation_path, headers=renewed_headers,
+                json={"idempotency_key": "secret-web-1"},
+            )
+            assert recovered.status_code == 200, recovered.text
+            assert recovered.json()["status"] == "SUCCEEDED"
+            assert recovered.json()["result"] == saved.json()
+            assert recovered.json()["result"]["revision"] == 1
+            assert "never-return-this" not in recovered.text
+            absent = await renewed_client.post(
+                operation_path, headers=renewed_headers,
+                json={"idempotency_key": "secret-web-rejected"},
+            )
+            assert absent.status_code == 200, absent.text
+            assert absent.json()["status"] == "NOT_FOUND"
+            assert absent.json()["result"] is None
+            forged = await renewed_client.post(
+                operation_path, headers=renewed_headers,
+                json={"idempotency_key": "secret-web-1", "requested_by": "other"},
+            )
+            assert forged.status_code == 422, forged.text
+        other_admin = await client.post(
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.accounts/actions/account.create",
+            headers={**headers, "idempotency-key": "webui-account-other-admin"},
+            json={"username": "otheradmin", "display_name": "Other Admin",
+                  "password": "other-admin-password", "role": "ADMIN"},
+        )
+        assert other_admin.status_code == 200, other_admin.text
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://forest.test"
+        ) as other_client:
+            assert (await other_client.post(
+                "/management/v1/auth/login",
+                headers={"origin": "http://forest.test"},
+                json={"username": "otheradmin", "password": "other-admin-password"},
+            )).status_code == 200
+            other_result = await other_client.post(
+                operation_path,
+                headers={
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": other_client.cookies["forest_management_csrf"],
+                },
+                json={"idempotency_key": "secret-web-1"},
+            )
+            assert other_result.status_code == 200, other_result.text
+            assert other_result.json()["status"] == "NOT_FOUND"
+            assert other_result.json()["result"] is None
+        assert (await secrets.web_operation_result(
+            operation_id=recovered.json()["operation_id"],
+            web_subject_ref="web-subject/other",
+        ))["status"] == "NOT_FOUND"
         account_path = (
             "/management/v1/scopes/deployment/deployment/modules/"
             "deployment.accounts/actions/"
