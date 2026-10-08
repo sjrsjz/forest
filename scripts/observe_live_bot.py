@@ -16,15 +16,15 @@ from datetime import datetime, timezone
 from urllib.request import urlopen
 
 from psycopg import sql
+from psycopg.errors import UndefinedTable
 
-from forest.official_bot_provisioning import OFFICIAL_BOT_COMPONENT_IDS
+from forest.deployment_access_settings import DeploymentAccessSettings
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.bot_store import BotStore
 from forest.storage.deployment_catalog import DeploymentCatalogRepository
 from forest.storage.deployment_secret_authority import DeploymentSecretAuthority
 from forest.storage.deployment_storage_profiles import DeploymentStorageProfileAuthority
 from forest.storage.deployment_store import DeploymentStore
-from forest.supervisor_host import SupervisorSettings
 
 RUNTIME = module_schema_namespace("forest.kernel.runtime")
 CONVERSATION = module_schema_namespace("forest.conversation.scheduler")
@@ -32,7 +32,6 @@ MEMORY = module_schema_namespace("forest.memory.graph")
 AGENT = module_schema_namespace("forest.agent.runtime")
 DELIVERY = module_schema_namespace("forest.delivery")
 JOBS = module_schema_namespace("forest.job.scheduler")
-EXPECTED_COMPONENTS = len(OFFICIAL_BOT_COMPONENT_IDS)
 
 
 def parser() -> argparse.ArgumentParser:
@@ -163,12 +162,13 @@ async def _bot_state(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"
             )
             bundles = await (
-                await connection.execute("SELECT count(*) AS count FROM forest_kernel.schema_bundles")
-            ).fetchone()
-            if bundles["count"] != EXPECTED_COMPONENTS:
-                raise RuntimeError(
-                    f"BOT_SCHEMA_BUNDLES_MISMATCH: expected {EXPECTED_COMPONENTS}, found {bundles['count']}"
+                await connection.execute(
+                    "SELECT count(*) AS count,"
+                    "count(*) FILTER (WHERE state='READY') AS ready "
+                    "FROM forest_kernel.schema_bundles WHERE bot_id=%s",
+                    (bot_id,),
                 )
+            ).fetchone()
             memory_attempt_table = await (
                 await connection.execute(
                     "SELECT to_regclass(%s) AS table_name",
@@ -214,6 +214,18 @@ async def _bot_state(
                     sql.SQL(
                         "SELECT count(*) AS members FROM {}.runtime_graph_modules "
                         "WHERE bot_id=%s AND graph_id=%s"
+                    ).format(sql.Identifier(RUNTIME)),
+                    (bot_id, graph["graph_id"]),
+                )
+            ).fetchone()
+            unmatched_bundles = await (
+                await connection.execute(
+                    sql.SQL(
+                        "SELECT count(*) AS count FROM forest_kernel.schema_bundles b "
+                        "WHERE b.bot_id=%s AND b.state='READY' AND NOT EXISTS ("
+                        "SELECT 1 FROM {}.runtime_graph_modules m "
+                        "WHERE m.bot_id=b.bot_id AND m.graph_id=%s "
+                        "AND m.component_id=b.component_id)"
                     ).format(sql.Identifier(RUNTIME)),
                     (bot_id, graph["graph_id"]),
                 )
@@ -451,6 +463,8 @@ async def _bot_state(
             ).fetchone()
     result = {
         "schema_bundles": bundles["count"],
+        "ready_schema_bundles": bundles["ready"],
+        "unmatched_ready_schema_bundles": unmatched_bundles["count"],
         "graph_id": graph["graph_id"],
         "graph_revision": graph["graph_revision"],
         "members": members["members"],
@@ -510,9 +524,17 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
                not member["control_admission"]
                for member in graph["components"].values()):
             failures.append("DEPLOYMENT_COMPONENT_INACTIVE")
-    if bot["schema_bundles"] != EXPECTED_COMPONENTS or bot["members"] != EXPECTED_COMPONENTS:
+    if (
+        not bot["ready_schema_bundles"]
+        or bot["ready_schema_bundles"] > bot["members"]
+        or bot["unmatched_ready_schema_bundles"]
+    ):
         failures.append("RUNTIME_GRAPH_CARDINALITY_INVALID")
-    if bot["lifecycle_recorded"] != EXPECTED_COMPONENTS or bot["active_members"] != EXPECTED_COMPONENTS:
+    if (
+        not bot["members"]
+        or bot["lifecycle_recorded"] != bot["members"]
+        or bot["active_members"] != bot["members"]
+    ):
         failures.append("RUNTIME_LIFECYCLE_INVALID")
     if bot["memory"]["stale_attempts"] or bot["memory"]["stale_reservations"]:
         failures.append("EMBEDDING_CONVERGENCE_STALE")
@@ -530,7 +552,7 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
 
 
 async def observe(arguments: argparse.Namespace) -> int:
-    settings = SupervisorSettings.from_environment()
+    settings = DeploymentAccessSettings.from_environment()
     deployment = DeploymentStore(settings.dsn, settings.deployment_id)
     await deployment.open()
     bot_store = None
@@ -617,6 +639,11 @@ def main() -> None:
     _validate(arguments)
     try:
         result = asyncio.run(observe(arguments))
+    except UndefinedTable:
+        raise SystemExit(
+            "OBSERVATION_SCHEMA_INCOMPATIBLE: a required deployment or Bot table is absent; "
+            "observe a Bot installed from the candidate baseline"
+        ) from None
     except RuntimeError as error:
         raise SystemExit(str(error)) from None
     raise SystemExit(result)

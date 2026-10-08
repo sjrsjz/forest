@@ -8,6 +8,7 @@ import signal
 import pytest
 import uvicorn
 
+from forest.deployment_access_settings import DeploymentAccessSettings
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.errors import ForestError
@@ -106,6 +107,37 @@ def test_supervisor_settings_builds_hidden_dsn_from_protected_files(tmp_path, mo
     assert settings.web_bootstrap.setup_id == "setup/0123456789abcdef"
     assert settings.web_bootstrap.pairing_code == "p" * 48
     assert settings.host_id == "host/0123456789abcdef0123456789abcdef"
+
+
+def test_read_only_deployment_access_needs_no_host_or_web_configuration(tmp_path, monkeypatch):
+    keyring = tmp_path / "keyring"
+    keyring.write_text(json.dumps({
+        "protocol": "forest.deployment-master-keyring/1",
+        "active_key_id": "master/observer/1",
+        "keys": {"master/observer/1": base64.b64encode(bytes(range(32))).decode()},
+    }, separators=(",", ":")), encoding="ascii")
+    password = tmp_path / "deployment-password"
+    password.write_text("observer-database-password", encoding="ascii")
+    monkeypatch.setenv("FOREST_DEPLOYMENT_ID", "forest/observer")
+    monkeypatch.setenv("FOREST_DEPLOYMENT_MASTER_KEYRING_FILE", str(keyring))
+    monkeypatch.setenv("FOREST_DEPLOYMENT_DATABASE_PASSWORD_FILE", str(password))
+    monkeypatch.setenv("FOREST_DEPLOYMENT_DATABASE_HOST", "postgres")
+    monkeypatch.delenv("FOREST_DEPLOYMENT_DSN", raising=False)
+    for name in (
+        "FOREST_HOST_ID", "FOREST_HOST_ID_FILE", "FOREST_HOST_DSN",
+        "FOREST_HOST_DATABASE_PASSWORD_FILE", "FOREST_DEPLOYMENT_WEB_BOOTSTRAP_FILE",
+        "FOREST_DEPLOYMENT_MANAGEMENT_ORIGIN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    access = DeploymentAccessSettings.from_environment()
+    assert access.deployment_id == "forest/observer"
+    assert access.dsn == (
+        "postgresql://forest:observer-database-password@postgres:5432/forest_deployment"
+    )
+    assert access.master_keyring.active_key_id == "master/observer/1"
+    assert "observer-database-password" not in repr(access)
+    assert repr(bytes(range(32))) not in repr(access)
 
 
 def test_supervisor_host_identity_has_one_explicit_stable_source(tmp_path, monkeypatch):
