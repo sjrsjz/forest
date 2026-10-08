@@ -46,3 +46,16 @@ async def test_incomplete_shell_prefix_is_not_claimed():
         "event_ref": "event/2",
     }, context)
     assert ingress is None
+
+
+async def test_reserved_shell_prefix_with_line_break_is_rejected_by_shell():
+    context = SimpleNamespace(identity={"generation_id": "shell/generation"})
+    ingress = await ShellCommand().inspect({
+        "normalized": {
+            "self_id": "10000",
+            "segments": [{"type": "text", "text": "#forest\ncore status"}],
+        },
+        "event_ref": "event/3",
+    }, context)
+    assert ingress["command_id"] == "shell.invalid"
+    assert ingress["arguments"] == {"error_code": "SHELL_SYNTAX_INVALID"}

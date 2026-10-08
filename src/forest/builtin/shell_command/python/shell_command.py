@@ -51,8 +51,10 @@ def _direct_text(normalized):
     value = "".join(texts).lstrip(" \t")
     if value == "#forest":
         return "", text_only
-    if not value.startswith("#forest ") and not value.startswith("#forest\t"):
+    if not value.startswith("#forest") or not value[len("#forest")].isspace():
         return None
+    if value[len("#forest")] not in " \t":
+        return "", False
     return value[len("#forest") :].lstrip(" \t"), text_only
 
 
