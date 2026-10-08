@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+隔离候选实例生产组合根验收（2026-10-08）：以当前提交 `0b47f58` 构建 `forest:runtime-candidate-v12`，在独立 PostgreSQL、包卷和 OneBot mock 上通过 Web 初始化、Host 存储结算、Bot 供给 READY、运行意图 ONLINE；Bot Graph 22/22 成员 ACTIVE、部署 Graph 8 个成员 ACTIVE。向不在许可名单的群注入恰好一条被动消息后，群入站/分类/Context 水位均为 1，全局记忆 source/trunk 各为 1，分类为 `NO_TRIGGER/group_not_allowed`，无 Agent Run 或待发送消息。同一 ONLINE Bot 对 `memory.graph` 发起模块热重载，目标及 6 个冻结依赖组件换代，15 个无关 Generation 保持身份，旧图 RETIRED、旧代均 DISPOSED；管理回执外层 `SUBMITTED` 而内层 `kernel.state=SUCCEEDED`，新图 ACTIVE。随后有序重启隔离 Supervisor，Bot 从持久账本恢复 READY/ONLINE，Graph 修订为 4，22/22 ACTIVE；30 秒四次只读观察零违约，群水位和记忆 source/trunk 保持 1，没有重复入站、活动 Run、并发会话或待发消息。使用占位模型凭据和 OneBot mock，未向真实 QQ 发消息；此次验收不证明真实模型质量或长时负载表现。
+
 Host-backed storage profile 撤销事实已加入 deployment 内核：当前 Supervisor 租约持有者在一个事务内重查退役静默证明、准确 Host pin 与供给 Job 状态，再写入不可变 revocation；复合外键绑定 profile、Bot 与 Host pin。同键并发重放合流，另一操作冲突；正常 profile 解析在撤销后拒绝发放 DSN，历史 metadata 保留。真实双库桥回归 `1 passed`。旧无 Host pin profile 不进入自动回收；Host pin 释放、Secret/role 失效和物理回收仍未实现。新的 bootstrap 与供给 Job 创建入口现在和撤销使用同一 profile 锁，已撤销 profile 或已存在的 Bot 身份不能产生新引用；无 Host pin 的旧 profile 撤销尝试明确拒绝。
 
 退役静默证明已加入 deployment 内核：准确退役操作与 `DELETING/OFFLINE` 围栏必须匹配，最后运行观测只能为空或无图 ID 的 `OFFLINE`，`STARTING/ONLINE/STOPPING/FAILED` 全部阻断。发现并修复 Supervisor 在 BotHost.close 失败且意图已变化时仍写 `OFFLINE` 的漏洞；关闭失败现在写 `BOT_RUNTIME_CLOSE_FAILED`，不会伪造证明。隔离 PostgreSQL 的并发/从未启动用例及 Supervisor 生命周期用例通过。证明目前只读且必须在解除引用前重查，Host pin 释放与物理回收仍未接线。
