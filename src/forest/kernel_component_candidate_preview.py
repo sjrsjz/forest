@@ -33,7 +33,7 @@ def component_candidate_preview_service(context):
             or not isinstance(request["component_id"], str)
             or _COMPONENT_ID.fullmatch(request["component_id"]) is None
             or not isinstance(source_kind, str)
-            or source_kind not in {"builtin", "installed"}
+            or source_kind not in {"builtin", "official", "installed"}
             or type(enabled) is not bool
             or type(request["expected_selection_revision"]) is not int
             or request["expected_selection_revision"] < 0
@@ -48,6 +48,18 @@ def component_candidate_preview_service(context):
                 and (
                     request["package_digest"] is not None
                     or request["manifest_digest"] is not None
+                    or capabilities
+                    or revision is not None
+                )
+            )
+            or (
+                source_kind == "official"
+                and (
+                    request["component_id"] == "component.worker-host"
+                    or not isinstance(request["package_digest"], str)
+                    or _DIGEST.fullmatch(request["package_digest"]) is None
+                    or not isinstance(request["manifest_digest"], str)
+                    or _DIGEST.fullmatch(request["manifest_digest"]) is None
                     or capabilities
                     or revision is not None
                 )

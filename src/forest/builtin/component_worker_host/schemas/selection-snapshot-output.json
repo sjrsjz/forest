@@ -10,7 +10,7 @@
         "type": "object",
         "properties": {
           "component_id": {"type": "string"},
-          "source_kind": {"enum": ["builtin", "installed"]},
+          "source_kind": {"enum": ["builtin", "official", "installed"]},
           "package_digest": {"type": ["string", "null"]},
           "manifest_digest": {"type": ["string", "null"]},
           "approved_capabilities": {"type": "array", "items": {"type": "string"}},

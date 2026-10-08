@@ -3,7 +3,7 @@
   "type": "object",
   "properties": {
     "component_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
-    "source_kind": {"enum": ["builtin", "installed"]},
+    "source_kind": {"enum": ["builtin", "official", "installed"]},
     "package_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
     "manifest_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$"},
     "approved_capabilities": {
@@ -29,6 +29,14 @@
         "source_kind": {"const": "builtin"},
         "package_digest": {"type": "null"},
         "manifest_digest": {"type": "null"},
+        "approved_capabilities": {"maxItems": 0}
+      }
+    },
+    {
+      "properties": {
+        "source_kind": {"const": "official"},
+        "package_digest": {"type": "string"},
+        "manifest_digest": {"type": "string"},
         "approved_capabilities": {"maxItems": 0}
       }
     },

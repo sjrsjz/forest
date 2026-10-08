@@ -41,7 +41,7 @@ from forest.media_capture_effect_driver import media_image_fetch_effect_driver_f
 from forest.model_contract import ModelCapabilities
 from forest.onebot_transport_effect_driver import onebot_transport_effect_driver_factory
 from forest.package_effects import PackageEffectDriverRegistry
-from forest.packages import PackageCatalog, auto_install_official_sources
+from forest.packages import PackageCatalog, PackageSnapshot, auto_install_official_sources
 from forest.process_executor_effect_driver import (
     native_process_effect_driver_factory,
     validate_process_executor_configuration,
@@ -66,6 +66,8 @@ class BotGraphCandidate:
     selection: ComponentSelectionSnapshot
     official_descriptors: tuple[RuntimeModuleDescriptor, ...]
     selection_reader: ComponentSelectionReader
+    official_defaults: tuple[PackageSnapshot, ...] = ()
+    official_effect_drivers: PackageEffectDriverRegistry | None = None
 
 
 def _required(name: str) -> str:
@@ -357,6 +359,8 @@ class BotHost:
         self.generation_authority = None
         self.registry: RuntimeModuleRegistry | None = None
         self._official_descriptors: tuple[RuntimeModuleDescriptor, ...] = ()
+        self._official_defaults: tuple[PackageSnapshot, ...] = ()
+        self._official_effect_drivers: PackageEffectDriverRegistry | None = None
         self._lease = None
         self._renewal_task: asyncio.Task | None = None
         self._replacement_task: asyncio.Task | None = None
@@ -602,6 +606,9 @@ class BotHost:
             if isinstance(result, BaseException):
                 raise result
         automatic_sources = tuple(captured)
+        default_official_snapshots = tuple(
+            snapshot for _source, snapshot in automatic_sources
+        )
         if isinstance(bootstrap_settings, BotBootstrapSettings):
             profile_components = dict(bootstrap_settings.components)
         elif isinstance(bootstrap_settings, BotSettings):
@@ -628,9 +635,9 @@ class BotHost:
                     "A frozen Bot bootstrap package is absent from the install catalog",
                     409,
                 )
-        resolved_official = resolve_official_package_snapshots(
-            selection,
-            tuple(snapshot for _source, snapshot in automatic_sources),
+        resolved_official = await asyncio.to_thread(
+            resolve_official_package_snapshots,
+            selection, tuple(snapshot for _source, snapshot in automatic_sources),
             self.package_catalog,
         )
         automatic_sources = tuple(
@@ -660,8 +667,9 @@ class BotHost:
             worker_host.descriptor,
             *automatic,
         )
-        selected = select_package_members(
-            selection, official_descriptors, self.package_catalog
+        selected = await asyncio.to_thread(
+            select_package_members,
+            selection, official_descriptors, self.package_catalog,
         )
         installed = []
         for entry in selected.installed:
@@ -687,6 +695,8 @@ class BotHost:
             selection,
             official_descriptors,
             candidate_reader,
+            default_official_snapshots,
+            automatic_effect_drivers,
         )
 
     async def start(self) -> None:
@@ -725,6 +735,8 @@ class BotHost:
                 await registry.start()
             self.registry = registry
             self._official_descriptors = assembled.official_descriptors
+            self._official_defaults = assembled.official_defaults
+            self._official_effect_drivers = assembled.official_effect_drivers
             self.selection_reader = assembled.selection_reader
             self._replacement_task = asyncio.create_task(
                 self._run_graph_replacements(),
@@ -808,6 +820,8 @@ class BotHost:
                         self.store,
                         kernel=self._kernel,
                         conn=conn,
+                        official_defaults=self._official_defaults,
+                        official_effect_drivers=self._official_effect_drivers,
                         component_id=component_id,
                         source_kind=source_kind,
                         package_digest=package_digest,
@@ -989,6 +1003,8 @@ class BotHost:
                 raise replacement_error
             self.registry = candidate
             self._official_descriptors = assembled.official_descriptors
+            self._official_defaults = assembled.official_defaults
+            self._official_effect_drivers = assembled.official_effect_drivers
             self.selection_reader = assembled.selection_reader
             errors = await previous.close()
             if errors:

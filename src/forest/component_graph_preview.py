@@ -9,11 +9,13 @@ from typing import Mapping
 from forest.builtin_packages import (
     PackageCandidateInspection,
     compile_installed_candidate_descriptor,
+    compile_official_candidate_descriptor,
     inspect_official_candidate_descriptor,
 )
 from forest.component_selection import (
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
+    resolve_official_package_snapshots,
     select_package_members,
 )
 from forest.errors import ForestError
@@ -21,7 +23,8 @@ from forest.kernel_resource_admission import (
     WorkerCapacityAdmission,
     assess_worker_capacity_in,
 )
-from forest.packages import PackageCatalog, digest_json
+from forest.package_effects import PackageEffectDriverRegistry
+from forest.packages import PackageCatalog, PackageSnapshot, digest_json
 from forest.runtime_modules import (
     RuntimeGraphTransitionPlan,
     RuntimeModuleDescriptor,
@@ -50,6 +53,8 @@ async def project_selection_graph_in(
     *,
     kernel,
     conn,
+    official_defaults: tuple[PackageSnapshot, ...] | None = None,
+    official_effect_drivers: PackageEffectDriverRegistry | None = None,
     component_id: str,
     source_kind: str,
     package_digest: str | None,
@@ -76,6 +81,8 @@ async def project_selection_graph_in(
     return await preview_selected_graph(
         current, selection, official_descriptors, catalog, store,
         kernel=kernel,
+        official_defaults=official_defaults,
+        official_effect_drivers=official_effect_drivers,
         target_component_id=component_id,
         expected_graph_revision=expected_graph_revision,
         expected_configuration_revisions=(
@@ -97,6 +104,8 @@ async def preview_selected_graph(
     kernel,
     target_component_id: str,
     expected_graph_revision: int,
+    official_defaults: tuple[PackageSnapshot, ...] | None = None,
+    official_effect_drivers: PackageEffectDriverRegistry | None = None,
     expected_configuration_revisions: Mapping[str, int] | None = None,
     conn=None,
     ordered_configuration_locks: bool = False,
@@ -110,6 +119,8 @@ async def preview_selected_graph(
                 current, selection, official_descriptors, catalog, store,
                 kernel=kernel, target_component_id=target_component_id,
                 expected_graph_revision=expected_graph_revision,
+                official_defaults=official_defaults,
+                official_effect_drivers=official_effect_drivers,
                 expected_configuration_revisions=expected_configuration_revisions,
                 conn=owned_conn,
                 ordered_configuration_locks=ordered_configuration_locks,
@@ -118,6 +129,8 @@ async def preview_selected_graph(
         current, selection, official_descriptors, catalog, store,
         kernel=kernel, target_component_id=target_component_id,
         expected_graph_revision=expected_graph_revision,
+        official_defaults=official_defaults,
+        official_effect_drivers=official_effect_drivers,
         expected_configuration_revisions=expected_configuration_revisions,
         conn=conn,
         ordered_configuration_locks=ordered_configuration_locks,
@@ -134,6 +147,8 @@ async def _preview_selected_graph_in(
     kernel,
     target_component_id: str,
     expected_graph_revision: int,
+    official_defaults: tuple[PackageSnapshot, ...] | None,
+    official_effect_drivers: PackageEffectDriverRegistry | None,
     expected_configuration_revisions: Mapping[str, int] | None,
     conn,
     ordered_configuration_locks: bool,
@@ -162,7 +177,43 @@ async def _preview_selected_graph_in(
             "Selected installed package requires an exact target configuration revision",
             422,
         )
-    selected = select_package_members(selection, official_descriptors, catalog)
+    if official_defaults is not None:
+        if official_effect_drivers is None:
+            raise ForestError(
+                "COMPONENT_SELECTION_PREVIEW_UNAVAILABLE",
+                "Official candidate compiler is unavailable",
+                503,
+            )
+        resolved = await asyncio.to_thread(
+            resolve_official_package_snapshots, selection, official_defaults, catalog
+        )
+        snapshots = {item.component["id"]: item for item in resolved}
+        if set(snapshots) != {
+            item.component_id for item in official_descriptors
+            if item.component_id != "component.worker-host"
+        }:
+            raise ForestError(
+                "COMPONENT_SELECTION_PREVIEW_UNAVAILABLE",
+                "Official release identities differ from the active Graph",
+                503,
+            )
+        compiled_official = []
+        for item in official_descriptors:
+            if (
+                item.component_id == "component.worker-host"
+                or item.artifact.package_digest == snapshots[item.component_id].digest
+            ):
+                compiled_official.append(item)
+                continue
+            compiled_official.append(await asyncio.to_thread(
+                compile_official_candidate_descriptor,
+                snapshots[item.component_id], catalog, store,
+                kernel=kernel, effect_driver_registry=official_effect_drivers,
+            ))
+        official_descriptors = tuple(compiled_official)
+    selected = await asyncio.to_thread(
+        select_package_members, selection, official_descriptors, catalog
+    )
     inspection_slots = asyncio.Semaphore(4)
 
     async def inspect_official(descriptor):

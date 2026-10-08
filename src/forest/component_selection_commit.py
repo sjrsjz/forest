@@ -87,6 +87,8 @@ def resolve_selection_commit_preflight(
                     host.store,
                     kernel=host._kernel,
                     conn=conn,
+                    official_defaults=host._official_defaults,
+                    official_effect_drivers=host._official_effect_drivers,
                     component_id=target,
                     source_kind=payload["source_kind"],
                     package_digest=payload["package_digest"],

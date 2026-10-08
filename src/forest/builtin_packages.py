@@ -564,6 +564,38 @@ async def inspect_official_candidate_descriptor(
     )
 
 
+def compile_official_candidate_descriptor(
+    snapshot: PackageSnapshot,
+    catalog: PackageCatalog,
+    store,
+    *,
+    kernel,
+    effect_driver_registry: PackageEffectDriverRegistry,
+) -> RuntimeModuleDescriptor:
+    """Compile a registered Bot official artifact without provisioning or execution."""
+
+    catalog.get_official_bot(snapshot.digest)
+    schema = snapshot.schema(snapshot.component["config_schema"])
+    storage = _configuration_storage(snapshot)
+    configuration = ModuleConfigurationRepository(
+        store,
+        component_id=snapshot.component["id"],
+        namespace=storage.spec.namespace,
+        payloads=kernel.payload,
+        immutable_paths=tuple(snapshot.component.get("config_immutable_paths", ())),
+    )
+    declarations = tuple(snapshot.component.get("effect_services", ()))
+    return _compile_package_descriptor(
+        snapshot, store, kernel=kernel, configuration=configuration,
+        configuration_schema=schema, storage=storage, grants=None,
+        resolved_contracts=None, effect_driver_registry=effect_driver_registry,
+        configuration_validator=effect_driver_registry.configuration_validator(
+            declarations
+        ),
+        trust_level="official", plan_only=True,
+    )
+
+
 async def bootstrap_builtin_package(
     source: Path,
     catalog: PackageCatalog,

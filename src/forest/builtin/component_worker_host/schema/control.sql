@@ -6,7 +6,7 @@ CREATE TABLE selection_heads (
 CREATE TABLE selection_entries (
     bot_id text NOT NULL,
     component_id text NOT NULL CHECK (component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
-    source_kind text NOT NULL CHECK (source_kind IN ('builtin','installed')),
+    source_kind text NOT NULL CHECK (source_kind IN ('builtin','official','installed')),
     package_digest text,
     manifest_digest text,
     approved_capabilities jsonb NOT NULL DEFAULT '[]'::jsonb,
@@ -16,6 +16,11 @@ CREATE TABLE selection_entries (
     PRIMARY KEY (bot_id, component_id),
     CHECK (
         (source_kind='builtin' AND package_digest IS NULL AND manifest_digest IS NULL
+            AND approved_capabilities='[]'::jsonb)
+        OR (source_kind='official'
+            AND package_digest IS NOT NULL AND manifest_digest IS NOT NULL
+            AND package_digest ~ '^sha256:[a-f0-9]{64}$'
+            AND manifest_digest ~ '^sha256:[a-f0-9]{64}$'
             AND approved_capabilities='[]'::jsonb)
         OR (source_kind='installed'
             AND package_digest IS NOT NULL AND manifest_digest IS NOT NULL
@@ -102,14 +107,16 @@ BEGIN
   IF context->>'port_kind' IS DISTINCT FROM 'query'
      OR context->>'port_name' IS DISTINCT FROM 'component.selection.project'
      OR target IS NULL OR target !~ '^[a-z0-9][a-z0-9._-]{0,127}$'
-     OR source IS NULL OR source NOT IN ('builtin','installed')
+     OR source IS NULL OR source NOT IN ('builtin','official','installed')
+     OR (source='official' AND target='component.worker-host')
      OR jsonb_typeof(input->'desired_enabled') IS DISTINCT FROM 'boolean'
      OR jsonb_typeof(input->'expected_selection_revision') IS DISTINCT FROM 'number'
      OR jsonb_typeof(input->'approved_capabilities') IS DISTINCT FROM 'array'
      OR (source='builtin' AND (input->'package_digest' IS DISTINCT FROM 'null'::jsonb
          OR input->'manifest_digest' IS DISTINCT FROM 'null'::jsonb
          OR input->'approved_capabilities' IS DISTINCT FROM '[]'::jsonb))
-     OR (source='installed' AND (input->>'package_digest' IS NULL
+     OR (source='official' AND input->'approved_capabilities' IS DISTINCT FROM '[]'::jsonb)
+     OR (source IN ('official','installed') AND (input->>'package_digest' IS NULL
          OR input->>'manifest_digest' IS NULL
          OR input->>'package_digest' !~ '^sha256:[a-f0-9]{64}$'
          OR input->>'manifest_digest' !~ '^sha256:[a-f0-9]{64}$'))
@@ -211,11 +218,13 @@ BEGIN
      OR op IS NULL OR octet_length(op) NOT BETWEEN 1 AND 256
      OR target IS NULL OR target !~ '^[a-z0-9][a-z0-9._-]{0,127}$'
      OR (NOT enabled AND target='component.worker-host')
-     OR source IS NULL OR source NOT IN ('builtin','installed')
+     OR source IS NULL OR source NOT IN ('builtin','official','installed')
+     OR (source='official' AND target='component.worker-host')
      OR (source='builtin' AND (input->'package_digest' IS DISTINCT FROM 'null'::jsonb
          OR input->'manifest_digest' IS DISTINCT FROM 'null'::jsonb
          OR input->'approved_capabilities' IS DISTINCT FROM '[]'::jsonb))
-     OR (source='installed' AND (input->>'package_digest' IS NULL
+     OR (source='official' AND input->'approved_capabilities' IS DISTINCT FROM '[]'::jsonb)
+     OR (source IN ('official','installed') AND (input->>'package_digest' IS NULL
          OR input->>'manifest_digest' IS NULL
          OR input->>'package_digest' !~ '^sha256:[a-f0-9]{64}$'
          OR input->>'manifest_digest' !~ '^sha256:[a-f0-9]{64}$'

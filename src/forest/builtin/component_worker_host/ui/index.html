@@ -68,16 +68,16 @@
       <p>按当前选择修订投影一笔启停意图，检查依赖与换代影响；预检不会修改 Bot。</p>
       <div class="row">
         <label>组件 ID<input id="preview-component-id" value="component.worker-host" autocomplete="off"></label>
-        <label>来源<select id="preview-source-kind"><option value="builtin">内置包</option><option value="installed">已登记外部包</option></select></label>
+        <label>来源<select id="preview-source-kind"><option value="builtin">当前内置包</option><option value="official">已登记官方工件</option><option value="installed">已登记外部包</option></select></label>
         <label>意图<select id="preview-enabled"><option value="true">启用</option><option value="false">停用</option></select></label>
       </div>
       <div id="preview-installed" hidden>
         <div class="row">
           <label>工件摘要<input id="preview-package-digest" placeholder="sha256:..."></label>
           <label>Manifest 摘要<input id="preview-manifest-digest" placeholder="sha256:..."></label>
-          <label>目标配置修订<input id="preview-config-revision" type="number" min="1" placeholder="启用外部包时必填"></label>
+          <label id="preview-config-field">目标配置修订<input id="preview-config-revision" type="number" min="1" placeholder="启用外部包时必填"></label>
         </div>
-        <label>批准能力（每行一项；留空表示不批准额外能力）<textarea id="preview-capabilities" spellcheck="false"></textarea></label>
+        <label id="preview-capabilities-field">批准能力（每行一项；留空表示不批准额外能力）<textarea id="preview-capabilities" spellcheck="false"></textarea></label>
       </div>
       <div class="row"><button id="run-preview" type="button">只读预检</button><button id="submit-selection" type="button" hidden>提交启停</button><span id="preview-note"></span></div>
       <div id="preview-result" hidden>
@@ -212,9 +212,10 @@
         const source_kind=byId('preview-source-kind').value;
         const desired_enabled=byId('preview-enabled').value==='true';
         const installed=source_kind==='installed';
-        const package_digest=installed?byId('preview-package-digest').value.trim():null;
-        const manifest_digest=installed?byId('preview-manifest-digest').value.trim():null;
-        if(installed&&(!/^sha256:[a-f0-9]{64}$/.test(package_digest)||!/^sha256:[a-f0-9]{64}$/.test(manifest_digest)))throw new Error('外部包需要精确工件和 Manifest 摘要');
+        const pinned=source_kind!=='builtin';
+        const package_digest=pinned?byId('preview-package-digest').value.trim():null;
+        const manifest_digest=pinned?byId('preview-manifest-digest').value.trim():null;
+        if(pinned&&(!/^sha256:[a-f0-9]{64}$/.test(package_digest)||!/^sha256:[a-f0-9]{64}$/.test(manifest_digest)))throw new Error('指定工件需要精确工件和 Manifest 摘要');
         const approved_capabilities=installed?byId('preview-capabilities').value.split(/[\n,]/).map(value=>value.trim()).filter(Boolean):[];
         if(new Set(approved_capabilities).size!==approved_capabilities.length)throw new Error('批准能力不能重复');
         const config=byId('preview-config-revision').value.trim();
@@ -335,7 +336,13 @@
     byId('refresh-selection-snapshot').onclick=()=>selectionSnapshot().catch(error=>notice(error.message));
     byId('run-preview').onclick=()=>previewCandidate().catch(error=>{byId('preview-note').textContent='预检失败';notice(error.message);});
     byId('submit-selection').onclick=()=>submitSelection().catch(error=>notice(error.message));
-    byId('preview-source-kind').onchange=()=>{byId('preview-installed').hidden=byId('preview-source-kind').value!=='installed';resize();};
+    byId('preview-source-kind').onchange=()=>{
+      const kind=byId('preview-source-kind').value;
+      byId('preview-installed').hidden=kind==='builtin';
+      byId('preview-config-field').hidden=kind!=='installed';
+      byId('preview-capabilities-field').hidden=kind!=='installed';
+      resize();
+    };
     byId('more').onclick=()=>list(nextAfter).catch(error=>notice(error.message));
     byId('load-packages').onclick=()=>listPackages().catch(error=>notice(error.message));
     byId('more-packages').onclick=()=>listPackages(true).catch(error=>notice(error.message));

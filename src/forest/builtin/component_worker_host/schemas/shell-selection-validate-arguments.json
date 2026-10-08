@@ -10,7 +10,7 @@
       "required": ["component_id", "source_kind", "package_digest", "manifest_digest", "approved_capabilities", "desired_enabled", "expected_configuration_revision", "expected_selection_revision", "expected_graph_revision"],
       "properties": {
         "component_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
-        "source_kind": {"enum": ["builtin", "installed"], "default": "builtin"},
+        "source_kind": {"enum": ["builtin", "official", "installed"], "default": "builtin"},
         "package_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$", "default": null},
         "manifest_digest": {"type": ["string", "null"], "pattern": "^sha256:[a-f0-9]{64}$", "default": null},
         "approved_capabilities": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 256}, "default": []},

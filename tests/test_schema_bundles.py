@@ -466,6 +466,37 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     assert (await call("enable", "selection/installed", installed))["ok"]
     assert projected_installed == await reader.snapshot()
 
+    official = {
+        "component_id": "routing.graph", "source_kind": "official",
+        "package_digest": "sha256:" + "c" * 64,
+        "manifest_digest": "sha256:" + "d" * 64,
+        "approved_capabilities": [],
+        "expected_selection_revision": 3, "expected_graph_revision": 1,
+        "requested_by": "subject/admin",
+    }
+    async with reader.publication_fence(expected_revision=3):
+        async with store.pool.connection() as conn, conn.transaction():
+            projected_official = await reader.project_in(
+                conn, component_id=official["component_id"],
+                source_kind="official",
+                package_digest=official["package_digest"],
+                manifest_digest=official["manifest_digest"],
+                approved_capabilities=(), desired_enabled=True,
+                expected_selection_revision=3,
+            )
+    assert (await call("enable", "selection/official", official))["ok"]
+    assert projected_official == await reader.snapshot()
+    bad_grants = {**official, "approved_capabilities": ["state.read"],
+                  "expected_selection_revision": 4}
+    assert (await call("enable", "selection/official-grants", bad_grants))[
+        "error"
+    ]["code"] == "COMPONENT_SELECTION_INVALID"
+    bad_self = {**official, "component_id": "component.worker-host",
+                "expected_selection_revision": 4}
+    assert (await call("enable", "selection/official-self", bad_self))[
+        "error"
+    ]["code"] == "COMPONENT_SELECTION_INVALID"
+
 
 @pytest.mark.postgres
 async def test_kernel_baseline_is_minimal_and_idempotent(clean_authority):

@@ -12,6 +12,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from shutil import copytree
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import urlsplit, urlunsplit
@@ -27,7 +28,8 @@ from pymilvus import AsyncMilvusClient
 from forest.adapters.onebot import SendResult
 from forest.bot_host import BotGraphCandidate, BotHost, BotRuntimeSettings, BotSettings
 from forest.builtin_packages import bootstrap_installed_package
-from forest.component_selection import ComponentSelectionSnapshot
+from forest.component_graph_preview import preview_selected_graph
+from forest.component_selection import ComponentSelectionEntry, ComponentSelectionSnapshot
 from forest.deployment_management_app import create_deployment_management_app
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
@@ -1673,6 +1675,83 @@ async def test_worker_host_can_reload_its_own_generation(tmp_path):
         await host.start()
         try:
             before = host.registry.graph_identity
+            routing_default = next(
+                item for item in host._official_defaults
+                if item.component["id"] == "routing.graph"
+            )
+            routing_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/routing_graph"
+            updated_root = tmp_path / "routing-preview-version"
+            copytree(routing_root, updated_root)
+            manifest_path = updated_root / "module.toml"
+            manifest_path.write_text(
+                manifest_path.read_text(encoding="utf-8").replace(
+                    f'version = "{routing_default.manifest["version"]}"',
+                    'version = "99.0.0"', 1,
+                ),
+                encoding="utf-8",
+            )
+            updated = host.package_catalog.build_official(updated_root, scope="bot")
+            entry = ComponentSelectionEntry(
+                "routing.graph", "official", updated.digest,
+                digest_json(updated.manifest), (), True, 1,
+            )
+            frozen = {
+                "protocol": "forest.component-selection-snapshot/1",
+                "revision": 1,
+                "entries": [entry.as_dict()],
+            }
+            preview = await preview_selected_graph(
+                host.registry,
+                ComponentSelectionSnapshot(1, (entry,), digest_json(frozen)),
+                host._official_descriptors, host.package_catalog, host.store,
+                kernel=host._kernel,
+                target_component_id="routing.graph",
+                expected_graph_revision=before.graph_revision,
+                official_defaults=host._official_defaults,
+                official_effect_drivers=host._official_effect_drivers,
+            )
+            assert next(
+                item for item in preview.packages
+                if item.component_id == "routing.graph"
+            ).package_digest == updated.digest
+            assert "routing.graph" in preview.impact.replace
+            assert host.registry.graph_identity == before
+            proposal = {
+                "component_id": "routing.graph", "source_kind": "official",
+                "package_digest": updated.digest,
+                "manifest_digest": digest_json(updated.manifest),
+                "approved_capabilities": [], "desired_enabled": True,
+                "expected_configuration_revision": None,
+                "expected_selection_revision": 0,
+                "expected_graph_revision": before.graph_revision,
+            }
+            contract = host.registry.get("component.worker-host").management_contract
+            validated = await contract.query("validate", proposal)
+            assert validated["plan_digest"] == preview.plan_digest
+            selected = await contract.action(
+                "module.enable",
+                operation_id="selection/pin-routing-official",
+                payload={**proposal, "plan_digest": validated["plan_digest"]},
+                authorization=SimpleNamespace(actor_ref="subject/host-admin"),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            assert selected["selection_revision"] == 1
+            async with asyncio.timeout(180):
+                while host.registry.graph_identity.graph_id == before.graph_id:
+                    latest = (await host._kernel.runtime.status())["latest_replacement"]
+                    if latest is not None and latest["state"] == "FAILED":
+                        pytest.fail(f"Official selection replacement failed: {latest}")
+                    await asyncio.sleep(0.1)
+                while (await host._kernel.runtime.status())["latest_replacement"]["state"] != "SUCCEEDED":
+                    await asyncio.sleep(0.1)
+            pinned = host.registry.graph_identity
+            assert pinned.generations["routing.graph"] != before.generations["routing.graph"]
+            assert next(
+                item for item in host.registry.descriptors
+                if item.component_id == "routing.graph"
+            ).artifact.package_digest == updated.digest
+            assert pinned.generations["kernel.runtime"] == before.generations["kernel.runtime"]
+            before = pinned
             affected = set(host.registry.replacement_closure("component.worker-host"))
             worker_host = host.registry.get("component.worker-host")
             request = await worker_host.management_contract.action(
@@ -1713,6 +1792,60 @@ async def test_worker_host_can_reload_its_own_generation(tmp_path):
             assert len(modules["members"]) == len(after.generations)
         finally:
             await host.close()
+        restarted = BotHost(
+            settings,
+            model_client_factory=FakeModelClient,
+            embedding_client_factory=FakeEmbeddingClient,
+            media_client_factory=FakeMediaClient,
+            vector_index_client_factory=FakeMilvusClient,
+            websocket_client_factory=create_websocket,
+            package_catalog=PackageCatalog(tmp_path / "self-reload-packages"),
+        )
+        try:
+            await restarted.start()
+            assert next(
+                item for item in restarted.registry.descriptors
+                if item.component_id == "routing.graph"
+            ).artifact.package_digest == updated.digest
+            selection = await restarted.selection_reader.snapshot()
+            assert selection.entries[0].source_kind == "official"
+            assert selection.entries[0].package_digest == updated.digest
+            audit = next(
+                item for item in restarted._official_defaults
+                if item.component["id"] == "audit.console"
+            )
+            before_disable = restarted.registry.graph_identity
+            disable = {
+                "component_id": "audit.console", "source_kind": "official",
+                "package_digest": audit.digest,
+                "manifest_digest": digest_json(audit.manifest),
+                "approved_capabilities": [], "desired_enabled": False,
+                "expected_configuration_revision": None,
+                "expected_selection_revision": selection.revision,
+                "expected_graph_revision": before_disable.graph_revision,
+            }
+            contract = restarted.registry.get("component.worker-host").management_contract
+            validated = await contract.query("validate", disable)
+            disabled = await contract.action(
+                "module.disable", operation_id="selection/disable-audit-official",
+                payload={**disable, "plan_digest": validated["plan_digest"]},
+                authorization=SimpleNamespace(actor_ref="subject/host-admin"),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            assert disabled["selection_revision"] == selection.revision + 1
+            async with asyncio.timeout(180):
+                while restarted.registry.graph_identity.graph_id == before_disable.graph_id:
+                    latest = (await restarted._kernel.runtime.status())["latest_replacement"]
+                    if latest is not None and latest["state"] == "FAILED":
+                        pytest.fail(f"Official disable replacement failed: {latest}")
+                    await asyncio.sleep(0.1)
+            assert "audit.console" not in restarted.registry.graph_identity.generations
+            assert next(
+                item for item in restarted.registry.descriptors
+                if item.component_id == "routing.graph"
+            ).artifact.package_digest == updated.digest
+        finally:
+            await restarted.close()
     finally:
         assert name.startswith("forest_self_reload_") and len(name) == 51
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
