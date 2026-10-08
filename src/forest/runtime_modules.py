@@ -2219,7 +2219,8 @@ class RuntimeModuleRegistry:
                 owned = tuple(
                     item
                     for item in self.order
-                    if item not in self._transferred_components
+                    if self.states[item] == ModuleLifecycleState.ACTIVE
+                    and item not in self._transferred_components
                     and (item not in self._retained_components or self._retained_committed)
                 )
                 frozen = self._freeze_owned_admission(components=owned)

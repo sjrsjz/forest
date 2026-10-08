@@ -1633,7 +1633,7 @@ async def test_embedding_configuration_can_rotate_its_secret_reference(tmp_path)
 
 
 @pytest.mark.postgres
-async def test_worker_host_can_reload_its_own_generation(tmp_path):
+async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
@@ -1839,6 +1839,83 @@ async def test_worker_host_can_reload_its_own_generation(tmp_path):
             assert saved["kernel"]["graph_revision"] == after.graph_revision
             modules = await new_worker_host.management_contract.query("modules", {})
             assert len(modules["members"]) == len(after.generations)
+            failing_root = tmp_path / "routing-failing-version"
+            copytree(routing_root, failing_root)
+            failing_manifest = failing_root / "module.toml"
+            failing_manifest.write_text(
+                failing_manifest.read_text(encoding="utf-8").replace(
+                    f'version = "{routing_default.manifest["version"]}"',
+                    'version = "99.0.1"', 1,
+                ),
+                encoding="utf-8",
+            )
+            failing_worker = failing_root / "python/routing_graph.py"
+            prepare_call = "await super().prepare(ctx, config, restored_state)"
+            worker_text = failing_worker.read_text(encoding="utf-8")
+            assert worker_text.count(prepare_call) == 1
+            failing_worker.write_text(
+                worker_text.replace(
+                    prepare_call,
+                    prepare_call + '\n        raise RuntimeError("fixture prepare failed")',
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            failing = host.package_catalog.build_official(failing_root, scope="bot")
+            failing_proposal = {
+                **proposal,
+                "package_digest": failing.digest,
+                "manifest_digest": digest_json(failing.manifest),
+                "expected_selection_revision": 1,
+                "expected_graph_revision": after.graph_revision,
+            }
+            failing_validated = await new_worker_host.management_contract.query(
+                "validate", failing_proposal
+            )
+            failed_selection = await new_worker_host.management_contract.action(
+                "module.enable", operation_id="selection/pin-failing-routing",
+                payload={
+                    **failing_proposal, "plan_digest": failing_validated["plan_digest"]
+                },
+                authorization=SimpleNamespace(actor_ref="subject/host-admin"),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            assert failed_selection["selection_revision"] == 2
+            async with asyncio.timeout(180):
+                while True:
+                    latest = (await host._kernel.runtime.status())["latest_replacement"]
+                    if latest is not None and latest["state"] == "FAILED":
+                        break
+                    await asyncio.sleep(0.1)
+            assert host.registry.graph_identity == after
+            assert host._fatal_replacement_error is None
+            still_serving = await new_worker_host.management_contract.query("modules", {})
+            assert len(still_serving["members"]) == len(after.generations)
+            restore = {
+                **proposal,
+                "expected_selection_revision": 2,
+                "expected_graph_revision": after.graph_revision,
+            }
+            restore_validated = await new_worker_host.management_contract.query(
+                "validate", restore
+            )
+            restored_selection = await new_worker_host.management_contract.action(
+                "module.enable", operation_id="selection/restore-routing",
+                payload={**restore, "plan_digest": restore_validated["plan_digest"]},
+                authorization=SimpleNamespace(actor_ref="subject/host-admin"),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            assert restored_selection["selection_revision"] == 3
+            async with asyncio.timeout(180):
+                while True:
+                    latest = (await host._kernel.runtime.status())["latest_replacement"]
+                    if latest is not None and latest["state"] == "SUCCEEDED":
+                        break
+                    await asyncio.sleep(0.1)
+            assert next(
+                item for item in host.registry.descriptors
+                if item.component_id == "routing.graph"
+            ).artifact.package_digest == updated.digest
         finally:
             await host.close()
         restarted = BotHost(
