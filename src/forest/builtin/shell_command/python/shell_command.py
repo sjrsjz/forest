@@ -38,19 +38,22 @@ def _direct_text(normalized):
         if first.get("type") == "mention" and first.get("external_user_id") == self_id:
             index = 1
     texts = []
+    text_only = True
     for segment in segments[index:]:
         if not isinstance(segment, dict) or segment.get("type") != "text":
-            return None
+            text_only = False
+            break
         text = segment.get("text")
         if not isinstance(text, str):
-            return None
+            text_only = False
+            break
         texts.append(text)
     value = "".join(texts).lstrip(" \t")
     if value == "#forest":
-        return ""
+        return "", text_only
     if not value.startswith("#forest ") and not value.startswith("#forest\t"):
         return None
-    return value[len("#forest") :].lstrip(" \t")
+    return value[len("#forest") :].lstrip(" \t"), text_only
 
 
 def _tokenize(value):
@@ -195,11 +198,17 @@ class ShellCommand(Plugin):
     @service("shell.ingress.inspect", semantics="read")
     async def inspect(self, payload, ctx):
         value = _plain(payload)
-        command_text = _direct_text(value["normalized"])
-        if command_text is None:
+        direct_command = _direct_text(value["normalized"])
+        if direct_command is None:
             return None
-        directory = await ctx.shell_commands.list()
-        command_id, command_version, arguments = _parse(command_text, directory)
+        command_text, text_only = direct_command
+        if text_only:
+            directory = await ctx.shell_commands.list()
+            command_id, command_version, arguments = _parse(command_text, directory)
+        else:
+            command_id, command_version, arguments = (
+                "shell.invalid", 1, {"error_code": "SHELL_SYNTAX_INVALID"}
+            )
         request_id = _stable("request", value["event_ref"])
         owner_id = _stable("rejection", request_id)
         return {
