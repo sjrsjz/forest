@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+隔离候选 v15 重建（2026-10-09）：从提交 `96019af` 构建 `forest:runtime-candidate-v15`，新建独立的 Secret、PostgreSQL 与包卷；旧 v14 两只 Bot 经管理 API 确认为 `OFFLINE` 后，停止 v14 Supervisor/PostgreSQL 而保留其卷。v15 Supervisor 本机 WebUI `127.0.0.1:18091` 健康，部署 Graph 的 8 个模块均已发布；经真实 Web 端口完成管理员初始化、Host 存储结算和两只 Bot 供应，mock Bot 与真实配置 `forest-main` 均为 `READY/OFFLINE`。真实配置的三类旧凭据由只读旧 Secret 卷和只读旧部署库在隔离进程内校验、解密，再写入 v15 Secret authority；未输出明文或保存到项目文件。两个 v15 Bot 私有库的 `forest.conversation.scheduler` 都是 `4.31.1/READY`，有效包基线摘要 `13ed0f0be3222d54ecc994b02a725a21dad1d263d47e438598255b7fc4f9e0d4` 与当前公共配置 SQL 加包私有 SQL 的组合一致。v15 mock Bot 已仅在 Docker 内部假 OneBot 上完成 ONLINE/OFFLINE，Bot Graph 为 STOPPED，真实 forest-main 从未发布 Graph；没有连接真实 QQ 或调用真实模型。旧在线 Forest 仍运行，实网切换仍待授权。
+
 异常领取组诊断完整性（2026-10-09）：`conversation.scheduler` 4.36.1 / 私有 SQL 4.31.1 修正多活动组的只读管理查询。此前 lane 恰好指向其中一组时，被指向的活动组会从异常列表消失；现在同群存在多个活动组时逐项列出并统一标记 `MULTIPLE_ACTIVE_GROUPS`，仅有一个活动组且非空 lane 错位时标记 `LANE_CLAIM_MISMATCH`。隔离 PostgreSQL 的完整 Conversation 包用例覆盖复合游标分页、lane 对齐其中一组、部分 lane 错位和单组错位，`1 passed`；Ruff 与差异检查通过。此改动不授予异常组重排权限，安全处置策略和长期实网验收仍未完成，旧预发布 Bot 库不能原位加载新私有基线。
 
 独立候选部署与官方包热换代（2026-10-09）：以当前源码构建 `forest:runtime-candidate-v13`，使用与旧在线实例隔离的 PostgreSQL、Secret 和包卷启动 Supervisor；本机 WebUI `127.0.0.1:18089` 返回 200。经生产 Web API 完成管理员初始化、Host 存储结算和两个 Bot 供应：模拟 OneBot Bot 与复制旧在线非敏感配置及三类凭据的 `forest-main` 均为 `READY/OFFLINE`。凭据在只读旧库和旧密钥卷中核验密文摘要后，直接写入候选 Secret authority；新旧嵌入 profile 均为 `Qwen/Qwen3-VL-Embedding-8B`、4096 维，真实候选保留 QQ ID `3605196653`、群 `933179609`、DeepSeek 模型身份，但未连接真实 QQ。mock Bot 曾经按运行意图上线并经 OneBot mock 验证完整图启动，验收后恢复 `OFFLINE`。
