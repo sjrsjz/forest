@@ -165,6 +165,32 @@ def test_host_official_provenance_is_scope_fenced(tmp_path):
     assert imported_untrusted.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
 
 
+def test_bot_official_provenance_requires_host_registration(tmp_path):
+    source_root = (
+        Path(__file__).resolve().parents[1]
+        / "src/forest/builtin/memory_graph"
+    )
+    catalog = PackageCatalog(tmp_path / "bot-catalog")
+    ordinary = catalog.build(source_root)
+    imported = PackageCatalog(tmp_path / "imported-bot-catalog")
+    imported.import_archive(catalog.export_archive(ordinary.digest))
+
+    for untrusted in (catalog, imported):
+        assert not untrusted.is_official_bot(ordinary.digest)
+        with pytest.raises(ForestError) as rejected:
+            untrusted.get_official_bot(ordinary.digest)
+        assert rejected.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
+
+    with pytest.raises(ForestError) as wrong_scope:
+        catalog.build_official(source_root, scope="deployment")
+    assert wrong_scope.value.code == "OFFICIAL_PACKAGE_SOURCE_INVALID"
+    official = catalog.build_official(source_root, scope="bot")
+    assert official.digest == ordinary.digest
+    assert PackageCatalog(tmp_path / "bot-catalog").get_official_bot(official.digest).digest == official.digest
+    assert not catalog.is_official_deployment(official.digest)
+    assert not imported.is_official_bot(official.digest)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("scope", ("deployment", "host"))
 async def test_non_bot_package_artifact_cannot_enter_bot_runtime(tmp_path, scope):

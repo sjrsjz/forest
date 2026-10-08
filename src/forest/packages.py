@@ -2560,16 +2560,17 @@ class PackageCatalog:
     def _official_table(scope: str) -> str:
         try:
             return {
+                "bot": "official_bot_artifacts",
                 "deployment": "official_deployment_artifacts",
                 "host": "official_host_artifacts",
             }[scope]
         except (KeyError, TypeError) as exc:
             raise ForestError(
-                "OFFICIAL_PACKAGE_SOURCE_INVALID", "Official control scope is invalid", 422,
+                "OFFICIAL_PACKAGE_SOURCE_INVALID", "Official package scope is invalid", 422,
             ) from exc
 
     def build_official(self, source: Path, *, scope: str = "deployment") -> PackageSnapshot:
-        """Register a host-supplied control-scope source as a trusted artifact.
+        """Register a host-supplied source as a trusted artifact for one scope.
 
         This authority is deliberately separate from ZIP import and ordinary build:
         an artifact's own manifest cannot grant itself official SQL execution.
@@ -2585,7 +2586,7 @@ class PackageCatalog:
         ):
             _fail(
                 "OFFICIAL_PACKAGE_SOURCE_INVALID",
-                "Official source must declare its control scope and trusted storage",
+                "Official source must declare its scope and trusted storage",
             )
         snapshot = self._publish(captured, manifest=manifest)
         with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
@@ -2633,6 +2634,12 @@ class PackageCatalog:
 
     def is_official_deployment(self, digest: str) -> bool:
         return self._is_official(digest, "deployment")
+
+    def get_official_bot(self, digest: str) -> PackageSnapshot:
+        return self._get_official(digest, "bot")
+
+    def is_official_bot(self, digest: str) -> bool:
+        return self._is_official(digest, "bot")
 
     def get_official_host(self, digest: str) -> PackageSnapshot:
         return self._get_official(digest, "host")

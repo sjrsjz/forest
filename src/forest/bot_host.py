@@ -465,7 +465,7 @@ class BotHost:
         )
         worker_host_source = Path(str(files("forest").joinpath("builtin/component_worker_host")))
         worker_host_snapshot = await asyncio.to_thread(
-            self.package_catalog.build, worker_host_source
+            self.package_catalog.build_official, worker_host_source, scope="bot"
         )
         worker_host = await bootstrap_builtin_snapshot(
             worker_host_snapshot,
@@ -588,7 +588,9 @@ class BotHost:
 
         async def capture(source):
             async with capture_slots:
-                snapshot = await asyncio.to_thread(self.package_catalog.build, source)
+                snapshot = await asyncio.to_thread(
+                    self.package_catalog.build_official, source, scope="bot"
+                )
                 return source, snapshot
 
         captured = await asyncio.gather(
