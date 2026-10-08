@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+异常领取组诊断完整性（2026-10-09）：`conversation.scheduler` 4.36.1 / 私有 SQL 4.31.1 修正多活动组的只读管理查询。此前 lane 恰好指向其中一组时，被指向的活动组会从异常列表消失；现在同群存在多个活动组时逐项列出并统一标记 `MULTIPLE_ACTIVE_GROUPS`，仅有一个活动组且非空 lane 错位时标记 `LANE_CLAIM_MISMATCH`。隔离 PostgreSQL 的完整 Conversation 包用例覆盖复合游标分页、lane 对齐其中一组、部分 lane 错位和单组错位，`1 passed`；Ruff 与差异检查通过。此改动不授予异常组重排权限，安全处置策略和长期实网验收仍未完成，旧预发布 Bot 库不能原位加载新私有基线。
+
 独立候选部署与官方包热换代（2026-10-09）：以当前源码构建 `forest:runtime-candidate-v13`，使用与旧在线实例隔离的 PostgreSQL、Secret 和包卷启动 Supervisor；本机 WebUI `127.0.0.1:18089` 返回 200。经生产 Web API 完成管理员初始化、Host 存储结算和两个 Bot 供应：模拟 OneBot Bot 与复制旧在线非敏感配置及三类凭据的 `forest-main` 均为 `READY/OFFLINE`。凭据在只读旧库和旧密钥卷中核验密文摘要后，直接写入候选 Secret authority；新旧嵌入 profile 均为 `Qwen/Qwen3-VL-Embedding-8B`、4096 维，真实候选保留 QQ ID `3605196653`、群 `933179609`、DeepSeek 模型身份，但未连接真实 QQ。mock Bot 曾经按运行意图上线并经 OneBot mock 验证完整图启动，验收后恢复 `OFFLINE`。
 
 同一候选包卷中，UID 10001 的无网络、只读根文件系统本地 CLI 使用完整 ZIP 和显式摘要发布 `routing.graph` 2.0.3；目录同时可读官方 2.0.2 与 2.0.3，发布时两个 Bot 的运行意图均未改变。mock Bot 再次上线后，通过 Bot 作用域 Web 预检和 `module.enable` 选择 2.0.3，Graph 修订 3→4，仅 `routing.graph` 的 Generation 改变，`kernel.runtime` 保持原代。Bot 退回离线后的只读 Bot 库审计显示两个 Graph 均 `STOPPED`，新图成员和被替换的旧代均 `DISPOSED`。旧在线 `forest-clean-supervisor-1` 与树莓派 `alicebot.service` 仍运行，真实切换尚未执行。本次没有实网群消息、模型质量或长时负载结论，旧部署数据卷保持原状。

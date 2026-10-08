@@ -4565,28 +4565,31 @@ BEGIN
                l.channel_kind,l.channel_ref,
                l.active_session_ref AS lane_session_ref,
                l.active_run_ref AS lane_run_ref,
-               CASE WHEN l.active_session_ref IS NULL AND l.active_run_ref IS NULL
-                    THEN 'MULTIPLE_ACTIVE_GROUPS'
+               CASE WHEN conflict.multiple_active THEN 'MULTIPLE_ACTIVE_GROUPS'
                     ELSE 'LANE_CLAIM_MISMATCH' END AS anomaly_code
         FROM __forest_module_schema__.trigger_claim_groups g
         JOIN __forest_module_schema__.conversation_lanes l
           ON l.bot_id=g.bot_id AND l.conversation_id=g.conversation_id
+        CROSS JOIN LATERAL (
+            SELECT EXISTS (
+                SELECT 1 FROM __forest_module_schema__.trigger_claim_groups other
+                WHERE other.bot_id=g.bot_id
+                  AND other.conversation_id=g.conversation_id
+                  AND other.claim_state='ACTIVE'
+                  AND other.claim_ref<>g.claim_ref
+            ) AS multiple_active
+        ) conflict
         WHERE g.bot_id=requested_bot AND g.claim_state='ACTIVE'
           AND (requested_conversation IS NULL
                OR g.conversation_id=requested_conversation)
           AND (after_conversation IS NULL
                OR (g.conversation_id,g.claim_ref)>(after_conversation,after_claim))
-          AND (
-              (l.active_session_ref=g.session_ref AND l.active_run_ref=g.run_ref)
-              OR (l.active_session_ref IS NULL AND l.active_run_ref IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM __forest_module_schema__.trigger_claim_groups other
-                      WHERE other.bot_id=g.bot_id
-                        AND other.conversation_id=g.conversation_id
-                        AND other.claim_state='ACTIVE'
-                        AND other.claim_ref<>g.claim_ref
-                  ))
-          ) IS NOT TRUE
+          AND (conflict.multiple_active OR (
+              (l.active_session_ref=g.session_ref
+               AND l.active_run_ref=g.run_ref) IS NOT TRUE
+              AND (l.active_session_ref IS NOT NULL
+                   OR l.active_run_ref IS NOT NULL)
+          ))
         ORDER BY g.conversation_id,g.claim_ref LIMIT requested_limit+1
     ), numbered AS (
         SELECT *,row_number() OVER (ORDER BY conversation_id,claim_ref) AS rn

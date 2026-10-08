@@ -2143,6 +2143,30 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 with pytest.raises(_RollbackOrphan):
                     async with store.pool.connection() as conn, conn.transaction():
                         await conn.execute(
+                            sql.SQL("UPDATE {}.conversation_lanes SET "
+                                    "active_session_ref=%s,active_run_ref=NULL "
+                                    "WHERE bot_id=%s AND conversation_id=%s")
+                            .format(sql.Identifier(namespace)),
+                            ("unrelated-session", store.bot_id, prefill_conversation),
+                        )
+                        singleton = await (
+                            await conn.execute(
+                                sql.SQL("SELECT {}.conversation_list_claim_anomalies("
+                                        "%s::jsonb,%s::jsonb) AS result")
+                                .format(sql.Identifier(namespace)),
+                                (Jsonb({"bot_id": store.bot_id}),
+                                 Jsonb({"conversation_id": prefill_conversation,
+                                        "limit": 20})),
+                            )
+                        ).fetchone()
+                        items = singleton["result"]["value"]["items"]
+                        assert len(items) == 1
+                        assert items[0]["claim_ref"] == claim_ref
+                        assert items[0]["anomaly_code"] == "LANE_CLAIM_MISMATCH"
+                        raise _RollbackOrphan
+                with pytest.raises(_RollbackOrphan):
+                    async with store.pool.connection() as conn, conn.transaction():
+                        await conn.execute(
                             sql.SQL("INSERT INTO {}.trigger_claim_groups("
                                     "bot_id,conversation_id,claim_ref,session_ref,run_ref,"
                                     "trigger_count,segment_count,last_trigger_ref,"
@@ -2181,7 +2205,24 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                                    for item in first_page["items"] + second_page["items"])
                         await conn.execute(
                             sql.SQL("UPDATE {}.conversation_lanes SET "
-                                    "active_session_ref=%s WHERE bot_id=%s "
+                                    "active_session_ref=%s,active_run_ref=%s "
+                                    "WHERE bot_id=%s AND conversation_id=%s")
+                            .format(sql.Identifier(namespace)),
+                            ("prefill-session", "prefill-run", store.bot_id,
+                             prefill_conversation),
+                        )
+                        aligned = await anomaly_page()
+                        aligned_next = await anomaly_page(aligned["next_cursor"])
+                        assert {item["claim_ref"] for item in
+                                aligned["items"] + aligned_next["items"]} == {
+                            claim_ref, "claim:" + "f" * 64,
+                        }
+                        assert all(item["anomaly_code"] == "MULTIPLE_ACTIVE_GROUPS"
+                                   for item in aligned["items"] + aligned_next["items"])
+                        await conn.execute(
+                            sql.SQL("UPDATE {}.conversation_lanes SET "
+                                    "active_session_ref=%s,active_run_ref=NULL "
+                                    "WHERE bot_id=%s "
                                     "AND conversation_id=%s")
                             .format(sql.Identifier(namespace)),
                             ("unrelated-session", store.bot_id, prefill_conversation),
@@ -2197,7 +2238,7 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                             )
                         ).fetchone()
                         assert len(mismatched["result"]["value"]["items"]) == 2
-                        assert all(item["anomaly_code"] == "LANE_CLAIM_MISMATCH"
+                        assert all(item["anomaly_code"] == "MULTIPLE_ACTIVE_GROUPS"
                                    for item in mismatched["result"]["value"]["items"])
                         raise _RollbackOrphan
             else:

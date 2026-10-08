@@ -127,6 +127,8 @@ PENDING ------------> FAILED / CANCELLED
 
 完成回复、失败和取消只提交组级终结事实及有界回执，不能把几十万项 `answered_trigger_ids` 或 `answered_events` 放进 UnitOfWork/Worker/模型帧。Memory 的回复联想仅对有界提案中的触发与事件逐项核验，不要求传输整组回答成员。逐触发物理结算由单调游标分段完成；它必须能在进程崩溃和热替换后重领，旧领取不能结算新分段。终态提交使用领取时已经核验的组头计数，不扫描整组触发行；每条物理终态转换须对应不可变分段成员和组级终结事实。`PENDING`、`CLAIMED`、`ANSWERED` 等对外有效状态由领取组与终结事实共同决定，在物理结算未完成时仍保持正确。当前实现已有累计领取组、最多 64 项的领取与终态结算分段、失租约后 IDLE 预填原 Run 重领，以及跨租约稳定的 `SESSION_END` 后继 Run 身份。显式重排的内部 UnitOfWork 现要求同事务核验旧 Agent Run 与 Session 均已终结，并使旧领取组按最多 64 项的分段返回 PENDING；物理结算前同群新 Run 不得越过该组。来源已经进入 Context 的积压由 `RECOVERY_PREFILL` 只领取、不重复追加，最终仍保留最后一个触发进入 `RECOVERY_CLAIM`。Agent 事务核验还拒绝旧 Run 中已登记任何 ToolCall，或存在 DISPATCHING、UNKNOWN 模型传输尝试的重排；此类 Run 的外部效果不能通过开启新 Run 来推定安全。管理动作 conversation.requeue.request 只写入绑定 Conversation、Session、Run 和领取组摘要的持久请求，不自行取得 actor 租约，也不跨 schema 改写 Agent。Scheduler 在旧 Run 返回 FAILED/CANCELLED 后读取请求，持有同群 actor 时调用重排 UnitOfWork；Agent 拒绝不安全重排时改走原终结路径并记录请求为 REJECTED，正常回答也会使待处理请求失效。候选列表按 Conversation ID 游标有界分页，模块自带管理 UI 展示活跃领取组和请求结果。异常孤儿组处置、真实管理会话与长期规模验收仍待完成，具体差距以[实现状态](implementation-status.md)为准。
 
+`conversation.claim.anomalies` 的分类以组结构为准：只要同群存在多个活动组，即使 lane 指向其中一组，也逐项列出冲突组并标记 `MULTIPLE_ACTIVE_GROUPS`；唯一活动组与非空 lane 指向不一致时才标记 `LANE_CLAIM_MISMATCH`。正常的单组无 Run 预填不算异常。
+
 ### 2.5 未创建 Run 的预填领取组恢复
 
 正常预填中，领取组已经存在而 Agent Run 尚未创建；actor 失租约后，新 actor 应复用组头冻结的 Session/Run 引用继续预填，不能仅凭“Run 不存在”判为孤儿。异常退出仅由管理员对准确的活动领取组提交受控重排请求触发，且必须在取得当前 actor 围栏后判定。候选查询和请求动作需要识别 `lane.active_session_ref/active_run_ref` 均为空、但同一会话恰有一个 `ACTIVE` 领取组的预填状态；请求冻结组的 `claim_ref`、`claim_digest`、Session/Run 与操作身份。它不能直接改动触发状态。
