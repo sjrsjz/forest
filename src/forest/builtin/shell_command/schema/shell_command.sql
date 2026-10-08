@@ -223,6 +223,13 @@ BEGIN
     WHEN input->>'binding_ref' IS DISTINCT FROM snapshot.binding_ref THEN 'SHELL_BINDING_DENIED'
     WHEN (input->>'admission_deadline')::timestamptz <= clock_timestamp() THEN 'SHELL_ADMISSION_EXPIRED'
     WHEN NOT allowed THEN 'SHELL_PRINCIPAL_DENIED'
+    WHEN input->>'command_id'='shell.invalid'
+         AND (input->>'command_version')::integer=1
+         AND jsonb_typeof(input->'arguments')='object'
+         AND input->'arguments'=jsonb_build_object('error_code',input->'arguments'->>'error_code')
+         AND input->'arguments'->>'error_code' IN (
+           'SHELL_SYNTAX_INVALID','SHELL_ARGUMENTS_INVALID','SHELL_COMMAND_NOT_FOUND'
+         ) THEN input->'arguments'->>'error_code'
     WHEN route IS NULL THEN 'SHELL_COMMAND_NOT_FOUND'
     ELSE NULL END;
   next_state:=CASE WHEN rejection_code IS NULL THEN 'QUEUED' ELSE 'REJECTION_PENDING' END;

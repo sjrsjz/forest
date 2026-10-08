@@ -161,6 +161,8 @@ Supervisor 同时启动多作用域 WebUI，并把 Host Graph 作为独立作用
 
 当前旧 Forest Supervisor 的停机尚未获得执行授权，候选真实 Bot 因此保持离线。执行切换前需重新读取实际容器和服务状态；不要把此快照当成当前运行事实。
 
+隔离候选后续只对 mock Bot 发布并选择 `shell.command` 1.3.3，Graph 10→11，当前 mock Bot 已回到 READY/OFFLINE、假 OneBot 已移除；真实 `forest-main` 仍未上线。该次假群消息验证了混合内容的 Shell 所有权和 `CONTROL_COMMAND` 分类。随后源码的 Shell 1.3.4 更正私有 SQL 拒绝码，因存储基线改变尚未进入当前候选，切换生产前须以干净候选库重新物化该基线并验证。
+
 ## 仍需补齐的能力
 
 - 树莓派与 PC 之间的长时实网抖动和持续真实流量验证；loopback 断连、action 不确定性、1000 条有界顺序流、过载显式失败、候选发布失败回滚和 owned task 崩溃后的 Supervisor 隔离已经自动化覆盖；
