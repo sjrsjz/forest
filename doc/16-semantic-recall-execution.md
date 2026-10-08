@@ -49,7 +49,9 @@ Agent 等待时释放本次执行租约，保留同一个逻辑 Session/Run 和�
 
 ## 4. 证据与投影
 
-Memory 发布 `forest.memory-evidence/1`，保留文本、图片引用、历史作者身份、群/主干、时间和实际路径。Agent 读取规范证据，按绑定的模型能力产生请求投影；纯文本模型移除图片内容，图文模型读取原图片引用。去图不会改变 Memory 的 QUERY 嵌入模型或查询语义。
+Memory 发布 `forest.memory-evidence/2`，保留文本、图片引用、历史作者身份、群/主干、时间和实际路径，并标记受检索媒体预算省略的图片。Agent 读取规范证据，按绑定的模型能力产生请求投影；纯文本模型移除图片内容，图文模型读取获选的原图片引用。去图不会改变 Memory 的 QUERY 嵌入模型或查询语义，也不会抹掉原始多模态记忆。
+
+普通模型步骤在派发前由 Agent 冻结核心提示词、预设、工具、Run 因果单元、Memory 证据和输出预留的成本报价；Conversation 在本群 Actor/Run 围栏下，从完整 Context 来源中选择待答触发及预算内的可选单元，并发布不可变 `forest.model-view-plan/1`。Agent 按该计划投影输入并在派发前复核成员和报价引用。后继步骤不能删掉此前已选单元，也不能把此前省略的旧单元重新选回；Provider 不参与选择或预算。Context 当前仍先构造有界完整快照，再应用选择计划，因此大规模快照成本和本地 token 估算精度仍需继续验收。
 
 Agent model.input、model.projection 与 model.wire 必须继承 Context、Preset、规范 Memory 证据及原媒体的受管父链。Provider 只校验并传输 Agent 已冻结的请求，不能裁剪上下文、估算拒绝预算或自行选取证据。规范证据、模型投影与 wire 是不同层的不可变产物，必须分别标明所有者与用途。
 
@@ -57,4 +59,4 @@ Agent model.input、model.projection 与 model.wire 必须继承 Context、Prese
 
 需要在真实 PostgreSQL 与实际隔离 Worker 路径验证：准备中断恢复、部分 ANN 回执恢复、零 facet/零结果、UNKNOWN 不重发、截止失败、并发登记合流、热重载后同 query 恢复、删除后 READY 失效，以及同群等待不并发、跨群不互相阻塞。Agent 验收还必须检查实际模型请求包含正确来源证据，纯文本请求没有图片内容，协议修复不启动新召回。阶段查询测试通过不能代替这些端到端验收。
 
-已有隔离 PostgreSQL 验收通过伪 OneBot 群 @ 入站、真实 Scheduler/Agent/Memory 隔离 Worker、伪嵌入和向量索引、伪模型调用串起一轮请求，检查证据进入 Provider 请求体并保留群、主干和作者来源，纯文本 wire 不含图片。图文请求场景核对当前群图片完成异步抓取并进入模型 wire；双群场景把第一群模型调用挂起，再为该群排入新 trigger，同时验证第二群的模型请求仍可进入 Provider，第一群没有并发第二请求。伪模型返回 UNKNOWN，未向真实 QQ 发送消息；真实 QQ、真实供应商响应、跨群成功回复及图片召回命中仍待验收。
+已有隔离 PostgreSQL 验收通过伪 OneBot 群 @ 入站、真实 Scheduler/Agent/Memory 隔离 Worker、伪模型调用串起请求，检查证据进入 Provider 请求体并保留群、主干和作者来源，纯文本 wire 不含图片。使用 QiYu 的真实 VL 嵌入端点和独立 Milvus 集合时，隔离用例已验证大图缩放、跨群 IMAGE→IMAGE 命中、来源归因、回复后的联想日志及来源归档后的跨主干联想提升；聊天模型和 OneBot 仍为替身。本轮再次运行同群触发续轮与 Agent 模块热发布整链，`2 passed`；10 万条关系分页与 2 万条高出度联想边采样用例也 `2 passed`。这些证据不等于真实 QQ 低频端到端、真实聊天供应商回复或数月混合图文负载验收；在线实例尚未切换到当前基线。
