@@ -60,6 +60,7 @@ MAX_PACKAGE_FILES = 512
 MAX_PACKAGE_ENTRIES = 4096
 MAX_PACKAGE_DEPTH = 32
 MAX_MANAGEMENT_UI_BYTES = 256 * 1024
+SHELL_P0_MAX_TIMEOUT_SECONDS = 20
 IDENTIFIER = re.compile(r"[a-zA-Z][a-zA-Z0-9_.-]{0,127}\Z")
 SQL_FUNCTION = re.compile(r"[a-z_][a-z0-9_]{0,62}\Z")
 ENTRYPOINT = re.compile(r"[a-zA-Z_]\w*(?:\.[a-zA-Z_]\w*)*:[a-zA-Z_]\w*\Z")
@@ -2164,6 +2165,10 @@ def _manifest(files: dict[str, bytes]) -> dict:
                 for alias in aliases
             )
             or any(alias[1] not in argument_properties for alias in aliases)
+            or (
+                declaration["service_class"] == "P0"
+                and declaration["timeout_s"] > SHELL_P0_MAX_TIMEOUT_SECONDS
+            )
         ):
             _fail(
                 "INVALID_SHELL_COMMAND",

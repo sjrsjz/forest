@@ -29,7 +29,10 @@ CREATE TABLE shell_command_catalog (
     required_capabilities jsonb NOT NULL,
     required_capabilities_digest text NOT NULL CHECK (required_capabilities_digest ~ '^sha256:[a-f0-9]{64}$'),
     output_policy text NOT NULL CHECK (output_policy IN ('SHORT','ARTIFACT','SILENT')),
-    timeout_seconds integer NOT NULL CHECK (timeout_seconds BETWEEN 1 AND 900),
+    timeout_seconds integer NOT NULL CHECK (
+        timeout_seconds BETWEEN 1 AND 900
+        AND (service_class <> 'P0' OR timeout_seconds <= 20)
+    ),
     owner_component_id text NOT NULL,
     target_generation_id text NOT NULL,
     target_service_id text NOT NULL,

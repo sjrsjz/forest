@@ -1058,3 +1058,5 @@ Shell 保留前缀与混合内容优先级（2026-10-09）：`shell.command` 1.3
 Shell 前缀换行补界（2026-10-09）：`shell.command` 1.3.3 将 `#forest` 后直接换行或其他空白分隔符视为已认领的语法错误，不再落入 Agent 分类；`#forestX` 仍不认领。同版本工件修改被包目录以 `PACKAGE_VERSION_CONFLICT` 拒绝，因此显式提升补丁版本。定向测试 8 passed、Ruff 通过。
 
 Shell 执行槽分级（2026-10-09）：`shell.command` 1.3.5 / 私有 SQL 2.2.2 把已接纳的 P0、P1 请求拆为各自一个 owned-work handler，使用独立的领取和结算 SQL authority。P1 claim 未完成时仍可领取 P0；错误等级的结算即使持有 claim token 也返回 `STALE_SHELL_CLAIM`。拒绝回执保持独立执行槽。隔离 PostgreSQL 定向用例 5 passed，非数据库回归 4 passed，完整 BotHost 链路 1 passed（481.34 秒），包编译与 Ruff 通过；Windows/Linux 官方包摘要相同。未切换在线 Bot，也未发送真实 QQ 消息。Bot 身份与期望运行状态由内核持有，builtin 管理包只使用受限端口。
+
+Shell P0 短命令约束（2026-10-09）：包编译器和运行时贡献声明限制 P0 目标服务调用时限至多 20 秒，Shell 目录输入 schema 与私有 PostgreSQL 目录表施加相同约束；P1 仍允许至多 900 秒。`shell.command` 升至 1.3.6 / 私有 SQL 2.2.3。定向包/运行时用例 2 passed，隔离 PostgreSQL 5 passed，全部官方自动安装包编译回归 1 passed，Ruff 与差异检查通过。该约束保护 P0 执行槽免受声明级长任务占用；它不证明目标模块内部一定有独立的执行容量或每次外部效果都能在时限内取消。未切换在线 Bot，也未发送真实 QQ 消息。

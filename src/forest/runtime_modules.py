@@ -24,7 +24,13 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from forest.errors import ForestError
-from forest.packages import contract_matches, contract_range, digest_json, storage_bundle_digest
+from forest.packages import (
+    SHELL_P0_MAX_TIMEOUT_SECONDS,
+    contract_matches,
+    contract_range,
+    digest_json,
+    storage_bundle_digest,
+)
 from forest.runtime_contracts import RuntimeContractRouter, RuntimeKernelServiceSpec
 from forest.runtime_generation import (
     BoundGenerationIdentity,
@@ -354,6 +360,10 @@ class RuntimeShellCommandContribution:
             or self.output_policy not in {"SHORT", "ARTIFACT", "SILENT"}
             or type(self.timeout_seconds) is not int
             or not 1 <= self.timeout_seconds <= 900
+            or (
+                self.service_class == "P0"
+                and self.timeout_seconds > SHELL_P0_MAX_TIMEOUT_SECONDS
+            )
         ):
             raise ValueError("Runtime Shell command contribution is invalid")
         digest_json(self.argument_schema)

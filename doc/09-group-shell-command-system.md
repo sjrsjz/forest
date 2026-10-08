@@ -114,7 +114,7 @@ Shell 回执只报告持久 `request_id` 和状态；Graph 替换仍由 Worker H
 
 优先级只决定可运行工作领取顺序，不改变历史顺序、权限、锁序或目标资源所有权。P0 可以登记取消意图，不能在另一个事务持锁或网络调用中间抢夺对象。最终效果仍由目标模块在安全点检查 cancellation/revision/fence。
 
-`shell.command` 对已接纳的 P0 与 P1 请求分别声明一个 owned-work handler，各有独立的 SQL claim/settle authority 和一个执行槽。P1 长命令占用自身执行槽时，P0 仍可领取已排队的 P0 请求；P0 的结算入口拒绝 P1 claim，反之亦然。拒绝回执另有独立 handler。当前 Shell P0 handler 的执行截止为 90 秒，P1 为 920 秒；这只保证 Shell 自己的领取与执行容量隔离，目标模块的容量和数据库争用仍需按各自端口约束处理。
+`shell.command` 对已接纳的 P0 与 P1 请求分别声明一个 owned-work handler，各有独立的 SQL claim/settle authority 和一个执行槽。P1 长命令占用自身执行槽时，P0 仍可领取已排队的 P0 请求；P0 的结算入口拒绝 P1 claim，反之亦然。拒绝回执另有独立 handler。P0 命令声明的目标服务调用时限最多 20 秒，包编译、运行时声明、Shell 目录输入和持久目录都执行此约束；P1 最多 900 秒。当前 Shell P0 handler 的执行截止为 90 秒，P1 为 920 秒；这只保证 Shell 自己的领取与执行容量隔离，目标模块的容量和数据库争用仍需按各自端口约束处理。
 
 Agent Run 取消采用持久两阶段协议。`run cancel` 只以 `run_id + expected_checkpoint_seq` 向 `agent.runtime` 登记不可变取消意图；并发请求由 Run 行锁和唯一目标约束确定唯一胜者，旧 checkpoint 请求直接冲突。Agent 在模型或工具交接事务内再次检查该意图：若取消先提交，则不得把新外部调用推进到 `DISPATCHING`；若外部交接先提交，则保留真实结果并在观察结果后的下一个安全边界取消，不能伪称请求从未发生。`MODEL_PENDING`、已 `DISPATCHING` 的工具以及 `BLOCKED_UNKNOWN` 不能直接改写为已取消。Agent 写入 `CANCELLED` checkpoint 后，Conversation Worker 以独立幂等终态操作把该 Run 已领取的 trigger 标记为 `CANCELLED` 并释放 lane；两步间崩溃时，恢复 Worker 从持久 Agent 终态继续完成 Conversation 收敛。
 

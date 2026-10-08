@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from psycopg import sql
+from psycopg.errors import CheckViolation
 from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
@@ -180,6 +181,22 @@ async def test_shell_admission_preserves_rejections_and_priority_capacity(clean_
                 )
             ).fetchone()
             assert admitted["shell_admit_ingress"]["value"]["state"] == "QUEUED"
+
+        with pytest.raises(CheckViolation):
+            async with conn.transaction():
+                await conn.execute(
+                    sql.SQL(
+                        "UPDATE {}.shell_command_catalog SET timeout_seconds=21 "
+                        "WHERE command_id='core.status'"
+                    ).format(sql.Identifier(schema_name))
+                )
+        changed = await conn.execute(
+            sql.SQL(
+                "UPDATE {}.shell_command_catalog SET timeout_seconds=900 "
+                "WHERE command_id='module.reload'"
+            ).format(sql.Identifier(schema_name))
+        )
+        assert changed.rowcount == 1
 
         class_context = Jsonb({"bot_id": "bot-bundle", "generation_id": "generation/shell"})
 
