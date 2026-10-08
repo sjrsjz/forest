@@ -2602,6 +2602,65 @@ class PackageCatalog:
             )
         return snapshot
 
+    def publish_official_archive(
+        self,
+        data: bytes,
+        *,
+        scope: str,
+        expected_archive_sha256: str,
+        expected_package_digest: str,
+        expected_manifest_digest: str,
+        expected_package_id: str,
+        expected_component_id: str,
+        expected_runtime: str,
+    ) -> PackageSnapshot:
+        """Commit a preauthorized ZIP and its official provenance together.
+
+        The caller owns authorization and the expected identities. Ordinary ZIP
+        import never calls this entry and cannot create official provenance.
+        """
+        table = self._official_table(scope)
+        if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_ARCHIVE_BYTES:
+            _fail("PACKAGE_TOO_LARGE", "Package ZIP exceeds the upload limit")
+        if (
+            not isinstance(expected_archive_sha256, str)
+            or "sha256:" + hashlib.sha256(data).hexdigest() != expected_archive_sha256
+        ):
+            _fail("PACKAGE_ARCHIVE_DIGEST_MISMATCH", "Package ZIP differs from its declared digest")
+        captured = archive_files(data)
+        manifest = _manifest(captured)
+        component = manifest["components"][0]
+        storage = component.get("storage")
+        if (
+            manifest["package_id"] != expected_package_id
+            or manifest["runtime"] != expected_runtime
+            or component["id"] != expected_component_id
+            or component["scope"] != scope
+            or (storage is not None and storage.get("execution_profile") != "official")
+        ):
+            _fail("OFFICIAL_PACKAGE_SOURCE_INVALID", "Official package identity is invalid")
+        content_digest = digest_json(
+            {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
+        )
+        if (
+            content_digest != expected_package_digest
+            or digest_json(manifest) != expected_manifest_digest
+        ):
+            _fail("OFFICIAL_PACKAGE_DIGEST_MISMATCH", "Official package contents differ")
+        with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=30)) as db, db:
+            self._prepare_catalog_tables(db, imports=False)
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                f"CREATE TABLE IF NOT EXISTS {table} "
+                "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
+            )
+            snapshot = self._publish(captured, manifest=manifest, locked_db=db)
+            db.execute(
+                f"INSERT OR IGNORE INTO {table} VALUES (?,?)",
+                (snapshot.digest, component["id"]),
+            )
+        return snapshot
+
     def _get_official(self, digest: str, scope: str) -> PackageSnapshot:
         """Open only artifacts admitted for this exact control scope."""
 

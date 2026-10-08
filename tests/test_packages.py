@@ -221,6 +221,126 @@ def test_official_registration_and_artifact_index_commit_together(tmp_path):
     assert catalog.get_official_bot(snapshot.digest).digest == snapshot.digest
 
 
+def test_official_archive_requires_exact_declared_bytes_and_identity(tmp_path):
+    staging = PackageCatalog(tmp_path / "staging")
+    source = staging.build(EXAMPLE)
+    archive = staging.export_archive(source.digest)
+    expected = {
+        "scope": "bot",
+        "expected_archive_sha256": "sha256:" + hashlib.sha256(archive).hexdigest(),
+        "expected_package_digest": source.digest,
+        "expected_manifest_digest": packages.digest_json(source.manifest),
+        "expected_package_id": source.manifest["package_id"],
+        "expected_component_id": source.component["id"],
+        "expected_runtime": source.manifest["runtime"],
+    }
+    catalog = PackageCatalog(tmp_path / "release")
+    for changed, code in (
+        ({"expected_archive_sha256": "sha256:" + "0" * 64}, "PACKAGE_ARCHIVE_DIGEST_MISMATCH"),
+        ({"expected_package_digest": "sha256:" + "0" * 64}, "OFFICIAL_PACKAGE_DIGEST_MISMATCH"),
+        ({"expected_manifest_digest": "sha256:" + "0" * 64}, "OFFICIAL_PACKAGE_DIGEST_MISMATCH"),
+        ({"expected_component_id": "another.component"}, "OFFICIAL_PACKAGE_SOURCE_INVALID"),
+        ({"expected_runtime": "another-runtime"}, "OFFICIAL_PACKAGE_SOURCE_INVALID"),
+    ):
+        with pytest.raises(ForestError) as rejected:
+            catalog.publish_official_archive(archive, **{**expected, **changed})
+        assert rejected.value.code == code
+        assert catalog.list() == []
+    released = catalog.publish_official_archive(archive, **expected)
+    assert released.digest == source.digest
+    assert catalog.get_official_bot(released.digest).digest == released.digest
+    assert catalog.publish_official_archive(archive, **expected).digest == released.digest
+
+
+def test_official_archive_registration_failure_rolls_back_index(tmp_path):
+    staging = PackageCatalog(tmp_path / "staging")
+    source = staging.build(EXAMPLE)
+    archive = staging.export_archive(source.digest)
+    catalog = PackageCatalog(tmp_path / "release")
+    index = catalog.root / "catalog.sqlite3"
+    with sqlite3.connect(index) as db:
+        db.execute(
+            "CREATE TABLE official_bot_artifacts "
+            "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
+        )
+        db.execute(
+            "CREATE TRIGGER reject_official BEFORE INSERT ON official_bot_artifacts "
+            "BEGIN SELECT RAISE(ABORT, 'injected official registration failure'); END"
+        )
+    expected = {
+        "scope": "bot",
+        "expected_archive_sha256": "sha256:" + hashlib.sha256(archive).hexdigest(),
+        "expected_package_digest": source.digest,
+        "expected_manifest_digest": packages.digest_json(source.manifest),
+        "expected_package_id": source.manifest["package_id"],
+        "expected_component_id": source.component["id"],
+        "expected_runtime": source.manifest["runtime"],
+    }
+    with pytest.raises(sqlite3.IntegrityError):
+        catalog.publish_official_archive(archive, **expected)
+    assert catalog.list() == []
+    with sqlite3.connect(index) as db:
+        db.execute("DROP TRIGGER reject_official")
+    assert catalog.publish_official_archive(archive, **expected).digest == source.digest
+
+
+@pytest.mark.asyncio
+async def test_host_local_command_publishes_only_bundled_bot_identity(tmp_path, capsys):
+    source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/routing_graph"
+    staging = PackageCatalog(tmp_path / "staging")
+    default = staging.build(source_root)
+    updated_root = tmp_path / "updated-routing"
+    shutil.copytree(source_root, updated_root)
+    manifest_path = updated_root / "module.toml"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            f'version = "{default.manifest["version"]}"',
+            'version = "99.0.0"', 1,
+        ), encoding="utf-8",
+    )
+    source = staging.build(updated_root)
+    assert source.digest != default.digest
+    archive = staging.export_archive(source.digest)
+    archive_path = tmp_path / "routing.zip"
+    archive_path.write_bytes(archive)
+    inspection_root = tmp_path / "inspection"
+    await run_plugin_command(Namespace(
+        command="plugin", plugin_command="import",
+        archive=archive_path, cache_dir=inspection_root,
+    ))
+    inspected = json.loads(capsys.readouterr().out)
+    assert inspected["package_digest"] == source.digest
+    assert inspected["archive_sha256"] == "sha256:" + hashlib.sha256(archive).hexdigest()
+    assert not PackageCatalog(inspection_root).is_official_bot(source.digest)
+    catalog = PackageCatalog(tmp_path / "production")
+    assert catalog.build_official(source_root, scope="bot").digest == default.digest
+    args = Namespace(
+        command="plugin", plugin_command="publish-official-bot",
+        archive=archive_path, catalog_dir=catalog.root,
+        archive_sha256=inspected["archive_sha256"],
+        package_digest=inspected["package_digest"],
+        manifest_digest=inspected["manifest_digest"],
+        package_id=inspected["package_id"],
+        component_id=inspected["component_id"],
+    )
+    with pytest.raises(ForestError) as relative:
+        await run_plugin_command(Namespace(**{**vars(args), "catalog_dir": Path("relative")}))
+    assert relative.value.code == "OFFICIAL_RELEASE_CATALOG_INVALID"
+    with pytest.raises(ForestError) as unknown:
+        await run_plugin_command(Namespace(**{**vars(args), "component_id": "unknown.component"}))
+    assert unknown.value.code == "OFFICIAL_RELEASE_COMPONENT_UNKNOWN"
+    assert len(catalog.list()) == 1
+    assert catalog.get_official_bot(default.digest).digest == default.digest
+
+    await run_plugin_command(args)
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "published-official-bot"
+    assert result["package_digest"] == source.digest
+    assert len(catalog.list()) == 2
+    assert catalog.get_official_bot(default.digest).digest == default.digest
+    assert catalog.get_official_bot(source.digest).digest == source.digest
+
+
 def test_bot_official_selection_resolves_exact_registered_artifact(tmp_path):
     source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/memory_graph"
     catalog = PackageCatalog(tmp_path / "catalog")

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from uuid import uuid4
 
@@ -69,6 +71,16 @@ def _parser() -> argparse.ArgumentParser:
     archive = actions.add_parser("import", help="验证并导入模块 ZIP")
     archive.add_argument("archive", type=Path)
     archive.add_argument("--cache-dir", type=Path, default=Path(".forest/packages"))
+    release = actions.add_parser(
+        "publish-official-bot", help="由宿主操作员向生产目录发布官方 Bot 包"
+    )
+    release.add_argument("archive", type=Path)
+    release.add_argument("--catalog-dir", type=Path, required=True)
+    release.add_argument("--archive-sha256", required=True)
+    release.add_argument("--package-digest", required=True)
+    release.add_argument("--manifest-digest", required=True)
+    release.add_argument("--package-id", required=True)
+    release.add_argument("--component-id", required=True)
     return parser
 
 
@@ -102,7 +114,7 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
     from jsonschema import Draft202012Validator
 
     from forest.drivers.python_worker import PythonWorker, WorkerIdentity
-    from forest.packages import PackageCatalog
+    from forest.packages import PackageCatalog, digest_json
     from forest.worker_limits import WorkerLimits
 
     if args.plugin_command == "init":
@@ -112,6 +124,9 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
             initialize_plugin, args.target, args.package_id, args.version, args.module
         )
         print(json.dumps(result, ensure_ascii=False))
+        return
+    if args.plugin_command == "publish-official-bot":
+        await run_official_release_command(args)
         return
     if args.plugin_command in {"lock", "import", "export"}:
         await run_artifact_command(args)
@@ -156,6 +171,9 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
             {
                 "status": "checked" if args.plugin_command == "check" else "built",
                 "package_digest": snapshot.digest,
+                "manifest_digest": digest_json(snapshot.manifest),
+                "package_id": snapshot.manifest["package_id"],
+                "component_id": snapshot.component["id"],
                 "artifact": str(snapshot.root),
             },
             ensure_ascii=False,
@@ -165,7 +183,7 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
 
 async def run_artifact_command(args: argparse.Namespace) -> None:
     from forest.environments import create_dependency_lock
-    from forest.packages import MAX_ARCHIVE_BYTES, PackageCatalog
+    from forest.packages import MAX_ARCHIVE_BYTES, PackageCatalog, digest_json
 
     if args.plugin_command == "lock":
         lock = await asyncio.to_thread(create_dependency_lock, args.source, args.requirements)
@@ -196,6 +214,7 @@ async def run_artifact_command(args: argparse.Namespace) -> None:
                 {
                     "status": "exported",
                     "package_digest": args.digest,
+                    "archive_sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
                     "archive": str(args.output),
                 },
                 ensure_ascii=False,
@@ -219,11 +238,89 @@ async def run_artifact_command(args: argparse.Namespace) -> None:
             {
                 "status": "imported",
                 "package_digest": snapshot.digest,
+                "manifest_digest": digest_json(snapshot.manifest),
+                "archive_sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+                "package_id": snapshot.manifest["package_id"],
+                "component_id": snapshot.component["id"],
                 "artifact": str(snapshot.root),
             },
             ensure_ascii=False,
         )
     )
+
+
+async def run_official_release_command(args: argparse.Namespace) -> None:
+    """Publish under the local catalog owner's OS authority, never a Bot grant."""
+    from forest.packages import (
+        MAX_ARCHIVE_BYTES,
+        PackageCatalog,
+        auto_install_official_sources,
+        validate_source_package,
+    )
+
+    catalog_root = args.catalog_dir
+    if not catalog_root.is_absolute() or not catalog_root.is_dir():
+        raise ForestError(
+            "OFFICIAL_RELEASE_CATALOG_INVALID",
+            "Official release requires an existing absolute catalog directory", 422,
+        )
+    if args.component_id == "component.worker-host":
+        raise ForestError(
+            "OFFICIAL_RELEASE_COMPONENT_UNSUPPORTED",
+            "Worker Host cannot be selected by an official Bot package digest", 422,
+        )
+    source = None
+    bundled_runtime = None
+    for candidate in auto_install_official_sources("bot"):
+        try:
+            manifest = tomllib.loads(candidate.joinpath("module.toml").read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            raise ForestError(
+                "OFFICIAL_RELEASE_SOURCE_INVALID",
+                "Bundled official Bot source is invalid", 500,
+            ) from None
+        if manifest["components"][0]["id"] == args.component_id:
+            source = candidate
+            bundled_runtime = manifest["runtime"]
+            if manifest["package_id"] != args.package_id:
+                raise ForestError(
+                    "OFFICIAL_RELEASE_IDENTITY_MISMATCH",
+                    "Official release differs from the bundled component identity", 422,
+                )
+            break
+    if source is None:
+        raise ForestError(
+            "OFFICIAL_RELEASE_COMPONENT_UNKNOWN",
+            "Official release target is not a bundled Bot component", 422,
+        )
+    await asyncio.to_thread(validate_source_package, source)
+    try:
+        with args.archive.open("rb") as stream:
+            content = stream.read(MAX_ARCHIVE_BYTES + 1)
+    except OSError:
+        raise ForestError(
+            "PACKAGE_IO_FAILED", "Unable to read the official package archive", 422,
+        ) from None
+    catalog = PackageCatalog(catalog_root)
+    snapshot = await asyncio.to_thread(
+        catalog.publish_official_archive,
+        content,
+        scope="bot",
+        expected_archive_sha256=args.archive_sha256,
+        expected_package_digest=args.package_digest,
+        expected_manifest_digest=args.manifest_digest,
+        expected_package_id=args.package_id,
+        expected_component_id=args.component_id,
+        expected_runtime=bundled_runtime,
+    )
+    print(json.dumps({
+        "status": "published-official-bot",
+        "package_digest": snapshot.digest,
+        "manifest_digest": args.manifest_digest,
+        "package_id": snapshot.manifest["package_id"],
+        "component_id": snapshot.component["id"],
+        "catalog": str(catalog.root),
+    }, ensure_ascii=False))
 
 
 if __name__ == "__main__":

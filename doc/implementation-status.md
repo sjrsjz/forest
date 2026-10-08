@@ -1,5 +1,9 @@
 # Forest 实现状态
 
+官方 Bot 包本地发布入口（2026-10-08）：`forest plugin publish-official-bot` 以生产包目录所有者的本地进程权限接纳完整 ZIP，要求显式绝对目录和 ZIP/内容/manifest 摘要，仅允许当前发行物自动安装的 Bot 官方组件与原包 ID/运行时，排除自举 Worker Host。目录的 `publish_official_archive` 在单一 SQLite 事务中提交索引、版本和官方来源；身份或摘要不匹配时目录不变，注入官方登记失败时索引回滚。隔离 CLI 用例实际发布不同版本的 `routing.graph`，默认版本仍在目录，普通 ZIP 导入仍无官方来源；定向 3 passed，包目录完整回归在底座改动后 `106 passed, 1 skipped`，Ruff 通过。此入口不授予群聊 Shell/Web/Worker 发布权，也不自动切换任何 Bot；生产目录发布、真实在线 Bot 热换代和长时负载仍未验收。
+
+同一入口在隔离 Linux runtime 镜像中按 Compose 的 UID 10001、无网络、只读根文件系统和独立包卷复验：本地命令发布新版 `routing.graph`，默认与新版两个官方摘要同时可读，目录共两条工件；临时镜像、卷与探针已清理。此验证使用一次性目录，不是现有在线 Supervisor 的真实包卷。
+
 Host 审计管理包（2026-10-08）：新增自动安装的 `host.audit` 1.0.0，可热替换且只通过 Host 包的只读 SQL Query 对 `forest_host.audit_records` 做最多 100 条的有界筛选、稳定游标分页；自带 Host WebUI，查询自身声明 `SECURITY`，因此先写脱敏读审计再交付页面结果。账本写入、不可变性与身份仍属于 Host 内核。隔离 PostgreSQL 的真实 Supervisor→Host 管理 HTTP 用例 `1 passed in 103.63s`，验证资源查询记录可从页面 Query 读到、该 Query 自身也留下当前 Generation 的无写回执记录；官方包目录与 Host 编译回归 `104 passed, 1 skipped`，Ruff 通过。未触碰在线 QQ Bot；长时负载和真实在线管理切换仍未验收。
 
 Host 敏感管理读取审计（2026-10-08）：Host 内核 baseline 新增独立、不可变的 `forest_host.audit_records`，按 Host/操作 ID 唯一约束，只接纳无写回执的 `web.query` 或绑定真实回执的 `web.action` 形状；共享控制作用域审计 authority 固定 schema/身份映射，部署审计保持原路径。管理网关在 Host 签票核验之后、包 Query 执行之前写审计，审计失败拒绝交付；`host.storage` 0.9.1 的资源清单、物化状态、精确资源和回收状态四项管理 Query 声明 `SECURITY`。隔离 PostgreSQL 的 Host 身份/账本用例验证查询审计同键合流且无 Web 写回执，纯网关用例验证失败时结果不外泄；真实 `run_supervisor` → Host Web 查询 → Host 审计账本 → Bot READY 供给用例 `1 passed in 102.88s`，部署审计和 WebUI 定向回归各 1 passed，包目录 `103 passed, 1 skipped`，Ruff 通过。此 Host 内核 baseline 变化要求未上线 Host 测试库重建；未接入真实 QQ，长时负载尚未验收。
