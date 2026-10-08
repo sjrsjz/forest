@@ -13,6 +13,7 @@
     .list{max-height:430px;overflow:auto}.row{display:grid;grid-template-columns:minmax(200px,2fr) 110px 110px 90px minmax(110px,1fr) auto;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid #203e30;min-width:730px}
     .row code,.row strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.identity{display:flex;flex-direction:column;min-width:0}.identity small{color:#91ac9a}
     .footer{justify-content:space-between;border-top:1px solid #29493a}.actions{display:flex;gap:6px}
+    .rename-edit{display:flex;gap:5px;margin-top:5px}.rename-edit[hidden]{display:none}.rename-edit input{min-width:0;width:100%}
   </style>
 </head>
 <body>
@@ -39,7 +40,23 @@
     const row=document.createElement('div');row.className='row';
     const identity=document.createElement('div');identity.className='identity';
     const title=document.createElement('strong');title.textContent=item.display_name;
-    const id=document.createElement('small');id.textContent=item.bot_id;identity.append(title,id);row.append(identity);
+    const id=document.createElement('small');id.textContent=item.bot_id;identity.append(title,id);
+    const renameEdit=document.createElement('form');renameEdit.className='rename-edit';renameEdit.hidden=true;
+    const renameInput=document.createElement('input');renameInput.value=item.display_name;renameInput.maxLength=256;
+    renameInput.setAttribute('aria-label','Bot 显示名称');
+    const save=document.createElement('button');save.type='submit';save.textContent='保存';
+    renameEdit.append(renameInput,save);identity.append(renameEdit);row.append(identity);
+    renameEdit.onsubmit=async event=>{
+      event.preventDefault();
+      const display_name=renameInput.value.trim();
+      if(!display_name){status.textContent='显示名称不能为空';return;}
+      save.disabled=true;status.textContent='正在重命名…';
+      try{
+        await request('action','bot.rename',{
+          bot_id:item.bot_id,display_name,expected_revision:item.bot_revision},randomId());
+        await load(false);
+      }catch(error){status.textContent=error.message;save.disabled=false;}
+    };
     cell(row,item.supply_state);cell(row,item.desired_state);cell(row,item.observed_state);
     const revision=document.createElement('code');revision.textContent='rev '+item.intent_revision;row.append(revision);
     const button=document.createElement('button');button.type='button';button.textContent=item.desired_state==='ONLINE'?'停止':'启动';
@@ -56,7 +73,10 @@
     const open=document.createElement('button');open.type='button';open.textContent='打开工作区';
     open.disabled=item.supply_state!=='READY'||item.observed_state!=='ONLINE';
     open.onclick=()=>send('open-scope',{scope_kind:'bot',source_id:item.bot_id});
-    const actions=document.createElement('div');actions.className='actions';actions.append(open,button);
+    const rename=document.createElement('button');rename.type='button';rename.textContent='重命名';
+    rename.disabled=item.supply_state!=='READY';
+    rename.onclick=()=>{renameEdit.hidden=!renameEdit.hidden;if(!renameEdit.hidden)renameInput.focus();};
+    const actions=document.createElement('div');actions.className='actions';actions.append(open,rename,button);
     row.append(actions);items.append(row);
   }
   async function load(append){

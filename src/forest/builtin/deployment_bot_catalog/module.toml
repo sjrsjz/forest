@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-bot-catalog"
-version = "1.1.0"
+version = "1.2.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_bot_catalog:DeploymentBotCatalog"
@@ -45,6 +45,13 @@ input_schema = "schemas/page-input.json"
 output_schema = "schemas/page-output.json"
 
 [[components.kernel_commands]]
+name = "deployment.bot-catalog.rename"
+contract = "1.0"
+kind = "deployment.bot-rename"
+input_schema = "schemas/rename-input.json"
+output_schema = "schemas/rename-output.json"
+
+[[components.kernel_commands]]
 name = "deployment.bot-catalog.set-desired"
 contract = "1.0"
 kind = "deployment.bot-set-desired"
@@ -57,6 +64,12 @@ port = "deployment.bot-catalog.page"
 default_limit = 50
 max_limit = 100
 timeout_s = 10
+
+[[components.management_actions]]
+id = "bot.rename"
+port = "deployment.bot-catalog.rename"
+priority = "P1"
+timeout_s = 15
 
 [[components.management_actions]]
 id = "bot.set-desired"

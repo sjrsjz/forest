@@ -485,6 +485,8 @@ material、缺失 active 引用和超过上限的 key 数，且 key material 不
 
 `deployment.bot-catalog` 已由宿主伪组件迁为官方可热替换包。内核持有 `bots`、`runtime_intents`、`runtime_observations` 和幂等操作账本；包不复制 Bot 身份或运行意图。内核的 `bot_catalog_page` 只返回有界分页投影，`bot_set_desired` 以操作 ID、输入摘要和期望修订在一个事务内合流；包不再安装目录 SQL 中转层，分页和运行意图分别声明为受限 kernel Query 与 Command；Worker 不取得目录表读写权限。管理 Action 先核对当前 CONTROL Generation，再在同一 PostgreSQL 事务内写 Web 签票回执与审计，内核 Command 在同一事务内调用目录 authority，操作 ID、输入摘要和期望修订由该 authority 校验后才推进意图。宿主的内部调度调用和包管理调用共用内核意图更新规则，旧宿主 Bot 目录页面和契约已经删除。部署基线已变，未上线实例须重建部署数据库；不保留旧基线迁移兼容层。
 
+目录包后续增加 bot.rename 管理动作：内核 bot_rename 以 Bot 身份修订 CAS 和操作 ID 合流，分页单独提供 bot_revision；运行意图仍使用独立的 intent_revision，二者不能混用。重命名不更改稳定 bot_id、供应状态或运行意图，退休中拒绝；相同名称的提交不推进修订。
+
 ### 7.2 部署包配置换代协议（预发布实现）
 
 部署包的 WebUI 和 JSON Schema 由包贡献；通用管理契约提供配置读取、计划和应用。内核只持有授权、Graph/Generation、持久换代请求和原子发布机制，不解释包的配置值。部署配置仓库持有不可变修订、计划及 `desired/effective` 双水位。恢复启动从控制内核的独立包选择账本读取最近一次已发布的 `effective` 修订，普通包图变更沿用当前活动 Graph 冻结的修订；配置与实际 Worker Generation 的冻结输入必须一致，不能在重启时把未发布的 `desired` 当成已发布的 `effective`。

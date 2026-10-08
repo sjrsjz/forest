@@ -25,6 +25,7 @@ from forest.deployment_kernel_management import (
     BootstrapProfileKernelCommand,
     BotBeginRetirementKernelCommand,
     BotCatalogKernelQuery,
+    BotRenameKernelCommand,
     BotSetDesiredKernelCommand,
     DeploymentKernelManagementAuthority,
     ProvisioningJobKernelCommand,
@@ -4194,6 +4195,8 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
                 BootstrapCatalogKernelQuery(bootstrap_registry),
         },
         kernel_management_handlers={
+            ("deployment.bot-catalog", "deployment.bot-rename"):
+                BotRenameKernelCommand(repository),
             ("deployment.bot-catalog", "deployment.bot-set-desired"):
                 BotSetDesiredKernelCommand(repository),
             ("deployment.secrets", "deployment.secret-put"):
@@ -4440,6 +4443,36 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         assert stale.status_code == 409, stale.text
         assert stale.json()["code"] == "BOT_INTENT_REVISION_CONFLICT"
         assert (await repository.inspect("bot/webui"))["desired_state"] == "ONLINE"
+        rename_path = (
+            "/management/v1/scopes/deployment/deployment/modules/"
+            "deployment.bot-catalog/actions/bot.rename"
+        )
+        rename_input = {
+            "bot_id": "bot/webui", "display_name": "Renamed WebUI Bot",
+            "expected_revision": 1,
+        }
+        rename_headers = {**headers, "idempotency-key": "webui-bot-rename"}
+        renamed = await client.post(
+            rename_path, headers=rename_headers, json=rename_input,
+        )
+        assert renamed.status_code == 200, renamed.text
+        assert renamed.json() == {
+            "bot_id": "bot/webui", "display_name": "Renamed WebUI Bot",
+            "bot_revision": 2,
+        }
+        assert (await repository.inspect("bot/webui"))["display_name"] == "Renamed WebUI Bot"
+        same_rename = await client.post(
+            rename_path, headers=rename_headers, json=rename_input,
+        )
+        assert same_rename.status_code == 200, same_rename.text
+        assert same_rename.json() == renamed.json()
+        stale_rename = await client.post(
+            rename_path, headers={**headers, "idempotency-key": "webui-bot-rename-stale"},
+            json={**rename_input, "display_name": "Stale Name"},
+        )
+        assert stale_rename.status_code == 409, stale_rename.text
+        assert stale_rename.json()["code"] == "BOT_REVISION_CONFLICT"
+        assert (await repository.inspect("bot/webui"))["display_name"] == "Renamed WebUI Bot"
         filtered = await client.post(
             page_path, headers=headers, json={"limit": 1, "search": "WebUI"}
         )
@@ -4628,6 +4661,11 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
             (
                 "deployment.bot-catalog",
                 deployment_registry.graph_identity.generations["deployment.bot-catalog"],
+                "bot.rename",
+            ),
+            (
+                "deployment.bot-catalog",
+                deployment_registry.graph_identity.generations["deployment.bot-catalog"],
                 "bot.set-desired",
             ),
             (
@@ -4646,6 +4684,7 @@ async def test_deployment_webui_discovers_components_and_keeps_secrets_write_onl
         audit_records = audit_page.json()["records"]
         assert {item["action"] for item in audit_records} == {
             "account.create",
+            "bot.rename",
             "bot.set-desired",
             "secret.put",
             "bootstrap.create",

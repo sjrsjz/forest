@@ -98,6 +98,21 @@ class DeploymentKernelManagementAuthority(ControlKernelManagementAuthority):
     scope_kind = "deployment"
 
 
+class BotRenameKernelCommand:
+    """Change a kernel-owned Bot display name under Web and Generation fences."""
+
+    def __init__(self, catalog) -> None:
+        self.catalog = catalog
+
+    async def prepare(self, payload: dict, *, operation_id: str) -> dict:
+        return dict(payload)
+
+    async def execute_in(self, conn, prepared: dict, *, operation_id: str) -> dict:
+        return await self.catalog.rename_in(
+            conn, operation_id=operation_id, **prepared,
+        )
+
+
 class BotSetDesiredKernelCommand:
     """Commit one Bot intent change under the caller's Web receipt and Generation."""
 

@@ -215,6 +215,7 @@ class DeploymentCatalogRepository:
             "guard_web_setup_change",
             "guard_runtime_graph_change",
             "bot_catalog_page",
+            "bot_rename",
             "bot_set_desired",
             "secret_metadata_page",
         }:
@@ -358,6 +359,31 @@ class DeploymentCatalogRepository:
                     (limit, after, search),
                 )
             ).fetchone()
+        envelope = row["result"]
+        if envelope["ok"] is not True:
+            error = envelope["error"]
+            raise ForestError(error["code"], error["message"], error["status"])
+        return envelope["value"]
+
+    async def rename_in(
+        self, conn, *, operation_id: str, bot_id: str,
+        display_name: str, expected_revision: int,
+    ) -> dict:
+        _bounded(operation_id, "operation_id", 256)
+        _bounded(bot_id, "bot_id", 128)
+        _bounded(display_name, "display_name", 256)
+        if type(expected_revision) is not int or not 1 <= expected_revision <= 9223372036854775807:
+            raise ForestError("DEPLOYMENT_INPUT_INVALID", "Bot revision is invalid", 422)
+        input_digest = digest_json({
+            "bot_id": bot_id, "display_name": display_name,
+            "expected_revision": expected_revision,
+        })
+        row = await (
+            await conn.execute(
+                "SELECT forest_deployment.bot_rename(%s,%s,%s,%s,%s,NULL,NULL) AS result",
+                (operation_id, input_digest, bot_id, display_name, expected_revision),
+            )
+        ).fetchone()
         envelope = row["result"]
         if envelope["ok"] is not True:
             error = envelope["error"]

@@ -26,6 +26,7 @@ from forest.deployment_kernel_management import (
     BootstrapProfileKernelCommand,
     BotBeginRetirementKernelCommand,
     BotCatalogKernelQuery,
+    BotRenameKernelCommand,
     BotSetDesiredKernelCommand,
     ProvisioningJobKernelCommand,
     ProvisioningJobsKernelQuery,
@@ -366,6 +367,8 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                     SecretOperationKernelQuery(secrets),
             },
             kernel_management_handlers={
+                ("deployment.bot-catalog", "deployment.bot-rename"):
+                    BotRenameKernelCommand(catalog),
                 ("deployment.bot-catalog", "deployment.bot-set-desired"):
                     BotSetDesiredKernelCommand(catalog),
                 ("deployment.retirement", "deployment.bot-begin-retirement"):

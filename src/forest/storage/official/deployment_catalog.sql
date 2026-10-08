@@ -567,7 +567,7 @@ CREATE TABLE forest_deployment.runtime_observations (
 CREATE TABLE forest_deployment.operations (
     operation_id text PRIMARY KEY CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     operation_kind text NOT NULL CHECK (operation_kind IN (
-        'REGISTER_READY','SET_DESIRED','BEGIN_RETIREMENT'
+        'REGISTER_READY','SET_DESIRED','RENAME','BEGIN_RETIREMENT'
     )),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     bot_id text NOT NULL REFERENCES forest_deployment.bots(bot_id),
@@ -660,12 +660,14 @@ BEGIN
     END IF;
     SELECT COALESCE(jsonb_agg(jsonb_build_object(
         'bot_id',page.bot_id,'display_name',page.display_name,
+        'bot_revision',page.bot_revision,
         'supply_state',page.supply_state,'desired_state',page.desired_state,
         'intent_revision',page.intent_revision,'observed_state',page.observed_state,
         'error_code',page.error_code) ORDER BY page.bot_id),'[]'::jsonb),count(*)
     INTO entries,found_count
     FROM (
-        SELECT b.bot_id,b.display_name,b.supply_state,i.desired_state,
+        SELECT b.bot_id,b.display_name,b.revision AS bot_revision,
+            b.supply_state,i.desired_state,
             i.revision AS intent_revision,o.observed_state,o.error_code
         FROM forest_deployment.bots b
         JOIN forest_deployment.runtime_intents i USING(bot_id)
@@ -683,6 +685,94 @@ BEGIN
         'value',jsonb_build_object('items',entries,
             'next_after',CASE WHEN found_count>requested_limit
                 THEN entries->(requested_limit-1)->>'bot_id' ELSE NULL END));
+END;
+$$;
+
+CREATE FUNCTION forest_deployment.bot_rename(
+    requested_operation text, requested_digest text, requested_bot text,
+    requested_name text, expected_revision bigint,
+    caller_component text, caller_generation text
+) RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    prior forest_deployment.operations%ROWTYPE;
+    current_supply text;
+    current_name text;
+    current_revision bigint;
+    saved_revision bigint;
+BEGIN
+    IF requested_operation IS NULL OR requested_digest IS NULL
+       OR requested_bot IS NULL OR requested_name IS NULL
+       OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR octet_length(requested_bot) NOT BETWEEN 1 AND 128
+       OR octet_length(requested_name) NOT BETWEEN 1 AND 256
+       OR requested_name ~ '[[:cntrl:]]'
+       OR expected_revision IS NULL OR expected_revision<1 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','DEPLOYMENT_INPUT_INVALID',
+                'message','Bot display name is invalid','status',422));
+    END IF;
+    IF caller_component IS NOT NULL THEN
+        IF caller_generation IS NULL OR NOT EXISTS (
+            SELECT 1 FROM forest_deployment.web_authority_receipts r
+            WHERE r.target_operation_ref=requested_operation
+              AND r.target_component_id=caller_component
+              AND r.target_generation_id=caller_generation
+              AND r.action_key='bot.rename'
+              AND r.input_digest=requested_digest AND r.web_role='ADMIN'
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','WEB_AUTHORITY_TICKET_REQUIRED',
+                    'message','Bot rename requires an accepted Web ticket','status',403));
+        END IF;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.deployment.operation/'||requested_operation,0));
+    SELECT * INTO prior FROM forest_deployment.operations
+        WHERE operation_id=requested_operation;
+    IF FOUND THEN
+        IF prior.input_digest<>requested_digest OR prior.operation_kind<>'RENAME'
+           OR prior.bot_id<>requested_bot THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','DEPLOYMENT_OPERATION_CONFLICT',
+                    'message','Operation input differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('bot_id',prior.bot_id,
+                'display_name',requested_name,'bot_revision',prior.resulting_revision));
+    END IF;
+    SELECT supply_state,display_name,revision
+        INTO current_supply,current_name,current_revision
+        FROM forest_deployment.bots WHERE bot_id=requested_bot FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','BOT_NOT_FOUND',
+                'message','Bot identity does not exist','status',404));
+    END IF;
+    IF current_supply<>'READY' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','BOT_NOT_READY',
+                'message','Retiring Bot cannot be renamed','status',409));
+    END IF;
+    IF current_revision<>expected_revision THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','BOT_REVISION_CONFLICT',
+                'message','Bot identity changed','status',409));
+    END IF;
+    IF current_name=requested_name THEN
+        saved_revision:=current_revision;
+    ELSE
+        UPDATE forest_deployment.bots SET display_name=requested_name,
+            revision=revision+1,updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot RETURNING revision INTO saved_revision;
+    END IF;
+    INSERT INTO forest_deployment.operations(
+        operation_id,operation_kind,input_digest,bot_id,resulting_revision
+    ) VALUES (requested_operation,'RENAME',requested_digest,
+        requested_bot,saved_revision);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('bot_id',requested_bot,
+            'display_name',requested_name,'bot_revision',saved_revision));
 END;
 $$;
 
@@ -1101,9 +1191,15 @@ BEGIN
     ) THEN
         RAISE EXCEPTION ''bot identity is immutable'';
     END IF;
-    IF NOT ((OLD.supply_state = ''READY'' AND NEW.supply_state = ''DELETING'')
-        OR (OLD.supply_state = ''DELETING'' AND NEW.supply_state = ''DELETED'')) THEN
-        RAISE EXCEPTION ''bot supply state transition is invalid'';
+    IF NOT (
+        (OLD.supply_state = ''READY'' AND NEW.supply_state = ''READY''
+            AND NEW.display_name IS DISTINCT FROM OLD.display_name)
+        OR (OLD.supply_state = ''READY'' AND NEW.supply_state = ''DELETING''
+            AND NEW.display_name = OLD.display_name)
+        OR (OLD.supply_state = ''DELETING'' AND NEW.supply_state = ''DELETED''
+            AND NEW.display_name = OLD.display_name)
+    ) THEN
+        RAISE EXCEPTION ''bot identity transition is invalid'';
     END IF;
     IF NEW.revision <> OLD.revision + 1 THEN
         RAISE EXCEPTION ''bot revision must advance once'';
