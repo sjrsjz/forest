@@ -21,3 +21,7 @@
 一次性只读脚本 [audit_group_memory_capture.py](../scripts/audit_group_memory_capture.py) 按准确 Bot 存储 Profile 连接 Bot 库，并在同一只读快照里把每条 group.message Inbox 与 source_occurrences、unavailable_source_events 对齐。它只输出计数、不可用错误码和最早未解释缺口时间；超过宽限期仍既无来源也无不可用事实，或同一消息同时有两种终态时，退出码为 1。它扫描完整群消息历史，不应当作为高频健康检查。运行时使用与 Supervisor 相同的 FOREST_* 环境引用、只读 Secret 卷和部署网络，在候选镜像中执行 python /tmp/audit.py --bot-id forest-main --grace-seconds 300。
 
 2026-10-10 本地时间对应的在线 v21 只读运行结果：1810 条群消息 = 1798 条来源记录 + 12 条显式不可用，重叠、宽限期内待捕获、过期未解释缺口均为 0；12 条不可用的底层媒体记录均为图片尺寸或像素上限拒绝。这证明该采样点没有静默漏捕获，不证明未来所有入站和真实 @ 回复链。
+
+## v21 连续在线观察（2026-10-10 本地时间）
+
+在 v21 接管约一小时后，使用同一只读观察器从 2026-10-09 16:42:35 UTC 至 16:47:35 UTC 每 30 秒采样，共 11 次、300.024 秒，所有样本违反项均为空。Bot Graph 4 始终为 22/22 ACTIVE，部署管理 HTTP 为 200；Memory 来源从 1802 增至 1815，末样本有 1341 个 READY facet。嵌入当日账本为 212 次已结算、143533 charged tokens，预留与 UNKNOWN 均为 0；无活动 Agent Run、Job 或待发送意图。许可群 lane 已分类并应用至序号 37，最新消息仍为 NO_TRIGGER / mention_required。紧接着的一次性全量合流审计得到 1827 条群 Inbox = 1815 条来源 + 12 条明确不可用，宽限期内待捕获、过期未解释缺口和结果重叠均为 0。本观察只证明该运行窗口内的静默处理，不覆盖真实 @ 回复或数月负载。
