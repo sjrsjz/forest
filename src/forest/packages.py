@@ -892,6 +892,7 @@ MANIFEST_SCHEMA = {
                                     "exclusiveMinimum": 0,
                                     "maximum": 120,
                                 },
+                                "read_only": {"type": "boolean"},
                                 "steps": {
                                     "type": "array",
                                     "minItems": 1,

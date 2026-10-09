@@ -41,6 +41,7 @@ class RuntimeServiceInvocation:
     causal_root_kind: str
     causal_root_id: str
     parent_call_id: str | None = None
+    read_only: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -53,6 +54,7 @@ class RuntimeServiceInvocation:
             or not 1 <= len(self.causal_root_kind) <= 128
             or not isinstance(self.causal_root_id, str)
             or not 1 <= len(self.causal_root_id) <= 256
+            or type(self.read_only) is not bool
             or (
                 self.parent_call_id is not None
                 and (
@@ -190,6 +192,7 @@ class RuntimeServiceHandle:
         causal_root_id: str,
         timeout_seconds: float = 30,
         parent_call_id: str | None = None,
+        read_only: bool = False,
         **kwargs,
     ):
         invocation = RuntimeServiceInvocation(
@@ -198,6 +201,7 @@ class RuntimeServiceHandle:
             causal_root_kind=causal_root_kind,
             causal_root_id=causal_root_id,
             parent_call_id=parent_call_id,
+            read_only=read_only,
         )
         return await self._router.invoke(self._request_key, invocation, args, kwargs)
 
@@ -335,6 +339,7 @@ class RuntimeContractRouter:
     def __init__(self, registry) -> None:
         self.registry = registry
         self._providers: dict[tuple[str, int], tuple[str, Any]] = {}
+        self._read_only_services: set[tuple[str, int]] = set()
         self._requests: dict[tuple, RuntimeServiceHandle] = {}
         self._routes: dict[tuple, FrozenServiceRoute] = {}
         self._sealed = False
@@ -590,6 +595,13 @@ class RuntimeContractRouter:
                     details={"service_id": service_id, "version": version},
                 )
             self._providers[key] = (component_id, handler)
+            if any(
+                item.get("service_id") == service_id
+                and item.get("version") == version
+                and item.get("semantics") == "read"
+                for item in contract["services"]
+            ):
+                self._read_only_services.add(key)
 
     def register_kernel_service(self, spec: RuntimeKernelServiceSpec) -> None:
         if self._sealed:
@@ -616,6 +628,13 @@ class RuntimeContractRouter:
                 503,
             )
         self._providers[key] = ("kernel.runtime", handler)
+        if any(
+            item.get("service_id") == spec.service_id
+            and item.get("version") == spec.version
+            and item.get("semantics") == "read"
+            for item in kernel.runtime_contract["services"]
+        ):
+            self._read_only_services.add(key)
 
     def seal(self) -> None:
         if self._sealed:
@@ -683,6 +702,7 @@ class RuntimeContractRouter:
         self._providers = {
             key: value for key, value in self._providers.items() if value[0] != component_id
         }
+        self._read_only_services.intersection_update(self._providers)
 
     def route(self, request_key: tuple) -> FrozenServiceRoute:
         route = self._routes.get(request_key)
@@ -774,7 +794,16 @@ class RuntimeContractRouter:
                         graph_id=accepted.graph_id,
                         graph_revision=accepted.graph_revision,
                     )
-        provider_component_id, handler = self._providers[(route.service_id, route.version)]
+        service_key = (route.service_id, route.version)
+        if invocation is not None and invocation.read_only and (
+            service_key not in self._read_only_services
+        ):
+            raise ForestError(
+                "SERVICE_READ_ONLY_VIOLATION",
+                "Read-only service cannot invoke a mutating or unclassified service",
+                403,
+            )
+        provider_component_id, handler = self._providers[service_key]
         if provider_component_id != route.provider_component_id:
             raise ForestError(
                 "RUNTIME_SERVICE_ROUTE_STALE",

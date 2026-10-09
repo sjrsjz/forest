@@ -72,6 +72,17 @@ _STATE_CONTRACT = {
     "properties": {},
     "additionalProperties": False,
 }
+_KERNEL_READ_SERVICES = frozenset({
+    "payload.verify", "payload.read", "authorization.grants",
+    "audit.query", "audit.page.snapshot",
+    "runtime.graph-replacement.status", "runtime.graph.snapshot",
+    "runtime.status.snapshot", "runtime.component-candidate.preview",
+    "deployment.package-registry.packages",
+    "deployment.package-registry.artifact",
+    "agent.tool.runtime-status",
+})
+
+
 _KERNEL_CONFIGURATION_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "type": "object",
@@ -197,7 +208,16 @@ class PreparedAuthorityModule:
         self.generation_authority = generation_authority
         self.runtime_contract = {
             "protocol": "forest.runtime-services/1",
-            "services": [{"service_id": service_id, "version": 1} for service_id in services],
+            "services": [
+                {
+                    "service_id": service_id,
+                    "version": 1,
+                    "semantics": (
+                        "read" if service_id in _KERNEL_READ_SERVICES else "idempotent"
+                    ),
+                }
+                for service_id in services
+            ],
         }
         self.generation_identity = None
         self.generation_active = False

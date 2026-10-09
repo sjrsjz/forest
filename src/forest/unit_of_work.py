@@ -327,7 +327,7 @@ class PostgresPackageUnitOfWorkCoordinator:
                         )
                         prior[step["id"]] = result
                     result = prior[declaration["steps"][-1]["id"]]
-                if self.work_notifier is not None:
+                if self.work_notifier is not None and not declaration.get("read_only", False):
                     self.work_notifier()
                 return result
         except ForestError:

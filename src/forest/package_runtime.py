@@ -295,6 +295,7 @@ class PackageGenerationAdapter:
         }
         self._job_cancellations: dict[str, Callable[[], Awaitable[bool]]] = {}
         self._owned_work_calls: set[str] = set()
+        self._writable_calls: set[str] = set()
         self._event_publisher = event_publisher
         self._component_job_scheduler = component_job_scheduler
         self._contribution_directories = FrozenContributionDirectories(
@@ -425,8 +426,8 @@ class PackageGenerationAdapter:
                 active=lambda: self.state is PackageGenerationState.ACTIVE,
                 recovered=lambda: self._recovered_generation,
                 failed=self._owned_work_failed,
-                call_started=self._owned_work_calls.add,
-                call_finished=self._owned_work_calls.discard,
+                call_started=self._begin_owned_work_call,
+                call_finished=self._finish_owned_work_call,
             )
             self.freeze_owned_admission = self._owned_work.freeze_admission
             self.drain_owned_work = self._drain_owned_work
@@ -438,7 +439,11 @@ class PackageGenerationAdapter:
         )
 
         services = [
-            {"service_id": item["name"], "version": _major(item["contract"])}
+            {
+                "service_id": item["name"],
+                "version": _major(item["contract"]),
+                "semantics": item.get("semantics", "at-most-once"),
+            }
             for item in (
                 *(item for item in self.component.get("provides", ())
                   if item.get("visibility", "public") == "public"),
@@ -511,6 +516,7 @@ class PackageGenerationAdapter:
                 {
                     "name": item["name"],
                     "version": _major(item["contract"]),
+                    "read_only": item.get("read_only", False),
                     "steps": [dict(step) for step in item["steps"]],
                 }
                 for item in self.component.get("unit_of_work_plans", ())
@@ -1023,8 +1029,15 @@ class PackageGenerationAdapter:
         normalize: Callable[[Any], Any],
         result_valid: Callable[[Any], bool],
         cancellation_requested: Callable[[], Awaitable[bool]] | None = None,
+        read_only: bool = False,
     ) -> Any:
         self._check_route(route)
+        if invocation.read_only and not read_only:
+            raise ForestError(
+                "SERVICE_READ_ONLY_VIOLATION",
+                "Read-only service cannot invoke a mutating service",
+                403,
+            )
         worker = self._worker
         identity = self.generation_identity
         prepared = self._prepared_binding
@@ -1061,6 +1074,8 @@ class PackageGenerationAdapter:
         )
         self._service_inflight += 1
         self._services_drained.clear()
+        if not read_only:
+            self._writable_calls.add(call_id)
         try:
             if durable:
                 admission = await self._service_operation_ledger.begin(
@@ -1130,6 +1145,7 @@ class PackageGenerationAdapter:
                 await self._service_operation_ledger.succeed(scope, service_route, result)
             return result
         finally:
+            self._writable_calls.discard(call_id)
             self._service_inflight -= 1
             if self._service_inflight == 0:
                 self._services_drained.set()
@@ -1175,6 +1191,9 @@ class PackageGenerationAdapter:
                 durable=(
                     self._provided_services[service_id]["semantics"]
                     == "at-most-once"
+                ),
+                read_only=(
+                    self._provided_services[service_id]["semantics"] == "read"
                 ),
                 dispatch=lambda worker, _scope, call_id: worker.invoke(
                         service_id,
@@ -1355,6 +1374,7 @@ class PackageGenerationAdapter:
                 service_id=service_id,
                 input_value=payload,
                 durable=declaration["semantics"] == "at-most-once",
+                read_only=declaration["semantics"] == "read",
                 dispatch=lambda _worker, scope, _call_id: driver.invoke(
                     payload, scope=scope, invocation=invocation
                 ),
@@ -1563,6 +1583,12 @@ class PackageGenerationAdapter:
             )
         timeout = self._worker.remaining_timeout(call_id, request["timeout"])
         if local is not None:
+            if call_id not in self._writable_calls and local["semantics"] != "read":
+                raise ForestError(
+                    "SERVICE_READ_ONLY_VIOLATION",
+                    "Read-only service cannot invoke a mutating effect",
+                    403,
+                )
             return await self._invoke_local_effect(
                 identity,
                 call_id,
@@ -1582,6 +1608,7 @@ class PackageGenerationAdapter:
             parent_call_id=call_id,
             causal_root_kind=scope.causal_root_kind,
             causal_root_id=scope.causal_root_id,
+            read_only=call_id not in self._writable_calls,
         )
 
     async def _domain_query_gateway(
@@ -1616,6 +1643,8 @@ class PackageGenerationAdapter:
                 "Worker requested an undeclared UnitOfWork plan",
                 403,
             )
+        if not declaration.get("read_only", False):
+            self._require_writable_call(parent_call_id)
         coordinator = self._unit_of_work_coordinator
         if coordinator is None:
             raise ForestError(
@@ -1677,6 +1706,8 @@ class PackageGenerationAdapter:
         request: dict,
     ) -> Any:
         outer = self._call_scope(identity, parent_call_id)
+        if kind == "command":
+            self._require_writable_call(parent_call_id)
         declarations = self.component.get(
             "domain_queries" if kind == "query" else "domain_commands", ()
         )
@@ -2342,6 +2373,22 @@ class PackageGenerationAdapter:
             result_valid=output_validator.is_valid,
         )
 
+    def _begin_owned_work_call(self, call_id: str) -> None:
+        self._owned_work_calls.add(call_id)
+        self._writable_calls.add(call_id)
+
+    def _finish_owned_work_call(self, call_id: str) -> None:
+        self._writable_calls.discard(call_id)
+        self._owned_work_calls.discard(call_id)
+
+    def _require_writable_call(self, call_id: str) -> None:
+        if call_id not in self._writable_calls:
+            raise ForestError(
+                "SERVICE_READ_ONLY_VIOLATION",
+                "This Worker call has no mutating service admission",
+                403,
+            )
+
     def _has_capability(self, capability: str) -> bool:
         return (
             capability in self._requested_capabilities
@@ -2405,6 +2452,7 @@ class PackageGenerationAdapter:
         if action == "commit":
             if not self._has_capability("state.write"):
                 raise ForestError("CAPABILITY_DENIED", "State write is not granted", 403)
+            self._require_writable_call(call_id)
             if self._state_commands is None:
                 raise ForestError("CAPABILITY_UNAVAILABLE", "State commands are unavailable", 503)
             return await self._state_commands.commit_state(
@@ -2483,6 +2531,8 @@ class PackageGenerationAdapter:
     ) -> Any:
         scope = self._call_scope(identity, call_id)
         action = request.get("action")
+        if action in {"begin-write", "append-write", "commit-write", "abort-write"}:
+            self._require_writable_call(call_id)
         if self._payload_authority is None:
             raise ForestError(
                 "CAPABILITY_UNAVAILABLE", "Payload authority is unavailable", 503
@@ -2662,6 +2712,7 @@ class PackageGenerationAdapter:
         self, identity: WorkerIdentity, call_id: str, request: dict
     ) -> Any:
         scope = self._call_scope(identity, call_id)
+        self._require_writable_call(call_id)
         if not self._has_capability(f"event.publish:{request['topic']}"):
             raise ForestError("CAPABILITY_DENIED", "Event publication is not granted", 403)
         if self._event_publisher is None:
@@ -2688,6 +2739,7 @@ class PackageGenerationAdapter:
         self, identity: WorkerIdentity, call_id: str, request: dict
     ) -> Any:
         scope = self._call_scope(identity, call_id)
+        self._require_writable_call(call_id)
         if not self._has_capability(f"job.schedule:{request['handler_id']}"):
             raise ForestError("CAPABILITY_DENIED", "Job scheduling is not granted", 403)
         if self._component_job_scheduler is None:
@@ -2714,6 +2766,8 @@ class PackageGenerationAdapter:
         self, identity: WorkerIdentity, call_id: str, request: dict
     ) -> Any:
         scope = self._call_scope(identity, call_id)
+        if request.get("action") not in {"list", "query-handed-off"}:
+            self._require_writable_call(call_id)
         worker = self._worker
         if worker is None:
             raise ForestError(
@@ -3202,6 +3256,15 @@ def package_runtime_descriptor(
             "PACKAGE_UOW_AUTHORITY_UNAVAILABLE",
             "Package declares UnitOfWork participants without an installed authority",
             503,
+        )
+    if (
+        trust_level != "official"
+        and any(plan.get("read_only", False) for plan in component.get("unit_of_work_plans", ()))
+    ):
+        raise ForestError(
+            "PACKAGE_UOW_READ_AUTHORITY_UNAVAILABLE",
+            "Read-only UnitOfWork plans require reviewed official authority",
+            403,
         )
     if component.get("unit_of_work_plans") and unit_of_work_coordinator_factory is None:
         raise ForestError(

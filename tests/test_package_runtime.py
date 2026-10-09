@@ -18,7 +18,11 @@ from forest.package_runtime import (
     package_runtime_descriptor,
 )
 from forest.packages import PackageCatalog, digest_json
-from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
+from forest.runtime_contracts import (
+    FrozenServiceRoute,
+    RuntimeContractRouter,
+    RuntimeServiceInvocation,
+)
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationContext
 from forest.runtime_modules import RuntimeModuleRegistry
 
@@ -1025,3 +1029,170 @@ async def test_package_job_type_is_published_and_bound_to_exact_generation(tmp_p
     await adapter.quiesce()
     await adapter.close()
     assert events[-2:] == ["quiesce", "close"]
+
+
+async def test_read_service_cannot_use_a_granted_state_write_port(tmp_path):
+    snapshot = PackageCatalog(tmp_path / "catalog").build(
+        Path(__file__).parents[1] / "examples/counter"
+    )
+    writes = []
+
+    class StateCommands:
+        async def commit_state(self, scope, **request):
+            writes.append((scope.call_id, request))
+            return {"value": request["value"], "revision": 1}
+
+    adapter = PackageGenerationAdapter(
+        snapshot=snapshot, bot_id="bot/read-boundary",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(
+            grant_set_digest="sha256:" + "1" * 64,
+            entries=(
+                SimpleNamespace(
+                    capability="state.write", resource_kind="component",
+                    resource_id="example.counter",
+                ),
+            ),
+        ),
+        service_routes={}, resolved_contracts={},
+        generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=None, state_commands=StateCommands(),
+        service_operation_ledger=NoServiceLedger(),
+    )
+    identity = object()
+    adapter._worker = SimpleNamespace(
+        identity=identity,
+        call_causal_root=lambda _call_id: ("test", "root"),
+        call_operation_id=lambda _call_id: "operation/one",
+    )
+    adapter.state = PackageGenerationState.ACTIVE
+    adapter.generation_identity = SimpleNamespace(
+        generation_id="generation/one", graph_id="graph/one", graph_revision=1
+    )
+    adapter._prepared_binding = SimpleNamespace(
+        instance_id="instance/one", worker_incarnation="worker/one"
+    )
+    route = FrozenServiceRoute(
+        service_id="counter.increment", version=1,
+        caller_component_id="example.counter",
+        provider_component_id="example.counter",
+        provider_generation_id="generation/one",
+        graph_id="graph/one", graph_revision=1,
+        admission_lane="DATA", owned_work=False,
+    )
+    invocation = RuntimeServiceInvocation(
+        operation_id="operation/one", timeout_seconds=5,
+        causal_root_kind="test", causal_root_id="root",
+    )
+
+    async def dispatch(_worker, _scope, call_id):
+        return await adapter._state_gateway(
+            identity, call_id, "commit",
+            {
+                "key": "counter", "value": {"count": 1},
+                "expected_revision": 0, "operation_id": "state/one",
+            },
+        )
+
+    async def invoke(*, read_only, inbound=invocation):
+        return await adapter._run_service_operation(
+            route=route, invocation=inbound,
+            service_id="counter.increment", input_value={},
+            durable=False, read_only=read_only,
+            dispatch=dispatch, normalize=lambda value: value,
+            result_valid=lambda value: isinstance(value, dict),
+        )
+
+    with pytest.raises(ForestError) as denied:
+        await invoke(read_only=True)
+    assert denied.value.code == "SERVICE_READ_ONLY_VIOLATION"
+    assert writes == []
+    assert adapter._writable_calls == set()
+
+    with pytest.raises(ForestError) as nested_denied:
+        await invoke(read_only=False, inbound=RuntimeServiceInvocation(
+            operation_id="operation/two", timeout_seconds=5,
+            causal_root_kind="test", causal_root_id="root", read_only=True,
+        ))
+    assert nested_denied.value.code == "SERVICE_READ_ONLY_VIOLATION"
+    assert writes == []
+
+    assert (await invoke(read_only=False))["revision"] == 1
+    assert len(writes) == 1
+    assert adapter._writable_calls == set()
+
+
+async def test_read_only_route_rejects_unclassified_and_mutating_kernel_services():
+    calls = []
+
+    async def read_service(payload):
+        calls.append(("read", payload))
+        return {"value": "read"}
+
+    async def write_service(payload):
+        calls.append(("write", payload))
+        return {"value": "write"}
+
+    provider = SimpleNamespace(
+        runtime_contract={
+            "services": (
+                {"service_id": "sample.read", "version": 1, "semantics": "read"},
+                {"service_id": "sample.write", "version": 1, "semantics": "idempotent"},
+                {"service_id": "sample.unknown", "version": 1},
+            ),
+        },
+        runtime_service_handlers=lambda: {
+            ("sample.read", 1): read_service,
+            ("sample.write", 1): write_service,
+            ("sample.unknown", 1): write_service,
+        },
+        generation_identity=SimpleNamespace(generation_id="generation/provider"),
+    )
+    caller = SimpleNamespace(runtime_contract={
+        "requires": (
+            {"service_id": "sample.read", "version": 1},
+            {"service_id": "sample.write", "version": 1},
+            {"service_id": "sample.unknown", "version": 1},
+        ),
+    })
+    registry = SimpleNamespace(
+        instances={"caller": caller, "provider": provider},
+        states={
+            "caller": SimpleNamespace(value="ACTIVE"),
+            "provider": SimpleNamespace(value="ACTIVE"),
+        },
+        graph_identity=SimpleNamespace(
+            graph_id="graph/one", graph_revision=1,
+            generations={
+                "caller": "generation/caller",
+                "provider": "generation/provider",
+            },
+        ),
+        generation_authority=None,
+    )
+    router = RuntimeContractRouter(registry)
+    router.register("provider", provider)
+    handles = {
+        name: router.request(
+            caller_component_id="caller", service_id=f"sample.{name}",
+            version=1, admission_lane="DATA", owned_work=False,
+        )
+        for name in ("read", "write", "unknown")
+    }
+    router.seal()
+
+    async def invoke(name, *, read_only):
+        return await handles[name].invoke(
+            {"value": name}, operation_id=f"operation/{name}",
+            causal_root_kind="test", causal_root_id="root",
+            read_only=read_only,
+        )
+
+    assert await invoke("read", read_only=True) == {"value": "read"}
+    for name in ("write", "unknown"):
+        with pytest.raises(ForestError) as denied:
+            await invoke(name, read_only=True)
+        assert denied.value.code == "SERVICE_READ_ONLY_VIOLATION"
+    assert calls == [("read", {"value": "read"})]
+    assert await invoke("write", read_only=False) == {"value": "write"}

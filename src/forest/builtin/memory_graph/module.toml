@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.86.1"
+version = "1.86.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -1163,6 +1163,7 @@ steps = [
 [[components.unit_of_work_plans]]
 name = "memory.preview-source-forget"
 contract = "1.0"
+read_only = true
 input_schema = "schemas/forget-preview-plan-input.json"
 output_schema = "schemas/forget-preview-output.json"
 timeout_s = 30
@@ -1175,6 +1176,7 @@ steps = [
 [[components.unit_of_work_plans]]
 name = "memory.preview-forget-batch"
 contract = "1.0"
+read_only = true
 input_schema = "schemas/forget-batch-preview-plan-input.json"
 output_schema = "schemas/forget-batch-preview-output.json"
 timeout_s = 30
