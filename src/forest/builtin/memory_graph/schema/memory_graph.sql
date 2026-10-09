@@ -1161,6 +1161,7 @@ CREATE TABLE association_journal (
     contribution_id text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     promoted_at timestamptz,
+    promoted_xid xid8,
     PRIMARY KEY (bot_id,journal_id),
     UNIQUE (bot_id,operation_id,bundle_id,trigger_source_unit_id,seed_source_unit_id),
     FOREIGN KEY (bot_id,bundle_id) REFERENCES retrieval_bundles(bot_id,bundle_id),
@@ -1179,6 +1180,7 @@ CREATE TABLE association_journal (
     CHECK (trigger_source_unit_id<>seed_source_unit_id),
     CHECK ((state='PROMOTED') = (contribution_id IS NOT NULL)),
     CHECK ((state='PROMOTED') = (promoted_at IS NOT NULL)),
+    CHECK ((state='PROMOTED') = (promoted_xid IS NOT NULL)),
     CHECK ((claim_token IS NULL) = (lease_deadline IS NULL))
 );
 
@@ -1202,6 +1204,9 @@ CREATE INDEX association_journal_ready_idx ON association_journal(
 CREATE INDEX association_journal_pending_trigger_idx ON association_journal(
     bot_id,trigger_source_unit_id,journal_id
 ) WHERE state='PENDING_ARCHIVE';
+CREATE INDEX association_journal_promoted_contribution_idx ON association_journal(
+    bot_id,contribution_id,journal_id
+) WHERE state='PROMOTED';
 
 CREATE INDEX sources_external_group_idx ON memory_sources(
     bot_id,platform,realm_id,external_group_id,identity_incarnation
@@ -6159,7 +6164,8 @@ BEGIN
         RETURN false;
     END IF;
     UPDATE __forest_module_schema__.association_journal
-    SET state='PROMOTED',contribution_id=contribution_ref,promoted_at=clock_timestamp()
+    SET state='PROMOTED',contribution_id=contribution_ref,
+        promoted_at=clock_timestamp(),promoted_xid=pg_current_xact_id()
     WHERE bot_id=requested_bot AND journal_id=requested_journal;
     RETURN true;
 END;
@@ -9953,6 +9959,13 @@ BEGIN
             SELECT count(*) FROM __forest_module_schema__.relation_evidence e
             WHERE e.bot_id=context->>'bot_id' AND e.contribution_id=v.contribution_id
         ),
+        'association_evidence_count',CASE
+            WHEN v.relation_kind='ASSOCIATES_WITH' AND v.origin_kind='MODEL' THEN (
+                SELECT count(*) FROM __forest_module_schema__.association_journal j
+                WHERE j.bot_id=context->>'bot_id' AND j.contribution_id=v.contribution_id
+                  AND j.state='PROMOTED'
+                  AND pg_visible_in_snapshot(j.promoted_xid,snapshot_value)
+            ) ELSE 0 END,
         'evidence',COALESCE((
             SELECT jsonb_agg(to_jsonb(evidence)-'evidence_index' ORDER BY evidence.evidence_index)
             FROM (
@@ -10082,6 +10095,100 @@ EXCEPTION WHEN invalid_text_representation THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
             'message','Relation snapshot is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_query_association_evidence(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_relation text := input->>'relation_id';
+    requested_contribution text := input->>'contribution_id';
+    requested_after text := input->>'after_journal_id';
+    page_limit integer := COALESCE((input->>'limit')::integer,16);
+    snapshot_value pg_snapshot;
+    check_value jsonb;
+    relation_row record;
+    total_count bigint;
+    items jsonb;
+    more boolean;
+    next_journal text;
+BEGIN
+    snapshot_value := (input->>'snapshot_xid')::pg_snapshot;
+    IF requested_bot IS NULL OR requested_relation IS NULL OR
+       requested_contribution IS NULL OR snapshot_value IS NULL OR
+       page_limit NOT BETWEEN 1 AND 32 OR
+       (requested_after IS NOT NULL AND octet_length(requested_after) NOT BETWEEN 1 AND 256) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Association evidence request is invalid','status',422));
+    END IF;
+    check_value := __forest_module_schema__.memory_query_relation_evidence(context,
+        jsonb_build_object('relation_id',requested_relation,
+            'contribution_id',requested_contribution,
+            'snapshot_xid',snapshot_value::text,'limit',1));
+    IF check_value->>'ok' IS DISTINCT FROM 'true' THEN RETURN check_value; END IF;
+    SELECT relation_kind,origin_kind INTO relation_row
+    FROM __forest_module_schema__.relation_contributions
+    WHERE bot_id=requested_bot AND relation_id=requested_relation
+      AND contribution_id=requested_contribution;
+    IF relation_row.relation_kind IS DISTINCT FROM 'ASSOCIATES_WITH'
+       OR relation_row.origin_kind IS DISTINCT FROM 'MODEL' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ASSOCIATION_EVIDENCE_UNAVAILABLE',
+                'message','Relation has no association learning journal','status',422));
+    END IF;
+    SELECT count(*) INTO total_count
+    FROM __forest_module_schema__.association_journal j
+    WHERE j.bot_id=requested_bot AND j.contribution_id=requested_contribution
+      AND j.state='PROMOTED'
+      AND pg_visible_in_snapshot(j.promoted_xid,snapshot_value);
+    WITH page AS (
+        SELECT j.journal_id,j.reply_ref,j.query_id,j.trigger_ref,
+            j.seed_rank_score,j.promoted_at,
+            jsonb_build_object('source_unit_id',j.trigger_source_unit_id,
+                'source_revision',j.trigger_source_revision,'part_id',j.trigger_part_id,
+                'source_id',ts.source_id,'source_kind',ts.source_kind,
+                'platform',ts.platform,'realm_id',ts.realm_id,
+                'external_group_id',ts.external_group_id,'trunk_id',tu.trunk_id,
+                'author_subject_ref',tu.author_subject_ref) AS trigger_evidence,
+            jsonb_build_object('source_unit_id',j.seed_source_unit_id,
+                'source_revision',j.seed_source_revision,'part_id',j.seed_part_id,
+                'source_id',ss.source_id,'source_kind',ss.source_kind,
+                'platform',ss.platform,'realm_id',ss.realm_id,
+                'external_group_id',ss.external_group_id,'trunk_id',su.trunk_id,
+                'author_subject_ref',su.author_subject_ref) AS seed_evidence
+        FROM __forest_module_schema__.association_journal j
+        JOIN __forest_module_schema__.source_units tu
+          ON tu.bot_id=j.bot_id AND tu.source_unit_id=j.trigger_source_unit_id
+        JOIN __forest_module_schema__.memory_sources ts
+          ON ts.bot_id=tu.bot_id AND ts.source_id=tu.source_id
+        JOIN __forest_module_schema__.source_units su
+          ON su.bot_id=j.bot_id AND su.source_unit_id=j.seed_source_unit_id
+        JOIN __forest_module_schema__.memory_sources ss
+          ON ss.bot_id=su.bot_id AND ss.source_id=su.source_id
+        WHERE j.bot_id=requested_bot AND j.contribution_id=requested_contribution
+          AND j.state='PROMOTED'
+          AND pg_visible_in_snapshot(j.promoted_xid,snapshot_value)
+          AND (requested_after IS NULL OR j.journal_id>requested_after)
+        ORDER BY j.journal_id LIMIT page_limit+1
+    ), visible AS (
+        SELECT * FROM page ORDER BY journal_id LIMIT page_limit
+    )
+    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.journal_id)
+        FROM visible v),'[]'::jsonb),
+        (SELECT count(*)>page_limit FROM page),
+        (SELECT journal_id FROM visible ORDER BY journal_id DESC LIMIT 1)
+    INTO items,more,next_journal;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('relation_id',requested_relation,
+            'contribution_id',requested_contribution,'snapshot_xid',snapshot_value::text,
+            'total_count',total_count,'items',items,'has_more',more,
+            'next_after',CASE WHEN more THEN next_journal ELSE NULL END));
+EXCEPTION WHEN invalid_text_representation THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+            'message','Association evidence snapshot is invalid','status',422));
 END;
 $$;
 

@@ -2,10 +2,12 @@
 
 import asyncio
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 from psycopg import sql
 from psycopg.types.json import Jsonb
 from test_memory_graph_package import _configuration
@@ -61,7 +63,7 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
                 "modality,part_count,content_manifest_digest,author_subject_ref,author_payload_id,"
                 "author_payload_digest,author_owner_component_id,author_owner_kind,author_owner_id,"
                 "accepted_deletion_epoch,eligibility_state,eligible_at,occurred_at) VALUES "
-                "(%s,%s,%s,%s,%s,%s,1,1,'GROUP_MESSAGE','TEXT',1,%s,%s,%s,%s,"
+                "(%s,%s,%s,%s,%s,%s,1,1,'GROUP_MESSAGE','TEXT',2,%s,%s,%s,%s,"
                 "'adapter.onebot','message.author',%s,0,%s,"
                 "CASE WHEN %s='ELIGIBLE' THEN clock_timestamp() ELSE NULL END,clock_timestamp())",
                 (bot, unit, "capture/" + unit, digest, source, "trunk/" + source,
@@ -75,6 +77,14 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
                 "(%s,%s,'text',0,'TEXT','text/plain',%s,%s,'adapter.onebot',"
                 "'context.input',%s,1)",
                 (bot, unit, "payload/" + unit, digest, unit),
+            )
+            await execute(
+                "INSERT INTO {}.source_parts(bot_id,source_unit_id,part_id,part_index,"
+                "part_kind,media_type,payload_id,payload_digest,payload_owner_component_id,"
+                "payload_owner_kind,payload_owner_id,byte_length) VALUES "
+                "(%s,%s,'text-alt',1,'TEXT','text/plain',%s,%s,'adapter.onebot',"
+                "'context.input',%s,1)",
+                (bot, unit, "payload-alt/" + unit, digest, unit),
             )
             await execute(
                 "INSERT INTO {}.source_occurrences(bot_id,occurrence_id,source_unit_id,"
@@ -229,7 +239,7 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
             "trigger_part_id,seed_source_unit_id,seed_source_revision,seed_part_id,"
             "seed_rank_score,promotion_ready) VALUES "
             "(%s,'journal/stale','reply/stale',%s,'reply/stale','bundle/test',"
-            "'query/test','trigger/stale','trigger',1,'text','seed',1,'text',0.8,true)",
+            "'query/test','trigger/stale','trigger',1,'text-alt','seed',1,'text-alt',0.8,true)",
             (bot, digest),
         )
 
@@ -341,6 +351,87 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
             "SELECT count(*) AS count FROM {}.relation_evidence WHERE bot_id=%s",
             (bot,),
         )).fetchone())["count"] == 2
+
+        relations = (await (await execute(
+            "SELECT {}.memory_query_relations(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": bot}), Jsonb({
+                "endpoint_kind": "SOURCE_UNIT", "endpoint_id": "trigger", "limit": 10,
+            })),
+        )).fetchone())["result"]
+        assert relations["ok"], relations
+        contribution = relations["value"]["items"][0]
+        assert contribution["evidence_count"] == 2
+        assert contribution["association_evidence_count"] == 5
+        snapshot = relations["value"]["snapshot_xid"]
+        journal_items = []
+        after = None
+        while True:
+            request = {"relation_id": contribution["relation_id"],
+                       "contribution_id": contribution["contribution_id"],
+                       "snapshot_xid": snapshot, "limit": 2}
+            if after is not None:
+                request["after_journal_id"] = after
+            result = (await (await execute(
+                "SELECT {}.memory_query_association_evidence(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": bot}), Jsonb(request)),
+            )).fetchone())["result"]
+            assert result["ok"], result
+            page = result["value"]
+            output_schema = json.loads((
+                Path(__file__).parents[1]
+                / "src/forest/builtin/memory_graph/schemas/query-association-evidence-output.json"
+            ).read_text(encoding="utf-8"))
+            Draft202012Validator(output_schema).validate(page)
+            assert page["total_count"] == 5
+            journal_items.extend(page["items"])
+            if not page["has_more"]:
+                break
+            after = page["next_after"]
+        assert len(journal_items) == 5
+        assert [item["journal_id"] for item in journal_items] == sorted(
+            item["journal_id"] for item in journal_items
+        )
+        assert {item["trigger_evidence"]["external_group_id"] for item in journal_items} == {
+            "question", "memory",
+        }
+        stale_evidence = next(item for item in journal_items
+                              if item["journal_id"] == "journal/stale")
+        assert stale_evidence["trigger_evidence"]["part_id"] == "text-alt"
+        assert stale_evidence["seed_evidence"]["part_id"] == "text-alt"
+        assert stale_evidence["trigger_evidence"]["source_id"] == "question"
+        assert stale_evidence["seed_evidence"]["source_id"] == "memory"
+
+        await execute(
+            "INSERT INTO {}.association_journal("
+            "bot_id,journal_id,operation_id,input_digest,reply_ref,bundle_id,"
+            "query_id,trigger_ref,trigger_source_unit_id,trigger_source_revision,"
+            "trigger_part_id,seed_source_unit_id,seed_source_revision,seed_part_id,"
+            "seed_rank_score,promotion_ready) VALUES "
+            "(%s,'journal/late','reply/late',%s,'reply/late','bundle/test',"
+            "'query/test','trigger/late','trigger',1,'text-alt','seed',1,'text',0.8,true)",
+            (bot, digest),
+        )
+        late = await (await execute(
+            "SELECT {}.memory_promote_association(%s,%s) AS promoted",
+            (bot, "journal/late"),
+        )).fetchone()
+        assert late["promoted"] is True
+        old_snapshot_page = (await (await execute(
+            "SELECT {}.memory_query_association_evidence(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": bot}), Jsonb({
+                "relation_id": contribution["relation_id"],
+                "contribution_id": contribution["contribution_id"],
+                "snapshot_xid": snapshot, "limit": 32,
+            })),
+        )).fetchone())["result"]
+        assert old_snapshot_page["ok"] and old_snapshot_page["value"]["total_count"] == 5
+        fresh_relations = (await (await execute(
+            "SELECT {}.memory_query_relations(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": bot}), Jsonb({
+                "endpoint_kind": "SOURCE_UNIT", "endpoint_id": "trigger", "limit": 10,
+            })),
+        )).fetchone())["result"]
+        assert fresh_relations["value"]["items"][0]["association_evidence_count"] == 6
 
     # A later question in the original group sees the promoted edge to the
     # other trunk, with both endpoints still carrying their own source labels.
@@ -532,3 +623,11 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
             "WHERE bot_id=%s AND active"
         ).format(schema), (bot,))).fetchone())["count"]
         assert active == 0
+        revoked = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_query_association_evidence(%s::jsonb,%s::jsonb) AS result"
+        ).format(schema), (Jsonb({"bot_id": bot}), Jsonb({
+            "relation_id": contribution["relation_id"],
+            "contribution_id": contribution["contribution_id"],
+            "snapshot_xid": snapshot, "limit": 16,
+        })))).fetchone())["result"]
+        assert revoked["error"]["code"] == "MEMORY_RELATION_NOT_VISIBLE"

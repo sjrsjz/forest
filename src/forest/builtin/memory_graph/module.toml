@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.81.1"
+version = "1.82.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -275,9 +275,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.75.1"
+schema_version = "3.76.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "5c6f99921f1bb7b45829918c5bf14c769e6f8a3b58b33717a08027382102f6b8"
+baseline_sha256 = "c7ab26ccd7a4efc1147ac186c9d18db76534b1251fd7ebde90ee701272402ed5"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -365,6 +365,13 @@ contract = "1.0"
 function = "memory_query_relation_evidence"
 input_schema = "schemas/query-relation-evidence-input.json"
 output_schema = "schemas/query-relation-evidence-output.json"
+
+[[components.domain_queries]]
+name = "memory.query-association-evidence"
+contract = "1.0"
+function = "memory_query_association_evidence"
+input_schema = "schemas/query-association-evidence-input.json"
+output_schema = "schemas/query-association-evidence-output.json"
 
 [[components.domain_queries]]
 name = "memory.query-neighbourhood"
@@ -541,6 +548,14 @@ port = "memory.query-relation-evidence"
 audit = "SECURITY"
 default_limit = 16
 max_limit = 16
+timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.associations.evidence"
+port = "memory.query-association-evidence"
+audit = "SECURITY"
+default_limit = 16
+max_limit = 32
 timeout_s = 10
 
 [[components.management_queries]]

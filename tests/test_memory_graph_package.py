@@ -3469,6 +3469,43 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                     "prior": {},
                 },
             )
+            reserved_position = await participant.invoke_in(
+                conn,
+                "memory.reserve-source-position-record",
+                {
+                    "protocol": "forest.uow-step/1",
+                    "caller": {
+                        "component_id": "adapter.onebot",
+                        "generation_id": generation_id,
+                    },
+                    "input": {
+                        "identity": {
+                            "source_id": "source/group/933179609",
+                            "source_kind": "GROUP",
+                            "identity_incarnation": 1,
+                            "platform": "onebot-v11",
+                            "realm_id": "qq",
+                            "external_group_id": "933179609",
+                            "trunk_id": "trunk/group/933179609",
+                        },
+                        "source_unit_id": "unit/event/captured",
+                        "conversation_ref": "onebot:group:933179609",
+                        "event_ref": "event/captured",
+                        "conversation_step_id": "conversation",
+                    },
+                    "prior": {"conversation": {
+                        "conversation_id": "onebot:group:933179609",
+                        "event_id": "event/captured",
+                        "ingress_seq": 1,
+                    }},
+                },
+                operation_id="position/event/captured",
+                causal_root_kind="adapter.ingress",
+                causal_root_id="event/captured",
+                parent_call_id="call/memory/position",
+                timeout_seconds=10,
+            )
+            assert reserved_position["source_order_seq"] == 1
             captured_source = await participant.invoke_in(
                 conn,
                 "memory.capture-source-record",
