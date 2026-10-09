@@ -3,6 +3,16 @@ import asyncio
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service
 
+_FINAL_ACQUISITION_ERRORS = frozenset({
+    "MEDIA_ENCODING_UNSUPPORTED",
+    "MEDIA_IMAGE_INVALID",
+    "MEDIA_PIXELS_EXCEEDED",
+    "MEDIA_SIZE_EXCEEDED",
+    "MEDIA_SIZE_INVALID",
+    "MEDIA_URL_FORBIDDEN",
+    "MEDIA_URL_INVALID",
+})
+
 
 def _plain(value):
     if hasattr(value, "items"):
@@ -98,7 +108,10 @@ class MediaCapture(Plugin):
                         "claim_token": capture["claim_token"],
                         "part_id": part["part_id"],
                         "error_code": error.code,
-                        "final": attempt >= self.max_attempts,
+                        "final": (
+                            error.code in _FINAL_ACQUISITION_ERRORS
+                            or attempt >= self.max_attempts
+                        ),
                     },
                     operation_id=ctx.operations.stable("fail:" + part["part_id"]),
                 )
