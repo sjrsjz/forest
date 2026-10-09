@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.86.2"
+version = "1.86.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -284,9 +284,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.79.0"
+schema_version = "3.80.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "0a9804cab574b692ce94aed0fadeff696e0ed30df3a1f404ac7a260a9626f2a9"
+baseline_sha256 = "42051d6c02f3bda6541628ff74dedbfa4b22bbd2a9961062eb3204e4fd91d473"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -811,6 +811,7 @@ output_schema = "schemas/unavailable-output.json"
 name = "memory.prepare-source-forget"
 contract = "1.0"
 function = "memory_prepare_source_forget"
+read_only = true
 input_schema = "schemas/forget-prepare-envelope.json"
 output_schema = "schemas/forget-prepare-output.json"
 
@@ -818,6 +819,7 @@ output_schema = "schemas/forget-prepare-output.json"
 name = "memory.preview-source-forget-record"
 contract = "1.0"
 function = "memory_preview_source_forget"
+read_only = true
 input_schema = "schemas/forget-preview-envelope.json"
 output_schema = "schemas/forget-preview-output.json"
 
@@ -825,6 +827,7 @@ output_schema = "schemas/forget-preview-output.json"
 name = "memory.prepare-forget-batch"
 contract = "1.0"
 function = "memory_prepare_forget_batch"
+read_only = true
 input_schema = "schemas/forget-batch-prepare-envelope.json"
 output_schema = "schemas/forget-batch-prepare-output.json"
 
@@ -832,6 +835,7 @@ output_schema = "schemas/forget-batch-prepare-output.json"
 name = "memory.preview-forget-batch-record"
 contract = "1.0"
 function = "memory_preview_forget_batch"
+read_only = true
 input_schema = "schemas/forget-batch-preview-envelope.json"
 output_schema = "schemas/forget-batch-preview-output.json"
 

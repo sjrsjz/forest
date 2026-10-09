@@ -454,6 +454,7 @@ MANIFEST_SCHEMA = {
                                             "output_schema",
                                         )
                                     },
+                                    "read_only": {"type": "boolean"},
                                     "payload_refs": {
                                         "type": "array",
                                         "maxItems": 32,
@@ -1899,6 +1900,9 @@ def _manifest(files: dict[str, bytes]) -> dict:
     if len(functions) != len(set(functions)):
         _fail("INVALID_DOMAIN_AUTHORITY", "Domain authority functions must be unique")
     participant_names = {item["name"] for item in unit_of_work_participants}
+    if any("read_only" in item for item in (*domain_queries, *domain_commands)):
+        _fail("INVALID_DOMAIN_AUTHORITY", "Read-only participant semantics belong only to UnitOfWork participants")
+    participants_by_name = {item["name"]: item for item in unit_of_work_participants}
     for plan in unit_of_work_plans:
         step_ids = set()
         for step in plan["steps"]:
@@ -1924,6 +1928,11 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     )
                 )
                 or (component_id == component["id"] and participant not in participant_names)
+                or (
+                    plan.get("read_only", False)
+                    and component_id == component["id"]
+                    and not participants_by_name[participant].get("read_only", False)
+                )
             ):
                 _fail(
                     "INVALID_UNIT_OF_WORK_PLAN",

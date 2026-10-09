@@ -7298,7 +7298,7 @@ END;
 $$;
 
 CREATE FUNCTION memory_preview_source_forget(context jsonb, envelope jsonb)
-RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
     body jsonb := envelope->'input';
     prior jsonb := envelope->'prior';
@@ -7353,7 +7353,7 @@ END;
 $$;
 
 CREATE FUNCTION memory_prepare_source_forget(context jsonb, envelope jsonb)
-RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
     body jsonb := envelope->'input';
     requested_bot text := context->>'bot_id';
@@ -9573,7 +9573,7 @@ END;
 $$;
 
 CREATE FUNCTION memory_prepare_forget_batch(context jsonb, envelope jsonb)
-RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
     body jsonb := envelope->'input';
     requested_bot text := context->>'bot_id';
@@ -9666,7 +9666,7 @@ END;
 $$;
 
 CREATE FUNCTION memory_preview_forget_batch(context jsonb, envelope jsonb)
-RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
     body jsonb := envelope->'input';
     prior jsonb := envelope->'prior';

@@ -284,6 +284,17 @@ class PostgresPackageUnitOfWorkCoordinator:
                             component_id=component_id,
                             generation_id=participant.generation_id,
                         )
+                    read_only = declaration.get("read_only", False)
+                    if read_only:
+                        for step in declaration["steps"]:
+                            participant = participants[step["component_id"]]
+                            supports = getattr(participant, "supports_read_only", None)
+                            if supports is None or not supports(step["participant"]):
+                                raise ForestError(
+                                    "PACKAGE_UOW_READ_PARTICIPANT_INVALID",
+                                    "Read-only UnitOfWork plan requires read-only participants",
+                                    409,
+                                )
                     prior = {}
                     for step in declaration["steps"]:
                         remaining = timeout_seconds - (time.monotonic() - started)
@@ -324,6 +335,7 @@ class PostgresPackageUnitOfWorkCoordinator:
                             causal_root_id=scope.causal_root_id,
                             parent_call_id=parent_call_id,
                             timeout_seconds=remaining,
+                            read_only=read_only,
                         )
                         prior[step["id"]] = result
                     result = prior[declaration["steps"][-1]["id"]]

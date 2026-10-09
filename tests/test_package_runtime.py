@@ -15,6 +15,7 @@ from forest.package_capabilities import PackageCallScope
 from forest.package_runtime import (
     PackageGenerationAdapter,
     PackageGenerationState,
+    PackageUnitOfWorkParticipant,
     package_runtime_descriptor,
 )
 from forest.packages import PackageCatalog, digest_json
@@ -1196,3 +1197,28 @@ async def test_read_only_route_rejects_unclassified_and_mutating_kernel_services
         assert denied.value.code == "SERVICE_READ_ONLY_VIOLATION"
     assert calls == [("read", {"value": "read"})]
     assert await invoke("write", read_only=False) == {"value": "write"}
+
+
+async def test_unit_of_work_participant_requires_declared_read_only_port():
+    calls = []
+
+    async def invoke(_conn, _generation, name, _payload, invocation):
+        calls.append((name, invocation.read_only))
+        return {"ok": True}
+
+    participant = PackageUnitOfWorkParticipant(
+        "example.component", "generation/one", invoke,
+        frozenset({"example.preview"}),
+    )
+    arguments = dict(
+        operation_id="operation/one", causal_root_kind="test",
+        causal_root_id="root", parent_call_id="call/one", timeout_seconds=5,
+        read_only=True,
+    )
+    with pytest.raises(ForestError) as denied:
+        await participant.invoke_in(None, "example.write", {}, **arguments)
+    assert denied.value.code == "PACKAGE_UOW_READ_PARTICIPANT_INVALID"
+    assert calls == []
+
+    assert await participant.invoke_in(None, "example.preview", {}, **arguments) == {"ok": True}
+    assert calls == [("example.preview", True)]

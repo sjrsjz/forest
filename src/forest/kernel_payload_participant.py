@@ -34,7 +34,20 @@ class KernelPayloadUnitOfWorkParticipant:
             )
         return identity.generation_id
 
+    @staticmethod
+    def supports_read_only(name: str) -> bool:
+        return name in {
+            "payload.preview-forget-anchor-from-prior",
+            "payload.preview-forget-anchors-from-prior",
+        }
+
     async def invoke_in(self, conn, name: str, payload: dict, **_invocation) -> dict:
+        if _invocation.get("read_only", False) and not self.supports_read_only(name):
+            raise ForestError(
+                "PACKAGE_UOW_READ_PARTICIPANT_INVALID",
+                "Payload participant cannot serve a read-only UnitOfWork plan",
+                409,
+            )
         if name == "payload.capture-deletion-epoch":
             envelope = _object(
                 payload,

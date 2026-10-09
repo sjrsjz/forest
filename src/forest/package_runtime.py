@@ -157,17 +157,22 @@ class _StagedPayloadWrite:
 class PackageUnitOfWorkParticipant:
     """Generation-bound package participant exposed only to kernel coordinators."""
 
-    __slots__ = ("component_id", "generation_id", "_invoke")
+    __slots__ = ("component_id", "generation_id", "_invoke", "_read_only_names")
 
     def __init__(
         self,
         component_id: str,
         generation_id: str,
         invoke: ParticipantInvoker,
+        read_only_names: frozenset[str] = frozenset(),
     ) -> None:
         self.component_id = component_id
         self.generation_id = generation_id
         self._invoke = invoke
+        self._read_only_names = read_only_names
+
+    def supports_read_only(self, name: str) -> bool:
+        return name in self._read_only_names
 
     async def invoke_in(
         self,
@@ -180,13 +185,21 @@ class PackageUnitOfWorkParticipant:
         causal_root_id: str,
         parent_call_id: str,
         timeout_seconds: float,
+        read_only: bool = False,
     ) -> Any:
+        if read_only and not self.supports_read_only(name):
+            raise ForestError(
+                "PACKAGE_UOW_READ_PARTICIPANT_INVALID",
+                "Read-only UnitOfWork plan requires a declared read-only participant",
+                409,
+            )
         invocation = RuntimeServiceInvocation(
             operation_id=operation_id,
             timeout_seconds=timeout_seconds,
             causal_root_kind=causal_root_kind,
             causal_root_id=causal_root_id,
             parent_call_id=parent_call_id,
+            read_only=read_only,
         )
         return await self._invoke(conn, self.generation_id, name, payload, invocation)
 
@@ -509,6 +522,7 @@ class PackageGenerationAdapter:
                     "name": item["name"],
                     "version": _major(item["contract"]),
                     "function": item["function"],
+                    "read_only": item.get("read_only", False),
                 }
                 for item in self.component.get("unit_of_work_participants", ())
             ],
@@ -682,6 +696,11 @@ class PackageGenerationAdapter:
             self.component_id,
             identity.generation_id,
             self._invoke_unit_of_work_participant,
+            frozenset(
+                name for name, (declaration, _input, _output)
+                in self._participant_declarations.items()
+                if declaration.get("read_only", False)
+            ),
         )
 
     async def _invoke_unit_of_work_participant(
@@ -3259,7 +3278,10 @@ def package_runtime_descriptor(
         )
     if (
         trust_level != "official"
-        and any(plan.get("read_only", False) for plan in component.get("unit_of_work_plans", ()))
+        and (
+            any(plan.get("read_only", False) for plan in component.get("unit_of_work_plans", ()))
+            or any(item.get("read_only", False) for item in component.get("unit_of_work_participants", ()))
+        )
     ):
         raise ForestError(
             "PACKAGE_UOW_READ_AUTHORITY_UNAVAILABLE",

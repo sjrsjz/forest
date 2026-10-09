@@ -574,7 +574,11 @@ class PostgresPackageDomainAuthority:
                 generation_id=scope.generation_id,
             )
         await self._verify_storage(conn, scope)
-        await self._verify_function(conn, function, query=kind == "query")
+        await self._verify_function(
+            conn,
+            function,
+            query=kind == "query" or (kind == "participant" and declaration.get("read_only", False)),
+        )
         await self._verify_payload_refs(
             conn, declaration, payload, scope=scope,
             management_authorization=management_authorization,

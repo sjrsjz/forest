@@ -104,7 +104,7 @@ handler 可返回 `Reply`、`Pass` 或 `Consumed`。`Pass` 表示不匹配，`Co
 
 `ctx.state.get` 是纯 Query：键不存在时返回 `value=None, revision=0`，不会创建记录。`ctx.state.commit` 是单键 Command，必须提交上次读取的 expected revision 和从逻辑调用身份派生的稳定 operation ID；内核在同一事务中完成 Generation 围栏、revision CAS、Payload 保存、不可变操作 step 与 head 推进。相同 operation ID 和输入跨执行尝试返回原回执，输入变化报冲突。同一次服务需要修改多个业务事实、同时发布 outbox 或形成更复杂不变量时，应贡献专用 Repository/UnitOfWork 契约，不能把多个 `ctx.state.commit` 假装成原子事务。
 
-只读调用身份由 Package Runtime 绑定到本次 Worker call，并随 Contract Router 的下游调用传递。包即使整体获得写 Capability，也不能在声明为 read 的服务里提交状态或 Payload、发出 Domain Command/UnitOfWork 写计划、发布事件或调度任务；只读调用只能进入下游显式声明为 read 的服务，未分类端口按可写处理。持久 owned-work 在操作账本准入后取得可写调用身份，排空时一并撤销。官方包如需跨模块的一致预览，可声明只读 UnitOfWork 计划：参与步骤必须经过官方审查且不提交业务写入，计划可持有读取围栏锁，但不产生工作通知；普通安装包不得以此获取写权。
+只读调用身份由 Package Runtime 绑定到本次 Worker call，并随 Contract Router 的下游调用传递。包即使整体获得写 Capability，也不能在声明为 read 的服务里提交状态或 Payload、发出 Domain Command/UnitOfWork 写计划、发布事件或调度任务；只读调用只能进入下游显式声明为 read 的服务，未分类端口按可写处理。持久 owned-work 在操作账本准入后取得可写调用身份，排空时一并撤销。官方包如需跨模块的一致预览，可声明只读 UnitOfWork 计划：每个步骤必须指向显式声明 `read_only = true` 的参与端口，协调器在执行任何步骤前核验所有跨组件端口。包私有 SQL 参与函数必须是 PostgreSQL `STABLE`/`IMMUTABLE`，由 Domain Authority 在调用时核验；内核 Payload 仅开放两项无持久写入的遗忘预览端口。计划可持有读取围栏锁，但不产生工作通知；普通安装包不得以此获取写权。
 
 大正文和二进制内容不能塞进 Worker 的 256 KiB 控制帧，也不能通过宿主回调或 Repository 绕过包边界。声明 `payload.read` 后，业务调用可用 `ctx.payloads.read_bytes/read_json` 按完整 `payload_id + digest + owner` 引用分块读取；缺少任一 owner 字段、摘要不符或正文已撤销都会拒绝。声明 `payload.write` 后，`put_bytes/put_json` 以当前组件为不可伪造 owner，按顺序分块上传并承诺总长度与 SHA-256；父引用也必须完整。宿主只保留单次调用内、Generation 有界的暂存，调用结束、取消、Worker 退出或 Generation 关闭即回收，最终正文仍由 `kernel.payload` 唯一持久化。生命周期 `prepare/start` 不具备业务调用作用域，不能借该端口读取正文；需要冻结的内容应在可审计业务端口中解析并持久化其结果。
 

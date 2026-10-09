@@ -1295,6 +1295,36 @@ async def test_forget_selection_freezes_filtered_members_and_actor_bound_pages(
         kernel.payload,
     )
     async with store.pool.connection() as conn, conn.transaction():
+        source_request = {"operation_id": "source/preview", "source_unit_id": "unit/one"}
+        source_prepared = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_prepare_source_forget(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({**step, "input": source_request, "prior": {}}),
+        ))).fetchone())["result"]
+        assert source_prepared["ok"] is True, source_prepared
+        source_payload = await participant.invoke_in(
+            conn, "payload.preview-forget-anchor-from-prior", {
+                **step, "input": {
+                    "protocol": "forest.payload-forget-anchor-preview/1",
+                    "prior_step_id": "prepare",
+                }, "prior": {"prepare": source_prepared["value"]},
+            }, read_only=True,
+        )
+        source_preview = (await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_preview_source_forget(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({**step, "input": {
+                "source_unit_id": "unit/one", "prepare_step_id": "prepare",
+                "preview_step_id": "payload",
+            }, "prior": {"prepare": source_prepared["value"],
+                         "payload": source_payload}}),
+        ))).fetchone())["result"]
+        assert source_preview["ok"] is True, source_preview
+        assert source_preview["value"]["source_unit_id"] == "unit/one"
+        assert source_preview["value"]["anchor_payload_id"] == first_root.payload_id
+    async with store.pool.connection() as conn, conn.transaction():
         prepared = (await (await conn.execute(sql.SQL(
             "SELECT {}.memory_prepare_forget_batch(%s,%s) AS result"
         ).format(namespace), (
