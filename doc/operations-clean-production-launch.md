@@ -80,6 +80,8 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 新宿主取得租约后会把数据库中遗留的 OneBot 当前客户端结算为 `FAILED/HOST_RESTARTED`，再建立新客户端。该行为只用于进程已失去的本地连接资源；发送结果不确定性仍按 Delivery 的 `UNKNOWN` 规则处理，不能把未知发送自动重试成重复消息。
 
+Supervisor 被 SIGKILL 后，立即重启可能因旧 Host incarnation 的 30 秒租约尚有效而以 `HOST_SUPERVISOR_BUSY` 退出；这是拒绝双主的 fencing，不要手工清空租约或更换 `host_id`。Compose 的 Supervisor 使用 `restart: unless-stopped`，会在租约到期后重新尝试；人工以 `--restart no` 运行时，应等租约到期再启动。新进程 HTTP 健康后仍需等待 Bot 的 `observed_state=ONLINE` 和新 Bot Graph `ACTIVE`，再核对原 Inbox、Context、Memory 与发送账本，不能只用进程存活判定恢复成功。
+
 若 Delivery 工作区出现 UNKNOWN，先从平台或 Provider 查询原发送 attempt，再进入 Bot 作用域的“发送结果核对”。选中记录后核对 Intent、Part、Attempt 与 Effect 引用，提交结论、证据类型和外部查询引用。确认未发送并重新排队会唤醒 Delivery Worker；确认已发送或最终未发送会终结原链。不要通过新建消息、重启 Bot 或修改数据库解除阻塞。
 
 Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supervisor`，镜像默认命令也是 `forest supervisor`。PostgreSQL 首次初始化创建 `forest_deployment`，以及由无超级用户 `forest_host` role 持有的独立 `forest_host`；Host role 不能连接 deployment 库。管理员先在 Secret 模块登记专属 PostgreSQL role 口令，再由 `deployment.storage-orchestrator` 冻结请求；`host.storage` 按其资源账本分配物理数据库名、无特权 login role 与 owner marker，并在 Host 物化及 pin 后原子发布 deployment DSN Secret/profile。Bot 运行时不持有 deployment 超级用户凭据。Supervisor 的健康检查只探测 loopback 管理监听，不读取 Web 凭据。开发期从旧 schema 切换时直接重建卷，不运行旧迁移链。
