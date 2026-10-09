@@ -105,13 +105,16 @@ class ComponentStateCommands:
                 component_id=component_id,
                 generation_id=generation_id,
             )
-            await conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
-                (
-                    "forest.kernel.runtime/state/"
-                    f"{self.runtime.store.bot_id}/{component_id}/{state_key}",
-                ),
-            )
+            for lock_id in (
+                "forest.kernel.runtime/state-operation/"
+                f"{self.runtime.store.bot_id}/{component_id}/{operation_id}",
+                "forest.kernel.runtime/state/"
+                f"{self.runtime.store.bot_id}/{component_id}/{state_key}",
+            ):
+                await conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    (lock_id,),
+                )
             replay = await (
                 await conn.execute(
                     sql.SQL(

@@ -1446,6 +1446,35 @@ async def test_component_state_separates_queries_from_revision_checked_commands(
     assert len(conflicts) == 1
     assert conflicts[0].code == "COMPONENT_STATE_REVISION_CONFLICT"
 
+    same_operation = await asyncio.gather(*(
+        commands.commit(
+            component_id="example.state", generation_id=generation_id,
+            call_id=f"call:shared:{index}", state_key="shared",
+            value={"count": 1}, expected_revision=0,
+            operation_id="state:shared:1",
+        ) for index in (1, 2)
+    ))
+    assert same_operation[0] == same_operation[1]
+    assert await queries.get(
+        component_id="example.state", generation_id=generation_id,
+        state_key="shared",
+    ) == {"value": {"count": 1}, "revision": 1}
+
+    cross_key = await asyncio.gather(*(
+        commands.commit(
+            component_id="example.state", generation_id=generation_id,
+            call_id=f"call:cross-key:{key}", state_key=key,
+            value={"count": 1}, expected_revision=0,
+            operation_id="state:cross-key:1",
+        ) for key in ("other-a", "other-b")
+    ), return_exceptions=True)
+    assert len([item for item in cross_key if isinstance(item, dict)]) == 1
+    cross_key_conflicts = [
+        item for item in cross_key if isinstance(item, ForestError)
+    ]
+    assert len(cross_key_conflicts) == 1
+    assert cross_key_conflicts[0].code == "COMPONENT_STATE_OPERATION_CONFLICT"
+
 
 @pytest.mark.postgres
 async def test_builtin_package_domain_state_runs_only_through_declared_authority(
