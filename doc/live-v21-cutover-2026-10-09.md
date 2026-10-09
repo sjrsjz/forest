@@ -15,3 +15,9 @@
 - ACTIVE 图中的实际包版本为 Embedding 2.8.4、Vector 2.4.2、Memory 1.86.1、Provider 4.4.1；`deployment.bot-catalog` 所在的部署 Graph 2 也是 ACTIVE。在线消息继续进入 Inbox 与 Context；切换后只读采样时二者均为 1644，Memory source unit 为 1635，随后仍继续增长。
 - Memory 批次检查得到 1183 个 READY 的 DOCUMENT facet（TEXT 1030、IMAGE 153），188 个 Embedding 批次 SUCCEEDED，188 个 Vector 发布批次 SETTLED；当日预算为 188 次已结算、122549 charged tokens，预留与 UNKNOWN 均为 0。`scripts/observe_live_bot.py` 在 35 秒内采集 4 个样本，违反项为 0；最终样本显示 11 个记忆主干、1183 个 READY facet、无逾期嵌入、无活动 Agent Run、无待发送意图、无并发 Session 或错位群 claim。
 - 许可群 `933179609` 的最新入站记录在该次采样中为 `NO_TRIGGER / mention_required`，群 lane 已应用到对应序号；因此本次切换**尚未**验证真实 @ 触发后的 Agent、Provider 与 QQ 回复。完整的跨群、图片及长时负载验收仍以既有隔离验证和后续受控实网观察为准，不由这次无触发采样推断。
+
+## 群消息到记忆来源的全量合流审计
+
+一次性只读脚本 [audit_group_memory_capture.py](../scripts/audit_group_memory_capture.py) 按准确 Bot 存储 Profile 连接 Bot 库，并在同一只读快照里把每条 group.message Inbox 与 source_occurrences、unavailable_source_events 对齐。它只输出计数、不可用错误码和最早未解释缺口时间；超过宽限期仍既无来源也无不可用事实，或同一消息同时有两种终态时，退出码为 1。它扫描完整群消息历史，不应当作为高频健康检查。运行时使用与 Supervisor 相同的 FOREST_* 环境引用、只读 Secret 卷和部署网络，在候选镜像中执行 python /tmp/audit.py --bot-id forest-main --grace-seconds 300。
+
+2026-10-10 本地时间对应的在线 v21 只读运行结果：1810 条群消息 = 1798 条来源记录 + 12 条显式不可用，重叠、宽限期内待捕获、过期未解释缺口均为 0；12 条不可用的底层媒体记录均为图片尺寸或像素上限拒绝。这证明该采样点没有静默漏捕获，不证明未来所有入站和真实 @ 回复链。
