@@ -6,15 +6,17 @@ from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from jsonschema import Draft202012Validator
 from test_schema_bundles import clean_authority as clean_authority
 
-from forest.builtin_packages import bootstrap_builtin_package, official_builtin_configuration
+from forest.builtin_packages import (
+    bootstrap_builtin_package,
+    official_builtin_configuration,
+    official_builtin_configuration_schema,
+)
 from forest.core_runtime import bootstrap_kernel
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
-from forest.official_bot_provisioning import (
-    validate_vector_index_configuration,
-)
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog, digest_json
 from forest.vector_index_effect_driver import (
@@ -25,8 +27,9 @@ from forest.vector_index_effect_driver import (
 
 @pytest.mark.asyncio
 async def test_vector_index_configuration_rejects_mutable_space_shape():
-    with pytest.raises(ForestError) as caught:
-        validate_vector_index_configuration(
+    assert not Draft202012Validator(
+        official_builtin_configuration_schema("vector_index_milvus")
+    ).is_valid(
             {
                 "protocol": "forest.vector-index.milvus/1",
                 "endpoint": "http://milvus:19530",
@@ -37,7 +40,6 @@ async def test_vector_index_configuration_rejects_mutable_space_shape():
                 "metric": "COSINE",
             }
         )
-    assert caught.value.code == "VECTOR_INDEX_CONFIGURATION_INVALID"
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,7 @@ import hashlib
 import json
 
 from forest.errors import ForestError
+from forest.model_contract import ModelCapabilities
 from forest.sdk import Plugin, service
 
 
@@ -31,6 +32,7 @@ class ChatCompletionsProvider(Plugin):
             )
         plain_config = _plain(config)
         self.capabilities = plain_config["capabilities"]
+        ModelCapabilities(**self.capabilities)
         self.capability_digest = _digest(self.capabilities)
         self.profile_ref = "profile:" + _digest(plain_config)[7:]
 

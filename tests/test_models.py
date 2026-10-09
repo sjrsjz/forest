@@ -11,12 +11,13 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from jsonschema import Draft202012Validator
 
+from forest.builtin_packages import official_builtin_configuration_schema
 from forest.errors import ForestError
 from forest.model_contract import MAX_REQUEST_BYTES, MediaSnapshot, ModelCapabilities
 from forest.model_contract import _encode as _contract_encode
 from forest.model_transport import ChatCompletionsClient
-from forest.official_bot_provisioning import validate_provider_configuration
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 from agent_protocol import ProtocolRepairView
@@ -82,8 +83,9 @@ def test_provider_configuration_rejects_retired_context_policy_fields():
         "max_image_pixels": 16777216,
         "image_token_upper_bound": 4096,
     })
-    with pytest.raises(ForestError, match="Provider configuration is invalid"):
-        validate_provider_configuration({
+    assert not Draft202012Validator(
+        official_builtin_configuration_schema("provider_chat_completions")
+    ).is_valid({
             "protocol": "forest.provider.chat-completions/1",
             "base_url": "https://example.invalid",
             "credential_ref": "secret://provider/test",

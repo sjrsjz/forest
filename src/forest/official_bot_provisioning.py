@@ -9,7 +9,6 @@ from tempfile import TemporaryDirectory
 from urllib.parse import urlsplit
 
 import psycopg
-from jsonschema import Draft202012Validator
 from psycopg_pool import PoolTimeout
 
 from forest.bootstrap_contributions import (
@@ -18,77 +17,12 @@ from forest.bootstrap_contributions import (
     BootstrapPackageSurface,
 )
 from forest.bot_host import BotBootstrapSettings, BotHost, BotRuntimeSettings
-from forest.builtin_packages import (
-    official_builtin_configuration_schema,
-)
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
-from forest.model_contract import ModelCapabilities
 from forest.packages import PackageCatalog, auto_install_official_sources
 from forest.runtime_modules import RuntimeManagementContribution
 from forest.storage.bot_provisioning_receipt import BotProvisioningReceiptAuthority
 from forest.storage.bot_store import BotStore
-
-PROVIDER_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("provider_chat_completions")
-EMBEDDING_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("embedding_multimodal")
-VECTOR_INDEX_CONFIGURATION_SCHEMA = official_builtin_configuration_schema("vector_index_milvus")
-
-
-def _validated_package_configuration(
-    schema: dict, value: object, code: str, message: str
-) -> dict:
-    if not Draft202012Validator(schema).is_valid(value):
-        raise ForestError(code, message, 422)
-    return value
-
-
-def validate_provider_configuration(value: object) -> tuple[dict, ModelCapabilities]:
-    configuration = _validated_package_configuration(
-        PROVIDER_CONFIGURATION_SCHEMA, value,
-        "PROVIDER_CONFIGURATION_INVALID", "Provider configuration is invalid",
-    )
-    try:
-        capabilities = ModelCapabilities(**configuration["capabilities"])
-    except (KeyError, TypeError, ForestError) as exc:
-        raise ForestError(
-            "PROVIDER_CONFIGURATION_INVALID", "Provider capabilities are invalid", 422
-        ) from exc
-    return {**configuration, "capabilities": capabilities.as_dict()}, capabilities
-
-
-def validate_embedding_configuration(value: object) -> tuple[dict, EmbeddingProfile]:
-    configuration = _validated_package_configuration(
-        EMBEDDING_CONFIGURATION_SCHEMA, value,
-        "EMBEDDING_CONFIGURATION_INVALID", "Embedding configuration is invalid",
-    )
-    try:
-        profile = EmbeddingProfile(**configuration["profile"])
-    except (KeyError, TypeError, ValueError, ForestError) as exc:
-        raise ForestError(
-            "EMBEDDING_CONFIGURATION_INVALID", "Embedding profile is invalid", 422
-        ) from exc
-    return configuration, profile
-
-
-def validate_vector_index_configuration(value: object) -> dict:
-    return _validated_package_configuration(
-        VECTOR_INDEX_CONFIGURATION_SCHEMA, value,
-        "VECTOR_INDEX_CONFIGURATION_INVALID", "Vector index configuration is invalid",
-    )
-
-def validate_trigger_policy_configuration(value: object) -> dict:
-    if not Draft202012Validator(
-        official_builtin_configuration_schema("trigger_policy")
-    ).is_valid(value):
-        raise ForestError(
-            "TRIGGER_POLICY_CONFIGURATION_INVALID",
-            "Trigger policy configuration is invalid",
-            422,
-        )
-    return {
-        **value,
-        "allowed_group_ids": tuple(value["allowed_group_ids"]),
-    }
 
 
 def _bootstrap_surface(component_id: str, label: str) -> RuntimeManagementContribution:
@@ -165,29 +99,6 @@ def official_bootstrap_schema_digests(
     return registry.schema_digests()
 
 
-def validate_official_bootstrap_components(
-    components: object, *, registry: BootstrapConfigurationRegistry | None = None,
-) -> dict[str, dict]:
-    registry = registry or BootstrapConfigurationRegistry(official_bootstrap_contributions())
-    schemas = {item.component_id: item.schema for item in registry.contributions}
-    if not isinstance(components, dict) or set(components) != set(schemas):
-        raise ForestError(
-            "OFFICIAL_BOOTSTRAP_COMPONENT_SET_INVALID",
-            "Official Bot bootstrap component set differs",
-            422,
-        )
-    for component_id, schema in schemas.items():
-        errors = tuple(Draft202012Validator(schema).iter_errors(components[component_id]))
-        if errors:
-            raise ForestError(
-                "OFFICIAL_BOOTSTRAP_CONFIGURATION_INVALID",
-                "Bootstrap component configuration is invalid",
-                422,
-                details={"component_id": component_id},
-            )
-    return components
-
-
 class OfficialBotSettingsResolver:
     """Validate a frozen Profile and pass its inputs to package-owned materializers."""
 
@@ -211,9 +122,8 @@ class OfficialBotSettingsResolver:
                 409,
             )
         components = {item.component_id: item for item in profile.components}
-        validate_official_bootstrap_components(
-            {component_id: item.config for component_id, item in components.items()},
-            registry=self.bootstrap_registry,
+        self.bootstrap_registry.validate_components(
+            {component_id: item.config for component_id, item in components.items()}
         )
         expected_digests = official_bootstrap_schema_digests(self.bootstrap_registry)
         expected_packages = self.bootstrap_registry.package_digests()
@@ -233,39 +143,10 @@ class OfficialBotSettingsResolver:
                     details={"component_id": component_id},
                 )
 
-        provider_seed = components["provider.chat-completions"].config
-        capability_fields = {
-            "deployment_id",
-            "model",
-            "capability_revision",
-            "model_revision",
-            "input_modalities",
-            "supports_tools",
-            "supports_streaming",
-            "stream_usage",
-            "max_output_tokens",
-            "image_roles",
-            "image_detail",
-            "system_role",
-            "output_token_parameter",
-            "tool_image_mapping",
-        }
-        validate_provider_configuration(
-            {
-                **provider_seed,
-                "capabilities": {
-                    key: value
-                    for key, value in provider_seed["capabilities"].items()
-                    if key in capability_fields
-                },
-            }
+        embedding_profile = EmbeddingProfile(
+            **components["embedding.multimodal"].config["profile"]
         )
-        _embedding, embedding_profile = validate_embedding_configuration(
-            components["embedding.multimodal"].config
-        )
-        vector_index = validate_vector_index_configuration(
-            components["vector.index"].config
-        )
+        vector_index = components["vector.index"].config
         if (
             vector_index["space_id"] != embedding_profile.space_id
             or vector_index["dimensions"] != embedding_profile.dimensions
@@ -275,9 +156,6 @@ class OfficialBotSettingsResolver:
                 "Vector index and embedding spaces differ",
                 409,
             )
-        validate_trigger_policy_configuration(
-            components["conversation.trigger-policy"].config
-        )
         for contribution in self.bootstrap_registry.contributions:
             value = components[contribution.component_id].config
             for field, schemes in contribution.origins:
