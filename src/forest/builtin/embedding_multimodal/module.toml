@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.embedding.multimodal"
-version = "2.8.3"
+version = "2.8.4"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "embedding_provider:MultimodalEmbeddingProvider"

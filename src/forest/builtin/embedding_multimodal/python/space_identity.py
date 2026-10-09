@@ -3,7 +3,7 @@
 import hashlib
 import json
 
-from forest.embedding_contract import IMAGE_INPUT_POLICY
+IMAGE_INPUT_POLICY = "authorized_capture_jpeg_fit_4m_v2_pillow-12.3.0"
 
 
 def digest_json(value):

@@ -4,9 +4,9 @@ import io
 import json
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from space_identity import IMAGE_INPUT_POLICY
 from space_identity import profile_snapshot as _profile_snapshot
 
-from forest.embedding_contract import IMAGE_INPUT_POLICY
 from forest.errors import ForestError
 from forest.sdk import Plugin, service
 

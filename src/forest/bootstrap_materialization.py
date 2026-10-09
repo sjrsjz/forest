@@ -19,7 +19,7 @@ from forest.errors import ForestError
 
 _PROJECTION_RUNNER = (
     "import json,runpy,sys;"
-    "sys.path[:0]=[sys.argv[2],sys.argv[3]];"
+    "sys.path[:0]=[sys.argv[2]];"
     "project=runpy.run_path(sys.argv[1],run_name='__forest_bootstrap__')['project'];"
     "json.dump(project(json.load(sys.stdin)),sys.stdout,allow_nan=False,separators=(',',':'))"
 )
@@ -119,7 +119,6 @@ def _run_bootstrap_projection(entrypoint, schema, files, value):
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(source)
-        source_root = Path(__file__).resolve().parents[1]
         environment = {
             key: os.environ[key]
             for key in ("SystemRoot", "WINDIR", "COMSPEC")
@@ -133,7 +132,7 @@ def _run_bootstrap_projection(entrypoint, schema, files, value):
             completed = subprocess.run(
                 [
                     sys.executable, "-I", "-S", "-B", "-c", _PROJECTION_RUNNER,
-                    str(root / entrypoint), str(root / "python"), str(source_root),
+                    str(root / entrypoint), str(root / "python"),
                 ],
                 input=content, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 cwd=directory, env=environment, timeout=10, check=False,
