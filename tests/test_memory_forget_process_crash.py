@@ -56,9 +56,9 @@ async def _invoke(store, namespace, function, context, body):
         return await _call(conn, namespace, function, context, body)
 
 
-async def _preview(store, namespace, payload, after_ordinal):
+async def _preview(store, namespace, payload, after_ordinal, *, batch_size=2):
     request = {"selection_id": _SELECTION, "requested_by": _ACTOR,
-               "after_ordinal": after_ordinal, "batch_size": 2}
+               "after_ordinal": after_ordinal, "batch_size": batch_size}
     async with store.pool.connection() as conn, conn.transaction():
         prepared = await _call(conn, namespace, "memory_prepare_forget_batch",
                                {"bot_id": store.bot_id},
