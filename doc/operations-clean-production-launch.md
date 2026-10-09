@@ -1,5 +1,7 @@
 # 干净生产启动链
 
+当前在线 `forest-main` 的镜像、备份、回退边界和只读验收见 [v21 在线切换记录](live-v21-cutover-2026-10-09.md)。下文带有 v15/v16/v19 候选编号的状态快照是历史记录。
+
 本文记录多 Bot Supervisor 的生产启动入口，以及独立 `forest bot` 诊断路径。宿主持有进程、数据库连接、HostLease 和 RuntimeGraph 生命周期；Adapter、触发策略、Conversation、Agent、Memory、Provider 与 Delivery 作为 Bot 作用域的平级 Generation 成员运行。Bot 基础身份和期望运行意图归部署内核，管理 builtin 通过受限端口操作。
 
 ## 启动图
