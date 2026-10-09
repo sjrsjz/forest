@@ -320,6 +320,8 @@ MemoryOperation
 
 不同主干可以通过 `ASSOCIATES_WITH`、证据或矛盾关系连接；语义关联不表示同群、先后发生或因果成立。全局实体可以连接来自多群的断言，但每条断言保留全部来源。群乙召回群甲的节点不会把它复制为群乙主干的原始事件；仅真正发生在群乙的新消息/模型步骤获得群乙的来源位置。图的schema、发布与召回输出详见[10 多主干记忆图](10-multi-trunk-memory-graph.md)。
 
+最终回复的学习提案只在 Memory 自有事务中登记幂等联想日志；触发来源尚未归档时保持 `PENDING_ARCHIVE`。归档事务只把该来源的待晋升日志标记为可领取，不在持有来源更新锁时跨主干建立边。`memory.association.promote` 是 Memory 包拥有的持久工作：准确 Generation 领取带 token、attempt 和租约的日志，Worker 调用本包晋升命令；命令先按稳定来源 ID 顺序锁定两端，再复核日志 claim、资格、来源状态与遗忘屏障，按规范端点对幂等发布贡献和两端证据。遗忘先抑制来源及未晋升日志、撤销已发布贡献；旧租约、重放和跨代 Worker 不能复活它。回复或归档提交只保证日志和可领取状态已持久化，`ASSOCIATES_WITH` 的可见性是异步最终收敛，不能在同一提交里假定已经出现；默认链路不为晋升再次调用 LLM。
+
 ### 7.5 完整多模态记忆与独立嵌入能力
 
 CanonicalContext、Archive、稳定源单元和Evidence均保留有序`ContentPart(part_id, part_index, kind=text|image, text?|media_ref?)`，记录图片在消息中的位置、作者和来源群。图片使用`ManagedMediaRef(bot_id, media_id, media_revision)`引用Bot域内受管媒体，不能只存过期的平台URL或图片说明。裁剪移出旧单元前必须可靠归档消息、媒体状态和稳定引用；已取得的原图必须有可恢复对象，尚未完成获取的引用由持久Capture任务与保留策略pin，允许窗口继续裁剪。获取失败则保留明确不可用状态，不声称图片已完整保存，详见[11的媒体获取协议](11-multimodal-memory-and-model-projection.md#4-图片接纳归档和可恢复性)。

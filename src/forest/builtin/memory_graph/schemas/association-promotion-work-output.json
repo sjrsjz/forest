@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "journal_id",
+    "state",
+    "promoted"
+  ],
+  "properties": {
+    "journal_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "state": {
+      "enum": [
+        "PENDING_ARCHIVE",
+        "PROMOTED",
+        "SUPPRESSED"
+      ]
+    },
+    "promoted": {
+      "type": "boolean"
+    }
+  }
+}

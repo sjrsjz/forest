@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "journal_id",
+    "claim_token",
+    "attempt"
+  ],
+  "properties": {
+    "journal_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "claim_token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    }
+  }
+}

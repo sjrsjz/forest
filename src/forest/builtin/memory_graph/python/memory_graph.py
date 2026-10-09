@@ -116,6 +116,17 @@ class MemoryGraph(Plugin):
             timeout=10,
         )
 
+    @job("memory.association.promote")
+    async def promote_association_work(self, task, ctx):
+        payload = task["payload"]
+        return await ctx.commands.call(
+            "memory.promote-claimed-association", payload,
+            operation_id=ctx.operations.stable(
+                "association:" + payload["journal_id"] + ":" + str(payload["attempt"])
+            ),
+            timeout=20,
+        )
+
     @job("memory.domain.bind")
     async def bind_domain_work(self, task, ctx):
         await self.ensure_domain(task["payload"], ctx)

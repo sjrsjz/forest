@@ -1066,3 +1066,8 @@ Shell P0 短命令约束（2026-10-09）：包编译器和运行时贡献声明�
 
 隔离候选资源收尾（2026-10-09）：v17 Supervisor 在两只 mock Bot 均 OFFLINE、真实配置 forest-main 未上线后优雅退出码 0，随后候选 PostgreSQL 停止；包卷、Secret 卷和数据库卷保留以供复核。原在线 `forest-clean-supervisor-1` 未停止或切换。
 2026-10-09 记忆主干目录分页：`memory.graph` 1.79.5 / SQL 3.73.3 把原先一次聚合最多 4096 个群主干且静默截断的管理查询改为精确群号过滤、不可变主干 ID 游标和每页最多 100 条；来源计数只计算本页。包内 WebUI 改为按需浏览，仍可直接输入精确主干 ID；来源单元的快照分页与关系证据查询保持各自契约。隔离 PostgreSQL 构造 4105 个主干的跨页、去重和群号筛选用例，以及现有 Memory 精确召回链路用例均通过（2 passed）；未触及在线 Bot 或真实 QQ。
+联想晋升的异步合流（2026-10-09）：`memory.graph` 1.80.0 / SQL 3.74.0 移除最终回复、归档和后到 Capture 事务内的同步跨主干晋升。回复只登记稳定 journal；归档/Capture 在自身事务内标记 `promotion_ready`；Memory 包新增独立 `memory.association.promote` owned-work，按 ready journal 领取并由 Worker 调用本包受限 Domain Command。晋升事务按来源 ID 顺序锁两端，再复核 claim token、attempt、租约、来源资格和遗忘状态；同端点对贡献仍只发布一次，命令重放返回相同结果，结算可重放，过期旧 claim 不得晋升。隔离 PostgreSQL 定向用例通过（1 passed），覆盖待归档、重复提案、两群归档各持一端来源锁后的并行晋升、过期 claim、新 claim 与遗忘撤销；完整 BotHost 假 OneBot + 真实 QiYu VL 嵌入 + 独立 Milvus 图文跨群链路通过（1 passed，151.23 秒），归档后实际 journal 与跨主干边进入终态。临时 VL 测试数据库已清理，官方包构建、Ruff 与差异检查通过。此次未切换在线 Bot 或发送真实 QQ 消息；当前新包版本的在途热替换和长期多群负载仍需单独验收。
+
+仍有一处证据合流缺口：相同来源端点对的多份学习日志可以引用不同 part；当前 `relation_evidence` 只保留首次晋升的两个 part，管理查询尚不能分页展示全部日志依据。端点对权重去重已成立，但 part 级证据集合的顺序无关投影与快照浏览尚未实现；不能把本次晋升拆队列的验证误认为完整证据合流验收。
+
+另有源内位置契约偏差待修：`doc/06-concurrent-convergence.md` 要求原始群消息在权威 Inbox 接纳时固定源内 `source_order_seq`；目前 `memory_capture_source` 在 Capture 提交时才递增 `source_clocks`。若图片等媒体获取使同群 Capture 乱序，`TRUNK_NEXT` 可能反映完成顺序而非接纳顺序。本次联想晋升调整未改变此行为；后续需将稳定源位置预留接到 Inbox 接纳与 Memory 捕获之间，并以乱序 Capture 数据库回归证明。

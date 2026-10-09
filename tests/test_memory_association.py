@@ -156,12 +156,11 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
         forged = await commit("reply/forged", "reply/forged",
                               {**seed, "source_unit_id": "not-a-frozen-seed"})
         assert forged["ok"] and forged["value"] == {
-            "protocol": "forest.association-journal/1",
-            "journaled": 0, "promoted": 0, "skipped": 1,
+            "protocol": "forest.association-journal/2",
+            "journaled": 0, "skipped": 1,
         }
         first = await commit("reply/one", "reply/one")
         assert first["ok"] and first["value"]["journaled"] == 1
-        assert first["value"]["promoted"] == 0
         assert (await commit("reply/one", "reply/one"))["ok"]
         assert (await (await execute(
             "SELECT count(*) AS count FROM {}.relation_contributions WHERE bot_id=%s",
@@ -178,17 +177,160 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
             "updated_at=clock_timestamp() WHERE bot_id=%s AND source_unit_id='trigger'",
             (bot,),
         )
-        journal = await (await execute(
-            "SELECT journal_id FROM {}.association_journal WHERE bot_id=%s "
-            "AND operation_id='reply/one'", (bot,),
-        )).fetchone()
-        promoted = await (await execute(
-            "SELECT {}.memory_promote_association(%s,%s) AS promoted",
-            (bot, journal["journal_id"]),
-        )).fetchone()
-        assert promoted["promoted"] is True
+        await execute(
+            "UPDATE {}.association_journal SET promotion_ready=true "
+            "WHERE bot_id=%s AND operation_id='reply/one'", (bot,),
+        )
+
+        async def settle_next(token):
+            claim = (await (await execute(
+                "SELECT {}.memory_claim_association_promotion(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": bot}), Jsonb({
+                    "protocol": "forest.owned-work-claim-request/1",
+                    "claim_token": token, "lease_seconds": 60,
+                })),
+            )).fetchone())["result"]
+            assert claim["ok"] and claim["value"] is not None
+            work = claim["value"]
+            advanced = (await (await execute(
+                "SELECT {}.memory_promote_claimed_association(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": bot}), Jsonb(work["payload"])),
+            )).fetchone())["result"]
+            assert advanced["ok"] and advanced["value"]["promoted"] is True
+            replay = (await (await execute(
+                "SELECT {}.memory_promote_claimed_association(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": bot}), Jsonb(work["payload"])),
+            )).fetchone())["result"]
+            assert replay == advanced
+            settlement = {
+                "protocol": "forest.owned-work-settle-request/1",
+                "work_id": work["work_id"], "claim_token": token,
+                "attempt": work["attempt"],
+                "outcome": {"status": "SUCCEEDED", "result": advanced["value"]},
+            }
+            settled = (await (await execute(
+                "SELECT {}.memory_settle_association_promotion(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": bot}), Jsonb(settlement)),
+            )).fetchone())["result"]
+            assert settled["ok"] and settled["value"]["work_id"] == work["work_id"]
+            assert (await (await execute(
+                "SELECT {}.memory_settle_association_promotion(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": bot}), Jsonb(settlement)),
+            )).fetchone())["result"] == settled
+
+        await settle_next("association/one")
         second = await commit("reply/two", "reply/two")
-        assert second["ok"] and second["value"]["promoted"] == 1
+        assert second["ok"] and second["value"]["journaled"] == 1
+        await settle_next("association/two")
+        await execute(
+            "INSERT INTO {}.association_journal("
+            "bot_id,journal_id,operation_id,input_digest,reply_ref,bundle_id,"
+            "query_id,trigger_ref,trigger_source_unit_id,trigger_source_revision,"
+            "trigger_part_id,seed_source_unit_id,seed_source_revision,seed_part_id,"
+            "seed_rank_score,promotion_ready) VALUES "
+            "(%s,'journal/stale','reply/stale',%s,'reply/stale','bundle/test',"
+            "'query/test','trigger/stale','trigger',1,'text','seed',1,'text',0.8,true)",
+            (bot, digest),
+        )
+
+        async def claim_only(token):
+            result = (await (await execute(
+                "SELECT {}.memory_claim_association_promotion(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": bot}), Jsonb({
+                    "protocol": "forest.owned-work-claim-request/1",
+                    "claim_token": token, "lease_seconds": 60,
+                })),
+            )).fetchone())["result"]
+            assert result["ok"] and result["value"] is not None
+            return result["value"]
+
+        old_claim = await claim_only("association/expired")
+        await execute(
+            "UPDATE {}.association_journal SET lease_deadline=clock_timestamp()-interval '1 second' "
+            "WHERE bot_id=%s AND journal_id='journal/stale'", (bot,),
+        )
+        current_claim = await claim_only("association/current")
+        assert current_claim["work_id"] == old_claim["work_id"]
+        assert current_claim["attempt"] == old_claim["attempt"] + 1
+        stale = (await (await execute(
+            "SELECT {}.memory_promote_claimed_association(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": bot}), Jsonb(old_claim["payload"])),
+        )).fetchone())["result"]
+        assert stale["ok"] is False
+        assert stale["error"]["code"] == "MEMORY_ASSOCIATION_CLAIM_LOST"
+        current = (await (await execute(
+            "SELECT {}.memory_promote_claimed_association(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": bot}), Jsonb(current_claim["payload"])),
+        )).fetchone())["result"]
+        assert current["ok"] and current["value"]["state"] == "PROMOTED"
+        for label, trigger, seed_unit in (
+            ("a", "trigger", "seed"), ("b", "seed", "trigger")
+        ):
+            await execute(
+                "INSERT INTO {}.association_journal("
+                "bot_id,journal_id,operation_id,input_digest,reply_ref,bundle_id,"
+                "query_id,trigger_ref,trigger_source_unit_id,trigger_source_revision,"
+                "trigger_part_id,seed_source_unit_id,seed_source_revision,seed_part_id,"
+                "seed_rank_score) VALUES "
+                "(%s,%s,%s,%s,%s,'bundle/test','query/test',%s,%s,1,'text',%s,1,'text',0.8)",
+                (bot, "journal/concurrent/" + label, "reply/concurrent/" + label,
+                 digest, "reply/concurrent/" + label, "trigger/concurrent/" + label,
+                 trigger, seed_unit),
+            )
+
+        entered_a, entered_b, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+        async def archive_like(trigger, label, entered):
+            async with store.pool.connection() as archive_conn:
+                async with archive_conn.transaction():
+                    await archive_conn.execute(sql.SQL(
+                        "SELECT 1 FROM {}.source_units "
+                        "WHERE bot_id=%s AND source_unit_id=%s FOR UPDATE"
+                    ).format(schema), (bot, trigger))
+                    entered.set()
+                    await release.wait()
+                    await archive_conn.execute(sql.SQL(
+                        "UPDATE {}.association_journal SET promotion_ready=true "
+                        "WHERE bot_id=%s AND journal_id=%s"
+                    ).format(schema), (bot, "journal/concurrent/" + label))
+
+        archive_a = asyncio.create_task(archive_like("trigger", "a", entered_a))
+        archive_b = asyncio.create_task(archive_like("seed", "b", entered_b))
+        await asyncio.wait_for(asyncio.gather(entered_a.wait(), entered_b.wait()), 3)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(archive_a, archive_b), 3)
+
+        async def promote_concurrent(token):
+            async with store.pool.connection() as worker_conn:
+                async def run(function, value):
+                    row = await (await worker_conn.execute(sql.SQL(
+                        "SELECT {}." + function + "(%s::jsonb,%s::jsonb) AS result"
+                    ).format(schema), (Jsonb({"bot_id": bot}), Jsonb(value)))).fetchone()
+                    assert row["result"]["ok"], row["result"]
+                    return row["result"]["value"]
+
+                work = await run("memory_claim_association_promotion", {
+                    "protocol": "forest.owned-work-claim-request/1",
+                    "claim_token": token, "lease_seconds": 60,
+                })
+                assert work["work_id"].startswith("journal/concurrent/")
+                result = await run("memory_promote_claimed_association", work["payload"])
+                assert result["state"] == "PROMOTED"
+                await run("memory_settle_association_promotion", {
+                    "protocol": "forest.owned-work-settle-request/1",
+                    "work_id": work["work_id"], "claim_token": token,
+                    "attempt": work["attempt"],
+                    "outcome": {"status": "SUCCEEDED", "result": result},
+                })
+                return work["work_id"]
+
+        promoted_journals = await asyncio.wait_for(asyncio.gather(
+            promote_concurrent("association/concurrent/a"),
+            promote_concurrent("association/concurrent/b"),
+        ), 5)
+        assert set(promoted_journals) == {
+            "journal/concurrent/a", "journal/concurrent/b",
+        }
         relation = await (await execute(
             "SELECT count(*) AS count,bool_and(cross_trunk) AS cross_trunk "
             "FROM {}.relation_contributions WHERE bot_id=%s",

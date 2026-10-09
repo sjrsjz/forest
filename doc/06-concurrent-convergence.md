@@ -134,6 +134,8 @@ Associativity of merge: (A ⊔ B) ⊔ C = A ⊔ (B ⊔ C)
 
 来源/主干/图发布表以[05 的存储总览](05-storage-security-operations.md#24-记忆与派生)及[10 的完整图契约](10-multi-trunk-memory-graph.md)为准。`memory_source_clocks` 在全局锁序中位于 `memory_clock` 之后、scope heads 之前，多个源按 source_id 排序。普通 Inbox/闭合 Context 提交先取得需要的 Conversation 锁，再接纳源位置；归档/图 Worker 不反向获取会话锁。共享 Bot 时钟不要求持有全 Bot 锁等待模型或一次完整图重建。
 
+跨主干联想采用日志与可领取状态分离：最终回复插入稳定 journal；归档与后到的 Capture 只把已合格触发源对应 journal 置为 `promotion_ready`，不在持有触发源写锁时读取或锁定另一个群的来源。Memory 自有 Worker 在独立事务领取 ready journal，按固定顺序锁两端来源，再以 claim token、attempt 和租约复核日志；提交后的命令和结算可重放，贡献 ID 由无向端点对确定，重复提案不累加权重。两群归档各持有本群来源写锁时无需互等对方来源，晋升可稍后完成；遗忘对待晋升日志作终态抑制、对已晋升贡献撤销，旧 Worker 不能越过新的 claim 或删除屏障。
+
 媒体/嵌入/请求表以[05](05-storage-security-operations.md#26-多模态来源受管媒体与嵌入)和[11](11-multimodal-memory-and-model-projection.md)为准，复用 `media_assets/media_captures/media_source_links/media_variants`、`embedding_profiles/embedding_artifacts/embedding_index_heads` 与 `model_request_manifests`。物化事实、source/scope 脏标记和索引 Job 同事务，外部下载/编码在事务外执行；媒体/索引业务行进入统一业务表锁序，不持媒体行反向获取 Conversation 或 memory_clock。
 
 ### 3.3 key 与身份规范化

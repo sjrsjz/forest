@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.79.5"
+version = "1.80.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -64,6 +64,7 @@ requests = [
   "domain.query:memory.query-relations",
   "domain.query:memory.search-relations",
   "domain.query:memory.forget-work-status",
+  "domain.command:memory.promote-claimed-association",
   "uow.execute:memory.capture-source",
   "uow.execute:memory.forget-source",
   "uow.execute:memory.preview-source-forget",
@@ -274,9 +275,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.73.3"
+schema_version = "3.74.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "3e27292860840a736014a81c43bb2cd761b2859be5b79cf2bc2c81da090766cd"
+baseline_sha256 = "5f60a74220a3985106b14ee98a53594783166f1b99a638597c15e75dba79fb02"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -406,6 +407,13 @@ contract = "1.0"
 function = "memory_assert_public_query"
 input_schema = "schemas/query-prepare-input.json"
 output_schema = "schemas/public-query-output.json"
+
+[[components.domain_commands]]
+name = "memory.promote-claimed-association"
+contract = "1.0"
+function = "memory_promote_claimed_association"
+input_schema = "schemas/association-promotion-work-input.json"
+output_schema = "schemas/association-promotion-work-output.json"
 
 [[components.domain_commands]]
 name = "memory.enqueue-management-forget"
@@ -941,6 +949,21 @@ claim_timeout_s = 5
 handler_timeout_s = 300
 settle_timeout_s = 5
 lease_seconds = 360
+
+[[components.owned_work_handlers]]
+name = "memory.association.promote"
+contract = "1.0"
+handler = "memory.association.promote"
+claim_function = "memory_claim_association_promotion"
+settle_function = "memory_settle_association_promotion"
+input_schema = "schemas/association-promotion-work-input.json"
+output_schema = "schemas/association-promotion-work-output.json"
+max_concurrency = 2
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 30
+settle_timeout_s = 5
+lease_seconds = 60
 
 [[components.owned_work_handlers]]
 name = "memory.forget.manage-work"

@@ -1130,6 +1130,11 @@ CREATE TABLE association_journal (
     seed_source_revision bigint NOT NULL CHECK (seed_source_revision>0),
     seed_part_id text NOT NULL,
     seed_rank_score double precision NOT NULL CHECK (seed_rank_score >= 0 AND seed_rank_score <= 256),
+    promotion_ready boolean NOT NULL DEFAULT false,
+    claim_token text CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     state text NOT NULL DEFAULT 'PENDING_ARCHIVE' CHECK (
         state IN ('PENDING_ARCHIVE','PROMOTED','SUPPRESSED')
     ),
@@ -1153,8 +1158,26 @@ CREATE TABLE association_journal (
         REFERENCES source_parts(bot_id,source_unit_id,part_id),
     CHECK (trigger_source_unit_id<>seed_source_unit_id),
     CHECK ((state='PROMOTED') = (contribution_id IS NOT NULL)),
-    CHECK ((state='PROMOTED') = (promoted_at IS NOT NULL))
+    CHECK ((state='PROMOTED') = (promoted_at IS NOT NULL)),
+    CHECK ((claim_token IS NULL) = (lease_deadline IS NULL))
 );
+
+CREATE TABLE association_promotion_settlements (
+    bot_id text NOT NULL,
+    claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,claim_token)
+);
+
+CREATE UNIQUE INDEX association_journal_claim_token_uniq ON association_journal(
+    bot_id,claim_token
+) WHERE claim_token IS NOT NULL;
+
+CREATE INDEX association_journal_ready_idx ON association_journal(
+    bot_id,next_attempt_at,journal_id
+) WHERE state='PENDING_ARCHIVE' AND promotion_ready;
 
 CREATE INDEX association_journal_pending_trigger_idx ON association_journal(
     bot_id,trigger_source_unit_id,journal_id
@@ -6017,7 +6040,10 @@ EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range
 END;
 $$;
 
-CREATE FUNCTION memory_promote_association(requested_bot text, requested_journal text)
+CREATE FUNCTION memory_promote_association(
+    requested_bot text, requested_journal text,
+    requested_token text DEFAULT NULL, requested_attempt integer DEFAULT NULL
+)
 RETURNS boolean LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
     journal_row __forest_module_schema__.association_journal%ROWTYPE;
@@ -6042,6 +6068,12 @@ BEGIN
     SELECT * INTO journal_row FROM __forest_module_schema__.association_journal
     WHERE bot_id=requested_bot AND journal_id=requested_journal FOR UPDATE;
     IF journal_row IS NULL OR journal_row.state<>'PENDING_ARCHIVE' THEN RETURN false; END IF;
+    IF requested_token IS NOT NULL AND (
+        journal_row.claim_token IS DISTINCT FROM requested_token
+        OR journal_row.attempt_count IS DISTINCT FROM requested_attempt
+        OR journal_row.lease_deadline<=clock_timestamp()
+    ) THEN RETURN false; END IF;
+    IF requested_token IS NULL AND journal_row.claim_token IS NOT NULL THEN RETURN false; END IF;
     SELECT u.eligibility_state,s.status INTO trigger_row
     FROM __forest_module_schema__.source_units u
     JOIN __forest_module_schema__.memory_sources s USING(bot_id,source_id)
@@ -6110,6 +6142,132 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_claim_association_promotion(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work_row __forest_module_schema__.association_journal%ROWTYPE;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ASSOCIATION_CLAIM_INVALID',
+                'message','Association claim is invalid','status',422));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.association_journal j
+    WHERE j.bot_id=requested_bot AND j.state='PENDING_ARCHIVE'
+      AND j.promotion_ready AND j.next_attempt_at<=clock_timestamp()
+      AND (j.claim_token IS NULL OR j.lease_deadline<=clock_timestamp())
+    ORDER BY j.next_attempt_at,j.journal_id
+    FOR UPDATE OF j SKIP LOCKED LIMIT 1;
+    IF work_row IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',NULL);
+    END IF;
+    UPDATE __forest_module_schema__.association_journal
+    SET claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1
+    WHERE bot_id=requested_bot AND journal_id=work_row.journal_id
+    RETURNING * INTO work_row;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-claim/1',
+            'work_id',work_row.journal_id,
+            'claim_token',work_row.claim_token,
+            'attempt',work_row.attempt_count,
+            'operation_id','memory-association-work:'||encode(sha256(convert_to(
+                jsonb_build_array(requested_bot,work_row.journal_id,
+                    work_row.attempt_count)::text,'UTF8')),'hex'),
+            'causal_root_kind','memory.association',
+            'causal_root_id',work_row.journal_id,
+            'payload',jsonb_build_object('journal_id',work_row.journal_id,
+                'claim_token',work_row.claim_token,'attempt',work_row.attempt_count)
+        ));
+END;
+$$;
+
+CREATE FUNCTION memory_promote_claimed_association(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    work_row __forest_module_schema__.association_journal%ROWTYPE;
+BEGIN
+    IF input->>'journal_id' IS NULL OR input->>'claim_token' IS NULL
+       OR input->>'attempt' IS NULL
+       OR input->>'attempt' !~ '^[1-9][0-9]*$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ASSOCIATION_CLAIM_INVALID',
+                'message','Association promotion claim is invalid','status',422));
+    END IF;
+    PERFORM __forest_module_schema__.memory_promote_association(
+        requested_bot,input->>'journal_id',input->>'claim_token',
+        (input->>'attempt')::integer);
+    SELECT * INTO work_row FROM __forest_module_schema__.association_journal
+    WHERE bot_id=requested_bot AND journal_id=input->>'journal_id';
+    IF work_row IS NULL OR work_row.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer
+       OR work_row.lease_deadline<=clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ASSOCIATION_CLAIM_LOST',
+                'message','Association claim is no longer current','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('journal_id',work_row.journal_id,
+            'state',work_row.state,'promoted',work_row.state='PROMOTED'));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_association_promotion(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    old_input jsonb;
+    old_result jsonb;
+    work_row __forest_module_schema__.association_journal%ROWTYPE;
+    result_value jsonb;
+BEGIN
+    SELECT input_payload,result_payload INTO old_input,old_result
+    FROM __forest_module_schema__.association_promotion_settlements
+    WHERE bot_id=requested_bot AND claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF old_input=input THEN RETURN old_result; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ASSOCIATION_SETTLEMENT_CONFLICT',
+                'message','Association claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.association_journal
+    WHERE bot_id=requested_bot AND journal_id=input->>'work_id' FOR UPDATE;
+    IF work_row IS NULL OR work_row.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ASSOCIATION_CLAIM_LOST',
+                'message','Association claim is no longer current','status',409));
+    END IF;
+    UPDATE __forest_module_schema__.association_journal
+    SET claim_token=NULL,lease_deadline=NULL,
+        next_attempt_at=CASE WHEN state='PENDING_ARCHIVE' THEN
+            clock_timestamp()+
+                (LEAST(power(2,LEAST(attempt_count,8)),300)*interval '1 second')
+            ELSE next_attempt_at END
+    WHERE bot_id=requested_bot AND journal_id=work_row.journal_id;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work_row.journal_id));
+    INSERT INTO __forest_module_schema__.association_promotion_settlements(
+        bot_id,claim_token,input_payload,result_payload)
+    VALUES(requested_bot,input->>'claim_token',input,result_value);
+    RETURN result_value;
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_ASSOCIATION_SETTLEMENT_INVALID',
+            'message','Association settlement is invalid','status',422));
+END;
+$$;
+
 CREATE FUNCTION memory_associate_final_reply(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
@@ -6131,7 +6289,7 @@ DECLARE
     journal_ref text;
     old_journal record;
     journaled_count integer := 0;
-    promoted_count integer := 0;
+    trigger_state text;
     skipped_count integer := 0;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
@@ -6207,6 +6365,9 @@ BEGIN
             skipped_count := skipped_count+1;
             CONTINUE;
         END IF;
+        SELECT eligibility_state INTO trigger_state
+        FROM __forest_module_schema__.source_units
+        WHERE bot_id=requested_bot AND source_unit_id=trigger_unit;
         journal_ref := 'association-journal:' || encode(sha256(convert_to(
             jsonb_build_array(requested_bot,requested_operation,
                 seed->>'bundle_id',trigger_unit,seed_unit)::text,'UTF8')),'hex');
@@ -6214,13 +6375,14 @@ BEGIN
             bot_id,journal_id,operation_id,input_digest,reply_ref,bundle_id,
             query_id,trigger_ref,trigger_source_unit_id,trigger_source_revision,
             trigger_part_id,seed_source_unit_id,seed_source_revision,seed_part_id,
-            seed_rank_score
+            seed_rank_score,promotion_ready
         ) VALUES (
             requested_bot,journal_ref,requested_operation,requested_digest,
             body->>'reply_ref',seed->>'bundle_id',seed->>'query_id',
             proposal->>'trigger_ref',trigger_unit,trigger_revision,trigger_part,
             seed_unit,seed_revision,seed#>>'{part_ids,0}',
-            (seed->>'rank_score')::double precision
+            (seed->>'rank_score')::double precision,
+            trigger_state='ELIGIBLE'
         ) ON CONFLICT DO NOTHING;
         SELECT * INTO old_journal FROM __forest_module_schema__.association_journal
         WHERE bot_id=requested_bot AND journal_id=journal_ref;
@@ -6234,13 +6396,10 @@ BEGIN
                     'message','Association journal identity differs','status',409));
         END IF;
         journaled_count := journaled_count+1;
-        IF __forest_module_schema__.memory_promote_association(requested_bot,journal_ref)
-        THEN promoted_count := promoted_count+1; END IF;
     END LOOP;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
-        'value',jsonb_build_object('protocol','forest.association-journal/1',
-            'journaled',journaled_count,'promoted',promoted_count,
-            'skipped',skipped_count));
+        'value',jsonb_build_object('protocol','forest.association-journal/2',
+            'journaled',journaled_count,'skipped',skipped_count));
 END;
 $$;
 
@@ -6266,7 +6425,6 @@ DECLARE
     part jsonb; duplicate_value boolean := false; eligibility_value text := 'REGISTERED';
     eligibility_operation_id text; eligibility_input_digest text;
     current_eligibility_revision bigint;
-    journal_row record;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR caller_component NOT IN ('adapter.onebot','memory.graph')
@@ -6516,14 +6674,11 @@ BEGIN
             occurrence_id=occurrence_id_value,resolved_at=clock_timestamp()
         WHERE bot_id=requested_bot AND conversation_ref=occurrence_value->>'conversation_ref'
           AND event_ref=occurrence_value->>'event_ref';
-        FOR journal_row IN
-            SELECT journal_id FROM __forest_module_schema__.association_journal
-            WHERE bot_id=requested_bot AND trigger_source_unit_id=unit_id_value
-              AND state='PENDING_ARCHIVE' ORDER BY journal_id
-        LOOP
-            PERFORM __forest_module_schema__.memory_promote_association(
-                requested_bot,journal_row.journal_id);
-        END LOOP;
+
+        UPDATE __forest_module_schema__.association_journal
+        SET promotion_ready=true
+        WHERE bot_id=requested_bot AND trigger_source_unit_id=unit_id_value
+          AND state='PENDING_ARCHIVE' AND NOT promotion_ready;
     END IF;
     SELECT eligibility_state INTO eligibility_value FROM __forest_module_schema__.source_units
     WHERE bot_id=requested_bot AND source_unit_id=unit_id_value;
@@ -7564,7 +7719,6 @@ DECLARE
     pending_row record;
     unavailable_row record;
     replay_row record;
-    journal_row record;
 BEGIN
     IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'conversation.scheduler'
@@ -7725,15 +7879,11 @@ BEGIN
         INSERT INTO __forest_module_schema__.facet_preparation_work(bot_id,source_unit_id)
         VALUES(requested_bot,occurrence_row.source_unit_id)
         ON CONFLICT (bot_id,source_unit_id) DO NOTHING;
-        FOR journal_row IN
-            SELECT journal_id FROM __forest_module_schema__.association_journal
-            WHERE bot_id=requested_bot
-              AND trigger_source_unit_id=occurrence_row.source_unit_id
-              AND state='PENDING_ARCHIVE' ORDER BY journal_id
-        LOOP
-            PERFORM __forest_module_schema__.memory_promote_association(
-                requested_bot,journal_row.journal_id);
-        END LOOP;
+
+        UPDATE __forest_module_schema__.association_journal
+        SET promotion_ready=true
+        WHERE bot_id=requested_bot AND trigger_source_unit_id=occurrence_row.source_unit_id
+          AND state='PENDING_ARCHIVE' AND NOT promotion_ready;
     END LOOP;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',committed);
