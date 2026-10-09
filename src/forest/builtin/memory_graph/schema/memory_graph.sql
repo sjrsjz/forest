@@ -10192,6 +10192,63 @@ EXCEPTION WHEN invalid_text_representation THEN
 END;
 $$;
 
+CREATE FUNCTION memory_read_retrieval_association_evidence(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_query text := input->>'query_id';
+    requested_index integer := (input->>'item_index')::integer;
+    page_limit integer := COALESCE((input->>'limit')::integer,16);
+    requested_after text := input->>'after_journal_id';
+    path_check jsonb;
+    relation_row record;
+BEGIN
+    IF requested_bot IS NULL OR requested_query IS NULL
+       OR octet_length(requested_query) NOT BETWEEN 1 AND 256
+       OR requested_index IS NULL OR requested_index NOT BETWEEN 0 AND 63
+       OR page_limit NOT BETWEEN 1 AND 32
+       OR (requested_after IS NOT NULL AND
+           octet_length(requested_after) NOT BETWEEN 1 AND 256) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RETRIEVAL_REQUEST_INVALID',
+                'message','Retrieval association evidence request is invalid','status',422));
+    END IF;
+    path_check := __forest_module_schema__.memory_read_retrieval_parts(context,
+        jsonb_build_object('query_id',requested_query,'item_index',requested_index,
+            'after_part_index',-1,'limit',1));
+    IF path_check->>'ok' IS DISTINCT FROM 'true' THEN RETURN path_check; END IF;
+    IF path_check#>'{value,node}'='null'::jsonb THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RETRIEVAL_PATH_UNAVAILABLE',
+                'message','Frozen retrieval path is unavailable','status',404));
+    END IF;
+    SELECT c.relation_id,c.contribution_id,q.graph_snapshot INTO relation_row
+    FROM __forest_module_schema__.memory_queries q
+    JOIN __forest_module_schema__.retrieval_items i
+      ON i.bot_id=q.bot_id AND i.bundle_id=q.bundle_id
+     AND i.item_index=requested_index
+    JOIN __forest_module_schema__.retrieval_relations r
+      ON r.bot_id=i.bot_id AND r.bundle_id=i.bundle_id
+     AND r.source_unit_id=i.path_parent_source_unit_id
+     AND r.target_unit_id=i.source_unit_id AND r.edge_id=i.path_edge_id
+     AND r.relation_kind='ASSOCIATED'
+    JOIN __forest_module_schema__.relation_contributions c
+      ON c.bot_id=r.bot_id AND c.contribution_id=r.contribution_id
+     AND c.relation_kind='ASSOCIATES_WITH' AND c.origin_kind='MODEL'
+    WHERE q.bot_id=requested_bot AND q.query_id=requested_query;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_ASSOCIATION_PATH_UNAVAILABLE',
+                'message','Frozen item has no learned association edge','status',404));
+    END IF;
+    RETURN __forest_module_schema__.memory_query_association_evidence(context,
+        jsonb_build_object('relation_id',relation_row.relation_id,
+            'contribution_id',relation_row.contribution_id,
+            'snapshot_xid',relation_row.graph_snapshot::text,
+            'after_journal_id',requested_after,'limit',page_limit));
+END;
+$$;
+
 CREATE FUNCTION memory_query_neighbourhood(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE

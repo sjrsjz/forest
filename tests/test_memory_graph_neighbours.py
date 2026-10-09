@@ -543,6 +543,17 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         assert cross_source["node"]["external_group_id"] == "group/b"
         assert not cross_source["node"]["is_current_source"]
         assert cross_source["node"]["matched_part_ids"] == []
+        async def read_association_evidence(index):
+            return (await (await execute(
+                "SELECT {}.memory_read_retrieval_association_evidence(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                    "query_id": "query/one", "item_index": index, "limit": 1,
+                })),
+            )).fetchone())["result"]
+
+        assert (await read_association_evidence(0))["error"]["code"] == "MEMORY_ASSOCIATION_PATH_UNAVAILABLE"
+        assert (await read_association_evidence(associated_index))["error"]["code"] == "MEMORY_ASSOCIATION_PATH_UNAVAILABLE"
+        assert (await read_association_evidence(63))["error"]["code"] == "MEMORY_RETRIEVAL_PATH_UNAVAILABLE"
         dependencies = (await (await execute(
             "SELECT {}.memory_read_retrieval_dependencies(%s::jsonb,%s::jsonb) AS result",
             (Jsonb({"bot_id": store.bot_id}), Jsonb({

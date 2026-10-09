@@ -5725,6 +5725,37 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
             for item in trial_page["items"]
         )
         async with host.store.pool.connection() as conn:
+            associated_item = await (await conn.execute(
+                sql.SQL(
+                    "SELECT i.item_index FROM {m}.memory_queries q "
+                    "JOIN {m}.retrieval_items i ON i.bot_id=q.bot_id "
+                    "AND i.bundle_id=q.bundle_id "
+                    "JOIN {m}.retrieval_relations r ON r.bot_id=i.bot_id "
+                    "AND r.bundle_id=i.bundle_id "
+                    "AND r.source_unit_id=i.path_parent_source_unit_id "
+                    "AND r.target_unit_id=i.source_unit_id AND r.edge_id=i.path_edge_id "
+                    "WHERE q.bot_id=%s AND q.query_id=%s "
+                    "AND i.source_unit_id=%s AND r.contribution_id=%s"
+                ).format(m=sql.Identifier(namespace)),
+                (settings.bot_id, trial_id, trigger_unit, journal["contribution_id"]),
+            )).fetchone()
+        assert associated_item is not None
+        association_port = next(
+            port for port in memory.component["domain_queries"]
+            if port["name"] == "memory.read-retrieval-association-evidence"
+        )
+        association_page = await memory.invoke_management_query(
+            association_port,
+            {"query_id": trial_id, "item_index": associated_item["item_index"],
+             "limit": 1},
+            timeout_seconds=10,
+        )
+        assert association_page["total_count"] >= 1
+        assert association_page["items"][0]["trigger_evidence"]["source_unit_id"] == trigger_unit
+        assert association_page["items"][0]["seed_evidence"]["source_unit_id"] == document_unit
+        assert association_page["items"][0]["trigger_evidence"]["external_group_id"] == "933179610"
+        assert association_page["items"][0]["seed_evidence"]["external_group_id"] == "933179609"
+        async with host.store.pool.connection() as conn:
             trial_matches = await (await conn.execute(
                 sql.SQL(
                     "SELECT q.modality AS query_modality,d.modality AS document_modality "

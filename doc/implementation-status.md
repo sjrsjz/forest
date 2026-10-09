@@ -1070,4 +1070,6 @@ Shell P0 短命令约束（2026-10-09）：包编译器和运行时贡献声明�
 
 关联学习依据分页（2026-10-09）：`memory.graph` 1.82.0 / SQL 3.76.0 在每条成功晋升日志中冻结 `promoted_xid`；关系列表区分创建时的必要证据与成功学习日志数量，新增包自有 `memory.query-association-evidence` 管理端口，按 `journal_id` 和同一图快照分页输出触发/种子各自的 part、群、主干与作者。WebUI 分开展示两类依据。隔离 PostgreSQL 用例验证同一端点对五份日志含不同 part、并发晋升、分页和后到第六份日志的快照隔离，关系权重仍去重；包构建、Ruff 和界面脚本语法检查通过。模型召回链路仍只以最早两条必要证据校验边，全部学习日志的可分页关系解释尚待接入；未切换在线 Bot 或发送真实 QQ 消息。
 
+冻结召回关联依据（2026-10-09）：`memory.graph` 1.83.0 / SQL 3.77.0 新增 `memory.read-retrieval-association-evidence` 包内只读端口。它以 query/item 定位本次冻结的直属学习关联边，先复核整条召回路径和当前资格，再以该查询的图快照分页读取成功晋升日志，返回两端准确 part、群、主干和作者；种子、时序边、规则边及无效 item 不能通过端口读取联想日志。真实 QiYu VL + Milvus 的假 OneBot 跨群召回与管理试验验证了关联项的双群来源，1 passed（144.72 秒）；隔离 PostgreSQL 的无关联路径拒绝用例 1 passed（47.03 秒）。模型输入仍是有界 `forest.memory-evidence/2` 来源节点投影，尚无向模型开放学习日志分页的工具；本次未切换在线 Bot 或发送 QQ 消息。Bot 身份与运行意图继续由部署内核持有，`deployment.bot-catalog` 仅通过受限端口管理。
+
 源内位置契约已落地（2026-10-09）：`adapter.onebot` 2.4.1 的四条接纳计划在 Conversation 后加入 Memory 源位置预留；`memory.graph` 1.81.1 / SQL 3.75.1 持有不可变预留表和稳定来源时钟，Capture 校验并使用预留位置，缺失预留的 OneBot 原始消息被拒绝。隔离 PostgreSQL 用例先预留两条同群消息、再倒序捕获，确认 source_order_seq 仍为接纳顺序；相关 Memory 回归 3 passed，完整 BotHost 文本与图片链路 2 passed。候选未部署到在线 Bot，也未发送真实 QQ 消息。

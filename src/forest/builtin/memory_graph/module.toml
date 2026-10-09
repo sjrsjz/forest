@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.82.0"
+version = "1.83.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -56,6 +56,7 @@ requests = [
   "domain.query:memory.read-retrieval-record",
   "domain.query:memory.read-retrieval-parts",
   "domain.query:memory.read-retrieval-dependencies",
+  "domain.query:memory.read-retrieval-association-evidence",
   "domain.query:memory.read-retrieval-materialization",
   "domain.query:memory.qualify-vector-candidates",
   "domain.query:memory.read-embedding-candidates",
@@ -275,9 +276,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.76.0"
+schema_version = "3.77.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "c7ab26ccd7a4efc1147ac186c9d18db76534b1251fd7ebde90ee701272402ed5"
+baseline_sha256 = "b97071f5eddebc5a69662c35e90abe97577c14d6633fc31755f160b2a5e2ea39"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -1408,6 +1409,13 @@ contract = "1.0"
 function = "memory_read_query_progress"
 input_schema = "schemas/query-prepare-input.json"
 output_schema = "schemas/query-progress-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-retrieval-association-evidence"
+contract = "1.0"
+function = "memory_read_retrieval_association_evidence"
+input_schema = "schemas/read-retrieval-association-evidence-input.json"
+output_schema = "schemas/query-association-evidence-output.json"
 
 [[components.domain_queries]]
 name = "memory.read-retrieval-dependencies"

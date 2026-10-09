@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "query_id",
+    "item_index"
+  ],
+  "properties": {
+    "query_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "item_index": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 63
+    },
+    "after_journal_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32
+    }
+  }
+}
