@@ -17,7 +17,6 @@ from forest.bootstrap_contributions import (
     BootstrapPackageSurface,
 )
 from forest.bot_host import BotBootstrapSettings, BotHost, BotRuntimeSettings
-from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.packages import PackageCatalog, auto_install_official_sources
 from forest.runtime_modules import RuntimeManagementContribution
@@ -143,19 +142,6 @@ class OfficialBotSettingsResolver:
                     details={"component_id": component_id},
                 )
 
-        embedding_profile = EmbeddingProfile(
-            **components["embedding.multimodal"].config["profile"]
-        )
-        vector_index = components["vector.index"].config
-        if (
-            vector_index["space_id"] != embedding_profile.space_id
-            or vector_index["dimensions"] != embedding_profile.dimensions
-        ):
-            raise ForestError(
-                "OFFICIAL_BOOTSTRAP_VECTOR_SPACE_MISMATCH",
-                "Vector index and embedding spaces differ",
-                409,
-            )
         for contribution in self.bootstrap_registry.contributions:
             value = components[contribution.component_id].config
             for field, schemes in contribution.origins:

@@ -4,6 +4,7 @@ import io
 import json
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from space_identity import profile_snapshot as _profile_snapshot
 
 from forest.embedding_contract import IMAGE_INPUT_POLICY
 from forest.errors import ForestError
@@ -67,33 +68,6 @@ def _canonical(value):
 
 def _bytes_digest(value):
     return "sha256:" + hashlib.sha256(value).hexdigest()
-
-
-def _profile_snapshot(profile):
-    model = profile["model"]
-    if model == "jina-clip-v2":
-        protocol_revision = "jina-clip-v2-http-2026-09-v1"
-        query_task = "retrieval.query"
-        truncate = False
-    elif model == "Qwen/Qwen3-VL-Embedding-8B":
-        protocol_revision = "siliconflow-qwen3-vl-embedding-http-2026-09-v1"
-        query_task = None
-        truncate = "right"
-    else:
-        raise ForestError(
-            "EMBEDDING_CONFIGURATION_INVALID", "Embedding model is unsupported", 422
-        )
-    return {
-        **profile,
-        "protocol_revision": protocol_revision,
-        "document_task": None,
-        "query_task": query_task,
-        "normalized": True,
-        "truncate": truncate,
-        "image_input": IMAGE_INPUT_POLICY,
-        "postprocessing": "l2_float32_v1",
-        "mixed_strategy": "independent_facets_v1",
-    }
 
 
 def _max_batch_items(model):

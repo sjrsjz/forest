@@ -17,7 +17,6 @@ from httpx import AsyncClient
 from psycopg import sql
 
 from forest.bootstrap_contributions import BootstrapConfigurationRegistry
-from forest.builtin_packages import official_builtin_configuration
 from forest.deployment_master_keyring import DeploymentMasterKeyring
 from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.embeddings import EmbeddingProfile
@@ -370,10 +369,11 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
                 },
             },
             "vector.index": {
-                **official_builtin_configuration("vector_index_milvus", overrides={
-                    "space_id": embedding.space_id, "dimensions": embedding.dimensions,
-                }),
+                "protocol": "forest.vector-index.milvus/1",
                 "endpoint": "http://127.0.0.1:19530",
+                "credential_ref": "",
+                "timeout_seconds": 10,
+                "metric": "COSINE",
             },
             "conversation.trigger-policy": {
                 "protocol": "forest.conversation.trigger-policy/1",

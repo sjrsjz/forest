@@ -1,0 +1,12 @@
+{
+  "protocol": "forest.bootstrap-materialization/1",
+  "base": "profile",
+  "overlay": {
+    "space_id": {
+      "$projection": "embedding.multimodal#/space_id"
+    },
+    "dimensions": {
+      "$projection": "embedding.multimodal#/dimensions"
+    }
+  }
+}

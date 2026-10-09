@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.model_contract import ModelCapabilities
 
@@ -54,8 +53,6 @@ def standalone_creation_components(settings, snapshots) -> dict[str, dict]:
         "profile": embedding_profile,
     })
     components["vector.index"].update({
-        "space_id": EmbeddingProfile(**embedding_profile).space_id,
-        "dimensions": settings.embedding_dimensions,
         "endpoint": settings.vector_index_endpoint,
         "credential_ref": settings.vector_index_credential_ref,
         "timeout_seconds": settings.vector_index_timeout_seconds,

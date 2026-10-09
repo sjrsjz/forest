@@ -8,7 +8,6 @@ from forest.bootstrap_contributions import (
     BootstrapConfigurationContribution,
     BootstrapConfigurationRegistry,
 )
-from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.official_bot_provisioning import (
     OfficialBotCatalogSettingsResolver,
@@ -68,15 +67,16 @@ def test_bootstrap_registry_rejects_duplicate_or_inexact_component_sets():
     assert invalid.value.code == "BOOTSTRAP_COMPONENT_CONFIGURATION_INVALID"
 
 
-def test_official_package_seeds_bind_vector_index_to_embedding_space():
+def test_official_creation_inputs_leave_vector_space_to_package_projection():
     registry = BootstrapConfigurationRegistry(official_bootstrap_contributions())
     values = {item.component_id: item.initial_value for item in registry.contributions}
-    embedding = EmbeddingProfile(**values["embedding.multimodal"]["profile"])
-    vector = values["vector.index"]
-
-    assert (vector["space_id"], vector["dimensions"]) == (
-        embedding.space_id, embedding.dimensions
-    )
+    assert "space_id" not in values["vector.index"]
+    assert "dimensions" not in values["vector.index"]
+    invalid_vector = {key: value.copy() for key, value in values.items()}
+    invalid_vector["vector.index"]["space_id"] = "sha256:" + "0" * 64
+    with pytest.raises(ForestError) as rejected_vector:
+        registry.validate_components(invalid_vector)
+    assert rejected_vector.value.code == "BOOTSTRAP_COMPONENT_CONFIGURATION_INVALID"
     invalid = {key: value.copy() for key, value in values.items()}
     invalid["embedding.multimodal"]["profile"] = {
         **values["embedding.multimodal"]["profile"], "dimensions": 4095,

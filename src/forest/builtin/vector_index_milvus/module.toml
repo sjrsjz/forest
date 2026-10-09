@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.4.1"
+version = "2.4.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -12,6 +12,7 @@ state_schema = 1
 reload_mode = "drain"
 config_schema = "schemas/config.json"
 bootstrap_config = "bootstrap.json"
+bootstrap_materialization = "bootstrap-materialization.json"
 auto_install = true
 configuration_apply = "worker-host/1"
 config_immutable_paths = ["/space_id", "/dimensions", "/metric"]
@@ -21,8 +22,8 @@ provides = []
 label = "Milvus Vector Index"
 description = "Rebuildable ANN index endpoint bound to the Bot embedding space."
 order = 30
-schema = "schemas/config.json"
-initial_value = "bootstrap.json"
+schema = "schemas/bootstrap-config.json"
+initial_value = "bootstrap-input.json"
 
 [[components.bootstrap_contribution.secret_refs]]
 field = "credential_ref"

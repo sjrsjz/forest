@@ -145,6 +145,15 @@ MANIFEST_SCHEMA = {
                     "configuration_apply": {"const": "worker-host/1"},
                     "bootstrap_config": {"type": "string"},
                     "bootstrap_materialization": {"type": "string"},
+                    "bootstrap_projection": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["entrypoint", "output_schema"],
+                        "properties": {
+                            "entrypoint": {"type": "string"},
+                            "output_schema": {"type": "string"},
+                        },
+                    },
                     "bootstrap_contribution": {
                         "type": "object",
                         "additionalProperties": False,
@@ -1339,6 +1348,33 @@ def _bootstrap_materialization(files: dict[str, bytes], component: dict) -> dict
     )
 
 
+def _bootstrap_projection(files: dict[str, bytes], component: dict) -> tuple[str, dict] | None:
+    declaration = component.get("bootstrap_projection")
+    if declaration is None:
+        return None
+    entrypoint = declaration["entrypoint"]
+    path = PurePosixPath(entrypoint)
+    if (
+        component["scope"] != "bot"
+        or component.get("auto_install") is not True
+        or component.get("bootstrap_contribution") is None
+        or not entrypoint.startswith("python/")
+        or path.is_absolute()
+        or ".." in path.parts
+        or path.suffix != ".py"
+        or entrypoint not in files
+        or len(files[entrypoint]) > 65_536
+    ):
+        _fail(
+            "INVALID_BOOTSTRAP_PROJECTION",
+            "Bootstrap projection must name bounded Python in an auto-installed Bot package",
+        )
+    schema = _schema(files, declaration["output_schema"])
+    if schema.get("type") != "object":
+        _fail("INVALID_BOOTSTRAP_PROJECTION", "Bootstrap projection output must be an object")
+    return entrypoint, schema
+
+
 def storage_bundle_digest(spec: StorageBundleSpec, execution_profile: str) -> str:
     """Bind installed storage to its schema, independently of runtime code."""
 
@@ -1575,6 +1611,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     )
         _bootstrap_ui(files, component)
     _bootstrap_materialization(files, component)
+    _bootstrap_projection(files, component)
     lifecycle = component.get("lifecycle", {})
     fact_matches = lifecycle.get("fact_matches", ())
     if fact_matches and "replacement_facts_schema" not in lifecycle:
@@ -2472,6 +2509,19 @@ class PackageSnapshot:
         """Read a validated creation-to-runtime template from the exact artifact."""
 
         return _bootstrap_materialization(self._verified_files(), self.component)
+
+    def bootstrap_projection(self) -> tuple[str, dict, dict[str, bytes]] | None:
+        """Capture a pure creation-time projector and its exact Python files."""
+
+        files = self._verified_files()
+        declaration = _bootstrap_projection(files, self.component)
+        if declaration is None:
+            return None
+        entrypoint, schema = declaration
+        return entrypoint, schema, {
+            name: content for name, content in files.items()
+            if name.startswith("python/") and name.endswith(".py")
+        }
 
     def bootstrap_ui(self) -> tuple[bytes, str] | None:
         """Return exact packaged setup HTML and its content hash."""

@@ -5,7 +5,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from forest.bootstrap_materialization import materialize_bootstrap_configuration
+from forest.bootstrap_materialization import (
+    materialize_bootstrap_configuration,
+    project_bootstrap_profiles,
+)
 from forest.official_bot_provisioning import official_bootstrap_contributions
 from forest.packages import PackageCatalog
 
@@ -43,9 +46,16 @@ async def test_package_templates_materialize_profile_links_and_agent_payload(tmp
     payloads = RecordingPayloads()
     root = Path(__file__).resolve().parents[1] / "src/forest/builtin"
 
+    snapshots = tuple(
+        (root / package_name, catalog.build(root / package_name))
+        for package_name in ("embedding_multimodal", "vector_index_milvus")
+    )
+    projections = await project_bootstrap_profiles(snapshots, profile)
+
     async def materialize(package_name):
         return await materialize_bootstrap_configuration(
             catalog.build(root / package_name), profile, payloads=payloads,
+            projections=projections,
         )
 
     provider = await materialize("provider_chat_completions")
@@ -53,7 +63,11 @@ async def test_package_templates_materialize_profile_links_and_agent_payload(tmp
     onebot = await materialize("adapter_onebot")
     shell = await materialize("shell_command")
     memory = await materialize("memory_graph")
+    vector = await materialize("vector_index_milvus")
     assert provider == profile["provider.chat-completions"]
+    assert vector["space_id"] == projections["embedding.multimodal"]["space_id"]
+    assert vector["dimensions"] == profile["embedding.multimodal"]["profile"]["dimensions"]
+    assert "space_id" not in profile["vector.index"]
     assert agent["output_tokens"] == 2048
     assert agent["preset"]["payload_id"] == "payload:test-preset"
     assert json.loads(payloads.writes[0]["content"]) == {"system": ["You are Forest."]}

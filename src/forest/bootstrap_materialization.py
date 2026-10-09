@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import re
+import subprocess
+import sys
 from copy import deepcopy
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from jsonschema import Draft202012Validator
 
 from forest.errors import ForestError
+
+_PROJECTION_RUNNER = (
+    "import json,runpy,sys;"
+    "sys.path[:0]=[sys.argv[2],sys.argv[3]];"
+    "project=runpy.run_path(sys.argv[1],run_name='__forest_bootstrap__')['project'];"
+    "json.dump(project(json.load(sys.stdin)),sys.stdout,allow_nan=False,separators=(',',':'))"
+)
 
 _COMPONENT_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 _OWNER = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._/-]{0,511}\Z")
@@ -42,6 +55,11 @@ def _validate_expression(value: Any, depth: int = 0) -> None:
             if set(value) != {"$bootstrap"}:
                 _invalid("Bootstrap reference must be a complete expression")
             _reference(value["$bootstrap"])
+            return
+        if "$projection" in value:
+            if set(value) != {"$projection"}:
+                _invalid("Bootstrap projection reference must be a complete expression")
+            _reference(value["$projection"])
             return
         if "$payload_json" in value:
             if set(value) != {"$payload_json"}:
@@ -86,12 +104,94 @@ def validate_materialization_spec(spec: object, *, has_contribution: bool) -> di
     return spec
 
 
+def _run_bootstrap_projection(entrypoint, schema, files, value):
+    content = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    if len(content) > 262_144:
+        raise ForestError(
+            "BOOTSTRAP_PROJECTION_INPUT_TOO_LARGE",
+            "Bootstrap projection input exceeds its byte limit", 422,
+        )
+    with TemporaryDirectory(prefix="forest-bootstrap-project-") as directory:
+        root = Path(directory)
+        for name, source in files.items():
+            target = root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(source)
+        source_root = Path(__file__).resolve().parents[1]
+        environment = {
+            key: os.environ[key]
+            for key in ("SystemRoot", "WINDIR", "COMSPEC")
+            if key in os.environ
+        }
+        environment.update(
+            PATH=os.defpath, PYTHONIOENCODING="utf-8",
+            PYTHONDONTWRITEBYTECODE="1",
+        )
+        try:
+            completed = subprocess.run(
+                [
+                    sys.executable, "-I", "-S", "-B", "-c", _PROJECTION_RUNNER,
+                    str(root / entrypoint), str(root / "python"), str(source_root),
+                ],
+                input=content, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                cwd=directory, env=environment, timeout=10, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ForestError(
+                "BOOTSTRAP_PROJECTION_FAILED",
+                "Bootstrap package projection did not finish", 503,
+            ) from exc
+    if completed.returncode != 0 or len(completed.stdout) > 65_536:
+        raise ForestError(
+            "BOOTSTRAP_PROJECTION_FAILED",
+            "Bootstrap package projection failed or exceeded its output bound", 422,
+        )
+    try:
+        projected = json.loads(completed.stdout)
+    except (UnicodeError, ValueError) as exc:
+        raise ForestError(
+            "BOOTSTRAP_PROJECTION_INVALID",
+            "Bootstrap package projection did not return JSON", 422,
+        ) from exc
+    if not Draft202012Validator(schema).is_valid(projected):
+        raise ForestError(
+            "BOOTSTRAP_PROJECTION_INVALID",
+            "Bootstrap package projection violates its declared schema", 422,
+        )
+    return projected
+
+
+async def project_bootstrap_profiles(snapshots, components: dict[str, dict]) -> dict[str, dict]:
+    """Project exact package-owned creation facts without giving packages host authority."""
+
+    projected = {}
+    for _source, snapshot in snapshots:
+        projection = snapshot.bootstrap_projection()
+        if projection is None:
+            continue
+        component_id = snapshot.component["id"]
+        if component_id not in components:
+            raise ForestError(
+                "BOOTSTRAP_COMPONENT_MISSING",
+                "Projected package is absent from frozen creation inputs", 409,
+                details={"component_id": component_id},
+            )
+        projected[component_id] = await asyncio.to_thread(
+            _run_bootstrap_projection, *projection, components[component_id]
+        )
+    return projected
+
+
 async def materialize_bootstrap_configuration(
     snapshot, profile_components: dict[str, dict], *, payloads,
+    projections: dict[str, dict] | None = None,
 ) -> dict:
     """Materialize one exact package's initial config from frozen creation facts."""
 
     component_id = snapshot.component["id"]
+    projections = projections or {}
     contribution = snapshot.bootstrap_contribution()
     spec = snapshot.bootstrap_materialization()
     base = (
@@ -126,6 +226,24 @@ async def materialize_bootstrap_configuration(
                         raise ForestError(
                             "BOOTSTRAP_REFERENCE_MISSING",
                             "Template references an absent creation field", 409,
+                            details={"component_id": source_id},
+                        )
+                    value = value[token]
+                return deepcopy(value)
+            if "$projection" in expression:
+                source_id, tokens = _reference(expression["$projection"])
+                if source_id not in projections:
+                    raise ForestError(
+                        "BOOTSTRAP_PROJECTION_MISSING",
+                        "Template references an absent package projection", 409,
+                        details={"component_id": source_id},
+                    )
+                value = projections[source_id]
+                for token in tokens:
+                    if not isinstance(value, dict) or token not in value:
+                        raise ForestError(
+                            "BOOTSTRAP_PROJECTION_FIELD_MISSING",
+                            "Template references an absent projection field", 409,
                             details={"component_id": source_id},
                         )
                     value = value[token]

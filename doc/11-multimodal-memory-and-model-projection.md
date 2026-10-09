@@ -141,7 +141,7 @@ EmbeddingProfile 是 Bot 生命周期身份的一部分。Bot 的首次记忆配
 
 Embedding Worker 在预热时依据本包的模型协议、预处理策略与冻结配置计算 `space_id`，并将空间 ID 与维度发布为经本包 schema 校验的 `replacement_facts`。Vector Worker 只发布其自身冻结配置中的空间 ID 与维度；其包清单通过 `lifecycle.fact_matches` 声明两项事实必须与 Embedding Generation 相等，同时形成明确的启动依赖。通用 RuntimeGraph 只按 JSON Pointer 比较两个候选事实，不导入嵌入模型或 Milvus 的身份算法。
 
-事实检查位于所有候选 Worker 预热之后、持久 Graph 发布之前；缺失、非标量、类型不同或值不同均拒绝候选并清理其 Generation，旧图保持现役。带有已保留成员的局部热替换同样比较候选视图中的准确 Generation 事实。每次向量请求仍由 Vector Effect Driver 按空间 ID 和维度围栏，Memory 的域绑定仍复核 Embedding 服务回执。当前创建期 Profile 仍有管理员填写的 Vector 空间字段，供应解析仍对其做一次跨组件复核；后续要把这一步改为 Embedding 包派生、Vector 包绑定，避免在宿主保留业务算法。
+事实检查位于所有候选 Worker 预热之后、持久 Graph 发布之前；缺失、非标量、类型不同或值不同均拒绝候选并清理其 Generation，旧图保持现役。带有已保留成员的局部热替换同样比较候选视图中的准确 Generation 事实。每次向量请求仍由 Vector Effect Driver 按空间 ID 和维度围栏，Memory 的域绑定仍复核 Embedding 服务回执。创建期 Profile 只接受 Embedding 模型身份、维度与 Vector endpoint 等各包自己的输入；不接受管理员填写 Vector 空间 ID/维度。准确捕获的 Embedding 包通过有界创建期投影派生空间 ID/维度，Vector 包的首次物化模板只引用该投影；宿主只执行通用投影和 JSON Schema 校验，不实现 Embedding 身份算法。运行图发布前仍由通用事实匹配围栏复核两包实际声明的空间身份。
 
 仅文本 Embedding 加 OCR/caption 不能满足该准入条件。Bot 的完整多模态记忆配置缺少图片编码/查询能力时，配置验证报告 `MULTIMODAL_EMBEDDING_REQUIRED`；运行期图片服务故障报告降级状态，可继续可靠接纳和稍后补索引，但不得悄悄将“完整多模态就绪”改成文本就绪。
 

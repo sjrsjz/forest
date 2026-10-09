@@ -13,7 +13,10 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 from uuid import uuid4
 
-from forest.bootstrap_materialization import materialize_bootstrap_configuration
+from forest.bootstrap_materialization import (
+    materialize_bootstrap_configuration,
+    project_bootstrap_profiles,
+)
 from forest.builtin_packages import (
     bootstrap_builtin_snapshot,
     bootstrap_installed_package,
@@ -647,11 +650,26 @@ class BotHost:
                 automatic_sources, resolved_official, strict=True
             )
         )
+        if expected_packages:
+            for _source, snapshot in automatic_sources:
+                expected = expected_packages.get(snapshot.component["id"])
+                if expected is not None and snapshot.digest != expected:
+                    raise ForestError(
+                        "BOOTSTRAP_PACKAGE_DIGEST_MISMATCH",
+                        "Selected Bot bootstrap package differs from its frozen profile",
+                        409,
+                        details={"component_id": snapshot.component["id"]},
+                    )
+        projections = (
+            await project_bootstrap_profiles(automatic_sources, profile_components)
+            if profile_components is not None else {}
+        )
         for source, snapshot in automatic_sources:
             if profile_components is not None:
                 initial_configuration = await materialize_bootstrap_configuration(
                     snapshot, profile_components,
                     payloads=self._kernel.payload,
+                    projections=projections,
                 )
             else:
                 initial_configuration = None
