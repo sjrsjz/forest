@@ -37,6 +37,7 @@ async def test_kernel_effect_freezes_command_and_permit_in_one_transaction(
         scope_kind="bot",
         bot=SimpleNamespace(store=store),
         kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
         schema_bundle_installer=installer,
         generation_authority=kernel.runtime,
     )

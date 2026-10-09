@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Effect participant 与只读 UnitOfWork 契约收敛（2026-10-10）：当前源码在新建的隔离 PostgreSQL Bot 库、假 OneBot、假模型/VL 与假 Milvus 下完成完整 BotHost 整链测试，`1 passed`（554.17 秒），覆盖 Shell、查询 facet 嵌入、向量工作、记忆管理与遗忘、热重载和重启。此前查询 facet 等待超时的根因是 `kernel.effect` participant 未接收 UnitOfWork 的 `read_only` 参数，导致 Effect prepare 在任何嵌入 Provider attempt 之前以 `HOST_STATE_FAILED` 失败，并非 VL 嵌入模型响应慢。现统一接收只读标志并拒绝只读计划中的 Effect 写入；Worker 的意外网关异常在宿主日志记录堆栈，IPC 仍只返回通用错误。定向 Effect 事务测试 `2 passed`；测试数据库无残留。本次测试没有连接真实 QQ 或调用真实模型，在线实例未切换当前源码。Bot 基础身份与期望运行状态继续由内核持有，`deployment.bot-catalog` 只通过受限端口提供管理操作。
+
 当前在线实例的实际运行状态与仍未完成的真实 @ 验收见 [v21 在线切换记录](live-v21-cutover-2026-10-09.md)。Bot 基础身份和期望运行状态属于部署内核；`deployment.bot-catalog` 仅通过受限端口提供可热重载管理入口。
 
 Memory 来源关系筛选（2026-10-10）：`memory.graph` 1.86.4 / 私有 SQL 3.81.0 在来源页和冻结批量遗忘选择中共用活动关系类型、跨主干条件；关系必须在页面快照可见，来源端点和证据须仍可召回。关系候选最多物化 8193 条贡献，超过 8192 条回退有序来源扫描，不以截断集合丢失结果。隔离 PostgreSQL 的来源/冻结选择用例 1 passed；十万来源与 8193 条关系的规模用例 1 passed，普通首页 0.004 秒、深页 0.002 秒、关系筛选页 0.505 秒。模块 UI 在折叠的高级条件中提供两个选择器。关系人工审核、全文/向量来源过滤和发布图投影仍未完成；在线 v21 尚未切换本次源码。

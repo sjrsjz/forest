@@ -131,8 +131,15 @@ class KernelEffectUnitOfWorkParticipant:
         causal_root_id: str,
         parent_call_id: str,
         timeout_seconds: float,
+        read_only: bool = False,
     ) -> Any:
         del operation_id, parent_call_id, timeout_seconds
+        if read_only:
+            raise ForestError(
+                "PACKAGE_UOW_READ_PARTICIPANT_INVALID",
+                "Effect participant cannot serve a read-only UnitOfWork plan",
+                409,
+            )
         envelope = _object(
             payload,
             {"protocol", "caller", "input", "prior"},

@@ -2663,21 +2663,62 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 "query_id": query["query_id"], "part_count": 3,
                 "facet_count": 3, "status": "PREPARED",
             }
-            async with asyncio.timeout(40):
-                while True:
-                    async with host.store.pool.connection() as conn:
-                        query_facets = await (
-                            await conn.execute(
-                                sql.SQL(
-                                    "SELECT facet_id,state,result_payload_id FROM {}.embedding_facets "
-                                    "WHERE bot_id=%s AND query_id='query/host-embedding'"
-                                ).format(sql.Identifier(memory_namespace)),
-                                (settings.bot_id,),
-                            )
-                        ).fetchall()
-                    if len(query_facets) == 3 and all(row["state"] == "READY" for row in query_facets):
-                        break
-                    await asyncio.sleep(0.1)
+            try:
+                async with asyncio.timeout(40):
+                    while True:
+                        async with host.store.pool.connection() as conn:
+                            query_facets = await (
+                                await conn.execute(
+                                    sql.SQL(
+                                        "SELECT facet_id,state,result_payload_id "
+                                        "FROM {}.embedding_facets "
+                                        "WHERE bot_id=%s AND query_id='query/host-embedding'"
+                                    ).format(sql.Identifier(memory_namespace)),
+                                    (settings.bot_id,),
+                                )
+                            ).fetchall()
+                        if len(query_facets) == 3 and all(
+                            row["state"] == "READY" for row in query_facets
+                        ):
+                            break
+                        await asyncio.sleep(0.1)
+            except TimeoutError as exc:
+                async with host.store.pool.connection() as conn:
+                    facets = await (await conn.execute(sql.SQL(
+                        "SELECT facet_id,state,attempt_count,current_attempt_id,"
+                        "failure_code,round(EXTRACT(EPOCH FROM "
+                        "(next_attempt_at-clock_timestamp()))::numeric,1) "
+                        "AS retry_after_seconds FROM {}.embedding_facets "
+                        "WHERE bot_id=%s AND query_id='query/host-embedding' "
+                        "ORDER BY facet_id"
+                    ).format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id,),
+                    )).fetchall()
+                    claims = await (await conn.execute(sql.SQL(
+                        "SELECT claim_id,state,purpose,item_count FROM "
+                        "{}.embedding_claims WHERE bot_id=%s ORDER BY created_at "
+                        "LIMIT 16"
+                    ).format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id,),
+                    )).fetchall()
+                    attempts = await (await conn.execute(sql.SQL(
+                        "SELECT claim_id,state,error_code FROM "
+                        "{}.embedding_batch_attempts WHERE bot_id=%s "
+                        "ORDER BY prepared_at LIMIT 16"
+                    ).format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id,),
+                    )).fetchall()
+                    settlements = await (await conn.execute(sql.SQL(
+                        "SELECT input_payload->'outcome'->'error'->>'code' "
+                        "AS error_code FROM {}.embedding_work_settlements "
+                        "WHERE bot_id=%s LIMIT 16"
+                    ).format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id,),
+                    )).fetchall()
+                raise AssertionError({
+                    "facets": facets, "claims": claims,
+                    "attempts": attempts, "settlements": settlements,
+                }) from exc
             async with host.store.pool.connection() as conn:
                 unit_state = await (
                     await conn.execute(

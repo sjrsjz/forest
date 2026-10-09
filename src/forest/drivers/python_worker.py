@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import logging
 import os
 import secrets
 import signal
@@ -728,6 +729,10 @@ class PythonWorker:
         except ForestError as error:
             result.update(ok=False, error=_error_envelope(error))
         except Exception:
+            logging.getLogger(__name__).exception(
+                "Worker capability gateway failed (kind=%s, action=%s)",
+                kind, action,
+            )
             result.update(
                 ok=False,
                 error={
