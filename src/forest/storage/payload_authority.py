@@ -115,7 +115,7 @@ class SourceTarget:
 
 
 @dataclass(frozen=True)
-class CleanPayloadRef:
+class PayloadRef:
     payload_id: str
     content_digest: str
     media_type: str
@@ -138,7 +138,7 @@ class KernelPayloadRepository:
 
     async def find_owner_in(
         self, conn, *, owner_component_id: str, owner_kind: str, owner_id: str
-    ) -> CleanPayloadRef | None:
+    ) -> PayloadRef | None:
         """Read an active payload by its immutable owner identity."""
 
         _bounded(owner_component_id, "owner_component_id", 128)
@@ -277,7 +277,7 @@ class KernelPayloadRepository:
         sources=(),
         parents=(),
         expected_deletion_epoch: int,
-    ) -> CleanPayloadRef:
+    ) -> PayloadRef:
         _bounded(owner_component_id, "owner_component_id", 128)
         _bounded(owner_kind, "owner_kind", 128)
         _bounded(owner_id, "owner_id", 512)
@@ -484,7 +484,7 @@ class KernelPayloadRepository:
             ),
             (self.store.bot_id, payload_id, content),
         )
-        return CleanPayloadRef(
+        return PayloadRef(
             payload_id,
             content_digest,
             media_type,
@@ -495,11 +495,11 @@ class KernelPayloadRepository:
             current_epoch,
         )
 
-    async def put_bytes(self, **values) -> CleanPayloadRef:
+    async def put_bytes(self, **values) -> PayloadRef:
         async with self.store.pool.connection() as conn, conn.transaction():
             return await self.put_bytes_in(conn, **values)
 
-    async def put_json_in(self, conn, *, value, **values) -> CleanPayloadRef:
+    async def put_json_in(self, conn, *, value, **values) -> PayloadRef:
         return await self.put_bytes_in(
             conn,
             content=_canonical(value),
@@ -516,7 +516,7 @@ class KernelPayloadRepository:
         owner_component_id,
         owner_kind,
         owner_id,
-    ) -> CleanPayloadRef:
+    ) -> PayloadRef:
         await self._clock_in(conn)
         row = await (
             await conn.execute(
@@ -937,8 +937,8 @@ class KernelPayloadRepository:
             return {"scrubbed": len(payload_ids)}
 
     @staticmethod
-    def _ref(row) -> CleanPayloadRef:
-        return CleanPayloadRef(
+    def _ref(row) -> PayloadRef:
+        return PayloadRef(
             row["payload_id"],
             row["content_digest"],
             row["media_type"],
