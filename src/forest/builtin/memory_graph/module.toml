@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.83.0"
+version = "1.84.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -145,6 +145,14 @@ semantics = "read"
 visibility = "management"
 input_schema = "schemas/trial-result-input.json"
 output_schema = "schemas/trial-result-output.json"
+
+[[components.provides]]
+name = "memory.trial.association-evidence"
+contract = "1.0"
+semantics = "read"
+visibility = "management"
+input_schema = "schemas/trial-association-evidence-input.json"
+output_schema = "schemas/trial-association-evidence-output.json"
 
 [[components.provides]]
 name = "memory.trial.image"
@@ -596,6 +604,16 @@ port = "memory.trial.result"
 required_role = "ADMIN"
 actor_field = "requested_by"
 audit = "SECURITY"
+timeout_s = 30
+
+[[components.management_queries]]
+id = "memory.trial.association-evidence"
+port = "memory.trial.association-evidence"
+required_role = "ADMIN"
+actor_field = "requested_by"
+audit = "SECURITY"
+default_limit = 8
+max_limit = 16
 timeout_s = 30
 
 [[components.management_queries]]

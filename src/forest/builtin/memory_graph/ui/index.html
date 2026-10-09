@@ -339,6 +339,37 @@
     else if(result.state==='READY')await loadTrialResult(query_id,false);
     else{clearTrialImages();$('trial-results').replaceChildren();$('trial-next').disabled=true;trialPage=null;}
   }
+  async function loadTrialAssociation(query_id,item,card,detail,button,after=null){
+    button.disabled=true;
+    try{
+      const input={query_id,item_index:item.item_index,limit:8};
+      if(after)input.after_journal_id=after;
+      const result=await call('memory.trial.association-evidence',input);
+      if($('trial-query').value.trim()!==query_id||!card.isConnected)return;
+      if(!after)detail.replaceChildren();
+      if(!result.available){
+        detail.textContent='\u6b64\u9879\u6ca1\u6709\u5df2\u5b66\u4e60\u7684\u8054\u60f3\u8fb9';
+        button.remove();return;
+      }
+      const page=result.page;
+      if(!after){
+        const heading=document.createElement('div');heading.className='muted';
+        heading.textContent=`\u5173\u8054 ${page.relation_id} ? \u5df2\u8bb0\u5f55 ${page.total_count} \u6b21`;
+        detail.append(heading);
+      }
+      for(const log of page.items){
+        const entry=document.createElement('div');entry.className='detail';
+        const endpoint=(label,source)=>`${label}: \u7fa4 ${source.external_group_id??'?'} ? \u4e3b\u5e72 ${source.trunk_id??'?'} ? \u4f5c\u8005 ${source.author_subject_ref} ? \u7247\u6bb5 ${source.part_id} ? ${source.source_unit_id}`;
+        entry.textContent=`${stamp(log.promoted_at)} ? ${log.journal_id}\n${endpoint('\u89e6\u53d1',log.trigger_evidence)}\n${endpoint('\u79cd\u5b50',log.seed_evidence)}`;
+        detail.append(entry);
+      }
+      if(page.has_more){
+        button.textContent='\u66f4\u591a\u5b66\u4e60\u8bb0\u5f55';
+        button.onclick=()=>loadTrialAssociation(query_id,item,card,detail,button,page.next_after)
+          .catch(error=>status(error.message));
+      }else button.remove();
+    }finally{button.disabled=false;}
+  }
   async function loadTrialResult(query_id=$('trial-query').value.trim(),next=false){
     const input={query_id,limit:4,after_index:next&&trialPage?.next_index!=null?trialPage.next_index:-1};
     const page=await call('memory.trial.result',input);
@@ -354,6 +385,14 @@
       const body=document.createElement('div');body.className='detail';
       body.textContent=(item.excerpt||'无文本片段')+(item.excerpt_truncated?'…':'');
       card.append(title,meta,body);
+      if(!item.is_seed){
+        const detail=document.createElement('div');detail.className='detail';
+        const button=document.createElement('button');
+        button.textContent='\u67e5\u770b\u5b66\u4e60\u4f9d\u636e';
+        button.onclick=()=>loadTrialAssociation(query_id,item,card,detail,button)
+          .catch(error=>status(error.message));
+        card.append(button,detail);
+      }
       for(const image of item.images){
         const wrap=document.createElement('div');wrap.className='detail';
         const button=document.createElement('button');

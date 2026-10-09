@@ -137,6 +137,41 @@ async def read_page(ctx, payload):
     }
 
 
+async def read_association_evidence(ctx, payload):
+    """Page learned evidence for one visible item in this actor's trial."""
+
+    evidence, reference, gates = await _authorized_evidence(ctx, payload)
+    gate = next((
+        item for item in gates if item["evidence_index"] == payload["item_index"]
+    ), None)
+    if gate is None or not gate["visible"]:
+        raise ForestError("MEMORY_TRIAL_ITEM_NOT_FOUND", "Trial item is unavailable", 404)
+    query = {
+        "query_id": payload["query_id"],
+        "item_index": gate["item_index"],
+        "limit": payload.get("limit", 8),
+    }
+    if "after_journal_id" in payload:
+        query["after_journal_id"] = payload["after_journal_id"]
+    try:
+        result = await ctx.queries.call(
+            "memory.read-retrieval-association-evidence", query, timeout=15,
+        )
+    except ForestError as exc:
+        if exc.code != "MEMORY_ASSOCIATION_PATH_UNAVAILABLE":
+            raise
+        result = None
+    if await _read_visibility(ctx, payload, reference, evidence) != gates:
+        raise ForestError("MEMORY_EVIDENCE_UNAVAILABLE", "Trial visibility changed", 409)
+    return {
+        "protocol": "forest.memory-trial-association-evidence/1",
+        "query_id": payload["query_id"],
+        "item_index": payload["item_index"],
+        "available": result is not None,
+        "page": result,
+    }
+
+
 async def read_image(ctx, payload):
     """Return one exact bounded image chunk from this actor's live evidence."""
 

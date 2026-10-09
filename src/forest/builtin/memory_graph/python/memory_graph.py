@@ -17,6 +17,7 @@ from facet_preparation import (
 from graph_region import expand as expand_graph
 from query_matching import prepare as prepare_matching
 from recall_work import advance as advance_recall
+from trial_result import read_association_evidence as read_trial_association_evidence
 from trial_result import read_image as read_trial_image
 from trial_result import read_page as read_trial_result_page
 from vector_work import delete as delete_vector
@@ -182,6 +183,16 @@ class MemoryGraph(Plugin):
     )
     async def trial_result(self, payload, ctx):
         return await read_trial_result_page(ctx, payload)
+
+    @service(
+        "memory.trial.association-evidence",
+        semantics="read",
+        contract="1.0",
+        input_schema="schemas/trial-association-evidence-input.json",
+        output_schema="schemas/trial-association-evidence-output.json",
+    )
+    async def trial_association_evidence(self, payload, ctx):
+        return await read_trial_association_evidence(ctx, payload)
 
     @service(
         "memory.trial.image",

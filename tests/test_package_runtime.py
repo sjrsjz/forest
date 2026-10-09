@@ -285,7 +285,8 @@ def test_management_only_memory_services_have_no_runtime_routes(tmp_path):
     routed = set(adapter.runtime_service_handlers())
     assert ("memory.query.request", 1) in public & routed
     for name in (
-        "memory.trial.result", "memory.trial.image", "memory.source.forget.preview"
+        "memory.trial.result", "memory.trial.association-evidence",
+        "memory.trial.image", "memory.source.forget.preview"
     ):
         assert (name, 1) not in public
         assert (name, 1) not in routed

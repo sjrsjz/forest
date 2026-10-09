@@ -3257,6 +3257,10 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 trial_page = await trial_query(
                     "memory.trial.result", {"query_id": trial_id, "limit": 4}
                 )
+                trial_association = await trial_query(
+                    "memory.trial.association-evidence",
+                    {"query_id": trial_id, "item_index": 0},
+                )
                 trial_image = await trial_query(
                     "memory.trial.image", {
                         "query_id": trial_id,
@@ -3270,8 +3274,11 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             result_reads = (await host._kernel.audit.scan(
                 action="memory.trial.result", limit=10,
             ))["records"]
-            assert len(image_reads) == len(result_reads) == 1
-            for record in (*image_reads, *result_reads):
+            association_reads = (await host._kernel.audit.scan(
+                action="memory.trial.association-evidence", limit=10,
+            ))["records"]
+            assert len(image_reads) == len(result_reads) == len(association_reads) == 1
+            for record in (*image_reads, *result_reads, *association_reads):
                 assert record["severity"] == "SECURITY"
                 assert record["producer_component_id"] == "memory.graph"
                 assert record["actor_id"] == "subject/host-admin"
@@ -3279,6 +3286,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 assert record["call_id"] is None
                 assert record["details_payload_id"] is None
             assert trial_page["total_count"] == 1
+            assert not trial_association["available"] and trial_association["page"] is None
             assert trial_page["items"][0]["source_unit_id"] == unit_evidence["source_unit_id"]
             assert trial_page["items"][0]["external_group_id"] == "933179609"
             assert trial_page["items"][0]["author_subject_ref"] == "qq:20001"
@@ -5755,6 +5763,48 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
         assert association_page["items"][0]["seed_evidence"]["source_unit_id"] == document_unit
         assert association_page["items"][0]["trigger_evidence"]["external_group_id"] == "933179610"
         assert association_page["items"][0]["seed_evidence"]["external_group_id"] == "933179609"
+        trial_items = list(trial_page["items"])
+        for _ in range(16):
+            if not trial_page["has_more"]:
+                break
+            trial_page = await memory.management_contract.query_authorized(
+                "memory.trial.result",
+                {"query_id": trial_id, "after_index": trial_page["next_index"], "limit": 4},
+                authorization=trial_authorization,
+            )
+            trial_items.extend(trial_page["items"])
+        assert not trial_page["has_more"]
+        trial_associated = next(item for item in trial_items
+                                if item["source_unit_id"] == trigger_unit)
+        trial_explanation = await memory.management_contract.query_authorized(
+            "memory.trial.association-evidence",
+            {"query_id": trial_id, "item_index": trial_associated["item_index"],
+             "limit": 1},
+            authorization=trial_authorization,
+        )
+        assert trial_explanation["available"]
+        assert trial_explanation["page"]["contribution_id"] == journal["contribution_id"]
+        assert trial_explanation["page"]["items"][0]["seed_evidence"]["external_group_id"] == "933179609"
+        trial_seed = next(item for item in trial_items
+                          if item["source_unit_id"] == document_unit)
+        seed_explanation = await memory.management_contract.query_authorized(
+            "memory.trial.association-evidence",
+            {"query_id": trial_id, "item_index": trial_seed["item_index"]},
+            authorization=trial_authorization,
+        )
+        assert not seed_explanation["available"] and seed_explanation["page"] is None
+        other_actor = SimpleNamespace(
+            actor_ref="subject/cross-vl-other",
+            web_subject_ref="subject/cross-vl-other",
+            target_generation_id=generation_id,
+        )
+        with pytest.raises(ForestError) as hidden:
+            await memory.management_contract.query_authorized(
+                "memory.trial.association-evidence",
+                {"query_id": trial_id, "item_index": trial_associated["item_index"]},
+                authorization=other_actor,
+            )
+        assert hidden.value.code == "MEMORY_TRIAL_NOT_FOUND"
         async with host.store.pool.connection() as conn:
             trial_matches = await (await conn.execute(
                 sql.SQL(
