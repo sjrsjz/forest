@@ -32,6 +32,10 @@
       <details><summary>更多两端来源条件</summary><div class="filters"><input id="journal-trigger-trunk" placeholder="触发主干 ID"><input id="journal-seed-trunk" placeholder="种子主干 ID"><input id="journal-trigger-author" placeholder="触发作者 ID"><input id="journal-seed-author" placeholder="种子作者 ID"></div></details>
       <div id="journal-rows"></div><div class="pager"><span id="journal-count" class="muted"></span><button id="journal-next" disabled>下一页日志</button></div>
     </details>
+    <details id="retraction-browser"><summary>关系撤回记录（审核历史，固定事实快照）</summary>
+      <div class="filters"><input id="retraction-relation" placeholder="精确关系 ID"><input id="retraction-contribution" placeholder="精确贡献 ID"><input id="retraction-actor" placeholder="审核操作者"><select id="retraction-reason"><option value="">全部原因</option><option value="INCORRECT">关系错误</option><option value="STALE">关系过时</option><option value="UNSAFE">内容不安全</option><option value="OTHER">其他原因</option></select><button id="retraction-search">查询撤回记录</button></div>
+      <div id="retraction-rows"></div><div class="pager"><span id="retraction-count" class="muted"></span><button id="retraction-next" disabled>下一页撤回记录</button></div>
+    </details>
   </section>
   <section id="forget" class="panel hidden">
     <p class="muted">按来源单元预览影响范围。预览后内容或关系变化时，执行会拒绝旧计划；请求状态可按 ID 查询。</p>
@@ -75,7 +79,7 @@
 </div>
 <script>
 (()=>{'use strict';
-  let port,nonce='',sequence=0,draft=null,sourcePage=null,sourcePageFilters='',sourceRequestSequence=0,trunkPage=null,trunkRequestSequence=0,facetPage=null,facetUnit=null,facetRequestSequence=0,attemptRequestSequence=0,currentAttempt=null,retryKey=null,relationPage=null,relationGlobal=false,journalPage=null,journalRequestSequence=0,forgetPlan=null,forgetTimer=null,trialTimer=null,trialPage=null,batchPage=null,batchPlan=null,batchTimer=null;
+  let port,nonce='',sequence=0,draft=null,sourcePage=null,sourcePageFilters='',sourceRequestSequence=0,trunkPage=null,trunkRequestSequence=0,facetPage=null,facetUnit=null,facetRequestSequence=0,attemptRequestSequence=0,currentAttempt=null,retryKey=null,relationPage=null,relationGlobal=false,journalPage=null,journalRequestSequence=0,retractionPage=null,retractionRequestSequence=0,forgetPlan=null,forgetTimer=null,trialTimer=null,trialPage=null,batchPage=null,batchPlan=null,batchTimer=null;
   const trialImageUrls=new Set();
   function clearTrialImages(){for(const url of trialImageUrls)URL.revokeObjectURL(url);trialImageUrls.clear();}
   const pending=new Map(),$=id=>document.getElementById(id);
@@ -263,6 +267,9 @@
             reason_code:reason.value
           },operationKey);
           if(box.isConnected){box.remove();relationPage=null;}
+          retractionPage=null;
+          if($('retraction-browser').open)
+            loadRetractions().catch(error=>status(error.message));
           status(`已撤回关系贡献 ${result.contribution_id} · ${result.reason_code}`);
         }catch(error){status(error.message);if(box.isConnected)retract.disabled=false;}
       };
@@ -270,6 +277,42 @@
       rows.append(box);
     }
     if(!items.length)rows.textContent='\u6ca1\u6709\u5339\u914d\u7684\u53ef\u89c1\u5173\u7cfb\u3002';
+  }
+  function retractionFilters(){
+    const input={limit:25};
+    for(const [field,id] of [['relation_id','retraction-relation'],
+      ['contribution_id','retraction-contribution'],
+      ['actor_subject_ref','retraction-actor'],['reason_code','retraction-reason']]){
+      const value=$(id).value.trim();if(value)input[field]=value;
+    }
+    return input;
+  }
+  async function loadRetractions(next=false){
+    const input=retractionFilters(),filterKey=JSON.stringify(input);
+    if(next&&retractionPage?.next_cursor&&retractionPage.filterKey===filterKey){
+      input.snapshot_created_at=retractionPage.snapshot_created_at;
+      input.snapshot_xid=retractionPage.snapshot_xid;
+      input.after_created_at=retractionPage.next_cursor.created_at;
+      input.after_operation_id=retractionPage.next_cursor.operation_id;
+      input.cursor_filter_digest=retractionPage.filter_digest;
+    }
+    const requestNumber=++retractionRequestSequence;
+    const page=await call('memory.relations.retractions',input);
+    if(requestNumber!==retractionRequestSequence||
+       JSON.stringify(retractionFilters())!==filterKey)return;
+    retractionPage={...page,filterKey};
+    const rows=$('retraction-rows');rows.replaceChildren();
+    for(const item of page.items){
+      const box=document.createElement('div');box.className='relation';
+      const title=document.createElement('strong');
+      title.textContent=`${item.reason_code} · ${item.relation_kind} · ${item.relation_id}`;
+      const detail=document.createElement('div');detail.className='detail';
+      detail.textContent=`贡献 ${item.contribution_id} · 操作 ${item.operation_id}\n${item.left_kind}:${item.left_id} ${item.relation_kind==='ASSOCIATES_WITH'?'↔':'→'} ${item.right_kind}:${item.right_id}\n${item.origin_kind} · ${item.cross_trunk?'跨主干':'同主干'} · 权重 ${item.weight_micros}/1000000\n审核 ${item.actor_subject_ref} · ${stamp(item.retracted_at)}`;
+      box.append(title,detail);rows.append(box);
+    }
+    if(!page.items.length)rows.textContent='没有匹配的关系撤回记录。';
+    $('retraction-count').textContent=`本页 ${page.items.length} 条 · 固定事实快照 ${stamp(page.snapshot_created_at)}`;
+    $('retraction-next').disabled=!page.has_more;
   }
   async function loadAssociationJournals(next=false){
     const input={limit:25};
@@ -677,6 +720,9 @@
   document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>show(button.dataset.tab));document.querySelectorAll('[data-path]').forEach(input=>input.onchange=changeSettings);
   $('trunk-search').onclick=()=>loadTrunks().catch(error=>status(error.message));$('trunk-next').onclick=()=>loadTrunks(true).catch(error=>status(error.message));$('trunk-browser').ontoggle=()=>{if($('trunk-browser').open&&!trunkPage)loadTrunks().catch(error=>status(error.message));};
   $('source-search').onclick=()=>loadSources().catch(error=>status(error.message));$('source-next').onclick=()=>loadSources(true).catch(error=>status(error.message));$('facet-refresh').onclick=()=>loadSourceFacets().catch(error=>status(error.message));$('facet-state').onchange=()=>{facetPage=null;loadSourceFacets().catch(error=>status(error.message));};$('facet-next').onclick=()=>loadSourceFacets(true).catch(error=>status(error.message));$('relation-search').onclick=()=>loadRelations().catch(error=>status(error.message));$('relation-global').onclick=()=>loadRelations(false,true).catch(error=>status(error.message));$('relation-neighbourhood').onclick=()=>loadNeighbourhood().catch(error=>status(error.message));$('relation-next').onclick=()=>loadRelations(true).catch(error=>status(error.message));$('journal-search').onclick=()=>loadAssociationJournals().catch(error=>status(error.message));$('journal-next').onclick=()=>loadAssociationJournals(true).catch(error=>status(error.message));$('journal-browser').ontoggle=()=>{if($('journal-browser').open&&!journalPage)loadAssociationJournals().catch(error=>status(error.message));};$('plan').onclick=()=>{changeSettings();send('request-plan');status('服务端校验中');};
+  $('retraction-search').onclick=()=>loadRetractions().catch(error=>status(error.message));
+  $('retraction-next').onclick=()=>loadRetractions(true).catch(error=>status(error.message));
+  $('retraction-browser').ontoggle=()=>{if($('retraction-browser').open&&!retractionPage)loadRetractions().catch(error=>status(error.message));};
   $('retry-confirm').onchange=()=>$('retry-action').disabled=!$('retry-confirm').checked||!currentAttempt?.items.some(item=>item.retry_eligible);
   $('retry-action').onclick=()=>retryUnknownAttempt().catch(error=>status(error.message));
   $('forget-source').oninput=clearForgetPlan;

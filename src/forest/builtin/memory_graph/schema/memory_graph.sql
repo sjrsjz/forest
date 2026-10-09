@@ -534,11 +534,18 @@ CREATE TABLE relation_retractions (
     reason_code text NOT NULL CHECK (
         reason_code IN ('INCORRECT','STALE','UNSAFE','OTHER')
     ),
+    created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,operation_id),
     UNIQUE (bot_id,contribution_id),
     FOREIGN KEY (bot_id,contribution_id)
         REFERENCES relation_contributions(bot_id,contribution_id)
+);
+CREATE INDEX relation_retractions_browse_idx ON relation_retractions(
+    bot_id,created_at DESC,operation_id DESC
+);
+CREATE INDEX relation_retractions_actor_idx ON relation_retractions(
+    bot_id,actor_subject_ref,created_at DESC,operation_id DESC
 );
 
 CREATE TABLE memory_queries (
@@ -6887,6 +6894,88 @@ CREATE FUNCTION memory_committed_forget_result(
         SELECT o.result_payload FROM __forest_module_schema__.source_forget_operations o
         WHERE o.bot_id=requested_bot AND o.operation_id=requested_id
     ) END
+$$;
+
+CREATE FUNCTION memory_query_relation_retractions(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    page_limit integer := COALESCE((input->>'limit')::integer,25);
+    snapshot_time timestamptz := COALESCE(
+        (input->>'snapshot_created_at')::timestamptz,clock_timestamp());
+    snapshot_value pg_snapshot := COALESCE(
+        (input->>'snapshot_xid')::pg_snapshot,pg_current_snapshot());
+    after_time timestamptz := (input->>'after_created_at')::timestamptz;
+    after_operation text := input->>'after_operation_id';
+    filter_digest text;
+    items jsonb;
+    more boolean;
+    next_time timestamptz;
+    next_operation text;
+BEGIN
+    filter_digest := 'sha256:' || encode(sha256(convert_to((
+        jsonb_build_array(input - 'limit' - 'snapshot_created_at' - 'snapshot_xid'
+            - 'after_created_at' - 'after_operation_id' - 'cursor_filter_digest',
+            snapshot_value::text,snapshot_time::text)
+    )::text,'UTF8')),'hex');
+    IF page_limit NOT BETWEEN 1 AND 50 OR
+       ((after_time IS NOT NULL) <> (after_operation IS NOT NULL)) OR
+       (after_time IS NOT NULL AND (NOT input ? 'snapshot_created_at' OR
+          NOT input ? 'snapshot_xid' OR
+          input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Relation retraction cursor is invalid','status',422));
+    END IF;
+    WITH page AS MATERIALIZED (
+        SELECT r.operation_id,r.contribution_id,r.actor_subject_ref,r.reason_code,
+            r.created_at,c.relation_id,c.relation_kind,c.origin_kind,
+            c.left_kind,c.left_id,c.right_kind,c.right_id,c.cross_trunk,
+            c.weight_micros
+        FROM __forest_module_schema__.relation_retractions r
+        JOIN __forest_module_schema__.relation_contributions c
+          ON c.bot_id=r.bot_id AND c.contribution_id=r.contribution_id
+        WHERE r.bot_id=requested_bot AND r.created_at<=snapshot_time
+          AND pg_visible_in_snapshot(r.created_xid,snapshot_value)
+          AND (after_time IS NULL OR
+               (r.created_at,r.operation_id)<(after_time,after_operation))
+          AND (input->>'relation_id' IS NULL OR
+               c.relation_id=input->>'relation_id')
+          AND (input->>'contribution_id' IS NULL OR
+               r.contribution_id=input->>'contribution_id')
+          AND (input->>'actor_subject_ref' IS NULL OR
+               r.actor_subject_ref=input->>'actor_subject_ref')
+          AND (input->>'reason_code' IS NULL OR
+               r.reason_code=input->>'reason_code')
+        ORDER BY r.created_at DESC,r.operation_id DESC LIMIT page_limit+1
+    ), visible AS (
+        SELECT * FROM page ORDER BY created_at DESC,operation_id DESC LIMIT page_limit
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'operation_id',v.operation_id,'relation_id',v.relation_id,
+        'contribution_id',v.contribution_id,'actor_subject_ref',v.actor_subject_ref,
+        'reason_code',v.reason_code,'retracted_at',v.created_at,
+        'relation_kind',v.relation_kind,'origin_kind',v.origin_kind,
+        'left_kind',v.left_kind,'left_id',v.left_id,
+        'right_kind',v.right_kind,'right_id',v.right_id,
+        'cross_trunk',v.cross_trunk,'weight_micros',v.weight_micros
+    ) ORDER BY v.created_at DESC,v.operation_id DESC),'[]'::jsonb),
+        (SELECT count(*)>page_limit FROM page),
+        (SELECT created_at FROM visible ORDER BY created_at,operation_id LIMIT 1),
+        (SELECT operation_id FROM visible ORDER BY created_at,operation_id LIMIT 1)
+    INTO items,more,next_time,next_operation
+    FROM visible v;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-relation-retractions/1',
+            'snapshot_created_at',snapshot_time,'snapshot_xid',snapshot_value::text,
+            'filter_digest',filter_digest,'items',items,'has_more',more,
+            'next_cursor',CASE WHEN more THEN jsonb_build_object(
+                'created_at',next_time,'operation_id',next_operation) ELSE NULL END));
+EXCEPTION WHEN invalid_text_representation THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+            'message','Relation retraction snapshot is invalid','status',422));
+END;
 $$;
 
 CREATE FUNCTION memory_retract_management_relation(context jsonb, input jsonb)
