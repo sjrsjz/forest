@@ -1,1 +1,1 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{},"additionalProperties":false}
+{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"external_group_id":{"type":"string","minLength":1,"maxLength":256},"after_trunk_id":{"type":"string","minLength":1,"maxLength":256},"limit":{"type":"integer","minimum":1,"maximum":100}},"additionalProperties":false}

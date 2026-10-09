@@ -54,6 +54,63 @@ def _trial_owner_id(query_id: str, part_id: str) -> str:
 
 
 @pytest.mark.postgres
+async def test_trunk_directory_pages_beyond_old_limit(clean_authority, tmp_path):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "memory-packages"), store, installer, kernel=kernel,
+        initial_configuration=_configuration(), resolved_contracts={},
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_sources "
+            "(bot_id,source_id,registration_operation_id,input_digest,source_kind,"
+            "platform,realm_id,external_group_id,identity_incarnation,identity_digest,"
+            "trunk_id) "
+            "SELECT %s,'source/test/'||g,'register/test/'||g,%s,'GROUP',"
+            "'onebot','qq','group-'||g,1,"
+            "'sha256:'||repeat(lpad(to_hex(g),4,'0'),16),"
+            "'trunk/test/'||lpad(g::text,4,'0') "
+            "FROM generate_series(1,4105) AS g"
+        ).format(namespace), (store.bot_id, "sha256:" + "a" * 64))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_trunks(bot_id,trunk_id,source_id) "
+            "SELECT bot_id,trunk_id,source_id FROM {}.memory_sources "
+            "WHERE bot_id=%s AND source_id LIKE 'source/test/%%'"
+        ).format(namespace, namespace), (store.bot_id,))
+
+    async def page(input_value):
+        async with store.pool.connection() as conn:
+            row = await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_list_trunks(%s::jsonb,%s::jsonb)"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id}), Jsonb(input_value),
+            ))).fetchone()
+        result = row["memory_list_trunks"]
+        assert result["ok"] is True
+        return result["value"]
+
+    first = await page({"limit": 100})
+    assert len(first["items"]) == 100
+    assert first["has_more"] is True
+    assert first["next_after"] == first["items"][-1]["trunk_id"]
+    second = await page({"limit": 100, "after_trunk_id": first["next_after"]})
+    assert len(second["items"]) == 100
+    assert second["has_more"] is True
+    assert {item["trunk_id"] for item in first["items"]}.isdisjoint(
+        item["trunk_id"] for item in second["items"]
+    )
+    tail = await page({"limit": 100, "after_trunk_id": "trunk/test/4095"})
+    assert len(tail["items"]) == 10
+    assert tail["has_more"] is False and tail["next_after"] is None
+    exact = await page({"limit": 1, "external_group_id": "group-120"})
+    assert [item["external_group_id"] for item in exact["items"]] == ["group-120"]
+    assert exact["has_more"] is False
+
+
+@pytest.mark.postgres
 async def test_embedding_claim_budgets_bounded_image_renditions(clean_authority, tmp_path):
     store, installer = clean_authority
     kernel = await bootstrap_kernel(store, installer)
@@ -4498,6 +4555,22 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 "eligible_sources": 1,
             }
         ]
+        assert trunks["has_more"] is False and trunks["next_after"] is None
+        assert (await instance.invoke_management_query(
+            queries["memory.list-trunks"],
+            {"external_group_id": "933179609", "limit": 1},
+            timeout_seconds=10,
+        ))["items"] == trunks["items"]
+        assert (await instance.invoke_management_query(
+            queries["memory.list-trunks"],
+            {"after_trunk_id": "trunk/group/933179609", "limit": 1},
+            timeout_seconds=10,
+        )) == {"items": [], "has_more": False, "next_after": None}
+        assert (await instance.invoke_management_query(
+            queries["memory.list-trunks"],
+            {"external_group_id": "missing-group", "limit": 1},
+            timeout_seconds=10,
+        ))["items"] == []
         sources = await instance.invoke_management_query(
             queries["memory.query-sources"],
             {"author_subject_ref": "qq:42", "trunk_id": "trunk/group/933179609"},

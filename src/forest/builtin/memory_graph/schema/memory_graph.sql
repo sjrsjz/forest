@@ -8451,32 +8451,56 @@ $$;
 
 CREATE FUNCTION memory_list_trunks(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
-DECLARE result jsonb;
+DECLARE
+    requested_limit integer := COALESCE((input->>'limit')::integer,50);
+    result jsonb;
+    more boolean;
+    next_after text;
 BEGIN
-    SELECT COALESCE(jsonb_agg(jsonb_build_object(
-        'trunk_id',q.trunk_id,'source_id',q.source_id,
-        'platform',q.platform,'realm_id',q.realm_id,
-        'external_group_id',q.external_group_id,
-        'registered_sources',q.registered_sources,
-        'eligible_sources',q.eligible_sources
-    ) ORDER BY q.trunk_id),'[]'::jsonb) INTO result
-    FROM (
+    -- Live keyset browsing: trunk identities are immutable. A fresh first page
+    -- observes new trunks; an existing cursor never duplicates a prior row.
+    WITH page AS MATERIALIZED (
         SELECT t.trunk_id,t.source_id,s.platform,s.realm_id,s.external_group_id,
-            count(u.source_unit_id) AS registered_sources,
-            count(u.source_unit_id) FILTER (
-                WHERE u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE'
-            ) AS eligible_sources
+            s.status
         FROM __forest_module_schema__.memory_trunks t
         JOIN __forest_module_schema__.memory_sources s
             ON s.bot_id=t.bot_id AND s.source_id=t.source_id
-        LEFT JOIN __forest_module_schema__.source_units u
-            ON u.bot_id=t.bot_id AND u.trunk_id=t.trunk_id
         WHERE t.bot_id=context->>'bot_id'
-        GROUP BY t.trunk_id,t.source_id,s.platform,s.realm_id,s.external_group_id
-        ORDER BY t.trunk_id LIMIT 4096
-    ) q;
+            AND (input->>'after_trunk_id' IS NULL
+                OR t.trunk_id > input->>'after_trunk_id')
+            AND (input->>'external_group_id' IS NULL
+                OR s.external_group_id=input->>'external_group_id')
+        ORDER BY t.trunk_id
+        LIMIT requested_limit+1
+    ), selected AS (
+        SELECT * FROM page ORDER BY trunk_id LIMIT requested_limit
+    ), counted AS (
+        SELECT p.trunk_id,p.source_id,p.platform,p.realm_id,p.external_group_id,
+            counts.registered_sources,
+            CASE WHEN p.status='ACTIVE' THEN counts.eligible_sources ELSE 0 END
+                AS eligible_sources
+        FROM selected p
+        CROSS JOIN LATERAL (
+            SELECT count(*) AS registered_sources,
+                count(*) FILTER (WHERE u.eligibility_state='ELIGIBLE')
+                    AS eligible_sources
+            FROM __forest_module_schema__.source_units u
+            WHERE u.bot_id=context->>'bot_id' AND u.trunk_id=p.trunk_id
+        ) counts
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+            'trunk_id',q.trunk_id,'source_id',q.source_id,
+            'platform',q.platform,'realm_id',q.realm_id,
+            'external_group_id',q.external_group_id,
+            'registered_sources',q.registered_sources,
+            'eligible_sources',q.eligible_sources
+        ) ORDER BY q.trunk_id),'[]'::jsonb),
+        (SELECT count(*) > requested_limit FROM page),max(q.trunk_id)
+    INTO result,more,next_after
+    FROM counted q;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
-        'value',jsonb_build_object('items',result));
+        'value',jsonb_build_object('items',result,'has_more',more,
+            'next_after',CASE WHEN more THEN next_after ELSE NULL END));
 END;
 $$;
 
