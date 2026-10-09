@@ -530,17 +530,10 @@ CREATE TABLE relation_retractions (
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
     input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     contribution_id text NOT NULL,
-    reason_payload_id text NOT NULL CHECK (octet_length(reason_payload_id) BETWEEN 1 AND 256),
-    reason_payload_digest text NOT NULL CHECK (
-        reason_payload_digest ~ '^sha256:[a-f0-9]{64}$'
+    actor_subject_ref text NOT NULL CHECK (octet_length(actor_subject_ref) BETWEEN 1 AND 256),
+    reason_code text NOT NULL CHECK (
+        reason_code IN ('INCORRECT','STALE','UNSAFE','OTHER')
     ),
-    reason_owner_component_id text NOT NULL CHECK (
-        octet_length(reason_owner_component_id) BETWEEN 1 AND 128
-    ),
-    reason_owner_kind text NOT NULL CHECK (
-        octet_length(reason_owner_kind) BETWEEN 1 AND 128
-    ),
-    reason_owner_id text NOT NULL CHECK (octet_length(reason_owner_id) BETWEEN 1 AND 512),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,operation_id),
     UNIQUE (bot_id,contribution_id),
@@ -6894,6 +6887,77 @@ CREATE FUNCTION memory_committed_forget_result(
         SELECT o.result_payload FROM __forest_module_schema__.source_forget_operations o
         WHERE o.bot_id=requested_bot AND o.operation_id=requested_id
     ) END
+$$;
+
+CREATE FUNCTION memory_retract_management_relation(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_contribution text := input->>'contribution_id';
+    requested_relation text := input->>'relation_id';
+    requested_actor text := input->>'requested_by';
+    requested_reason text := input->>'reason_code';
+    requested_digest text := 'sha256:' ||
+        encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    previous_record record;
+    target_record record;
+    retracted_at timestamptz;
+BEGIN
+    IF requested_bot IS NULL OR requested_operation IS NULL OR
+       octet_length(requested_operation) NOT BETWEEN 1 AND 256 OR
+       requested_contribution IS NULL OR requested_relation IS NULL OR
+       requested_actor IS NULL OR octet_length(requested_actor) NOT BETWEEN 1 AND 256 OR
+       requested_reason IS NULL OR
+       requested_reason NOT IN ('INCORRECT','STALE','UNSAFE','OTHER') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_RETRACTION_INVALID',
+                'message','Relation retraction request is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/relation-retract/' || requested_bot || '/' || requested_operation,0));
+    SELECT * INTO previous_record
+    FROM __forest_module_schema__.relation_retractions
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF FOUND THEN
+        IF previous_record.input_digest IS DISTINCT FROM requested_digest OR
+           previous_record.contribution_id IS DISTINCT FROM requested_contribution THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_RELATION_RETRACTION_CONFLICT',
+                    'message','Relation retraction operation differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.memory-relation-retraction/1',
+                'relation_id',requested_relation,'contribution_id',requested_contribution,
+                'reason_code',previous_record.reason_code,
+                'retracted_at',previous_record.created_at));
+    END IF;
+    SELECT c.relation_id,c.active INTO target_record
+    FROM __forest_module_schema__.relation_contributions c
+    WHERE c.bot_id=requested_bot AND c.contribution_id=requested_contribution
+    FOR UPDATE;
+    IF NOT FOUND OR target_record.relation_id IS DISTINCT FROM requested_relation THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_NOT_FOUND',
+                'message','Relation contribution does not exist','status',404));
+    END IF;
+    IF NOT target_record.active THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_ALREADY_RETRACTED',
+                'message','Relation contribution is no longer active','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.relation_retractions(
+        bot_id,operation_id,input_digest,contribution_id,actor_subject_ref,reason_code)
+    VALUES(requested_bot,requested_operation,requested_digest,
+        requested_contribution,requested_actor,requested_reason)
+    RETURNING created_at INTO retracted_at;
+    UPDATE __forest_module_schema__.relation_contributions SET active=false
+    WHERE bot_id=requested_bot AND contribution_id=requested_contribution;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-relation-retraction/1',
+            'relation_id',requested_relation,'contribution_id',requested_contribution,
+            'reason_code',requested_reason,'retracted_at',retracted_at));
+END;
 $$;
 
 CREATE FUNCTION memory_enqueue_management_forget(context jsonb, input jsonb)

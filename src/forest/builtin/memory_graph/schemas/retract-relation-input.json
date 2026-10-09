@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["relation_id", "contribution_id", "reason_code", "requested_by"],
+  "properties": {
+    "relation_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "contribution_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "reason_code": {"enum": ["INCORRECT", "STALE", "UNSAFE", "OTHER"]},
+    "requested_by": {"type": "string", "minLength": 1, "maxLength": 256}
+  }
+}

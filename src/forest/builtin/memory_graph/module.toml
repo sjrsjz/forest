@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.86.4"
+version = "1.87.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -284,9 +284,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.81.0"
+schema_version = "3.82.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "9be3f9e4293daab2542e6f38b2d0bd2653ee767d81b352687dcd32628fd6f405"
+baseline_sha256 = "238d034fb4c97bda457104114b2057fc355d6d9fefb3fadb32373268951a6a39"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -437,6 +437,13 @@ contract = "1.0"
 function = "memory_promote_claimed_association"
 input_schema = "schemas/association-promotion-work-input.json"
 output_schema = "schemas/association-promotion-work-output.json"
+
+[[components.domain_commands]]
+name = "memory.retract-management-relation"
+contract = "1.0"
+function = "memory_retract_management_relation"
+input_schema = "schemas/retract-relation-input.json"
+output_schema = "schemas/retract-relation-output.json"
 
 [[components.domain_commands]]
 name = "memory.enqueue-management-forget"
@@ -639,6 +646,13 @@ required_role = "ADMIN"
 actor_field = "requested_by"
 audit = "SECURITY"
 timeout_s = 30
+
+[[components.management_actions]]
+id = "memory.relations.retract"
+port = "memory.retract-management-relation"
+priority = "P0"
+actor_field = "requested_by"
+timeout_s = 15
 
 [[components.management_actions]]
 id = "memory.forget.enqueue"

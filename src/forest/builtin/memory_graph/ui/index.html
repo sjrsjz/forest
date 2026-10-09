@@ -242,6 +242,31 @@
         };
         box.append(learned,button);
       }
+      const review=document.createElement('details');review.className='review';
+      const heading=document.createElement('summary');heading.textContent='审核并撤回这条关系贡献';
+      const controls=document.createElement('div');controls.className='filters';
+      const reason=document.createElement('select');
+      for(const [code,label] of [['INCORRECT','关系错误'],['STALE','关系过时'],['UNSAFE','内容不安全'],['OTHER','其他原因']]){
+        const option=document.createElement('option');option.value=code;option.textContent=label;reason.append(option);
+      }
+      const confirmation=document.createElement('label');confirmation.className='confirm';
+      const checked=document.createElement('input');checked.type='checkbox';
+      confirmation.append(checked,document.createTextNode('已核对关系 ID、贡献 ID 和来源证据，确认撤回'));
+      const retract=document.createElement('button');retract.className='danger';retract.textContent='撤回贡献';
+      const operationKey=`relation-retract:${randomId()}`;
+      retract.onclick=async()=>{
+        if(!checked.checked){status('请先核对关系来源并确认撤回');return;}
+        retract.disabled=true;
+        try{
+          const result=await action('memory.relations.retract',{
+            relation_id:item.relation_id,contribution_id:item.contribution_id,
+            reason_code:reason.value
+          },operationKey);
+          if(box.isConnected){box.remove();relationPage=null;}
+          status(`已撤回关系贡献 ${result.contribution_id} · ${result.reason_code}`);
+        }catch(error){status(error.message);if(box.isConnected)retract.disabled=false;}
+      };
+      controls.append(reason,confirmation,retract);review.append(heading,controls);box.append(review);
       rows.append(box);
     }
     if(!items.length)rows.textContent='\u6ca1\u6709\u5339\u914d\u7684\u53ef\u89c1\u5173\u7cfb\u3002';

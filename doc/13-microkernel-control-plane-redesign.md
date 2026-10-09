@@ -434,6 +434,8 @@ Secret 权威先按 operation ID、再按 Secret 引用获取事务锁，保证�
 
 管理调用必须按 scope provider 收口所有权和传输。Bot 与 deployment provider 由注册表选择，Bot provider 签发真实 Bot ticket，deployment provider 保持部署会话事务边界；deployment 模块与 Bot 模块使用同一发现、生命周期、契约和 UI 挂载协议。Memory 模块必须声明群主干目录、来源组合筛选、绑定筛选条件的稳定键集分页、人工关系筛选、实际发布图的 scope/节点/边遍历，以及 text/image/mixed 真实召回试验；每条返回关系必须说明方向、审核来源、贡献、证据、投影版本和跨主干状态。相关索引直接进入最终数据库基线，控制台只通过模块 operation 使用这些能力。简单列表、浏览器内筛选或 JSON 图遍历不能冒充大规模记忆管理完成。
 
+关系人工撤回只作用于准确的贡献 ID，不把整个关系名当作隐式批量目标。管理入口注入真实操作者，包内命令在同一事务锁定贡献、写不可变撤回事实并单向停用贡献；同一操作重放合流，另一操作与已停用贡献冲突。新图邻接和关系查询过滤停用贡献；历史冻结证据保留原查询的事实，不回写伪造旧回复。关系来源证据与撤回记录须能按权限独立查询，后续审核历史分页也属于 Memory 包，而非宿主数据库后台。
+
 Bot 目录拆分必须保持两层 authority，不能把整个“Bot 页面”包装成 deployment 模块。部署内核持有 Bot 基础身份、期望运行状态、观测和幂等操作账本；`deployment.bot-catalog` 只持有目录界面、契约和通过受限内核端口发起的管理操作，不复制这些事实。未来的创建、重命名、供应重试和供应 Job 投影也必须调用相应 authority 的有界端口。点击目录项只把规范 `bot_id` 交给壳层的通用 scope opener。壳层通过带会话和 CSRF 的单 Bot scope resolver 向部署内核取得当前可用的 scope，再通过 Bot provider 挂载目标 Bot 的模块注册表；部署 runtime 不得无界展开全体 Bot 目录，当前 Bot 仅由其 scoped runtime 投影。维护开关、组件配置/启停/调用、OneBot、Agent、Memory、Routing 和 Scheduler 始终由目标 Bot authority 与对应模块契约处理，不能经过目录模块代签。包工件目录也不能顺便塞入 Bot 目录：全部署包仓库归 deployment/host 服务，某个 Bot 对包代际的选择才归 Bot scope。目录贡献卸载后，已有 Bot runtime 不被伪装成删除；只是控制面不再提供目录发现入口。
 
 UI 生命周期同样分层。目录贡献可以调用壳层提供的通用 `openScope({kind,id})` 能力，但不能取得 `app.js` 内部函数、直接操作 Bot 工作区 DOM 或拼接 Bot 专用管理 URL。目录可附带名称等显示提示，但它们不是作用域权威。Scope opener 必须通过通用 `/scopes/{kind}/{id}/modules` 和对应 provider 重新解析目标、读取该 scope 的 ACTIVE 模块描述符并建立工作区；目录模块自行处理列表分页、供应进度、创建/重命名/重试表单和晚到响应。未 READY 的 Bot 仅在目录内展示供应状态，不伪装成已可挂载的运行作用域。这样 Bot 数量增长后可以给目录增加服务端筛选与键集分页，而不会让每个 Bot 的业务面板重新成为 deployment 页面的一部分。

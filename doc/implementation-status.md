@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Memory 关系人工撤回（2026-10-10）：`memory.graph` 1.87.0 / 私有 SQL 3.82.0 在包内增加 `memory.relations.retract` 管理动作。管理员从关系卡片核对准确关系、贡献和来源证据后选择限定原因并确认；命令按贡献行串行，记录不可变操作者/原因/操作摘要，并把该贡献一次性停用。相同操作重放返回同一回执，不同操作并发只允许一笔成功；新关系浏览与图召回不再使用停用贡献，已有冻结证据仍保留历史记录。隔离 PostgreSQL 的跨 Bot 隔离、并发、重放和新查询可见性用例 `1 passed`；内嵌 UI 脚本语法检查通过。本次未切换在线 Bot，也未发送 QQ 消息。关系审核历史的分页浏览、全文/向量来源过滤及发布图投影仍未完成。
+
 Effect participant 与只读 UnitOfWork 契约收敛（2026-10-10）：当前源码在新建的隔离 PostgreSQL Bot 库、假 OneBot、假模型/VL 与假 Milvus 下完成完整 BotHost 整链测试，`1 passed`（554.17 秒），覆盖 Shell、查询 facet 嵌入、向量工作、记忆管理与遗忘、热重载和重启。此前查询 facet 等待超时的根因是 `kernel.effect` participant 未接收 UnitOfWork 的 `read_only` 参数，导致 Effect prepare 在任何嵌入 Provider attempt 之前以 `HOST_STATE_FAILED` 失败，并非 VL 嵌入模型响应慢。现统一接收只读标志并拒绝只读计划中的 Effect 写入；Worker 的意外网关异常在宿主日志记录堆栈，IPC 仍只返回通用错误。定向 Effect 事务测试 `2 passed`；测试数据库无残留。本次测试没有连接真实 QQ 或调用真实模型，在线实例未切换当前源码。Bot 基础身份与期望运行状态继续由内核持有，`deployment.bot-catalog` 只通过受限端口提供管理操作。
 
 当前在线实例的实际运行状态与仍未完成的真实 @ 验收见 [v21 在线切换记录](live-v21-cutover-2026-10-09.md)。Bot 基础身份和期望运行状态属于部署内核；`deployment.bot-catalog` 仅通过受限端口提供可热重载管理入口。
