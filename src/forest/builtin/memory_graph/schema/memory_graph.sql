@@ -1293,6 +1293,12 @@ CREATE TABLE vector_work_settlements (
 CREATE INDEX source_units_author_idx ON source_units(
     bot_id,author_subject_ref,eligibility_state,occurred_at DESC,source_unit_id DESC
 );
+CREATE INDEX source_units_author_payload_idx ON source_units(
+    bot_id,author_payload_id,source_unit_id
+);
+CREATE INDEX source_parts_payload_idx ON source_parts(
+    bot_id,payload_id,source_unit_id
+);
 CREATE INDEX source_units_modality_idx ON source_units(
     bot_id,modality,eligibility_state,occurred_at DESC,source_unit_id DESC
 );
@@ -7202,6 +7208,43 @@ BEGIN
 END;
 $$;
 
+-- Resolve Payload closure through two reverse indexes. A correlated OR over
+-- source_units would read every source in a long-lived Bot for each forget batch.
+CREATE FUNCTION memory_payload_source_candidates(requested_bot text, selected_ids text[])
+RETURNS TABLE(source_unit_id text) LANGUAGE sql STABLE AS $$
+    SELECT candidate.source_unit_id FROM (
+        SELECT u.source_unit_id
+        FROM __forest_module_schema__.source_units u
+        WHERE u.bot_id=requested_bot AND u.author_payload_id=ANY(selected_ids)
+        UNION
+        SELECT p.source_unit_id
+        FROM __forest_module_schema__.source_parts p
+        WHERE p.bot_id=requested_bot AND p.payload_id=ANY(selected_ids)
+    ) candidate
+$$;
+
+-- The three reverse edge paths stay independent until their small candidate
+-- sets are merged; unrelated graph edges must not be scanned for each batch.
+CREATE FUNCTION memory_forget_relation_candidates(
+    requested_bot text, affected_ids text[])
+RETURNS TABLE(contribution_id text) LANGUAGE sql STABLE AS $$
+    SELECT candidate.contribution_id FROM (
+        SELECT c.contribution_id
+        FROM __forest_module_schema__.relation_contributions c
+        WHERE c.bot_id=requested_bot AND c.active
+          AND c.left_kind='SOURCE_UNIT' AND c.left_id=ANY(affected_ids)
+        UNION
+        SELECT c.contribution_id
+        FROM __forest_module_schema__.relation_contributions c
+        WHERE c.bot_id=requested_bot AND c.active
+          AND c.right_kind='SOURCE_UNIT' AND c.right_id=ANY(affected_ids)
+        UNION
+        SELECT e.contribution_id
+        FROM __forest_module_schema__.relation_evidence e
+        WHERE e.bot_id=requested_bot AND e.source_unit_id=ANY(affected_ids)
+    ) candidate
+$$;
+
 CREATE FUNCTION memory_source_forget_impact(requested_bot text, selected_ids text[])
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
@@ -7213,12 +7256,11 @@ DECLARE
 BEGIN
     SELECT COALESCE(array_agg(u.source_unit_id ORDER BY u.source_unit_id),ARRAY[]::text[])
     INTO affected_ids
-    FROM __forest_module_schema__.source_units u
-    WHERE u.bot_id=requested_bot AND u.eligibility_state<>'SUPPRESSED' AND (
-        u.author_payload_id=ANY(selected_ids) OR EXISTS (
-            SELECT 1 FROM __forest_module_schema__.source_parts p
-            WHERE p.bot_id=u.bot_id AND p.source_unit_id=u.source_unit_id
-              AND p.payload_id=ANY(selected_ids)));
+    FROM __forest_module_schema__.memory_payload_source_candidates(
+        requested_bot,selected_ids) candidate
+    JOIN __forest_module_schema__.source_units u
+      ON u.bot_id=requested_bot AND u.source_unit_id=candidate.source_unit_id
+    WHERE u.eligibility_state<>'SUPPRESSED';
     SELECT COALESCE(array_agg(f.facet_id ORDER BY f.facet_id),ARRAY[]::text[])
     INTO vector_ids
     FROM __forest_module_schema__.embedding_facets f
@@ -7228,13 +7270,11 @@ BEGIN
           WHERE d.bot_id=f.bot_id AND d.index_ref_id=f.facet_id);
     SELECT COALESCE(array_agg(c.contribution_id ORDER BY c.contribution_id),ARRAY[]::text[])
     INTO relation_ids
-    FROM __forest_module_schema__.relation_contributions c
-    WHERE c.bot_id=requested_bot AND c.active AND (
-        (c.left_kind='SOURCE_UNIT' AND c.left_id=ANY(affected_ids)) OR
-        (c.right_kind='SOURCE_UNIT' AND c.right_id=ANY(affected_ids)) OR EXISTS (
-            SELECT 1 FROM __forest_module_schema__.relation_evidence e
-            WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
-              AND e.source_unit_id=ANY(affected_ids)));
+    FROM __forest_module_schema__.memory_forget_relation_candidates(
+        requested_bot,affected_ids) candidate
+    JOIN __forest_module_schema__.relation_contributions c
+      ON c.bot_id=requested_bot AND c.contribution_id=candidate.contribution_id
+    WHERE c.active;
     SELECT COALESCE(array_agg(j.journal_id ORDER BY j.journal_id),ARRAY[]::text[])
     INTO journal_ids
     FROM __forest_module_schema__.association_journal j
@@ -7365,13 +7405,13 @@ BEGIN
                     ARRAY[]::text[])
     INTO affected_ids
     FROM (
-        SELECT u.source_unit_id FROM __forest_module_schema__.source_units u
-        WHERE u.bot_id=requested_bot AND u.eligibility_state<>'SUPPRESSED' AND (
-            u.author_payload_id=ANY(selected_ids) OR EXISTS (
-                SELECT 1 FROM __forest_module_schema__.source_parts p
-                WHERE p.bot_id=u.bot_id AND p.source_unit_id=u.source_unit_id
-                  AND p.payload_id=ANY(selected_ids)))
-        ORDER BY u.source_unit_id FOR UPDATE
+        SELECT u.source_unit_id
+        FROM __forest_module_schema__.memory_payload_source_candidates(
+            requested_bot,selected_ids) candidate
+        JOIN __forest_module_schema__.source_units u
+          ON u.bot_id=requested_bot AND u.source_unit_id=candidate.source_unit_id
+        WHERE u.eligibility_state<>'SUPPRESSED'
+        ORDER BY u.source_unit_id FOR UPDATE OF u
     ) locked;
     IF required_source_ids IS NULL OR cardinality(required_source_ids)=0 OR
        NOT required_source_ids <@ affected_ids THEN
@@ -7414,12 +7454,10 @@ BEGIN
       AND (trigger_source_unit_id=ANY(affected_ids)
            OR seed_source_unit_id=ANY(affected_ids));
     UPDATE __forest_module_schema__.relation_contributions c SET active=false
-    WHERE c.bot_id=requested_bot AND c.active AND (
-        (c.left_kind='SOURCE_UNIT' AND c.left_id=ANY(affected_ids)) OR
-        (c.right_kind='SOURCE_UNIT' AND c.right_id=ANY(affected_ids)) OR EXISTS (
-            SELECT 1 FROM __forest_module_schema__.relation_evidence e
-            WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
-              AND e.source_unit_id=ANY(affected_ids)));
+    FROM __forest_module_schema__.memory_forget_relation_candidates(
+        requested_bot,affected_ids) candidate
+    WHERE c.bot_id=requested_bot AND c.contribution_id=candidate.contribution_id
+      AND c.active;
     GET DIAGNOSTICS retracted_count = ROW_COUNT;
     RETURN jsonb_build_object(
         'suppressed_source_units',cardinality(affected_ids),
