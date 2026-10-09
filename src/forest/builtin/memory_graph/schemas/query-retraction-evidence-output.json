@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "relation_id", "contribution_id", "snapshot_xid", "total_count", "items", "has_more", "next_after"],
+  "properties": {
+    "protocol": {"const": "forest.memory-retraction-evidence/1"},
+    "relation_id": {"$ref": "#/$defs/id"},
+    "contribution_id": {"$ref": "#/$defs/id"},
+    "snapshot_xid": {"type": "string", "minLength": 3, "maxLength": 65536},
+    "total_count": {"type": "integer", "minimum": 0, "maximum": 64},
+    "items": {"type": "array", "maxItems": 16, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evidence_index", "source_unit_id", "source_revision", "available", "source"],
+      "properties": {
+        "evidence_index": {"type": "integer", "minimum": 0, "maximum": 63},
+        "source_unit_id": {"$ref": "#/$defs/id"},
+        "source_revision": {"type": "integer", "minimum": 1},
+        "available": {"type": "boolean"},
+        "source": {"oneOf": [
+          {"type": "null"},
+          {"type": "object", "additionalProperties": false,
+           "required": ["part_id", "trunk_id", "source_id", "source_kind", "platform", "realm_id", "external_group_id", "author_subject_ref"],
+           "properties": {
+             "part_id": {"$ref": "#/$defs/id"},
+             "trunk_id": {"type": ["string", "null"]},
+             "source_id": {"$ref": "#/$defs/id"},
+             "source_kind": {"type": "string"},
+             "platform": {"type": ["string", "null"]},
+             "realm_id": {"type": ["string", "null"]},
+             "external_group_id": {"type": ["string", "null"]},
+             "author_subject_ref": {"$ref": "#/$defs/id"}
+           }}
+        ]}
+      }
+    }},
+    "has_more": {"type": "boolean"},
+    "next_after": {"type": ["integer", "null"], "minimum": 0, "maximum": 63}
+  },
+  "$defs": {"id": {"type": "string", "minLength": 1, "maxLength": 256}}
+}

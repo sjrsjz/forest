@@ -9,7 +9,7 @@
     "filter_digest": {"type": "string", "pattern": "^sha256:[a-f0-9]{64}$"},
     "items": {"type": "array", "maxItems": 50, "items": {
       "type": "object", "additionalProperties": false,
-      "required": ["operation_id", "relation_id", "contribution_id", "actor_subject_ref", "reason_code", "retracted_at", "relation_kind", "origin_kind", "left_kind", "left_id", "right_kind", "right_id", "cross_trunk", "weight_micros"],
+      "required": ["operation_id", "relation_id", "contribution_id", "actor_subject_ref", "reason_code", "retracted_at", "relation_kind", "origin_kind", "left_kind", "left_id", "right_kind", "right_id", "cross_trunk", "weight_micros", "evidence_count"],
       "properties": {
         "operation_id": {"$ref": "#/$defs/id"},
         "relation_id": {"$ref": "#/$defs/id"},
@@ -24,7 +24,8 @@
         "right_kind": {"enum": ["SOURCE_UNIT", "ASSERTION", "ENTITY", "ARTIFACT"]},
         "right_id": {"$ref": "#/$defs/id"},
         "cross_trunk": {"type": "boolean"},
-        "weight_micros": {"type": "integer", "minimum": 0, "maximum": 1000000000000}
+        "weight_micros": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+        "evidence_count": {"type": "integer", "minimum": 0, "maximum": 64}
       }
     }},
     "has_more": {"type": "boolean"},

@@ -308,7 +308,38 @@
       title.textContent=`${item.reason_code} · ${item.relation_kind} · ${item.relation_id}`;
       const detail=document.createElement('div');detail.className='detail';
       detail.textContent=`贡献 ${item.contribution_id} · 操作 ${item.operation_id}\n${item.left_kind}:${item.left_id} ${item.relation_kind==='ASSOCIATES_WITH'?'↔':'→'} ${item.right_kind}:${item.right_id}\n${item.origin_kind} · ${item.cross_trunk?'跨主干':'同主干'} · 权重 ${item.weight_micros}/1000000\n审核 ${item.actor_subject_ref} · ${stamp(item.retracted_at)}`;
-      box.append(title,detail);rows.append(box);
+      box.append(title,detail);
+      if(item.evidence_count){
+        const evidence=document.createElement('div');evidence.className='detail';
+        const button=document.createElement('button');
+        button.textContent=`查看历史证据（${item.evidence_count} 条）`;
+        let after=null,shown=0;
+        button.onclick=async()=>{
+          button.disabled=true;
+          try{
+            const input={relation_id:item.relation_id,
+              contribution_id:item.contribution_id,snapshot_xid:page.snapshot_xid,limit:16};
+            if(after!==null)input.after_evidence_index=after;
+            const result=await call('memory.relations.retraction-evidence',input);
+            if(!box.isConnected)return;
+            for(const entry of result.items){
+              const line=document.createElement('div');
+              line.textContent=entry.available&&entry.source?
+                `${entry.evidence_index+1}. ${formatRelationSource({
+                  ...entry.source,source_unit_id:entry.source_unit_id})}`:
+                `${entry.evidence_index+1}. 来源 ${entry.source_unit_id} 已失效；群、作者和 part 已隐藏`;
+              evidence.append(line);
+            }
+            shown+=result.items.length;
+            if(result.has_more){
+              after=result.next_after;
+              button.textContent=`继续查看历史证据（剩余 ${result.total_count-shown} 条）`;
+            }else button.remove();
+          }catch(error){status(error.message);}finally{if(box.isConnected)button.disabled=false;}
+        };
+        box.append(button,evidence);
+      }
+      rows.append(box);
     }
     if(!page.items.length)rows.textContent='没有匹配的关系撤回记录。';
     $('retraction-count').textContent=`本页 ${page.items.length} 条 · 固定事实快照 ${stamp(page.snapshot_created_at)}`;

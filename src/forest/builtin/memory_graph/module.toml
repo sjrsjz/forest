@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.87.1"
+version = "1.87.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -284,9 +284,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.82.1"
+schema_version = "3.82.2"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "30aab6cb8e01f6e993572bd7bba543af461b987d4ed48f1ebc304c5ce93aaf88"
+baseline_sha256 = "20c06daf1d38fb7be147e235d0096056571e83a097a0b40c44f7c05608be5baf"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -374,6 +374,13 @@ contract = "1.0"
 function = "memory_query_relation_retractions"
 input_schema = "schemas/query-retractions-input.json"
 output_schema = "schemas/query-retractions-output.json"
+
+[[components.domain_queries]]
+name = "memory.query-retraction-evidence"
+contract = "1.0"
+function = "memory_query_retraction_evidence"
+input_schema = "schemas/query-relation-evidence-input.json"
+output_schema = "schemas/query-retraction-evidence-output.json"
 
 [[components.domain_queries]]
 name = "memory.query-relation-evidence"
@@ -579,6 +586,15 @@ required_role = "ADMIN"
 audit = "SECURITY"
 default_limit = 25
 max_limit = 50
+timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.relations.retraction-evidence"
+port = "memory.query-retraction-evidence"
+required_role = "ADMIN"
+audit = "SECURITY"
+default_limit = 16
+max_limit = 16
 timeout_s = 10
 
 [[components.management_queries]]

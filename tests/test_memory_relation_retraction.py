@@ -28,6 +28,40 @@ async def test_relation_retraction_converges_and_removes_new_recall_edges(
     )
     namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
     async with store.pool.connection() as conn, conn.transaction():
+        digest = "sha256:" + "a" * 64
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_sources "
+            "(bot_id,source_id,registration_operation_id,input_digest,source_kind,"
+            "platform,realm_id,external_group_id,identity_incarnation,identity_digest,"
+            "trunk_id) VALUES (%s,'source/review','source/register',%s,'GROUP',"
+            "'onebot','qq','933179609',1,%s,'trunk/review')"
+        ).format(namespace), (store.bot_id, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_trunks(bot_id,trunk_id,source_id) "
+            "VALUES (%s,'trunk/review','source/review')"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.source_units "
+            "(bot_id,source_unit_id,capture_operation_id,input_digest,source_id,"
+            "trunk_id,source_order_seq,source_revision,unit_kind,modality,part_count,"
+            "content_manifest_digest,author_subject_ref,author_payload_id,"
+            "author_payload_digest,author_owner_component_id,author_owner_kind,"
+            "author_owner_id,accepted_deletion_epoch,eligibility_state,"
+            "eligible_at,eligible_xid,occurred_at) VALUES "
+            "(%s,'unit/review','capture/review',%s,'source/review','trunk/review',"
+            "1,1,'MESSAGE','TEXT',20,%s,'qq:42','payload/author',%s,"
+            "'memory.graph','test','unit/review',0,'ELIGIBLE',"
+            "clock_timestamp(),pg_current_xact_id(),clock_timestamp())"
+        ).format(namespace), (store.bot_id, digest, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.source_parts "
+            "(bot_id,source_unit_id,part_id,part_index,part_kind,media_type,"
+            "payload_id,payload_digest,payload_owner_component_id,"
+            "payload_owner_kind,payload_owner_id) "
+            "SELECT %s,'unit/review','part/review/'||n,n,'TEXT','text/plain',"
+            "'payload/review/'||n,%s,'memory.graph','test','unit/review' "
+            "FROM generate_series(0,19) n"
+        ).format(namespace), (store.bot_id, digest))
         await conn.execute(sql.SQL(
             "INSERT INTO {}.relation_contributions "
             "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
@@ -37,6 +71,13 @@ async def test_relation_retraction_converges_and_removes_new_recall_edges(
             "'ASSOCIATES_WITH','ENTITY','entity/left','ENTITY','entity/right',"
             "'MANUAL',900000,0,false)"
         ).format(namespace), (store.bot_id, "sha256:" + "a" * 64))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.relation_evidence "
+            "(bot_id,contribution_id,evidence_index,source_unit_id,"
+            "source_revision,part_id) "
+            "SELECT %s,'contribution/review',n,'unit/review',1,'part/review/'||n "
+            "FROM generate_series(0,19) n"
+        ).format(namespace), (store.bot_id,))
 
     async def invoke(operation, *, reason="INCORRECT", bot_id=None,
                      relation="relation/review", contribution="contribution/review"):
@@ -160,3 +201,61 @@ async def test_relation_retraction_converges_and_removes_new_recall_edges(
     fresh = await history({"limit": 1, "reason_code": "INCORRECT"})
     assert fresh["value"]["items"][0]["contribution_id"] == "contribution/review/late"
     assert (await history({"limit": 1, "reason_code": "STALE"}))["value"]["items"] == []
+
+    async def evidence(body, bot_id=None):
+        async with store.pool.connection() as conn:
+            row = await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_query_retraction_evidence(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": bot_id or store.bot_id}), Jsonb(body),
+            ))).fetchone()
+        return row["result"]
+
+    evidence_request = {
+        "relation_id": "relation/review", "contribution_id": "contribution/review",
+        "snapshot_xid": third_page["value"]["snapshot_xid"], "limit": 16,
+    }
+    old_snapshot = await evidence({
+        **evidence_request,
+        "snapshot_xid": before["result"]["value"]["snapshot_xid"],
+    })
+    assert old_snapshot["error"]["code"] == "MEMORY_RELATION_RETRACTION_NOT_FOUND"
+    assert (await evidence(evidence_request, bot_id="bot/foreign"))["error"][
+        "code"
+    ] == "MEMORY_RELATION_RETRACTION_NOT_FOUND"
+    first_evidence = await evidence(evidence_request)
+    assert first_evidence["ok"] is True
+    evidence_schema = json.loads((
+        Path(__file__).parents[1] /
+        "src/forest/builtin/memory_graph/schemas/query-retraction-evidence-output.json"
+    ).read_text(encoding="utf-8"))
+    Draft202012Validator(evidence_schema).validate(first_evidence["value"])
+    assert first_evidence["value"]["total_count"] == 20
+    assert len(first_evidence["value"]["items"]) == 16
+    assert first_evidence["value"]["has_more"] is True
+    assert first_evidence["value"]["items"][0]["source"] == {
+        "part_id": "part/review/0", "trunk_id": "trunk/review",
+        "source_id": "source/review", "source_kind": "GROUP",
+        "platform": "onebot", "realm_id": "qq",
+        "external_group_id": "933179609", "author_subject_ref": "qq:42",
+    }
+    second_evidence = await evidence({
+        **evidence_request,
+        "after_evidence_index": first_evidence["value"]["next_after"],
+    })
+    assert [item["evidence_index"] for item in second_evidence["value"]["items"]] == [
+        16, 17, 18, 19,
+    ]
+    assert second_evidence["value"]["has_more"] is False
+
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "UPDATE {}.source_units SET eligibility_state='SUPPRESSED',"
+            "eligibility_revision=eligibility_revision+1 "
+            "WHERE bot_id=%s AND source_unit_id='unit/review'"
+        ).format(namespace), (store.bot_id,))
+    redacted = await evidence(evidence_request)
+    assert redacted["value"]["items"][0] == {
+        "evidence_index": 0, "source_unit_id": "unit/review",
+        "source_revision": 1, "available": False, "source": None,
+    }
