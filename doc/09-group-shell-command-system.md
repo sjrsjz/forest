@@ -1,5 +1,7 @@
 # 群聊 Shell、管理命令与优先级详细设计
 
+> 当前实现说明（2026-10-09）：Adapter 先调用可热重载的 `shell.ingress.inspect` Worker，再进入 Inbox/分类事务；尚无下文所述的内核 ShellGate、ingress proof 或脱离 Shell 包的最小救援路由。下文是目标设计，最终归属待明确后须同步代码与协议。
+
 ## 1. 目标与边界
 
 管理员可以在群聊中查询、维护和修复 Forest，不要求身处服务器旁。群聊 Shell、WebUI 和 CLI 调用同一组类型化 management contracts；Shell 只提供适合短消息的入口和 CONTROL 回执，不成为另一套业务实现。
