@@ -232,6 +232,43 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
         second = await commit("reply/two", "reply/two")
         assert second["ok"] and second["value"]["journaled"] == 1
         await settle_next("association/two")
+        async def journal_page(filters):
+            row = await (await execute(
+                "SELECT {}.memory_query_association_journals(%s::jsonb,%s::jsonb) AS result",
+                (Jsonb({"bot_id": bot}), Jsonb(filters)),
+            )).fetchone()
+            return row["result"]
+
+        first_page = await journal_page({
+            "state": "PROMOTED", "trigger_external_group_id": "question",
+            "seed_external_group_id": "memory", "limit": 1,
+        })
+        assert first_page["ok"], first_page
+        page = first_page["value"]
+        Draft202012Validator(json.loads((
+            Path(__file__).parents[1] / "src/forest/builtin/memory_graph/schemas/"
+            "query-association-journals-output.json"
+        ).read_text(encoding="utf-8"))).validate(page)
+        assert page["has_more"] and len(page["items"]) == 1
+        assert page["items"][0]["trigger_evidence"]["trunk_id"] == "trunk/question"
+        assert page["items"][0]["seed_evidence"]["external_group_id"] == "memory"
+        assert page["items"][0]["cross_trunk"] is True
+        assert page["items"][0]["relation_active"] is True
+        next_filters = {
+            "state": "PROMOTED", "trigger_external_group_id": "question",
+            "seed_external_group_id": "memory", "limit": 1,
+            "snapshot_xid": page["snapshot_xid"],
+            "cursor_filter_digest": page["filter_digest"],
+            "after_created_at": page["next_cursor"]["created_at"],
+            "after_journal_id": page["next_cursor"]["journal_id"],
+        }
+        second_page = await journal_page(next_filters)
+        assert second_page["ok"] and len(second_page["value"]["items"]) == 1
+        assert second_page["value"]["has_more"] is False
+        assert (await journal_page({**next_filters,
+            "seed_external_group_id": "question"}))["error"]["code"] == (
+                "MEMORY_QUERY_INVALID"
+            )
         await execute(
             "INSERT INTO {}.association_journal("
             "bot_id,journal_id,operation_id,input_digest,reply_ref,bundle_id,"
@@ -242,6 +279,14 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
             "'query/test','trigger/stale','trigger',1,'text-alt','seed',1,'text-alt',0.8,true)",
             (bot, digest),
         )
+        pending = await journal_page({"state": "PENDING_ARCHIVE", "journal_id": "journal/stale"})
+        assert pending["ok"] and pending["value"]["items"][0]["journal_id"] == (
+            "journal/stale"
+        )
+        assert not (await journal_page({
+            "state": "PENDING_ARCHIVE", "journal_id": "journal/stale",
+            "snapshot_xid": page["snapshot_xid"],
+        }))["value"]["items"]
 
         async def claim_only(token):
             result = (await (await execute(

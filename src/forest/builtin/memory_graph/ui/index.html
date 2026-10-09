@@ -27,6 +27,11 @@
     <div class="filters"><input id="relation-evidence-trunk" placeholder="证据主干 ID"><input id="relation-evidence-group" placeholder="证据群号"><input id="relation-evidence-author" placeholder="证据作者 ID"><span class="muted">三个条件须由同一条证据满足；全局结果的有向边按规范左右端点显示。</span></div>
     <div class="filters"><label>跳数 <input id="graph-hops" type="number" min="1" max="3" value="2"></label><label>节点上限 <input id="graph-nodes" type="number" min="1" max="32" value="16"></label><label>边上限 <input id="graph-edges" type="number" min="1" max="32" value="16"></label><button id="relation-neighbourhood">多跳区域</button></div>
     <div id="relation-nodes" class="detail"></div><div id="relation-rows"></div><div class="pager"><span id="relation-count" class="muted"></span><button id="relation-next" disabled>下一页</button></div>
+    <details id="journal-browser"><summary>关联学习日志（实时状态，按创建时间分页）</summary>
+      <div class="filters"><input id="journal-id" placeholder="精确日志 ID"><input id="journal-query" placeholder="精确召回查询 ID"><select id="journal-state"><option value="">全部状态</option><option>PENDING_ARCHIVE</option><option>PROMOTED</option><option>SUPPRESSED</option></select><input id="journal-trigger-group" placeholder="触发群号"><input id="journal-seed-group" placeholder="种子群号"><button id="journal-search">查询日志</button></div>
+      <details><summary>更多两端来源条件</summary><div class="filters"><input id="journal-trigger-trunk" placeholder="触发主干 ID"><input id="journal-seed-trunk" placeholder="种子主干 ID"><input id="journal-trigger-author" placeholder="触发作者 ID"><input id="journal-seed-author" placeholder="种子作者 ID"></div></details>
+      <div id="journal-rows"></div><div class="pager"><span id="journal-count" class="muted"></span><button id="journal-next" disabled>下一页日志</button></div>
+    </details>
   </section>
   <section id="forget" class="panel hidden">
     <p class="muted">按来源单元预览影响范围。预览后内容或关系变化时，执行会拒绝旧计划；请求状态可按 ID 查询。</p>
@@ -70,7 +75,7 @@
 </div>
 <script>
 (()=>{'use strict';
-  let port,nonce='',sequence=0,draft=null,sourcePage=null,trunkPage=null,trunkRequestSequence=0,facetPage=null,facetUnit=null,facetRequestSequence=0,attemptRequestSequence=0,currentAttempt=null,retryKey=null,relationPage=null,relationGlobal=false,forgetPlan=null,forgetTimer=null,trialTimer=null,trialPage=null,batchPage=null,batchPlan=null,batchTimer=null;
+  let port,nonce='',sequence=0,draft=null,sourcePage=null,trunkPage=null,trunkRequestSequence=0,facetPage=null,facetUnit=null,facetRequestSequence=0,attemptRequestSequence=0,currentAttempt=null,retryKey=null,relationPage=null,relationGlobal=false,journalPage=null,journalRequestSequence=0,forgetPlan=null,forgetTimer=null,trialTimer=null,trialPage=null,batchPage=null,batchPlan=null,batchTimer=null;
   const trialImageUrls=new Set();
   function clearTrialImages(){for(const url of trialImageUrls)URL.revokeObjectURL(url);trialImageUrls.clear();}
   const pending=new Map(),$=id=>document.getElementById(id);
@@ -203,6 +208,34 @@
       rows.append(box);
     }
     if(!items.length)rows.textContent='\u6ca1\u6709\u5339\u914d\u7684\u53ef\u89c1\u5173\u7cfb\u3002';
+  }
+  async function loadAssociationJournals(next=false){
+    const input={limit:25};
+    for(const [field,id] of [['journal_id','journal-id'],['query_id','journal-query'],['state','journal-state'],['trigger_external_group_id','journal-trigger-group'],['seed_external_group_id','journal-seed-group'],['trigger_trunk_id','journal-trigger-trunk'],['seed_trunk_id','journal-seed-trunk'],['trigger_author_subject_ref','journal-trigger-author'],['seed_author_subject_ref','journal-seed-author']]){
+      const value=$(id).value.trim();if(value)input[field]=value;
+    }
+    if(next&&journalPage?.next_cursor){
+      input.snapshot_xid=journalPage.snapshot_xid;
+      input.cursor_filter_digest=journalPage.filter_digest;
+      input.after_created_at=journalPage.next_cursor.created_at;
+      input.after_journal_id=journalPage.next_cursor.journal_id;
+    }
+    const request=++journalRequestSequence;
+    const page=await call('memory.associations.journals',input);
+    if(request!==journalRequestSequence)return;
+    journalPage=page;
+    const rows=$('journal-rows');rows.replaceChildren();
+    for(const item of page.items){
+      const box=document.createElement('div');box.className='relation';
+      const title=document.createElement('strong');
+      title.textContent=`${item.state} · ${item.journal_id} · ${stamp(item.created_at)}`;
+      const detail=document.createElement('div');detail.className='detail';
+      detail.textContent=`回复 ${item.reply_ref} · 查询 ${item.query_id} · 尝试 ${item.attempt_count} · 待归档就绪 ${item.promotion_ready}\n触发 ${formatRelationSource(item.trigger_evidence)} · ${item.trigger_evidence.eligibility_state}/${item.trigger_evidence.source_status}\n种子 ${formatRelationSource(item.seed_evidence)} · ${item.seed_evidence.eligibility_state}/${item.seed_evidence.source_status}\n${item.cross_trunk?'跨主干':'同主干'} · 关系 ${item.relation_id??'—'} · 关系活动 ${item.relation_active} · 晋升 ${item.promoted_at?stamp(item.promoted_at):'—'}`;
+      box.append(title,detail);rows.append(box);
+    }
+    if(!page.items.length)rows.textContent='没有匹配的关联学习日志。';
+    $('journal-count').textContent=`本页 ${page.items.length} 条；创建快照已冻结，状态按查询时读取`;
+    $('journal-next').disabled=!page.has_more;
   }
   function relationFilters(input){
     if($('relation-kind').value)input.relation_kinds=[$('relation-kind').value];
@@ -581,7 +614,7 @@
   function changeSettings(){document.querySelectorAll('[data-path]').forEach(input=>draft.retrieval[input.dataset.path]=Number(input.value));send('set-draft',{value:draft});status('设置草稿已更新');}
   document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>show(button.dataset.tab));document.querySelectorAll('[data-path]').forEach(input=>input.onchange=changeSettings);
   $('trunk-search').onclick=()=>loadTrunks().catch(error=>status(error.message));$('trunk-next').onclick=()=>loadTrunks(true).catch(error=>status(error.message));$('trunk-browser').ontoggle=()=>{if($('trunk-browser').open&&!trunkPage)loadTrunks().catch(error=>status(error.message));};
-  $('source-search').onclick=()=>loadSources().catch(error=>status(error.message));$('source-next').onclick=()=>loadSources(true).catch(error=>status(error.message));$('facet-refresh').onclick=()=>loadSourceFacets().catch(error=>status(error.message));$('facet-state').onchange=()=>{facetPage=null;loadSourceFacets().catch(error=>status(error.message));};$('facet-next').onclick=()=>loadSourceFacets(true).catch(error=>status(error.message));$('relation-search').onclick=()=>loadRelations().catch(error=>status(error.message));$('relation-global').onclick=()=>loadRelations(false,true).catch(error=>status(error.message));$('relation-neighbourhood').onclick=()=>loadNeighbourhood().catch(error=>status(error.message));$('relation-next').onclick=()=>loadRelations(true).catch(error=>status(error.message));$('plan').onclick=()=>{changeSettings();send('request-plan');status('服务端校验中');};
+  $('source-search').onclick=()=>loadSources().catch(error=>status(error.message));$('source-next').onclick=()=>loadSources(true).catch(error=>status(error.message));$('facet-refresh').onclick=()=>loadSourceFacets().catch(error=>status(error.message));$('facet-state').onchange=()=>{facetPage=null;loadSourceFacets().catch(error=>status(error.message));};$('facet-next').onclick=()=>loadSourceFacets(true).catch(error=>status(error.message));$('relation-search').onclick=()=>loadRelations().catch(error=>status(error.message));$('relation-global').onclick=()=>loadRelations(false,true).catch(error=>status(error.message));$('relation-neighbourhood').onclick=()=>loadNeighbourhood().catch(error=>status(error.message));$('relation-next').onclick=()=>loadRelations(true).catch(error=>status(error.message));$('journal-search').onclick=()=>loadAssociationJournals().catch(error=>status(error.message));$('journal-next').onclick=()=>loadAssociationJournals(true).catch(error=>status(error.message));$('journal-browser').ontoggle=()=>{if($('journal-browser').open&&!journalPage)loadAssociationJournals().catch(error=>status(error.message));};$('plan').onclick=()=>{changeSettings();send('request-plan');status('服务端校验中');};
   $('retry-confirm').onchange=()=>$('retry-action').disabled=!$('retry-confirm').checked||!currentAttempt?.items.some(item=>item.retry_eligible);
   $('retry-action').onclick=()=>retryUnknownAttempt().catch(error=>status(error.message));
   $('forget-source').oninput=clearForgetPlan;

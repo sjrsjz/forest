@@ -1,0 +1,334 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "snapshot_xid",
+    "filter_digest",
+    "items",
+    "has_more",
+    "next_cursor"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.memory-association-journals-page/1"
+    },
+    "snapshot_xid": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 65536
+    },
+    "filter_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "journal_id",
+          "query_id",
+          "reply_ref",
+          "trigger_ref",
+          "state",
+          "promotion_ready",
+          "attempt_count",
+          "created_at",
+          "promoted_at",
+          "contribution_id",
+          "relation_id",
+          "relation_active",
+          "cross_trunk",
+          "trigger_evidence",
+          "seed_evidence"
+        ],
+        "properties": {
+          "journal_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "query_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reply_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "trigger_ref": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "state": {
+            "enum": [
+              "PENDING_ARCHIVE",
+              "PROMOTED",
+              "SUPPRESSED"
+            ]
+          },
+          "promotion_ready": {
+            "type": "boolean"
+          },
+          "attempt_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "promoted_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "contribution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "relation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "relation_active": {
+            "type": "boolean"
+          },
+          "cross_trunk": {
+            "type": "boolean"
+          },
+          "trigger_evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_unit_id",
+              "source_revision",
+              "part_id",
+              "source_id",
+              "source_kind",
+              "platform",
+              "realm_id",
+              "external_group_id",
+              "trunk_id",
+              "author_subject_ref",
+              "eligibility_state",
+              "source_status"
+            ],
+            "properties": {
+              "source_unit_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "source_revision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "part_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "source_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "source_kind": {
+                "enum": [
+                  "GROUP",
+                  "DIRECT",
+                  "DOCUMENT",
+                  "SYSTEM",
+                  "UNKNOWN"
+                ]
+              },
+              "platform": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "realm_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "external_group_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "trunk_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "author_subject_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "eligibility_state": {
+                "enum": [
+                  "REGISTERED",
+                  "ELIGIBLE",
+                  "SUPPRESSED"
+                ]
+              },
+              "source_status": {
+                "enum": [
+                  "ACTIVE",
+                  "RETIRED"
+                ]
+              }
+            }
+          },
+          "seed_evidence": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_unit_id",
+              "source_revision",
+              "part_id",
+              "source_id",
+              "source_kind",
+              "platform",
+              "realm_id",
+              "external_group_id",
+              "trunk_id",
+              "author_subject_ref",
+              "eligibility_state",
+              "source_status"
+            ],
+            "properties": {
+              "source_unit_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "source_revision": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "part_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "source_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "source_kind": {
+                "enum": [
+                  "GROUP",
+                  "DIRECT",
+                  "DOCUMENT",
+                  "SYSTEM",
+                  "UNKNOWN"
+                ]
+              },
+              "platform": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "realm_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "external_group_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "trunk_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "author_subject_ref": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "eligibility_state": {
+                "enum": [
+                  "REGISTERED",
+                  "ELIGIBLE",
+                  "SUPPRESSED"
+                ]
+              },
+              "source_status": {
+                "enum": [
+                  "ACTIVE",
+                  "RETIRED"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "has_more": {
+      "type": "boolean"
+    },
+    "next_cursor": {
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "created_at",
+            "journal_id"
+          ],
+          "properties": {
+            "created_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "journal_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

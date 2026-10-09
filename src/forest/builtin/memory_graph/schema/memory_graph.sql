@@ -1160,6 +1160,7 @@ CREATE TABLE association_journal (
     ),
     contribution_id text,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
     promoted_at timestamptz,
     promoted_xid xid8,
     PRIMARY KEY (bot_id,journal_id),
@@ -1207,6 +1208,21 @@ CREATE INDEX association_journal_pending_trigger_idx ON association_journal(
 CREATE INDEX association_journal_promoted_contribution_idx ON association_journal(
     bot_id,contribution_id,journal_id
 ) WHERE state='PROMOTED';
+CREATE INDEX association_journal_browse_idx ON association_journal(
+    bot_id,created_at DESC,journal_id DESC
+);
+CREATE INDEX association_journal_query_browse_idx ON association_journal(
+    bot_id,query_id,created_at DESC,journal_id DESC
+);
+CREATE INDEX association_journal_state_browse_idx ON association_journal(
+    bot_id,state,created_at DESC,journal_id DESC
+);
+CREATE INDEX association_journal_trigger_browse_idx ON association_journal(
+    bot_id,trigger_source_unit_id,created_at DESC,journal_id DESC
+);
+CREATE INDEX association_journal_seed_browse_idx ON association_journal(
+    bot_id,seed_source_unit_id,created_at DESC,journal_id DESC
+);
 
 CREATE INDEX sources_external_group_idx ON memory_sources(
     bot_id,platform,realm_id,external_group_id,identity_incarnation
@@ -10189,6 +10205,108 @@ EXCEPTION WHEN invalid_text_representation THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
             'message','Association evidence snapshot is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_query_association_journals(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    page_limit integer := COALESCE((input->>'limit')::integer,25);
+    snapshot_value pg_snapshot;
+    filter_digest text;
+    items jsonb;
+    more boolean;
+    cursor_value jsonb;
+BEGIN
+    snapshot_value := COALESCE((input->>'snapshot_xid')::pg_snapshot,pg_current_snapshot());
+    filter_digest := 'sha256:' || encode(sha256(convert_to(
+        jsonb_build_array(input - 'limit' - 'snapshot_xid' - 'after_created_at'
+            - 'after_journal_id' - 'cursor_filter_digest',snapshot_value::text)::text,
+        'UTF8')),'hex');
+    IF requested_bot IS NULL OR page_limit NOT BETWEEN 1 AND 50 OR
+       ((input ? 'after_created_at') <> (input ? 'after_journal_id')) OR
+       (input ? 'after_journal_id' AND (NOT input ? 'snapshot_xid' OR
+          input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) OR
+       (input ? 'state' AND input->>'state' NOT IN
+          ('PENDING_ARCHIVE','PROMOTED','SUPPRESSED')) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Association journal filter or cursor is invalid','status',422));
+    END IF;
+    WITH page AS (
+        SELECT j.journal_id,j.query_id,j.reply_ref,j.trigger_ref,j.state,
+            j.promotion_ready,j.attempt_count,j.created_at,j.promoted_at,
+            j.contribution_id,c.relation_id,COALESCE(c.active,false) AS relation_active,
+            tu.trunk_id IS DISTINCT FROM su.trunk_id AS cross_trunk,
+            jsonb_build_object('source_unit_id',j.trigger_source_unit_id,
+                'source_revision',j.trigger_source_revision,'part_id',j.trigger_part_id,
+                'source_id',ts.source_id,'source_kind',ts.source_kind,
+                'platform',ts.platform,'realm_id',ts.realm_id,
+                'external_group_id',ts.external_group_id,'trunk_id',tu.trunk_id,
+                'author_subject_ref',tu.author_subject_ref,
+                'eligibility_state',tu.eligibility_state,'source_status',ts.status)
+                AS trigger_evidence,
+            jsonb_build_object('source_unit_id',j.seed_source_unit_id,
+                'source_revision',j.seed_source_revision,'part_id',j.seed_part_id,
+                'source_id',ss.source_id,'source_kind',ss.source_kind,
+                'platform',ss.platform,'realm_id',ss.realm_id,
+                'external_group_id',ss.external_group_id,'trunk_id',su.trunk_id,
+                'author_subject_ref',su.author_subject_ref,
+                'eligibility_state',su.eligibility_state,'source_status',ss.status)
+                AS seed_evidence
+        FROM __forest_module_schema__.association_journal j
+        JOIN __forest_module_schema__.source_units tu
+          ON tu.bot_id=j.bot_id AND tu.source_unit_id=j.trigger_source_unit_id
+        JOIN __forest_module_schema__.memory_sources ts
+          ON ts.bot_id=tu.bot_id AND ts.source_id=tu.source_id
+        JOIN __forest_module_schema__.source_units su
+          ON su.bot_id=j.bot_id AND su.source_unit_id=j.seed_source_unit_id
+        JOIN __forest_module_schema__.memory_sources ss
+          ON ss.bot_id=su.bot_id AND ss.source_id=su.source_id
+        LEFT JOIN __forest_module_schema__.relation_contributions c
+          ON c.bot_id=j.bot_id AND c.contribution_id=j.contribution_id
+        WHERE j.bot_id=requested_bot
+          AND pg_visible_in_snapshot(j.created_xid,snapshot_value)
+          AND (input->>'journal_id' IS NULL OR j.journal_id=input->>'journal_id')
+          AND (input->>'query_id' IS NULL OR j.query_id=input->>'query_id')
+          AND (input->>'state' IS NULL OR j.state=input->>'state')
+          AND (input->>'trigger_external_group_id' IS NULL OR
+               ts.external_group_id=input->>'trigger_external_group_id')
+          AND (input->>'seed_external_group_id' IS NULL OR
+               ss.external_group_id=input->>'seed_external_group_id')
+          AND (input->>'trigger_trunk_id' IS NULL OR
+               tu.trunk_id=input->>'trigger_trunk_id')
+          AND (input->>'seed_trunk_id' IS NULL OR
+               su.trunk_id=input->>'seed_trunk_id')
+          AND (input->>'trigger_author_subject_ref' IS NULL OR
+               tu.author_subject_ref=input->>'trigger_author_subject_ref')
+          AND (input->>'seed_author_subject_ref' IS NULL OR
+               su.author_subject_ref=input->>'seed_author_subject_ref')
+          AND (NOT input ? 'after_created_at' OR
+               (j.created_at,j.journal_id)<
+               ((input->>'after_created_at')::timestamptz,
+                input->>'after_journal_id'))
+        ORDER BY j.created_at DESC,j.journal_id DESC LIMIT page_limit+1
+    ), visible AS (
+        SELECT * FROM page ORDER BY created_at DESC,journal_id DESC LIMIT page_limit
+    )
+    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v)
+        ORDER BY v.created_at DESC,v.journal_id DESC) FROM visible v),'[]'::jsonb),
+        (SELECT count(*)>page_limit FROM page),
+        (SELECT jsonb_build_object('created_at',v.created_at,
+            'journal_id',v.journal_id) FROM visible v
+         ORDER BY v.created_at,v.journal_id LIMIT 1)
+    INTO items,more,cursor_value;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-association-journals-page/1',
+            'snapshot_xid',snapshot_value::text,'filter_digest',filter_digest,
+            'items',items,'has_more',more,
+            'next_cursor',CASE WHEN more THEN cursor_value ELSE NULL END));
+EXCEPTION WHEN invalid_text_representation OR datetime_field_overflow THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+            'message','Association journal snapshot or cursor is invalid','status',422));
 END;
 $$;
 

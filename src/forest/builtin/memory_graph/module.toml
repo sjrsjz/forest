@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.84.1"
+version = "1.85.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -284,9 +284,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.77.0"
+schema_version = "3.78.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "b97071f5eddebc5a69662c35e90abe97577c14d6633fc31755f160b2a5e2ea39"
+baseline_sha256 = "21d3cbbc04969b828c28ccd7b7fe49cb0bbe4748ab9cc066db04618794da04dc"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -381,6 +381,13 @@ contract = "1.0"
 function = "memory_query_association_evidence"
 input_schema = "schemas/query-association-evidence-input.json"
 output_schema = "schemas/query-association-evidence-output.json"
+
+[[components.domain_queries]]
+name = "memory.query-association-journals"
+contract = "1.0"
+function = "memory_query_association_journals"
+input_schema = "schemas/query-association-journals-input.json"
+output_schema = "schemas/query-association-journals-output.json"
 
 [[components.domain_queries]]
 name = "memory.query-neighbourhood"
@@ -566,6 +573,15 @@ audit = "SECURITY"
 default_limit = 16
 max_limit = 32
 timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.associations.journals"
+port = "memory.query-association-journals"
+required_role = "ADMIN"
+audit = "SECURITY"
+default_limit = 25
+max_limit = 50
+timeout_s = 15
 
 [[components.management_queries]]
 id = "memory.relations.neighbourhood"

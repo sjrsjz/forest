@@ -298,6 +298,8 @@ MemoryQuery
 
 管理召回试验的 `memory.trial.association-evidence` 只读服务先按管理员主体、当前 Generation、试验有效期及已发布 EvidenceBundle 确认所选可见项，再把界面中的证据序号映射到冻结图项目序号，读取该项的关联学习日志。没有学习关联的种子、时序边或规则边返回明确的不可用状态；失效路径、遗忘或授权变化则拒绝读取。结果按需分页，管理入口声明敏感读取审计，不把全部日志注入模型提示词。
 
+管理员另可通过 `memory.associations.journals` 浏览 Bot 全局联想学习日志。此包自有只读 Query 需要 ADMIN 权限并在交付内容前写独立的 `SECURITY` 读取审计；按日志 ID、查询 ID、当前状态以及触发端和种子端各自的群号、主干、作者组合筛选，最多 50 条一页。日志创建事务 ID 固定翻页可见集，游标绑定筛选摘要并按 `(created_at, journal_id)` 键集排序；两端来源、当前资格、是否跨主干、关联贡献和当前活动状态逐条明确展示。`PENDING_ARCHIVE`、`PROMOTED`、`SUPPRESSED` 以及来源资格是查询时的实时状态，状态筛选下跨页成员可随并发归档或遗忘变化；界面不得将它表述为冻结的历史状态。该入口用于管理排查，不能绕过已冻结召回路径给 Agent 批量读取日志。
+
 单来源遗忘的 prepare participant 只读取不可变作者 anchor，不提前锁定源单元；Kernel Payload 删除屏障先取得，Memory apply 随后按稳定顺序锁定并抑制来源。匹配事务同样先捕获 Payload 屏障，再锁查询准备和插入匹配事实，避免外键检查与“先锁源、后取删除屏障”的遗忘事务形成反向等待。提交时的资格复核由实际写入 participant 完成，prepare 不承担状态更新。
 
 遗忘预览沿同一作者 anchor 取得 Kernel Payload 的来源及派生闭包。Payload Authority 持有删除时钟的排他事务锁，返回选中 Payload 的摘要与当前删除纪元；Memory 在同一预览事务计算将被抑制的来源单元、将写入删除 outbox 的向量引用、将撤销的关系贡献及待归档联想日志，返回各项计数、少量来源 ID 样本和覆盖完整集合的影响摘要。预览不撤销正文。携带计划执行时，Payload 在删除屏障内重算闭包并同时核对纪元与选中摘要，Memory 在同一 UnitOfWork 内重算影响计划并核对全部字段和计划摘要；任何变化返回冲突，整笔事务回滚。FinalReply UnitOfWork 也先捕获 Payload 删除屏障，再提交 Agent、Conversation 与 Memory 联想日志；之后的独立晋升事务重新核验来源资格与遗忘状态，不能借较早的回复提交绕过删除屏障。无计划的内部 `memory.source.forget/1` 调用仍保留原有直接遗忘语义；Web 管理动作将计划绑定到管理员授权票据并原子入队，模块 owned-work 执行时重算计划；过期计划记录 FAILED，查询保留终态。
