@@ -67,6 +67,7 @@ from forest.runtime_modules import (
     RuntimeComponentJobContribution,
     RuntimeEventPublicationContribution,
     RuntimeEventSubscriptionContribution,
+    RuntimeFactMatch,
     RuntimeJobTypeContribution,
     RuntimeModuleDescriptor,
     RuntimeShellCommandContribution,
@@ -3468,6 +3469,10 @@ def package_runtime_descriptor(
                         )
                         else ()
                     ),
+                    *(
+                        match["component_id"]
+                        for match in component.get("lifecycle", {}).get("fact_matches", ())
+                    ),
                 )
             )
         ),
@@ -3525,4 +3530,10 @@ def package_runtime_descriptor(
             )
         ),
         retention_service_requires=tuple(sorted(resolved_contracts.items())),
+        fact_matches=tuple(
+            RuntimeFactMatch(
+                match["component_id"], match["own_pointer"], match["other_pointer"]
+            )
+            for match in component.get("lifecycle", {}).get("fact_matches", ())
+        ),
     )

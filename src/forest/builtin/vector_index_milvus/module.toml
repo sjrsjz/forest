@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.4.0"
+version = "2.4.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -42,10 +42,21 @@ max_owned_tasks = 2
 max_owned_resources = 2
 
 [components.lifecycle]
+replacement_facts_schema = "schemas/replacement-facts.json"
 prepare_timeout_s = 10
 start_timeout_s = 30
 drain_timeout_s = 120
 stop_timeout_s = 15
+
+[[components.lifecycle.fact_matches]]
+component_id = "embedding.multimodal"
+own_pointer = "/space/space_id"
+other_pointer = "/space/space_id"
+
+[[components.lifecycle.fact_matches]]
+component_id = "embedding.multimodal"
+own_pointer = "/space/dimensions"
+other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"

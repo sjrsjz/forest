@@ -681,6 +681,25 @@ class OwnedWorkLifecycle(StrEnum):
 
 
 @dataclass(frozen=True)
+class RuntimeFactMatch:
+    component_id: str
+    own_pointer: str
+    other_pointer: str
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.component_id, str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", self.component_id) is None
+            or any(not isinstance(pointer, str) or not pointer.startswith("/")
+                   or len(pointer.encode("utf-8")) > 1024
+                   or any(not token or re.search(r"~(?![01])", token)
+                          for token in pointer[1:].split("/"))
+                   for pointer in (self.own_pointer, self.other_pointer))
+        ):
+            raise ValueError("Runtime fact match declaration is invalid")
+
+
+@dataclass(frozen=True)
 class RuntimeModuleDescriptor:
     component_id: str
     requires: tuple[str, ...]
@@ -704,6 +723,7 @@ class RuntimeModuleDescriptor:
     startup_service_requires: tuple[tuple[str, str], ...] = ()
     retention_requires: tuple[str, ...] = ()
     retention_service_requires: tuple[tuple[str, str], ...] = ()
+    fact_matches: tuple[RuntimeFactMatch, ...] = ()
     worker_limits: WorkerLimits | None = None
 
     def __post_init__(self) -> None:
@@ -758,6 +778,14 @@ class RuntimeModuleDescriptor:
             raise ValueError("Runtime provided service identities must be unique")
         if len(self.startup_service_requires) != len(set(self.startup_service_requires)):
             raise ValueError("Runtime startup service requirements must be unique")
+        if (
+            any(not isinstance(match, RuntimeFactMatch)
+                or match.component_id == self.component_id
+                or match.component_id not in self.requires
+                for match in self.fact_matches)
+            or len(self.fact_matches) != len(set(self.fact_matches))
+        ):
+            raise ValueError("Runtime fact matches must name distinct startup dependencies")
         if (
             len(self.retention_requires) != len(set(self.retention_requires))
             or self.component_id in self.retention_requires
@@ -1770,6 +1798,66 @@ class RuntimeModuleRegistry:
             lease = await self._prepare_graph()
             await self._start_clean(lease, publish=False)
 
+    @staticmethod
+    def _fact_value(facts: dict, pointer: str):
+        value = facts
+        for escaped in pointer[1:].split("/"):
+            token = escaped.replace("~1", "/").replace("~0", "~")
+            if not isinstance(value, dict) or token not in value:
+                raise ForestError(
+                    "RUNTIME_GRAPH_FACT_MISSING",
+                    "Declared component fact is absent from the candidate graph",
+                    409,
+                )
+            value = value[token]
+        if type(value) not in (str, int, float, bool):
+            raise ForestError(
+                "RUNTIME_GRAPH_FACT_INVALID",
+                "Declared component fact must be a scalar",
+                409,
+            )
+        return value
+
+    def _validate_fact_matches(self) -> None:
+        facts = {}
+        for descriptor in self.descriptors:
+            if not descriptor.fact_matches:
+                continue
+            for component_id in (descriptor.component_id, *(
+                match.component_id for match in descriptor.fact_matches
+            )):
+                if component_id in facts:
+                    continue
+                getter = getattr(self.instances[component_id], "replacement_candidate_fact", None)
+                if getter is None:
+                    raise ForestError(
+                        "RUNTIME_GRAPH_FACT_MISSING",
+                        "Declared component has no candidate facts",
+                        409,
+                    )
+                candidate = getter()
+                if not isinstance(candidate, dict) or not isinstance(candidate.get("facts"), dict):
+                    raise ForestError(
+                        "RUNTIME_GRAPH_FACT_INVALID",
+                        "Candidate component returned invalid facts",
+                        409,
+                    )
+                facts[component_id] = candidate["facts"]
+            own = facts[descriptor.component_id]
+            for match in descriptor.fact_matches:
+                left = self._fact_value(own, match.own_pointer)
+                right = self._fact_value(facts[match.component_id], match.other_pointer)
+                if type(left) is not type(right) or left != right:
+                    raise ForestError(
+                        "RUNTIME_GRAPH_FACT_MISMATCH",
+                        "Candidate component facts disagree",
+                        409,
+                        details={
+                            "component_id": descriptor.component_id,
+                            "dependency_id": match.component_id,
+                        },
+                    )
+
     async def _start_clean(self, lease, *, publish: bool = True) -> None:
         """Prewarm, publish, then admit a clean immutable Generation graph."""
 
@@ -1792,6 +1880,8 @@ class RuntimeModuleRegistry:
                     if start is not None:
                         await start()
                     prewarmed.append(component_id)
+                current = None
+                self._validate_fact_matches()
                 self._prewarmed = True
 
             if not publish:

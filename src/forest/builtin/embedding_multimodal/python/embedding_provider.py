@@ -328,6 +328,12 @@ class MultimodalEmbeddingProvider(Plugin):
         self.space_id = _digest(self.snapshot)
         self.profile_ref = "profile:" + _digest(plain)[7:]
 
+    def replacement_facts(self):
+        return {"space": {
+            "space_id": self.space_id,
+            "dimensions": self.profile["dimensions"],
+        }}
+
     @service(
         "embedding.profile.bind",
         semantics="read",

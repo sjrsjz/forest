@@ -136,6 +136,13 @@ EmbeddingProfile 是 Bot 生命周期身份的一部分。Bot 的首次记忆配
 
 实现上，`embedding.multimodal` 的包清单声明 `/profile` 为不可变配置路径，`vector.index` 声明 `/space_id`、`/dimensions`、`/metric` 不可变；通用配置账本在计划和候选装配中执行这些约束。`memory.graph` 自身的 `/embedding` 也被冻结。Embedding 和 Milvus 的 endpoint、凭据及传输限制仍可按正常配置换代。Bot Host 不得导入这两个包的身份仓库或另写一份身份表来代行配置策略；Milvus 私有持久化只保留删除 ref 的 tombstone 围栏。部署首次装配仍须校验三个包的空间身份相符，实际请求再由冻结 Generation 检查精确空间。
 
+
+### 5.1 候选图的嵌入空间事实围栏
+
+Embedding Worker 在预热时依据本包的模型协议、预处理策略与冻结配置计算 `space_id`，并将空间 ID 与维度发布为经本包 schema 校验的 `replacement_facts`。Vector Worker 只发布其自身冻结配置中的空间 ID 与维度；其包清单通过 `lifecycle.fact_matches` 声明两项事实必须与 Embedding Generation 相等，同时形成明确的启动依赖。通用 RuntimeGraph 只按 JSON Pointer 比较两个候选事实，不导入嵌入模型或 Milvus 的身份算法。
+
+事实检查位于所有候选 Worker 预热之后、持久 Graph 发布之前；缺失、非标量、类型不同或值不同均拒绝候选并清理其 Generation，旧图保持现役。带有已保留成员的局部热替换同样比较候选视图中的准确 Generation 事实。每次向量请求仍由 Vector Effect Driver 按空间 ID 和维度围栏，Memory 的域绑定仍复核 Embedding 服务回执。当前创建期 Profile 仍有管理员填写的 Vector 空间字段，供应解析仍对其做一次跨组件复核；后续要把这一步改为 Embedding 包派生、Vector 包绑定，避免在宿主保留业务算法。
+
 仅文本 Embedding 加 OCR/caption 不能满足该准入条件。Bot 的完整多模态记忆配置缺少图片编码/查询能力时，配置验证报告 `MULTIMODAL_EMBEDDING_REQUIRED`；运行期图片服务故障报告降级状态，可继续可靠接纳和稍后补索引，但不得悄悄将“完整多模态就绪”改成文本就绪。
 
 `space_id` 表示完整的兼容性契约，绑定模型修订、预处理、归一化和度量。同一 Bot 的 space 不原地升级；新 Bot 的新索引回填后按事实水位和覆盖情况显式发布。新查询不能拿新模型向量去搜索旧空间，也不能对不同空间的向量做 cosine、平均或相加。

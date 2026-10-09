@@ -275,6 +275,18 @@ MANIFEST_SCHEMA = {
                             },
                             "replacement_guard_query": {"type": "string"},
                             "replacement_facts_schema": {"type": "string"},
+                            "fact_matches": {
+                                "type": "array", "maxItems": 16,
+                                "items": {
+                                    "type": "object", "additionalProperties": False,
+                                    "required": ["component_id", "own_pointer", "other_pointer"],
+                                    "properties": {
+                                        "component_id": {"type": "string"},
+                                        "own_pointer": {"type": "string"},
+                                        "other_pointer": {"type": "string"},
+                                    },
+                                },
+                            },
                         },
                     },
                     "capabilities": {
@@ -1563,7 +1575,24 @@ def _manifest(files: dict[str, bytes]) -> dict:
                     )
         _bootstrap_ui(files, component)
     _bootstrap_materialization(files, component)
-    replacement_facts_schema = component.get("lifecycle", {}).get(
+    lifecycle = component.get("lifecycle", {})
+    fact_matches = lifecycle.get("fact_matches", ())
+    if fact_matches and "replacement_facts_schema" not in lifecycle:
+        _fail("INVALID_FACT_MATCH", "Fact matches require a declared replacement facts schema")
+    for match in fact_matches:
+        if (
+            not IDENTIFIER.fullmatch(match["component_id"])
+            or match["component_id"] == component["id"]
+            or not _valid_json_pointer(match["own_pointer"])
+            or not _valid_json_pointer(match["other_pointer"])
+        ):
+            _fail("INVALID_FACT_MATCH", "Fact match must name an external component and bounded pointers")
+    if len({
+        (match["component_id"], match["own_pointer"], match["other_pointer"])
+        for match in fact_matches
+    }) != len(fact_matches):
+        _fail("INVALID_FACT_MATCH", "Fact match declaration is duplicated")
+    replacement_facts_schema = lifecycle.get(
         "replacement_facts_schema"
     )
     if replacement_facts_schema is not None:
