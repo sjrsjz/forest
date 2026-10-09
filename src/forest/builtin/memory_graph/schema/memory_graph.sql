@@ -1329,6 +1329,12 @@ CREATE INDEX relation_browse_idx ON relation_contributions(
 CREATE INDEX relation_cross_trunk_browse_idx ON relation_contributions(
     bot_id,cross_trunk,relation_id,contribution_id
 ) WHERE active;
+CREATE INDEX relation_source_kind_filter_idx ON relation_contributions(
+    bot_id,relation_kind,contribution_id
+) WHERE active AND (left_kind='SOURCE_UNIT' OR right_kind='SOURCE_UNIT');
+CREATE INDEX relation_source_cross_filter_idx ON relation_contributions(
+    bot_id,cross_trunk,contribution_id
+) WHERE active AND (left_kind='SOURCE_UNIT' OR right_kind='SOURCE_UNIT');
 CREATE INDEX relation_evidence_source_idx ON relation_evidence(
     bot_id,source_unit_id,contribution_id
 );
@@ -8916,6 +8922,50 @@ LANGUAGE sql STABLE AS $$
           SELECT 1 FROM __forest_module_schema__.source_occurrences o
           WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
             AND o.binding_ref=filters->>'binding_ref'))
+      AND ((filters->>'relation_kind' IS NULL AND
+            filters->>'relation_cross_trunk' IS NULL) OR
+           (u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE' AND
+            pg_catalog.pg_visible_in_snapshot(u.eligible_xid,snapshot_value) AND
+            EXISTS (
+              SELECT 1 FROM __forest_module_schema__.relation_contributions c
+              WHERE c.bot_id=u.bot_id AND c.active
+                AND pg_catalog.pg_visible_in_snapshot(c.created_xid,snapshot_value)
+                AND ((c.left_kind='SOURCE_UNIT' AND c.left_id=u.source_unit_id)
+                  OR (c.right_kind='SOURCE_UNIT' AND c.right_id=u.source_unit_id))
+                AND (filters->>'relation_kind' IS NULL OR
+                     c.relation_kind=filters->>'relation_kind')
+                AND (filters->>'relation_cross_trunk' IS NULL OR
+                     c.cross_trunk=(filters->>'relation_cross_trunk')::boolean)
+                AND (c.left_kind<>'SOURCE_UNIT' OR c.left_id=u.source_unit_id
+                     OR EXISTS (
+                       SELECT 1 FROM __forest_module_schema__.source_units ul
+                       JOIN __forest_module_schema__.memory_sources sl
+                         ON sl.bot_id=ul.bot_id AND sl.source_id=ul.source_id
+                       WHERE ul.bot_id=c.bot_id AND ul.source_unit_id=c.left_id
+                         AND ul.eligibility_state='ELIGIBLE' AND sl.status='ACTIVE'
+                         AND pg_catalog.pg_visible_in_snapshot(
+                           ul.eligible_xid,snapshot_value)))
+                AND (c.right_kind<>'SOURCE_UNIT' OR c.right_id=u.source_unit_id
+                     OR EXISTS (
+                       SELECT 1 FROM __forest_module_schema__.source_units ur
+                       JOIN __forest_module_schema__.memory_sources sr
+                         ON sr.bot_id=ur.bot_id AND sr.source_id=ur.source_id
+                       WHERE ur.bot_id=c.bot_id AND ur.source_unit_id=c.right_id
+                         AND ur.eligibility_state='ELIGIBLE' AND sr.status='ACTIVE'
+                         AND pg_catalog.pg_visible_in_snapshot(
+                           ur.eligible_xid,snapshot_value)))
+                AND NOT EXISTS (
+                  SELECT 1 FROM __forest_module_schema__.relation_evidence e
+                  JOIN __forest_module_schema__.source_units ue
+                    ON ue.bot_id=e.bot_id AND ue.source_unit_id=e.source_unit_id
+                  JOIN __forest_module_schema__.memory_sources se
+                    ON se.bot_id=ue.bot_id AND se.source_id=ue.source_id
+                  WHERE e.bot_id=c.bot_id AND e.contribution_id=c.contribution_id
+                    AND (ue.eligibility_state<>'ELIGIBLE' OR se.status<>'ACTIVE'
+                         OR NOT pg_catalog.pg_visible_in_snapshot(
+                           ue.eligible_xid,snapshot_value))
+                )
+            )))
       AND (filters->>'author_subject_ref' IS NULL OR
            u.author_subject_ref=filters->>'author_subject_ref')
       AND (filters->>'modality' IS NULL OR u.modality=filters->>'modality')
@@ -8949,6 +8999,10 @@ DECLARE
     selected_source_status text := COALESCE(input->>'source_status','ACTIVE');
     selected_index_coverage text := input->>'index_coverage';
     selected_unknown boolean := input->>'only_unknown_facets'='true';
+    selected_relation_kind text := input->>'relation_kind';
+    selected_relation_filter boolean := input ? 'relation_kind' OR
+                                        input ? 'relation_cross_trunk';
+    candidate_relation_count integer;
     candidate_source_ids text[];
     items jsonb;
     more boolean;
@@ -8974,6 +9028,10 @@ BEGIN
        selected_source_status NOT IN ('ACTIVE','RETIRED') OR
        (selected_index_coverage IS NOT NULL AND selected_index_coverage NOT IN
            ('NO_FACETS','NOT_READY','PARTIAL','COMPLETE')) OR
+       (selected_relation_kind IS NOT NULL AND selected_relation_kind NOT IN
+           ('ASSOCIATES_WITH','EVIDENCE','CONTRADICTS','SUBJECT_OF')) OR
+       (input ? 'relation_cross_trunk' AND
+           jsonb_typeof(input->'relation_cross_trunk')<>'boolean') OR
        (input ? 'only_unknown_facets' AND
            jsonb_typeof(input->'only_unknown_facets')<>'boolean') OR
        (input ? 'group_source_ids' AND (cardinality(selected_sources)=0 OR
@@ -9014,10 +9072,35 @@ BEGIN
               AND f.purpose='DOCUMENT' AND f.state='READY'
             ORDER BY f.source_unit_id LIMIT 8193
         ) candidate;
+    ELSIF selected_relation_filter THEN
+        -- If more than 8192 contribution rows qualify, use the ordered source
+        -- scan. A partial candidate list must never silently omit sources.
+        WITH candidate_relations AS MATERIALIZED (
+            SELECT c.left_kind,c.left_id,c.right_kind,c.right_id
+            FROM __forest_module_schema__.relation_contributions c
+            WHERE c.bot_id=context->>'bot_id' AND c.active
+              AND (c.left_kind='SOURCE_UNIT' OR c.right_kind='SOURCE_UNIT')
+              AND pg_visible_in_snapshot(c.created_xid,snapshot_value)
+              AND (selected_relation_kind IS NULL OR
+                   c.relation_kind=selected_relation_kind)
+              AND (NOT input ? 'relation_cross_trunk' OR
+                   c.cross_trunk=(input->>'relation_cross_trunk')::boolean)
+            ORDER BY c.contribution_id LIMIT 8193
+        ), relation_members AS (
+            SELECT left_id AS source_unit_id FROM candidate_relations
+            WHERE left_kind='SOURCE_UNIT'
+            UNION
+            SELECT right_id FROM candidate_relations
+            WHERE right_kind='SOURCE_UNIT'
+        )
+        SELECT (SELECT count(*) FROM candidate_relations),
+               (SELECT array_agg(source_unit_id) FROM relation_members)
+        INTO candidate_relation_count,candidate_source_ids;
     END IF;
     IF input ? 'source_unit_id' OR
        ((selected_unknown OR selected_index_coverage IN ('COMPLETE','PARTIAL')) AND
-        COALESCE(cardinality(candidate_source_ids),0)<=8192) THEN
+        COALESCE(cardinality(candidate_source_ids),0)<=8192) OR
+       (selected_relation_filter AND candidate_relation_count<=8192) THEN
         WITH page AS (
             SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
                 u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,

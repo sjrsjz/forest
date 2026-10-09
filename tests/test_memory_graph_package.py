@@ -1033,6 +1033,21 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
                 digest if state == "READY" else None,
                 "2026-01-01T00:00:00Z" if state == "READY" else None,
             ))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.relation_contributions "
+            "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
+            "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
+            "weight_micros,admitted_deletion_epoch,cross_trunk) VALUES "
+            "(%s,'relation/cursor','relation-operation/cursor',%s,"
+            "'relation-id/cursor','ASSOCIATES_WITH','SOURCE_UNIT','unit/newest',"
+            "'SOURCE_UNIT','unit/oldest','RULE',500000,0,false)"
+        ).format(namespace), (store.bot_id, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.relation_evidence "
+            "(bot_id,contribution_id,evidence_index,source_unit_id,"
+            "source_revision,part_id) VALUES "
+            "(%s,'relation/cursor',0,'unit/newest',1,'part/newest')"
+        ).format(namespace), (store.bot_id,))
 
     async with store.pool.connection() as writer, store.pool.connection() as reader:
         async with writer.transaction():
@@ -1092,6 +1107,68 @@ async def test_source_cursor_excludes_source_committed_after_first_page(
         assert [item["source_unit_id"] for item in fresh["result"]["value"]["items"]] == [
             "unit/newest", "unit/late", "unit/oldest"
         ]
+        related = await (await reader.execute(
+            sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+            (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                "relation_kind": "ASSOCIATES_WITH", "relation_cross_trunk": False,
+            })),
+        )).fetchone()
+        assert [item["source_unit_id"] for item in
+                related["result"]["value"]["items"]] == [
+                    "unit/newest", "unit/oldest",
+                ]
+        relation_first = await (await reader.execute(
+            sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+            (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                "relation_kind": "ASSOCIATES_WITH", "limit": 1,
+            })),
+        )).fetchone()
+        relation_page = relation_first["result"]["value"]
+        relation_cursor = {
+            "relation_kind": "ASSOCIATES_WITH", "limit": 1,
+            "snapshot_accepted_at": relation_page["snapshot_accepted_at"],
+            "snapshot_xid": relation_page["snapshot_xid"],
+            "after_occurred_at": relation_page["next_cursor"]["occurred_at"],
+            "after_source_unit_id": relation_page["next_cursor"]["source_unit_id"],
+            "cursor_filter_digest": relation_page["filter_digest"],
+        }
+        relation_second = await (await reader.execute(
+            sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+            (Jsonb({"bot_id": store.bot_id}), Jsonb(relation_cursor)),
+        )).fetchone()
+        assert [item["source_unit_id"] for item in
+                relation_second["result"]["value"]["items"]] == ["unit/oldest"]
+        altered_relation_cursor = await (await reader.execute(
+            sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),
+            (Jsonb({"bot_id": store.bot_id}), Jsonb({
+                **relation_cursor, "relation_cross_trunk": True,
+            })),
+        )).fetchone()
+        assert altered_relation_cursor["result"]["error"]["code"] == (
+            "MEMORY_QUERY_INVALID"
+        )
+        frozen_related = await (await reader.execute(sql.SQL(
+            "SELECT {}.memory_freeze_forget_selection(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id,
+                   "operation_id": "freeze/related"}),
+            Jsonb({"selection_id": "selection/related",
+                   "requested_by": "admin/relation-filter",
+                   "filters": {"relation_kind": "ASSOCIATES_WITH",
+                               "relation_cross_trunk": False}}),
+        ))).fetchone()
+        assert frozen_related["result"]["value"]["member_count"] == 2
+        for relation_filter in (
+            {"relation_kind": "CONTRADICTS"},
+            {"relation_cross_trunk": True},
+        ):
+            empty = await (await reader.execute(
+                sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(
+                    namespace
+                ),
+                (Jsonb({"bot_id": store.bot_id}), Jsonb(relation_filter)),
+            )).fetchone()
+            assert empty["result"]["value"]["items"] == []
         exact = await (
             await reader.execute(
                 sql.SQL("SELECT {}.memory_query_sources(%s,%s) AS result").format(namespace),

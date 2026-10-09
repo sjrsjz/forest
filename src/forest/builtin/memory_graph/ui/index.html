@@ -17,7 +17,7 @@
   <section id="sources" class="panel">
     <div class="filters"><input id="trunk" placeholder="精确主干 ID（可从下方选择）"><input id="source-unit-id" placeholder="精确来源单元 ID"><input id="author" placeholder="作者主体"><select id="modality"><option value="">全部模态</option><option>TEXT</option><option>IMAGE</option><option>MIXED</option><option>CONTROL</option></select><input id="unit-kind" placeholder="单元类型"><label>从 <input id="occurred-from" type="datetime-local"></label><label>至 <input id="occurred-to" type="datetime-local"></label><button id="source-search">查询</button></div>
     <details id="trunk-browser"><summary>浏览群主干（实时分页）</summary><div class="filters"><input id="trunk-group" placeholder="精确群号"><button id="trunk-search">查询主干</button><span class="muted">新主干需刷新首页查看</span></div><div id="trunk-rows"></div><div class="pager"><span id="trunk-count" class="muted"></span><button id="trunk-next" disabled>下一页</button></div></details>
-    <details><summary>更多来源条件</summary><div class="filters"><textarea id="group-source-ids" rows="2" placeholder="每行一个群来源 ID，最多 256 个"></textarea><input id="source-id" placeholder="精确来源 ID"><select id="source-kind"><option value="">全部来源类型</option><option>GROUP</option><option>DIRECT</option><option>DOCUMENT</option><option>SYSTEM</option><option>UNKNOWN</option></select><input id="platform" placeholder="平台"><input id="realm-id" placeholder="Realm"><input id="external-group-id" placeholder="群号"><input id="binding-ref" placeholder="Binding"><select id="eligibility-state"><option value="ELIGIBLE">可召回</option><option value="REGISTERED">待归档</option><option value="SUPPRESSED">已抑制</option></select><select id="source-status"><option value="ACTIVE">活动来源</option><option value="RETIRED">已退役来源</option></select><select id="index-coverage"><option value="">全部索引状态</option><option value="NO_FACETS">无文档 facet</option><option value="NOT_READY">文档 facet 未就绪</option><option value="PARTIAL">部分就绪</option><option value="COMPLETE">全部就绪</option></select><label class="confirm"><input id="only-unknown-facets" type="checkbox">仅 UNKNOWN 嵌入</label><input id="source-order-from" type="number" min="1" placeholder="源序号起"><input id="source-order-to" type="number" min="1" placeholder="源序号止（不含）"></div></details>
+    <details><summary>更多来源条件</summary><div class="filters"><textarea id="group-source-ids" rows="2" placeholder="每行一个群来源 ID，最多 256 个"></textarea><input id="source-id" placeholder="精确来源 ID"><select id="source-kind"><option value="">全部来源类型</option><option>GROUP</option><option>DIRECT</option><option>DOCUMENT</option><option>SYSTEM</option><option>UNKNOWN</option></select><input id="platform" placeholder="平台"><input id="realm-id" placeholder="Realm"><input id="external-group-id" placeholder="群号"><input id="binding-ref" placeholder="Binding"><select id="eligibility-state"><option value="ELIGIBLE">可召回</option><option value="REGISTERED">待归档</option><option value="SUPPRESSED">已抑制</option></select><select id="source-status"><option value="ACTIVE">活动来源</option><option value="RETIRED">已退役来源</option></select><select id="index-coverage"><option value="">全部索引状态</option><option value="NO_FACETS">无文档 facet</option><option value="NOT_READY">文档 facet 未就绪</option><option value="PARTIAL">部分就绪</option><option value="COMPLETE">全部就绪</option></select><select id="source-relation-kind"><option value="">全部关系类型</option><option>ASSOCIATES_WITH</option><option>EVIDENCE</option><option>CONTRADICTS</option><option>SUBJECT_OF</option></select><select id="source-relation-cross"><option value="">全部主干关系</option><option value="true">跨主干关系</option><option value="false">同主干关系</option></select><label class="confirm"><input id="only-unknown-facets" type="checkbox">仅 UNKNOWN 嵌入</label><input id="source-order-from" type="number" min="1" placeholder="源序号起"><input id="source-order-to" type="number" min="1" placeholder="源序号止（不含）"></div></details>
     <table class="table"><thead><tr><th style="width:24%">来源单元</th><th style="width:16%">群 / 主干</th><th style="width:17%">作者</th><th style="width:14%">类型</th><th>发生时间</th><th style="width:8%">操作</th></tr></thead><tbody id="source-rows"></tbody></table>
     <div class="pager"><span id="source-count" class="muted"></span><button id="source-next" disabled>下一页</button></div>
     <details id="source-facets" hidden><summary id="facet-title">文档嵌入诊断</summary><div class="filters"><select id="facet-state"><option value="">全部状态</option><option value="UNKNOWN">UNKNOWN</option><option value="FAILED">FAILED</option><option value="PENDING">PENDING</option><option value="READY">READY</option></select><button id="facet-refresh">刷新</button><span class="muted">预算为批次共享额，不能按 facet 相加。</span></div><div id="facet-rows"></div><div class="pager"><span id="facet-count" class="muted"></span><button id="facet-next" disabled>下一页</button></div><details id="attempt-detail" hidden><summary>计费批次与成员</summary><div id="attempt-info" class="detail"></div><label class="confirm"><input id="retry-confirm" type="checkbox">我确认旧请求可能已收费；新请求可能再次计费，旧 UNKNOWN 占额仍保留</label><button id="retry-action" disabled>将当前可用成员重新排队</button></details></details>
@@ -89,7 +89,44 @@
   const cell=(row,value)=>{const node=row.insertCell();node.textContent=value??'—';return node;};
   const stamp=value=>value?new Date(value).toLocaleString():'—';
   function show(tab){for(const panel of ['sources','relations','trial','forget','settings'])$(panel).classList.toggle('hidden',panel!==tab);document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
-  function sourceInput(){const value={limit:50,eligibility_state:$('eligibility-state').value,source_status:$('source-status').value};if($('trunk').value.trim())value.trunk_id=$('trunk').value.trim();const groups=[...new Set($('group-source-ids').value.split(/\r?\n/).map(id=>id.trim()).filter(Boolean))];if(groups.length){if(groups.length>256)throw Error('??? ID ?? 256 ?');value.group_source_ids=groups;}if($('source-unit-id').value.trim())value.source_unit_id=$('source-unit-id').value.trim();if($('source-id').value.trim())value.source_id=$('source-id').value.trim();for(const [field,id] of [['platform','platform'],['realm_id','realm-id'],['external_group_id','external-group-id'],['binding_ref','binding-ref'],['author_subject_ref','author'],['unit_kind','unit-kind']])if($(id).value.trim())value[field]=$(id).value.trim();if($('source-kind').value)value.source_kind=$('source-kind').value;if($('modality').value)value.modality=$('modality').value;if($('index-coverage').value)value.index_coverage=$('index-coverage').value;if($('only-unknown-facets').checked)value.only_unknown_facets=true;for(const [field,id] of [['source_order_from','source-order-from'],['source_order_to','source-order-to']])if($(id).value){if(!value.source_id)throw Error('源序号范围需要填写精确来源 ID');const ordinal=Number($(id).value);if(!Number.isSafeInteger(ordinal)||ordinal<1)throw Error('源序号必须是安全的正整数');value[field]=ordinal;}if($('occurred-from').value)value.occurred_from=new Date($('occurred-from').value).toISOString();if($('occurred-to').value)value.occurred_to=new Date($('occurred-to').value).toISOString();return value;}
+  function sourceInput(){
+    const value={limit:50,eligibility_state:$('eligibility-state').value,
+      source_status:$('source-status').value};
+    for(const [field,id] of [
+      ['trunk_id','trunk'],['source_unit_id','source-unit-id'],
+      ['source_id','source-id'],['platform','platform'],['realm_id','realm-id'],
+      ['external_group_id','external-group-id'],['binding_ref','binding-ref'],
+      ['author_subject_ref','author'],['unit_kind','unit-kind']
+    ])if($(id).value.trim())value[field]=$(id).value.trim();
+    const groups=[...new Set($('group-source-ids').value.split(/\r?\n/)
+      .map(id=>id.trim()).filter(Boolean))];
+    if(groups.length){
+      if(groups.length>256)throw Error('群来源 ID 最多 256 个');
+      value.group_source_ids=groups;
+    }
+    for(const [field,id] of [
+      ['source_kind','source-kind'],['modality','modality'],
+      ['index_coverage','index-coverage'],['relation_kind','source-relation-kind']
+    ])if($(id).value)value[field]=$(id).value;
+    if($('source-relation-cross').value)
+      value.relation_cross_trunk=$('source-relation-cross').value==='true';
+    if($('only-unknown-facets').checked)value.only_unknown_facets=true;
+    for(const [field,id] of [
+      ['source_order_from','source-order-from'],
+      ['source_order_to','source-order-to']
+    ])if($(id).value){
+      if(!value.source_id)throw Error('源序号范围需要填写精确来源 ID');
+      const ordinal=Number($(id).value);
+      if(!Number.isSafeInteger(ordinal)||ordinal<1)
+        throw Error('源序号必须是安全的正整数');
+      value[field]=ordinal;
+    }
+    if($('occurred-from').value)
+      value.occurred_from=new Date($('occurred-from').value).toISOString();
+    if($('occurred-to').value)
+      value.occurred_to=new Date($('occurred-to').value).toISOString();
+    return value;
+  }
   async function loadTrunks(next=false){
     const group=$('trunk-group').value.trim(),requestNumber=++trunkRequestSequence;
     const input={limit:50};if(group)input.external_group_id=group;

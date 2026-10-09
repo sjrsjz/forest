@@ -124,10 +124,39 @@ async def test_group_source_browse_at_one_hundred_thousand_units(
         "limit": 50,
     })
     assert unknown["items"] == [] and unknown["has_more"] is False
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.relation_contributions "
+            "(bot_id,contribution_id,operation_id,input_digest,relation_id,"
+            "relation_kind,left_kind,left_id,right_kind,right_id,origin_kind,"
+            "weight_micros,admitted_deletion_epoch,cross_trunk) "
+            "SELECT %s,'scale/rel/'||lpad(n::text,5,'0'),"
+            "'scale/op/'||lpad(n::text,5,'0'),%s,"
+            "'scale/relation/'||lpad(n::text,5,'0'),"
+            "'ASSOCIATES_WITH','SOURCE_UNIT',"
+            "'unit/933179609/'||lpad((CASE WHEN n=8193 THEN 50000 ELSE n END)"
+            "::text,6,'0'),'SOURCE_UNIT',"
+            "'unit/933179610/'||lpad(n::text,6,'0'),"
+            "'RULE',500000,0,true FROM generate_series(1,8193) n"
+        ).format(namespace), (store.bot_id, digest_a))
+        await conn.execute(sql.SQL("ANALYZE {}.relation_contributions").format(namespace))
+    related, relation_seconds = await page({
+        "external_group_id": "933179609", "relation_kind": "ASSOCIATES_WITH",
+        "relation_cross_trunk": True, "limit": 1,
+    })
+    assert [item["source_unit_id"] for item in related["items"]] == [
+        "unit/933179609/050000"
+    ]
+    assert related["has_more"] is True
+    unrelated, _ = await page({
+        "external_group_id": "933179609", "relation_cross_trunk": False,
+        "limit": 1,
+    })
+    assert unrelated["items"] == []
     print(
         "source_browse_seconds first={:.3f} second={:.3f} deep={:.3f} "
-        "coverage={:.3f} unknown={:.3f}".format(
+        "coverage={:.3f} unknown={:.3f} relation={:.3f}".format(
             first_seconds, second_seconds, deep_seconds,
-            coverage_seconds, unknown_seconds,
+            coverage_seconds, unknown_seconds, relation_seconds,
         )
     )
