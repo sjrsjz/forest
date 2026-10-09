@@ -533,7 +533,7 @@ async def test_direct_source_identity_collision_is_rejected_before_capture_write
     identity = {
         "source_id": "source/direct/one",
         "source_kind": "DIRECT",
-        "platform": "onebot-v11",
+        "platform": "test-platform",
         "realm_id": "qq",
         "external_group_id": None,
         "identity_incarnation": 1,
@@ -555,7 +555,7 @@ async def test_direct_source_identity_collision_is_rejected_before_capture_write
                 sql.SQL("INSERT INTO {}.memory_sources("
                         "bot_id,source_id,registration_operation_id,input_digest,"
                         "source_kind,platform,realm_id,identity_incarnation,identity_digest) "
-                        "VALUES(%s,%s,%s,%s,'DIRECT','onebot-v11','qq',1,%s)")
+                        "VALUES(%s,%s,%s,%s,'DIRECT','test-platform','qq',1,%s)")
                 .format(sql.Identifier(namespace)),
                 (store.bot_id, source_id, "register:" + source_id,
                  "sha256:" + "b" * 64, identity_digest),
@@ -703,7 +703,7 @@ async def test_pending_archive_and_late_capture_preserve_batch_identity(
                 "identity": {
                     "source_id": "source/direct/late",
                     "source_kind": "DIRECT",
-                    "platform": "onebot-v11",
+                    "platform": "test-platform",
                     "realm_id": "qq",
                     "external_group_id": None,
                     "identity_incarnation": 1,

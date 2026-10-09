@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.80.0"
+version = "1.81.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -275,9 +275,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.74.0"
+schema_version = "3.75.1"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "5f60a74220a3985106b14ee98a53594783166f1b99a638597c15e75dba79fb02"
+baseline_sha256 = "5c6f99921f1bb7b45829918c5bf14c769e6f8a3b58b33717a08027382102f6b8"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -723,6 +723,13 @@ contract = "1.0"
 function = "memory_settle_embedding_budget"
 input_schema = "schemas/budget-settle-envelope.json"
 output_schema = "schemas/budget-output.json"
+
+[[components.unit_of_work_participants]]
+name = "memory.reserve-source-position-record"
+contract = "1.0"
+function = "memory_reserve_source_position"
+input_schema = "schemas/reserve-position-envelope.json"
+output_schema = "schemas/reserve-position-output.json"
 
 [[components.unit_of_work_participants]]
 name = "memory.capture-source-record"

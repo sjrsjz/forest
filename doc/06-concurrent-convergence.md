@@ -311,6 +311,12 @@ LLM 联想是显式可选 Job：冻结两端 source/assertion revision、各自�
 
 检索先固定图修订，随后按当前输出主体、ReplyRoute、来源权限、删除状态及模型输入切口过滤节点、边和完整支持证据。每一跳都不得穿过隐藏端点产生公开路径解释；相同事实的多个合法来源必须逐项标出 group_source_id、安全群名快照及消息/作者定位。当前群仍在队列中的尾部及其派生产物即使在图物理存储中存在，也不能绕过 InputBatch 通过联想返回。固定图语义的合流并不赋予跨群公开权限。
 
+#### 6.4.1 OneBot 接纳时固定源内位置（2026-10-09）
+
+OneBot 接纳 UnitOfWork 在 Conversation 接纳之后、媒体登记或 Memory 捕获之前，调用 Memory 包的 `memory.reserve-source-position-record`。参与者核对同事务的 conversation_id、event_id 和 ingress_seq，按 Bot 内稳定 source_id 锁定来源时钟，记录不可变的 `(source_unit_id, source_order_seq, conversation_ref, event_ref, ingress_seq)`。跨 Conversation 的同群消息共用来源时钟；ingress_seq 只用于核对接纳身份，不直接充当主干位置。图片获取失败可以留下位置空洞，但不能把后到消息重新编号。
+
+后续 `memory.capture-source-record` 必须核对并消费该预留位置；缺失预留的 OneBot 群聊或私聊原始消息返回冲突。非 OneBot 的闭合模型、工具和导入来源仍在各自事实提交时分配位置。预留与 Inbox 同事务回滚；媒体 Worker 可以乱序完成，图投影仍按预留位置构造 TRUNK_NEXT。
+
 ### 6.5 无模型摘要的确定性裁剪
 
 裁剪输入固定为 `context_revision + context_view_revision + context_view_profile_ref + source_manifest + token_budget + tokenizer_version + trim_policy_version + pin_set`。先持久化原始来源或不可变范围引用并确认 retention pin，再按版本化规则移出闭合、可移出单元；发布的是所保留单元与移出范围的视图 manifest。未回答触发的必要原文、系统约束和未闭合工具结构保留；若最小合法视图仍超预算，按 08 的显式超限/暂停策略处理，不能偷偷调用模型总结或丢弃触发原文。canonical 视图预算由明确 view profile 固定，含图片的完整 ContentPart 和归档引用保留；当前对话 LLM 不支持图片或请求预算改变都不能成为持久删图/改写此视图规则的理由。

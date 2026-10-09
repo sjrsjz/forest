@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "caller",
+    "input",
+    "prior"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.uow-step/1"
+    },
+    "caller": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component_id",
+        "generation_id"
+      ],
+      "properties": {
+        "component_id": {
+          "const": "adapter.onebot"
+        },
+        "generation_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity",
+        "source_unit_id",
+        "conversation_ref",
+        "event_ref",
+        "conversation_step_id"
+      ],
+      "properties": {
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "source_id",
+            "source_kind",
+            "identity_incarnation",
+            "platform",
+            "realm_id",
+            "external_group_id",
+            "trunk_id"
+          ],
+          "properties": {
+            "source_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "source_kind": {
+              "enum": [
+                "GROUP",
+                "DIRECT"
+              ]
+            },
+            "identity_incarnation": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "platform": {
+              "const": "onebot-v11"
+            },
+            "realm_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "external_group_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 256
+            },
+            "trunk_id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 256
+            }
+          }
+        },
+        "source_unit_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "conversation_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "event_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "conversation_step_id": {
+          "const": "conversation"
+        }
+      }
+    },
+    "prior": {
+      "type": "object"
+    }
+  }
+}

@@ -383,6 +383,13 @@ class AdapterOneBot(Plugin):
                 "context_disposition": "MATERIALIZE",
             },
         }
+        plan["position"] = {
+            "identity": identity,
+            "source_unit_id": capture["source_unit_id"],
+            "conversation_ref": conversation_ref,
+            "event_ref": conversation_event_id,
+            "conversation_step_id": "conversation",
+        }
         if memory_capture is not None:
             plan["payload_epoch"] = {"protocol": "forest.payload-epoch-capture/1"}
             plan["memory"] = {

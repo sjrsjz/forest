@@ -123,6 +123,8 @@ FINAL_READY 只是引用 Agent 私有 ModelTurn 的最终候选 checkpoint，不
 
 每个 source_id 有独立 `memory_source_clocks.next_source_order_seq`。权威来源提交短事务在去重判定后分配位置，固定 `(bot_id, source_id, source_order_seq)` 与 source_unit_id 的唯一关系。重试返回原位置；失败回滚不产生第二个源单元。
 
+OneBot 实现中，Conversation 接纳与 Memory 源位置预留属于同一 UnitOfWork；Memory 以稳定 source_id 的时钟分配位置，并保存不可变的事件及 ingress_seq 对照。纯文本随后在该事务捕获，含图片消息由媒体 Worker 稍后捕获，两者均核对原预留位置。跨 Conversation 的同群接纳由来源时钟仲裁，媒体完成、裁剪和归档均不能改变已分配顺序。
+
 锁顺序沿用[05 提交守卫](05-storage-security-operations.md)：先取得所需的路由、Bot、Conversation 等所有权，再取得 memory_clock、按 source_id 排序的 memory_source_clocks、memory scope heads 和事实行。任何网络、模型调用、批量对象上传和图重建均在事务外执行；不得让归档 Worker 持有来源时钟等待 I/O。
 
 | 序列 | 表示什么 | 不能用来替代什么 |

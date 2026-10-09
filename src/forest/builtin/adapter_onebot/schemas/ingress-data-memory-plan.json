@@ -1,9 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object", "additionalProperties": false,
-  "required": ["adapter", "conversation", "payload_epoch", "memory", "classification"],
+  "required": ["adapter", "conversation", "position", "payload_epoch", "memory", "classification"],
   "properties": {
-    "adapter": {"type": "object"}, "conversation": {"type": "object"},
+    "adapter": {"type": "object"}, "conversation": {"type": "object"}, "position": {"type": "object"},
     "payload_epoch": {"type": "object"}, "memory": {"type": "object"},
     "classification": {"type": "object"}
   }

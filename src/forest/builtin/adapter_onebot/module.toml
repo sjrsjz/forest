@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.3.0"
+version = "2.4.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -171,6 +171,7 @@ timeout_s = 30
 steps = [
   { id = "adapter", component_id = "adapter.onebot", participant = "adapter.record-ingress", input_path = "/adapter" },
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.admit-message", input_path = "/conversation" },
+  { id = "position", component_id = "memory.graph", participant = "memory.reserve-source-position-record", input_path = "/position" },
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
   { id = "memory", component_id = "memory.graph", participant = "memory.capture-source-record", input_path = "/memory" },
   { id = "classification", component_id = "conversation.scheduler", participant = "conversation.complete-classification", input_path = "/classification" }
@@ -185,6 +186,7 @@ timeout_s = 30
 steps = [
   { id = "adapter", component_id = "adapter.onebot", participant = "adapter.record-ingress", input_path = "/adapter" },
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.admit-message", input_path = "/conversation" },
+  { id = "position", component_id = "memory.graph", participant = "memory.reserve-source-position-record", input_path = "/position" },
   { id = "media", component_id = "media.capture", participant = "media.register-ingress", input_path = "/media" },
   { id = "classification", component_id = "conversation.scheduler", participant = "conversation.complete-classification", input_path = "/classification" }
 ]
@@ -198,6 +200,7 @@ timeout_s = 30
 steps = [
   { id = "adapter", component_id = "adapter.onebot", participant = "adapter.record-ingress", input_path = "/adapter" },
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.admit-message", input_path = "/conversation" },
+  { id = "position", component_id = "memory.graph", participant = "memory.reserve-source-position-record", input_path = "/position" },
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
   { id = "memory", component_id = "memory.graph", participant = "memory.capture-source-record", input_path = "/memory" },
   { id = "shell", component_id = "shell.command", participant = "shell.admit-ingress", input_path = "/shell" },
@@ -213,6 +216,7 @@ timeout_s = 30
 steps = [
   { id = "adapter", component_id = "adapter.onebot", participant = "adapter.record-ingress", input_path = "/adapter" },
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.admit-message", input_path = "/conversation" },
+  { id = "position", component_id = "memory.graph", participant = "memory.reserve-source-position-record", input_path = "/position" },
   { id = "media", component_id = "media.capture", participant = "media.register-ingress", input_path = "/media" },
   { id = "shell", component_id = "shell.command", participant = "shell.admit-ingress", input_path = "/shell" },
   { id = "classification", component_id = "conversation.scheduler", participant = "conversation.classify-shell-ingress", input_path = "/shell_classification" }

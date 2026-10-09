@@ -1070,4 +1070,4 @@ Shell P0 短命令约束（2026-10-09）：包编译器和运行时贡献声明�
 
 仍有一处证据合流缺口：相同来源端点对的多份学习日志可以引用不同 part；当前 `relation_evidence` 只保留首次晋升的两个 part，管理查询尚不能分页展示全部日志依据。端点对权重去重已成立，但 part 级证据集合的顺序无关投影与快照浏览尚未实现；不能把本次晋升拆队列的验证误认为完整证据合流验收。
 
-另有源内位置契约偏差待修：`doc/06-concurrent-convergence.md` 要求原始群消息在权威 Inbox 接纳时固定源内 `source_order_seq`；目前 `memory_capture_source` 在 Capture 提交时才递增 `source_clocks`。若图片等媒体获取使同群 Capture 乱序，`TRUNK_NEXT` 可能反映完成顺序而非接纳顺序。本次联想晋升调整未改变此行为；后续需将稳定源位置预留接到 Inbox 接纳与 Memory 捕获之间，并以乱序 Capture 数据库回归证明。
+源内位置契约已落地（2026-10-09）：`adapter.onebot` 2.4.1 的四条接纳计划在 Conversation 后加入 Memory 源位置预留；`memory.graph` 1.81.1 / SQL 3.75.1 持有不可变预留表和稳定来源时钟，Capture 校验并使用预留位置，缺失预留的 OneBot 原始消息被拒绝。隔离 PostgreSQL 用例先预留两条同群消息、再倒序捕获，确认 source_order_seq 仍为接纳顺序；相关 Memory 回归 3 passed，完整 BotHost 文本与图片链路 2 passed。候选未部署到在线 Bot，也未发送真实 QQ 消息。
