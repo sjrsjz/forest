@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import os
 import shutil
+import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -28,6 +29,18 @@ from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocatio
 from forest.schema_bundles import module_schema_namespace
 from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
+
+
+def _bump_package_version(manifest: Path) -> None:
+    source = manifest.read_text(encoding="utf-8")
+    current = tomllib.loads(source)["version"]
+    major, minor, patch = (int(item) for item in current.split("."))
+    next_version = f"{major}.{minor}.{patch + 1}"
+    old = f'version = "{current}"'
+    assert source.count(old) == 1
+    manifest.write_text(
+        source.replace(old, f'version = "{next_version}"', 1), encoding="utf-8",
+    )
 
 
 async def _realize_private(store, host_id, operation_id, receipt):
@@ -272,11 +285,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert mismatched.value.code == "HOST_STORAGE_DATABASE_MISMATCH"
 
         manifest = source / "module.toml"
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8").replace(
-                'version = "0.9.0"', 'version = "0.9.1"', 1,
-            ), encoding="utf-8",
-        )
+        _bump_package_version(manifest)
         replacement = catalog.build_official(source, scope="host")
         current = await controller.replace(
             "host.storage", replacement.digest,
@@ -455,11 +464,7 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
                         "claim_token": "abandoned/queued", "lease_seconds": 3})),
             )).fetchone())["result"]
         assert abandoned["ok"] and abandoned["value"]["work_id"] == queued_reservation["resource_id"]
-        manifest.write_text(
-            manifest.read_text(encoding="utf-8").replace(
-                'version = "0.9.1"', 'version = "0.9.2"', 1,
-            ), encoding="utf-8",
-        )
+        _bump_package_version(manifest)
         resumed_package = catalog.build_official(source, scope="host")
         current = await controller.replace(
             "host.storage", resumed_package.digest,

@@ -1,4 +1,4 @@
-"""Durable control-scope outcomes for package-owned work."""
+"""Durable outcomes for package service calls in a control scope."""
 
 from __future__ import annotations
 
@@ -64,19 +64,26 @@ class ControlPackageServiceOperationLedger:
                 _bounded(route.service_id, 128),
                 _bounded(route.graph_id, 512),
             ))
-            or not route.service_id.startswith("owned-work.")
             or type(route.graph_revision) is not int
             or route.graph_revision < 1
-            or route.admission_lane != "DATA"
-            or route.owned_work is not True
-            or route.parent_call_id is not None
+            or route.admission_lane not in {"DATA", "CONTROL"}
+            or not (
+                (route.owned_work is True
+                 and route.service_id.startswith("owned-work.")
+                 and route.admission_lane == "DATA"
+                 and route.parent_call_id is None)
+                or (route.owned_work is False
+                    and not route.service_id.startswith("owned-work.")
+                    and (route.parent_call_id is None
+                         or _bounded(route.parent_call_id, 128)))
+            )
             or isinstance(route.timeout_seconds, bool)
             or not isinstance(route.timeout_seconds, (int, float))
             or not 0 < route.timeout_seconds <= 86_400
         ):
             raise ForestError(
                 f"{self.scope.upper()}_SERVICE_OPERATION_INVALID",
-                "Control-scope owned-work operation identity is invalid", 422,
+                "Control-scope service operation identity is invalid", 422,
             )
 
     @staticmethod
@@ -87,7 +94,7 @@ class ControlPackageServiceOperationLedger:
                 execute=False,
                 error=PackageServiceError(
                     "SERVICE_OPERATION_UNKNOWN",
-                    "Original owned-work dispatch has no provable outcome", 409,
+                    "Original service dispatch has no provable outcome", 409,
                 ),
             )
         envelope = row["outcome"]
@@ -122,14 +129,15 @@ class ControlPackageServiceOperationLedger:
         self._validate(scope, route)
         if not isinstance(input_value, dict):
             raise ForestError(
-                f"{self.scope.upper()}_SERVICE_OPERATION_INVALID", "Owned-work input is invalid", 422,
+                f"{self.scope.upper()}_SERVICE_OPERATION_INVALID", "Service input is invalid", 422,
             )
         input_digest = digest_json({"service_id": route.service_id, "input": input_value})
         try:
             async with self.store.pool.connection() as conn, conn.transaction():
                 await self.generations.verify_active_generation_in(
                     conn, component_id=scope.component_id,
-                    generation_id=scope.generation_id, admission_lane="DATA",
+                    generation_id=scope.generation_id,
+                    admission_lane=route.admission_lane,
                 )
                 created = await (
                     await self._execute(conn,
@@ -188,7 +196,7 @@ class ControlPackageServiceOperationLedger:
                         execute=False,
                         error=PackageServiceError(
                             "SERVICE_OPERATION_UNKNOWN",
-                            "Original owned-work dispatch has no provable outcome", 409,
+                            "Original service dispatch has no provable outcome", 409,
                         ),
                     )
                 return self._outcome(row)
@@ -206,11 +214,11 @@ class ControlPackageServiceOperationLedger:
             encoded = json.dumps(envelope, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError, UnicodeError) as exc:
             raise ForestError(
-                f"{self.scope.upper()}_SERVICE_OUTCOME_INVALID", "Owned-work outcome is not JSON", 502,
+                f"{self.scope.upper()}_SERVICE_OUTCOME_INVALID", "Service outcome is not JSON", 502,
             ) from exc
         if len(encoded.encode("utf-8")) > 65536:
             raise ForestError(
-                f"{self.scope.upper()}_SERVICE_OUTCOME_TOO_LARGE", "Owned-work outcome exceeds 64 KiB", 502,
+                f"{self.scope.upper()}_SERVICE_OUTCOME_TOO_LARGE", "Service outcome exceeds 64 KiB", 502,
             )
         try:
             async with self.store.pool.connection() as conn, conn.transaction():
@@ -236,14 +244,14 @@ class ControlPackageServiceOperationLedger:
                 ):
                     raise ForestError(
                         "SERVICE_OPERATION_STALE_ATTEMPT",
-                        "Owned-work result has no matching active attempt", 409,
+                        "Service result has no matching active attempt", 409,
                     )
                 if row["status"] == status and row["outcome"] == envelope:
                     return
                 if row["status"] != "ACTIVE":
                     raise ForestError(
                         "SERVICE_OPERATION_STALE_ATTEMPT",
-                        "Owned-work result arrived after its attempt ended", 409,
+                        "Service result arrived after its attempt ended", 409,
                     )
                 await self._execute(conn,
                     "UPDATE __scope_schema__.package_service_operations "

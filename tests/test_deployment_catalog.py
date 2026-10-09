@@ -67,6 +67,7 @@ from forest.package_capabilities import (
 )
 from forest.package_domain_authority import PostgresPackageDomainAuthority
 from forest.packages import PackageCatalog, digest_json, storage_bundle_digest
+from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_generation import PreparedGenerationBinding, RuntimeStorageBinding
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
@@ -974,6 +975,134 @@ priority = "P1"
             await restarted.close()
         await controller.close()
 
+
+
+
+@pytest.mark.postgres
+async def test_ordinary_deployment_state_package_survives_generation_swap(
+    deployment_catalog, tmp_path
+):
+    from test_host_package_compiler import _host_package
+
+    repository = deployment_catalog
+    await repository.initialize()
+    lease = await repository.claim_supervisor(
+        "host/state-test", "incarnation/state-test", lease_seconds=300,
+    )
+    catalog = PackageCatalog(tmp_path / "catalog")
+    runtime = DeploymentRuntimeScope(
+        repository.store,
+        SimpleNamespace(authority_lease=lambda **_values: lease),
+        package_catalog=catalog,
+    )
+    source = tmp_path / "source"
+    _host_package(source)
+    manifest = source / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8")
+        .replace('package_id = "forest.host-sample"',
+                 'package_id = "forest.deployment-sample"', 1)
+        .replace('id = "host.sample"', 'id = "deployment.sample"', 1)
+        .replace('scope = "host"', 'scope = "deployment"', 1)
+        .replace('state_schema = 1',
+                 'state_schema = 1\nstate_value_schema = "schemas/state.json"', 1)
+        .replace('requests = []', 'requests = ["state.read", "state.write"]', 1)
+        .replace('host.sample.echo', 'deployment.sample.echo')
+        + '''
+[[components.provides]]
+name = "deployment.sample.bump"
+contract = "1.0"
+semantics = "at-most-once"
+input_schema = "schemas/bump-input.json"
+output_schema = "schemas/bump-output.json"
+''',
+        encoding="utf-8",
+    )
+    (source / "schemas/state.json").write_text(
+        '{"type":"object","additionalProperties":false,'
+        '"required":["count"],"properties":{"count":{"type":"integer","minimum":0}}}',
+        encoding="utf-8",
+    )
+    (source / "schemas/bump-input.json").write_text(
+        '{"type":"object","additionalProperties":false,'
+        '"required":["delta"],"properties":{"delta":{"type":"integer","minimum":1}}}',
+        encoding="utf-8",
+    )
+    (source / "schemas/bump-output.json").write_text(
+        '{"type":"object","additionalProperties":false,'
+        '"required":["count"],"properties":{"count":{"type":"integer","minimum":0}}}',
+        encoding="utf-8",
+    )
+    worker = source / "python/host_sample.py"
+    worker.write_text(
+        worker.read_text(encoding="utf-8")
+        .replace('host.sample.echo', 'deployment.sample.echo')
+        + "\n    @service('deployment.sample.bump', semantics='at-most-once')\n"
+          "    async def bump(self, payload, ctx):\n"
+          "        current = await ctx.state.get('counter')\n"
+          "        count = (current['value'] or {'count': 0})['count'] + payload['delta']\n"
+          "        saved = await ctx.state.commit('counter', {'count': count}, "
+          "current['revision'], ctx.operations.stable('counter'))\n"
+          "        return {'count': saved['value']['count']}\n",
+        encoding="utf-8",
+    )
+    controller = DeploymentPackageController(
+        runtime, catalog,
+        official_sources=(Path(__file__).parents[1]
+                          / "src/forest/builtin/deployment_audit",),
+    )
+    try:
+        base = await controller.start()
+        ordinary = catalog.build(source)
+        added = await controller.add(
+            "deployment.sample", ordinary.digest,
+            expected_graph_revision=base.graph_identity.graph_revision,
+        )
+
+        async def bump(registry, operation_id):
+            member = registry.get("deployment.sample")
+            identity = member.generation_identity
+            route = FrozenServiceRoute(
+                service_id="deployment.sample.bump", version=1,
+                caller_component_id="deployment.sample",
+                provider_component_id="deployment.sample",
+                provider_generation_id=identity.generation_id,
+                graph_id=identity.graph_id, graph_revision=identity.graph_revision,
+                admission_lane="DATA", owned_work=False,
+            )
+            return await member.runtime_service_handlers()[
+                ("deployment.sample.bump", 1)
+            ].invoke_routed(
+                route,
+                RuntimeServiceInvocation(
+                    operation_id, 10, "deployment.test", repository.store.deployment_id,
+                ),
+                (), {"delta": 1},
+            )
+
+        assert await bump(added, "deployment-bump/one") == {"count": 1}
+        assert await bump(added, "deployment-bump/one") == {"count": 1}
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.0"', 'version = "1.0.1"', 1,
+            ), encoding="utf-8",
+        )
+        next_package = catalog.build(source)
+        replaced = await controller.replace(
+            "deployment.sample", next_package.digest,
+            expected_graph_revision=added.graph_identity.graph_revision,
+        )
+        assert await bump(replaced, "deployment-bump/two") == {"count": 2}
+        async with repository.store.pool.connection() as conn:
+            rows = await (await conn.execute(
+                "SELECT revision FROM forest_deployment.component_state_heads "
+                "WHERE deployment_id=%s AND component_id='deployment.sample' "
+                "AND state_key='counter'",
+                (repository.store.deployment_id,),
+            )).fetchall()
+        assert [row["revision"] for row in rows] == [2]
+    finally:
+        await controller.close()
 
 @pytest.mark.postgres
 async def test_deployment_configuration_apply_publishes_frozen_generation(

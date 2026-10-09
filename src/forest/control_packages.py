@@ -24,6 +24,7 @@ from forest.runtime_modules import (
     configuration_management_contribution,
 )
 from forest.schema_bundles import StorageBundleSpec
+from forest.storage.control_component_state import ControlPackageStateAuthority
 from forest.storage.deployment_module_configuration import DeploymentModuleConfigurationRepository
 from forest.storage.host_module_configuration import HostModuleConfigurationRepository
 
@@ -356,16 +357,24 @@ async def bootstrap_installed_control_package(
         "id", "scope", "state_schema", "reload_mode", "config_schema",
         "bootstrap_config", "resources", "lifecycle", "capabilities",
         "provides", "management_queries", "management_ui", "config_immutable_paths",
+        "state_value_schema",
     }
+    requested = tuple(component.get("capabilities", {}).get("requests", ()))
     if (
         component["scope"] != scope_kind
         or set(component) - allowed
-        or component.get("capabilities", {}).get("requests")
-        or any(item["semantics"] != "read" for item in component["provides"])
+        or not set(requested) <= {"state.read", "state.write"}
+        or ("state.write" in requested and "state.read" not in requested)
+        or (requested and "state_value_schema" not in component)
+        or any(
+            item["semantics"] not in {"read", "at-most-once"}
+            or (item["semantics"] == "at-most-once" and "state.write" not in requested)
+            for item in component["provides"]
+        )
     ):
         raise ForestError(
             f"{scope_kind.upper()}_PACKAGE_PORT_UNAVAILABLE",
-            "Installed control packages currently support only pure read services",
+            "Installed control package requests unsupported state or service authority",
             422,
         )
     config_schema = snapshot.schema(component["config_schema"])
@@ -400,8 +409,21 @@ async def bootstrap_installed_control_package(
     else:
         prepared_configuration = None
     grants = _BuiltinGrantSet(
-        (), digest_json([f"forest.{scope_kind}.installed-grants/1", snapshot.digest, component["id"]]),
+        tuple(_BuiltinGrant(item, "component", component["id"]) for item in requested),
+        digest_json([
+            f"forest.{scope_kind}.installed-grants/1", snapshot.digest,
+            component["id"], requested,
+        ]),
     )
+    state = (
+        ControlPackageStateAuthority(
+            runtime, state_schema=component["state_schema"],
+            value_schema=snapshot.schema(component["state_value_schema"]),
+        )
+        if requested else None
+    )
+    if state is not None:
+        await state.verify_contract(component["id"])
     ui = snapshot.management_ui()
     management = (configuration_management_contribution(
         component["id"], scope_kinds=(scope_kind,),
@@ -421,8 +443,13 @@ async def bootstrap_installed_control_package(
         prepared_configuration=prepared_configuration,
         generation_verifier=runtime.generation_authority.verify_active_generation,
         generation_member_verifier=runtime.generation_authority.verify_generation_member,
-        state_queries=None, state_commands=None, domain_queries=None,
-        service_operation_ledger=None, storage=None, trust_level="installed",
+        state_queries=state if "state.read" in requested else None,
+        state_commands=state if "state.write" in requested else None,
+        domain_queries=None,
+        service_operation_ledger=(
+            runtime.service_operation_ledger if "state.write" in requested else None
+        ),
+        storage=None, trust_level="installed",
         management=management,
         management_contract_factory=lambda adapter: PackageManagementContract(
             configuration, adapter=adapter, schema=config_schema,

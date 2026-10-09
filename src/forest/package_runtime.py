@@ -561,6 +561,10 @@ class PackageGenerationAdapter:
                 "additionalProperties": False,
             }
         )
+        self._state_value_validator = (
+            Draft202012Validator(self.state_contract)
+            if state_schema_ref is not None else None
+        )
 
     def runtime_service_handlers(self) -> dict[tuple[str, int], RoutedServiceEndpoint]:
         handlers = {
@@ -2472,6 +2476,12 @@ class PackageGenerationAdapter:
             if not self._has_capability("state.write"):
                 raise ForestError("CAPABILITY_DENIED", "State write is not granted", 403)
             self._require_writable_call(call_id)
+            if (self._state_value_validator is not None
+                    and not self._state_value_validator.is_valid(request["value"])):
+                raise ForestError(
+                    "COMPONENT_STATE_INPUT_INVALID",
+                    "State value violates its package schema", 422,
+                )
             if self._state_commands is None:
                 raise ForestError("CAPABILITY_UNAVAILABLE", "State commands are unavailable", 503)
             return await self._state_commands.commit_state(

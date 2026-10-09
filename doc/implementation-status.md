@@ -2,7 +2,9 @@
 
 当前在线实例的实际运行状态与仍未完成的真实 @ 验收见 [v21 在线切换记录](live-v21-cutover-2026-10-09.md)。Bot 基础身份和期望运行状态属于部署内核；`deployment.bot-catalog` 仅通过受限端口提供可热重载管理入口。
 
-普通控制插件热重载验收（2026-10-10）：在一次性 PostgreSQL 容器的真实 Host Graph 中，先经 Web 变更账本把官方样例包换至新 Generation，再用没有官方登记的本地安装包替换同一组件；Graph 修订继续推进、Generation 身份变化，普通包的管理查询经新 Worker 返回预期值。现有 Host 用例 1 passed（5.50 秒），Ruff 与 Python 编译通过，测试数据库和容器已清理。此结果只证明普通控制包当前的纯读服务与包配置可热替换；部署/Host 普通包的私有状态、持久任务和管理写操作仍无完整内核权威，所需事务与围栏见 [控制面设计](13-microkernel-control-plane-redesign.md)。
+普通控制包组件状态（2026-10-10）：部署与 Host 内核现提供按 scope、组件和状态键隔离的受限状态端口。普通包显式请求 `state.read/write` 并声明值 Schema；不超过 64 KiB 的规范 JSON 值作为不可变 Payload 保存，单键写入经准确 Generation 核验、操作 ID 合流、预期修订 CAS 和持久服务操作账本结算。首次写入固定状态版本和值 Schema 摘要；契约不一致的热替换候选被拒绝，契约一致的新 Generation 可以续用旧状态。隔离 PostgreSQL 的 Host 与 deployment Graph 用例共 4 passed，另有 Host 官方存储热换代用例 1 passed；本地 Package Runtime 14 passed，包目录 106 passed/1 skipped。当前端口不提供普通控制包的私有 SQL、跨资源事务、持久 Job 或 Web 管理写动作。根基线发生变化，未上线候选部署需重建数据库；在线 v21 未切换本次源码，也未向真实 QQ 发消息。
+
+普通控制插件热重载验收（2026-10-10）：在一次性 PostgreSQL 容器的真实 Host Graph 中，先经 Web 变更账本把官方样例包换至新 Generation，再用没有官方登记的本地安装包替换同一组件；Graph 修订继续推进、Generation 身份变化，普通包的管理查询经新 Worker 返回预期值。该阶段 Host 用例 1 passed（5.50 秒），Ruff 与 Python 编译通过，测试数据库和容器已清理；随后补入的组件状态端口见上一段。持久任务和管理写操作仍需 [控制面设计](13-microkernel-control-plane-redesign.md) 所述的独立权威与围栏。
 
 调用级只读围栏验收（2026-10-10）：通用 Package Runtime 现把 read 服务身份固定到 Worker call 并经 Contract Router 向下传播；状态和 Payload 写入、Domain Command、普通 UnitOfWork、Event/Job 发布以及目录执行均要求可写调用身份，拥有组件级 Capability 不再足以让只读服务写入。owned-work 在持久操作准入后取得并在调用结束时撤销写身份。Memory Graph 的两个跨模块遗忘预览显式声明为仅官方可用的只读 UnitOfWork 计划，保持原子观察且不唤醒后台工作；普通计划仍要求写身份。定向 Package Runtime 13 passed、包目录 106 passed/1 skipped；一次性 PostgreSQL 的完整 BotHost 生命周期、Shell、Memory 管理与换代场景 1 passed in 442.22s，测试库残留 0。在线 v21 尚未切换本次源码，也未向真实 QQ 发消息。
 

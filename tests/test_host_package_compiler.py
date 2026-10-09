@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
@@ -22,7 +23,10 @@ from forest.host_packages import (
 )
 from forest.host_runtime import HostRuntimeScope
 from forest.host_supervisor import HostSupervisor
+from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog, digest_json
+from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
+from forest.storage.control_component_state import ControlPackageStateAuthority
 from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
@@ -264,6 +268,184 @@ async def test_host_package_compiles_into_real_generation(tmp_path):
         assert await ordinary_registry.get("host.sample").management_contract.query(
             "echo", {"value": "ordinary-reloaded"},
         ) == {"value": "ordinary-reloaded"}
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8")
+            .replace('version = "1.0.3"', 'version = "1.1.0"', 1)
+            .replace('state_schema = 1',
+                     'state_schema = 1\nstate_value_schema = "schemas/state.json"', 1)
+            .replace('requests = []', 'requests = ["state.read", "state.write"]', 1)
+            + '''
+[[components.provides]]
+name = "host.sample.bump"
+contract = "1.0"
+semantics = "at-most-once"
+input_schema = "schemas/bump-input.json"
+output_schema = "schemas/bump-output.json"
+''',
+            encoding="utf-8",
+        )
+        (source / "schemas/state.json").write_text(
+            '{"$schema":"https://json-schema.org/draft/2020-12/schema",'
+            '"type":"object","additionalProperties":false,'
+            '"required":["count"],"properties":{"count":{"type":"integer","minimum":0}}}',
+            encoding="utf-8",
+        )
+        (source / "schemas/bump-input.json").write_text(
+            '{"$schema":"https://json-schema.org/draft/2020-12/schema",'
+            '"type":"object","additionalProperties":false,'
+            '"required":["delta"],"properties":{"delta":{"type":"integer","minimum":1}}}',
+            encoding="utf-8",
+        )
+        (source / "schemas/bump-output.json").write_text(
+            '{"$schema":"https://json-schema.org/draft/2020-12/schema",'
+            '"type":"object","additionalProperties":false,'
+            '"required":["count"],"properties":{"count":{"type":"integer","minimum":0}}}',
+            encoding="utf-8",
+        )
+        worker_source = source / "python/host_sample.py"
+        worker_source.write_text(
+            worker_source.read_text(encoding="utf-8")
+            + "\n    @service('host.sample.bump', semantics='at-most-once')\n"
+              "    async def bump(self, payload, ctx):\n"
+              "        current = await ctx.state.get('counter')\n"
+              "        count = (current['value'] or {'count': 0})['count'] + payload['delta']\n"
+              "        saved = await ctx.state.commit('counter', {'count': count}, "
+              "current['revision'], ctx.operations.stable('counter'))\n"
+              "        return {'count': saved['value']['count']}\n",
+            encoding="utf-8",
+        )
+        state_package = catalog.build(source)
+        state_registry = await controller.replace(
+            "host.sample", state_package.digest,
+            expected_graph_revision=ordinary_registry.graph_identity.graph_revision,
+        )
+
+        async def bump(registry, operation_id):
+            member = registry.get("host.sample")
+            identity = member.generation_identity
+            route = FrozenServiceRoute(
+                service_id="host.sample.bump", version=1,
+                caller_component_id="host.sample", provider_component_id="host.sample",
+                provider_generation_id=identity.generation_id,
+                graph_id=identity.graph_id, graph_revision=identity.graph_revision,
+                admission_lane="DATA", owned_work=False,
+            )
+            return await member.runtime_service_handlers()[
+                ("host.sample.bump", 1)
+            ].invoke_routed(
+                route,
+                RuntimeServiceInvocation(operation_id, 10, "host.test", host_id),
+                (), {"delta": 1},
+            )
+
+        assert await bump(state_registry, "bump/one") == {"count": 1}
+        assert await bump(state_registry, "bump/one") == {"count": 1}
+        state = ControlPackageStateAuthority(
+            runtime, state_schema=1,
+            value_schema=state_registry.get("host.sample").state_contract,
+        )
+        generation = state_registry.get("host.sample").generation_identity.generation_id
+        scope = PackageCallScope(
+            bot_id=None, scope_kind="host", scope_id=host_id,
+            component_id="host.sample", generation_id=generation,
+            instance_id="instance/host-test", worker_incarnation="worker/host-test",
+            call_id="call:stale-test", call_operation_id="stale/test",
+            causal_root_kind="host.test", causal_root_id=host_id,
+        )
+        assert await state.read_state(scope, state_key="counter") == {
+            "value": {"count": 1}, "revision": 1,
+        }
+        with pytest.raises(ForestError) as stale_state:
+            await state.commit_state(
+                scope, state_key="counter", value={"count": 9},
+                expected_revision=0, operation_id="state/stale-test",
+            )
+        assert stale_state.value.code == "COMPONENT_STATE_REVISION_CONFLICT"
+        with pytest.raises(ForestError) as wrong_scope:
+            await state.read_state(
+                replace(scope, scope_id="host/" + "f" * 32), state_key="counter",
+            )
+        assert wrong_scope.value.code == "PACKAGE_CAPABILITY_SCOPE_MISMATCH"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.1.0"', 'version = "1.1.1"', 1,
+            ),
+            encoding="utf-8",
+        )
+        next_package = catalog.build(source)
+        next_registry = await controller.replace(
+            "host.sample", next_package.digest,
+            expected_graph_revision=state_registry.graph_identity.graph_revision,
+        )
+        assert await bump(next_registry, "bump/two") == {"count": 2}
+        async with store.pool.connection() as conn:
+            payloads = await (await conn.execute(
+                "SELECT count(*) AS count FROM forest_host.component_state_payloads "
+                "WHERE host_id=%s AND component_id='host.sample'", (host_id,),
+            )).fetchone()
+            steps = await (await conn.execute(
+                "SELECT count(*) AS count FROM forest_host.component_state_steps "
+                "WHERE host_id=%s AND component_id='host.sample'", (host_id,),
+            )).fetchone()
+        assert payloads["count"] == steps["count"] == 2
+        state_schema_file = source / "schemas/state.json"
+        state_schema_file.write_text(
+            state_schema_file.read_text(encoding="utf-8").replace(
+                '"minimum":0', '"minimum":1', 1,
+            ), encoding="utf-8",
+        )
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.1.1"', 'version = "1.1.2"', 1,
+            ), encoding="utf-8",
+        )
+        incompatible = catalog.build(source)
+        with pytest.raises(ForestError) as schema_drift:
+            await controller.preview_change(
+                operation_kind="REPLACE", component_id="host.sample",
+                package_digest=incompatible.digest,
+                expected_graph_revision=next_registry.graph_identity.graph_revision,
+            )
+        assert schema_drift.value.code == "COMPONENT_STATE_CONTRACT_MISMATCH"
+        assert controller.registry.graph_identity == next_registry.graph_identity
+
+        live_scope = replace(
+            scope,
+            generation_id=next_registry.get("host.sample").generation_identity.generation_id,
+            call_id="call:concurrent-state",
+        )
+        same_operation = await asyncio.gather(*(
+            state.commit_state(
+                live_scope, state_key="counter", value={"count": 3},
+                expected_revision=2, operation_id="state/concurrent-same",
+            ) for _ in range(2)
+        ))
+        assert [item["revision"] for item in same_operation] == [3, 3]
+        competing = await asyncio.gather(
+            state.commit_state(
+                live_scope, state_key="counter", value={"count": 4},
+                expected_revision=3, operation_id="state/concurrent-four",
+            ),
+            state.commit_state(
+                live_scope, state_key="counter", value={"count": 5},
+                expected_revision=3, operation_id="state/concurrent-five",
+            ),
+            return_exceptions=True,
+        )
+        accepted = [item for item in competing if isinstance(item, dict)]
+        rejected = [item for item in competing if isinstance(item, ForestError)]
+        assert len(accepted) == len(rejected) == 1
+        assert accepted[0]["revision"] == 4
+        assert rejected[0].code == "COMPONENT_STATE_REVISION_CONFLICT"
+        assert await state.read_state(live_scope, state_key="counter") == {
+            "value": accepted[0]["value"], "revision": 4,
+        }
+        async with store.pool.connection() as conn:
+            count = await (await conn.execute(
+                "SELECT count(*) AS count FROM forest_host.component_state_steps "
+                "WHERE host_id=%s AND component_id='host.sample'", (host_id,),
+            )).fetchone()
+        assert count["count"] == 4
     finally:
         if change_task is not None:
             change_task.cancel()

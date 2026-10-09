@@ -100,6 +100,105 @@ CREATE TABLE forest_host.runtime_package_selection (
     PRIMARY KEY (host_id,component_id)
 );
 
+CREATE TABLE forest_host.component_state_contracts (
+    host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
+    component_id text NOT NULL CHECK (component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
+    state_schema integer NOT NULL CHECK (state_schema > 0),
+    contract_digest text NOT NULL CHECK (contract_digest ~ '^sha256:[a-f0-9]{64}$'),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (host_id,component_id)
+);
+
+CREATE TABLE forest_host.component_state_payloads (
+    host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
+    component_id text NOT NULL CHECK (component_id ~ '^[a-z0-9][a-z0-9._-]{0,127}$'),
+    payload_id text NOT NULL CHECK (octet_length(payload_id) BETWEEN 1 AND 128),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[a-f0-9]{64}$'),
+    content_bytes bytea NOT NULL CHECK (octet_length(content_bytes) BETWEEN 1 AND 65536),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (host_id,component_id,payload_id),
+    UNIQUE (host_id,component_id,operation_id),
+    UNIQUE (host_id,component_id,payload_id,content_digest),
+    FOREIGN KEY (host_id,component_id)
+        REFERENCES forest_host.component_state_contracts(host_id,component_id),
+    CHECK (content_digest='sha256:' || encode(sha256(content_bytes),'hex'))
+);
+
+CREATE TABLE forest_host.component_state_steps (
+    host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
+    component_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    generation_id text NOT NULL,
+    call_id text NOT NULL CHECK (octet_length(call_id) BETWEEN 1 AND 128),
+    state_key text NOT NULL CHECK (octet_length(state_key) BETWEEN 1 AND 128),
+    expected_revision bigint NOT NULL CHECK (expected_revision >= 0),
+    revision bigint NOT NULL CHECK (revision > 0),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    payload_id text NOT NULL,
+    value_digest text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (host_id,component_id,operation_id),
+    UNIQUE (host_id,component_id,state_key,revision),
+    UNIQUE (host_id,component_id,state_key,revision,payload_id,value_digest),
+    FOREIGN KEY (host_id,generation_id)
+        REFERENCES forest_host.runtime_generations(host_id,generation_id),
+    FOREIGN KEY (host_id,component_id,payload_id,value_digest)
+        REFERENCES forest_host.component_state_payloads(host_id,component_id,payload_id,content_digest),
+    CHECK (revision=expected_revision+1)
+);
+
+CREATE TABLE forest_host.component_state_heads (
+    host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
+    component_id text NOT NULL,
+    state_key text NOT NULL,
+    revision bigint NOT NULL CHECK (revision > 0),
+    payload_id text NOT NULL,
+    value_digest text NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (host_id,component_id,state_key),
+    FOREIGN KEY (host_id,component_id,state_key,revision,payload_id,value_digest)
+        REFERENCES forest_host.component_state_steps(
+            host_id,component_id,state_key,revision,payload_id,value_digest)
+);
+
+CREATE FUNCTION forest_host.reject_component_state_fact_change() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    RAISE EXCEPTION 'Component state fact is immutable' USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION forest_host.guard_component_state_head_change() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'Component state head cannot be deleted' USING ERRCODE='55000';
+    END IF;
+    IF OLD.host_id IS DISTINCT FROM NEW.host_id
+       OR OLD.component_id IS DISTINCT FROM NEW.component_id
+       OR OLD.state_key IS DISTINCT FROM NEW.state_key
+       OR NEW.revision<>OLD.revision+1 THEN
+        RAISE EXCEPTION 'Component state head transition is invalid' USING ERRCODE='55000';
+    END IF;
+    NEW.updated_at := clock_timestamp();
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER component_state_contract_immutable
+    BEFORE UPDATE OR DELETE ON forest_host.component_state_contracts
+    FOR EACH ROW EXECUTE FUNCTION forest_host.reject_component_state_fact_change();
+CREATE TRIGGER component_state_payload_immutable
+    BEFORE UPDATE OR DELETE ON forest_host.component_state_payloads
+    FOR EACH ROW EXECUTE FUNCTION forest_host.reject_component_state_fact_change();
+CREATE TRIGGER component_state_step_immutable
+    BEFORE UPDATE OR DELETE ON forest_host.component_state_steps
+    FOR EACH ROW EXECUTE FUNCTION forest_host.reject_component_state_fact_change();
+CREATE TRIGGER component_state_head_transition
+    BEFORE UPDATE OR DELETE ON forest_host.component_state_heads
+    FOR EACH ROW EXECUTE FUNCTION forest_host.guard_component_state_head_change();
+
 CREATE TABLE forest_host.package_service_operations (
     host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
     component_id text NOT NULL,
