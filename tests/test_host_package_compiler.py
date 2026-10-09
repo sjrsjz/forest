@@ -239,6 +239,31 @@ async def test_host_package_compiles_into_real_generation(tmp_path):
         assert settled["state"] == "SUCCEEDED"
         assert controller.registry.graph_identity.graph_revision == graph.graph_revision + 2
         assert controller.registry.get("host.sample").snapshot.digest == queued_package.digest
+
+        # The installed artifact has no official provenance, yet its read
+        # service must survive a real Generation replacement.
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.2"', 'version = "1.0.3"', 1,
+            ),
+            encoding="utf-8",
+        )
+        ordinary = catalog.build(source)
+        assert not catalog.is_official_host(ordinary.digest)
+        previous = controller.registry
+        ordinary_registry = await controller.replace(
+            "host.sample", ordinary.digest,
+            expected_graph_revision=previous.graph_identity.graph_revision,
+        )
+        assert ordinary_registry.graph_identity.graph_revision == (
+            previous.graph_identity.graph_revision + 1
+        )
+        assert ordinary_registry.get("host.sample").generation_identity != (
+            previous.get("host.sample").generation_identity
+        )
+        assert await ordinary_registry.get("host.sample").management_contract.query(
+            "echo", {"value": "ordinary-reloaded"},
+        ) == {"value": "ordinary-reloaded"}
     finally:
         if change_task is not None:
             change_task.cancel()
