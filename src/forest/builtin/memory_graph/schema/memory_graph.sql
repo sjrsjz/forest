@@ -9487,6 +9487,119 @@ EXCEPTION WHEN invalid_text_representation OR invalid_datetime_format
 END;
 $$;
 
+CREATE FUNCTION memory_query_trial_vector_sources(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    trial jsonb;
+    validation jsonb;
+    page_limit integer := COALESCE((input->>'limit')::integer,50);
+    snapshot_time timestamptz := COALESCE(
+        (input->>'snapshot_accepted_at')::timestamptz,clock_timestamp());
+    snapshot_value pg_snapshot := COALESCE(
+        (input->>'snapshot_xid')::pg_snapshot,pg_current_snapshot());
+    after_time timestamptz := (input->>'after_occurred_at')::timestamptz;
+    source_filters jsonb := input - 'query_id' - 'requested_by'
+        - 'snapshot_accepted_at' - 'snapshot_xid' - 'after_occurred_at'
+        - 'after_source_unit_id' - 'cursor_filter_digest';
+    filter_digest text;
+    items jsonb;
+    more boolean;
+    cursor_value jsonb;
+BEGIN
+    trial := __forest_module_schema__.memory_read_management_trial(
+        context,jsonb_build_object('query_id',input->>'query_id',
+                                   'requested_by',input->>'requested_by'));
+    IF trial->>'ok' IS DISTINCT FROM 'true' THEN RETURN trial; END IF;
+    IF trial#>>'{value,state}' IS DISTINCT FROM 'READY' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_NOT_READY',
+                'message','Trial matching is not ready','status',409));
+    END IF;
+    IF EXISTS (SELECT 1 FROM __forest_module_schema__.memory_trial_inputs t
+        WHERE t.bot_id=context->>'bot_id' AND t.query_id=input->>'query_id'
+          AND t.cancelled_at IS NOT NULL) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TRIAL_INPUT_UNAVAILABLE',
+                'message','Trial input was cancelled','status',410));
+    END IF;
+    IF page_limit NOT BETWEEN 1 AND 50 OR
+       COALESCE(input->>'eligibility_state','ELIGIBLE')<>'ELIGIBLE' OR
+       COALESCE(input->>'source_status','ACTIVE')<>'ACTIVE' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Vector source pages require active eligible sources',
+                'status',422));
+    END IF;
+    -- Reuse the ordinary source-query validator, including field dependencies
+    -- and text/range bounds. Its single-row read uses the same source filters.
+    validation := __forest_module_schema__.memory_query_sources(
+        context,source_filters || jsonb_build_object('limit',1));
+    IF validation->>'ok' IS DISTINCT FROM 'true' THEN RETURN validation; END IF;
+    filter_digest := 'sha256:' || encode(sha256(convert_to(
+        jsonb_build_array(source_filters - 'limit',input->>'query_id',
+            input->>'requested_by',snapshot_value::text,snapshot_time::text
+        )::text,'UTF8')),'hex');
+    IF ((after_time IS NOT NULL) <> (input ? 'after_source_unit_id')) OR
+       (after_time IS NOT NULL AND
+          (NOT input ? 'snapshot_accepted_at' OR NOT input ? 'snapshot_xid' OR
+           input->>'cursor_filter_digest' IS DISTINCT FROM filter_digest)) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Vector source cursor is invalid','status',422));
+    END IF;
+    WITH matches AS MATERIALIZED (
+        SELECT m.source_unit_id,m.source_revision,max(m.score) AS best_score,
+            min(m.candidate_rank) AS best_candidate_rank,
+            count(DISTINCT m.query_facet_id)::integer AS matched_query_facets
+        FROM __forest_module_schema__.query_seed_matches m
+        JOIN __forest_module_schema__.embedding_facets f
+          ON f.bot_id=m.bot_id AND f.facet_id=m.document_facet_id
+         AND f.source_unit_id=m.source_unit_id
+         AND f.source_revision=m.source_revision AND f.state='READY'
+        WHERE m.bot_id=context->>'bot_id' AND m.query_id=input->>'query_id'
+        GROUP BY m.source_unit_id,m.source_revision
+    ), page AS (
+        SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
+            u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
+            u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
+            u.eligibility_state,u.source_status,u.document_facet_count,
+            u.ready_document_facet_count,u.failed_document_facet_count,
+            u.unknown_document_facet_count,u.index_coverage,
+            m.best_score,m.best_candidate_rank,m.matched_query_facets
+        FROM matches m
+        JOIN __forest_module_schema__.memory_filtered_source_units(
+            context->>'bot_id',source_filters,snapshot_time,snapshot_value) u
+          ON u.source_unit_id=m.source_unit_id
+         AND u.source_revision=m.source_revision
+        WHERE after_time IS NULL OR
+            (u.occurred_at,u.source_unit_id)<
+                (after_time,input->>'after_source_unit_id')
+        ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT page_limit+1
+    ), visible AS (
+        SELECT * FROM page ORDER BY occurred_at DESC,source_unit_id DESC
+        LIMIT page_limit
+    )
+    SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v)
+                  ORDER BY v.occurred_at DESC,v.source_unit_id DESC)
+                  FROM visible v),'[]'::jsonb),
+           (SELECT count(*)>page_limit FROM page),
+           (SELECT jsonb_build_object('occurred_at',v.occurred_at,
+               'source_unit_id',v.source_unit_id)
+            FROM visible v ORDER BY v.occurred_at,v.source_unit_id LIMIT 1)
+    INTO items,more,cursor_value;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('query_id',input->>'query_id',
+            'snapshot_accepted_at',snapshot_time,'snapshot_xid',snapshot_value::text,
+            'filter_digest',filter_digest,'items',items,'has_more',more,
+            'next_cursor',CASE WHEN more THEN cursor_value ELSE NULL END));
+EXCEPTION WHEN invalid_text_representation OR invalid_datetime_format
+    OR datetime_field_overflow OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+            'message','Vector source query input is invalid','status',422));
+END;
+$$;
+
 CREATE FUNCTION memory_query_source_embedding_facets(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE

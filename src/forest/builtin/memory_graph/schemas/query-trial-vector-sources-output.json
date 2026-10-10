@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "query_id",
+    "snapshot_accepted_at",
+    "snapshot_xid",
+    "items",
+    "has_more",
+    "next_cursor",
+    "filter_digest"
+  ],
+  "properties": {
+    "snapshot_accepted_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "snapshot_xid": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 65536
+    },
+    "items": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_unit_id",
+          "source_id",
+          "trunk_id",
+          "source_kind",
+          "platform",
+          "realm_id",
+          "external_group_id",
+          "author_subject_ref",
+          "unit_kind",
+          "modality",
+          "occurred_at",
+          "source_order_seq",
+          "part_count",
+          "eligibility_state",
+          "source_status",
+          "document_facet_count",
+          "ready_document_facet_count",
+          "failed_document_facet_count",
+          "unknown_document_facet_count",
+          "index_coverage",
+          "best_score",
+          "best_candidate_rank",
+          "matched_query_facets"
+        ],
+        "properties": {
+          "source_unit_id": {
+            "type": "string"
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "trunk_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_kind": {
+            "type": "string"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "realm_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "external_group_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "author_subject_ref": {
+            "type": "string"
+          },
+          "unit_kind": {
+            "type": "string"
+          },
+          "modality": {
+            "type": "string"
+          },
+          "occurred_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "source_order_seq": {
+            "type": "integer"
+          },
+          "part_count": {
+            "type": "integer"
+          },
+          "eligibility_state": {
+            "enum": [
+              "REGISTERED",
+              "ELIGIBLE",
+              "SUPPRESSED"
+            ]
+          },
+          "source_status": {
+            "enum": [
+              "ACTIVE",
+              "RETIRED"
+            ]
+          },
+          "document_facet_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ready_document_facet_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "failed_document_facet_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "unknown_document_facet_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "index_coverage": {
+            "enum": [
+              "NO_FACETS",
+              "NOT_READY",
+              "PARTIAL",
+              "COMPLETE"
+            ]
+          },
+          "best_score": {
+            "type": "number"
+          },
+          "best_candidate_rank": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 256
+          },
+          "matched_query_facets": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 256
+          }
+        }
+      }
+    },
+    "has_more": {
+      "type": "boolean"
+    },
+    "next_cursor": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+        "occurred_at",
+        "source_unit_id"
+      ],
+      "properties": {
+        "occurred_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source_unit_id": {
+          "type": "string"
+        }
+      }
+    },
+    "filter_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "query_id": {
+      "type": "string"
+    }
+  }
+}

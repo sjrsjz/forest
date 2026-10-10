@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.88.0"
+version = "1.89.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -62,6 +62,7 @@ requests = [
   "domain.query:memory.read-embedding-candidates",
   "domain.query:memory.list-trunks",
   "domain.query:memory.query-sources",
+  "domain.query:memory.query-trial-vector-sources",
   "domain.query:memory.query-relations",
   "domain.query:memory.search-relations",
   "domain.query:memory.forget-work-status",
@@ -284,9 +285,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.83.0"
+schema_version = "3.84.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "4281087c4e2cdc18ddcdb84fd12d6c4ac031ba5c7ba519686cc45c9451ddb812"
+baseline_sha256 = "d769637982d48034a086d1781d5f6d94792026f10262949f55a5e45e85750ae7"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -332,6 +333,13 @@ contract = "1.0"
 function = "memory_query_sources"
 input_schema = "schemas/query-sources-input.json"
 output_schema = "schemas/query-sources-output.json"
+
+[[components.domain_queries]]
+name = "memory.query-trial-vector-sources"
+contract = "1.0"
+function = "memory_query_trial_vector_sources"
+input_schema = "schemas/query-trial-vector-sources-input.json"
+output_schema = "schemas/query-trial-vector-sources-output.json"
 
 [[components.domain_queries]]
 name = "memory.query-source-facets"
@@ -528,6 +536,16 @@ audit = "SECURITY"
 default_limit = 50
 max_limit = 100
 timeout_s = 10
+
+[[components.management_queries]]
+id = "memory.sources.vector"
+port = "memory.query-trial-vector-sources"
+required_role = "ADMIN"
+actor_field = "requested_by"
+audit = "SECURITY"
+default_limit = 50
+max_limit = 50
+timeout_s = 15
 
 [[components.management_queries]]
 id = "memory.source-facets.query"

@@ -3298,6 +3298,9 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 trial_page = await trial_query(
                     "memory.trial.result", {"query_id": trial_id, "limit": 4}
                 )
+                vector_page = await trial_query(
+                    "memory.sources.vector", {"query_id": trial_id, "limit": 1}
+                )
                 trial_association = await trial_query(
                     "memory.trial.association-evidence",
                     {"query_id": trial_id, "item_index": 0},
@@ -3331,6 +3334,29 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert trial_page["items"][0]["source_unit_id"] == unit_evidence["source_unit_id"]
             assert trial_page["items"][0]["external_group_id"] == "933179609"
             assert trial_page["items"][0]["author_subject_ref"] == "qq:20001"
+            assert vector_page["query_id"] == trial_id
+            assert len(vector_page["items"]) == 1
+            assert vector_page["items"][0]["source_unit_id"] == unit_evidence["source_unit_id"]
+            assert vector_page["items"][0]["external_group_id"] == "933179609"
+            assert vector_page["items"][0]["author_subject_ref"] == "qq:20001"
+            assert vector_page["items"][0]["best_score"] >= 0.35
+            assert vector_page["items"][0]["matched_query_facets"] >= 1
+            assert not vector_page["has_more"]
+            with pytest.raises(ForestError) as changed_vector_cursor:
+                await memory_instance.management_contract.query_authorized(
+                    "memory.sources.vector", {
+                        "query_id": trial_id, "trunk_id": "another-trunk",
+                        "snapshot_accepted_at": vector_page["snapshot_accepted_at"],
+                        "snapshot_xid": vector_page["snapshot_xid"],
+                        "after_occurred_at": vector_page["items"][0]["occurred_at"],
+                        "after_source_unit_id": vector_page["items"][0]["source_unit_id"],
+                        "cursor_filter_digest": vector_page["filter_digest"],
+                    },
+                    authorization=SimpleNamespace(
+                        actor_ref=trial_actor, web_subject_ref=trial_actor,
+                    ),
+                )
+            assert changed_vector_cursor.value.code == "MEMORY_QUERY_INVALID"
             assert base64.b64decode(trial_image["data_base64"]) == picture_bytes
             with pytest.raises(ForestError) as foreign_trial:
                 await memory_instance.management_contract.query_authorized(
@@ -3338,6 +3364,15 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     authorization=SimpleNamespace(actor_ref="subject/other-admin", web_subject_ref="subject/other-admin"),
                 )
             assert foreign_trial.value.code == "MEMORY_TRIAL_NOT_FOUND"
+            with pytest.raises(ForestError) as foreign_vector:
+                await memory_instance.management_contract.query_authorized(
+                    "memory.sources.vector", {"query_id": trial_id},
+                    authorization=SimpleNamespace(
+                        actor_ref="subject/other-admin",
+                        web_subject_ref="subject/other-admin",
+                    ),
+                )
+            assert foreign_vector.value.code == "MEMORY_TRIAL_NOT_FOUND"
 
             # The owned Memory worker advances a fresh query from capture through
             # embedding, fixed ANN, region freeze and evidence publication.
@@ -3556,6 +3591,11 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             )
             assert trial_page_after_forget["total_count"] == 0
             assert trial_page_after_forget["items"] == []
+            vector_after_forget = await memory_instance.management_contract.query_authorized(
+                "memory.sources.vector", {"query_id": trial_id},
+                authorization=trial_authorization,
+            )
+            assert vector_after_forget["items"] == []
             with pytest.raises(ForestError) as forgotten_trial_image:
                 await memory_instance.management_contract.query_authorized(
                     "memory.trial.image", {
