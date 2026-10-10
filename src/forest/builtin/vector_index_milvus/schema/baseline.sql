@@ -62,6 +62,65 @@ CREATE TABLE vector_collection_start_claims (
     claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
     lease_deadline timestamptz NOT NULL
 );
+-- One transactional counter per Bot orders committed ref transitions. Its
+-- row lock serializes concurrent publications and tombstones without a SQL
+-- transaction spanning Milvus I/O.
+CREATE TABLE vector_ref_clocks (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    current_seq bigint NOT NULL DEFAULT 0 CHECK (current_seq >= 0)
+);
+CREATE TABLE vector_ref_changes (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    mutation_seq bigint NOT NULL CHECK (mutation_seq > 0),
+    ref_id text NOT NULL CHECK (octet_length(ref_id) BETWEEN 1 AND 256),
+    space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
+    state text NOT NULL CHECK (state IN ('ACTIVE','TOMBSTONED')),
+    purpose text CHECK (purpose IN ('DOCUMENT','QUERY')),
+    input_digest text CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    replay_locator jsonb,
+    vector_digest text CHECK (vector_digest ~ '^sha256:[a-f0-9]{64}$'),
+    changed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,mutation_seq),
+    FOREIGN KEY (bot_id,ref_id) REFERENCES vector_index_refs(bot_id,ref_id),
+    CHECK ((state='ACTIVE') = (purpose IS NOT NULL)),
+    CHECK ((state='ACTIVE') = (input_digest IS NOT NULL)),
+    CHECK ((state='ACTIVE') = (replay_locator IS NOT NULL)),
+    CHECK ((state='ACTIVE') = (vector_digest IS NOT NULL))
+);
+CREATE FUNCTION guard_vector_ref_change() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    RAISE EXCEPTION 'Vector ref change is immutable' USING ERRCODE='55000';
+END;
+$$;
+CREATE TRIGGER vector_ref_change_immutable
+    BEFORE UPDATE OR DELETE ON vector_ref_changes
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_ref_change();
+
+CREATE FUNCTION vector_append_ref_change(
+    requested_bot text, requested_ref text, requested_space text,
+    next_state text, next_purpose text, next_digest text,
+    next_replay jsonb, next_vector_digest text
+) RETURNS bigint LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    next_seq bigint;
+BEGIN
+    INSERT INTO __forest_module_schema__.vector_ref_clocks(bot_id)
+    VALUES(requested_bot) ON CONFLICT (bot_id) DO NOTHING;
+    UPDATE __forest_module_schema__.vector_ref_clocks
+    SET current_seq=current_seq+1 WHERE bot_id=requested_bot
+    RETURNING current_seq INTO next_seq;
+    INSERT INTO __forest_module_schema__.vector_ref_changes(
+        bot_id,mutation_seq,ref_id,space_id,state,purpose,input_digest,
+        replay_locator,vector_digest
+    ) VALUES(
+        requested_bot,next_seq,requested_ref,requested_space,next_state,
+        next_purpose,next_digest,next_replay,next_vector_digest
+    );
+    RETURN next_seq;
+END;
+$$;
+
 CREATE FUNCTION guard_vector_collection_binding() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     RAISE EXCEPTION 'Vector collection binding is immutable' USING ERRCODE='55000';
@@ -454,6 +513,11 @@ BEGIN
         UPDATE __forest_module_schema__.vector_index_refs
         SET state='ACTIVE',published_at=clock_timestamp()
         WHERE bot_id=requested_bot AND ref_id=requested_ref;
+        PERFORM __forest_module_schema__.vector_append_ref_change(
+            requested_bot,requested_ref,existing.space_id,'ACTIVE',
+            existing.purpose,existing.input_digest,existing.replay_locator,
+            existing.vector_digest
+        );
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('ref_id',requested_ref,
@@ -517,17 +581,100 @@ BEGIN
                 requested_bot,requested_ref,requested_space,'TOMBSTONED',
                 clock_timestamp(),clock_timestamp()
             );
+            PERFORM __forest_module_schema__.vector_append_ref_change(
+                requested_bot,requested_ref,requested_space,'TOMBSTONED',
+                NULL,NULL,NULL,NULL
+            );
         ELSIF existing.state<>'TOMBSTONED' THEN
             UPDATE __forest_module_schema__.vector_index_refs
             SET state='TOMBSTONED',purpose=NULL,input_digest=NULL,
                 replay_locator=NULL,vector_digest=NULL,published_at=NULL,
                 tombstoned_at=clock_timestamp(),next_sweep_at=clock_timestamp()
             WHERE bot_id=requested_bot AND ref_id=requested_ref;
+            PERFORM __forest_module_schema__.vector_append_ref_change(
+                requested_bot,requested_ref,requested_space,'TOMBSTONED',
+                NULL,NULL,NULL,NULL
+            );
         END IF;
     END LOOP;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('ref_ids',input->'ref_ids',
                                    'space_id',requested_space));
+END;
+$$;
+
+-- A caller freezes through_seq once, then reads exact committed deltas
+-- in bounded pages. Gaps are corruption, never silently treated as completion.
+CREATE FUNCTION vector_ref_change_head(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    current_seq bigint;
+BEGIN
+    SELECT c.current_seq INTO current_seq
+    FROM __forest_module_schema__.vector_ref_clocks c
+    WHERE c.bot_id=requested_bot;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('through_seq',COALESCE(current_seq,0)));
+END;
+$$;
+
+CREATE FUNCTION vector_ref_change_page(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    after_seq bigint := (input->>'after_seq')::bigint;
+    through_seq bigint := (input->>'through_seq')::bigint;
+    page_limit integer := (input->>'limit')::integer;
+    current_seq bigint;
+    selected_count integer;
+    first_seq bigint;
+    last_seq bigint;
+    selected_changes jsonb;
+BEGIN
+    IF requested_bot IS NULL OR after_seq IS NULL OR through_seq IS NULL
+       OR page_limit IS NULL OR after_seq<0 OR through_seq<after_seq
+       OR page_limit NOT BETWEEN 1 AND 128 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REF_CHANGE_INPUT_INVALID',
+                'message','Ref change page is invalid','status',422));
+    END IF;
+    SELECT c.current_seq INTO current_seq
+    FROM __forest_module_schema__.vector_ref_clocks c
+    WHERE c.bot_id=requested_bot;
+    IF through_seq>COALESCE(current_seq,0) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REF_CHANGE_WATERMARK_INVALID',
+                'message','Ref change watermark exceeds the committed ledger',
+                'status',409));
+    END IF;
+    SELECT count(*),min(mutation_seq),max(mutation_seq),
+           COALESCE(jsonb_agg(jsonb_build_object(
+               'mutation_seq',mutation_seq,'ref_id',ref_id,
+               'space_id',space_id,'state',state,'purpose',purpose,
+               'input_digest',input_digest,'replay_locator',replay_locator,
+               'vector_digest',vector_digest
+           ) ORDER BY mutation_seq),'[]'::jsonb)
+      INTO selected_count,first_seq,last_seq,selected_changes
+    FROM (
+        SELECT mutation_seq,ref_id,space_id,state,purpose,input_digest,
+               replay_locator,vector_digest
+        FROM __forest_module_schema__.vector_ref_changes
+        WHERE bot_id=requested_bot AND mutation_seq>after_seq
+          AND mutation_seq<=through_seq
+        ORDER BY mutation_seq LIMIT page_limit
+    ) page;
+    IF (selected_count=0 AND after_seq<through_seq)
+       OR (selected_count>0 AND (
+           first_seq<>after_seq+1 OR last_seq<>after_seq+selected_count
+       )) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REF_CHANGE_GAP',
+                'message','Ref change ledger has a gap','status',503));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('next_seq',COALESCE(last_seq,after_seq),
+            'through_seq',through_seq,'changes',selected_changes));
 END;
 $$;
 

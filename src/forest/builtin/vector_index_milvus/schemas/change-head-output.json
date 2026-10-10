@@ -1,0 +1,15 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "through_seq"
+  ],
+  "properties": {
+    "through_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

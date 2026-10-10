@@ -1,0 +1,86 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "next_seq",
+    "through_seq",
+    "changes"
+  ],
+  "properties": {
+    "next_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "through_seq": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9223372036854775807
+    },
+    "changes": {
+      "type": "array",
+      "maxItems": 128,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "mutation_seq",
+          "ref_id",
+          "space_id",
+          "state",
+          "purpose",
+          "input_digest",
+          "replay_locator",
+          "vector_digest"
+        ],
+        "properties": {
+          "mutation_seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ref_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "space_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "state": {
+            "enum": [
+              "ACTIVE",
+              "TOMBSTONED"
+            ]
+          },
+          "purpose": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "replay_locator": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "vector_digest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema"
+}

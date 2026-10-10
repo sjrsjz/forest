@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.9.0"
+version = "2.10.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -44,7 +44,9 @@ requests = [
   "domain.command:vector.ref.tombstone",
   "domain.command:vector.collection.quarantine",
   "domain.query:vector.ref.require-query",
-  "domain.query:vector.ref.filter-active"
+  "domain.query:vector.ref.filter-active",
+  "domain.query:vector.ref.change-head",
+  "domain.query:vector.ref.change-page"
 ]
 
 [components.resources]
@@ -74,9 +76,9 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.8.0"
+schema_version = "2.9.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "768b399fd7b5303ef970746f1964aa70e8caba1a2b35b2758121424ae511f0df"
+baseline_sha256 = "c2d3e0ac3a704780d077197d62499a7e867b4b32f830b34e2e97c43191455893"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -136,6 +138,20 @@ contract = "1.0"
 function = "vector_ref_filter_active"
 input_schema = "schemas/search-output.json"
 output_schema = "schemas/search-output.json"
+
+[[components.domain_queries]]
+name = "vector.ref.change-head"
+contract = "1.0"
+function = "vector_ref_change_head"
+input_schema = "schemas/change-head-input.json"
+output_schema = "schemas/change-head-output.json"
+
+[[components.domain_queries]]
+name = "vector.ref.change-page"
+contract = "1.0"
+function = "vector_ref_change_page"
+input_schema = "schemas/change-page-input.json"
+output_schema = "schemas/change-page-output.json"
 
 [[components.owned_work_handlers]]
 name = "vector.tombstones.sweep"

@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+向量 ref 提交水位归包（2026-10-10）：`vector.index` 2.10.0 / 私有 SQL 2.9.0 在首次 ACTIVE 发布与首次 TOMBSTONED 的原事务内追加不可变变更记录，Bot 私有计数器以 PostgreSQL 行锁串行化不同 ref 的提交顺序；重复激活、重复删除与失败事务不产生第二条记录。`vector.ref.change-head/1` 冻结已提交水位，`change-page/1` 以最多 128 项分页返回 ReplayLocator 或墓碑并拒绝序号缺口。并发重复激活/删除、12 条连续记录及分页、隔离 PostgreSQL＋真实 Milvus 向量回归 7 项通过；完整 BotHost 图热替换 1 项、Milvus 已写入但 ref 仍为 PENDING 的进程硬退出恢复 1 项通过。物理逐行审计、候选索引重建与切换、变更日志安全回收尚未实现；本次未切换在线 v21，也未发送真实 QQ 消息。
+
 Vector collection 运行期身份围栏（2026-10-10）：`vector.index` 2.9.0 / 私有 SQL 2.8.0 在包内持久记录 READY/REBUILD_REQUIRED；Effect Driver 每次物理传输前后核对 collection ID 和布局，观察到同名重建、丢失或布局改变时，分别经清单声明的 PREPARED 启动命令或 ACTIVE 运行命令把绑定隔离。包内 ref 预留、激活和查询拒绝隔离绑定，墓碑仍可登记。隔离 PostgreSQL 与真实 Milvus 的向量回归 7 项通过，包含运行中同名重建及新 Generation 保持隔离；完整 BotHost 常规触发整链与 ACTIVE Generation 身份故障注入 1 项、完整图热替换 1 项、Milvus 已写入但 ref 仍为 PENDING 时的进程硬退出恢复 1 项通过。此围栏不检测单行缺失，也没有候选重建/切换；物理核对与读写间仍有跨系统竞态，在线 v21 未切换。
 
 向量 tombstone 清扫包化（2026-10-10）：`vector.index` 2.6.0 / 私有 SQL 2.5.0 使用 `vector.tombstones.sweep` owned-work handler、包私有 claim/settle SQL 和纯物理删除 `vector.transport.prune` 端口，移除了宿主 Effect Driver 的清扫循环及宿主仓库领取函数。每次最多领取 128 个同空间 ref；租约过期可重领，旧 token 结算被围栏拒绝，失败/未知结果仍按持久 tombstone 重试。结算回执保留 48 小时并在 claim 中每次最多回收 128 条，tombstone 永不因回执回收而删除。隔离 PostgreSQL 的领取、重复结算、竞争、租约接管和有界回收通过；真实 Milvus 向量索引回归 6 passed（21.98 秒），完整假 OneBot/模型/Milvus BotHost 生命周期及热替换回归在回执回收补丁前 1 passed（598.96 秒），随后变动只涉及结算回执保留 SQL，独立 SQL 回归通过。Ruff 与差异检查通过。普通 upsert/delete 的 ref 准入、collection 绑定和重建 Job 仍在宿主或缺失，尚未实现包内完整索引重建；在线 v21 未切换，未发送 QQ 消息。

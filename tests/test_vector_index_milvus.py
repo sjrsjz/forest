@@ -386,6 +386,55 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
     assert (await invoke("vector_ref_filter_active", hits))["error"]["code"] == (
         "VECTOR_INDEX_QUERY_REF_MISSING"
     )
+    concurrent = [
+        _with_replay({
+            "ref_id": f"ref/concurrent/{index}", "space_id": space_id,
+            "purpose": "DOCUMENT", "vector": [0.0, 1.0, 0.0, 0.0],
+        }) for index in (1, 2)
+    ]
+    for item in concurrent:
+        assert (await invoke(reserve, item, digest=digest_json(item)))["ok"]
+    activated = await asyncio.gather(*(
+        invoke(activate, {"ref_id": item["ref_id"],
+                          "input_digest": digest_json(item)})
+        for item in (*concurrent, *concurrent)
+    ))
+    assert all(result["ok"] for result in activated)
+    deleted = await asyncio.gather(*(
+        invoke(tombstone, {"space_id": space_id, "ref_ids": [item["ref_id"]]})
+        for item in concurrent
+    ))
+    assert all(result["ok"] for result in deleted)
+    assert (await invoke(tombstone, {
+        "space_id": space_id, "ref_ids": [item["ref_id"] for item in concurrent],
+    }))["ok"]
+    head = await invoke("vector_ref_change_head", {})
+    assert head["value"] == {"through_seq": 12}
+    cursor = 0
+    changes = []
+    while cursor < 12:
+        page = (await invoke("vector_ref_change_page", {
+            "after_seq": cursor, "through_seq": 12, "limit": 5,
+        }))["value"]
+        assert page["next_seq"] > cursor
+        changes.extend(page["changes"])
+        cursor = page["next_seq"]
+    assert [item["mutation_seq"] for item in changes] == list(range(1, 13))
+    assert changes[0]["ref_id"] == document["ref_id"]
+    assert changes[0]["state"] == "ACTIVE"
+    assert changes[0]["replay_locator"] == document["replay"]
+    assert changes[0]["input_digest"] == digest
+    assert {(item["ref_id"], item["state"]) for item in changes[8:10]} == {
+        (item["ref_id"], "ACTIVE") for item in concurrent
+    }
+    assert {(item["ref_id"], item["state"]) for item in changes[10:]} == {
+        (item["ref_id"], "TOMBSTONED") for item in concurrent
+    }
+    assert all(item["replay_locator"] is None for item in changes if
+               item["state"] == "TOMBSTONED")
+    assert (await invoke("vector_ref_change_page", {
+        "after_seq": 12, "through_seq": 12, "limit": 5,
+    }))["value"]["changes"] == []
     quarantined = await invoke("vector_collection_quarantine", {
         "binding_revision": 1, "collection_id": 42,
         "reason": "collection identity changed",
@@ -414,7 +463,10 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
             )
         ).fetchall()
     assert [(row["ref_id"], row["state"]) for row in rows] == [
-        ("ref/atomic-new", "PENDING"), ("ref/document", "TOMBSTONED"),
+        ("ref/atomic-new", "PENDING"),
+        ("ref/concurrent/1", "TOMBSTONED"),
+        ("ref/concurrent/2", "TOMBSTONED"),
+        ("ref/document", "TOMBSTONED"),
         ("ref/first", "TOMBSTONED"), ("ref/live", "TOMBSTONED"),
         ("ref/pending", "TOMBSTONED"), ("ref/query", "TOMBSTONED"),
     ]
