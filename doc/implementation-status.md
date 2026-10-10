@@ -1,4 +1,6 @@
 # Forest 实现状态
+向量 ref 包内持久审计（2026-10-10）：`vector.index` 2.12.0 / 私有 SQL 2.11.0 新增 `vector.refs.audit` owned-work，包私有状态记录 REF→PHYSICAL 阶段、最多 64 项的分页游标、冻结提交水位、claim token/租约、结算回执与已核验水位。Worker 只用声明的 Milvus 物理读取端口；包 SQL 在裁决事务中重查当前绑定、有效租约和 ref 状态，晚于水位激活的 ref 延后处理，PENDING/墓碑不会误判；缺失或内容不符的 ACTIVE 行、无账本物理行把绑定隔离为 `REBUILD_REQUIRED/row mismatch`。新 ACTIVE 提交把下一轮设为到期，审计后若水位推进则约一分钟复扫，否则约一小时复扫；ACTIVE ref 与首次 ACTIVE 变更各有专用索引。隔离 PostgreSQL＋真实 Milvus 的向量包 10 项通过，其中 3 项检查审计裁决、晚到写入、阶段接续、过期 claim 与并发同键结算；完整 BotHost 图热替换 1 项及 Milvus 写入后进程硬退出恢复 1 项通过，Ruff 通过。物理页不共享 MVCC 快照，`last_checked_seq` 不是全局实时一致性证明；候选重建、增量追赶与原子切换、变更日志安全回收、包管理页仍未完成。本轮未切换在线 QQ 实例，也未发消息。
+
 向量物理核验端口（2026-10-10）：`vector.index` 2.11.0 / 私有 SQL 2.10.0 在 ref 预留、首次 ACTIVE 变更中冻结标准 big-endian float32 字节摘要（`f32-sha256`），保留原始 JSON 重放摘要；TOMBSTONED 清空当前 ref 摘要，历史变更不可改。Milvus Effect 新增包声明的 `vector.transport.audit/1`，每次精确读取或主键游标枚举最多 64 行，仅返回行身份、元数据和物理摘要；调用前后均核验 collection 绑定。隔离 PostgreSQL＋真实 Milvus 7 项通过，覆盖 0.1 等 float32 精度转换、精确读取、游标逐页枚举与现有 ref 事务行为；完整 BotHost 图热替换 1 项通过；进程硬退出恢复 1 项通过（测试以 ReplayLocator owner_id 精确定位被中断的 embedding attempt，避免同批其他 attempt 误报）；Ruff 通过。物理枚举的各页不是同一 MVCC 快照；完整包自有持久审计裁决、候选重建/切换、日志回收仍未完成。本次不切换在线 QQ 实例，也不发送消息。
 
 

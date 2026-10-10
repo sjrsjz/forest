@@ -182,6 +182,111 @@ class MilvusVectorIndex(Plugin):
             timeout=10,
         )
 
+    @job("vector.refs.audit")
+    async def audit_refs(self, task, ctx):
+        request = _plain(task["payload"])
+        if request["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_AUDIT_SPACE_MISMATCH",
+                "Audit work belongs to another vector space", 409,
+            )
+        phase = request["phase"]
+        if phase == "REF":
+            refs = request["refs"]
+            if not refs or refs != sorted(set(refs)):
+                raise ForestError(
+                    "VECTOR_AUDIT_CLAIM_INVALID",
+                    "Audit ref page is not a bounded ordered page", 502,
+                )
+            observed = _plain(await ctx.services.call(
+                "vector.transport.audit",
+                {"space_id": self.space_id, "mode": "GET", "ref_ids": refs},
+                operation_id=ctx.operations.stable(
+                    "audit-get:" + task["work_id"]
+                ),
+                timeout=35,
+            ))
+            if observed["space_id"] != self.space_id or observed["mode"] != "GET":
+                raise ForestError(
+                    "VECTOR_AUDIT_TRANSPORT_INVALID",
+                    "Milvus audit returned another ref page", 502,
+                )
+            rows = {row["ref_id"]: row for row in observed["rows"]}
+            if len(rows) != len(observed["rows"]) or set(rows) - set(refs):
+                raise ForestError(
+                    "VECTOR_AUDIT_TRANSPORT_INVALID",
+                    "Milvus audit returned duplicate or unrelated refs", 502,
+                )
+            observations = [
+                {"ref_id": ref_id, "physical": rows.get(ref_id)}
+                for ref_id in refs
+            ]
+            next_ref = refs[-1]
+            done = len(refs) < request["limit"]
+        elif phase == "PHYSICAL":
+            observed = _plain(await ctx.services.call(
+                "vector.transport.audit",
+                {"space_id": self.space_id, "mode": "SCAN",
+                 "after_ref": request["after_ref"], "limit": request["limit"]},
+                operation_id=ctx.operations.stable(
+                    "audit-scan:" + task["work_id"]
+                ),
+                timeout=35,
+            ))
+            if observed["space_id"] != self.space_id or observed["mode"] != "SCAN":
+                raise ForestError(
+                    "VECTOR_AUDIT_TRANSPORT_INVALID",
+                    "Milvus audit returned another physical page", 502,
+                )
+            rows = observed["rows"]
+            refs = [row["ref_id"] for row in rows]
+            if refs != sorted(set(refs)):
+                raise ForestError(
+                    "VECTOR_AUDIT_TRANSPORT_INVALID",
+                    "Milvus audit returned an unordered page", 502,
+                )
+            observations = [
+                {"ref_id": row["ref_id"], "physical": row}
+                for row in rows
+            ]
+            next_ref = observed["next_ref"]
+            done = observed["done"]
+        else:
+            raise ForestError(
+                "VECTOR_AUDIT_CLAIM_INVALID", "Unknown audit phase", 502,
+            )
+        quarantined = False
+        if observations:
+            decision = _plain(await ctx.commands.call(
+                "vector.audit.adjudicate",
+                {
+                    "space_id": self.space_id,
+                    "binding_revision": request["binding_revision"],
+                    "collection_id": request["collection_id"],
+                    "cycle_seq": request["cycle_seq"],
+                    "claim_token": request["claim_token"],
+                    "observations": observations,
+                },
+                operation_id=ctx.operations.stable(
+                    "audit-decide:" + task["work_id"] + ":" +
+                    _digest(observations)[7:]
+                ),
+                timeout=15,
+            ))
+            if decision["state"] not in ("READY", "REBUILD_REQUIRED"):
+                raise ForestError(
+                    "VECTOR_AUDIT_DECISION_INVALID",
+                    "Package audit command returned another state", 502,
+                )
+            quarantined = decision["state"] == "REBUILD_REQUIRED"
+        return {
+            "space_id": self.space_id, "phase": phase,
+            "binding_revision": request["binding_revision"],
+            "collection_id": request["collection_id"],
+            "next_ref": next_ref, "done": done,
+            "quarantined": quarantined,
+        }
+
     @job("vector.tombstones.sweep")
     async def sweep_tombstones(self, task, ctx):
         request = _plain(task["payload"])

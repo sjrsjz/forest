@@ -345,6 +345,7 @@ class BotHost:
         model_client_factory=None,
         embedding_client_factory=None,
         vector_index_client_factory=None,
+        vector_index_audit_client_factory=None,
         media_client_factory=None,
         websocket_client_factory=None,
         credential_resolver=None,
@@ -376,6 +377,7 @@ class BotHost:
         self._model_client_factory = model_client_factory
         self._embedding_client_factory = embedding_client_factory
         self._vector_index_client_factory = vector_index_client_factory
+        self._vector_index_audit_client_factory = vector_index_audit_client_factory
         self._media_client_factory = media_client_factory
         self._websocket_client_factory = websocket_client_factory
         self._credential_resolver = credential_resolver
@@ -534,6 +536,10 @@ class BotHost:
         vector_index_driver_options = {}
         if self._vector_index_client_factory is not None:
             vector_index_driver_options["client_factory"] = self._vector_index_client_factory
+        if self._vector_index_audit_client_factory is not None:
+            vector_index_driver_options["audit_client_factory"] = (
+                self._vector_index_audit_client_factory
+            )
         vector_index_effect_factory = milvus_vector_index_effect_driver_factory(
             bot_id=self.store.bot_id,
             runtime=self._kernel.runtime,

@@ -527,6 +527,10 @@ BEGIN
             existing.purpose,existing.input_digest,existing.replay_locator,
             existing.vector_digest,existing.physical_digest
         );
+        -- New published refs need not wait for the periodic audit interval.
+        UPDATE __forest_module_schema__.vector_audit_work
+        SET next_at=LEAST(next_at,clock_timestamp())
+        WHERE bot_id=requested_bot;
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('ref_id',requested_ref,
@@ -1017,5 +1021,458 @@ BEGIN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('state','REBUILD_REQUIRED',
             'binding_revision',requested_revision,'collection_id',requested_id));
+END;
+$$;
+
+
+-- The package owns a resumable audit cursor. The frozen mutation waterline
+-- excludes refs published after the cycle began; a later cycle catches them.
+CREATE INDEX vector_index_refs_active_audit_idx
+    ON vector_index_refs(bot_id,ref_id) WHERE state='ACTIVE';
+CREATE UNIQUE INDEX vector_ref_changes_active_ref_idx
+    ON vector_ref_changes(bot_id,ref_id) WHERE state='ACTIVE';
+
+CREATE TABLE vector_audit_work (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
+    binding_revision bigint NOT NULL CHECK (binding_revision > 0),
+    collection_id bigint NOT NULL CHECK (collection_id > 0),
+    phase text NOT NULL DEFAULT 'REF' CHECK (phase IN ('REF','PHYSICAL')),
+    after_ref text CHECK (octet_length(after_ref) BETWEEN 1 AND 256),
+    cycle_seq bigint CHECK (cycle_seq >= 0),
+    next_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    claim_token text CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    claim_payload jsonb,
+    last_checked_seq bigint CHECK (last_checked_seq >= 0),
+    last_checked_at timestamptz,
+    CHECK ((claim_token IS NULL) = (lease_deadline IS NULL)),
+    CHECK ((claim_token IS NULL) = (claim_payload IS NULL))
+);
+CREATE TABLE vector_audit_settlements (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,claim_token)
+);
+CREATE INDEX vector_audit_settlements_gc_idx ON vector_audit_settlements(
+    bot_id,settled_at,claim_token
+);
+CREATE FUNCTION guard_vector_audit_settlement() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF TG_OP='DELETE'
+       AND OLD.settled_at<clock_timestamp()-interval '48 hours' THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'Vector audit settlement is immutable until expiry'
+        USING ERRCODE='55000';
+END;
+$$;
+CREATE TRIGGER vector_audit_settlement_guard
+    BEFORE UPDATE OR DELETE ON vector_audit_settlements
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_audit_settlement();
+
+CREATE FUNCTION vector_claim_ref_audit(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    binding __forest_module_schema__.vector_collection_bindings%ROWTYPE;
+    work __forest_module_schema__.vector_audit_work%ROWTYPE;
+    selected_refs jsonb;
+    selected_seq bigint;
+    work_key text;
+    next_attempt integer;
+    next_payload jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_AUDIT_CLAIM_INVALID',
+                'message','Vector audit claim is invalid','status',422));
+    END IF;
+    DELETE FROM __forest_module_schema__.vector_audit_settlements receipt
+    WHERE (receipt.bot_id,receipt.claim_token) IN (
+        SELECT old.bot_id,old.claim_token
+        FROM __forest_module_schema__.vector_audit_settlements old
+        WHERE old.bot_id=requested_bot
+          AND old.settled_at<clock_timestamp()-interval '48 hours'
+        ORDER BY old.settled_at,old.claim_token
+        LIMIT 128 FOR UPDATE SKIP LOCKED
+    );
+    SELECT b.* INTO binding
+    FROM __forest_module_schema__.vector_collection_health h
+    JOIN __forest_module_schema__.vector_collection_bindings b
+      ON b.bot_id=h.bot_id AND b.binding_revision=h.binding_revision
+    WHERE h.bot_id=requested_bot AND h.state='READY';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                                  'ok',true,'value',NULL);
+    END IF;
+    INSERT INTO __forest_module_schema__.vector_audit_work(
+        bot_id,space_id,binding_revision,collection_id
+    ) VALUES(
+        requested_bot,binding.space_id,binding.binding_revision,binding.collection_id
+    ) ON CONFLICT (bot_id) DO NOTHING;
+    SELECT * INTO work FROM __forest_module_schema__.vector_audit_work
+    WHERE bot_id=requested_bot FOR UPDATE;
+    IF work.binding_revision<>binding.binding_revision
+       OR work.collection_id<>binding.collection_id THEN
+        UPDATE __forest_module_schema__.vector_audit_work
+        SET space_id=binding.space_id,
+            binding_revision=binding.binding_revision,
+            collection_id=binding.collection_id,
+            phase='REF',after_ref=NULL,cycle_seq=NULL,
+            next_at=clock_timestamp(),claim_token=NULL,
+            lease_deadline=NULL,claim_payload=NULL
+        WHERE bot_id=requested_bot;
+        SELECT * INTO work FROM __forest_module_schema__.vector_audit_work
+        WHERE bot_id=requested_bot;
+    END IF;
+    IF work.claim_token=requested_token
+       AND work.lease_deadline>clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                                  'ok',true,'value',work.claim_payload);
+    END IF;
+    IF work.next_at>clock_timestamp()
+       OR (work.lease_deadline IS NOT NULL
+           AND work.lease_deadline>clock_timestamp()) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                                  'ok',true,'value',NULL);
+    END IF;
+    selected_seq := work.cycle_seq;
+    IF selected_seq IS NULL THEN
+        SELECT current_seq INTO selected_seq
+        FROM __forest_module_schema__.vector_ref_clocks
+        WHERE bot_id=requested_bot;
+        selected_seq := COALESCE(selected_seq,0);
+    END IF;
+    selected_refs := '[]'::jsonb;
+    IF work.phase='REF' THEN
+        SELECT COALESCE(jsonb_agg(ref_id ORDER BY ref_id),'[]'::jsonb)
+          INTO selected_refs
+        FROM (
+            SELECT r.ref_id
+            FROM __forest_module_schema__.vector_index_refs r
+            LEFT JOIN __forest_module_schema__.vector_ref_changes c
+              ON c.bot_id=r.bot_id AND c.ref_id=r.ref_id
+             AND c.state='ACTIVE'
+            WHERE r.bot_id=requested_bot AND r.state='ACTIVE'
+              AND (c.mutation_seq<=selected_seq OR c.mutation_seq IS NULL)
+              AND (work.after_ref IS NULL OR r.ref_id>work.after_ref)
+            ORDER BY r.ref_id LIMIT 64
+        ) page;
+        IF jsonb_array_length(selected_refs)=0 THEN
+            work.phase := 'PHYSICAL';
+            work.after_ref := NULL;
+        END IF;
+    END IF;
+    next_attempt := work.attempt_count+1;
+    work_key := 'vector-audit:' ||
+        encode(sha256(convert_to(requested_bot||'/'||requested_token,'UTF8')),'hex');
+    next_payload := jsonb_build_object(
+        'protocol','forest.owned-work-claim/1',
+        'work_id',work_key,'claim_token',requested_token,
+        'attempt',next_attempt,'operation_id',work_key,
+        'causal_root_kind','vector.audit','causal_root_id',work_key,
+        'payload',jsonb_build_object(
+            'space_id',binding.space_id,'phase',work.phase,
+            'claim_token',requested_token,
+            'after_ref',work.after_ref,'limit',64,'cycle_seq',selected_seq,
+            'binding_revision',binding.binding_revision,
+            'collection_id',binding.collection_id,'refs',selected_refs));
+    UPDATE __forest_module_schema__.vector_audit_work
+    SET phase=work.phase,after_ref=work.after_ref,cycle_seq=selected_seq,
+        claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=next_attempt,claim_payload=next_payload
+    WHERE bot_id=requested_bot;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                              'ok',true,'value',next_payload);
+END;
+$$;
+
+-- Compare physical observations against current SQL authority only after
+-- freezing the cycle waterline. A late activation is deferred, not condemned.
+CREATE FUNCTION vector_adjudicate_ref_audit(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_space text := input->>'space_id';
+    requested_revision bigint := (input->>'binding_revision')::bigint;
+    requested_id bigint := (input->>'collection_id')::bigint;
+    requested_seq bigint := (input->>'cycle_seq')::bigint;
+    requested_token text := input->>'claim_token';
+    observations jsonb := input->'observations';
+    observation jsonb;
+    physical jsonb;
+    requested_ref text;
+    current_ref __forest_module_schema__.vector_index_refs%ROWTYPE;
+    published_seq bigint;
+    health __forest_module_schema__.vector_collection_health%ROWTYPE;
+    work __forest_module_schema__.vector_audit_work%ROWTYPE;
+    mismatch_ref text;
+BEGIN
+    IF requested_bot IS NULL OR requested_space IS NULL
+       OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_revision IS NULL OR requested_revision<=0
+       OR requested_id IS NULL OR requested_id<=0
+       OR requested_seq IS NULL OR requested_seq<0
+       OR jsonb_typeof(observations) IS DISTINCT FROM 'array'
+       OR jsonb_array_length(observations) NOT BETWEEN 1 AND 64 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_AUDIT_INPUT_INVALID',
+                'message','Vector audit observations are invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'vector-collection:'||requested_bot,0));
+    SELECT * INTO work FROM __forest_module_schema__.vector_audit_work
+    WHERE bot_id=requested_bot FOR SHARE;
+    IF NOT FOUND OR work.claim_token IS DISTINCT FROM requested_token
+       OR work.lease_deadline<=clock_timestamp()
+       OR work.cycle_seq IS DISTINCT FROM requested_seq
+       OR work.space_id IS DISTINCT FROM requested_space
+       OR work.binding_revision IS DISTINCT FROM requested_revision
+       OR work.collection_id IS DISTINCT FROM requested_id THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_AUDIT_CLAIM_STALE',
+                'message','Vector audit lease is no longer current','status',409));
+    END IF;
+    SELECT * INTO health FROM __forest_module_schema__.vector_collection_health
+    WHERE bot_id=requested_bot FOR UPDATE;
+    IF NOT FOUND OR health.binding_revision<>requested_revision
+       OR NOT EXISTS(
+           SELECT 1 FROM __forest_module_schema__.vector_collection_bindings b
+           WHERE b.bot_id=requested_bot
+             AND b.binding_revision=requested_revision
+             AND b.collection_id=requested_id AND b.space_id=requested_space
+       ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_AUDIT_BINDING_STALE',
+                'message','Vector audit binding changed','status',409));
+    END IF;
+    IF health.state='REBUILD_REQUIRED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('state','REBUILD_REQUIRED','ref_id',NULL));
+    END IF;
+    FOR observation IN SELECT value FROM jsonb_array_elements(observations)
+    LOOP
+        requested_ref := observation->>'ref_id';
+        physical := observation->'physical';
+        IF requested_ref IS NULL
+           OR octet_length(requested_ref) NOT BETWEEN 1 AND 256
+           OR jsonb_typeof(physical) NOT IN ('object','null')
+           OR (jsonb_typeof(physical)='object'
+               AND physical->>'ref_id' IS DISTINCT FROM requested_ref) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                'ok',false,'error',jsonb_build_object(
+                    'code','VECTOR_AUDIT_INPUT_INVALID',
+                    'message','Vector audit row is invalid','status',422));
+        END IF;
+        SELECT * INTO current_ref
+        FROM __forest_module_schema__.vector_index_refs
+        WHERE bot_id=requested_bot AND ref_id=requested_ref FOR UPDATE;
+        IF NOT FOUND THEN
+            mismatch_ref := requested_ref;
+            EXIT;
+        END IF;
+        IF current_ref.state<>'ACTIVE' THEN
+            CONTINUE;
+        END IF;
+        SELECT c.mutation_seq INTO published_seq
+        FROM __forest_module_schema__.vector_ref_changes c
+        WHERE c.bot_id=requested_bot AND c.ref_id=requested_ref
+          AND c.state='ACTIVE';
+        IF published_seq IS NULL THEN
+            mismatch_ref := requested_ref;
+            EXIT;
+        END IF;
+        IF published_seq>requested_seq THEN
+            CONTINUE;
+        END IF;
+        IF jsonb_typeof(physical) IS DISTINCT FROM 'object'
+           OR physical->>'bot_id' IS DISTINCT FROM requested_bot
+           OR physical->>'space_id' IS DISTINCT FROM current_ref.space_id
+           OR physical->>'purpose' IS DISTINCT FROM current_ref.purpose
+           OR physical->>'input_digest' IS DISTINCT FROM current_ref.input_digest
+           OR physical->>'physical_digest' IS DISTINCT FROM current_ref.physical_digest THEN
+            mismatch_ref := requested_ref;
+            EXIT;
+        END IF;
+    END LOOP;
+    IF mismatch_ref IS NOT NULL THEN
+        UPDATE __forest_module_schema__.vector_collection_health
+        SET state='REBUILD_REQUIRED',reason='row mismatch',
+            observed_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND binding_revision=requested_revision
+          AND state='READY';
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('state','REBUILD_REQUIRED',
+                                        'ref_id',mismatch_ref));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('state','READY','ref_id',NULL));
+END;
+$$;
+
+CREATE FUNCTION vector_settle_ref_audit(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_work text := input->>'work_id';
+    requested_attempt integer := (input->>'attempt')::integer;
+    outcome jsonb := input->'outcome';
+    result_value jsonb := outcome->'result';
+    work __forest_module_schema__.vector_audit_work%ROWTYPE;
+    existing_input jsonb;
+    existing_result jsonb;
+    expected_work text;
+    expected_next text;
+    expected_done boolean;
+    next_at_value timestamptz;
+    receipt jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_work IS NULL OR requested_attempt IS NULL
+       OR outcome->>'status' IS NULL
+       OR outcome->>'status' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_AUDIT_SETTLE_INVALID',
+                'message','Vector audit settlement is invalid','status',422));
+    END IF;
+    expected_work := 'vector-audit:' ||
+        encode(sha256(convert_to(requested_bot||'/'||requested_token,'UTF8')),'hex');
+    IF requested_work IS DISTINCT FROM expected_work THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_AUDIT_SETTLE_INVALID',
+                'message','Vector audit work identity differs','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'vector-audit-settle:'||requested_bot||':'||requested_token,0));
+    SELECT input_payload,result_payload INTO existing_input,existing_result
+    FROM __forest_module_schema__.vector_audit_settlements
+    WHERE bot_id=requested_bot AND claim_token=requested_token;
+    IF FOUND THEN
+        IF existing_input=input THEN RETURN existing_result; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_AUDIT_SETTLE_CONFLICT',
+                'message','Vector audit claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.vector_audit_work
+    WHERE bot_id=requested_bot FOR UPDATE;
+    IF NOT FOUND OR work.claim_token IS DISTINCT FROM requested_token
+       OR work.attempt_count<>requested_attempt
+       OR work.lease_deadline<=clock_timestamp()
+       OR work.claim_payload->>'work_id' IS DISTINCT FROM requested_work THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_AUDIT_CLAIM_STALE',
+                'message','Vector audit lease is no longer current','status',409));
+    END IF;
+    IF outcome->>'status'='SUCCEEDED' THEN
+        IF result_value->>'space_id' IS DISTINCT FROM work.space_id
+           OR result_value->>'phase' IS DISTINCT FROM work.phase
+           OR (result_value->>'binding_revision')::bigint<>work.binding_revision
+           OR (result_value->>'collection_id')::bigint<>work.collection_id
+           OR jsonb_typeof(result_value->'done') IS DISTINCT FROM 'boolean'
+           OR jsonb_typeof(result_value->'quarantined') IS DISTINCT FROM 'boolean' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                'ok',false,'error',jsonb_build_object(
+                    'code','VECTOR_AUDIT_SETTLE_INVALID',
+                    'message','Vector audit result differs from its claim',
+                    'status',422));
+        END IF;
+        IF work.phase='REF' THEN
+            SELECT max(value) INTO expected_next
+            FROM jsonb_array_elements_text(work.claim_payload#>'{payload,refs}');
+            expected_done :=
+                jsonb_array_length(work.claim_payload#>'{payload,refs}')<64;
+            IF result_value->>'next_ref' IS DISTINCT FROM expected_next
+               OR (result_value->>'done')::boolean IS DISTINCT FROM expected_done THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                    'ok',false,'error',jsonb_build_object(
+                        'code','VECTOR_AUDIT_SETTLE_INVALID',
+                        'message','Vector audit ref cursor differs','status',422));
+            END IF;
+        ELSIF (result_value->>'done')::boolean=false
+           AND (result_value->>'next_ref' IS NULL
+                OR (work.after_ref IS NOT NULL
+                    AND result_value->>'next_ref'<=work.after_ref)) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                'ok',false,'error',jsonb_build_object(
+                    'code','VECTOR_AUDIT_SETTLE_INVALID',
+                    'message','Vector audit physical cursor did not advance',
+                    'status',422));
+        END IF;
+        IF (result_value->>'quarantined')::boolean
+           AND NOT EXISTS(
+               SELECT 1 FROM __forest_module_schema__.vector_collection_health h
+               WHERE h.bot_id=requested_bot
+                 AND h.binding_revision=work.binding_revision
+                 AND h.state='REBUILD_REQUIRED'
+           ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                'ok',false,'error',jsonb_build_object(
+                    'code','VECTOR_AUDIT_SETTLE_INVALID',
+                    'message','Audit quarantine has no authority fact',
+                    'status',422));
+        END IF;
+        IF (result_value->>'quarantined')::boolean THEN
+            next_at_value := clock_timestamp()+interval '1 hour';
+            UPDATE __forest_module_schema__.vector_audit_work
+            SET phase='REF',after_ref=NULL,cycle_seq=NULL,
+                next_at=next_at_value,claim_token=NULL,
+                lease_deadline=NULL,claim_payload=NULL
+            WHERE bot_id=requested_bot;
+        ELSIF work.phase='REF' THEN
+            UPDATE __forest_module_schema__.vector_audit_work
+            SET phase=CASE WHEN expected_done THEN 'PHYSICAL' ELSE 'REF' END,
+                after_ref=CASE WHEN expected_done THEN NULL ELSE expected_next END,
+                next_at=clock_timestamp(),claim_token=NULL,
+                lease_deadline=NULL,claim_payload=NULL
+            WHERE bot_id=requested_bot;
+        ELSIF (result_value->>'done')::boolean THEN
+            next_at_value := clock_timestamp()+
+                CASE WHEN EXISTS(
+                    SELECT 1 FROM __forest_module_schema__.vector_ref_clocks
+                    WHERE bot_id=requested_bot AND current_seq>work.cycle_seq
+                ) THEN interval '1 minute' ELSE interval '1 hour' END;
+            UPDATE __forest_module_schema__.vector_audit_work
+            SET phase='REF',after_ref=NULL,cycle_seq=NULL,
+                next_at=next_at_value,claim_token=NULL,
+                lease_deadline=NULL,claim_payload=NULL,
+                last_checked_seq=work.cycle_seq,last_checked_at=clock_timestamp()
+            WHERE bot_id=requested_bot;
+        ELSE
+            UPDATE __forest_module_schema__.vector_audit_work
+            SET after_ref=result_value->>'next_ref',
+                next_at=clock_timestamp(),claim_token=NULL,
+                lease_deadline=NULL,claim_payload=NULL
+            WHERE bot_id=requested_bot;
+        END IF;
+    ELSE
+        UPDATE __forest_module_schema__.vector_audit_work
+        SET next_at=clock_timestamp()+interval '30 seconds',
+            claim_token=NULL,lease_deadline=NULL,claim_payload=NULL
+        WHERE bot_id=requested_bot;
+    END IF;
+    receipt := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'protocol','forest.owned-work-settled/1',
+            'work_id',requested_work));
+    INSERT INTO __forest_module_schema__.vector_audit_settlements(
+        bot_id,claim_token,input_payload,result_payload
+    ) VALUES(requested_bot,requested_token,input,receipt);
+    RETURN receipt;
 END;
 $$;

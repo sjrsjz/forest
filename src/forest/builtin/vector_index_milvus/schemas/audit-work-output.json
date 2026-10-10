@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "space_id",
+    "binding_revision",
+    "collection_id",
+    "phase",
+    "next_ref",
+    "done",
+    "quarantined"
+  ],
+  "properties": {
+    "space_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "binding_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "collection_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "phase": {
+      "enum": [
+        "REF",
+        "PHYSICAL"
+      ]
+    },
+    "next_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "done": {
+      "type": "boolean"
+    },
+    "quarantined": {
+      "type": "boolean"
+    }
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "state",
+    "ref_id"
+  ],
+  "properties": {
+    "state": {
+      "enum": [
+        "READY",
+        "REBUILD_REQUIRED"
+      ]
+    },
+    "ref_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

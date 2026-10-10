@@ -486,6 +486,315 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
+@pytest.mark.parametrize("case", ("missing-active", "unbound-physical"))
+async def test_package_owned_ref_audit_quarantines_stable_physical_mismatch(
+    clean_authority, tmp_path, case
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    space_id = "space/audit/" + uuid4().hex
+    await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
+        PackageCatalog(tmp_path / "audit-packages"),
+        store, installer, kernel=kernel,
+        initial_configuration=official_builtin_configuration(
+            "vector_index_milvus",
+            overrides={"space_id": space_id, "dimensions": 4},
+        ),
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "vector-index.milvus": lambda *_args: None,
+        }),
+    )
+    namespace = module_schema_namespace("forest.vector.index")
+
+    async def invoke(function, payload, *, operation_id=None):
+        context = {"bot_id": store.bot_id}
+        if operation_id is not None:
+            context["operation_id"] = operation_id
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result").format(
+                        sql.Identifier(namespace), sql.Identifier(function)
+                    ),
+                    (Jsonb(context), Jsonb(payload)),
+                )
+            ).fetchone()
+        envelope = row["result"]
+        if not envelope["ok"]:
+            error = envelope["error"]
+            raise ForestError(error["code"], error["message"], error["status"])
+        return envelope["value"]
+
+    shape = {
+        "space_id": space_id,
+        "collection_name": vector_collection_name(store.bot_id, space_id),
+        "dimensions": 4, "metric": "COSINE",
+    }
+    plan = await invoke(
+        "vector_collection_plan", {**shape, "exists": False, "collection_id": None},
+        operation_id="audit/start",
+    )
+    assert plan["state"] == "CREATE"
+    await invoke(
+        "vector_collection_confirm",
+        {**shape, "collection_id": 42, "claim_token": plan["claim_token"]},
+    )
+
+    async def publish(ref_id):
+        public = _with_replay({
+            "ref_id": ref_id, "space_id": space_id,
+            "purpose": "DOCUMENT", "vector": [0.1, 0.2, 0.3, 0.4],
+        })
+        digest = digest_json(public)
+        await invoke("vector_ref_reserve", {
+            **public, "source_input_digest": digest,
+            "physical_digest": _physical_digest(public["vector"]),
+        })
+        await invoke("vector_ref_activate", {
+            "ref_id": ref_id, "input_digest": digest,
+        })
+        return public
+
+    if case == "missing-active":
+        await publish("ref/a")
+    claim_input = {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "audit/first", "lease_seconds": 90,
+    }
+    work = await invoke("vector_claim_ref_audit", claim_input)
+    assert work == await invoke("vector_claim_ref_audit", claim_input)
+    assert work["payload"]["phase"] == (
+        "REF" if case == "missing-active" else "PHYSICAL"
+    )
+    if case == "missing-active":
+        assert work["payload"]["refs"] == ["ref/a"]
+        await publish("ref/b")
+        assert (await invoke("vector_adjudicate_ref_audit", {
+            "space_id": space_id, "binding_revision": 1,
+            "collection_id": 42, "cycle_seq": work["payload"]["cycle_seq"],
+            "claim_token": work["claim_token"],
+            "observations": [{"ref_id": "ref/b", "physical": None}],
+        })) == {"state": "READY", "ref_id": None}
+    else:
+        assert work["payload"]["refs"] == []
+
+    async def service_call(name, payload, **_options):
+        assert name == "vector.transport.audit"
+        if case == "missing-active":
+            assert payload["mode"] == "GET" and payload["ref_ids"] == ["ref/a"]
+            return {
+                "space_id": space_id, "mode": "GET", "rows": [],
+                "next_ref": None, "done": True,
+            }
+        assert payload["mode"] == "SCAN"
+        return {
+            "space_id": space_id, "mode": "SCAN",
+            "rows": [{
+                "ref_id": "ref/unbound", "bot_id": store.bot_id,
+                "space_id": space_id, "purpose": "DOCUMENT",
+                "input_digest": "sha256:" + "a" * 64,
+                "physical_digest": "f32-sha256:" + "b" * 64,
+            }],
+            "next_ref": "ref/unbound", "done": True,
+        }
+
+    async def command_call(name, payload, **_options):
+        assert name == "vector.audit.adjudicate"
+        return await invoke("vector_adjudicate_ref_audit", payload)
+
+    component = MilvusVectorIndex()
+    component.space_id = space_id
+    ctx = SimpleNamespace(
+        services=SimpleNamespace(call=service_call),
+        commands=SimpleNamespace(call=command_call),
+        operations=SimpleNamespace(stable=lambda value: value),
+    )
+    result = await component.audit_refs(work, ctx)
+    assert result["quarantined"]
+    settlement = {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": work["work_id"], "claim_token": work["claim_token"],
+        "attempt": work["attempt"],
+        "outcome": {"status": "SUCCEEDED", "result": result},
+    }
+    settled, replayed = await asyncio.gather(
+        invoke("vector_settle_ref_audit", settlement),
+        invoke("vector_settle_ref_audit", settlement),
+    )
+    assert settled == {"protocol": "forest.owned-work-settled/1",
+                       "work_id": work["work_id"]}
+    assert replayed == settled
+    with pytest.raises(ForestError) as stale:
+        await invoke("vector_adjudicate_ref_audit", {
+            "space_id": space_id, "binding_revision": 1,
+            "collection_id": 42, "cycle_seq": work["payload"]["cycle_seq"],
+            "claim_token": work["claim_token"],
+            "observations": [{"ref_id": "ref/unbound", "physical": None}],
+        })
+    assert stale.value.code == "VECTOR_AUDIT_CLAIM_STALE"
+    async with store.pool.connection() as conn:
+        health = await (
+            await conn.execute(
+                sql.SQL("SELECT state,reason FROM {}.vector_collection_health "
+                        "WHERE bot_id=%s").format(sql.Identifier(namespace)),
+                (store.bot_id,),
+            )
+        ).fetchone()
+    assert health == {"state": "REBUILD_REQUIRED", "reason": "row mismatch"}
+    assert await invoke("vector_claim_ref_audit", {
+        **claim_input, "claim_token": "audit/second",
+    }) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_ref_audit_resumes_into_physical_scan_and_records_waterline(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    space_id = "space/audit-ok/" + uuid4().hex
+    await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
+        PackageCatalog(tmp_path / "audit-ok-packages"),
+        store, installer, kernel=kernel,
+        initial_configuration=official_builtin_configuration(
+            "vector_index_milvus",
+            overrides={"space_id": space_id, "dimensions": 4},
+        ),
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "vector-index.milvus": lambda *_args: None,
+        }),
+    )
+    namespace = module_schema_namespace("forest.vector.index")
+
+    async def invoke(function, payload, *, operation_id=None):
+        context = {"bot_id": store.bot_id}
+        if operation_id is not None:
+            context["operation_id"] = operation_id
+        async with store.pool.connection() as conn, conn.transaction():
+            envelope = (
+                await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result").format(
+                            sql.Identifier(namespace), sql.Identifier(function)
+                        ),
+                        (Jsonb(context), Jsonb(payload)),
+                    )
+                ).fetchone()
+            )["result"]
+        assert envelope["ok"], envelope
+        return envelope["value"]
+
+    shape = {
+        "space_id": space_id,
+        "collection_name": vector_collection_name(store.bot_id, space_id),
+        "dimensions": 4, "metric": "COSINE",
+    }
+    plan = await invoke(
+        "vector_collection_plan", {**shape, "exists": False, "collection_id": None},
+        operation_id="audit-ok/start",
+    )
+    await invoke("vector_collection_confirm", {
+        **shape, "collection_id": 42, "claim_token": plan["claim_token"],
+    })
+
+    async def publish(ref_id):
+        public = _with_replay({
+            "ref_id": ref_id, "space_id": space_id,
+            "purpose": "DOCUMENT", "vector": [0.1, 0.2, 0.3, 0.4],
+        })
+        digest = digest_json(public)
+        await invoke("vector_ref_reserve", {
+            **public, "source_input_digest": digest,
+            "physical_digest": _physical_digest(public["vector"]),
+        })
+        await invoke("vector_ref_activate", {
+            "ref_id": ref_id, "input_digest": digest,
+        })
+        return {
+            "ref_id": ref_id, "bot_id": store.bot_id,
+            "space_id": space_id, "purpose": "DOCUMENT",
+            "input_digest": digest,
+            "physical_digest": _physical_digest(public["vector"]),
+        }
+
+    first_row = await publish("ref/a")
+    claim = {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "audit-ok/ref", "lease_seconds": 90,
+    }
+    first = await invoke("vector_claim_ref_audit", claim)
+    assert first["payload"]["phase"] == "REF"
+    assert first["payload"]["refs"] == ["ref/a"]
+    assert first["payload"]["cycle_seq"] == 1
+    late_row = await publish("ref/b")
+
+    async def service_call(name, payload, **_options):
+        assert name == "vector.transport.audit"
+        if payload["mode"] == "GET":
+            return {
+                "space_id": space_id, "mode": "GET", "rows": [first_row],
+                "next_ref": None, "done": True,
+            }
+        return {
+            "space_id": space_id, "mode": "SCAN",
+            "rows": [first_row, late_row],
+            "next_ref": "ref/b", "done": True,
+        }
+
+    async def command_call(name, payload, **_options):
+        assert name == "vector.audit.adjudicate"
+        return await invoke("vector_adjudicate_ref_audit", payload)
+
+    component = MilvusVectorIndex()
+    component.space_id = space_id
+    ctx = SimpleNamespace(
+        services=SimpleNamespace(call=service_call),
+        commands=SimpleNamespace(call=command_call),
+        operations=SimpleNamespace(stable=lambda value: value),
+    )
+
+    async def run_and_settle(work):
+        result = await component.audit_refs(work, ctx)
+        assert not result["quarantined"]
+        settled = await invoke("vector_settle_ref_audit", {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": work["work_id"], "claim_token": work["claim_token"],
+            "attempt": work["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": result},
+        })
+        assert settled == {"protocol": "forest.owned-work-settled/1",
+                           "work_id": work["work_id"]}
+
+    await run_and_settle(first)
+    second = await invoke("vector_claim_ref_audit", {
+        **claim, "claim_token": "audit-ok/physical",
+    })
+    assert second["payload"]["phase"] == "PHYSICAL"
+    assert second["payload"]["cycle_seq"] == 1
+    await run_and_settle(second)
+    async with store.pool.connection() as conn:
+        state = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT phase,cycle_seq,last_checked_seq,"
+                    "last_checked_at IS NOT NULL AS checked,"
+                    "next_at>clock_timestamp() AS scheduled "
+                    "FROM {}.vector_audit_work WHERE bot_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id,),
+            )
+        ).fetchone()
+    assert state == {
+        "phase": "REF", "cycle_seq": None, "last_checked_seq": 1,
+        "checked": True, "scheduled": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
 async def test_missing_collection_with_active_refs_requires_rebuild(clean_authority, tmp_path):
     store, installer = clean_authority
     kernel = await bootstrap_kernel(store, installer)

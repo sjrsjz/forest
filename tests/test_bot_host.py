@@ -421,6 +421,42 @@ class FakeMilvusClient:
         self.closed = True
 
 
+class FakeMilvusAuditClient:
+    class Iterator:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def next(self):
+            return self.rows
+
+        def close(self):
+            return None
+
+    def __init__(self, **_values):
+        self.closed = False
+
+    def query_iterator(
+        self, *, collection_name, batch_size, limit, filter,
+        output_fields, **_values,
+    ):
+        assert batch_size == limit
+        if filter:
+            assert filter.startswith("ref_id > ")
+            after_ref = json.loads(filter[len("ref_id > "):])
+        else:
+            after_ref = None
+        rows = FakeMilvusClient.collections[collection_name]["rows"]
+        selected = [
+            {field: deepcopy(rows[ref_id][field]) for field in output_fields}
+            for ref_id in sorted(rows)
+            if after_ref is None or ref_id > after_ref
+        ][:limit]
+        return self.Iterator(selected)
+
+    def close(self):
+        self.closed = True
+
+
 class FakeWebSocketClient:
     def __init__(self, self_id: str) -> None:
         self.self_id = self_id
@@ -874,6 +910,7 @@ async def test_worker_host_shell_reload_preserves_unaffected_generations(tmp_pat
         embedding_client_factory=FakeEmbeddingClient,
         media_client_factory=FakeMediaClient,
         vector_index_client_factory=FakeMilvusClient,
+        vector_index_audit_client_factory=FakeMilvusAuditClient,
         websocket_client_factory=create_websocket,
         package_catalog=package_catalog,
         package_registry_reader=read_package_registry,
@@ -1547,6 +1584,7 @@ async def test_embedding_configuration_can_rotate_its_secret_reference(tmp_path)
         embedding_client_factory=RecordingEmbeddingClient,
         media_client_factory=FakeMediaClient,
         vector_index_client_factory=FakeMilvusClient,
+        vector_index_audit_client_factory=FakeMilvusAuditClient,
         websocket_client_factory=create_websocket,
         package_catalog=PackageCatalog(tmp_path / "secret-rotation-packages"),
     )
@@ -1612,6 +1650,7 @@ async def test_embedding_configuration_can_rotate_its_secret_reference(tmp_path)
             embedding_client_factory=RecordingEmbeddingClient,
             media_client_factory=FakeMediaClient,
             vector_index_client_factory=FakeMilvusClient,
+            vector_index_audit_client_factory=FakeMilvusAuditClient,
             websocket_client_factory=create_websocket,
             package_catalog=PackageCatalog(tmp_path / "secret-rotation-packages"),
         )
@@ -1676,6 +1715,7 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
         embedding_client_factory=FakeEmbeddingClient,
         media_client_factory=FakeMediaClient,
         vector_index_client_factory=FakeMilvusClient,
+        vector_index_audit_client_factory=FakeMilvusAuditClient,
         websocket_client_factory=create_websocket,
         package_catalog=PackageCatalog(tmp_path / "self-reload-packages"),
     )
@@ -1765,6 +1805,7 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                 embedding_client_factory=FakeEmbeddingClient,
                 media_client_factory=FakeMediaClient,
                 vector_index_client_factory=FakeMilvusClient,
+                vector_index_audit_client_factory=FakeMilvusAuditClient,
                 websocket_client_factory=create_websocket,
                 package_catalog=PackageCatalog(tmp_path / "self-reload-packages"),
             )
@@ -1929,6 +1970,7 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
             embedding_client_factory=FakeEmbeddingClient,
             media_client_factory=FakeMediaClient,
             vector_index_client_factory=FakeMilvusClient,
+            vector_index_audit_client_factory=FakeMilvusAuditClient,
             websocket_client_factory=create_websocket,
             package_catalog=PackageCatalog(tmp_path / "self-reload-packages"),
         )
@@ -1984,6 +2026,7 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
             embedding_client_factory=FakeEmbeddingClient,
             media_client_factory=FakeMediaClient,
             vector_index_client_factory=FakeMilvusClient,
+            vector_index_audit_client_factory=FakeMilvusAuditClient,
             websocket_client_factory=create_websocket,
             package_catalog=PackageCatalog(tmp_path / "self-reload-packages"),
         )
@@ -2048,6 +2091,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             embedding_client_factory=FakeEmbeddingClient,
             media_client_factory=FakeMediaClient,
             vector_index_client_factory=FakeMilvusClient,
+            vector_index_audit_client_factory=FakeMilvusAuditClient,
             websocket_client_factory=create_websocket,
             package_catalog=package_catalog,
         )
@@ -4246,6 +4290,9 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             embedding_client_factory=None if real_transport else FakeEmbeddingClient,
             media_client_factory=ValidPngMediaClient if valid_media else FakeMediaClient,
             vector_index_client_factory=None if real_transport else FakeMilvusClient,
+            vector_index_audit_client_factory=(
+                None if real_transport else FakeMilvusAuditClient
+            ),
             websocket_client_factory=create_websocket,
             package_catalog=PackageCatalog(tmp_path / catalog_name),
         )
