@@ -20,7 +20,7 @@ import tomllib
 import zipfile
 from collections import OrderedDict
 from collections.abc import Callable
-from contextlib import closing
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from importlib.resources import files
@@ -2682,18 +2682,21 @@ class PackageCatalog:
                 "OFFICIAL_PACKAGE_SOURCE_INVALID",
                 "Official source must declare its scope and trusted storage",
             )
-        with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
-            self._prepare_catalog_tables(db, imports=False)
-            db.execute("BEGIN IMMEDIATE")
-            db.execute(
-                f"CREATE TABLE IF NOT EXISTS {table} "
-                "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
-            )
-            snapshot = self._publish(captured, manifest=manifest, locked_db=db)
-            db.execute(
-                f"INSERT OR IGNORE INTO {table} VALUES (?,?)",
-                (snapshot.digest, component["id"]),
-            )
+        with self._prepared_artifact(captured, manifest) as prepared:
+            with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=10)) as db, db:
+                self._prepare_catalog_tables(db, imports=False)
+                db.execute("BEGIN IMMEDIATE")
+                db.execute(
+                    f"CREATE TABLE IF NOT EXISTS {table} "
+                    "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
+                )
+                snapshot = self._publish(
+                    captured, manifest=manifest, locked_db=db, prepared=prepared
+                )
+                db.execute(
+                    f"INSERT OR IGNORE INTO {table} VALUES (?,?)",
+                    (snapshot.digest, component["id"]),
+                )
         return snapshot
 
     def publish_official_archive(
@@ -2741,18 +2744,21 @@ class PackageCatalog:
             or digest_json(manifest) != expected_manifest_digest
         ):
             _fail("OFFICIAL_PACKAGE_DIGEST_MISMATCH", "Official package contents differ")
-        with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=30)) as db, db:
-            self._prepare_catalog_tables(db, imports=False)
-            db.execute("BEGIN IMMEDIATE")
-            db.execute(
-                f"CREATE TABLE IF NOT EXISTS {table} "
-                "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
-            )
-            snapshot = self._publish(captured, manifest=manifest, locked_db=db)
-            db.execute(
-                f"INSERT OR IGNORE INTO {table} VALUES (?,?)",
-                (snapshot.digest, component["id"]),
-            )
+        with self._prepared_artifact(captured, manifest) as prepared:
+            with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=30)) as db, db:
+                self._prepare_catalog_tables(db, imports=False)
+                db.execute("BEGIN IMMEDIATE")
+                db.execute(
+                    f"CREATE TABLE IF NOT EXISTS {table} "
+                    "(digest TEXT PRIMARY KEY, component_id TEXT NOT NULL)"
+                )
+                snapshot = self._publish(
+                    captured, manifest=manifest, locked_db=db, prepared=prepared
+                )
+                db.execute(
+                    f"INSERT OR IGNORE INTO {table} VALUES (?,?)",
+                    (snapshot.digest, component["id"]),
+                )
         return snapshot
 
     def _get_official(self, digest: str, scope: str) -> PackageSnapshot:
@@ -2833,44 +2839,61 @@ class PackageCatalog:
             operation_id=operation_id, actor_ref=actor_ref,
             archive_sha256=archive_sha256,
         )
-        with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=30)) as db, db:
-            self._prepare_catalog_tables(db, imports=True)
-            db.execute("BEGIN IMMEDIATE")
-            prior = db.execute(
-                "SELECT actor_ref,archive_sha256,digest FROM package_imports WHERE operation_id=?",
-                (operation_id,),
-            ).fetchone()
-            if prior is not None:
-                if prior[:2] != (actor_ref, archive_sha256):
-                    _fail("PACKAGE_IMPORT_OPERATION_CONFLICT", "Import key was used for another request")
-                if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_ARCHIVE_BYTES:
-                    _fail("PACKAGE_TOO_LARGE", "Package ZIP exceeds the upload limit")
-                if (
-                    "sha256:" + hashlib.sha256(data).hexdigest() != archive_sha256
-                ):
-                    _fail("PACKAGE_ARCHIVE_DIGEST_MISMATCH", "Package ZIP differs from its declared digest")
-                return self.get(prior[2])
-            closed = db.execute(
-                "SELECT actor_ref,archive_sha256 FROM package_import_closures WHERE operation_id=?",
-                (operation_id,),
-            ).fetchone()
-            if closed is not None:
-                if closed != (actor_ref, archive_sha256):
-                    _fail("PACKAGE_IMPORT_OPERATION_CONFLICT", "Import key was used for another request")
-                _fail("PACKAGE_IMPORT_CLOSED", "Import operation was closed before publication")
+        # A committed replay or closure takes precedence over parsing a late ZIP.
+        # Both observations are repeated under the write lock after preparation.
+        prior = self._rows(
+            "SELECT actor_ref,archive_sha256,digest FROM package_imports "
+            "WHERE operation_id=?", (operation_id,), table="package_imports",
+        )
+        if prior:
+            if prior[0][:2] != (actor_ref, archive_sha256):
+                _fail("PACKAGE_IMPORT_OPERATION_CONFLICT", "Import key was used for another request")
             if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_ARCHIVE_BYTES:
                 _fail("PACKAGE_TOO_LARGE", "Package ZIP exceeds the upload limit")
             if "sha256:" + hashlib.sha256(data).hexdigest() != archive_sha256:
                 _fail("PACKAGE_ARCHIVE_DIGEST_MISMATCH", "Package ZIP differs from its declared digest")
-            captured = archive_files(data)
-            manifest = _manifest(captured)
-            if check_manifest is not None:
-                check_manifest(deepcopy(manifest))
-            return self._publish(
-                captured, manifest=manifest,
-                import_operation=(operation_id, actor_ref, archive_sha256),
-                locked_db=db,
-            )
+            return self.get(prior[0][2])
+        closed = self._rows(
+            "SELECT actor_ref,archive_sha256 FROM package_import_closures "
+            "WHERE operation_id=?", (operation_id,), table="package_import_closures",
+        )
+        if closed:
+            if closed[0] != (actor_ref, archive_sha256):
+                _fail("PACKAGE_IMPORT_OPERATION_CONFLICT", "Import key was used for another request")
+            _fail("PACKAGE_IMPORT_CLOSED", "Import operation was closed before publication")
+        if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_ARCHIVE_BYTES:
+            _fail("PACKAGE_TOO_LARGE", "Package ZIP exceeds the upload limit")
+        if "sha256:" + hashlib.sha256(data).hexdigest() != archive_sha256:
+            _fail("PACKAGE_ARCHIVE_DIGEST_MISMATCH", "Package ZIP differs from its declared digest")
+        captured = archive_files(data)
+        manifest = _manifest(captured)
+        if check_manifest is not None:
+            check_manifest(deepcopy(manifest))
+        with self._prepared_artifact(captured, manifest) as prepared:
+            with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=30)) as db, db:
+                self._prepare_catalog_tables(db, imports=True)
+                db.execute("BEGIN IMMEDIATE")
+                prior = db.execute(
+                    "SELECT actor_ref,archive_sha256,digest FROM package_imports "
+                    "WHERE operation_id=?", (operation_id,),
+                ).fetchone()
+                if prior is not None:
+                    if prior[:2] != (actor_ref, archive_sha256):
+                        _fail("PACKAGE_IMPORT_OPERATION_CONFLICT", "Import key was used for another request")
+                    return self.get(prior[2])
+                closed = db.execute(
+                    "SELECT actor_ref,archive_sha256 FROM package_import_closures "
+                    "WHERE operation_id=?", (operation_id,),
+                ).fetchone()
+                if closed is not None:
+                    if closed != (actor_ref, archive_sha256):
+                        _fail("PACKAGE_IMPORT_OPERATION_CONFLICT", "Import key was used for another request")
+                    _fail("PACKAGE_IMPORT_CLOSED", "Import operation was closed before publication")
+                return self._publish(
+                    captured, manifest=manifest,
+                    import_operation=(operation_id, actor_ref, archive_sha256),
+                    locked_db=db, prepared=prepared,
+                )
 
     def close_import_if_absent(
         self, *, operation_id: str, actor_ref: str, archive_sha256: str
@@ -3128,11 +3151,60 @@ class PackageCatalog:
                 return []
             return db.execute(query, parameters).fetchall()
 
+    @contextmanager
+    def _prepared_artifact(self, captured: dict[str, bytes], manifest: dict):
+        """Fsync and verify immutable bytes before taking the catalog write lock."""
+        digest = digest_json(
+            {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
+        )
+        destination = self.root / digest.removeprefix("sha256:")
+        if destination.exists():
+            PackageSnapshot(destination, digest, manifest).verify()
+            yield digest, destination, None
+            return
+        staging = self.root / (".capture-" + uuid4().hex)
+        try:
+            try:
+                staging.mkdir(mode=0o700)
+                for name, data in captured.items():
+                    target = staging / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open("xb") as stream:
+                        stream.write(data)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if sys.platform != "win32":
+                        target.chmod(0o400)
+            except OSError as exc:
+                raise ForestError(
+                    "PACKAGE_STORAGE_ERROR", "Unable to prepare package artifact", 500
+                ) from exc
+            PackageSnapshot(staging, digest, manifest).verify()
+            yield digest, destination, staging
+        finally:
+            # Clean only this build's still-unpublished capture.
+            if staging.exists():
+                info = staging.lstat()
+                if (
+                    not stat.S_ISLNK(info.st_mode)
+                    and not getattr(info, "st_reparse_tag", 0)
+                    and staging.resolve().parent == self.root.resolve()
+                ):
+                    shutil.rmtree(staging)
+
     def _publish(
         self, captured: dict[str, bytes], *, manifest: dict, bind_version: bool = True,
         import_operation: tuple[str, str, str] | None = None,
         locked_db: sqlite3.Connection | None = None,
+        prepared: tuple[str, Path, Path | None] | None = None,
     ) -> PackageSnapshot:
+        if prepared is None:
+            with self._prepared_artifact(captured, manifest) as ready:
+                return self._publish(
+                    captured, manifest=manifest, bind_version=bind_version,
+                    import_operation=import_operation, locked_db=locked_db,
+                    prepared=ready,
+                )
         if locked_db is None:
             with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=30)) as db, db:
                 self._prepare_catalog_tables(db, imports=import_operation is not None)
@@ -3140,11 +3212,9 @@ class PackageCatalog:
                 return self._publish(
                     captured, manifest=manifest, bind_version=bind_version,
                     import_operation=import_operation, locked_db=db,
+                    prepared=prepared,
                 )
-        digest = digest_json(
-            {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
-        )
-        destination = self.root / digest.removeprefix("sha256:")
+        digest, destination, staging = prepared
         if import_operation is not None:
             prior = locked_db.execute(
                 "SELECT actor_ref,archive_sha256,digest FROM package_imports "
@@ -3177,36 +3247,23 @@ class PackageCatalog:
                 "PACKAGE_VERSION_CONFLICT", "A package version cannot silently change content"
             )
         if not destination.exists():
-            staging = self.root / (".capture-" + uuid4().hex)
-            staging.mkdir(mode=0o700)
+            if staging is None:
+                raise ForestError(
+                    "PACKAGE_STORAGE_ERROR", "Prepared artifact disappeared", 500
+                )
             try:
-                for name, data in captured.items():
-                    target = staging / name
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with target.open("xb") as stream:
-                        stream.write(data)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                    if sys.platform != "win32":
-                        target.chmod(0o400)
                 staging.rename(destination)
+            except FileExistsError:
+                # A competing writer published the same digest first.
+                pass
             except OSError as exc:
                 raise ForestError(
                     "PACKAGE_STORAGE_ERROR", "Unable to publish package artifact", 500
                 ) from exc
-            finally:
-                # Only this build's still-unpublished directory may be removed. Check the
-                # resolved parent and reparse status before any recursive Windows cleanup.
-                if staging.exists():
-                    info = staging.lstat()
-                    if (
-                        not stat.S_ISLNK(info.st_mode)
-                        and not getattr(info, "st_reparse_tag", 0)
-                        and staging.resolve().parent == self.root.resolve()
-                    ):
-                        shutil.rmtree(staging)
         snapshot = PackageSnapshot(destination, digest, manifest)
-        snapshot.verify()
+        if staging is not None and staging.exists():
+            # This call lost a same-digest race; verify the winner before binding.
+            snapshot.verify()
         locked_db.execute("INSERT OR IGNORE INTO artifacts VALUES (?)", (digest,))
         if bind_version:
             locked_db.execute(

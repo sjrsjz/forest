@@ -221,6 +221,40 @@ def test_official_registration_and_artifact_index_commit_together(tmp_path):
     assert catalog.get_official_bot(snapshot.digest).digest == snapshot.digest
 
 
+def test_official_build_does_not_hold_catalog_write_lock_while_fsyncing(
+    tmp_path, monkeypatch
+):
+    sources = auto_install_official_sources("deployment")[:2]
+    assert len(sources) == 2
+    catalog = PackageCatalog(tmp_path / "official-concurrent")
+    entered = Event()
+    release = Event()
+    real_fsync = packages.os.fsync
+    paused = False
+
+    def delayed_fsync(fd):
+        nonlocal paused
+        if not paused:
+            paused = True
+            entered.set()
+            assert release.wait(timeout=30)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(packages.os, "fsync", delayed_fsync)
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        first = workers.submit(catalog.build_official, sources[0], scope="deployment")
+        try:
+            assert entered.wait(timeout=30)
+            second = workers.submit(catalog.build_official, sources[1], scope="deployment")
+            second_snapshot = second.result(timeout=30)
+        finally:
+            release.set()
+        first_snapshot = first.result(timeout=30)
+    assert first_snapshot.digest != second_snapshot.digest
+    assert catalog.get_official_deployment(first_snapshot.digest).digest == first_snapshot.digest
+    assert catalog.get_official_deployment(second_snapshot.digest).digest == second_snapshot.digest
+
+
 def test_official_archive_requires_exact_declared_bytes_and_identity(tmp_path):
     staging = PackageCatalog(tmp_path / "staging")
     source = staging.build(EXAMPLE)
@@ -1363,6 +1397,52 @@ def test_import_close_and_publish_choose_one_durable_outcome(tmp_path):
         assert observed == {"found": False, "package_digest": None, "closed": True}
         assert published == ("rejected", "PACKAGE_IMPORT_CLOSED")
     assert PackageCatalog(root).close_import_if_absent(**racing) == observed
+
+
+def test_import_close_can_win_while_archive_bytes_are_fsyncing(tmp_path, monkeypatch):
+    source_catalog = PackageCatalog(tmp_path / "source-catalog")
+    snapshot = source_catalog.build(source(tmp_path))
+    archive = source_catalog.export_archive(snapshot.digest)
+    destination = PackageCatalog(tmp_path / "destination")
+    identity = {
+        "operation_id": "web:sha256:" + "f" * 64,
+        "actor_ref": "admin:one",
+        "archive_sha256": "sha256:" + hashlib.sha256(archive).hexdigest(),
+    }
+    entered = Event()
+    release = Event()
+    real_fsync = packages.os.fsync
+    paused = False
+
+    def delayed_fsync(fd):
+        nonlocal paused
+        if not paused:
+            paused = True
+            entered.set()
+            assert release.wait(timeout=30)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(packages.os, "fsync", delayed_fsync)
+
+    def publish():
+        try:
+            destination.import_archive_idempotent(archive, **identity)
+        except ForestError as error:
+            return error.code
+        return "PUBLISHED"
+
+    with ThreadPoolExecutor(max_workers=1) as workers:
+        publication = workers.submit(publish)
+        try:
+            assert entered.wait(timeout=30)
+            closed = destination.close_import_if_absent(**identity)
+        finally:
+            release.set()
+        result = publication.result(timeout=30)
+    assert closed == {"found": False, "package_digest": None, "closed": True}
+    assert result == "PACKAGE_IMPORT_CLOSED"
+    assert destination.list() == []
+    assert not list(destination.root.glob(".capture-*"))
 
 
 def test_unbound_web_artifacts_do_not_reserve_version_after_rejected_registration(tmp_path):
