@@ -280,6 +280,8 @@ snapshot 至少包括 `bot_id, component_id, generation_id, state_schema, source
 
 Bot 宿主必须持续监督当前 RuntimeGraph 报告的全部 owned task、HostLease 续租任务和图替换任务。任一仍属于当前图的任务取消、异常或无异常提前返回，都使该 Bot 宿主失败；多 Bot Supervisor 将准确错误码写入该 Bot 的 `FAILED` 观测并关闭其管理准入，不影响其他 Bot。热替换期间只在 replacement lock 两侧比较任务所有权：已经属于旧图的完成任务不得误伤新图，候选发布后新图任务立即进入监督集合。宿主关闭会先撤销监督，再按反向依赖排空模块，避免把预期取消误报为运行故障。
 
+Generation 持有的 Effect Driver 若启动长期任务，必须通过 `owned_tasks` 端口将任务逐级交给 Package Generation 和 RuntimeGraph；WebSocket 读取、入站消费等任务不能只由 Driver 私下持有。当前图中的连接读取任务即使正常返回，也表示该传输已停止，宿主应按上述故障路径关闭本代并让 Supervisor 依据运行意图重试。HTTP 健康检查只能说明管理进程可连接，不能代替 Bot 图与外部传输的运行观察。
+
 Bot 正常停止、取消和运行异常都必须先拒绝新的管理准入，等待已准入的管理请求退出，再关闭该 BotHost；异常路径不能绕过这道排空屏障。等待仅覆盖当前 Bot 的管理请求，其他 Bot 的管理入口继续服务。
 
 包自有工作排空以领取循环存活为前提。若任一被排空的循环提前终止，无论是否已观察到队列暂空，都必须使本次排空以明确错误结束，触发发布前回滚；不能无限等待只会由存活循环发出的排空信号，也不能把失败循环视为已成功排空。

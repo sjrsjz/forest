@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -8,6 +9,7 @@ import pytest
 from forest.adapters.onebot import PreparedSend, SendResult
 from forest.errors import ForestError
 from forest.onebot_transport_effect_driver import OneBotTransportEffectDriver
+from forest.package_runtime import PackageGenerationAdapter
 
 
 def _prepared(text="hello"):
@@ -151,6 +153,13 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
 
     driver.bind_ingress(ingest)
     await driver.start()
+    transport_task = asyncio.create_task(asyncio.Event().wait())
+    client.owned_tasks = lambda: (transport_task,)
+    assert driver.owned_tasks() == (transport_task,)
+    generation = object.__new__(PackageGenerationAdapter)
+    generation._owned_work = None
+    generation._effect_drivers = {"adapter.onebot.transport.send": driver}
+    assert generation.owned_tasks() == (transport_task,)
     assert resolved == [("secret://onebot/main", 11)]
     assert not client.active
 
@@ -227,3 +236,5 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
 
     await driver.close()
     assert client.closed
+    transport_task.cancel()
+    await asyncio.gather(transport_task, return_exceptions=True)

@@ -111,6 +111,13 @@ class OneBotTransportEffectDriver:
             )
         self._ingress = handler
 
+    def owned_tasks(self) -> tuple[asyncio.Task, ...]:
+        return tuple(
+            task
+            for transport in self._bindings.values()
+            for task in transport.client.owned_tasks()
+        )
+
     async def start(self) -> None:
         if self._ingress is None:
             raise ForestError(

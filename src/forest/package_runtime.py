@@ -50,6 +50,7 @@ from forest.package_effects import (
     PackageEffectDriverFactory,
     PackageIngressEffectDriver,
     PackageServiceEffectDriver,
+    PackageTaskOwningEffectDriver,
 )
 from forest.package_owned_work import PackageOwnedWorkSupervisor
 from forest.packages import PackageSnapshot, contract_range, digest_json
@@ -1152,7 +1153,11 @@ class PackageGenerationAdapter:
             self._owned_work.notify()
 
     def owned_tasks(self) -> tuple[asyncio.Task, ...]:
-        return self._owned_work.owned_tasks() if self._owned_work is not None else ()
+        tasks = self._owned_work.owned_tasks() if self._owned_work is not None else ()
+        for driver in self._effect_drivers.values():
+            if isinstance(driver, PackageTaskOwningEffectDriver):
+                tasks += driver.owned_tasks()
+        return tasks
 
     def _check_route(self, route: FrozenServiceRoute) -> None:
         identity = self.generation_identity

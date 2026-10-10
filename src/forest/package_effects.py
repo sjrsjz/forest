@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -22,6 +23,13 @@ class PackageEffectDriver(Protocol):
     async def resume(self) -> None: ...
 
     async def close(self) -> None: ...
+
+
+@runtime_checkable
+class PackageTaskOwningEffectDriver(Protocol):
+    """Expose long-lived Generation-owned effect tasks to host supervision."""
+
+    def owned_tasks(self) -> tuple[asyncio.Task, ...]: ...
 
 
 @runtime_checkable
