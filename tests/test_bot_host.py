@@ -5513,6 +5513,34 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                     ):
                         break
                     await asyncio.sleep(0.1)
+            if scenario == "text":
+                vector_driver = host.registry.get("vector.index")._effect_drivers[
+                    "vector.transport.search"
+                ]
+                collection_name = vector_driver.collection_name
+                collection = FakeMilvusClient.collections[collection_name]
+                original_id = collection["collection_id"]
+                collection["collection_id"] = original_id + 1000000
+                try:
+                    with pytest.raises(ForestError) as changed:
+                        await vector_driver.invoke(
+                            {"query_ref_id": "probe", "space_id":
+                             vector_driver.configuration["space_id"], "limit": 1},
+                            scope=vector_driver.identity,
+                            invocation=SimpleNamespace(operation_id="identity-probe"),
+                        )
+                    assert changed.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
+                    vector_schema = module_schema_namespace("forest.vector.index")
+                    async with host.store.pool.connection() as conn:
+                        health = await (await conn.execute(
+                            sql.SQL("SELECT state,reason FROM {}.vector_collection_health "
+                                    "WHERE bot_id=%s").format(sql.Identifier(vector_schema)),
+                            (settings.bot_id,),
+                        )).fetchone()
+                    assert health == {"state": "REBUILD_REQUIRED",
+                                      "reason": "collection identity changed"}
+                finally:
+                    collection["collection_id"] = original_id
     finally:
         if RecordingModelClient.first_gate is not None:
             RecordingModelClient.first_gate.set()

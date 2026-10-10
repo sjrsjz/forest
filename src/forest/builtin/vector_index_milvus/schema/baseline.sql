@@ -44,6 +44,15 @@ CREATE TABLE vector_collection_bindings (
     bound_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,binding_revision)
 );
+CREATE TABLE vector_collection_health (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    binding_revision bigint NOT NULL CHECK (binding_revision > 0),
+    state text NOT NULL CHECK (state IN ('READY','REBUILD_REQUIRED')),
+    reason text,
+    observed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    FOREIGN KEY (bot_id,binding_revision) REFERENCES vector_collection_bindings(bot_id,binding_revision),
+    CHECK ((state='READY') = (reason IS NULL))
+);
 CREATE TABLE vector_collection_start_claims (
     bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
     space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
@@ -350,6 +359,14 @@ BEGIN
             'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_STARTING',
                 'message','Collection startup has not settled','status',503));
     END IF;
+    IF NOT EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_collection_health
+        WHERE bot_id=requested_bot AND state='READY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_REBUILD_REQUIRED',
+                'message','Vector collection is not ready','status',503));
+    END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'vector-ref:'||requested_bot||':'||requested_ref,0));
     SELECT * INTO existing FROM __forest_module_schema__.vector_index_refs
@@ -404,6 +421,16 @@ BEGIN
     END IF;
     PERFORM pg_advisory_xact_lock_shared(hashtextextended(
         'vector-collection:'||requested_bot,0));
+    IF NOT EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_collection_health h
+        JOIN __forest_module_schema__.vector_collection_bindings b
+          ON b.bot_id=h.bot_id AND b.binding_revision=h.binding_revision
+        WHERE h.bot_id=requested_bot AND h.state='READY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_REBUILD_REQUIRED',
+                'message','Vector collection is not ready','status',503));
+    END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'vector-ref:'||requested_bot||':'||requested_ref,0));
     SELECT * INTO existing FROM __forest_module_schema__.vector_index_refs
@@ -511,6 +538,14 @@ DECLARE
     requested_ref text := input->>'query_ref_id';
     requested_space text := input->>'space_id';
 BEGIN
+    IF NOT EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_collection_health
+        WHERE bot_id=requested_bot AND state='READY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_REBUILD_REQUIRED',
+                'message','Vector collection is not ready','status',503));
+    END IF;
     IF EXISTS(
         SELECT 1 FROM __forest_module_schema__.vector_index_refs
         WHERE bot_id=requested_bot AND ref_id=requested_ref
@@ -535,6 +570,14 @@ DECLARE
     requested_space text := input->>'space_id';
     filtered jsonb;
 BEGIN
+    IF NOT EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_collection_health
+        WHERE bot_id=requested_bot AND state='READY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_REBUILD_REQUIRED',
+                'message','Vector collection is not ready','status',503));
+    END IF;
     IF NOT EXISTS(
         SELECT 1 FROM __forest_module_schema__.vector_index_refs
         WHERE bot_id=requested_bot AND ref_id=requested_ref
@@ -573,6 +616,9 @@ DECLARE
     observed_id bigint;
     binding __forest_module_schema__.vector_collection_bindings%ROWTYPE;
     claim __forest_module_schema__.vector_collection_start_claims%ROWTYPE;
+    health __forest_module_schema__.vector_collection_health%ROWTYPE;
+    selected_revision bigint;
+    selected_id bigint;
     selected_state text;
     selected_reason text;
     selected_token text;
@@ -629,12 +675,24 @@ BEGIN
                     'message','Collection binding belongs to another vector space',
                     'status',409));
         END IF;
-        selected_state := CASE WHEN observed_exists
-            AND observed_id=binding.collection_id THEN 'READY'
-            ELSE 'REBUILD_REQUIRED' END;
-        selected_reason := CASE WHEN selected_state='READY' THEN NULL
-            WHEN observed_exists THEN 'collection identity changed'
-            ELSE 'collection missing with binding' END;
+        selected_revision := binding.binding_revision;
+        selected_id := binding.collection_id;
+        SELECT * INTO health FROM __forest_module_schema__.vector_collection_health
+        WHERE bot_id=requested_bot;
+        IF NOT FOUND OR health.binding_revision IS DISTINCT FROM binding.binding_revision THEN
+            selected_state := 'REBUILD_REQUIRED';
+            selected_reason := 'collection health ledger is incomplete';
+        ELSIF health.state='REBUILD_REQUIRED' THEN
+            selected_state := 'REBUILD_REQUIRED';
+            selected_reason := health.reason;
+        ELSE
+            selected_state := CASE WHEN observed_exists
+                AND observed_id=binding.collection_id THEN 'READY'
+                ELSE 'REBUILD_REQUIRED' END;
+            selected_reason := CASE WHEN selected_state='READY' THEN NULL
+                WHEN observed_exists THEN 'collection identity changed'
+                ELSE 'collection missing with binding' END;
+        END IF;
     ELSE
         SELECT * INTO claim FROM __forest_module_schema__.vector_collection_start_claims
         WHERE bot_id=requested_bot FOR UPDATE;
@@ -683,7 +741,8 @@ BEGIN
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('state',selected_state,
-            'reason',selected_reason,'claim_token',selected_token));
+            'reason',selected_reason,'claim_token',selected_token,
+            'binding_revision',selected_revision,'collection_id',selected_id));
 END;
 $$;
 
@@ -750,9 +809,56 @@ BEGIN
         requested_bot,1,requested_space,requested_name,requested_id,
         requested_dimensions,requested_metric
     );
+    INSERT INTO __forest_module_schema__.vector_collection_health(
+        bot_id,binding_revision,state
+    ) VALUES(requested_bot,1,'READY');
     DELETE FROM __forest_module_schema__.vector_collection_start_claims
     WHERE bot_id=requested_bot;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
-        'value',jsonb_build_object('state','READY','reason',NULL,'claim_token',NULL));
+        'value',jsonb_build_object('state','READY','reason',NULL,'claim_token',NULL,
+            'binding_revision',1,'collection_id',requested_id));
+END;
+$$;
+
+CREATE FUNCTION vector_collection_quarantine(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_revision bigint := (input->>'binding_revision')::bigint;
+    requested_id bigint := (input->>'collection_id')::bigint;
+    requested_reason text := input->>'reason';
+    binding __forest_module_schema__.vector_collection_bindings%ROWTYPE;
+BEGIN
+    IF requested_bot IS NULL OR requested_revision IS NULL
+       OR requested_id IS NULL OR requested_revision<=0 OR requested_id<=0
+       OR requested_reason IS NULL OR requested_reason NOT IN (
+           'collection missing','collection identity changed',
+           'collection layout changed','row mismatch'
+       ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
+                'message','Collection quarantine request is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'vector-collection:'||requested_bot,0));
+    SELECT * INTO binding FROM __forest_module_schema__.vector_collection_bindings
+    WHERE bot_id=requested_bot ORDER BY binding_revision DESC LIMIT 1;
+    IF NOT FOUND OR binding.binding_revision IS DISTINCT FROM requested_revision
+       OR binding.collection_id IS DISTINCT FROM requested_id THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_BINDING_STALE',
+                'message','Collection binding changed before quarantine','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.vector_collection_health(
+        bot_id,binding_revision,state,reason
+    ) VALUES(requested_bot,requested_revision,'REBUILD_REQUIRED',requested_reason)
+    ON CONFLICT (bot_id) DO UPDATE
+    SET state='REBUILD_REQUIRED',reason=EXCLUDED.reason,
+        observed_at=clock_timestamp()
+    WHERE vector_collection_health.binding_revision=requested_revision
+      AND vector_collection_health.state='READY';
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('state','REBUILD_REQUIRED',
+            'binding_revision',requested_revision,'collection_id',requested_id));
 END;
 $$;

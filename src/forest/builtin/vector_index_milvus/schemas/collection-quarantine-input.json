@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "binding_revision",
+    "collection_id",
+    "reason"
+  ],
+  "properties": {
+    "binding_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "collection_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "reason": {
+      "enum": [
+        "collection missing",
+        "collection identity changed",
+        "collection layout changed",
+        "row mismatch"
+      ]
+    }
+  }
+}

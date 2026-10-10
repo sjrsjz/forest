@@ -259,3 +259,5 @@ forest plugin import hello.zip
 普通包的 components.capabilities.requests 只能列出该包已声明的自身服务、领域操作、状态、事件或任务端口；部署批准必须与此请求集合准确一致。宿主随代码交付的官方 Bot 包可另在 components.capabilities.official_bot_grants 中声明 capability 与显式 delegable 布尔值，资源始终由内核绑定为当前 Bot，包不得填写任意 Bot ID。只有官方 bootstrap 路径会将该声明纳入带策略修订的 GrantSet；普通安装包只要出现此字段就会在数据库访问前被拒绝，ZIP 导入或 manifest 自报不能取得官方身份。该声明属于内容寻址工件，热重载时按准确包摘要重新装配授予；BotHost 不维护按组件名分派的授权表。
 
 原生 Effect Driver 可在宿主驱动注册表中附带配置安全校验器。包通过 effect_services.kind 选择驱动种类；通用包装配器按该声明组合校验器，在创建期、配置提交与 Generation 准备中使用同一边界，不按组件目录名分派。校验器属于宿主提供的受信任驱动代码，普通插件不得以 manifest 路径要求宿主加载自身 Python 函数；包内运行时 schema 仍负责公开配置形状。
+
+Effect Driver 若需改变本包的持久领域状态，须由 effect service 在清单中逐项声明 `startup_commands` 或 `runtime_commands`，且目标必须是本包 Domain Command。前者只接纳 PREPARED Generation 的启动观察，后者只接纳当前 ACTIVE Generation 的运行期观察；内核逐次验证输入/输出 schema、操作 ID 与代际围栏。驱动不得直接读写包私有表，也不能把运行期事件偷走启动端口。`vector.index` 的 Milvus 身份异常据此调用包内隔离命令；集合健康事实始终属于包。

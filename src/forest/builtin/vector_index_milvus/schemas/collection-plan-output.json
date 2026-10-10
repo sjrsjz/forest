@@ -5,7 +5,9 @@
   "required": [
     "state",
     "reason",
-    "claim_token"
+    "claim_token",
+    "binding_revision",
+    "collection_id"
   ],
   "properties": {
     "state": {
@@ -28,6 +30,20 @@
         "string",
         "null"
       ]
+    },
+    "binding_revision": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "collection_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
     }
   }
 }

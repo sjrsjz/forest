@@ -406,6 +406,10 @@ MANIFEST_SCHEMA = {
                                     "type": "array", "maxItems": 8,
                                     "uniqueItems": True, "items": {"type": "string"},
                                 },
+                                "runtime_commands": {
+                                    "type": "array", "maxItems": 8,
+                                    "uniqueItems": True, "items": {"type": "string"},
+                                },
                                 "ingress": {
                                     "type": "object",
                                     "additionalProperties": False,
@@ -1672,10 +1676,12 @@ def _manifest(files: dict[str, bytes]) -> dict:
     declared_domain_commands = {item["name"] for item in domain_commands}
     for effect in effect_services:
         startup_commands = effect.get("startup_commands", ())
-        if any(name not in declared_domain_commands for name in startup_commands):
+        runtime_commands = effect.get("runtime_commands", ())
+        if any(name not in declared_domain_commands
+               for name in (*startup_commands, *runtime_commands)):
             _fail(
-                "INVALID_EFFECT_STARTUP_COMMANDS",
-                "Effect startup commands must be package-owned Domain commands",
+                "INVALID_EFFECT_COMMANDS",
+                "Effect commands must be package-owned Domain commands",
             )
     private_work_commands = [
         name for work in owned_work_handlers

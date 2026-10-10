@@ -57,6 +57,7 @@ def _bind_package_startup(driver, store):
         function = {
             "vector.collection.plan": "vector_collection_plan",
             "vector.collection.confirm": "vector_collection_confirm",
+            "vector.collection.quarantine": "vector_collection_quarantine",
         }[name]
         async with store.pool.connection() as conn, conn.transaction():
             row = await (
@@ -75,6 +76,7 @@ def _bind_package_startup(driver, store):
         return envelope["value"]
 
     driver.bind_startup_commands(call)
+    driver.bind_runtime_commands(call)
     return driver
 
 
@@ -266,6 +268,7 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
     plan = "vector_collection_plan"
     assert (await invoke(plan, absent, operation_id="startup/a"))["value"] == {
         "state": "CREATE", "reason": None, "claim_token": "startup/a",
+        "binding_revision": None, "collection_id": None,
     }
     assert (await invoke(plan, absent, operation_id="startup/b"))["value"][
         "state"
@@ -383,6 +386,22 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
     assert (await invoke("vector_ref_filter_active", hits))["error"]["code"] == (
         "VECTOR_INDEX_QUERY_REF_MISSING"
     )
+    quarantined = await invoke("vector_collection_quarantine", {
+        "binding_revision": 1, "collection_id": 42,
+        "reason": "collection identity changed",
+    })
+    assert quarantined["value"]["state"] == "REBUILD_REQUIRED"
+    assert (await invoke(plan, {**shape, "exists": True, "collection_id": 42},
+                         operation_id="startup/c"))["value"]["state"] == "REBUILD_REQUIRED"
+    assert (await invoke(reserve, document, digest=digest))["error"]["code"] == (
+        "VECTOR_INDEX_REBUILD_REQUIRED"
+    )
+    assert (await invoke("vector_ref_require_query", {
+        "query_ref_id": "ref/query", "space_id": space_id, "limit": 1,
+    }))["error"]["code"] == "VECTOR_INDEX_REBUILD_REQUIRED"
+    assert (await invoke(tombstone, {
+        "space_id": space_id, "ref_ids": ["ref/live"],
+    }))["ok"]
 
     async with store.pool.connection() as conn:
         rows = await (
@@ -837,6 +856,20 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             collection_name=collection_name
         )
         assert description["collection_id"] != original_collection_id
+        with pytest.raises(ForestError) as live_replaced:
+            await drivers["vector.transport.search"].invoke(
+                {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
+                scope=scope, invocation=invocation,
+            )
+        assert live_replaced.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
+        async with store.pool.connection() as conn:
+            health = await (await conn.execute(
+                sql.SQL("SELECT state,reason FROM {}.vector_collection_health "
+                        "WHERE bot_id=%s").format(sql.Identifier(namespace)),
+                (bot_id,),
+            )).fetchone()
+        assert health == {"state": "REBUILD_REQUIRED",
+                          "reason": "collection identity changed"}
         await drivers["vector.transport.search"].close()
         replacement = driver_for("vector.transport.search")
         drivers["vector.transport.search"] = replacement

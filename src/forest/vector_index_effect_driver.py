@@ -71,6 +71,7 @@ class MilvusVectorIndexEffectDriver:
         self.service_id = declaration["name"]
         self.bot_id = bot_id
         self._startup_command = None
+        self._runtime_command = None
         self._startup_operation_id = "vector-collection-start:" + hashlib.sha256(
             (identity.generation_id + "\0" + self.service_id).encode("utf-8")
         ).hexdigest()
@@ -81,6 +82,8 @@ class MilvusVectorIndexEffectDriver:
         self.client = None
         self.accepting = False
         self.rebuild_required = False
+        self.binding_revision = None
+        self.collection_id = None
 
     def bind_startup_commands(self, command) -> None:
         if self._startup_command is not None or not callable(command):
@@ -89,6 +92,14 @@ class MilvusVectorIndexEffectDriver:
                 "Vector startup command port was bound more than once", 500,
             )
         self._startup_command = command
+
+    def bind_runtime_commands(self, command) -> None:
+        if self._runtime_command is not None or not callable(command):
+            raise ForestError(
+                "PACKAGE_EFFECT_RUNTIME_BINDING_INVALID",
+                "Vector runtime command port was bound more than once", 500,
+            )
+        self._runtime_command = command
 
     async def start(self) -> None:
         token = await _call(
@@ -103,6 +114,8 @@ class MilvusVectorIndexEffectDriver:
                 503,
             )
         self.rebuild_required = False
+        self.binding_revision = None
+        self.collection_id = None
         self.client = self.client_factory(
             uri=self.configuration["endpoint"],
             token=token,
@@ -110,6 +123,8 @@ class MilvusVectorIndexEffectDriver:
         )
         try:
             await self._ensure_collection()
+            if not self.rebuild_required:
+                await self._verify_physical_collection()
         except BaseException:
             client, self.client = self.client, None
             try:
@@ -134,6 +149,65 @@ class MilvusVectorIndexEffectDriver:
         _LOG.error(
             "Vector collection rebuild required: %s (bot_id=%s, space_id=%s)",
             reason, self.bot_id, self.configuration["space_id"],
+        )
+
+    def _remember_binding(self, decision) -> None:
+        revision = decision.get("binding_revision")
+        collection_id = decision.get("collection_id")
+        if type(revision) is not int or revision <= 0 or type(collection_id) is not int or collection_id <= 0:
+            raise ForestError(
+                "VECTOR_INDEX_BINDING_INVALID",
+                "Package returned an invalid collection binding", 502,
+            )
+        self.binding_revision = revision
+        self.collection_id = collection_id
+
+    async def _quarantine(self, reason: str) -> None:
+        self._require_rebuild(reason)
+        if self.binding_revision is not None:
+            command = self._runtime_command if self.accepting else self._startup_command
+            if command is None:
+                raise ForestError(
+                    "PACKAGE_EFFECT_RUNTIME_BINDING_INVALID",
+                    "Vector quarantine has no package command port", 500,
+                )
+            await command(
+                "vector.collection.quarantine",
+                {"binding_revision": self.binding_revision,
+                 "collection_id": self.collection_id, "reason": reason},
+                operation_id=self._startup_operation_id + ":quarantine:" + reason,
+            )
+
+    async def _verify_physical_collection(self) -> None:
+        try:
+            async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                exists = await self.client.has_collection(
+                    collection_name=self.collection_name
+                )
+                description = await self.client.describe_collection(
+                    collection_name=self.collection_name
+                ) if exists else None
+        except (TimeoutError, MilvusException, OSError) as exc:
+            raise ForestError(
+                "VECTOR_INDEX_UNAVAILABLE", "Milvus collection is unavailable", 503
+            ) from exc
+        if description is None:
+            reason = "collection missing"
+        elif self._collection_id(description) != self.collection_id:
+            reason = "collection identity changed"
+        else:
+            try:
+                self._validate_collection_description(description)
+            except ForestError as exc:
+                if exc.code != "VECTOR_INDEX_SPACE_IMMUTABLE":
+                    raise
+                reason = "collection layout changed"
+            else:
+                return
+        await self._quarantine(reason)
+        raise ForestError(
+            "VECTOR_INDEX_REBUILD_REQUIRED",
+            "Published vector refs require index reconstruction", 503,
         )
 
     def _validate_collection_description(self, description) -> int:
@@ -193,11 +267,15 @@ class MilvusVectorIndexEffectDriver:
             {**shape, "collection_id": collection_id, "claim_token": token},
             operation_id=self._startup_operation_id + ":confirm",
         )
-        if confirmed != {"state": "READY", "reason": None, "claim_token": None}:
+        if confirmed != {
+            "state": "READY", "reason": None, "claim_token": None,
+            "binding_revision": 1, "collection_id": collection_id,
+        }:
             raise ForestError(
                 "VECTOR_INDEX_BINDING_INVALID",
                 "Package did not confirm the physical collection identity", 502,
             )
+        self._remember_binding(confirmed)
 
     async def _ensure_collection(self) -> None:
         if self._startup_command is None:
@@ -222,9 +300,7 @@ class MilvusVectorIndexEffectDriver:
                         description = await self.client.describe_collection(
                             collection_name=self.collection_name
                         )
-                        collection_id = self._validate_collection_description(
-                            description
-                        )
+                        collection_id = self._collection_id(description)
                     decision = await self._startup_command(
                         "vector.collection.plan",
                         {**shape, "exists": exists, "collection_id": collection_id},
@@ -232,6 +308,15 @@ class MilvusVectorIndexEffectDriver:
                     )
                     state = decision["state"]
                     if state == "READY":
+                        if not exists or collection_id != decision["collection_id"]:
+                            continue
+                        self._remember_binding(decision)
+                        try:
+                            self._validate_collection_description(description)
+                        except ForestError as exc:
+                            if exc.code != "VECTOR_INDEX_SPACE_IMMUTABLE":
+                                raise
+                            await self._quarantine("collection layout changed")
                         return
                     if state == "WAIT":
                         await asyncio.sleep(0.2)
@@ -243,7 +328,20 @@ class MilvusVectorIndexEffectDriver:
                             collection_name=self.collection_name
                         ):
                             continue
-                        self._require_rebuild(decision["reason"])
+                        if decision["binding_revision"] is not None:
+                            self._remember_binding(decision)
+                            if decision["reason"] in (
+                                "collection identity changed",
+                                "collection missing with binding",
+                            ):
+                                await self._quarantine(
+                                    "collection missing" if not exists
+                                    else "collection identity changed"
+                                )
+                            else:
+                                self._require_rebuild(decision["reason"])
+                        else:
+                            self._require_rebuild(decision["reason"])
                         return
                     token = decision["claim_token"]
                     if not isinstance(token, str) or not token:
@@ -302,6 +400,7 @@ class MilvusVectorIndexEffectDriver:
                 "Published vector refs require index reconstruction",
                 503,
             )
+        await self._verify_physical_collection()
         if self.service_id == "vector.transport.upsert":
             return await self._upsert(payload)
         if self.service_id == "vector.transport.search":
@@ -348,6 +447,7 @@ class MilvusVectorIndexEffectDriver:
             raise ForestError(
                 "VECTOR_INDEX_UPSERT_UNAVAILABLE", "Milvus upsert failed", 503
             ) from exc
+        await self._verify_physical_collection()
         return {"ref_id": payload["ref_id"], "space_id": payload["space_id"]}
 
     async def _search(self, payload):
@@ -386,6 +486,7 @@ class MilvusVectorIndexEffectDriver:
             raise ForestError(
                 "VECTOR_INDEX_SEARCH_UNAVAILABLE", "Milvus search failed", 503
             ) from exc
+        await self._verify_physical_collection()
         hits = raw[0] if isinstance(raw, list) and raw else []
         result = []
         for hit in hits:
@@ -426,6 +527,7 @@ class MilvusVectorIndexEffectDriver:
             raise ForestError(
                 "VECTOR_INDEX_DELETE_UNAVAILABLE", "Milvus deletion failed", 503
             ) from exc
+        await self._verify_physical_collection()
         return {"ref_ids": list(refs), "space_id": payload["space_id"]}
 
     async def quiesce(self) -> None:

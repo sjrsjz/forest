@@ -187,7 +187,7 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 每个 Bot 的 collection 身份由 `(bot_id, space_id, dimensions, metric)` 一次冻结。模型种类、模型修订、维度或空间改变必须创建新 Bot/新隔离索引；兼容 endpoint 和凭据可以经 `vector.index` 配置新 Generation 替换。Milvus 是可重建派生库：丢失后从当前合格 facet 与稳定 ref 重放，不得反向把 Milvus 当作消息或关系权威。
 
-当前候选的 `vector.index` 2.8.0 / 私有 SQL 2.7.0 已由包 Worker 校验受管 Embedding 结果；包内领域命令管理 PENDING→ACTIVE 与不可逆 TOMBSTONED、冻结 ReplayLocator/空间/用途并在检索返回前过滤非 ACTIVE 文档引用。collection 绑定账本、创建租约及启动时的复用/重建裁决也由包内 Domain 命令持有，Milvus Effect Driver 只验证物理布局并执行包返回的建集合动作；启动端口在包清单中逐项声明，只在候选 Generation 的 PREPARED 阶段可调用。tombstone 周期清扫由包自有持久工作领取和结算。缺失但仍有 PENDING/ACTIVE ref、同名 collection 身份改变或既有 collection 缺少绑定时，当前 Generation 以 `REBUILD_REQUIRED` 降级启动；此围栏只能识别启动时整集合缺失与身份更换，不能识别原 collection 内单行缺失。下面 5.2 的持续审计、候选重建与原子切换尚未完成，不得把当前围栏当作可执行重建。
+当前候选的 `vector.index` 2.9.0 / 私有 SQL 2.8.0 已由包 Worker 校验受管 Embedding 结果；包内领域命令管理 PENDING→ACTIVE 与不可逆 TOMBSTONED、冻结 ReplayLocator/空间/用途并在检索返回前过滤非 ACTIVE 文档引用。collection 绑定账本、健康状态、创建租约及启动时的复用/重建裁决由包内 Domain 持有；Milvus Effect Driver 只验证物理身份和布局并执行包返回的建集合动作。启动命令仅在 PREPARED Generation 可用，运行期异常则经清单声明的受限运行命令写入持久 `REBUILD_REQUIRED`。每次传输前后核对 Milvus collection ID 和布局；运行中同名重建、集合丢失或布局改变会隔离该绑定，后续 ref 预留、激活、查询均拒绝，墓碑归档继续。此检查不能跨 PostgreSQL/Milvus 形成原子事务，也不能发现同一 collection 内单行缺失；下面 5.2 的逐行持续审计、候选重建和原子切换尚未完成，不得把当前围栏当作可执行重建。
 
 `memory.graph` 在包清单中声明 `/embedding` 为 Bot 生命周期内不可变配置。通用模块配置仓库在规划和应用配置时按当前有效修订核验这个路径，启动时也拒绝与已有 Memory 有效配置冲突的模型身份；检索参数和嵌入预算可以通过新 Generation 调整。模型 endpoint 与凭据属于 `embedding.multimodal` 的连接配置，不放进 Memory 的模型身份字段。
 

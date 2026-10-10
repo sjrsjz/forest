@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.8.0"
+version = "2.9.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -42,6 +42,7 @@ requests = [
   "domain.command:vector.ref.reserve",
   "domain.command:vector.ref.activate",
   "domain.command:vector.ref.tombstone",
+  "domain.command:vector.collection.quarantine",
   "domain.query:vector.ref.require-query",
   "domain.query:vector.ref.filter-active"
 ]
@@ -73,9 +74,9 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.7.0"
+schema_version = "2.8.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "336de1df6e07ba62d3e128e43e3697acf1b19ab9227d39afee55fff533fd6bd7"
+baseline_sha256 = "768b399fd7b5303ef970746f1964aa70e8caba1a2b35b2758121424ae511f0df"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -93,6 +94,13 @@ contract = "1.0"
 function = "vector_collection_confirm"
 input_schema = "schemas/collection-confirm-input.json"
 output_schema = "schemas/collection-plan-output.json"
+
+[[components.domain_commands]]
+name = "vector.collection.quarantine"
+contract = "1.0"
+function = "vector_collection_quarantine"
+input_schema = "schemas/collection-quarantine-input.json"
+output_schema = "schemas/collection-quarantine-output.json"
 
 [[components.domain_commands]]
 name = "vector.ref.reserve"
@@ -169,7 +177,8 @@ output_schema = "schemas/delete-output.json"
 name = "vector.transport.upsert"
 contract = "2.0"
 kind = "vector-index.milvus"
-startup_commands = ["vector.collection.plan", "vector.collection.confirm"]
+startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
+runtime_commands = ["vector.collection.quarantine"]
 semantics = "idempotent"
 input_schema = "schemas/transport-upsert-input.json"
 output_schema = "schemas/upsert-output.json"
@@ -178,7 +187,8 @@ output_schema = "schemas/upsert-output.json"
 name = "vector.transport.search"
 contract = "1.0"
 kind = "vector-index.milvus"
-startup_commands = ["vector.collection.plan", "vector.collection.confirm"]
+startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
+runtime_commands = ["vector.collection.quarantine"]
 semantics = "read"
 input_schema = "schemas/search-input.json"
 output_schema = "schemas/search-output.json"
@@ -187,7 +197,8 @@ output_schema = "schemas/search-output.json"
 name = "vector.transport.prune"
 contract = "1.0"
 kind = "vector-index.milvus"
-startup_commands = ["vector.collection.plan", "vector.collection.confirm"]
+startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
+runtime_commands = ["vector.collection.quarantine"]
 semantics = "idempotent"
 input_schema = "schemas/delete-input.json"
 output_schema = "schemas/delete-output.json"
