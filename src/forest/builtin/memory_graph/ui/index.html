@@ -669,6 +669,7 @@
     }
     if(!page.items.length)rows.insertRow().insertCell().textContent='这一页没有成员';
     $('batch-next').disabled=!page.has_more;
+    return page;
   }
   function clearBatchPlan(){
     batchPlan=null;
@@ -734,11 +735,21 @@
       batchTimer=setTimeout(()=>loadBatchStatus(request_id).catch(error=>status(error.message)),1500);
     else if(result.state==='SUCCEEDED'){
       if($('batch-selection-id').value.trim()===result.selection_id){
-        if(Number($('batch-after').value)===result.after_ordinal){
+        const advance=Number($('batch-after').value)===result.after_ordinal;
+        if(advance){
           clearBatchPlan();
           $('batch-after').value=result.result.last_ordinal;
         }
-        await loadBatchSelection();
+        const page=await loadBatchSelection();
+        if(advance&&page&&$('batch-selection-id').value.trim()===result.selection_id){
+          if(page.next_unapplied_ordinal==null){
+            $('batch-impact').textContent='冻结选择已全部处理。';
+          }else{
+            $('batch-after').value=page.next_unapplied_ordinal-1;
+            try{await previewBatch();}
+            catch(error){status(`下一批预览失败：${error.message}`);}
+          }
+        }
       }
       loadSources().catch(error=>status(error.message));
     }else{status('该批未完成；请重新预览后决定是否重试');}
