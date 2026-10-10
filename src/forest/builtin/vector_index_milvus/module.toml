@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.6.0"
+version = "2.7.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -38,8 +38,12 @@ requests = [
   "payload.read",
   "service.call:vector.transport.upsert",
   "service.call:vector.transport.search",
-  "service.call:vector.transport.delete",
-  "service.call:vector.transport.prune"
+  "service.call:vector.transport.prune",
+  "domain.command:vector.ref.reserve",
+  "domain.command:vector.ref.activate",
+  "domain.command:vector.ref.tombstone",
+  "domain.query:vector.ref.require-query",
+  "domain.query:vector.ref.filter-active"
 ]
 
 [components.resources]
@@ -69,12 +73,47 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.5.0"
+schema_version = "2.6.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "315d213b9fa5bd9e1e294e1b55185e5f44a3381e09a6f4ad54ec8d2446e709fc"
+baseline_sha256 = "0122122a1c9976e3a54b3719c18871ead4ed83f59ee92adf1695de9dd6192f67"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
+
+[[components.domain_commands]]
+name = "vector.ref.reserve"
+contract = "1.0"
+function = "vector_ref_reserve"
+input_schema = "schemas/upsert-input.json"
+output_schema = "schemas/ref-reserve-output.json"
+
+[[components.domain_commands]]
+name = "vector.ref.activate"
+contract = "1.0"
+function = "vector_ref_activate"
+input_schema = "schemas/ref-activate-input.json"
+output_schema = "schemas/ref-activate-output.json"
+
+[[components.domain_commands]]
+name = "vector.ref.tombstone"
+contract = "1.0"
+function = "vector_ref_tombstone"
+input_schema = "schemas/delete-input.json"
+output_schema = "schemas/delete-output.json"
+
+[[components.domain_queries]]
+name = "vector.ref.require-query"
+contract = "1.0"
+function = "vector_ref_require_query"
+input_schema = "schemas/search-input.json"
+output_schema = "schemas/ref-query-output.json"
+
+[[components.domain_queries]]
+name = "vector.ref.filter-active"
+contract = "1.0"
+function = "vector_ref_filter_active"
+input_schema = "schemas/search-output.json"
+output_schema = "schemas/search-output.json"
 
 [[components.owned_work_handlers]]
 name = "vector.tombstones.sweep"
@@ -114,10 +153,10 @@ output_schema = "schemas/delete-output.json"
 
 [[components.effect_services]]
 name = "vector.transport.upsert"
-contract = "1.0"
+contract = "2.0"
 kind = "vector-index.milvus"
 semantics = "idempotent"
-input_schema = "schemas/upsert-input.json"
+input_schema = "schemas/transport-upsert-input.json"
 output_schema = "schemas/upsert-output.json"
 
 [[components.effect_services]]
@@ -127,14 +166,6 @@ kind = "vector-index.milvus"
 semantics = "read"
 input_schema = "schemas/search-input.json"
 output_schema = "schemas/search-output.json"
-
-[[components.effect_services]]
-name = "vector.transport.delete"
-contract = "1.0"
-kind = "vector-index.milvus"
-semantics = "idempotent"
-input_schema = "schemas/delete-input.json"
-output_schema = "schemas/delete-output.json"
 
 [[components.effect_services]]
 name = "vector.transport.prune"

@@ -73,15 +73,31 @@ async def test_vector_package_validates_replay_payload_before_milvus_effect():
         calls.append((service, payload, options))
         return {"ref_id": "facet/one", "space_id": "space/test"}
 
+    command_calls = []
+
+    async def command(name, payload, **_options):
+        command_calls.append(name)
+        if name == "vector.ref.reserve":
+            return {
+                "ref_id": payload["ref_id"], "space_id": payload["space_id"],
+                "input_digest": digest_json(payload), "state": "PENDING",
+            }
+        assert name == "vector.ref.activate"
+        return {"ref_id": payload["ref_id"], "space_id": "space/test",
+                "state": "ACTIVE"}
+
     ctx = SimpleNamespace(
         payloads=SimpleNamespace(read_json=read_json),
+        commands=SimpleNamespace(call=command),
         services=SimpleNamespace(call=call),
         operations=SimpleNamespace(stable=lambda value: value),
     )
     assert await component.upsert(request, ctx) == {
         "ref_id": "facet/one", "space_id": "space/test"
     }
+    assert command_calls == ["vector.ref.reserve", "vector.ref.activate"]
     assert len(calls) == 1 and calls[0][0] == "vector.transport.upsert"
+    assert calls[0][1]["input_digest"] == digest_json(request)
     changed = {**request, "vector": [0.0, 1.0, 0.0, 0.0]}
     with pytest.raises(ForestError) as mismatch:
         await component.upsert(changed, ctx)
@@ -173,6 +189,159 @@ async def test_embedding_and_vector_identity_are_package_declared_immutable_path
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
+async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_path):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    space_id = "space/ref/" + uuid4().hex
+    await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
+        PackageCatalog(tmp_path / "ref-packages"),
+        store, installer, kernel=kernel,
+        initial_configuration=official_builtin_configuration(
+            "vector_index_milvus",
+            overrides={"space_id": space_id, "dimensions": 4},
+        ),
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "vector-index.milvus": lambda *_args: None,
+        }),
+    )
+    namespace = module_schema_namespace("forest.vector.index")
+
+    async def invoke(function, payload, *, digest=None):
+        context = {"bot_id": store.bot_id}
+        if digest is not None:
+            context["input_digest"] = digest
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result").format(
+                        sql.Identifier(namespace), sql.Identifier(function)
+                    ),
+                    (Jsonb(context), Jsonb(payload)),
+                )
+            ).fetchone()
+        return row["result"]
+
+    document = _with_replay({
+        "ref_id": "ref/document", "space_id": space_id,
+        "purpose": "DOCUMENT", "vector": [1.0, 0.0, 0.0, 0.0],
+    })
+    digest = digest_json(document)
+    reserve = "vector_ref_reserve"
+    activate = "vector_ref_activate"
+    tombstone = "vector_ref_tombstone"
+    assert (await invoke(reserve, document, digest=digest))["value"]["state"] == "PENDING"
+    assert (await invoke(reserve, document, digest=digest))["value"]["state"] == "PENDING"
+    assert (await invoke(reserve, document, digest="sha256:" + "0" * 64))[
+        "error"
+    ]["code"] == "VECTOR_INDEX_REF_CONFLICT"
+    assert (await invoke(activate, {
+        "ref_id": document["ref_id"], "input_digest": digest,
+    }))["value"]["state"] == "ACTIVE"
+    assert (await invoke(reserve, document, digest=digest))["value"]["state"] == "ACTIVE"
+    assert (await invoke(activate, {
+        "ref_id": document["ref_id"], "input_digest": digest,
+    }))["value"]["state"] == "ACTIVE"
+
+    pending = _with_replay({
+        "ref_id": "ref/pending", "space_id": space_id,
+        "purpose": "DOCUMENT", "vector": [0.0, 1.0, 0.0, 0.0],
+    })
+    pending_digest = digest_json(pending)
+    assert (await invoke(reserve, pending, digest=pending_digest))["ok"]
+    assert (await invoke(tombstone, {
+        "space_id": space_id, "ref_ids": ["ref/pending", "ref/document", "ref/first"],
+    }))["ok"]
+    assert (await invoke(activate, {
+        "ref_id": "ref/pending", "input_digest": pending_digest,
+    }))["error"]["code"] == "VECTOR_INDEX_REF_DELETED"
+    assert (await invoke(reserve, pending, digest=pending_digest))[
+        "error"
+    ]["code"] == "VECTOR_INDEX_REF_DELETED"
+    first = _with_replay({
+        "ref_id": "ref/first", "space_id": space_id,
+        "purpose": "DOCUMENT", "vector": [0.0, 0.0, 1.0, 0.0],
+    })
+    assert (await invoke(reserve, first, digest=digest_json(first)))[
+        "error"
+    ]["code"] == "VECTOR_INDEX_REF_DELETED"
+
+    query = _with_replay({
+        "ref_id": "ref/query", "space_id": space_id,
+        "purpose": "QUERY", "vector": [1.0, 0.0, 0.0, 0.0],
+    })
+    query_digest = digest_json(query)
+    assert (await invoke(reserve, query, digest=query_digest))["ok"]
+    assert (await invoke("vector_ref_require_query", {
+        "query_ref_id": "ref/query", "space_id": space_id, "limit": 1,
+    }))["error"]["code"] == "VECTOR_INDEX_QUERY_REF_MISSING"
+    assert (await invoke(activate, {
+        "ref_id": "ref/query", "input_digest": query_digest,
+    }))["ok"]
+    assert (await invoke("vector_ref_require_query", {
+        "query_ref_id": "ref/query", "space_id": space_id, "limit": 1,
+    }))["ok"]
+    live = _with_replay({
+        "ref_id": "ref/live", "space_id": space_id,
+        "purpose": "DOCUMENT", "vector": [1.0, 0.0, 0.0, 0.0],
+    })
+    assert (await invoke(reserve, live, digest=digest_json(live)))["ok"]
+    assert (await invoke(activate, {
+        "ref_id": live["ref_id"], "input_digest": digest_json(live),
+    }))["ok"]
+    hits = {
+        "query_ref_id": "ref/query", "space_id": space_id,
+        "hits": [
+            {"ref_id": "ref/document", "score": 0.9},
+            {"ref_id": "ref/live", "score": 0.8},
+            {"ref_id": "ref/first", "score": 0.7},
+        ],
+    }
+    filtered = await invoke("vector_ref_filter_active", hits)
+    assert filtered["value"]["hits"] == [hits["hits"][1]]
+    assert (await invoke(tombstone, {
+        "space_id": space_id, "ref_ids": ["ref/live"],
+    }))["ok"]
+    assert (await invoke("vector_ref_filter_active", hits))["value"]["hits"] == []
+    conflict = await invoke(tombstone, {
+        "space_id": "space/other", "ref_ids": ["ref/atomic-new", "ref/query"],
+    })
+    assert conflict["error"]["code"] == "VECTOR_INDEX_SPACE_MISMATCH"
+    assert (await invoke(reserve, _with_replay({
+        "ref_id": "ref/atomic-new", "space_id": space_id,
+        "purpose": "DOCUMENT", "vector": [0.0, 1.0, 0.0, 0.0],
+    }), digest=digest_json(_with_replay({
+        "ref_id": "ref/atomic-new", "space_id": space_id,
+        "purpose": "DOCUMENT", "vector": [0.0, 1.0, 0.0, 0.0],
+    }))))["ok"]
+    assert (await invoke(tombstone, {
+        "space_id": space_id, "ref_ids": ["ref/query"],
+    }))["ok"]
+    assert (await invoke("vector_ref_filter_active", hits))["error"]["code"] == (
+        "VECTOR_INDEX_QUERY_REF_MISSING"
+    )
+
+    async with store.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT ref_id,state,input_digest,replay_locator,next_sweep_at "
+                    "FROM {}.vector_index_refs WHERE bot_id=%s ORDER BY ref_id"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id,),
+            )
+        ).fetchall()
+    assert [(row["ref_id"], row["state"]) for row in rows] == [
+        ("ref/atomic-new", "PENDING"), ("ref/document", "TOMBSTONED"),
+        ("ref/first", "TOMBSTONED"), ("ref/live", "TOMBSTONED"),
+        ("ref/pending", "TOMBSTONED"), ("ref/query", "TOMBSTONED"),
+    ]
+    assert all(row["input_digest"] is None and row["replay_locator"] is None
+               and row["next_sweep_at"] is not None for row in rows[1:])
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
 async def test_missing_collection_with_active_refs_requires_rebuild(clean_authority, tmp_path):
     store, installer = clean_authority
     kernel = await bootstrap_kernel(store, installer)
@@ -228,38 +397,44 @@ async def test_missing_collection_with_active_refs_requires_rebuild(clean_author
         )
 
     search = driver_for("vector.transport.search")
-    delete = driver_for("vector.transport.delete")
+    prune = driver_for("vector.transport.prune")
+    namespace = module_schema_namespace("forest.vector.index")
+    replay = _with_replay({
+        "ref_id": "ref/document/existing", "space_id": configuration["space_id"],
+        "purpose": "DOCUMENT", "vector": [1.0, 0.0, 0.0, 0.0],
+    })
     async with store.pool.connection() as conn, conn.transaction():
-        await search.refs.record_active(
-            conn, ref_id="ref/document/existing",
-            space_id=configuration["space_id"], purpose="DOCUMENT",
-            input_digest="sha256:" + "0" * 64,
-            replay_locator=_with_replay({
-                "ref_id": "ref/document/existing", "vector": [1.0, 0.0, 0.0, 0.0],
-            })["replay"],
-            vector_digest=digest_json([1.0, 0.0, 0.0, 0.0]),
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.vector_index_refs "
+                "(bot_id,ref_id,space_id,state,purpose,input_digest,"
+                "replay_locator,vector_digest) "
+                "VALUES (%s,%s,%s,'PENDING','DOCUMENT',%s,%s,%s)"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id, replay["ref_id"], configuration["space_id"],
+             digest_json(replay), Jsonb(replay["replay"]),
+             replay["replay"]["vector_digest"]),
         )
     await search.start()
-    await delete.start()
+    await prune.start()
     assert search.accepting and search.rebuild_required
-    assert delete.accepting and delete.rebuild_required
-    with pytest.raises(ForestError) as missing:
-        await search.invoke(
-            {"query_ref_id": "ref/query", "space_id": configuration["space_id"], "limit": 1},
-            scope=identity, invocation=SimpleNamespace(operation_id="search"),
-        )
-    assert missing.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
-    assert await delete.invoke(
-        {"ref_ids": ["ref/document/existing"], "space_id": configuration["space_id"]},
-        scope=identity, invocation=SimpleNamespace(operation_id="delete"),
-    ) == {
-        "ref_ids": ["ref/document/existing"], "space_id": configuration["space_id"],
-    }
-    async with store.pool.connection() as conn, conn.transaction():
-        assert (await delete.refs.lock(conn, "ref/document/existing"))["state"] == "TOMBSTONED"
+    assert prune.accepting and prune.rebuild_required
+    for driver, payload in (
+        (search, {"query_ref_id": "ref/query",
+                  "space_id": configuration["space_id"], "limit": 1}),
+        (prune, {"ref_ids": ["ref/document/existing"],
+                 "space_id": configuration["space_id"]}),
+    ):
+        with pytest.raises(ForestError) as missing:
+            await driver.invoke(
+                payload, scope=identity,
+                invocation=SimpleNamespace(operation_id="missing"),
+            )
+        assert missing.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
     await search.close()
-    await delete.close()
+    await prune.close()
     assert all(client.closed for client in clients)
+
 
 
 @pytest.mark.asyncio
@@ -417,24 +592,19 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
 
     store, installer = clean_authority
     kernel = await bootstrap_kernel(store, installer)
-    suffix = uuid4().hex
     bot_id = store.bot_id
-    space_id = f"space/test/{suffix}"
+    space_id = f"space/test/{uuid4().hex}"
+    configuration = official_builtin_configuration(
+        "vector_index_milvus",
+        overrides={"endpoint": uri, "space_id": space_id, "dimensions": 4},
+    )
+
     async def verify_generation(**_values):
         return None
 
     async def resolve_token(_ref, _revision):
         return ""
 
-    configuration = {
-        "protocol": "forest.vector-index.milvus/1",
-        "endpoint": uri,
-        "credential_ref": "",
-        "timeout_seconds": 30,
-        "space_id": space_id,
-        "dimensions": 4,
-        "metric": "COSINE",
-    }
     await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
         PackageCatalog(tmp_path / "vector-packages"),
@@ -449,39 +619,44 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
     identity = SimpleNamespace(
         component_id="vector.index", generation_id="generation/vector-test"
     )
-    kernel_runtime = SimpleNamespace(verify_generation_member=verify_generation)
-    drivers = {
-        service: MilvusVectorIndexEffectDriver(
-            configuration,
-            1,
-            identity,
+    runtime = SimpleNamespace(verify_generation_member=verify_generation)
+
+    def driver_for(service):
+        return MilvusVectorIndexEffectDriver(
+            configuration, 1, identity,
             {"name": service, "kind": "vector-index.milvus"},
-            bot_id=bot_id,
-            store=store,
-            runtime=kernel_runtime,
+            bot_id=bot_id, store=store, runtime=runtime,
             token_resolver=resolve_token,
         )
-        for service in (
-            "vector.transport.upsert",
-            "vector.transport.search",
-            "vector.transport.delete",
+
+    drivers = {
+        name: driver_for(name) for name in (
+            "vector.transport.upsert", "vector.transport.search",
+            "vector.transport.prune",
         )
     }
     scope = identity
     invocation = SimpleNamespace(operation_id="test")
     collection_name = drivers["vector.transport.upsert"].collection_name
+
+    def transport_row(ref_id, purpose, vector):
+        public = _with_replay({
+            "ref_id": ref_id, "space_id": space_id,
+            "purpose": purpose, "vector": vector,
+        })
+        return {**public, "input_digest": digest_json(public)}
+
     try:
         await asyncio.gather(*(driver.start() for driver in drivers.values()))
         assert not any(driver.rebuild_required for driver in drivers.values())
-        collection = await drivers["vector.transport.upsert"].client.describe_collection(
+        upsert = drivers["vector.transport.upsert"]
+        collection = await upsert.client.describe_collection(
             collection_name=collection_name
         )
         assert {field["name"] for field in collection["fields"]} == {
             "ref_id", "bot_id", "space_id", "purpose", "input_digest", "embedding",
         }
-        # Milvus may commit a write while its acknowledgement is lost. The
-        # PostgreSQL ref fence must remain uncommitted until the retry confirms
-        # the same immutable row.
+
         class LostAcknowledgement:
             def __init__(self, client):
                 self.client = client
@@ -497,139 +672,74 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                     raise OSError("injected lost Milvus acknowledgement")
                 return result
 
-        upsert_driver = drivers["vector.transport.upsert"]
-        upsert_driver.client = LostAcknowledgement(upsert_driver.client)
-        near_row = _with_replay({
-            "ref_id": "ref/document/near",
-            "space_id": space_id,
-            "purpose": "DOCUMENT",
-            "vector": [1.0, 0.0, 0.0, 0.0],
-        })
+        upsert.client = LostAcknowledgement(upsert.client)
+        near = transport_row(
+            "ref/document/near", "DOCUMENT", [1.0, 0.0, 0.0, 0.0]
+        )
         with pytest.raises(ForestError) as uncertain:
-            await upsert_driver.invoke(
-                near_row, scope=scope, invocation=invocation,
-            )
+            await upsert.invoke(near, scope=scope, invocation=invocation)
         assert uncertain.value.code == "VECTOR_INDEX_UPSERT_UNAVAILABLE"
-        assert await upsert_driver.client.get(
+        assert await upsert.client.get(
             collection_name=collection_name, ids=["ref/document/near"],
             output_fields=["ref_id"], consistency_level="Strong",
         ) == [{"ref_id": "ref/document/near"}]
-        async with store.pool.connection() as conn, conn.transaction():
-            assert await upsert_driver.refs.lock(conn, "ref/document/near") is None
-        await upsert_driver.close()
-        upsert_driver = MilvusVectorIndexEffectDriver(
-            configuration, 1, identity,
-            {"name": "vector.transport.upsert", "kind": "vector-index.milvus"},
-            bot_id=bot_id, store=store, runtime=kernel_runtime,
-            token_resolver=resolve_token,
-        )
-        drivers["vector.transport.upsert"] = upsert_driver
-        await upsert_driver.start()
-        await drivers["vector.transport.upsert"].invoke(
-            near_row,
-            scope=scope,
-            invocation=invocation,
-        )
-        async with store.pool.connection() as conn, conn.transaction():
-            persisted = await upsert_driver.refs.lock(conn, "ref/document/near")
-            assert persisted["state"] == "ACTIVE"
-            assert persisted["space_id"] == space_id
-            assert persisted["purpose"] == "DOCUMENT"
-        await drivers["vector.transport.upsert"].invoke(
-            _with_replay({
-                "ref_id": "ref/document/far",
-                "space_id": space_id,
-                "purpose": "DOCUMENT",
-                "vector": [0.0, 1.0, 0.0, 0.0],
-            }),
-            scope=scope,
-            invocation=invocation,
-        )
-        await drivers["vector.transport.upsert"].invoke(
-            _with_replay({
-                "ref_id": "ref/query",
-                "space_id": space_id,
-                "purpose": "QUERY",
-                "vector": [1.0, 0.0, 0.0, 0.0],
-            }),
-            scope=scope,
-            invocation=invocation,
-        )
+        namespace = module_schema_namespace("forest.vector.index")
+        async with store.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    sql.SQL("SELECT ref_id FROM {}.vector_index_refs WHERE bot_id=%s")
+                    .format(sql.Identifier(namespace)), (bot_id,),
+                )
+            ).fetchall()
+        assert rows == []
 
+        await upsert.close()
+        upsert = driver_for("vector.transport.upsert")
+        drivers["vector.transport.upsert"] = upsert
+        await upsert.start()
+        for row in (
+            near,
+            transport_row("ref/document/far", "DOCUMENT", [0.0, 1.0, 0.0, 0.0]),
+            transport_row("ref/query", "QUERY", [1.0, 0.0, 0.0, 0.0]),
+        ):
+            assert await upsert.invoke(
+                row, scope=scope, invocation=invocation,
+            ) == {"ref_id": row["ref_id"], "space_id": space_id}
         result = await drivers["vector.transport.search"].invoke(
             {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
-            scope=scope,
-            invocation=invocation,
+            scope=scope, invocation=invocation,
         )
-        hits = result["hits"]
-        assert [hit["ref_id"] for hit in hits] == [
-            "ref/document/near",
-            "ref/document/far",
+        assert [hit["ref_id"] for hit in result["hits"]] == [
+            "ref/document/near", "ref/document/far",
         ]
-        assert set(hits[0]) == {"ref_id", "score"}
-        assert all("embedding" not in hit for hit in hits)
-
-        with pytest.raises(ForestError) as rebound:
-            await drivers["vector.transport.upsert"].invoke(
-                _with_replay({
-                    "ref_id": "ref/document/near",
-                    "space_id": space_id,
-                    "purpose": "DOCUMENT",
-                    "vector": [0.0, 0.0, 1.0, 0.0],
-                }),
-                scope=scope,
-                invocation=invocation,
-            )
-        assert rebound.value.code == "VECTOR_INDEX_REF_CONFLICT"
-
-        await drivers["vector.transport.delete"].invoke(
+        assert all(set(hit) == {"ref_id", "score"} for hit in result["hits"])
+        await drivers["vector.transport.prune"].invoke(
             {"ref_ids": ["ref/document/near"], "space_id": space_id},
-            scope=scope,
-            invocation=invocation,
+            scope=scope, invocation=invocation,
         )
         result = await drivers["vector.transport.search"].invoke(
             {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
-            scope=scope,
-            invocation=invocation,
+            scope=scope, invocation=invocation,
         )
-        hits = result["hits"]
-        assert [hit["ref_id"] for hit in hits] == ["ref/document/far"]
-        with pytest.raises(ForestError) as deleted:
-            await drivers["vector.transport.upsert"].invoke(
-                _with_replay({
-                    "ref_id": "ref/document/near",
-                    "space_id": space_id,
-                    "purpose": "DOCUMENT",
-                    "vector": [1.0, 0.0, 0.0, 0.0],
-                }),
-                scope=scope,
-                invocation=invocation,
-            )
-        assert deleted.value.code == "VECTOR_INDEX_REF_DELETED"
-        await drivers["vector.transport.delete"].invoke(
-            {"ref_ids": ["ref/never-published"], "space_id": space_id},
-            scope=scope,
-            invocation=invocation,
-        )
-        with pytest.raises(ForestError) as preempted:
-            await drivers["vector.transport.upsert"].invoke(
-                _with_replay({
-                    "ref_id": "ref/never-published",
-                    "space_id": space_id,
-                    "purpose": "DOCUMENT",
-                    "vector": [0.0, 0.0, 1.0, 0.0],
-                }),
-                scope=scope,
-                invocation=invocation,
-            )
-        assert preempted.value.code == "VECTOR_INDEX_REF_DELETED"
+        assert [hit["ref_id"] for hit in result["hits"]] == ["ref/document/far"]
 
+        replay = near["replay"]
         async with store.pool.connection() as conn, conn.transaction():
-            binding, active = await upsert_driver.refs.lock_collection_state(conn)
-        assert active
-        assert binding["binding_revision"] == 1
+            await conn.execute(
+                sql.SQL(
+                    "INSERT INTO {}.vector_index_refs "
+                    "(bot_id,ref_id,space_id,state,purpose,input_digest,"
+                    "replay_locator,vector_digest,published_at) "
+                    "VALUES (%s,%s,%s,'ACTIVE','DOCUMENT',%s,%s,%s,"
+                    "clock_timestamp())"
+                ).format(sql.Identifier(namespace)),
+                (bot_id, near["ref_id"], space_id, near["input_digest"],
+                 Jsonb(replay), replay["vector_digest"]),
+            )
+            binding, active = await upsert.bindings.lock_collection_state(conn)
+        assert active and binding["binding_revision"] == 1
         original_collection_id = binding["collection_id"]
-        client = upsert_driver.client
+        client = upsert.client
         await client.drop_collection(collection_name=collection_name)
         replacement_schema = client.create_schema(
             auto_id=False, enable_dynamic_field=False
@@ -640,39 +750,38 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         replacement_schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
         replacement_schema.add_field("space_id", DataType.VARCHAR, max_length=256)
         replacement_schema.add_field("purpose", DataType.VARCHAR, max_length=16)
-        replacement_schema.add_field("input_digest", DataType.VARCHAR, max_length=71)
+        replacement_schema.add_field(
+            "input_digest", DataType.VARCHAR, max_length=71
+        )
         replacement_schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=4)
-        replacement_indexes = client.prepare_index_params()
-        replacement_indexes.add_index(
+        indexes = client.prepare_index_params()
+        indexes.add_index(
             field_name="embedding", index_type="AUTOINDEX", metric_type="COSINE"
         )
         await client.create_collection(
             collection_name=collection_name, schema=replacement_schema,
-            index_params=replacement_indexes, consistency_level="Strong",
+            index_params=indexes, consistency_level="Strong",
         )
-        replacement_description = await client.describe_collection(
+        description = await client.describe_collection(
             collection_name=collection_name
         )
-        assert replacement_description["collection_id"] != original_collection_id
+        assert description["collection_id"] != original_collection_id
         await drivers["vector.transport.search"].close()
-        replacement_search = MilvusVectorIndexEffectDriver(
-            configuration, 1, identity,
-            {"name": "vector.transport.search", "kind": "vector-index.milvus"},
-            bot_id=bot_id, store=store, runtime=kernel_runtime,
-            token_resolver=resolve_token,
-        )
-        drivers["vector.transport.search"] = replacement_search
-        await replacement_search.start()
-        assert replacement_search.rebuild_required
+        replacement = driver_for("vector.transport.search")
+        drivers["vector.transport.search"] = replacement
+        await replacement.start()
+        assert replacement.rebuild_required
         with pytest.raises(ForestError) as replaced:
-            await replacement_search.invoke(
+            await replacement.invoke(
                 {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
                 scope=scope, invocation=invocation,
             )
         assert replaced.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
     finally:
         client = drivers["vector.transport.upsert"].client
-        if client is not None and await client.has_collection(collection_name=collection_name):
+        if client is not None and await client.has_collection(
+            collection_name=collection_name
+        ):
             await client.drop_collection(collection_name=collection_name)
         for driver in drivers.values():
             await driver.close()

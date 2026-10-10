@@ -87,11 +87,41 @@ class MilvusVectorIndex(Plugin):
                 "VECTOR_REPLAY_VECTOR_INVALID",
                 "Vector differs from its immutable replay result", 409,
             )
-        return await ctx.services.call(
-            "vector.transport.upsert", request,
+        reserved = _plain(await ctx.commands.call(
+            "vector.ref.reserve", request,
+            operation_id=ctx.operations.stable("reserve-ref:" + request["ref_id"]),
+            timeout=10,
+        ))
+        if reserved["ref_id"] != request["ref_id"] or reserved["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_REF_RESERVATION_INVALID",
+                "Ref reservation confirmed another vector", 502,
+            )
+        written = _plain(await ctx.services.call(
+            "vector.transport.upsert",
+            {**request, "input_digest": reserved["input_digest"]},
             operation_id=ctx.operations.stable("milvus-upsert:" + request["ref_id"]),
+            contract_major=2,
             timeout=30,
-        )
+        ))
+        if written != {"ref_id": request["ref_id"], "space_id": self.space_id}:
+            raise ForestError(
+                "VECTOR_TRANSPORT_RESULT_INVALID",
+                "Milvus transport confirmed another vector", 502,
+            )
+        activated = _plain(await ctx.commands.call(
+            "vector.ref.activate",
+            {"ref_id": request["ref_id"], "input_digest": reserved["input_digest"]},
+            operation_id=ctx.operations.stable("activate-ref:" + request["ref_id"]),
+            timeout=10,
+        ))
+        if activated != {"ref_id": request["ref_id"],
+                         "space_id": self.space_id, "state": "ACTIVE"}:
+            raise ForestError(
+                "VECTOR_REF_ACTIVATION_INVALID",
+                "Ref activation confirmed another vector", 502,
+            )
+        return {"ref_id": request["ref_id"], "space_id": self.space_id}
 
     @service(
         "vector.index.search", semantics="read", contract="2.0",
@@ -100,12 +130,24 @@ class MilvusVectorIndex(Plugin):
     )
     async def search(self, payload, ctx):
         request = _plain(payload)
-        return await ctx.services.call(
+        await ctx.queries.call(
+            "vector.ref.require-query", request, timeout=10,
+        )
+        found = _plain(await ctx.services.call(
             "vector.transport.search", request,
             operation_id=ctx.operations.stable(
                 "milvus-search:" + _digest(request)[7:]
             ),
             timeout=30,
+        ))
+        if (found["query_ref_id"] != request["query_ref_id"]
+                or found["space_id"] != self.space_id):
+            raise ForestError(
+                "VECTOR_TRANSPORT_RESULT_INVALID",
+                "Milvus transport confirmed another query", 502,
+            )
+        return await ctx.queries.call(
+            "vector.ref.filter-active", found, timeout=10,
         )
 
     @service(
@@ -115,10 +157,15 @@ class MilvusVectorIndex(Plugin):
     )
     async def delete(self, payload, ctx):
         request = _plain(payload)
-        return await ctx.services.call(
-            "vector.transport.delete", request,
-            operation_id=ctx.operations.stable("milvus-delete:" + _digest(request)[7:]),
-            timeout=30,
+        if request["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_INDEX_SPACE_MISMATCH",
+                "Vector belongs to another index space", 409,
+            )
+        return await ctx.commands.call(
+            "vector.ref.tombstone", request,
+            operation_id=ctx.operations.stable("tombstone:" + _digest(request)[7:]),
+            timeout=10,
         )
 
     @job("vector.tombstones.sweep")

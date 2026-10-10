@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "query_ref_id",
+    "space_id"
+  ],
+  "properties": {
+    "query_ref_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "space_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  }
+}

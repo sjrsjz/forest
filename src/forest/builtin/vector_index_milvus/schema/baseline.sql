@@ -4,11 +4,12 @@ CREATE TABLE vector_index_refs (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     ref_id text NOT NULL CHECK (octet_length(ref_id) BETWEEN 1 AND 256),
     space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
-    state text NOT NULL CHECK (state IN ('ACTIVE','TOMBSTONED')),
+    state text NOT NULL CHECK (state IN ('PENDING','ACTIVE','TOMBSTONED')),
     purpose text CHECK (purpose IN ('DOCUMENT','QUERY')),
     input_digest text CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     replay_locator jsonb,
     vector_digest text CHECK (vector_digest ~ '^sha256:[a-f0-9]{64}$'),
+    published_at timestamptz,
     tombstoned_at timestamptz,
     next_sweep_at timestamptz,
     sweep_count integer NOT NULL DEFAULT 0 CHECK (sweep_count >= 0),
@@ -16,10 +17,11 @@ CREATE TABLE vector_index_refs (
     sweep_lease_deadline timestamptz,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,ref_id),
-    CHECK ((state='ACTIVE') = (input_digest IS NOT NULL)),
-    CHECK ((state='ACTIVE') = (purpose IS NOT NULL)),
-    CHECK ((state='ACTIVE') = (replay_locator IS NOT NULL)),
-    CHECK ((state='ACTIVE') = (vector_digest IS NOT NULL)),
+    CHECK ((state<>'TOMBSTONED') = (input_digest IS NOT NULL)),
+    CHECK ((state<>'TOMBSTONED') = (purpose IS NOT NULL)),
+    CHECK ((state<>'TOMBSTONED') = (replay_locator IS NOT NULL)),
+    CHECK ((state<>'TOMBSTONED') = (vector_digest IS NOT NULL)),
+    CHECK ((state='ACTIVE') = (published_at IS NOT NULL)),
     CHECK ((state='TOMBSTONED') = (tombstoned_at IS NOT NULL)),
     CHECK ((state='TOMBSTONED') = (next_sweep_at IS NOT NULL)),
     CHECK ((sweep_claim_token IS NULL) = (sweep_lease_deadline IS NULL)),
@@ -55,10 +57,20 @@ BEGIN
        ROW(OLD.bot_id,OLD.ref_id,OLD.space_id,OLD.created_at) THEN
         RAISE EXCEPTION 'Vector ref identity is immutable' USING ERRCODE='55000';
     END IF;
-    IF OLD.state='ACTIVE' AND NEW.state='TOMBSTONED'
+    IF OLD.state='PENDING' AND NEW.state='ACTIVE'
+       AND ROW(NEW.purpose,NEW.input_digest,NEW.replay_locator,NEW.vector_digest)
+           IS NOT DISTINCT FROM
+           ROW(OLD.purpose,OLD.input_digest,OLD.replay_locator,OLD.vector_digest)
+       AND NEW.published_at IS NOT NULL
+       AND NEW.tombstoned_at IS NULL AND NEW.next_sweep_at IS NULL
+       AND NEW.sweep_count=0 THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.state IN ('PENDING','ACTIVE') AND NEW.state='TOMBSTONED'
        AND NEW.purpose IS NULL AND NEW.input_digest IS NULL
        AND NEW.replay_locator IS NULL
-       AND NEW.vector_digest IS NULL AND NEW.tombstoned_at IS NOT NULL
+       AND NEW.vector_digest IS NULL AND NEW.published_at IS NULL
+       AND NEW.tombstoned_at IS NOT NULL
        AND NEW.next_sweep_at IS NOT NULL AND NEW.sweep_count=0
        AND NEW.sweep_claim_token IS NULL
        AND NEW.sweep_lease_deadline IS NULL THEN
@@ -288,5 +300,241 @@ BEGIN
         bot_id,claim_token,input_payload,result_payload
     ) VALUES(requested_bot,requested_token,input,result_value);
     RETURN result_value;
+END;
+$$;
+
+-- Ref admission is package-owned and never holds a SQL transaction across
+-- Milvus I/O. PENDING records preserve exact replay evidence after a crash.
+CREATE FUNCTION vector_ref_reserve(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_ref text := input->>'ref_id';
+    requested_space text := input->>'space_id';
+    requested_purpose text := input->>'purpose';
+    requested_digest text := context->>'input_digest';
+    requested_replay jsonb := input->'replay';
+    requested_vector_digest text := requested_replay->>'vector_digest';
+    existing __forest_module_schema__.vector_index_refs%ROWTYPE;
+    result_state text;
+BEGIN
+    IF requested_bot IS NULL
+       OR requested_ref IS NULL OR octet_length(requested_ref) NOT BETWEEN 1 AND 256
+       OR requested_space IS NULL OR octet_length(requested_space) NOT BETWEEN 1 AND 256
+       OR requested_purpose IS NULL OR requested_purpose NOT IN ('DOCUMENT','QUERY')
+       OR requested_digest IS NULL OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR jsonb_typeof(requested_replay) IS DISTINCT FROM 'object'
+       OR requested_vector_digest IS NULL OR requested_vector_digest !~ '^sha256:[a-f0-9]{64}$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_INPUT_INVALID',
+                'message','Vector ref reservation is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended(
+        'vector-collection:'||requested_bot,0));
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'vector-ref:'||requested_bot||':'||requested_ref,0));
+    SELECT * INTO existing FROM __forest_module_schema__.vector_index_refs
+    WHERE bot_id=requested_bot AND ref_id=requested_ref FOR UPDATE;
+    IF NOT FOUND THEN
+        INSERT INTO __forest_module_schema__.vector_index_refs(
+            bot_id,ref_id,space_id,state,purpose,input_digest,
+            replay_locator,vector_digest
+        ) VALUES(
+            requested_bot,requested_ref,requested_space,'PENDING',
+            requested_purpose,requested_digest,requested_replay,
+            requested_vector_digest
+        );
+        result_state := 'PENDING';
+    ELSE
+        IF existing.state='TOMBSTONED' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','VECTOR_INDEX_REF_DELETED',
+                    'message','Deleted vector ref cannot be published','status',409));
+        END IF;
+        IF existing.space_id IS DISTINCT FROM requested_space
+           OR existing.purpose IS DISTINCT FROM requested_purpose
+           OR existing.input_digest IS DISTINCT FROM requested_digest
+           OR existing.replay_locator IS DISTINCT FROM requested_replay
+           OR existing.vector_digest IS DISTINCT FROM requested_vector_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','VECTOR_INDEX_REF_CONFLICT',
+                    'message','Vector ref was bound to other data','status',409));
+        END IF;
+        result_state := existing.state;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('ref_id',requested_ref,'space_id',requested_space,
+                                   'input_digest',requested_digest,'state',result_state));
+END;
+$$;
+
+CREATE FUNCTION vector_ref_activate(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_ref text := input->>'ref_id';
+    requested_digest text := input->>'input_digest';
+    existing __forest_module_schema__.vector_index_refs%ROWTYPE;
+BEGIN
+    IF requested_bot IS NULL
+       OR requested_ref IS NULL OR octet_length(requested_ref) NOT BETWEEN 1 AND 256
+       OR requested_digest IS NULL OR requested_digest !~ '^sha256:[a-f0-9]{64}$' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_INPUT_INVALID',
+                'message','Vector ref activation is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended(
+        'vector-collection:'||requested_bot,0));
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'vector-ref:'||requested_bot||':'||requested_ref,0));
+    SELECT * INTO existing FROM __forest_module_schema__.vector_index_refs
+    WHERE bot_id=requested_bot AND ref_id=requested_ref FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_REF_MISSING',
+                'message','Vector ref reservation is missing','status',409));
+    END IF;
+    IF existing.state='TOMBSTONED' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_REF_DELETED',
+                'message','Deleted vector ref cannot be published','status',409));
+    END IF;
+    IF existing.input_digest IS DISTINCT FROM requested_digest THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_REF_CONFLICT',
+                'message','Vector ref was bound to other data','status',409));
+    END IF;
+    IF existing.state='PENDING' THEN
+        UPDATE __forest_module_schema__.vector_index_refs
+        SET state='ACTIVE',published_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND ref_id=requested_ref;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('ref_id',requested_ref,
+                                   'space_id',existing.space_id,'state','ACTIVE'));
+END;
+$$;
+
+CREATE FUNCTION vector_ref_tombstone(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_space text := input->>'space_id';
+    requested_ref text;
+    existing __forest_module_schema__.vector_index_refs%ROWTYPE;
+BEGIN
+    IF requested_bot IS NULL
+       OR requested_space IS NULL OR octet_length(requested_space) NOT BETWEEN 1 AND 256
+       OR jsonb_typeof(input->'ref_ids') IS DISTINCT FROM 'array' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_INPUT_INVALID',
+                'message','Vector tombstone request is invalid','status',422));
+    END IF;
+    IF jsonb_array_length(input->'ref_ids') NOT BETWEEN 1 AND 1024 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_INPUT_INVALID',
+                'message','Vector tombstone request is invalid','status',422));
+    END IF;
+    -- Validate and lock every ref before mutating any of them. A conflict in
+    -- the last list member must not commit earlier tombstones.
+    PERFORM pg_advisory_xact_lock_shared(hashtextextended(
+        'vector-collection:'||requested_bot,0));
+    FOR requested_ref IN
+        SELECT value FROM jsonb_array_elements_text(input->'ref_ids')
+        ORDER BY value
+    LOOP
+        IF octet_length(requested_ref) NOT BETWEEN 1 AND 256 THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','VECTOR_INDEX_INPUT_INVALID',
+                    'message','Vector ref identity is invalid','status',422));
+        END IF;
+        PERFORM pg_advisory_xact_lock(hashtextextended(
+            'vector-ref:'||requested_bot||':'||requested_ref,0));
+        SELECT * INTO existing FROM __forest_module_schema__.vector_index_refs
+        WHERE bot_id=requested_bot AND ref_id=requested_ref FOR UPDATE;
+        IF FOUND AND existing.space_id IS DISTINCT FROM requested_space THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','VECTOR_INDEX_SPACE_MISMATCH',
+                    'message','Vector ref belongs to another space','status',409));
+        END IF;
+    END LOOP;
+    FOR requested_ref IN
+        SELECT DISTINCT value FROM jsonb_array_elements_text(input->'ref_ids')
+        ORDER BY value
+    LOOP
+        SELECT * INTO existing FROM __forest_module_schema__.vector_index_refs
+        WHERE bot_id=requested_bot AND ref_id=requested_ref FOR UPDATE;
+        IF NOT FOUND THEN
+            INSERT INTO __forest_module_schema__.vector_index_refs(
+                bot_id,ref_id,space_id,state,tombstoned_at,next_sweep_at
+            ) VALUES(
+                requested_bot,requested_ref,requested_space,'TOMBSTONED',
+                clock_timestamp(),clock_timestamp()
+            );
+        ELSIF existing.state<>'TOMBSTONED' THEN
+            UPDATE __forest_module_schema__.vector_index_refs
+            SET state='TOMBSTONED',purpose=NULL,input_digest=NULL,
+                replay_locator=NULL,vector_digest=NULL,published_at=NULL,
+                tombstoned_at=clock_timestamp(),next_sweep_at=clock_timestamp()
+            WHERE bot_id=requested_bot AND ref_id=requested_ref;
+        END IF;
+    END LOOP;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('ref_ids',input->'ref_ids',
+                                   'space_id',requested_space));
+END;
+$$;
+
+CREATE FUNCTION vector_ref_require_query(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_ref text := input->>'query_ref_id';
+    requested_space text := input->>'space_id';
+BEGIN
+    IF EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_index_refs
+        WHERE bot_id=requested_bot AND ref_id=requested_ref
+          AND space_id=requested_space AND state='ACTIVE' AND purpose='QUERY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('query_ref_id',requested_ref,
+                                       'space_id',requested_space));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','VECTOR_INDEX_QUERY_REF_MISSING',
+            'message','Query vector ref is unavailable','status',409));
+END;
+$$;
+
+-- Milvus is derived: only authoritative ACTIVE refs can escape a search.
+CREATE FUNCTION vector_ref_filter_active(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_ref text := input->>'query_ref_id';
+    requested_space text := input->>'space_id';
+    filtered jsonb;
+BEGIN
+    IF NOT EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_index_refs
+        WHERE bot_id=requested_bot AND ref_id=requested_ref
+          AND space_id=requested_space AND state='ACTIVE' AND purpose='QUERY'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_QUERY_REF_MISSING',
+                'message','Query vector ref is unavailable','status',409));
+    END IF;
+    SELECT COALESCE(jsonb_agg(hit ORDER BY position),'[]'::jsonb) INTO filtered
+    FROM jsonb_array_elements(input->'hits') WITH ORDINALITY AS h(hit,position)
+    WHERE EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_index_refs r
+        WHERE r.bot_id=requested_bot AND r.ref_id=hit->>'ref_id'
+          AND r.space_id=requested_space AND r.state='ACTIVE'
+          AND r.purpose='DOCUMENT'
+    );
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('query_ref_id',requested_ref,
+            'space_id',requested_space,'hits',filtered));
 END;
 $$;

@@ -18,13 +18,13 @@ from pymilvus.exceptions import MilvusException
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.schema_bundles import module_schema_namespace
-from forest.storage.vector_index_authority import VectorIndexRefRepository
+from forest.storage.vector_collection_binding import VectorIndexBindingRepository
 
 _REF = re.compile(r"[^\x00]{1,256}\Z")
 _LOG = logging.getLogger(__name__)
 _SERVICES = frozenset(
     {"vector.transport.upsert", "vector.transport.search",
-     "vector.transport.delete", "vector.transport.prune"}
+     "vector.transport.prune"}
 )
 
 
@@ -74,7 +74,7 @@ class MilvusVectorIndexEffectDriver:
         self.identity = identity
         self.service_id = declaration["name"]
         self.bot_id = bot_id
-        self.refs = VectorIndexRefRepository(
+        self.bindings = VectorIndexBindingRepository(
             store, namespace=module_schema_namespace("forest.vector.index")
         )
         self.runtime = runtime
@@ -134,8 +134,8 @@ class MilvusVectorIndexEffectDriver:
     async def _ensure_collection(self) -> None:
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                async with self.refs.store.pool.connection() as conn, conn.transaction():
-                    binding, active_refs = await self.refs.lock_collection_state(conn)
+                async with self.bindings.store.pool.connection() as conn, conn.transaction():
+                    binding, live_refs = await self.bindings.lock_collection_state(conn)
                     if binding is not None and (
                         binding["space_id"] != self.configuration["space_id"]
                         or binding["collection_name"] != self.collection_name
@@ -174,8 +174,8 @@ class MilvusVectorIndexEffectDriver:
                         elif binding["collection_id"] != collection_id:
                             self._require_rebuild("collection identity changed")
                         return
-                    if active_refs:
-                        self._require_rebuild("collection missing with active refs")
+                    if live_refs:
+                        self._require_rebuild("collection missing with pending or active refs")
                         return
                     schema = self.client.create_schema(
                         auto_id=False, enable_dynamic_field=False
@@ -205,7 +205,7 @@ class MilvusVectorIndexEffectDriver:
                     description = await self.client.describe_collection(
                         collection_name=self.collection_name
                     )
-                    await self.refs.bind_collection(
+                    await self.bindings.bind_collection(
                         conn,
                         revision=1 if binding is None else binding["binding_revision"] + 1,
                         space_id=self.configuration["space_id"],
@@ -250,7 +250,7 @@ class MilvusVectorIndexEffectDriver:
     async def invoke(self, payload, *, scope, invocation):
         await self._admit(scope)
         self._check_space(payload["space_id"])
-        if self.rebuild_required and self.service_id != "vector.transport.delete":
+        if self.rebuild_required:
             raise ForestError(
                 "VECTOR_INDEX_REBUILD_REQUIRED",
                 "Published vector refs require index reconstruction",
@@ -260,19 +260,32 @@ class MilvusVectorIndexEffectDriver:
             return await self._upsert(payload)
         if self.service_id == "vector.transport.search":
             return await self._search(payload)
-        if self.service_id == "vector.transport.prune":
-            return await self._prune(payload)
-        return await self._delete(payload)
+        return await self._prune(payload)
 
     async def _upsert(self, payload):
-        values = tuple(float(item) for item in payload["vector"])
+        try:
+            values = tuple(float(item) for item in payload["vector"])
+        except (TypeError, ValueError) as exc:
+            raise ForestError(
+                "VECTOR_INDEX_INPUT_INVALID", "Vector index row is invalid", 422
+            ) from exc
         if (
             not _valid_ref(payload["ref_id"])
             or len(values) != self.configuration["dimensions"]
             or any(not math.isfinite(item) for item in values)
+            or payload["purpose"] not in ("DOCUMENT", "QUERY")
         ):
             raise ForestError(
                 "VECTOR_INDEX_INPUT_INVALID", "Vector index row is invalid", 422
+            )
+        request = {
+            key: payload[key]
+            for key in ("ref_id", "space_id", "purpose", "vector", "replay")
+        }
+        input_digest = payload["input_digest"]
+        if input_digest != digest_json(request):
+            raise ForestError(
+                "VECTOR_INDEX_INPUT_INVALID", "Vector input digest differs", 422
             )
         row = {
             "ref_id": payload["ref_id"],
@@ -280,41 +293,12 @@ class MilvusVectorIndexEffectDriver:
             "space_id": payload["space_id"],
             "purpose": payload["purpose"],
             "embedding": list(values),
+            "input_digest": input_digest,
         }
-        input_digest = digest_json(row)
-        row["input_digest"] = input_digest
-        replay = payload["replay"]
         try:
-            async with self.refs.store.pool.connection() as conn, conn.transaction():
-                await self.refs.lock_collection_mutation(conn)
-                existing = await self.refs.lock(conn, payload["ref_id"])
-                if existing is not None:
-                    if existing["state"] == "TOMBSTONED":
-                        raise ForestError(
-                            "VECTOR_INDEX_REF_DELETED", "Deleted vector ref cannot be published", 409
-                        )
-                    if (
-                        existing["input_digest"] != input_digest
-                        or existing["space_id"] != payload["space_id"]
-                        or existing["purpose"] != payload["purpose"]
-                        or existing["replay_locator"] != replay
-                        or existing["vector_digest"] != replay["vector_digest"]
-                    ):
-                        raise ForestError(
-                            "VECTOR_INDEX_REF_CONFLICT", "Vector ref was bound to other data", 409
-                        )
-                async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                    await self.client.upsert(collection_name=self.collection_name, data=[row])
-                if existing is None:
-                    await self.refs.record_active(
-                        conn, ref_id=payload["ref_id"],
-                        space_id=payload["space_id"], purpose=payload["purpose"],
-                        input_digest=input_digest,
-                        replay_locator=replay, vector_digest=replay["vector_digest"],
-                    )
-        except ForestError:
-            raise
-        except (TimeoutError, MilvusException, OSError, psycopg.Error) as exc:
+            async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                await self.client.upsert(collection_name=self.collection_name, data=[row])
+        except (TimeoutError, MilvusException, OSError) as exc:
             raise ForestError(
                 "VECTOR_INDEX_UPSERT_UNAVAILABLE", "Milvus upsert failed", 503
             ) from exc
@@ -380,32 +364,6 @@ class MilvusVectorIndexEffectDriver:
             "space_id": payload["space_id"],
             "hits": result,
         }
-
-    async def _delete(self, payload):
-        refs = tuple(payload["ref_ids"])
-        if any(not _valid_ref(item) for item in refs):
-            raise ForestError(
-                "VECTOR_INDEX_INPUT_INVALID", "Vector deletion refs are invalid", 422
-            )
-        try:
-            async with self.refs.store.pool.connection() as conn, conn.transaction():
-                await self.refs.lock_collection_mutation(conn)
-                for ref_id in sorted(set(refs)):
-                    existing = await self.refs.lock(conn, ref_id)
-                    await self.refs.record_tombstone(
-                        conn, ref_id=ref_id, space_id=payload["space_id"],
-                        existing=existing,
-                    )
-                # With no collection, the durable tombstone is the deletion result.
-                if not self.rebuild_required:
-                    await self._prune(payload)
-        except ForestError:
-            raise
-        except (TimeoutError, MilvusException, OSError, psycopg.Error) as exc:
-            raise ForestError(
-                "VECTOR_INDEX_DELETE_UNAVAILABLE", "Milvus deletion failed", 503
-            ) from exc
-        return {"ref_ids": list(refs), "space_id": payload["space_id"]}
 
     async def _prune(self, payload):
         refs = tuple(payload["ref_ids"])

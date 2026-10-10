@@ -222,32 +222,53 @@ async def test_memory_vector_publish_recovers_after_process_crash(tmp_path):
                 )
             ).fetchall()
             claimed = [row for row in batches if row["state"] == "CLAIMED"]
-            assert len(claimed) == 1 and claimed[0]["attempt_count"] == 1
-            attempt_id = claimed[0]["attempt_id"]
-            facets = await (
-                await conn.execute(
-                    sql.SQL(
-                        "SELECT f.facet_id,f.state FROM {m}.embedding_batch_attempts a "
-                        "JOIN {m}.embedding_claim_items ci ON ci.bot_id=a.bot_id "
-                        "AND ci.claim_id=a.claim_id "
-                        "JOIN {m}.embedding_facets f ON f.bot_id=ci.bot_id "
-                        "AND f.facet_id=ci.facet_id "
-                        "WHERE a.bot_id=%s AND a.attempt_id=%s"
-                    ).format(m=sql.Identifier(memory_schema)),
-                    (bot_id, attempt_id),
+            assert claimed
+            interrupted = None
+            for candidate in claimed:
+                candidate_facets = await (
+                    await conn.execute(
+                        sql.SQL(
+                            "SELECT f.facet_id,f.state FROM {m}.embedding_batch_attempts a "
+                            "JOIN {m}.embedding_claim_items ci ON ci.bot_id=a.bot_id "
+                            "AND ci.claim_id=a.claim_id "
+                            "JOIN {m}.embedding_facets f ON f.bot_id=ci.bot_id "
+                            "AND f.facet_id=ci.facet_id "
+                            "WHERE a.bot_id=%s AND a.attempt_id=%s"
+                        ).format(m=sql.Identifier(memory_schema)),
+                        (bot_id, candidate["attempt_id"]),
+                    )
+                ).fetchall()
+                if not candidate_facets:
+                    continue
+                candidate_ids = [row["facet_id"] for row in candidate_facets]
+                candidate_written = await milvus.get(
+                    collection_name=collection,
+                    ids=candidate_ids,
+                    output_fields=["ref_id", "purpose"],
+                    consistency_level="Strong",
                 )
-            ).fetchall()
-            assert facets and all(row["state"] == "EMBEDDED" for row in facets)
-            facet_ids = [row["facet_id"] for row in facets]
+                if candidate_written:
+                    assert interrupted is None
+                    interrupted = candidate
+                    facets = candidate_facets
+                    facet_ids = candidate_ids
+                    written = candidate_written
+            assert interrupted is not None
+            assert interrupted["attempt_count"] == 1
+            attempt_id = interrupted["attempt_id"]
+            assert all(row["state"] == "EMBEDDED" for row in facets)
             refs = await (
                 await conn.execute(
-                    sql.SQL("SELECT ref_id FROM {}.vector_index_refs "
+                    sql.SQL("SELECT ref_id,state FROM {}.vector_index_refs "
                             "WHERE bot_id=%s AND ref_id=ANY(%s)")
                     .format(sql.Identifier(vector_schema)),
                     (bot_id, facet_ids),
                 )
             ).fetchall()
-            assert refs == []
+            assert {row["ref_id"] for row in refs} == {
+                row["ref_id"] for row in written
+            }
+            assert all(row["state"] == "PENDING" for row in refs)
             # Wait for the real host lease to expire; never forge a new owner.
             host_lease = await (
                 await conn.execute(
@@ -256,12 +277,6 @@ async def test_memory_vector_publish_recovers_after_process_crash(tmp_path):
                     (bot_id,),
                 )
             ).fetchone()
-        written = await milvus.get(
-            collection_name=collection,
-            ids=facet_ids,
-            output_fields=["purpose"],
-            consistency_level="Strong",
-        )
         assert written and all(row["purpose"] == "DOCUMENT" for row in written)
         delay = (host_lease["expires_at"] - datetime.now(timezone.utc)).total_seconds()
         if delay > 0:
@@ -327,4 +342,6 @@ async def test_memory_vector_publish_recovers_after_process_crash(tmp_path):
 
 
 if __name__ == "__main__" and sys.argv[1:2] == ["--crash-child"]:
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(_crash_child(Path(sys.argv[2])))
