@@ -92,7 +92,7 @@ Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supe
 
 `pg_dump` 只保存 PostgreSQL 权威事实，不包含 Milvus 向量。整体重置前如需可回滚的完整记忆，应另行保存同一向量集合或重新嵌入，并明确处理外部调用费用。
 
-若向量驱动报告 `VECTOR_INDEX_REBUILD_REQUIRED`，表示 Milvus collection 缺失而 PostgreSQL 仍有活动 ref。Bot 可继续接收入站并保存权威记忆，语义检索和新向量发布会明确失败；删除 ref 仍结算 tombstone。当前候选尚无经过验收的索引重放/原子切换操作，应恢复匹配的 Milvus 备份或在隔离环境完成重建流程后再切换，不能手工创建一个空的同名 collection 并宣称召回已恢复。
+若向量驱动报告 `VECTOR_INDEX_REBUILD_REQUIRED`，表示 Milvus collection 缺失且 PostgreSQL 仍有活动 ref、同名 collection 的 `collection_id` 已变化，或一个既有 collection 没有包私有身份绑定。Bot 可继续接收入站并保存权威记忆，语义检索和新向量发布会明确失败；删除 ref 仍结算 tombstone。当前候选尚无经过验收的索引重放/原子切换操作，应恢复与绑定身份一致的 Milvus 备份或在隔离环境完成重建流程后再切换，不能手工创建一个空的同名 collection 并宣称召回已恢复。
 
 在线 v21 镜像使用的 `forest-main` deployment 库保留旧基线，缺少当前候选源码要求的 `forest_deployment.storage_profile_revocations`。候选探针会以 `OBSERVATION_SCHEMA_INCOMPATIBLE` 退出，尚未读到 Bot 库，不能据此判断在线 Bot 是否健康，也不能宣称完成候选长时实网验收。应先在隔离环境验证候选基线，再有计划地切换在线实例，不对在线库临时补表。
 

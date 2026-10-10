@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from jsonschema import Draft202012Validator
+from pymilvus import DataType
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin_packages import (
@@ -256,8 +258,8 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
     invocation = SimpleNamespace(operation_id="test")
     collection_name = drivers["vector.index.upsert"].collection_name
     try:
-        for driver in drivers.values():
-            await driver.start()
+        await asyncio.gather(*(driver.start() for driver in drivers.values()))
+        assert not any(driver.rebuild_required for driver in drivers.values())
         collection = await drivers["vector.index.upsert"].client.describe_collection(
             collection_name=collection_name
         )
@@ -405,9 +407,55 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                 invocation=invocation,
             )
         assert preempted.value.code == "VECTOR_INDEX_REF_DELETED"
+
+        async with store.pool.connection() as conn, conn.transaction():
+            binding, active = await upsert_driver.refs.lock_collection_state(conn)
+        assert active
+        assert binding["binding_revision"] == 1
+        original_collection_id = binding["collection_id"]
+        client = upsert_driver.client
+        await client.drop_collection(collection_name=collection_name)
+        replacement_schema = client.create_schema(
+            auto_id=False, enable_dynamic_field=False
+        )
+        replacement_schema.add_field(
+            "ref_id", DataType.VARCHAR, is_primary=True, max_length=256
+        )
+        replacement_schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
+        replacement_schema.add_field("space_id", DataType.VARCHAR, max_length=256)
+        replacement_schema.add_field("purpose", DataType.VARCHAR, max_length=16)
+        replacement_schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=4)
+        replacement_indexes = client.prepare_index_params()
+        replacement_indexes.add_index(
+            field_name="embedding", index_type="AUTOINDEX", metric_type="COSINE"
+        )
+        await client.create_collection(
+            collection_name=collection_name, schema=replacement_schema,
+            index_params=replacement_indexes, consistency_level="Strong",
+        )
+        replacement_description = await client.describe_collection(
+            collection_name=collection_name
+        )
+        assert replacement_description["collection_id"] != original_collection_id
+        await drivers["vector.index.search"].close()
+        replacement_search = MilvusVectorIndexEffectDriver(
+            configuration, 1, identity,
+            {"name": "vector.index.search", "kind": "vector-index.milvus"},
+            bot_id=bot_id, store=store, runtime=kernel_runtime,
+            token_resolver=resolve_token,
+        )
+        drivers["vector.index.search"] = replacement_search
+        await replacement_search.start()
+        assert replacement_search.rebuild_required
+        with pytest.raises(ForestError) as replaced:
+            await replacement_search.invoke(
+                {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
+                scope=scope, invocation=invocation,
+            )
+        assert replaced.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
     finally:
         client = drivers["vector.index.upsert"].client
-        if client is not None:
+        if client is not None and await client.has_collection(collection_name=collection_name):
             await client.drop_collection(collection_name=collection_name)
         for driver in drivers.values():
             await driver.close()

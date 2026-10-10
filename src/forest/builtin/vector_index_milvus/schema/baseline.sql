@@ -18,6 +18,26 @@ CREATE INDEX vector_index_refs_sweep_idx ON vector_index_refs(
     bot_id,next_sweep_at,ref_id
 ) WHERE state='TOMBSTONED';
 
+-- Milvus names are deterministic, but a dropped and recreated collection has
+-- a different server identity. Keep the binding history in the package store.
+CREATE TABLE vector_collection_bindings (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    binding_revision bigint NOT NULL CHECK (binding_revision > 0),
+    space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
+    collection_name text NOT NULL CHECK (octet_length(collection_name) BETWEEN 1 AND 256),
+    collection_id bigint NOT NULL CHECK (collection_id > 0),
+    bound_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,binding_revision)
+);
+CREATE FUNCTION guard_vector_collection_binding() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'Vector collection binding is immutable' USING ERRCODE='55000';
+END;
+$$;
+CREATE TRIGGER vector_collection_binding_immutable
+    BEFORE UPDATE OR DELETE ON vector_collection_bindings
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_collection_binding();
+
 CREATE FUNCTION guard_vector_index_ref() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
     IF ROW(NEW.bot_id,NEW.ref_id,NEW.created_at) IS DISTINCT FROM

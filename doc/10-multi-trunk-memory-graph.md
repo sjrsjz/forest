@@ -187,7 +187,7 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 每个 Bot 的 collection 身份由 `(bot_id, space_id, dimensions, metric)` 一次冻结。模型种类、模型修订、维度或空间改变必须创建新 Bot/新隔离索引；兼容 endpoint 和凭据可以经 `vector.index` 配置新 Generation 替换。Milvus 是可重建派生库：丢失后从当前合格 facet 与稳定 ref 重放，不得反向把 Milvus 当作消息或关系权威。
 
-当前候选在启动 `vector.index` Effect Driver 时，若 collection 已消失但 PostgreSQL ref 账本仍存在 ACTIVE 引用，会进入 `REBUILD_REQUIRED` 降级状态：不创建空 collection，upsert/search 明确拒绝，delete 仍持久记录 tombstone，Bot 的群消息和权威归档可继续。该围栏只识别启动时整集合缺失；已有同名但内容不完整的 collection 仍需完整性核验。受管嵌入结果 Payload、冻结 facet/ref、重建进度、候选物理索引和原子切换尚未连成生产重建流程，不能把此围栏称作已经完成 Milvus 恢复。
+当前候选的 `vector.index` 2.4.3 / 私有 SQL 2.3.1 将 Milvus 的 `collection_id` 与 Bot、冻结空间、collection 名写入追加式包私有绑定账本；三个 Effect 服务启动时在同一 Bot 级独占锁下核对该身份，普通 upsert/delete 使用共享锁。缺失但仍有 ACTIVE ref、同名 collection 身份改变或既有 collection 缺少绑定时，Generation 以 `REBUILD_REQUIRED` 降级启动：不把空索引当成完整历史，upsert/search 明确拒绝，delete 仍持久记录 tombstone，Bot 的群消息与权威归档可继续。没有活动 ref 时允许首次创建或在绑定过的 collection 整体丢失后创建新的空代，并追加新绑定。此围栏能识别启动时整集合缺失与同名重建，尚不能识别原 collection 内部个别行丢失；受管嵌入结果 Payload、冻结 facet/ref、重建进度、候选物理索引和原子切换也尚未连成生产重建流程。
 
 `memory.graph` 在包清单中声明 `/embedding` 为 Bot 生命周期内不可变配置。通用模块配置仓库在规划和应用配置时按当前有效修订核验这个路径，启动时也拒绝与已有 Memory 有效配置冲突的模型身份；检索参数和嵌入预算可以通过新 Generation 调整。模型 endpoint 与凭据属于 `embedding.multimodal` 的连接配置，不放进 Memory 的模型身份字段。
 

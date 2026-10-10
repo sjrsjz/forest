@@ -315,6 +315,7 @@ class FakeMilvusClient:
     search_calls = 0
     fail_search_at = None
     collections = {}
+    next_collection_id = 1
     fail_after_upsert_once = False
     upsert_ack_losses = 0
     fail_next_delete = False
@@ -345,7 +346,10 @@ class FakeMilvusClient:
 
     async def create_collection(self, *, collection_name, schema, **_values):
         vector = next(item for item in schema.fields if item["name"] == "embedding")
+        collection_id = type(self).next_collection_id
+        type(self).next_collection_id += 1
         self.collections[collection_name] = {
+            "collection_id": collection_id,
             "dimensions": vector["dim"],
             "fields": deepcopy(schema.fields),
             "rows": {},
@@ -354,6 +358,7 @@ class FakeMilvusClient:
     async def describe_collection(self, *, collection_name):
         collection = self.collections[collection_name]
         return {
+            "collection_id": collection["collection_id"],
             "fields": [
                 {"name": field["name"], **(
                     {"params": {"dim": field["dim"]}}

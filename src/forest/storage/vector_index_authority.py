@@ -15,20 +15,56 @@ class VectorIndexRefRepository:
     def _table(self):
         return sql.Identifier(self.namespace, "vector_index_refs")
 
-    async def has_active_refs(self) -> bool:
-        """Whether PostgreSQL still expects rows in the derived collection."""
-        async with self.store.pool.connection() as conn, conn.transaction():
-            await conn.execute("SET TRANSACTION READ ONLY")
-            row = await (
-                await conn.execute(
-                    sql.SQL(
-                        "SELECT EXISTS(SELECT 1 FROM {} WHERE bot_id=%s "
-                        "AND state='ACTIVE') AS has_active"
-                    ).format(self._table()),
-                    (self.store.bot_id,),
-                )
-            ).fetchone()
-            return bool(row["has_active"])
+    def _binding_table(self):
+        return sql.Identifier(self.namespace, "vector_collection_bindings")
+
+    def _collection_lock_key(self) -> str:
+        return f"vector-collection:{self.store.bot_id}"
+
+    async def lock_collection_mutation(self, conn) -> None:
+        """Let ref mutations run concurrently, but exclude collection replacement."""
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock_shared(hashtextextended(%s, 0))",
+            (self._collection_lock_key(),),
+        )
+
+    async def lock_collection_state(self, conn) -> tuple[dict | None, bool]:
+        """Serialize collection inspection/binding against ref mutations."""
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+            (self._collection_lock_key(),),
+        )
+        binding = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s "
+                    "ORDER BY binding_revision DESC LIMIT 1"
+                ).format(self._binding_table()),
+                (self.store.bot_id,),
+            )
+        ).fetchone()
+        active = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT EXISTS(SELECT 1 FROM {} WHERE bot_id=%s "
+                    "AND state='ACTIVE') AS has_active"
+                ).format(self._table()),
+                (self.store.bot_id,),
+            )
+        ).fetchone()
+        return (dict(binding) if binding is not None else None, bool(active["has_active"]))
+
+    async def bind_collection(
+        self, conn, *, revision: int, space_id: str,
+        collection_name: str, collection_id: int,
+    ) -> None:
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}(bot_id,binding_revision,space_id,"
+                "collection_name,collection_id) VALUES(%s,%s,%s,%s,%s)"
+            ).format(self._binding_table()),
+            (self.store.bot_id, revision, space_id, collection_name, collection_id),
+        )
 
     async def lock(self, conn, ref_id: str) -> dict | None:
         await conn.execute(

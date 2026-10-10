@@ -97,6 +97,7 @@ class MilvusVectorIndexEffectDriver:
                 "Vector index credential is unavailable",
                 503,
             )
+        self.rebuild_required = False
         self.client = self.client_factory(
             uri=self.configuration["endpoint"],
             token=token,
@@ -145,59 +146,108 @@ class MilvusVectorIndexEffectDriver:
                 _LOG.warning("Vector tombstone sweep failed: %s", type(exc).__name__)
                 await asyncio.sleep(10)
 
+    def _collection_id(self, description) -> int:
+        collection_id = description.get("collection_id")
+        if type(collection_id) is not int or collection_id <= 0:
+            raise ForestError(
+                "VECTOR_INDEX_IDENTITY_INVALID",
+                "Milvus did not provide a valid collection identity",
+                502,
+            )
+        return collection_id
+
+    def _require_rebuild(self, reason: str) -> None:
+        self.rebuild_required = True
+        _LOG.error(
+            "Vector collection rebuild required: %s (bot_id=%s, space_id=%s)",
+            reason, self.bot_id, self.configuration["space_id"],
+        )
+
     async def _ensure_collection(self) -> None:
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                if await self.client.has_collection(collection_name=self.collection_name):
-                    description = await self.client.describe_collection(
-                        collection_name=self.collection_name
-                    )
-                    fields = {item["name"]: item for item in description.get("fields", [])}
-                    vector = fields.get("embedding", {})
-                    if (
-                        set(fields) != {"ref_id", "bot_id", "space_id", "purpose", "embedding"}
-                        or int(vector.get("params", {}).get("dim", -1))
-                        != self.configuration["dimensions"]
+                async with self.refs.store.pool.connection() as conn, conn.transaction():
+                    binding, active_refs = await self.refs.lock_collection_state(conn)
+                    if binding is not None and (
+                        binding["space_id"] != self.configuration["space_id"]
+                        or binding["collection_name"] != self.collection_name
                     ):
                         raise ForestError(
                             "VECTOR_INDEX_SPACE_IMMUTABLE",
-                            "Milvus collection layout differs",
+                            "Collection binding belongs to another vector space",
                             409,
                         )
-                    return
-                if await self.refs.has_active_refs():
-                    self.rebuild_required = True
-                    _LOG.error(
-                        "Vector collection missing with active refs; rebuild required "
-                        "(bot_id=%s, space_id=%s)",
-                        self.bot_id, self.configuration["space_id"],
+                    if await self.client.has_collection(
+                        collection_name=self.collection_name
+                    ):
+                        description = await self.client.describe_collection(
+                            collection_name=self.collection_name
+                        )
+                        fields = {
+                            item["name"]: item for item in description.get("fields", [])
+                        }
+                        vector = fields.get("embedding", {})
+                        if (
+                            set(fields) != {
+                                "ref_id", "bot_id", "space_id", "purpose", "embedding"
+                            }
+                            or int(vector.get("params", {}).get("dim", -1))
+                            != self.configuration["dimensions"]
+                        ):
+                            raise ForestError(
+                                "VECTOR_INDEX_SPACE_IMMUTABLE",
+                                "Milvus collection layout differs",
+                                409,
+                            )
+                        collection_id = self._collection_id(description)
+                        if binding is None:
+                            self._require_rebuild("unbound collection")
+                        elif binding["collection_id"] != collection_id:
+                            self._require_rebuild("collection identity changed")
+                        return
+                    if active_refs:
+                        self._require_rebuild("collection missing with active refs")
+                        return
+                    schema = self.client.create_schema(
+                        auto_id=False, enable_dynamic_field=False
                     )
-                    return
-                schema = self.client.create_schema(
-                    auto_id=False, enable_dynamic_field=False
-                )
-                schema.add_field("ref_id", DataType.VARCHAR, is_primary=True, max_length=256)
-                schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
-                schema.add_field("space_id", DataType.VARCHAR, max_length=256)
-                schema.add_field("purpose", DataType.VARCHAR, max_length=16)
-                schema.add_field(
-                    "embedding",
-                    DataType.FLOAT_VECTOR,
-                    dim=self.configuration["dimensions"],
-                )
-                indexes = self.client.prepare_index_params()
-                indexes.add_index(
-                    field_name="embedding", index_type="AUTOINDEX", metric_type="COSINE"
-                )
-                await self.client.create_collection(
-                    collection_name=self.collection_name,
-                    schema=schema,
-                    index_params=indexes,
-                    consistency_level="Strong",
-                )
+                    schema.add_field(
+                        "ref_id", DataType.VARCHAR, is_primary=True, max_length=256
+                    )
+                    schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
+                    schema.add_field("space_id", DataType.VARCHAR, max_length=256)
+                    schema.add_field("purpose", DataType.VARCHAR, max_length=16)
+                    schema.add_field(
+                        "embedding", DataType.FLOAT_VECTOR,
+                        dim=self.configuration["dimensions"],
+                    )
+                    indexes = self.client.prepare_index_params()
+                    indexes.add_index(
+                        field_name="embedding", index_type="AUTOINDEX",
+                        metric_type="COSINE",
+                    )
+                    await self.client.create_collection(
+                        collection_name=self.collection_name,
+                        schema=schema,
+                        index_params=indexes,
+                        consistency_level="Strong",
+                    )
+                    description = await self.client.describe_collection(
+                        collection_name=self.collection_name
+                    )
+                    await self.refs.bind_collection(
+                        conn,
+                        revision=1 if binding is None else binding["binding_revision"] + 1,
+                        space_id=self.configuration["space_id"],
+                        collection_name=self.collection_name,
+                        collection_id=self._collection_id(description),
+                    )
         except ForestError:
             raise
-        except (TimeoutError, MilvusException, OSError, KeyError, TypeError, ValueError) as exc:
+        except (
+            TimeoutError, MilvusException, OSError, KeyError, TypeError,
+            ValueError, psycopg.Error,
+        ) as exc:
             raise ForestError(
                 "VECTOR_INDEX_UNAVAILABLE", "Milvus collection is unavailable", 503
             ) from exc
@@ -262,6 +312,7 @@ class MilvusVectorIndexEffectDriver:
         input_digest = digest_json(row)
         try:
             async with self.refs.store.pool.connection() as conn, conn.transaction():
+                await self.refs.lock_collection_mutation(conn)
                 existing = await self.refs.lock(conn, payload["ref_id"])
                 if existing is not None:
                     if existing["state"] == "TOMBSTONED":
@@ -355,6 +406,7 @@ class MilvusVectorIndexEffectDriver:
             )
         try:
             async with self.refs.store.pool.connection() as conn, conn.transaction():
+                await self.refs.lock_collection_mutation(conn)
                 for ref_id in sorted(set(refs)):
                     existing = await self.refs.lock(conn, ref_id)
                     await self.refs.record_tombstone(
