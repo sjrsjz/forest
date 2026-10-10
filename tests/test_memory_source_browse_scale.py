@@ -153,10 +153,57 @@ async def test_group_source_browse_at_one_hundred_thousand_units(
         "limit": 1,
     })
     assert unrelated["items"] == []
+    # The sparse missing-projection path must not omit a late source when
+    # 8193 distinct sources exceed the bounded candidate threshold.
+    async with store.pool.connection() as conn, conn.transaction():
+        members = (
+            "SELECT n FROM generate_series(1,8192) n "
+            "UNION ALL SELECT 50000"
+        )
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.source_parts "
+            "(bot_id,source_unit_id,part_id,part_index,part_kind,media_type,"
+            "payload_id,payload_digest,payload_owner_component_id,"
+            "payload_owner_kind,payload_owner_id) "
+            "SELECT %s,'unit/933179609/'||lpad(n::text,6,'0'),"
+            "'part/'||n,0,'TEXT','text/plain','payload/'||n,%s,"
+            "'memory.graph','test','unit/933179609/'||lpad(n::text,6,'0') "
+            "FROM (" + members + ") members"
+        ).format(namespace), (store.bot_id, digest_a))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.facet_preparation_work "
+            "(bot_id,source_unit_id,state,prepared_facet_count) "
+            "SELECT %s,'unit/933179609/'||lpad(n::text,6,'0'),'READY',1 "
+            "FROM (" + members + ") members"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.embedding_facets "
+            "(bot_id,facet_id,purpose,input_kind,input_ref,input_revision,"
+            "source_unit_id,source_revision,part_id,modality,selector_start_char,"
+            "selector_end_char,input_payload_id,input_payload_digest,"
+            "facet_content_digest,input_media_type,input_byte_length,space_id,"
+            "accepted_deletion_epoch) "
+            "SELECT %s,'facet/'||n,'DOCUMENT','SOURCE_UNIT',"
+            "'unit/933179609/'||lpad(n::text,6,'0'),1,"
+            "'unit/933179609/'||lpad(n::text,6,'0'),1,'part/'||n,"
+            "'TEXT',0,1,'payload/'||n,%s,%s,'text/plain',1,"
+            "'space/scale',0 FROM (" + members + ") members"
+        ).format(namespace), (store.bot_id, digest_a, digest_a))
+        await conn.execute(sql.SQL("ANALYZE {}.embedding_facets").format(namespace))
+        await conn.execute(sql.SQL("ANALYZE {}.facet_preparation_work").format(namespace))
+    missing_text, missing_text_seconds = await page({
+        "external_group_id": "933179609",
+        "only_missing_text_projection": True, "limit": 1,
+    })
+    assert [item["source_unit_id"] for item in missing_text["items"]] == [
+        "unit/933179609/050000"
+    ]
+    assert missing_text["has_more"] is True
     print(
         "source_browse_seconds first={:.3f} second={:.3f} deep={:.3f} "
-        "coverage={:.3f} unknown={:.3f} relation={:.3f}".format(
+        "coverage={:.3f} unknown={:.3f} relation={:.3f} missing_text={:.3f}".format(
             first_seconds, second_seconds, deep_seconds,
             coverage_seconds, unknown_seconds, relation_seconds,
+            missing_text_seconds,
         )
     )

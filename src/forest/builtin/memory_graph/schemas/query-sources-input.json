@@ -21,6 +21,7 @@
     "source_status": {"enum": ["ACTIVE", "RETIRED"]},
     "index_coverage": {"enum": ["NO_FACETS", "NOT_READY", "PARTIAL", "COMPLETE"]},
     "only_unknown_facets": {"type": "boolean"},
+    "only_missing_text_projection": {"type": "boolean"},
     "relation_kind": {"enum": ["ASSOCIATES_WITH", "EVIDENCE", "CONTRADICTS", "SUBJECT_OF"]},
     "relation_cross_trunk": {"type": "boolean"},
     "source_order_from": {"type": "integer", "minimum": 1, "maximum": 9223372036854775807},

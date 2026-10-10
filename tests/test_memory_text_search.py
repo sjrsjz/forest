@@ -170,6 +170,8 @@ async def test_text_projection_pages_and_forget_follow_source_authority(
         ).format(namespace), (store.bot_id,))
     missing = (await page({"text_contains": needle}))["value"]
     assert [item["source_unit_id"] for item in missing["items"]] == ["unit/2", "unit/3"]
+    missing_projection = (await page({"only_missing_text_projection": True}))["value"]
+    assert [item["source_unit_id"] for item in missing_projection["items"]] == ["unit/1"]
     request = {"source_unit_id": "unit/1", "requested_by": "admin/search"}
     rebuild_context = {"bot_id": store.bot_id, "operation_id": "rebuild/search/1"}
     queued = await rebuild_call("memory_enqueue_text_projection_rebuild",
@@ -246,6 +248,7 @@ async def test_text_projection_pages_and_forget_follow_source_authority(
     assert [item["source_unit_id"] for item in repaired["items"]] == [
         "unit/1", "unit/2", "unit/3",
     ]
+    assert (await page({"only_missing_text_projection": True}))["value"]["items"] == []
 
     async with store.pool.connection() as conn:
         frozen = (await (await conn.execute(sql.SQL(

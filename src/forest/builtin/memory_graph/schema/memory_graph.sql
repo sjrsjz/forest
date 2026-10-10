@@ -1444,6 +1444,9 @@ CREATE INDEX embedding_facets_unknown_source_idx ON embedding_facets(
 CREATE INDEX embedding_facets_source_page_idx ON embedding_facets(
     bot_id,source_unit_id,source_revision,facet_id
 ) WHERE purpose='DOCUMENT';
+CREATE INDEX embedding_facets_document_text_idx ON embedding_facets(
+    bot_id,source_unit_id,source_revision,facet_id
+) WHERE purpose='DOCUMENT' AND modality='TEXT';
 CREATE INDEX embedding_facets_query_idx ON embedding_facets(
     bot_id,query_id,purpose,state,facet_id
 );
@@ -9327,6 +9330,22 @@ LANGUAGE sql STABLE AS $$
                 filters->>'text_contains')
             AND pg_catalog.strpos(pg_catalog.lower(t.content),
                 pg_catalog.lower(filters->>'text_contains'))>0))
+      AND (filters->>'only_missing_text_projection' IS DISTINCT FROM 'true' OR
+           (EXISTS (
+              SELECT 1 FROM __forest_module_schema__.facet_preparation_work w
+              WHERE w.bot_id=u.bot_id AND w.source_unit_id=u.source_unit_id
+                AND w.state='READY')
+            AND EXISTS (
+              SELECT 1 FROM __forest_module_schema__.embedding_facets f
+              WHERE f.bot_id=u.bot_id AND f.source_unit_id=u.source_unit_id
+                AND f.source_revision=u.source_revision
+                AND f.purpose='DOCUMENT' AND f.modality='TEXT'
+                AND NOT EXISTS (
+                  SELECT 1 FROM __forest_module_schema__.source_text_facets t
+                  WHERE t.bot_id=f.bot_id AND t.facet_id=f.facet_id
+                    AND t.source_unit_id=f.source_unit_id
+                    AND t.source_revision=f.source_revision
+                    AND t.content_digest=f.facet_content_digest))))
       AND (filters->>'index_coverage' IS NULL OR
            coverage.index_coverage=filters->>'index_coverage')
       AND (filters->>'only_unknown_facets' IS DISTINCT FROM 'true' OR
@@ -9356,6 +9375,7 @@ DECLARE
     selected_source_status text := COALESCE(input->>'source_status','ACTIVE');
     selected_index_coverage text := input->>'index_coverage';
     selected_unknown boolean := input->>'only_unknown_facets'='true';
+    selected_missing_text boolean := input->>'only_missing_text_projection'='true';
     selected_relation_kind text := input->>'relation_kind';
     selected_text text := input->>'text_contains';
     selected_relation_filter boolean := input ? 'relation_kind' OR
@@ -9395,6 +9415,8 @@ BEGIN
            jsonb_typeof(input->'relation_cross_trunk')<>'boolean') OR
        (input ? 'only_unknown_facets' AND
            jsonb_typeof(input->'only_unknown_facets')<>'boolean') OR
+       (input ? 'only_missing_text_projection' AND
+           jsonb_typeof(input->'only_missing_text_projection')<>'boolean') OR
        (input ? 'group_source_ids' AND (cardinality(selected_sources)=0 OR
           cardinality(selected_sources)>256)) OR
        (input ? 'source_order_from' AND NOT (input ? 'source_id')) OR
@@ -9445,6 +9467,25 @@ BEGIN
               AND f.purpose='DOCUMENT' AND f.state='READY'
             ORDER BY f.source_unit_id LIMIT 8193
         ) candidate;
+    ELSIF selected_missing_text THEN
+        SELECT array_agg(candidate.source_unit_id)
+        INTO candidate_source_ids
+        FROM (
+            SELECT DISTINCT f.source_unit_id
+            FROM __forest_module_schema__.embedding_facets f
+            JOIN __forest_module_schema__.facet_preparation_work w
+              ON w.bot_id=f.bot_id AND w.source_unit_id=f.source_unit_id
+                 AND w.state='READY'
+            WHERE f.bot_id=context->>'bot_id'
+              AND f.purpose='DOCUMENT' AND f.modality='TEXT'
+              AND NOT EXISTS (
+                  SELECT 1 FROM __forest_module_schema__.source_text_facets t
+                  WHERE t.bot_id=f.bot_id AND t.facet_id=f.facet_id
+                    AND t.source_unit_id=f.source_unit_id
+                    AND t.source_revision=f.source_revision
+                    AND t.content_digest=f.facet_content_digest)
+            ORDER BY f.source_unit_id LIMIT 8193
+        ) candidate;
     ELSIF selected_relation_filter THEN
         -- If more than 8192 contribution rows qualify, use the ordered source
         -- scan. A partial candidate list must never silently omit sources.
@@ -9473,7 +9514,8 @@ BEGIN
     IF input ? 'source_unit_id' OR
        (selected_text IS NOT NULL AND
         COALESCE(cardinality(candidate_source_ids),0)<=8192) OR
-       ((selected_unknown OR selected_index_coverage IN ('COMPLETE','PARTIAL')) AND
+       ((selected_unknown OR selected_missing_text OR
+         selected_index_coverage IN ('COMPLETE','PARTIAL')) AND
         COALESCE(cardinality(candidate_source_ids),0)<=8192) OR
        (selected_relation_filter AND candidate_relation_count<=8192) THEN
         WITH page AS (
