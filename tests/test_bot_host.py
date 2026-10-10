@@ -4498,6 +4498,66 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                                     consistency_level="Strong",
                                 )
                                 assert rows == [{"ref_id": document_ref}]
+                            async with asyncio.timeout(25):
+                                while True:
+                                    page = await web.post(
+                                        f"{base}/queries/vector.collection.retirements",
+                                        headers=headers,
+                                        json={"limit": 20, "source_kind": "OLD_BINDING"},
+                                    )
+                                    assert page.status_code == 200, page.text
+                                    retirement = next(
+                                        (item for item in page.json()["items"]
+                                         if item["binding_revision"] == 1), None,
+                                    )
+                                    if retirement is not None:
+                                        break
+                                    await asyncio.sleep(0.2)
+                            assert retirement["state"] == "QUEUED"
+                            vector_schema = module_schema_namespace("forest.vector.index")
+                            async with host.store.pool.connection() as conn, conn.transaction():
+                                timing = await (await conn.execute(sql.SQL(
+                                    "SELECT eligible_at,clock_timestamp() AS database_now "
+                                    "FROM {}.vector_collection_gc_work "
+                                    "WHERE bot_id=%s AND binding_revision=1"
+                                ).format(sql.Identifier(vector_schema)),
+                                    (settings.bot_id,),
+                                )).fetchone()
+                                assert timing["eligible_at"] > (
+                                    timing["database_now"] + timedelta(minutes=9)
+                                )
+                                await conn.execute(sql.SQL(
+                                    "UPDATE {}.vector_collection_gc_work "
+                                    "SET eligible_at=clock_timestamp()-interval '1 second' "
+                                    "WHERE bot_id=%s AND binding_revision=1 AND state='QUEUED'"
+                                ).format(sql.Identifier(vector_schema)), (settings.bot_id,))
+                            async with asyncio.timeout(50):
+                                while True:
+                                    page = await web.post(
+                                        f"{base}/queries/vector.collection.retirements",
+                                        headers=headers,
+                                        json={"limit": 20, "source_kind": "OLD_BINDING"},
+                                    )
+                                    assert page.status_code == 200, page.text
+                                    retirement = next(
+                                        item for item in page.json()["items"]
+                                        if item["binding_revision"] == 1
+                                    )
+                                    if retirement["state"] == "DELETED":
+                                        break
+                                    assert retirement["state"] != "BLOCKED", retirement
+                                    await asyncio.sleep(0.2)
+                            assert not await physical.has_collection(
+                                collection_name=old_collection_name
+                            )
+                            assert await physical.has_collection(
+                                collection_name=new_collection_name
+                            )
+                            assert await physical.get(
+                                collection_name=new_collection_name,
+                                ids=[document_ref], output_fields=["ref_id"],
+                                consistency_level="Strong",
+                            ) == [{"ref_id": document_ref}]
                         finally:
                             await physical.close()
             return
