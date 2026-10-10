@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.17.0"
+version = "2.18.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -47,6 +47,10 @@ requests = [
   "domain.command:vector.collection.quarantine",
   "domain.command:vector.audit.adjudicate",
   "domain.command:vector.rebuild.confirm",
+  "domain.command:vector.rebuild.commit",
+  "domain.command:vector.io.enter",
+  "domain.command:vector.io.exit",
+  "domain.query:vector.io.pending",
   "domain.query:vector.ref.require-query",
   "domain.query:vector.ref.filter-active",
   "domain.query:vector.ref.change-head",
@@ -80,9 +84,9 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.16.0"
+schema_version = "2.17.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "8c3d3ba4ba0b017de64c6400d2f06bb5bd9724c8547cfb5376f20553ccebb565"
+baseline_sha256 = "00b7cf3935555edcf9208847201808cfdd9793c22a16c8e9ce01eb25801b277c"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -130,6 +134,27 @@ input_schema = "schemas/rebuild-confirm-input.json"
 output_schema = "schemas/rebuild-create-output.json"
 
 [[components.domain_commands]]
+name = "vector.io.enter"
+contract = "1.0"
+function = "vector_io_enter"
+input_schema = "schemas/io-enter-input.json"
+output_schema = "schemas/io-enter-output.json"
+
+[[components.domain_commands]]
+name = "vector.io.exit"
+contract = "1.0"
+function = "vector_io_exit"
+input_schema = "schemas/io-exit-input.json"
+output_schema = "schemas/io-exit-output.json"
+
+[[components.domain_commands]]
+name = "vector.rebuild.commit"
+contract = "1.0"
+function = "vector_publish_rebuild"
+input_schema = "schemas/rebuild-publish-work-input.json"
+output_schema = "schemas/rebuild-publish-output.json"
+
+[[components.domain_commands]]
 name = "vector.ref.reserve"
 contract = "2.0"
 function = "vector_ref_reserve"
@@ -149,6 +174,13 @@ contract = "1.0"
 function = "vector_ref_tombstone"
 input_schema = "schemas/delete-input.json"
 output_schema = "schemas/delete-output.json"
+
+[[components.domain_queries]]
+name = "vector.io.pending"
+contract = "1.0"
+function = "vector_query_publish_drain"
+input_schema = "schemas/io-pending-input.json"
+output_schema = "schemas/io-pending-output.json"
 
 [[components.domain_queries]]
 name = "vector.rebuild.status"
@@ -236,6 +268,21 @@ claim_timeout_s = 5
 handler_timeout_s = 70
 settle_timeout_s = 5
 lease_seconds = 90
+
+[[components.owned_work_handlers]]
+name = "vector.rebuild.publish"
+contract = "1.0"
+handler = "vector.rebuild.publish"
+claim_function = "vector_claim_rebuild_publish"
+settle_function = "vector_settle_rebuild_publish"
+input_schema = "schemas/rebuild-publish-work-input.json"
+output_schema = "schemas/rebuild-publish-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 155
+settle_timeout_s = 5
+lease_seconds = 180
 
 [[components.owned_work_handlers]]
 name = "vector.refs.audit"

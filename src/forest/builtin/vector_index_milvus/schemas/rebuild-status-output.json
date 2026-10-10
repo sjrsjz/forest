@@ -16,7 +16,9 @@
     "error_code",
     "audit_seq",
     "audit_after_ref",
-    "audited_at"
+    "audited_at",
+    "published_at",
+    "published_seq"
   ],
   "properties": {
     "request_id": {
@@ -33,6 +35,8 @@
         "AUDIT_READY",
         "AUDIT_CLAIMED",
         "AUDITED",
+        "PUBLISHING",
+        "PUBLISHED",
         "FAILED"
       ]
     },
@@ -107,6 +111,20 @@
         "null"
       ],
       "format": "date-time"
+    },
+    "published_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "published_seq": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
     }
   }
 }

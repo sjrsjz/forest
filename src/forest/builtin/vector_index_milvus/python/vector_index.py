@@ -1,9 +1,12 @@
 """Package-owned vector service boundary and replay evidence validation."""
 
+import asyncio
 import hashlib
 import json
 import math
 import struct
+import time
+from uuid import uuid4
 
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service
@@ -79,6 +82,33 @@ async def _resolve_replay_vector(ctx, replay, ref_id, space_id, dimensions):
     return values
 
 
+async def _enter_io(ctx, space_id, binding, purpose):
+    ticket = _plain(await ctx.commands.call(
+        "vector.io.enter",
+        {"space_id": space_id, "binding": binding, "purpose": purpose},
+        operation_id=ctx.operations.stable("io-enter:" + uuid4().hex),
+        timeout=10,
+    ))
+    if ticket["binding"] != binding:
+        raise ForestError(
+            "VECTOR_IO_ADMISSION_INVALID",
+            "Physical admission confirmed another binding", 502,
+        )
+    return ticket["ticket"]
+
+
+async def _exit_io(ctx, ticket):
+    released = _plain(await ctx.commands.call(
+        "vector.io.exit", {"ticket": ticket},
+        operation_id=ctx.operations.stable("io-exit:" + ticket), timeout=10,
+    ))
+    if released != {"ticket": ticket}:
+        raise ForestError(
+            "VECTOR_IO_RELEASE_INVALID",
+            "Physical admission released another ticket", 502,
+        )
+
+
 class MilvusVectorIndex(Plugin):
     """Own public vector contracts; the bound effect performs Milvus I/O."""
 
@@ -126,39 +156,43 @@ class MilvusVectorIndex(Plugin):
                 "VECTOR_REF_RESERVATION_INVALID",
                 "Ref reservation confirmed another vector", 502,
             )
-        written = _plain(await ctx.services.call(
-            "vector.transport.upsert",
-            {**request, "input_digest": reserved["input_digest"],
-             "binding": reserved["binding"]},
-            operation_id=ctx.operations.stable(
-                "milvus-upsert:" + request["ref_id"] + ":" +
-                str(reserved["binding"]["binding_revision"])
-            ),
-            contract_major=3,
-            timeout=30,
-        ))
-        if written != {"ref_id": request["ref_id"], "space_id": self.space_id}:
-            raise ForestError(
-                "VECTOR_TRANSPORT_RESULT_INVALID",
-                "Milvus transport confirmed another vector", 502,
-            )
-        activated = _plain(await ctx.commands.call(
-            "vector.ref.activate",
-            {"ref_id": request["ref_id"], "input_digest": reserved["input_digest"],
-             "binding": reserved["binding"]},
-            operation_id=ctx.operations.stable(
-                "activate-ref:" + request["ref_id"] + ":" +
-                str(reserved["binding"]["binding_revision"])
-            ),
-            contract_major=2, timeout=10,
-        ))
-        if activated != {"ref_id": request["ref_id"],
-                         "space_id": self.space_id, "state": "ACTIVE"}:
-            raise ForestError(
-                "VECTOR_REF_ACTIVATION_INVALID",
-                "Ref activation confirmed another vector", 502,
-            )
-        return {"ref_id": request["ref_id"], "space_id": self.space_id}
+        ticket = await _enter_io(ctx, self.space_id, reserved["binding"], "UPSERT")
+        try:
+            written = _plain(await ctx.services.call(
+                "vector.transport.upsert",
+                {**request, "input_digest": reserved["input_digest"],
+                 "binding": reserved["binding"]},
+                operation_id=ctx.operations.stable(
+                    "milvus-upsert:" + request["ref_id"] + ":" +
+                    str(reserved["binding"]["binding_revision"])
+                ),
+                contract_major=3,
+                timeout=30,
+            ))
+            if written != {"ref_id": request["ref_id"], "space_id": self.space_id}:
+                raise ForestError(
+                    "VECTOR_TRANSPORT_RESULT_INVALID",
+                    "Milvus transport confirmed another vector", 502,
+                )
+            activated = _plain(await ctx.commands.call(
+                "vector.ref.activate",
+                {"ref_id": request["ref_id"], "input_digest": reserved["input_digest"],
+                 "binding": reserved["binding"]},
+                operation_id=ctx.operations.stable(
+                    "activate-ref:" + request["ref_id"] + ":" +
+                    str(reserved["binding"]["binding_revision"])
+                ),
+                contract_major=2, timeout=10,
+            ))
+            if activated != {"ref_id": request["ref_id"],
+                             "space_id": self.space_id, "state": "ACTIVE"}:
+                raise ForestError(
+                    "VECTOR_REF_ACTIVATION_INVALID",
+                    "Ref activation confirmed another vector", 502,
+                )
+            return {"ref_id": request["ref_id"], "space_id": self.space_id}
+        finally:
+            await _exit_io(ctx, ticket)
 
     @service(
         "vector.index.search", semantics="read", contract="2.0",
@@ -393,6 +427,58 @@ class MilvusVectorIndex(Plugin):
             "done": done,
         }
 
+    @job("vector.rebuild.publish")
+    async def publish_rebuild_candidate(self, task, ctx):
+        request = _plain(task["payload"])
+        if request["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_REBUILD_SPACE_MISMATCH",
+                "Candidate belongs to another vector space", 409,
+            )
+        deadline = time.monotonic() + 105
+        while True:
+            pending = _plain(await ctx.queries.call(
+                "vector.io.pending",
+                {"request_id": request["request_id"],
+                 "claim_token": request["claim_token"]},
+                timeout=10,
+            ))
+            if pending["active_count"] == 0:
+                break
+            if time.monotonic() >= deadline:
+                raise ForestError(
+                    "VECTOR_REBUILD_DRAIN_TIMEOUT",
+                    "Old vector calls did not drain", 503,
+                )
+            await asyncio.sleep(0.25)
+        physical = _plain(await ctx.services.call(
+            "vector.transport.audit",
+            {"space_id": self.space_id, "mode": "SCAN", "after_ref": None,
+             "limit": 1, "binding": {
+                 "binding_revision": request["candidate_revision"],
+                 "collection_id": request["collection_id"],
+                 "collection_name": request["collection_name"],
+             }},
+            operation_id=ctx.operations.stable(
+                "publish-probe:" + request["request_id"] + ":" +
+                str(request["candidate_revision"])
+            ),
+            contract_major=2, timeout=35,
+        ))
+        if physical["space_id"] != self.space_id or physical["mode"] != "SCAN":
+            raise ForestError(
+                "VECTOR_REBUILD_PHYSICAL_MISMATCH",
+                "Candidate physical identity probe failed", 409,
+            )
+        return await ctx.commands.call(
+            "vector.rebuild.commit", request,
+            operation_id=ctx.operations.stable(
+                "publish-commit:" + request["request_id"] + ":" +
+                str(request["candidate_revision"])
+            ),
+            timeout=10,
+        )
+
     @job("vector.refs.audit")
     async def audit_refs(self, task, ctx):
         request = _plain(task["payload"])
@@ -516,16 +602,20 @@ class MilvusVectorIndex(Plugin):
                 "VECTOR_SWEEP_SPACE_MISMATCH",
                 "Tombstone sweep belongs to another vector space", 409,
             )
-        response = _plain(await ctx.services.call(
-            "vector.transport.prune", request,
-            operation_id=ctx.operations.stable("milvus-prune:" + _digest(request)[7:]),
-            contract_major=2, timeout=30,
-        ))
-        if response != {
-            "ref_ids": request["ref_ids"], "space_id": request["space_id"],
-        }:
-            raise ForestError(
-                "VECTOR_SWEEP_RESULT_INVALID",
-                "Milvus prune confirmed another tombstone batch", 502,
-            )
-        return response
+        ticket = await _enter_io(ctx, self.space_id, request["binding"], "SWEEP")
+        try:
+            response = _plain(await ctx.services.call(
+                "vector.transport.prune", request,
+                operation_id=ctx.operations.stable("milvus-prune:" + _digest(request)[7:]),
+                contract_major=2, timeout=30,
+            ))
+            if response != {
+                "ref_ids": request["ref_ids"], "space_id": request["space_id"],
+            }:
+                raise ForestError(
+                    "VECTOR_SWEEP_RESULT_INVALID",
+                    "Milvus prune confirmed another tombstone batch", 502,
+                )
+            return response
+        finally:
+            await _exit_io(ctx, ticket)

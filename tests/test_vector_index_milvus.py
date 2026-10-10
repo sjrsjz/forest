@@ -132,6 +132,10 @@ async def test_vector_package_validates_replay_payload_before_milvus_effect():
                 "binding": {"binding_revision": 1, "collection_id": 42,
                             "collection_name": "test_collection"},
             }
+        if name == "vector.io.enter":
+            return {"ticket": "test-ticket", "binding": payload["binding"]}
+        if name == "vector.io.exit":
+            return {"ticket": payload["ticket"]}
         assert name == "vector.ref.activate"
         return {"ref_id": payload["ref_id"], "space_id": "space/test",
                 "state": "ACTIVE"}
@@ -145,7 +149,8 @@ async def test_vector_package_validates_replay_payload_before_milvus_effect():
     assert await component.upsert(request, ctx) == {
         "ref_id": "facet/one", "space_id": "space/test"
     }
-    assert command_calls == ["vector.ref.reserve", "vector.ref.activate"]
+    assert command_calls == ["vector.ref.reserve", "vector.io.enter",
+                             "vector.ref.activate", "vector.io.exit"]
     assert calls[0][1]["input_digest"] == digest_json(request)
     assert len(calls) == 1 and calls[0][0] == "vector.transport.upsert"
     assert calls[0][1]["input_digest"] == digest_json(request)
@@ -800,14 +805,17 @@ async def test_rebuild_candidate_audit_paginates_frozen_refs(
             (bot_id, digest, space_id, name + "_r2"),
         )
 
-    async def domain(function, payload):
+    async def domain(function, payload, *, operation_id=None, allow_error=False):
         async with store.pool.connection() as conn, conn.transaction():
             row = await (await conn.execute(
                 sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result")
                 .format(sql.Identifier(namespace), sql.Identifier(function)),
-                (Jsonb({"bot_id": bot_id}), Jsonb(payload)),
+                (Jsonb({"bot_id": bot_id, "operation_id": operation_id}),
+                 Jsonb(payload)),
             )).fetchone()
-        assert row["result"]["ok"]
+        if allow_error:
+            return row["result"]
+        assert row["result"]["ok"], row["result"]
         return row["result"]["value"]
 
     claim = {"protocol": "forest.owned-work-claim-request/1",
@@ -865,6 +873,79 @@ async def test_rebuild_candidate_audit_paginates_frozen_refs(
     assert status["state"] == "AUDITED"
     assert status["audit_after_ref"] == "ref/audit/064"
     assert status["audited_at"] is not None
+
+    old_binding = {"binding_revision": 1, "collection_id": 41,
+                   "collection_name": name}
+    old_ticket = await domain("vector_io_enter", {
+        "space_id": space_id, "binding": old_binding, "purpose": "UPSERT",
+    }, operation_id="audit/page/old-io")
+    assert old_ticket["ticket"] == "audit/page/old-io"
+    publish_claim = await domain("vector_claim_rebuild_publish", {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "audit/page/publish", "lease_seconds": 180,
+    })
+    assert publish_claim["payload"]["audit_seq"] == 65
+    assert (await domain("vector_query_rebuild", {
+        "request_id": "audit/page", "requested_by": "admin",
+    }))["state"] == "PUBLISHING"
+    refused = await domain("vector_io_enter", {
+        "space_id": space_id, "binding": old_binding, "purpose": "UPSERT",
+    }, operation_id="audit/page/new-io", allow_error=True)
+    assert refused["error"]["code"] == "VECTOR_INDEX_SWITCHING"
+    assert (await domain("vector_query_publish_drain", {
+        "request_id": "audit/page", "claim_token": publish_claim["claim_token"],
+    }))["active_count"] == 1
+    pending = await domain("vector_publish_rebuild", publish_claim["payload"],
+                           allow_error=True)
+    assert pending["error"]["code"] == "VECTOR_REBUILD_DRAIN_PENDING"
+    await domain("vector_io_exit", {"ticket": old_ticket["ticket"]})
+    assert (await domain("vector_query_publish_drain", {
+        "request_id": "audit/page", "claim_token": publish_claim["claim_token"],
+    }))["active_count"] == 0
+    async def publish_query(name, payload, **_options):
+        assert name == "vector.io.pending"
+        return await domain("vector_query_publish_drain", payload)
+
+    async def publish_service(service_name, payload, **_options):
+        assert service_name == "vector.transport.audit"
+        assert payload["binding"] == {
+            "binding_revision": 2, "collection_id": 42,
+            "collection_name": name + "_r2",
+        }
+        return {"space_id": space_id, "mode": "SCAN",
+                "rows": [], "next_ref": None, "done": True}
+
+    async def publish_command(name, payload, **_options):
+        assert name == "vector.rebuild.commit"
+        return await domain("vector_publish_rebuild", payload)
+
+    component = MilvusVectorIndex()
+    component.space_id = space_id
+    publish_ctx = SimpleNamespace(
+        queries=SimpleNamespace(call=publish_query),
+        services=SimpleNamespace(call=publish_service),
+        commands=SimpleNamespace(call=publish_command),
+        operations=SimpleNamespace(stable=lambda value: value),
+    )
+    publication = await component.publish_rebuild_candidate(
+        {"payload": publish_claim["payload"]}, publish_ctx,
+    )
+    assert publication["binding_revision"] == 2
+    assert publication["published_seq"] == 65
+    assert await domain("vector_publish_rebuild", publish_claim["payload"]) == publication
+    await domain("vector_settle_rebuild_publish", {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": publish_claim["work_id"],
+        "claim_token": publish_claim["claim_token"],
+        "attempt": publish_claim["attempt"],
+        "outcome": {"status": "SUCCEEDED", "result": publication},
+    })
+    current = await domain("vector_collection_current", {"space_id": space_id})
+    assert current["binding"]["binding_revision"] == 2
+    assert current["binding"]["collection_id"] == 42
+    assert (await domain("vector_query_rebuild", {
+        "request_id": "audit/page", "requested_by": "admin",
+    }))["state"] == "PUBLISHED"
 
 
 @pytest.mark.asyncio

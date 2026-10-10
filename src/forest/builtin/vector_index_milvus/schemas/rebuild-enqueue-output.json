@@ -22,6 +22,8 @@
         "AUDIT_READY",
         "AUDIT_CLAIMED",
         "AUDITED",
+        "PUBLISHING",
+        "PUBLISHED",
         "FAILED"
       ]
     },
