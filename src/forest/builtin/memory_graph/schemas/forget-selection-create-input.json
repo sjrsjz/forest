@@ -20,6 +20,7 @@
         "author_subject_ref": {"$ref": "#/$defs/id"},
         "modality": {"enum": ["TEXT", "IMAGE", "MIXED", "CONTROL"]},
         "unit_kind": {"type": "string", "minLength": 1, "maxLength": 128},
+        "text_contains": {"type": "string", "minLength": 2, "maxLength": 64},
         "eligibility_state": {"enum": ["REGISTERED", "ELIGIBLE"]},
         "source_status": {"enum": ["ACTIVE", "RETIRED"]},
         "relation_kind": {"enum": ["ASSOCIATES_WITH", "EVIDENCE", "CONTRADICTS", "SUBJECT_OF"]},

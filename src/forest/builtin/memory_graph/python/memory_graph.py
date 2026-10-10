@@ -5,7 +5,7 @@ from embedding_work import dispatch as dispatch_embedding
 from embedding_work import recover as recover_embedding
 from evidence_materialization import materialize as materialize_evidence
 from facet_preparation import (
-    FACET_BATCH_SIZE,
+    DOCUMENT_FACET_BATCH_SIZE,
     MAX_DOCUMENT_FACETS,
     MAX_QUERY_FACETS,
     MAX_QUERY_IMAGE_BYTES,
@@ -454,14 +454,21 @@ class MemoryGraph(Plugin):
                             "error_code": "MEMORY_TEXT_INVALID",
                         }
                 try:
-                    facets.extend(document_facets(
+                    part_facets = document_facets(
                         source_unit_id, source_revision, space_id, [part], text_parts
-                    ))
+                    )
                 except ValueError:
                     return {
                         "disposition": "FAILED", "facet_count": 0,
                         "error_code": "MEMORY_FACET_SOURCE_INVALID",
                     }
+                if part["part_kind"] == "TEXT":
+                    content = text_parts[part["part_id"]]
+                    for facet in part_facets:
+                        facet["search_text"] = content[
+                            facet["selector_start_char"]:facet["selector_end_char"]
+                        ]
+                facets.extend(part_facets)
                 if len(facets) > MAX_DOCUMENT_FACETS:
                     return {
                         "disposition": "FAILED", "facet_count": 0,
@@ -483,8 +490,8 @@ class MemoryGraph(Plugin):
                 "Archived source has too many parts for facet preparation",
                 409,
             )
-        for batch_index, offset in enumerate(range(0, len(facets), FACET_BATCH_SIZE)):
-            batch = facets[offset:offset + FACET_BATCH_SIZE]
+        for batch_index, offset in enumerate(range(0, len(facets), DOCUMENT_FACET_BATCH_SIZE)):
+            batch = facets[offset:offset + DOCUMENT_FACET_BATCH_SIZE]
             await ctx.uow.call(
                 "memory.prepare-document-facets",
                 {

@@ -137,7 +137,8 @@
         },
         "input_payload": {
           "$ref": "#/$defs/payload"
-        }
+        },
+        "search_text": {"type": "string", "minLength": 1, "maxLength": 2048}
       }
     },
     "document_input": {
@@ -176,9 +177,16 @@
         "facets": {
           "type": "array",
           "minItems": 1,
-          "maxItems": 64,
+          "maxItems": 16,
           "items": {
-            "$ref": "#/$defs/facet"
+            "allOf": [
+              {"$ref": "#/$defs/facet"},
+              {
+                "if": {"properties": {"modality": {"const": "TEXT"}}},
+                "then": {"required": ["search_text"]},
+                "else": {"not": {"required": ["search_text"]}}
+              }
+            ]
           }
         }
       }

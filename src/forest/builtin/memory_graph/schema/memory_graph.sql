@@ -819,6 +819,31 @@ CREATE TABLE embedding_facets (
     UNIQUE (bot_id,index_ref_id)
 );
 
+CREATE FUNCTION memory_text_bigrams(content text)
+RETURNS text[] LANGUAGE sql IMMUTABLE PARALLEL SAFE SET search_path = pg_catalog AS $$
+    SELECT COALESCE(array_agg(DISTINCT substring(lower(content) FROM n FOR 2)),
+                    ARRAY[]::text[])
+    FROM generate_series(1,greatest(char_length(content)-1,0)) n;
+$$;
+
+CREATE TABLE source_text_facets (
+    bot_id text NOT NULL,
+    facet_id text NOT NULL,
+    source_unit_id text NOT NULL,
+    source_revision bigint NOT NULL CHECK (source_revision > 0),
+    content text NOT NULL CHECK (octet_length(content) BETWEEN 1 AND 8192),
+    content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[a-f0-9]{64}$'),
+    created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    grams text[] GENERATED ALWAYS AS
+        (__forest_module_schema__.memory_text_bigrams(content)) STORED,
+    PRIMARY KEY (bot_id,facet_id),
+    FOREIGN KEY (bot_id,facet_id) REFERENCES embedding_facets(bot_id,facet_id),
+    FOREIGN KEY (bot_id,source_unit_id,source_revision)
+        REFERENCES source_units(bot_id,source_unit_id,source_revision)
+);
+CREATE INDEX source_text_facets_grams_idx ON source_text_facets USING gin(grams);
+CREATE INDEX source_text_facets_source_idx ON source_text_facets(bot_id,source_unit_id);
+
 CREATE TABLE query_match_preparations (
     bot_id text NOT NULL,
     query_id text NOT NULL,
@@ -5005,6 +5030,7 @@ DECLARE
     start_value integer;
     end_value integer;
     byte_count integer;
+    search_content text;
     facet_count integer;
     part_modality text;
     part_payload_id text;
@@ -5039,7 +5065,7 @@ BEGIN
        OR body->>'batch_index' IS NULL OR body->>'batch_index' !~ '^[0-9]+$'
        OR jsonb_typeof(facets) IS DISTINCT FROM 'array'
        OR jsonb_array_length(facets) NOT BETWEEN 0 AND 64
-       OR (purpose_value='DOCUMENT' AND jsonb_array_length(facets)=0) THEN
+       OR (purpose_value='DOCUMENT' AND jsonb_array_length(facets) NOT BETWEEN 1 AND 16) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_FACET_INPUT_INVALID',
                 'message','Facet input is invalid','status',422));
@@ -5157,6 +5183,7 @@ BEGIN
         reference := facet->'input_payload';
         modality_value := facet->>'modality';
         byte_count := (facet->>'input_byte_length')::integer;
+        search_content := facet->>'search_text';
         start_value := (facet->>'selector_start_char')::integer;
         end_value := (facet->>'selector_end_char')::integer;
         IF input_kind_value='SOURCE_UNIT' THEN
@@ -5197,6 +5224,13 @@ BEGIN
            OR reference->>'owner_id' IS DISTINCT FROM part_owner_id
            OR facet->>'facet_content_digest' !~ '^sha256:[a-f0-9]{64}$'
            OR byte_count NOT BETWEEN 1 AND 33554432
+           OR (purpose_value='DOCUMENT' AND modality_value='TEXT' AND
+               (search_content IS NULL OR octet_length(search_content) NOT BETWEEN 1 AND 8192
+                OR octet_length(search_content) IS DISTINCT FROM byte_count
+                OR 'sha256:'||encode(sha256(convert_to(search_content,'UTF8')),'hex')
+                   IS DISTINCT FROM facet->>'facet_content_digest'))
+           OR ((purpose_value<>'DOCUMENT' OR modality_value='IMAGE') AND
+               facet ? 'search_text')
            OR (modality_value='TEXT' AND
                (start_value IS NULL OR end_value IS NULL OR start_value<0 OR end_value<=start_value))
            OR (modality_value='IMAGE' AND
@@ -5244,7 +5278,26 @@ BEGIN
            OR existing_row.accepted_deletion_epoch IS DISTINCT FROM accepted_epoch THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','MEMORY_FACET_IDENTITY_CONFLICT',
-                    'message','Facet identity names different source content','status',409));
+                'message','Facet identity names different source content','status',409));
+        END IF;
+        IF purpose_value='DOCUMENT' AND modality_value='TEXT' THEN
+            INSERT INTO __forest_module_schema__.source_text_facets(
+                bot_id,facet_id,source_unit_id,source_revision,content,content_digest)
+            VALUES(requested_bot,facet->>'facet_id',source_id_value,input_revision_value,
+                   search_content,facet->>'facet_content_digest')
+            ON CONFLICT (bot_id,facet_id) DO NOTHING;
+            IF NOT EXISTS (
+                SELECT 1 FROM __forest_module_schema__.source_text_facets t
+                WHERE t.bot_id=requested_bot AND t.facet_id=facet->>'facet_id'
+                  AND t.source_unit_id=source_id_value
+                  AND t.source_revision=input_revision_value
+                  AND t.content_digest=facet->>'facet_content_digest'
+                  AND t.content=search_content
+            ) THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','MEMORY_TEXT_PROJECTION_CONFLICT',
+                        'message','Text search projection differs from its facet','status',409));
+            END IF;
         END IF;
     END LOOP;
     INSERT INTO __forest_module_schema__.facet_preparation_operations(
@@ -7677,6 +7730,8 @@ BEGIN
     SET eligibility_state='SUPPRESSED',input_batch_ref=NULL,context_revision=NULL
     WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids)
       AND eligibility_state<>'SUPPRESSED';
+    DELETE FROM __forest_module_schema__.source_text_facets
+    WHERE bot_id=requested_bot AND source_unit_id=ANY(affected_ids);
     INSERT INTO __forest_module_schema__.vector_index_deletions(
         bot_id,index_ref_id,space_id,deletion_epoch)
     SELECT bot_id,facet_id,space_id,deletion_epoch_value
@@ -9211,6 +9266,15 @@ LANGUAGE sql STABLE AS $$
            u.author_subject_ref=filters->>'author_subject_ref')
       AND (filters->>'modality' IS NULL OR u.modality=filters->>'modality')
       AND (filters->>'unit_kind' IS NULL OR u.unit_kind=filters->>'unit_kind')
+      AND (filters->>'text_contains' IS NULL OR EXISTS (
+          SELECT 1 FROM __forest_module_schema__.source_text_facets t
+          WHERE t.bot_id=u.bot_id AND t.source_unit_id=u.source_unit_id
+            AND t.source_revision=u.source_revision
+            AND pg_catalog.pg_visible_in_snapshot(t.created_xid,snapshot_value)
+            AND t.grams @> __forest_module_schema__.memory_text_bigrams(
+                filters->>'text_contains')
+            AND pg_catalog.strpos(pg_catalog.lower(t.content),
+                pg_catalog.lower(filters->>'text_contains'))>0))
       AND (filters->>'index_coverage' IS NULL OR
            coverage.index_coverage=filters->>'index_coverage')
       AND (filters->>'only_unknown_facets' IS DISTINCT FROM 'true' OR
@@ -9241,6 +9305,7 @@ DECLARE
     selected_index_coverage text := input->>'index_coverage';
     selected_unknown boolean := input->>'only_unknown_facets'='true';
     selected_relation_kind text := input->>'relation_kind';
+    selected_text text := input->>'text_contains';
     selected_relation_filter boolean := input ? 'relation_kind' OR
                                         input ? 'relation_cross_trunk';
     candidate_relation_count integer;
@@ -9271,6 +9336,9 @@ BEGIN
            ('NO_FACETS','NOT_READY','PARTIAL','COMPLETE')) OR
        (selected_relation_kind IS NOT NULL AND selected_relation_kind NOT IN
            ('ASSOCIATES_WITH','EVIDENCE','CONTRADICTS','SUBJECT_OF')) OR
+       (selected_text IS NOT NULL AND
+           (char_length(selected_text) NOT BETWEEN 2 AND 64 OR
+            octet_length(selected_text)>256)) OR
        (input ? 'relation_cross_trunk' AND
            jsonb_typeof(input->'relation_cross_trunk')<>'boolean') OR
        (input ? 'only_unknown_facets' AND
@@ -9293,6 +9361,18 @@ BEGIN
     -- set is large, use the ordered source scan rather than materializing it.
     IF input ? 'source_unit_id' THEN
         candidate_source_ids := ARRAY[input->>'source_unit_id'];
+    ELSIF selected_text IS NOT NULL THEN
+        SELECT array_agg(candidate.source_unit_id)
+        INTO candidate_source_ids
+        FROM (
+            SELECT DISTINCT t.source_unit_id
+            FROM __forest_module_schema__.source_text_facets t
+            WHERE t.bot_id=context->>'bot_id'
+              AND pg_visible_in_snapshot(t.created_xid,snapshot_value)
+              AND t.grams @> __forest_module_schema__.memory_text_bigrams(selected_text)
+              AND strpos(lower(t.content),lower(selected_text))>0
+            ORDER BY t.source_unit_id LIMIT 8193
+        ) candidate;
     ELSIF selected_unknown THEN
         SELECT array_agg(candidate.source_unit_id)
         INTO candidate_source_ids
@@ -9339,6 +9419,8 @@ BEGIN
         INTO candidate_relation_count,candidate_source_ids;
     END IF;
     IF input ? 'source_unit_id' OR
+       (selected_text IS NOT NULL AND
+        COALESCE(cardinality(candidate_source_ids),0)<=8192) OR
        ((selected_unknown OR selected_index_coverage IN ('COMPLETE','PARTIAL')) AND
         COALESCE(cardinality(candidate_source_ids),0)<=8192) OR
        (selected_relation_filter AND candidate_relation_count<=8192) THEN
