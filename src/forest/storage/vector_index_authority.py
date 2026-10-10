@@ -122,27 +122,3 @@ class VectorIndexRefRepository:
                 ).format(self._table()),
                 (self.store.bot_id, ref_id),
             )
-
-    async def claim_due_sweep(self, *, limit: int = 128) -> list[str]:
-        async with self.store.pool.connection() as conn, conn.transaction():
-            rows = await (
-                await conn.execute(
-                    sql.SQL(
-                        "SELECT ref_id,sweep_count FROM {} WHERE bot_id=%s "
-                        "AND state='TOMBSTONED' AND next_sweep_at<=clock_timestamp() "
-                        "ORDER BY next_sweep_at,ref_id LIMIT %s FOR UPDATE SKIP LOCKED"
-                    ).format(self._table()),
-                    (self.store.bot_id, limit),
-                )
-            ).fetchall()
-            for row in rows:
-                delay = min(30 * (2 ** min(row["sweep_count"] + 1, 12)), 86400)
-                await conn.execute(
-                    sql.SQL(
-                        "UPDATE {} SET sweep_count=sweep_count+1,"
-                        "next_sweep_at=clock_timestamp()+(%s*interval '1 second') "
-                        "WHERE bot_id=%s AND ref_id=%s"
-                    ).format(self._table()),
-                    (delay, self.store.bot_id, row["ref_id"]),
-                )
-            return [row["ref_id"] for row in rows]

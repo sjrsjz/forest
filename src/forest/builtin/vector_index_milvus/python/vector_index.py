@@ -5,7 +5,7 @@ import json
 import math
 
 from forest.errors import ForestError
-from forest.sdk import Plugin, service
+from forest.sdk import Plugin, job, service
 
 
 def _plain(value):
@@ -120,3 +120,23 @@ class MilvusVectorIndex(Plugin):
             operation_id=ctx.operations.stable("milvus-delete:" + _digest(request)[7:]),
             timeout=30,
         )
+
+    @job("vector.tombstones.sweep")
+    async def sweep_tombstones(self, task, ctx):
+        request = _plain(task["payload"])
+        if request["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_SWEEP_SPACE_MISMATCH",
+                "Tombstone sweep belongs to another vector space", 409,
+            )
+        response = _plain(await ctx.services.call(
+            "vector.transport.prune", request,
+            operation_id=ctx.operations.stable("milvus-prune:" + _digest(request)[7:]),
+            timeout=30,
+        ))
+        if response != request:
+            raise ForestError(
+                "VECTOR_SWEEP_RESULT_INVALID",
+                "Milvus prune confirmed another tombstone batch", 502,
+            )
+        return response

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.5.1"
+version = "2.6.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -38,7 +38,8 @@ requests = [
   "payload.read",
   "service.call:vector.transport.upsert",
   "service.call:vector.transport.search",
-  "service.call:vector.transport.delete"
+  "service.call:vector.transport.delete",
+  "service.call:vector.transport.prune"
 ]
 
 [components.resources]
@@ -68,12 +69,27 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.4.1"
+schema_version = "2.5.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "68c9ec2fb9b67694623ea9c38a035e1da9b2464c786f4fe134a804be134ace68"
+baseline_sha256 = "315d213b9fa5bd9e1e294e1b55185e5f44a3381e09a6f4ad54ec8d2446e709fc"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
+
+[[components.owned_work_handlers]]
+name = "vector.tombstones.sweep"
+contract = "1.0"
+handler = "vector.tombstones.sweep"
+claim_function = "vector_claim_tombstone_sweep"
+settle_function = "vector_settle_tombstone_sweep"
+input_schema = "schemas/delete-input.json"
+output_schema = "schemas/delete-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 40
+settle_timeout_s = 5
+lease_seconds = 60
 
 [[components.provides]]
 name = "vector.index.upsert"
@@ -114,6 +130,14 @@ output_schema = "schemas/search-output.json"
 
 [[components.effect_services]]
 name = "vector.transport.delete"
+contract = "1.0"
+kind = "vector-index.milvus"
+semantics = "idempotent"
+input_schema = "schemas/delete-input.json"
+output_schema = "schemas/delete-output.json"
+
+[[components.effect_services]]
+name = "vector.transport.prune"
 contract = "1.0"
 kind = "vector-index.milvus"
 semantics = "idempotent"

@@ -23,7 +23,8 @@ from forest.storage.vector_index_authority import VectorIndexRefRepository
 _REF = re.compile(r"[^\x00]{1,256}\Z")
 _LOG = logging.getLogger(__name__)
 _SERVICES = frozenset(
-    {"vector.transport.upsert", "vector.transport.search", "vector.transport.delete"}
+    {"vector.transport.upsert", "vector.transport.search",
+     "vector.transport.delete", "vector.transport.prune"}
 )
 
 
@@ -83,7 +84,6 @@ class MilvusVectorIndexEffectDriver:
         self.client = None
         self.accepting = False
         self.rebuild_required = False
-        self._sweep_task = None
 
     async def start(self) -> None:
         token = await _call(
@@ -113,38 +113,6 @@ class MilvusVectorIndexEffectDriver:
                 _LOG.warning("Vector index client close failed after startup error")
             raise
         self.accepting = True
-        self._start_sweeper()
-
-    def _start_sweeper(self) -> None:
-        if (self.service_id == "vector.transport.delete"
-                and not self.rebuild_required and self._sweep_task is None):
-            self._sweep_task = asyncio.create_task(self._sweep_tombstones())
-
-    async def _stop_sweeper(self) -> None:
-        task, self._sweep_task = self._sweep_task, None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-
-    async def _sweep_tombstones(self) -> None:
-        while True:
-            try:
-                refs = await self.refs.claim_due_sweep()
-                if refs:
-                    async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                        await self.client.delete(
-                            collection_name=self.collection_name, ids=refs
-                        )
-                else:
-                    await asyncio.sleep(10)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                _LOG.warning("Vector tombstone sweep failed: %s", type(exc).__name__)
-                await asyncio.sleep(10)
 
     def _collection_id(self, description) -> int:
         collection_id = description.get("collection_id")
@@ -292,6 +260,8 @@ class MilvusVectorIndexEffectDriver:
             return await self._upsert(payload)
         if self.service_id == "vector.transport.search":
             return await self._search(payload)
+        if self.service_id == "vector.transport.prune":
+            return await self._prune(payload)
         return await self._delete(payload)
 
     async def _upsert(self, payload):
@@ -428,10 +398,7 @@ class MilvusVectorIndexEffectDriver:
                     )
                 # With no collection, the durable tombstone is the deletion result.
                 if not self.rebuild_required:
-                    async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                        await self.client.delete(
-                            collection_name=self.collection_name, ids=list(refs)
-                        )
+                    await self._prune(payload)
         except ForestError:
             raise
         except (TimeoutError, MilvusException, OSError, psycopg.Error) as exc:
@@ -440,20 +407,34 @@ class MilvusVectorIndexEffectDriver:
             ) from exc
         return {"ref_ids": list(refs), "space_id": payload["space_id"]}
 
+    async def _prune(self, payload):
+        refs = tuple(payload["ref_ids"])
+        if any(not _valid_ref(item) for item in refs):
+            raise ForestError(
+                "VECTOR_INDEX_INPUT_INVALID", "Vector deletion refs are invalid", 422
+            )
+        try:
+            async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                await self.client.delete(
+                    collection_name=self.collection_name, ids=list(refs)
+                )
+        except (TimeoutError, MilvusException, OSError) as exc:
+            raise ForestError(
+                "VECTOR_INDEX_DELETE_UNAVAILABLE", "Milvus deletion failed", 503
+            ) from exc
+        return {"ref_ids": list(refs), "space_id": payload["space_id"]}
+
     async def quiesce(self) -> None:
         self.accepting = False
-        await self._stop_sweeper()
 
     async def resume(self) -> None:
         if self.client is None:
             await self.start()
         else:
             self.accepting = True
-            self._start_sweeper()
 
     async def close(self) -> None:
         self.accepting = False
-        await self._stop_sweeper()
         client, self.client = self.client, None
         if client is not None:
             await client.close()

@@ -8,6 +8,8 @@ from uuid import uuid4
 
 import pytest
 from jsonschema import Draft202012Validator
+from psycopg import sql
+from psycopg.types.json import Jsonb
 from pymilvus import DataType
 from test_schema_bundles import clean_authority as clean_authority
 
@@ -22,6 +24,7 @@ from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.package_effects import PackageEffectDriverRegistry
 from forest.packages import PackageCatalog, digest_json
+from forest.schema_bundles import module_schema_namespace
 from forest.vector_index_effect_driver import (
     MilvusVectorIndexEffectDriver,
     milvus_vector_index_effect_driver_factory,
@@ -257,6 +260,152 @@ async def test_missing_collection_with_active_refs_requires_rebuild(clean_author
     await search.close()
     await delete.close()
     assert all(client.closed for client in clients)
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
+async def test_tombstone_sweep_claim_and_settle_are_package_owned(clean_authority, tmp_path):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    space_id = "space/sweep/" + uuid4().hex
+    await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
+        PackageCatalog(tmp_path / "sweep-packages"),
+        store, installer, kernel=kernel,
+        initial_configuration=official_builtin_configuration(
+            "vector_index_milvus",
+            overrides={"space_id": space_id, "dimensions": 4},
+        ),
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "vector-index.milvus": lambda *_args: None,
+        }),
+    )
+    namespace = module_schema_namespace("forest.vector.index")
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.vector_index_refs"
+                "(bot_id,ref_id,space_id,state,tombstoned_at,next_sweep_at) "
+                "VALUES (%s,'ref/a',%s,'TOMBSTONED',clock_timestamp(),"
+                "clock_timestamp()-interval '1 second'),"
+                "(%s,'ref/b',%s,'TOMBSTONED',clock_timestamp(),"
+                "clock_timestamp()-interval '1 second')"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id, space_id, store.bot_id, space_id),
+        )
+
+    async def invoke(function, payload):
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result").format(
+                        sql.Identifier(namespace), sql.Identifier(function)
+                    ),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb(payload)),
+                )
+            ).fetchone()
+        return row["result"]
+
+    claim = {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "claim/vector-sweep/one", "lease_seconds": 60,
+    }
+    first = await invoke("vector_claim_tombstone_sweep", claim)
+    assert first["ok"]
+    work = first["value"]
+    assert work["payload"] == {"space_id": space_id, "ref_ids": ["ref/a", "ref/b"]}
+    assert (await invoke("vector_claim_tombstone_sweep", claim))["value"] == work
+    assert (await invoke("vector_claim_tombstone_sweep", {
+        **claim, "claim_token": "claim/vector-sweep/two",
+    }))["value"] is None
+
+    settlement = {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": work["work_id"], "claim_token": claim["claim_token"],
+        "attempt": work["attempt"],
+        "outcome": {"status": "SUCCEEDED", "result": work["payload"]},
+    }
+    settled = await invoke("vector_settle_tombstone_sweep", settlement)
+    assert settled["ok"]
+    assert (await invoke("vector_settle_tombstone_sweep", settlement)) == settled
+    conflict = await invoke("vector_settle_tombstone_sweep", {
+        **settlement, "outcome": {"status": "FAILED", "error": {"code": "test"}},
+    })
+    assert conflict["error"]["code"] == "VECTOR_SWEEP_SETTLE_CONFLICT"
+    async with store.pool.connection() as conn:
+        rows = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT ref_id,sweep_count,sweep_claim_token,"
+                    "next_sweep_at>clock_timestamp() AS rescheduled "
+                    "FROM {}.vector_index_refs WHERE bot_id=%s ORDER BY ref_id"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id,),
+            )
+        ).fetchall()
+    assert [(row["ref_id"], row["sweep_count"], row["sweep_claim_token"],
+             row["rescheduled"]) for row in rows] == [
+        ("ref/a", 1, None, True), ("ref/b", 1, None, True),
+    ]
+
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.vector_sweep_settlements"
+                "(bot_id,claim_token,input_payload,result_payload,settled_at) "
+                "SELECT %s,'old/'||g,'{{}}'::jsonb,'{{}}'::jsonb,"
+                "clock_timestamp()-interval '49 hours' "
+                "FROM generate_series(1,130) AS g"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id,),
+        )
+    for token, expected_left in (("gc/first", 2), ("gc/second", 0)):
+        assert (await invoke("vector_claim_tombstone_sweep", {
+            **claim, "claim_token": token,
+        }))["value"] is None
+        async with store.pool.connection() as conn:
+            counts = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT count(*) FILTER (WHERE claim_token LIKE 'old/%%') "
+                        "AS expired, count(*) FILTER "
+                        "(WHERE claim_token=%s) AS fresh "
+                        "FROM {}.vector_sweep_settlements WHERE bot_id=%s"
+                    ).format(sql.Identifier(namespace)),
+                    (claim["claim_token"], store.bot_id),
+                )
+            ).fetchone()
+        assert counts == {"expired": expected_left, "fresh": 1}
+
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.vector_index_refs"
+                "(bot_id,ref_id,space_id,state,tombstoned_at,next_sweep_at) "
+                "VALUES (%s,'ref/c',%s,'TOMBSTONED',clock_timestamp(),"
+                "clock_timestamp()-interval '1 second')"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id, space_id),
+        )
+    short_claim = {**claim, "claim_token": "claim/vector-sweep/expired",
+                   "lease_seconds": 3}
+    expired = (await invoke("vector_claim_tombstone_sweep", short_claim))["value"]
+    assert expired["payload"]["ref_ids"] == ["ref/c"]
+    await asyncio.sleep(3.2)
+    successor_claim = {**claim, "claim_token": "claim/vector-sweep/successor"}
+    successor = (await invoke("vector_claim_tombstone_sweep", successor_claim))["value"]
+    assert successor["payload"]["ref_ids"] == ["ref/c"]
+    stale = await invoke("vector_settle_tombstone_sweep", {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": expired["work_id"], "claim_token": short_claim["claim_token"],
+        "attempt": 1, "outcome": {"status": "SUCCEEDED", "result": expired["payload"]},
+    })
+    assert stale["error"]["code"] == "VECTOR_SWEEP_CLAIM_STALE"
+    assert (await invoke("vector_settle_tombstone_sweep", {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": successor["work_id"], "claim_token": successor_claim["claim_token"],
+        "attempt": 1, "outcome": {"status": "FAILED", "error": {"code": "NETWORK"}},
+    }))["ok"]
 
 
 @pytest.mark.asyncio
