@@ -1698,7 +1698,7 @@ BEGIN
         END IF;
         IF EXISTS(SELECT 1 FROM __forest_module_schema__.vector_rebuild_work
             WHERE bot_id=requested_bot
-              AND state IN ('QUEUED','CLAIMED','CANDIDATE_READY')) THEN
+              AND state NOT IN ('PUBLISHED','FAILED')) THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','VECTOR_REBUILD_IN_PROGRESS',
                     'message','Another rebuild is in progress','status',409));
@@ -3109,5 +3109,190 @@ BEGIN
         bot_id,claim_token,input_payload,result_payload
     ) VALUES(requested_bot,input->>'claim_token',input,response);
     RETURN response;
+END;
+$$;
+
+-- Bounded operator views remain package-owned. The Web gateway may validate,
+-- authorize and route these ports but does not interpret vector domain state.
+CREATE FUNCTION vector_query_management_summary(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    health __forest_module_schema__.vector_collection_health%ROWTYPE;
+    binding __forest_module_schema__.vector_collection_bindings%ROWTYPE;
+    active __forest_module_schema__.vector_rebuild_work%ROWTYPE;
+    head_seq bigint;
+    queued_count bigint;
+    blocked_count bigint;
+    unconfirmed_count bigint;
+BEGIN
+    IF requested_bot IS NULL OR input<>'{}'::jsonb THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_MANAGEMENT_INPUT_INVALID',
+                'message','Index overview input is invalid','status',422));
+    END IF;
+    SELECT * INTO health FROM __forest_module_schema__.vector_collection_health
+    WHERE bot_id=requested_bot;
+    SELECT * INTO binding FROM __forest_module_schema__.vector_collection_bindings
+    WHERE bot_id=requested_bot AND binding_revision=health.binding_revision;
+    SELECT * INTO active FROM __forest_module_schema__.vector_rebuild_work
+    WHERE bot_id=requested_bot AND state NOT IN ('PUBLISHED','FAILED')
+    ORDER BY created_at DESC,request_id DESC LIMIT 1;
+    SELECT COALESCE(current_seq,0) INTO head_seq
+    FROM __forest_module_schema__.vector_ref_clocks
+    WHERE bot_id=requested_bot;
+    SELECT count(*) FILTER (WHERE state IN ('QUEUED','CLAIMED')),
+           count(*) FILTER (WHERE state='BLOCKED')
+    INTO queued_count,blocked_count
+    FROM __forest_module_schema__.vector_collection_gc_work
+    WHERE bot_id=requested_bot;
+    SELECT count(*) INTO unconfirmed_count
+    FROM __forest_module_schema__.vector_rebuild_attempts a
+    JOIN __forest_module_schema__.vector_rebuild_work w
+      ON w.bot_id=a.bot_id AND w.request_id=a.request_id
+    WHERE a.bot_id=requested_bot AND a.collection_id IS NULL
+      AND (w.candidate_revision IS DISTINCT FROM a.candidate_revision
+           OR w.state='FAILED');
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'binding',CASE WHEN binding.bot_id IS NULL THEN 'null'::jsonb
+                      ELSE jsonb_build_object(
+                          'binding_revision',binding.binding_revision,
+                          'collection_name',binding.collection_name,
+                          'collection_id',binding.collection_id,
+                          'space_id',binding.space_id,
+                          'dimensions',binding.dimensions) END,
+            'health_state',health.state,'health_reason',health.reason,
+            'ref_seq',COALESCE(head_seq,0),
+            'active_rebuild',CASE WHEN active.bot_id IS NULL THEN 'null'::jsonb
+                             ELSE jsonb_build_object(
+                                 'request_id',active.request_id,
+                                 'state',active.state,
+                                 'created_at',active.created_at) END,
+            'retirement_pending',COALESCE(queued_count,0),
+            'retirement_blocked',COALESCE(blocked_count,0),
+            'unconfirmed_attempts',unconfirmed_count));
+END;
+$$;
+
+CREATE FUNCTION vector_query_management_rebuilds(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_actor text := input->>'requested_by';
+    requested_state text := input->>'state';
+    requested_limit integer := (input->>'limit')::integer;
+    cursor_at timestamptz := (input->>'after_created_at')::timestamptz;
+    cursor_id text := input->>'after_request_id';
+    item __forest_module_schema__.vector_rebuild_work%ROWTYPE;
+    items jsonb := '[]'::jsonb;
+    item_count integer := 0;
+    more boolean := false;
+    next_cursor jsonb := 'null'::jsonb;
+BEGIN
+    IF requested_bot IS NULL OR requested_actor IS NULL
+       OR octet_length(requested_actor) NOT BETWEEN 1 AND 256
+       OR requested_limit IS NULL OR requested_limit NOT BETWEEN 1 AND 50
+       OR ((cursor_at IS NULL)<>(cursor_id IS NULL))
+       OR (cursor_id IS NOT NULL AND octet_length(cursor_id) NOT BETWEEN 1 AND 256)
+       OR (requested_state IS NOT NULL AND requested_state NOT IN (
+           'QUEUED','CLAIMED','CANDIDATE_READY','REPLAY_CLAIMED',
+           'AUDIT_READY','AUDIT_CLAIMED','AUDITED','PUBLISHING',
+           'PUBLISHED','FAILED')) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_MANAGEMENT_INPUT_INVALID',
+                'message','Rebuild list input is invalid','status',422));
+    END IF;
+    FOR item IN
+        SELECT * FROM __forest_module_schema__.vector_rebuild_work
+        WHERE bot_id=requested_bot AND requested_by=requested_actor
+          AND (requested_state IS NULL OR state=requested_state)
+          AND (cursor_at IS NULL OR (created_at,request_id)<(cursor_at,cursor_id))
+        ORDER BY created_at DESC,request_id DESC LIMIT requested_limit+1
+    LOOP
+        IF item_count=requested_limit THEN more := true; EXIT; END IF;
+        items := items||jsonb_build_array(jsonb_build_object(
+            'request_id',item.request_id,'state',item.state,
+            'base_revision',item.base_revision,
+            'candidate_revision',item.candidate_revision,
+            'replay_cursor',item.replay_cursor,
+            'audit_seq',item.audit_seq,'published_seq',item.published_seq,
+            'error_code',item.error_code,
+            'created_at',item.created_at,'updated_at',item.updated_at));
+        item_count := item_count+1;
+        next_cursor := jsonb_build_object(
+            'created_at',item.created_at,'request_id',item.request_id);
+    END LOOP;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('items',items,'has_more',more,
+            'next_cursor',CASE WHEN more THEN next_cursor ELSE 'null'::jsonb END));
+END;
+$$;
+
+CREATE FUNCTION vector_query_management_collections(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_state text := input->>'state';
+    requested_kind text := input->>'source_kind';
+    requested_limit integer := (input->>'limit')::integer;
+    cursor_revision bigint := (input->>'after_revision')::bigint;
+    item record;
+    items jsonb := '[]'::jsonb;
+    item_count integer := 0;
+    more boolean := false;
+    next_revision bigint;
+BEGIN
+    IF requested_bot IS NULL OR requested_limit IS NULL
+       OR requested_limit NOT BETWEEN 1 AND 50
+       OR (cursor_revision IS NOT NULL AND cursor_revision<=0)
+       OR (requested_state IS NOT NULL AND requested_state NOT IN (
+           'QUEUED','CLAIMED','DELETED','BLOCKED','NEEDS_ID'))
+       OR (requested_kind IS NOT NULL AND requested_kind NOT IN (
+           'OLD_BINDING','ABANDONED_CANDIDATE','UNCONFIRMED_ATTEMPT')) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_MANAGEMENT_INPUT_INVALID',
+                'message','Collection list input is invalid','status',422));
+    END IF;
+    FOR item IN
+        SELECT * FROM (
+            SELECT g.binding_revision,g.collection_name,g.collection_id,
+                   g.source_kind,g.state,g.eligible_at,g.error_code,
+                   g.created_at,g.deleted_at
+            FROM __forest_module_schema__.vector_collection_gc_work g
+            WHERE g.bot_id=requested_bot
+            UNION ALL
+            SELECT a.candidate_revision,a.collection_name,a.collection_id,
+                   'UNCONFIRMED_ATTEMPT'::text,'NEEDS_ID'::text,
+                   NULL::timestamptz,NULL::text,a.created_at,NULL::timestamptz
+            FROM __forest_module_schema__.vector_rebuild_attempts a
+            JOIN __forest_module_schema__.vector_rebuild_work w
+              ON w.bot_id=a.bot_id AND w.request_id=a.request_id
+            WHERE a.bot_id=requested_bot AND a.collection_id IS NULL
+              AND (w.candidate_revision IS DISTINCT FROM a.candidate_revision
+                   OR w.state='FAILED')
+        ) candidates
+        WHERE (cursor_revision IS NULL OR binding_revision<cursor_revision)
+          AND (requested_state IS NULL OR state=requested_state)
+          AND (requested_kind IS NULL OR source_kind=requested_kind)
+        ORDER BY binding_revision DESC LIMIT requested_limit+1
+    LOOP
+        IF item_count=requested_limit THEN more := true; EXIT; END IF;
+        items := items||jsonb_build_array(jsonb_build_object(
+            'binding_revision',item.binding_revision,
+            'collection_name',item.collection_name,
+            'collection_id',item.collection_id,
+            'source_kind',item.source_kind,'state',item.state,
+            'eligible_at',item.eligible_at,
+            'error_code',item.error_code,
+            'created_at',item.created_at,'deleted_at',item.deleted_at));
+        item_count := item_count+1;
+        next_revision := item.binding_revision;
+    END LOOP;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('items',items,'has_more',more,
+            'next_cursor',CASE WHEN more THEN
+                jsonb_build_object('after_revision',next_revision)
+                ELSE 'null'::jsonb END));
 END;
 $$;

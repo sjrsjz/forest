@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -1082,6 +1083,97 @@ async def test_rebuild_candidate_audit_paginates_frozen_refs(
     })
     assert orphan_claim["payload"]["collection_id"] == 43
     assert orphan_claim["payload"]["collection_name"] == name + "_r3"
+
+    schema_root = Path(__file__).parents[1] / (
+        "src/forest/builtin/vector_index_milvus/schemas"
+    )
+
+    def validate_management(name, value):
+        schema = json.loads((schema_root / (name + ".json")).read_text(
+            encoding="utf-8"
+        ))
+        Draft202012Validator(schema).validate(value)
+
+    summary = await domain("vector_query_management_summary", {})
+    validate_management("management-summary-output", summary)
+    assert summary["binding"]["binding_revision"] == 2
+    assert summary["ref_seq"] == 65
+    assert summary["health_state"] == "READY"
+    assert summary["active_rebuild"] is None
+    assert summary["retirement_pending"] == 1
+
+    first_rebuild_page = await domain("vector_query_management_rebuilds", {
+        "requested_by": "admin", "limit": 1,
+    })
+    validate_management("management-rebuilds-output", first_rebuild_page)
+    assert first_rebuild_page["has_more"]
+    assert first_rebuild_page["items"][0]["request_id"] == "audit/orphan"
+    cursor = first_rebuild_page["next_cursor"]
+    second_rebuild_page = await domain("vector_query_management_rebuilds", {
+        "requested_by": "admin", "limit": 1,
+        "after_created_at": cursor["created_at"],
+        "after_request_id": cursor["request_id"],
+    })
+    validate_management("management-rebuilds-output", second_rebuild_page)
+    assert second_rebuild_page["items"][0]["request_id"] == "audit/page"
+    assert not second_rebuild_page["has_more"]
+    filtered = await domain("vector_query_management_rebuilds", {
+        "requested_by": "admin", "limit": 20, "state": "PUBLISHED",
+    })
+    assert [item["request_id"] for item in filtered["items"]] == ["audit/page"]
+
+    collections = await domain("vector_query_management_collections", {"limit": 1})
+    validate_management("management-collections-output", collections)
+    assert collections["items"][0]["binding_revision"] == 3
+    assert collections["has_more"]
+    older = await domain("vector_query_management_collections", {
+        "limit": 1, **collections["next_cursor"],
+    })
+    assert older["items"][0]["binding_revision"] == 1
+    assert older["items"][0]["state"] == "DELETED"
+
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_rebuild_work "
+                    "(bot_id,request_id,input_digest,requested_by,space_id,"
+                    "base_revision,dimensions,state,candidate_revision,"
+                    "candidate_name) "
+                    "VALUES (%s,'audit/unconfirmed',%s,'admin',%s,2,4,"
+                    "'FAILED',4,%s)")
+            .format(sql.Identifier(namespace)),
+            (bot_id, digest, space_id, name + "_r4"),
+        )
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_rebuild_attempts "
+                    "(bot_id,candidate_revision,request_id,attempt,collection_name) "
+                    "VALUES (%s,4,'audit/unconfirmed',1,%s)")
+            .format(sql.Identifier(namespace)), (bot_id, name + "_r4"),
+        )
+    unconfirmed = await domain("vector_query_management_collections", {
+        "limit": 20, "state": "NEEDS_ID",
+    })
+    validate_management("management-collections-output", unconfirmed)
+    assert len(unconfirmed["items"]) == 1
+    assert unconfirmed["items"][0]["collection_id"] is None
+    assert (await domain("vector_query_management_summary", {}))[
+        "unconfirmed_attempts"
+    ] == 1
+
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_rebuild_work "
+                    "(bot_id,request_id,input_digest,requested_by,space_id,"
+                    "base_revision,dimensions,state,candidate_revision,"
+                    "candidate_name,candidate_id,replay_waterline,audit_seq) "
+                    "VALUES (%s,'audit/busy',%s,'admin',%s,2,4,"
+                    "'AUDIT_READY',5,%s,45,65,65)")
+            .format(sql.Identifier(namespace)),
+            (bot_id, digest, space_id, name + "_r5"),
+        )
+    refused_rebuild = await domain("vector_enqueue_rebuild", {
+        "requested_by": "admin",
+    }, operation_id="audit/page/new-rebuild", allow_error=True)
+    assert refused_rebuild["error"]["code"] == "VECTOR_REBUILD_IN_PROGRESS"
 
 
 @pytest.mark.asyncio

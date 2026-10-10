@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "requested_by",
+    "limit"
+  ],
+  "properties": {
+    "requested_by": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50
+    },
+    "state": {
+      "enum": [
+        "QUEUED",
+        "CLAIMED",
+        "CANDIDATE_READY",
+        "REPLAY_CLAIMED",
+        "AUDIT_READY",
+        "AUDIT_CLAIMED",
+        "AUDITED",
+        "PUBLISHING",
+        "PUBLISHED",
+        "FAILED"
+      ]
+    },
+    "after_created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "after_request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  }
+}

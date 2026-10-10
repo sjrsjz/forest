@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "items",
+    "has_more",
+    "next_cursor"
+  ],
+  "properties": {
+    "items": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "binding_revision",
+          "collection_name",
+          "collection_id",
+          "source_kind",
+          "state",
+          "eligible_at",
+          "error_code",
+          "created_at",
+          "deleted_at"
+        ],
+        "properties": {
+          "binding_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "collection_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "collection_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "source_kind": {
+            "enum": [
+              "OLD_BINDING",
+              "ABANDONED_CANDIDATE",
+              "UNCONFIRMED_ATTEMPT"
+            ]
+          },
+          "state": {
+            "enum": [
+              "QUEUED",
+              "CLAIMED",
+              "DELETED",
+              "BLOCKED",
+              "NEEDS_ID"
+            ]
+          },
+          "eligible_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "error_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "deleted_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        }
+      }
+    },
+    "has_more": {
+      "type": "boolean"
+    },
+    "next_cursor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "after_revision"
+          ],
+          "properties": {
+            "after_revision": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  }
+}

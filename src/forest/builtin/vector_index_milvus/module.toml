@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.19.0"
+version = "2.20.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -83,11 +83,60 @@ component_id = "embedding.multimodal"
 own_pointer = "/space/dimensions"
 other_pointer = "/space/dimensions"
 
+[components.management_ui]
+entrypoint = "ui/index.html"
+protocol = "forest.management-ui/1"
+contribution_id = "vector.index.workspace"
+label = "向量索引"
+group = "memory"
+order = 30
+
+[[components.management_queries]]
+id = "vector.index.summary"
+port = "vector.management.summary"
+required_role = "ADMIN"
+audit = "SECURITY"
+timeout_s = 10
+
+[[components.management_queries]]
+id = "vector.rebuild.list"
+port = "vector.management.rebuilds"
+required_role = "ADMIN"
+actor_field = "requested_by"
+audit = "SECURITY"
+default_limit = 20
+max_limit = 50
+timeout_s = 10
+
+[[components.management_queries]]
+id = "vector.rebuild.get"
+port = "vector.rebuild.status"
+required_role = "ADMIN"
+actor_field = "requested_by"
+audit = "SECURITY"
+timeout_s = 10
+
+[[components.management_queries]]
+id = "vector.collection.retirements"
+port = "vector.management.collections"
+required_role = "ADMIN"
+audit = "SECURITY"
+default_limit = 20
+max_limit = 50
+timeout_s = 10
+
+[[components.management_actions]]
+id = "vector.rebuild.start"
+port = "vector.rebuild.enqueue"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 15
+
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.18.0"
+schema_version = "2.19.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "70c735d7ff94b0f2ea62f69ac4f242f98bf516a799cc41738c3fc866a15a8360"
+baseline_sha256 = "61a62c9ed9651993077556a925a3c0b7facf08c10228ad62237e3fd8d9c236a5"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -175,6 +224,27 @@ contract = "1.0"
 function = "vector_ref_tombstone"
 input_schema = "schemas/delete-input.json"
 output_schema = "schemas/delete-output.json"
+
+[[components.domain_queries]]
+name = "vector.management.summary"
+contract = "1.0"
+function = "vector_query_management_summary"
+input_schema = "schemas/management-summary-input.json"
+output_schema = "schemas/management-summary-output.json"
+
+[[components.domain_queries]]
+name = "vector.management.rebuilds"
+contract = "1.0"
+function = "vector_query_management_rebuilds"
+input_schema = "schemas/management-rebuilds-input.json"
+output_schema = "schemas/management-rebuilds-output.json"
+
+[[components.domain_queries]]
+name = "vector.management.collections"
+contract = "1.0"
+function = "vector_query_management_collections"
+input_schema = "schemas/management-collections-input.json"
+output_schema = "schemas/management-collections-output.json"
 
 [[components.domain_queries]]
 name = "vector.io.pending"
