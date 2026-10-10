@@ -4189,7 +4189,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease")
+    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -4314,6 +4314,107 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 if domain is not None and domain["state"] == "READY":
                     break
                 await asyncio.sleep(0.1)
+        if scenario == "vector-web":
+            class VectorWebSupervisor:
+                async def management_scopes(self):
+                    return ({"scope_kind": "bot", "scope_id": settings.bot_id},)
+
+                @asynccontextmanager
+                async def management_host(self, scope_id):
+                    assert scope_id == settings.bot_id
+                    yield host
+
+            async with _real_web_identity_for_bot_test(dsn) as identity:
+                web_app = create_deployment_management_app(
+                    deployment_id="deployment/host-web-test",
+                    identity_authority=identity,
+                    allowed_origin="http://forest.test",
+                    bot_supervisor=VectorWebSupervisor(),
+                )
+                base = (
+                    f"/management/v1/scopes/bot/{settings.bot_id}/"
+                    "modules/vector.index"
+                )
+                async with AsyncClient(
+                    transport=ASGITransport(app=web_app), base_url="http://forest.test",
+                ) as web:
+                    login = await web.post(
+                        "/management/v1/auth/login",
+                        headers={"origin": "http://forest.test"},
+                        json={"username": "admin", "password": "host-web-password-1"},
+                    )
+                    assert login.status_code == 200, login.text
+                    headers = {
+                        "origin": "http://forest.test",
+                        "x-forest-csrf": web.cookies["forest_management_csrf"],
+                    }
+                    vector_row = next(
+                        row for row in host.registry.describe()
+                        if row["component_id"] == "vector.index"
+                    )
+                    contribution = vector_row["management_contributions"][0]
+                    assert contribution["contribution_id"] == "vector.index.workspace"
+                    digest = contribution["surface"]["sha256"]
+                    page = await web.get(f"{base}/management-ui/{digest}")
+                    assert page.status_code == 200, page.text
+                    assert "vector.rebuild.start" in page.text
+                    overview = await web.post(
+                        f"{base}/queries/vector.index.summary",
+                        headers=headers, json={},
+                    )
+                    assert overview.status_code == 200, overview.text
+                    assert overview.json()["health_state"] == "READY"
+                    assert overview.json()["binding"]["binding_revision"] == 1
+                    action_headers = {**headers, "idempotency-key": "vector-web-rebuild"}
+                    queued = await web.post(
+                        f"{base}/actions/vector.rebuild.start",
+                        headers=action_headers, json={},
+                    )
+                    assert queued.status_code == 200, queued.text
+                    repeated = await web.post(
+                        f"{base}/actions/vector.rebuild.start",
+                        headers=action_headers, json={},
+                    )
+                    assert repeated.status_code == 200, repeated.text
+                    request_id = queued.json()["request_id"]
+                    assert repeated.json()["request_id"] == request_id
+                    listed = await web.post(
+                        f"{base}/queries/vector.rebuild.list",
+                        headers=headers, json={"limit": 20},
+                    )
+                    assert listed.status_code == 200, listed.text
+                    assert request_id in {
+                        item["request_id"] for item in listed.json()["items"]
+                    }
+                    detail = await web.post(
+                        f"{base}/queries/vector.rebuild.get",
+                        headers=headers, json={"request_id": request_id},
+                    )
+                    assert detail.status_code == 200, detail.text
+                    assert detail.json()["request_id"] == request_id
+                    retirements = await web.post(
+                        f"{base}/queries/vector.collection.retirements",
+                        headers=headers, json={"limit": 20},
+                    )
+                    assert retirements.status_code == 200, retirements.text
+                    async with asyncio.timeout(70):
+                        while True:
+                            progress = await web.post(
+                                f"{base}/queries/vector.rebuild.get",
+                                headers=headers, json={"request_id": request_id},
+                            )
+                            assert progress.status_code == 200, progress.text
+                            if progress.json()["state"] == "PUBLISHED":
+                                break
+                            assert progress.json()["state"] != "FAILED", progress.text
+                            await asyncio.sleep(0.2)
+                    published = await web.post(
+                        f"{base}/queries/vector.index.summary",
+                        headers=headers, json={},
+                    )
+                    assert published.status_code == 200, published.text
+                    assert published.json()["binding"]["binding_revision"] == 2
+            return
         prepared_crash = asyncio.Event()
         result_observation_interrupted = asyncio.Event()
         result_ledger_interrupted = asyncio.Event()
