@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.15.0"
+version = "2.16.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -80,9 +80,9 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.14.0"
+schema_version = "2.15.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "212786c2724f0d3e2054f90f752fc6e33bef7bb4856da085c7c3f79a48bebce3"
+baseline_sha256 = "92226dcec490ae96dedcb3b81a92bfb29464f156609da616c039948c57e64e37"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -206,6 +206,21 @@ claim_timeout_s = 5
 handler_timeout_s = 90
 settle_timeout_s = 5
 lease_seconds = 120
+
+[[components.owned_work_handlers]]
+name = "vector.rebuild.replay"
+contract = "1.0"
+handler = "vector.rebuild.replay"
+claim_function = "vector_claim_rebuild_replay"
+settle_function = "vector_settle_rebuild_replay"
+input_schema = "schemas/rebuild-replay-work-input.json"
+output_schema = "schemas/rebuild-replay-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 600
+settle_timeout_s = 5
+lease_seconds = 660
 
 [[components.owned_work_handlers]]
 name = "vector.refs.audit"

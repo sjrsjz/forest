@@ -600,6 +600,140 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
+async def test_rebuild_replay_lost_lease_abandons_candidate(
+    clean_authority, tmp_path,
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    space_id = "space/replay-lease/" + uuid4().hex
+    await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
+        PackageCatalog(tmp_path / "replay-lease-packages"),
+        store, installer, kernel=kernel,
+        initial_configuration=official_builtin_configuration(
+            "vector_index_milvus",
+            overrides={"space_id": space_id, "dimensions": 4},
+        ),
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "vector-index.milvus": lambda *_args: None,
+        }),
+    )
+    namespace = module_schema_namespace("forest.vector.index")
+    ref = _with_replay({
+        "ref_id": "ref/lease/live", "space_id": space_id,
+        "purpose": "DOCUMENT", "vector": [1.0, 0.0, 0.0, 0.0],
+    })
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_collection_bindings "
+                    "(bot_id,binding_revision,space_id,collection_name,"
+                    "collection_id,dimensions,metric) "
+                    "VALUES (%s,1,%s,%s,41,4,'COSINE')")
+            .format(sql.Identifier(namespace)),
+            (store.bot_id, space_id,
+             vector_collection_name(store.bot_id, space_id)),
+        )
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_collection_health "
+                    "(bot_id,binding_revision,state) VALUES (%s,1,'READY')")
+            .format(sql.Identifier(namespace)), (store.bot_id,),
+        )
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_index_refs "
+                    "(bot_id,ref_id,space_id,state,purpose,input_digest,"
+                    "replay_locator,vector_digest,physical_digest,published_at) "
+                    "VALUES (%s,%s,%s,'ACTIVE','DOCUMENT',%s,%s,%s,%s,"
+                    "clock_timestamp())")
+            .format(sql.Identifier(namespace)),
+            (store.bot_id, ref["ref_id"], space_id, digest_json(ref),
+             Jsonb(ref["replay"]), ref["replay"]["vector_digest"],
+             _physical_digest(ref["vector"])),
+        )
+        await conn.execute(
+            sql.SQL("SELECT {}.vector_append_ref_change("
+                    "%s,%s,%s,'ACTIVE','DOCUMENT',%s,%s,%s,%s)")
+            .format(sql.Identifier(namespace)),
+            (store.bot_id, ref["ref_id"], space_id, digest_json(ref),
+             Jsonb(ref["replay"]), ref["replay"]["vector_digest"],
+             _physical_digest(ref["vector"])),
+        )
+
+    async def domain(function, payload, operation_id="rebuild/lease"):
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (await conn.execute(
+                sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result")
+                .format(sql.Identifier(namespace), sql.Identifier(function)),
+                (Jsonb({"bot_id": store.bot_id,
+                        "operation_id": operation_id}), Jsonb(payload)),
+            )).fetchone()
+        return row["result"]
+
+    enqueued = (await domain(
+        "vector_enqueue_rebuild", {"requested_by": "admin"},
+    ))["value"]
+    claim = {"protocol": "forest.owned-work-claim-request/1",
+             "claim_token": "create/first", "lease_seconds": 120}
+    creation = (await domain("vector_claim_rebuild_create", claim))["value"]
+    candidate = {
+        "request_id": enqueued["request_id"],
+        "claim_token": creation["claim_token"],
+        "candidate_revision": creation["payload"]["candidate_revision"],
+        "collection_name": creation["payload"]["collection_name"],
+        "collection_id": 42,
+    }
+    assert candidate["candidate_revision"] == 2
+    confirmed = (await domain(
+        "vector_confirm_rebuild_candidate", candidate,
+    ))["value"]
+    assert (await domain("vector_settle_rebuild_create", {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": creation["work_id"],
+        "claim_token": creation["claim_token"],
+        "attempt": creation["attempt"],
+        "outcome": {"status": "SUCCEEDED", "result": confirmed},
+    }))["ok"]
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL("UPDATE {}.vector_collection_health "
+                    "SET state='REBUILD_REQUIRED',reason='base index unavailable' "
+                    "WHERE bot_id=%s")
+            .format(sql.Identifier(namespace)), (store.bot_id,),
+        )
+    replay = (await domain("vector_claim_rebuild_replay", {
+        **claim, "claim_token": "replay/expired", "lease_seconds": 660,
+    }))["value"]
+    assert replay["payload"]["candidate_revision"] == 2
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL("UPDATE {}.vector_rebuild_work "
+                    "SET lease_deadline=clock_timestamp()-interval '1 second' "
+                    "WHERE bot_id=%s AND request_id=%s")
+            .format(sql.Identifier(namespace)),
+            (store.bot_id, enqueued["request_id"]),
+        )
+    assert (await domain("vector_claim_rebuild_replay", {
+        **claim, "claim_token": "replay/successor", "lease_seconds": 660,
+    }))["value"] is None
+    replacement = (await domain("vector_claim_rebuild_create", {
+        **claim, "claim_token": "create/replacement",
+    }))["value"]
+    assert replacement["payload"]["candidate_revision"] == 3
+    assert replacement["payload"]["collection_name"] != candidate["collection_name"]
+    late = await domain("vector_settle_rebuild_replay", {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": replay["work_id"],
+        "claim_token": replay["claim_token"],
+        "attempt": replay["attempt"],
+        "outcome": {"status": "SUCCEEDED", "result": {
+            "request_id": enqueued["request_id"],
+            "candidate_revision": 2, "collection_id": 42, "next_seq": 1,
+        }},
+    })
+    assert late["error"]["code"] == "VECTOR_REPLAY_CLAIM_STALE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
 @pytest.mark.parametrize("case", ("missing-active", "unbound-physical"))
 async def test_package_owned_ref_audit_quarantines_stable_physical_mismatch(
     clean_authority, tmp_path, case
@@ -1434,6 +1568,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
 
         component = MilvusVectorIndex()
         component.space_id = space_id
+        component.dimensions = 4
         candidate_receipt = await component.create_rebuild_candidate(
             {"payload": next_claim["payload"]},
             SimpleNamespace(
@@ -1503,6 +1638,137 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             "collection_id": status["candidate_id"],
             "collection_name": candidate_name,
         }
+        live_replay = transport_row(
+            "ref/replay/query", "QUERY", [0.0, 1.0, 0.0, 0.0]
+        )
+        deleted_replay = transport_row(
+            "ref/replay/deleted", "DOCUMENT", [0.0, 0.0, 1.0, 0.0]
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("INSERT INTO {}.vector_index_refs "
+                        "(bot_id,ref_id,space_id,state,purpose,input_digest,"
+                        "replay_locator,vector_digest,physical_digest,published_at) "
+                        "VALUES (%s,%s,%s,'ACTIVE','QUERY',%s,%s,%s,%s,"
+                        "clock_timestamp())")
+                .format(sql.Identifier(namespace)),
+                (bot_id, live_replay["ref_id"], space_id,
+                 live_replay["input_digest"], Jsonb(live_replay["replay"]),
+                 live_replay["replay"]["vector_digest"],
+                 _physical_digest(live_replay["vector"])),
+            )
+            await conn.execute(
+                sql.SQL("INSERT INTO {}.vector_index_refs "
+                        "(bot_id,ref_id,space_id,state,tombstoned_at,next_sweep_at) "
+                        "VALUES (%s,%s,%s,'TOMBSTONED',clock_timestamp(),"
+                        "clock_timestamp())")
+                .format(sql.Identifier(namespace)),
+                (bot_id, deleted_replay["ref_id"], space_id),
+            )
+            for row, state in (
+                (live_replay, "ACTIVE"),
+                (deleted_replay, "ACTIVE"),
+                (deleted_replay, "TOMBSTONED"),
+            ):
+                active = state == "ACTIVE"
+                await conn.execute(
+                    sql.SQL("SELECT {}.vector_append_ref_change("
+                            "%s,%s,%s,%s,%s,%s,%s,%s,%s)")
+                    .format(sql.Identifier(namespace)),
+                    (bot_id, row["ref_id"], space_id, state,
+                     row["purpose"] if active else None,
+                     row["input_digest"] if active else None,
+                     Jsonb(row["replay"]) if active else None,
+                     row["replay"]["vector_digest"] if active else None,
+                     _physical_digest(row["vector"]) if active else None),
+                )
+        replay_claim = await rebuild_domain(
+            "vector_claim_rebuild_replay",
+            {**claim_input, "claim_token": "rebuild/replay/first",
+             "lease_seconds": 660},
+        )
+        actions = replay_claim["payload"]["changes"]
+        assert [item["mutation_seq"] for item in actions] == [1, 2, 3]
+        assert [item["state"] for item in actions] == [
+            "ACTIVE", "TOMBSTONED", "TOMBSTONED",
+        ]
+        assert all(item["replay_locator"] is None for item in actions[1:])
+
+        async def read_replay_json(reference):
+            assert reference == live_replay["replay"]["result"]
+            return {
+                "protocol": "forest.embedding-result/1",
+                "status": "RESPONDED", "space_id": space_id,
+                "vectors": [{"index": 0, "facet_id": live_replay["ref_id"],
+                             "values": live_replay["vector"]}],
+            }
+
+        async def replay_service(name, payload, **_options):
+            assert name in {"vector.transport.upsert", "vector.transport.prune"}
+            return await drivers[name].invoke(
+                payload, scope=scope, invocation=invocation
+            )
+
+        replay_context = SimpleNamespace(
+            payloads=SimpleNamespace(read_json=read_replay_json),
+            services=SimpleNamespace(call=replay_service),
+            operations=SimpleNamespace(stable=lambda value: value),
+        )
+        replay_receipt = await component.replay_rebuild_page(
+            {"payload": replay_claim["payload"]}, replay_context,
+        )
+        await rebuild_domain("vector_settle_rebuild_replay", {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": replay_claim["work_id"],
+            "claim_token": replay_claim["claim_token"],
+            "attempt": replay_claim["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": replay_receipt},
+        })
+        assert (await rebuild_domain("vector_query_rebuild", {
+            "request_id": enqueued["request_id"], "requested_by": "admin",
+        }))["replay_cursor"] == 3
+        assert await upsert.client.get(
+            collection_name=candidate_name, ids=[live_replay["ref_id"]],
+            output_fields=["ref_id"], consistency_level="Strong",
+        ) == [{"ref_id": live_replay["ref_id"]}]
+        assert await upsert.client.get(
+            collection_name=candidate_name, ids=[deleted_replay["ref_id"]],
+            output_fields=["ref_id"], consistency_level="Strong",
+        ) == []
+        await rebuild_domain("vector_ref_tombstone", {
+            "space_id": space_id, "ref_ids": [live_replay["ref_id"]],
+        })
+        catchup_claim = await rebuild_domain(
+            "vector_claim_rebuild_replay",
+            {**claim_input, "claim_token": "rebuild/replay/catchup",
+             "lease_seconds": 660},
+        )
+        assert [row["state"] for row in catchup_claim["payload"]["changes"]] == [
+            "TOMBSTONED"
+        ]
+        catchup_receipt = await component.replay_rebuild_page(
+            {"payload": catchup_claim["payload"]}, replay_context,
+        )
+        await rebuild_domain("vector_settle_rebuild_replay", {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": catchup_claim["work_id"],
+            "claim_token": catchup_claim["claim_token"],
+            "attempt": catchup_claim["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": catchup_receipt},
+        })
+        assert (await rebuild_domain("vector_query_rebuild", {
+            "request_id": enqueued["request_id"], "requested_by": "admin",
+        }))["replay_cursor"] == 4
+        assert await upsert.client.get(
+            collection_name=candidate_name, ids=[live_replay["ref_id"]],
+            output_fields=["ref_id"], consistency_level="Strong",
+        ) == []
+        assert await rebuild_domain(
+            "vector_claim_rebuild_replay",
+            {**claim_input, "claim_token": "rebuild/replay/empty",
+             "lease_seconds": 660},
+        ) is None
+
         candidate_query = {**transport_row(
             "ref/query/candidate", "QUERY", [1.0, 0.0, 0.0, 0.0]
         ), "binding": candidate_binding}

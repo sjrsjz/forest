@@ -11,6 +11,7 @@
     "candidate_name",
     "candidate_id",
     "replay_waterline",
+    "replay_cursor",
     "attempt_count",
     "error_code"
   ],
@@ -25,6 +26,7 @@
         "QUEUED",
         "CLAIMED",
         "CANDIDATE_READY",
+        "REPLAY_CLAIMED",
         "FAILED"
       ]
     },
@@ -73,6 +75,10 @@
         "string",
         "null"
       ]
+    },
+    "replay_cursor": {
+      "type": "integer",
+      "minimum": 0
     }
   }
 }

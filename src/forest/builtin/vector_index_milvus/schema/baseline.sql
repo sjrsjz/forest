@@ -1561,12 +1561,14 @@ CREATE TABLE vector_rebuild_work (
     base_revision bigint NOT NULL CHECK (base_revision>0),
     dimensions integer NOT NULL CHECK (dimensions BETWEEN 1 AND 4096),
     state text NOT NULL DEFAULT 'QUEUED' CHECK
-        (state IN ('QUEUED','CLAIMED','CANDIDATE_READY','FAILED')),
+        (state IN ('QUEUED','CLAIMED','CANDIDATE_READY','REPLAY_CLAIMED','FAILED')),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count>=0),
     candidate_revision bigint,
     candidate_name text,
     candidate_id bigint CHECK (candidate_id>0),
     replay_waterline bigint CHECK (replay_waterline>=0),
+    replay_cursor bigint NOT NULL DEFAULT 0 CHECK (replay_cursor>=0),
+    replay_attempt_count bigint NOT NULL DEFAULT 0 CHECK (replay_attempt_count>=0),
     claim_token text,
     lease_deadline timestamptz,
     claim_payload jsonb,
@@ -1578,11 +1580,11 @@ CREATE TABLE vector_rebuild_work (
     CHECK ((claim_token IS NULL)=(claim_payload IS NULL)),
     CHECK ((candidate_revision IS NULL)=(candidate_name IS NULL)),
     CHECK (candidate_id IS NULL OR candidate_revision IS NOT NULL),
-    CHECK (state<>'CANDIDATE_READY' OR
+    CHECK (state NOT IN ('CANDIDATE_READY','REPLAY_CLAIMED') OR
            (candidate_id IS NOT NULL AND replay_waterline IS NOT NULL))
 );
 CREATE UNIQUE INDEX vector_rebuild_one_active_idx ON vector_rebuild_work(bot_id)
-    WHERE state IN ('QUEUED','CLAIMED','CANDIDATE_READY');
+    WHERE state IN ('QUEUED','CLAIMED','CANDIDATE_READY','REPLAY_CLAIMED');
 CREATE TABLE vector_rebuild_attempts (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     candidate_revision bigint NOT NULL CHECK (candidate_revision>1),
@@ -1603,6 +1605,23 @@ CREATE TABLE vector_rebuild_settlements (
     settled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY(bot_id,claim_token)
 );
+
+CREATE INDEX vector_rebuild_settlements_gc_idx ON vector_rebuild_settlements(
+    bot_id,settled_at,claim_token
+);
+CREATE FUNCTION guard_vector_rebuild_settlement() RETURNS trigger
+LANGUAGE plpgsql SET search_path=pg_catalog AS $$
+BEGIN
+    IF TG_OP='DELETE' AND OLD.settled_at<clock_timestamp()-interval '48 hours' THEN
+        RETURN OLD;
+    END IF;
+    RAISE EXCEPTION 'Vector rebuild settlement is immutable until expiry'
+        USING ERRCODE='55000';
+END;
+$$;
+CREATE TRIGGER vector_rebuild_settlement_guard
+    BEFORE UPDATE OR DELETE ON vector_rebuild_settlements
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_rebuild_settlement();
 
 CREATE FUNCTION vector_enqueue_rebuild(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
@@ -1684,6 +1703,7 @@ BEGIN
             'candidate_name',work.candidate_name,
             'candidate_id',work.candidate_id,
             'replay_waterline',work.replay_waterline,
+            'replay_cursor',work.replay_cursor,
             'attempt_count',work.attempt_count,'error_code',work.error_code));
 END;
 $$;
@@ -1711,6 +1731,13 @@ BEGIN
                 'message','Rebuild claim is invalid','status',422));
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended('vector-rebuild:'||requested_bot,0));
+    DELETE FROM __forest_module_schema__.vector_rebuild_settlements
+    WHERE bot_id=requested_bot AND claim_token IN (
+        SELECT claim_token FROM __forest_module_schema__.vector_rebuild_settlements
+        WHERE bot_id=requested_bot
+          AND settled_at<clock_timestamp()-interval '48 hours'
+        ORDER BY settled_at,claim_token LIMIT 16
+    );
     SELECT * INTO work FROM __forest_module_schema__.vector_rebuild_work
     WHERE bot_id=requested_bot AND state='CLAIMED'
     ORDER BY updated_at LIMIT 1 FOR UPDATE;
@@ -1922,5 +1949,223 @@ BEGIN
         bot_id,claim_token,input_payload,result_payload
     ) VALUES(requested_bot,input->>'claim_token',input,result_payload);
     RETURN result_payload;
+END;
+$$;
+
+-- A replay claim covers at most sixteen ordered committed changes. Each claim
+-- owns one physical candidate generation. Losing its lease abandons that
+-- candidate, so a late Milvus write cannot affect its successor.
+CREATE TABLE vector_rebuild_replay_settlements (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(bot_id,claim_token)
+);
+CREATE INDEX vector_rebuild_replay_settlements_gc_idx
+    ON vector_rebuild_replay_settlements(bot_id,settled_at,claim_token);
+CREATE TRIGGER vector_rebuild_replay_settlement_guard
+    BEFORE UPDATE OR DELETE ON vector_rebuild_replay_settlements
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_rebuild_settlement();
+CREATE FUNCTION vector_claim_rebuild_replay(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work __forest_module_schema__.vector_rebuild_work%ROWTYPE;
+    head_seq bigint;
+    page_count integer;
+    first_seq bigint;
+    last_seq bigint;
+    actions jsonb;
+    next_payload jsonb;
+    work_key text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REPLAY_CLAIM_INVALID',
+                'message','Replay claim is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-rebuild:'||requested_bot,0));
+    DELETE FROM __forest_module_schema__.vector_rebuild_replay_settlements
+    WHERE bot_id=requested_bot AND claim_token IN (
+        SELECT claim_token FROM __forest_module_schema__.vector_rebuild_replay_settlements
+        WHERE bot_id=requested_bot
+          AND settled_at<clock_timestamp()-interval '48 hours'
+        ORDER BY settled_at,claim_token LIMIT 16
+    );
+    SELECT * INTO work FROM __forest_module_schema__.vector_rebuild_work
+    WHERE bot_id=requested_bot AND state='REPLAY_CLAIMED'
+    ORDER BY updated_at LIMIT 1 FOR UPDATE;
+    IF FOUND AND work.claim_token=requested_token
+       AND work.lease_deadline>clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',work.claim_payload);
+    END IF;
+    IF FOUND AND work.lease_deadline<=clock_timestamp() THEN
+        UPDATE __forest_module_schema__.vector_rebuild_work
+        SET state=CASE WHEN attempt_count>=5 THEN 'FAILED' ELSE 'QUEUED' END,
+            candidate_revision=NULL,candidate_name=NULL,candidate_id=NULL,
+            replay_waterline=NULL,replay_cursor=0,claim_token=NULL,
+            lease_deadline=NULL,claim_payload=NULL,
+            error_code='VECTOR_REPLAY_LEASE_EXPIRED',
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND request_id=work.request_id;
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.vector_rebuild_work
+    WHERE bot_id=requested_bot AND state='CANDIDATE_READY'
+    ORDER BY created_at LIMIT 1 FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',NULL);
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.vector_collection_health h
+        WHERE h.bot_id=requested_bot AND h.binding_revision=work.base_revision
+    ) THEN
+        UPDATE __forest_module_schema__.vector_rebuild_work
+        SET state='FAILED',error_code='VECTOR_REBUILD_BASE_CHANGED',
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND request_id=work.request_id;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',NULL);
+    END IF;
+    SELECT COALESCE(current_seq,0) INTO head_seq
+    FROM __forest_module_schema__.vector_ref_clocks
+    WHERE bot_id=requested_bot;
+    head_seq := COALESCE(head_seq,0);
+    IF work.replay_cursor>=head_seq THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',NULL);
+    END IF;
+    SELECT count(*),min(mutation_seq),max(mutation_seq),
+           COALESCE(jsonb_agg(jsonb_build_object(
+                'mutation_seq',mutation_seq,'ref_id',ref_id,
+                'space_id',space_id,'state',effective_state,
+                'purpose',CASE WHEN effective_state='ACTIVE' THEN purpose END,
+                'input_digest',CASE WHEN effective_state='ACTIVE' THEN input_digest END,
+                'replay_locator',CASE WHEN effective_state='ACTIVE' THEN replay_locator END,
+                'vector_digest',CASE WHEN effective_state='ACTIVE' THEN vector_digest END,
+                'physical_digest',CASE WHEN effective_state='ACTIVE' THEN physical_digest END
+           ) ORDER BY mutation_seq),'[]'::jsonb)
+    INTO page_count,first_seq,last_seq,actions
+    FROM (
+        SELECT c.mutation_seq,c.ref_id,c.space_id,c.purpose,c.input_digest,
+               c.replay_locator,c.vector_digest,c.physical_digest,
+               CASE WHEN c.state='ACTIVE' AND r.state='ACTIVE'
+                    THEN 'ACTIVE' ELSE 'TOMBSTONED' END AS effective_state
+        FROM __forest_module_schema__.vector_ref_changes c
+        JOIN __forest_module_schema__.vector_index_refs r
+          ON r.bot_id=c.bot_id AND r.ref_id=c.ref_id
+        WHERE c.bot_id=requested_bot AND c.mutation_seq>work.replay_cursor
+          AND c.mutation_seq<=head_seq
+        ORDER BY c.mutation_seq LIMIT 16
+    ) page;
+    IF page_count=0 OR first_seq<>work.replay_cursor+1
+       OR last_seq<>work.replay_cursor+page_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REF_CHANGE_GAP',
+                'message','Ref change ledger has a gap','status',503));
+    END IF;
+    work_key := 'vector-rebuild-replay:'||encode(sha256(convert_to(
+        requested_bot||'/'||work.request_id,'UTF8')),'hex');
+    next_payload := jsonb_build_object(
+        'protocol','forest.owned-work-claim/1','work_id',work.request_id,
+        'claim_token',requested_token,'attempt',work.replay_attempt_count+1,
+        'operation_id',work_key||':'||work.candidate_revision::text||':'||last_seq::text,
+        'causal_root_kind','vector.rebuild','causal_root_id',work.request_id,
+        'payload',jsonb_build_object(
+            'request_id',work.request_id,'space_id',work.space_id,
+            'candidate_revision',work.candidate_revision,
+            'collection_id',work.candidate_id,
+            'collection_name',work.candidate_name,
+            'after_seq',work.replay_cursor,'next_seq',last_seq,
+            'changes',actions));
+    UPDATE __forest_module_schema__.vector_rebuild_work
+    SET state='REPLAY_CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        claim_payload=next_payload,replay_attempt_count=replay_attempt_count+1,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=work.request_id;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1',
+        'ok',true,'value',next_payload);
+END;
+$$;
+
+CREATE FUNCTION vector_settle_rebuild_replay(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    prior __forest_module_schema__.vector_rebuild_replay_settlements%ROWTYPE;
+    work __forest_module_schema__.vector_rebuild_work%ROWTYPE;
+    receipt jsonb;
+    response jsonb;
+    succeeded boolean;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR input#>>'{outcome,status}' IS NULL
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REPLAY_SETTLE_INVALID',
+                'message','Replay settlement is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-rebuild:'||requested_bot,0));
+    SELECT * INTO prior FROM __forest_module_schema__.vector_rebuild_replay_settlements
+    WHERE bot_id=requested_bot AND claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF prior.input_payload=input THEN RETURN prior.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REPLAY_SETTLE_CONFLICT',
+                'message','Replay claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.vector_rebuild_work
+    WHERE bot_id=requested_bot AND request_id=input->>'work_id' FOR UPDATE;
+    IF NOT FOUND OR work.state<>'REPLAY_CLAIMED'
+       OR work.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work.lease_deadline<=clock_timestamp()
+       OR work.replay_attempt_count IS DISTINCT FROM (input->>'attempt')::bigint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REPLAY_CLAIM_STALE',
+                'message','Replay claim is no longer current','status',409));
+    END IF;
+    succeeded := input#>>'{outcome,status}'='SUCCEEDED';
+    receipt := input#>'{outcome,result}';
+    IF succeeded AND (
+        receipt->>'request_id' IS DISTINCT FROM work.request_id
+        OR (receipt->>'candidate_revision')::bigint IS DISTINCT FROM work.candidate_revision
+        OR (receipt->>'collection_id')::bigint IS DISTINCT FROM work.candidate_id
+        OR (receipt->>'next_seq')::bigint IS DISTINCT FROM
+            (work.claim_payload#>>'{payload,next_seq}')::bigint
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REPLAY_SETTLE_INVALID',
+                'message','Replay receipt differs from claimed page','status',422));
+    END IF;
+    UPDATE __forest_module_schema__.vector_rebuild_work
+    SET state=CASE WHEN succeeded THEN 'CANDIDATE_READY'
+                   WHEN attempt_count>=5 THEN 'FAILED' ELSE 'QUEUED' END,
+        replay_cursor=CASE WHEN succeeded THEN (receipt->>'next_seq')::bigint
+                           ELSE 0 END,
+        candidate_revision=CASE WHEN succeeded THEN candidate_revision END,
+        candidate_name=CASE WHEN succeeded THEN candidate_name END,
+        candidate_id=CASE WHEN succeeded THEN candidate_id END,
+        replay_waterline=CASE WHEN succeeded THEN replay_waterline END,
+        claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
+        error_code=CASE WHEN succeeded THEN NULL ELSE
+            COALESCE(input#>>'{outcome,error,code}','VECTOR_REPLAY_FAILED') END,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=work.request_id;
+    response := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work.request_id));
+    INSERT INTO __forest_module_schema__.vector_rebuild_replay_settlements(
+        bot_id,claim_token,input_payload,result_payload
+    ) VALUES(requested_bot,input->>'claim_token',input,response);
+    RETURN response;
 END;
 $$;

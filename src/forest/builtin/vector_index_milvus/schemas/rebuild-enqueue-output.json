@@ -18,6 +18,7 @@
         "QUEUED",
         "CLAIMED",
         "CANDIDATE_READY",
+        "REPLAY_CLAIMED",
         "FAILED"
       ]
     },

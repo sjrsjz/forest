@@ -36,6 +36,49 @@ def _physical_digest(values):
     return "f32-sha256:" + hashlib.sha256(packed).hexdigest()
 
 
+async def _resolve_replay_vector(ctx, replay, ref_id, space_id, dimensions):
+    reference = replay["result"]
+    if (
+        reference["owner_component_id"] != "embedding.multimodal"
+        or reference["owner_kind"] != "embedding.result"
+    ):
+        raise ForestError(
+            "VECTOR_REPLAY_IDENTITY_INVALID",
+            "Vector replay source belongs to another owner", 409,
+        )
+    result = _plain(await ctx.payloads.read_json(reference))
+    index = replay["item_index"]
+    vectors = result.get("vectors")
+    if (
+        result.get("protocol") != "forest.embedding-result/1"
+        or result.get("status") != "RESPONDED"
+        or result.get("space_id") != space_id
+        or not isinstance(vectors, list)
+        or index >= len(vectors)
+    ):
+        raise ForestError(
+            "VECTOR_REPLAY_RESULT_INVALID",
+            "Vector replay result does not contain the requested item", 409,
+        )
+    item = vectors[index]
+    values = item.get("values") if isinstance(item, dict) else None
+    if (
+        not isinstance(item, dict)
+        or item.get("index") != index
+        or item.get("facet_id") != ref_id
+        or not isinstance(values, list)
+        or len(values) != dimensions
+        or any(type(value) not in (int, float) or not math.isfinite(value)
+               for value in values)
+        or _digest(values) != replay["vector_digest"]
+    ):
+        raise ForestError(
+            "VECTOR_REPLAY_VECTOR_INVALID",
+            "Vector differs from its immutable replay result", 409,
+        )
+    return values
+
+
 class MilvusVectorIndex(Plugin):
     """Own public vector contracts; the bound effect performs Milvus I/O."""
 
@@ -58,43 +101,15 @@ class MilvusVectorIndex(Plugin):
     async def upsert(self, payload, ctx):
         request = _plain(payload)
         replay = request["replay"]
-        reference = replay["result"]
-        if (
-            request["space_id"] != self.space_id
-            or reference["owner_component_id"] != "embedding.multimodal"
-            or reference["owner_kind"] != "embedding.result"
-        ):
+        if request["space_id"] != self.space_id:
             raise ForestError(
                 "VECTOR_REPLAY_IDENTITY_INVALID",
-                "Vector replay source belongs to another space or owner", 409,
+                "Vector replay source belongs to another space", 409,
             )
-        result = _plain(await ctx.payloads.read_json(reference))
-        index = replay["item_index"]
-        vectors = result.get("vectors")
-        if (
-            result.get("protocol") != "forest.embedding-result/1"
-            or result.get("status") != "RESPONDED"
-            or result.get("space_id") != self.space_id
-            or not isinstance(vectors, list)
-            or index >= len(vectors)
-        ):
-            raise ForestError(
-                "VECTOR_REPLAY_RESULT_INVALID",
-                "Vector replay result does not contain the requested item", 409,
-            )
-        item = vectors[index]
-        values = item.get("values") if isinstance(item, dict) else None
-        if (
-            not isinstance(item, dict)
-            or item.get("index") != index
-            or item.get("facet_id") != request["ref_id"]
-            or not isinstance(values, list)
-            or len(values) != self.dimensions
-            or any(type(value) not in (int, float) or not math.isfinite(value)
-                   for value in values)
-            or values != request["vector"]
-            or _digest(values) != replay["vector_digest"]
-        ):
+        values = await _resolve_replay_vector(
+            ctx, replay, request["ref_id"], self.space_id, self.dimensions,
+        )
+        if values != request["vector"]:
             raise ForestError(
                 "VECTOR_REPLAY_VECTOR_INVALID",
                 "Vector differs from its immutable replay result", 409,
@@ -242,6 +257,86 @@ class MilvusVectorIndex(Plugin):
             ),
             timeout=10,
         )
+
+    @job("vector.rebuild.replay")
+    async def replay_rebuild_page(self, task, ctx):
+        page = _plain(task["payload"])
+        if page["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_REPLAY_SPACE_MISMATCH",
+                "Replay page belongs to another vector space", 409,
+            )
+        binding = {
+            "binding_revision": page["candidate_revision"],
+            "collection_id": page["collection_id"],
+            "collection_name": page["collection_name"],
+        }
+        cursor = page["after_seq"]
+        for change in page["changes"]:
+            if change["mutation_seq"] != cursor + 1:
+                raise ForestError(
+                    "VECTOR_REF_CHANGE_GAP", "Replay page has a gap", 503,
+                )
+            cursor += 1
+            if change["space_id"] != self.space_id:
+                raise ForestError(
+                    "VECTOR_REPLAY_SPACE_MISMATCH",
+                    "Replay change belongs to another vector space", 409,
+                )
+            if change["state"] == "TOMBSTONED":
+                removed = _plain(await ctx.services.call(
+                    "vector.transport.prune",
+                    {"space_id": self.space_id,
+                     "ref_ids": [change["ref_id"]], "binding": binding},
+                    operation_id=ctx.operations.stable("replay-prune:" + str(cursor)),
+                    contract_major=2, timeout=30,
+                ))
+                if removed != {"space_id": self.space_id,
+                               "ref_ids": [change["ref_id"]]}:
+                    raise ForestError(
+                        "VECTOR_REPLAY_TRANSPORT_INVALID",
+                        "Replay prune confirmed another reference", 502,
+                    )
+                continue
+            replay = change["replay_locator"]
+            values = await _resolve_replay_vector(
+                ctx, replay, change["ref_id"], self.space_id, self.dimensions,
+            )
+            request = {
+                "ref_id": change["ref_id"], "space_id": self.space_id,
+                "purpose": change["purpose"], "vector": values, "replay": replay,
+            }
+            if (
+                _digest(request) != change["input_digest"]
+                or _physical_digest(values) != change["physical_digest"]
+            ):
+                raise ForestError(
+                    "VECTOR_REPLAY_VECTOR_INVALID",
+                    "Replay result differs from the committed reference", 409,
+                )
+            written = _plain(await ctx.services.call(
+                "vector.transport.upsert",
+                {**request, "input_digest": change["input_digest"],
+                 "binding": binding},
+                operation_id=ctx.operations.stable("replay-upsert:" + str(cursor)),
+                contract_major=3, timeout=30,
+            ))
+            if written != {"ref_id": change["ref_id"],
+                           "space_id": self.space_id}:
+                raise ForestError(
+                    "VECTOR_REPLAY_TRANSPORT_INVALID",
+                    "Replay upsert confirmed another reference", 502,
+                )
+        if cursor != page["next_seq"]:
+            raise ForestError(
+                "VECTOR_REF_CHANGE_GAP", "Replay page ended early", 503,
+            )
+        return {
+            "request_id": page["request_id"],
+            "candidate_revision": page["candidate_revision"],
+            "collection_id": page["collection_id"],
+            "next_seq": cursor,
+        }
 
     @job("vector.refs.audit")
     async def audit_refs(self, task, ctx):
