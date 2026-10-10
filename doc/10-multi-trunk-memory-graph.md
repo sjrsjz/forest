@@ -225,6 +225,22 @@ Memory 的每日嵌入账本以 UTC 日期和 Bot ID 为键。每个稳定 batch
 
 结果观察由 `memory.observe-embedding-effect` 在单一 UnitOfWork 内依次冻结 Kernel Effect 回执、结算每日预算、更新 Memory 批次和 facet。成功回执只把结果 Payload 引用与每个 facet 的向量摘要写回 PostgreSQL，向量本体仍留在受管结果 Payload 中，待后续发布到独立向量索引；已被抑制的 facet 不再转为可发布态。明确 `NOT_APPLIED` 才释放预算并允许重新 claim；`UNKNOWN` 保留占额和不可重发的状态。观察输入必须对应 Effect 已接受的观察事实、`effect.evidence` 摘要和结果 Payload 父边，且批次成员与顺序逐项匹配。
 
+### 5.2 向量索引重放、核验与切换
+
+`vector.index` 必须能只凭本包持久账本和受管 Payload 引用恢复自己的派生索引，不能在宿主 Effect Driver 中直接查询 `memory.graph` 私有表。现有 ref 账本仅保存输入摘要，缺少向量重放定位；这是完整重建的阻断项。索引包的服务端口负责准入、重放、持久状态和任务生命周期；通用 Milvus 传输适配器只执行显式 collection 上的建表、写入、读取、删除及枚举，不裁定来源资格。管理动作和状态页由 `vector.index` 包贡献，Web 网关不内置“重建 Bot 记忆”业务分支。
+
+发布契约升级后，`vector.index.upsert` 除即时向量外还必须收到不可变的 `ReplayLocator`：准确的 `embedding.result` PayloadRef、批次内 item index、facet/ref ID、向量摘要及冻结 space ID。索引包经受限 Payload 读端口验证结果协议、父引用、item 身份、维度和向量摘要，确认即时向量与重放向量相同；活动 ref 行不可变地绑定定位符和输入摘要。不能读取、已撤销或不匹配的定位符不得登记为 ACTIVE。普通重试只允许相同 ref/定位符/摘要；同 ref 不同内容必须失败。QUERY ref 也遵守此规则，查询终结或过期须由 `memory.graph` 的删除 outbox 持久转为 tombstone，不能让已清理的临时结果长期占用 ACTIVE。已发布 DOCUMENT 来源遗忘时，Memory 先撤销资格并写删除 outbox；索引包收到删除后先记不可逆 tombstone，候选和活动索引的物理删除可异步重放。Payload 被撤销而 ref 仍 ACTIVE 时，重建进入可诊断的 `BLOCKED_SOURCE_UNAVAILABLE`，不得擅自跳过该 ref、重新嵌入或把部分候选发布为完整索引。
+
+每个 Bot/space 只有一个已发布 `active_binding`，它指向真实 Milvus `collection_id`、物理名称、索引代次和完整覆盖水位；重建请求只创建本包的持久 Job、独立候选名称和候选 identity。旧活动集合在重建期间继续服务；若已丢失或身份不符，则查询与新 upsert 继续明确返回 `VECTOR_INDEX_REBUILD_REQUIRED`，权威归档与 tombstone 不停。候选不能复用已丢失集合的旧名称，也不能以“同名存在”代替真实 identity 核验。Job 的领取 token、尝试号和租约阻止旧 Worker 发布；重启与热替换按持久阶段恢复，失败候选只由本包在核验 collection identity 后回收。
+
+重建开始时，本包在 ref 写序列上记录切口 `s0`。Worker 以 `ref_id` 稳定分页读取 ACTIVE ref 的 ReplayLocator，将准确向量重放到候选；并发 upsert/delete 在旧集合正常结算的同一个 ref 事务里追加单调序列的变更记录，记录重放定位符或 tombstone。重复操作按 ref 与输入摘要合流，迟到 upsert 不能越过 tombstone。扫描与增量追赶允许交错：候选按每个 ref 的最新已结算序列覆盖，旧快照不能覆盖较新的删除；网络调用失败只重试同一候选/同一变更，不推进已应用水位。索引包不得把首次扫描的“最大 ref ID”冒充完整覆盖。
+
+候选核验以冻结变更水位 `sN` 推导预期的 ref ID、用途和输入摘要集合，再通过 Milvus 有界枚举/批量读取逐项比对候选的实际集合；仅比数量、仅检查 collection 存在或抽样均不能宣称完整。Milvus 行须保存输入摘要以支持核验，额外行、缺项、错误摘要和错误用途均阻断切换。候选在核验期只有重建 Worker 可写，因此可边接收旧索引的新变更边核对冻结 `sN`。核验后持续追赶；切换时获取 Bot/space 的排他变更围栏，只允许有界尾段和有界时间内的最终应用及复核，超界就释放围栏继续追赶。最终以一个 PostgreSQL 事务追加绑定并 CAS 发布 `active_binding` 与覆盖水位；事务失败时旧 binding 仍唯一可读，候选保留以供重试。普通 upsert/delete/search 和 tombstone 清扫在一次调用内固定已发布 binding，并持有共享围栏至 Milvus 调用结束，不得跨切换混用两个物理集合。切换后旧集合等旧调用排空，再按准确旧 `collection_id` 回收。
+
+运行中的完整性审计同样枚举已发布集合并对照冻结 ref 账本与变更水位；发现单行缺失、额外行或内容不符时将该 binding 标记 `REBUILD_REQUIRED` 并拒绝后续 ANN 查询。审计周期之间外部破坏不可能被同步察觉，状态页必须显示上次完整核验水位与时间，不能将“曾通过审计”解释为实时完整。在线召回仍必须让 `memory.graph` 逐个回查来源资格、修订和删除屏障，Milvus 结果本身永不授权展示内容。
+
+验收须在隔离 PostgreSQL 与真实 Milvus 上覆盖：整体 collection 丢失、原 collection 内单行缺失、同名不同 identity、QUERY 与 DOCUMENT 混合 ref、Payload 撤销、忘却与迟到 upsert、扫描中并发发布/删除、切换前后搜索、Worker 崩溃恢复和热替换。只有候选逐行核验且绑定原子切换通过，才可把 `REBUILD_REQUIRED` 标记为已恢复。
+
 ## 6. 跨主干联想、证据与合流
 
 联想可以连接群甲、群乙的源单元，或连接分别由两群支撑的实体/断言。它仅提供扩展线索；联想不把来源转成当前群，不把两个断言合成一个确定事实，也不授予原本没有的跨群读取能力。
