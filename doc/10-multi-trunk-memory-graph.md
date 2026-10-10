@@ -497,6 +497,8 @@ MemoryRelationView
   evidence_refs[], operation_ref, occurred_at
 ```
 
+关系审核只改变关系贡献的审核事实，不改写来源证据。自动生成的活动贡献在 `UNREVIEWED` 时默认参与召回，管理员明确撤回后立即退出；批准记录为不可变 `APPROVED` 事实。人工新建关系先以候选状态保存，未经批准不得进入召回图。批准与撤回必须锁定同一贡献并按操作 ID 幂等合流；审核列表用创建事务快照冻结状态，来源资格仍在读取时复核。
+
 端点是可继续查询的稳定引用；方向以当前 seed 和规范边方向分别表达，不能只返回两个名称后让前端猜。人工关系、模型候选、确定性顺序边和由多项证据归约出的联想必须使用不同 `relation_type/created_by_kind/status`。UI 可隐藏内部 ID 的默认显示，但详情必须能解释这条边从何而来、由哪些来源支撑、是否跨群、是否已审核、是否被删除或仅是候选。
 
 真实召回试验由 `memory.trial.start` 管理 action 建立一次受限运行，由 `memory.trial.get` 管理 query 读取状态和结果；取消使用独立 action。试验输入为 text/image/mixed，启动动作可以创建临时资产、请求嵌入并产生费用，不能伪装成只读 query。试验只服务于所选 Bot 的管理权限，输入标记为 `admin_trial`，不分配 `group_source_id`、群主干位置、`source_unit_id` 或群消息发生时间，也不经过 Conversation 入站、Agent 触发或长期记忆归档。人工建边、撤边、遗忘和重建是带 expected revision、计划摘要、权限和幂等键的 action，不能从图画布直接改数据库。

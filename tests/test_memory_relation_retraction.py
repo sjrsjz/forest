@@ -103,6 +103,81 @@ async def test_relation_retraction_converges_and_removes_new_recall_edges(
     assert [item["contribution_id"] for item in before["result"]["value"]["items"]] == [
         "contribution/review"
     ]
+    assert before["result"]["value"]["items"][0]["review_state"] == "UNREVIEWED"
+
+    async def approve(operation, *, relation="relation/review"):
+        body = {
+            "relation_id": relation, "contribution_id": "contribution/review",
+            "requested_by": "admin/test",
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (await conn.execute(sql.SQL(
+                "SELECT {}.memory_approve_management_relation(%s,%s) AS result"
+            ).format(namespace), (
+                Jsonb({"bot_id": store.bot_id, "operation_id": operation}),
+                Jsonb(body),
+            ))).fetchone()
+        return row["result"]
+
+    first_approval, second_approval = await asyncio.gather(
+        approve("approve/one"), approve("approve/two"),
+    )
+    approved = first_approval if first_approval["ok"] else second_approval
+    refused = second_approval if first_approval["ok"] else first_approval
+    assert approved["value"]["contribution_id"] == "contribution/review"
+    assert refused["error"]["code"] == "MEMORY_RELATION_ALREADY_APPROVED"
+    approval_operation = "approve/one" if first_approval["ok"] else "approve/two"
+    assert await approve(approval_operation) == approved
+    assert (await approve(approval_operation, relation="another"))["error"]["code"] == (
+        "MEMORY_RELATION_APPROVAL_CONFLICT"
+    )
+    async with store.pool.connection() as conn:
+        approved_page = await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_query_relations(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"limit": 10, "review_states": ["APPROVED"]}),
+        ))).fetchone()
+        unreviewed_page = await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_query_relations(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"limit": 10, "review_states": ["UNREVIEWED"]}),
+        ))).fetchone()
+    approved_item = approved_page["result"]["value"]["items"][0]
+    assert approved_item["review_state"] == "APPROVED"
+    assert approved_item["reviewed_by"] == "admin/test"
+    assert unreviewed_page["result"]["value"]["items"] == []
+    async with store.pool.connection() as conn:
+        approved_graph = await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_query_neighbourhood(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"endpoint_kind": "ENTITY", "endpoint_id": "entity/left",
+                   "review_states": ["APPROVED"], "max_hops": 1}),
+        ))).fetchone()
+        unreviewed_graph = await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_query_neighbourhood(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id}),
+            Jsonb({"endpoint_kind": "ENTITY", "endpoint_id": "entity/left",
+                   "review_states": ["UNREVIEWED"], "max_hops": 1}),
+        ))).fetchone()
+    assert len(approved_graph["result"]["value"]["edges"]) == 1
+    assert unreviewed_graph["result"]["value"]["edges"] == []
+    neighbourhood_schema = json.loads((
+        Path(__file__).parents[1] /
+        "src/forest/builtin/memory_graph/schemas/query-neighbourhood-output.json"
+    ).read_text(encoding="utf-8"))
+    Draft202012Validator(neighbourhood_schema).validate(
+        approved_graph["result"]["value"]
+    )
+    relation_schema = json.loads((
+        Path(__file__).parents[1] /
+        "src/forest/builtin/memory_graph/schemas/query-relations-output.json"
+    ).read_text(encoding="utf-8"))
+    Draft202012Validator(relation_schema).validate(approved_page["result"]["value"])
+
     foreign = await invoke("review/foreign", bot_id="bot/foreign")
     assert foreign["error"]["code"] == "MEMORY_RELATION_NOT_FOUND"
     first, second = await asyncio.gather(invoke("review/one"), invoke("review/two"))
@@ -148,9 +223,9 @@ async def test_relation_retraction_converges_and_removes_new_recall_edges(
                 f"entity/left/{suffix}", f"entity/right/{suffix}",
             ))
         result = await invoke(
-            f"review/{suffix}", relation=relation, contribution=contribution,
+            f"review/history/{suffix}", relation=relation, contribution=contribution,
         )
-        assert result["ok"] is True
+        assert result["ok"] is True, result
 
     async def history(body):
         async with store.pool.connection() as conn:

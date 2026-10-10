@@ -548,6 +548,20 @@ CREATE INDEX relation_retractions_actor_idx ON relation_retractions(
     bot_id,actor_subject_ref,created_at DESC,operation_id DESC
 );
 
+CREATE TABLE relation_approvals (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    contribution_id text NOT NULL,
+    actor_subject_ref text NOT NULL CHECK (octet_length(actor_subject_ref) BETWEEN 1 AND 256),
+    created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id),
+    UNIQUE (bot_id,contribution_id),
+    FOREIGN KEY (bot_id,contribution_id)
+        REFERENCES relation_contributions(bot_id,contribution_id)
+);
+
 CREATE TABLE memory_queries (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     query_id text NOT NULL CHECK (octet_length(query_id) BETWEEN 1 AND 256),
@@ -7224,6 +7238,77 @@ EXCEPTION WHEN invalid_text_representation THEN
 END;
 $$;
 
+CREATE FUNCTION memory_approve_management_relation(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_contribution text := input->>'contribution_id';
+    requested_relation text := input->>'relation_id';
+    requested_actor text := input->>'requested_by';
+    requested_digest text := 'sha256:' ||
+        encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    previous_record record;
+    target_record record;
+    approved_at timestamptz;
+BEGIN
+    IF requested_bot IS NULL OR requested_operation IS NULL OR
+       octet_length(requested_operation) NOT BETWEEN 1 AND 256 OR
+       requested_contribution IS NULL OR requested_relation IS NULL OR
+       requested_actor IS NULL OR octet_length(requested_actor) NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_APPROVAL_INVALID',
+                'message','Relation approval request is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/relation-approve/' || requested_bot || '/' || requested_operation,0));
+    SELECT * INTO previous_record
+    FROM __forest_module_schema__.relation_approvals
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF FOUND THEN
+        IF previous_record.input_digest IS DISTINCT FROM requested_digest OR
+           previous_record.contribution_id IS DISTINCT FROM requested_contribution THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_RELATION_APPROVAL_CONFLICT',
+                    'message','Relation approval operation differs','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.memory-relation-approval/1',
+                'relation_id',requested_relation,'contribution_id',requested_contribution,
+                'approved_at',previous_record.created_at));
+    END IF;
+    SELECT c.relation_id,c.active INTO target_record
+    FROM __forest_module_schema__.relation_contributions c
+    WHERE c.bot_id=requested_bot AND c.contribution_id=requested_contribution
+    FOR UPDATE;
+    IF NOT FOUND OR target_record.relation_id IS DISTINCT FROM requested_relation THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_NOT_FOUND',
+                'message','Relation contribution does not exist','status',404));
+    END IF;
+    IF NOT target_record.active THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_ALREADY_RETRACTED',
+                'message','Relation contribution is no longer active','status',409));
+    END IF;
+    IF EXISTS (SELECT 1 FROM __forest_module_schema__.relation_approvals
+               WHERE bot_id=requested_bot AND contribution_id=requested_contribution) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_ALREADY_APPROVED',
+                'message','Relation contribution is already approved','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.relation_approvals(
+        bot_id,operation_id,input_digest,contribution_id,actor_subject_ref)
+    VALUES(requested_bot,requested_operation,requested_digest,
+        requested_contribution,requested_actor)
+    RETURNING created_at INTO approved_at;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-relation-approval/1',
+            'relation_id',requested_relation,'contribution_id',requested_contribution,
+            'approved_at',approved_at));
+END;
+$$;
+
 CREATE FUNCTION memory_retract_management_relation(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE
@@ -11006,11 +11091,17 @@ BEGIN
         SELECT c.contribution_id,c.relation_id,c.relation_kind,c.relation_key,
             c.left_kind,c.left_id,c.right_kind,c.right_id,c.weight_micros,
             c.origin_kind,c.created_at,c.cross_trunk,
+            CASE WHEN a.contribution_id IS NULL THEN 'UNREVIEWED'
+                 ELSE 'APPROVED' END AS review_state,
+            a.actor_subject_ref AS reviewed_by,a.created_at AS reviewed_at,
             CASE WHEN c.relation_kind='ASSOCIATES_WITH' THEN 'UNDIRECTED'
                  WHEN NOT has_endpoint THEN 'CANONICAL'
                  WHEN c.left_kind=endpoint_kind AND c.left_id=endpoint_id
                     THEN 'OUTBOUND' ELSE 'INBOUND' END AS direction
         FROM __forest_module_schema__.relation_contributions c
+        LEFT JOIN __forest_module_schema__.relation_approvals a
+          ON a.bot_id=c.bot_id AND a.contribution_id=c.contribution_id
+         AND pg_visible_in_snapshot(a.created_xid,snapshot_value)
         WHERE c.bot_id=context->>'bot_id' AND c.active
           AND pg_visible_in_snapshot(c.created_xid,snapshot_value)
           AND (NOT has_endpoint OR
@@ -11020,6 +11111,10 @@ BEGIN
               SELECT value FROM jsonb_array_elements_text(input->'relation_kinds')))
           AND (NOT (input ? 'origin_kinds') OR c.origin_kind IN (
               SELECT value FROM jsonb_array_elements_text(input->'origin_kinds')))
+          AND (NOT (input ? 'review_states') OR
+               (CASE WHEN a.contribution_id IS NULL THEN 'UNREVIEWED'
+                     ELSE 'APPROVED' END) IN (
+                   SELECT value FROM jsonb_array_elements_text(input->'review_states')))
           AND (NOT input ? 'cross_trunk' OR
                c.cross_trunk=(input->>'cross_trunk')::boolean)
           AND (NOT (input ? 'evidence_trunk_id') AND

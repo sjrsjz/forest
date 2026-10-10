@@ -9,6 +9,8 @@
       "items": {"enum": ["ASSOCIATES_WITH", "EVIDENCE", "CONTRADICTS", "SUBJECT_OF"]}},
     "origin_kinds": {"type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
       "items": {"enum": ["MANUAL", "VECTOR", "RULE", "MODEL"]}},
+    "review_states": {"type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true,
+      "items": {"enum": ["UNREVIEWED", "APPROVED"]}},
     "direction": {"enum": ["OUTBOUND", "INBOUND", "UNDIRECTED"]},
     "cross_trunk": {"type": "boolean"},
     "evidence_trunk_id": {"$ref": "#/$defs/id"},

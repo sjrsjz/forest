@@ -6,7 +6,7 @@
     "snapshot_xid": {"type": "string", "minLength": 3, "maxLength": 65536},
     "items": {"type": "array", "maxItems": 20, "items": {
       "type": "object", "additionalProperties": false,
-      "required": ["relation_id", "contribution_id", "relation_kind", "relation_key", "left_kind", "left_id", "right_kind", "right_id", "weight_micros", "origin_kind", "created_at", "cross_trunk", "direction", "evidence_count", "association_evidence_count", "evidence"],
+      "required": ["relation_id", "contribution_id", "relation_kind", "relation_key", "left_kind", "left_id", "right_kind", "right_id", "weight_micros", "origin_kind", "created_at", "cross_trunk", "direction", "review_state", "reviewed_by", "reviewed_at", "evidence_count", "association_evidence_count", "evidence"],
       "properties": {
         "relation_id": {"$ref": "#/$defs/id"},
         "contribution_id": {"$ref": "#/$defs/id"},
@@ -16,6 +16,9 @@
         "right_kind": {"$ref": "#/$defs/kind"}, "right_id": {"$ref": "#/$defs/id"},
         "weight_micros": {"type": "integer", "minimum": 0},
         "origin_kind": {"enum": ["MANUAL", "VECTOR", "RULE", "MODEL"]},
+        "review_state": {"enum": ["UNREVIEWED", "APPROVED"]},
+        "reviewed_by": {"type": ["string", "null"], "maxLength": 256},
+        "reviewed_at": {"type": ["string", "null"], "format": "date-time"},
         "created_at": {"type": "string", "format": "date-time"},
         "cross_trunk": {"type": "boolean"},
         "direction": {"enum": ["OUTBOUND", "INBOUND", "UNDIRECTED", "CANONICAL"]},

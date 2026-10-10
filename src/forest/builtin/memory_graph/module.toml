@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.90.5"
+version = "1.91.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -66,6 +66,7 @@ requests = [
   "domain.query:memory.query-trial-vector-sources",
   "domain.query:memory.query-relations",
   "domain.query:memory.search-relations",
+  "domain.command:memory.approve-management-relation",
   "domain.query:memory.forget-work-status",
   "domain.command:memory.promote-claimed-association",
   "domain.command:memory.stage-text-projection-rebuild",
@@ -288,9 +289,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.88.0"
+schema_version = "3.89.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "9efa7c53c6ac9ceabc7d656ab46ff11cfca0db07242c42486f4537eefe2842d7"
+baseline_sha256 = "e9218cd3b0221152b7bc63b6f3dded1df8fe0585cdbfda8e315d1e5ae8914c6f"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -490,6 +491,13 @@ contract = "1.0"
 function = "memory_promote_claimed_association"
 input_schema = "schemas/association-promotion-work-input.json"
 output_schema = "schemas/association-promotion-work-output.json"
+
+[[components.domain_commands]]
+name = "memory.approve-management-relation"
+contract = "1.0"
+function = "memory_approve_management_relation"
+input_schema = "schemas/approve-relation-input.json"
+output_schema = "schemas/approve-relation-output.json"
 
 [[components.domain_commands]]
 name = "memory.retract-management-relation"
@@ -739,6 +747,13 @@ timeout_s = 30
 [[components.management_actions]]
 id = "memory.text-index.rebuild"
 port = "memory.enqueue-text-projection-rebuild"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "memory.relations.approve"
+port = "memory.approve-management-relation"
 priority = "P1"
 actor_field = "requested_by"
 timeout_s = 15

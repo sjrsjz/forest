@@ -24,7 +24,7 @@
     <details id="text-rebuild-browser"><summary>正文索引重建状态</summary><div class="filters"><input id="text-rebuild-request" placeholder="重建请求 ID"><button id="text-rebuild-refresh">查询状态</button></div><div id="text-rebuild-info" class="detail"></div></details>
   </section>
   <section id="relations" class="panel hidden">
-    <div class="filters"><select id="endpoint-kind"><option>SOURCE_UNIT</option><option>ASSERTION</option><option>ENTITY</option><option>ARTIFACT</option></select><input id="endpoint-id" style="flex:1" placeholder="节点 ID；可从来源列表点击选取"><select id="relation-kind"><option value="">全部关系</option><option>ASSOCIATES_WITH</option><option>EVIDENCE</option><option>CONTRADICTS</option><option>SUBJECT_OF</option></select><select id="relation-origin"><option value="">全部来源</option><option>MANUAL</option><option>VECTOR</option><option>RULE</option><option>MODEL</option></select><select id="relation-direction"><option value="">全部方向</option><option>OUTBOUND</option><option>INBOUND</option><option>UNDIRECTED</option></select><select id="relation-cross"><option value="">全部主干</option><option value="true">跨主干</option><option value="false">同主干</option></select><button id="relation-search">一跳列表</button><button id="relation-global">全局筛选</button></div>
+    <div class="filters"><select id="endpoint-kind"><option>SOURCE_UNIT</option><option>ASSERTION</option><option>ENTITY</option><option>ARTIFACT</option></select><input id="endpoint-id" style="flex:1" placeholder="节点 ID；可从来源列表点击选取"><select id="relation-kind"><option value="">全部关系</option><option>ASSOCIATES_WITH</option><option>EVIDENCE</option><option>CONTRADICTS</option><option>SUBJECT_OF</option></select><select id="relation-origin"><option value="">全部来源</option><option>MANUAL</option><option>VECTOR</option><option>RULE</option><option>MODEL</option></select><select id="relation-review"><option value="">&#20840;&#37096;&#23457;&#26680;&#29366;&#24577;</option><option value="UNREVIEWED">&#26410;&#23457;&#26680;</option><option value="APPROVED">&#24050;&#25209;&#20934;</option></select><select id="relation-direction"><option value="">全部方向</option><option>OUTBOUND</option><option>INBOUND</option><option>UNDIRECTED</option></select><select id="relation-cross"><option value="">全部主干</option><option value="true">跨主干</option><option value="false">同主干</option></select><button id="relation-search">一跳列表</button><button id="relation-global">全局筛选</button></div>
     <div class="filters"><input id="relation-evidence-trunk" placeholder="证据主干 ID"><input id="relation-evidence-group" placeholder="证据群号"><input id="relation-evidence-author" placeholder="证据作者 ID"><span class="muted">三个条件须由同一条证据满足；全局结果的有向边按规范左右端点显示。</span></div>
     <div class="filters"><label>跳数 <input id="graph-hops" type="number" min="1" max="3" value="2"></label><label>节点上限 <input id="graph-nodes" type="number" min="1" max="32" value="16"></label><label>边上限 <input id="graph-edges" type="number" min="1" max="32" value="16"></label><button id="relation-neighbourhood">多跳区域</button></div>
     <div id="relation-nodes" class="detail"></div><div id="relation-rows"></div><div class="pager"><span id="relation-count" class="muted"></span><button id="relation-next" disabled>下一页</button></div>
@@ -224,6 +224,7 @@
       meta.textContent=`${item.traversal_depth?`\u7b2c ${item.traversal_depth} \u8df3 \u00b7 \u4ece ${item.from_kind}:${item.from_id} \u00b7 `:''}\u5173\u7cfb ${item.relation_id} \u00b7 \u8d21\u732e ${item.contribution_id} \u00b7 ${item.origin_kind} \u00b7 ${item.cross_trunk?'\u8de8\u4e3b\u5e72':'\u540c\u4e3b\u5e72'} \u00b7 \u6743\u91cd ${item.weight_micros}/1000000`;
       const evidence=document.createElement('div');evidence.className='detail';
       evidence.textContent=item.evidence.length?item.evidence.map(formatRelationSource).join('\n'):'\u6ca1\u6709\u5173\u7cfb\u5fc5\u8981\u8bc1\u636e';
+      if(item.review_state)meta.textContent+=' \u00b7 \u5ba1\u6838 '+item.review_state+(item.reviewed_by?'\uff08'+item.reviewed_by+' \u00b7 '+stamp(item.reviewed_at)+'\uff09':'');
       box.append(title,meta,evidence);
       if(item.evidence_count>item.evidence.length){
         let shown=item.evidence.length,cursor=shown-1;
@@ -264,6 +265,21 @@
           }catch(error){status(error.message);}finally{if(box.isConnected)button.disabled=false;}
         };
         box.append(learned,button);
+      }
+      if(item.review_state==='UNREVIEWED'){
+        const approve=document.createElement('button');approve.type='button';approve.textContent='\u6279\u51c6\u5173\u7cfb';
+        const operationKey='relation-approve:'+randomId();
+        approve.onclick=async()=>{
+          approve.disabled=true;
+          try{
+            await action('memory.relations.approve',{
+              relation_id:item.relation_id,contribution_id:item.contribution_id
+            },operationKey);
+            if(box.isConnected){relationPage=null;await loadRelations(false,relationGlobal);}
+            status('\u5df2\u6279\u51c6\u5173\u7cfb\u8d21\u732e '+item.contribution_id);
+          }catch(error){status(error.message);if(box.isConnected)approve.disabled=false;}
+        };
+        box.append(approve);
       }
       const review=document.createElement('details');review.className='review';
       const heading=document.createElement('summary');heading.textContent='审核并撤回这条关系贡献';
@@ -395,6 +411,7 @@
   function relationFilters(input){
     if($('relation-kind').value)input.relation_kinds=[$('relation-kind').value];
     if($('relation-origin').value)input.origin_kinds=[$('relation-origin').value];
+    if($('relation-review').value)input.review_states=[$('relation-review').value];
     if($('relation-cross').value)input.cross_trunk=$('relation-cross').value==='true';
     for(const [field,id] of [['evidence_trunk_id','relation-evidence-trunk'],['evidence_external_group_id','relation-evidence-group'],['evidence_author_subject_ref','relation-evidence-author']]){
       if($(id).value.trim())input[field]=$(id).value.trim();
