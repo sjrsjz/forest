@@ -7,3 +7,5 @@
 切换顺序为：确认旧 Agent Run 已完成且无待发送 Delivery；将旧 Bot 提交为 `OFFLINE` 并确认旧进程释放 OneBot 连接；再将新 Bot 提交为 `ONLINE`。新部署观察最终为 `ONLINE`、容器 `running/healthy` 且重启计数 0；新 Bot 图修订 1 的 22 个组件均为 ACTIVE，只有新进程持有到树莓派 `8080` 的已建立 TCP 连接。初次只读观测中新 Bot Inbox、Context、Memory source、Agent Run 与 Delivery 均为空。整个切换没有发送 QQ 测试消息。
 
 这是从空 Bot 库开始的新记忆域，旧 Bot 的历史没有迁入新库，但旧数据库和容器均保留。若新实例失败，应先将 `forest-main-v22` 设为 `OFFLINE` 并确认其 OneBot 连接关闭，再将旧 `forest-main` 设为 `ONLINE`；不能让两者同时接收同一 QQ 账号事件。此次证据证明当前源码的真实控制面、供应与整图启动，不证明获准群的下一条 @ 已触发、真实模型回复或长期混合图文负载；这些仍需低频入站观察。
+
+后续只读观测（2026-10-11）：新 Bot 已接收 4 条群消息，Inbox 和 Context 各 4 条，Memory source unit 4 条且全部有 occurrence；四条均来自许可群 `933179609` 之外，分类为 `FINAL/NO_TRIGGER`、原因 `group_not_allowed`，Agent Run 仍为 0。这证明新实例的 OneBot 入站与无触发归档路径在运行，不证明许可群真实 @、模型回复或发送路径。`memory.graph` 仍为 SQL 3.88.0。

@@ -1205,3 +1205,7 @@ Memory 批量遗忘后续预览（2026-10-11）：`memory.graph` 1.90.5 的包�
 当前源码新基线在线切换（2026-10-11）：旧部署/Host 内核基线与当前源码不兼容，故新建独立部署及 Bot 库，旧 `forest-main` 正常 OFFLINE 且原数据保留。新 `forest-main-v22` 经包管理供应为 READY/OFFLINE 后才切换为 ONLINE；当前镜像 `forest:runtime-candidate-9e8a28d` 的部署图 8 个模块、Bot 图 22 个模块 ACTIVE，Memory/Vector 私有 SQL 为 3.88.0/2.19.0，只有新进程持有树莓派 OneBot 连接。首次观测新库 Inbox/Memory/Run/Delivery 均为空，未向 QQ 发测试消息；获准群真实 @ 和模型回复尚未验收。详见[新基线切换记录](live-v22-cutover-2026-10-11.md)。
 
 Memory 关系审核批准（2026-10-11）：`memory.graph` 1.91.0 / 私有 SQL 3.89.0 为已有活动关系贡献新增不可变批准事实、幂等管理动作，以及按快照显示和筛选 `UNREVIEWED`/`APPROVED` 的关系页；撤回继续独立停用贡献。隔离 PostgreSQL 用例覆盖并发批准、同键回放、冲突输入、状态筛选及批准后撤回，1 passed。当前尚无人工候选创建及其批准前召回门禁，也没有完整的 relation/projection revision；线上 v22 仍运行 Memory 1.90.5 / SQL 3.88.0，本次没有热替换在线包或发送 QQ 消息。
+
+热替换边界与在线入站核对（2026-10-11）：当前安装器要求已有 schema bundle 的版本、基线摘要和存储身份完全一致；代码或 UI 变更若保持 SQL 身份不变，builtin 存储身份回归与 Graph 排空/失败恢复的本地用例共 3 passed。SQL 变化不能靠当前候选 prewarm 热替换：存储安装在旧 Generation 仍活动时发生，直接执行 DDL 会破坏旧代的读取边界。完整 BotHost 官方包选择/热替换隔离回归运行 542.88 秒时主进程持续接近占满一个 CPU 核，主动中断，不能计为通过；隔离测试库已确认清理。在线 v22 的 4 条真实入站全部来自许可群以外，均被 `group_not_allowed` 正常归档，Agent Run 为 0；许可群回复仍未验收。
+
+组件选择存储身份前置围栏（2026-10-11）：Bot 作用域的 `module.validate` 与选择提交共用 Graph 投影，现在一次读取候选包的存储身份和内核 bundle 账本；已安装同 schema ID 的版本、基线、Repository contract、执行档位或状态不符时返回 `SCHEMA_BUNDLE_UPGRADE_REQUIRED`，不先写选择事实。官方与外部包的代码/UI 变化仍以稳定存储 bundle 摘要通过。隔离 PostgreSQL 的已安装包热替换用例覆盖代码变更继续准入、SQL baseline 与版本变更在预览中拒绝、旧 Graph 保持不变，1 passed；Ruff 与差异检查通过。此围栏不执行在线 SQL 升级，也不能把前述 9 分钟未完成的完整 BotHost 回归算作通过。

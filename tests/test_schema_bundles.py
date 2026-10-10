@@ -3180,6 +3180,38 @@ async def test_installed_archive_uses_separate_configuration_schema_and_hot_relo
         expected_configuration_revisions={"tests.routing-component": 1},
     )
     assert repeated_preview.plan_digest == selected_preview.plan_digest
+    schema_changed_root = tmp_path / "schema-changed-source"
+    copytree(updated_root, schema_changed_root)
+    changed_baseline = (
+        baseline + b"\nCREATE TABLE extra_records (record_id text PRIMARY KEY);"
+    )
+    (schema_changed_root / "schema" / "records.sql").write_bytes(changed_baseline)
+    changed_manifest = schema_changed_root / "module.toml"
+    changed_manifest.write_text(
+        changed_manifest.read_text(encoding="utf-8")
+        .replace('version = "1.0.1"', 'version = "1.0.2"', 1)
+        .replace('schema_version = "1.0.0"', 'schema_version = "1.0.1"', 1)
+        .replace(
+            f'baseline_sha256 = "{hashlib.sha256(baseline).hexdigest()}"',
+            f'baseline_sha256 = "{hashlib.sha256(changed_baseline).hexdigest()}"',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    changed_source = source_catalog.build(schema_changed_root)
+    changed_snapshot = catalog.import_archive(
+        source_catalog.export_archive(changed_source.digest)
+    )
+    with pytest.raises(ForestError) as schema_change:
+        await preview_selected_graph(
+            first, pinned_selection(changed_snapshot), (routing_descriptor,),
+            catalog, store, kernel=isolated_core,
+            target_component_id="tests.routing-component",
+            expected_graph_revision=first_graph.graph_revision,
+            expected_configuration_revisions={"tests.routing-component": 1},
+        )
+    assert schema_change.value.code == "SCHEMA_BUNDLE_UPGRADE_REQUIRED"
+    assert (await core.runtime.status())["graph_revision"] == first_graph.graph_revision
     prior_selection = pinned_selection(installed_snapshot)
     prior_preview = await preview_selected_graph(
         first, prior_selection, (routing_descriptor,), catalog, store,

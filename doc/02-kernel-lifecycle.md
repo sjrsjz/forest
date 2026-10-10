@@ -91,7 +91,11 @@ stop_timeout_s = 10
 requests = ["memory.recall", "context.commit", "provider.generate", "tool.invoke", "reply.propose"]
 ```
 
-校验顺序：包摘要/信任策略 → manifest 格式 → 内核 API 兼容 → 运行时可用 → schema bundle 身份与 Repository contract 完整 → 服务依赖解析 → 可序列化组件状态转换可用 → 资源容量 → 能力授予。任何必需项失败都不能发布部分服务。Forest 首次发布前，一个模块只有从空 namespace 安装的内容寻址 baseline；包里不存在按开发历史累积的 SQL migration 目录。首次发布后的 schema 升级边才随模块独立定义，不能重新形成宿主级编号迁移链。
+校验顺序：包摘要/信任策略 → manifest 格式 → 内核 API 兼容 → 运行时可用 → schema bundle 身份与 Repository contract 完整 → 服务依赖解析 → 可序列化组件状态转换可用 → 资源容量 → 能力授予。任何必需项失败都不能发布部分服务。
+
+组件选择的只读预览和提交前事务复核必须用同一存储身份规则读取已安装 bundle：候选 SQL 身份与现有账本不一致、又没有受支持的版本升级边时，必须在写入期望选择前拒绝，不能让预热阶段才发现不兼容并留下无法冷启动的选择事实。新组件的空 namespace 仍由安装器原子创建；同一 SQL bundle 的 Python、UI 和 manifest 版本变更不应被误判为 schema 升级。
+
+Forest 首次发布前，一个模块只有从空 namespace 安装的内容寻址 baseline；包里不存在按开发历史累积的 SQL migration 目录。首次发布后的 schema 升级边才随模块独立定义，不能重新形成宿主级编号迁移链。
 
 声明 `capabilities.requests` 只是申请，实际集合为 manifest、部署授予、Bot 策略和请求身份的交集。`required=false` 的依赖缺失必须产生显式降级能力清单，不能在运行中随机 `ImportError`。
 
