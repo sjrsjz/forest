@@ -2882,3 +2882,232 @@ BEGIN
     RETURN response;
 END;
 $$;
+
+-- Retirement is package authority: only an immutable, previously identified
+-- collection can be removed. A name with no confirmed physical ID is retained
+-- for operator inspection rather than being guessed from the namespace.
+CREATE TABLE vector_collection_gc_work (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    binding_revision bigint NOT NULL CHECK (binding_revision>0),
+    space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
+    collection_name text NOT NULL CHECK (octet_length(collection_name) BETWEEN 1 AND 256),
+    collection_id bigint NOT NULL CHECK (collection_id>0),
+    source_kind text NOT NULL CHECK (source_kind IN ('OLD_BINDING','ABANDONED_CANDIDATE')),
+    state text NOT NULL DEFAULT 'QUEUED' CHECK (state IN ('QUEUED','CLAIMED','DELETED','BLOCKED')),
+    eligible_at timestamptz NOT NULL,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count>=0),
+    claim_token text,
+    lease_deadline timestamptz,
+    claim_payload jsonb,
+    error_code text,
+    deleted_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(bot_id,binding_revision),
+    CHECK ((claim_token IS NULL)=(lease_deadline IS NULL)),
+    CHECK ((claim_token IS NULL)=(claim_payload IS NULL)),
+    CHECK ((state='DELETED')=(deleted_at IS NOT NULL))
+);
+CREATE INDEX vector_collection_gc_due_idx ON vector_collection_gc_work(
+    bot_id,eligible_at,binding_revision
+) WHERE state IN ('QUEUED','CLAIMED');
+CREATE TABLE vector_collection_gc_settlements (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(bot_id,claim_token)
+);
+CREATE INDEX vector_collection_gc_settlements_gc_idx
+    ON vector_collection_gc_settlements(bot_id,settled_at,claim_token);
+CREATE TRIGGER vector_collection_gc_settlement_guard
+    BEFORE UPDATE OR DELETE ON vector_collection_gc_settlements
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_rebuild_settlement();
+
+CREATE FUNCTION vector_claim_collection_gc(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work __forest_module_schema__.vector_collection_gc_work%ROWTYPE;
+    next_payload jsonb;
+    work_key text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_GC_CLAIM_INVALID',
+                'message','Collection retirement claim is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-rebuild:'||requested_bot,0));
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-gc:'||requested_bot,0));
+    DELETE FROM __forest_module_schema__.vector_collection_gc_settlements
+    WHERE bot_id=requested_bot AND claim_token IN (
+        SELECT claim_token FROM __forest_module_schema__.vector_collection_gc_settlements
+        WHERE bot_id=requested_bot
+          AND settled_at<clock_timestamp()-interval '48 hours'
+        ORDER BY settled_at,claim_token LIMIT 16
+    );
+    INSERT INTO __forest_module_schema__.vector_collection_gc_work(
+        bot_id,binding_revision,space_id,collection_name,collection_id,
+        source_kind,eligible_at
+    )
+    SELECT b.bot_id,b.binding_revision,b.space_id,b.collection_name,
+           b.collection_id,'OLD_BINDING',current_binding.bound_at+interval '10 minutes'
+    FROM __forest_module_schema__.vector_collection_bindings b
+    JOIN __forest_module_schema__.vector_collection_health h
+      ON h.bot_id=b.bot_id AND h.binding_revision>b.binding_revision
+    JOIN __forest_module_schema__.vector_collection_bindings current_binding
+      ON current_binding.bot_id=h.bot_id
+     AND current_binding.binding_revision=h.binding_revision
+    WHERE b.bot_id=requested_bot
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.vector_collection_gc_work g
+          WHERE g.bot_id=b.bot_id AND g.binding_revision=b.binding_revision
+      )
+    ORDER BY b.binding_revision LIMIT 16 ON CONFLICT DO NOTHING;
+    INSERT INTO __forest_module_schema__.vector_collection_gc_work(
+        bot_id,binding_revision,space_id,collection_name,collection_id,
+        source_kind,eligible_at
+    )
+    SELECT a.bot_id,a.candidate_revision,w.space_id,a.collection_name,
+           a.collection_id,'ABANDONED_CANDIDATE',
+           GREATEST(a.created_at,w.updated_at)+interval '10 minutes'
+    FROM __forest_module_schema__.vector_rebuild_attempts a
+    JOIN __forest_module_schema__.vector_rebuild_work w
+      ON w.bot_id=a.bot_id AND w.request_id=a.request_id
+    WHERE a.bot_id=requested_bot AND a.collection_id IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.vector_collection_bindings b
+          WHERE b.bot_id=a.bot_id AND b.binding_revision=a.candidate_revision
+      )
+      AND (w.candidate_revision IS DISTINCT FROM a.candidate_revision
+           OR w.state='FAILED')
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.vector_collection_gc_work g
+          WHERE g.bot_id=a.bot_id AND g.binding_revision=a.candidate_revision
+      )
+    ORDER BY a.candidate_revision LIMIT 16 ON CONFLICT DO NOTHING;
+    SELECT * INTO work FROM __forest_module_schema__.vector_collection_gc_work
+    WHERE bot_id=requested_bot AND state='CLAIMED'
+      AND claim_token=requested_token AND lease_deadline>clock_timestamp()
+    FOR UPDATE;
+    IF FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',work.claim_payload);
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.vector_collection_gc_work
+    WHERE bot_id=requested_bot AND state IN ('QUEUED','CLAIMED')
+      AND eligible_at<=clock_timestamp()
+      AND (state='QUEUED' OR lease_deadline<=clock_timestamp())
+    ORDER BY eligible_at,binding_revision LIMIT 1 FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',NULL);
+    END IF;
+    IF work.attempt_count>=5 THEN
+        UPDATE __forest_module_schema__.vector_collection_gc_work
+        SET state='BLOCKED',claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
+            error_code='VECTOR_GC_RETRY_EXHAUSTED',updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND binding_revision=work.binding_revision;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',NULL);
+    END IF;
+    work_key := 'vector-collection-gc:'||encode(sha256(convert_to(
+        requested_bot||'/'||work.binding_revision::text,'UTF8')),'hex');
+    next_payload := jsonb_build_object(
+        'protocol','forest.owned-work-claim/1',
+        'work_id',work.binding_revision::text,'claim_token',requested_token,
+        'attempt',work.attempt_count+1,
+        'operation_id',work_key||':'||(work.attempt_count+1)::text,
+        'causal_root_kind','vector.collection-retirement',
+        'causal_root_id',work.binding_revision::text,
+        'payload',jsonb_build_object(
+            'space_id',work.space_id,
+            'binding_revision',work.binding_revision,
+            'collection_name',work.collection_name,
+            'collection_id',work.collection_id));
+    UPDATE __forest_module_schema__.vector_collection_gc_work
+    SET state='CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        claim_payload=next_payload,attempt_count=attempt_count+1,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND binding_revision=work.binding_revision;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1',
+        'ok',true,'value',next_payload);
+END;
+$$;
+
+CREATE FUNCTION vector_settle_collection_gc(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    prior __forest_module_schema__.vector_collection_gc_settlements%ROWTYPE;
+    work __forest_module_schema__.vector_collection_gc_work%ROWTYPE;
+    receipt jsonb;
+    response jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_GC_SETTLE_INVALID',
+                'message','Collection retirement result is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-gc:'||requested_bot,0));
+    SELECT * INTO prior FROM __forest_module_schema__.vector_collection_gc_settlements
+    WHERE bot_id=requested_bot AND claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF prior.input_payload=input THEN RETURN prior.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_GC_SETTLE_CONFLICT',
+                'message','Collection retirement was settled differently','status',409));
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.vector_collection_gc_work
+    WHERE bot_id=requested_bot AND binding_revision=(input->>'work_id')::bigint
+    FOR UPDATE;
+    IF NOT FOUND OR work.state<>'CLAIMED'
+       OR work.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work.lease_deadline<=clock_timestamp()
+       OR work.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_GC_CLAIM_STALE',
+                'message','Collection retirement claim is no longer current','status',409));
+    END IF;
+    receipt := input#>'{outcome,result}';
+    IF input#>>'{outcome,status}'='SUCCEEDED' THEN
+        IF receipt IS DISTINCT FROM work.claim_payload->'payload'
+               || jsonb_build_object('deleted',true) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','VECTOR_GC_SETTLE_INVALID',
+                    'message','Retirement result differs from claimed collection','status',422));
+        END IF;
+        UPDATE __forest_module_schema__.vector_collection_gc_work
+        SET state='DELETED',deleted_at=clock_timestamp(),error_code=NULL,
+            claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND binding_revision=work.binding_revision;
+    ELSE
+        UPDATE __forest_module_schema__.vector_collection_gc_work
+        SET state=CASE WHEN attempt_count>=5 OR
+                 input#>>'{outcome,error,code}'='VECTOR_INDEX_GC_IDENTITY_MISMATCH'
+                 THEN 'BLOCKED' ELSE 'QUEUED' END,
+            eligible_at=clock_timestamp()+interval '1 minute',
+            error_code=COALESCE(input#>>'{outcome,error,code}',
+                                'VECTOR_GC_TRANSPORT_FAILED'),
+            claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND binding_revision=work.binding_revision;
+    END IF;
+    response := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work.binding_revision::text));
+    INSERT INTO __forest_module_schema__.vector_collection_gc_settlements(
+        bot_id,claim_token,input_payload,result_payload
+    ) VALUES(requested_bot,input->>'claim_token',input,response);
+    RETURN response;
+END;
+$$;

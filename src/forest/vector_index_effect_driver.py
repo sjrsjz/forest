@@ -23,7 +23,8 @@ _LOG = logging.getLogger(__name__)
 _SERVICES = frozenset(
     {"vector.transport.upsert", "vector.transport.search",
      "vector.transport.prune", "vector.transport.audit",
-     "vector.transport.candidate-create"}
+     "vector.transport.candidate-create",
+     "vector.transport.collection-drop"}
 )
 
 
@@ -477,6 +478,8 @@ class MilvusVectorIndexEffectDriver:
     async def invoke(self, payload, *, scope, invocation):
         await self._admit(scope)
         self._check_space(payload["space_id"])
+        if self.service_id == "vector.transport.collection-drop":
+            return await self._collection_drop(payload)
         if self.service_id == "vector.transport.candidate-create":
             return await self._candidate_create(payload)
         binding = payload.get("binding")
@@ -535,6 +538,47 @@ class MilvusVectorIndexEffectDriver:
             "collection_name": name,
             "collection_id": collection_id,
         }
+
+    async def _collection_drop(self, payload):
+        revision = payload["binding_revision"]
+        collection_name = payload["collection_name"]
+        collection_id = payload["collection_id"]
+        base = vector_collection_name(self.bot_id, self.configuration["space_id"])
+        expected_name = base if revision == 1 else base + "_r" + str(revision)
+        if (
+            type(revision) is not int or revision <= 0
+            or type(collection_id) is not int or collection_id <= 0
+            or collection_name != expected_name
+        ):
+            raise ForestError(
+                "VECTOR_INDEX_GC_IDENTITY_MISMATCH",
+                "Retired collection identity is invalid", 409,
+            )
+        try:
+            async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                if await self.client.has_collection(collection_name=collection_name):
+                    description = await self.client.describe_collection(
+                        collection_name=collection_name
+                    )
+                    if self._collection_id(description) != collection_id:
+                        raise ForestError(
+                            "VECTOR_INDEX_GC_IDENTITY_MISMATCH",
+                            "Retired collection name now identifies another collection", 409,
+                        )
+                    await self.client.drop_collection(collection_name=collection_name)
+                    if await self.client.has_collection(collection_name=collection_name):
+                        raise ForestError(
+                            "VECTOR_INDEX_GC_UNAVAILABLE",
+                            "Retired collection still exists after deletion", 503,
+                        )
+        except ForestError:
+            raise
+        except (TimeoutError, MilvusException, OSError) as exc:
+            raise ForestError(
+                "VECTOR_INDEX_GC_UNAVAILABLE",
+                "Retired collection deletion is unavailable", 503,
+            ) from exc
+        return {**payload, "deleted": True}
 
     async def _upsert(self, payload, collection_name):
         try:

@@ -162,6 +162,48 @@ async def test_vector_package_validates_replay_payload_before_milvus_effect():
 
 
 @pytest.mark.asyncio
+async def test_collection_gc_refuses_reused_name_with_different_physical_id():
+    bot_id = "bot-gc-identity"
+    space_id = "space/gc-identity"
+    collection_name = vector_collection_name(bot_id, space_id) + "_r2"
+
+    class PhysicalCollections:
+        def __init__(self):
+            self.ids = {collection_name: 43}
+            self.dropped = []
+
+        async def has_collection(self, *, collection_name):
+            return collection_name in self.ids
+
+        async def describe_collection(self, *, collection_name):
+            return {"collection_id": self.ids[collection_name]}
+
+        async def drop_collection(self, *, collection_name):
+            self.dropped.append(collection_name)
+            del self.ids[collection_name]
+
+    physical = PhysicalCollections()
+    driver = MilvusVectorIndexEffectDriver(
+        {"space_id": space_id, "timeout_seconds": 2}, 1,
+        SimpleNamespace(component_id="vector.index", generation_id="gc-test"),
+        {"kind": "vector-index.milvus",
+         "name": "vector.transport.collection-drop"},
+        bot_id=bot_id, runtime=None, token_resolver=None,
+    )
+    driver.client = physical
+    stale = {"space_id": space_id, "binding_revision": 2,
+             "collection_name": collection_name, "collection_id": 42}
+    with pytest.raises(ForestError) as mismatch:
+        await driver._collection_drop(stale)
+    assert mismatch.value.code == "VECTOR_INDEX_GC_IDENTITY_MISMATCH"
+    assert physical.dropped == []
+    exact = {**stale, "collection_id": 43}
+    assert await driver._collection_drop(exact) == {**exact, "deleted": True}
+    assert await driver._collection_drop(exact) == {**exact, "deleted": True}
+    assert physical.dropped == [collection_name]
+
+
+@pytest.mark.asyncio
 async def test_vector_index_configuration_rejects_mutable_space_shape():
     assert not Draft202012Validator(
         official_builtin_configuration_schema("vector_index_milvus")
@@ -946,6 +988,100 @@ async def test_rebuild_candidate_audit_paginates_frozen_refs(
     assert (await domain("vector_query_rebuild", {
         "request_id": "audit/page", "requested_by": "admin",
     }))["state"] == "PUBLISHED"
+
+    # Retirement stays dormant until the published successor has aged.
+    gc_claim_request = {"protocol": "forest.owned-work-claim-request/1",
+                        "claim_token": "audit/page/gc-old", "lease_seconds": 60}
+    assert await domain("vector_claim_collection_gc", gc_claim_request) is None
+    async with store.pool.connection() as conn, conn.transaction():
+        old_gc = await (await conn.execute(
+            sql.SQL("SELECT source_kind,state FROM {}.vector_collection_gc_work "
+                    "WHERE bot_id=%s AND binding_revision=1")
+            .format(sql.Identifier(namespace)), (bot_id,),
+        )).fetchone()
+        assert old_gc == {"source_kind": "OLD_BINDING", "state": "QUEUED"}
+        await conn.execute(
+            sql.SQL("UPDATE {}.vector_collection_gc_work "
+                    "SET eligible_at=clock_timestamp()-interval '1 second' "
+                    "WHERE bot_id=%s AND binding_revision=1")
+            .format(sql.Identifier(namespace)), (bot_id,),
+        )
+    gc_claim = await domain("vector_claim_collection_gc", gc_claim_request)
+    assert gc_claim["payload"] == {
+        "space_id": space_id, "binding_revision": 1,
+        "collection_name": name, "collection_id": 41,
+    }
+    physical_gc_calls = []
+
+    async def gc_transport(service_name, payload, **_options):
+        assert service_name == "vector.transport.collection-drop"
+        physical_gc_calls.append(payload)
+        return {**payload, "deleted": True}
+
+    gc_ctx = SimpleNamespace(
+        services=SimpleNamespace(call=gc_transport),
+        operations=SimpleNamespace(stable=lambda value: value),
+    )
+    gc_result = await component.collect_retired_collection(gc_claim, gc_ctx)
+    assert physical_gc_calls == [gc_claim["payload"]]
+    settled = {"protocol": "forest.owned-work-settle-request/1",
+               "work_id": gc_claim["work_id"],
+               "claim_token": gc_claim["claim_token"],
+               "attempt": gc_claim["attempt"],
+               "outcome": {"status": "SUCCEEDED", "result": gc_result}}
+    await domain("vector_settle_collection_gc", settled)
+    await domain("vector_settle_collection_gc", settled)
+    async with store.pool.connection() as conn:
+        old_gc = await (await conn.execute(
+            sql.SQL("SELECT state,deleted_at IS NOT NULL AS deleted "
+                    "FROM {}.vector_collection_gc_work "
+                    "WHERE bot_id=%s AND binding_revision=1")
+            .format(sql.Identifier(namespace)), (bot_id,),
+        )).fetchone()
+    assert old_gc == {"state": "DELETED", "deleted": True}
+
+    # A failed but confirmed candidate is also discoverable; its name alone
+    # would not authorize deletion without the recorded physical ID.
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_rebuild_work "
+                    "(bot_id,request_id,input_digest,requested_by,space_id,"
+                    "base_revision,dimensions,state,candidate_revision,"
+                    "candidate_name,candidate_id) "
+                    "VALUES (%s,'audit/orphan',%s,'admin',%s,2,4,'FAILED',"
+                    "3,%s,43)")
+            .format(sql.Identifier(namespace)),
+            (bot_id, digest, space_id, name + "_r3"),
+        )
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_rebuild_attempts "
+                    "(bot_id,candidate_revision,request_id,attempt,"
+                    "collection_name,collection_id) "
+                    "VALUES (%s,3,'audit/orphan',1,%s,43)")
+            .format(sql.Identifier(namespace)), (bot_id, name + "_r3"),
+        )
+    assert await domain("vector_claim_collection_gc", {
+        **gc_claim_request, "claim_token": "audit/page/gc-orphan",
+    }) is None
+    async with store.pool.connection() as conn, conn.transaction():
+        orphan_gc = await (await conn.execute(
+            sql.SQL("SELECT source_kind,state FROM {}.vector_collection_gc_work "
+                    "WHERE bot_id=%s AND binding_revision=3")
+            .format(sql.Identifier(namespace)), (bot_id,),
+        )).fetchone()
+        assert orphan_gc == {"source_kind": "ABANDONED_CANDIDATE",
+                             "state": "QUEUED"}
+        await conn.execute(
+            sql.SQL("UPDATE {}.vector_collection_gc_work "
+                    "SET eligible_at=clock_timestamp()-interval '1 second' "
+                    "WHERE bot_id=%s AND binding_revision=3")
+            .format(sql.Identifier(namespace)), (bot_id,),
+        )
+    orphan_claim = await domain("vector_claim_collection_gc", {
+        **gc_claim_request, "claim_token": "audit/page/gc-orphan",
+    })
+    assert orphan_claim["payload"]["collection_id"] == 43
+    assert orphan_claim["payload"]["collection_name"] == name + "_r3"
 
 
 @pytest.mark.asyncio
@@ -2154,8 +2290,8 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             )
         assert replaced.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
 
-        # Simulate only the already verified SQL publication fact here; the
-        # candidate replay and atomic switch authority are separate work.
+        # This fixture substitutes a published binding to check startup
+        # routing; the package publish state machine is covered separately.
         async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(
                 sql.SQL("INSERT INTO {}.vector_collection_bindings "
@@ -2186,6 +2322,29 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         assert [hit["ref_id"] for hit in recovered_hits["hits"]] == [
             candidate_document["ref_id"]
         ]
+
+        gc_driver = driver_for("vector.transport.collection-drop")
+        drivers["vector.transport.collection-drop"] = gc_driver
+        await gc_driver.start()
+        stale_gc = {"space_id": space_id, "binding_revision": 1,
+                    "collection_name": collection_name,
+                    "collection_id": original_collection_id}
+        with pytest.raises(ForestError) as changed_id:
+            await gc_driver.invoke(stale_gc, scope=scope, invocation=invocation)
+        assert changed_id.value.code == "VECTOR_INDEX_GC_IDENTITY_MISMATCH"
+        assert await client.has_collection(collection_name=collection_name)
+
+        retired_name = collection_name + "_r3"
+        retired_id = await gc_driver._create_collection_named(retired_name)
+        exact_gc = {"space_id": space_id, "binding_revision": 3,
+                    "collection_name": retired_name, "collection_id": retired_id}
+        assert await gc_driver.invoke(exact_gc, scope=scope, invocation=invocation) == {
+            **exact_gc, "deleted": True,
+        }
+        assert not await client.has_collection(collection_name=retired_name)
+        assert await gc_driver.invoke(exact_gc, scope=scope, invocation=invocation) == {
+            **exact_gc, "deleted": True,
+        }
     finally:
         client = drivers["vector.transport.upsert"].client
         if client is not None and await client.has_collection(

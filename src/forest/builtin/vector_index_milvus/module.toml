@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.18.0"
+version = "2.19.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -41,6 +41,7 @@ requests = [
   "service.call:vector.transport.prune",
   "service.call:vector.transport.audit",
   "service.call:vector.transport.candidate-create",
+  "service.call:vector.transport.collection-drop",
   "domain.command:vector.ref.reserve",
   "domain.command:vector.ref.activate",
   "domain.command:vector.ref.tombstone",
@@ -84,9 +85,9 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.17.0"
+schema_version = "2.18.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "00b7cf3935555edcf9208847201808cfdd9793c22a16c8e9ce01eb25801b277c"
+baseline_sha256 = "70c735d7ff94b0f2ea62f69ac4f242f98bf516a799cc41738c3fc866a15a8360"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -285,6 +286,21 @@ settle_timeout_s = 5
 lease_seconds = 180
 
 [[components.owned_work_handlers]]
+name = "vector.collection.gc"
+contract = "1.0"
+handler = "vector.collection.gc"
+claim_function = "vector_claim_collection_gc"
+settle_function = "vector_settle_collection_gc"
+input_schema = "schemas/collection-gc-input.json"
+output_schema = "schemas/collection-gc-output.json"
+max_concurrency = 1
+poll_interval_ms = 5000
+claim_timeout_s = 5
+handler_timeout_s = 45
+settle_timeout_s = 5
+lease_seconds = 60
+
+[[components.owned_work_handlers]]
 name = "vector.refs.audit"
 contract = "2.0"
 handler = "vector.refs.audit"
@@ -389,3 +405,14 @@ runtime_commands = ["vector.collection.quarantine"]
 semantics = "idempotent"
 input_schema = "schemas/candidate-create-input.json"
 output_schema = "schemas/candidate-create-output.json"
+
+[[components.effect_services]]
+name = "vector.transport.collection-drop"
+contract = "1.0"
+kind = "vector-index.milvus"
+startup_queries = ["vector.collection.current"]
+startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
+runtime_commands = ["vector.collection.quarantine"]
+semantics = "idempotent"
+input_schema = "schemas/collection-gc-input.json"
+output_schema = "schemas/collection-gc-output.json"

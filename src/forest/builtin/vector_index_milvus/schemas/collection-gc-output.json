@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "space_id",
+    "binding_revision",
+    "collection_name",
+    "collection_id",
+    "deleted"
+  ],
+  "properties": {
+    "space_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "binding_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "collection_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "collection_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "deleted": {
+      "const": true
+    }
+  }
+}

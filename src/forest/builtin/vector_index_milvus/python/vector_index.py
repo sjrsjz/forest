@@ -479,6 +479,29 @@ class MilvusVectorIndex(Plugin):
             timeout=10,
         )
 
+    @job("vector.collection.gc")
+    async def collect_retired_collection(self, task, ctx):
+        target = _plain(task["payload"])
+        if target["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_GC_SPACE_MISMATCH",
+                "Retired collection belongs to another vector space", 409,
+            )
+        removed = _plain(await ctx.services.call(
+            "vector.transport.collection-drop", target,
+            operation_id=ctx.operations.stable(
+                "collection-gc:" + str(target["binding_revision"]) + ":" +
+                str(task["attempt"])
+            ),
+            timeout=35,
+        ))
+        if removed != {**target, "deleted": True}:
+            raise ForestError(
+                "VECTOR_GC_TRANSPORT_INVALID",
+                "Retirement confirmed another physical collection", 502,
+            )
+        return removed
+
     @job("vector.refs.audit")
     async def audit_refs(self, task, ctx):
         request = _plain(task["payload"])
