@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.14.0"
+version = "2.15.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -40,11 +40,13 @@ requests = [
   "service.call:vector.transport.search",
   "service.call:vector.transport.prune",
   "service.call:vector.transport.audit",
+  "service.call:vector.transport.candidate-create",
   "domain.command:vector.ref.reserve",
   "domain.command:vector.ref.activate",
   "domain.command:vector.ref.tombstone",
   "domain.command:vector.collection.quarantine",
   "domain.command:vector.audit.adjudicate",
+  "domain.command:vector.rebuild.confirm",
   "domain.query:vector.ref.require-query",
   "domain.query:vector.ref.filter-active",
   "domain.query:vector.ref.change-head",
@@ -78,9 +80,9 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.13.0"
+schema_version = "2.14.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "fbfc4e316f9ca08bbade9441c12fb8153aebd94511ada72534feae3cb89b044d"
+baseline_sha256 = "212786c2724f0d3e2054f90f752fc6e33bef7bb4856da085c7c3f79a48bebce3"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -114,6 +116,20 @@ input_schema = "schemas/audit-adjudicate-input.json"
 output_schema = "schemas/audit-adjudicate-output.json"
 
 [[components.domain_commands]]
+name = "vector.rebuild.enqueue"
+contract = "1.0"
+function = "vector_enqueue_rebuild"
+input_schema = "schemas/rebuild-enqueue-input.json"
+output_schema = "schemas/rebuild-enqueue-output.json"
+
+[[components.domain_commands]]
+name = "vector.rebuild.confirm"
+contract = "1.0"
+function = "vector_confirm_rebuild_candidate"
+input_schema = "schemas/rebuild-confirm-input.json"
+output_schema = "schemas/rebuild-create-output.json"
+
+[[components.domain_commands]]
 name = "vector.ref.reserve"
 contract = "2.0"
 function = "vector_ref_reserve"
@@ -133,6 +149,13 @@ contract = "1.0"
 function = "vector_ref_tombstone"
 input_schema = "schemas/delete-input.json"
 output_schema = "schemas/delete-output.json"
+
+[[components.domain_queries]]
+name = "vector.rebuild.status"
+contract = "1.0"
+function = "vector_query_rebuild"
+input_schema = "schemas/rebuild-status-input.json"
+output_schema = "schemas/rebuild-status-output.json"
 
 [[components.domain_queries]]
 name = "vector.collection.current"
@@ -168,6 +191,21 @@ contract = "1.0"
 function = "vector_ref_change_page"
 input_schema = "schemas/change-page-input.json"
 output_schema = "schemas/change-page-output.json"
+
+[[components.owned_work_handlers]]
+name = "vector.rebuild.create"
+contract = "1.0"
+handler = "vector.rebuild.create"
+claim_function = "vector_claim_rebuild_create"
+settle_function = "vector_settle_rebuild_create"
+input_schema = "schemas/rebuild-create-work-input.json"
+output_schema = "schemas/rebuild-create-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 90
+settle_timeout_s = 5
+lease_seconds = 120
 
 [[components.owned_work_handlers]]
 name = "vector.refs.audit"
@@ -263,3 +301,14 @@ runtime_commands = ["vector.collection.quarantine"]
 semantics = "idempotent"
 input_schema = "schemas/transport-prune-input.json"
 output_schema = "schemas/delete-output.json"
+
+[[components.effect_services]]
+name = "vector.transport.candidate-create"
+contract = "1.0"
+kind = "vector-index.milvus"
+startup_queries = ["vector.collection.current"]
+startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
+runtime_commands = ["vector.collection.quarantine"]
+semantics = "idempotent"
+input_schema = "schemas/candidate-create-input.json"
+output_schema = "schemas/candidate-create-output.json"

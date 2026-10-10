@@ -22,7 +22,8 @@ _REF = re.compile(r"[^\x00]{1,256}\Z")
 _LOG = logging.getLogger(__name__)
 _SERVICES = frozenset(
     {"vector.transport.upsert", "vector.transport.search",
-     "vector.transport.prune", "vector.transport.audit"}
+     "vector.transport.prune", "vector.transport.audit",
+     "vector.transport.candidate-create"}
 )
 
 
@@ -262,6 +263,9 @@ class MilvusVectorIndexEffectDriver:
         return self._collection_id(description)
 
     async def _create_collection(self) -> int:
+        return await self._create_collection_named(self.collection_name)
+
+    async def _create_collection_named(self, collection_name: str) -> int:
         schema = self.client.create_schema(
             auto_id=False, enable_dynamic_field=False
         )
@@ -281,11 +285,11 @@ class MilvusVectorIndexEffectDriver:
             field_name="embedding", index_type="AUTOINDEX", metric_type="COSINE"
         )
         await self.client.create_collection(
-            collection_name=self.collection_name, schema=schema,
+            collection_name=collection_name, schema=schema,
             index_params=indexes, consistency_level="Strong",
         )
         description = await self.client.describe_collection(
-            collection_name=self.collection_name
+            collection_name=collection_name
         )
         return self._validate_collection_description(description)
 
@@ -473,6 +477,8 @@ class MilvusVectorIndexEffectDriver:
     async def invoke(self, payload, *, scope, invocation):
         await self._admit(scope)
         self._check_space(payload["space_id"])
+        if self.service_id == "vector.transport.candidate-create":
+            return await self._candidate_create(payload)
         binding = payload.get("binding")
         if self.rebuild_required and (
             binding is None or binding.get("binding_revision") == self.binding_revision
@@ -492,6 +498,43 @@ class MilvusVectorIndexEffectDriver:
         if self.service_id == "vector.transport.audit":
             return await self._audit(payload, collection_name)
         return await self._prune(payload, collection_name)
+
+    async def _candidate_create(self, payload):
+        revision = payload["candidate_revision"]
+        name = payload["collection_name"]
+        base = vector_collection_name(self.bot_id, self.configuration["space_id"])
+        if (
+            type(revision) is not int or revision <= 1
+            or (self.binding_revision is not None
+                and revision <= self.binding_revision)
+            or name != base + "_r" + str(revision)
+        ):
+            raise ForestError(
+                "VECTOR_INDEX_BINDING_STALE",
+                "Candidate name differs from its reserved revision", 409,
+            )
+        try:
+            async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                if await self.client.has_collection(collection_name=name):
+                    description = await self.client.describe_collection(
+                        collection_name=name
+                    )
+                    collection_id = self._validate_collection_description(description)
+                else:
+                    collection_id = await self._create_collection_named(name)
+        except ForestError:
+            raise
+        except (TimeoutError, MilvusException, OSError) as exc:
+            raise ForestError(
+                "VECTOR_INDEX_CANDIDATE_UNAVAILABLE",
+                "Milvus candidate creation is unavailable", 503,
+            ) from exc
+        return {
+            "space_id": payload["space_id"],
+            "candidate_revision": revision,
+            "collection_name": name,
+            "collection_id": collection_id,
+        }
 
     async def _upsert(self, payload, collection_name):
         try:

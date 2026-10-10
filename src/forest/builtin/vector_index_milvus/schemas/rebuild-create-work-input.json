@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "request_id",
+    "claim_token",
+    "phase",
+    "space_id",
+    "dimensions",
+    "candidate_revision",
+    "collection_name",
+    "collection_id"
+  ],
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "claim_token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "phase": {
+      "enum": [
+        "CREATE",
+        "CONFIRMED"
+      ]
+    },
+    "space_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "dimensions": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4096
+    },
+    "candidate_revision": {
+      "type": "integer",
+      "minimum": 2
+    },
+    "collection_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "collection_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    }
+  }
+}

@@ -193,6 +193,56 @@ class MilvusVectorIndex(Plugin):
             timeout=10,
         )
 
+    @job("vector.rebuild.create")
+    async def create_rebuild_candidate(self, task, ctx):
+        request = _plain(task["payload"])
+        if request["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_REBUILD_SPACE_MISMATCH",
+                "Candidate belongs to another vector space", 409,
+            )
+        if request["phase"] == "CREATE":
+            physical = _plain(await ctx.services.call(
+                "vector.transport.candidate-create",
+                {
+                    "space_id": self.space_id,
+                    "candidate_revision": request["candidate_revision"],
+                    "collection_name": request["collection_name"],
+                },
+                operation_id=ctx.operations.stable(
+                    "candidate-create:" + request["request_id"] + ":" +
+                    str(request["candidate_revision"])
+                ),
+                timeout=40,
+            ))
+            if (
+                physical["space_id"] != self.space_id
+                or physical["candidate_revision"] != request["candidate_revision"]
+                or physical["collection_name"] != request["collection_name"]
+            ):
+                raise ForestError(
+                    "VECTOR_REBUILD_TRANSPORT_INVALID",
+                    "Candidate transport returned another collection", 502,
+                )
+            collection_id = physical["collection_id"]
+        else:
+            collection_id = request["collection_id"]
+        return await ctx.commands.call(
+            "vector.rebuild.confirm",
+            {
+                "request_id": request["request_id"],
+                "claim_token": request["claim_token"],
+                "candidate_revision": request["candidate_revision"],
+                "collection_name": request["collection_name"],
+                "collection_id": collection_id,
+            },
+            operation_id=ctx.operations.stable(
+                "candidate-confirm:" + request["request_id"] + ":" +
+                request["claim_token"]
+            ),
+            timeout=10,
+        )
+
     @job("vector.refs.audit")
     async def audit_refs(self, task, ctx):
         request = _plain(task["payload"])

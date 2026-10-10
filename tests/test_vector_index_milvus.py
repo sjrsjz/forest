@@ -1219,12 +1219,13 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         name: driver_for(name) for name in (
             "vector.transport.upsert", "vector.transport.search",
             "vector.transport.prune", "vector.transport.audit",
+            "vector.transport.candidate-create",
         )
     }
     scope = identity
     invocation = SimpleNamespace(operation_id="test")
     collection_name = drivers["vector.transport.upsert"].collection_name
-    candidate_name = collection_name + "_r2"
+    candidate_name = None
 
     def transport_row(ref_id, purpose, vector):
         public = _with_replay({
@@ -1363,33 +1364,143 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         assert next(row for row in scanned if
                     row["ref_id"] == precision["ref_id"]) == observed["rows"][0]
 
-        # A second physical collection must be addressed by its own immutable
-        # name and server identity, even while revision 1 remains published.
-        candidate_schema = upsert.client.create_schema(
-            auto_id=False, enable_dynamic_field=False
+        # An expired unconfirmed attempt receives a new revision and cannot
+        # confirm the successor's candidate after its lease is lost.
+        async def rebuild_domain(function, payload, operation_id="rebuild/test"):
+            async with store.pool.connection() as conn, conn.transaction():
+                row = await (
+                    await conn.execute(
+                        sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result").format(
+                            sql.Identifier(namespace), sql.Identifier(function)
+                        ),
+                        (Jsonb({"bot_id": bot_id, "operation_id": operation_id}),
+                         Jsonb(payload)),
+                    )
+                ).fetchone()
+            envelope = row["result"]
+            if not envelope["ok"]:
+                error = envelope["error"]
+                raise ForestError(error["code"], error["message"], error["status"])
+            return envelope["value"]
+
+        enqueued = await rebuild_domain(
+            "vector_enqueue_rebuild", {"requested_by": "admin"},
+            operation_id="rebuild/request",
         )
-        candidate_schema.add_field(
-            "ref_id", DataType.VARCHAR, is_primary=True, max_length=256
+        assert enqueued["state"] == "QUEUED"
+        claim_input = {
+            "protocol": "forest.owned-work-claim-request/1",
+            "claim_token": "rebuild/claim/first", "lease_seconds": 120,
+        }
+        first_claim = await rebuild_domain(
+            "vector_claim_rebuild_create", claim_input
         )
-        candidate_schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
-        candidate_schema.add_field("space_id", DataType.VARCHAR, max_length=256)
-        candidate_schema.add_field("purpose", DataType.VARCHAR, max_length=16)
-        candidate_schema.add_field("input_digest", DataType.VARCHAR, max_length=71)
-        candidate_schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=4)
-        candidate_indexes = upsert.client.prepare_index_params()
-        candidate_indexes.add_index(
-            field_name="embedding", index_type="AUTOINDEX", metric_type="COSINE"
+        assert first_claim["payload"]["candidate_revision"] == 2
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("UPDATE {}.vector_rebuild_work "
+                        "SET lease_deadline=clock_timestamp()-interval '1 second' "
+                        "WHERE bot_id=%s AND request_id=%s")
+                .format(sql.Identifier(namespace)),
+                (bot_id, enqueued["request_id"]),
+            )
+        next_claim = await rebuild_domain(
+            "vector_claim_rebuild_create",
+            {**claim_input, "claim_token": "rebuild/claim/second"},
         )
-        await upsert.client.create_collection(
-            collection_name=candidate_name, schema=candidate_schema,
-            index_params=candidate_indexes, consistency_level="Strong",
+        assert next_claim["payload"]["candidate_revision"] == 3
+        with pytest.raises(ForestError) as late_confirm:
+            await rebuild_domain("vector_confirm_rebuild_candidate", {
+                "request_id": enqueued["request_id"],
+                "claim_token": first_claim["claim_token"],
+                "candidate_revision": 2,
+                "collection_name": first_claim["payload"]["collection_name"],
+                "collection_id": 42,
+            })
+        assert late_confirm.value.code == "VECTOR_REBUILD_CLAIM_STALE"
+
+        async def candidate_service(name, payload, **_options):
+            assert name == "vector.transport.candidate-create"
+            return await drivers[name].invoke(
+                payload, scope=scope, invocation=invocation
+            )
+
+        async def candidate_command(name, payload, **options):
+            assert name == "vector.rebuild.confirm"
+            return await rebuild_domain(
+                "vector_confirm_rebuild_candidate", payload,
+                operation_id=options["operation_id"],
+            )
+
+        component = MilvusVectorIndex()
+        component.space_id = space_id
+        candidate_receipt = await component.create_rebuild_candidate(
+            {"payload": next_claim["payload"]},
+            SimpleNamespace(
+                services=SimpleNamespace(call=candidate_service),
+                commands=SimpleNamespace(call=candidate_command),
+                operations=SimpleNamespace(stable=lambda value: value),
+            ),
         )
-        candidate_description = await upsert.client.describe_collection(
-            collection_name=candidate_name
+        candidate_name = candidate_receipt["collection_name"]
+        # A crash after durable confirmation but before owned-work settlement
+        # must reuse the confirmed physical identity without creating again.
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("UPDATE {}.vector_rebuild_work "
+                        "SET lease_deadline=clock_timestamp()-interval '1 second' "
+                        "WHERE bot_id=%s AND request_id=%s")
+                .format(sql.Identifier(namespace)),
+                (bot_id, enqueued["request_id"]),
+            )
+        confirmed_claim = await rebuild_domain(
+            "vector_claim_rebuild_create",
+            {**claim_input, "claim_token": "rebuild/claim/confirmed"},
         )
+        assert confirmed_claim["payload"]["phase"] == "CONFIRMED"
+        assert confirmed_claim["payload"]["candidate_revision"] == 3
+        assert confirmed_claim["payload"]["collection_id"] == (
+            candidate_receipt["collection_id"]
+        )
+
+        async def no_second_physical_create(*_args, **_kwargs):
+            raise AssertionError("confirmed candidate must not be recreated")
+
+        confirmed_receipt = await component.create_rebuild_candidate(
+            {"payload": confirmed_claim["payload"]},
+            SimpleNamespace(
+                services=SimpleNamespace(call=no_second_physical_create),
+                commands=SimpleNamespace(call=candidate_command),
+                operations=SimpleNamespace(stable=lambda value: value),
+            ),
+        )
+        assert confirmed_receipt == candidate_receipt
+        with pytest.raises(ForestError) as late_settlement:
+            await rebuild_domain("vector_settle_rebuild_create", {
+                "protocol": "forest.owned-work-settle-request/1",
+                "work_id": next_claim["work_id"],
+                "claim_token": next_claim["claim_token"],
+                "attempt": next_claim["attempt"],
+                "outcome": {"status": "SUCCEEDED", "result": candidate_receipt},
+            })
+        assert late_settlement.value.code == "VECTOR_REBUILD_CLAIM_STALE"
+        await rebuild_domain("vector_settle_rebuild_create", {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": confirmed_claim["work_id"],
+            "claim_token": confirmed_claim["claim_token"],
+            "attempt": confirmed_claim["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": confirmed_receipt},
+        })
+        status = await rebuild_domain("vector_query_rebuild", {
+            "request_id": enqueued["request_id"], "requested_by": "admin",
+        })
+        assert status["state"] == "CANDIDATE_READY"
+        assert status["candidate_revision"] == 3
+        assert status["candidate_id"] == candidate_receipt["collection_id"]
+        assert status["replay_waterline"] is not None
         candidate_binding = {
-            "binding_revision": 2,
-            "collection_id": candidate_description["collection_id"],
+            "binding_revision": status["candidate_revision"],
+            "collection_id": status["candidate_id"],
             "collection_name": candidate_name,
         }
         candidate_query = {**transport_row(
@@ -1499,22 +1610,23 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                 sql.SQL("INSERT INTO {}.vector_collection_bindings "
                         "(bot_id,binding_revision,space_id,collection_name,"
                         "collection_id,dimensions,metric) "
-                        "VALUES (%s,2,%s,%s,%s,4,'COSINE')")
+                        "VALUES (%s,%s,%s,%s,%s,4,'COSINE')")
                 .format(sql.Identifier(namespace)),
-                (bot_id, space_id, candidate_name, candidate_binding["collection_id"]),
+                (bot_id, candidate_binding["binding_revision"], space_id,
+                 candidate_name, candidate_binding["collection_id"]),
             )
             await conn.execute(
                 sql.SQL("UPDATE {}.vector_collection_health "
-                        "SET binding_revision=2,state='READY',reason=NULL "
+                        "SET binding_revision=%s,state='READY',reason=NULL "
                         "WHERE bot_id=%s").format(sql.Identifier(namespace)),
-                (bot_id,),
+                (candidate_binding["binding_revision"], bot_id),
             )
         await replacement.close()
         recovered = driver_for("vector.transport.search")
         drivers["vector.transport.search"] = recovered
         await recovered.start()
         assert recovered.collection_name == candidate_name
-        assert recovered.binding_revision == 2
+        assert recovered.binding_revision == candidate_binding["binding_revision"]
         recovered_hits = await recovered.invoke(
             {"query_ref_id": candidate_query["ref_id"], "space_id": space_id,
              "limit": 2, "binding": candidate_binding},
@@ -1529,9 +1641,8 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             collection_name=collection_name
         ):
             await client.drop_collection(collection_name=collection_name)
-        if client is not None and await client.has_collection(
-            collection_name=candidate_name
-        ):
+        if (client is not None and candidate_name is not None
+                and await client.has_collection(collection_name=candidate_name)):
             await client.drop_collection(collection_name=candidate_name)
         for driver in drivers.values():
             await driver.close()
