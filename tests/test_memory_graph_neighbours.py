@@ -517,6 +517,14 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
         assert frozen["value"]["result_count"] == 32
         assert frozen["value"]["seed_count"] == 1
         assert await freeze([]) == frozen  # Historic metadata is immutable, not a new region.
+        retired_query = (await (await execute(
+            "SELECT index_ref_id,space_id,state FROM {}.vector_index_deletions "
+            "WHERE bot_id=%s AND index_ref_id='query/facet'",
+            (store.bot_id,),
+        )).fetchone())
+        assert retired_query == {
+            "index_ref_id": "query/facet", "space_id": "space/test", "state": "PENDING"
+        }
         assert (await (await execute("SELECT count(*) AS n FROM {}.retrieval_relations", ())).fetchone())["n"] == 31
         parts_validator = Draft202012Validator(package.snapshot.schema("schemas/read-retrieval-parts-output.json"))
 

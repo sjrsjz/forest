@@ -1,6 +1,8 @@
 # Forest 实现状态
 
-向量索引重建契约审计（2026-10-10）：[10 节 5.2](10-multi-trunk-memory-graph.md) 已明确 `vector.index` 包拥有 ReplayLocator、ref 增量日志、候选 collection、逐行核验和绑定 CAS 切换；Milvus 传输适配器不读取 `memory.graph` 私有表。当前实现的 `vector_index_refs` 仅保存输入摘要，`vector.index.upsert/2` 仅接收即时向量，无法从其账本重读向量；QUERY ref 终结清理、运行中单行缺失审计、增量追赶与原子切换均未实现。因此现有 `REBUILD_REQUIRED` 只是一道失效围栏，不是可执行重建操作。该审计未修改在线 v21 或发送 QQ 消息。
+成功召回的临时 QUERY ref 回收（2026-10-10）：`memory.graph` 1.90.2 / 私有 SQL 3.87.0 在检索区域成功冻结的同一事务中，为该查询所有已 READY 的 QUERY facet 登记 `vector_index_deletions`；冻结重放不重复登记。持久删除 Worker 沿原 tombstone 协议回收 Milvus 临时向量，冻结的 seed/图证据仍由 Memory 保留。隔离 PostgreSQL 的有界图冻结用例验证了首次登记与重复冻结合流（1 passed，45.79 秒），Ruff 和差异检查通过。FAILED/CANCELLED 的查询及冻结前迟到写入仍需独立终结清理；此改动没有建立 ReplayLocator 或索引重建能力，也未切换在线 v21 或发送 QQ 消息。
+
+向量索引重建契约审计（2026-10-10）：[10 节 5.2](10-multi-trunk-memory-graph.md) 已明确 `vector.index` 包拥有 ReplayLocator、ref 增量日志、候选 collection、逐行核验和绑定 CAS 切换；Milvus 传输适配器不读取 `memory.graph` 私有表。当前实现的 `vector_index_refs` 仅保存输入摘要，`vector.index.upsert/2` 仅接收即时向量，无法从其账本重读向量；QUERY ref 失败/取消终结清理、运行中单行缺失审计、增量追赶与原子切换均未实现。因此现有 `REBUILD_REQUIRED` 只是一道失效围栏，不是可执行重建操作。该审计未修改在线 v21 或发送 QQ 消息。
 
 包目录写锁收敛（2026-10-10）：官方包 build/publish 与 Web 幂等导入现在先在目录私有的 `.capture-*` 中写盘、fsync 并校验工件，再进入短 SQLite 写事务发布目录名和登记来源/回执。导入在写事务内重查同一操作的已提交回执或关闭记录，关闭与发布仍只有一个持久结局；竞争者先发布同摘要工件时校验胜者后登记。定点并发用例证明另一个官方包可在首包 fsync 暂停时提交，关闭可在导入 fsync 暂停时先结算并使晚到导入返回 `PACKAGE_IMPORT_CLOSED`；包目录完整回归 108 passed、1 skipped，Ruff 与差异检查通过。仍未进行在线 v21 切换或真实 QQ 消息发送。
 

@@ -2716,6 +2716,16 @@ BEGIN
     FROM jsonb_array_elements(edges) WITH ORDINALITY;
     UPDATE __forest_module_schema__.memory_queries SET state='FROZEN',bundle_id=bundle_value,
         frozen_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND query_id=query_row.query_id;
+    -- The frozen match receipts no longer need their temporary ANN query rows.
+    -- Keep the Memory facet/evidence; retire only the derived index ref.
+    INSERT INTO __forest_module_schema__.vector_index_deletions(
+        bot_id,index_ref_id,space_id,deletion_epoch)
+    SELECT f.bot_id,f.facet_id,f.space_id,
+           (epoch_value->>'deletion_epoch')::bigint
+    FROM __forest_module_schema__.embedding_facets f
+    WHERE f.bot_id=context->>'bot_id' AND f.query_id=query_row.query_id
+      AND f.purpose='QUERY' AND f.state='READY'
+    ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
     RETURN __forest_module_schema__.memory_read_retrieval_record(context,body);
 END;
 $$;
