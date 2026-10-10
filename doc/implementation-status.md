@@ -1209,3 +1209,5 @@ Memory 关系审核批准（2026-10-11）：`memory.graph` 1.91.0 / 私有 SQL 3
 热替换边界与在线入站核对（2026-10-11）：当前安装器要求已有 schema bundle 的版本、基线摘要和存储身份完全一致；代码或 UI 变更若保持 SQL 身份不变，builtin 存储身份回归与 Graph 排空/失败恢复的本地用例共 3 passed。SQL 变化不能靠当前候选 prewarm 热替换：存储安装在旧 Generation 仍活动时发生，直接执行 DDL 会破坏旧代的读取边界。完整 BotHost 官方包选择/热替换隔离回归运行 542.88 秒时主进程持续接近占满一个 CPU 核，主动中断，不能计为通过；隔离测试库已确认清理。在线 v22 的 4 条真实入站全部来自许可群以外，均被 `group_not_allowed` 正常归档，Agent Run 为 0；许可群回复仍未验收。
 
 组件选择存储身份前置围栏（2026-10-11）：Bot 作用域的 `module.validate` 与选择提交共用 Graph 投影，现在一次读取候选包的存储身份和内核 bundle 账本；已安装同 schema ID 的版本、基线、Repository contract、执行档位或状态不符时返回 `SCHEMA_BUNDLE_UPGRADE_REQUIRED`，不先写选择事实。官方与外部包的代码/UI 变化仍以稳定存储 bundle 摘要通过。隔离 PostgreSQL 的已安装包热替换用例覆盖代码变更继续准入、SQL baseline 与版本变更在预览中拒绝、旧 Graph 保持不变，1 passed；Ruff 与差异检查通过。此围栏不执行在线 SQL 升级，也不能把前述 9 分钟未完成的完整 BotHost 回归算作通过。
+
+三作用域存储预检合流（2026-10-11）：Bot、部署及 Host 组件变更现在共用只读 schema bundle 身份规则；控制域预览与正式替换先用无副作用的计划编译核对已安装账本，覆盖模块业务 SQL 与配置专用 bundle，拒绝不兼容版本时不排空旧 Graph。控制域存储投影与实际安装共用同一函数，避免两条路径的摘要漂移。隔离 PostgreSQL 的 Host 存储包热重载及 SQL 版本漂移拒绝、配置专用 Host 包和 Bot 包回归共 3 passed；Ruff 与差异检查通过。该围栏不执行 SQL 在线升级；在线 v22 未切换包或发送 QQ 消息。

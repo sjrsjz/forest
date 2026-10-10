@@ -9,10 +9,12 @@ from pathlib import Path
 from forest.control_packages import (
     bootstrap_builtin_control_package,
     bootstrap_installed_control_package,
+    control_storage_bundle,
 )
 from forest.errors import ForestError
 from forest.packages import PackageCatalog, PackageSnapshot, digest_json
 from forest.runtime_modules import RuntimeModuleRegistry
+from forest.schema_bundle_preflight import require_installable_storage_in
 
 
 class ControlPackageController:
@@ -142,6 +144,14 @@ class ControlPackageController:
                 {**self._snapshots, component_id: snapshot}, plan_only=True,
                 frozen_configurations=await self._active_configurations(graph),
             )
+            async with self.runtime.store.pool.connection() as conn:
+                await require_installable_storage_in(
+                    conn, scope=self.scope_kind, scope_id=self.runtime.scope_id,
+                    storages=tuple(
+                        control_storage_bundle(item, self.scope_kind)
+                        for item in {**self._snapshots, component_id: snapshot}.values()
+                    ),
+                )
             impact = candidate.preview_graph_transition(
                 previous, target_component_id=component_id
             )
@@ -321,6 +331,17 @@ class ControlPackageController:
             frozen = await self._active_configurations(previous.graph_identity)
             if configuration_binding is not None:
                 frozen[component_id] = configuration_binding
+            await self._assemble(
+                snapshots, plan_only=True, frozen_configurations=frozen,
+            )
+            async with self.runtime.store.pool.connection() as conn:
+                await require_installable_storage_in(
+                    conn, scope=self.scope_kind, scope_id=self.runtime.scope_id,
+                    storages=tuple(
+                        control_storage_bundle(item, self.scope_kind)
+                        for item in snapshots.values()
+                    ),
+                )
             candidate = await self._assemble(
                 snapshots, activation_id=activation_id,
                 frozen_configurations=frozen,

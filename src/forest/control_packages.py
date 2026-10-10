@@ -79,6 +79,35 @@ def _configuration_storage(component_id: str, scope_kind: str) -> tuple[StorageB
     ), baseline
 
 
+def control_storage_bundle(snapshot, scope_kind: str) -> RuntimeStorageBundle:
+    """Project the exact SQL bundle installed for a control package."""
+
+    declared = snapshot.storage_bundle()
+    if declared is None:
+        spec, baseline = _configuration_storage(snapshot.component["id"], scope_kind)
+    else:
+        metadata, owned_sql = declared
+        if metadata["execution_profile"] != "official":
+            raise ForestError(
+                f"{scope_kind.upper()}_PACKAGE_STORAGE_REQUIRED",
+                "Control storage requires the trusted SQL profile", 422,
+            )
+        common_sql = files("forest.storage.official").joinpath(
+            "control_module_configuration.sql"
+        ).read_bytes()
+        baseline = common_sql + b"\n" + owned_sql
+        spec = StorageBundleSpec(
+            component_id=snapshot.component["id"], schema_id=metadata["schema_id"],
+            schema_version=metadata["schema_version"],
+            baseline_sha256=hashlib.sha256(baseline).hexdigest(),
+            repository_contract=metadata["repository_contract"], scope=scope_kind,
+        )
+    return RuntimeStorageBundle(
+        spec, baseline, storage_bundle_digest(spec, "official"),
+        execution_profile="official",
+    )
+
+
 async def _prepared_configuration(configuration, binding, schema: dict):
     if binding is None:
         selected = await configuration.desired_checked()
@@ -211,34 +240,12 @@ async def bootstrap_builtin_control_package(
             "Control package write ports must match declared management bindings", 503,
         )
     declared = snapshot.storage_bundle()
-    if declared is not None:
-        metadata, owned_sql = declared
-        if metadata["execution_profile"] != "official":
-            raise ForestError(
-                f"{scope_kind.upper()}_PACKAGE_STORAGE_REQUIRED",
-                "Official control storage must use the trusted SQL profile", 422,
-            )
-        common_sql = files("forest.storage.official").joinpath(
-            "control_module_configuration.sql"
-        ).read_bytes()
-        baseline = common_sql + b"\n" + owned_sql
-        spec = StorageBundleSpec(
-            component_id=component["id"], schema_id=metadata["schema_id"],
-            schema_version=metadata["schema_version"],
-            baseline_sha256=hashlib.sha256(baseline).hexdigest(),
-            repository_contract=metadata["repository_contract"], scope=scope_kind,
-        )
-        storage = RuntimeStorageBundle(
-            spec, baseline, storage_bundle_digest(spec, "official"),
-            execution_profile="official",
-        )
-    else:
-        spec, baseline = _configuration_storage(component["id"], scope_kind)
-        storage = None
+    bundle = control_storage_bundle(snapshot, scope_kind)
+    spec, baseline = bundle.spec, bundle.baseline
+    storage = bundle if declared is not None else None
     if not plan_only:
         await runtime.schema_bundle_installer.install(
-            spec, baseline,
-            storage.package_digest if storage is not None else storage_bundle_digest(spec, "official"),
+            spec, baseline, bundle.package_digest,
             execution_profile="official",
         )
     config_schema = snapshot.schema(component["config_schema"])
@@ -383,10 +390,11 @@ async def bootstrap_installed_control_package(
         raise ForestError(
             "PACKAGE_CONFIGURATION_INVALID", "Control bootstrap configuration is invalid", 422
         )
-    spec, baseline = _configuration_storage(component["id"], scope_kind)
+    bundle = control_storage_bundle(snapshot, scope_kind)
+    spec, baseline = bundle.spec, bundle.baseline
     if not plan_only:
         await runtime.schema_bundle_installer.install(
-            spec, baseline, storage_bundle_digest(spec, "official"),
+            spec, baseline, bundle.package_digest,
             execution_profile="official",
         )
     configuration = configuration_type(

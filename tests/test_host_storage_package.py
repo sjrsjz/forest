@@ -295,6 +295,30 @@ async def test_host_storage_reservation_is_fenced_idempotent_and_survives_reload
         assert (await current.get("host.storage").management_contract.query(
             "generations", {"bot_id": "bot/storage"},
         ))["items"][0]["resource_id"] == first["resource_id"]
+        compatible_manifest = manifest.read_text(encoding="utf-8")
+        current_version = tomllib.loads(compatible_manifest)["version"]
+        manifest.write_text(
+            compatible_manifest.replace(
+                f'version = "{current_version}"', 'version = "9.9.9"', 1,
+            ).replace('schema_version = "1.7.0"', 'schema_version = "9.9.9"', 1),
+            encoding="utf-8",
+        )
+        incompatible = catalog.build_official(source, scope="host")
+        with pytest.raises(ForestError) as rejected:
+            await controller.preview_change(
+                operation_kind="REPLACE", component_id="host.storage",
+                package_digest=incompatible.digest,
+                expected_graph_revision=current.graph_identity.graph_revision,
+            )
+        assert rejected.value.code == "SCHEMA_BUNDLE_UPGRADE_REQUIRED"
+        with pytest.raises(ForestError) as direct_rejected:
+            await controller.replace(
+                "host.storage", incompatible.digest,
+                expected_graph_revision=current.graph_identity.graph_revision,
+            )
+        assert direct_rejected.value.code == "SCHEMA_BUNDLE_UPGRADE_REQUIRED"
+        assert controller.registry.graph_identity == current.graph_identity
+        manifest.write_text(compatible_manifest, encoding="utf-8")
         new_graph = current.graph_identity
         new_route = FrozenServiceRoute(
             service_id="host.storage.reserve", version=1,
