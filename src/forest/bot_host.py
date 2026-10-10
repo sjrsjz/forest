@@ -536,7 +536,6 @@ class BotHost:
             vector_index_driver_options["client_factory"] = self._vector_index_client_factory
         vector_index_effect_factory = milvus_vector_index_effect_driver_factory(
             bot_id=self.store.bot_id,
-            store=self.store,
             runtime=self._kernel.runtime,
             token_resolver=resolve_vector_index_token,
             **vector_index_driver_options,

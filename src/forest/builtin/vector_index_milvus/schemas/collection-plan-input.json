@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "space_id",
+    "collection_name",
+    "dimensions",
+    "metric",
+    "exists",
+    "collection_id"
+  ],
+  "properties": {
+    "space_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "collection_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "dimensions": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4096
+    },
+    "metric": {
+      "const": "COSINE"
+    },
+    "exists": {
+      "type": "boolean"
+    },
+    "collection_id": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    }
+  }
+}

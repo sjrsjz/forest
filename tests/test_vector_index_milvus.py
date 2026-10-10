@@ -28,6 +28,7 @@ from forest.schema_bundles import module_schema_namespace
 from forest.vector_index_effect_driver import (
     MilvusVectorIndexEffectDriver,
     milvus_vector_index_effect_driver_factory,
+    vector_collection_name,
 )
 
 
@@ -47,6 +48,34 @@ def _with_replay(row):
             "vector_digest": digest_json(vector),
         },
     }
+
+
+def _bind_package_startup(driver, store):
+    namespace = module_schema_namespace("forest.vector.index")
+
+    async def call(name, payload, *, operation_id):
+        function = {
+            "vector.collection.plan": "vector_collection_plan",
+            "vector.collection.confirm": "vector_collection_confirm",
+        }[name]
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result").format(
+                        sql.Identifier(namespace), sql.Identifier(function)
+                    ),
+                    (Jsonb({"bot_id": store.bot_id, "operation_id": operation_id}),
+                     Jsonb(payload)),
+                )
+            ).fetchone()
+        envelope = row["result"]
+        if not envelope["ok"]:
+            error = envelope["error"]
+            raise ForestError(error["code"], error["message"], error["status"])
+        return envelope["value"]
+
+    driver.bind_startup_commands(call)
+    return driver
 
 
 @pytest.mark.asyncio
@@ -207,10 +236,12 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
     )
     namespace = module_schema_namespace("forest.vector.index")
 
-    async def invoke(function, payload, *, digest=None):
+    async def invoke(function, payload, *, digest=None, operation_id=None):
         context = {"bot_id": store.bot_id}
         if digest is not None:
             context["input_digest"] = digest
+        if operation_id is not None:
+            context["operation_id"] = operation_id
         async with store.pool.connection() as conn, conn.transaction():
             row = await (
                 await conn.execute(
@@ -226,6 +257,38 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
         "ref_id": "ref/document", "space_id": space_id,
         "purpose": "DOCUMENT", "vector": [1.0, 0.0, 0.0, 0.0],
     })
+    shape = {
+        "space_id": space_id,
+        "collection_name": vector_collection_name(store.bot_id, space_id),
+        "dimensions": 4, "metric": "COSINE",
+    }
+    absent = {**shape, "exists": False, "collection_id": None}
+    plan = "vector_collection_plan"
+    assert (await invoke(plan, absent, operation_id="startup/a"))["value"] == {
+        "state": "CREATE", "reason": None, "claim_token": "startup/a",
+    }
+    assert (await invoke(plan, absent, operation_id="startup/b"))["value"][
+        "state"
+    ] == "WAIT"
+    assert (await invoke(
+        "vector_ref_reserve", document, digest=digest_json(document)
+    ))["error"]["code"] == "VECTOR_INDEX_COLLECTION_STARTING"
+    confirmation = {**shape, "collection_id": 42, "claim_token": "startup/a"}
+    assert (await invoke(
+        "vector_collection_confirm",
+        {**confirmation, "claim_token": "startup/b"},
+    ))["error"]["code"] == "VECTOR_INDEX_COLLECTION_CLAIM_STALE"
+    assert (await invoke(
+        "vector_collection_confirm", confirmation
+    ))["value"]["state"] == "READY"
+    assert (await invoke(
+        plan, {**shape, "exists": True, "collection_id": 42},
+        operation_id="startup/b",
+    ))["value"]["state"] == "READY"
+    assert (await invoke(
+        plan, {**shape, "exists": True, "collection_id": 43},
+        operation_id="startup/b",
+    ))["value"]["state"] == "REBUILD_REQUIRED"
     digest = digest_json(document)
     reserve = "vector_ref_reserve"
     activate = "vector_ref_activate"
@@ -389,12 +452,12 @@ async def test_missing_collection_with_active_refs_requires_rebuild(clean_author
     runtime = SimpleNamespace(verify_generation_member=verify_generation)
 
     def driver_for(service):
-        return MilvusVectorIndexEffectDriver(
+        return _bind_package_startup(MilvusVectorIndexEffectDriver(
             configuration, 1, identity,
             {"name": service, "kind": "vector-index.milvus"},
-            bot_id=store.bot_id, store=store, runtime=runtime,
+            bot_id=store.bot_id, runtime=runtime,
             token_resolver=resolve_token, client_factory=client_factory,
-        )
+        ), store)
 
     search = driver_for("vector.transport.search")
     prune = driver_for("vector.transport.prune")
@@ -611,7 +674,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         store, installer, kernel=kernel, initial_configuration=configuration,
         effect_driver_registry=PackageEffectDriverRegistry({
             "vector-index.milvus": milvus_vector_index_effect_driver_factory(
-                bot_id=bot_id, store=store, runtime=kernel.runtime,
+                bot_id=bot_id, runtime=kernel.runtime,
                 token_resolver=resolve_token,
             )
         }),
@@ -622,12 +685,12 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
     runtime = SimpleNamespace(verify_generation_member=verify_generation)
 
     def driver_for(service):
-        return MilvusVectorIndexEffectDriver(
+        return _bind_package_startup(MilvusVectorIndexEffectDriver(
             configuration, 1, identity,
             {"name": service, "kind": "vector-index.milvus"},
-            bot_id=bot_id, store=store, runtime=runtime,
+            bot_id=bot_id, runtime=runtime,
             token_resolver=resolve_token,
-        )
+        ), store)
 
     drivers = {
         name: driver_for(name) for name in (
@@ -736,8 +799,16 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                 (bot_id, near["ref_id"], space_id, near["input_digest"],
                  Jsonb(replay), replay["vector_digest"]),
             )
-            binding, active = await upsert.bindings.lock_collection_state(conn)
-        assert active and binding["binding_revision"] == 1
+            binding = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT * FROM {}.vector_collection_bindings "
+                        "WHERE bot_id=%s ORDER BY binding_revision DESC LIMIT 1"
+                    ).format(sql.Identifier(namespace)),
+                    (bot_id,),
+                )
+            ).fetchone()
+        assert binding["binding_revision"] == 1
         original_collection_id = binding["collection_id"]
         client = upsert.client
         await client.drop_collection(collection_name=collection_name)

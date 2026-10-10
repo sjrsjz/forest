@@ -955,6 +955,51 @@ class PackageGenerationAdapter:
                 result_validator=output_validator.is_valid,
             )
 
+    async def _effect_startup_command(
+        self, allowed: frozenset[str], name: str, payload: dict,
+        *, operation_id: str,
+    ) -> dict:
+        identity = self.generation_identity
+        prepared = self._prepared_binding
+        authority = self._domain_commands
+        declaration = next(
+            (item for item in self.component.get("domain_commands", ())
+             if item["name"] == name),
+            None,
+        )
+        if (
+            name not in allowed or declaration is None
+            or identity is None or prepared is None or authority is None
+            or not isinstance(operation_id, str) or not operation_id
+        ):
+            raise ForestError(
+                "PACKAGE_EFFECT_STARTUP_BINDING_INVALID",
+                "Effect requested an undeclared or unavailable startup command",
+                409,
+            )
+        input_validator, output_validator = self._service_schemas[name]
+        if not isinstance(payload, dict) or not input_validator.is_valid(payload):
+            raise ForestError(
+                "PACKAGE_EFFECT_STARTUP_INPUT_INVALID",
+                "Effect startup input violates its package schema", 422,
+            )
+        call_id = "call:" + uuid4().hex
+        return await authority.invoke_preparation_command(
+            PackageCallScope(
+                bot_id=self.bot_id, scope_kind=self.scope_kind,
+                scope_id=self.scope_id, component_id=self.component_id,
+                generation_id=identity.generation_id,
+                instance_id=prepared.instance_id,
+                worker_incarnation=prepared.worker_incarnation,
+                call_id=call_id, call_operation_id=operation_id,
+                causal_root_kind="runtime.generation",
+                causal_root_id=identity.generation_id,
+            ),
+            declaration, payload, parent_call_id=call_id,
+            timeout_seconds=_timeout(self.component, "start_timeout_s", 10),
+            result_validator=output_validator.is_valid,
+        )
+
     async def _release_contribution_directories(self) -> None:
         identity = self.generation_identity
         prepared = self._prepared_binding
@@ -3004,6 +3049,24 @@ class PackageGenerationAdapter:
                         details={"service_id": service_id},
                     )
                 started_drivers.append(driver)
+                startup_commands = frozenset(
+                    declaration.get("startup_commands", ())
+                )
+                if startup_commands:
+                    binder = getattr(driver, "bind_startup_commands", None)
+                    if not callable(binder):
+                        raise ForestError(
+                            "PACKAGE_EFFECT_STARTUP_BINDING_INVALID",
+                            "Effect driver does not implement its startup command port",
+                            500,
+                            details={"service_id": service_id},
+                        )
+                    binder(
+                        lambda name, payload, *, operation_id, allowed=startup_commands:
+                            self._effect_startup_command(
+                                allowed, name, payload, operation_id=operation_id,
+                            )
+                    )
                 ingress = declaration.get("ingress")
                 if ingress is not None:
                     if not isinstance(driver, PackageIngressEffectDriver):

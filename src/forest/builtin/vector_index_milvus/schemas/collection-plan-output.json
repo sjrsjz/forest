@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "state",
+    "reason",
+    "claim_token"
+  ],
+  "properties": {
+    "state": {
+      "enum": [
+        "READY",
+        "CREATE",
+        "CONFIRM",
+        "WAIT",
+        "REBUILD_REQUIRED"
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "claim_token": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

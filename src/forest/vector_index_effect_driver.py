@@ -11,14 +11,11 @@ import math
 import re
 from collections.abc import Mapping
 
-import psycopg
 from pymilvus import AsyncMilvusClient, DataType
 from pymilvus.exceptions import MilvusException
 
 from forest.errors import ForestError
 from forest.packages import digest_json
-from forest.schema_bundles import module_schema_namespace
-from forest.storage.vector_collection_binding import VectorIndexBindingRepository
 
 _REF = re.compile(r"[^\x00]{1,256}\Z")
 _LOG = logging.getLogger(__name__)
@@ -54,7 +51,6 @@ class MilvusVectorIndexEffectDriver:
         declaration,
         *,
         bot_id,
-        store,
         runtime,
         token_resolver,
         client_factory=AsyncMilvusClient,
@@ -74,9 +70,10 @@ class MilvusVectorIndexEffectDriver:
         self.identity = identity
         self.service_id = declaration["name"]
         self.bot_id = bot_id
-        self.bindings = VectorIndexBindingRepository(
-            store, namespace=module_schema_namespace("forest.vector.index")
-        )
+        self._startup_command = None
+        self._startup_operation_id = "vector-collection-start:" + hashlib.sha256(
+            (identity.generation_id + "\0" + self.service_id).encode("utf-8")
+        ).hexdigest()
         self.runtime = runtime
         self.token_resolver = token_resolver
         self.client_factory = client_factory
@@ -84,6 +81,14 @@ class MilvusVectorIndexEffectDriver:
         self.client = None
         self.accepting = False
         self.rebuild_required = False
+
+    def bind_startup_commands(self, command) -> None:
+        if self._startup_command is not None or not callable(command):
+            raise ForestError(
+                "PACKAGE_EFFECT_STARTUP_BINDING_INVALID",
+                "Vector startup command port was bound more than once", 500,
+            )
+        self._startup_command = command
 
     async def start(self) -> None:
         token = await _call(
@@ -131,93 +136,134 @@ class MilvusVectorIndexEffectDriver:
             reason, self.bot_id, self.configuration["space_id"],
         )
 
+    def _validate_collection_description(self, description) -> int:
+        fields = {item["name"]: item for item in description.get("fields", [])}
+        vector = fields.get("embedding", {})
+        if (
+            set(fields) != {
+                "ref_id", "bot_id", "space_id", "purpose",
+                "input_digest", "embedding",
+            }
+            or int(vector.get("params", {}).get("dim", -1))
+            != self.configuration["dimensions"]
+        ):
+            raise ForestError(
+                "VECTOR_INDEX_SPACE_IMMUTABLE",
+                "Milvus collection layout differs", 409,
+            )
+        return self._collection_id(description)
+
+    async def _create_collection(self) -> int:
+        schema = self.client.create_schema(
+            auto_id=False, enable_dynamic_field=False
+        )
+        schema.add_field(
+            "ref_id", DataType.VARCHAR, is_primary=True, max_length=256
+        )
+        schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
+        schema.add_field("space_id", DataType.VARCHAR, max_length=256)
+        schema.add_field("purpose", DataType.VARCHAR, max_length=16)
+        schema.add_field("input_digest", DataType.VARCHAR, max_length=71)
+        schema.add_field(
+            "embedding", DataType.FLOAT_VECTOR,
+            dim=self.configuration["dimensions"],
+        )
+        indexes = self.client.prepare_index_params()
+        indexes.add_index(
+            field_name="embedding", index_type="AUTOINDEX", metric_type="COSINE"
+        )
+        await self.client.create_collection(
+            collection_name=self.collection_name, schema=schema,
+            index_params=indexes, consistency_level="Strong",
+        )
+        description = await self.client.describe_collection(
+            collection_name=self.collection_name
+        )
+        return self._validate_collection_description(description)
+
+    async def _confirm_collection(self, token: str, collection_id: int) -> None:
+        shape = {
+            "space_id": self.configuration["space_id"],
+            "collection_name": self.collection_name,
+            "dimensions": self.configuration["dimensions"],
+            "metric": self.configuration["metric"],
+        }
+        confirmed = await self._startup_command(
+            "vector.collection.confirm",
+            {**shape, "collection_id": collection_id, "claim_token": token},
+            operation_id=self._startup_operation_id + ":confirm",
+        )
+        if confirmed != {"state": "READY", "reason": None, "claim_token": None}:
+            raise ForestError(
+                "VECTOR_INDEX_BINDING_INVALID",
+                "Package did not confirm the physical collection identity", 502,
+            )
+
     async def _ensure_collection(self) -> None:
+        if self._startup_command is None:
+            raise ForestError(
+                "PACKAGE_EFFECT_STARTUP_BINDING_INVALID",
+                "Vector collection startup has no package command port", 500,
+            )
+        shape = {
+            "space_id": self.configuration["space_id"],
+            "collection_name": self.collection_name,
+            "dimensions": self.configuration["dimensions"],
+            "metric": self.configuration["metric"],
+        }
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                async with self.bindings.store.pool.connection() as conn, conn.transaction():
-                    binding, live_refs = await self.bindings.lock_collection_state(conn)
-                    if binding is not None and (
-                        binding["space_id"] != self.configuration["space_id"]
-                        or binding["collection_name"] != self.collection_name
-                    ):
-                        raise ForestError(
-                            "VECTOR_INDEX_SPACE_IMMUTABLE",
-                            "Collection binding belongs to another vector space",
-                            409,
-                        )
-                    if await self.client.has_collection(
+                while True:
+                    exists = await self.client.has_collection(
                         collection_name=self.collection_name
-                    ):
+                    )
+                    collection_id = None
+                    if exists:
                         description = await self.client.describe_collection(
                             collection_name=self.collection_name
                         )
-                        fields = {
-                            item["name"]: item for item in description.get("fields", [])
-                        }
-                        vector = fields.get("embedding", {})
-                        if (
-                            set(fields) != {
-                                "ref_id", "bot_id", "space_id", "purpose",
-                                "input_digest", "embedding"
-                            }
-                            or int(vector.get("params", {}).get("dim", -1))
-                            != self.configuration["dimensions"]
+                        collection_id = self._validate_collection_description(
+                            description
+                        )
+                    decision = await self._startup_command(
+                        "vector.collection.plan",
+                        {**shape, "exists": exists, "collection_id": collection_id},
+                        operation_id=self._startup_operation_id,
+                    )
+                    state = decision["state"]
+                    if state == "READY":
+                        return
+                    if state == "WAIT":
+                        await asyncio.sleep(0.2)
+                        continue
+                    if state == "REBUILD_REQUIRED":
+                        # Another startup may have published a binding between
+                        # the physical observation and the package decision.
+                        if not exists and await self.client.has_collection(
+                            collection_name=self.collection_name
                         ):
-                            raise ForestError(
-                                "VECTOR_INDEX_SPACE_IMMUTABLE",
-                                "Milvus collection layout differs",
-                                409,
-                            )
-                        collection_id = self._collection_id(description)
-                        if binding is None:
-                            self._require_rebuild("unbound collection")
-                        elif binding["collection_id"] != collection_id:
-                            self._require_rebuild("collection identity changed")
+                            continue
+                        self._require_rebuild(decision["reason"])
                         return
-                    if live_refs:
-                        self._require_rebuild("collection missing with pending or active refs")
-                        return
-                    schema = self.client.create_schema(
-                        auto_id=False, enable_dynamic_field=False
-                    )
-                    schema.add_field(
-                        "ref_id", DataType.VARCHAR, is_primary=True, max_length=256
-                    )
-                    schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
-                    schema.add_field("space_id", DataType.VARCHAR, max_length=256)
-                    schema.add_field("purpose", DataType.VARCHAR, max_length=16)
-                    schema.add_field("input_digest", DataType.VARCHAR, max_length=71)
-                    schema.add_field(
-                        "embedding", DataType.FLOAT_VECTOR,
-                        dim=self.configuration["dimensions"],
-                    )
-                    indexes = self.client.prepare_index_params()
-                    indexes.add_index(
-                        field_name="embedding", index_type="AUTOINDEX",
-                        metric_type="COSINE",
-                    )
-                    await self.client.create_collection(
-                        collection_name=self.collection_name,
-                        schema=schema,
-                        index_params=indexes,
-                        consistency_level="Strong",
-                    )
-                    description = await self.client.describe_collection(
-                        collection_name=self.collection_name
-                    )
-                    await self.bindings.bind_collection(
-                        conn,
-                        revision=1 if binding is None else binding["binding_revision"] + 1,
-                        space_id=self.configuration["space_id"],
-                        collection_name=self.collection_name,
-                        collection_id=self._collection_id(description),
-                    )
+                    token = decision["claim_token"]
+                    if not isinstance(token, str) or not token:
+                        raise ForestError(
+                            "VECTOR_INDEX_BINDING_INVALID",
+                            "Package returned a creation action without a claim", 502,
+                        )
+                    if state == "CREATE":
+                        collection_id = await self._create_collection()
+                    elif state != "CONFIRM" or collection_id is None:
+                        raise ForestError(
+                            "VECTOR_INDEX_BINDING_INVALID",
+                            "Package returned an invalid collection action", 502,
+                        )
+                    await self._confirm_collection(token, collection_id)
+                    return
         except ForestError:
             raise
-        except (
-            TimeoutError, MilvusException, OSError, KeyError, TypeError,
-            ValueError, psycopg.Error,
-        ) as exc:
+        except (TimeoutError, MilvusException, OSError, KeyError, TypeError,
+                ValueError) as exc:
             raise ForestError(
                 "VECTOR_INDEX_UNAVAILABLE", "Milvus collection is unavailable", 503
             ) from exc
@@ -399,7 +445,7 @@ class MilvusVectorIndexEffectDriver:
 
 
 def milvus_vector_index_effect_driver_factory(
-    *, bot_id, store, runtime, token_resolver, client_factory=AsyncMilvusClient
+    *, bot_id, runtime, token_resolver, client_factory=AsyncMilvusClient
 ):
     def create(configuration, configuration_revision, identity, declaration):
         return MilvusVectorIndexEffectDriver(
@@ -408,7 +454,6 @@ def milvus_vector_index_effect_driver_factory(
             identity,
             declaration,
             bot_id=bot_id,
-            store=store,
             runtime=runtime,
             token_resolver=token_resolver,
             client_factory=client_factory,

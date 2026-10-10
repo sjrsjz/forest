@@ -402,6 +402,10 @@ MANIFEST_SCHEMA = {
                                     )
                                 },
                                 "semantics": {"enum": ["at-most-once", "idempotent", "read"]},
+                                "startup_commands": {
+                                    "type": "array", "maxItems": 8,
+                                    "uniqueItems": True, "items": {"type": "string"},
+                                },
                                 "ingress": {
                                     "type": "object",
                                     "additionalProperties": False,
@@ -1665,6 +1669,14 @@ def _manifest(files: dict[str, bytes]) -> dict:
     shell_commands = component.get("shell_commands", [])
     agent_tools = component.get("agent_tools", [])
     owned_work_handlers = component.get("owned_work_handlers", [])
+    declared_domain_commands = {item["name"] for item in domain_commands}
+    for effect in effect_services:
+        startup_commands = effect.get("startup_commands", ())
+        if any(name not in declared_domain_commands for name in startup_commands):
+            _fail(
+                "INVALID_EFFECT_STARTUP_COMMANDS",
+                "Effect startup commands must be package-owned Domain commands",
+            )
     private_work_commands = [
         name for work in owned_work_handlers
         for name in work.get("private_commands", ())

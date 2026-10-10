@@ -39,8 +39,19 @@ CREATE TABLE vector_collection_bindings (
     space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
     collection_name text NOT NULL CHECK (octet_length(collection_name) BETWEEN 1 AND 256),
     collection_id bigint NOT NULL CHECK (collection_id > 0),
+    dimensions integer NOT NULL CHECK (dimensions BETWEEN 1 AND 4096),
+    metric text NOT NULL CHECK (metric='COSINE'),
     bound_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,binding_revision)
+);
+CREATE TABLE vector_collection_start_claims (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
+    collection_name text NOT NULL CHECK (octet_length(collection_name) BETWEEN 1 AND 256),
+    dimensions integer NOT NULL CHECK (dimensions BETWEEN 1 AND 4096),
+    metric text NOT NULL CHECK (metric='COSINE'),
+    claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    lease_deadline timestamptz NOT NULL
 );
 CREATE FUNCTION guard_vector_collection_binding() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -331,6 +342,14 @@ BEGIN
     END IF;
     PERFORM pg_advisory_xact_lock_shared(hashtextextended(
         'vector-collection:'||requested_bot,0));
+    IF EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_collection_start_claims
+        WHERE bot_id=requested_bot AND lease_deadline>clock_timestamp()
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_STARTING',
+                'message','Collection startup has not settled','status',503));
+    END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'vector-ref:'||requested_bot||':'||requested_ref,0));
     SELECT * INTO existing FROM __forest_module_schema__.vector_index_refs
@@ -536,5 +555,204 @@ BEGIN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('query_ref_id',requested_ref,
             'space_id',requested_space,'hits',filtered));
+END;
+$$;
+
+-- A startup command decides collection reuse/creation from the package ledger.
+-- The host supplies observed physical identity but cannot mutate the ledger.
+CREATE FUNCTION vector_collection_plan(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := context->>'operation_id';
+    requested_space text := input->>'space_id';
+    requested_name text := input->>'collection_name';
+    requested_dimensions integer;
+    requested_metric text := input->>'metric';
+    observed_exists boolean;
+    observed_id bigint;
+    binding __forest_module_schema__.vector_collection_bindings%ROWTYPE;
+    claim __forest_module_schema__.vector_collection_start_claims%ROWTYPE;
+    selected_state text;
+    selected_reason text;
+    selected_token text;
+BEGIN
+    IF requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_space IS NULL OR octet_length(requested_space) NOT BETWEEN 1 AND 256
+       OR requested_name IS NULL OR octet_length(requested_name) NOT BETWEEN 1 AND 256
+       OR jsonb_typeof(input->'dimensions') IS DISTINCT FROM 'number'
+       OR jsonb_typeof(input->'exists') IS DISTINCT FROM 'boolean'
+       OR requested_metric IS DISTINCT FROM 'COSINE' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
+                'message','Collection observation is invalid','status',422));
+    END IF;
+    IF requested_name IS DISTINCT FROM 'forest_memory_ref2_' || substr(
+        encode(sha256(
+            convert_to(requested_bot,'UTF8') || decode('00','hex') ||
+            convert_to(requested_space,'UTF8')
+        ),'hex'),1,32
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
+                'message','Collection name differs from its Bot space','status',422));
+    END IF;
+    requested_dimensions := (input->>'dimensions')::integer;
+    observed_exists := (input->>'exists')::boolean;
+    IF requested_dimensions NOT BETWEEN 1 AND 4096
+       OR (observed_exists AND jsonb_typeof(input->'collection_id') IS DISTINCT FROM 'number')
+       OR (NOT observed_exists AND input->'collection_id'<>'null'::jsonb) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
+                'message','Collection observation is invalid','status',422));
+    END IF;
+    IF observed_exists THEN
+        observed_id := (input->>'collection_id')::bigint;
+        IF observed_id<=0 THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
+                    'message','Collection identity is invalid','status',422));
+        END IF;
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'vector-collection:'||requested_bot,0));
+    SELECT * INTO binding FROM __forest_module_schema__.vector_collection_bindings
+    WHERE bot_id=requested_bot ORDER BY binding_revision DESC LIMIT 1;
+    IF FOUND THEN
+        IF binding.space_id IS DISTINCT FROM requested_space
+           OR binding.collection_name IS DISTINCT FROM requested_name
+           OR binding.dimensions IS DISTINCT FROM requested_dimensions
+           OR binding.metric IS DISTINCT FROM requested_metric THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','VECTOR_INDEX_SPACE_IMMUTABLE',
+                    'message','Collection binding belongs to another vector space',
+                    'status',409));
+        END IF;
+        selected_state := CASE WHEN observed_exists
+            AND observed_id=binding.collection_id THEN 'READY'
+            ELSE 'REBUILD_REQUIRED' END;
+        selected_reason := CASE WHEN selected_state='READY' THEN NULL
+            WHEN observed_exists THEN 'collection identity changed'
+            ELSE 'collection missing with binding' END;
+    ELSE
+        SELECT * INTO claim FROM __forest_module_schema__.vector_collection_start_claims
+        WHERE bot_id=requested_bot FOR UPDATE;
+        IF FOUND AND claim.lease_deadline>clock_timestamp() THEN
+            IF claim.space_id IS DISTINCT FROM requested_space
+               OR claim.collection_name IS DISTINCT FROM requested_name
+               OR claim.dimensions IS DISTINCT FROM requested_dimensions
+               OR claim.metric IS DISTINCT FROM requested_metric THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                    'error',jsonb_build_object('code','VECTOR_INDEX_SPACE_IMMUTABLE',
+                        'message','Collection startup claim has another shape',
+                        'status',409));
+            END IF;
+            IF claim.claim_token=requested_token THEN
+                selected_state := CASE WHEN observed_exists THEN 'CONFIRM' ELSE 'CREATE' END;
+                selected_token := requested_token;
+            ELSE
+                selected_state := 'WAIT';
+                selected_reason := 'another Generation is creating the collection';
+            END IF;
+        ELSE
+            DELETE FROM __forest_module_schema__.vector_collection_start_claims
+            WHERE bot_id=requested_bot;
+            IF observed_exists THEN
+                selected_state := 'REBUILD_REQUIRED';
+                selected_reason := 'unbound collection';
+            ELSIF EXISTS(
+                SELECT 1 FROM __forest_module_schema__.vector_index_refs
+                WHERE bot_id=requested_bot AND state IN ('PENDING','ACTIVE')
+            ) THEN
+                selected_state := 'REBUILD_REQUIRED';
+                selected_reason := 'collection missing with pending or active refs';
+            ELSE
+                INSERT INTO __forest_module_schema__.vector_collection_start_claims(
+                    bot_id,space_id,collection_name,dimensions,metric,
+                    claim_token,lease_deadline
+                ) VALUES(
+                    requested_bot,requested_space,requested_name,
+                    requested_dimensions,requested_metric,requested_token,
+                    clock_timestamp()+interval '60 seconds'
+                );
+                selected_state := 'CREATE';
+                selected_token := requested_token;
+            END IF;
+        END IF;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('state',selected_state,
+            'reason',selected_reason,'claim_token',selected_token));
+END;
+$$;
+
+CREATE FUNCTION vector_collection_confirm(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_space text := input->>'space_id';
+    requested_name text := input->>'collection_name';
+    requested_dimensions integer := (input->>'dimensions')::integer;
+    requested_metric text := input->>'metric';
+    requested_id bigint := (input->>'collection_id')::bigint;
+    claim __forest_module_schema__.vector_collection_start_claims%ROWTYPE;
+BEGIN
+    IF requested_bot IS NULL OR requested_token IS NULL
+       OR requested_space IS NULL OR requested_name IS NULL
+       OR requested_dimensions NOT BETWEEN 1 AND 4096
+       OR requested_metric IS DISTINCT FROM 'COSINE'
+       OR requested_id IS NULL OR requested_id<=0 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
+                'message','Collection confirmation is invalid','status',422));
+    END IF;
+    IF requested_name IS DISTINCT FROM 'forest_memory_ref2_' || substr(
+        encode(sha256(
+            convert_to(requested_bot,'UTF8') || decode('00','hex') ||
+            convert_to(requested_space,'UTF8')
+        ),'hex'),1,32
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
+                'message','Collection name differs from its Bot space','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'vector-collection:'||requested_bot,0));
+    SELECT * INTO claim FROM __forest_module_schema__.vector_collection_start_claims
+    WHERE bot_id=requested_bot FOR UPDATE;
+    IF NOT FOUND OR claim.claim_token IS DISTINCT FROM requested_token
+       OR claim.lease_deadline<=clock_timestamp()
+       OR claim.space_id IS DISTINCT FROM requested_space
+       OR claim.collection_name IS DISTINCT FROM requested_name
+       OR claim.dimensions IS DISTINCT FROM requested_dimensions
+       OR claim.metric IS DISTINCT FROM requested_metric THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_CLAIM_STALE',
+                'message','Collection startup claim is no longer current','status',409));
+    END IF;
+    IF EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_index_refs
+        WHERE bot_id=requested_bot AND state IN ('PENDING','ACTIVE')
+    ) OR EXISTS(
+        SELECT 1 FROM __forest_module_schema__.vector_collection_bindings
+        WHERE bot_id=requested_bot
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_CLAIM_STALE',
+                'message','Collection ledger changed during startup','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.vector_collection_bindings(
+        bot_id,binding_revision,space_id,collection_name,collection_id,
+        dimensions,metric
+    ) VALUES(
+        requested_bot,1,requested_space,requested_name,requested_id,
+        requested_dimensions,requested_metric
+    );
+    DELETE FROM __forest_module_schema__.vector_collection_start_claims
+    WHERE bot_id=requested_bot;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('state','READY','reason',NULL,'claim_token',NULL));
 END;
 $$;
