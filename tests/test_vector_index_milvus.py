@@ -229,6 +229,7 @@ async def test_missing_collection_with_active_refs_requires_rebuild(clean_author
     async with store.pool.connection() as conn, conn.transaction():
         await search.refs.record_active(
             conn, ref_id="ref/document/existing",
+            space_id=configuration["space_id"], purpose="DOCUMENT",
             input_digest="sha256:" + "0" * 64,
             replay_locator=_with_replay({
                 "ref_id": "ref/document/existing", "vector": [1.0, 0.0, 0.0, 0.0],
@@ -381,7 +382,10 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             invocation=invocation,
         )
         async with store.pool.connection() as conn, conn.transaction():
-            assert (await upsert_driver.refs.lock(conn, "ref/document/near"))["state"] == "ACTIVE"
+            persisted = await upsert_driver.refs.lock(conn, "ref/document/near")
+            assert persisted["state"] == "ACTIVE"
+            assert persisted["space_id"] == space_id
+            assert persisted["purpose"] == "DOCUMENT"
         await drivers["vector.transport.upsert"].invoke(
             _with_replay({
                 "ref_id": "ref/document/far",

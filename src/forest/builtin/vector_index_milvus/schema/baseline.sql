@@ -3,7 +3,9 @@
 CREATE TABLE vector_index_refs (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     ref_id text NOT NULL CHECK (octet_length(ref_id) BETWEEN 1 AND 256),
+    space_id text NOT NULL CHECK (octet_length(space_id) BETWEEN 1 AND 256),
     state text NOT NULL CHECK (state IN ('ACTIVE','TOMBSTONED')),
+    purpose text CHECK (purpose IN ('DOCUMENT','QUERY')),
     input_digest text CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     replay_locator jsonb,
     vector_digest text CHECK (vector_digest ~ '^sha256:[a-f0-9]{64}$'),
@@ -13,6 +15,7 @@ CREATE TABLE vector_index_refs (
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,ref_id),
     CHECK ((state='ACTIVE') = (input_digest IS NOT NULL)),
+    CHECK ((state='ACTIVE') = (purpose IS NOT NULL)),
     CHECK ((state='ACTIVE') = (replay_locator IS NOT NULL)),
     CHECK ((state='ACTIVE') = (vector_digest IS NOT NULL)),
     CHECK ((state='TOMBSTONED') = (tombstoned_at IS NOT NULL)),
@@ -44,12 +47,13 @@ CREATE TRIGGER vector_collection_binding_immutable
 
 CREATE FUNCTION guard_vector_index_ref() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF ROW(NEW.bot_id,NEW.ref_id,NEW.created_at) IS DISTINCT FROM
-       ROW(OLD.bot_id,OLD.ref_id,OLD.created_at) THEN
+    IF ROW(NEW.bot_id,NEW.ref_id,NEW.space_id,NEW.created_at) IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.ref_id,OLD.space_id,OLD.created_at) THEN
         RAISE EXCEPTION 'Vector ref identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.state='ACTIVE' AND NEW.state='TOMBSTONED'
-       AND NEW.input_digest IS NULL AND NEW.replay_locator IS NULL
+       AND NEW.purpose IS NULL AND NEW.input_digest IS NULL
+       AND NEW.replay_locator IS NULL
        AND NEW.vector_digest IS NULL AND NEW.tombstoned_at IS NOT NULL
        AND NEW.next_sweep_at IS NOT NULL AND NEW.sweep_count=0 THEN
         RETURN NEW;

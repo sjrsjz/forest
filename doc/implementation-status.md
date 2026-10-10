@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+向量 ref 重放行身份补齐（2026-10-10）：`vector.index` 2.5.1 / 私有 SQL 2.4.1 在 ACTIVE ref 上冻结 `space_id` 和 `purpose`，并将空间纳入不可变行身份；转 tombstone 时清除用途、保留空间。这样包账本可用 Bot、空间、用途、ref、ReplayLocator 和摘要还原 Milvus 行，不必从不可解释的输入摘要猜测 DOCUMENT/QUERY。独立 PostgreSQL 与真实 Milvus 的向量索引用例 5 passed（17.05 秒）。ref 状态机、collection 绑定和清扫仍在宿主，单行审计及重建切换尚未实现；在线 v21 未切换，未发送 QQ 消息。
+
 向量 ReplayLocator 发布链路（2026-10-10）：`vector.index` 2.5.0 / 私有 SQL 2.4.0 将 `vector.index.upsert/3`、`search/2`、`delete/1` 放入可热替换包 Worker。upsert 重读不可变 `embedding.result` PayloadRef，核对 Embedding space、facet、批次序号、维度、向量及摘要后才调用 `vector.transport.*` Effect；ACTIVE ref 保存 ReplayLocator 与向量摘要，Milvus 行保存输入摘要，tombstone 清除重放引用。包的状态请求并发上限从 1 调到 16，以容纳 Memory 每批最多 4 个并发 facet。隔离 PostgreSQL + 假 OneBot/模型/Milvus 的完整 BotHost 生命周期回归 1 passed（583.09 秒）；独立 PostgreSQL 缺 collection 围栏与真实 Milvus 往返各 1 passed，Ruff 通过。当前 ref 状态机及 collection 绑定仍在宿主 Effect Driver，尚未收敛到包私有 Domain；运行中单行缺失审计、候选 collection 重放、增量追赶及绑定 CAS 切换仍未实现，不能称为可执行索引重建。在线 v21 未切换，未发送 QQ 消息。
 
 查询终态向量围栏（2026-10-10）：`memory.graph` 1.90.3 / 私有 SQL 3.88.0 在 `query_recall_work` 首次转为 READY、FAILED 或 CANCELLED 的同一事务中，为该查询所有已存在 QUERY facet 登记不可逆向量删除 outbox，覆盖尚未发布和迟到外部写入；facet 准备持有任务行共享锁，拒绝终态后增加成员。嵌入批次领取及派发前资格复核排除终态查询，避免继续为已取消查询产生新的模型费用。隔离 PostgreSQL 用例验证取消后的 READY/PENDING ref 均有删除围栏、晚到 facet 被拒绝、无新嵌入 claim，且原检索冻结与重复调用仍成功（1 passed，44.09 秒）；Ruff 和差异检查通过。已交接的外部嵌入调用仍须按原 Effect 账本对账，不能凭取消推断未计费。ReplayLocator、单行缺失审计及索引重建切换仍未实现；在线 v21 未切换，未发送 QQ 消息。

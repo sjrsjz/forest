@@ -187,7 +187,7 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 每个 Bot 的 collection 身份由 `(bot_id, space_id, dimensions, metric)` 一次冻结。模型种类、模型修订、维度或空间改变必须创建新 Bot/新隔离索引；兼容 endpoint 和凭据可以经 `vector.index` 配置新 Generation 替换。Milvus 是可重建派生库：丢失后从当前合格 facet 与稳定 ref 重放，不得反向把 Milvus 当作消息或关系权威。
 
-当前候选的 `vector.index` 2.4.3 / 私有 SQL 2.3.1 将 Milvus 的 `collection_id` 与 Bot、冻结空间、collection 名写入追加式包私有绑定账本；三个 Effect 服务启动时在同一 Bot 级独占锁下核对该身份，普通 upsert/delete 使用共享锁。缺失但仍有 ACTIVE ref、同名 collection 身份改变或既有 collection 缺少绑定时，Generation 以 `REBUILD_REQUIRED` 降级启动：不把空索引当成完整历史，upsert/search 明确拒绝，delete 仍持久记录 tombstone，Bot 的群消息与权威归档可继续。没有活动 ref 时允许首次创建或在绑定过的 collection 整体丢失后创建新的空代，并追加新绑定。此围栏能识别启动时整集合缺失与同名重建，尚不能识别原 collection 内部个别行丢失；受管嵌入结果 Payload、冻结 facet/ref、重建进度、候选物理索引和原子切换也尚未连成生产重建流程。
+当前候选的 `vector.index` 2.5.1 / 私有 SQL 2.4.1 已由包 Worker 对公开 upsert 校验受管 Embedding 结果，保存 ReplayLocator，并在 ACTIVE ref 上冻结空间与用途；Milvus `collection_id` 绑定账本和启动围栏仍由宿主 Effect Driver 操作。缺失但仍有 ACTIVE ref、同名 collection 身份改变或既有 collection 缺少绑定时，当前 Generation 以 `REBUILD_REQUIRED` 降级启动；此围栏只能识别启动时整集合缺失与身份更换，不能识别原 collection 内单行缺失。下面 5.2 的包内状态机、持续审计与重建切换是尚未完成的目标契约，不得把当前围栏当作可执行重建。
 
 `memory.graph` 在包清单中声明 `/embedding` 为 Bot 生命周期内不可变配置。通用模块配置仓库在规划和应用配置时按当前有效修订核验这个路径，启动时也拒绝与已有 Memory 有效配置冲突的模型身份；检索参数和嵌入预算可以通过新 Generation 调整。模型 endpoint 与凭据属于 `embedding.multimodal` 的连接配置，不放进 Memory 的模型身份字段。
 
@@ -227,7 +227,9 @@ Memory 的每日嵌入账本以 UTC 日期和 Bot ID 为键。每个稳定 batch
 
 ### 5.2 向量索引重放、核验与切换
 
-`vector.index` 必须能只凭本包持久账本和受管 Payload 引用恢复自己的派生索引，不能在宿主 Effect Driver 中直接查询 `memory.graph` 私有表。现有 ref 账本仅保存输入摘要，缺少向量重放定位；这是完整重建的阻断项。索引包的服务端口负责准入、重放、持久状态和任务生命周期；通用 Milvus 传输适配器只执行显式 collection 上的建表、写入、读取、删除及枚举，不裁定来源资格。管理动作和状态页由 `vector.index` 包贡献，Web 网关不内置“重建 Bot 记忆”业务分支。
+`vector.index` 必须能只凭本包持久账本和受管 Payload 引用恢复自己的派生索引，不能在宿主 Effect Driver 中直接查询 `memory.graph` 私有表。当前 ref 已保存向量重放定位符，公开服务也已进入包 Worker；尚未完成的是将 ref/collection 权威状态机、清扫工作和重建 Job 从宿主移入包私有 Domain。索引包的服务端口负责准入、重放、持久状态和任务生命周期；通用 Milvus 传输适配器只执行显式 collection 上的建表、写入、读取、删除及枚举，不裁定来源资格、不读写索引包私有表。管理动作和状态页由 `vector.index` 包贡献，Web 网关不内置“重建 Bot 记忆”业务分支。
+
+包内写入协议采用短事务与持久补偿，不以持有 PostgreSQL 事务跨 Milvus 网络调用作为正确性前提。`reserve-upsert` Domain Command 按 `(bot_id,ref_id)` 加锁，在已发布 binding 上冻结 ref、ReplayLocator、用途和输入摘要并登记 `PENDING`；相同输入重放合流，异载荷冲突，已有 tombstone 直接拒绝。包 Worker 随后向传输端口提交显式 binding 身份和向量，收到成功回执后用 `activate-upsert` 命令仅将仍为同一保留记录的 ref 提升为 `ACTIVE`。进程在任一阶段崩溃时，以稳定操作 ID 重放同一保留记录和传输调用；若删除已先行立 tombstone，激活必须拒绝，不得重新发布。删除先由包 Domain 原子写入不可逆 tombstone 和变更序列，再调用物理删除；传输结果失败或未知时 tombstone 保持，包自有持久清扫工作按 ref/集合身份持续重放删除，覆盖原 upsert 在删除之后迟到提交的情况。清扫 claim、租约、结算和退避都属于包，不在宿主 Effect Driver 常驻私有循环。读取与普通写入须冻结同一次调用使用的已发布 binding，传输端口只验证并执行该显式物理身份；绑定准备和切换由包 Domain CAS 决定，不能让三个传输 Driver 分别作出权威判断。
 
 发布契约升级后，`vector.index.upsert` 除即时向量外还必须收到不可变的 `ReplayLocator`：准确的 `embedding.result` PayloadRef、批次内 item index、facet/ref ID、向量摘要及冻结 space ID。索引包经受限 Payload 读端口验证结果协议、父引用、item 身份、维度和向量摘要，确认即时向量与重放向量相同；活动 ref 行不可变地绑定定位符和输入摘要。不能读取、已撤销或不匹配的定位符不得登记为 ACTIVE。普通重试只允许相同 ref/定位符/摘要；同 ref 不同内容必须失败。QUERY ref 也遵守此规则，查询终结或过期须由 `memory.graph` 的删除 outbox 持久转为 tombstone，不能让已清理的临时结果长期占用 ACTIVE。已发布 DOCUMENT 来源遗忘时，Memory 先撤销资格并写删除 outbox；索引包收到删除后先记不可逆 tombstone，候选和活动索引的物理删除可异步重放。Payload 被撤销而 ref 仍 ACTIVE 时，重建进入可诊断的 `BLOCKED_SOURCE_UNAVAILABLE`，不得擅自跳过该 ref、重新嵌入或把部分候选发布为完整索引。
 

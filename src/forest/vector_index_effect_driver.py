@@ -325,6 +325,8 @@ class MilvusVectorIndexEffectDriver:
                         )
                     if (
                         existing["input_digest"] != input_digest
+                        or existing["space_id"] != payload["space_id"]
+                        or existing["purpose"] != payload["purpose"]
                         or existing["replay_locator"] != replay
                         or existing["vector_digest"] != replay["vector_digest"]
                     ):
@@ -335,7 +337,9 @@ class MilvusVectorIndexEffectDriver:
                     await self.client.upsert(collection_name=self.collection_name, data=[row])
                 if existing is None:
                     await self.refs.record_active(
-                        conn, ref_id=payload["ref_id"], input_digest=input_digest,
+                        conn, ref_id=payload["ref_id"],
+                        space_id=payload["space_id"], purpose=payload["purpose"],
+                        input_digest=input_digest,
                         replay_locator=replay, vector_digest=replay["vector_digest"],
                     )
         except ForestError:
@@ -419,7 +423,8 @@ class MilvusVectorIndexEffectDriver:
                 for ref_id in sorted(set(refs)):
                     existing = await self.refs.lock(conn, ref_id)
                     await self.refs.record_tombstone(
-                        conn, ref_id=ref_id, existing=existing
+                        conn, ref_id=ref_id, space_id=payload["space_id"],
+                        existing=existing,
                     )
                 # With no collection, the durable tombstone is the deletion result.
                 if not self.rebuild_required:

@@ -82,34 +82,39 @@ class VectorIndexRefRepository:
         return dict(row) if row is not None else None
 
     async def record_active(
-        self, conn, *, ref_id: str, input_digest: str,
+        self, conn, *, ref_id: str, space_id: str, purpose: str,
+        input_digest: str,
         replay_locator: dict, vector_digest: str,
     ) -> None:
         from psycopg.types.json import Jsonb
 
         await conn.execute(
             sql.SQL(
-                "INSERT INTO {}(bot_id,ref_id,state,input_digest,"
-                "replay_locator,vector_digest) "
-                "VALUES(%s,%s,'ACTIVE',%s,%s,%s)"
+                "INSERT INTO {}(bot_id,ref_id,space_id,state,purpose,"
+                "input_digest,replay_locator,vector_digest) "
+                "VALUES(%s,%s,%s,'ACTIVE',%s,%s,%s,%s)"
             ).format(self._table()),
-            (self.store.bot_id, ref_id, input_digest, Jsonb(replay_locator), vector_digest),
+            (self.store.bot_id, ref_id, space_id, purpose, input_digest,
+             Jsonb(replay_locator), vector_digest),
         )
 
-    async def record_tombstone(self, conn, *, ref_id: str, existing: dict | None) -> None:
+    async def record_tombstone(
+        self, conn, *, ref_id: str, space_id: str, existing: dict | None,
+    ) -> None:
         if existing is None:
             await conn.execute(
                 sql.SQL(
-                    "INSERT INTO {}(bot_id,ref_id,state,tombstoned_at,next_sweep_at) "
-                    "VALUES(%s,%s,'TOMBSTONED',clock_timestamp(),"
+                    "INSERT INTO {}(bot_id,ref_id,space_id,state,"
+                    "tombstoned_at,next_sweep_at) "
+                    "VALUES(%s,%s,%s,'TOMBSTONED',clock_timestamp(),"
                     "clock_timestamp()+interval '30 seconds')"
                 ).format(self._table()),
-                (self.store.bot_id, ref_id),
+                (self.store.bot_id, ref_id, space_id),
             )
         elif existing["state"] == "ACTIVE":
             await conn.execute(
                 sql.SQL(
-                    "UPDATE {} SET state='TOMBSTONED',input_digest=NULL,"
+                    "UPDATE {} SET state='TOMBSTONED',purpose=NULL,input_digest=NULL,"
                     "replay_locator=NULL,vector_digest=NULL,"
                     "tombstoned_at=clock_timestamp(),"
                     "next_sweep_at=clock_timestamp()+interval '30 seconds' "
