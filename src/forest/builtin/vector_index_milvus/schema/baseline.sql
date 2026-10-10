@@ -810,6 +810,27 @@ BEGIN
 END;
 $$;
 
+-- Resolve the package-owned active physical name before startup observes Milvus.
+-- A replacement Generation must follow the published binding, not recreate the
+-- deterministic first-generation collection after a future rebuild switch.
+CREATE FUNCTION vector_collection_current(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    binding __forest_module_schema__.vector_collection_bindings%ROWTYPE;
+BEGIN
+    SELECT * INTO binding FROM __forest_module_schema__.vector_collection_bindings
+    WHERE bot_id=requested_bot ORDER BY binding_revision DESC LIMIT 1;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('binding',CASE WHEN FOUND THEN
+            jsonb_build_object(
+                'binding_revision',binding.binding_revision,
+                'collection_id',binding.collection_id,
+                'collection_name',binding.collection_name)
+            ELSE 'null'::jsonb END));
+END;
+$$;
+
 -- A startup command decides collection reuse/creation from the package ledger.
 -- The host supplies observed physical identity but cannot mutate the ledger.
 CREATE FUNCTION vector_collection_plan(context jsonb, input jsonb)
@@ -843,16 +864,7 @@ BEGIN
             'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
                 'message','Collection observation is invalid','status',422));
     END IF;
-    IF requested_name IS DISTINCT FROM 'forest_memory_ref2_' || substr(
-        encode(sha256(
-            convert_to(requested_bot,'UTF8') || decode('00','hex') ||
-            convert_to(requested_space,'UTF8')
-        ),'hex'),1,32
-    ) THEN
-        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
-            'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
-                'message','Collection name differs from its Bot space','status',422));
-    END IF;
+
     requested_dimensions := (input->>'dimensions')::integer;
     observed_exists := (input->>'exists')::boolean;
     IF requested_dimensions NOT BETWEEN 1 AND 4096
@@ -903,6 +915,17 @@ BEGIN
                 ELSE 'collection missing with binding' END;
         END IF;
     ELSE
+        IF requested_name IS DISTINCT FROM 'forest_memory_ref2_' || substr(
+            encode(sha256(
+                convert_to(requested_bot,'UTF8') || decode('00','hex') ||
+                convert_to(requested_space,'UTF8')
+            ),'hex'),1,32
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_INPUT_INVALID',
+                    'message','First collection name differs from its Bot space',
+                    'status',422));
+        END IF;
         SELECT * INTO claim FROM __forest_module_schema__.vector_collection_start_claims
         WHERE bot_id=requested_bot FOR UPDATE;
         IF FOUND AND claim.lease_deadline>clock_timestamp() THEN

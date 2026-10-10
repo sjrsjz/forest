@@ -119,6 +119,16 @@ class PackageAgentToolEffectAuthority(Protocol):
 
 
 class PackageDomainQueries(Protocol):
+    async def invoke_preparation_query(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any: ...
+
     async def invoke_query(
         self,
         scope: PackageCallScope,

@@ -78,6 +78,20 @@ def _bind_package_startup(driver, store):
             raise ForestError(error["code"], error["message"], error["status"])
         return envelope["value"]
 
+    async def query(name, payload):
+        assert name == "vector.collection.current"
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.vector_collection_current(%s::jsonb,%s::jsonb) "
+                            "AS result").format(sql.Identifier(namespace)),
+                    (Jsonb({"bot_id": store.bot_id}), Jsonb(payload)),
+                )
+            ).fetchone()
+        assert row["result"]["ok"]
+        return row["result"]["value"]
+
+    driver.bind_startup_queries(query)
     driver.bind_startup_commands(call)
     driver.bind_runtime_commands(call)
     return driver
@@ -222,6 +236,82 @@ async def test_embedding_and_vector_identity_are_package_declared_immutable_path
             validation_digest=vector_digest,
         )
     assert vector_error.value.code == "MODULE_CONFIGURATION_IMMUTABLE"
+
+
+@pytest.mark.asyncio
+async def test_vector_startup_reobserves_binding_advanced_during_plan():
+    bot_id = "bot/startup-race"
+    space_id = "space/startup-race"
+    base = vector_collection_name(bot_id, space_id)
+    candidate = base + "_r2"
+    bindings = (
+        {"binding_revision": 1, "collection_id": 42,
+         "collection_name": base},
+        {"binding_revision": 2, "collection_id": 43,
+         "collection_name": candidate},
+    )
+
+    class Physical:
+        closed = False
+
+        async def has_collection(self, *, collection_name):
+            return collection_name in {base, candidate}
+
+        async def describe_collection(self, *, collection_name):
+            return {
+                "collection_id": 42 if collection_name == base else 43,
+                "fields": [
+                    {"name": name, **({"params": {"dim": 4}} if name == "embedding"
+                                    else {})}
+                    for name in (
+                        "ref_id", "bot_id", "space_id", "purpose",
+                        "input_digest", "embedding",
+                    )
+                ],
+            }
+
+        async def close(self):
+            self.closed = True
+
+    physical = Physical()
+    configuration = official_builtin_configuration(
+        "vector_index_milvus", overrides={"space_id": space_id, "dimensions": 4}
+    )
+
+    async def token(_ref, _revision):
+        return ""
+
+    driver = MilvusVectorIndexEffectDriver(
+        configuration, 1,
+        SimpleNamespace(component_id="vector.index", generation_id="generation/race"),
+        {"name": "vector.transport.search", "kind": "vector-index.milvus"},
+        bot_id=bot_id, runtime=SimpleNamespace(), token_resolver=token,
+        client_factory=lambda **_values: physical,
+    )
+    queried = 0
+    observed = []
+
+    async def current(name, payload):
+        nonlocal queried
+        assert name == "vector.collection.current" and payload == {}
+        queried += 1
+        return {"binding": bindings[0] if queried == 1 else bindings[1]}
+
+    async def plan(name, payload, *, operation_id):
+        assert name == "vector.collection.plan" and operation_id
+        observed.append(payload["collection_name"])
+        if len(observed) == 1:
+            raise ForestError("VECTOR_INDEX_SPACE_IMMUTABLE", "binding advanced", 409)
+        return {"state": "READY", "reason": None, "claim_token": None,
+                "binding_revision": 2, "collection_id": 43}
+
+    driver.bind_startup_queries(current)
+    driver.bind_startup_commands(plan)
+    await driver.start()
+    assert observed == [base, candidate]
+    assert driver.collection_name == candidate and driver.binding_revision == 2
+    await driver.close()
+    assert physical.closed
 
 
 @pytest.mark.asyncio
@@ -1134,6 +1224,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
     scope = identity
     invocation = SimpleNamespace(operation_id="test")
     collection_name = drivers["vector.transport.upsert"].collection_name
+    candidate_name = collection_name + "_r2"
 
     def transport_row(ref_id, purpose, vector):
         public = _with_replay({
@@ -1272,6 +1363,56 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         assert next(row for row in scanned if
                     row["ref_id"] == precision["ref_id"]) == observed["rows"][0]
 
+        # A second physical collection must be addressed by its own immutable
+        # name and server identity, even while revision 1 remains published.
+        candidate_schema = upsert.client.create_schema(
+            auto_id=False, enable_dynamic_field=False
+        )
+        candidate_schema.add_field(
+            "ref_id", DataType.VARCHAR, is_primary=True, max_length=256
+        )
+        candidate_schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
+        candidate_schema.add_field("space_id", DataType.VARCHAR, max_length=256)
+        candidate_schema.add_field("purpose", DataType.VARCHAR, max_length=16)
+        candidate_schema.add_field("input_digest", DataType.VARCHAR, max_length=71)
+        candidate_schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=4)
+        candidate_indexes = upsert.client.prepare_index_params()
+        candidate_indexes.add_index(
+            field_name="embedding", index_type="AUTOINDEX", metric_type="COSINE"
+        )
+        await upsert.client.create_collection(
+            collection_name=candidate_name, schema=candidate_schema,
+            index_params=candidate_indexes, consistency_level="Strong",
+        )
+        candidate_description = await upsert.client.describe_collection(
+            collection_name=candidate_name
+        )
+        candidate_binding = {
+            "binding_revision": 2,
+            "collection_id": candidate_description["collection_id"],
+            "collection_name": candidate_name,
+        }
+        candidate_query = {**transport_row(
+            "ref/query/candidate", "QUERY", [1.0, 0.0, 0.0, 0.0]
+        ), "binding": candidate_binding}
+        candidate_document = {**transport_row(
+            "ref/document/candidate", "DOCUMENT", [1.0, 0.0, 0.0, 0.0]
+        ), "binding": candidate_binding}
+        await upsert.invoke(candidate_query, scope=scope, invocation=invocation)
+        await upsert.invoke(candidate_document, scope=scope, invocation=invocation)
+        candidate_hits = await drivers["vector.transport.search"].invoke(
+            {"query_ref_id": candidate_query["ref_id"], "space_id": space_id,
+             "limit": 2, "binding": candidate_binding},
+            scope=scope, invocation=invocation,
+        )
+        assert [hit["ref_id"] for hit in candidate_hits["hits"]] == [
+            candidate_document["ref_id"]
+        ]
+        assert await upsert.client.get(
+            collection_name=collection_name, ids=[candidate_document["ref_id"]],
+            output_fields=["ref_id"], consistency_level="Strong",
+        ) == []
+
         replay = near["replay"]
         async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(
@@ -1350,11 +1491,47 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                 scope=scope, invocation=invocation,
             )
         assert replaced.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
+
+        # Simulate only the already verified SQL publication fact here; the
+        # candidate replay and atomic switch authority are separate work.
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("INSERT INTO {}.vector_collection_bindings "
+                        "(bot_id,binding_revision,space_id,collection_name,"
+                        "collection_id,dimensions,metric) "
+                        "VALUES (%s,2,%s,%s,%s,4,'COSINE')")
+                .format(sql.Identifier(namespace)),
+                (bot_id, space_id, candidate_name, candidate_binding["collection_id"]),
+            )
+            await conn.execute(
+                sql.SQL("UPDATE {}.vector_collection_health "
+                        "SET binding_revision=2,state='READY',reason=NULL "
+                        "WHERE bot_id=%s").format(sql.Identifier(namespace)),
+                (bot_id,),
+            )
+        await replacement.close()
+        recovered = driver_for("vector.transport.search")
+        drivers["vector.transport.search"] = recovered
+        await recovered.start()
+        assert recovered.collection_name == candidate_name
+        assert recovered.binding_revision == 2
+        recovered_hits = await recovered.invoke(
+            {"query_ref_id": candidate_query["ref_id"], "space_id": space_id,
+             "limit": 2, "binding": candidate_binding},
+            scope=scope, invocation=invocation,
+        )
+        assert [hit["ref_id"] for hit in recovered_hits["hits"]] == [
+            candidate_document["ref_id"]
+        ]
     finally:
         client = drivers["vector.transport.upsert"].client
         if client is not None and await client.has_collection(
             collection_name=collection_name
         ):
             await client.drop_collection(collection_name=collection_name)
+        if client is not None and await client.has_collection(
+            collection_name=candidate_name
+        ):
+            await client.drop_collection(collection_name=candidate_name)
         for driver in drivers.values():
             await driver.close()

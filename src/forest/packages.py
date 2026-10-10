@@ -402,6 +402,10 @@ MANIFEST_SCHEMA = {
                                     )
                                 },
                                 "semantics": {"enum": ["at-most-once", "idempotent", "read"]},
+                                "startup_queries": {
+                                    "type": "array", "maxItems": 8,
+                                    "uniqueItems": True, "items": {"type": "string"},
+                                },
                                 "startup_commands": {
                                     "type": "array", "maxItems": 8,
                                     "uniqueItems": True, "items": {"type": "string"},
@@ -1674,7 +1678,14 @@ def _manifest(files: dict[str, bytes]) -> dict:
     agent_tools = component.get("agent_tools", [])
     owned_work_handlers = component.get("owned_work_handlers", [])
     declared_domain_commands = {item["name"] for item in domain_commands}
+    declared_domain_queries = {item["name"] for item in domain_queries}
     for effect in effect_services:
+        if any(name not in declared_domain_queries
+               for name in effect.get("startup_queries", ())):
+            _fail(
+                "INVALID_EFFECT_QUERIES",
+                "Effect startup queries must be package-owned Domain queries",
+            )
         startup_commands = effect.get("startup_commands", ())
         runtime_commands = effect.get("runtime_commands", ())
         if any(name not in declared_domain_commands

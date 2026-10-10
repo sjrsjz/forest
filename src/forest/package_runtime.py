@@ -955,6 +955,52 @@ class PackageGenerationAdapter:
                 result_validator=output_validator.is_valid,
             )
 
+    async def _effect_startup_query(
+        self, allowed: frozenset[str], name: str, payload: dict,
+    ) -> dict:
+        identity = self.generation_identity
+        prepared = self._prepared_binding
+        authority = self._domain_queries
+        declaration = next(
+            (item for item in self.component.get("domain_queries", ())
+             if item["name"] == name), None,
+        )
+        if (
+            name not in allowed or declaration is None
+            or identity is None or prepared is None or authority is None
+        ):
+            raise ForestError(
+                "PACKAGE_EFFECT_STARTUP_BINDING_INVALID",
+                "Effect requested an undeclared or unavailable startup query", 409,
+            )
+        input_validator, output_validator = self._service_schemas[name]
+        if not isinstance(payload, dict) or not input_validator.is_valid(payload):
+            raise ForestError(
+                "PACKAGE_EFFECT_STARTUP_INPUT_INVALID",
+                "Effect startup query input violates its package schema", 422,
+            )
+        call_id = "call:" + uuid4().hex
+        result = await authority.invoke_preparation_query(
+            PackageCallScope(
+                bot_id=self.bot_id, scope_kind=self.scope_kind,
+                scope_id=self.scope_id, component_id=self.component_id,
+                generation_id=identity.generation_id,
+                instance_id=prepared.instance_id,
+                worker_incarnation=prepared.worker_incarnation,
+                call_id=call_id, call_operation_id=call_id,
+                causal_root_kind="runtime.generation",
+                causal_root_id=identity.generation_id,
+            ),
+            declaration, payload, parent_call_id=call_id,
+            timeout_seconds=_timeout(self.component, "start_timeout_s", 10),
+        )
+        if not output_validator.is_valid(result):
+            raise ForestError(
+                "DOMAIN_OUTPUT_INVALID",
+                "Effect startup query result violates its package schema", 502,
+            )
+        return result
+
     async def _effect_startup_command(
         self, allowed: frozenset[str], name: str, payload: dict,
         *, operation_id: str,
@@ -3092,6 +3138,21 @@ class PackageGenerationAdapter:
                         details={"service_id": service_id},
                     )
                 started_drivers.append(driver)
+                startup_queries = frozenset(
+                    declaration.get("startup_queries", ())
+                )
+                if startup_queries:
+                    binder = getattr(driver, "bind_startup_queries", None)
+                    if not callable(binder):
+                        raise ForestError(
+                            "PACKAGE_EFFECT_STARTUP_BINDING_INVALID",
+                            "Effect driver does not implement its startup query port",
+                            500, details={"service_id": service_id},
+                        )
+                    binder(
+                        lambda name, payload, allowed=startup_queries:
+                            self._effect_startup_query(allowed, name, payload)
+                    )
                 startup_commands = frozenset(
                     declaration.get("startup_commands", ())
                 )

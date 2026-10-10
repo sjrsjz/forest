@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.13.0"
+version = "2.14.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -78,9 +78,9 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.12.0"
+schema_version = "2.13.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "46e2d6c65f516200433a0276a67eadd334abc5a067516ca511b52c1dc41fdf00"
+baseline_sha256 = "fbfc4e316f9ca08bbade9441c12fb8153aebd94511ada72534feae3cb89b044d"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -133,6 +133,13 @@ contract = "1.0"
 function = "vector_ref_tombstone"
 input_schema = "schemas/delete-input.json"
 output_schema = "schemas/delete-output.json"
+
+[[components.domain_queries]]
+name = "vector.collection.current"
+contract = "1.0"
+function = "vector_collection_current"
+input_schema = "schemas/change-head-input.json"
+output_schema = "schemas/collection-current-output.json"
 
 [[components.domain_queries]]
 name = "vector.ref.require-query"
@@ -217,6 +224,7 @@ output_schema = "schemas/delete-output.json"
 name = "vector.transport.upsert"
 contract = "3.0"
 kind = "vector-index.milvus"
+startup_queries = ["vector.collection.current"]
 startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
 runtime_commands = ["vector.collection.quarantine"]
 semantics = "idempotent"
@@ -227,6 +235,7 @@ output_schema = "schemas/upsert-output.json"
 name = "vector.transport.search"
 contract = "2.0"
 kind = "vector-index.milvus"
+startup_queries = ["vector.collection.current"]
 startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
 runtime_commands = ["vector.collection.quarantine"]
 semantics = "read"
@@ -237,6 +246,7 @@ output_schema = "schemas/search-output.json"
 name = "vector.transport.audit"
 contract = "2.0"
 kind = "vector-index.milvus"
+startup_queries = ["vector.collection.current"]
 startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
 runtime_commands = ["vector.collection.quarantine"]
 semantics = "read"
@@ -247,6 +257,7 @@ output_schema = "schemas/transport-audit-output.json"
 name = "vector.transport.prune"
 contract = "2.0"
 kind = "vector-index.milvus"
+startup_queries = ["vector.collection.current"]
 startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
 runtime_commands = ["vector.collection.quarantine"]
 semantics = "idempotent"

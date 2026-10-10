@@ -72,6 +72,7 @@ class MilvusVectorIndexEffectDriver:
         self.identity = identity
         self.service_id = declaration["name"]
         self.bot_id = bot_id
+        self._startup_query = None
         self._startup_command = None
         self._runtime_command = None
         self._startup_operation_id = "vector-collection-start:" + hashlib.sha256(
@@ -88,6 +89,14 @@ class MilvusVectorIndexEffectDriver:
         self.rebuild_required = False
         self.binding_revision = None
         self.collection_id = None
+
+    def bind_startup_queries(self, query) -> None:
+        if self._startup_query is not None or not callable(query):
+            raise ForestError(
+                "PACKAGE_EFFECT_STARTUP_BINDING_INVALID",
+                "Vector startup query port was bound more than once", 500,
+            )
+        self._startup_query = query
 
     def bind_startup_commands(self, command) -> None:
         if self._startup_command is not None or not callable(command):
@@ -129,7 +138,11 @@ class MilvusVectorIndexEffectDriver:
         try:
             await self._ensure_collection()
             if not self.rebuild_required:
-                await self._verify_physical_collection()
+                await self._verify_physical_collection({
+                    "binding_revision": self.binding_revision,
+                    "collection_id": self.collection_id,
+                    "collection_name": self.collection_name,
+                })
         except BaseException:
             client, self.client = self.client, None
             self._token = None
@@ -168,30 +181,45 @@ class MilvusVectorIndexEffectDriver:
         self.binding_revision = revision
         self.collection_id = collection_id
 
-    async def _quarantine(self, reason: str) -> None:
-        self._require_rebuild(reason)
-        if self.binding_revision is not None:
+    async def _quarantine(self, reason: str, binding=None) -> None:
+        target = binding or {
+            "binding_revision": self.binding_revision,
+            "collection_id": self.collection_id,
+        }
+        if target["binding_revision"] == self.binding_revision:
+            self._require_rebuild(reason)
+        if target["binding_revision"] is not None:
             command = self._runtime_command if self.accepting else self._startup_command
             if command is None:
                 raise ForestError(
                     "PACKAGE_EFFECT_RUNTIME_BINDING_INVALID",
                     "Vector quarantine has no package command port", 500,
                 )
-            await command(
-                "vector.collection.quarantine",
-                {"binding_revision": self.binding_revision,
-                 "collection_id": self.collection_id, "reason": reason},
-                operation_id=self._startup_operation_id + ":quarantine:" + reason,
-            )
+            try:
+                await command(
+                    "vector.collection.quarantine",
+                    {"binding_revision": target["binding_revision"],
+                     "collection_id": target["collection_id"], "reason": reason},
+                    operation_id=(self._startup_operation_id + ":quarantine:" +
+                                  str(target["binding_revision"]) + ":" + reason),
+                )
+            except ForestError as exc:
+                if exc.code != "VECTOR_INDEX_COLLECTION_BINDING_STALE":
+                    raise
+                raise ForestError(
+                    "VECTOR_INDEX_BINDING_STALE",
+                    "Physical binding changed during collection verification", 503,
+                ) from exc
 
-    async def _verify_physical_collection(self) -> None:
+    async def _verify_physical_collection(self, binding) -> None:
+        collection_name = binding["collection_name"]
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
                 exists = await self.client.has_collection(
-                    collection_name=self.collection_name
+                    collection_name=collection_name
                 )
                 description = await self.client.describe_collection(
-                    collection_name=self.collection_name
+                    collection_name=collection_name
                 ) if exists else None
         except (TimeoutError, MilvusException, OSError) as exc:
             raise ForestError(
@@ -199,7 +227,7 @@ class MilvusVectorIndexEffectDriver:
             ) from exc
         if description is None:
             reason = "collection missing"
-        elif self._collection_id(description) != self.collection_id:
+        elif self._collection_id(description) != binding["collection_id"]:
             reason = "collection identity changed"
         else:
             try:
@@ -210,7 +238,7 @@ class MilvusVectorIndexEffectDriver:
                 reason = "collection layout changed"
             else:
                 return
-        await self._quarantine(reason)
+        await self._quarantine(reason, binding)
         raise ForestError(
             "VECTOR_INDEX_REBUILD_REQUIRED",
             "Published vector refs require index reconstruction", 503,
@@ -284,20 +312,31 @@ class MilvusVectorIndexEffectDriver:
         self._remember_binding(confirmed)
 
     async def _ensure_collection(self) -> None:
-        if self._startup_command is None:
+        if self._startup_command is None or self._startup_query is None:
             raise ForestError(
                 "PACKAGE_EFFECT_STARTUP_BINDING_INVALID",
-                "Vector collection startup has no package command port", 500,
+                "Vector collection startup has no package authority ports", 500,
             )
-        shape = {
-            "space_id": self.configuration["space_id"],
-            "collection_name": self.collection_name,
-            "dimensions": self.configuration["dimensions"],
-            "metric": self.configuration["metric"],
-        }
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
                 while True:
+                    current = await self._startup_query(
+                        "vector.collection.current", {}
+                    )
+                    binding = current["binding"]
+                    if binding is not None:
+                        self._check_binding(binding)
+                        self.collection_name = binding["collection_name"]
+                    else:
+                        self.collection_name = vector_collection_name(
+                            self.bot_id, self.configuration["space_id"]
+                        )
+                    shape = {
+                        "space_id": self.configuration["space_id"],
+                        "collection_name": self.collection_name,
+                        "dimensions": self.configuration["dimensions"],
+                        "metric": self.configuration["metric"],
+                    }
                     exists = await self.client.has_collection(
                         collection_name=self.collection_name
                     )
@@ -307,11 +346,21 @@ class MilvusVectorIndexEffectDriver:
                             collection_name=self.collection_name
                         )
                         collection_id = self._collection_id(description)
-                    decision = await self._startup_command(
-                        "vector.collection.plan",
-                        {**shape, "exists": exists, "collection_id": collection_id},
-                        operation_id=self._startup_operation_id,
-                    )
+                    try:
+                        decision = await self._startup_command(
+                            "vector.collection.plan",
+                            {**shape, "exists": exists, "collection_id": collection_id},
+                            operation_id=self._startup_operation_id,
+                        )
+                    except ForestError as exc:
+                        if exc.code != "VECTOR_INDEX_SPACE_IMMUTABLE":
+                            raise
+                        latest = await self._startup_query(
+                            "vector.collection.current", {}
+                        )
+                        if latest["binding"] == binding:
+                            raise
+                        continue
                     state = decision["state"]
                     if state == "READY":
                         if not exists or collection_id != decision["collection_id"]:
@@ -398,10 +447,23 @@ class MilvusVectorIndexEffectDriver:
             )
 
     def _check_binding(self, binding) -> None:
+        if not isinstance(binding, Mapping):
+            raise ForestError(
+                "VECTOR_INDEX_BINDING_STALE", "Physical binding is invalid", 503,
+            )
+        revision = binding.get("binding_revision")
+        collection_id = binding.get("collection_id")
+        name = binding.get("collection_name")
+        base = vector_collection_name(self.bot_id, self.configuration["space_id"])
+        expected_name = base if revision == 1 else base + "_r" + str(revision)
         if (
-            binding.get("binding_revision") != self.binding_revision
-            or binding.get("collection_id") != self.collection_id
-            or binding.get("collection_name") != self.collection_name
+            type(revision) is not int or revision <= 0
+            or type(collection_id) is not int or collection_id <= 0
+            or name != expected_name
+            or (self.binding_revision is not None and revision < self.binding_revision)
+            or (revision == self.binding_revision and (
+                collection_id != self.collection_id or name != self.collection_name
+            ))
         ):
             raise ForestError(
                 "VECTOR_INDEX_BINDING_STALE",
@@ -411,23 +473,27 @@ class MilvusVectorIndexEffectDriver:
     async def invoke(self, payload, *, scope, invocation):
         await self._admit(scope)
         self._check_space(payload["space_id"])
-        if self.rebuild_required:
+        binding = payload.get("binding")
+        if self.rebuild_required and (
+            binding is None or binding.get("binding_revision") == self.binding_revision
+        ):
             raise ForestError(
                 "VECTOR_INDEX_REBUILD_REQUIRED",
                 "Published vector refs require index reconstruction",
                 503,
             )
-        self._check_binding(payload["binding"])
-        await self._verify_physical_collection()
+        self._check_binding(binding)
+        await self._verify_physical_collection(binding)
+        collection_name = binding["collection_name"]
         if self.service_id == "vector.transport.upsert":
-            return await self._upsert(payload)
+            return await self._upsert(payload, collection_name)
         if self.service_id == "vector.transport.search":
-            return await self._search(payload)
+            return await self._search(payload, collection_name)
         if self.service_id == "vector.transport.audit":
-            return await self._audit(payload)
-        return await self._prune(payload)
+            return await self._audit(payload, collection_name)
+        return await self._prune(payload, collection_name)
 
-    async def _upsert(self, payload):
+    async def _upsert(self, payload, collection_name):
         try:
             values = tuple(float(item) for item in payload["vector"])
         except (TypeError, ValueError) as exc:
@@ -462,19 +528,19 @@ class MilvusVectorIndexEffectDriver:
         }
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                await self.client.upsert(collection_name=self.collection_name, data=[row])
+                await self.client.upsert(collection_name=collection_name, data=[row])
         except (TimeoutError, MilvusException, OSError) as exc:
             raise ForestError(
                 "VECTOR_INDEX_UPSERT_UNAVAILABLE", "Milvus upsert failed", 503
             ) from exc
-        await self._verify_physical_collection()
+        await self._verify_physical_collection(payload["binding"])
         return {"ref_id": payload["ref_id"], "space_id": payload["space_id"]}
 
-    async def _search(self, payload):
+    async def _search(self, payload, collection_name):
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
                 query_rows = await self.client.get(
-                    collection_name=self.collection_name,
+                    collection_name=collection_name,
                     ids=[payload["query_ref_id"]],
                     output_fields=["embedding", "purpose", "space_id"],
                     consistency_level="Strong",
@@ -488,7 +554,7 @@ class MilvusVectorIndexEffectDriver:
                 bot_literal = json.dumps(self.bot_id, ensure_ascii=False)
                 space_literal = json.dumps(payload["space_id"], ensure_ascii=False)
                 raw = await self.client.search(
-                    collection_name=self.collection_name,
+                    collection_name=collection_name,
                     data=[query_rows[0]["embedding"]],
                     anns_field="embedding",
                     filter=(
@@ -506,7 +572,7 @@ class MilvusVectorIndexEffectDriver:
             raise ForestError(
                 "VECTOR_INDEX_SEARCH_UNAVAILABLE", "Milvus search failed", 503
             ) from exc
-        await self._verify_physical_collection()
+        await self._verify_physical_collection(payload["binding"])
         hits = raw[0] if isinstance(raw, list) and raw else []
         result = []
         for hit in hits:
@@ -562,7 +628,7 @@ class MilvusVectorIndexEffectDriver:
             "physical_digest": physical_digest,
         }
 
-    def _scan_page(self, after_ref, limit):
+    def _scan_page(self, collection_name, after_ref, limit):
         client = self.audit_client_factory(
             uri=self.configuration["endpoint"], token=self._token,
             timeout=float(self.configuration["timeout_seconds"]),
@@ -574,7 +640,7 @@ class MilvusVectorIndexEffectDriver:
                 if after_ref is not None else ""
             )
             iterator = client.query_iterator(
-                collection_name=self.collection_name,
+                collection_name=collection_name,
                 batch_size=limit, limit=limit, filter=filter_expr,
                 output_fields=[
                     "ref_id", "bot_id", "space_id", "purpose",
@@ -590,13 +656,13 @@ class MilvusVectorIndexEffectDriver:
             finally:
                 client.close()
 
-    async def _audit(self, payload):
+    async def _audit(self, payload, collection_name):
         mode = payload["mode"]
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
                 if mode == "GET":
                     raw = await self.client.get(
-                        collection_name=self.collection_name,
+                        collection_name=collection_name,
                         ids=payload["ref_ids"],
                         output_fields=[
                             "ref_id", "bot_id", "space_id", "purpose",
@@ -606,7 +672,7 @@ class MilvusVectorIndexEffectDriver:
                     )
                 elif mode == "SCAN":
                     raw = await asyncio.to_thread(
-                        self._scan_page, payload["after_ref"], payload["limit"]
+                        self._scan_page, collection_name, payload["after_ref"], payload["limit"]
                     )
                 else:
                     raise ForestError(
@@ -618,7 +684,7 @@ class MilvusVectorIndexEffectDriver:
             raise ForestError(
                 "VECTOR_INDEX_AUDIT_UNAVAILABLE", "Milvus audit read failed", 503,
             ) from exc
-        await self._verify_physical_collection()
+        await self._verify_physical_collection(payload["binding"])
         rows = [self._audit_row(item) for item in raw]
         if mode == "GET":
             allowed = set(payload["ref_ids"])
@@ -646,7 +712,7 @@ class MilvusVectorIndexEffectDriver:
             "done": len(refs) < payload["limit"],
         }
 
-    async def _prune(self, payload):
+    async def _prune(self, payload, collection_name):
         refs = tuple(payload["ref_ids"])
         if any(not _valid_ref(item) for item in refs):
             raise ForestError(
@@ -655,13 +721,13 @@ class MilvusVectorIndexEffectDriver:
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
                 await self.client.delete(
-                    collection_name=self.collection_name, ids=list(refs)
+                    collection_name=collection_name, ids=list(refs)
                 )
         except (TimeoutError, MilvusException, OSError) as exc:
             raise ForestError(
                 "VECTOR_INDEX_DELETE_UNAVAILABLE", "Milvus deletion failed", 503
             ) from exc
-        await self._verify_physical_collection()
+        await self._verify_physical_collection(payload["binding"])
         return {"ref_ids": list(refs), "space_id": payload["space_id"]}
 
     async def quiesce(self) -> None:

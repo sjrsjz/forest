@@ -241,6 +241,20 @@ class PostgresPackageDomainAuthority:
             timeout_seconds=timeout_seconds,
         )
 
+    async def invoke_preparation_query(
+        self,
+        scope: PackageCallScope,
+        declaration: dict,
+        payload: dict,
+        *,
+        parent_call_id: str,
+        timeout_seconds: float,
+    ) -> Any:
+        return await self._invoke(
+            "preparation_query", scope, declaration, payload,
+            parent_call_id=parent_call_id, timeout_seconds=timeout_seconds,
+        )
+
     async def invoke_command(
         self,
         scope: PackageCallScope,
@@ -457,6 +471,17 @@ class PostgresPackageDomainAuthority:
                             generation_id=scope.generation_id,
                             admission_lane="CONTROL",
                         )
+                    elif kind == "preparation_query":
+                        # The prepared-generation lease check takes a SHARE lock;
+                        # the SQL function itself is verified STABLE below.
+                        await conn.execute(
+                            "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+                        )
+                        await self.runtime.verify_prepared_generation_in(
+                            conn,
+                            component_id=self.component_id,
+                            generation_id=scope.generation_id,
+                        )
                     elif kind == "preparation_command":
                         await self.runtime.verify_prepared_generation_in(
                             conn,
@@ -482,7 +507,7 @@ class PostgresPackageDomainAuthority:
                     port_kind = (
                         "command"
                         if kind in {"preparation_command", "cleanup_command"}
-                        else kind
+                        else "query" if kind == "preparation_query" else kind
                     )
                     result = await self._invoke_in(
                         conn,
