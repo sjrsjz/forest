@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+向量 ReplayLocator 发布链路（2026-10-10）：`vector.index` 2.5.0 / 私有 SQL 2.4.0 将 `vector.index.upsert/3`、`search/2`、`delete/1` 放入可热替换包 Worker。upsert 重读不可变 `embedding.result` PayloadRef，核对 Embedding space、facet、批次序号、维度、向量及摘要后才调用 `vector.transport.*` Effect；ACTIVE ref 保存 ReplayLocator 与向量摘要，Milvus 行保存输入摘要，tombstone 清除重放引用。包的状态请求并发上限从 1 调到 16，以容纳 Memory 每批最多 4 个并发 facet。隔离 PostgreSQL + 假 OneBot/模型/Milvus 的完整 BotHost 生命周期回归 1 passed（583.09 秒）；独立 PostgreSQL 缺 collection 围栏与真实 Milvus 往返各 1 passed，Ruff 通过。当前 ref 状态机及 collection 绑定仍在宿主 Effect Driver，尚未收敛到包私有 Domain；运行中单行缺失审计、候选 collection 重放、增量追赶及绑定 CAS 切换仍未实现，不能称为可执行索引重建。在线 v21 未切换，未发送 QQ 消息。
+
 查询终态向量围栏（2026-10-10）：`memory.graph` 1.90.3 / 私有 SQL 3.88.0 在 `query_recall_work` 首次转为 READY、FAILED 或 CANCELLED 的同一事务中，为该查询所有已存在 QUERY facet 登记不可逆向量删除 outbox，覆盖尚未发布和迟到外部写入；facet 准备持有任务行共享锁，拒绝终态后增加成员。嵌入批次领取及派发前资格复核排除终态查询，避免继续为已取消查询产生新的模型费用。隔离 PostgreSQL 用例验证取消后的 READY/PENDING ref 均有删除围栏、晚到 facet 被拒绝、无新嵌入 claim，且原检索冻结与重复调用仍成功（1 passed，44.09 秒）；Ruff 和差异检查通过。已交接的外部嵌入调用仍须按原 Effect 账本对账，不能凭取消推断未计费。ReplayLocator、单行缺失审计及索引重建切换仍未实现；在线 v21 未切换，未发送 QQ 消息。
 
 成功召回的临时 QUERY ref 回收（2026-10-10）：`memory.graph` 1.90.2 / 私有 SQL 3.87.0 在检索区域成功冻结的同一事务中，为该查询所有已 READY 的 QUERY facet 登记 `vector_index_deletions`；冻结重放不重复登记。持久删除 Worker 沿原 tombstone 协议回收 Milvus 临时向量，冻结的 seed/图证据仍由 Memory 保留。隔离 PostgreSQL 的有界图冻结用例验证了首次登记与重复冻结合流（1 passed，45.79 秒），Ruff 和差异检查通过。FAILED/CANCELLED 查询的现有 ref 围栏已由后续终态协议补齐；此改动没有建立 ReplayLocator 或索引重建能力，也未切换在线 v21 或发送 QQ 消息。

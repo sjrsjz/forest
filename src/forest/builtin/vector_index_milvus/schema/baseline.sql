@@ -5,12 +5,16 @@ CREATE TABLE vector_index_refs (
     ref_id text NOT NULL CHECK (octet_length(ref_id) BETWEEN 1 AND 256),
     state text NOT NULL CHECK (state IN ('ACTIVE','TOMBSTONED')),
     input_digest text CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    replay_locator jsonb,
+    vector_digest text CHECK (vector_digest ~ '^sha256:[a-f0-9]{64}$'),
     tombstoned_at timestamptz,
     next_sweep_at timestamptz,
     sweep_count integer NOT NULL DEFAULT 0 CHECK (sweep_count >= 0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,ref_id),
     CHECK ((state='ACTIVE') = (input_digest IS NOT NULL)),
+    CHECK ((state='ACTIVE') = (replay_locator IS NOT NULL)),
+    CHECK ((state='ACTIVE') = (vector_digest IS NOT NULL)),
     CHECK ((state='TOMBSTONED') = (tombstoned_at IS NOT NULL)),
     CHECK ((state='TOMBSTONED') = (next_sweep_at IS NOT NULL))
 );
@@ -45,7 +49,8 @@ BEGIN
         RAISE EXCEPTION 'Vector ref identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.state='ACTIVE' AND NEW.state='TOMBSTONED'
-       AND NEW.input_digest IS NULL AND NEW.tombstoned_at IS NOT NULL
+       AND NEW.input_digest IS NULL AND NEW.replay_locator IS NULL
+       AND NEW.vector_digest IS NULL AND NEW.tombstoned_at IS NOT NULL
        AND NEW.next_sweep_at IS NOT NULL AND NEW.sweep_count=0 THEN
         RETURN NEW;
     END IF;

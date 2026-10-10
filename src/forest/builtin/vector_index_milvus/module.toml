@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.4.3"
+version = "2.5.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -16,7 +16,6 @@ bootstrap_materialization = "bootstrap-materialization.json"
 auto_install = true
 configuration_apply = "worker-host/1"
 config_immutable_paths = ["/space_id", "/dimensions", "/metric"]
-provides = []
 
 [components.bootstrap_contribution]
 label = "Milvus Vector Index"
@@ -34,11 +33,19 @@ allow_empty = true
 field = "endpoint"
 schemes = ["http", "https"]
 
+[components.capabilities]
+requests = [
+  "payload.read",
+  "service.call:vector.transport.upsert",
+  "service.call:vector.transport.search",
+  "service.call:vector.transport.delete"
+]
+
 [components.resources]
 max_frame_bytes = 262144
 max_inflight = 64
 max_queue_items = 256
-max_state_inflight = 1
+max_state_inflight = 16
 max_owned_tasks = 2
 max_owned_resources = 2
 
@@ -61,31 +68,52 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.3.1"
+schema_version = "2.4.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "a4c4190251d3c1a869f08eb4f22449d20ffe562effbf203a1e463aab3a7f8a2d"
+baseline_sha256 = "211e892772df8549d4630049e8b300dc1f2f5c2a79862d2a32f503fac39a9dea"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
 
-[[components.effect_services]]
+[[components.provides]]
 name = "vector.index.upsert"
+contract = "3.0"
+semantics = "idempotent"
+input_schema = "schemas/upsert-input.json"
+output_schema = "schemas/upsert-output.json"
+
+[[components.provides]]
+name = "vector.index.search"
 contract = "2.0"
+semantics = "read"
+input_schema = "schemas/search-input.json"
+output_schema = "schemas/search-output.json"
+
+[[components.provides]]
+name = "vector.index.delete"
+contract = "1.0"
+semantics = "idempotent"
+input_schema = "schemas/delete-input.json"
+output_schema = "schemas/delete-output.json"
+
+[[components.effect_services]]
+name = "vector.transport.upsert"
+contract = "1.0"
 kind = "vector-index.milvus"
 semantics = "idempotent"
 input_schema = "schemas/upsert-input.json"
 output_schema = "schemas/upsert-output.json"
 
 [[components.effect_services]]
-name = "vector.index.search"
-contract = "2.0"
+name = "vector.transport.search"
+contract = "1.0"
 kind = "vector-index.milvus"
 semantics = "read"
 input_schema = "schemas/search-input.json"
 output_schema = "schemas/search-output.json"
 
 [[components.effect_services]]
-name = "vector.index.delete"
+name = "vector.transport.delete"
 contract = "1.0"
 kind = "vector-index.milvus"
 semantics = "idempotent"

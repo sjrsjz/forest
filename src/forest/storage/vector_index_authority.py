@@ -81,13 +81,19 @@ class VectorIndexRefRepository:
         ).fetchone()
         return dict(row) if row is not None else None
 
-    async def record_active(self, conn, *, ref_id: str, input_digest: str) -> None:
+    async def record_active(
+        self, conn, *, ref_id: str, input_digest: str,
+        replay_locator: dict, vector_digest: str,
+    ) -> None:
+        from psycopg.types.json import Jsonb
+
         await conn.execute(
             sql.SQL(
-                "INSERT INTO {}(bot_id,ref_id,state,input_digest) "
-                "VALUES(%s,%s,'ACTIVE',%s)"
+                "INSERT INTO {}(bot_id,ref_id,state,input_digest,"
+                "replay_locator,vector_digest) "
+                "VALUES(%s,%s,'ACTIVE',%s,%s,%s)"
             ).format(self._table()),
-            (self.store.bot_id, ref_id, input_digest),
+            (self.store.bot_id, ref_id, input_digest, Jsonb(replay_locator), vector_digest),
         )
 
     async def record_tombstone(self, conn, *, ref_id: str, existing: dict | None) -> None:
@@ -104,6 +110,7 @@ class VectorIndexRefRepository:
             await conn.execute(
                 sql.SQL(
                     "UPDATE {} SET state='TOMBSTONED',input_digest=NULL,"
+                    "replay_locator=NULL,vector_digest=NULL,"
                     "tombstoned_at=clock_timestamp(),"
                     "next_sweep_at=clock_timestamp()+interval '30 seconds' "
                     "WHERE bot_id=%s AND ref_id=%s"

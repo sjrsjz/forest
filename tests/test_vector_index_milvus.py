@@ -11,6 +11,7 @@ from jsonschema import Draft202012Validator
 from pymilvus import DataType
 from test_schema_bundles import clean_authority as clean_authority
 
+from forest.builtin.vector_index_milvus.python.vector_index import MilvusVectorIndex
 from forest.builtin_packages import (
     bootstrap_builtin_package,
     official_builtin_configuration,
@@ -25,6 +26,64 @@ from forest.vector_index_effect_driver import (
     MilvusVectorIndexEffectDriver,
     milvus_vector_index_effect_driver_factory,
 )
+
+
+def _with_replay(row):
+    vector = row["vector"]
+    return {
+        **row,
+        "replay": {
+            "result": {
+                "payload_id": "replay/" + row["ref_id"],
+                "digest": "sha256:" + "a" * 64,
+                "owner_component_id": "embedding.multimodal",
+                "owner_kind": "embedding.result",
+                "owner_id": "attempt/" + row["ref_id"],
+            },
+            "item_index": 0,
+            "vector_digest": digest_json(vector),
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_vector_package_validates_replay_payload_before_milvus_effect():
+    component = MilvusVectorIndex()
+    component.space_id = "space/test"
+    component.dimensions = 4
+    request = _with_replay({
+        "ref_id": "facet/one", "space_id": "space/test",
+        "purpose": "DOCUMENT", "vector": [1.0, 0.0, 0.0, 0.0],
+    })
+    calls = []
+
+    async def read_json(reference):
+        assert reference == request["replay"]["result"]
+        return {
+            "protocol": "forest.embedding-result/1", "status": "RESPONDED",
+            "space_id": "space/test",
+            "vectors": [{"index": 0, "facet_id": "facet/one",
+                         "values": [1.0, 0.0, 0.0, 0.0]}],
+        }
+
+    async def call(service, payload, **options):
+        calls.append((service, payload, options))
+        return {"ref_id": "facet/one", "space_id": "space/test"}
+
+    ctx = SimpleNamespace(
+        payloads=SimpleNamespace(read_json=read_json),
+        services=SimpleNamespace(call=call),
+        operations=SimpleNamespace(stable=lambda value: value),
+    )
+    assert await component.upsert(request, ctx) == {
+        "ref_id": "facet/one", "space_id": "space/test"
+    }
+    assert len(calls) == 1 and calls[0][0] == "vector.transport.upsert"
+    changed = {**request, "vector": [0.0, 1.0, 0.0, 0.0]}
+    with pytest.raises(ForestError) as mismatch:
+        await component.upsert(changed, ctx)
+    assert mismatch.value.code == "VECTOR_REPLAY_VECTOR_INVALID"
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio
@@ -165,12 +224,16 @@ async def test_missing_collection_with_active_refs_requires_rebuild(clean_author
             token_resolver=resolve_token, client_factory=client_factory,
         )
 
-    search = driver_for("vector.index.search")
-    delete = driver_for("vector.index.delete")
+    search = driver_for("vector.transport.search")
+    delete = driver_for("vector.transport.delete")
     async with store.pool.connection() as conn, conn.transaction():
         await search.refs.record_active(
             conn, ref_id="ref/document/existing",
             input_digest="sha256:" + "0" * 64,
+            replay_locator=_with_replay({
+                "ref_id": "ref/document/existing", "vector": [1.0, 0.0, 0.0, 0.0],
+            })["replay"],
+            vector_digest=digest_json([1.0, 0.0, 0.0, 0.0]),
         )
     await search.start()
     await delete.start()
@@ -249,22 +312,22 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             token_resolver=resolve_token,
         )
         for service in (
-            "vector.index.upsert",
-            "vector.index.search",
-            "vector.index.delete",
+            "vector.transport.upsert",
+            "vector.transport.search",
+            "vector.transport.delete",
         )
     }
     scope = identity
     invocation = SimpleNamespace(operation_id="test")
-    collection_name = drivers["vector.index.upsert"].collection_name
+    collection_name = drivers["vector.transport.upsert"].collection_name
     try:
         await asyncio.gather(*(driver.start() for driver in drivers.values()))
         assert not any(driver.rebuild_required for driver in drivers.values())
-        collection = await drivers["vector.index.upsert"].client.describe_collection(
+        collection = await drivers["vector.transport.upsert"].client.describe_collection(
             collection_name=collection_name
         )
         assert {field["name"] for field in collection["fields"]} == {
-            "ref_id", "bot_id", "space_id", "purpose", "embedding",
+            "ref_id", "bot_id", "space_id", "purpose", "input_digest", "embedding",
         }
         # Milvus may commit a write while its acknowledgement is lost. The
         # PostgreSQL ref fence must remain uncommitted until the retry confirms
@@ -284,14 +347,14 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                     raise OSError("injected lost Milvus acknowledgement")
                 return result
 
-        upsert_driver = drivers["vector.index.upsert"]
+        upsert_driver = drivers["vector.transport.upsert"]
         upsert_driver.client = LostAcknowledgement(upsert_driver.client)
-        near_row = {
+        near_row = _with_replay({
             "ref_id": "ref/document/near",
             "space_id": space_id,
             "purpose": "DOCUMENT",
             "vector": [1.0, 0.0, 0.0, 0.0],
-        }
+        })
         with pytest.raises(ForestError) as uncertain:
             await upsert_driver.invoke(
                 near_row, scope=scope, invocation=invocation,
@@ -306,41 +369,41 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         await upsert_driver.close()
         upsert_driver = MilvusVectorIndexEffectDriver(
             configuration, 1, identity,
-            {"name": "vector.index.upsert", "kind": "vector-index.milvus"},
+            {"name": "vector.transport.upsert", "kind": "vector-index.milvus"},
             bot_id=bot_id, store=store, runtime=kernel_runtime,
             token_resolver=resolve_token,
         )
-        drivers["vector.index.upsert"] = upsert_driver
+        drivers["vector.transport.upsert"] = upsert_driver
         await upsert_driver.start()
-        await drivers["vector.index.upsert"].invoke(
+        await drivers["vector.transport.upsert"].invoke(
             near_row,
             scope=scope,
             invocation=invocation,
         )
         async with store.pool.connection() as conn, conn.transaction():
             assert (await upsert_driver.refs.lock(conn, "ref/document/near"))["state"] == "ACTIVE"
-        await drivers["vector.index.upsert"].invoke(
-            {
+        await drivers["vector.transport.upsert"].invoke(
+            _with_replay({
                 "ref_id": "ref/document/far",
                 "space_id": space_id,
                 "purpose": "DOCUMENT",
                 "vector": [0.0, 1.0, 0.0, 0.0],
-            },
+            }),
             scope=scope,
             invocation=invocation,
         )
-        await drivers["vector.index.upsert"].invoke(
-            {
+        await drivers["vector.transport.upsert"].invoke(
+            _with_replay({
                 "ref_id": "ref/query",
                 "space_id": space_id,
                 "purpose": "QUERY",
                 "vector": [1.0, 0.0, 0.0, 0.0],
-            },
+            }),
             scope=scope,
             invocation=invocation,
         )
 
-        result = await drivers["vector.index.search"].invoke(
+        result = await drivers["vector.transport.search"].invoke(
             {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
             scope=scope,
             invocation=invocation,
@@ -354,24 +417,24 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         assert all("embedding" not in hit for hit in hits)
 
         with pytest.raises(ForestError) as rebound:
-            await drivers["vector.index.upsert"].invoke(
-                {
+            await drivers["vector.transport.upsert"].invoke(
+                _with_replay({
                     "ref_id": "ref/document/near",
                     "space_id": space_id,
                     "purpose": "DOCUMENT",
                     "vector": [0.0, 0.0, 1.0, 0.0],
-                },
+                }),
                 scope=scope,
                 invocation=invocation,
             )
         assert rebound.value.code == "VECTOR_INDEX_REF_CONFLICT"
 
-        await drivers["vector.index.delete"].invoke(
+        await drivers["vector.transport.delete"].invoke(
             {"ref_ids": ["ref/document/near"], "space_id": space_id},
             scope=scope,
             invocation=invocation,
         )
-        result = await drivers["vector.index.search"].invoke(
+        result = await drivers["vector.transport.search"].invoke(
             {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
             scope=scope,
             invocation=invocation,
@@ -379,30 +442,30 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         hits = result["hits"]
         assert [hit["ref_id"] for hit in hits] == ["ref/document/far"]
         with pytest.raises(ForestError) as deleted:
-            await drivers["vector.index.upsert"].invoke(
-                {
+            await drivers["vector.transport.upsert"].invoke(
+                _with_replay({
                     "ref_id": "ref/document/near",
                     "space_id": space_id,
                     "purpose": "DOCUMENT",
                     "vector": [1.0, 0.0, 0.0, 0.0],
-                },
+                }),
                 scope=scope,
                 invocation=invocation,
             )
         assert deleted.value.code == "VECTOR_INDEX_REF_DELETED"
-        await drivers["vector.index.delete"].invoke(
+        await drivers["vector.transport.delete"].invoke(
             {"ref_ids": ["ref/never-published"], "space_id": space_id},
             scope=scope,
             invocation=invocation,
         )
         with pytest.raises(ForestError) as preempted:
-            await drivers["vector.index.upsert"].invoke(
-                {
+            await drivers["vector.transport.upsert"].invoke(
+                _with_replay({
                     "ref_id": "ref/never-published",
                     "space_id": space_id,
                     "purpose": "DOCUMENT",
                     "vector": [0.0, 0.0, 1.0, 0.0],
-                },
+                }),
                 scope=scope,
                 invocation=invocation,
             )
@@ -424,6 +487,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         replacement_schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
         replacement_schema.add_field("space_id", DataType.VARCHAR, max_length=256)
         replacement_schema.add_field("purpose", DataType.VARCHAR, max_length=16)
+        replacement_schema.add_field("input_digest", DataType.VARCHAR, max_length=71)
         replacement_schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=4)
         replacement_indexes = client.prepare_index_params()
         replacement_indexes.add_index(
@@ -437,14 +501,14 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             collection_name=collection_name
         )
         assert replacement_description["collection_id"] != original_collection_id
-        await drivers["vector.index.search"].close()
+        await drivers["vector.transport.search"].close()
         replacement_search = MilvusVectorIndexEffectDriver(
             configuration, 1, identity,
-            {"name": "vector.index.search", "kind": "vector-index.milvus"},
+            {"name": "vector.transport.search", "kind": "vector-index.milvus"},
             bot_id=bot_id, store=store, runtime=kernel_runtime,
             token_resolver=resolve_token,
         )
-        drivers["vector.index.search"] = replacement_search
+        drivers["vector.transport.search"] = replacement_search
         await replacement_search.start()
         assert replacement_search.rebuild_required
         with pytest.raises(ForestError) as replaced:
@@ -454,7 +518,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             )
         assert replaced.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
     finally:
-        client = drivers["vector.index.upsert"].client
+        client = drivers["vector.transport.upsert"].client
         if client is not None and await client.has_collection(collection_name=collection_name):
             await client.drop_collection(collection_name=collection_name)
         for driver in drivers.values():

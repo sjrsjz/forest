@@ -23,7 +23,7 @@ from forest.storage.vector_index_authority import VectorIndexRefRepository
 _REF = re.compile(r"[^\x00]{1,256}\Z")
 _LOG = logging.getLogger(__name__)
 _SERVICES = frozenset(
-    {"vector.index.upsert", "vector.index.search", "vector.index.delete"}
+    {"vector.transport.upsert", "vector.transport.search", "vector.transport.delete"}
 )
 
 
@@ -116,7 +116,7 @@ class MilvusVectorIndexEffectDriver:
         self._start_sweeper()
 
     def _start_sweeper(self) -> None:
-        if (self.service_id == "vector.index.delete"
+        if (self.service_id == "vector.transport.delete"
                 and not self.rebuild_required and self._sweep_task is None):
             self._sweep_task = asyncio.create_task(self._sweep_tombstones())
 
@@ -189,7 +189,8 @@ class MilvusVectorIndexEffectDriver:
                         vector = fields.get("embedding", {})
                         if (
                             set(fields) != {
-                                "ref_id", "bot_id", "space_id", "purpose", "embedding"
+                                "ref_id", "bot_id", "space_id", "purpose",
+                                "input_digest", "embedding"
                             }
                             or int(vector.get("params", {}).get("dim", -1))
                             != self.configuration["dimensions"]
@@ -217,6 +218,7 @@ class MilvusVectorIndexEffectDriver:
                     schema.add_field("bot_id", DataType.VARCHAR, max_length=256)
                     schema.add_field("space_id", DataType.VARCHAR, max_length=256)
                     schema.add_field("purpose", DataType.VARCHAR, max_length=16)
+                    schema.add_field("input_digest", DataType.VARCHAR, max_length=71)
                     schema.add_field(
                         "embedding", DataType.FLOAT_VECTOR,
                         dim=self.configuration["dimensions"],
@@ -280,15 +282,15 @@ class MilvusVectorIndexEffectDriver:
     async def invoke(self, payload, *, scope, invocation):
         await self._admit(scope)
         self._check_space(payload["space_id"])
-        if self.rebuild_required and self.service_id != "vector.index.delete":
+        if self.rebuild_required and self.service_id != "vector.transport.delete":
             raise ForestError(
                 "VECTOR_INDEX_REBUILD_REQUIRED",
                 "Published vector refs require index reconstruction",
                 503,
             )
-        if self.service_id == "vector.index.upsert":
+        if self.service_id == "vector.transport.upsert":
             return await self._upsert(payload)
-        if self.service_id == "vector.index.search":
+        if self.service_id == "vector.transport.search":
             return await self._search(payload)
         return await self._delete(payload)
 
@@ -310,6 +312,8 @@ class MilvusVectorIndexEffectDriver:
             "embedding": list(values),
         }
         input_digest = digest_json(row)
+        row["input_digest"] = input_digest
+        replay = payload["replay"]
         try:
             async with self.refs.store.pool.connection() as conn, conn.transaction():
                 await self.refs.lock_collection_mutation(conn)
@@ -319,7 +323,11 @@ class MilvusVectorIndexEffectDriver:
                         raise ForestError(
                             "VECTOR_INDEX_REF_DELETED", "Deleted vector ref cannot be published", 409
                         )
-                    if existing["input_digest"] != input_digest:
+                    if (
+                        existing["input_digest"] != input_digest
+                        or existing["replay_locator"] != replay
+                        or existing["vector_digest"] != replay["vector_digest"]
+                    ):
                         raise ForestError(
                             "VECTOR_INDEX_REF_CONFLICT", "Vector ref was bound to other data", 409
                         )
@@ -327,7 +335,8 @@ class MilvusVectorIndexEffectDriver:
                     await self.client.upsert(collection_name=self.collection_name, data=[row])
                 if existing is None:
                     await self.refs.record_active(
-                        conn, ref_id=payload["ref_id"], input_digest=input_digest
+                        conn, ref_id=payload["ref_id"], input_digest=input_digest,
+                        replay_locator=replay, vector_digest=replay["vector_digest"],
                     )
         except ForestError:
             raise

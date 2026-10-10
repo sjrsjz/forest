@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.90.3"
+version = "1.90.4"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -118,7 +118,7 @@ startup_dependency = false
 
 [[components.requires]]
 name = "vector.index.upsert"
-contract = ">=2.0,<3.0"
+contract = ">=3.0,<4.0"
 required = false
 startup_dependency = false
 

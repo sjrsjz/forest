@@ -2720,9 +2720,23 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     ).format(sql.Identifier(memory_namespace)),
                         (settings.bot_id,),
                     )).fetchall()
+                    vector_batches = await (await conn.execute(sql.SQL(
+                        "SELECT state,attempt_count,next_attempt_at,claim_payload "
+                        "FROM {}.vector_publish_batches WHERE bot_id=%s LIMIT 16"
+                    ).format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id,),
+                    )).fetchall()
+                    vector_settlements = await (await conn.execute(sql.SQL(
+                        "SELECT input_payload->'outcome'->'error' AS error "
+                        "FROM {}.vector_work_settlements WHERE bot_id=%s LIMIT 16"
+                    ).format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id,),
+                    )).fetchall()
                 raise AssertionError({
                     "facets": facets, "claims": claims,
                     "attempts": attempts, "settlements": settlements,
+                    "vector_batches": vector_batches,
+                    "vector_settlements": vector_settlements,
                 }) from exc
             async with host.store.pool.connection() as conn:
                 unit_state = await (
@@ -2874,7 +2888,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 )).fetchone()
             assert replayed_publish["attempts"] >= 2
             index_collection = host.registry.get("vector.index")._effect_drivers[
-                "vector.index.upsert"
+                "vector.transport.upsert"
             ].collection_name
             assert set(FakeMilvusClient.collections[index_collection]["rows"]) >= {
                 facet["facet_id"] for facet in facets
@@ -3650,7 +3664,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             forget_input["operation_id"] = request_id
             assert forget["deletion_epoch"] == previous_epoch + 1
             assert forget["suppressed_source_units"] == 1
-            assert forget["vector_deletions"] == len(facets) + len(query_facets)
+            assert forget["vector_deletions"] == len(facets)
             assert forget["retracted_relations"] == 1
             async with host.store.pool.connection() as conn, conn.transaction():
                 await conn.execute(

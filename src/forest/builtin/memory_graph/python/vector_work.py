@@ -66,9 +66,14 @@ async def publish(ctx, task, profile):
                         "space_id": work["space_id"],
                         "purpose": work["purpose"],
                         "vector": vectors[facet["item_index"]]["values"],
+                        "replay": {
+                            "result": work["result"],
+                            "item_index": facet["item_index"],
+                            "vector_digest": facet["vector_digest"],
+                        },
                     },
                     operation_id=ctx.operations.stable("vector-upsert:" + facet["facet_id"]),
-                    contract_major=2,
+                    contract_major=3,
                     timeout=15,
                 ))
         except ForestError as exc:
