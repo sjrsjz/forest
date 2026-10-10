@@ -31,7 +31,8 @@
           "purpose",
           "input_digest",
           "replay_locator",
-          "vector_digest"
+          "vector_digest",
+          "physical_digest"
         ],
         "properties": {
           "mutation_seq": {
@@ -77,6 +78,13 @@
               "string",
               "null"
             ]
+          },
+          "physical_digest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "pattern": "^f32-sha256:[a-f0-9]{64}$"
           }
         }
       }

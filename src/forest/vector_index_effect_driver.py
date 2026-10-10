@@ -9,9 +9,10 @@ import json
 import logging
 import math
 import re
+import struct
 from collections.abc import Mapping
 
-from pymilvus import AsyncMilvusClient, DataType
+from pymilvus import AsyncMilvusClient, DataType, MilvusClient
 from pymilvus.exceptions import MilvusException
 
 from forest.errors import ForestError
@@ -21,7 +22,7 @@ _REF = re.compile(r"[^\x00]{1,256}\Z")
 _LOG = logging.getLogger(__name__)
 _SERVICES = frozenset(
     {"vector.transport.upsert", "vector.transport.search",
-     "vector.transport.prune"}
+     "vector.transport.prune", "vector.transport.audit"}
 )
 
 
@@ -54,6 +55,7 @@ class MilvusVectorIndexEffectDriver:
         runtime,
         token_resolver,
         client_factory=AsyncMilvusClient,
+        audit_client_factory=MilvusClient,
     ) -> None:
         if (
             declaration.get("kind") != "vector-index.milvus"
@@ -78,6 +80,8 @@ class MilvusVectorIndexEffectDriver:
         self.runtime = runtime
         self.token_resolver = token_resolver
         self.client_factory = client_factory
+        self.audit_client_factory = audit_client_factory
+        self._token = None
         self.collection_name = vector_collection_name(bot_id, configuration["space_id"])
         self.client = None
         self.accepting = False
@@ -116,6 +120,7 @@ class MilvusVectorIndexEffectDriver:
         self.rebuild_required = False
         self.binding_revision = None
         self.collection_id = None
+        self._token = token
         self.client = self.client_factory(
             uri=self.configuration["endpoint"],
             token=token,
@@ -127,6 +132,7 @@ class MilvusVectorIndexEffectDriver:
                 await self._verify_physical_collection()
         except BaseException:
             client, self.client = self.client, None
+            self._token = None
             try:
                 await client.close()
             except Exception:
@@ -405,6 +411,8 @@ class MilvusVectorIndexEffectDriver:
             return await self._upsert(payload)
         if self.service_id == "vector.transport.search":
             return await self._search(payload)
+        if self.service_id == "vector.transport.audit":
+            return await self._audit(payload)
         return await self._prune(payload)
 
     async def _upsert(self, payload):
@@ -512,6 +520,120 @@ class MilvusVectorIndexEffectDriver:
             "hits": result,
         }
 
+    def _audit_row(self, raw):
+        ref_id = raw.get("ref_id")
+        if not isinstance(ref_id, str) or not _valid_ref(ref_id):
+            raise ForestError(
+                "VECTOR_INDEX_RESPONSE_INVALID",
+                "Milvus returned a row without a valid primary key", 502,
+            )
+        vector = raw.get("embedding")
+        physical_digest = None
+        if (
+            isinstance(vector, list)
+            and len(vector) == self.configuration["dimensions"]
+            and all(type(value) in (int, float) and math.isfinite(value)
+                    for value in vector)
+        ):
+            try:
+                packed = struct.pack("!" + "f" * len(vector), *vector)
+            except (OverflowError, struct.error):
+                pass
+            else:
+                physical_digest = "f32-sha256:" + hashlib.sha256(packed).hexdigest()
+        return {
+            "ref_id": ref_id,
+            **{
+                key: raw.get(key) if isinstance(raw.get(key), str) else None
+                for key in ("bot_id", "space_id", "purpose", "input_digest")
+            },
+            "physical_digest": physical_digest,
+        }
+
+    def _scan_page(self, after_ref, limit):
+        client = self.audit_client_factory(
+            uri=self.configuration["endpoint"], token=self._token,
+            timeout=float(self.configuration["timeout_seconds"]),
+        )
+        iterator = None
+        try:
+            filter_expr = (
+                "ref_id > " + json.dumps(after_ref, ensure_ascii=False)
+                if after_ref is not None else ""
+            )
+            iterator = client.query_iterator(
+                collection_name=self.collection_name,
+                batch_size=limit, limit=limit, filter=filter_expr,
+                output_fields=[
+                    "ref_id", "bot_id", "space_id", "purpose",
+                    "input_digest", "embedding",
+                ],
+                consistency_level="Strong",
+            )
+            return iterator.next() or []
+        finally:
+            try:
+                if iterator is not None:
+                    iterator.close()
+            finally:
+                client.close()
+
+    async def _audit(self, payload):
+        mode = payload["mode"]
+        try:
+            async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                if mode == "GET":
+                    raw = await self.client.get(
+                        collection_name=self.collection_name,
+                        ids=payload["ref_ids"],
+                        output_fields=[
+                            "ref_id", "bot_id", "space_id", "purpose",
+                            "input_digest", "embedding",
+                        ],
+                        consistency_level="Strong",
+                    )
+                elif mode == "SCAN":
+                    raw = await asyncio.to_thread(
+                        self._scan_page, payload["after_ref"], payload["limit"]
+                    )
+                else:
+                    raise ForestError(
+                        "VECTOR_INDEX_INPUT_INVALID", "Unknown audit mode", 422,
+                    )
+        except ForestError:
+            raise
+        except (TimeoutError, MilvusException, OSError, ValueError, TypeError) as exc:
+            raise ForestError(
+                "VECTOR_INDEX_AUDIT_UNAVAILABLE", "Milvus audit read failed", 503,
+            ) from exc
+        await self._verify_physical_collection()
+        rows = [self._audit_row(item) for item in raw]
+        if mode == "GET":
+            allowed = set(payload["ref_ids"])
+            if len(rows) > len(allowed) or any(item["ref_id"] not in allowed for item in rows):
+                raise ForestError(
+                    "VECTOR_INDEX_RESPONSE_INVALID", "Milvus returned unrelated refs", 502,
+                )
+            return {
+                "space_id": payload["space_id"], "mode": mode, "rows": rows,
+                "next_ref": None, "done": True,
+            }
+        refs = [item["ref_id"] for item in rows]
+        if (
+            len(refs) > payload["limit"]
+            or refs != sorted(set(refs))
+            or (payload["after_ref"] is not None
+                and any(ref <= payload["after_ref"] for ref in refs))
+        ):
+            raise ForestError(
+                "VECTOR_INDEX_RESPONSE_INVALID", "Milvus audit cursor is invalid", 502,
+            )
+        return {
+            "space_id": payload["space_id"], "mode": mode, "rows": rows,
+            "next_ref": refs[-1] if refs else payload["after_ref"],
+            "done": len(refs) < payload["limit"],
+        }
+
     async def _prune(self, payload):
         refs = tuple(payload["ref_ids"])
         if any(not _valid_ref(item) for item in refs):
@@ -542,12 +664,14 @@ class MilvusVectorIndexEffectDriver:
     async def close(self) -> None:
         self.accepting = False
         client, self.client = self.client, None
+        self._token = None
         if client is not None:
             await client.close()
 
 
 def milvus_vector_index_effect_driver_factory(
-    *, bot_id, runtime, token_resolver, client_factory=AsyncMilvusClient
+    *, bot_id, runtime, token_resolver, client_factory=AsyncMilvusClient,
+    audit_client_factory=MilvusClient,
 ):
     def create(configuration, configuration_revision, identity, declaration):
         return MilvusVectorIndexEffectDriver(
@@ -559,6 +683,7 @@ def milvus_vector_index_effect_driver_factory(
             runtime=runtime,
             token_resolver=token_resolver,
             client_factory=client_factory,
+            audit_client_factory=audit_client_factory,
         )
 
     return create

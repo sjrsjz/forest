@@ -1,4 +1,6 @@
 # Forest 实现状态
+向量物理核验端口（2026-10-10）：`vector.index` 2.11.0 / 私有 SQL 2.10.0 在 ref 预留、首次 ACTIVE 变更中冻结标准 big-endian float32 字节摘要（`f32-sha256`），保留原始 JSON 重放摘要；TOMBSTONED 清空当前 ref 摘要，历史变更不可改。Milvus Effect 新增包声明的 `vector.transport.audit/1`，每次精确读取或主键游标枚举最多 64 行，仅返回行身份、元数据和物理摘要；调用前后均核验 collection 绑定。隔离 PostgreSQL＋真实 Milvus 7 项通过，覆盖 0.1 等 float32 精度转换、精确读取、游标逐页枚举与现有 ref 事务行为；完整 BotHost 图热替换 1 项通过；进程硬退出恢复 1 项通过（测试以 ReplayLocator owner_id 精确定位被中断的 embedding attempt，避免同批其他 attempt 误报）；Ruff 通过。物理枚举的各页不是同一 MVCC 快照；完整包自有持久审计裁决、候选重建/切换、日志回收仍未完成。本次不切换在线 QQ 实例，也不发送消息。
+
 
 向量 ref 提交水位归包（2026-10-10）：`vector.index` 2.10.0 / 私有 SQL 2.9.0 在首次 ACTIVE 发布与首次 TOMBSTONED 的原事务内追加不可变变更记录，Bot 私有计数器以 PostgreSQL 行锁串行化不同 ref 的提交顺序；重复激活、重复删除与失败事务不产生第二条记录。`vector.ref.change-head/1` 冻结已提交水位，`change-page/1` 以最多 128 项分页返回 ReplayLocator 或墓碑并拒绝序号缺口。并发重复激活/删除、12 条连续记录及分页、隔离 PostgreSQL＋真实 Milvus 向量回归 7 项通过；完整 BotHost 图热替换 1 项、Milvus 已写入但 ref 仍为 PENDING 的进程硬退出恢复 1 项通过。物理逐行审计、候选索引重建与切换、变更日志安全回收尚未实现；本次未切换在线 v21，也未发送真实 QQ 消息。
 

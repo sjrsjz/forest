@@ -13,7 +13,10 @@ from psycopg.types.json import Jsonb
 from pymilvus import DataType
 from test_schema_bundles import clean_authority as clean_authority
 
-from forest.builtin.vector_index_milvus.python.vector_index import MilvusVectorIndex
+from forest.builtin.vector_index_milvus.python.vector_index import (
+    MilvusVectorIndex,
+    _physical_digest,
+)
 from forest.builtin_packages import (
     bootstrap_builtin_package,
     official_builtin_configuration,
@@ -111,7 +114,7 @@ async def test_vector_package_validates_replay_payload_before_milvus_effect():
         if name == "vector.ref.reserve":
             return {
                 "ref_id": payload["ref_id"], "space_id": payload["space_id"],
-                "input_digest": digest_json(payload), "state": "PENDING",
+                "input_digest": payload["source_input_digest"], "state": "PENDING",
             }
         assert name == "vector.ref.activate"
         return {"ref_id": payload["ref_id"], "space_id": "space/test",
@@ -127,6 +130,7 @@ async def test_vector_package_validates_replay_payload_before_milvus_effect():
         "ref_id": "facet/one", "space_id": "space/test"
     }
     assert command_calls == ["vector.ref.reserve", "vector.ref.activate"]
+    assert calls[0][1]["input_digest"] == digest_json(request)
     assert len(calls) == 1 and calls[0][0] == "vector.transport.upsert"
     assert calls[0][1]["input_digest"] == digest_json(request)
     changed = {**request, "vector": [0.0, 1.0, 0.0, 0.0]}
@@ -240,6 +244,11 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
 
     async def invoke(function, payload, *, digest=None, operation_id=None):
         context = {"bot_id": store.bot_id}
+        if function == "vector_ref_reserve":
+            payload = {
+                **payload, "source_input_digest": digest or digest_json(payload),
+                "physical_digest": _physical_digest(payload["vector"]),
+            }
         if digest is not None:
             context["input_digest"] = digest
         if operation_id is not None:
@@ -424,6 +433,7 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
     assert changes[0]["state"] == "ACTIVE"
     assert changes[0]["replay_locator"] == document["replay"]
     assert changes[0]["input_digest"] == digest
+    assert changes[0]["physical_digest"] == _physical_digest(document["vector"])
     assert {(item["ref_id"], item["state"]) for item in changes[8:10]} == {
         (item["ref_id"], "ACTIVE") for item in concurrent
     }
@@ -542,12 +552,12 @@ async def test_missing_collection_with_active_refs_requires_rebuild(clean_author
             sql.SQL(
                 "INSERT INTO {}.vector_index_refs "
                 "(bot_id,ref_id,space_id,state,purpose,input_digest,"
-                "replay_locator,vector_digest) "
-                "VALUES (%s,%s,%s,'PENDING','DOCUMENT',%s,%s,%s)"
+                "replay_locator,vector_digest,physical_digest) "
+                "VALUES (%s,%s,%s,'PENDING','DOCUMENT',%s,%s,%s,%s)"
             ).format(sql.Identifier(namespace)),
             (store.bot_id, replay["ref_id"], configuration["space_id"],
              digest_json(replay), Jsonb(replay["replay"]),
-             replay["replay"]["vector_digest"]),
+             replay["replay"]["vector_digest"], _physical_digest(replay["vector"])),
         )
     await search.start()
     await prune.start()
@@ -766,7 +776,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
     drivers = {
         name: driver_for(name) for name in (
             "vector.transport.upsert", "vector.transport.search",
-            "vector.transport.prune",
+            "vector.transport.prune", "vector.transport.audit",
         )
     }
     scope = identity
@@ -857,18 +867,55 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         )
         assert [hit["ref_id"] for hit in result["hits"]] == ["ref/document/far"]
 
+        precision = transport_row(
+            "ref/document/precision", "DOCUMENT", [0.1, 0.2, 0.3, 0.4]
+        )
+        await upsert.invoke(precision, scope=scope, invocation=invocation)
+        audit = drivers["vector.transport.audit"]
+        observed = await audit.invoke(
+            {"space_id": space_id, "mode": "GET",
+             "ref_ids": ["ref/document/precision", "ref/document/near"]},
+            scope=scope, invocation=invocation,
+        )
+        assert observed["done"] and observed["next_ref"] is None
+        assert observed["rows"] == [{
+            "ref_id": precision["ref_id"], "bot_id": bot_id,
+            "space_id": space_id, "purpose": "DOCUMENT",
+            "input_digest": precision["input_digest"],
+            "physical_digest": _physical_digest(precision["vector"]),
+        }]
+        cursor = None
+        scanned = []
+        while True:
+            page = await audit.invoke(
+                {"space_id": space_id, "mode": "SCAN",
+                 "after_ref": cursor, "limit": 1},
+                scope=scope, invocation=invocation,
+            )
+            scanned.extend(page["rows"])
+            if page["done"]:
+                break
+            assert page["next_ref"] != cursor
+            cursor = page["next_ref"]
+        assert [row["ref_id"] for row in scanned] == [
+            "ref/document/far", "ref/document/precision", "ref/query",
+        ]
+        assert next(row for row in scanned if
+                    row["ref_id"] == precision["ref_id"]) == observed["rows"][0]
+
         replay = near["replay"]
         async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(
                 sql.SQL(
                     "INSERT INTO {}.vector_index_refs "
                     "(bot_id,ref_id,space_id,state,purpose,input_digest,"
-                    "replay_locator,vector_digest,published_at) "
-                    "VALUES (%s,%s,%s,'ACTIVE','DOCUMENT',%s,%s,%s,"
+                    "replay_locator,vector_digest,physical_digest,published_at) "
+                    "VALUES (%s,%s,%s,'ACTIVE','DOCUMENT',%s,%s,%s,%s,"
                     "clock_timestamp())"
                 ).format(sql.Identifier(namespace)),
                 (bot_id, near["ref_id"], space_id, near["input_digest"],
-                 Jsonb(replay), replay["vector_digest"]),
+                 Jsonb(replay), replay["vector_digest"],
+                 _physical_digest(near["vector"])),
             )
             binding = await (
                 await conn.execute(

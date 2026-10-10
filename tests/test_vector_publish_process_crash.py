@@ -248,6 +248,17 @@ async def test_memory_vector_publish_recovers_after_process_crash(tmp_path):
                     consistency_level="Strong",
                 )
                 if candidate_written:
+                    replay_owner = await (
+                        await conn.execute(
+                            sql.SQL(
+                                "SELECT replay_locator#>>'{{result,owner_id}}' AS owner_id "
+                                "FROM {}.vector_index_refs WHERE bot_id=%s AND ref_id=%s"
+                            ).format(sql.Identifier(vector_schema)),
+                            (bot_id, candidate_written[0]["ref_id"]),
+                        )
+                    ).fetchone()
+                    if replay_owner is None or replay_owner["owner_id"] != candidate["attempt_id"]:
+                        continue
                     assert interrupted is None
                     interrupted = candidate
                     facets = candidate_facets

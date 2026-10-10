@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "space_id",
+    "mode"
+  ],
+  "properties": {
+    "space_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "mode": {
+      "enum": [
+        "GET",
+        "SCAN"
+      ]
+    },
+    "ref_ids": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    },
+    "after_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "mode": {
+          "const": "GET"
+        }
+      },
+      "required": [
+        "ref_ids"
+      ],
+      "not": {
+        "anyOf": [
+          {
+            "required": [
+              "after_ref"
+            ]
+          },
+          {
+            "required": [
+              "limit"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "properties": {
+        "mode": {
+          "const": "SCAN"
+        }
+      },
+      "required": [
+        "after_ref",
+        "limit"
+      ],
+      "not": {
+        "required": [
+          "ref_ids"
+        ]
+      }
+    }
+  ]
+}

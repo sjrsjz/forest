@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.10.0"
+version = "2.11.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -39,6 +39,7 @@ requests = [
   "service.call:vector.transport.upsert",
   "service.call:vector.transport.search",
   "service.call:vector.transport.prune",
+  "service.call:vector.transport.audit",
   "domain.command:vector.ref.reserve",
   "domain.command:vector.ref.activate",
   "domain.command:vector.ref.tombstone",
@@ -76,9 +77,9 @@ other_pointer = "/space/dimensions"
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.9.0"
+schema_version = "2.10.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "c2d3e0ac3a704780d077197d62499a7e867b4b32f830b34e2e97c43191455893"
+baseline_sha256 = "19853899e00f32e6972065863dc72da7771e76dc125bf92d0410b458efb0d08d"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -108,7 +109,7 @@ output_schema = "schemas/collection-quarantine-output.json"
 name = "vector.ref.reserve"
 contract = "1.0"
 function = "vector_ref_reserve"
-input_schema = "schemas/upsert-input.json"
+input_schema = "schemas/ref-reserve-input.json"
 output_schema = "schemas/ref-reserve-output.json"
 
 [[components.domain_commands]]
@@ -208,6 +209,16 @@ runtime_commands = ["vector.collection.quarantine"]
 semantics = "read"
 input_schema = "schemas/search-input.json"
 output_schema = "schemas/search-output.json"
+
+[[components.effect_services]]
+name = "vector.transport.audit"
+contract = "1.0"
+kind = "vector-index.milvus"
+startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
+runtime_commands = ["vector.collection.quarantine"]
+semantics = "read"
+input_schema = "schemas/transport-audit-input.json"
+output_schema = "schemas/transport-audit-output.json"
 
 [[components.effect_services]]
 name = "vector.transport.prune"

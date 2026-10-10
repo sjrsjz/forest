@@ -9,6 +9,7 @@ CREATE TABLE vector_index_refs (
     input_digest text CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     replay_locator jsonb,
     vector_digest text CHECK (vector_digest ~ '^sha256:[a-f0-9]{64}$'),
+    physical_digest text CHECK (physical_digest ~ '^f32-sha256:[a-f0-9]{64}$'),
     published_at timestamptz,
     tombstoned_at timestamptz,
     next_sweep_at timestamptz,
@@ -21,6 +22,7 @@ CREATE TABLE vector_index_refs (
     CHECK ((state<>'TOMBSTONED') = (purpose IS NOT NULL)),
     CHECK ((state<>'TOMBSTONED') = (replay_locator IS NOT NULL)),
     CHECK ((state<>'TOMBSTONED') = (vector_digest IS NOT NULL)),
+    CHECK ((state<>'TOMBSTONED') = (physical_digest IS NOT NULL)),
     CHECK ((state='ACTIVE') = (published_at IS NOT NULL)),
     CHECK ((state='TOMBSTONED') = (tombstoned_at IS NOT NULL)),
     CHECK ((state='TOMBSTONED') = (next_sweep_at IS NOT NULL)),
@@ -79,13 +81,15 @@ CREATE TABLE vector_ref_changes (
     input_digest text CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
     replay_locator jsonb,
     vector_digest text CHECK (vector_digest ~ '^sha256:[a-f0-9]{64}$'),
+    physical_digest text CHECK (physical_digest ~ '^f32-sha256:[a-f0-9]{64}$'),
     changed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,mutation_seq),
     FOREIGN KEY (bot_id,ref_id) REFERENCES vector_index_refs(bot_id,ref_id),
     CHECK ((state='ACTIVE') = (purpose IS NOT NULL)),
     CHECK ((state='ACTIVE') = (input_digest IS NOT NULL)),
     CHECK ((state='ACTIVE') = (replay_locator IS NOT NULL)),
-    CHECK ((state='ACTIVE') = (vector_digest IS NOT NULL))
+    CHECK ((state='ACTIVE') = (vector_digest IS NOT NULL)),
+    CHECK ((state='ACTIVE') = (physical_digest IS NOT NULL))
 );
 CREATE FUNCTION guard_vector_ref_change() RETURNS trigger
 LANGUAGE plpgsql SET search_path = pg_catalog AS $$
@@ -100,7 +104,7 @@ CREATE TRIGGER vector_ref_change_immutable
 CREATE FUNCTION vector_append_ref_change(
     requested_bot text, requested_ref text, requested_space text,
     next_state text, next_purpose text, next_digest text,
-    next_replay jsonb, next_vector_digest text
+    next_replay jsonb, next_vector_digest text, next_physical_digest text
 ) RETURNS bigint LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
 DECLARE
     next_seq bigint;
@@ -112,10 +116,10 @@ BEGIN
     RETURNING current_seq INTO next_seq;
     INSERT INTO __forest_module_schema__.vector_ref_changes(
         bot_id,mutation_seq,ref_id,space_id,state,purpose,input_digest,
-        replay_locator,vector_digest
+        replay_locator,vector_digest,physical_digest
     ) VALUES(
         requested_bot,next_seq,requested_ref,requested_space,next_state,
-        next_purpose,next_digest,next_replay,next_vector_digest
+        next_purpose,next_digest,next_replay,next_vector_digest,next_physical_digest
     );
     RETURN next_seq;
 END;
@@ -137,9 +141,9 @@ BEGIN
         RAISE EXCEPTION 'Vector ref identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.state='PENDING' AND NEW.state='ACTIVE'
-       AND ROW(NEW.purpose,NEW.input_digest,NEW.replay_locator,NEW.vector_digest)
+       AND ROW(NEW.purpose,NEW.input_digest,NEW.replay_locator,NEW.vector_digest,NEW.physical_digest)
            IS NOT DISTINCT FROM
-           ROW(OLD.purpose,OLD.input_digest,OLD.replay_locator,OLD.vector_digest)
+           ROW(OLD.purpose,OLD.input_digest,OLD.replay_locator,OLD.vector_digest,OLD.physical_digest)
        AND NEW.published_at IS NOT NULL
        AND NEW.tombstoned_at IS NULL AND NEW.next_sweep_at IS NULL
        AND NEW.sweep_count=0 THEN
@@ -148,7 +152,8 @@ BEGIN
     IF OLD.state IN ('PENDING','ACTIVE') AND NEW.state='TOMBSTONED'
        AND NEW.purpose IS NULL AND NEW.input_digest IS NULL
        AND NEW.replay_locator IS NULL
-       AND NEW.vector_digest IS NULL AND NEW.published_at IS NULL
+       AND NEW.vector_digest IS NULL AND NEW.physical_digest IS NULL
+       AND NEW.published_at IS NULL
        AND NEW.tombstoned_at IS NOT NULL
        AND NEW.next_sweep_at IS NOT NULL AND NEW.sweep_count=0
        AND NEW.sweep_claim_token IS NULL
@@ -157,9 +162,9 @@ BEGIN
     END IF;
     IF OLD.state='TOMBSTONED' AND NEW.state='TOMBSTONED'
        AND ROW(NEW.purpose,NEW.input_digest,NEW.replay_locator,
-               NEW.vector_digest,NEW.tombstoned_at) IS NOT DISTINCT FROM
+               NEW.vector_digest,NEW.physical_digest,NEW.tombstoned_at) IS NOT DISTINCT FROM
            ROW(OLD.purpose,OLD.input_digest,OLD.replay_locator,
-               OLD.vector_digest,OLD.tombstoned_at)
+               OLD.vector_digest,OLD.physical_digest,OLD.tombstoned_at)
        AND (
            (NEW.sweep_count=OLD.sweep_count
             AND NEW.next_sweep_at=OLD.next_sweep_at
@@ -391,7 +396,8 @@ DECLARE
     requested_ref text := input->>'ref_id';
     requested_space text := input->>'space_id';
     requested_purpose text := input->>'purpose';
-    requested_digest text := context->>'input_digest';
+    requested_digest text := input->>'source_input_digest';
+    requested_physical_digest text := input->>'physical_digest';
     requested_replay jsonb := input->'replay';
     requested_vector_digest text := requested_replay->>'vector_digest';
     existing __forest_module_schema__.vector_index_refs%ROWTYPE;
@@ -403,7 +409,9 @@ BEGIN
        OR requested_purpose IS NULL OR requested_purpose NOT IN ('DOCUMENT','QUERY')
        OR requested_digest IS NULL OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
        OR jsonb_typeof(requested_replay) IS DISTINCT FROM 'object'
-       OR requested_vector_digest IS NULL OR requested_vector_digest !~ '^sha256:[a-f0-9]{64}$' THEN
+       OR requested_vector_digest IS NULL OR requested_vector_digest !~ '^sha256:[a-f0-9]{64}$'
+       OR requested_physical_digest IS NULL
+       OR requested_physical_digest !~ '^f32-sha256:[a-f0-9]{64}$' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','VECTOR_INDEX_INPUT_INVALID',
                 'message','Vector ref reservation is invalid','status',422));
@@ -433,11 +441,11 @@ BEGIN
     IF NOT FOUND THEN
         INSERT INTO __forest_module_schema__.vector_index_refs(
             bot_id,ref_id,space_id,state,purpose,input_digest,
-            replay_locator,vector_digest
+            replay_locator,vector_digest,physical_digest
         ) VALUES(
             requested_bot,requested_ref,requested_space,'PENDING',
             requested_purpose,requested_digest,requested_replay,
-            requested_vector_digest
+            requested_vector_digest,requested_physical_digest
         );
         result_state := 'PENDING';
     ELSE
@@ -450,7 +458,8 @@ BEGIN
            OR existing.purpose IS DISTINCT FROM requested_purpose
            OR existing.input_digest IS DISTINCT FROM requested_digest
            OR existing.replay_locator IS DISTINCT FROM requested_replay
-           OR existing.vector_digest IS DISTINCT FROM requested_vector_digest THEN
+           OR existing.vector_digest IS DISTINCT FROM requested_vector_digest
+           OR existing.physical_digest IS DISTINCT FROM requested_physical_digest THEN
             RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
                 'error',jsonb_build_object('code','VECTOR_INDEX_REF_CONFLICT',
                     'message','Vector ref was bound to other data','status',409));
@@ -516,7 +525,7 @@ BEGIN
         PERFORM __forest_module_schema__.vector_append_ref_change(
             requested_bot,requested_ref,existing.space_id,'ACTIVE',
             existing.purpose,existing.input_digest,existing.replay_locator,
-            existing.vector_digest
+            existing.vector_digest,existing.physical_digest
         );
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
@@ -583,17 +592,18 @@ BEGIN
             );
             PERFORM __forest_module_schema__.vector_append_ref_change(
                 requested_bot,requested_ref,requested_space,'TOMBSTONED',
-                NULL,NULL,NULL,NULL
+                NULL,NULL,NULL,NULL,NULL
             );
         ELSIF existing.state<>'TOMBSTONED' THEN
             UPDATE __forest_module_schema__.vector_index_refs
             SET state='TOMBSTONED',purpose=NULL,input_digest=NULL,
-                replay_locator=NULL,vector_digest=NULL,published_at=NULL,
+                replay_locator=NULL,vector_digest=NULL,physical_digest=NULL,
+                published_at=NULL,
                 tombstoned_at=clock_timestamp(),next_sweep_at=clock_timestamp()
             WHERE bot_id=requested_bot AND ref_id=requested_ref;
             PERFORM __forest_module_schema__.vector_append_ref_change(
                 requested_bot,requested_ref,requested_space,'TOMBSTONED',
-                NULL,NULL,NULL,NULL
+                NULL,NULL,NULL,NULL,NULL
             );
         END IF;
     END LOOP;
@@ -653,12 +663,12 @@ BEGIN
                'mutation_seq',mutation_seq,'ref_id',ref_id,
                'space_id',space_id,'state',state,'purpose',purpose,
                'input_digest',input_digest,'replay_locator',replay_locator,
-               'vector_digest',vector_digest
+               'vector_digest',vector_digest,'physical_digest',physical_digest
            ) ORDER BY mutation_seq),'[]'::jsonb)
       INTO selected_count,first_seq,last_seq,selected_changes
     FROM (
         SELECT mutation_seq,ref_id,space_id,state,purpose,input_digest,
-               replay_locator,vector_digest
+               replay_locator,vector_digest,physical_digest
         FROM __forest_module_schema__.vector_ref_changes
         WHERE bot_id=requested_bot AND mutation_seq>after_seq
           AND mutation_seq<=through_seq

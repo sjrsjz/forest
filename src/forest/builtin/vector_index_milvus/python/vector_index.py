@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import struct
 
 from forest.errors import ForestError
 from forest.sdk import Plugin, job, service
@@ -22,6 +23,17 @@ def _digest(value):
         allow_nan=False,
     ).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _physical_digest(values):
+    try:
+        packed = struct.pack("!" + "f" * len(values), *values)
+    except (OverflowError, struct.error) as exc:
+        raise ForestError(
+            "VECTOR_REPLAY_VECTOR_INVALID",
+            "Vector cannot be represented by the physical index", 422,
+        ) from exc
+    return "f32-sha256:" + hashlib.sha256(packed).hexdigest()
 
 
 class MilvusVectorIndex(Plugin):
@@ -88,7 +100,9 @@ class MilvusVectorIndex(Plugin):
                 "Vector differs from its immutable replay result", 409,
             )
         reserved = _plain(await ctx.commands.call(
-            "vector.ref.reserve", request,
+            "vector.ref.reserve",
+            {**request, "source_input_digest": _digest(request),
+             "physical_digest": _physical_digest(values)},
             operation_id=ctx.operations.stable("reserve-ref:" + request["ref_id"]),
             timeout=10,
         ))
