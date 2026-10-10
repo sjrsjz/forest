@@ -92,7 +92,7 @@ Compose 编排 `initialize`、`postgres`、`etcd`、`minio`、`milvus` 和 `supe
 
 `pg_dump` 只保存 PostgreSQL 权威事实，不包含 Milvus 向量。整体重置前如需可回滚的完整记忆，应另行保存同一向量集合或重新嵌入，并明确处理外部调用费用。
 
-当前在线 `forest-main` 的 deployment 库仍是旧预发布基线，缺少 `forest_deployment.storage_profile_revocations`。当前候选探针会以 `OBSERVATION_SCHEMA_INCOMPATIBLE` 退出，无法据此宣称已完成长时实网验收；应先在隔离环境验证候选基线，再有计划地切换在线实例，不对在线库临时补表。
+在线 v21 镜像使用的 `forest-main` deployment 库保留旧基线，缺少当前候选源码要求的 `forest_deployment.storage_profile_revocations`。候选探针会以 `OBSERVATION_SCHEMA_INCOMPATIBLE` 退出，尚未读到 Bot 库，不能据此判断在线 Bot 是否健康，也不能宣称完成候选长时实网验收。应先在隔离环境验证候选基线，再有计划地切换在线实例，不对在线库临时补表。
 
 长时实网验收使用 `scripts/observe_live_bot.py`，并在候选镜像、同一 deployment 网络和 Supervisor 的只读 Secret mount 中运行。该探针只输出 RuntimeGraph、工作项和 Memory 状态计数及错误代码，不读取或输出凭据、Payload 正文、群消息、作者身份或媒体内容。每个样本使用 Bot 数据库的只读 repeatable-read 事务，检查 READY schema bundle 是否属于当前图、当前图全部成员是否都有最新且 ACTIVE 的生命周期事实、超过 deadline 且再宽限指定秒数仍未结算的 Embedding batch attempt/预算预留，以及同一 Agent session 是否出现多个未终结 Run；`conversation_claims` 仅按活动领取组与群 lane 汇总，单个无 Run 的预填组是合法状态，多个活动组或与 lane 的 Session/Run 不对齐则报 `CONVERSATION_CLAIM_ALIGNMENT_INVALID`，该只读检查不执行自动重排；`memory.facet_states` 区分用途和状态，`memory.attempt_failures` 汇总失败代码，`DOCUMENT.UNKNOWN/FAILED` 作为长期记忆覆盖缺口报告违反项。`latest_ingress_decisions` 按每个会话最新一条消息汇总触发决策及原因码，利用 `(bot_id,conversation_id,ingress_seq)` 索引定位，不扫描全量历史；它是排障快照，不是累计触发计数。deployment 状态和管理端 HTTP 同期采样。OneBot 连接是模块运行时资源，当前持久化 schema 不提供 Binding/Client 在线事实；该数据库探针不能单独证明 WebSocket 在线，实网验收还需由适配器运行状态和低频端到端消息确认。若 Bot 库缺少当前候选基线的 `embedding_batch_attempts`，探针会以 `BOT_SCHEMA_INCOMPATIBLE` 失败，应先在隔离库安装候选基线，不能把旧在线库的结果当作新版本验收。任一样本出现违反项时最终退出码为 1，完整时段无违反项才退出 0。sidecar 不提供管理 HTTP，运行时应加 `--no-healthcheck`，避免继承 runtime 镜像的 Supervisor healthcheck：
 
