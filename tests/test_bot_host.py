@@ -4189,7 +4189,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web")
+    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -4223,6 +4223,15 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
     )
     qiyu_env_file = os.environ.get("FOREST_TEST_QIYU_ENV_FILE") if scenario == "visual" else None
     real_transport = bool(qiyu_env_file)
+    real_vector = scenario == "vector-web-real"
+    if real_vector:
+        milvus_uri = os.environ.get("FOREST_TEST_MILVUS_URI")
+        if not milvus_uri:
+            pytest.skip("FOREST_TEST_MILVUS_URI is required")
+        settings = replace(
+            settings, bot_id="bot-vector-web-" + uuid4().hex[:16],
+            vector_index_endpoint=milvus_uri,
+        )
     valid_media = real_transport or bool(os.environ.get("FOREST_TEST_MEDIA_CAPTURE_DELAY_SECONDS"))
     if qiyu_env_file:
         qiyu_values = qiyu_embedding_config(qiyu_env_file)
@@ -4289,9 +4298,11 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             model_client_factory=RecordingModelClient,
             embedding_client_factory=None if real_transport else FakeEmbeddingClient,
             media_client_factory=ValidPngMediaClient if valid_media else FakeMediaClient,
-            vector_index_client_factory=None if real_transport else FakeMilvusClient,
+            vector_index_client_factory=(
+                None if real_transport or real_vector else FakeMilvusClient
+            ),
             vector_index_audit_client_factory=(
-                None if real_transport else FakeMilvusAuditClient
+                None if real_transport or real_vector else FakeMilvusAuditClient
             ),
             websocket_client_factory=create_websocket,
             package_catalog=PackageCatalog(tmp_path / catalog_name),
@@ -4314,7 +4325,67 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 if domain is not None and domain["state"] == "READY":
                     break
                 await asyncio.sleep(0.1)
-        if scenario == "vector-web":
+        if scenario in {"vector-web", "vector-web-real"}:
+            document_ref = None
+            if real_vector:
+                conversation = host.registry.get("conversation.scheduler")
+                configuration = conversation.module_configuration
+                desired = await configuration.desired(include_value=True)
+                compact = deepcopy(desired.value)
+                compact["context_view"]["high_watermark_units"] = 2
+                compact["context_view"]["retain_units"] = 1
+                plan = await configuration.plan(
+                    operation_id="vector-web-compact-plan",
+                    expected_desired_revision=desired.revision,
+                    value=compact,
+                    validation_digest=digest_json(
+                        conversation.snapshot.schema("schemas/config.json")
+                    ),
+                )
+                await configuration.apply(
+                    operation_id="vector-web-compact-apply",
+                    plan_id=plan["plan_id"],
+                    expected_desired_revision=desired.revision,
+                )
+                await host.replace_runtime_graph()
+                for index in range(1, 5):
+                    await clients[-1].handler(json.dumps({
+                        "self_id": int(settings.onebot_self_id),
+                        "post_type": "message", "message_type": "group",
+                        "sub_type": "normal",
+                        "time": int(datetime.now(timezone.utc).timestamp()),
+                        "message_id": 98000 + index, "user_id": 20001,
+                        "group_id": 933179609,
+                        "sender": {"user_id": 20001, "nickname": "Vector tester",
+                                   "card": "", "role": "member"},
+                        "message": [{"type": "text", "data": {
+                            "text": f"Index rebuild document {index}."
+                        }}],
+                    }).encode())
+                document_unit = "onebot-unit:" + hashlib.sha256(
+                    b"binding/main\x0098001"
+                ).hexdigest()
+                async with asyncio.timeout(150):
+                    while True:
+                        async with host.store.pool.connection() as conn:
+                            facet = await (await conn.execute(sql.SQL(
+                                "SELECT f.index_ref_id,f.state,s.eligibility_state "
+                                "FROM {m}.embedding_facets f "
+                                "JOIN {m}.source_units s ON s.bot_id=f.bot_id "
+                                "AND s.source_unit_id=f.source_unit_id "
+                                "WHERE f.bot_id=%s AND f.source_unit_id=%s "
+                                "AND f.purpose='DOCUMENT' AND f.modality='TEXT'"
+                            ).format(m=sql.Identifier(memory_schema)),
+                                (settings.bot_id, document_unit),
+                            )).fetchone()
+                        if (facet is not None and facet["state"] == "READY"
+                                and facet["eligibility_state"] == "ELIGIBLE"):
+                            document_ref = facet["index_ref_id"]
+                            break
+                        await asyncio.sleep(0.2)
+                assert document_ref
+                assert not clients[-1].sent
+
             class VectorWebSupervisor:
                 async def management_scopes(self):
                     return ({"scope_kind": "bot", "scope_id": settings.bot_id},)
@@ -4365,6 +4436,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                     assert overview.status_code == 200, overview.text
                     assert overview.json()["health_state"] == "READY"
                     assert overview.json()["binding"]["binding_revision"] == 1
+                    old_collection_name = overview.json()["binding"]["collection_name"]
                     action_headers = {**headers, "idempotency-key": "vector-web-rebuild"}
                     queued = await web.post(
                         f"{base}/actions/vector.rebuild.start",
@@ -4414,6 +4486,20 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                     )
                     assert published.status_code == 200, published.text
                     assert published.json()["binding"]["binding_revision"] == 2
+                    if real_vector:
+                        new_collection_name = published.json()["binding"]["collection_name"]
+                        assert new_collection_name != old_collection_name
+                        physical = AsyncMilvusClient(uri=settings.vector_index_endpoint)
+                        try:
+                            for collection_name in (old_collection_name, new_collection_name):
+                                rows = await physical.get(
+                                    collection_name=collection_name,
+                                    ids=[document_ref], output_fields=["ref_id"],
+                                    consistency_level="Strong",
+                                )
+                                assert rows == [{"ref_id": document_ref}]
+                        finally:
+                            await physical.close()
             return
         prepared_crash = asyncio.Event()
         result_observation_interrupted = asyncio.Event()
@@ -5697,7 +5783,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         RecordingModelClient.reply_factory = None
         RecordingModelClient.not_sent_attempts = 0
         await host.close()
-        if real_transport:
+        if real_transport or real_vector:
             profile = EmbeddingProfile(
                 deployment_id=settings.embedding_deployment_id,
                 model_revision=settings.embedding_model_revision,
@@ -5709,8 +5795,11 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             )
             client = AsyncMilvusClient(uri=settings.vector_index_endpoint)
             try:
-                if await client.has_collection(collection_name=collection_name):
-                    await client.drop_collection(collection_name=collection_name)
+                for managed_name in await client.list_collections():
+                    if managed_name == collection_name or managed_name.startswith(
+                        collection_name + "_r"
+                    ):
+                        await client.drop_collection(collection_name=managed_name)
             finally:
                 await client.close()
         assert name.startswith("forest_recall_") and len(name) == 46
