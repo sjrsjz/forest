@@ -104,7 +104,7 @@ class MilvusVectorIndex(Plugin):
             {**request, "source_input_digest": _digest(request),
              "physical_digest": _physical_digest(values)},
             operation_id=ctx.operations.stable("reserve-ref:" + request["ref_id"]),
-            timeout=10,
+            contract_major=2, timeout=10,
         ))
         if reserved["ref_id"] != request["ref_id"] or reserved["space_id"] != self.space_id:
             raise ForestError(
@@ -113,9 +113,13 @@ class MilvusVectorIndex(Plugin):
             )
         written = _plain(await ctx.services.call(
             "vector.transport.upsert",
-            {**request, "input_digest": reserved["input_digest"]},
-            operation_id=ctx.operations.stable("milvus-upsert:" + request["ref_id"]),
-            contract_major=2,
+            {**request, "input_digest": reserved["input_digest"],
+             "binding": reserved["binding"]},
+            operation_id=ctx.operations.stable(
+                "milvus-upsert:" + request["ref_id"] + ":" +
+                str(reserved["binding"]["binding_revision"])
+            ),
+            contract_major=3,
             timeout=30,
         ))
         if written != {"ref_id": request["ref_id"], "space_id": self.space_id}:
@@ -125,9 +129,13 @@ class MilvusVectorIndex(Plugin):
             )
         activated = _plain(await ctx.commands.call(
             "vector.ref.activate",
-            {"ref_id": request["ref_id"], "input_digest": reserved["input_digest"]},
-            operation_id=ctx.operations.stable("activate-ref:" + request["ref_id"]),
-            timeout=10,
+            {"ref_id": request["ref_id"], "input_digest": reserved["input_digest"],
+             "binding": reserved["binding"]},
+            operation_id=ctx.operations.stable(
+                "activate-ref:" + request["ref_id"] + ":" +
+                str(reserved["binding"]["binding_revision"])
+            ),
+            contract_major=2, timeout=10,
         ))
         if activated != {"ref_id": request["ref_id"],
                          "space_id": self.space_id, "state": "ACTIVE"}:
@@ -144,15 +152,16 @@ class MilvusVectorIndex(Plugin):
     )
     async def search(self, payload, ctx):
         request = _plain(payload)
-        await ctx.queries.call(
-            "vector.ref.require-query", request, timeout=10,
-        )
+        pinned = _plain(await ctx.queries.call(
+            "vector.ref.require-query", request, contract_major=2, timeout=10,
+        ))
         found = _plain(await ctx.services.call(
-            "vector.transport.search", request,
+            "vector.transport.search", {**request, "binding": pinned["binding"]},
             operation_id=ctx.operations.stable(
-                "milvus-search:" + _digest(request)[7:]
+                "milvus-search:" + _digest(request)[7:] + ":" +
+                str(pinned["binding"]["binding_revision"])
             ),
-            timeout=30,
+            contract_major=2, timeout=30,
         ))
         if (found["query_ref_id"] != request["query_ref_id"]
                 or found["space_id"] != self.space_id):
@@ -161,7 +170,9 @@ class MilvusVectorIndex(Plugin):
                 "Milvus transport confirmed another query", 502,
             )
         return await ctx.queries.call(
-            "vector.ref.filter-active", found, timeout=10,
+            "vector.ref.filter-active",
+            {**found, "binding": pinned["binding"]},
+            contract_major=2, timeout=10,
         )
 
     @service(
@@ -200,11 +211,16 @@ class MilvusVectorIndex(Plugin):
                 )
             observed = _plain(await ctx.services.call(
                 "vector.transport.audit",
-                {"space_id": self.space_id, "mode": "GET", "ref_ids": refs},
+                {"space_id": self.space_id, "mode": "GET", "ref_ids": refs,
+                 "binding": {
+                     "binding_revision": request["binding_revision"],
+                     "collection_id": request["collection_id"],
+                     "collection_name": request["collection_name"],
+                 }},
                 operation_id=ctx.operations.stable(
                     "audit-get:" + task["work_id"]
                 ),
-                timeout=35,
+                contract_major=2, timeout=35,
             ))
             if observed["space_id"] != self.space_id or observed["mode"] != "GET":
                 raise ForestError(
@@ -227,11 +243,16 @@ class MilvusVectorIndex(Plugin):
             observed = _plain(await ctx.services.call(
                 "vector.transport.audit",
                 {"space_id": self.space_id, "mode": "SCAN",
-                 "after_ref": request["after_ref"], "limit": request["limit"]},
+                 "after_ref": request["after_ref"], "limit": request["limit"],
+                 "binding": {
+                     "binding_revision": request["binding_revision"],
+                     "collection_id": request["collection_id"],
+                     "collection_name": request["collection_name"],
+                 }},
                 operation_id=ctx.operations.stable(
                     "audit-scan:" + task["work_id"]
                 ),
-                timeout=35,
+                contract_major=2, timeout=35,
             ))
             if observed["space_id"] != self.space_id or observed["mode"] != "SCAN":
                 raise ForestError(
@@ -298,9 +319,11 @@ class MilvusVectorIndex(Plugin):
         response = _plain(await ctx.services.call(
             "vector.transport.prune", request,
             operation_id=ctx.operations.stable("milvus-prune:" + _digest(request)[7:]),
-            timeout=30,
+            contract_major=2, timeout=30,
         ))
-        if response != request:
+        if response != {
+            "ref_ids": request["ref_ids"], "space_id": request["space_id"],
+        }:
             raise ForestError(
                 "VECTOR_SWEEP_RESULT_INVALID",
                 "Milvus prune confirmed another tombstone batch", 502,

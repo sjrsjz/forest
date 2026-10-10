@@ -115,6 +115,8 @@ async def test_vector_package_validates_replay_payload_before_milvus_effect():
             return {
                 "ref_id": payload["ref_id"], "space_id": payload["space_id"],
                 "input_digest": payload["source_input_digest"], "state": "PENDING",
+                "binding": {"binding_revision": 1, "collection_id": 42,
+                            "collection_name": "test_collection"},
             }
         assert name == "vector.ref.activate"
         return {"ref_id": payload["ref_id"], "space_id": "space/test",
@@ -244,6 +246,11 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
 
     async def invoke(function, payload, *, digest=None, operation_id=None):
         context = {"bot_id": store.bot_id}
+        if function in ("vector_ref_activate", "vector_ref_filter_active"):
+            payload = {**payload, "binding": {
+                "binding_revision": 1, "collection_id": 42,
+                "collection_name": vector_collection_name(store.bot_id, space_id),
+            }}
         if function == "vector_ref_reserve":
             payload = {
                 **payload, "source_input_digest": digest or digest_json(payload),
@@ -445,10 +452,23 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
     assert (await invoke("vector_ref_change_page", {
         "after_seq": 12, "through_seq": 12, "limit": 5,
     }))["value"]["changes"] == []
+    late = _with_replay({
+        "ref_id": "ref/late", "space_id": space_id,
+        "purpose": "DOCUMENT", "vector": [0.0, 0.0, 1.0, 0.0],
+    })
+    late_digest = digest_json(late)
+    late_binding = (await invoke(reserve, late, digest=late_digest))["value"]["binding"]
     quarantined = await invoke("vector_collection_quarantine", {
         "binding_revision": 1, "collection_id": 42,
         "reason": "collection identity changed",
     })
+    assert (await invoke(activate, {
+        "ref_id": late["ref_id"], "input_digest": late_digest,
+        "binding": late_binding,
+    }))["error"]["code"] == "VECTOR_INDEX_BINDING_STALE"
+    assert (await invoke("vector_ref_filter_active", hits))["error"]["code"] == (
+        "VECTOR_INDEX_BINDING_STALE"
+    )
     assert quarantined["value"]["state"] == "REBUILD_REQUIRED"
     assert (await invoke(plan, {**shape, "exists": True, "collection_id": 42},
                          operation_id="startup/c"))["value"]["state"] == "REBUILD_REQUIRED"
@@ -477,11 +497,15 @@ async def test_vector_ref_domain_fences_late_publication(clean_authority, tmp_pa
         ("ref/concurrent/1", "TOMBSTONED"),
         ("ref/concurrent/2", "TOMBSTONED"),
         ("ref/document", "TOMBSTONED"),
-        ("ref/first", "TOMBSTONED"), ("ref/live", "TOMBSTONED"),
+        ("ref/first", "TOMBSTONED"), ("ref/late", "PENDING"),
+        ("ref/live", "TOMBSTONED"),
         ("ref/pending", "TOMBSTONED"), ("ref/query", "TOMBSTONED"),
     ]
+    assert rows[5]["input_digest"] == late_digest
+    assert rows[5]["replay_locator"] == late["replay"]
     assert all(row["input_digest"] is None and row["replay_locator"] is None
-               and row["next_sweep_at"] is not None for row in rows[1:])
+               and row["next_sweep_at"] is not None
+               for row in rows[1:] if row["ref_id"] != "ref/late")
 
 
 @pytest.mark.asyncio
@@ -547,12 +571,13 @@ async def test_package_owned_ref_audit_quarantines_stable_physical_mismatch(
             "purpose": "DOCUMENT", "vector": [0.1, 0.2, 0.3, 0.4],
         })
         digest = digest_json(public)
-        await invoke("vector_ref_reserve", {
+        reserved = await invoke("vector_ref_reserve", {
             **public, "source_input_digest": digest,
             "physical_digest": _physical_digest(public["vector"]),
         })
         await invoke("vector_ref_activate", {
             "ref_id": ref_id, "input_digest": digest,
+            "binding": reserved["binding"],
         })
         return public
 
@@ -706,12 +731,13 @@ async def test_ref_audit_resumes_into_physical_scan_and_records_waterline(
             "purpose": "DOCUMENT", "vector": [0.1, 0.2, 0.3, 0.4],
         })
         digest = digest_json(public)
-        await invoke("vector_ref_reserve", {
+        reserved = await invoke("vector_ref_reserve", {
             **public, "source_input_digest": digest,
             "physical_digest": _physical_digest(public["vector"]),
         })
         await invoke("vector_ref_activate", {
             "ref_id": ref_id, "input_digest": digest,
+            "binding": reserved["binding"],
         })
         return {
             "ref_id": ref_id, "bot_id": store.bot_id,
@@ -921,6 +947,19 @@ async def test_tombstone_sweep_claim_and_settle_are_package_owned(clean_authorit
             ).format(sql.Identifier(namespace)),
             (store.bot_id, space_id, store.bot_id, space_id),
         )
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_collection_bindings "
+                    "(bot_id,binding_revision,space_id,collection_name,"
+                    "collection_id,dimensions,metric) "
+                    "VALUES (%s,1,%s,%s,42,4,'COSINE')")
+            .format(sql.Identifier(namespace)),
+            (store.bot_id, space_id, vector_collection_name(store.bot_id, space_id)),
+        )
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_collection_health "
+                    "(bot_id,binding_revision,state) VALUES (%s,1,'READY')")
+            .format(sql.Identifier(namespace)), (store.bot_id,),
+        )
 
     async def invoke(function, payload):
         async with store.pool.connection() as conn, conn.transaction():
@@ -941,7 +980,11 @@ async def test_tombstone_sweep_claim_and_settle_are_package_owned(clean_authorit
     first = await invoke("vector_claim_tombstone_sweep", claim)
     assert first["ok"]
     work = first["value"]
-    assert work["payload"] == {"space_id": space_id, "ref_ids": ["ref/a", "ref/b"]}
+    assert work["payload"] == {
+        "space_id": space_id, "ref_ids": ["ref/a", "ref/b"],
+        "binding": {"binding_revision": 1, "collection_id": 42,
+                    "collection_name": vector_collection_name(store.bot_id, space_id)},
+    }
     assert (await invoke("vector_claim_tombstone_sweep", claim))["value"] == work
     assert (await invoke("vector_claim_tombstone_sweep", {
         **claim, "claim_token": "claim/vector-sweep/two",
@@ -1097,7 +1140,8 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             "ref_id": ref_id, "space_id": space_id,
             "purpose": purpose, "vector": vector,
         })
-        return {**public, "input_digest": digest_json(public)}
+        return {**public, "input_digest": digest_json(public),
+                "binding": binding_snapshot}
 
     try:
         await asyncio.gather(*(driver.start() for driver in drivers.values()))
@@ -1106,6 +1150,17 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         collection = await upsert.client.describe_collection(
             collection_name=collection_name
         )
+        binding_snapshot = {
+            "binding_revision": 1, "collection_id": collection["collection_id"],
+            "collection_name": collection_name,
+        }
+        with pytest.raises(ForestError) as stale_binding:
+            await upsert.invoke(
+                {**transport_row("ref/stale", "DOCUMENT", [1.0, 0.0, 0.0, 0.0]),
+                 "binding": {**binding_snapshot, "binding_revision": 2}},
+                scope=scope, invocation=invocation,
+            )
+        assert stale_binding.value.code == "VECTOR_INDEX_BINDING_STALE"
         assert {field["name"] for field in collection["fields"]} == {
             "ref_id", "bot_id", "space_id", "purpose", "input_digest", "embedding",
         }
@@ -1159,7 +1214,8 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                 row, scope=scope, invocation=invocation,
             ) == {"ref_id": row["ref_id"], "space_id": space_id}
         result = await drivers["vector.transport.search"].invoke(
-            {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
+            {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2,
+             "binding": binding_snapshot},
             scope=scope, invocation=invocation,
         )
         assert [hit["ref_id"] for hit in result["hits"]] == [
@@ -1167,11 +1223,13 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         ]
         assert all(set(hit) == {"ref_id", "score"} for hit in result["hits"])
         await drivers["vector.transport.prune"].invoke(
-            {"ref_ids": ["ref/document/near"], "space_id": space_id},
+            {"ref_ids": ["ref/document/near"], "space_id": space_id,
+             "binding": binding_snapshot},
             scope=scope, invocation=invocation,
         )
         result = await drivers["vector.transport.search"].invoke(
-            {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
+            {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2,
+             "binding": binding_snapshot},
             scope=scope, invocation=invocation,
         )
         assert [hit["ref_id"] for hit in result["hits"]] == ["ref/document/far"]
@@ -1183,7 +1241,8 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         audit = drivers["vector.transport.audit"]
         observed = await audit.invoke(
             {"space_id": space_id, "mode": "GET",
-             "ref_ids": ["ref/document/precision", "ref/document/near"]},
+             "ref_ids": ["ref/document/precision", "ref/document/near"],
+             "binding": binding_snapshot},
             scope=scope, invocation=invocation,
         )
         assert observed["done"] and observed["next_ref"] is None
@@ -1198,7 +1257,8 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         while True:
             page = await audit.invoke(
                 {"space_id": space_id, "mode": "SCAN",
-                 "after_ref": cursor, "limit": 1},
+                 "after_ref": cursor, "limit": 1,
+                  "binding": binding_snapshot},
                 scope=scope, invocation=invocation,
             )
             scanned.extend(page["rows"])
@@ -1266,7 +1326,8 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         assert description["collection_id"] != original_collection_id
         with pytest.raises(ForestError) as live_replaced:
             await drivers["vector.transport.search"].invoke(
-                {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2},
+                {"query_ref_id": "ref/query", "space_id": space_id, "limit": 2,
+             "binding": binding_snapshot},
                 scope=scope, invocation=invocation,
             )
         assert live_replaced.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"

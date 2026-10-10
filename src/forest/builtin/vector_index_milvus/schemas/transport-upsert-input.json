@@ -8,7 +8,8 @@
     "purpose",
     "vector",
     "replay",
-    "input_digest"
+    "input_digest",
+    "binding"
   ],
   "properties": {
     "ref_id": {
@@ -91,6 +92,30 @@
     "input_digest": {
       "type": "string",
       "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_revision",
+        "collection_id",
+        "collection_name"
+      ],
+      "properties": {
+        "binding_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "collection_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "collection_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
     }
   }
 }

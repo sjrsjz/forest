@@ -232,6 +232,7 @@ DECLARE
     selected_space text;
     last_space text;
     selected_ids text[];
+    binding __forest_module_schema__.vector_collection_bindings%ROWTYPE;
     work_key text;
 BEGIN
     IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
@@ -274,6 +275,14 @@ BEGIN
             RETURN jsonb_build_object('protocol','forest.domain-result/1',
                                       'ok',true,'value',NULL);
         END IF;
+        -- Do not lease tombstones when no collection can receive the prune.
+        IF NOT EXISTS(
+            SELECT 1 FROM __forest_module_schema__.vector_collection_bindings
+            WHERE bot_id=requested_bot AND space_id=selected_space
+        ) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                                      'ok',true,'value',NULL);
+        END IF;
         WITH due AS (
             SELECT ref_id FROM __forest_module_schema__.vector_index_refs
             WHERE bot_id=requested_bot AND space_id=selected_space
@@ -299,6 +308,14 @@ BEGIN
             'error',jsonb_build_object('code','VECTOR_SWEEP_SPACE_CONFLICT',
                 'message','One sweep lease spans multiple vector spaces','status',409));
     END IF;
+    SELECT * INTO binding
+    FROM __forest_module_schema__.vector_collection_bindings
+    WHERE bot_id=requested_bot AND space_id=selected_space
+    ORDER BY binding_revision DESC LIMIT 1;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                                  'ok',true,'value',NULL);
+    END IF;
     work_key := 'vector-sweep:' ||
         encode(sha256(convert_to(requested_token,'UTF8')),'hex');
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
@@ -308,7 +325,11 @@ BEGIN
             'operation_id',work_key,
             'causal_root_kind','vector.tombstone','causal_root_id',work_key,
             'payload',jsonb_build_object(
-                'ref_ids',to_jsonb(selected_ids),'space_id',selected_space)));
+                'ref_ids',to_jsonb(selected_ids),'space_id',selected_space,
+                'binding',jsonb_build_object(
+                    'binding_revision',binding.binding_revision,
+                    'collection_id',binding.collection_id,
+                    'collection_name',binding.collection_name))));
 END;
 $$;
 
@@ -401,6 +422,7 @@ DECLARE
     requested_replay jsonb := input->'replay';
     requested_vector_digest text := requested_replay->>'vector_digest';
     existing __forest_module_schema__.vector_index_refs%ROWTYPE;
+    binding __forest_module_schema__.vector_collection_bindings%ROWTYPE;
     result_state text;
 BEGIN
     IF requested_bot IS NULL
@@ -426,10 +448,13 @@ BEGIN
             'error',jsonb_build_object('code','VECTOR_INDEX_COLLECTION_STARTING',
                 'message','Collection startup has not settled','status',503));
     END IF;
-    IF NOT EXISTS(
-        SELECT 1 FROM __forest_module_schema__.vector_collection_health
-        WHERE bot_id=requested_bot AND state='READY'
-    ) THEN
+    SELECT b.* INTO binding
+    FROM __forest_module_schema__.vector_collection_health h
+    JOIN __forest_module_schema__.vector_collection_bindings b
+      ON b.bot_id=h.bot_id AND b.binding_revision=h.binding_revision
+    WHERE h.bot_id=requested_bot AND h.state='READY'
+      AND b.space_id=requested_space;
+    IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','VECTOR_INDEX_REBUILD_REQUIRED',
                 'message','Vector collection is not ready','status',503));
@@ -468,7 +493,11 @@ BEGIN
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('ref_id',requested_ref,'space_id',requested_space,
-                                   'input_digest',requested_digest,'state',result_state));
+                                   'input_digest',requested_digest,'state',result_state,
+                                   'binding',jsonb_build_object(
+                                       'binding_revision',binding.binding_revision,
+                                       'collection_id',binding.collection_id,
+                                       'collection_name',binding.collection_name)));
 END;
 $$;
 
@@ -478,6 +507,7 @@ DECLARE
     requested_bot text := context->>'bot_id';
     requested_ref text := input->>'ref_id';
     requested_digest text := input->>'input_digest';
+    requested_binding jsonb := input->'binding';
     existing __forest_module_schema__.vector_index_refs%ROWTYPE;
 BEGIN
     IF requested_bot IS NULL
@@ -494,10 +524,13 @@ BEGIN
         JOIN __forest_module_schema__.vector_collection_bindings b
           ON b.bot_id=h.bot_id AND b.binding_revision=h.binding_revision
         WHERE h.bot_id=requested_bot AND h.state='READY'
+          AND b.binding_revision=(requested_binding->>'binding_revision')::bigint
+          AND b.collection_id=(requested_binding->>'collection_id')::bigint
+          AND b.collection_name=(requested_binding->>'collection_name')
     ) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
-            'error',jsonb_build_object('code','VECTOR_INDEX_REBUILD_REQUIRED',
-                'message','Vector collection is not ready','status',503));
+            'error',jsonb_build_object('code','VECTOR_INDEX_BINDING_STALE',
+                'message','Vector binding changed before publication','status',503));
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(
         'vector-ref:'||requested_bot||':'||requested_ref,0));
@@ -698,11 +731,15 @@ DECLARE
     requested_bot text := context->>'bot_id';
     requested_ref text := input->>'query_ref_id';
     requested_space text := input->>'space_id';
+    binding __forest_module_schema__.vector_collection_bindings%ROWTYPE;
 BEGIN
-    IF NOT EXISTS(
-        SELECT 1 FROM __forest_module_schema__.vector_collection_health
-        WHERE bot_id=requested_bot AND state='READY'
-    ) THEN
+    SELECT b.* INTO binding
+    FROM __forest_module_schema__.vector_collection_health h
+    JOIN __forest_module_schema__.vector_collection_bindings b
+      ON b.bot_id=h.bot_id AND b.binding_revision=h.binding_revision
+    WHERE h.bot_id=requested_bot AND h.state='READY'
+      AND b.space_id=requested_space;
+    IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','VECTOR_INDEX_REBUILD_REQUIRED',
                 'message','Vector collection is not ready','status',503));
@@ -714,7 +751,11 @@ BEGIN
     ) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
             'value',jsonb_build_object('query_ref_id',requested_ref,
-                                       'space_id',requested_space));
+                                       'space_id',requested_space,
+                                       'binding',jsonb_build_object(
+                                           'binding_revision',binding.binding_revision,
+                                           'collection_id',binding.collection_id,
+                                           'collection_name',binding.collection_name)));
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','VECTOR_INDEX_QUERY_REF_MISSING',
@@ -729,15 +770,22 @@ DECLARE
     requested_bot text := context->>'bot_id';
     requested_ref text := input->>'query_ref_id';
     requested_space text := input->>'space_id';
+    requested_binding jsonb := input->'binding';
     filtered jsonb;
 BEGIN
     IF NOT EXISTS(
-        SELECT 1 FROM __forest_module_schema__.vector_collection_health
-        WHERE bot_id=requested_bot AND state='READY'
+        SELECT 1 FROM __forest_module_schema__.vector_collection_health h
+        JOIN __forest_module_schema__.vector_collection_bindings b
+          ON b.bot_id=h.bot_id AND b.binding_revision=h.binding_revision
+        WHERE h.bot_id=requested_bot AND h.state='READY'
+          AND b.space_id=requested_space
+          AND b.binding_revision=(requested_binding->>'binding_revision')::bigint
+          AND b.collection_id=(requested_binding->>'collection_id')::bigint
+          AND b.collection_name=(requested_binding->>'collection_name')
     ) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
-            'error',jsonb_build_object('code','VECTOR_INDEX_REBUILD_REQUIRED',
-                'message','Vector collection is not ready','status',503));
+            'error',jsonb_build_object('code','VECTOR_INDEX_BINDING_STALE',
+                'message','Vector binding changed during search','status',503));
     END IF;
     IF NOT EXISTS(
         SELECT 1 FROM __forest_module_schema__.vector_index_refs
@@ -1187,7 +1235,8 @@ BEGIN
             'claim_token',requested_token,
             'after_ref',work.after_ref,'limit',64,'cycle_seq',selected_seq,
             'binding_revision',binding.binding_revision,
-            'collection_id',binding.collection_id,'refs',selected_refs));
+            'collection_id',binding.collection_id,
+            'collection_name',binding.collection_name,'refs',selected_refs));
     UPDATE __forest_module_schema__.vector_audit_work
     SET phase=work.phase,after_ref=work.after_ref,cycle_seq=selected_seq,
         claim_token=requested_token,

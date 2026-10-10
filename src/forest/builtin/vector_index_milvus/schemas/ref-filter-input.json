@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "query_ref_id",
+    "space_id",
+    "hits",
+    "binding"
+  ],
+  "properties": {
+    "query_ref_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "space_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "hits": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ref_id",
+          "score"
+        ],
+        "properties": {
+          "ref_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "score": {
+            "type": "number"
+          }
+        }
+      }
+    },
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "binding_revision",
+        "collection_id",
+        "collection_name"
+      ],
+      "properties": {
+        "binding_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "collection_id": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "collection_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    }
+  }
+}

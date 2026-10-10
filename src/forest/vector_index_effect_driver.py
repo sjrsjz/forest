@@ -397,6 +397,17 @@ class MilvusVectorIndexEffectDriver:
                 409,
             )
 
+    def _check_binding(self, binding) -> None:
+        if (
+            binding.get("binding_revision") != self.binding_revision
+            or binding.get("collection_id") != self.collection_id
+            or binding.get("collection_name") != self.collection_name
+        ):
+            raise ForestError(
+                "VECTOR_INDEX_BINDING_STALE",
+                "Physical call targets another collection binding", 503,
+            )
+
     async def invoke(self, payload, *, scope, invocation):
         await self._admit(scope)
         self._check_space(payload["space_id"])
@@ -406,6 +417,7 @@ class MilvusVectorIndexEffectDriver:
                 "Published vector refs require index reconstruction",
                 503,
             )
+        self._check_binding(payload["binding"])
         await self._verify_physical_collection()
         if self.service_id == "vector.transport.upsert":
             return await self._upsert(payload)
