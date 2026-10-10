@@ -19,6 +19,9 @@
         "CLAIMED",
         "CANDIDATE_READY",
         "REPLAY_CLAIMED",
+        "AUDIT_READY",
+        "AUDIT_CLAIMED",
+        "AUDITED",
         "FAILED"
       ]
     },

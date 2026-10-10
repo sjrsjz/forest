@@ -13,7 +13,10 @@
     "replay_waterline",
     "replay_cursor",
     "attempt_count",
-    "error_code"
+    "error_code",
+    "audit_seq",
+    "audit_after_ref",
+    "audited_at"
   ],
   "properties": {
     "request_id": {
@@ -27,6 +30,9 @@
         "CLAIMED",
         "CANDIDATE_READY",
         "REPLAY_CLAIMED",
+        "AUDIT_READY",
+        "AUDIT_CLAIMED",
+        "AUDITED",
         "FAILED"
       ]
     },
@@ -79,6 +85,28 @@
     "replay_cursor": {
       "type": "integer",
       "minimum": 0
+    },
+    "audit_seq": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "audit_after_ref": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "audited_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
     }
   }
 }

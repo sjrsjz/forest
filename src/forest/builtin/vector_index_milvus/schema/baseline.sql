@@ -1561,7 +1561,7 @@ CREATE TABLE vector_rebuild_work (
     base_revision bigint NOT NULL CHECK (base_revision>0),
     dimensions integer NOT NULL CHECK (dimensions BETWEEN 1 AND 4096),
     state text NOT NULL DEFAULT 'QUEUED' CHECK
-        (state IN ('QUEUED','CLAIMED','CANDIDATE_READY','REPLAY_CLAIMED','FAILED')),
+        (state IN ('QUEUED','CLAIMED','CANDIDATE_READY','REPLAY_CLAIMED','AUDIT_READY','AUDIT_CLAIMED','AUDITED','FAILED')),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count>=0),
     candidate_revision bigint,
     candidate_name text,
@@ -1569,6 +1569,11 @@ CREATE TABLE vector_rebuild_work (
     replay_waterline bigint CHECK (replay_waterline>=0),
     replay_cursor bigint NOT NULL DEFAULT 0 CHECK (replay_cursor>=0),
     replay_attempt_count bigint NOT NULL DEFAULT 0 CHECK (replay_attempt_count>=0),
+    audit_seq bigint CHECK (audit_seq>=0),
+    audit_after_ref text CHECK (octet_length(audit_after_ref) BETWEEN 1 AND 256),
+    audit_claim_count bigint NOT NULL DEFAULT 0 CHECK (audit_claim_count>=0),
+    audit_failure_count integer NOT NULL DEFAULT 0 CHECK (audit_failure_count>=0),
+    audited_at timestamptz,
     claim_token text,
     lease_deadline timestamptz,
     claim_payload jsonb,
@@ -1580,11 +1585,16 @@ CREATE TABLE vector_rebuild_work (
     CHECK ((claim_token IS NULL)=(claim_payload IS NULL)),
     CHECK ((candidate_revision IS NULL)=(candidate_name IS NULL)),
     CHECK (candidate_id IS NULL OR candidate_revision IS NOT NULL),
-    CHECK (state NOT IN ('CANDIDATE_READY','REPLAY_CLAIMED') OR
-           (candidate_id IS NOT NULL AND replay_waterline IS NOT NULL))
+    CHECK (state NOT IN ('CANDIDATE_READY','REPLAY_CLAIMED',
+                         'AUDIT_READY','AUDIT_CLAIMED','AUDITED') OR
+           (candidate_id IS NOT NULL AND replay_waterline IS NOT NULL)),
+    CHECK (state NOT IN ('AUDIT_READY','AUDIT_CLAIMED','AUDITED') OR
+           audit_seq IS NOT NULL),
+    CHECK ((state='AUDITED')=(audited_at IS NOT NULL))
 );
 CREATE UNIQUE INDEX vector_rebuild_one_active_idx ON vector_rebuild_work(bot_id)
-    WHERE state IN ('QUEUED','CLAIMED','CANDIDATE_READY','REPLAY_CLAIMED');
+    WHERE state IN ('QUEUED','CLAIMED','CANDIDATE_READY',
+                    'REPLAY_CLAIMED','AUDIT_READY','AUDIT_CLAIMED','AUDITED');
 CREATE TABLE vector_rebuild_attempts (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     candidate_revision bigint NOT NULL CHECK (candidate_revision>1),
@@ -1704,6 +1714,9 @@ BEGIN
             'candidate_id',work.candidate_id,
             'replay_waterline',work.replay_waterline,
             'replay_cursor',work.replay_cursor,
+            'audit_seq',work.audit_seq,
+            'audit_after_ref',work.audit_after_ref,
+            'audited_at',work.audited_at,
             'attempt_count',work.attempt_count,'error_code',work.error_code));
 END;
 $$;
@@ -2018,7 +2031,7 @@ BEGIN
         WHERE bot_id=requested_bot AND request_id=work.request_id;
     END IF;
     SELECT * INTO work FROM __forest_module_schema__.vector_rebuild_work
-    WHERE bot_id=requested_bot AND state='CANDIDATE_READY'
+    WHERE bot_id=requested_bot AND state IN ('CANDIDATE_READY','AUDITED')
     ORDER BY created_at LIMIT 1 FOR UPDATE;
     IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1',
@@ -2042,6 +2055,12 @@ BEGIN
     IF work.replay_cursor>=head_seq THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1',
             'ok',true,'value',NULL);
+    END IF;
+    IF work.state='AUDITED' THEN
+        UPDATE __forest_module_schema__.vector_rebuild_work
+        SET state='CANDIDATE_READY',audit_seq=NULL,audit_after_ref=NULL,
+            audited_at=NULL,audit_failure_count=0,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND request_id=work.request_id;
     END IF;
     SELECT count(*),min(mutation_seq),max(mutation_seq),
            COALESCE(jsonb_agg(jsonb_build_object(
@@ -2155,7 +2174,8 @@ BEGIN
         candidate_name=CASE WHEN succeeded THEN candidate_name END,
         candidate_id=CASE WHEN succeeded THEN candidate_id END,
         replay_waterline=CASE WHEN succeeded THEN replay_waterline END,
-        claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
+        audit_seq=NULL,audit_after_ref=NULL,audited_at=NULL,
+        audit_failure_count=0,claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
         error_code=CASE WHEN succeeded THEN NULL ELSE
             COALESCE(input#>>'{outcome,error,code}','VECTOR_REPLAY_FAILED') END,
         updated_at=clock_timestamp()
@@ -2164,6 +2184,221 @@ BEGIN
         'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
             'work_id',work.request_id));
     INSERT INTO __forest_module_schema__.vector_rebuild_replay_settlements(
+        bot_id,claim_token,input_payload,result_payload
+    ) VALUES(requested_bot,input->>'claim_token',input,response);
+    RETURN response;
+END;
+$$;
+
+-- Candidate audit holds replay paused while checking a single immutable ref
+-- waterline. A newer committed ref transition invalidates AUDITED before
+-- another replay page is claimed; final publication is a separate fence.
+CREATE INDEX vector_ref_changes_tombstone_ref_idx
+    ON vector_ref_changes(bot_id,ref_id,mutation_seq)
+    WHERE state='TOMBSTONED';
+CREATE TABLE vector_rebuild_audit_settlements (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(bot_id,claim_token)
+);
+CREATE INDEX vector_rebuild_audit_settlements_gc_idx
+    ON vector_rebuild_audit_settlements(bot_id,settled_at,claim_token);
+CREATE TRIGGER vector_rebuild_audit_settlement_guard
+    BEFORE UPDATE OR DELETE ON vector_rebuild_audit_settlements
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_rebuild_settlement();
+
+CREATE FUNCTION vector_claim_rebuild_audit(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work __forest_module_schema__.vector_rebuild_work%ROWTYPE;
+    head_seq bigint;
+    expected_rows jsonb;
+    next_payload jsonb;
+    work_key text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REBUILD_AUDIT_CLAIM_INVALID',
+                'message','Candidate audit claim is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-rebuild:'||requested_bot,0));
+    DELETE FROM __forest_module_schema__.vector_rebuild_audit_settlements
+    WHERE bot_id=requested_bot AND claim_token IN (
+        SELECT claim_token FROM __forest_module_schema__.vector_rebuild_audit_settlements
+        WHERE bot_id=requested_bot
+          AND settled_at<clock_timestamp()-interval '48 hours'
+        ORDER BY settled_at,claim_token LIMIT 16
+    );
+    SELECT * INTO work FROM __forest_module_schema__.vector_rebuild_work
+    WHERE bot_id=requested_bot AND state='AUDIT_CLAIMED'
+    ORDER BY updated_at LIMIT 1 FOR UPDATE;
+    IF FOUND AND work.claim_token=requested_token
+       AND work.lease_deadline>clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',work.claim_payload);
+    END IF;
+    IF FOUND AND work.lease_deadline<=clock_timestamp() THEN
+        UPDATE __forest_module_schema__.vector_rebuild_work
+        SET state='AUDIT_READY',claim_token=NULL,lease_deadline=NULL,
+            claim_payload=NULL,error_code='VECTOR_REBUILD_AUDIT_LEASE_EXPIRED',
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND request_id=work.request_id;
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.vector_rebuild_work
+    WHERE bot_id=requested_bot AND state IN ('CANDIDATE_READY','AUDIT_READY')
+    ORDER BY created_at LIMIT 1 FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',NULL);
+    END IF;
+    IF work.state='CANDIDATE_READY' THEN
+        SELECT COALESCE(current_seq,0) INTO head_seq
+        FROM __forest_module_schema__.vector_ref_clocks
+        WHERE bot_id=requested_bot;
+        head_seq := COALESCE(head_seq,0);
+        IF head_seq<>work.replay_cursor THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                'ok',true,'value',NULL);
+        END IF;
+        UPDATE __forest_module_schema__.vector_rebuild_work
+        SET state='AUDIT_READY',audit_seq=head_seq,audit_after_ref=NULL,
+            audit_failure_count=0,updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND request_id=work.request_id;
+        work.audit_seq := head_seq;
+        work.audit_after_ref := NULL;
+    END IF;
+    SELECT COALESCE(jsonb_agg(to_jsonb(page) ORDER BY ref_id),'[]'::jsonb)
+    INTO expected_rows
+    FROM (
+        SELECT c.ref_id,c.bot_id,c.space_id,c.purpose,
+               c.input_digest,c.physical_digest
+        FROM __forest_module_schema__.vector_ref_changes c
+        WHERE c.bot_id=requested_bot AND c.state='ACTIVE'
+          AND c.mutation_seq<=work.audit_seq
+          AND (work.audit_after_ref IS NULL OR c.ref_id>work.audit_after_ref)
+          AND NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.vector_ref_changes d
+              WHERE d.bot_id=c.bot_id AND d.ref_id=c.ref_id
+                AND d.state='TOMBSTONED' AND d.mutation_seq<=work.audit_seq
+          )
+        ORDER BY c.ref_id LIMIT 64
+    ) page;
+    work_key := 'vector-rebuild-audit:'||encode(sha256(convert_to(
+        requested_bot||'/'||work.request_id,'UTF8')),'hex');
+    next_payload := jsonb_build_object(
+        'protocol','forest.owned-work-claim/1','work_id',work.request_id,
+        'claim_token',requested_token,'attempt',work.audit_claim_count+1,
+        'operation_id',work_key||':'||work.candidate_revision::text||':'||
+            (work.audit_claim_count+1)::text,
+        'causal_root_kind','vector.rebuild','causal_root_id',work.request_id,
+        'payload',jsonb_build_object(
+            'request_id',work.request_id,'space_id',work.space_id,
+            'candidate_revision',work.candidate_revision,
+            'collection_id',work.candidate_id,
+            'collection_name',work.candidate_name,
+            'audit_seq',work.audit_seq,'after_ref',work.audit_after_ref,
+            'limit',64,'expected',expected_rows));
+    UPDATE __forest_module_schema__.vector_rebuild_work
+    SET state='AUDIT_CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        claim_payload=next_payload,audit_claim_count=audit_claim_count+1,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=work.request_id;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1',
+        'ok',true,'value',next_payload);
+END;
+$$;
+
+CREATE FUNCTION vector_settle_rebuild_audit(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    prior __forest_module_schema__.vector_rebuild_audit_settlements%ROWTYPE;
+    work __forest_module_schema__.vector_rebuild_work%ROWTYPE;
+    receipt jsonb;
+    response jsonb;
+    succeeded boolean;
+    page jsonb;
+    expected jsonb;
+    expected_last text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR input#>>'{outcome,status}' IS NULL
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REBUILD_AUDIT_SETTLE_INVALID',
+                'message','Candidate audit settlement is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-rebuild:'||requested_bot,0));
+    SELECT * INTO prior FROM __forest_module_schema__.vector_rebuild_audit_settlements
+    WHERE bot_id=requested_bot AND claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF prior.input_payload=input THEN RETURN prior.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REBUILD_AUDIT_SETTLE_CONFLICT',
+                'message','Audit claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.vector_rebuild_work
+    WHERE bot_id=requested_bot AND request_id=input->>'work_id' FOR UPDATE;
+    IF NOT FOUND OR work.state<>'AUDIT_CLAIMED'
+       OR work.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work.lease_deadline<=clock_timestamp()
+       OR work.audit_claim_count IS DISTINCT FROM (input->>'attempt')::bigint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_REBUILD_AUDIT_CLAIM_STALE',
+                'message','Candidate audit claim is no longer current','status',409));
+    END IF;
+    succeeded := input#>>'{outcome,status}'='SUCCEEDED';
+    receipt := input#>'{outcome,result}';
+    page := work.claim_payload->'payload';
+    expected := page->'expected';
+    IF succeeded THEN
+        expected_last := CASE WHEN jsonb_array_length(expected)>0 THEN
+            expected->(jsonb_array_length(expected)-1)->>'ref_id'
+            ELSE page->>'after_ref' END;
+        IF receipt->>'request_id' IS DISTINCT FROM work.request_id
+           OR (receipt->>'candidate_revision')::bigint IS DISTINCT FROM work.candidate_revision
+           OR (receipt->>'collection_id')::bigint IS DISTINCT FROM work.candidate_id
+           OR (receipt->>'audit_seq')::bigint IS DISTINCT FROM work.audit_seq
+           OR receipt->>'next_ref' IS DISTINCT FROM expected_last
+           OR (receipt->>'done')::boolean IS DISTINCT FROM
+              (jsonb_array_length(expected)<64) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','VECTOR_REBUILD_AUDIT_SETTLE_INVALID',
+                    'message','Audit result differs from claimed page','status',422));
+        END IF;
+    END IF;
+    UPDATE __forest_module_schema__.vector_rebuild_work
+    SET state=CASE WHEN succeeded AND (receipt->>'done')::boolean THEN 'AUDITED'
+                   WHEN succeeded THEN 'AUDIT_READY'
+                   WHEN input#>>'{outcome,error,code}'='VECTOR_REBUILD_AUDIT_MISMATCH'
+                        OR audit_failure_count>=2 THEN 'FAILED'
+                   ELSE 'AUDIT_READY' END,
+        audit_after_ref=CASE WHEN succeeded THEN receipt->>'next_ref'
+                             ELSE audit_after_ref END,
+        audit_failure_count=CASE WHEN succeeded THEN 0
+                                 ELSE audit_failure_count+1 END,
+        audited_at=CASE WHEN succeeded AND (receipt->>'done')::boolean
+                        THEN clock_timestamp() ELSE NULL END,
+        claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
+        error_code=CASE WHEN succeeded THEN NULL ELSE
+            COALESCE(input#>>'{outcome,error,code}',
+                     'VECTOR_REBUILD_AUDIT_FAILED') END,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=work.request_id;
+    response := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work.request_id));
+    INSERT INTO __forest_module_schema__.vector_rebuild_audit_settlements(
         bot_id,claim_token,input_payload,result_payload
     ) VALUES(requested_bot,input->>'claim_token',input,response);
     RETURN response;

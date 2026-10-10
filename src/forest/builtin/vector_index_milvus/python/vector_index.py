@@ -338,6 +338,61 @@ class MilvusVectorIndex(Plugin):
             "next_seq": cursor,
         }
 
+    @job("vector.rebuild.audit")
+    async def audit_rebuild_candidate(self, task, ctx):
+        page = _plain(task["payload"])
+        if page["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_REBUILD_AUDIT_SPACE_MISMATCH",
+                "Candidate audit belongs to another vector space", 409,
+            )
+        expected = page["expected"]
+        refs = [row["ref_id"] for row in expected]
+        if refs != sorted(set(refs)) or len(refs) > page["limit"]:
+            raise ForestError(
+                "VECTOR_REBUILD_AUDIT_PAGE_INVALID",
+                "Expected candidate page is unordered", 502,
+            )
+        physical = _plain(await ctx.services.call(
+            "vector.transport.audit",
+            {
+                "space_id": self.space_id, "mode": "SCAN",
+                "after_ref": page["after_ref"], "limit": page["limit"],
+                "binding": {
+                    "binding_revision": page["candidate_revision"],
+                    "collection_id": page["collection_id"],
+                    "collection_name": page["collection_name"],
+                },
+            },
+            operation_id=ctx.operations.stable(
+                "candidate-audit:" + page["request_id"] + ":" +
+                str(page["audit_seq"]) + ":" +
+                (page["after_ref"] or "start")
+            ),
+            contract_major=2, timeout=35,
+        ))
+        next_ref = refs[-1] if refs else page["after_ref"]
+        done = len(refs) < page["limit"]
+        if (
+            physical["space_id"] != self.space_id
+            or physical["mode"] != "SCAN"
+            or physical["rows"] != expected
+            or physical["next_ref"] != next_ref
+            or physical["done"] is not done
+        ):
+            raise ForestError(
+                "VECTOR_REBUILD_AUDIT_MISMATCH",
+                "Candidate rows differ from the frozen reference ledger", 409,
+            )
+        return {
+            "request_id": page["request_id"],
+            "candidate_revision": page["candidate_revision"],
+            "collection_id": page["collection_id"],
+            "audit_seq": page["audit_seq"],
+            "next_ref": next_ref,
+            "done": done,
+        }
+
     @job("vector.refs.audit")
     async def audit_refs(self, task, ctx):
         request = _plain(task["payload"])

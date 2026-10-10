@@ -734,6 +734,141 @@ async def test_rebuild_replay_lost_lease_abandons_candidate(
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
+async def test_rebuild_candidate_audit_paginates_frozen_refs(
+    clean_authority, tmp_path,
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    space_id = "space/audit-page/" + uuid4().hex
+    await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
+        PackageCatalog(tmp_path / "audit-page-packages"),
+        store, installer, kernel=kernel,
+        initial_configuration=official_builtin_configuration(
+            "vector_index_milvus",
+            overrides={"space_id": space_id, "dimensions": 4},
+        ),
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "vector-index.milvus": lambda *_args: None,
+        }),
+    )
+    namespace = module_schema_namespace("forest.vector.index")
+    bot_id = store.bot_id
+    name = vector_collection_name(bot_id, space_id)
+    digest = "sha256:" + "a" * 64
+    physical = "f32-sha256:" + "b" * 64
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_collection_bindings "
+                    "(bot_id,binding_revision,space_id,collection_name,"
+                    "collection_id,dimensions,metric) "
+                    "VALUES (%s,1,%s,%s,41,4,'COSINE')")
+            .format(sql.Identifier(namespace)), (bot_id, space_id, name),
+        )
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_collection_health "
+                    "(bot_id,binding_revision,state) VALUES (%s,1,'READY')")
+            .format(sql.Identifier(namespace)), (bot_id,),
+        )
+        for index in range(65):
+            ref_id = f"ref/audit/{index:03d}"
+            await conn.execute(
+                sql.SQL("INSERT INTO {}.vector_index_refs "
+                        "(bot_id,ref_id,space_id,state,purpose,input_digest,"
+                        "replay_locator,vector_digest,physical_digest,published_at) "
+                        "VALUES (%s,%s,%s,'ACTIVE','DOCUMENT',%s,%s,%s,%s,"
+                        "clock_timestamp())")
+                .format(sql.Identifier(namespace)),
+                (bot_id, ref_id, space_id, digest, Jsonb({"test": index}),
+                 digest, physical),
+            )
+            await conn.execute(
+                sql.SQL("SELECT {}.vector_append_ref_change("
+                        "%s,%s,%s,'ACTIVE','DOCUMENT',%s,%s,%s,%s)")
+                .format(sql.Identifier(namespace)),
+                (bot_id, ref_id, space_id, digest, Jsonb({"test": index}),
+                 digest, physical),
+            )
+        await conn.execute(
+            sql.SQL("INSERT INTO {}.vector_rebuild_work "
+                    "(bot_id,request_id,input_digest,requested_by,space_id,"
+                    "base_revision,dimensions,state,candidate_revision,"
+                    "candidate_name,candidate_id,replay_waterline,replay_cursor) "
+                    "VALUES (%s,'audit/page',%s,'admin',%s,1,4,"
+                    "'CANDIDATE_READY',2,%s,42,65,65)")
+            .format(sql.Identifier(namespace)),
+            (bot_id, digest, space_id, name + "_r2"),
+        )
+
+    async def domain(function, payload):
+        async with store.pool.connection() as conn, conn.transaction():
+            row = await (await conn.execute(
+                sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS result")
+                .format(sql.Identifier(namespace), sql.Identifier(function)),
+                (Jsonb({"bot_id": bot_id}), Jsonb(payload)),
+            )).fetchone()
+        assert row["result"]["ok"]
+        return row["result"]["value"]
+
+    claim = {"protocol": "forest.owned-work-claim-request/1",
+             "lease_seconds": 90}
+    first = await domain("vector_claim_rebuild_audit", {
+        **claim, "claim_token": "audit/page/first",
+    })
+    assert len(first["payload"]["expected"]) == 64
+    assert first["payload"]["expected"][0]["ref_id"] == "ref/audit/000"
+    assert first["payload"]["expected"][-1]["ref_id"] == "ref/audit/063"
+    await domain("vector_settle_rebuild_audit", {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": first["work_id"],
+        "claim_token": first["claim_token"],
+        "attempt": first["attempt"],
+        "outcome": {"status": "SUCCEEDED", "result": {
+            "request_id": "audit/page", "candidate_revision": 2,
+            "collection_id": 42, "audit_seq": 65,
+            "next_ref": "ref/audit/063", "done": False,
+        }},
+    })
+    second = await domain("vector_claim_rebuild_audit", {
+        **claim, "claim_token": "audit/page/second",
+    })
+    assert second["payload"]["after_ref"] == "ref/audit/063"
+    assert [row["ref_id"] for row in second["payload"]["expected"]] == [
+        "ref/audit/064"
+    ]
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL("UPDATE {}.vector_rebuild_work "
+                    "SET lease_deadline=clock_timestamp()-interval '1 second' "
+                    "WHERE bot_id=%s AND request_id='audit/page'")
+            .format(sql.Identifier(namespace)), (bot_id,),
+        )
+    resumed = await domain("vector_claim_rebuild_audit", {
+        **claim, "claim_token": "audit/page/resumed",
+    })
+    assert resumed["payload"]["after_ref"] == second["payload"]["after_ref"]
+    assert resumed["payload"]["expected"] == second["payload"]["expected"]
+    await domain("vector_settle_rebuild_audit", {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": resumed["work_id"],
+        "claim_token": resumed["claim_token"],
+        "attempt": resumed["attempt"],
+        "outcome": {"status": "SUCCEEDED", "result": {
+            "request_id": "audit/page", "candidate_revision": 2,
+            "collection_id": 42, "audit_seq": 65,
+            "next_ref": "ref/audit/064", "done": True,
+        }},
+    })
+    status = await domain("vector_query_rebuild", {
+        "request_id": "audit/page", "requested_by": "admin",
+    })
+    assert status["state"] == "AUDITED"
+    assert status["audit_after_ref"] == "ref/audit/064"
+    assert status["audited_at"] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
 @pytest.mark.parametrize("case", ("missing-active", "unbound-physical"))
 async def test_package_owned_ref_audit_quarantines_stable_physical_mismatch(
     clean_authority, tmp_path, case
@@ -1704,7 +1839,10 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             }
 
         async def replay_service(name, payload, **_options):
-            assert name in {"vector.transport.upsert", "vector.transport.prune"}
+            assert name in {
+                "vector.transport.upsert", "vector.transport.prune",
+                "vector.transport.audit",
+            }
             return await drivers[name].invoke(
                 payload, scope=scope, invocation=invocation
             )
@@ -1735,9 +1873,53 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             collection_name=candidate_name, ids=[deleted_replay["ref_id"]],
             output_fields=["ref_id"], consistency_level="Strong",
         ) == []
+        audit_claim = await rebuild_domain(
+            "vector_claim_rebuild_audit",
+            {**claim_input, "claim_token": "rebuild/audit/active",
+             "lease_seconds": 90},
+        )
+        assert [row["ref_id"] for row in audit_claim["payload"]["expected"]] == [
+            live_replay["ref_id"]
+        ]
+        # A tombstone committed after the audit claim belongs to the next
+        # replay waterline; it must not rewrite this frozen expected page.
         await rebuild_domain("vector_ref_tombstone", {
             "space_id": space_id, "ref_ids": [live_replay["ref_id"]],
         })
+        audit_row = {
+            "ref_id": live_replay["ref_id"], "bot_id": bot_id,
+            "space_id": space_id, "purpose": "QUERY",
+            "embedding": live_replay["vector"],
+            "input_digest": live_replay["input_digest"],
+        }
+        await upsert.client.upsert(
+            collection_name=candidate_name,
+            data=[{**audit_row, "input_digest": "sha256:" + "f" * 64}],
+        )
+        with pytest.raises(ForestError) as wrong_digest:
+            await component.audit_rebuild_candidate(
+                {"payload": audit_claim["payload"]}, replay_context,
+            )
+        assert wrong_digest.value.code == "VECTOR_REBUILD_AUDIT_MISMATCH"
+        await upsert.client.upsert(
+            collection_name=candidate_name, data=[audit_row],
+        )
+        audit_receipt = await component.audit_rebuild_candidate(
+            {"payload": audit_claim["payload"]}, replay_context,
+        )
+        await rebuild_domain("vector_settle_rebuild_audit", {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": audit_claim["work_id"],
+            "claim_token": audit_claim["claim_token"],
+            "attempt": audit_claim["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": audit_receipt},
+        })
+        audited = await rebuild_domain("vector_query_rebuild", {
+            "request_id": enqueued["request_id"], "requested_by": "admin",
+        })
+        assert audited["state"] == "AUDITED"
+        assert audited["audit_seq"] == 3
+
         catchup_claim = await rebuild_domain(
             "vector_claim_rebuild_replay",
             {**claim_input, "claim_token": "rebuild/replay/catchup",
@@ -1763,6 +1945,28 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             collection_name=candidate_name, ids=[live_replay["ref_id"]],
             output_fields=["ref_id"], consistency_level="Strong",
         ) == []
+        second_audit = await rebuild_domain(
+            "vector_claim_rebuild_audit",
+            {**claim_input, "claim_token": "rebuild/audit/empty",
+             "lease_seconds": 90},
+        )
+        assert second_audit["payload"]["audit_seq"] == 4
+        assert second_audit["payload"]["expected"] == []
+        second_receipt = await component.audit_rebuild_candidate(
+            {"payload": second_audit["payload"]}, replay_context,
+        )
+        await rebuild_domain("vector_settle_rebuild_audit", {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": second_audit["work_id"],
+            "claim_token": second_audit["claim_token"],
+            "attempt": second_audit["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": second_receipt},
+        })
+        audited = await rebuild_domain("vector_query_rebuild", {
+            "request_id": enqueued["request_id"], "requested_by": "admin",
+        })
+        assert audited["state"] == "AUDITED"
+        assert audited["audit_seq"] == 4
         assert await rebuild_domain(
             "vector_claim_rebuild_replay",
             {**claim_input, "claim_token": "rebuild/replay/empty",
