@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "request_id",
+    "claim_token",
+    "facets"
+  ],
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "claim_token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "facets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "facet_id",
+          "part_id",
+          "selector_start_char",
+          "selector_end_char",
+          "content",
+          "content_digest"
+        ],
+        "properties": {
+          "facet_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "part_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "selector_start_char": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "selector_end_char": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048
+          },
+          "content_digest": {
+            "type": "string",
+            "pattern": "^sha256:[a-f0-9]{64}$"
+          }
+        }
+      }
+    }
+  }
+}

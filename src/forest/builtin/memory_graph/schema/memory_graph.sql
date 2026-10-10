@@ -844,6 +844,58 @@ CREATE TABLE source_text_facets (
 CREATE INDEX source_text_facets_grams_idx ON source_text_facets USING gin(grams);
 CREATE INDEX source_text_facets_source_idx ON source_text_facets(bot_id,source_unit_id);
 
+CREATE TABLE text_projection_rebuild_work (
+    bot_id text NOT NULL,
+    request_id text NOT NULL CHECK (octet_length(request_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
+    source_unit_id text NOT NULL,
+    source_revision bigint NOT NULL CHECK (source_revision>0),
+    space_id text NOT NULL CHECK (space_id ~ '^sha256:[a-f0-9]{64}$'),
+    state text NOT NULL DEFAULT 'QUEUED'
+        CHECK (state IN ('QUEUED','CLAIMED','SUCCEEDED','FAILED')),
+    claim_token text UNIQUE,
+    lease_deadline timestamptz,
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count BETWEEN 0 AND 3),
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    facet_count integer CHECK (facet_count BETWEEN 0 AND 4096),
+    published_at timestamptz,
+    error_code text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,request_id),
+    FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
+    CHECK ((state='CLAIMED')=(claim_token IS NOT NULL AND lease_deadline IS NOT NULL)),
+    CHECK ((published_at IS NOT NULL)=(facet_count IS NOT NULL)),
+    CHECK (published_at IS NULL OR state IN ('CLAIMED','SUCCEEDED'))
+);
+CREATE UNIQUE INDEX text_projection_rebuild_active_source_idx
+    ON text_projection_rebuild_work(bot_id,source_unit_id)
+    WHERE state IN ('QUEUED','CLAIMED');
+CREATE INDEX text_projection_rebuild_queue_idx
+    ON text_projection_rebuild_work(bot_id,state,next_attempt_at,request_id);
+CREATE INDEX text_projection_rebuild_lease_idx
+    ON text_projection_rebuild_work(bot_id,lease_deadline,request_id)
+    WHERE state='CLAIMED';
+CREATE TABLE text_projection_rebuild_stage (
+    bot_id text NOT NULL,
+    request_id text NOT NULL,
+    facet_id text NOT NULL,
+    content text NOT NULL CHECK (octet_length(content) BETWEEN 1 AND 8192),
+    content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[a-f0-9]{64}$'),
+    PRIMARY KEY (bot_id,request_id,facet_id),
+    FOREIGN KEY (bot_id,request_id)
+        REFERENCES text_projection_rebuild_work(bot_id,request_id),
+    FOREIGN KEY (bot_id,facet_id) REFERENCES embedding_facets(bot_id,facet_id)
+);
+CREATE TABLE text_projection_rebuild_settlements (
+    bot_id text NOT NULL,
+    claim_token text NOT NULL,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    PRIMARY KEY (bot_id,claim_token)
+);
+
 CREATE TABLE query_match_preparations (
     bot_id text NOT NULL,
     query_id text NOT NULL,
@@ -9597,6 +9649,414 @@ EXCEPTION WHEN invalid_text_representation OR invalid_datetime_format
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
             'message','Vector source query input is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_enqueue_text_projection_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_id text := context->>'operation_id';
+    requested_digest text := 'sha256:' ||
+        encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    unit_row __forest_module_schema__.source_units%ROWTYPE;
+    prior __forest_module_schema__.text_projection_rebuild_work%ROWTYPE;
+    source_status text;
+    preparation_state text;
+    domain_space text;
+BEGIN
+    IF requested_id IS NULL OR octet_length(requested_id) NOT BETWEEN 1 AND 256
+       OR input->>'source_unit_id' IS NULL OR
+          octet_length(input->>'source_unit_id') NOT BETWEEN 1 AND 256
+       OR input->>'requested_by' IS NULL OR
+          octet_length(input->>'requested_by') NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_INPUT_INVALID',
+                'message','Text rebuild request is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/text-rebuild/'||requested_bot||'/'||
+        (input->>'source_unit_id'),0));
+    SELECT * INTO prior FROM __forest_module_schema__.text_projection_rebuild_work
+    WHERE bot_id=requested_bot AND request_id=requested_id;
+    IF FOUND THEN
+        IF prior.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_CONFLICT',
+                    'message','Text rebuild operation was reused','status',409));
+        END IF;
+    ELSE
+        SELECT * INTO unit_row FROM __forest_module_schema__.source_units
+        WHERE bot_id=requested_bot AND source_unit_id=input->>'source_unit_id'
+        FOR SHARE;
+        SELECT status INTO source_status FROM __forest_module_schema__.memory_sources
+        WHERE bot_id=requested_bot AND source_id=unit_row.source_id FOR SHARE;
+        SELECT state INTO preparation_state
+        FROM __forest_module_schema__.facet_preparation_work
+        WHERE bot_id=requested_bot AND source_unit_id=unit_row.source_unit_id;
+        SELECT space_id INTO domain_space FROM __forest_module_schema__.memory_domains
+        WHERE bot_id=requested_bot;
+        IF unit_row IS NULL OR unit_row.eligibility_state<>'ELIGIBLE'
+           OR source_status IS DISTINCT FROM 'ACTIVE'
+           OR preparation_state IS DISTINCT FROM 'READY'
+           OR domain_space IS NULL THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_SOURCE_UNAVAILABLE',
+                    'message','Source is not ready for text projection rebuild','status',409));
+        END IF;
+        IF EXISTS (SELECT 1 FROM __forest_module_schema__.text_projection_rebuild_work w
+            WHERE w.bot_id=requested_bot AND w.source_unit_id=unit_row.source_unit_id
+              AND w.state IN ('QUEUED','CLAIMED')) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_IN_PROGRESS',
+                    'message','Source already has a text rebuild in progress','status',409));
+        END IF;
+        INSERT INTO __forest_module_schema__.text_projection_rebuild_work(
+            bot_id,request_id,input_digest,requested_by,source_unit_id,
+            source_revision,space_id)
+        VALUES(requested_bot,requested_id,requested_digest,input->>'requested_by',
+            unit_row.source_unit_id,unit_row.source_revision,domain_space)
+        RETURNING * INTO prior;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-text-rebuild-enqueued/1',
+            'request_id',requested_id,'source_unit_id',prior.source_unit_id,
+            'source_revision',prior.source_revision));
+END;
+$$;
+
+CREATE FUNCTION memory_query_text_projection_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    work_row __forest_module_schema__.text_projection_rebuild_work%ROWTYPE;
+BEGIN
+    SELECT * INTO work_row FROM __forest_module_schema__.text_projection_rebuild_work
+    WHERE bot_id=context->>'bot_id' AND request_id=input->>'request_id'
+      AND requested_by=input->>'requested_by';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_NOT_FOUND',
+                'message','Text rebuild request does not exist','status',404));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-text-rebuild/1',
+            'request_id',work_row.request_id,'source_unit_id',work_row.source_unit_id,
+            'source_revision',work_row.source_revision,'state',work_row.state,
+            'facet_count',work_row.facet_count,'error_code',work_row.error_code,
+            'created_at',work_row.created_at,'updated_at',work_row.updated_at,
+            'published_at',work_row.published_at));
+END;
+$$;
+
+CREATE FUNCTION memory_claim_text_projection_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    expired record;
+    work_row __forest_module_schema__.text_projection_rebuild_work%ROWTYPE;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_CLAIM_INVALID',
+                'message','Text rebuild claim is invalid','status',422));
+    END IF;
+    FOR expired IN
+        SELECT request_id,published_at,attempt_count
+        FROM __forest_module_schema__.text_projection_rebuild_work
+        WHERE bot_id=requested_bot AND state='CLAIMED'
+          AND lease_deadline<=clock_timestamp()
+        ORDER BY lease_deadline,request_id FOR UPDATE SKIP LOCKED LIMIT 16
+    LOOP
+        DELETE FROM __forest_module_schema__.text_projection_rebuild_stage
+        WHERE bot_id=requested_bot AND request_id=expired.request_id;
+        UPDATE __forest_module_schema__.text_projection_rebuild_work
+        SET state=CASE WHEN expired.published_at IS NOT NULL THEN 'SUCCEEDED'
+                       WHEN expired.attempt_count>=3 THEN 'FAILED'
+                       ELSE 'QUEUED' END,
+            claim_token=NULL,lease_deadline=NULL,updated_at=clock_timestamp(),
+            next_attempt_at=clock_timestamp(),
+            error_code=CASE WHEN expired.published_at IS NOT NULL THEN NULL
+                ELSE 'MEMORY_TEXT_REBUILD_LEASE_EXPIRED' END
+        WHERE bot_id=requested_bot AND request_id=expired.request_id;
+    END LOOP;
+    SELECT * INTO work_row FROM __forest_module_schema__.text_projection_rebuild_work
+    WHERE bot_id=requested_bot AND state='QUEUED'
+      AND next_attempt_at<=clock_timestamp()
+    ORDER BY next_attempt_at,request_id FOR UPDATE SKIP LOCKED LIMIT 1;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',NULL);
+    END IF;
+    DELETE FROM __forest_module_schema__.text_projection_rebuild_stage
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id;
+    UPDATE __forest_module_schema__.text_projection_rebuild_work
+    SET state='CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1,error_code=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id
+    RETURNING * INTO work_row;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-claim/1',
+            'work_id',work_row.request_id,'claim_token',work_row.claim_token,
+            'attempt',work_row.attempt_count,
+            'operation_id','memory-text-rebuild:'||encode(sha256(convert_to(
+                requested_bot||'/'||work_row.request_id||'/'||
+                work_row.attempt_count,'UTF8')),'hex'),
+            'causal_root_kind','memory.text-rebuild',
+            'causal_root_id',work_row.request_id,
+            'payload',jsonb_build_object('request_id',work_row.request_id,
+                'claim_token',work_row.claim_token,
+                'source_unit_id',work_row.source_unit_id,
+                'source_revision',work_row.source_revision,
+                'space_id',work_row.space_id)));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_text_projection_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    old_row __forest_module_schema__.text_projection_rebuild_settlements%ROWTYPE;
+    work_row __forest_module_schema__.text_projection_rebuild_work%ROWTYPE;
+    result_value jsonb;
+    next_state text;
+BEGIN
+    SELECT * INTO old_row FROM __forest_module_schema__.text_projection_rebuild_settlements
+    WHERE bot_id=requested_bot AND claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF old_row.input_payload=input THEN RETURN old_row.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_SETTLEMENT_CONFLICT',
+                'message','Text rebuild claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.text_projection_rebuild_work
+    WHERE bot_id=requested_bot AND request_id=input->>'work_id' FOR UPDATE;
+    IF NOT FOUND OR work_row.state<>'CLAIMED'
+       OR work_row.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_CLAIM_LOST',
+                'message','Text rebuild claim is no longer current','status',409));
+    END IF;
+    next_state := CASE WHEN work_row.published_at IS NOT NULL THEN 'SUCCEEDED'
+        WHEN work_row.attempt_count<3 THEN 'QUEUED' ELSE 'FAILED' END;
+    DELETE FROM __forest_module_schema__.text_projection_rebuild_stage
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id;
+    UPDATE __forest_module_schema__.text_projection_rebuild_work
+    SET state=next_state,claim_token=NULL,lease_deadline=NULL,
+        next_attempt_at=CASE WHEN next_state='QUEUED' THEN
+            clock_timestamp()+(LEAST(power(2,attempt_count),30)*interval '1 second')
+            ELSE next_attempt_at END,
+        error_code=CASE WHEN next_state='SUCCEEDED' THEN NULL
+            ELSE COALESCE(input#>>'{outcome,error,code}',
+                'MEMORY_TEXT_REBUILD_INCOMPLETE') END,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work_row.request_id));
+    INSERT INTO __forest_module_schema__.text_projection_rebuild_settlements(
+        bot_id,claim_token,input_payload,result_payload)
+    VALUES(requested_bot,input->>'claim_token',input,result_value);
+    RETURN result_value;
+END;
+$$;
+
+CREATE FUNCTION memory_stage_text_projection_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    work_row __forest_module_schema__.text_projection_rebuild_work%ROWTYPE;
+    unit_row __forest_module_schema__.source_units%ROWTYPE;
+    source_status text;
+    facet_row __forest_module_schema__.embedding_facets%ROWTYPE;
+    item jsonb;
+    item_content text;
+    staged_count integer;
+    new_count integer;
+BEGIN
+    IF jsonb_typeof(input->'facets') IS DISTINCT FROM 'array'
+       OR jsonb_array_length(input->'facets') NOT BETWEEN 1 AND 16
+       OR (SELECT count(DISTINCT j.value->>'facet_id')
+           FROM jsonb_array_elements(input->'facets') AS j(value))
+           <> jsonb_array_length(input->'facets') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_INPUT_INVALID',
+                'message','Text rebuild batch is invalid','status',422));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.text_projection_rebuild_work
+    WHERE bot_id=requested_bot AND request_id=input->>'request_id' FOR UPDATE;
+    IF NOT FOUND OR work_row.state<>'CLAIMED'
+       OR work_row.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work_row.published_at IS NOT NULL
+       OR work_row.lease_deadline<=clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_CLAIM_LOST',
+                'message','Text rebuild claim is no longer current','status',409));
+    END IF;
+    SELECT * INTO unit_row FROM __forest_module_schema__.source_units
+    WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id FOR SHARE;
+    SELECT status INTO source_status FROM __forest_module_schema__.memory_sources
+    WHERE bot_id=requested_bot AND source_id=unit_row.source_id FOR SHARE;
+    IF unit_row IS NULL OR unit_row.eligibility_state<>'ELIGIBLE'
+       OR unit_row.source_revision<>work_row.source_revision
+       OR source_status IS DISTINCT FROM 'ACTIVE'
+       OR (SELECT space_id FROM __forest_module_schema__.memory_domains
+           WHERE bot_id=requested_bot) IS DISTINCT FROM work_row.space_id THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_SOURCE_UNAVAILABLE',
+                'message','Source changed during text rebuild','status',409));
+    END IF;
+    FOR item IN SELECT value FROM jsonb_array_elements(input->'facets') LOOP
+        item_content := item->>'content';
+        SELECT * INTO facet_row FROM __forest_module_schema__.embedding_facets
+        WHERE bot_id=requested_bot AND facet_id=item->>'facet_id'
+          AND purpose='DOCUMENT' AND modality='TEXT'
+          AND source_unit_id=work_row.source_unit_id
+          AND source_revision=work_row.source_revision
+          AND space_id=work_row.space_id;
+        IF NOT FOUND OR item_content IS NULL
+           OR octet_length(item_content) NOT BETWEEN 1 AND 8192
+           OR item->>'content_digest' IS DISTINCT FROM facet_row.facet_content_digest
+           OR item->>'content_digest' IS DISTINCT FROM
+              ('sha256:'||encode(sha256(convert_to(item_content,'UTF8')),'hex'))
+           OR octet_length(item_content) IS DISTINCT FROM facet_row.input_byte_length
+           OR char_length(item_content) IS DISTINCT FROM
+              facet_row.selector_end_char-facet_row.selector_start_char
+           OR item->>'part_id' IS DISTINCT FROM facet_row.part_id
+           OR (item->>'selector_start_char')::integer
+              IS DISTINCT FROM facet_row.selector_start_char
+           OR (item->>'selector_end_char')::integer
+              IS DISTINCT FROM facet_row.selector_end_char THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_FACET_MISMATCH',
+                    'message','Text chunk differs from its immutable facet','status',409));
+        END IF;
+        IF EXISTS (SELECT 1 FROM __forest_module_schema__.text_projection_rebuild_stage t
+            WHERE t.bot_id=requested_bot AND t.request_id=work_row.request_id
+              AND t.facet_id=facet_row.facet_id
+              AND (t.content IS DISTINCT FROM item_content OR
+                   t.content_digest IS DISTINCT FROM facet_row.facet_content_digest)) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_STAGE_CONFLICT',
+                    'message','Text rebuild facet was staged differently','status',409));
+        END IF;
+    END LOOP;
+    SELECT count(*) INTO staged_count
+    FROM __forest_module_schema__.text_projection_rebuild_stage
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id;
+    SELECT count(*) INTO new_count FROM jsonb_array_elements(input->'facets') AS j(value)
+    WHERE NOT EXISTS (SELECT 1 FROM __forest_module_schema__.text_projection_rebuild_stage t
+        WHERE t.bot_id=requested_bot AND t.request_id=work_row.request_id
+          AND t.facet_id=j.value->>'facet_id');
+    IF staged_count+new_count>4096 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_LIMIT',
+                'message','Text rebuild exceeds source facet limit','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.text_projection_rebuild_stage(
+        bot_id,request_id,facet_id,content,content_digest)
+    SELECT requested_bot,work_row.request_id,j.value->>'facet_id',
+        j.value->>'content',j.value->>'content_digest'
+    FROM jsonb_array_elements(input->'facets') AS j(value)
+    WHERE true
+    ON CONFLICT (bot_id,request_id,facet_id) DO NOTHING;
+    staged_count := staged_count+new_count;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('request_id',work_row.request_id,
+            'staged_facet_count',staged_count));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_INPUT_INVALID',
+            'message','Text rebuild batch is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_publish_text_projection_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    work_row __forest_module_schema__.text_projection_rebuild_work%ROWTYPE;
+    unit_row __forest_module_schema__.source_units%ROWTYPE;
+    source_status text;
+    requested_count integer := (input->>'facet_count')::integer;
+    expected_count integer;
+    staged_count integer;
+BEGIN
+    IF requested_count IS NULL OR requested_count NOT BETWEEN 0 AND 4096 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_INPUT_INVALID',
+                'message','Text rebuild count is invalid','status',422));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.text_projection_rebuild_work
+    WHERE bot_id=requested_bot AND request_id=input->>'request_id' FOR UPDATE;
+    IF NOT FOUND OR work_row.state<>'CLAIMED'
+       OR work_row.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work_row.lease_deadline<=clock_timestamp() THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_CLAIM_LOST',
+                'message','Text rebuild claim is no longer current','status',409));
+    END IF;
+    IF work_row.published_at IS NOT NULL THEN
+        IF work_row.facet_count=requested_count THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+                'value',jsonb_build_object('request_id',work_row.request_id,
+                    'facet_count',work_row.facet_count));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_CONFLICT',
+                'message','Published text rebuild count differs','status',409));
+    END IF;
+    SELECT * INTO unit_row FROM __forest_module_schema__.source_units
+    WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id FOR SHARE;
+    SELECT status INTO source_status FROM __forest_module_schema__.memory_sources
+    WHERE bot_id=requested_bot AND source_id=unit_row.source_id FOR SHARE;
+    IF unit_row IS NULL OR unit_row.eligibility_state<>'ELIGIBLE'
+       OR unit_row.source_revision<>work_row.source_revision
+       OR source_status IS DISTINCT FROM 'ACTIVE'
+       OR (SELECT space_id FROM __forest_module_schema__.memory_domains
+           WHERE bot_id=requested_bot) IS DISTINCT FROM work_row.space_id THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_SOURCE_UNAVAILABLE',
+                'message','Source changed before text publication','status',409));
+    END IF;
+    SELECT count(*) INTO expected_count FROM __forest_module_schema__.embedding_facets
+    WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id
+      AND source_revision=work_row.source_revision
+      AND purpose='DOCUMENT' AND modality='TEXT';
+    SELECT count(*) INTO staged_count FROM __forest_module_schema__.text_projection_rebuild_stage
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id;
+    IF requested_count<>expected_count OR staged_count<>expected_count THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_INCOMPLETE',
+                'message','Staged text differs from current document facets','status',409));
+    END IF;
+    DELETE FROM __forest_module_schema__.source_text_facets
+    WHERE bot_id=requested_bot AND source_unit_id=work_row.source_unit_id;
+    INSERT INTO __forest_module_schema__.source_text_facets(
+        bot_id,facet_id,source_unit_id,source_revision,content,content_digest)
+    SELECT requested_bot,t.facet_id,work_row.source_unit_id,work_row.source_revision,
+           t.content,t.content_digest
+    FROM __forest_module_schema__.text_projection_rebuild_stage t
+    WHERE t.bot_id=requested_bot AND t.request_id=work_row.request_id
+    ORDER BY t.facet_id;
+    DELETE FROM __forest_module_schema__.text_projection_rebuild_stage
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id;
+    UPDATE __forest_module_schema__.text_projection_rebuild_work
+    SET published_at=clock_timestamp(),facet_count=requested_count,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND request_id=work_row.request_id;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('request_id',work_row.request_id,
+            'facet_count',requested_count));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_TEXT_REBUILD_INPUT_INVALID',
+            'message','Text rebuild input is invalid','status',422));
 END;
 $$;
 

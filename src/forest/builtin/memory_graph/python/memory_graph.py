@@ -1,16 +1,15 @@
 import hashlib
 import json
 
+from document_source import collect_document_facets
 from embedding_work import dispatch as dispatch_embedding
 from embedding_work import recover as recover_embedding
 from evidence_materialization import materialize as materialize_evidence
 from facet_preparation import (
     DOCUMENT_FACET_BATCH_SIZE,
-    MAX_DOCUMENT_FACETS,
     MAX_QUERY_FACETS,
     MAX_QUERY_IMAGE_BYTES,
     batch_operation_id,
-    document_facets,
     query_part_facets,
     query_part_operation_id,
 )
@@ -423,73 +422,12 @@ class MemoryGraph(Plugin):
         source_unit_id = request["source_unit_id"]
         source_revision = request["source_revision"]
         space_id = request["space_id"]
-        facets = []
-        after_index = -1
-        for _ in range(64):
-            page = await ctx.queries.call(
-                "memory.read-facet-source",
-                {
-                    "source_unit_id": source_unit_id,
-                    "after_part_index": after_index,
-                    "limit": 64,
-                },
-                timeout=10,
-            )
-            if page["status"] == "UNAVAILABLE":
-                return {"disposition": "SUPPRESSED", "facet_count": 0, "error_code": None}
-            if page["source_revision"] != source_revision:
-                return {
-                    "disposition": "FAILED", "facet_count": 0,
-                    "error_code": "MEMORY_FACET_REVISION_MISMATCH",
-                }
-            for part in page["parts"]:
-                text_parts = {}
-                if part["part_kind"] == "TEXT":
-                    raw = await ctx.payloads.read_bytes(part["payload"])
-                    try:
-                        text_parts[part["part_id"]] = raw.decode("utf-8")
-                    except UnicodeDecodeError:
-                        return {
-                            "disposition": "FAILED", "facet_count": 0,
-                            "error_code": "MEMORY_TEXT_INVALID",
-                        }
-                try:
-                    part_facets = document_facets(
-                        source_unit_id, source_revision, space_id, [part], text_parts
-                    )
-                except ValueError:
-                    return {
-                        "disposition": "FAILED", "facet_count": 0,
-                        "error_code": "MEMORY_FACET_SOURCE_INVALID",
-                    }
-                if part["part_kind"] == "TEXT":
-                    content = text_parts[part["part_id"]]
-                    for facet in part_facets:
-                        facet["search_text"] = content[
-                            facet["selector_start_char"]:facet["selector_end_char"]
-                        ]
-                facets.extend(part_facets)
-                if len(facets) > MAX_DOCUMENT_FACETS:
-                    return {
-                        "disposition": "FAILED", "facet_count": 0,
-                        "error_code": "MEMORY_FACET_LIMIT_EXCEEDED",
-                    }
-            if not page["has_more"]:
-                break
-            next_index = page["next_part_index"]
-            if next_index is None or next_index <= after_index:
-                raise ForestError(
-                    "MEMORY_FACET_PAGE_INVALID",
-                    "Facet source pagination did not advance",
-                    502,
-                )
-            after_index = next_index
-        else:
-            raise ForestError(
-                "MEMORY_FACET_PAGE_LIMIT",
-                "Archived source has too many parts for facet preparation",
-                409,
-            )
+        collected = await collect_document_facets(
+            ctx, source_unit_id, source_revision, space_id
+        )
+        if collected["disposition"] != "READY":
+            return collected
+        facets = collected["facets"]
         for batch_index, offset in enumerate(range(0, len(facets), DOCUMENT_FACET_BATCH_SIZE)):
             batch = facets[offset:offset + DOCUMENT_FACET_BATCH_SIZE]
             await ctx.uow.call(
@@ -508,6 +446,55 @@ class MemoryGraph(Plugin):
                 timeout=20,
             )
         return {"disposition": "READY", "facet_count": len(facets), "error_code": None}
+
+    @job("memory.text-projection.rebuild")
+    async def rebuild_text_projection(self, task, ctx):
+        request = task["payload"]
+        request_id = request["request_id"]
+        claim_token = request["claim_token"]
+        collected = await collect_document_facets(
+            ctx, request["source_unit_id"], request["source_revision"],
+            request["space_id"],
+        )
+        if collected["disposition"] != "READY":
+            code = collected["error_code"] or "MEMORY_TEXT_REBUILD_SOURCE_UNAVAILABLE"
+            raise ForestError(code, "Text projection source is unavailable", 409)
+        text_facets = [
+            {
+                "facet_id": facet["facet_id"],
+                "part_id": facet["part_id"],
+                "selector_start_char": facet["selector_start_char"],
+                "selector_end_char": facet["selector_end_char"],
+                "content": facet["search_text"],
+                "content_digest": facet["facet_content_digest"],
+            }
+            for facet in collected["facets"] if facet["modality"] == "TEXT"
+        ]
+        for batch_index, offset in enumerate(
+            range(0, len(text_facets), DOCUMENT_FACET_BATCH_SIZE)
+        ):
+            await ctx.commands.call(
+                "memory.stage-text-projection-rebuild",
+                {
+                    "request_id": request_id, "claim_token": claim_token,
+                    "facets": text_facets[offset:offset + DOCUMENT_FACET_BATCH_SIZE],
+                },
+                operation_id=ctx.operations.stable(
+                    f"text-rebuild-stage:{request_id}:{claim_token}:{batch_index}"
+                ),
+                timeout=30,
+            )
+        return await ctx.commands.call(
+            "memory.publish-text-projection-rebuild",
+            {
+                "request_id": request_id, "claim_token": claim_token,
+                "facet_count": len(text_facets),
+            },
+            operation_id=ctx.operations.stable(
+                f"text-rebuild-publish:{request_id}:{claim_token}"
+            ),
+            timeout=120,
+        )
 
     @job("memory.embedding.dispatch")
     async def dispatch_embedding_batch(self, task, ctx):

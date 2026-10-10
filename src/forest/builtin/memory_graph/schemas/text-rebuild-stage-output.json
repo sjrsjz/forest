@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "request_id",
+    "staged_facet_count"
+  ],
+  "properties": {
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "staged_facet_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4096
+    }
+  }
+}

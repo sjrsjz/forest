@@ -150,6 +150,103 @@ async def test_text_projection_pages_and_forget_follow_source_authority(
     assert [item["source_unit_id"] for item in fresh["items"]] == [
         "unit/1", "unit/2", "unit/3",
     ]
+    # Rebuild a lost derived projection from the immutable document facet.
+    async def rebuild_call(function, context, body):
+        async with store.pool.connection() as conn:
+            row = await (await conn.execute(sql.SQL(
+                "SELECT {}." + function + "(%s,%s) AS result"
+            ).format(namespace), (Jsonb(context), Jsonb(body)))).fetchone()
+        return row["result"]
+
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.facet_preparation_work "
+            "(bot_id,source_unit_id,state,prepared_facet_count) "
+            "VALUES (%s,'unit/1','READY',1)"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "DELETE FROM {}.source_text_facets "
+            "WHERE bot_id=%s AND source_unit_id='unit/1'"
+        ).format(namespace), (store.bot_id,))
+    missing = (await page({"text_contains": needle}))["value"]
+    assert [item["source_unit_id"] for item in missing["items"]] == ["unit/2", "unit/3"]
+    request = {"source_unit_id": "unit/1", "requested_by": "admin/search"}
+    rebuild_context = {"bot_id": store.bot_id, "operation_id": "rebuild/search/1"}
+    queued = await rebuild_call("memory_enqueue_text_projection_rebuild",
+                                rebuild_context, request)
+    assert queued["ok"] and queued["value"]["source_revision"] == 1
+    assert await rebuild_call("memory_enqueue_text_projection_rebuild",
+                              rebuild_context, request) == queued
+    unauthorized = await rebuild_call("memory_query_text_projection_rebuild",
+                                      {"bot_id": store.bot_id},
+                                      {"request_id": "rebuild/search/1",
+                                       "requested_by": "admin/other"})
+    assert unauthorized["error"]["code"] == "MEMORY_TEXT_REBUILD_NOT_FOUND"
+    claim = await rebuild_call("memory_claim_text_projection_rebuild",
+                               {"bot_id": store.bot_id}, {
+        "protocol": "forest.owned-work-claim-request/1",
+        "claim_token": "claim/rebuild/search/1", "lease_seconds": 960,
+    })
+    assert claim["ok"] and claim["value"]["payload"]["source_unit_id"] == "unit/1"
+    assert claim["value"]["payload"]["claim_token"] == "claim/rebuild/search/1"
+    prepared_facet = document_facets("unit/1", 1, space, [{
+        "part_id": "part/1", "part_kind": "TEXT", "payload": reference(1),
+    }], {"part/1": content})[0]
+    staged = {
+        "request_id": "rebuild/search/1",
+        "claim_token": "claim/rebuild/search/1",
+        "facets": [{
+            "facet_id": prepared_facet["facet_id"], "part_id": "part/1",
+            "selector_start_char": prepared_facet["selector_start_char"],
+            "selector_end_char": prepared_facet["selector_end_char"],
+            "content": content,
+            "content_digest": prepared_facet["facet_content_digest"],
+        }],
+    }
+    forged_rebuild = await rebuild_call("memory_stage_text_projection_rebuild",
+                                       {"bot_id": store.bot_id},
+                                       {**staged, "facets": [{**staged["facets"][0],
+                                                            "content": "forged"}]})
+    assert forged_rebuild["error"]["code"] == "MEMORY_TEXT_REBUILD_FACET_MISMATCH"
+    assert (await rebuild_call("memory_stage_text_projection_rebuild",
+                               {"bot_id": store.bot_id}, staged))["ok"]
+    assert (await rebuild_call("memory_stage_text_projection_rebuild",
+                               {"bot_id": store.bot_id}, staged))["value"][
+        "staged_facet_count"] == 1
+    published = await rebuild_call("memory_publish_text_projection_rebuild",
+                                   {"bot_id": store.bot_id}, {
+        "request_id": "rebuild/search/1",
+        "claim_token": "claim/rebuild/search/1", "facet_count": 1,
+    })
+    assert published["ok"], published
+    settled = await rebuild_call("memory_settle_text_projection_rebuild",
+                                 {"bot_id": store.bot_id}, {
+        "protocol": "forest.owned-work-settle-request/1",
+        "work_id": "rebuild/search/1",
+        "claim_token": "claim/rebuild/search/1", "attempt": 1,
+        "outcome": {"status": "SUCCEEDED", "result": published["value"]},
+    })
+    assert settled["ok"], settled
+    status = await rebuild_call("memory_query_text_projection_rebuild",
+                                {"bot_id": store.bot_id}, {
+        "request_id": "rebuild/search/1",
+        "requested_by": "admin/search",
+    })
+    assert status["value"]["state"] == "SUCCEEDED"
+    assert status["value"]["facet_count"] == 1
+    old_snapshot = (await page({
+        "text_contains": needle,
+        "snapshot_accepted_at": missing["snapshot_accepted_at"],
+        "snapshot_xid": missing["snapshot_xid"],
+    }))["value"]
+    assert [item["source_unit_id"] for item in old_snapshot["items"]] == [
+        "unit/2", "unit/3",
+    ]
+    repaired = (await page({"text_contains": needle}))["value"]
+    assert [item["source_unit_id"] for item in repaired["items"]] == [
+        "unit/1", "unit/2", "unit/3",
+    ]
+
     async with store.pool.connection() as conn:
         frozen = (await (await conn.execute(sql.SQL(
             "SELECT {}.memory_freeze_forget_selection(%s,%s) AS result"

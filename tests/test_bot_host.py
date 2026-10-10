@@ -3312,6 +3312,42 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                         "part_id": picture["part_id"], "offset": 0,
                     },
                 )
+                async with host.store.pool.connection() as conn, conn.transaction():
+                    projection = await (await conn.execute(
+                        sql.SQL(
+                            "DELETE FROM {}.source_text_facets "
+                            "WHERE bot_id=%s AND source_unit_id=%s RETURNING facet_id"
+                        ).format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id, unit_evidence["source_unit_id"]),
+                    )).fetchall()
+                assert projection
+                rebuild = await web.post(
+                    f"{trial_base}/actions/memory.text-index.rebuild",
+                    headers={**headers, "idempotency-key": "host-rebuild-text-projection"},
+                    json={"source_unit_id": unit_evidence["source_unit_id"]},
+                )
+                assert rebuild.status_code == 200, rebuild.text
+                rebuild_id = rebuild.json()["request_id"]
+                async with asyncio.timeout(120):
+                    while True:
+                        rebuild_state = await trial_query(
+                            "memory.text-index.rebuild-status",
+                            {"request_id": rebuild_id},
+                        )
+                        if rebuild_state["state"] == "SUCCEEDED":
+                            break
+                        assert rebuild_state["state"] != "FAILED", rebuild_state
+                        await asyncio.sleep(0.2)
+                assert rebuild_state["facet_count"] == len(projection)
+                async with host.store.pool.connection() as conn:
+                    restored = await (await conn.execute(
+                        sql.SQL(
+                            "SELECT count(*) AS n FROM {}.source_text_facets "
+                            "WHERE bot_id=%s AND source_unit_id=%s"
+                        ).format(sql.Identifier(memory_namespace)),
+                        (settings.bot_id, unit_evidence["source_unit_id"]),
+                    )).fetchone()
+                assert restored["n"] == len(projection)
             image_reads = (await host._kernel.audit.scan(
                 action="memory.trial.image", limit=10,
             ))["records"]
