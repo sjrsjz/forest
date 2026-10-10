@@ -406,12 +406,59 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
             )).fetchone())["result"]
         assert (await cancel_work("query/status"))["value"]["status"] == "TERMINAL"
         await register_query("query/cancel-pending")
+        await ready_facet("query/cancel-facet", "query-input", "query/cancel-pending")
+        await execute(
+            "INSERT INTO {}.embedding_facets (bot_id,facet_id,purpose,query_id,input_kind,"
+            "input_ref,input_revision,source_unit_id,source_revision,part_id,modality,"
+            "selector_start_char,selector_end_char,input_payload_id,input_payload_digest,"
+            "facet_content_digest,input_media_type,input_byte_length,space_id,"
+            "accepted_deletion_epoch) VALUES "
+            "(%s,'query/cancel-pending-facet','QUERY','query/cancel-pending',"
+            "'SOURCE_UNIT','query-input',1,'query-input',1,'text','TEXT',0,1,"
+            "'input/cancel-pending',%s,%s,'text/plain',1,'space/test',0)",
+            (store.bot_id, digest, digest),
+        )
         pending_request = {**request,"input":{**request["input"],
             "query_id":"query/cancel-pending"}}
         assert (await request_work(pending_request))["ok"]
         cancelled = await cancel_work("query/cancel-pending")
         assert cancelled["value"]["status"] == "CANCELLED"
         assert await cancel_work("query/cancel-pending") == cancelled
+        closed_ref = await (await execute(
+            "SELECT state FROM {}.vector_index_deletions "
+            "WHERE bot_id=%s AND index_ref_id='query/cancel-facet'",
+            (store.bot_id,),
+        )).fetchone()
+        assert closed_ref == {"state": "PENDING"}
+        pending_ref = await (await execute(
+            "SELECT state FROM {}.vector_index_deletions "
+            "WHERE bot_id=%s AND index_ref_id='query/cancel-pending-facet'",
+            (store.bot_id,),
+        )).fetchone()
+        assert pending_ref == {"state": "PENDING"}
+        no_claim = (await (await execute(
+            "SELECT {}.memory_claim_embedding_batch(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": store.bot_id, "generation_id": "generation/test"}),
+             Jsonb({"protocol": "forest.owned-work-claim-request/1",
+                    "claim_token": "embedding/after-cancel", "lease_seconds": 30})),
+        )).fetchone())["result"]
+        assert no_claim["ok"] and no_claim["value"] is None
+        late_part = {
+            "protocol": "forest.memory-query-part-facets/1",
+            "query_id": "query/cancel-pending", "space_id": "space/test",
+            "input_identity": {"kind": "SOURCE_UNIT", "ref": "query-input", "revision": 1},
+            "source_unit_id": "query-input", "source_revision": 1,
+            "batch_index": 0, "part_id": "text", "facets": [],
+        }
+        late_result = (await (await execute(
+            "SELECT {}.memory_prepare_facets(%s::jsonb,%s::jsonb) AS result",
+            (Jsonb({"bot_id": store.bot_id, "operation_id": "late/cancelled",
+                    "participant_input_digest": digest}),
+             Jsonb({"protocol": "forest.uow-step/1",
+                    "caller": {"component_id": "memory.graph"},
+                    "input": late_part, "prior": {}})),
+        )).fetchone())["result"]
+        assert late_result["error"]["code"] == "MEMORY_QUERY_CLOSED"
         await register_query("query/cancel-claimed")
         claimed_request = {**request,"input":{**request["input"],
             "query_id":"query/cancel-claimed"}}
@@ -473,6 +520,35 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
             "(%s,'query/one','query/facet','seed',1,'document/seed',1,0.9)",
             (store.bot_id,),
         )
+
+        # A terminal recall atomically fences every existing query ref. Roll
+        # the probe back so this query can still exercise the freeze path.
+        with pytest.raises(RuntimeError, match="rollback terminal"):
+            async with conn.transaction():
+                await execute(
+                    "INSERT INTO {}.query_recall_work "
+                    "(bot_id,query_id,deadline_at) VALUES "
+                    "(%s,'query/one',clock_timestamp()+interval '1 minute')",
+                    (store.bot_id,),
+                )
+                await execute(
+                    "UPDATE {}.query_recall_work SET state='FAILED',"
+                    "last_error_code='MEMORY_RECALL_DEADLINE' "
+                    "WHERE bot_id=%s AND query_id='query/one'",
+                    (store.bot_id,),
+                )
+                retirement = await (await execute(
+                    "SELECT index_ref_id,state FROM {}.vector_index_deletions "
+                    "WHERE bot_id=%s AND index_ref_id='query/facet'",
+                    (store.bot_id,),
+                )).fetchone()
+                assert retirement == {"index_ref_id": "query/facet", "state": "PENDING"}
+                raise RuntimeError("rollback terminal")
+        assert (await (await execute(
+            "SELECT count(*) AS n FROM {}.vector_index_deletions "
+            "WHERE bot_id=%s AND index_ref_id='query/facet'",
+            (store.bot_id,),
+        )).fetchone())["n"] == 0
 
         async def read_neighbours(_port, body, **_kwargs):
             return await neighbours(body["query_id"], body["source_unit_id"], body["association_limit"])

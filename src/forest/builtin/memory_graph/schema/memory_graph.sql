@@ -1336,6 +1336,28 @@ CREATE TABLE vector_index_deletions (
     CHECK ((claim_token IS NULL) =
         (claim_payload IS NULL AND lease_deadline IS NULL))
 );
+-- A terminal recall can race with a late facet/embedding attempt. Close every
+-- existing query ref in the same transaction as the terminal state change.
+CREATE FUNCTION memory_retire_terminal_query_refs()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    INSERT INTO __forest_module_schema__.vector_index_deletions(
+        bot_id,index_ref_id,space_id,deletion_epoch)
+    SELECT f.bot_id,f.facet_id,f.space_id,f.accepted_deletion_epoch
+    FROM __forest_module_schema__.embedding_facets f
+    WHERE f.bot_id=NEW.bot_id AND f.query_id=NEW.query_id
+      AND f.purpose='QUERY'
+    ON CONFLICT (bot_id,index_ref_id) DO NOTHING;
+    RETURN NEW;
+END;
+$$;
+CREATE TRIGGER query_recall_terminal_vector_retirement
+    AFTER UPDATE OF state ON query_recall_work
+    FOR EACH ROW
+    WHEN (NEW.state IN ('READY','FAILED','CANCELLED')
+          AND OLD.state IS DISTINCT FROM NEW.state)
+    EXECUTE FUNCTION memory_retire_terminal_query_refs();
+
 CREATE TABLE vector_publish_batches (
     bot_id text NOT NULL,
     attempt_id text NOT NULL,
@@ -5086,6 +5108,7 @@ DECLARE
     trial_row __forest_module_schema__.memory_trial_inputs%ROWTYPE;
     trial_part_row __forest_module_schema__.memory_trial_parts%ROWTYPE;
     query_row __forest_module_schema__.memory_queries%ROWTYPE;
+    recall_state text;
     domain_row __forest_module_schema__.memory_domains%ROWTYPE;
     existing_row __forest_module_schema__.embedding_facets%ROWTYPE;
     operation_row __forest_module_schema__.facet_preparation_operations%ROWTYPE;
@@ -5180,6 +5203,18 @@ BEGIN
                 'source_unit_id',source_id_value,'query_id',body->>'query_id',
                 'input_identity',body->'input_identity',
                 'batch_index',batch_index_value,'facet_count',facet_count)));
+    END IF;
+    IF purpose_value='QUERY' THEN
+        -- Share-lock the work row so a terminal update cannot cross this
+        -- transaction's new facet membership before its retirement trigger.
+        SELECT state INTO recall_state
+        FROM __forest_module_schema__.query_recall_work
+        WHERE bot_id=requested_bot AND query_id=target_id_value FOR SHARE;
+        IF recall_state IN ('READY','FAILED','CANCELLED') THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_QUERY_CLOSED',
+                    'message','Query no longer accepts new facets','status',409));
+        END IF;
     END IF;
     SELECT * INTO domain_row FROM __forest_module_schema__.memory_domains
     WHERE bot_id=requested_bot FOR SHARE;
@@ -5510,6 +5545,11 @@ BEGIN
         ) trial_member ON true
         WHERE ci.bot_id=requested_bot AND ci.claim_id=requested_claim
           AND f.state=expected_state AND f.space_id=expected_space
+          AND (f.purpose='DOCUMENT' OR NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.query_recall_work w
+              WHERE w.bot_id=f.bot_id AND w.query_id=f.query_id
+                AND w.state IN ('READY','FAILED','CANCELLED')
+          ))
           AND f.current_attempt_id IS NOT DISTINCT FROM expected_attempt
           AND f.accepted_deletion_epoch<=epoch_number
           AND (source_member.eligible IS NOT NULL OR trial_member.eligible IS NOT NULL)
@@ -8636,6 +8676,11 @@ BEGIN
         WHERE f.bot_id=requested_bot
           AND f.state='PENDING' AND f.space_id=domain_space
           AND f.next_attempt_at<=clock_timestamp()
+          AND (f.purpose='DOCUMENT' OR NOT EXISTS (
+              SELECT 1 FROM __forest_module_schema__.query_recall_work w
+              WHERE w.bot_id=f.bot_id AND w.query_id=f.query_id
+                AND w.state IN ('READY','FAILED','CANCELLED')
+          ))
           AND (source_data.conversation_ref IS NOT NULL
                OR trial_data.payload_owner_id IS NOT NULL)
           AND NOT EXISTS (
