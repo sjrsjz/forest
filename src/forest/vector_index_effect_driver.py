@@ -82,6 +82,7 @@ class MilvusVectorIndexEffectDriver:
         self.collection_name = vector_collection_name(bot_id, configuration["space_id"])
         self.client = None
         self.accepting = False
+        self.rebuild_required = False
         self._sweep_task = None
 
     async def start(self) -> None:
@@ -101,12 +102,21 @@ class MilvusVectorIndexEffectDriver:
             token=token,
             timeout=float(self.configuration["timeout_seconds"]),
         )
-        await self._ensure_collection()
+        try:
+            await self._ensure_collection()
+        except BaseException:
+            client, self.client = self.client, None
+            try:
+                await client.close()
+            except Exception:
+                _LOG.warning("Vector index client close failed after startup error")
+            raise
         self.accepting = True
         self._start_sweeper()
 
     def _start_sweeper(self) -> None:
-        if self.service_id == "vector.index.delete" and self._sweep_task is None:
+        if (self.service_id == "vector.index.delete"
+                and not self.rebuild_required and self._sweep_task is None):
             self._sweep_task = asyncio.create_task(self._sweep_tombstones())
 
     async def _stop_sweeper(self) -> None:
@@ -154,6 +164,14 @@ class MilvusVectorIndexEffectDriver:
                             "Milvus collection layout differs",
                             409,
                         )
+                    return
+                if await self.refs.has_active_refs():
+                    self.rebuild_required = True
+                    _LOG.error(
+                        "Vector collection missing with active refs; rebuild required "
+                        "(bot_id=%s, space_id=%s)",
+                        self.bot_id, self.configuration["space_id"],
+                    )
                     return
                 schema = self.client.create_schema(
                     auto_id=False, enable_dynamic_field=False
@@ -212,6 +230,12 @@ class MilvusVectorIndexEffectDriver:
     async def invoke(self, payload, *, scope, invocation):
         await self._admit(scope)
         self._check_space(payload["space_id"])
+        if self.rebuild_required and self.service_id != "vector.index.delete":
+            raise ForestError(
+                "VECTOR_INDEX_REBUILD_REQUIRED",
+                "Published vector refs require index reconstruction",
+                503,
+            )
         if self.service_id == "vector.index.upsert":
             return await self._upsert(payload)
         if self.service_id == "vector.index.search":
@@ -336,10 +360,12 @@ class MilvusVectorIndexEffectDriver:
                     await self.refs.record_tombstone(
                         conn, ref_id=ref_id, existing=existing
                     )
-                async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
-                    await self.client.delete(
-                        collection_name=self.collection_name, ids=list(refs)
-                    )
+                # With no collection, the durable tombstone is the deletion result.
+                if not self.rebuild_required:
+                    async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                        await self.client.delete(
+                            collection_name=self.collection_name, ids=list(refs)
+                        )
         except ForestError:
             raise
         except (TimeoutError, MilvusException, OSError, psycopg.Error) as exc:

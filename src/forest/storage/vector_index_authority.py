@@ -15,6 +15,21 @@ class VectorIndexRefRepository:
     def _table(self):
         return sql.Identifier(self.namespace, "vector_index_refs")
 
+    async def has_active_refs(self) -> bool:
+        """Whether PostgreSQL still expects rows in the derived collection."""
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await conn.execute("SET TRANSACTION READ ONLY")
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT EXISTS(SELECT 1 FROM {} WHERE bot_id=%s "
+                        "AND state='ACTIVE') AS has_active"
+                    ).format(self._table()),
+                    (self.store.bot_id,),
+                )
+            ).fetchone()
+            return bool(row["has_active"])
+
     async def lock(self, conn, ref_id: str) -> dict | None:
         await conn.execute(
             "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",

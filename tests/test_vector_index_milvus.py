@@ -109,6 +109,92 @@ async def test_embedding_and_vector_identity_are_package_declared_immutable_path
 
 @pytest.mark.asyncio
 @pytest.mark.postgres
+async def test_missing_collection_with_active_refs_requires_rebuild(clean_authority, tmp_path):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    configuration = official_builtin_configuration(
+        "vector_index_milvus",
+        overrides={"space_id": f"space/test/{uuid4().hex}", "dimensions": 4},
+    )
+    await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/vector_index_milvus",
+        PackageCatalog(tmp_path / "vector-packages"),
+        store, installer, kernel=kernel, initial_configuration=configuration,
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "vector-index.milvus": lambda *_args: None,
+        }),
+    )
+
+    class MissingCollection:
+        closed = False
+
+        async def has_collection(self, *, collection_name):
+            return False
+
+        def create_schema(self, **_values):
+            raise AssertionError("An empty collection must not replace published refs")
+
+        async def close(self):
+            self.closed = True
+
+    clients = []
+
+    def client_factory(**_values):
+        client = MissingCollection()
+        clients.append(client)
+        return client
+
+    async def verify_generation(**_values):
+        return None
+
+    async def resolve_token(_ref, _revision):
+        return ""
+
+    identity = SimpleNamespace(
+        component_id="vector.index", generation_id="generation/test"
+    )
+    runtime = SimpleNamespace(verify_generation_member=verify_generation)
+
+    def driver_for(service):
+        return MilvusVectorIndexEffectDriver(
+            configuration, 1, identity,
+            {"name": service, "kind": "vector-index.milvus"},
+            bot_id=store.bot_id, store=store, runtime=runtime,
+            token_resolver=resolve_token, client_factory=client_factory,
+        )
+
+    search = driver_for("vector.index.search")
+    delete = driver_for("vector.index.delete")
+    async with store.pool.connection() as conn, conn.transaction():
+        await search.refs.record_active(
+            conn, ref_id="ref/document/existing",
+            input_digest="sha256:" + "0" * 64,
+        )
+    await search.start()
+    await delete.start()
+    assert search.accepting and search.rebuild_required
+    assert delete.accepting and delete.rebuild_required
+    with pytest.raises(ForestError) as missing:
+        await search.invoke(
+            {"query_ref_id": "ref/query", "space_id": configuration["space_id"], "limit": 1},
+            scope=identity, invocation=SimpleNamespace(operation_id="search"),
+        )
+    assert missing.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
+    assert await delete.invoke(
+        {"ref_ids": ["ref/document/existing"], "space_id": configuration["space_id"]},
+        scope=identity, invocation=SimpleNamespace(operation_id="delete"),
+    ) == {
+        "ref_ids": ["ref/document/existing"], "space_id": configuration["space_id"],
+    }
+    async with store.pool.connection() as conn, conn.transaction():
+        assert (await delete.refs.lock(conn, "ref/document/existing"))["state"] == "TOMBSTONED"
+    await search.close()
+    await delete.close()
+    assert all(client.closed for client in clients)
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres
 async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_path):
     uri = os.environ.get("FOREST_TEST_MILVUS_URI")
     if not uri:
