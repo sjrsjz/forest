@@ -21,3 +21,5 @@ v25 使用独立的 `forest_deployment_v25`、`forest_host_v25`、Bot 物理库�
 ## 2026-10-11 Web 管理入口实调
 
 使用 v25 管理员会话经 `/management/v1/scopes/resolve` 解析 Bot 管理 scope，再按 scope 路由调用 `vector.index.summary`：索引健康 `READY`、引用水位 0、绑定修订 1、无活动重建。经同一 Bot scope 下载 `vector.index.workspace` 的包自带管理页，15,728 字节与运行时贡献清单的 SHA-256 相符。直接把 `forest-main-v25` 作为 URL 中的 scope ID 会得到 `BOT_MANAGEMENT_SCOPE_NOT_FOUND`，因为 Bot 身份与管理 scope ID 是不同字段；本次未发起重建或其他写动作。
+
+Memory 管理入口同样经真实会话验证：按许可群号筛选主干得到 1 条，模块自带页面 81,413 字节与运行时 SHA-256 一致。来源查询默认只看 `ELIGIBLE`，此时返回 0；明确筛选 `REGISTERED` 后首个 2 条分页存在且 `has_more=true`，两条均为文本、`NO_FACETS`。这说明这些来源尚未取得归档资格：Memory 在归档资格提交后才把来源升为 `ELIGIBLE` 并入列文档 facet 工作；不是适配器丢失入站。管理页已提供“待归档”筛选。该在线检查未人为推动归档或调用嵌入服务。
