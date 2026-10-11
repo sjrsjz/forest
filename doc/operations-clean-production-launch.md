@@ -1,6 +1,6 @@
 # 干净生产启动链
 
-当前在线 `forest-main-v22` 的基线与回退边界见 [v22 在线切换记录](live-v22-cutover-2026-10-11.md)；旧 `forest-main` 的数据和传输热修分别见 [v21 切换记录](live-v21-cutover-2026-10-09.md)与[传输热修记录](live-v21-transport-hotfix-2026-10-11.md)。下文带有 v15/v16/v19 候选编号的状态快照是历史记录。
+截至 2026-10-11，在线 Bot 为 `forest-main-v25`，Supervisor 使用 `forest:runtime-candidate-3577fc2`；当前状态、管理入口、独立数据库和回退边界见 [v25 在线验收记录](live-v25-cutover-2026-10-11.md)。v24 Bot 保持 OFFLINE，v21–v24 与下文 v15/v16 的切换记录均为历史快照，不能据此操作当前实例。
 
 本文记录多 Bot Supervisor 的生产启动入口，以及独立 `forest bot` 诊断路径。宿主持有进程、数据库连接、HostLease 和 RuntimeGraph 生命周期；Adapter、触发策略、Conversation、Agent、Memory、Provider 与 Delivery 作为 Bot 作用域的平级 Generation 成员运行。Bot 基础身份和期望运行意图归部署内核，管理 builtin 通过受限端口操作。
 
@@ -159,19 +159,19 @@ Compose 中无需设置 `FOREST_DEPLOYMENT_DSN` 或 `FOREST_HOST_DSN`：Supervis
 
 Supervisor 同时启动多作用域 WebUI，并把 Host Graph 作为独立作用域注册；Host 包自带资源清单与模块配置页经 Host Web 回执授权。页面从 deployment provider 动态发现 Bot 目录、Secret、Provisioning 与管理账号工作区；可以写入不回显的版本化 Secret、管理 ADMIN/AUDITOR 账号及会话、在 Host 存储模块提交建库请求，待结算后使用对应 storage profile，并从 Bootstrap Contributor 目录逐模块设置 Provider、VL Embedding、触发策略、Shell、Agent 和 OneBot 后冻结 profile、加入供应队列。登录使用 HttpOnly、SameSite 服务端会话；POST 同时校验精确 Origin 和 CSRF，角色在 HTTP 入口与目标作用域网关复核。Bot 进入 ONLINE 后，壳层作用域选择器通过注册的 Bot provider 打开该 Bot 的准确 RuntimeGraph 模块工作区；壳层不复制 Agent、Memory、OneBot 或 Job 页面。下线先禁止新管理调用，已接纳调用排空后再关闭 Bot Host。
 
-## v15 候选切换边界（2026-10-09）
+## 当前 v25 验收与回退边界（2026-10-11）
 
-当前隔离候选为 forest-live-candidate-v16-supervisor 与 forest-live-candidate-v15-pg，WebUI 只监听本机 127.0.0.1:18091。v16 使用提交 634fe37 的镜像，复用 v15 的独立 Secret、PostgreSQL 与官方包卷；v15 Supervisor 已停止、容器保留。forest-main 与 mock Bot 均为 READY/OFFLINE，真实 Bot 从未发布 Graph。mock Bot 已在 Docker 内部假 OneBot 上完成 v16 冷恢复离线→在线→离线，22 个成员 ACTIVE 时 Embedding 精确采用官方 2.8.1 工件；验收后 Graph STOPPED、假 OneBot 已移除、mock 凭据保持占位值。真实 Bot 只许可群 933179609，冻结的 VL 模型为 Qwen/Qwen3-VL-Embedding-8B、4096 维。旧 forest-clean-supervisor-1 仍在线，不可同时启动候选真实 QQ Bot。
+`forest-candidate-v25-supervisor` 的 WebUI 监听本机 `127.0.0.1:18096`；部署、Host、Bot 数据库与包卷均独立。只读复核显示 Supervisor healthy、Bot 图 22/22 ACTIVE，v24/v25 到树莓派 OneBot 的已建立连接为 0/1。当前 Bot 的 OneBot `self_id` 为 `3605196653`，触发策略只允许群 `933179609` 显式 @ 该账号；此前许可群入站均未满足这一条件，Agent Run 为 0。真实 @→Agent→Provider→Delivery 尚未验收，不能用连接数或其他群的入站代替。
 
-切换时先复核上述三方状态及候选凭据、群白名单和 WebUI 运行意图，再让旧 Forest Supervisor 与树莓派 AliceBot 停止向同一个 QQ 身份提供服务；确认旧 OneBot 连接退出后，才把候选 `forest-main` 的期望状态改为 `ONLINE`。只在许可群做低频人工触发，同时记录候选 Bot Graph、OneBot 连接、Agent Run、Delivery 回执和 Memory 状态；`scripts/observe_live_bot.py` 的只读采样不能替代实际群回复检查。切换不迁移旧预发布 Bot 数据库，也不删除旧卷。若候选失败，先将其真实 Bot 改回 `OFFLINE` 并确认连接关闭，再恢复旧 Forest 和树莓派服务；不得让回滚实例与候选同时使用该 QQ 身份。任何 `UNKNOWN` 发送或模型效果仍按各模块的证据协议核对，不靠重复群消息探测。
+回退前重新读取运行意图、运行观察与 OneBot 连接：先将 v25 Bot 改为 OFFLINE，确认其连接退出，再将 v24 Bot 改为 ONLINE；两者不可同时持有同一 QQ 身份。切换操作应使用新的幂等键与当前意图修订，不重放旧切换请求。任何 `UNKNOWN` 发送或模型效果按所属模块的证据协议恢复，不能靠重复群消息探测。实际步骤与保存的旧容器见 [v25 在线验收记录](live-v25-cutover-2026-10-11.md)。
 
-当前旧 Forest Supervisor 的停机尚未获得执行授权，候选真实 Bot 因此保持离线。执行切换前需重新读取实际容器和服务状态；不要把此快照当成当前运行事实。
+## 历史 v15/v16 候选（2026-10-09）
 
-隔离候选后续只对 mock Bot 发布并选择 `shell.command` 1.3.3，Graph 10→11，当前 mock Bot 已回到 READY/OFFLINE、假 OneBot 已移除；真实 `forest-main` 仍未上线。该次假群消息验证了混合内容的 Shell 所有权和 `CONTROL_COMMAND` 分类。随后源码的 Shell 1.3.4 更正私有 SQL 拒绝码，因存储基线改变尚未进入当前候选，切换生产前须以干净候选库重新物化该基线并验证。
+当时 v16 复用 v15 的隔离 Secret、PostgreSQL 与包卷；mock Bot 在 Docker 内部假 OneBot 完成冷恢复和 Shell 混合内容验证，真实 Bot 保持离线。随后已通过新的独立候选和多次受控切换推进到 v25。原“旧 Supervisor 停机未获授权、候选必须离线”的判断只描述 2026-10-09 的旧现场，现已失效。
 
 ## 仍需补齐的能力
 
 - 树莓派与 PC 之间的长时实网抖动和持续真实流量验证；loopback 断连、action 不确定性、1000 条有界顺序流、过载显式失败、候选发布失败回滚和 owned task 崩溃后的 Supervisor 隔离已经自动化覆盖；
 - 许可群中的低频消息、图片和排队行为需由真人触发完成最终验收，自动验收不得主动向群发送消息。
 
-上述缺口不能由组合根中的特殊判断补齐，必须继续作为平级模块和内核协调 UoW 接入。
+真实验收应记录 Bot Graph、Agent Run、Provider Effect、Delivery 回执和 Memory 状态；只读采样不能替代实际群回复检查。
