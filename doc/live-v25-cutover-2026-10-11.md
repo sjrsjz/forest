@@ -38,3 +38,12 @@ Memory 管理入口同样经真实会话验证：按许可群号筛选主干得�
 ## 2026-10-11 真实 VL 管理召回试验
 
 在 v25 认证 Bot 管理 scope 中分别上传一段短文本和一张本地生成的 64×64 PNG，以 `memory.trial.start` 各发起一次查询。两个试验均经过 CLAIMED/PENDING 到达 READY；`memory.trial.result` 各返回 0 项、`truncated=false`、无截断原因。只读 Bot 库进一步核对：两个查询分别有一个 `TEXT` 和 `IMAGE` 的 READY QUERY facet，预算账本累计 2 次已结算嵌入请求、48 个计费 token、0 次 UNKNOWN。当前库的群聊来源尚未归档为 ELIGIBLE，故空结果符合资格状态；这验证真实 QiYu VL 端点接受文本与图片并完成查询冻结，不证明非空图的跨模态命中。本次没有向 QQ 发送消息。
+
+
+## 2026-10-11 已响应模型结果的阻塞诊断
+
+许可群 933179609 的一个 Run 自 10:25:50 UTC 起保持 BLOCKED_UNKNOWN，10:35:50 UTC 截止时间已过。只读账本确认 Provider 在 10:26:46 UTC 保存了 model.result 和 model.usage；结果为 RESPONDED、finish_reason=length、text 为空、error_code=MODEL_OUTPUT_INCOMPLETE。旧版 Provider 4.4.1 的派发输出 schema 只接受 RESPONDED.error_code=null，故通用服务账本把已经完成的调用记为 RUNTIME_SERVICE_OUTPUT_INVALID；旧版只读 lookup 又拒绝该真实结果，Agent/Effect 无法对账。不能把原 Attempt 当作未发送重试。
+
+提交 85c7d34 将 Provider 升至 4.4.2、Agent 升至 4.49.1，保留已响应质量错误并经原 Attempt 转成协议修复或终结事实；过期 Run 不再发起修复调用。57 项模型/Agent 定向离线测试通过，两包在本地和候选镜像内部的工件摘要一致。仅覆盖这八个修复文件的镜像 forest:runtime-candidate-quality-85c7d34 已构建，基础镜像仍是在线使用的 0968bfb；预创建容器的环境、挂载、网络、端口与资源限制均与线上一致，但未启动，随后已清理。在线 v25 仍使用原镜像和原包。
+
+12:43 UTC 更新后的只读观察器确认 Supervisor healthy、22/22 ACTIVE，群分类水位 22、Context 水位 17、活动 Run 1 且已过期，明确报 AGENT_RUN_DEADLINE_EXPIRED。当前 Agent 的 replacement guard 对绑定被替换 Provider 的 UNKNOWN 请求给出 blocker，因此不能直接热换 Provider；镜像更新本身也不会覆盖已发布包选择。需先通过受限、可验证的原 Attempt 对账端口收敛旧 Run，或在全新隔离 Bot 中完成切换。没有停止在线容器、修改线上库或发送 QQ 消息。
