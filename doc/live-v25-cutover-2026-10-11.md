@@ -30,3 +30,8 @@ Memory 管理入口同样经真实会话验证：按许可群号筛选主干得�
 重启后部署图仍选中 `deployment.package-registry` 1.6.2；镜像升级不会擅自覆盖已发布的包选择。目录已包含官方 1.6.3 工件 `sha256:277c38df2e8eaacbb9f074782ecea395fd2da54bcfb1745a7faa5bcf3164f701`。通过认证管理端读取图修订 4，预览只替换该模块、保留其他 7 个部署模块，再提交带修订和计划摘要的 `module.replace`。操作 `web:sha256:94dcabcf01f9e99c4a2d89f9b269b70b05e15084b4c72bef5818fc3e72dd5c3d` 结算 `SUCCEEDED`；部署图修订 5 的该模块 `ACTIVE`，版本 1.6.3。此步骤验证了部署模块的真实在线代际热替换，而不是仅验证进程镜像更新。
 
 替换后 Web 管理端的向量索引查询为 READY、绑定修订 1；向量与记忆包自带页面字节均匹配运行时声明的 SHA-256。Bot 图 12 为 22/22 ACTIVE，Supervisor 仍 healthy 且连接数仍为 0/1。只读 Bot 库核对 inbox/context 各 203 条、Memory 来源 202 条、Agent Run 0；203 条全部为 NO_TRIGGER（非许可群 189、许可群未明确 @ 当前账号 14）。唯一未建来源的消息由图片像素超限明确记为 `MEDIA_CAPTURE_UNAVAILABLE`。本次未主动发送 QQ 消息；许可群明确 @ 当前登录账号后的 Agent→Provider→Delivery 回执仍待低频真人验收。
+## 2026-10-11 媒体采集传输宿主更新
+
+提交 `0968bfb` 修复原生图片采集端的 DNS 验证/连接地址替换窗口，构建 `forest:runtime-candidate-0968bfb`。停机后保留原容器为 `forest-candidate-v25-supervisor-backup-12dbd5c`，新容器沿用 v25 的隔离数据库、包卷、只读密钥与 bootstrap、本机管理端口和资源/安全限制，并在启动前连接 PostgreSQL 与 Milvus 网络。旧容器停下后才启动新容器，避免同时连接 OneBot。
+
+恢复期间管理端先可用，Bot scope 曾短暂返回 `BOT_MANAGEMENT_UNAVAILABLE`，此时没有重启进程；随后 Bot 图 14 的 22/22 成员 ACTIVE，Supervisor `running/healthy`、重启次数 0。v24/v25 到树莓派 OneBot 的 ESTABLISHED 连接恢复为 0/1。认证管理端的向量与记忆查询、两份包自带页面 SHA-256 核对通过；部署图仍选中 `deployment.package-registry` 1.6.3。只读 Bot 库核对 inbox/context 各 234、Memory 来源 233、Agent Run 0；唯一缺失来源仍是已明确结算 `MEDIA_CAPTURE_UNAVAILABLE` 的超像素图片。最近入站已到 `2026-10-11T07:33:04Z`，许可群 14 条现有消息均为 `mention_required`。本次未主动发送 QQ 消息，明确 @ 当前 Bot 后的真实回复仍待低频验收。
