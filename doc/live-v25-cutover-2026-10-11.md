@@ -47,3 +47,15 @@ Memory 管理入口同样经真实会话验证：按许可群号筛选主干得�
 提交 85c7d34 将 Provider 升至 4.4.2、Agent 升至 4.49.1，保留已响应质量错误并经原 Attempt 转成协议修复或终结事实；过期 Run 不再发起修复调用。57 项模型/Agent 定向离线测试通过，两包在本地和候选镜像内部的工件摘要一致。仅覆盖这八个修复文件的镜像 forest:runtime-candidate-quality-85c7d34 已构建，基础镜像仍是在线使用的 0968bfb；预创建容器的环境、挂载、网络、端口与资源限制均与线上一致，但未启动，随后已清理。在线 v25 仍使用原镜像和原包。
 
 12:43 UTC 更新后的只读观察器确认 Supervisor healthy、22/22 ACTIVE，群分类水位 22、Context 水位 17、活动 Run 1 且已过期，明确报 AGENT_RUN_DEADLINE_EXPIRED。当前 Agent 的 replacement guard 对绑定被替换 Provider 的 UNKNOWN 请求给出 blocker，因此不能直接热换 Provider；镜像更新本身也不会覆盖已发布包选择。需先通过受限、可验证的原 Attempt 对账端口收敛旧 Run，或在全新隔离 Bot 中完成切换。没有停止在线容器、修改线上库或发送 QQ 消息。
+
+
+## 2026-10-11 故障实例暂时下线
+
+只读服务账本确认旧 Provider lookup 每次都将真实已响应结果判为 PROVIDER_RESULT_CORRUPT，Conversation Agent owned-work 随后以约一秒间隔重领，累计 6415 条失败操作。通过现有认证管理端用新的幂等键把 forest-main-v25 运行意图设为 OFFLINE，观察状态也已收敛为 OFFLINE；Supervisor、数据库、Provider 回执及原容器均保留。之后只读复查失败操作仍为 6415 条，最新时间固定在 12:55:00 UTC，没有继续增长。该动作没有删除消息/记忆、修改模型账本或发送 QQ 消息。重新设为 ONLINE 前必须先解决 UNKNOWN 对账或换用已验证的新隔离 Bot。
+
+
+## 2026-10-11 原结果对账与在线恢复
+
+确认 Bot 处于 OFFLINE 且 component.worker-host 选择账本没有 Agent/Provider 的显式固定摘要后，使用已验证约束的 forest:runtime-candidate-quality-85c7d34 替换 Supervisor 容器；旧容器停止并保留为 forest-candidate-v25-supervisor-backup-0968bfb-quality。新 Supervisor healthy、重启 0，沿用原部署/Host/Bot 库、密钥、包卷、管理端口及两个网络。通过原管理契约把 Bot 设回 ONLINE 后，冷启动图修订 16 的 22/22 成员 ACTIVE：Provider 4.4.2 摘要 sha256:cc22d87f233cc3cdcaaf734db54a54e46701faaefa5b49c6c97684bce1dbee1e，Agent 4.49.1 摘要 sha256:d0e2061d94285a0c4467f27ca2bff0e5ade9fc5612dbe382e90511f55bb0191d。由于旧活动图已停止，这是正常冷启动装配，未绕过活动图的 UNKNOWN 热替换围栏。
+
+旧 Run run:9b104319e5bd04f994e7bbd7d069887b9bb094f742bb81d224c018518e1eeca2 在 13:05:08 UTC 终结为 FAILED/AGENT_PROTOCOL_FAILED，协议失败事实为 AGENT_PROTOCOL_OUTPUT_INCOMPLETE。原 Request 只有 1 次 Attempt，原 Effect 只有 1 次；两者经已保存的 Provider 结果回查收敛为 SUCCEEDED，没有第二次模型派发。许可群 933179609 的分类与 Context 水位均为 25，执行槽已释放。20 秒三次只读观察均为零违约、活动 Run 0、过期 Run 0、待发送 0，最近 QQ 发送仍为 08:46:52 UTC 的旧回执。本次恢复没有向 QQ 主动发送新消息，也没有删除历史数据库。
