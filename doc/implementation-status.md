@@ -1218,4 +1218,6 @@ Memory 关系审核批准（2026-10-11）：`memory.graph` 1.91.0 / 私有 SQL 3
 
 Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.graph` 1.92.1 只调整模块 UI 和包版本，明确人工 `ASSOCIATES_WITH` 待批准时不参与联想扩散，自动贡献的人工复核不构成召回门槛；批准按钮也按人工关系和自动复核区分。JS 语法和官方包完整构建通过，SQL 仍为 3.90.0。v23 在线管理预检确认只替换 Memory 及共用 Worker/依赖边界的 Agent、Media、Conversation、Shell、OneBot Adapter、Delivery 七个 Generation，保留另 15 个；选择请求使 Bot 图 3→4，旧图 RETIRED，新图 22/22 ACTIVE，Supervisor healthy、0 次重启。已认证管理端返回活动 UI 的准确 SHA-256 字节；热换代期间 Inbox/Context/Memory 来源继续由 3 增至 9，均因群不在许可名单而静默归档，Agent Run 为 0。该证据证明相同 SQL 身份的真实包热替换与入站连续性，不证明 SQL 在线升级或许可群 @ 回复。
 
-2026-10-11 源码候选：`memory.graph` 1.93.0 / SQL 3.91.0 将图区域截断原因写入不可变召回账本，并贯通规范证据、管理试验和 Agent 投影；`agent.runtime` 4.48.0 与 `conversation.scheduler` 4.37.0 对齐证据协议。无截断、节点上限、种子上限及双上限均有明确原因；SQL 校验原因与截断标志、种子预算的一致性。隔离 PostgreSQL 的高扇出冻结用例及文本群聊到 Provider 的端到端用例通过，相关纯逻辑用例 56 通过。此源码候选尚未切换在线 v23：v23 仍运行 `memory.graph` 1.92.1 / SQL 3.90.0，下一次切换需采用新 Bot 物理库，不能对活动库直接套用新 baseline。
+2026-10-11 源码候选：`memory.graph` 1.93.0 / SQL 3.91.0 将图区域截断原因写入不可变召回账本，并贯通规范证据、管理试验和 Agent 投影；`agent.runtime` 4.48.0 与 `conversation.scheduler` 4.37.0 对齐证据协议。无截断、节点上限、种子上限及双上限均有明确原因；SQL 校验原因与截断标志、种子预算的一致性。隔离 PostgreSQL 的高扇出冻结用例及文本群聊到 Provider 的端到端用例通过，相关纯逻辑用例 56 通过。v23 活动库仍是 `memory.graph` 1.92.1 / SQL 3.90.0，不能原地套用新 baseline；随后按独立 Bot 物理库切换至 v24，见下文。
+
+2026-10-11 v24 隔离切换：提交 `735fbb4` 的镜像已在独立部署、Host、Bot 数据库启动；v23 先 OFFLINE，v24 后 ONLINE，22 个 Bot Generation ACTIVE，单条 OneBot 连接只属于 v24。v24 已持久接收 2 条非许可群消息且无缺失来源；许可群未触发 Agent，真实 QQ 回复仍待低频验收。操作与回退见 `doc/live-v24-cutover-2026-10-11.md`。
