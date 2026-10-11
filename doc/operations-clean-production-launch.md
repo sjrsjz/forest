@@ -13,7 +13,7 @@
 - `conversation.trigger-policy`、`conversation.scheduler`、`codec.onebot`；
 - `adapter.onebot`、`delivery`、`process.executor`、`job.scheduler`、`shell.command`。
 
-OneBot 消息进入后，Adapter 复核 Binding 与 HTTP 签名，通过冻结到准确 Generation 的 `codec.onebot` 契约取得规范消息，再提交载荷和平台观察。Codec 不接触凭据、Socket、Repository 或 Conversation。`conversation.trigger-policy` 根据冻结配置给出 `TRIGGER` 或 `NO_TRIGGER`；内核 OneBot ingress UoW 在同一事务中提交平台事件、Conversation Inbox、群主干 Memory 来源与分类结果。Scheduler 因此不再依赖测试或管理端手工补写触发记录。
+OneBot 消息进入后，Adapter 复核 Binding、连接世代与传输围栏，通过冻结到准确 Generation 的 `codec.onebot` 契约取得规范消息，再提交载荷和平台观察。Codec 不接触凭据、Socket、Repository 或 Conversation。`conversation.trigger-policy` 根据冻结配置给出 `TRIGGER` 或 `NO_TRIGGER`；内核 OneBot ingress UoW 在同一事务中提交平台事件、Conversation Inbox、群主干 Memory 来源与分类结果。Scheduler 因此不再依赖测试或管理端手工补写触发记录。
 
 群策略当前支持 `MENTION`、`ALL` 和 `DISABLED`。`MENTION` 只在许可群内且消息明确 `@` 当前 Bot 身份时触发 Agent；未触发消息仍进入该群 Conversation 的有序 Inbox 和短期上下文流水。每个群继续由单 Actor 排队，不同群可以并行。
 
