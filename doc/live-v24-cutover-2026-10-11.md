@@ -9,3 +9,5 @@ v24 复用现有 PostgreSQL 和 Milvus 服务，但使用独立的 `forest_deplo
 切换后只读探针看到 v24 的 2 条新入站均来自非许可群，均为 `FINAL/NO_TRIGGER group_not_allowed`；对应 Context 与 Memory 来源各 2 条，无缺失来源，Agent Run 为 0。许可群尚无真实 @ 入站，本次不能据此认定最新版本已完成模型回复、发送与长期图文负载验收。
 
 如需回退，必须先在 `127.0.0.1:18095` 将 `forest-main-v24` 设为 `OFFLINE` 并确认实际离线及 OneBot 连接关闭，再在 `127.0.0.1:18094` 将 `forest-main-v23` 设为 `ONLINE`。两边物理库和包卷暂时保留，历史数据没有自动合并路径。
+
+后续验收（2026-10-11）：当前源码的多 Bot Supervisor 生命周期与假 OneBot 跨群 Agent 端到端场景合计 4 passed（107.43 秒），覆盖多实例监督、跨群独立推进及来源归因。v24 管理面分别提交一次纯文本和一次 64×64 PNG 图片召回试验，二者均到 READY、结果为 0 项且 `truncation_reason=null`；只读账本确认各有一个 READY 的 QUERY facet，累计两次已结算嵌入请求、48 个计费 token、0 次 UNKNOWN。该结果证明真实 VL 嵌入端点接受两种输入并完成冻结，不证明非空图中的跨模态命中；许可群 @→回复仍待独立验收。

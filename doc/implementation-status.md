@@ -1221,3 +1221,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-11 源码候选：`memory.graph` 1.93.0 / SQL 3.91.0 将图区域截断原因写入不可变召回账本，并贯通规范证据、管理试验和 Agent 投影；`agent.runtime` 4.48.0 与 `conversation.scheduler` 4.37.0 对齐证据协议。无截断、节点上限、种子上限及双上限均有明确原因；SQL 校验原因与截断标志、种子预算的一致性。隔离 PostgreSQL 的高扇出冻结用例及文本群聊到 Provider 的端到端用例通过，相关纯逻辑用例 56 通过。v23 活动库仍是 `memory.graph` 1.92.1 / SQL 3.90.0，不能原地套用新 baseline；随后按独立 Bot 物理库切换至 v24，见下文。
 
 2026-10-11 v24 隔离切换：提交 `735fbb4` 的镜像已在独立部署、Host、Bot 数据库启动；v23 先 OFFLINE，v24 后 ONLINE，22 个 Bot Generation ACTIVE，单条 OneBot 连接只属于 v24。v24 已持久接收 2 条非许可群消息且无缺失来源；许可群未触发 Agent，真实 QQ 回复仍待低频验收。操作与回退见 `doc/live-v24-cutover-2026-10-11.md`。
+
+2026-10-11 v24 追加验收：隔离 PostgreSQL 的多 Bot 生命周期与跨群 Agent 链路 4 passed；在线管理试验分别完成一次文本和图片 VL 嵌入，两个 QUERY facet READY，预算账本为 2 次已结算、48 token、0 UNKNOWN。空库返回 0 项，尚不能替代有文档的图片召回及获准群真实回复。详见 `doc/live-v24-cutover-2026-10-11.md`。
