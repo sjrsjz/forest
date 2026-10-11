@@ -26,6 +26,12 @@
   <section id="relations" class="panel hidden">
     <div class="filters"><select id="endpoint-kind"><option>SOURCE_UNIT</option><option>ASSERTION</option><option>ENTITY</option><option>ARTIFACT</option></select><input id="endpoint-id" style="flex:1" placeholder="节点 ID；可从来源列表点击选取"><select id="relation-kind"><option value="">全部关系</option><option>ASSOCIATES_WITH</option><option>EVIDENCE</option><option>CONTRADICTS</option><option>SUBJECT_OF</option></select><select id="relation-origin"><option value="">全部来源</option><option>MANUAL</option><option>VECTOR</option><option>RULE</option><option>MODEL</option></select><select id="relation-review"><option value="">&#20840;&#37096;&#23457;&#26680;&#29366;&#24577;</option><option value="UNREVIEWED">&#26410;&#23457;&#26680;</option><option value="APPROVED">&#24050;&#25209;&#20934;</option></select><select id="relation-direction"><option value="">全部方向</option><option>OUTBOUND</option><option>INBOUND</option><option>UNDIRECTED</option></select><select id="relation-cross"><option value="">全部主干</option><option value="true">跨主干</option><option value="false">同主干</option></select><button id="relation-search">一跳列表</button><button id="relation-global">全局筛选</button></div>
     <div class="filters"><input id="relation-evidence-trunk" placeholder="证据主干 ID"><input id="relation-evidence-group" placeholder="证据群号"><input id="relation-evidence-author" placeholder="证据作者 ID"><span class="muted">三个条件须由同一条证据满足；全局结果的有向边按规范左右端点显示。</span></div>
+    <details id="relation-candidate"><summary>创建人工关系候选</summary>
+      <div class="filters"><select id="candidate-kind"><option>ASSOCIATES_WITH</option><option>EVIDENCE</option><option>CONTRADICTS</option><option>SUBJECT_OF</option></select><input id="candidate-key" placeholder="可选关系键"><input id="candidate-weight" type="number" min="0" max="1000000000000" step="1" value="900000" placeholder="权重（百万分之一）"></div>
+      <div class="filters"><input id="candidate-left-unit" placeholder="左端来源单元 ID"><input id="candidate-left-part" list="candidate-left-options" placeholder="左端证据 part ID"><datalist id="candidate-left-options"></datalist><button id="candidate-left-parts">读取左端 parts</button><span id="candidate-left-meta" class="muted"></span></div>
+      <div class="filters"><input id="candidate-right-unit" placeholder="右端来源单元 ID"><input id="candidate-right-part" list="candidate-right-options" placeholder="右端证据 part ID"><datalist id="candidate-right-options"></datalist><button id="candidate-right-parts">读取右端 parts</button><span id="candidate-right-meta" class="muted"></span></div>
+      <div class="filters"><button id="candidate-create">保存待审核候选</button><span id="candidate-state" class="muted">两端须为同一 Bot 的活动归档来源；人工联想须批准后才参与 Agent 召回。</span></div>
+    </details>
     <div class="filters"><label>跳数 <input id="graph-hops" type="number" min="1" max="3" value="2"></label><label>节点上限 <input id="graph-nodes" type="number" min="1" max="32" value="16"></label><label>边上限 <input id="graph-edges" type="number" min="1" max="32" value="16"></label><button id="relation-neighbourhood">多跳区域</button></div>
     <div id="relation-nodes" class="detail"></div><div id="relation-rows"></div><div class="pager"><span id="relation-count" class="muted"></span><button id="relation-next" disabled>下一页</button></div>
     <details id="journal-browser"><summary>关联学习日志（实时状态，按创建时间分页）</summary>
@@ -80,7 +86,7 @@
 </div>
 <script>
 (()=>{'use strict';
-  let port,nonce='',sequence=0,draft=null,sourcePage=null,sourcePageFilters='',sourceRequestSequence=0,trunkPage=null,trunkRequestSequence=0,facetPage=null,facetUnit=null,facetRequestSequence=0,attemptRequestSequence=0,currentAttempt=null,retryKey=null,relationPage=null,relationGlobal=false,journalPage=null,journalRequestSequence=0,retractionPage=null,retractionRequestSequence=0,forgetPlan=null,forgetTimer=null,trialTimer=null,trialPage=null,batchPage=null,batchPlan=null,batchTimer=null;
+  let port,nonce='',sequence=0,draft=null,sourcePage=null,sourcePageFilters='',sourceRequestSequence=0,trunkPage=null,trunkRequestSequence=0,facetPage=null,facetUnit=null,facetRequestSequence=0,attemptRequestSequence=0,currentAttempt=null,retryKey=null,relationPage=null,relationGlobal=false,candidateKey=null,candidatePartPages={left:null,right:null},journalPage=null,journalRequestSequence=0,retractionPage=null,retractionRequestSequence=0,forgetPlan=null,forgetTimer=null,trialTimer=null,trialPage=null,batchPage=null,batchPlan=null,batchTimer=null;
   const trialImageUrls=new Set();
   function clearTrialImages(){for(const url of trialImageUrls)URL.revokeObjectURL(url);trialImageUrls.clear();}
   const pending=new Map(),$=id=>document.getElementById(id);
@@ -224,6 +230,7 @@
       meta.textContent=`${item.traversal_depth?`\u7b2c ${item.traversal_depth} \u8df3 \u00b7 \u4ece ${item.from_kind}:${item.from_id} \u00b7 `:''}\u5173\u7cfb ${item.relation_id} \u00b7 \u8d21\u732e ${item.contribution_id} \u00b7 ${item.origin_kind} \u00b7 ${item.cross_trunk?'\u8de8\u4e3b\u5e72':'\u540c\u4e3b\u5e72'} \u00b7 \u6743\u91cd ${item.weight_micros}/1000000`;
       const evidence=document.createElement('div');evidence.className='detail';
       evidence.textContent=item.evidence.length?item.evidence.map(formatRelationSource).join('\n'):'\u6ca1\u6709\u5173\u7cfb\u5fc5\u8981\u8bc1\u636e';
+      if(item.proposed_by)meta.textContent+=' \u00b7 \u5019\u9009\u4eba '+item.proposed_by;
       if(item.review_state)meta.textContent+=' \u00b7 \u5ba1\u6838 '+item.review_state+(item.reviewed_by?'\uff08'+item.reviewed_by+' \u00b7 '+stamp(item.reviewed_at)+'\uff09':'');
       box.append(title,meta,evidence);
       if(item.evidence_count>item.evidence.length){
@@ -439,6 +446,57 @@
     $('relation-nodes').textContent='';renderRelationItems(page.items,page.snapshot_xid);
     $('relation-count').textContent=`${useGlobal?'全局':'一跳'}本页 ${page.items.length} 条 · 固定事实快照`;
     $('relation-next').disabled=!page.has_more;
+  }
+  async function loadCandidateParts(side){
+    const unit=$(`candidate-${side}-unit`).value.trim();
+    if(!unit)throw Error('请先填写来源单元 ID');
+    const previous=candidatePartPages[side];
+    const continuing=previous?.source_unit_id===unit&&previous.has_more;
+    const input={source_unit_id:unit,limit:16};
+    if(continuing)input.after_part_index=previous.next_after;
+    const button=$(`candidate-${side}-parts`);button.disabled=true;
+    try{
+      const page=await call('memory.sources.parts',input);
+      if($(`candidate-${side}-unit`).value.trim()!==unit)return;
+      const options=$(`candidate-${side}-options`);
+      if(!continuing)options.replaceChildren();
+      for(const part of page.items){
+        const option=document.createElement('option');option.value=part.part_id;
+        option.label=`${part.part_index} · ${part.part_kind} · ${part.media_type}`;
+        options.append(option);
+      }
+      candidatePartPages[side]={source_unit_id:unit,next_after:page.next_after,
+        has_more:page.has_more};
+      $(`candidate-${side}-meta`).textContent=`群 ${page.external_group_id??'非群来源'} · 主干 ${page.trunk_id??'—'} · 作者 ${page.author_subject_ref} · 已读取 ${options.children.length}/${page.part_count} parts`;
+      button.textContent=page.has_more?'继续读取 parts':'已读取全部 parts';
+      button.disabled=!page.has_more;
+    }catch(error){button.disabled=false;throw error;}
+  }
+  async function createRelationCandidate(){
+    const body={
+      relation_kind:$('candidate-kind').value,
+      left_source_unit_id:$('candidate-left-unit').value.trim(),
+      left_part_id:$('candidate-left-part').value.trim(),
+      right_source_unit_id:$('candidate-right-unit').value.trim(),
+      right_part_id:$('candidate-right-part').value.trim(),
+      weight_micros:Number($('candidate-weight').value),
+    };
+    const relationKey=$('candidate-key').value.trim();
+    if(relationKey)body.relation_key=relationKey;
+    if(!body.left_source_unit_id||!body.left_part_id||
+       !body.right_source_unit_id||!body.right_part_id||
+       !Number.isSafeInteger(body.weight_micros)||body.weight_micros<0||
+       body.weight_micros>1000000000000)throw Error('请填写两端来源、证据 part 和有效权重');
+    if(!candidateKey)candidateKey='relation-candidate:'+randomId();
+    const button=$('candidate-create');button.disabled=true;
+    try{
+      const created=await action('memory.relations.create-candidate',body,candidateKey);
+      candidateKey=null;
+      $('candidate-state').textContent=`待审核 ${created.relation_id} · 贡献 ${created.contribution_id} · ${created.cross_trunk?'跨主干':'同主干'}`;
+      $('relation-origin').value='MANUAL';$('relation-review').value='UNREVIEWED';
+      relationPage=null;
+      await loadRelations(false,true);
+    }finally{button.disabled=false;}
   }
   async function loadNeighbourhood(){
     const endpoint_id=$('endpoint-id').value.trim();
@@ -798,6 +856,19 @@
   document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>show(button.dataset.tab));document.querySelectorAll('[data-path]').forEach(input=>input.onchange=changeSettings);
   $('trunk-search').onclick=()=>loadTrunks().catch(error=>status(error.message));$('trunk-next').onclick=()=>loadTrunks(true).catch(error=>status(error.message));$('trunk-browser').ontoggle=()=>{if($('trunk-browser').open&&!trunkPage)loadTrunks().catch(error=>status(error.message));};
   $('source-search').onclick=()=>loadSources().catch(error=>status(error.message));$('source-next').onclick=()=>loadSources(true).catch(error=>status(error.message));$('facet-refresh').onclick=()=>loadSourceFacets().catch(error=>status(error.message));$('facet-state').onchange=()=>{facetPage=null;loadSourceFacets().catch(error=>status(error.message));};$('facet-next').onclick=()=>loadSourceFacets(true).catch(error=>status(error.message));$('relation-search').onclick=()=>loadRelations().catch(error=>status(error.message));$('relation-global').onclick=()=>loadRelations(false,true).catch(error=>status(error.message));$('relation-neighbourhood').onclick=()=>loadNeighbourhood().catch(error=>status(error.message));$('relation-next').onclick=()=>loadRelations(true).catch(error=>status(error.message));$('journal-search').onclick=()=>loadAssociationJournals().catch(error=>status(error.message));$('journal-next').onclick=()=>loadAssociationJournals(true).catch(error=>status(error.message));$('journal-browser').ontoggle=()=>{if($('journal-browser').open&&!journalPage)loadAssociationJournals().catch(error=>status(error.message));};$('plan').onclick=()=>{changeSettings();send('request-plan');status('服务端校验中');};
+  for(const id of ['candidate-key','candidate-weight','candidate-left-unit','candidate-left-part','candidate-right-unit','candidate-right-part'])$(id).oninput=()=>{candidateKey=null;};
+  for(const side of ['left','right']){
+    $(`candidate-${side}-unit`).oninput=()=>{
+      candidateKey=null;candidatePartPages[side]=null;
+      $(`candidate-${side}-options`).replaceChildren();
+      $(`candidate-${side}-meta`).textContent='';
+      const button=$(`candidate-${side}-parts`);button.disabled=false;
+      button.textContent=`读取${side==='left'?'左':'右'}端 parts`;
+    };
+    $(`candidate-${side}-parts`).onclick=()=>loadCandidateParts(side).catch(error=>status(error.message));
+  }
+  $('candidate-kind').onchange=()=>{candidateKey=null;};
+  $('candidate-create').onclick=()=>createRelationCandidate().catch(error=>status(error.message));
   $('retraction-search').onclick=()=>loadRetractions().catch(error=>status(error.message));
   $('retraction-next').onclick=()=>loadRetractions(true).catch(error=>status(error.message));
   $('retraction-browser').ontoggle=()=>{if($('retraction-browser').open&&!retractionPage)loadRetractions().catch(error=>status(error.message));};

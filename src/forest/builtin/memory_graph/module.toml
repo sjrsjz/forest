@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.91.0"
+version = "1.92.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -67,6 +67,7 @@ requests = [
   "domain.query:memory.query-relations",
   "domain.query:memory.search-relations",
   "domain.command:memory.approve-management-relation",
+  "domain.command:memory.create-management-relation-candidate",
   "domain.query:memory.forget-work-status",
   "domain.command:memory.promote-claimed-association",
   "domain.command:memory.stage-text-projection-rebuild",
@@ -289,9 +290,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.89.0"
+schema_version = "3.90.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "e9218cd3b0221152b7bc63b6f3dded1df8fe0585cdbfda8e315d1e5ae8914c6f"
+baseline_sha256 = "54943fbb9f3eb00c931688176303f935dd967df65d47ce3f3fb69b0334d958b5"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -372,6 +373,13 @@ contract = "1.0"
 function = "memory_query_forget_selection"
 input_schema = "schemas/forget-selection-query-input.json"
 output_schema = "schemas/forget-selection-query-output.json"
+
+[[components.domain_queries]]
+name = "memory.query-source-parts"
+contract = "1.0"
+function = "memory_query_source_parts"
+input_schema = "schemas/query-source-parts-input.json"
+output_schema = "schemas/query-source-parts-output.json"
 
 [[components.domain_queries]]
 name = "memory.query-relations"
@@ -491,6 +499,13 @@ contract = "1.0"
 function = "memory_promote_claimed_association"
 input_schema = "schemas/association-promotion-work-input.json"
 output_schema = "schemas/association-promotion-work-output.json"
+
+[[components.domain_commands]]
+name = "memory.create-management-relation-candidate"
+contract = "1.0"
+function = "memory_create_management_relation_candidate"
+input_schema = "schemas/create-relation-candidate-input.json"
+output_schema = "schemas/create-relation-candidate-output.json"
 
 [[components.domain_commands]]
 name = "memory.approve-management-relation"
@@ -629,6 +644,15 @@ audit = "SECURITY"
 timeout_s = 30
 
 [[components.management_queries]]
+id = "memory.sources.parts"
+port = "memory.query-source-parts"
+required_role = "ADMIN"
+audit = "SECURITY"
+default_limit = 16
+max_limit = 32
+timeout_s = 10
+
+[[components.management_queries]]
 id = "memory.relations.query"
 port = "memory.query-relations"
 audit = "SECURITY"
@@ -747,6 +771,13 @@ timeout_s = 30
 [[components.management_actions]]
 id = "memory.text-index.rebuild"
 port = "memory.enqueue-text-projection-rebuild"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "memory.relations.create-candidate"
+port = "memory.create-management-relation-candidate"
 priority = "P1"
 actor_field = "requested_by"
 timeout_s = 15

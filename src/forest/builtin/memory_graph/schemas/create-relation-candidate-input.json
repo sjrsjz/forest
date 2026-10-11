@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["relation_kind", "left_source_unit_id", "left_part_id", "right_source_unit_id", "right_part_id", "weight_micros", "requested_by"],
+  "properties": {
+    "relation_kind": {"enum": ["ASSOCIATES_WITH", "EVIDENCE", "CONTRADICTS", "SUBJECT_OF"]},
+    "relation_key": {"type": "string", "maxLength": 256},
+    "left_source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "left_part_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "right_source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "right_part_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "weight_micros": {"type": "integer", "minimum": 0, "maximum": 1000000000000},
+    "requested_by": {"type": "string", "minLength": 1, "maxLength": 256}
+  }
+}

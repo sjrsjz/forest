@@ -548,6 +548,20 @@ CREATE INDEX relation_retractions_actor_idx ON relation_retractions(
     bot_id,actor_subject_ref,created_at DESC,operation_id DESC
 );
 
+CREATE UNIQUE INDEX relation_manual_active_unique ON relation_contributions(
+    bot_id,relation_id
+) WHERE origin_kind='MANUAL' AND active;
+
+CREATE TABLE manual_relation_candidates (
+    bot_id text NOT NULL,
+    contribution_id text NOT NULL,
+    actor_subject_ref text NOT NULL CHECK (octet_length(actor_subject_ref) BETWEEN 1 AND 256),
+    created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    PRIMARY KEY (bot_id,contribution_id),
+    FOREIGN KEY (bot_id,contribution_id,created_xid)
+        REFERENCES relation_contributions(bot_id,contribution_id,created_xid)
+);
+
 CREATE TABLE relation_approvals (
     bot_id text NOT NULL,
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
@@ -2246,10 +2260,15 @@ $$;
 
 CREATE FUNCTION memory_graph_association_visible(
     requested_bot text, contribution_ref text, contribution_xid xid8,
-    target_ref text, graph_snapshot_value pg_snapshot, requested_query text,
+    origin_kind_value text, target_ref text, graph_snapshot_value pg_snapshot, requested_query text,
     conversation_value text, cut_value bigint
 ) RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     SELECT pg_visible_in_snapshot(contribution_xid,graph_snapshot_value)
+       AND (origin_kind_value<>'MANUAL' OR EXISTS (
+           SELECT 1 FROM __forest_module_schema__.relation_approvals a
+           WHERE a.bot_id=requested_bot AND a.contribution_id=contribution_ref
+             AND pg_visible_in_snapshot(a.created_xid,graph_snapshot_value)
+       ))
        AND __forest_module_schema__.memory_graph_unit_visible(
            requested_bot,target_ref,graph_snapshot_value,
            requested_query,conversation_value,cut_value)
@@ -2352,7 +2371,7 @@ BEGIN
            AND c.relation_kind='ASSOCIATES_WITH' AND c.active
            AND c.sample_key>=sample_pivot
            AND __forest_module_schema__.memory_graph_association_visible(
-               requested_bot,c.contribution_id,c.created_xid,c.right_id,
+               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,c.right_id,
                query_row.graph_snapshot,requested_query,conversation_value,cut_value)
          ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
         UNION ALL
@@ -2363,7 +2382,7 @@ BEGIN
            AND c.relation_kind='ASSOCIATES_WITH' AND c.active
            AND c.sample_key<sample_pivot
            AND __forest_module_schema__.memory_graph_association_visible(
-               requested_bot,c.contribution_id,c.created_xid,c.right_id,
+               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,c.right_id,
                query_row.graph_snapshot,requested_query,conversation_value,cut_value)
          ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
         UNION ALL
@@ -2374,7 +2393,7 @@ BEGIN
            AND c.relation_kind='ASSOCIATES_WITH' AND c.active
            AND c.sample_key>=sample_pivot
            AND __forest_module_schema__.memory_graph_association_visible(
-               requested_bot,c.contribution_id,c.created_xid,c.left_id,
+               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,c.left_id,
                query_row.graph_snapshot,requested_query,conversation_value,cut_value)
          ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
         UNION ALL
@@ -2385,7 +2404,7 @@ BEGIN
            AND c.relation_kind='ASSOCIATES_WITH' AND c.active
            AND c.sample_key<sample_pivot
            AND __forest_module_schema__.memory_graph_association_visible(
-               requested_bot,c.contribution_id,c.created_xid,c.left_id,
+               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,c.left_id,
                query_row.graph_snapshot,requested_query,conversation_value,cut_value)
          ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
     ), sampled AS MATERIALIZED (
@@ -4720,7 +4739,12 @@ CREATE TRIGGER forget_selection_members_frozen
     FOR EACH ROW EXECUTE FUNCTION guard_forget_selection_member();
 CREATE TRIGGER relation_evidence_immutable BEFORE UPDATE OR DELETE ON relation_evidence
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER manual_relation_candidates_immutable
+    BEFORE UPDATE OR DELETE ON manual_relation_candidates
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER relation_retractions_immutable BEFORE UPDATE OR DELETE ON relation_retractions
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER relation_approvals_immutable BEFORE UPDATE OR DELETE ON relation_approvals
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
 CREATE TRIGGER memory_query_parts_immutable BEFORE UPDATE OR DELETE ON memory_query_parts
     FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
@@ -7235,6 +7259,140 @@ EXCEPTION WHEN invalid_text_representation THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
         'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
             'message','Retraction evidence snapshot is invalid','status',422));
+END;
+$$;
+
+CREATE FUNCTION memory_create_management_relation_candidate(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_actor text := input->>'requested_by';
+    requested_kind text := input->>'relation_kind';
+    requested_key text := COALESCE(input->>'relation_key','');
+    requested_weight bigint := (input->>'weight_micros')::bigint;
+    left_ref text := input->>'left_source_unit_id';
+    right_ref text := input->>'right_source_unit_id';
+    left_part text := input->>'left_part_id';
+    right_part text := input->>'right_part_id';
+    swap_value text;
+    requested_digest text := 'sha256:' ||
+        encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    relation_ref text;
+    contribution_ref text;
+    left_row record;
+    right_row record;
+    existing record;
+    created_value timestamptz;
+    cross_value boolean;
+BEGIN
+    IF requested_bot IS NULL OR requested_operation IS NULL OR
+       octet_length(requested_operation) NOT BETWEEN 1 AND 256 OR
+       requested_actor IS NULL OR octet_length(requested_actor) NOT BETWEEN 1 AND 256 OR
+       requested_kind IS NULL OR
+       requested_kind NOT IN ('ASSOCIATES_WITH','EVIDENCE','CONTRADICTS','SUBJECT_OF') OR
+       octet_length(requested_key)>256 OR
+       requested_weight IS NULL OR requested_weight NOT BETWEEN 0 AND 1000000000000 OR
+       left_ref IS NULL OR octet_length(left_ref) NOT BETWEEN 1 AND 256 OR
+       right_ref IS NULL OR octet_length(right_ref) NOT BETWEEN 1 AND 256 OR
+       left_ref=right_ref OR
+       left_part IS NULL OR octet_length(left_part) NOT BETWEEN 1 AND 256 OR
+       right_part IS NULL OR octet_length(right_part) NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_CANDIDATE_INVALID',
+                'message','Manual relation candidate input is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/manual-operation/' || requested_bot || '/' || requested_operation,0));
+    SELECT * INTO existing FROM __forest_module_schema__.relation_contributions
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF FOUND THEN
+        IF existing.origin_kind<>'MANUAL' OR
+           existing.input_digest IS DISTINCT FROM requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_RELATION_CANDIDATE_CONFLICT',
+                    'message','Candidate operation differs from its first request','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('protocol','forest.memory-relation-candidate/1',
+                'relation_id',existing.relation_id,'contribution_id',existing.contribution_id,
+                'review_state','UNREVIEWED','cross_trunk',existing.cross_trunk,
+                'created_at',existing.created_at));
+    END IF;
+    IF requested_kind='ASSOCIATES_WITH' AND left_ref>right_ref THEN
+        swap_value:=left_ref;left_ref:=right_ref;right_ref:=swap_value;
+        swap_value:=left_part;left_part:=right_part;right_part:=swap_value;
+    END IF;
+    -- Forget locks source units in source_unit_id order before retracting edges.
+    PERFORM 1 FROM __forest_module_schema__.source_units
+    WHERE bot_id=requested_bot AND source_unit_id IN (left_ref,right_ref)
+    ORDER BY source_unit_id FOR SHARE;
+    SELECT u.source_revision,u.trunk_id,u.accepted_deletion_epoch,
+           u.eligibility_state,s.status AS source_status INTO left_row
+    FROM __forest_module_schema__.source_units u
+    JOIN __forest_module_schema__.memory_sources s
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+    WHERE u.bot_id=requested_bot AND u.source_unit_id=left_ref;
+    SELECT u.source_revision,u.trunk_id,u.accepted_deletion_epoch,
+           u.eligibility_state,s.status AS source_status INTO right_row
+    FROM __forest_module_schema__.source_units u
+    JOIN __forest_module_schema__.memory_sources s
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+    WHERE u.bot_id=requested_bot AND u.source_unit_id=right_ref;
+    IF left_row IS NULL OR right_row IS NULL OR
+       left_row.eligibility_state<>'ELIGIBLE' OR right_row.eligibility_state<>'ELIGIBLE' OR
+       left_row.source_status<>'ACTIVE' OR right_row.source_status<>'ACTIVE' OR
+       NOT EXISTS (SELECT 1 FROM __forest_module_schema__.source_parts p
+           WHERE p.bot_id=requested_bot AND p.source_unit_id=left_ref AND p.part_id=left_part) OR
+       NOT EXISTS (SELECT 1 FROM __forest_module_schema__.source_parts p
+           WHERE p.bot_id=requested_bot AND p.source_unit_id=right_ref AND p.part_id=right_part)
+    THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_CANDIDATE_SOURCE_UNAVAILABLE',
+                'message','Candidate endpoints or evidence parts are unavailable','status',409));
+    END IF;
+    relation_ref := 'manual-relation:' || encode(sha256(convert_to(
+        jsonb_build_array(requested_bot,requested_kind,left_ref,right_ref,requested_key)::text,
+        'UTF8')),'hex');
+    contribution_ref := 'manual:' || encode(sha256(convert_to(
+        jsonb_build_array(requested_bot,requested_operation)::text,'UTF8')),'hex');
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/manual-relation/' || requested_bot || '/' || relation_ref,0));
+    IF EXISTS (SELECT 1 FROM __forest_module_schema__.relation_contributions c
+        WHERE c.bot_id=requested_bot AND c.relation_id=relation_ref
+          AND c.origin_kind='MANUAL' AND c.active) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RELATION_CANDIDATE_EXISTS',
+                'message','An active manual candidate already describes this relation','status',409));
+    END IF;
+    cross_value := left_row.trunk_id IS DISTINCT FROM right_row.trunk_id;
+    INSERT INTO __forest_module_schema__.relation_contributions(
+        bot_id,contribution_id,operation_id,input_digest,relation_id,relation_kind,
+        left_kind,left_id,right_kind,right_id,relation_key,origin_kind,weight_micros,
+        admitted_deletion_epoch,cross_trunk)
+    VALUES(requested_bot,contribution_ref,requested_operation,requested_digest,
+        relation_ref,requested_kind,'SOURCE_UNIT',left_ref,'SOURCE_UNIT',right_ref,
+        requested_key,'MANUAL',requested_weight,
+        GREATEST(left_row.accepted_deletion_epoch,right_row.accepted_deletion_epoch),
+        cross_value)
+    RETURNING created_at INTO created_value;
+    INSERT INTO __forest_module_schema__.manual_relation_candidates(
+        bot_id,contribution_id,actor_subject_ref)
+    VALUES(requested_bot,contribution_ref,requested_actor);
+    INSERT INTO __forest_module_schema__.relation_evidence(
+        bot_id,contribution_id,evidence_index,source_unit_id,source_revision,part_id)
+    VALUES
+        (requested_bot,contribution_ref,0,left_ref,left_row.source_revision,left_part),
+        (requested_bot,contribution_ref,1,right_ref,right_row.source_revision,right_part);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-relation-candidate/1',
+            'relation_id',relation_ref,'contribution_id',contribution_ref,
+            'review_state','UNREVIEWED','cross_trunk',cross_value,
+            'created_at',created_value));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_RELATION_CANDIDATE_INVALID',
+            'message','Manual relation candidate input is invalid','status',422));
 END;
 $$;
 
@@ -11059,6 +11217,68 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_query_source_parts(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_unit text := input->>'source_unit_id';
+    requested_after integer := COALESCE((input->>'after_part_index')::integer,-1);
+    page_limit integer := COALESCE((input->>'limit')::integer,16);
+    source_row record;
+    items jsonb;
+    last_index integer;
+    more boolean;
+BEGIN
+    IF requested_bot IS NULL OR requested_unit IS NULL OR
+       octet_length(requested_unit) NOT BETWEEN 1 AND 256 OR
+       requested_after NOT BETWEEN -1 AND 4095 OR page_limit NOT BETWEEN 1 AND 32 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+                'message','Source part page request is invalid','status',422));
+    END IF;
+    SELECT u.source_unit_id,u.source_revision,u.trunk_id,u.author_subject_ref,
+           u.part_count,s.external_group_id INTO source_row
+    FROM __forest_module_schema__.source_units u
+    JOIN __forest_module_schema__.memory_sources s
+      ON s.bot_id=u.bot_id AND s.source_id=u.source_id
+    WHERE u.bot_id=requested_bot AND u.source_unit_id=requested_unit
+      AND u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_SOURCE_UNIT_NOT_AVAILABLE',
+                'message','Source unit is not available for a relation candidate','status',404));
+    END IF;
+    WITH page AS (
+        SELECT p.part_index,p.part_id,p.part_kind,p.media_type
+        FROM __forest_module_schema__.source_parts p
+        WHERE p.bot_id=requested_bot AND p.source_unit_id=requested_unit
+          AND p.part_index>requested_after
+        ORDER BY p.part_index LIMIT page_limit+1
+    ), numbered AS (
+        SELECT *,row_number() OVER (ORDER BY part_index) AS n FROM page
+    )
+    SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'part_index',part_index,'part_id',part_id,'part_kind',part_kind,
+        'media_type',media_type) ORDER BY part_index)
+        FILTER (WHERE n<=page_limit),'[]'::jsonb),
+        max(part_index) FILTER (WHERE n<=page_limit),count(*)>page_limit
+    INTO items,last_index,more FROM numbered;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-source-parts/1',
+            'source_unit_id',source_row.source_unit_id,
+            'source_revision',source_row.source_revision,
+            'trunk_id',source_row.trunk_id,
+            'external_group_id',source_row.external_group_id,
+            'author_subject_ref',source_row.author_subject_ref,
+            'part_count',source_row.part_count,'items',items,'has_more',more,
+            'next_after',CASE WHEN more THEN last_index ELSE NULL END));
+EXCEPTION WHEN invalid_text_representation OR numeric_value_out_of_range THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+        'error',jsonb_build_object('code','MEMORY_QUERY_INVALID',
+            'message','Source part page request is invalid','status',422));
+END;
+$$;
+
 CREATE FUNCTION memory_query_relations(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
@@ -11091,6 +11311,7 @@ BEGIN
         SELECT c.contribution_id,c.relation_id,c.relation_kind,c.relation_key,
             c.left_kind,c.left_id,c.right_kind,c.right_id,c.weight_micros,
             c.origin_kind,c.created_at,c.cross_trunk,
+            m.actor_subject_ref AS proposed_by,
             CASE WHEN a.contribution_id IS NULL THEN 'UNREVIEWED'
                  ELSE 'APPROVED' END AS review_state,
             a.actor_subject_ref AS reviewed_by,a.created_at AS reviewed_at,
@@ -11102,6 +11323,8 @@ BEGIN
         LEFT JOIN __forest_module_schema__.relation_approvals a
           ON a.bot_id=c.bot_id AND a.contribution_id=c.contribution_id
          AND pg_visible_in_snapshot(a.created_xid,snapshot_value)
+        LEFT JOIN __forest_module_schema__.manual_relation_candidates m
+          ON m.bot_id=c.bot_id AND m.contribution_id=c.contribution_id
         WHERE c.bot_id=context->>'bot_id' AND c.active
           AND pg_visible_in_snapshot(c.created_xid,snapshot_value)
           AND (NOT has_endpoint OR

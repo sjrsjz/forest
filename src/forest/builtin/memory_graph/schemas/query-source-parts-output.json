@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["protocol", "source_unit_id", "source_revision", "trunk_id", "external_group_id", "author_subject_ref", "part_count", "items", "has_more", "next_after"],
+  "properties": {
+    "protocol": {"const": "forest.memory-source-parts/1"},
+    "source_unit_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "source_revision": {"type": "integer", "minimum": 1},
+    "trunk_id": {"type": ["string", "null"]},
+    "external_group_id": {"type": ["string", "null"]},
+    "author_subject_ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "part_count": {"type": "integer", "minimum": 1, "maximum": 4096},
+    "items": {"type": "array", "maxItems": 32, "items": {
+      "type": "object", "additionalProperties": false,
+      "required": ["part_index", "part_id", "part_kind", "media_type"],
+      "properties": {
+        "part_index": {"type": "integer", "minimum": 0, "maximum": 4095},
+        "part_id": {"type": "string", "minLength": 1, "maxLength": 256},
+        "part_kind": {"enum": ["TEXT", "IMAGE"]},
+        "media_type": {"type": "string", "minLength": 1, "maxLength": 128}
+      }
+    }},
+    "has_more": {"type": "boolean"},
+    "next_after": {"type": ["integer", "null"], "minimum": 0, "maximum": 4095}
+  }
+}

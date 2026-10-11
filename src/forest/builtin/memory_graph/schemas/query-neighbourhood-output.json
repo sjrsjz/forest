@@ -18,7 +18,7 @@
       "required": ["relation_id", "contribution_id", "relation_kind", "relation_key",
         "left_kind", "left_id", "right_kind", "right_id", "weight_micros",
         "origin_kind", "created_at", "cross_trunk", "direction",
-        "review_state", "reviewed_by", "reviewed_at", "evidence_count",
+        "review_state", "proposed_by", "reviewed_by", "reviewed_at", "evidence_count",
         "association_evidence_count", "evidence", "traversal_depth", "from_kind", "from_id"],
       "properties": {
         "relation_id": {"$ref": "#/$defs/id"},
@@ -30,6 +30,7 @@
         "weight_micros": {"type": "integer", "minimum": 0},
         "origin_kind": {"enum": ["MANUAL", "VECTOR", "RULE", "MODEL"]},
         "review_state": {"enum": ["UNREVIEWED", "APPROVED"]},
+        "proposed_by": {"type": ["string", "null"], "maxLength": 256},
         "reviewed_by": {"type": ["string", "null"], "maxLength": 256},
         "reviewed_at": {"type": ["string", "null"], "format": "date-time"},
         "created_at": {"type": "string", "format": "date-time"},
