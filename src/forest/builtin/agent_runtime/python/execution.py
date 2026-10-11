@@ -873,6 +873,7 @@ class AgentExecution:
                         request_id=model_head["request_id"],
                         attempt_id=model_attempt["attempt_id"],
                         effect_operation_id=model_attempt["effect_operation_ref"],
+                        payload_digest=model_head["initial_wire_payload_digest"],
                     )
                 ):
                     continue

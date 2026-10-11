@@ -8,7 +8,6 @@ import json
 from collections.abc import Mapping
 
 from forest.errors import ForestError
-from forest.kernel_effect_executor_outcome import load_handed_off_model_command
 from forest.model_contract import ModelCapabilities, PreparedModelRequest
 from forest.model_transport import ChatCompletionsClient
 from forest.packages import digest_json
@@ -37,6 +36,73 @@ def _provider_payload_ref(saved, *, owner_kind: str, owner_id: str) -> dict:
         "owner_kind": owner_kind,
         "owner_id": owner_id,
     }
+
+
+async def _load_handed_off_model_command(effects, payloads, request):
+    """Bind a read to the original Agent Effect and frozen Provider command."""
+
+    if (
+        type(request) is not dict
+        or set(request) != {"protocol", "effect_operation_id", "attempt_id"}
+        or request["protocol"] != "forest.provider-result-lookup-request/1"
+        or not isinstance(request["effect_operation_id"], str)
+        or not isinstance(request["attempt_id"], str)
+    ):
+        raise ForestError(
+            "EFFECT_OUTCOME_INPUT_INVALID", "Executor outcome request is invalid", 422
+        )
+    loaded = await effects.load(request["effect_operation_id"])
+    effect, attempt = loaded["effect"], loaded["attempt"]
+    if (
+        effect["producer_component_id"] != "agent.runtime"
+        or effect["effect_kind"] != "provider.model.dispatch"
+        or effect["target_kind"] != "component.service"
+        or effect["target_id"]
+            != "provider.chat-completions/provider.model.dispatch"
+        or attempt is None
+        or attempt["attempt_id"] != request["attempt_id"]
+        or attempt["executor_component_id"] != "provider.chat-completions"
+        or attempt["state"] not in {
+            "DISPATCHING", "SUCCEEDED", "NOT_APPLIED", "UNKNOWN"
+        }
+        or effect["input_payload_id"] is None
+    ):
+        raise ForestError(
+            "EFFECT_OUTCOME_BOUNDARY_CLOSED",
+            "Effect is not one handed-off Agent model operation", 409,
+        )
+    async with payloads.store.pool.connection() as conn, conn.transaction():
+        ref = await payloads.verify_in(
+            conn,
+            payload_id=effect["input_payload_id"],
+            digest=effect["input_payload_digest"],
+            owner_component_id="kernel.effect",
+            owner_kind="effect.input",
+            owner_id=effect["effect_operation_id"],
+        )
+        content = await payloads.read_bytes_in(conn, ref.payload_id)
+    try:
+        command = json.loads(content)
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ForestError(
+            "EFFECT_OUTCOME_CORRUPT", "Frozen Effect command is invalid", 500
+        ) from exc
+    if (
+        type(command) is not dict
+        or command.get("protocol") != "forest.provider-dispatch/1"
+        or command.get("effect_operation_id") != effect["effect_operation_id"]
+        or command.get("component_id") != attempt["executor_component_id"]
+        or command.get("generation_id") != attempt["executor_generation_id"]
+        or not isinstance(command.get("prepared"), dict)
+        or command["prepared"].get("transport_attempt_id")
+            != attempt["attempt_id"]
+        or not isinstance(command["prepared"].get("request_id"), str)
+        or not isinstance(command["prepared"].get("payload_digest"), str)
+    ):
+        raise ForestError(
+            "EFFECT_OUTCOME_CORRUPT", "Frozen Effect command identity differs", 500
+        )
+    return effect, attempt, command
 
 
 class ChatCompletionsEffectDriver:
@@ -359,11 +425,11 @@ class ChatCompletionsResultLookupDriver:
             component_id=self.identity.component_id,
             generation_id=self.identity.generation_id,
         )
-        effect, attempt, command = await load_handed_off_model_command(
+        effect, attempt, command = await _load_handed_off_model_command(
             self.effects,
             self.payloads,
             {
-                "protocol": "forest.effect-executor-outcome-request/1",
+                "protocol": "forest.provider-result-lookup-request/1",
                 "effect_operation_id": payload["effect_operation_id"],
                 "attempt_id": payload["attempt_id"],
             },

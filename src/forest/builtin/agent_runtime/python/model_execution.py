@@ -901,28 +901,31 @@ class ModelExecution:
 
     async def reconcile_committed(
         self, *, owner: dict, request_id: str, attempt_id: str,
-        effect_operation_id: str,
+        effect_operation_id: str, payload_digest: str,
     ) -> bool:
         """Read committed executor or Provider-owned result evidence; never dispatch."""
 
         outcome = await self.ctx.services.call(
             "runtime.effect-executor-outcome",
             {
-                "protocol": "forest.effect-executor-outcome-request/1",
+                "protocol": "forest.effect-executor-outcome-request/2",
                 "effect_operation_id": effect_operation_id,
                 "attempt_id": attempt_id,
             },
             operation_id=self.ctx.operations.stable(
                 f"inspect-model-effect:{attempt_id}"
             ),
-            contract_major=1,
+            contract_major=2,
             timeout=15,
         )
         if (
-            outcome.get("protocol") != "forest.effect-executor-outcome/1"
-            or outcome.get("effect_operation_id") != effect_operation_id
-            or outcome.get("attempt_id") != attempt_id
-            or outcome.get("request_id") != request_id
+            type(outcome) is not dict
+            or set(outcome) != {
+                "protocol", "effect_operation_id", "attempt_id", "state", "receipt"
+            }
+            or outcome["protocol"] != "forest.effect-executor-outcome/2"
+            or outcome["effect_operation_id"] != effect_operation_id
+            or outcome["attempt_id"] != attempt_id
         ):
             raise ForestError(
                 "AGENT_EFFECT_OUTCOME_INVALID", "Executor outcome identity differs", 502
@@ -931,7 +934,7 @@ class ModelExecution:
         if outcome["state"] == "SUCCEEDED":
             committed = _receipt(
                 outcome["receipt"], request_id=request_id, attempt_id=attempt_id,
-                payload_digest=outcome["payload_digest"],
+                payload_digest=payload_digest,
             )
             if committed["status"] in {"RESPONDED", "NOT_SENT"}:
                 receipt = committed
@@ -954,7 +957,7 @@ class ModelExecution:
                 or lookup.get("effect_operation_id") != effect_operation_id
                 or lookup.get("attempt_id") != attempt_id
                 or lookup.get("request_id") != request_id
-                or lookup.get("payload_digest") != outcome["payload_digest"]
+                or lookup.get("payload_digest") != payload_digest
             ):
                 raise ForestError(
                     "AGENT_PROVIDER_RESULT_LOOKUP_INVALID",
@@ -969,7 +972,7 @@ class ModelExecution:
                 )
             receipt = _receipt(
                 lookup["receipt"], request_id=request_id, attempt_id=attempt_id,
-                payload_digest=outcome["payload_digest"],
+                payload_digest=payload_digest,
             )
             if receipt["status"] != "RESPONDED":
                 raise ForestError(

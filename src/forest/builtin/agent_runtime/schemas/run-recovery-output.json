@@ -41,7 +41,7 @@
       "type": "object",
       "required": [
         "request_id", "step_seq", "request_kind", "provider_component_id", "state",
-        "attempt_count"
+        "attempt_count", "initial_wire_payload_digest"
       ],
       "properties": {
         "request_id": {"$ref": "#/$defs/id"},
@@ -54,7 +54,8 @@
             "UNKNOWN", "ABANDONED"
           ]
         },
-        "attempt_count": {"type": "integer", "minimum": 0}
+        "attempt_count": {"type": "integer", "minimum": 0},
+        "initial_wire_payload_digest": {"$ref": "#/$defs/digest"}
       },
       "additionalProperties": false
     },

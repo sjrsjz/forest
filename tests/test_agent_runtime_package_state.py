@@ -1196,6 +1196,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
             "request_id": concurrent_successor_id, "step_seq": 1,
             "request_kind": "PRIMARY", "provider_component_id": "provider.chat",
             "state": "READY", "attempt_count": 0,
+            "initial_wire_payload_digest": successor_wire.digest,
         }
         assert recovered_successor["model_attempt"] is None
         successor_resume = await instance.invoke_management_query(
@@ -2018,6 +2019,7 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         )
         assert model_recovery["state"] == "MODEL_PENDING"
         assert model_recovery["model_request"]["request_id"] == "model-request/package/1"
+        assert model_recovery["model_request"]["initial_wire_payload_digest"] == initial_wire.digest
         assert model_recovery["model_attempt"] == {
             "attempt_id": "model-attempt/package/1",
             "effect_operation_ref": "model-effect/package/1",

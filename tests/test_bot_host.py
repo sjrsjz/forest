@@ -5762,15 +5762,24 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                     ("kernel.runtime", "kernel.effect", "kernel.payload"),
                 )
             )
-            stored_outcome = await outcome_query({
-                "protocol": "forest.effect-executor-outcome-request/1",
+            outcome_request = {
+                "protocol": "forest.effect-executor-outcome-request/2",
                 "effect_operation_id": delivered_attempt["effect_operation_ref"],
                 "attempt_id": delivered_attempt["attempt_id"],
-            })
+            }
+            with pytest.raises(ForestError, match="Effect is not a handed-off service operation owned by this caller"):
+                await outcome_query.invoke_routed(
+                    SimpleNamespace(caller_component_id="conversation.scheduler"),
+                    None, (outcome_request,), {},
+                )
+            stored_outcome = await outcome_query.invoke_routed(
+                SimpleNamespace(caller_component_id="agent.runtime"),
+                None, (outcome_request,), {},
+            )
             assert stored_outcome["state"] == (
                 "ACTIVE" if scenario == "result-payload-recovery" else "SUCCEEDED"
             )
-            assert stored_outcome["request_id"] == delivered_attempt["request_id"]
+            assert stored_outcome["protocol"] == "forest.effect-executor-outcome/2"
             if scenario == "result-payload-recovery":
                 assert stored_outcome["receipt"] is None
             else:

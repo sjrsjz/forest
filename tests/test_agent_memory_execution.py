@@ -76,10 +76,10 @@ async def test_model_recovery_prefers_committed_receipt_and_never_dispatches():
                 "state": "ABSENT", "receipt": None,
             }
         assert name == "runtime.effect-executor-outcome"
+        assert body["protocol"] == "forest.effect-executor-outcome-request/2"
         return {
-            "protocol": "forest.effect-executor-outcome/1",
+            "protocol": "forest.effect-executor-outcome/2",
             "effect_operation_id": "effect/1", "attempt_id": "attempt/1",
-            "request_id": "request/1", "payload_digest": receipt["payload_digest"],
             "state": "SUCCEEDED" if committed else "ABSENT",
             "receipt": receipt if committed else None,
         }
@@ -114,6 +114,7 @@ async def test_model_recovery_prefers_committed_receipt_and_never_dispatches():
     identity = {
         "owner": {"run_id": "run/1"}, "request_id": "request/1",
         "attempt_id": "attempt/1", "effect_operation_id": "effect/1",
+        "payload_digest": receipt["payload_digest"],
     }
     assert await model.reconcile_committed(**identity) is False
     assert calls == [

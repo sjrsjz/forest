@@ -1223,3 +1223,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-11 v24 隔离切换：提交 `735fbb4` 的镜像已在独立部署、Host、Bot 数据库启动；v23 先 OFFLINE，v24 后 ONLINE，22 个 Bot Generation ACTIVE，单条 OneBot 连接只属于 v24。v24 已持久接收 2 条非许可群消息且无缺失来源；许可群未触发 Agent，真实 QQ 回复仍待低频验收。操作与回退见 `doc/live-v24-cutover-2026-10-11.md`。
 
 2026-10-11 v24 追加验收：隔离 PostgreSQL 的多 Bot 生命周期与跨群 Agent 链路 4 passed；在线管理试验分别完成一次文本和图片 VL 嵌入，两个 QUERY facet READY，预算账本为 2 次已结算、48 token、0 UNKNOWN。空库返回 0 项，尚不能替代有文档的图片召回及获准群真实回复。详见 `doc/live-v24-cutover-2026-10-11.md`。
+
+2026-10-11 效果回执职责收敛：内核 `runtime.effect-executor-outcome/2` 仅凭冻结路由中的生产者身份、Effect/Attempt、目标服务及服务操作账本查询通用已提交回执；模型请求身份与正文摘要由 Agent 冻结的 Model Request 核对，Provider 的只读结果查询在 Provider 边界验证原派发命令和结果载荷。`agent.runtime` 4.49.0 / SQL 2.32.0 增加恢复查询中的初始模型 wire 摘要，不再把内核 Effect wire 摘要误用为模型正文摘要。Agent 纯逻辑 15 passed，Agent 包隔离 PostgreSQL 1 passed，完整 BotHost 服务账本恢复与 Provider 载荷兜底各 1 passed；两种恢复均只发起一次模型请求。Ruff 与静态编译通过。此改动尚未发布到在线 v24；切换前需使用新 Bot 物理库和候选实例验证，不对 v24 原库原地替换。

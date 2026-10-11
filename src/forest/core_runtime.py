@@ -72,10 +72,18 @@ _STATE_CONTRACT = {
     "properties": {},
     "additionalProperties": False,
 }
+_KERNEL_SERVICE_MAJORS = {"runtime.effect-executor-outcome": 2}
+
+
+def _kernel_service_major(service_id: str) -> int:
+    return _KERNEL_SERVICE_MAJORS.get(service_id, 1)
+
+
 _KERNEL_READ_SERVICES = frozenset({
     "payload.verify", "payload.read", "authorization.grants",
     "audit.query", "audit.page.snapshot",
     "runtime.graph-replacement.status", "runtime.graph.snapshot",
+    "runtime.effect-executor-outcome",
     "runtime.status.snapshot", "runtime.component-candidate.preview",
     "deployment.package-registry.packages",
     "deployment.package-registry.artifact",
@@ -211,7 +219,7 @@ class PreparedAuthorityModule:
             "services": [
                 {
                     "service_id": service_id,
-                    "version": 1,
+                    "version": _kernel_service_major(service_id),
                     "semantics": (
                         "read" if service_id in _KERNEL_READ_SERVICES else "idempotent"
                     ),
@@ -969,7 +977,7 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                     ),
                     RuntimeKernelServiceSpec(
                         "runtime.effect-executor-outcome",
-                        1,
+                        _kernel_service_major("runtime.effect-executor-outcome"),
                         ("kernel.runtime", "kernel.effect", "kernel.payload"),
                         effect_executor_outcome_service,
                     ),
@@ -978,7 +986,8 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                 else ()
             ),
             provided_services=tuple(
-                (service_id, "1.0") for service_id in definition["services"]
+                (service_id, f"{_kernel_service_major(service_id)}.0")
+                for service_id in definition["services"]
             ),
             agent_tools=((RUNTIME_STATUS_TOOL,) if component_id == "kernel.runtime" else ()),
             shell_commands=(),

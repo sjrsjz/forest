@@ -1414,7 +1414,8 @@ BEGIN
     SELECT m.request_id, jsonb_build_object(
         'request_id',m.request_id,'step_seq',m.step_seq,'request_kind',m.request_kind,
         'provider_component_id',m.provider_component_id,'state',m.state,
-        'attempt_count',m.attempt_count
+        'attempt_count',m.attempt_count,
+        'initial_wire_payload_digest',m.initial_wire_payload_digest
     ) INTO request_id_value, request_value
     FROM __forest_module_schema__.model_requests m
     WHERE m.bot_id=requested_bot AND (

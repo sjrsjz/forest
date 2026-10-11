@@ -68,7 +68,7 @@ class RuntimeServiceInvocation:
 
 @dataclass(frozen=True)
 class RoutedServiceEndpoint:
-    """Provider endpoint that receives the kernel-sealed route explicitly."""
+    """Service endpoint that receives the kernel-sealed route explicitly."""
 
     routed: Callable
 
@@ -621,10 +621,10 @@ class RuntimeContractRouter:
             )
         context = RuntimeKernelServiceContext(self.registry, spec.participants)
         handler = spec.factory(context)
-        if not callable(handler):
+        if not callable(handler) and not isinstance(handler, RoutedServiceEndpoint):
             raise ForestError(
                 "RUNTIME_KERNEL_SERVICE_INVALID",
-                "Kernel coordinator factory returned no callable handler",
+                "Kernel coordinator factory returned no callable or routed handler",
                 503,
             )
         self._providers[key] = ("kernel.runtime", handler)

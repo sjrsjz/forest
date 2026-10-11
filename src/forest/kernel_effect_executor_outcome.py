@@ -1,4 +1,4 @@
-"""Read one executor result already committed to the Kernel service ledger."""
+"""Read a committed executor service outcome through a producer-bound Effect."""
 
 from __future__ import annotations
 
@@ -6,16 +6,15 @@ import json
 
 from forest.errors import ForestError
 from forest.packages import digest_json
+from forest.runtime_contracts import RoutedServiceEndpoint
 from forest.storage.service_operations import KernelServiceOperationLedger
 
 
-async def load_handed_off_model_command(effects, payloads, request):
-    """Bind a read to the original Agent Effect and frozen Provider command."""
-
+async def _load_handed_off_service_command(effects, payloads, request, producer_component_id):
     if (
         type(request) is not dict
         or set(request) != {"protocol", "effect_operation_id", "attempt_id"}
-        or request["protocol"] != "forest.effect-executor-outcome-request/1"
+        or request["protocol"] != "forest.effect-executor-outcome-request/2"
         or not isinstance(request["effect_operation_id"], str)
         or not isinstance(request["attempt_id"], str)
     ):
@@ -24,15 +23,18 @@ async def load_handed_off_model_command(effects, payloads, request):
         )
     loaded = await effects.load(request["effect_operation_id"])
     effect, attempt = loaded["effect"], loaded["attempt"]
+    target = effect["target_id"]
+    target_component, separator, service_name = (
+        target.partition("/") if isinstance(target, str) else ("", "", "")
+    )
     if (
-        effect["producer_component_id"] != "agent.runtime"
-        or effect["effect_kind"] != "provider.model.dispatch"
+        effect["producer_component_id"] != producer_component_id
         or effect["target_kind"] != "component.service"
-        or effect["target_id"]
-            != "provider.chat-completions/provider.model.dispatch"
+        or not separator
+        or not service_name
         or attempt is None
         or attempt["attempt_id"] != request["attempt_id"]
-        or attempt["executor_component_id"] != "provider.chat-completions"
+        or attempt["executor_component_id"] != target_component
         or attempt["state"] not in {
             "DISPATCHING", "SUCCEEDED", "NOT_APPLIED", "UNKNOWN"
         }
@@ -40,7 +42,7 @@ async def load_handed_off_model_command(effects, payloads, request):
     ):
         raise ForestError(
             "EFFECT_OUTCOME_BOUNDARY_CLOSED",
-            "Effect is not one handed-off Agent model operation", 409,
+            "Effect is not a handed-off service operation owned by this caller", 409,
         )
     async with payloads.store.pool.connection() as conn, conn.transaction():
         ref = await payloads.verify_in(
@@ -56,24 +58,13 @@ async def load_handed_off_model_command(effects, payloads, request):
         command = json.loads(content)
     except (TypeError, ValueError, UnicodeError) as exc:
         raise ForestError(
-            "EFFECT_OUTCOME_CORRUPT", "Frozen Effect command is invalid", 500
+            "EFFECT_OUTCOME_CORRUPT", "Frozen service command is invalid", 500
         ) from exc
-    if (
-        type(command) is not dict
-        or command.get("protocol") != "forest.provider-dispatch/1"
-        or command.get("effect_operation_id") != effect["effect_operation_id"]
-        or command.get("component_id") != attempt["executor_component_id"]
-        or command.get("generation_id") != attempt["executor_generation_id"]
-        or not isinstance(command.get("prepared"), dict)
-        or command["prepared"].get("transport_attempt_id")
-            != attempt["attempt_id"]
-        or not isinstance(command["prepared"].get("request_id"), str)
-        or not isinstance(command["prepared"].get("payload_digest"), str)
-    ):
+    if type(command) is not dict:
         raise ForestError(
-            "EFFECT_OUTCOME_CORRUPT", "Frozen Effect command identity differs", 500
+            "EFFECT_OUTCOME_CORRUPT", "Frozen service command is invalid", 500
         )
-    return effect, attempt, command
+    return effect, attempt, service_name, command
 
 
 def effect_executor_outcome_service(context):
@@ -82,29 +73,31 @@ def effect_executor_outcome_service(context):
     payloads = context.participant("kernel.payload").service
     ledger = KernelServiceOperationLedger(runtime, payloads)
 
-    async def read(request):
-        effect, attempt, command = await load_handed_off_model_command(
-            effects, payloads, request
+    async def read(route, _invocation, *args, **kwargs):
+        if len(args) != 1 or kwargs:
+            raise ForestError(
+                "EFFECT_OUTCOME_INPUT_INVALID", "Executor outcome requires one input", 422
+            )
+        effect, attempt, service_name, command = await _load_handed_off_service_command(
+            effects, payloads, args[0], route.caller_component_id
         )
         result = await ledger.inspect(
             component_id=attempt["executor_component_id"],
             operation_id=effect["effect_operation_id"],
-            service_name="provider.model.dispatch",
+            service_name=service_name,
             input_digest=digest_json({
-                "service_id": "provider.model.dispatch", "input": command,
+                "service_id": service_name, "input": command,
             }),
             generation_id=attempt["executor_generation_id"],
             causal_root_kind=effect["root_operation_kind"],
             causal_root_id=effect["root_operation_id"],
         )
         return {
-            "protocol": "forest.effect-executor-outcome/1",
+            "protocol": "forest.effect-executor-outcome/2",
             "effect_operation_id": effect["effect_operation_id"],
             "attempt_id": attempt["attempt_id"],
-            "request_id": command["prepared"]["request_id"],
-            "payload_digest": command["prepared"]["payload_digest"],
             "state": result["state"],
             "receipt": result["result"],
         }
 
-    return read
+    return RoutedServiceEndpoint(read)
