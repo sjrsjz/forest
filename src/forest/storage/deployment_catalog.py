@@ -813,6 +813,81 @@ class DeploymentCatalogRepository:
             ).fetchall()
             return tuple(dict(row) for row in rows)
 
+    async def list_failed_offline_bots_page(
+        self, *, after_bot_id: str | None = None, limit: int = 256,
+    ) -> tuple[dict, ...]:
+        """Find withdrawn failures that have no live graph to close."""
+        if after_bot_id is not None:
+            _bounded(after_bot_id, "after_bot_id", 128)
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ForestError("DEPLOYMENT_INPUT_INVALID", "Bot page limit is invalid", 422)
+        after_clause = " AND o.bot_id>%s" if after_bot_id is not None else ""
+        parameters = (after_bot_id, limit) if after_bot_id is not None else (limit,)
+        async with self.store.pool.connection() as conn:
+            rows = await (
+                await conn.execute(
+                    "SELECT o.bot_id,i.revision AS intent_revision,"
+                    "o.revision AS observation_revision "
+                    "FROM forest_deployment.runtime_observations o "
+                    "JOIN forest_deployment.runtime_intents i USING(bot_id) "
+                    "JOIN forest_deployment.bots b USING(bot_id) "
+                    "WHERE i.desired_state='OFFLINE' "
+                    "AND o.observed_state='FAILED' AND o.graph_id IS NULL "
+                    "AND o.error_code<>'BOT_RUNTIME_CLOSE_FAILED' "
+                    "AND b.supply_state<>'DELETED'"
+                    + after_clause + " ORDER BY o.bot_id LIMIT %s",
+                    parameters,
+                )
+            ).fetchall()
+            return tuple(dict(row) for row in rows)
+
+    async def settle_failed_offline(
+        self, lease: DeploymentSupervisorLease, *, bot_id: str,
+        intent_revision: int, observation_revision: int,
+    ) -> bool:
+        """Fence a withdrawn, already-closed failed runtime into OFFLINE."""
+        _bounded(bot_id, "bot_id", 128)
+        if (
+            type(intent_revision) is not int or intent_revision < 1
+            or type(observation_revision) is not int or observation_revision < 1
+        ):
+            raise ForestError("DEPLOYMENT_INPUT_INVALID", "Observation fence is invalid", 422)
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self._verify_lease_in(conn, lease)
+            row = await (
+                await conn.execute(
+                    "SELECT b.supply_state,i.desired_state,"
+                    "i.revision AS intent_revision,o.observed_state,"
+                    "o.graph_id,o.error_code,o.revision AS observation_revision "
+                    "FROM forest_deployment.bots b "
+                    "JOIN forest_deployment.runtime_intents i USING(bot_id) "
+                    "JOIN forest_deployment.runtime_observations o USING(bot_id) "
+                    "WHERE b.bot_id=%s FOR UPDATE OF b,i,o",
+                    (bot_id,),
+                )
+            ).fetchone()
+            if (
+                row is None
+                or row["supply_state"] == "DELETED"
+                or row["desired_state"] != "OFFLINE"
+                or row["intent_revision"] != intent_revision
+                or row["observed_state"] != "FAILED"
+                or row["graph_id"] is not None
+                or row["error_code"] == "BOT_RUNTIME_CLOSE_FAILED"
+                or row["observation_revision"] != observation_revision
+            ):
+                return False
+            await conn.execute(
+                "UPDATE forest_deployment.runtime_observations SET "
+                "observed_state='OFFLINE',supervisor_owner_epoch=%s,"
+                "supervisor_incarnation=%s,graph_id=NULL,error_code=NULL,"
+                "consecutive_failures=0,retry_not_before=NULL,"
+                "revision=revision+1,updated_at=clock_timestamp() "
+                "WHERE bot_id=%s",
+                (lease.owner_epoch, lease.incarnation, bot_id),
+            )
+            return True
+
     async def list_online_bots_page(
         self, *, after_bot_id: str | None = None, limit: int = 256,
     ) -> tuple[dict, ...]:

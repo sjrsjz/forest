@@ -211,6 +211,7 @@ class MultiBotSupervisor:
             while not self._closing:
                 cycle += 1
                 self._reap()
+                await self._settle_withdrawn_failures()
                 now = datetime.now(timezone.utc)
                 after_bot_id = None
                 while True:
@@ -271,6 +272,27 @@ class MultiBotSupervisor:
         except Exception:
             self.failure = "DEPLOYMENT_SUPERVISOR_FAILED"
             raise
+
+    async def _settle_withdrawn_failures(self) -> None:
+        """Only this Supervisor can confirm a failed runner has been reaped."""
+        after_bot_id = None
+        while not self._closing:
+            page = await self.catalog.list_failed_offline_bots_page(
+                after_bot_id=after_bot_id
+            )
+            for bot in page:
+                if self._closing:
+                    return
+                if bot["bot_id"] not in self._runners:
+                    await self.catalog.settle_failed_offline(
+                        self.lease,
+                        bot_id=bot["bot_id"],
+                        intent_revision=bot["intent_revision"],
+                        observation_revision=bot["observation_revision"],
+                    )
+            if len(page) < 256:
+                return
+            after_bot_id = page[-1]["bot_id"]
 
     def _reap(self) -> None:
         for bot_id, runner in tuple(self._runners.items()):

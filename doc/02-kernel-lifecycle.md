@@ -288,6 +288,8 @@ Bot 宿主必须持续监督当前 RuntimeGraph 报告的全部 owned task、Hos
 
 Generation 持有的 Effect Driver 若启动长期任务，必须通过 `owned_tasks` 端口将任务逐级交给 Package Generation 和 RuntimeGraph；WebSocket 读取、入站消费等任务不能只由 Driver 私下持有。当前图中的连接读取任务即使正常返回，也表示该传输已停止，宿主应按上述故障路径关闭本代并让 Supervisor 依据运行意图重试。HTTP 健康检查只能说明管理进程可连接，不能代替 Bot 图与外部传输的运行观察。
 
+当 Bot 启动失败且 Host 已关闭时，Supervisor 记录 `FAILED` 和有界重试时间。管理员随后把运行意图撤为 `OFFLINE`，管理动作只修改内核意图，不伪造运行观察；Supervisor 回收该 Bot runner 后，按当前 Supervisor lease、意图修订和 `FAILED` 观察修订在同一事务中结算为 `OFFLINE`，并清除重试时间。任一修订变化、意图重新变为 `ONLINE`、观察不再是无图的 `FAILED`，都不得覆盖新状态。若 Host 清理失败（`BOT_RUNTIME_CLOSE_FAILED`），不得将故障观察伪装为 OFFLINE，必须保留故障供人工处理。其他 Bot 的运行不受该结算影响。
+
 Bot 正常停止、取消和运行异常都必须先拒绝新的管理准入，等待已准入的管理请求退出，再关闭该 BotHost；异常路径不能绕过这道排空屏障。等待仅覆盖当前 Bot 的管理请求，其他 Bot 的管理入口继续服务。
 
 包自有工作排空以领取循环存活为前提。若任一被排空的循环提前终止，无论是否已观察到队列暂空，都必须使本次排空以明确错误结束，触发发布前回滚；不能无限等待只会由存活循环发出的排空信号，也不能把失败循环视为已成功排空。

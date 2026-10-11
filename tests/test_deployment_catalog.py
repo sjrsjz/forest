@@ -3415,6 +3415,47 @@ async def test_deployment_failure_backoff_is_fenced_and_visible(deployment_catal
     assert projected["desired_state"] == "ONLINE"
     assert projected["observed_state"] == "FAILED"
     assert projected["retry_not_before"] is not None
+    withdrawn = await repository.set_desired(
+        operation_id="runtime/failing/offline", bot_id=bot["bot_id"],
+        desired_state="OFFLINE", expected_revision=projected["intent_revision"],
+    )
+    page = await repository.list_failed_offline_bots_page()
+    assert page == ({
+        "bot_id": bot["bot_id"],
+        "intent_revision": withdrawn["intent_revision"],
+        "observation_revision": projected["observation_revision"],
+    },)
+    assert not await repository.settle_failed_offline(
+        lease, bot_id=bot["bot_id"],
+        intent_revision=projected["intent_revision"],
+        observation_revision=projected["observation_revision"],
+    )
+    assert not await repository.settle_failed_offline(
+        lease, bot_id=bot["bot_id"],
+        intent_revision=withdrawn["intent_revision"],
+        observation_revision=first["revision"],
+    )
+    assert (await repository.inspect(bot["bot_id"]))["observed_state"] == "FAILED"
+    assert await repository.settle_failed_offline(
+        lease, bot_id=bot["bot_id"],
+        intent_revision=withdrawn["intent_revision"],
+        observation_revision=projected["observation_revision"],
+    )
+    settled = await repository.inspect(bot["bot_id"])
+    assert settled["observed_state"] == "OFFLINE"
+    assert settled["error_code"] is None
+    assert settled["retry_not_before"] is None
+    close_failed = await repository.observe(
+        lease, bot_id=bot["bot_id"], observed_state="FAILED",
+        error_code="BOT_RUNTIME_CLOSE_FAILED",
+    )
+    assert await repository.list_failed_offline_bots_page() == ()
+    assert not await repository.settle_failed_offline(
+        lease, bot_id=bot["bot_id"],
+        intent_revision=withdrawn["intent_revision"],
+        observation_revision=close_failed["revision"],
+    )
+    assert (await repository.inspect(bot["bot_id"]))["observed_state"] == "FAILED"
 
 
 @pytest.mark.postgres
@@ -5404,6 +5445,22 @@ async def test_multi_bot_supervisor_contains_one_bot_start_failure(deployment_ca
         broken = await repository.inspect("bot/broken")
         assert broken["error_code"] == "BOT_TEST_START_FAILED"
         assert broken["retry_not_before"] is not None
+        await repository.set_desired(
+            operation_id="runtime/broken/offline", bot_id="bot/broken",
+            desired_state="OFFLINE", expected_revision=broken["intent_revision"],
+        )
+
+        async def withdrawn():
+            current = await repository.inspect("bot/broken")
+            return (
+                current["desired_state"] == "OFFLINE"
+                and current["observed_state"] == "OFFLINE"
+                and current["error_code"] is None
+                and current["retry_not_before"] is None
+            )
+
+        await _eventually(withdrawn)
+        assert (await repository.inspect("bot/healthy"))["observed_state"] == "ONLINE"
     finally:
         await supervisor.close()
 
