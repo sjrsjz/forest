@@ -275,15 +275,23 @@ class ControlManagementGateway:
                 )
 
             publish_started = False
+            terminal_publish_rejection = None
 
             async def commit(content: bytes):
-                nonlocal publish_started
+                nonlocal publish_started, terminal_publish_rejection
                 publish_started = True
-                result = await publish(
-                    content, operation_id=operation_id,
-                    actor_ref=authorization.web_subject_ref,
-                    content_sha256=content_sha256,
-                )
+                try:
+                    result = await publish(
+                        content, operation_id=operation_id,
+                        actor_ref=authorization.web_subject_ref,
+                        content_sha256=content_sha256,
+                    )
+                except ForestError as error:
+                    if error.code in contract.artifact_terminal_rejection_codes(
+                        artifact_id
+                    ):
+                        terminal_publish_rejection = error.code
+                    raise
                 async with self.web_receipts.store.pool.connection() as conn, conn.transaction():
                     await self._authorize_mutation_in(
                         conn, ticket=authorization, component_id=component_id,
@@ -305,9 +313,9 @@ class ControlManagementGateway:
                 yield max_bytes, commit
             except ForestError as error:
                 if reservation is not None and reservation["status"] == "RESERVED" and (
-                    not publish_started and error.code in {
-                    "PACKAGE_TOO_LARGE", "PACKAGE_ARCHIVE_DIGEST_MISMATCH",
-                    }
+                    (not publish_started and error.code in {
+                        "PACKAGE_TOO_LARGE", "PACKAGE_ARCHIVE_DIGEST_MISMATCH",
+                    }) or terminal_publish_rejection == error.code
                 ):
                     receipt = await contract.artifact_close(
                         artifact_id, {

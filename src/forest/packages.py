@@ -878,6 +878,14 @@ MANIFEST_SCHEMA = {
                                 "reserve_port": {"type": "string"},
                                 "settle_port": {"type": "string"},
                                 "close_port": {"type": "string"},
+                                "terminal_rejection_codes": {
+                                    "type": "array", "minItems": 1, "maxItems": 64,
+                                    "uniqueItems": True,
+                                    "items": {
+                                        "type": "string",
+                                        "pattern": "^[A-Z][A-Z0-9_]{0,127}$",
+                                    },
+                                },
                             },
                         },
                     },
@@ -2005,6 +2013,10 @@ def _manifest(files: dict[str, bytes]) -> dict:
             or (("reserve_port" in declaration) != ("settle_port" in declaration))
             or (("reserve_port" in declaration) != ("close_port" in declaration))
             or (declaration["direction"] != "upload" and "reserve_port" in declaration)
+            or ("terminal_rejection_codes" in declaration and (
+                declaration["direction"] != "upload"
+                or "close_port" not in declaration
+            ))
             or ("close_port" in declaration and (
                 effect_port_semantics.get(declaration["close_port"]) != "idempotent"
                 or declaration["close_port"] == declaration["port"]

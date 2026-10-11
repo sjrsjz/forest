@@ -1231,3 +1231,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-11 失败启动后撤回收敛：`MultiBotSupervisor` 对期望 OFFLINE、观察 FAILED、无运行图且 runner 已回收的 Bot 分页扫描；内核目录在 Supervisor lease、意图修订和观察修订共同围栏下原子结算 OFFLINE，不让管理命令直接改观察。修订竞态与多 Bot 隔离的 PostgreSQL 用例 2 passed，Supervisor 生命周期回归 4 passed；Ruff 与编译检查通过。此修正尚未替换当前在线 v25 进程。
 
 2026-10-11 v25 Supervisor 原位镜像更新：生命周期修正提交 `3577fc2` 构建为 `forest:runtime-candidate-3577fc2`。先停机并保留旧容器 `forest-candidate-v25-supervisor-backup-f08ceac`，新容器沿用 v25 数据库、密钥挂载、包卷及管理端口，在启动前接通 PostgreSQL 与 Milvus 网络。更新后 Supervisor healthy、无重启，图 10 为 22/22 ACTIVE；v24/v25 到 OneBot 的 ESTABLISHED 连接为 0/1。只读核查显示 inbox/context 各 35 条、Agent Run 0；许可群已有两条记录均为 `mention_required`，真实显式 @→回复仍待低频验收。失败启动后撤回的 OFFLINE 收敛已由隔离 PostgreSQL 用例验证，当前在线实例没有故意制造失败以测试这一分支。
+
+2026-10-11 部署包导入确定性拒绝收敛：`deployment.package-registry` 1.6.3 在不可变清单声明可终止的物理发布错误码；通用 Web 网关仅在准确的发布调用返回该声明错误后，向包声明的幂等目录关闭端口请求同一操作键的物理裁决。目录若已有成功回执则补结算 `SUCCEEDED`，否则先持久关闭晚到发布再保留原错误码结算 `REJECTED`；未声明的暂时性或不确定错误仍保持 `RESERVED`，由包自有恢复任务核对。隔离 Docker 网络内的 PostgreSQL/ASGI 包导入与 Generation 热替换用例 1 passed，覆盖官方命名空间拒绝、损坏 ZIP、成功重放和真正中断恢复；包清单回归 108 passed、1 skipped；Ruff、编译与官方包构建通过。当前在线 v25 尚未切换此代码。

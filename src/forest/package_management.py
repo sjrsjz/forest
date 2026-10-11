@@ -205,6 +205,10 @@ class PackageManagementContract(ModuleConfigurationContract):
         )
         return await self.adapter.invoke_management_artifact_close(port, payload)
 
+    def artifact_terminal_rejection_codes(self, artifact_id: str) -> frozenset[str]:
+        declaration, _port = self._artifacts[artifact_id]
+        return frozenset(declaration.get("terminal_rejection_codes", ()))
+
     def asset(self, asset_id: str) -> dict:
         try:
             return self._assets[asset_id]

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-package-registry"
-version = "1.6.2"
+version = "1.6.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_package_registry:DeploymentPackageRegistry"
@@ -197,3 +197,12 @@ required_role = "ADMIN"
 reserve_port = "deployment.package-registry.import.reserve"
 settle_port = "deployment.package-registry.import.settle"
 close_port = "deployment.catalog.import-close"
+terminal_rejection_codes = [
+  "INVALID_PACKAGE_ARCHIVE", "INVALID_MANIFEST", "INVALID_SCHEMA",
+  "INVALID_STORAGE_BUNDLE", "INVALID_COMPONENT", "INVALID_SERVICES",
+  "INVALID_MANAGEMENT_OPERATIONS", "PACKAGE_FILE_REJECTED",
+  "PACKAGE_PATH_COLLISION", "PACKAGE_LINK_REJECTED", "PACKAGE_TOO_LARGE",
+  "PACKAGE_ARCHIVE_DIGEST_MISMATCH", "PACKAGE_RESERVED_NAMESPACE",
+  "PACKAGE_VERSION_CONFLICT", "UNSUPPORTED_MANIFEST", "UNSUPPORTED_CAPABILITY",
+  "KERNEL_API_INCOMPATIBLE"
+]

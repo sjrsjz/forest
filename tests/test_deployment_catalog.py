@@ -747,27 +747,72 @@ priority = "P1"
             )
             assert reserved.status_code == 403, reserved.text
             assert reserved.json()["code"] == "PACKAGE_RESERVED_NAMESPACE"
-            reserved_page = await client.post(
+            rejected_namespace = await client.post(
                 "/management/v1/scopes/deployment/deployment/modules/"
                 "deployment.package-registry/queries/import.page",
                 headers={
                     "origin": "http://forest.test",
                     "x-forest-csrf": client.cookies["forest_management_csrf"],
                 },
-                json={"status": "RESERVED", "limit": 1},
+                json={"status": "REJECTED"},
             )
-            assert reserved_page.status_code == 200, reserved_page.text
-            assert len(reserved_page.json()["records"]) == 1
-            assert reserved_page.json()["records"][0]["package_digest"] is None
-            assert reserved_page.json()["records"][0]["error_code"] is None
-            reserved_import = reserved_page.json()["records"][0]
+            assert rejected_namespace.status_code == 200, rejected_namespace.text
+            namespace_row = next(
+                row for row in rejected_namespace.json()["records"]
+                if row["archive_sha256"] == reserved_headers["x-forest-artifact-sha256"]
+            )
+            assert namespace_row["error_code"] == "PACKAGE_RESERVED_NAMESPACE"
+            assert package_catalog.close_import_if_absent(
+                operation_id=namespace_row["operation_id"],
+                actor_ref=namespace_row["actor_ref"],
+                archive_sha256=namespace_row["archive_sha256"],
+            ) == {"found": False, "package_digest": None, "closed": True}
+
+            invalid_bytes = b"not a ZIP archive"
+            invalid_headers = {
+                **upload_headers,
+                "idempotency-key": "test-package-upload-invalid-zip",
+                "x-forest-artifact-length": str(len(invalid_bytes)),
+                "x-forest-artifact-sha256":
+                    "sha256:" + hashlib.sha256(invalid_bytes).hexdigest(),
+            }
+            invalid = await client.post(
+                upload_path, headers=invalid_headers, content=invalid_bytes,
+            )
+            assert invalid.status_code == 422, invalid.text
+            assert invalid.json()["code"] == "INVALID_PACKAGE_ARCHIVE"
+            invalid_page = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.package-registry/queries/import.page",
+                headers={
+                    "origin": "http://forest.test",
+                    "x-forest-csrf": client.cookies["forest_management_csrf"],
+                },
+                json={"status": "REJECTED"},
+            )
+            assert any(
+                row["archive_sha256"] == invalid_headers["x-forest-artifact-sha256"]
+                and row["error_code"] == "INVALID_PACKAGE_ARCHIVE"
+                for row in invalid_page.json()["records"]
+            )
+
             namespace = module_schema_namespace("forest.deployment.package-imports")
+            reserved_import = {
+                "operation_id": "test-recovery-absent",
+                "actor_ref": "admin:recovery",
+                "archive_sha256": "sha256:" + "a" * 64,
+            }
             async with repository.store.pool.connection() as conn, conn.transaction():
                 await conn.execute(
-                    sql.SQL("UPDATE {}.package_import_requests SET created_at="
-                            "clock_timestamp()-interval '2 minutes' "
-                            "WHERE operation_id=%s").format(sql.Identifier(namespace)),
-                    (reserved_import["operation_id"],),
+                    sql.SQL("INSERT INTO {}.package_import_requests "
+                            "(operation_id,actor_ref,generation_id,content_length,"
+                            "archive_sha256,status,created_at) VALUES "
+                            "(%s,%s,%s,1,%s,'RESERVED',"
+                            "clock_timestamp()-interval '2 minutes')")
+                    .format(sql.Identifier(namespace)),
+                    (reserved_import["operation_id"], reserved_import["actor_ref"],
+                     initial.graph_identity.generations["deployment.package-registry"],
+                     reserved_import["archive_sha256"]),
                 )
             for _ in range(100):
                 recovered_reserved = await module.management_contract.query(
@@ -910,7 +955,7 @@ priority = "P1"
         untrusted_manifest = untrusted_source / "module.toml"
         untrusted_manifest.write_text(
             untrusted_manifest.read_text(encoding="utf-8").replace(
-                'version = "1.6.1"', 'version = "1.6.2"', 1
+                'version = "1.6.3"', 'version = "1.6.4"', 1
             ), encoding="utf-8",
         )
         untrusted = package_catalog.build(untrusted_source)
@@ -926,7 +971,7 @@ priority = "P1"
         manifest = next_source / "module.toml"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
-                'version = "1.6.1"', 'version = "1.6.2"', 1
+                'version = "1.6.3"', 'version = "1.6.4"', 1
             ), encoding="utf-8",
         )
         replacement = package_catalog.build_official(next_source)
