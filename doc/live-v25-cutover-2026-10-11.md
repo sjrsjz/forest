@@ -23,3 +23,10 @@ v25 使用独立的 `forest_deployment_v25`、`forest_host_v25`、Bot 物理库�
 使用 v25 管理员会话经 `/management/v1/scopes/resolve` 解析 Bot 管理 scope，再按 scope 路由调用 `vector.index.summary`：索引健康 `READY`、引用水位 0、绑定修订 1、无活动重建。经同一 Bot scope 下载 `vector.index.workspace` 的包自带管理页，15,728 字节与运行时贡献清单的 SHA-256 相符。直接把 `forest-main-v25` 作为 URL 中的 scope ID 会得到 `BOT_MANAGEMENT_SCOPE_NOT_FOUND`，因为 Bot 身份与管理 scope ID 是不同字段；本次未发起重建或其他写动作。
 
 Memory 管理入口同样经真实会话验证：按许可群号筛选主干得到 1 条，模块自带页面 81,413 字节与运行时 SHA-256 一致。来源查询默认只看 `ELIGIBLE`，此时返回 0；明确筛选 `REGISTERED` 后首个 2 条分页存在且 `has_more=true`，两条均为文本、`NO_FACETS`。这说明这些来源尚未取得归档资格：Memory 在归档资格提交后才把来源升为 `ELIGIBLE` 并入列文档 facet 工作；不是适配器丢失入站。管理页已提供“待归档”筛选。该在线检查未人为推动归档或调用嵌入服务。
+## 2026-10-11 部署包 1.6.3 在线替换
+
+提交 `12dbd5c` 构建 `forest:runtime-candidate-12dbd5c`。停下原 Supervisor 后将其保留为 `forest-candidate-v25-supervisor-backup-3577fc2`，新容器沿用独立 deployment/host/Bot 库、包卷、密钥和本机管理端口，并在启动前接入 PostgreSQL 与 Milvus 网络。新 Supervisor 为 `running/healthy`、重启次数 0；v24/v25 到树莓派 OneBot 的 ESTABLISHED 连接数为 0/1。
+
+重启后部署图仍选中 `deployment.package-registry` 1.6.2；镜像升级不会擅自覆盖已发布的包选择。目录已包含官方 1.6.3 工件 `sha256:277c38df2e8eaacbb9f074782ecea395fd2da54bcfb1745a7faa5bcf3164f701`。通过认证管理端读取图修订 4，预览只替换该模块、保留其他 7 个部署模块，再提交带修订和计划摘要的 `module.replace`。操作 `web:sha256:94dcabcf01f9e99c4a2d89f9b269b70b05e15084b4c72bef5818fc3e72dd5c3d` 结算 `SUCCEEDED`；部署图修订 5 的该模块 `ACTIVE`，版本 1.6.3。此步骤验证了部署模块的真实在线代际热替换，而不是仅验证进程镜像更新。
+
+替换后 Web 管理端的向量索引查询为 READY、绑定修订 1；向量与记忆包自带页面字节均匹配运行时声明的 SHA-256。Bot 图 12 为 22/22 ACTIVE，Supervisor 仍 healthy 且连接数仍为 0/1。只读 Bot 库核对 inbox/context 各 203 条、Memory 来源 202 条、Agent Run 0；203 条全部为 NO_TRIGGER（非许可群 189、许可群未明确 @ 当前账号 14）。唯一未建来源的消息由图片像素超限明确记为 `MEDIA_CAPTURE_UNAVAILABLE`。本次未主动发送 QQ 消息；许可群明确 @ 当前登录账号后的 Agent→Provider→Delivery 回执仍待低频真人验收。
