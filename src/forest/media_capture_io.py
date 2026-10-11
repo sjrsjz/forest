@@ -36,6 +36,13 @@ class CapturedImage:
     decoded_pixels: int
 
 
+@dataclass(frozen=True)
+class PinnedPublicURL:
+    connect_url: str
+    authority: str
+    tls_hostname: str
+
+
 def _validate(content: bytes) -> CapturedImage:
     if not content or len(content) > MAX_MEDIA_BYTES:
         raise _error("MEDIA_SIZE_EXCEEDED")
@@ -98,7 +105,7 @@ class PublicImageCaptureClient:
                 retries=0,
                 limits=httpx.Limits(
                     max_connections=max_connections,
-                    max_keepalive_connections=max_connections,
+                    max_keepalive_connections=0,
                 ),
             ),
             follow_redirects=False,
@@ -108,7 +115,7 @@ class PublicImageCaptureClient:
         )
 
     @staticmethod
-    async def _public_url(value: object) -> str:
+    async def _public_url(value: object) -> PinnedPublicURL:
         if (
             not isinstance(value, str)
             or not 1 <= len(value.encode()) <= 8192
@@ -137,15 +144,24 @@ class PublicImageCaptureClient:
                 not ipaddress.ip_address(item[4][0]).is_global for item in addresses
             ):
                 raise ValueError
-            return str(httpx.URL(value))
+            canonical = httpx.URL(value)
+            return PinnedPublicURL(
+                connect_url=str(canonical.copy_with(host=addresses[0][4][0])),
+                authority=canonical.netloc.decode("ascii"),
+                tls_hostname=hostname,
+            )
         except (ValueError, UnicodeError, OSError, httpx.InvalidURL):
             raise _error("MEDIA_URL_FORBIDDEN") from None
 
     async def fetch(self, locator: dict) -> CapturedImage:
-        url = await self._public_url(locator.get("uri"))
+        target = await self._public_url(locator.get("uri"))
         try:
             async with asyncio.timeout(self.timeout_seconds):
-                async with self._client.stream("GET", url) as response:
+                async with self._client.stream(
+                    "GET", target.connect_url,
+                    headers={"Host": target.authority},
+                    extensions={"sni_hostname": target.tls_hostname},
+                ) as response:
                     if response.status_code != 200:
                         raise _error("MEDIA_HTTP_REJECTED")
                     if response.headers.get("content-encoding", "identity").lower() != "identity":
