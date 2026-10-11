@@ -10,6 +10,7 @@
     "dimensions",
     "candidate_revision",
     "collection_name",
+    "owner_marker",
     "collection_id"
   ],
   "properties": {
@@ -54,6 +55,10 @@
         "null"
       ],
       "minimum": 1
+    },
+    "owner_marker": {
+      "type": "string",
+      "pattern": "^forest[.]vector-candidate/1:[a-f0-9]{64}$"
     }
   }
 }

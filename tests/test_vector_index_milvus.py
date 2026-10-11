@@ -32,6 +32,7 @@ from forest.schema_bundles import module_schema_namespace
 from forest.vector_index_effect_driver import (
     MilvusVectorIndexEffectDriver,
     milvus_vector_index_effect_driver_factory,
+    vector_candidate_owner_marker,
     vector_collection_name,
 )
 
@@ -171,13 +172,15 @@ async def test_collection_gc_refuses_reused_name_with_different_physical_id():
     class PhysicalCollections:
         def __init__(self):
             self.ids = {collection_name: 43}
+            self.owner_marker = "unrelated collection"
             self.dropped = []
 
         async def has_collection(self, *, collection_name):
             return collection_name in self.ids
 
         async def describe_collection(self, *, collection_name):
-            return {"collection_id": self.ids[collection_name]}
+            return {"collection_id": self.ids[collection_name],
+                    "description": self.owner_marker}
 
         async def drop_collection(self, *, collection_name):
             self.dropped.append(collection_name)
@@ -198,7 +201,15 @@ async def test_collection_gc_refuses_reused_name_with_different_physical_id():
         await driver._collection_drop(stale)
     assert mismatch.value.code == "VECTOR_INDEX_GC_IDENTITY_MISMATCH"
     assert physical.dropped == []
-    exact = {**stale, "collection_id": 43}
+    exact = {**stale, "collection_id": 43,
+             "owner_marker": vector_candidate_owner_marker(
+                 bot_id, space_id, "request/gc", 2, collection_name,
+             )}
+    with pytest.raises(ForestError) as wrong_owner:
+        await driver._collection_drop(exact)
+    assert wrong_owner.value.code == "VECTOR_INDEX_GC_IDENTITY_MISMATCH"
+    assert physical.dropped == []
+    physical.owner_marker = exact["owner_marker"]
     assert await driver._collection_drop(exact) == {**exact, "deleted": True}
     assert await driver._collection_drop(exact) == {**exact, "deleted": True}
     assert physical.dropped == [collection_name]
@@ -1011,6 +1022,7 @@ async def test_rebuild_candidate_audit_paginates_frozen_refs(
     assert gc_claim["payload"] == {
         "space_id": space_id, "binding_revision": 1,
         "collection_name": name, "collection_id": 41,
+        "owner_marker": None,
     }
     physical_gc_calls = []
 
@@ -1057,9 +1069,12 @@ async def test_rebuild_candidate_audit_paginates_frozen_refs(
         await conn.execute(
             sql.SQL("INSERT INTO {}.vector_rebuild_attempts "
                     "(bot_id,candidate_revision,request_id,attempt,"
-                    "collection_name,collection_id) "
-                    "VALUES (%s,3,'audit/orphan',1,%s,43)")
-            .format(sql.Identifier(namespace)), (bot_id, name + "_r3"),
+                    "collection_name,owner_marker,collection_id) "
+                    "VALUES (%s,3,'audit/orphan',1,%s,%s,43)")
+            .format(sql.Identifier(namespace)),
+            (bot_id, name + "_r3", vector_candidate_owner_marker(
+                bot_id, space_id, "audit/orphan", 3, name + "_r3",
+            )),
         )
     assert await domain("vector_claim_collection_gc", {
         **gc_claim_request, "claim_token": "audit/page/gc-orphan",
@@ -1145,9 +1160,13 @@ async def test_rebuild_candidate_audit_paginates_frozen_refs(
         )
         await conn.execute(
             sql.SQL("INSERT INTO {}.vector_rebuild_attempts "
-                    "(bot_id,candidate_revision,request_id,attempt,collection_name) "
-                    "VALUES (%s,4,'audit/unconfirmed',1,%s)")
-            .format(sql.Identifier(namespace)), (bot_id, name + "_r4"),
+                    "(bot_id,candidate_revision,request_id,attempt,"
+                    "collection_name,owner_marker) "
+                    "VALUES (%s,4,'audit/unconfirmed',1,%s,%s)")
+            .format(sql.Identifier(namespace)),
+            (bot_id, name + "_r4", vector_candidate_owner_marker(
+                bot_id, space_id, "audit/unconfirmed", 4, name + "_r4",
+            )),
         )
     unconfirmed = await domain("vector_query_management_collections", {
         "limit": 20, "state": "NEEDS_ID",
@@ -1974,6 +1993,10 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             "vector_claim_rebuild_create", claim_input
         )
         assert first_claim["payload"]["candidate_revision"] == 2
+        assert first_claim["payload"]["owner_marker"] == vector_candidate_owner_marker(
+            bot_id, space_id, enqueued["request_id"], 2,
+            first_claim["payload"]["collection_name"],
+        )
         async with store.pool.connection() as conn, conn.transaction():
             await conn.execute(
                 sql.SQL("UPDATE {}.vector_rebuild_work "
@@ -1987,6 +2010,14 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             {**claim_input, "claim_token": "rebuild/claim/second"},
         )
         assert next_claim["payload"]["candidate_revision"] == 3
+        wrong_name = first_claim["payload"]["collection_name"]
+        await upsert._create_collection_named(wrong_name)
+        with pytest.raises(ForestError) as wrong_owner:
+            await drivers["vector.transport.candidate-create"].invoke(
+                first_claim["payload"], scope=scope, invocation=invocation,
+            )
+        assert wrong_owner.value.code == "VECTOR_INDEX_CANDIDATE_OWNERSHIP_MISMATCH"
+        await upsert.client.drop_collection(collection_name=wrong_name)
         with pytest.raises(ForestError) as late_confirm:
             await rebuild_domain("vector_confirm_rebuild_candidate", {
                 "request_id": enqueued["request_id"],
@@ -2022,6 +2053,9 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             ),
         )
         candidate_name = candidate_receipt["collection_name"]
+        assert (await upsert.client.describe_collection(
+            collection_name=candidate_name,
+        ))["description"] == next_claim["payload"]["owner_marker"]
         # A crash after durable confirmation but before owned-work settlement
         # must reuse the confirmed physical identity without creating again.
         async with store.pool.connection() as conn, conn.transaction():
@@ -2426,9 +2460,9 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         assert changed_id.value.code == "VECTOR_INDEX_GC_IDENTITY_MISMATCH"
         assert await client.has_collection(collection_name=collection_name)
 
-        retired_name = collection_name + "_r3"
+        retired_name = collection_name + "_r4"
         retired_id = await gc_driver._create_collection_named(retired_name)
-        exact_gc = {"space_id": space_id, "binding_revision": 3,
+        exact_gc = {"space_id": space_id, "binding_revision": 4,
                     "collection_name": retired_name, "collection_id": retired_id}
         assert await gc_driver.invoke(exact_gc, scope=scope, invocation=invocation) == {
             **exact_gc, "deleted": True,

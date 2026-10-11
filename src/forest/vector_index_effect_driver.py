@@ -45,6 +45,18 @@ def vector_collection_name(bot_id: str, space_id: str) -> str:
     return "forest_memory_ref2_" + suffix
 
 
+def vector_candidate_owner_marker(
+    bot_id: str, space_id: str, request_id: str,
+    candidate_revision: int, collection_name: str,
+) -> str:
+    identity = "\0".join((
+        bot_id, space_id, request_id, str(candidate_revision), collection_name,
+    ))
+    return "forest.vector-candidate/1:" + hashlib.sha256(
+        identity.encode("utf-8")
+    ).hexdigest()
+
+
 class MilvusVectorIndexEffectDriver:
     def __init__(
         self,
@@ -266,10 +278,13 @@ class MilvusVectorIndexEffectDriver:
     async def _create_collection(self) -> int:
         return await self._create_collection_named(self.collection_name)
 
-    async def _create_collection_named(self, collection_name: str) -> int:
-        schema = self.client.create_schema(
-            auto_id=False, enable_dynamic_field=False
-        )
+    async def _create_collection_named(
+        self, collection_name: str, *, owner_marker: str | None = None,
+    ) -> int:
+        schema_options = {"auto_id": False, "enable_dynamic_field": False}
+        if owner_marker is not None:
+            schema_options["description"] = owner_marker
+        schema = self.client.create_schema(**schema_options)
         schema.add_field(
             "ref_id", DataType.VARCHAR, is_primary=True, max_length=256
         )
@@ -292,6 +307,11 @@ class MilvusVectorIndexEffectDriver:
         description = await self.client.describe_collection(
             collection_name=collection_name
         )
+        if owner_marker is not None and description.get("description") != owner_marker:
+            raise ForestError(
+                "VECTOR_INDEX_CANDIDATE_OWNERSHIP_MISMATCH",
+                "Created candidate has another owner marker", 409,
+            )
         return self._validate_collection_description(description)
 
     async def _confirm_collection(self, token: str, collection_id: int) -> None:
@@ -506,15 +526,20 @@ class MilvusVectorIndexEffectDriver:
         revision = payload["candidate_revision"]
         name = payload["collection_name"]
         base = vector_collection_name(self.bot_id, self.configuration["space_id"])
+        owner_marker = vector_candidate_owner_marker(
+            self.bot_id, self.configuration["space_id"],
+            payload["request_id"], revision, name,
+        )
         if (
             type(revision) is not int or revision <= 1
             or (self.binding_revision is not None
                 and revision <= self.binding_revision)
             or name != base + "_r" + str(revision)
+            or payload["owner_marker"] != owner_marker
         ):
             raise ForestError(
                 "VECTOR_INDEX_BINDING_STALE",
-                "Candidate name differs from its reserved revision", 409,
+                "Candidate identity differs from its reserved revision", 409,
             )
         try:
             async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
@@ -522,9 +547,16 @@ class MilvusVectorIndexEffectDriver:
                     description = await self.client.describe_collection(
                         collection_name=name
                     )
+                    if description.get("description") != owner_marker:
+                        raise ForestError(
+                            "VECTOR_INDEX_CANDIDATE_OWNERSHIP_MISMATCH",
+                            "Existing candidate has another owner marker", 409,
+                        )
                     collection_id = self._validate_collection_description(description)
                 else:
-                    collection_id = await self._create_collection_named(name)
+                    collection_id = await self._create_collection_named(
+                        name, owner_marker=owner_marker,
+                    )
         except ForestError:
             raise
         except (TimeoutError, MilvusException, OSError) as exc:
@@ -564,6 +596,13 @@ class MilvusVectorIndexEffectDriver:
                         raise ForestError(
                             "VECTOR_INDEX_GC_IDENTITY_MISMATCH",
                             "Retired collection name now identifies another collection", 409,
+                        )
+                    owner_marker = payload.get("owner_marker")
+                    if (owner_marker is not None and
+                            description.get("description") != owner_marker):
+                        raise ForestError(
+                            "VECTOR_INDEX_GC_IDENTITY_MISMATCH",
+                            "Retired collection has another owner marker", 409,
                         )
                     await self.client.drop_collection(collection_name=collection_name)
                     if await self.client.has_collection(collection_name=collection_name):

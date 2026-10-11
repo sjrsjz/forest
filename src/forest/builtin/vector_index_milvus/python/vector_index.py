@@ -255,8 +255,10 @@ class MilvusVectorIndex(Plugin):
                 "vector.transport.candidate-create",
                 {
                     "space_id": self.space_id,
+                    "request_id": request["request_id"],
                     "candidate_revision": request["candidate_revision"],
                     "collection_name": request["collection_name"],
+                    "owner_marker": request["owner_marker"],
                 },
                 operation_id=ctx.operations.stable(
                     "candidate-create:" + request["request_id"] + ":" +

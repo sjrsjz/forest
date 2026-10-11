@@ -1625,6 +1625,8 @@ CREATE TABLE vector_rebuild_attempts (
     request_id text NOT NULL,
     attempt integer NOT NULL CHECK (attempt>0),
     collection_name text NOT NULL CHECK (octet_length(collection_name) BETWEEN 1 AND 256),
+    owner_marker text NOT NULL CHECK (
+        owner_marker ~ '^forest[.]vector-candidate/1:[a-f0-9]{64}$'),
     collection_id bigint CHECK (collection_id>0),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY(bot_id,candidate_revision),
@@ -1758,6 +1760,7 @@ DECLARE
     next_revision bigint;
     base_name text;
     next_name text;
+    next_marker text;
     next_payload jsonb;
     work_key text;
 BEGIN
@@ -1823,13 +1826,28 @@ BEGIN
             convert_to(requested_bot,'UTF8')||decode('00','hex')||
             convert_to(work.space_id,'UTF8')),'hex'),1,32);
         next_name := base_name||'_r'||next_revision::text;
+        next_marker := 'forest.vector-candidate/1:'||encode(sha256(
+            convert_to(requested_bot,'UTF8')||decode('00','hex')||
+            convert_to(work.space_id,'UTF8')||decode('00','hex')||
+            convert_to(work.request_id,'UTF8')||decode('00','hex')||
+            convert_to(next_revision::text,'UTF8')||decode('00','hex')||
+            convert_to(next_name,'UTF8')),'hex');
         INSERT INTO __forest_module_schema__.vector_rebuild_attempts(
-            bot_id,candidate_revision,request_id,attempt,collection_name
+            bot_id,candidate_revision,request_id,attempt,collection_name,
+            owner_marker
         ) VALUES(requested_bot,next_revision,work.request_id,
-                 work.attempt_count+1,next_name);
+                 work.attempt_count+1,next_name,next_marker);
     ELSE
         next_revision := work.candidate_revision;
         next_name := work.candidate_name;
+        SELECT owner_marker INTO next_marker
+        FROM __forest_module_schema__.vector_rebuild_attempts
+        WHERE bot_id=requested_bot AND candidate_revision=next_revision
+          AND request_id=work.request_id;
+        IF next_marker IS NULL THEN
+            RAISE EXCEPTION 'Confirmed candidate has no frozen owner marker'
+                USING ERRCODE='23514';
+        END IF;
     END IF;
     work_key := 'vector-rebuild-create:'||encode(sha256(convert_to(
         requested_bot||'/'||work.request_id,'UTF8')),'hex');
@@ -1846,7 +1864,7 @@ BEGIN
                          ELSE 'CONFIRMED' END,
             'space_id',work.space_id,'dimensions',work.dimensions,
             'candidate_revision',next_revision,
-            'collection_name',next_name,
+            'collection_name',next_name,'owner_marker',next_marker,
             'collection_id',work.candidate_id));
     UPDATE __forest_module_schema__.vector_rebuild_work
     SET state='CLAIMED',claim_token=requested_token,
@@ -2893,6 +2911,8 @@ CREATE TABLE vector_collection_gc_work (
     collection_name text NOT NULL CHECK (octet_length(collection_name) BETWEEN 1 AND 256),
     collection_id bigint NOT NULL CHECK (collection_id>0),
     source_kind text NOT NULL CHECK (source_kind IN ('OLD_BINDING','ABANDONED_CANDIDATE')),
+    owner_marker text CHECK (
+        owner_marker ~ '^forest[.]vector-candidate/1:[a-f0-9]{64}$'),
     state text NOT NULL DEFAULT 'QUEUED' CHECK (state IN ('QUEUED','CLAIMED','DELETED','BLOCKED')),
     eligible_at timestamptz NOT NULL,
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count>=0),
@@ -2954,11 +2974,14 @@ BEGIN
     );
     INSERT INTO __forest_module_schema__.vector_collection_gc_work(
         bot_id,binding_revision,space_id,collection_name,collection_id,
-        source_kind,eligible_at
+        source_kind,owner_marker,eligible_at
     )
     SELECT b.bot_id,b.binding_revision,b.space_id,b.collection_name,
-           b.collection_id,'OLD_BINDING',current_binding.bound_at+interval '10 minutes'
+           b.collection_id,'OLD_BINDING',a.owner_marker,
+           current_binding.bound_at+interval '10 minutes'
     FROM __forest_module_schema__.vector_collection_bindings b
+    LEFT JOIN __forest_module_schema__.vector_rebuild_attempts a
+      ON a.bot_id=b.bot_id AND a.candidate_revision=b.binding_revision
     JOIN __forest_module_schema__.vector_collection_health h
       ON h.bot_id=b.bot_id AND h.binding_revision>b.binding_revision
     JOIN __forest_module_schema__.vector_collection_bindings current_binding
@@ -2972,10 +2995,10 @@ BEGIN
     ORDER BY b.binding_revision LIMIT 16 ON CONFLICT DO NOTHING;
     INSERT INTO __forest_module_schema__.vector_collection_gc_work(
         bot_id,binding_revision,space_id,collection_name,collection_id,
-        source_kind,eligible_at
+        source_kind,owner_marker,eligible_at
     )
     SELECT a.bot_id,a.candidate_revision,w.space_id,a.collection_name,
-           a.collection_id,'ABANDONED_CANDIDATE',
+           a.collection_id,'ABANDONED_CANDIDATE',a.owner_marker,
            GREATEST(a.created_at,w.updated_at)+interval '10 minutes'
     FROM __forest_module_schema__.vector_rebuild_attempts a
     JOIN __forest_module_schema__.vector_rebuild_work w
@@ -3030,7 +3053,8 @@ BEGIN
             'space_id',work.space_id,
             'binding_revision',work.binding_revision,
             'collection_name',work.collection_name,
-            'collection_id',work.collection_id));
+            'collection_id',work.collection_id,
+            'owner_marker',work.owner_marker));
     UPDATE __forest_module_schema__.vector_collection_gc_work
     SET state='CLAIMED',claim_token=requested_token,
         lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),

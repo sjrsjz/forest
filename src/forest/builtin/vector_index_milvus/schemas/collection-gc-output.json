@@ -30,6 +30,13 @@
     },
     "deleted": {
       "const": true
+    },
+    "owner_marker": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^forest[.]vector-candidate/1:[a-f0-9]{64}$"
     }
   }
 }

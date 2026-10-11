@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.20.0"
+version = "2.21.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -134,9 +134,9 @@ timeout_s = 15
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.19.0"
+schema_version = "2.20.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "61a62c9ed9651993077556a925a3c0b7facf08c10228ad62237e3fd8d9c236a5"
+baseline_sha256 = "f3d7c48da588eb3f0d8da4a4cce64e3e433bf4259f8383fc8573ba7d77adc556"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
