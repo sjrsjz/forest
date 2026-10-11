@@ -1823,6 +1823,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
     invocation = SimpleNamespace(operation_id="test")
     collection_name = drivers["vector.transport.upsert"].collection_name
     candidate_name = None
+    wrong_name = None
 
     def transport_row(ref_id, purpose, vector):
         public = _with_replay({
@@ -2010,6 +2011,9 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             {**claim_input, "claim_token": "rebuild/claim/second"},
         )
         assert next_claim["payload"]["candidate_revision"] == 3
+        probe_driver = driver_for("vector.transport.collection-probe")
+        drivers["vector.transport.collection-probe"] = probe_driver
+        await probe_driver.start()
         wrong_name = first_claim["payload"]["collection_name"]
         await upsert._create_collection_named(wrong_name)
         with pytest.raises(ForestError) as wrong_owner:
@@ -2017,6 +2021,11 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
                 first_claim["payload"], scope=scope, invocation=invocation,
             )
         assert wrong_owner.value.code == "VECTOR_INDEX_CANDIDATE_OWNERSHIP_MISMATCH"
+        with pytest.raises(ForestError) as wrong_probe:
+            await probe_driver.invoke(
+                first_claim["payload"], scope=scope, invocation=invocation,
+            )
+        assert wrong_probe.value.code == "VECTOR_INDEX_DISCOVERY_IDENTITY_MISMATCH"
         await upsert.client.drop_collection(collection_name=wrong_name)
         with pytest.raises(ForestError) as late_confirm:
             await rebuild_domain("vector_confirm_rebuild_candidate", {
@@ -2044,6 +2053,153 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         component = MilvusVectorIndex()
         component.space_id = space_id
         component.dimensions = 4
+        discovery_request = {
+            "protocol": "forest.owned-work-claim-request/1",
+            "claim_token": "discovery/absent", "lease_seconds": 60,
+        }
+        assert await rebuild_domain(
+            "vector_claim_collection_discovery", discovery_request,
+        ) is None
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("UPDATE {}.vector_collection_discovery_work "
+                        "SET next_at=clock_timestamp()-interval '1 second' "
+                        "WHERE bot_id=%s AND candidate_revision=2")
+                .format(sql.Identifier(namespace)), (bot_id,),
+            )
+        absent_claim = await rebuild_domain(
+            "vector_claim_collection_discovery", discovery_request,
+        )
+        assert absent_claim["payload"]["owner_marker"] == (
+            first_claim["payload"]["owner_marker"]
+        )
+
+        async def discovery_service(name, payload, **_options):
+            assert name == "vector.transport.collection-probe"
+            return await probe_driver.invoke(
+                payload, scope=scope, invocation=invocation,
+            )
+
+        discovery_ctx = SimpleNamespace(
+            services=SimpleNamespace(call=discovery_service),
+            operations=SimpleNamespace(stable=lambda value: value),
+        )
+        absent = await component.discover_unconfirmed_collection(
+            absent_claim, discovery_ctx,
+        )
+        assert absent["state"] == "ABSENT" and absent["collection_id"] is None
+        absent_settlement = {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": absent_claim["work_id"],
+            "claim_token": absent_claim["claim_token"],
+            "attempt": absent_claim["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": absent},
+        }
+        await rebuild_domain("vector_settle_collection_discovery", absent_settlement)
+        await rebuild_domain("vector_settle_collection_discovery", absent_settlement)
+        async with store.pool.connection() as conn:
+            absent_row = await (await conn.execute(
+                sql.SQL("SELECT state,last_observation,next_at>clock_timestamp() "
+                        "AS deferred FROM {}.vector_collection_discovery_work "
+                        "WHERE bot_id=%s AND candidate_revision=2")
+                .format(sql.Identifier(namespace)), (bot_id,),
+            )).fetchone()
+        assert absent_row == {"state": "QUEUED", "last_observation": "ABSENT",
+                              "deferred": True}
+
+        late_payload = {key: first_claim["payload"][key] for key in (
+            "space_id", "request_id", "candidate_revision",
+            "collection_name", "owner_marker",
+        )}
+        late_create = await drivers["vector.transport.candidate-create"].invoke(
+            late_payload, scope=scope, invocation=invocation,
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("UPDATE {}.vector_collection_discovery_work "
+                        "SET next_at=clock_timestamp()-interval '1 second' "
+                        "WHERE bot_id=%s AND candidate_revision=2")
+                .format(sql.Identifier(namespace)), (bot_id,),
+            )
+        found_claim = await rebuild_domain(
+            "vector_claim_collection_discovery",
+            {**discovery_request, "claim_token": "discovery/found"},
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("UPDATE {}.vector_collection_discovery_work "
+                        "SET lease_deadline=clock_timestamp()-interval '1 second' "
+                        "WHERE bot_id=%s AND candidate_revision=2")
+                .format(sql.Identifier(namespace)), (bot_id,),
+            )
+        reclaimed_claim = await rebuild_domain(
+            "vector_claim_collection_discovery",
+            {**discovery_request, "claim_token": "discovery/reclaimed"},
+        )
+        assert reclaimed_claim["payload"] == found_claim["payload"]
+        with pytest.raises(ForestError) as stale_discovery:
+            await rebuild_domain("vector_settle_collection_discovery", {
+                "protocol": "forest.owned-work-settle-request/1",
+                "work_id": found_claim["work_id"],
+                "claim_token": found_claim["claim_token"],
+                "attempt": found_claim["attempt"],
+                "outcome": {"status": "SUCCEEDED", "result": {
+                    **found_claim["payload"], "state": "FOUND",
+                    "collection_id": late_create["collection_id"],
+                }},
+            })
+        assert stale_discovery.value.code == "VECTOR_DISCOVERY_CLAIM_STALE"
+        found_claim = reclaimed_claim
+        found = await component.discover_unconfirmed_collection(
+            found_claim, discovery_ctx,
+        )
+        assert found["state"] == "FOUND"
+        assert found["collection_id"] == late_create["collection_id"]
+        await rebuild_domain("vector_settle_collection_discovery", {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": found_claim["work_id"],
+            "claim_token": found_claim["claim_token"],
+            "attempt": found_claim["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": found},
+        })
+        async with store.pool.connection() as conn:
+            recovered_id = await (await conn.execute(
+                sql.SQL("SELECT collection_id FROM {}.vector_rebuild_attempts "
+                        "WHERE bot_id=%s AND candidate_revision=2")
+                .format(sql.Identifier(namespace)), (bot_id,),
+            )).fetchone()
+        assert recovered_id["collection_id"] == late_create["collection_id"]
+
+        gc_request = {
+            "protocol": "forest.owned-work-claim-request/1",
+            "claim_token": "discovery/gc", "lease_seconds": 60,
+        }
+        assert await rebuild_domain("vector_claim_collection_gc", gc_request) is None
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("UPDATE {}.vector_collection_gc_work "
+                        "SET eligible_at=clock_timestamp()-interval '1 second' "
+                        "WHERE bot_id=%s AND binding_revision=2")
+                .format(sql.Identifier(namespace)), (bot_id,),
+            )
+        gc_claim = await rebuild_domain("vector_claim_collection_gc", gc_request)
+        assert gc_claim["payload"]["collection_id"] == late_create["collection_id"]
+        assert gc_claim["payload"]["owner_marker"] == late_payload["owner_marker"]
+        gc_driver = driver_for("vector.transport.collection-drop")
+        drivers["vector.transport.collection-drop"] = gc_driver
+        await gc_driver.start()
+        removed = await gc_driver.invoke(
+            gc_claim["payload"], scope=scope, invocation=invocation,
+        )
+        await rebuild_domain("vector_settle_collection_gc", {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": gc_claim["work_id"],
+            "claim_token": gc_claim["claim_token"],
+            "attempt": gc_claim["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": removed},
+        })
+        assert not await upsert.client.has_collection(collection_name=wrong_name)
+
         candidate_receipt = await component.create_rebuild_candidate(
             {"payload": next_claim["payload"]},
             SimpleNamespace(
@@ -2449,9 +2605,7 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
             candidate_document["ref_id"]
         ]
 
-        gc_driver = driver_for("vector.transport.collection-drop")
-        drivers["vector.transport.collection-drop"] = gc_driver
-        await gc_driver.start()
+        gc_driver = drivers["vector.transport.collection-drop"]
         stale_gc = {"space_id": space_id, "binding_revision": 1,
                     "collection_name": collection_name,
                     "collection_id": original_collection_id}
@@ -2480,5 +2634,8 @@ async def test_milvus_vector_index_round_trip_by_reference(clean_authority, tmp_
         if (client is not None and candidate_name is not None
                 and await client.has_collection(collection_name=candidate_name)):
             await client.drop_collection(collection_name=candidate_name)
+        if (client is not None and wrong_name is not None
+                and await client.has_collection(collection_name=wrong_name)):
+            await client.drop_collection(collection_name=wrong_name)
         for driver in drivers.values():
             await driver.close()

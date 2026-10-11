@@ -24,6 +24,7 @@ _SERVICES = frozenset(
     {"vector.transport.upsert", "vector.transport.search",
      "vector.transport.prune", "vector.transport.audit",
      "vector.transport.candidate-create",
+     "vector.transport.collection-probe",
      "vector.transport.collection-drop"}
 )
 
@@ -500,6 +501,8 @@ class MilvusVectorIndexEffectDriver:
         self._check_space(payload["space_id"])
         if self.service_id == "vector.transport.collection-drop":
             return await self._collection_drop(payload)
+        if self.service_id == "vector.transport.collection-probe":
+            return await self._collection_probe(payload)
         if self.service_id == "vector.transport.candidate-create":
             return await self._candidate_create(payload)
         binding = payload.get("binding")
@@ -618,6 +621,53 @@ class MilvusVectorIndexEffectDriver:
                 "Retired collection deletion is unavailable", 503,
             ) from exc
         return {**payload, "deleted": True}
+
+    async def _collection_probe(self, payload):
+        revision = payload["candidate_revision"]
+        name = payload["collection_name"]
+        base = vector_collection_name(self.bot_id, self.configuration["space_id"])
+        marker = vector_candidate_owner_marker(
+            self.bot_id, self.configuration["space_id"],
+            payload["request_id"], revision, name,
+        )
+        if (
+            type(revision) is not int or revision <= 1
+            or name != base + "_r" + str(revision)
+            or payload["owner_marker"] != marker
+        ):
+            raise ForestError(
+                "VECTOR_INDEX_DISCOVERY_IDENTITY_MISMATCH",
+                "Discovery request differs from its frozen candidate", 409,
+            )
+        try:
+            async with asyncio.timeout(float(self.configuration["timeout_seconds"])):
+                if not await self.client.has_collection(collection_name=name):
+                    return {**payload, "state": "ABSENT", "collection_id": None}
+                description = await self.client.describe_collection(
+                    collection_name=name
+                )
+                if description.get("description") != marker:
+                    raise ForestError(
+                        "VECTOR_INDEX_DISCOVERY_IDENTITY_MISMATCH",
+                        "Physical candidate has another owner marker", 409,
+                    )
+                try:
+                    collection_id = self._validate_collection_description(description)
+                except ForestError as exc:
+                    if exc.code != "VECTOR_INDEX_SPACE_IMMUTABLE":
+                        raise
+                    raise ForestError(
+                        "VECTOR_INDEX_DISCOVERY_IDENTITY_MISMATCH",
+                        "Physical candidate layout changed", 409,
+                    ) from exc
+        except ForestError:
+            raise
+        except (TimeoutError, MilvusException, OSError) as exc:
+            raise ForestError(
+                "VECTOR_INDEX_DISCOVERY_UNAVAILABLE",
+                "Candidate identity probe is unavailable", 503,
+            ) from exc
+        return {**payload, "state": "FOUND", "collection_id": collection_id}
 
     async def _upsert(self, payload, collection_name):
         try:

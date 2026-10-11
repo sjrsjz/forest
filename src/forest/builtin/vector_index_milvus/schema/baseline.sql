@@ -1945,6 +1945,7 @@ DECLARE
 BEGIN
     IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
        OR input#>>'{outcome,status}' IS NULL
+       OR input#>>'{outcome,status}' IS NULL
        OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','VECTOR_REBUILD_SETTLE_INVALID',
@@ -3136,6 +3137,320 @@ BEGIN
 END;
 $$;
 
+-- A positive physical owner marker can recover the ID of an abandoned create.
+-- ABSENT is an observation, not proof that a delayed create can never arrive.
+CREATE TABLE vector_collection_discovery_work (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    candidate_revision bigint NOT NULL CHECK (candidate_revision>1),
+    state text NOT NULL DEFAULT 'QUEUED' CHECK
+        (state IN ('QUEUED','CLAIMED','RESOLVED','BLOCKED')),
+    next_at timestamptz NOT NULL,
+    attempt_count bigint NOT NULL DEFAULT 0 CHECK (attempt_count>=0),
+    failure_count integer NOT NULL DEFAULT 0 CHECK (failure_count>=0),
+    last_observation text CHECK (last_observation IN ('ABSENT','FOUND')),
+    found_id bigint CHECK (found_id>0),
+    claim_token text,
+    lease_deadline timestamptz,
+    claim_payload jsonb,
+    error_code text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(bot_id,candidate_revision),
+    FOREIGN KEY(bot_id,candidate_revision)
+        REFERENCES vector_rebuild_attempts(bot_id,candidate_revision),
+    CHECK ((claim_token IS NULL)=(lease_deadline IS NULL)),
+    CHECK ((claim_token IS NULL)=(claim_payload IS NULL)),
+    CHECK ((state='RESOLVED')=(found_id IS NOT NULL))
+);
+CREATE INDEX vector_collection_discovery_due_idx
+    ON vector_collection_discovery_work(bot_id,next_at,candidate_revision)
+    WHERE state IN ('QUEUED','CLAIMED');
+CREATE INDEX vector_rebuild_unknown_candidate_idx
+    ON vector_rebuild_attempts(bot_id,candidate_revision)
+    WHERE collection_id IS NULL;
+CREATE TABLE vector_collection_discovery_settlements (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    claim_token text NOT NULL CHECK (octet_length(claim_token) BETWEEN 1 AND 256),
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    settled_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY(bot_id,claim_token)
+);
+CREATE INDEX vector_collection_discovery_settlements_gc_idx
+    ON vector_collection_discovery_settlements(bot_id,settled_at,claim_token);
+CREATE TRIGGER vector_collection_discovery_settlement_guard
+    BEFORE UPDATE OR DELETE ON vector_collection_discovery_settlements
+    FOR EACH ROW EXECUTE FUNCTION guard_vector_rebuild_settlement();
+
+CREATE FUNCTION vector_claim_collection_discovery(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    work __forest_module_schema__.vector_collection_discovery_work%ROWTYPE;
+    candidate __forest_module_schema__.vector_rebuild_attempts%ROWTYPE;
+    rebuild __forest_module_schema__.vector_rebuild_work%ROWTYPE;
+    next_payload jsonb;
+    work_key text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_bot IS NULL OR requested_token IS NULL
+       OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_DISCOVERY_CLAIM_INVALID',
+                'message','Candidate discovery claim is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-rebuild:'||requested_bot,0));
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-discovery:'||requested_bot,0));
+    DELETE FROM __forest_module_schema__.vector_collection_discovery_settlements
+    WHERE bot_id=requested_bot AND claim_token IN (
+        SELECT claim_token
+        FROM __forest_module_schema__.vector_collection_discovery_settlements
+        WHERE bot_id=requested_bot
+          AND settled_at<clock_timestamp()-interval '48 hours'
+        ORDER BY settled_at,claim_token LIMIT 16
+    );
+    INSERT INTO __forest_module_schema__.vector_collection_discovery_work(
+        bot_id,candidate_revision,next_at
+    )
+    SELECT a.bot_id,a.candidate_revision,
+           GREATEST(a.created_at,w.updated_at)+interval '10 minutes'
+    FROM __forest_module_schema__.vector_rebuild_attempts a
+    JOIN __forest_module_schema__.vector_rebuild_work w
+      ON w.bot_id=a.bot_id AND w.request_id=a.request_id
+    WHERE a.bot_id=requested_bot AND a.collection_id IS NULL
+      AND (w.candidate_revision IS DISTINCT FROM a.candidate_revision
+           OR w.state='FAILED')
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.vector_collection_bindings b
+          WHERE b.bot_id=a.bot_id AND b.binding_revision=a.candidate_revision
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.vector_collection_discovery_work d
+          WHERE d.bot_id=a.bot_id AND d.candidate_revision=a.candidate_revision
+      )
+    ORDER BY a.candidate_revision LIMIT 16 ON CONFLICT DO NOTHING;
+    SELECT * INTO work FROM __forest_module_schema__.vector_collection_discovery_work
+    WHERE bot_id=requested_bot AND state='CLAIMED'
+      AND claim_token=requested_token AND lease_deadline>clock_timestamp()
+    FOR UPDATE;
+    IF FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',work.claim_payload);
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.vector_collection_discovery_work
+    WHERE bot_id=requested_bot AND state IN ('QUEUED','CLAIMED')
+      AND next_at<=clock_timestamp()
+      AND (state='QUEUED' OR lease_deadline<=clock_timestamp())
+    ORDER BY next_at,candidate_revision LIMIT 1 FOR UPDATE SKIP LOCKED;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',NULL);
+    END IF;
+    IF work.failure_count>=5 OR
+       (work.state='CLAIMED' AND work.failure_count>=4) THEN
+        UPDATE __forest_module_schema__.vector_collection_discovery_work
+        SET state='BLOCKED',claim_token=NULL,lease_deadline=NULL,
+            claim_payload=NULL,error_code='VECTOR_DISCOVERY_RETRY_EXHAUSTED',
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND candidate_revision=work.candidate_revision;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',NULL);
+    END IF;
+    SELECT * INTO candidate FROM __forest_module_schema__.vector_rebuild_attempts
+    WHERE bot_id=requested_bot AND candidate_revision=work.candidate_revision;
+    SELECT * INTO rebuild FROM __forest_module_schema__.vector_rebuild_work
+    WHERE bot_id=requested_bot AND request_id=candidate.request_id;
+    IF candidate.bot_id IS NULL OR rebuild.bot_id IS NULL
+       OR candidate.collection_id IS NOT NULL
+       OR NOT (rebuild.candidate_revision IS DISTINCT FROM candidate.candidate_revision
+               OR rebuild.state='FAILED')
+       OR EXISTS (
+           SELECT 1 FROM __forest_module_schema__.vector_collection_bindings b
+           WHERE b.bot_id=requested_bot
+             AND b.binding_revision=work.candidate_revision
+       ) THEN
+        UPDATE __forest_module_schema__.vector_collection_discovery_work
+        SET state='BLOCKED',claim_token=NULL,lease_deadline=NULL,
+            claim_payload=NULL,error_code='VECTOR_DISCOVERY_ATTEMPT_CHANGED',
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND candidate_revision=work.candidate_revision;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1',
+            'ok',true,'value',NULL);
+    END IF;
+    work_key := 'vector-collection-discovery:'||encode(sha256(convert_to(
+        requested_bot||'/'||work.candidate_revision::text,'UTF8')),'hex');
+    next_payload := jsonb_build_object(
+        'protocol','forest.owned-work-claim/1',
+        'work_id',work.candidate_revision::text,'claim_token',requested_token,
+        'attempt',work.attempt_count+1,
+        'operation_id',work_key||':'||(work.attempt_count+1)::text,
+        'causal_root_kind','vector.collection-discovery',
+        'causal_root_id',candidate.request_id,
+        'payload',jsonb_build_object(
+            'space_id',rebuild.space_id,
+            'request_id',candidate.request_id,
+            'candidate_revision',candidate.candidate_revision,
+            'collection_name',candidate.collection_name,
+            'owner_marker',candidate.owner_marker));
+    UPDATE __forest_module_schema__.vector_collection_discovery_work
+    SET state='CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        claim_payload=next_payload,attempt_count=attempt_count+1,
+        failure_count=failure_count+CASE WHEN work.state='CLAIMED' THEN 1 ELSE 0 END,
+        error_code=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND candidate_revision=work.candidate_revision;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1',
+        'ok',true,'value',next_payload);
+END;
+$$;
+
+CREATE FUNCTION vector_settle_collection_discovery(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    prior __forest_module_schema__.vector_collection_discovery_settlements%ROWTYPE;
+    work __forest_module_schema__.vector_collection_discovery_work%ROWTYPE;
+    candidate __forest_module_schema__.vector_rebuild_attempts%ROWTYPE;
+    rebuild __forest_module_schema__.vector_rebuild_work%ROWTYPE;
+    receipt jsonb;
+    result_payload jsonb;
+    observed_id bigint;
+    failure_code text;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_DISCOVERY_SETTLE_INVALID',
+                'message','Candidate discovery result is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-rebuild:'||requested_bot,0));
+    PERFORM pg_advisory_xact_lock(hashtextextended('vector-discovery:'||requested_bot,0));
+    SELECT * INTO prior
+    FROM __forest_module_schema__.vector_collection_discovery_settlements
+    WHERE bot_id=requested_bot AND claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF prior.input_payload=input THEN RETURN prior.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_DISCOVERY_SETTLE_CONFLICT',
+                'message','Candidate discovery settled differently','status',409));
+    END IF;
+    SELECT * INTO work FROM __forest_module_schema__.vector_collection_discovery_work
+    WHERE bot_id=requested_bot
+      AND candidate_revision=(input->>'work_id')::bigint FOR UPDATE;
+    IF NOT FOUND OR work.state<>'CLAIMED'
+       OR work.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work.lease_deadline<=clock_timestamp()
+       OR work.attempt_count IS DISTINCT FROM (input->>'attempt')::bigint THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','VECTOR_DISCOVERY_CLAIM_STALE',
+                'message','Candidate discovery claim is no longer current',
+                'status',409));
+    END IF;
+    receipt := input#>'{outcome,result}';
+    IF input#>>'{outcome,status}'='SUCCEEDED' THEN
+        IF receipt IS NULL OR
+           receipt - 'state' - 'collection_id' IS DISTINCT FROM
+               work.claim_payload->'payload' OR
+           receipt->>'state' NOT IN ('FOUND','ABSENT') THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                'ok',false,'error',jsonb_build_object(
+                    'code','VECTOR_DISCOVERY_SETTLE_INVALID',
+                    'message','Candidate observation differs from claim','status',422));
+        END IF;
+        IF receipt->>'state'='FOUND' THEN
+            IF jsonb_typeof(receipt->'collection_id')<>'number' OR
+               receipt->>'collection_id' !~ '^[1-9][0-9]{0,18}$' OR
+               (receipt->>'collection_id')::numeric>9223372036854775807 THEN
+                RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                    'ok',false,'error',jsonb_build_object(
+                        'code','VECTOR_DISCOVERY_SETTLE_INVALID',
+                        'message','Candidate physical ID is invalid','status',422));
+            END IF;
+            observed_id := (receipt->>'collection_id')::bigint;
+        ELSIF receipt->'collection_id' IS DISTINCT FROM 'null'::jsonb THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1',
+                'ok',false,'error',jsonb_build_object(
+                    'code','VECTOR_DISCOVERY_SETTLE_INVALID',
+                    'message','Absent candidate has a physical ID','status',422));
+        END IF;
+        SELECT * INTO candidate FROM __forest_module_schema__.vector_rebuild_attempts
+        WHERE bot_id=requested_bot AND candidate_revision=work.candidate_revision
+        FOR UPDATE;
+        SELECT * INTO rebuild FROM __forest_module_schema__.vector_rebuild_work
+        WHERE bot_id=requested_bot AND request_id=candidate.request_id FOR UPDATE;
+        IF candidate.bot_id IS NULL OR rebuild.bot_id IS NULL
+           OR candidate.request_id IS DISTINCT FROM
+                work.claim_payload#>>'{payload,request_id}'
+           OR candidate.owner_marker IS DISTINCT FROM
+                work.claim_payload#>>'{payload,owner_marker}'
+           OR candidate.collection_name IS DISTINCT FROM
+                work.claim_payload#>>'{payload,collection_name}'
+           OR rebuild.space_id IS DISTINCT FROM
+                work.claim_payload#>>'{payload,space_id}'
+           OR NOT (rebuild.candidate_revision IS DISTINCT FROM
+                       candidate.candidate_revision OR rebuild.state='FAILED')
+           OR EXISTS (
+               SELECT 1 FROM __forest_module_schema__.vector_collection_bindings b
+               WHERE b.bot_id=requested_bot
+                 AND b.binding_revision=work.candidate_revision
+           ) OR (candidate.collection_id IS NOT NULL AND
+                 candidate.collection_id IS DISTINCT FROM observed_id) THEN
+            UPDATE __forest_module_schema__.vector_collection_discovery_work
+            SET state='BLOCKED',claim_token=NULL,lease_deadline=NULL,
+                claim_payload=NULL,error_code='VECTOR_DISCOVERY_ATTEMPT_CHANGED',
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot
+              AND candidate_revision=work.candidate_revision;
+        ELSIF observed_id IS NOT NULL THEN
+            UPDATE __forest_module_schema__.vector_rebuild_attempts
+            SET collection_id=observed_id
+            WHERE bot_id=requested_bot
+              AND candidate_revision=work.candidate_revision;
+            UPDATE __forest_module_schema__.vector_collection_discovery_work
+            SET state='RESOLVED',found_id=observed_id,
+                last_observation='FOUND',failure_count=0,error_code=NULL,
+                claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot
+              AND candidate_revision=work.candidate_revision;
+        ELSE
+            UPDATE __forest_module_schema__.vector_collection_discovery_work
+            SET state='QUEUED',next_at=clock_timestamp()+interval '1 day',
+                last_observation='ABSENT',failure_count=0,error_code=NULL,
+                claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
+                updated_at=clock_timestamp()
+            WHERE bot_id=requested_bot
+              AND candidate_revision=work.candidate_revision;
+        END IF;
+    ELSE
+        failure_code := left(COALESCE(input#>>'{outcome,error,code}',
+                                      'VECTOR_DISCOVERY_PROBE_FAILED'),256);
+        UPDATE __forest_module_schema__.vector_collection_discovery_work
+        SET state=CASE WHEN failure_count+1>=5 OR failure_code IN (
+                    'VECTOR_INDEX_DISCOVERY_IDENTITY_MISMATCH',
+                    'VECTOR_DISCOVERY_TRANSPORT_INVALID',
+                    'VECTOR_DISCOVERY_SPACE_MISMATCH')
+                  THEN 'BLOCKED' ELSE 'QUEUED' END,
+            next_at=clock_timestamp()+interval '1 minute',
+            failure_count=failure_count+1,error_code=failure_code,
+            claim_token=NULL,lease_deadline=NULL,claim_payload=NULL,
+            updated_at=clock_timestamp()
+        WHERE bot_id=requested_bot AND candidate_revision=work.candidate_revision;
+    END IF;
+    result_payload := jsonb_build_object('protocol','forest.domain-result/1',
+        'ok',true,'value',jsonb_build_object(
+            'protocol','forest.owned-work-settled/1',
+            'work_id',work.candidate_revision::text));
+    INSERT INTO __forest_module_schema__.vector_collection_discovery_settlements(
+        bot_id,claim_token,input_payload,result_payload
+    ) VALUES(requested_bot,input->>'claim_token',input,result_payload);
+    RETURN result_payload;
+END;
+$$;
+
 -- Bounded operator views remain package-owned. The Web gateway may validate,
 -- authorize and route these ports but does not interpret vector domain state.
 CREATE FUNCTION vector_query_management_summary(context jsonb, input jsonb)
@@ -3282,16 +3597,24 @@ BEGIN
         SELECT * FROM (
             SELECT g.binding_revision,g.collection_name,g.collection_id,
                    g.source_kind,g.state,g.eligible_at,g.error_code,
-                   g.created_at,g.deleted_at
+                   g.created_at,g.deleted_at,
+                   NULL::text AS discovery_state,
+                   NULL::text AS last_observation
             FROM __forest_module_schema__.vector_collection_gc_work g
             WHERE g.bot_id=requested_bot
             UNION ALL
             SELECT a.candidate_revision,a.collection_name,a.collection_id,
                    'UNCONFIRMED_ATTEMPT'::text,'NEEDS_ID'::text,
-                   NULL::timestamptz,NULL::text,a.created_at,NULL::timestamptz
+                   COALESCE(d.next_at,
+                       GREATEST(a.created_at,w.updated_at)+interval '10 minutes'),
+                   d.error_code,a.created_at,NULL::timestamptz,
+                   COALESCE(d.state,'UNSCHEDULED'),d.last_observation
             FROM __forest_module_schema__.vector_rebuild_attempts a
             JOIN __forest_module_schema__.vector_rebuild_work w
               ON w.bot_id=a.bot_id AND w.request_id=a.request_id
+            LEFT JOIN __forest_module_schema__.vector_collection_discovery_work d
+              ON d.bot_id=a.bot_id
+             AND d.candidate_revision=a.candidate_revision
             WHERE a.bot_id=requested_bot AND a.collection_id IS NULL
               AND (w.candidate_revision IS DISTINCT FROM a.candidate_revision
                    OR w.state='FAILED')
@@ -3309,7 +3632,9 @@ BEGIN
             'source_kind',item.source_kind,'state',item.state,
             'eligible_at',item.eligible_at,
             'error_code',item.error_code,
-            'created_at',item.created_at,'deleted_at',item.deleted_at));
+            'created_at',item.created_at,'deleted_at',item.deleted_at,
+            'discovery_state',item.discovery_state,
+            'last_observation',item.last_observation));
         item_count := item_count+1;
         next_revision := item.binding_revision;
     END LOOP;

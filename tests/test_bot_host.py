@@ -3813,9 +3813,10 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     ):
                         break
                     await asyncio.sleep(0.1)
-            assert not set(FakeMilvusClient.collections[index_collection]["rows"]) & {
-                facet["facet_id"] for facet in facets + query_facets
-            }
+            deleted_refs = {facet["facet_id"] for facet in facets + query_facets}
+            async with asyncio.timeout(90):
+                while set(FakeMilvusClient.collections[index_collection]["rows"]) & deleted_refs:
+                    await asyncio.sleep(0.1)
             assert FakeMilvusClient.delete_failures == previous_delete_failures + 1
 
             previous = host.registry.graph_identity

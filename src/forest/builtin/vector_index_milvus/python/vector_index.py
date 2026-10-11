@@ -481,6 +481,37 @@ class MilvusVectorIndex(Plugin):
             timeout=10,
         )
 
+    @job("vector.collection.discover")
+    async def discover_unconfirmed_collection(self, task, ctx):
+        target = _plain(task["payload"])
+        if target["space_id"] != self.space_id:
+            raise ForestError(
+                "VECTOR_DISCOVERY_SPACE_MISMATCH",
+                "Candidate belongs to another vector space", 409,
+            )
+        observed = _plain(await ctx.services.call(
+            "vector.transport.collection-probe", target,
+            operation_id=ctx.operations.stable(
+                "collection-discover:" + str(target["candidate_revision"]) +
+                ":" + str(task["attempt"])
+            ),
+            timeout=35,
+        ))
+        state = observed.get("state")
+        collection_id = observed.get("collection_id")
+        if (
+            any(observed.get(key) != value for key, value in target.items())
+            or (state == "FOUND" and
+                (type(collection_id) is not int or collection_id <= 0))
+            or (state == "ABSENT" and collection_id is not None)
+            or state not in {"FOUND", "ABSENT"}
+        ):
+            raise ForestError(
+                "VECTOR_DISCOVERY_TRANSPORT_INVALID",
+                "Candidate probe returned another physical identity", 502,
+            )
+        return observed
+
     @job("vector.collection.gc")
     async def collect_retired_collection(self, task, ctx):
         target = _plain(task["payload"])

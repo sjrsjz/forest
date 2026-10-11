@@ -23,7 +23,9 @@
           "eligible_at",
           "error_code",
           "created_at",
-          "deleted_at"
+          "deleted_at",
+          "discovery_state",
+          "last_observation"
         ],
         "properties": {
           "binding_revision": {
@@ -83,6 +85,23 @@
               "null"
             ],
             "format": "date-time"
+          },
+          "discovery_state": {
+            "enum": [
+              null,
+              "UNSCHEDULED",
+              "QUEUED",
+              "CLAIMED",
+              "RESOLVED",
+              "BLOCKED"
+            ]
+          },
+          "last_observation": {
+            "enum": [
+              null,
+              "ABSENT",
+              "FOUND"
+            ]
           }
         }
       }

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.vector-index.milvus"
-version = "2.21.0"
+version = "2.22.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "vector_index:MilvusVectorIndex"
@@ -41,6 +41,7 @@ requests = [
   "service.call:vector.transport.prune",
   "service.call:vector.transport.audit",
   "service.call:vector.transport.candidate-create",
+  "service.call:vector.transport.collection-probe",
   "service.call:vector.transport.collection-drop",
   "domain.command:vector.ref.reserve",
   "domain.command:vector.ref.activate",
@@ -134,9 +135,9 @@ timeout_s = 15
 
 [components.storage]
 schema_id = "forest.vector.index"
-schema_version = "2.20.0"
+schema_version = "2.21.0"
 baseline = "schema/baseline.sql"
-baseline_sha256 = "f3d7c48da588eb3f0d8da4a4cce64e3e433bf4259f8383fc8573ba7d77adc556"
+baseline_sha256 = "ba53c6746d7223c81947eafdd24a49208ba616fec2f5f005093f6e643c4ae780"
 scope = "bot"
 repository_contract = "forest.vector-index-refs.repository/1"
 execution_profile = "official"
@@ -356,6 +357,21 @@ settle_timeout_s = 5
 lease_seconds = 180
 
 [[components.owned_work_handlers]]
+name = "vector.collection.discover"
+contract = "1.0"
+handler = "vector.collection.discover"
+claim_function = "vector_claim_collection_discovery"
+settle_function = "vector_settle_collection_discovery"
+input_schema = "schemas/collection-discovery-input.json"
+output_schema = "schemas/collection-discovery-output.json"
+max_concurrency = 1
+poll_interval_ms = 5000
+claim_timeout_s = 5
+handler_timeout_s = 45
+settle_timeout_s = 5
+lease_seconds = 60
+
+[[components.owned_work_handlers]]
 name = "vector.collection.gc"
 contract = "1.0"
 handler = "vector.collection.gc"
@@ -475,6 +491,17 @@ runtime_commands = ["vector.collection.quarantine"]
 semantics = "idempotent"
 input_schema = "schemas/candidate-create-input.json"
 output_schema = "schemas/candidate-create-output.json"
+
+[[components.effect_services]]
+name = "vector.transport.collection-probe"
+contract = "1.0"
+kind = "vector-index.milvus"
+startup_queries = ["vector.collection.current"]
+startup_commands = ["vector.collection.plan", "vector.collection.confirm", "vector.collection.quarantine"]
+runtime_commands = ["vector.collection.quarantine"]
+semantics = "read"
+input_schema = "schemas/collection-discovery-input.json"
+output_schema = "schemas/collection-discovery-output.json"
 
 [[components.effect_services]]
 name = "vector.transport.collection-drop"

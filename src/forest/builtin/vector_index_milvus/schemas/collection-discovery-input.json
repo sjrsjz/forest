@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["space_id", "request_id", "candidate_revision", "collection_name", "owner_marker"],
+  "properties": {
+    "space_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "request_id": {"type": "string", "minLength": 1, "maxLength": 256},
+    "candidate_revision": {"type": "integer", "minimum": 2},
+    "collection_name": {"type": "string", "minLength": 1, "maxLength": 256},
+    "owner_marker": {"type": "string", "pattern": "^forest[.]vector-candidate/1:[a-f0-9]{64}$"}
+  }
+}
