@@ -54,6 +54,8 @@ CREATE TABLE conversation_lanes (
     resume_reason_ref text CHECK (
         resume_reason_ref IS NULL OR octet_length(resume_reason_ref) BETWEEN 1 AND 256
     ),
+    agent_work_failure_streak integer NOT NULL DEFAULT 0
+        CHECK (agent_work_failure_streak BETWEEN 0 AND 12),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id, conversation_id),
@@ -67,7 +69,6 @@ CREATE TABLE conversation_lanes (
     CHECK (active_run_ref IS NULL OR active_session_ref IS NOT NULL),
     CHECK ((resume_not_before IS NULL) = (resume_reason_code IS NULL)),
     CHECK (resume_reason_ref IS NULL OR resume_reason_code IS NOT NULL),
-    CHECK (resume_not_before IS NULL OR active_session_ref IS NOT NULL),
     CHECK (
         (maintenance_generation_id IS NULL AND maintenance_context_revision IS NULL
          AND maintenance_view_revision IS NULL AND maintenance_media_cost_revision IS NULL)
@@ -2058,6 +2059,7 @@ BEGIN
             UPDATE __forest_module_schema__.conversation_lanes
             SET active_session_ref=NULL,active_run_ref=NULL,resume_not_before=NULL,
                 resume_reason_code=NULL,resume_reason_ref=NULL,
+                agent_work_failure_streak=0,
                 mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp()
             WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
             selection_mailbox_revision := selection_mailbox_revision + 1;
@@ -2330,6 +2332,9 @@ BEGIN
         END,
         mailbox_revision=mailbox_revision+1,
         resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,
+        agent_work_failure_streak=CASE
+            WHEN requested_boundary='SESSION_END' AND selection_kind='SILENT_DRAIN'
+                THEN 0 ELSE agent_work_failure_streak END,
         updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
     INSERT INTO __forest_module_schema__.selection_operations(
@@ -4332,7 +4337,8 @@ BEGIN
     VALUES(requested_bot,claim_group.claim_ref);
     UPDATE __forest_module_schema__.conversation_lanes
     SET active_session_ref=NULL,active_run_ref=NULL,resume_not_before=NULL,
-        resume_reason_code=NULL,resume_reason_ref=NULL,updated_at=clock_timestamp()
+        resume_reason_code=NULL,resume_reason_ref=NULL,
+        agent_work_failure_streak=0,updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
     RETURN jsonb_build_object(
         'protocol','forest.domain-result/1','ok',true,
@@ -4751,6 +4757,7 @@ BEGIN
     UPDATE __forest_module_schema__.conversation_lanes
     SET active_session_ref=NULL,active_run_ref=NULL,resume_not_before=NULL,
         resume_reason_code=NULL,resume_reason_ref=NULL,
+        agent_work_failure_streak=0,
         mailbox_revision=mailbox_revision+1,updated_at=clock_timestamp()
     WHERE bot_id=requested_bot AND conversation_id=requested_conversation;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
@@ -5226,6 +5233,7 @@ DECLARE
     work_result jsonb := input#>'{outcome,result}';
     delay_value numeric;
     reason_value text;
+    failure_streak integer;
 BEGIN
     IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
        OR requested_work IS NULL OR requested_token IS NULL
@@ -5293,7 +5301,7 @@ BEGIN
             SET actor_owner_id=NULL,actor_expires_at=NULL,
                 resume_not_before=clock_timestamp()+(delay_value*interval '1 second'),
                 resume_reason_code=reason_value,resume_reason_ref=requested_token,
-                updated_at=clock_timestamp()
+                agent_work_failure_streak=0,updated_at=clock_timestamp()
             WHERE bot_id=requested_bot AND conversation_id=requested_work;
         ELSE
             IF lane.active_session_ref IS NOT NULL THEN
@@ -5308,17 +5316,20 @@ BEGIN
             UPDATE __forest_module_schema__.conversation_lanes
             SET actor_owner_id=NULL,actor_expires_at=NULL,
                 resume_not_before=NULL,resume_reason_code=NULL,resume_reason_ref=NULL,
-                updated_at=clock_timestamp()
+                agent_work_failure_streak=0,updated_at=clock_timestamp()
             WHERE bot_id=requested_bot AND conversation_id=requested_work;
         END IF;
     ELSE
-        reason_value := COALESCE(input#>>'{outcome,error,code}','agent_work_failed');
+        -- The claim settlement retains the original error; the lane owns only
+        -- a stable scheduling reason and a reference to that settlement.
+        reason_value := 'AGENT_WORK_FAILED';
+        failure_streak := LEAST(lane.agent_work_failure_streak+1,12);
+        delay_value := LEAST(3600::numeric,5*power(2::numeric,failure_streak-1));
         UPDATE __forest_module_schema__.conversation_lanes
         SET actor_owner_id=NULL,actor_expires_at=NULL,
-            resume_not_before=CASE WHEN active_session_ref IS NULL THEN NULL
-                ELSE clock_timestamp()+interval '1 second' END,
-            resume_reason_code=CASE WHEN active_session_ref IS NULL THEN NULL ELSE reason_value END,
-            resume_reason_ref=CASE WHEN active_session_ref IS NULL THEN NULL ELSE requested_token END,
+            resume_not_before=clock_timestamp()+(delay_value*interval '1 second'),
+            resume_reason_code=reason_value,resume_reason_ref=requested_token,
+            agent_work_failure_streak=failure_streak,
             updated_at=clock_timestamp()
         WHERE bot_id=requested_bot AND conversation_id=requested_work;
     END IF;

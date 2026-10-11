@@ -111,6 +111,8 @@ Pipeline 分别保存 `context_disposition`（可读正文/受限占位/无效�
 
 Agent 结束且没有待处理触发时，剩余消息按有限批次静默写入 Context 并触发正常裁剪，不调用对话 Agent、不创建回复；即使群从未触发 Agent，空闲时也执行此路径。每批的固定切口、写入、游标推进与触发 claim 形成持久操作，退出空闲/结束检查与入站唤醒在同一会话协调记录上串行化。完整规则与竞态见[08 群聊交互设计](08-group-context-interaction.md)。
 
+Conversation 的 Agent owned-work 若以基础设施/契约错误返回 `FAILED`，这不是 Agent 的 `FAILED` 终态，也不能据此代替 Agent 写失败回复或重发已交接模型 Effect。Scheduler 在持有 lane 行锁的结算事务内递增该 lane 的连续工作失败次数（包括 Session 尚未建立时），并延迟下一次 actor 领取：第 n 次为 `min(3600, 5×2^(n-1))` 秒，n 在 12 封顶；同一 claim 的重放只能返回原结算，不能重复增加次数。正常 `DEFER/RELEASE` 清零；新 Session 的首次领取不吞掉此前尚未成功的失败。等待期间仍可接纳/分类群消息，P0 Shell 及其他群 Actor 不受该 lane 的退避影响；后续 Agent 必须依据原 Run/Effect 账本恢复，不能因再领取而换身份补发网络效果。持久退避压住确定性错误的高频循环，但不把 UNKNOWN 伪装成可安全重试，长期失败需通过可审计的管理诊断处置。
+
 取消、工具确认及管理 Shell 走受权控制通道，不等待正在工作的 Agent、Context 写租约或前面的异步分类缺口；等待时仍保留 Session 所有权，控制操作不创建另一条同群 Agent 响应链。涉及 Context 的控制效果通过该状态所有者的短事务或安全点执行，不能因此并发改写 Prompt。
 
 接入顺序为 `trusted normalize → (Inbox + ShellGate route 同事务持久化) → business filter/command/agent selection → observe`。ShellGate 是稳定内核中的有界确定性检查，在任意插件代码之前认领 `#forest` 保留命名空间；完整解析和管理实现可由热替换模块承担。识别控制命名空间后即固定 `command_route=CONTROL, trigger_decision=CONTROL_COMMAND`；未知命令、参数错误、无权请求或解析模块离线都不回落 Agent。核心救援子命令不依赖该模块。控制路由与历史消费是两个决策：控制已执行也不跳过更早的 ingress_seq，连续水位只约束历史管线。
