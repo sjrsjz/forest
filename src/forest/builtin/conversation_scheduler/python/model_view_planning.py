@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 
-from model_view_selection import ViewCost, ViewSelectionError, select_context_units
+from model_view_selection import ViewCost, ViewSelectionError, select_joint_view
 
 from forest.errors import ForestError
 
@@ -33,7 +33,7 @@ def estimated_tokens(value: object, per_token: int) -> int:
 
 
 def fixed_cost(quote: dict, *, per_token: int, overhead: int, bot_id: str) -> ViewCost:
-    """Charge Agent causal input and Memory evidence before optional Context."""
+    """Charge immutable instructions, causal input, and Memory bundle metadata."""
     if quote.get("protocol") != "forest.model-view-quote/1" or quote.get("bot_id") != bot_id:
         raise ForestError("CONTEXT_MODEL_VIEW_QUOTE_INVALID", "Model view quote identity is invalid", 409)
     history = quote.get("fixed_units")
@@ -44,27 +44,24 @@ def fixed_cost(quote: dict, *, per_token: int, overhead: int, bot_id: str) -> Vi
         raise ForestError("CONTEXT_MODEL_VIEW_QUOTE_INVALID", "Model output reservation is invalid", 409)
     evidence = quote.get("evidence")
     if evidence is not None:
-        if not isinstance(evidence, dict) or evidence.get("protocol") != "forest.memory-evidence/3" or evidence.get("bot_id") != bot_id:
+        if (not isinstance(evidence, dict) or evidence.get("protocol") != "forest.memory-evidence/3"
+                or evidence.get("bot_id") != bot_id or not isinstance(evidence.get("evidence"), list)
+                or len(evidence["evidence"]) > 64
+                or any(not isinstance(row, dict) for row in evidence["evidence"])):
             raise ForestError("CONTEXT_MODEL_VIEW_QUOTE_INVALID", "Memory evidence identity is invalid", 409)
     source = {
         "core_prompt": quote.get("core_prompt"),
         "preset_context": quote["preset_context"],
         "tools": quote.get("tools"),
         "fixed_units": history,
-        "evidence": evidence,
+        "evidence": ({key: value for key, value in evidence.items() if key != "evidence"}
+                     if evidence is not None else None),
     }
     if not isinstance(source["core_prompt"], str) or not isinstance(source["tools"], list):
         raise ForestError("CONTEXT_MODEL_VIEW_QUOTE_INVALID", "Model instructions are invalid", 409)
-    media = decoded = 0
-    if evidence is not None:
-        for unit in evidence.get("evidence", ()):
-            for part in unit.get("parts", ()):
-                if part.get("kind") == "image" and part.get("projection_state") == "READY":
-                    media += part["byte_length"]
-                    decoded += part["width"] * part["height"] * 4
     return ViewCost(
         output + estimated_tokens(source, per_token) + len(history) * overhead,
-        media, decoded,
+        0, 0,
     )
 
 
@@ -150,8 +147,9 @@ async def publish_model_view(scheduler, payload: dict, ctx) -> dict:
         profile["model_view_decoded_bytes"],
     )
     try:
-        selection = select_context_units(
-            pages, required_unit_ids=required,
+        joint = select_joint_view(
+            pages, quote["evidence"]["evidence"] if quote.get("evidence") else [],
+            required_unit_ids=required,
             previous_selected_unit_ids=selected_ids,
             previous_considered_unit_ids=previous_ids, fixed_cost=fixed,
             budget=budget, bytes_per_token=profile["utf8_bytes_per_estimated_token"],
@@ -159,6 +157,7 @@ async def publish_model_view(scheduler, payload: dict, ctx) -> dict:
         )
     except ViewSelectionError as exc:
         raise ForestError("CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED", str(exc), 413) from exc
+    selection = joint.context
     document = {
         "protocol": "forest.model-view-plan/1", **expected,
         "quote": quote_ref,
@@ -173,8 +172,11 @@ async def publish_model_view(scheduler, payload: dict, ctx) -> dict:
         "selected_unit_ids": list(selection.selected_unit_ids),
         "omitted_unit_ids": list(selection.omitted_unit_ids),
         "required_unit_ids": required,
+        "selected_evidence_unit_ids": list(joint.selected_evidence_unit_ids),
+        "omitted_evidence_unit_ids": list(joint.omitted_evidence_unit_ids),
         "prior_plan": previous["plan"] if previous["found"] else None,
         "fixed_cost": vars_cost(fixed),
+        "evidence_cost": vars_cost(joint.evidence_cost),
         "selected_cost": vars_cost(selection.selected_cost),
         "total_cost": vars_cost(selection.total_cost),
         "budget": vars_cost(budget),

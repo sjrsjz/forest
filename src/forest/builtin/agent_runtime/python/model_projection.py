@@ -777,6 +777,21 @@ def prepare_model_request(
         validator = _Projection(snapshot, capabilities, dict(media or {}))
         for unit in memory_units:
             validator.validate_memory_parts(unit)
+        if snapshot.get("model_view_plan_ref") is not None:
+            selected_evidence = snapshot.get("model_view_selected_evidence_unit_ids")
+            omitted_evidence = snapshot.get("model_view_omitted_evidence_unit_ids")
+            evidence_ids = [unit["unit_id"] for unit in memory_units]
+            if (not isinstance(selected_evidence, list) or not isinstance(omitted_evidence, list)
+                    or len(set(selected_evidence)) != len(selected_evidence)
+                    or len(set(omitted_evidence)) != len(omitted_evidence)
+                    or set(selected_evidence) & set(omitted_evidence)
+                    or set(selected_evidence) | set(omitted_evidence) != set(evidence_ids)
+                    or [unit_id for unit_id in evidence_ids if unit_id in selected_evidence]
+                    != selected_evidence):
+                raise _error("MODEL_INPUT_INVALID", "Memory evidence differs from the published model view")
+            memory_reference["omitted_unit_ids"] = omitted_evidence
+            selected_set = set(selected_evidence)
+            memory_units = [unit for unit in memory_units if unit["unit_id"] in selected_set]
     grouped = _groups(units, capabilities)
     required = set(snapshot.get("required_unit_ids", [unit["unit_id"] for unit in units]))
     if not required.issubset({unit["unit_id"] for unit in units}):
@@ -815,9 +830,9 @@ def prepare_model_request(
                 "target_conversation": _attribution(snapshot["conversation"]),
                 "author": {"principal_ref": "bot:" + snapshot["bot_id"],
                            "identity_origin": "host_memory_retrieval"},
-                "text": ("Memory retrieval was incomplete or unavailable. No retrieved evidence is provided; "
-                         "this does not establish that relevant memories do not exist.")
-                        if memory_reference["status"] == "DEGRADED" else
+                "text": ("Retrieved memory evidence was omitted by the Context model-view budget. "
+                         "No retrieved evidence is provided in this call.")
+                        if memory_reference.get("omitted_unit_ids") else
                         "Memory retrieval returned no evidence. This is status data, not a user instruction.",
             })]}
             memory_reference["status_projected"] = True
@@ -830,7 +845,7 @@ def prepare_model_request(
         projector.image_bytes += extra.image_bytes
         projector.image_pixels += extra.image_pixels
         memory_reference["projected_unit_ids"] = [unit["unit_id"] for unit in memory_units]
-        memory_reference["omitted_unit_ids"] = []
+        memory_reference.setdefault("omitted_unit_ids", [])
     if len({(item["unit_id"], item["part_id"], item.get("json_pointer"))
             for item in projector.included + projector.omitted}) != (
             len(projector.included) + len(projector.omitted)):
@@ -866,6 +881,8 @@ def prepare_model_request(
         "model_view_quote_ref": snapshot.get("model_view_quote_ref"),
         "model_view_selected_unit_ids": snapshot.get("model_view_selected_unit_ids"),
         "model_view_omitted_unit_ids": snapshot.get("model_view_omitted_unit_ids"),
+        "model_view_selected_evidence_unit_ids": snapshot.get("model_view_selected_evidence_unit_ids"),
+        "model_view_omitted_evidence_unit_ids": snapshot.get("model_view_omitted_evidence_unit_ids"),
         "source_manifest": projector.sources,
         "included_part_refs": projector.included, "omitted_part_refs": projector.omitted,
         "omitted_unit_ids": [], "media_transform_refs": projector.materialized,

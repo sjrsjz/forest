@@ -42,6 +42,7 @@ async def test_agent_filters_only_conversation_members_and_preserves_causal_hist
             "context_revision": 2, "context_view_revision": 1,
             "media_cost_revision": 0, "context_applied_seq": 2,
             "selected_unit_ids": ["ctx:2"], "omitted_unit_ids": ["ctx:1"],
+            "selected_evidence_unit_ids": [], "omitted_evidence_unit_ids": [],
         }
         return {"plan": plan_ref, "step_seq": 1, "source_set_digest": digest_json(["ctx:1", "ctx:2"])}
 
@@ -97,6 +98,8 @@ async def test_agent_filters_only_conversation_members_and_preserves_causal_hist
         "model_view_quote_ref": selection["quote_ref"],
         "model_view_selected_unit_ids": selection["selected_unit_ids"],
         "model_view_omitted_unit_ids": selection["omitted_unit_ids"],
+        "model_view_selected_evidence_unit_ids": selection["selected_evidence_unit_ids"],
+        "model_view_omitted_evidence_unit_ids": selection["omitted_evidence_unit_ids"],
     }
     await verify_model_view(
         ctx, snapshot=selected, preset_context=["persona"], tools=[],

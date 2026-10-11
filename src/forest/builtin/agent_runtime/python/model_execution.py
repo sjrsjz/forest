@@ -328,13 +328,18 @@ class ModelExecution:
                     "AGENT_MEMORY_FENCE_MISMATCH", "Memory evidence belongs to another query", 409
                 )
             if "image" in target.input_modalities:
-                selected_media_bytes = 0
+                published_media_bytes = selected_media_bytes = selected_expected_bytes = 0
+                selected_evidence_ids = set(snapshot.get("model_view_selected_evidence_unit_ids", ()))
                 for unit in evidence.get("evidence", ()):
+                    selected_unit = (snapshot.get("model_view_plan_ref") is None
+                                     or "evidence:" + unit["source_unit_id"] in selected_evidence_ids)
                     for part in unit.get("parts", ()):
-                        if part.get("kind") != "image":
+                        if part.get("kind") != "image" or part["projection_state"] != "READY":
                             continue
-                        if part["projection_state"] != "READY":
+                        published_media_bytes += part["byte_length"]
+                        if not selected_unit:
                             continue
+                        selected_expected_bytes += part["byte_length"]
                         reference = part["media_ref"]
                         content = await self.ctx.payloads.read_bytes(reference)
                         if len(content) != part["byte_length"]:
@@ -351,7 +356,8 @@ class ModelExecution:
                         )
                         images[(unit["source_unit_id"], part["part_id"])] = image
                         images[reference["payload_id"]] = image
-                if selected_media_bytes != evidence["selected_media_bytes"]:
+                if (published_media_bytes != evidence["selected_media_bytes"]
+                        or selected_media_bytes != selected_expected_bytes):
                     raise ForestError(
                         "AGENT_MEMORY_MEDIA_MISMATCH",
                         "Memory evidence media total differs from its publication", 409,

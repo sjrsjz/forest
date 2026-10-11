@@ -100,11 +100,26 @@ async def quote_and_read_plan(
         raise ForestError("AGENT_MODEL_VIEW_PLAN_INVALID", "Conversation membership differs from the snapshot", 409)
     if not set(fixed_view["required_unit_ids"]) <= set(selected):
         raise ForestError("AGENT_MODEL_VIEW_PLAN_INVALID", "Required triggers are absent", 409)
+    evidence_ids = ["evidence:" + row["source_unit_id"] for row in evidence["evidence"]] if evidence else []
+    selected_evidence = plan.get("selected_evidence_unit_ids")
+    omitted_evidence = plan.get("omitted_evidence_unit_ids")
+    if (
+        not isinstance(selected_evidence, list) or not isinstance(omitted_evidence, list)
+        or len(set(evidence_ids)) != len(evidence_ids)
+        or len(set(selected_evidence)) != len(selected_evidence)
+        or len(set(omitted_evidence)) != len(omitted_evidence)
+        or set(selected_evidence) & set(omitted_evidence)
+        or [unit_id for unit_id in evidence_ids if unit_id in selected_evidence] != selected_evidence
+        or set(selected_evidence) | set(omitted_evidence) != set(evidence_ids)
+    ):
+        raise ForestError("AGENT_MODEL_VIEW_PLAN_INVALID", "Memory membership differs from the quote", 409)
     return {
         "plan_ref": plan_ref,
         "quote_ref": quote_ref,
         "selected_unit_ids": selected,
         "omitted_unit_ids": omitted,
+        "selected_evidence_unit_ids": selected_evidence,
+        "omitted_evidence_unit_ids": omitted_evidence,
     }
 
 
@@ -121,12 +136,16 @@ async def verify_model_view(
     quote = await ctx.payloads.read_json(_exact(quote_ref))
     selected = snapshot.get("model_view_selected_unit_ids")
     omitted = snapshot.get("model_view_omitted_unit_ids")
+    selected_evidence = snapshot.get("model_view_selected_evidence_unit_ids")
+    omitted_evidence = snapshot.get("model_view_omitted_evidence_unit_ids")
     if (
         plan.get("protocol") != "forest.model-view-plan/1"
         or quote.get("protocol") != "forest.model-view-quote/1"
         or plan.get("quote") != quote_ref
         or plan.get("selected_unit_ids") != selected
         or plan.get("omitted_unit_ids") != omitted
+        or plan.get("selected_evidence_unit_ids") != selected_evidence
+        or plan.get("omitted_evidence_unit_ids") != omitted_evidence
         or quote.get("bot_id") != snapshot.get("bot_id")
         or quote.get("run_ref") != snapshot.get("run_id")
         or quote.get("input_revision") != snapshot.get("input_revision")
@@ -140,6 +159,17 @@ async def verify_model_view(
         )
     ):
         raise ForestError("AGENT_MODEL_VIEW_PLAN_INVALID", "Model call differs from its published quote", 409)
+    evidence_ids = ["evidence:" + row["source_unit_id"] for row in quote["evidence"]["evidence"]] if evidence_ref else []
+    if (
+        not isinstance(selected_evidence, list) or not isinstance(omitted_evidence, list)
+        or len(set(evidence_ids)) != len(evidence_ids)
+        or len(set(selected_evidence)) != len(selected_evidence)
+        or len(set(omitted_evidence)) != len(omitted_evidence)
+        or set(selected_evidence) & set(omitted_evidence)
+        or [unit_id for unit_id in evidence_ids if unit_id in selected_evidence] != selected_evidence
+        or set(selected_evidence) | set(omitted_evidence) != set(evidence_ids)
+    ):
+        raise ForestError("AGENT_MODEL_VIEW_PLAN_INVALID", "Memory members differ from the published plan", 409)
     units = snapshot.get("units")
     if not isinstance(units, list) or not isinstance(selected, list) or not isinstance(omitted, list):
         raise ForestError("AGENT_MODEL_VIEW_PLAN_INVALID", "Selected model view is invalid", 409)

@@ -4204,7 +4204,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
     parsed = urlsplit(dsn)
     uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
     settings = BotSettings(
-        bot_id="bot-agent-recall-test", dsn=uri,
+        bot_id="bot-agent-recall-test-" + uuid4().hex[:12], dsn=uri,
         model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
         model="test-model", model_deployment_id="provider.chat-completions/test",
         model_max_output_tokens=1024,

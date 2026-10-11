@@ -20,6 +20,7 @@ _SPEC.loader.exec_module(_MODULE)
 ViewCost = _MODULE.ViewCost
 ViewSelectionError = _MODULE.ViewSelectionError
 select_context_units = _MODULE.select_context_units
+select_joint_view = _MODULE.select_joint_view
 
 
 def _unit(index: int, *, bytes_: int = 20, media: int = 0) -> dict:
@@ -107,3 +108,62 @@ def test_media_charge_can_stop_optional_selection_without_dropping_required_imag
             bytes_per_token=2,
             unit_overhead=0,
         )
+
+
+def test_joint_view_keeps_causal_and_recent_context_before_ranked_memory():
+    units = [_unit(index, bytes_=100) for index in range(1, 7)]
+    evidence = [
+        {"source_unit_id": "first", "parts": [{"kind": "text", "text": "recalled"}]},
+        {"source_unit_id": "second", "parts": [{"kind": "image", "projection_state": "READY",
+                                                 "byte_length": 100, "width": 10, "height": 10}]},
+    ]
+    plan = select_joint_view(
+        units, evidence, required_unit_ids=("input:1",),
+        previous_selected_unit_ids=(), previous_considered_unit_ids=(),
+        fixed_cost=ViewCost(),
+        budget=ViewCost(tokens=33, media_bytes=20, decoded_bytes=400),
+        bytes_per_token=20, unit_overhead=0,
+    )
+    assert "input:1" in plan.context.selected_unit_ids
+    assert "input:6" in plan.context.selected_unit_ids
+    assert plan.selected_evidence_unit_ids == ("evidence:first",)
+    assert plan.omitted_evidence_unit_ids == ("evidence:second",)
+    assert plan.context.total_cost.tokens <= 33
+    assert plan.context.selected_bitmap.count("1") < len(units)
+
+
+def test_joint_view_never_reselects_old_context_omissions_when_memory_changes():
+    units = [_unit(index) for index in range(1, 6)]
+    evidence = [{"source_unit_id": "recalled", "parts": [{"kind": "text", "text": "fact"}]}]
+    first = select_joint_view(
+        units, evidence, required_unit_ids=("input:5",),
+        previous_selected_unit_ids=(), previous_considered_unit_ids=(),
+        fixed_cost=ViewCost(),
+        budget=ViewCost(tokens=30, media_bytes=1000, decoded_bytes=4000),
+        bytes_per_token=2, unit_overhead=0,
+    )
+    assert first.context.omitted_unit_ids
+    next_plan = select_joint_view(
+        [*units, _unit(6)], [], required_unit_ids=("input:5", "input:6"),
+        previous_selected_unit_ids=first.context.selected_unit_ids,
+        previous_considered_unit_ids=first.context.considered_unit_ids,
+        fixed_cost=ViewCost(),
+        budget=ViewCost(tokens=70, media_bytes=1000, decoded_bytes=4000),
+        bytes_per_token=2, unit_overhead=0,
+    )
+    assert "input:6" in next_plan.context.selected_unit_ids
+    assert set(first.context.omitted_unit_ids).isdisjoint(next_plan.context.selected_unit_ids)
+    assert set(first.context.selected_unit_ids) <= set(next_plan.context.selected_unit_ids)
+
+
+def test_joint_view_returns_unused_memory_reservation_to_group_history():
+    units = [_unit(index, bytes_=20) for index in range(1, 6)]
+    plan = select_joint_view(
+        units, [], required_unit_ids=("input:5",),
+        previous_selected_unit_ids=(), previous_considered_unit_ids=(),
+        fixed_cost=ViewCost(),
+        budget=ViewCost(tokens=50, media_bytes=1000, decoded_bytes=4000),
+        bytes_per_token=2, unit_overhead=0,
+    )
+    assert plan.context.selected_unit_ids == tuple(f"input:{index}" for index in range(1, 6))
+    assert plan.selected_evidence_unit_ids == ()

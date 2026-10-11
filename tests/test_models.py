@@ -478,6 +478,32 @@ def test_empty_native_memory_evidence_reports_no_match_without_trimming_context(
     assert "current trigger" in result.body.decode()
 
 
+def test_published_view_omits_ranked_memory_without_claiming_no_match():
+    value = snapshot(unit("required", "current trigger"), required=["required"])
+    value["conversation"] = {
+        "conversation_id": "onebot:group:group-a",
+        "group_source_id": "onebot:group:group-a",
+        "platform": "onebot-v11", "channel_kind": "group", "channel_id": "group-a",
+    }
+    value["model_view_plan_ref"] = {"payload_id": "plan-a"}
+    value["model_view_selected_evidence_unit_ids"] = []
+    value["model_view_omitted_evidence_unit_ids"] = ["evidence:source-unit-a"]
+    evidence = native_evidence()
+    result = prepared(value, evidence=evidence)
+    assert result.manifest["memory_evidence"]["projected_unit_ids"] == []
+    assert result.manifest["memory_evidence"]["omitted_unit_ids"] == ["evidence:source-unit-a"]
+    assert "omitted by the Context model-view budget" in result.body.decode()
+    assert "current trigger" in result.body.decode()
+    value["model_view_selected_evidence_unit_ids"] = ["evidence:source-unit-a"]
+    value["model_view_omitted_evidence_unit_ids"] = []
+    selected = prepared(value, evidence=evidence)
+    assert selected.manifest["memory_evidence"]["projected_unit_ids"] == ["evidence:source-unit-a"]
+    assert selected.manifest["source_manifest"][0]["source"]["channel_id"] == "group-b"
+    value["model_view_omitted_evidence_unit_ids"] = ["evidence:source-unit-a"]
+    with pytest.raises(ForestError, match="Memory evidence differs"):
+        prepared(value, evidence=evidence)
+
+
 def test_provider_projects_supported_image_without_a_context_budget():
     value = snapshot(unit(parts=[{"type": "image", "media_ref": "media-a"}]))
     result = prepared(value, capabilities(input_modalities=("text", "image")),

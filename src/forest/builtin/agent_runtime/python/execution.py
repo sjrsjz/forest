@@ -664,6 +664,8 @@ class AgentExecution:
         model_snapshot["model_view_quote_ref"] = plan["quote_ref"]
         model_snapshot["model_view_selected_unit_ids"] = plan["selected_unit_ids"]
         model_snapshot["model_view_omitted_unit_ids"] = plan["omitted_unit_ids"]
+        model_snapshot["model_view_selected_evidence_unit_ids"] = plan["selected_evidence_unit_ids"]
+        model_snapshot["model_view_omitted_evidence_unit_ids"] = plan["omitted_evidence_unit_ids"]
         return model_snapshot
 
     @staticmethod
