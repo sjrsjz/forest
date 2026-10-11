@@ -101,7 +101,11 @@ def _receipt(value, *, request_id: str, attempt_id: str, payload_digest: str) ->
             502,
         )
     if value["status"] == "RESPONDED":
-        if value["result"] is None or value["error_code"] is not None:
+        if value["result"] is None or value["error_code"] not in {
+            None, "MODEL_USAGE_INVALID", "MODEL_TOOL_ARGUMENTS",
+            "MODEL_TOOL_SEQUENCE", "MODEL_TOOL_UNDECLARED",
+            "MODEL_EMPTY_OUTPUT", "MODEL_OUTPUT_INCOMPLETE",
+        }:
             raise ForestError(
                 "PROVIDER_RESULT_INVALID", "Successful Provider receipt is incomplete", 502
             )
@@ -136,7 +140,7 @@ def _provider_result(value, *, receipt: dict) -> dict:
         or value.get("payload_digest") != receipt["payload_digest"]
         or not isinstance(value.get("text"), str)
         or not isinstance(value.get("tool_calls"), list)
-        or value.get("error_code") is not None
+        or value.get("error_code") != receipt["error_code"]
     ):
         raise ForestError(
             "PROVIDER_RESULT_INVALID", "Provider result Payload is invalid", 502
@@ -1057,7 +1061,7 @@ class ModelExecution:
             "status": "RESPONDED",
             "request_id": request_id,
             "attempt_id": attempt_id,
-            "error_code": None,
+            "error_code": receipt["error_code"],
             "result_ref": receipt["result"],
             "result": result,
         }

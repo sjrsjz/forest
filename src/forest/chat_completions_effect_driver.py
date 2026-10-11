@@ -499,7 +499,11 @@ class ChatCompletionsResultLookupDriver:
             or result["payload_digest"] != prepared["payload_digest"]
             or not isinstance(result["text"], str)
             or not isinstance(result["tool_calls"], list)
-            or result["error_code"] is not None
+            or result["error_code"] not in {
+                None, "MODEL_USAGE_INVALID", "MODEL_TOOL_ARGUMENTS",
+                "MODEL_TOOL_SEQUENCE", "MODEL_TOOL_UNDECLARED",
+                "MODEL_EMPTY_OUTPUT", "MODEL_OUTPUT_INCOMPLETE",
+            }
             or (usage is not None and (
                 type(usage) is not dict
                 or set(usage) != {
@@ -527,7 +531,7 @@ class ChatCompletionsResultLookupDriver:
                     usage_ref, owner_kind="model.usage", owner_id=attempt["attempt_id"]
                 ) if usage_ref is not None else None
             ),
-            "error_code": None,
+            "error_code": result["error_code"],
         }
         return {**common, "state": "RESPONDED", "receipt": receipt}
 

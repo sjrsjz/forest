@@ -18,7 +18,7 @@
       "then": {
         "properties": {
           "result": {"$ref": "#/$defs/result"},
-          "error_code": {"type": "null"}
+          "error_code": {"$ref": "#/$defs/response_error"}
         }
       },
       "else": {
@@ -30,6 +30,7 @@
     }
   ],
   "$defs": {
+    "response_error": {"enum": [null, "MODEL_USAGE_INVALID", "MODEL_TOOL_ARGUMENTS", "MODEL_TOOL_SEQUENCE", "MODEL_TOOL_UNDECLARED", "MODEL_EMPTY_OUTPUT", "MODEL_OUTPUT_INCOMPLETE"]},
     "id": {"type": "string", "minLength": 1, "maxLength": 512},
     "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
     "payload": {

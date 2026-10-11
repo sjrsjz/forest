@@ -187,7 +187,7 @@
           ]
         },
         "error_code": {
-          "type": "null"
+          "enum": [null, "MODEL_USAGE_INVALID", "MODEL_TOOL_ARGUMENTS", "MODEL_TOOL_SEQUENCE", "MODEL_TOOL_UNDECLARED", "MODEL_EMPTY_OUTPUT", "MODEL_OUTPUT_INCOMPLETE"]
         }
       }
     }

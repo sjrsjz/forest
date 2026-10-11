@@ -46,8 +46,12 @@ def _candidate(value: object, *, request_id: str, attempt_id: str) -> str:
         or value.get("request_id") != request_id
         or value.get("transport_attempt_id") != attempt_id
         or not isinstance(value.get("text"), str)
-        or not value["text"]
-        or value.get("error_code") is not None
+        or (not value["text"] and value.get("error_code") is None)
+        or value.get("error_code") not in {
+            None, "MODEL_USAGE_INVALID", "MODEL_TOOL_ARGUMENTS",
+            "MODEL_TOOL_SEQUENCE", "MODEL_TOOL_UNDECLARED",
+            "MODEL_EMPTY_OUTPUT", "MODEL_OUTPUT_INCOMPLETE",
+        }
     ):
         raise ForestError(
             "PROVIDER_RESULT_INVALID",
@@ -901,7 +905,7 @@ class AgentExecution:
                             )
                     else:
                         return await self._finish_cancel(request, owner, run, recovery)
-                if datetime.now(UTC) >= deadline:
+                if datetime.now(UTC) >= deadline and state != "PARSING":
                     raise ForestError(
                         "AGENT_DEADLINE_EXCEEDED", "Agent execution deadline expired", 409
                     )
@@ -1070,6 +1074,7 @@ class AgentExecution:
                             attempt_id=attempt["attempt_id"],
                         ),
                         result_ref=result_ref,
+                        provider_error_code=result["error_code"],
                         declarations=declarations,
                         bindings=bindings,
                         repair_of_request_id=repair_of,
@@ -1077,6 +1082,7 @@ class AgentExecution:
                             head["request_kind"] != "REPAIR"
                             and recovery["repair_count"] < 1
                             and recovery["next_step_seq"] < self.config["max_steps"]
+                            and datetime.now(UTC) < deadline
                         ),
                     )
                     continue
@@ -1330,6 +1336,7 @@ class AgentExecution:
                         attempt_id=attempt_id,
                     ),
                     result_ref=invoked["result_ref"],
+                    provider_error_code=invoked["result"]["error_code"],
                     declarations=declarations,
                     bindings=bindings,
                     repair_of_request_id=repair_of,
@@ -1337,6 +1344,7 @@ class AgentExecution:
                         not is_repair
                         and recovery["repair_count"] < 1
                         and step_seq < self.config["max_steps"]
+                        and datetime.now(UTC) < deadline
                     ),
                 )
         finally:

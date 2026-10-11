@@ -455,10 +455,11 @@ async def _bot_state(
                     sql.SQL(
                         "SELECT "
                         "(SELECT count(*) FROM {a}.agent_runs WHERE bot_id=%s AND terminal_at IS NULL) AS active_runs,"
+                        "(SELECT count(*) FROM {a}.agent_runs WHERE bot_id=%s AND terminal_at IS NULL AND absolute_deadline < now()) AS expired_runs,"
                         "(SELECT count(*) FROM {d}.send_intents WHERE bot_id=%s AND state NOT IN ('SENT','FAILED','CANCELLED')) AS pending_sends,"
                         "(SELECT count(*) FROM {j}.jobs WHERE bot_id=%s AND state NOT IN ('SUCCEEDED','FAILED','CANCELLED','UNKNOWN')) AS active_jobs"
                     ).format(a=sql.Identifier(AGENT), d=sql.Identifier(DELIVERY), j=sql.Identifier(JOBS)),
-                    (bot_id, bot_id, bot_id),
+                    (bot_id, bot_id, bot_id, bot_id),
                 )
             ).fetchone()
     result = {
@@ -544,6 +545,8 @@ def _violations(deployment: dict, bot: dict, health_status: int) -> list[str]:
         failures.append("DOCUMENT_EMBEDDING_FAILED")
     if bot["concurrency"]["overlapping_sessions"]:
         failures.append("AGENT_SESSION_CONCURRENCY_INVALID")
+    if bot["work"]["expired_runs"]:
+        failures.append("AGENT_RUN_DEADLINE_EXPIRED")
     if bot["conversation_claims"]["misaligned_conversations"]:
         failures.append("CONVERSATION_CLAIM_ALIGNMENT_INVALID")
     if health_status != 200:

@@ -206,11 +206,26 @@ class TurnRecorder:
         turn_id: str,
         candidate: str,
         result_ref: dict,
+        provider_error_code: str | None,
         declarations: list[dict],
         bindings: dict[str, dict],
         repair_of_request_id: str | None,
         allow_repair: bool,
     ) -> dict:
+        if provider_error_code is not None:
+            return await self._protocol_failure(
+                owner=owner,
+                request_id=request_id,
+                attempt_id=attempt_id,
+                candidate=candidate,
+                error=ForestError(
+                    "AGENT_PROTOCOL_" + provider_error_code.removeprefix("MODEL_"),
+                    f"Completed model response is unusable: {provider_error_code}",
+                    422,
+                ),
+                result_ref=result_ref,
+                allow_repair=allow_repair,
+            )
         try:
             turn = parse_model_turn(candidate, allowed_tools=tuple(bindings))
         except ForestError as exc:

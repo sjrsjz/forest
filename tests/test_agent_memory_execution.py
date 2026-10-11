@@ -10,13 +10,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
 
 from forest.errors import ForestError
 from forest.model_contract import ModelCapabilities
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
-from execution import AgentExecution
+from execution import AgentExecution, _candidate
 from model_execution import ModelExecution, _digest
+from turn_recording import TurnRecorder
 
 
 class MemoryServices:
@@ -550,3 +552,108 @@ async def test_replacement_parks_before_next_model_call(
     assert payloads[0]["reload_operation_id"] == operation_id
     assert calls == ["agent.acquire-run-lease", "agent.park-reload",
                      "agent.release-run-lease"]
+
+
+@pytest.mark.asyncio
+async def test_persisted_incomplete_response_reconciles_without_dispatch_and_settles_protocol():
+    """A completed, billed response is not a transport UNKNOWN even when its text is empty."""
+    digest = "sha256:" + "2" * 64
+    result_ref = {
+        "payload_id": "payload:incomplete", "digest": "sha256:" + "1" * 64,
+        "owner_component_id": "provider.chat-completions",
+        "owner_kind": "model.result", "owner_id": "attempt/quality",
+    }
+    result = {
+        "protocol": "forest.provider-model-result/1", "status": "RESPONDED",
+        "request_id": "request/quality", "transport_attempt_id": "attempt/quality",
+        "payload_digest": digest, "text": "", "tool_calls": [],
+        "finish_reason": "length", "provider_response_id": "response/quality",
+        "provider_model": "model/quality", "error_code": "MODEL_OUTPUT_INCOMPLETE",
+    }
+    receipt = {
+        "status": "RESPONDED", "request_id": "request/quality",
+        "transport_attempt_id": "attempt/quality", "payload_digest": digest,
+        "result": result_ref, "usage": None,
+        "error_code": "MODEL_OUTPUT_INCOMPLETE",
+    }
+    root = Path(__file__).resolve().parents[1]
+    for path, value in (
+        ("dispatch-output.json", receipt),
+        ("result-lookup-output.json", {
+            "protocol": "forest.provider-result-lookup/1",
+            "effect_operation_id": "effect/quality",
+            "attempt_id": "attempt/quality",
+            "request_id": "request/quality", "payload_digest": digest,
+            "state": "RESPONDED", "receipt": receipt,
+        }),
+    ):
+        schema = json.loads((root / "src/forest/builtin/provider_chat_completions/schemas" / path).read_text())
+        Draft202012Validator(schema).validate(value)
+
+    calls = []
+    saved = []
+
+    async def service(name, body, **_kwargs):
+        calls.append(name)
+        if name == "runtime.effect-executor-outcome":
+            return {
+                "protocol": "forest.effect-executor-outcome/2",
+                "effect_operation_id": "effect/quality",
+                "attempt_id": "attempt/quality", "state": "FAILED", "receipt": None,
+            }
+        assert name == "provider.model.result.lookup"
+        return {
+            "protocol": "forest.provider-result-lookup/1",
+            "effect_operation_id": "effect/quality",
+            "attempt_id": "attempt/quality",
+            "request_id": "request/quality", "payload_digest": digest,
+            "state": "RESPONDED", "receipt": receipt,
+        }
+
+    async def uow(name, body, **_kwargs):
+        saved.append((name, body))
+        if name == "agent.record-protocol-failure":
+            return {"resulting_state": "FAILED"}
+        assert name == "agent.observe-model-effect"
+        return {"accepted": True}
+
+    async def put_json(body, **kwargs):
+        return {
+            "payload_id": "payload:" + kwargs["owner_kind"],
+            "digest": "sha256:" + "3" * 64,
+            "owner_component_id": "agent.runtime",
+            "owner_kind": kwargs["owner_kind"],
+            "owner_id": kwargs["owner_id"],
+        }
+
+    async def read_json(reference):
+        assert reference == result_ref
+        return result
+
+    ctx = SimpleNamespace(
+        services=SimpleNamespace(call=service),
+        uow=SimpleNamespace(call=uow),
+        payloads=SimpleNamespace(read_json=read_json, put_json=put_json),
+        operations=SimpleNamespace(stable=lambda value: "operation:" + value),
+    )
+    model = ModelExecution(ctx)
+    assert await model.reconcile_committed(
+        owner={"run_id": "run/quality"},
+        request_id="request/quality", attempt_id="attempt/quality",
+        effect_operation_id="effect/quality", payload_digest=digest,
+    )
+    outcome = await TurnRecorder(ctx).record(
+        owner={"run_id": "run/quality"},
+        request_id="request/quality", attempt_id="attempt/quality",
+        turn_id="turn/quality",
+        candidate=_candidate(result, request_id="request/quality", attempt_id="attempt/quality"),
+        result_ref=result_ref, provider_error_code=result["error_code"],
+        declarations=[], bindings={}, repair_of_request_id=None,
+        allow_repair=False,
+    )
+    assert outcome == {"status": "FAILED", "error_code": "AGENT_PROTOCOL_OUTPUT_INCOMPLETE"}
+    assert calls == ["runtime.effect-executor-outcome", "provider.model.result.lookup"]
+    assert [name for name, _ in saved] == [
+        "agent.observe-model-effect", "agent.record-protocol-failure"
+    ]
+    assert saved[-1][1]["error_code"] == "AGENT_PROTOCOL_OUTPUT_INCOMPLETE"
