@@ -32,12 +32,14 @@ class FrozenContributionDirectories:
     def __init__(
         self,
         *,
+        consumer_component_id: str,
         declarations: Iterable[dict],
         routes: Mapping[str, Any],
         domain_queries: PackageDomainQueries | None,
         domain_query_declarations: Iterable[dict],
         agent_tool_effects: PackageAgentToolEffectAuthority | None = None,
     ) -> None:
+        self._consumer_component_id = consumer_component_id
         self._declarations = {item["kind"]: item for item in declarations}
         self._routes = {
             kind: (
@@ -861,7 +863,7 @@ class FrozenContributionDirectories:
         parent_call_id: str,
         remaining_timeout: Callable[[float], float],
     ) -> dict:
-        if scope.component_id != "shell.command":
+        if scope.component_id != self._consumer_component_id:
             raise ForestError(
                 "SHELL_EXECUTION_AUTHORITY_INVALID",
                 "Only the Shell dispatcher may execute a Shell command route",

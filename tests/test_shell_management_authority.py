@@ -3,8 +3,43 @@ from types import SimpleNamespace
 import pytest
 
 from forest.errors import ForestError
+from forest.package_capabilities import PackageCallScope
+from forest.package_contribution_directories import FrozenContributionDirectories
 from forest.shell_command_protocol import ShellCommandExecutionRequest
 from forest.shell_management_authority import ShellManagementAuthorization
+
+
+@pytest.mark.asyncio
+async def test_shell_directory_execution_uses_its_declared_consumer_identity():
+    directory = FrozenContributionDirectories(
+        consumer_component_id="module.shell-consumer",
+        declarations=({"kind": "shell-commands", "max_execution_timeout_s": 30},),
+        routes={"shell-commands": ()},
+        domain_queries=None,
+        domain_query_declarations=(),
+    )
+
+    def scope(component_id):
+        return PackageCallScope(
+            "bot/test", component_id, "generation/shell", "instance/shell",
+            "worker/shell", "call/shell", "operation/shell", "shell.request", "request/shell",
+        )
+
+    async def execute(component_id):
+        return await directory.invoke(
+            {"kind": "shell-commands", "action": "execute"},
+            graph_identity=None,
+            scope=scope(component_id),
+            parent_call_id="call/shell",
+            remaining_timeout=lambda value: value,
+        )
+
+    with pytest.raises(ForestError) as accepted:
+        await execute("module.shell-consumer")
+    assert accepted.value.code == "CONTRIBUTION_DIRECTORY_REQUEST_INVALID"
+    with pytest.raises(ForestError) as forbidden:
+        await execute("shell.command")
+    assert forbidden.value.code == "SHELL_EXECUTION_AUTHORITY_INVALID"
 
 
 @pytest.mark.asyncio
@@ -12,7 +47,7 @@ async def test_shell_management_uses_sealed_participant_generation():
     calls = []
 
     class Participant:
-        component_id = "shell.command"
+        component_id = "module.shell-consumer"
         generation_id = "generation/shell"
 
         async def invoke_in(self, conn, service_id, payload, **kwargs):
@@ -28,9 +63,10 @@ async def test_shell_management_uses_sealed_participant_generation():
     instance = SimpleNamespace(unit_of_work_participant=lambda: participant)
     registry = SimpleNamespace(
         graph_identity=SimpleNamespace(
-            generations={"shell.command": "generation/shell"}
+            generations={"module.shell-consumer": "generation/shell"}
         ),
-        instances={"shell.command": instance},
+        instances={"module.shell-consumer": instance},
+        directory_consumers={"shell-commands": "module.shell-consumer"},
     )
     registry.contract_router = SimpleNamespace(registry=registry)
 

@@ -82,6 +82,7 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
             }
 
     directory = FrozenContributionDirectories(
+        consumer_component_id="module.tool-consumer",
         declarations=({"kind": "agent-tools", "max_execution_timeout_s": 30},),
         routes={"agent-tools": (("module.owner", contribution, Service()),)},
         domain_queries=None,
@@ -114,7 +115,7 @@ async def test_agent_tool_dispatch_requires_the_handed_off_effect_and_frozen_rou
     }
     scope = PackageCallScope(
         "bot:1",
-        "agent.runtime",
+        "module.tool-consumer",
         "generation:agent:1",
         "instance:1",
         "worker:1",

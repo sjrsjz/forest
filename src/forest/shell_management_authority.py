@@ -66,9 +66,16 @@ class ShellManagementAuthorization:
         registry = self.host.registry
         if registry is None:
             raise ForestError("KERNEL_UNAVAILABLE", "RuntimeGraph is unavailable", 503)
+        shell_component_id = registry.directory_consumers.get("shell-commands")
+        if shell_component_id is None:
+            raise ForestError(
+                "SHELL_MANAGEMENT_AUTHORITY_UNAVAILABLE",
+                "Shell directory consumer is unavailable",
+                503,
+            )
         try:
             participant = RuntimeUnitOfWorkParticipantHandle(
-                registry.contract_router, "shell.command"
+                registry.contract_router, shell_component_id
             ).resolve()
         except ForestError as exc:
             raise ForestError(

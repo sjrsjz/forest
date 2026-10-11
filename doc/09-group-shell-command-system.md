@@ -84,7 +84,7 @@ RuntimeShellCommandContribution {
 
 `module.enable/disable` 是 `component.worker-host` 的管理 action，Shell 命令只能把经过解析的参数交给该 action；Shell 服务不直接调用选择写端口，也不复制选择账本 SQL。控制入口使用同一不可变 action 声明、输入 schema、actor 字段、operation ID、计划摘要和 `runtime.selection-commit` 事务预检。两种入口的凭据不同：Web 使用 Web authority ticket；Shell 使用当前 `shell.command` 已授权的执行 claim。不能把 Shell principal 填进 Web ticket 字段，或把 `management_action` 写端口降成普通 Domain Command 来迁就 Shell。
 
-Shell claim 由 Shell 组件提供事务内验证契约，证明 `bot_id`、原群、`request_id`、`claim_token`、principal、命令及版本、冻结的目标 component/Generation、已消费的 `kernel.authorization` ticket、有效 lease 和当前管理员资格。Shell Worker 给控制入口的是这个 claim 的引用与规范化 action 输入，不是数据库句柄或私表名。控制入口从已冻结的 Shell 路由与 `management_operation_id` 核对 action，不能由 Worker 任意指定另一个管理操作；action 的 `requested_by` 始终由验证后的 principal 注入，群文本不能覆盖。
+Shell claim 由当前 RuntimeGraph 中声明消费 `shell-commands` 目录的组件提供事务内验证契约，证明 `bot_id`、原群、`request_id`、`claim_token`、principal、命令及版本、冻结的目标 component/Generation、已消费的 `kernel.authorization` ticket、有效 lease 和当前管理员资格。管理入口从该目录消费组件解析冻结的 UnitOfWork participant 并核对准确 Generation，不按 `shell.command` 名称找验证器。Shell Worker 给控制入口的是这个 claim 的引用与规范化 action 输入，不是数据库句柄或私表名。控制入口从已冻结的 Shell 路由与 `management_operation_id` 核对 action，不能由 Worker 任意指定另一个管理操作；action 的 `requested_by` 始终由验证后的 principal 注入，群文本不能覆盖。
 
 提交顺序为：取得 RuntimeGraph 操作锁 → 在目标 Bot 数据库开启事务 → 经 Shell 包验证 claim（Web 则验 Web ticket、Bot policy 与审计）→ 运行同一个 `runtime.selection-commit` 预检，按组件 ID 顺序锁定选择/配置头并核对准确 action 输入、目标 Generation、选择修订、Graph 修订、配置修订与计划摘要 → 调用包内 `management_action` 写端口 → 同事务记录来源明确的审计与操作回执。Shell 的管理员资格与 lease 必须在这笔事务里重验；预检不得只在 Shell 接纳时进行。任一步失败整笔回滚，不能出现“Shell 已获准、选择账本却采用过期图”的部分提交。
 

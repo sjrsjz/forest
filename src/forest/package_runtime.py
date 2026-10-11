@@ -313,6 +313,7 @@ class PackageGenerationAdapter:
         self._event_publisher = event_publisher
         self._component_job_scheduler = component_job_scheduler
         self._contribution_directories = FrozenContributionDirectories(
+            consumer_component_id=self.component_id,
             declarations=self.component.get("contribution_directories", ()),
             routes=contribution_directories or {},
             domain_queries=domain_queries,
