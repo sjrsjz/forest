@@ -1229,3 +1229,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-11 v25 隔离候选已切换在线：提交 `f08ceac` 构建为 `forest:runtime-candidate-f08ceac`，deployment/host/Bot 库及包卷独立。首次启动遗漏 Milvus 网络导致 `VECTOR_INDEX_UNAVAILABLE`，先回退 v24，补齐 `forest-clean_default` 后重新切换成功。当前 v25 Supervisor healthy、图 8 为 22/22 ACTIVE、Agent SQL 2.32.0、向量绑定修订 1 READY，v24/v25 到 OneBot 连接为 0/1；一条非许可群消息已进入 Context/Memory，Agent Run 为 0。许可群真实 @→回复待验收，详见 `doc/live-v25-cutover-2026-10-11.md`。
 
 2026-10-11 失败启动后撤回收敛：`MultiBotSupervisor` 对期望 OFFLINE、观察 FAILED、无运行图且 runner 已回收的 Bot 分页扫描；内核目录在 Supervisor lease、意图修订和观察修订共同围栏下原子结算 OFFLINE，不让管理命令直接改观察。修订竞态与多 Bot 隔离的 PostgreSQL 用例 2 passed，Supervisor 生命周期回归 4 passed；Ruff 与编译检查通过。此修正尚未替换当前在线 v25 进程。
+
+2026-10-11 v25 Supervisor 原位镜像更新：生命周期修正提交 `3577fc2` 构建为 `forest:runtime-candidate-3577fc2`。先停机并保留旧容器 `forest-candidate-v25-supervisor-backup-f08ceac`，新容器沿用 v25 数据库、密钥挂载、包卷及管理端口，在启动前接通 PostgreSQL 与 Milvus 网络。更新后 Supervisor healthy、无重启，图 10 为 22/22 ACTIVE；v24/v25 到 OneBot 的 ESTABLISHED 连接为 0/1。只读核查显示 inbox/context 各 35 条、Agent Run 0；许可群已有两条记录均为 `mention_required`，真实显式 @→回复仍待低频验收。失败启动后撤回的 OFFLINE 收敛已由隔离 PostgreSQL 用例验证，当前在线实例没有故意制造失败以测试这一分支。
