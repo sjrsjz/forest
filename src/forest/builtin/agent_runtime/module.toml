@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.50.0"
+version = "4.51.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -83,6 +83,8 @@ requests = [
   "uow.execute:agent.fail-unsendable-input",
   "uow.execute:agent.cancel-run",
   "uow.execute:agent.cancel-prepared",
+  "uow.execute:agent.expire-run",
+  "uow.execute:agent.expire-prepared",
   "uow.execute:agent.block-frozen-model",
   "uow.execute:agent.prepare-model-request",
   "uow.execute:agent.inherit-model-request",
@@ -211,9 +213,9 @@ output_schema = "schemas/run-snapshot-output.json"
 
 [components.storage]
 schema_id = "forest.agent.runtime"
-schema_version = "2.32.0"
+schema_version = "2.33.0"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "68c68ab4ac9e75abfe7b2068ab1105a7440b2d61d08dfb2ebbba3ea45968565c"
+baseline_sha256 = "110af453ea76f491f291f039a411483a8f08fe17d42889b817cb36846f7d6377"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -499,6 +501,19 @@ name = "agent.cancel-run-record"
 contract = "1.0"
 function = "agent_cancel_run"
 input_schema = "schemas/cancel-run-envelope.json"
+output_schema = "schemas/run-snapshot-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/state"
+owner_component = "agent.runtime"
+owner_kind = "checkpoint.state"
+owner_id_path = "/input/checkpoint_id"
+
+[[components.unit_of_work_participants]]
+name = "agent.expire-run-record"
+contract = "1.0"
+function = "agent_expire_run"
+input_schema = "schemas/expire-run-envelope.json"
 output_schema = "schemas/run-snapshot-output.json"
 
 [[components.unit_of_work_participants.payload_refs]]
@@ -856,6 +871,27 @@ timeout_s = 15
 steps = [
   { id = "effect", component_id = "kernel.effect", participant = "effect.abandon", input_path = "/effect" },
   { id = "agent", component_id = "agent.runtime", participant = "agent.cancel-run-record", input_path = "/agent" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.expire-run"
+contract = "1.0"
+input_schema = "schemas/expire-run-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+timeout_s = 15
+steps = [
+  { id = "agent", component_id = "agent.runtime", participant = "agent.expire-run-record" }
+]
+
+[[components.unit_of_work_plans]]
+name = "agent.expire-prepared"
+contract = "1.0"
+input_schema = "schemas/expire-prepared-input.json"
+output_schema = "schemas/run-snapshot-output.json"
+timeout_s = 15
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.abandon", input_path = "/effect" },
+  { id = "agent", component_id = "agent.runtime", participant = "agent.expire-run-record", input_path = "/agent" }
 ]
 
 [[components.unit_of_work_plans]]

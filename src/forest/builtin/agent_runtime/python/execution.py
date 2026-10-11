@@ -523,35 +523,99 @@ class AgentExecution:
             "error_code": values.get("error_code"),
         }
 
-    async def _finish_cancel(
-        self, request: dict, owner: dict, run: dict, recovery: dict
-    ) -> dict:
-        intent = recovery["cancel_request"]
+    @staticmethod
+    def _prepared_effect(recovery: dict) -> dict | None:
         model = recovery.get("model_request")
         attempt = recovery.get("model_attempt")
         tool = recovery.get("tool_call")
-        prepared = None
         if (
             isinstance(model, dict)
             and model["state"] == "ATTEMPT_PREPARED"
             and isinstance(attempt, dict)
             and attempt["state"] == "PREPARED"
         ):
-            prepared = {
+            return {
                 "kind": "MODEL",
                 "effect_operation_id": attempt["effect_operation_ref"],
                 "attempt_id": attempt["attempt_id"],
             }
-        elif (
+        if (
             isinstance(tool, dict)
             and tool["state"] in {"PROPOSED", "WAIT_APPROVAL"}
             and tool["effect_attempt_id"] is not None
         ):
-            prepared = {
+            return {
                 "kind": "TOOL",
                 "effect_operation_id": tool["effect_operation_ref"],
                 "attempt_id": tool["effect_attempt_id"],
             }
+        return None
+
+    async def _finish_expired(
+        self, request: dict, owner: dict, run: dict, recovery: dict
+    ) -> dict:
+        progress = run["progress"]
+        checkpoint_id = stable(
+            "checkpoint-expire", run["run_id"], progress["checkpoint_seq"] + 1,
+            progress["input_revision"], progress["next_step_seq"],
+        )
+        checkpoint = await self.ctx.payloads.put_json(
+            {
+                "phase": "FAILED", "run_id": run["run_id"],
+                "error_code": "AGENT_DEADLINE_EXCEEDED",
+                "input_revision": progress["input_revision"],
+                "next_step_seq": progress["next_step_seq"],
+            },
+            owner_kind="checkpoint.state", owner_id=checkpoint_id,
+            parents=(self._preset_ref(),),
+        )
+        prepared = self._prepared_effect(recovery)
+        agent = {
+            "owner": owner, "checkpoint_id": checkpoint_id, "state": checkpoint,
+            "prepared": prepared, "input_revision": progress["input_revision"],
+            "step_seq": progress["next_step_seq"],
+            "checkpoint_seq": progress["checkpoint_seq"],
+        }
+        plan = "agent.expire-run"
+        payload = agent
+        if prepared is not None:
+            prepared["abandonment_operation_id"] = stable(
+                "abandon-expire", run["run_id"], prepared["attempt_id"]
+            )
+            plan = "agent.expire-prepared"
+            payload = {
+                "effect": {
+                    "protocol": "forest.effect-abandon/1",
+                    "effect_operation_id": prepared["effect_operation_id"],
+                    "attempt_id": prepared["attempt_id"],
+                    "abandonment_operation_id": prepared["abandonment_operation_id"],
+                    "reason_code": "AGENT_DEADLINE_EXCEEDED",
+                    "cancel_effect": True,
+                },
+                "agent": agent,
+            }
+        try:
+            expired = await self.ctx.uow.call(
+                plan, payload,
+                operation_id=stable("expire-run", run["run_id"], checkpoint_id),
+                timeout=15,
+            )
+        except ForestError as exc:
+            if exc.code not in {"AGENT_EXPIRE_EFFECT_PENDING", "EFFECT_NOT_ABANDONABLE"}:
+                raise
+            return self._result(
+                request, "BLOCKED_UNKNOWN", run,
+                error_code="AGENT_EXPIRE_EFFECT_PENDING",
+            )
+        return self._result(
+            request, "FAILED", expired, error_code="AGENT_DEADLINE_EXCEEDED"
+        )
+
+    async def _finish_cancel(
+        self, request: dict, owner: dict, run: dict, recovery: dict
+    ) -> dict:
+        intent = recovery["cancel_request"]
+        prepared = self._prepared_effect(recovery)
         checkpoint_id = stable(
             "checkpoint-cancel", run["run_id"], intent["operation_id"],
             run["progress"]["checkpoint_seq"] + 1,
@@ -916,14 +980,21 @@ class AgentExecution:
                     and isinstance(tool_call, dict)
                     and tool_call["state"] in {"DISPATCHING", "UNKNOWN"}
                 )
+                if state == "FINAL_READY":
+                    return self._result(request, "FINAL_READY", run)
+                if state == "RELOAD_WAIT":
+                    return self._result(request, "RELOAD_WAIT", run)
                 if (
                     datetime.now(UTC) >= deadline
                     and state not in {"PARSING", "MODEL_PENDING", "BLOCKED_UNKNOWN"}
                     and not handed_off_tool
                 ):
-                    raise ForestError(
-                        "AGENT_DEADLINE_EXCEEDED", "Agent execution deadline expired", 409
-                    )
+                    try:
+                        return await self._finish_expired(request, owner, run, recovery)
+                    except ForestError as exc:
+                        if exc.code != "AGENT_CANCEL_REQUESTED":
+                            raise
+                        continue
                 reload_operation = self.reload_operation()
                 if reload_operation is not None and state in {
                     "PREPARING_MODEL", "REPAIR_READY", "WAIT_TOOL",
@@ -932,8 +1003,6 @@ class AgentExecution:
                     return await self._park_reload(
                         request, owner, run, state, reload_operation
                     )
-                if state == "FINAL_READY":
-                    return self._result(request, "FINAL_READY", run)
                 if state == "WAIT_INPUT":
                     return self._result(request, "WAIT_INPUT", run)
                 if state == "WAIT_APPROVAL":
@@ -1038,8 +1107,6 @@ class AgentExecution:
                         run,
                         error_code=run.get("error_code") or "AGENT_MODEL_RESULT_UNKNOWN",
                     )
-                if state == "RELOAD_WAIT":
-                    return self._result(request, "RELOAD_WAIT", run)
                 if recovery["next_step_seq"] > self.config["max_steps"]:
                     raise ForestError(
                         "AGENT_STEP_LIMIT_EXCEEDED",

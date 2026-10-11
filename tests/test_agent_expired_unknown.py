@@ -11,8 +11,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from forest.errors import ForestError
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
 from execution import AgentExecution
 
@@ -97,9 +95,9 @@ async def test_expired_unknown_effects_stay_reconcilable(monkeypatch):
     assert tool_result["status"] == "BLOCKED_UNKNOWN"
     executor.tools.invoke.assert_awaited_once()
 
-    # The same expired Run must still reject a state that could start new work.
+    # A safe state is settled durably instead of repeatedly failing owned work.
     recovery["state"] = "PREPARING_MODEL"
-    with pytest.raises(ForestError) as error:
-        await executor.execute(request)
-    assert error.value.code == "AGENT_DEADLINE_EXCEEDED"
+    executor._finish_expired = AsyncMock(return_value={"status": "FAILED"})
+    assert await executor.execute(request) == {"status": "FAILED"}
+    executor._finish_expired.assert_awaited_once()
     assert calls.count("agent.release-run-lease") == 3

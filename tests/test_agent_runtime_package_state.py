@@ -3862,5 +3862,323 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
         assert cancelled["session"]["state"] == "CANCELLED"
         assert cancelled["cancel_request"]["requested_by"] == "admin:test"
         assert cancelled["progress"]["checkpoint_seq"] == 1
+        async with store.pool.connection() as conn, conn.transaction():
+            replayed_cancel = await replacement_participant.invoke_in(
+                conn, "agent.cancel-run-record", cancel_envelope,
+                operation_id="agent-cancel/package/direct",
+                causal_root_kind="agent.run",
+                causal_root_id="run/agent-package/cancel",
+                parent_call_id="call:agent-package/cancel-replay",
+                timeout_seconds=10,
+            )
+        assert replayed_cancel == cancelled
+
+        expired_start = copy.deepcopy(start_envelope)
+        expired_start["input"].update(
+            conversation_ref="conversation/onebot/group/933179611",
+            session_id="session/agent-package/expired",
+            run_id="run/agent-package/expired",
+            absolute_deadline=(
+                datetime.now(timezone.utc) + timedelta(seconds=2)
+            ).isoformat(),
+        )
+        expired_start["input"]["input_batch"].update(
+            input_batch_ref="input-batch/agent-package/expired",
+            trigger_claim={
+                "ref": "claim:" + "e" * 64,
+                "count": 1, "last_trigger_ref": "trigger/expired",
+                "last_trigger_ingress_seq": 1,
+                "digest": digest_json({"claim": "expired"}),
+            },
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            await replacement_participant.invoke_in(
+                conn, "agent.start-run-record", expired_start,
+                operation_id="agent-run-start/package/expired",
+                causal_root_kind="conversation.run",
+                causal_root_id="run/agent-package/expired",
+                parent_call_id="call:agent-package/start-expired",
+                timeout_seconds=10,
+            )
+        expired_owner = await _lease_operation(
+            store, replacement_participant, replacement_generation,
+            "agent.acquire-run-record",
+            {"run_id": "run/agent-package/expired",
+             "owner_id": "agent-worker/expired", "lease_seconds": 120},
+            "agent-acquire/package/expired",
+        )
+        expired_state = await _payload(
+            kernel, owner_kind="checkpoint.state",
+            owner_id="checkpoint/package/expired",
+            value=b'{"phase":"FAILED","error_code":"AGENT_DEADLINE_EXCEEDED"}',
+        )
+        expired_envelope = {
+            "protocol": "forest.uow-step/1",
+            "caller": {"component_id": "agent.runtime",
+                       "generation_id": replacement_generation},
+            "input": {
+                "owner": _owner_ref(expired_owner),
+                "checkpoint_id": expired_state.owner_id,
+                "state": expired_state.canonical(), "prepared": None,
+                "input_revision": 1, "step_seq": 1, "checkpoint_seq": 0,
+            },
+            "prior": {},
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            with pytest.raises(ForestError) as early_expiry:
+                await replacement_participant.invoke_in(
+                    conn, "agent.expire-run-record", expired_envelope,
+                    operation_id="agent-expire/package/early",
+                    causal_root_kind="agent.run",
+                    causal_root_id="run/agent-package/expired",
+                    parent_call_id="call:agent-package/expire-early",
+                    timeout_seconds=10,
+                )
+        assert early_expiry.value.code == "AGENT_EXPIRE_BOUNDARY_CLOSED"
+        await asyncio.sleep(2.1)
+        async with store.pool.connection() as conn, conn.transaction():
+            expired_run = await replacement_participant.invoke_in(
+                conn, "agent.expire-run-record", expired_envelope,
+                operation_id="agent-expire/package/expired",
+                causal_root_kind="agent.run",
+                causal_root_id="run/agent-package/expired",
+                parent_call_id="call:agent-package/expire",
+                timeout_seconds=10,
+            )
+        assert expired_run["state"] == "FAILED"
+        assert expired_run["error_code"] == "AGENT_DEADLINE_EXCEEDED"
+        assert expired_run["session"]["state"] == "FAILED"
+        assert expired_run["progress"]["checkpoint_seq"] == 1
+        async with store.pool.connection() as conn:
+            expiry_fact = await (await conn.execute(
+                sql.SQL("SELECT c.input_digest,c.state_payload_id,c.state_payload_digest,"
+                        "c.phase,r.state,r.error_code FROM {}.run_checkpoints c "
+                        "JOIN {}.agent_runs r ON r.bot_id=c.bot_id AND r.run_id=c.run_id "
+                        "WHERE c.bot_id=%s AND c.checkpoint_id=%s")
+                .format(sql.Identifier(namespace),
+                        sql.Identifier(namespace)),
+                (store.bot_id, expired_state.owner_id),
+            )).fetchone()
+        assert expiry_fact == {
+            "input_digest": digest_json(expired_envelope["input"]),
+            "state_payload_id": expired_state.payload_id,
+            "state_payload_digest": expired_state.digest,
+            "phase": "FAILED", "state": "FAILED",
+            "error_code": "AGENT_DEADLINE_EXCEEDED",
+        }
+        async with store.pool.connection() as conn, conn.transaction():
+            replayed_expiry = await replacement_participant.invoke_in(
+                conn, "agent.expire-run-record", expired_envelope,
+                operation_id="agent-expire/package/expired",
+                causal_root_kind="agent.run",
+                causal_root_id="run/agent-package/expired",
+                parent_call_id="call:agent-package/expire-replay",
+                timeout_seconds=10,
+            )
+        assert replayed_expiry == expired_run
+
+        prepared_run_id = "run/agent-package/expired-prepared"
+        prepared_request_id = "model-request/package/expired-prepared"
+        prepared_attempt_id = "model-attempt/package/expired-prepared"
+        prepared_effect_id = "model-effect/package/expired-prepared"
+        prepared_deadline = datetime.now(timezone.utc) + timedelta(seconds=5)
+        prepared_start = copy.deepcopy(expired_start)
+        prepared_start["input"].update(
+            conversation_ref="conversation/onebot/group/933179612",
+            session_id="session/agent-package/expired-prepared",
+            run_id=prepared_run_id,
+            absolute_deadline=prepared_deadline.isoformat(),
+        )
+        prepared_start["input"]["input_batch"].update(
+            input_batch_ref="input-batch/agent-package/expired-prepared",
+            trigger_claim={
+                "ref": "claim:" + "f" * 64, "count": 1,
+                "last_trigger_ref": "trigger/expired-prepared",
+                "last_trigger_ingress_seq": 1,
+                "digest": digest_json({"claim": "expired-prepared"}),
+            },
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            await replacement_participant.invoke_in(
+                conn, "agent.start-run-record", prepared_start,
+                operation_id="agent-run-start/package/expired-prepared",
+                causal_root_kind="conversation.run", causal_root_id=prepared_run_id,
+                parent_call_id="call:agent-package/start-expired-prepared",
+                timeout_seconds=10,
+            )
+        prepared_owner = await _lease_operation(
+            store, replacement_participant, replacement_generation,
+            "agent.acquire-run-record",
+            {"run_id": prepared_run_id,
+             "owner_id": "agent-worker/expired-prepared", "lease_seconds": 120},
+            "agent-acquire/package/expired-prepared",
+        )
+        prepared_projection = await _payload(
+            kernel, owner_kind="model.projection", owner_id=prepared_request_id,
+            value=b'{"messages":[{"role":"user","content":"A"}]}',
+        )
+        prepared_wire = await _payload(
+            kernel, owner_kind="model.wire", owner_id=prepared_attempt_id,
+            value=b'{"model":"model/package-test","messages":[]}',
+        )
+        prepared_effect_wire = await _payload(
+            kernel, owner_component_id="kernel.effect", owner_kind="effect.wire",
+            owner_id=prepared_attempt_id,
+            value=b'{"dispatch":"provider.model.dispatch","request_id":"expired-prepared"}',
+        )
+        prepared_effect_input = await _payload(
+            kernel, owner_component_id="kernel.effect", owner_kind="effect.input",
+            owner_id=prepared_effect_id,
+            value=b'{"request_id":"expired-prepared"}',
+        )
+        prepared_request = copy.deepcopy(plan_request)
+        prepared_request["caller"]["generation_id"] = replacement_generation
+        prepared_request["input"]["owner"] = _owner_ref(prepared_owner)
+        prepared_request["input"]["request"].update(
+            request_id=prepared_request_id,
+            first_attempt_id=prepared_attempt_id,
+            projection=prepared_projection.canonical(),
+            initial_wire=prepared_wire.canonical(),
+        )
+        prepared_attempt = copy.deepcopy(plan_attempt)
+        prepared_attempt["caller"]["generation_id"] = replacement_generation
+        prepared_attempt["input"].update(
+            owner=_owner_ref(prepared_owner), request_id=prepared_request_id,
+            attempt_id=prepared_attempt_id,
+            effect_operation_ref=prepared_effect_id,
+        )
+        prepared_attempt["prior"]["effect"].update(
+            input_payload=prepared_effect_input.canonical(),
+            wire_payload=prepared_effect_wire.canonical(),
+        )
+        prepared_attempt["prior"]["effect"]["permit"].update(
+            effect_operation_id=prepared_effect_id,
+            attempt_id=prepared_attempt_id,
+            wire_payload_id=prepared_effect_wire.payload_id,
+            wire_payload_digest=prepared_effect_wire.digest,
+        )
+        async with store.pool.connection() as conn, conn.transaction():
+            await replacement_participant.invoke_in(
+                conn, "agent.prepare-model-request-record", prepared_request,
+                operation_id="agent-model-request/package/expired-prepared",
+                causal_root_kind="agent.run", causal_root_id=prepared_run_id,
+                parent_call_id="call:agent-package/expired-prepared/request",
+                timeout_seconds=10,
+            )
+            await replacement_participant.invoke_in(
+                conn, "agent.prepare-model-attempt-record", prepared_attempt,
+                operation_id="agent-model-attempt/package/expired-prepared",
+                causal_root_kind="agent.run", causal_root_id=prepared_run_id,
+                parent_call_id="call:agent-package/expired-prepared/attempt",
+                timeout_seconds=10,
+            )
+            await _seed_prepared_effect(
+                conn, kernel, store, operation_id=prepared_effect_id,
+                attempt_id=prepared_attempt_id, wire=prepared_effect_wire,
+                generation_id=replacement_generation,
+            )
+        prepared_checkpoint = await _payload(
+            kernel, owner_kind="checkpoint.state",
+            owner_id="checkpoint/package/expired-prepared",
+            value=b'{"phase":"FAILED","error_code":"AGENT_DEADLINE_EXCEEDED"}',
+        )
+        abandonment_id = "abandon/package/expired-prepared"
+        prepared_expiry = {
+            "effect": {
+                "protocol": "forest.effect-abandon/1",
+                "effect_operation_id": prepared_effect_id,
+                "attempt_id": prepared_attempt_id,
+                "abandonment_operation_id": abandonment_id,
+                "reason_code": "AGENT_DEADLINE_EXCEEDED",
+                "cancel_effect": True,
+            },
+            "agent": {
+                "owner": _owner_ref(prepared_owner),
+                "checkpoint_id": prepared_checkpoint.owner_id,
+                "state": prepared_checkpoint.canonical(),
+                "prepared": {
+                    "kind": "MODEL", "effect_operation_id": prepared_effect_id,
+                    "attempt_id": prepared_attempt_id,
+                    "abandonment_operation_id": abandonment_id,
+                },
+                "input_revision": 1, "step_seq": 1, "checkpoint_seq": 0,
+            },
+        }
+        expiry_declaration = next(
+            item for item in replacement.component["unit_of_work_plans"]
+            if item["name"] == "agent.expire-prepared"
+        )
+        replacement_binding = replacement._prepared_binding
+        expiry_scope = PackageCallScope(
+            bot_id=store.bot_id, component_id="agent.runtime",
+            generation_id=replacement_generation,
+            instance_id=replacement_binding.instance_id,
+            worker_incarnation=replacement_binding.worker_incarnation,
+            call_id="call:agent-package/expired-prepared",
+            call_operation_id="agent-expire/package/expired-prepared",
+            causal_root_kind="agent.run", causal_root_id=prepared_run_id,
+        )
+        await asyncio.sleep(max(
+            0.0, (prepared_deadline - datetime.now(timezone.utc)).total_seconds() + 0.1
+        ))
+        invalid_expiry = copy.deepcopy(prepared_expiry)
+        invalid_expiry["agent"]["prepared"]["attempt_id"] = (
+            "model-attempt/package/expired-prepared-wrong"
+        )
+        with pytest.raises(ForestError) as invalid_proof:
+            await replacement._unit_of_work_coordinator.execute(
+                replace(expiry_scope, call_operation_id="agent-expire/package/invalid-proof"),
+                expiry_declaration, invalid_expiry,
+                parent_call_id="call:agent-package/expired-prepared/invalid",
+                timeout_seconds=15,
+            )
+        assert invalid_proof.value.code == "AGENT_EXPIRE_EFFECT_PROOF_INVALID"
+        async with store.pool.connection() as conn:
+            effect_before = await (await conn.execute(sql.SQL(
+                "SELECT o.state AS operation_state,a.state AS attempt_state "
+                "FROM {}.effect_operations o JOIN {}.effect_attempts a "
+                "ON a.bot_id=o.bot_id AND a.effect_operation_id=o.effect_operation_id "
+                "WHERE o.bot_id=%s AND o.effect_operation_id=%s"
+            ).format(sql.Identifier(kernel.effect.namespace),
+                     sql.Identifier(kernel.effect.namespace)),
+                (store.bot_id, prepared_effect_id))).fetchone()
+        assert effect_before == {
+            "operation_state": "PREPARED", "attempt_state": "PREPARED",
+        }
+        prepared_expired = await replacement._unit_of_work_coordinator.execute(
+            expiry_scope, expiry_declaration, prepared_expiry,
+            parent_call_id="call:agent-package/expired-prepared",
+            timeout_seconds=15,
+        )
+        assert prepared_expired["state"] == "FAILED"
+        assert prepared_expired["error_code"] == "AGENT_DEADLINE_EXCEEDED"
+        assert prepared_expired["session"]["state"] == "FAILED"
+        assert await replacement._unit_of_work_coordinator.execute(
+            expiry_scope, expiry_declaration, prepared_expiry,
+            parent_call_id="call:agent-package/expired-prepared/replay",
+            timeout_seconds=15,
+        ) == prepared_expired
+        async with store.pool.connection() as conn:
+            effect_after = await (await conn.execute(sql.SQL(
+                "SELECT o.state AS operation_state,a.state AS attempt_state "
+                "FROM {}.effect_operations o JOIN {}.effect_attempts a "
+                "ON a.bot_id=o.bot_id AND a.effect_operation_id=o.effect_operation_id "
+                "WHERE o.bot_id=%s AND o.effect_operation_id=%s"
+            ).format(sql.Identifier(kernel.effect.namespace),
+                     sql.Identifier(kernel.effect.namespace)),
+                (store.bot_id, prepared_effect_id))).fetchone()
+            model_after = await (await conn.execute(sql.SQL(
+                "SELECT m.state AS request_state,a.state AS attempt_state "
+                "FROM {}.model_requests m JOIN {}.model_transport_attempts a "
+                "ON a.bot_id=m.bot_id AND a.request_id=m.request_id "
+                "WHERE m.bot_id=%s AND m.request_id=%s"
+            ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                (store.bot_id, prepared_request_id))).fetchone()
+        assert effect_after == {
+            "operation_state": "CANCELLED", "attempt_state": "ABANDONED",
+        }
+        assert model_after == {
+            "request_state": "ABANDONED", "attempt_state": "ABANDONED",
+        }
     finally:
         assert await registry.close() == []
