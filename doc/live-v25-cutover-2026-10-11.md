@@ -13,3 +13,7 @@ v25 使用独立的 `forest_deployment_v25`、`forest_host_v25`、Bot 物理库�
 `3577fc2` 修复失败启动后撤回意图的生命周期收敛。v25 Supervisor 停机后保留旧容器 `forest-candidate-v25-supervisor-backup-f08ceac`，用 `forest:runtime-candidate-3577fc2` 重新创建同名容器，并沿用原部署、Host、Bot 数据库、包卷、密钥、管理端口；PostgreSQL 与 Milvus 网络均在启动前接通。
 
 新容器 healthy、重启次数 0，图 10 为 22/22 ACTIVE，v24/v25 到树莓派 OneBot 的 ESTABLISHED 连接为 0/1。只读核查为 inbox/context 各 35 条、Agent Run 0；许可群两条消息都判定为 `mention_required`。真实显式 @→Agent→Provider→Delivery 尚待许可群低频验收；本次未主动发送 QQ 消息。失败启动后撤回的 OFFLINE 分支已在隔离 PostgreSQL 回归验证，未在在线 Bot 上人为制造失败。
+
+## 2026-10-11 许可群静默诊断
+
+只读检查截至 `2026-10-11T05:00:22Z` 的入站元数据：49 条消息全部进入 Context，48 条建立 Memory 来源；唯一缺失来源是非许可群图片像素超限，已以 `MEDIA_CAPTURE_UNAVAILABLE` 记账。许可群 10 条消息均为 `mention_required`，Agent Run 仍为 0。逐条对照 OneBot 原始段和规范化段后确认 @ 未在适配器丢失：v25 登录账号 `3605196653`，许可群现有 @ 段指向其他账号，另有仅含回复引用而无 @ 的消息。当前 MENTION 策略要求显式 @ 登录账号；等待一次明确 @3605196653 的低频真人验收。
