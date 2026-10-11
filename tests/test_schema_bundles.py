@@ -4477,6 +4477,14 @@ async def test_clean_kernel_effect_preserves_unknown_and_reconciles_explicitly(
         )
         == abandonment
     )
+    with pytest.raises(ForestError) as mismatched_effect:
+        await effects.abandon_prepared(
+            effect_operation_id="effect/other",
+            attempt_id=first_abandoned.attempt_id,
+            abandonment_operation_id="abandon/abandoned-retry/1",
+            reason_code="PREPARE_EXPIRED",
+        )
+    assert mismatched_effect.value.code == "EFFECT_ABANDONMENT_CONFLICT"
     second_abandoned = await prepare_abandon_attempt(2)
     assert second_abandoned.attempt_no == 2
     await effects.abandon_prepared(

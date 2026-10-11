@@ -834,18 +834,28 @@ class KernelEffectRepository:
         if type(cancel_effect) is not bool:
             raise ForestError("EFFECT_INPUT_INVALID", "Invalid cancellation flag", 422)
         input_digest = _digest([attempt_id, reason_code, cancel_effect])
+        abandonment_query = sql.SQL(
+            "SELECT b.*,a.effect_operation_id AS bound_effect_operation_id "
+            "FROM {} b JOIN {} a ON a.bot_id=b.bot_id "
+            "AND a.attempt_id=b.attempt_id "
+            "WHERE b.bot_id=%s AND b.abandonment_operation_id=%s"
+        ).format(self._table("attempt_abandonments"), self._table("effect_attempts"))
         existing = await (
             await conn.execute(
-                sql.SQL(
-                    "SELECT * FROM {} WHERE bot_id=%s AND abandonment_operation_id=%s"
-                ).format(self._table("attempt_abandonments")),
+                abandonment_query,
                 (self.store.bot_id, abandonment_operation_id),
             )
         ).fetchone()
         if existing is not None:
-            if existing["input_digest"] != input_digest:
+            if (
+                existing["input_digest"] != input_digest
+                or existing["bound_effect_operation_id"] != effect_operation_id
+            ):
                 raise ForestError("EFFECT_ABANDONMENT_CONFLICT", "Abandonment input differs", 409)
-            return dict(existing)
+            return {
+                key: value for key, value in existing.items()
+                if key != "bound_effect_operation_id"
+            }
         effect = await (
             await conn.execute(
                 sql.SQL(
@@ -864,16 +874,20 @@ class KernelEffectRepository:
         ).fetchone()
         existing = await (
             await conn.execute(
-                sql.SQL(
-                    "SELECT * FROM {} WHERE bot_id=%s AND abandonment_operation_id=%s"
-                ).format(self._table("attempt_abandonments")),
+                abandonment_query,
                 (self.store.bot_id, abandonment_operation_id),
             )
         ).fetchone()
         if existing is not None:
-            if existing["input_digest"] != input_digest:
+            if (
+                existing["input_digest"] != input_digest
+                or existing["bound_effect_operation_id"] != effect_operation_id
+            ):
                 raise ForestError("EFFECT_ABANDONMENT_CONFLICT", "Abandonment input differs", 409)
-            return dict(existing)
+            return {
+                key: value for key, value in existing.items()
+                if key != "bound_effect_operation_id"
+            }
         if (
             effect is None
             or attempt is None

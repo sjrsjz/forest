@@ -10,6 +10,8 @@
 
 仍需单独验证工具 PREPARED Effect 在 Run 截止时的跨参与者结算及进程硬退出恢复，完成长期多群图文负载验收，并在新隔离 Bot 数据库上验证当前包基线；现有 v26 旧 SQL 基线不可直接作为新源码的热替换目标。
 
+Effect 放弃回执重放核验（2026-10-12）：内核 Effect authority 在按 `abandonment_operation_id` 返回已有 PREPARED 放弃回执时，现从不可变 attempt 账本核对调用方给出的 `effect_operation_id`；同一 attempt、原因与取消标志但错误 Effect ID 返回 `EFFECT_ABANDONMENT_CONFLICT`。回执摘要和数据库格式不变，既有正确重放仍可用。独立 PostgreSQL 的 Effect 状态回归 1 passed，Ruff 通过；测试容器已移除，在线 v26 未切换，未发送 QQ 消息。
+
 ## 当前快照（2026-10-12）
 
 当前源码已包含 `agent.runtime` 4.51.0 / SQL 2.33.0 的持久超时结算，以及 `vector.index` 2.23.0 / SQL 2.22.0 的运行期审计页判定围栏；两项分别通过隔离 PostgreSQL 与完整模拟 BotHost 回归。下面的历史记录保留各阶段当时的结论，判断当前实现应以本节及最新代码、包清单和运行账本为准。
