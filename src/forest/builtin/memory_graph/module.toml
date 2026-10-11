@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.93.1"
+version = "1.93.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -21,7 +21,7 @@ config_immutable_paths = ["/embedding"]
 max_frame_bytes = 262144
 max_inflight = 16
 max_queue_items = 128
-max_state_inflight = 8
+max_state_inflight = 16
 max_owned_tasks = 16
 max_owned_resources = 4
 
