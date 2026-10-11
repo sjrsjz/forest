@@ -35,3 +35,6 @@ Memory 管理入口同样经真实会话验证：按许可群号筛选主干得�
 提交 `0968bfb` 修复原生图片采集端的 DNS 验证/连接地址替换窗口，构建 `forest:runtime-candidate-0968bfb`。停机后保留原容器为 `forest-candidate-v25-supervisor-backup-12dbd5c`，新容器沿用 v25 的隔离数据库、包卷、只读密钥与 bootstrap、本机管理端口和资源/安全限制，并在启动前连接 PostgreSQL 与 Milvus 网络。旧容器停下后才启动新容器，避免同时连接 OneBot。
 
 恢复期间管理端先可用，Bot scope 曾短暂返回 `BOT_MANAGEMENT_UNAVAILABLE`，此时没有重启进程；随后 Bot 图 14 的 22/22 成员 ACTIVE，Supervisor `running/healthy`、重启次数 0。v24/v25 到树莓派 OneBot 的 ESTABLISHED 连接恢复为 0/1。认证管理端的向量与记忆查询、两份包自带页面 SHA-256 核对通过；部署图仍选中 `deployment.package-registry` 1.6.3。只读 Bot 库核对 inbox/context 各 234、Memory 来源 233、Agent Run 0；唯一缺失来源仍是已明确结算 `MEDIA_CAPTURE_UNAVAILABLE` 的超像素图片。最近入站已到 `2026-10-11T07:33:04Z`，许可群 14 条现有消息均为 `mention_required`。本次未主动发送 QQ 消息，明确 @ 当前 Bot 后的真实回复仍待低频验收。
+## 2026-10-11 真实 VL 管理召回试验
+
+在 v25 认证 Bot 管理 scope 中分别上传一段短文本和一张本地生成的 64×64 PNG，以 `memory.trial.start` 各发起一次查询。两个试验均经过 CLAIMED/PENDING 到达 READY；`memory.trial.result` 各返回 0 项、`truncated=false`、无截断原因。只读 Bot 库进一步核对：两个查询分别有一个 `TEXT` 和 `IMAGE` 的 READY QUERY facet，预算账本累计 2 次已结算嵌入请求、48 个计费 token、0 次 UNKNOWN。当前库的群聊来源尚未归档为 ELIGIBLE，故空结果符合资格状态；这验证真实 QiYu VL 端点接受文本与图片并完成查询冻结，不证明非空图的跨模态命中。本次没有向 QQ 发送消息。
