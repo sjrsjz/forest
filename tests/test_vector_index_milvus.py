@@ -1282,12 +1282,14 @@ async def test_package_owned_ref_audit_quarantines_stable_physical_mismatch(
     if case == "missing-active":
         assert work["payload"]["refs"] == ["ref/a"]
         await publish("ref/b")
-        assert (await invoke("vector_adjudicate_ref_audit", {
-            "space_id": space_id, "binding_revision": 1,
-            "collection_id": 42, "cycle_seq": work["payload"]["cycle_seq"],
-            "claim_token": work["claim_token"],
-            "observations": [{"ref_id": "ref/b", "physical": None}],
-        })) == {"state": "READY", "ref_id": None}
+        with pytest.raises(ForestError) as wrong_page:
+            await invoke("vector_adjudicate_ref_audit", {
+                "space_id": space_id, "binding_revision": 1,
+                "collection_id": 42, "cycle_seq": work["payload"]["cycle_seq"],
+                "claim_token": work["claim_token"],
+                "observations": [{"ref_id": "ref/b", "physical": None}],
+            })
+        assert wrong_page.value.code == "VECTOR_AUDIT_PAGE_MISMATCH"
     else:
         assert work["payload"]["refs"] == []
 
@@ -1381,7 +1383,7 @@ async def test_ref_audit_resumes_into_physical_scan_and_records_waterline(
     )
     namespace = module_schema_namespace("forest.vector.index")
 
-    async def invoke(function, payload, *, operation_id=None):
+    async def invoke(function, payload, *, operation_id=None, allow_error=False):
         context = {"bot_id": store.bot_id}
         if operation_id is not None:
             context["operation_id"] = operation_id
@@ -1396,6 +1398,8 @@ async def test_ref_audit_resumes_into_physical_scan_and_records_waterline(
                     )
                 ).fetchone()
             )["result"]
+        if allow_error:
+            return envelope
         assert envelope["ok"], envelope
         return envelope["value"]
 
@@ -1442,13 +1446,31 @@ async def test_ref_audit_resumes_into_physical_scan_and_records_waterline(
     assert first["payload"]["phase"] == "REF"
     assert first["payload"]["refs"] == ["ref/a"]
     assert first["payload"]["cycle_seq"] == 1
+    missing_decision = await invoke("vector_settle_ref_audit", {
+            "protocol": "forest.owned-work-settle-request/1",
+            "work_id": first["work_id"], "claim_token": first["claim_token"],
+            "attempt": first["attempt"],
+            "outcome": {"status": "SUCCEEDED", "result": {
+                "space_id": space_id, "phase": "REF",
+                "binding_revision": 1, "collection_id": 42,
+                "next_ref": "ref/a", "done": True, "quarantined": False,
+            }},
+        }, allow_error=True)
+    assert missing_decision["error"]["code"] == "VECTOR_AUDIT_DECISION_MISSING"
     late_row = await publish("ref/b")
+
+    physical_empty = False
 
     async def service_call(name, payload, **_options):
         assert name == "vector.transport.audit"
         if payload["mode"] == "GET":
             return {
                 "space_id": space_id, "mode": "GET", "rows": [first_row],
+                "next_ref": None, "done": True,
+            }
+        if physical_empty:
+            return {
+                "space_id": space_id, "mode": "SCAN", "rows": [],
                 "next_ref": None, "done": True,
             }
         return {
@@ -1504,6 +1526,27 @@ async def test_ref_audit_resumes_into_physical_scan_and_records_waterline(
         "phase": "REF", "cycle_seq": None, "last_checked_seq": 1,
         "checked": True, "scheduled": True,
     }
+    await invoke("vector_ref_tombstone", {
+        "space_id": space_id, "ref_ids": ["ref/a", "ref/b"],
+    })
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "UPDATE {}.vector_audit_work SET next_at=clock_timestamp() "
+            "WHERE bot_id=%s"
+        ).format(sql.Identifier(namespace)), (store.bot_id,))
+    physical_empty = True
+    empty_page = await invoke("vector_claim_ref_audit", {
+        **claim, "claim_token": "audit-ok/empty-physical",
+    })
+    assert empty_page["payload"]["phase"] == "PHYSICAL"
+    assert empty_page["payload"]["refs"] == []
+    await run_and_settle(empty_page)
+    async with store.pool.connection() as conn:
+        checked = await (await conn.execute(sql.SQL(
+            "SELECT last_checked_seq FROM {}.vector_audit_work "
+            "WHERE bot_id=%s"
+        ).format(sql.Identifier(namespace)), (store.bot_id,))).fetchone()
+    assert checked["last_checked_seq"] == 4
 
 
 @pytest.mark.asyncio

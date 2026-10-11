@@ -614,34 +614,37 @@ class MilvusVectorIndex(Plugin):
             ]
             next_ref = observed["next_ref"]
             done = observed["done"]
+            if next_ref != (refs[-1] if refs else None) or (not refs and not done):
+                raise ForestError(
+                    "VECTOR_AUDIT_TRANSPORT_INVALID",
+                    "Milvus audit cursor differs from its physical page", 502,
+                )
         else:
             raise ForestError(
                 "VECTOR_AUDIT_CLAIM_INVALID", "Unknown audit phase", 502,
             )
-        quarantined = False
-        if observations:
-            decision = _plain(await ctx.commands.call(
-                "vector.audit.adjudicate",
-                {
-                    "space_id": self.space_id,
-                    "binding_revision": request["binding_revision"],
-                    "collection_id": request["collection_id"],
-                    "cycle_seq": request["cycle_seq"],
-                    "claim_token": request["claim_token"],
-                    "observations": observations,
-                },
-                operation_id=ctx.operations.stable(
-                    "audit-decide:" + task["work_id"] + ":" +
-                    _digest(observations)[7:]
-                ),
-                timeout=15,
-            ))
-            if decision["state"] not in ("READY", "REBUILD_REQUIRED"):
-                raise ForestError(
-                    "VECTOR_AUDIT_DECISION_INVALID",
-                    "Package audit command returned another state", 502,
-                )
-            quarantined = decision["state"] == "REBUILD_REQUIRED"
+        decision = _plain(await ctx.commands.call(
+            "vector.audit.adjudicate",
+            {
+                "space_id": self.space_id,
+                "binding_revision": request["binding_revision"],
+                "collection_id": request["collection_id"],
+                "cycle_seq": request["cycle_seq"],
+                "claim_token": request["claim_token"],
+                "observations": observations,
+            },
+            operation_id=ctx.operations.stable(
+                "audit-decide:" + task["work_id"] + ":" +
+                _digest(observations)[7:]
+            ),
+            timeout=15,
+        ))
+        if decision["state"] not in ("READY", "REBUILD_REQUIRED"):
+            raise ForestError(
+                "VECTOR_AUDIT_DECISION_INVALID",
+                "Package audit command returned another state", 502,
+            )
+        quarantined = decision["state"] == "REBUILD_REQUIRED"
         return {
             "space_id": self.space_id, "phase": phase,
             "binding_revision": request["binding_revision"],
