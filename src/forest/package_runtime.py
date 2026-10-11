@@ -3745,15 +3745,6 @@ def package_runtime_descriptor(
                         if component["scope"] == "bot" else ()
                     ),
                     *(
-                        ("routing.graph",)
-                        if component["scope"] == "bot" and (
-                            component.get("publishes")
-                            or component.get("subscribes")
-                            or component.get("jobs")
-                        )
-                        else ()
-                    ),
-                    *(
                         match["component_id"]
                         for match in component.get("lifecycle", {}).get("fact_matches", ())
                     ),
@@ -3775,6 +3766,10 @@ def package_runtime_descriptor(
         event_publications=event_publications,
         event_subscriptions=event_subscriptions,
         component_jobs=component_jobs,
+        contribution_directories=tuple(
+            declaration["kind"]
+            for declaration in component.get("contribution_directories", ())
+        ),
         job_types=job_types,
         agent_tools=agent_tools,
         shell_commands=shell_commands,

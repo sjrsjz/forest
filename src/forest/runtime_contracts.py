@@ -401,10 +401,13 @@ class RuntimeContractRouter:
     def agent_tools(
         self, caller_component_id: str
     ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
-        if caller_component_id != "agent.runtime":
+        if (
+            self.registry.directory_consumers.get("agent-tools") is None
+            or caller_component_id != self.registry.directory_consumers["agent-tools"]
+        ):
             raise ForestError(
                 "RUNTIME_AGENT_TOOL_DISCOVERY_FORBIDDEN",
-                "Only the Agent runtime may consume the graph tool directory",
+                "Only the declared Agent tool directory consumer may read this graph directory",
                 403,
             )
         discovered = []
@@ -427,10 +430,13 @@ class RuntimeContractRouter:
     def shell_commands(
         self, caller_component_id: str
     ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
-        if caller_component_id != "shell.command":
+        if (
+            self.registry.directory_consumers.get("shell-commands") is None
+            or caller_component_id != self.registry.directory_consumers["shell-commands"]
+        ):
             raise ForestError(
                 "RUNTIME_SHELL_COMMAND_DISCOVERY_FORBIDDEN",
-                "Only the Shell runtime may consume the graph command directory",
+                "Only the declared Shell command directory consumer may read this graph directory",
                 403,
             )
         discovered = []
@@ -454,10 +460,13 @@ class RuntimeContractRouter:
     def job_types(
         self, caller_component_id: str
     ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
-        if caller_component_id != "job.scheduler":
+        if (
+            self.registry.directory_consumers.get("job-types") is None
+            or caller_component_id != self.registry.directory_consumers["job-types"]
+        ):
             raise ForestError(
                 "RUNTIME_JOB_TYPE_DISCOVERY_FORBIDDEN",
-                "Only the Job scheduler may consume the graph job directory",
+                "Only the declared Job type directory consumer may read this graph directory",
                 403,
             )
         discovered = []
@@ -481,10 +490,13 @@ class RuntimeContractRouter:
     def event_subscriptions(
         self, caller_component_id: str
     ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
-        if caller_component_id != "routing.graph":
+        if (
+            self.registry.directory_consumers.get("routing-routes") is None
+            or caller_component_id != self.registry.directory_consumers["routing-routes"]
+        ):
             raise ForestError(
                 "RUNTIME_EVENT_DIRECTORY_FORBIDDEN",
-                "Only routing.graph may consume the event subscription directory",
+                "Only the declared routing directory consumer may read event subscriptions",
                 403,
             )
         discovered = []
@@ -508,10 +520,13 @@ class RuntimeContractRouter:
     def event_publications(
         self, caller_component_id: str
     ) -> tuple[tuple[str, object, RuntimeGenerationHandle], ...]:
-        if caller_component_id != "routing.graph":
+        if (
+            self.registry.directory_consumers.get("routing-routes") is None
+            or caller_component_id != self.registry.directory_consumers["routing-routes"]
+        ):
             raise ForestError(
                 "RUNTIME_EVENT_DIRECTORY_FORBIDDEN",
-                "Only routing.graph may consume the event publication directory",
+                "Only the declared routing directory consumer may read event publications",
                 403,
             )
         return tuple(
@@ -532,10 +547,13 @@ class RuntimeContractRouter:
     def component_jobs(
         self, caller_component_id: str
     ) -> tuple[tuple[str, object, RuntimeServiceHandle], ...]:
-        if caller_component_id != "routing.graph":
+        if (
+            self.registry.directory_consumers.get("routing-routes") is None
+            or caller_component_id != self.registry.directory_consumers["routing-routes"]
+        ):
             raise ForestError(
                 "RUNTIME_COMPONENT_JOB_DIRECTORY_FORBIDDEN",
-                "Only routing.graph may consume the ComponentJob directory",
+                "Only the declared routing directory consumer may read ComponentJobs",
                 403,
             )
         discovered = []

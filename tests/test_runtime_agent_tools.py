@@ -10,6 +10,7 @@ from forest.runtime_modules import (
     OwnedWorkLifecycle,
     RuntimeAgentToolContribution,
     RuntimeArtifactIdentity,
+    RuntimeEventPublicationContribution,
     RuntimeModuleDescriptor,
     RuntimeModuleRegistry,
     RuntimeShellCommandContribution,
@@ -315,16 +316,18 @@ def test_runtime_graph_rejects_ambiguous_shell_command_directory():
 def test_contribution_consumers_follow_provider_lifecycle_order():
     descriptors = (
         RuntimeModuleDescriptor(
-            "agent.runtime",
+            "module.tool-consumer",
             (),
             lambda *_: object(),
             _ARTIFACT,
+            contribution_directories=("agent-tools",),
         ),
         RuntimeModuleDescriptor(
-            "shell.command",
+            "module.command-consumer",
             (),
             lambda *_: object(),
             _ARTIFACT,
+            contribution_directories=("shell-commands",),
         ),
         RuntimeModuleDescriptor(
             "module.provider",
@@ -338,23 +341,35 @@ def test_contribution_consumers_follow_provider_lifecycle_order():
 
     registry = RuntimeModuleRegistry(_runtime(), descriptors)
 
-    assert registry.order.index("module.provider") < registry.order.index("agent.runtime")
-    assert registry.order.index("module.provider") < registry.order.index("shell.command")
-    assert registry.describe()[0]["requires"] == ["module.provider"]
-    assert registry.describe()[1]["requires"] == ["module.provider"]
+    assert registry.order.index("module.provider") < registry.order.index("module.tool-consumer")
+    assert registry.order.index("module.provider") < registry.order.index("module.command-consumer")
+    assert registry.directory_consumers == {
+        "agent-tools": "module.tool-consumer",
+        "shell-commands": "module.command-consumer",
+    }
+    assert registry.contract_router.agent_tools("module.tool-consumer")[0][0] == "module.provider"
+    with pytest.raises(ForestError) as forbidden:
+        registry.contract_router.agent_tools("agent.runtime")
+    assert forbidden.value.code == "RUNTIME_AGENT_TOOL_DISCOVERY_FORBIDDEN"
+    assert {item["component_id"]: item["requires"] for item in registry.describe()} == {
+        "module.provider": [],
+        "module.tool-consumer": ["module.provider"],
+        "module.command-consumer": ["module.provider"],
+    }
 
 
 def test_dynamic_command_dependency_participates_in_cycle_rejection():
     descriptors = (
         RuntimeModuleDescriptor(
-            "shell.command",
+            "module.command-consumer",
             (),
             lambda *_: object(),
             _ARTIFACT,
+            contribution_directories=("shell-commands",),
         ),
         RuntimeModuleDescriptor(
             "module.provider",
-            ("shell.command",),
+            ("module.command-consumer",),
             lambda *_: object(),
             _ARTIFACT,
             shell_commands=(_command("module.shell-inspect"),),
@@ -364,6 +379,40 @@ def test_dynamic_command_dependency_participates_in_cycle_rejection():
     with pytest.raises(ForestError) as caught:
         RuntimeModuleRegistry(_runtime(), descriptors)
     assert caught.value.code == "RUNTIME_MODULE_DEPENDENCY_CYCLE"
+
+
+def test_routing_directory_starts_before_contributors_and_has_one_consumer():
+    router = RuntimeModuleDescriptor(
+        "module.route-owner", (), lambda *_: object(), _ARTIFACT,
+        contribution_directories=("routing-routes",),
+    )
+    publisher = RuntimeModuleDescriptor(
+        "module.publisher", (), lambda *_: object(), _ARTIFACT,
+        event_publications=(RuntimeEventPublicationContribution("demo.event", "1.0", {}),),
+    )
+    registry = RuntimeModuleRegistry(_runtime(), (publisher, router))
+    assert registry.order == ["module.route-owner", "module.publisher"]
+    assert registry.replacement_closure("module.publisher") == (
+        "module.route-owner", "module.publisher",
+    )
+    assert registry.replacement_closure("module.route-owner") == (
+        "module.route-owner", "module.publisher",
+    )
+    assert registry.contract_router.event_publications("module.route-owner")[0][0] == "module.publisher"
+    with pytest.raises(ForestError) as forbidden:
+        registry.contract_router.event_publications("routing.graph")
+    assert forbidden.value.code == "RUNTIME_EVENT_DIRECTORY_FORBIDDEN"
+
+    with pytest.raises(ForestError) as missing:
+        RuntimeModuleRegistry(_runtime(), (publisher,))
+    assert missing.value.code == "RUNTIME_CONTRIBUTION_DIRECTORY_MISSING"
+
+    with pytest.raises(ForestError) as duplicate:
+        RuntimeModuleRegistry(_runtime(), (router, RuntimeModuleDescriptor(
+            "module.other-route-owner", (), lambda *_: object(), _ARTIFACT,
+            contribution_directories=("routing-routes",),
+        )))
+    assert duplicate.value.code == "RUNTIME_CONTRIBUTION_DIRECTORY_CONFLICT"
 
 
 @pytest.mark.asyncio

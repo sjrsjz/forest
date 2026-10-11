@@ -179,6 +179,8 @@ stateDiagram-v2
 
 启动按 DAG 拓扑序，独立节点可以有界并行准备；每个依赖稳定 ready 后才准备调用方。失败时按逆拓扑回收此次新建资源，不停止原先已运行且不属于此次操作的模块。
 
+冻结贡献目录的消费权来自组件 manifest 的 `contribution_directories.kind`，同一 RuntimeGraph 内每种目录只能有一个消费组件；Contract Router 只向该组件提供目录句柄，不按 `component_id` 名称授予权限。`agent-tools`、`shell-commands`、`job-types` 的消费组件依赖各贡献组件，确保贡献方先就绪；`routing-routes` 则由事件发布、订阅和 ComponentJob 贡献组件依赖路由目录消费组件，确保路由服务先就绪。缺少路由目录消费组件的路由贡献拒绝成图。路由目录消费组件还持有指向各贡献组件的冻结引用：任一方热替换均将双方纳入替换闭包，这条引用只用于保留规划，不形成反向启动依赖。目录消费声明、启动依赖与保留引用进入 Generation 描述符摘要。
+
 停机先关闭顶层 admission 和定时器，再按“调用方先排空、被调用方后停止”的顺序。调用方在排空中发出的子请求使用原调用树令牌及剩余 deadline；不能借此建立新顶层工作。
 
 正常 Bot 暂停与真正停机分别处理。`data_admission` 控制新 Agent/业务作业，`control_admission` 控制受权运维入口；普通 `pause` 关闭前者并提升 `maintenance_epoch`，保留接收绑定、核心 ShellGate、状态/恢复命令及必要回执。停止宿主、关闭绑定或封闭整个 Bot 事实库时，原群控制链也可能中断，操作应提前返回持久 operation_id 并明确恢复入口。稳定核心命令不能作为普通插件被卸载，完整 Shell 模块的替换不应冻结核心救援路由，详见[09](09-group-shell-command-system.md)。

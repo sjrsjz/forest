@@ -718,6 +718,7 @@ class RuntimeModuleDescriptor:
     event_publications: tuple[RuntimeEventPublicationContribution, ...] = ()
     event_subscriptions: tuple[RuntimeEventSubscriptionContribution, ...] = ()
     component_jobs: tuple[RuntimeComponentJobContribution, ...] = ()
+    contribution_directories: tuple[str, ...] = ()
     owned_work_lifecycle: OwnedWorkLifecycle = OwnedWorkLifecycle.NONE
     provided_services: tuple[tuple[str, str], ...] = ()
     startup_service_requires: tuple[tuple[str, str], ...] = ()
@@ -772,6 +773,12 @@ class RuntimeModuleDescriptor:
         component_job_ids = [item.handler_id for item in self.component_jobs]
         if len(component_job_ids) != len(set(component_job_ids)):
             raise ValueError("Runtime ComponentJob identities must be unique")
+        if (
+            len(self.contribution_directories) != len(set(self.contribution_directories))
+            or set(self.contribution_directories)
+            - {"agent-tools", "shell-commands", "job-types", "routing-routes"}
+        ):
+            raise ValueError("Runtime contribution directory declarations are invalid")
         if not isinstance(self.owned_work_lifecycle, OwnedWorkLifecycle):
             raise ValueError("Runtime owned-work lifecycle declaration is invalid")
         if len(self.provided_services) != len(set(self.provided_services)):
@@ -916,27 +923,52 @@ class RuntimeModuleRegistry:
         component_ids = {descriptor.component_id for descriptor in self.descriptors}
         self._component_ids = component_ids
         dynamic_requires = {component_id: set() for component_id in component_ids}
-        if "agent.runtime" in component_ids:
-            dynamic_requires["agent.runtime"].update(
-                descriptor.component_id
-                for descriptor in self.descriptors
-                if descriptor.agent_tools and descriptor.component_id != "agent.runtime"
-            )
-        if "shell.command" in component_ids:
-            dynamic_requires["shell.command"].update(
-                descriptor.component_id
-                for descriptor in self.descriptors
-                if descriptor.shell_commands and descriptor.component_id != "shell.command"
-            )
-        if "job.scheduler" in component_ids:
-            dynamic_requires["job.scheduler"].update(
-                descriptor.component_id
-                for descriptor in self.descriptors
-                if descriptor.job_types and descriptor.component_id != "job.scheduler"
-            )
+        dynamic_retention_requires = {component_id: set() for component_id in component_ids}
+        directory_consumers: dict[str, str] = {}
+        for descriptor in self.descriptors:
+            for kind in descriptor.contribution_directories:
+                if kind in directory_consumers:
+                    raise ForestError(
+                        "RUNTIME_CONTRIBUTION_DIRECTORY_CONFLICT",
+                        "Contribution directory has more than one consumer in the RuntimeGraph",
+                        409,
+                        details={"kind": kind},
+                    )
+                directory_consumers[kind] = descriptor.component_id
+        self.directory_consumers = directory_consumers
+        for kind, field in (
+            ("agent-tools", "agent_tools"),
+            ("shell-commands", "shell_commands"),
+            ("job-types", "job_types"),
+            ("routing-routes", "event_publications"),
+            ("routing-routes", "event_subscriptions"),
+            ("routing-routes", "component_jobs"),
+        ):
+            consumer = directory_consumers.get(kind)
+            for descriptor in self.descriptors:
+                if not getattr(descriptor, field) or descriptor.component_id == consumer:
+                    continue
+                if consumer is None:
+                    if kind == "routing-routes":
+                        raise ForestError(
+                            "RUNTIME_CONTRIBUTION_DIRECTORY_MISSING",
+                            "Routing contributions require a directory consumer",
+                            422,
+                            details={"kind": kind},
+                        )
+                    continue
+                if kind == "routing-routes":
+                    dynamic_requires[descriptor.component_id].add(consumer)
+                    dynamic_retention_requires[consumer].add(descriptor.component_id)
+                else:
+                    dynamic_requires[consumer].add(descriptor.component_id)
         self._dynamic_requires = {
             component_id: tuple(sorted(required))
             for component_id, required in dynamic_requires.items()
+        }
+        self._dynamic_retention_requires = {
+            component_id: tuple(sorted(required))
+            for component_id, required in dynamic_retention_requires.items()
         }
         providers: dict[tuple[str, int], tuple[str, str]] = {}
         for descriptor in self.descriptors:
@@ -1005,6 +1037,7 @@ class RuntimeModuleRegistry:
                 (
                     set(descriptor.retention_requires)
                     | set(self._service_retention_requires[descriptor.component_id])
+                    | set(self._dynamic_retention_requires[descriptor.component_id])
                 )
                 & self._component_ids
                 - set(self._effective_requires(descriptor))
@@ -1217,6 +1250,7 @@ class RuntimeModuleRegistry:
             "protocol": "forest.runtime-module/1",
             "component_id": descriptor.component_id,
             "requires": list(self._effective_requires(descriptor)),
+            "contribution_directories": list(descriptor.contribution_directories),
             "retention_requires": list(self._retention_requires(descriptor)),
             "factory_ref": (
                 "forest.package-generation-adapter/1"
