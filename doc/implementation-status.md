@@ -2,9 +2,9 @@
 
 ## 当前快照（2026-10-12）
 
-当前源码与在线实例须分开判断。源码包含 `agent.runtime` 4.51.0 的 Run 截止时间结算、`memory.graph` 1.93.2 和 `vector.index` 2.23.0 的包内向量审计裁决；各项隔离回归见下方按日期记录。在线 v26 仍运行较早的 Agent 4.50.0 与 Vector 2.22.0，不能把源码回归视作在线升级验收。
+当前源码与在线实例须分开判断。源码包含 `agent.runtime` 4.51.0 / 私有 SQL 2.33.0 的 Run 截止时间结算、`memory.graph` 1.93.2 和 `vector.index` 2.23.0 / 私有 SQL 2.22.0 的包内向量审计裁决；各项隔离回归及完整模拟 BotHost 验证见下方按日期记录。在线 v26 仍运行较早的 Agent 4.50.0 与 Vector 2.22.0，不能把源码回归视作在线升级验收。
 
-2026-10-12 06:05（北京时间）的两次只读在线采样显示：`forest-main-v26` 为 READY/ONLINE，运行图 22/22 ACTIVE，未见生命周期违规；Memory 有 218 条来源、6 个群主干，活动 Agent Run、逾期 Run、待发送与活动任务均为 0。许可群 `933179609` 尚无入站记录，因此真实低频 @→Agent→Provider→发送链仍未验收。采样未读取群消息正文，也未向 QQ 发送消息。
+2026-10-12 06:57（北京时间）的两次只读在线采样显示：`forest-main-v26` 为 READY/ONLINE，运行图 22/22 ACTIVE，未见生命周期违规；Memory 有 220 条来源、6 个群主干，活动 Agent Run、逾期 Run、待发送与活动任务均为 0。许可群 `933179609` 尚无入站记录，因此真实低频 @→Agent→Provider→发送链仍未验收。采样未读取群消息正文，也未向 QQ 发送消息。
 
 权威边界已核对：部署内核的 `bots`、`runtime_intents` 与监督器观测账本持有 Bot 基础身份和运行意图；可热替换的 `deployment.bot-catalog` 通过清单声明的受限 kernel query/command 端口贡献目录管理 UI，不复制 Bot 状态或拥有目标 Bot 的模块配置。后续重构必须保持此边界。
 
@@ -12,13 +12,7 @@
 
 Effect 放弃回执重放核验（2026-10-12）：内核 Effect authority 在按 `abandonment_operation_id` 返回已有 PREPARED 放弃回执时，现从不可变 attempt 账本核对调用方给出的 `effect_operation_id`；同一 attempt、原因与取消标志但错误 Effect ID 返回 `EFFECT_ABANDONMENT_CONFLICT`。回执摘要和数据库格式不变，既有正确重放仍可用。独立 PostgreSQL 的 Effect 状态回归 1 passed，Ruff 通过；测试容器已移除，在线 v26 未切换，未发送 QQ 消息。
 
-## 当前快照（2026-10-12）
-
-当前源码已包含 `agent.runtime` 4.51.0 / SQL 2.33.0 的持久超时结算，以及 `vector.index` 2.23.0 / SQL 2.22.0 的运行期审计页判定围栏；两项分别通过隔离 PostgreSQL 与完整模拟 BotHost 回归。下面的历史记录保留各阶段当时的结论，判断当前实现应以本节及最新代码、包清单和运行账本为准。
-
-在线 v26 仍运行 `agent.runtime` 4.50.0、`vector.index` 2.22.0、`memory.graph` 1.93.2，尚未安装上述新 SQL 基线。2026-10-12 06:05（北京时间）的只读观察：Bot `ONLINE`，图修订 3 的 22 个组件全部 ACTIVE，218 条来源分布在 6 个群主干；文档 facet、活动 Run、待发送、活跃 Job、逾期 Run 与观察违约均为 0。获准群 `933179609` 尚无入站记录，故当前 v26 的真实 @→Agent→Delivery 链路仍未验收。观察只读取状态和计数，没有读取消息正文或作者，也没有发 QQ 消息。
-
-继续交付仍需：对当前源码建立隔离新 Bot 库并完成低频真实许可群触发；验证 Agent 的 PREPARED 工具 Effect 与进程硬退出后的截止时间恢复；对有长期图文数据的多群写入、召回、裁剪、成本与热重载做持续验收。在线 v26 旧库与新私有 SQL 基线不兼容，切换须走独立库或明确设计的升级路径。
+同一源码的 Agent 包持久状态回归已在另一隔离 PostgreSQL 库复跑，`test_agent_package_owns_run_snapshot_and_epoch_fenced_lease` 1 passed（66.22 秒），覆盖既有 Run/Session、工具 PREPARED 管理员取消、模型 PREPARED 截止时间结算与回执重放。测试库及容器已移除。此复跑不等于工具 PREPARED 截止时间或进程硬退出的单独证明，也没有切换在线 v26。
 
 Memory 召回成本临时收界（2026-10-11）：线上故障请求的 Provider usage 为输入 36717、输出 8192 token；冻结 wire 的 32 条 Memory 证据含 10 张图片、约 1.7 MB，Context ModelView 估算 32768 token 中固定证据占 32495，最近 17 条可选群聊记录被挤掉。已通过正式 Web 配置计划把在线 memory.graph 的检索上限设为 8 节点、8000 字符、2 MiB 图片，desired/effective 修订 2、图 17 的 22/22 成员 ACTIVE，许可群分类/Context 水位同为 29、无活动 Run/待发送；未主动发起新的模型或 QQ 调用，所以实际费用下降幅度尚待观察。源码 memory.graph 1.93.1 同步采用新默认值，包构建及 Memory/模型纯逻辑回归 46 项通过。根本的可选 Memory 与 Context 联合选取仍未实现，已在 Agent 详细设计标明，不应把本次配置调整视为完成该职责。
 
