@@ -315,7 +315,7 @@ class ChatCompletionsEffectDriver:
         )
         self.accepting = True
 
-    async def _verify_effect(self, payload: dict) -> None:
+    async def _verify_effect(self, payload: dict, *, producer_component_id: str) -> None:
         await self.runtime.verify_generation_member(
             component_id=self.identity.component_id,
             generation_id=self.identity.generation_id,
@@ -327,6 +327,10 @@ class ChatCompletionsEffectDriver:
             not self.accepting
             or attempt is None
             or effect["state"] != "DISPATCHING"
+            or effect["producer_component_id"] != producer_component_id
+            or effect["effect_kind"] != "provider.model.dispatch"
+            or effect["target_kind"] != "component.service"
+            or effect["target_id"] != self.identity.component_id + "/provider.model.dispatch"
             or attempt["state"] != "DISPATCHING"
             or attempt["attempt_id"] != payload["prepared"]["transport_attempt_id"]
             or attempt["executor_component_id"] != self.identity.component_id
@@ -360,7 +364,10 @@ class ChatCompletionsEffectDriver:
                 raise ForestError(
                     "PROVIDER_REQUEST_FENCE_MISMATCH", "Provider request identity changed", 409
                 )
-            await self._verify_effect(payload)
+            await self._verify_effect(
+                payload,
+                producer_component_id=projection["owner_component_id"],
+            )
 
         result = await self.client.dispatch(prepared, permitcheck=permitcheck)
         return await self._materialize_result(
