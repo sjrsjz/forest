@@ -59,3 +59,10 @@ Memory 管理入口同样经真实会话验证：按许可群号筛选主干得�
 确认 Bot 处于 OFFLINE 且 component.worker-host 选择账本没有 Agent/Provider 的显式固定摘要后，使用已验证约束的 forest:runtime-candidate-quality-85c7d34 替换 Supervisor 容器；旧容器停止并保留为 forest-candidate-v25-supervisor-backup-0968bfb-quality。新 Supervisor healthy、重启 0，沿用原部署/Host/Bot 库、密钥、包卷、管理端口及两个网络。通过原管理契约把 Bot 设回 ONLINE 后，冷启动图修订 16 的 22/22 成员 ACTIVE：Provider 4.4.2 摘要 sha256:cc22d87f233cc3cdcaaf734db54a54e46701faaefa5b49c6c97684bce1dbee1e，Agent 4.49.1 摘要 sha256:d0e2061d94285a0c4467f27ca2bff0e5ade9fc5612dbe382e90511f55bb0191d。由于旧活动图已停止，这是正常冷启动装配，未绕过活动图的 UNKNOWN 热替换围栏。
 
 旧 Run run:9b104319e5bd04f994e7bbd7d069887b9bb094f742bb81d224c018518e1eeca2 在 13:05:08 UTC 终结为 FAILED/AGENT_PROTOCOL_FAILED，协议失败事实为 AGENT_PROTOCOL_OUTPUT_INCOMPLETE。原 Request 只有 1 次 Attempt，原 Effect 只有 1 次；两者经已保存的 Provider 结果回查收敛为 SUCCEEDED，没有第二次模型派发。许可群 933179609 的分类与 Context 水位均为 25，执行槽已释放。20 秒三次只读观察均为零违约、活动 Run 0、过期 Run 0、待发送 0，最近 QQ 发送仍为 08:46:52 UTC 的旧回执。本次恢复没有向 QQ 主动发送新消息，也没有删除历史数据库。
+
+
+## 2026-10-11 召回成本上限调整
+
+对已终结的两次许可群模型请求只读统计：两次 PRIMARY 的输出上限均为 8192 token；首次补全使用 3016 token，故障补全恰好使用 8192 token 且 finish_reason=length。故障补全输入计费 36717 token；冻结 wire 有 35 条消息，其中 32 条是 Memory 证据、10 张图片，序列化体积约 1.7 MB、文本字段共约 7 万字符；CorePrompt 约 4.8 千字符，当前 Context 仅 1 条。Conversation 发布的 ModelView 预算为估算 32768 token，Memory 等固定成本占 32495，最近群聊 Context 的 17 条可选记录均未进入这次模型请求。估算量与供应商实际计费量不同，不能让 Provider 以估算超限拒绝派发；但这揭示 Memory 先占固定预算会挤掉正常群聊上下文。
+
+通过 v25 的正式 Web 配置计划/应用契约，将 memory.graph 检索上限从 32 节点、24000 字符、12 MiB 图片调整为 8 节点、8000 字符、2 MiB 图片，保留图文召回能力。desired/effective 均已收敛至修订 2，图从 16 热替换到 17，22/22 ACTIVE；Memory 1.93.0、Agent 4.49.1、Provider 4.4.2，许可群分类/Context 水位均为 29、无活动 Run 或待发送。当前没有为验证新上限而主动触发模型 API 或 QQ 消息，实际下次模型计费仍需低频观察。源码默认值另在 memory.graph 1.93.1 更新；更完整的 Memory/Context 联合选择仍待实现。

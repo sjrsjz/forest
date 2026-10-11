@@ -312,7 +312,7 @@ MemoryQuery
 4. 每次展开一个节点时，时序边不占用联想边配额。每条 `ASSOCIATES_WITH` 贡献保存由 `contribution_id` 派生的固定伪随机键；查询以 `(query_id, source_unit_id)` 派生游标起点，从两种端点方向各自沿索引读取起点后和回绕前的合格边，每段最多读取 `max_association_edges_per_node + 1` 条，再合并选取至多该数量进行扩散。来源、证据、删除和快照资格必须在各段达到数量上限前核验。相同查询可审计重放，不同查询通常落在不同伪随机窗口；这不是均匀独立抽样。数据库只对有界候选集排序，不得先取全量高出度邻接再在进程内裁剪；若大量边不可见，索引扫描仍可能越过这些边。
 5. 检索包冻结直接种子、图激活、前驱边、实际进入区域的关系和删除 epoch。Memory 规范证据发布写独立不可变 `retrieval_materializations` 回执，不修改检索项；模型能力投影及确认由 Agent 的请求 manifest 持有，不在 Memory 中建立第二份模型投影状态。
 
-默认值为：`seed_limit=4`、`candidate_limit_per_facet=64`、`min_similarity=0.35`、`min_graph_relevance=0.05`、`max_graph_nodes=32`、`max_association_edges_per_node=32`、`sequence_weight=0.55`、`association_weight=0.90`。这些值由 `memory.graph` 的模块配置冻结，可随新 Generation 发布，但一个已冻结检索包不受后来配置变更影响。
+默认值为：`seed_limit=4`、`candidate_limit_per_facet=64`、`min_similarity=0.35`、`min_graph_relevance=0.05`、`max_graph_nodes=8`、`max_retrieval_chars=8000`、`max_retrieval_media_bytes=2097152`、`max_association_edges_per_node=32`、`sequence_weight=0.55`、`association_weight=0.90`。这些值由 `memory.graph` 的模块配置冻结，可随新 Generation 发布，但一个已冻结检索包不受后来配置变更影响。
 
 成功回复后的联想学习只使用该轮**实际投影给模型的直接种子**。图扩散带出的节点、因字符预算未投影的节点和失败/取消 Run 均不得产生学习边。Agent 在模型请求事实中冻结种子及实际送出的 part，最终提交时按每次模型调用所属输入版本的最后一个触发记录给出有界提案（最多 128 对，超额显式标记 `truncated`）。Conversation 在同一 FinalReply UnitOfWork 中返回已回答的触发记录与原始事件映射；Memory 用该事件对应的查询 part、冻结检索包中的直接种子和送出 part 复核后写入 `association_journal`。若触发消息仍在活动 Context，日志保持 `PENDING_ARCHIVE`；归档或后到 Capture 只把合格日志标记为可领取。Memory 自有持久 Worker 在独立事务内晋升，最终创建稳定的无向 `ASSOCIATES_WITH` 贡献，权重固定为 QiYu 默认的 0.9。重复召回不累加边权，删除任一端点会抑制尚未提升的日志，已提升贡献则在来源遗忘事务中撤销。回复与归档提交不等待联想边出现。
 

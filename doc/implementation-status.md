@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+Memory 召回成本临时收界（2026-10-11）：线上故障请求的 Provider usage 为输入 36717、输出 8192 token；冻结 wire 的 32 条 Memory 证据含 10 张图片、约 1.7 MB，Context ModelView 估算 32768 token 中固定证据占 32495，最近 17 条可选群聊记录被挤掉。已通过正式 Web 配置计划把在线 memory.graph 的检索上限设为 8 节点、8000 字符、2 MiB 图片，desired/effective 修订 2、图 17 的 22/22 成员 ACTIVE，许可群分类/Context 水位同为 29、无活动 Run/待发送；未主动发起新的模型或 QQ 调用，所以实际费用下降幅度尚待观察。源码 memory.graph 1.93.1 同步采用新默认值，包构建及 Memory/模型纯逻辑回归 46 项通过。根本的可选 Memory 与 Context 联合选取仍未实现，已在 Agent 详细设计标明，不应把本次配置调整视为完成该职责。
+
 v25 原结果在线对账完成（2026-10-11）：Bot 先 OFFLINE 止住旧版 Provider lookup 的 6415 次失败重领；确认 Agent/Provider 无显式固定包摘要后，用只覆盖本次八个文件的 forest:runtime-candidate-quality-85c7d34 冷启动同一 Supervisor，并以原管理契约恢复 Bot ONLINE。图 16 的 22/22 成员 ACTIVE，Provider 4.4.2 与 Agent 4.49.1 的摘要分别为 sha256:cc22d87f233cc3cdcaaf734db54a54e46701faaefa5b49c6c97684bce1dbee1e 和 sha256:d0e2061d94285a0c4467f27ca2bff0e5ade9fc5612dbe382e90511f55bb0191d。旧 UNKNOWN Run 通过原 Provider 结果回查终结为 FAILED/AGENT_PROTOCOL_FAILED，准确协议原因 AGENT_PROTOCOL_OUTPUT_INCOMPLETE；原 Request/Effect 各只有一次 Attempt，没有重派发。许可群分类/Context 水位同为 25，20 秒三次观察零违约、活动/逾期 Run 和待发送均为 0，QQ 最近发送回执时间未变化。旧 Supervisor 容器保留用于回退，详见 v25 在线切换记录。
 
 故障 v25 暂时下线（2026-10-11）：旧 Provider lookup 把已保存的 MODEL_OUTPUT_INCOMPLETE 结果反复判为 PROVIDER_RESULT_CORRUPT；Conversation Agent owned-work 约每秒重领，累计 6415 条失败服务操作。已通过现有 Web 管理契约把 forest-main-v25 设为 OFFLINE，观察状态收敛；随后失败计数不再增长，旧库与模型回执保留，Supervisor 仍运行。候选镜像未切换、QQ 没有新增发送。重新上线必须先完成正式对账或使用新隔离 Bot，不能直接重启旧 Run。
