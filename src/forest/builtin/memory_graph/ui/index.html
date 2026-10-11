@@ -231,7 +231,14 @@
       const evidence=document.createElement('div');evidence.className='detail';
       evidence.textContent=item.evidence.length?item.evidence.map(formatRelationSource).join('\n'):'\u6ca1\u6709\u5173\u7cfb\u5fc5\u8981\u8bc1\u636e';
       if(item.proposed_by)meta.textContent+=' \u00b7 \u5019\u9009\u4eba '+item.proposed_by;
-      if(item.review_state)meta.textContent+=' \u00b7 \u5ba1\u6838 '+item.review_state+(item.reviewed_by?'\uff08'+item.reviewed_by+' \u00b7 '+stamp(item.reviewed_at)+'\uff09':'');
+      if(item.origin_kind==='MANUAL'){
+        meta.textContent+=' \u00b7 \u4eba\u5de5\u5173\u7cfb '+(item.review_state==='APPROVED'?'\u5df2\u6279\u51c6':'\u5f85\u6279\u51c6');
+        if(item.relation_kind==='ASSOCIATES_WITH')meta.textContent+=item.review_state==='APPROVED'?' \u00b7 \u53ef\u53c2\u4e0e\u8054\u60f3\u6269\u6563':' \u00b7 \u6682\u4e0d\u53c2\u4e0e\u8054\u60f3\u6269\u6563';
+      }else{
+        meta.textContent+=' \u00b7 \u81ea\u52a8\u8d21\u732e\uff08\u4eba\u5de5\u590d\u6838\u4e0d\u662f\u53ec\u56de\u95e8\u69db\uff09';
+        if(item.review_state==='APPROVED')meta.textContent+=' \u00b7 \u5df2\u4eba\u5de5\u590d\u6838';
+      }
+      if(item.reviewed_by)meta.textContent+=' \u00b7 '+item.reviewed_by+' \u00b7 '+stamp(item.reviewed_at);
       box.append(title,meta,evidence);
       if(item.evidence_count>item.evidence.length){
         let shown=item.evidence.length,cursor=shown-1;
@@ -274,7 +281,7 @@
         box.append(learned,button);
       }
       if(item.review_state==='UNREVIEWED'){
-        const approve=document.createElement('button');approve.type='button';approve.textContent='\u6279\u51c6\u5173\u7cfb';
+        const approve=document.createElement('button');approve.type='button';approve.textContent=item.origin_kind==='MANUAL'?'\u6279\u51c6\u4eba\u5de5\u5173\u7cfb':'\u6807\u8bb0\u5df2\u590d\u6838';
         const operationKey='relation-approve:'+randomId();
         approve.onclick=async()=>{
           approve.disabled=true;
