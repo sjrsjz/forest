@@ -907,7 +907,20 @@ class AgentExecution:
                             )
                     else:
                         return await self._finish_cancel(request, owner, run, recovery)
-                if datetime.now(UTC) >= deadline and state != "PARSING":
+                # A handed-off effect remains reconcilable after the Run deadline.
+                # The deadline may stop new work, but cannot turn an uncertain
+                # network outcome into a terminal failure.
+                tool_call = recovery.get("tool_call")
+                handed_off_tool = (
+                    state == "WAIT_TOOL"
+                    and isinstance(tool_call, dict)
+                    and tool_call["state"] in {"DISPATCHING", "UNKNOWN"}
+                )
+                if (
+                    datetime.now(UTC) >= deadline
+                    and state not in {"PARSING", "MODEL_PENDING", "BLOCKED_UNKNOWN"}
+                    and not handed_off_tool
+                ):
                     raise ForestError(
                         "AGENT_DEADLINE_EXCEEDED", "Agent execution deadline expired", 409
                     )
