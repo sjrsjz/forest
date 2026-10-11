@@ -44,7 +44,7 @@ def fixed_cost(quote: dict, *, per_token: int, overhead: int, bot_id: str) -> Vi
         raise ForestError("CONTEXT_MODEL_VIEW_QUOTE_INVALID", "Model output reservation is invalid", 409)
     evidence = quote.get("evidence")
     if evidence is not None:
-        if not isinstance(evidence, dict) or evidence.get("protocol") != "forest.memory-evidence/2" or evidence.get("bot_id") != bot_id:
+        if not isinstance(evidence, dict) or evidence.get("protocol") != "forest.memory-evidence/3" or evidence.get("bot_id") != bot_id:
             raise ForestError("CONTEXT_MODEL_VIEW_QUOTE_INVALID", "Memory evidence identity is invalid", 409)
     source = {
         "core_prompt": quote.get("core_prompt"),

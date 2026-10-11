@@ -57,10 +57,18 @@ async def expand(ctx, query_id, seeds, policy):
                 best[target_id] = propagated
                 parents[target_id] = (node_id, edge["edge_id"])
                 heapq.heappush(queue, (-propagated, len(seed_order), target_id))
+    seed_limited = len(seeds) > budget
+    node_limited = any(
+        node_id not in visited and -score == best[node_id] for score, _, node_id in queue
+    )
+    truncation_reason = (
+        "SEED_AND_NODE_LIMIT" if seed_limited and node_limited else
+        "SEED_LIMIT" if seed_limited else
+        "NODE_LIMIT" if node_limited else None
+    )
     return {
         "nodes": nodes, "read_count": len(visited),
-        "truncated": len(seeds) > budget or any(
-            node_id not in visited and -score == best[node_id] for score, _, node_id in queue
-        ),
+        "truncated": truncation_reason is not None,
+        "truncation_reason": truncation_reason,
         "association_sampled": association_sampled,
     }

@@ -36,7 +36,7 @@ from forest.model_contract import (
 from forest.model_contract import _encode as _contract_encode
 
 PROJECTION_REVISION = "forest-model-view-v2"
-MEMORY_EVIDENCE_REVISION = "forest-memory-evidence-v1"
+MEMORY_EVIDENCE_REVISION = "forest-memory-evidence-v2"
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 # Conversation publishes at most 4096 active units and one archive reference.
 # One Agent Run can add at most 256 model turns and their paired tool results.
@@ -183,9 +183,9 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
     value = _decode(_encode(value), limit=MAX_REQUEST_BYTES)
     required = {"protocol", "bot_id", "query_id", "bundle_id", "graph_snapshot_ref",
                 "current_source", "evidence", "content_truncated", "missing_count",
-                "truncated", "association_sampled", "read_count", "max_retrieval_chars",
+                "truncated", "truncation_reason", "association_sampled", "read_count", "max_retrieval_chars",
                 "max_retrieval_media_bytes", "selected_media_bytes"}
-    if not isinstance(value, dict) or set(value) != required or value["protocol"] != "forest.memory-evidence/2":
+    if not isinstance(value, dict) or set(value) != required or value["protocol"] != "forest.memory-evidence/3":
         raise _error("MODEL_INPUT_INVALID", "Memory evidence is not its native publication")
     if value["bot_id"] != snapshot["bot_id"]:
         raise _error("MODEL_SOURCE_INVALID", "Memory evidence belongs to another Bot")
@@ -211,6 +211,10 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
     for name in ("content_truncated", "truncated", "association_sampled"):
         if type(value[name]) is not bool:
             raise _error("MODEL_INPUT_INVALID", "Memory completeness flags are invalid")
+    if value["truncation_reason"] not in (
+            None, "SEED_LIMIT", "NODE_LIMIT", "SEED_AND_NODE_LIMIT"
+    ) or value["truncated"] != (value["truncation_reason"] is not None):
+        raise _error("MODEL_INPUT_INVALID", "Memory truncation reason is invalid")
     for name, maximum in (("missing_count", 64), ("read_count", 64),
                           ("max_retrieval_chars", 1_000_000),
                           ("max_retrieval_media_bytes", 33_554_432),
@@ -219,7 +223,8 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
             raise _error("MODEL_INPUT_INVALID", "Memory completeness count is invalid")
     reference = {name: value[name] for name in (
         "bundle_id", "query_id", "graph_snapshot_ref", "current_source",
-        "content_truncated", "missing_count", "truncated", "association_sampled",
+        "content_truncated", "missing_count", "truncated", "truncation_reason",
+        "association_sampled",
         "read_count", "max_retrieval_chars", "max_retrieval_media_bytes",
         "selected_media_bytes",
     )}

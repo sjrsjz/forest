@@ -22,7 +22,7 @@ async def _authorized_evidence(ctx, payload):
         raise ForestError("MEMORY_EVIDENCE_INVALID", "Trial evidence is not JSON", 409) from exc
     if (
         not isinstance(evidence, dict)
-        or evidence.get("protocol") != "forest.memory-trial-evidence/1"
+        or evidence.get("protocol") != "forest.memory-trial-evidence/2"
         or evidence.get("input_kind") != "ADMIN_TRIAL"
         or evidence.get("current_source") is not None
         or evidence.get("bot_id") != ctx.identity["bot_id"]
@@ -123,13 +123,14 @@ async def read_page(ctx, payload):
     last_index = selected[-1]["evidence_index"] if selected else after
     has_more = any(gate["evidence_index"] > last_index for gate in values)
     return {
-        "protocol": "forest.memory-trial-result-page/2",
+        "protocol": "forest.memory-trial-result-page/3",
         "query_id": query_id,
         "bundle_id": evidence["bundle_id"],
         "graph_snapshot_ref": evidence["graph_snapshot_ref"],
         "total_count": len(values),
         "content_truncated": evidence["content_truncated"],
         "truncated": evidence["truncated"],
+        "truncation_reason": evidence["truncation_reason"],
         "association_sampled": evidence["association_sampled"],
         "items": items,
         "next_index": last_index if has_more else None,

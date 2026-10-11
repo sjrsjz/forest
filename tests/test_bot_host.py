@@ -3133,7 +3133,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
             assert materialized[0]["evidence_count"] == 1
             assert materialized[0]["missing_count"] == 0
             document = json.loads(await host._kernel.payload.read_bytes(materialized[0]["evidence_ref"]["payload_id"]))
-            assert document["protocol"] == "forest.memory-evidence/2"
+            assert document["protocol"] == "forest.memory-evidence/3"
             assert document["current_source"]["external_group_id"] == "933179609"
             unit_evidence = document["evidence"][0]
             assert unit_evidence["author_subject_ref"] == "qq:20001"

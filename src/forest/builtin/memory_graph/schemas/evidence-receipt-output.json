@@ -11,11 +11,12 @@
     "missing_count",
     "content_truncated",
     "truncated",
+    "truncation_reason",
     "association_sampled"
   ],
   "properties": {
     "protocol": {
-      "const": "forest.memory-evidence-receipt/1"
+      "const": "forest.memory-evidence-receipt/2"
     },
     "query_id": {
       "type": "string",
@@ -71,6 +72,7 @@
     "truncated": {
       "type": "boolean"
     },
+    "truncation_reason": {"enum": ["SEED_LIMIT", "NODE_LIMIT", "SEED_AND_NODE_LIMIT", null]},
     "association_sampled": {
       "type": "boolean"
     }

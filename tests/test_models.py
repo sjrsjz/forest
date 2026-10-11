@@ -263,11 +263,11 @@ def native_evidence(*, parts=None):
         part["byte_length"] for part in row["parts"]
         if part["kind"] == "image" and part["projection_state"] == "READY"
     )
-    return {"protocol": "forest.memory-evidence/2", "bot_id": "bot-a",
+    return {"protocol": "forest.memory-evidence/3", "bot_id": "bot-a",
             "query_id": "query-a", "bundle_id": "bundle-a",
             "graph_snapshot_ref": "memory-query:query-a", "current_source": current,
             "evidence": [row], "content_truncated": False, "missing_count": 0,
-            "truncated": False, "association_sampled": True,
+            "truncated": False, "truncation_reason": None, "association_sampled": True,
             "read_count": 1, "max_retrieval_chars": 1024,
             "max_retrieval_media_bytes": 12582912,
             "selected_media_bytes": selected_media_bytes}

@@ -39,12 +39,13 @@
         "nodes",
         "read_count",
         "truncated",
+        "truncation_reason",
         "association_sampled",
         "deletion_epoch_step_id"
       ],
       "properties": {
         "protocol": {
-          "const": "forest.memory-retrieval-freeze/1"
+          "const": "forest.memory-retrieval-freeze/2"
         },
         "query_id": {
           "type": "string",
@@ -115,6 +116,7 @@
         "truncated": {
           "type": "boolean"
         },
+        "truncation_reason": {"enum": ["SEED_LIMIT", "NODE_LIMIT", "SEED_AND_NODE_LIMIT", null]},
         "association_sampled": {
           "type": "boolean"
         },

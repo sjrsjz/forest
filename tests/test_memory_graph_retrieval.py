@@ -46,6 +46,7 @@ async def test_lazy_diffusion_settles_strongest_path_once_and_handles_cycles():
     assert result["nodes"][2]["path_edge_id"] == "dc"
     assert reads == ["a", "d", "c", "b"]
     assert result["read_count"] == 4 and not result["truncated"]
+    assert result["truncation_reason"] is None
 
 
 @pytest.mark.asyncio
@@ -56,7 +57,7 @@ async def test_node_budget_stops_neighbour_reads_before_traversing_whole_graph()
         ctx, "query/test", [{"source_unit_id": "seed", "rank_score": 0.1}], _policy(3)
     )
     assert len(reads) == result["read_count"] == len(result["nodes"]) == 3
-    assert result["truncated"]
+    assert result["truncated"] and result["truncation_reason"] == "NODE_LIMIT"
 
 
 @pytest.mark.asyncio
@@ -70,7 +71,7 @@ async def test_weight_one_neighbours_cannot_displace_direct_seeds_at_node_budget
     ], policy)
     assert reads == ["z", "y"]
     assert all(node["is_seed"] for node in result["nodes"])
-    assert result["truncated"]
+    assert result["truncated"] and result["truncation_reason"] == "NODE_LIMIT"
 
 
 @pytest.mark.asyncio
@@ -82,3 +83,15 @@ async def test_unavailable_nodes_consume_read_budget_and_do_not_expand():
     )
     assert reads == ["gone"] and result["read_count"] == 1
     assert result["nodes"] == [] and not result["truncated"]
+    assert result["truncation_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_seed_and_frontier_limits_have_distinct_reasons():
+    seeds = [{"source_unit_id": name, "rank_score": 0.1} for name in ("a", "b", "c")]
+    no_edges = await expand(_context({}, []), "query/test", seeds, _policy(2))
+    assert no_edges["truncation_reason"] == "SEED_LIMIT"
+    with_edges = await expand(
+        _context({"a": [_edge("ad", "d")]}, []), "query/test", seeds, _policy(2)
+    )
+    assert with_edges["truncation_reason"] == "SEED_AND_NODE_LIMIT"

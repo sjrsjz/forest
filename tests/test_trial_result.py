@@ -51,13 +51,13 @@ async def test_trial_result_pages_keep_group_and_author_attribution():
                     "parts": [{"kind": "text", "text": f"text {index}"}],
                 }).encode()
             return json.dumps({
-                "protocol": "forest.memory-trial-evidence/1",
+                "protocol": "forest.memory-trial-evidence/2",
                 "input_kind": "ADMIN_TRIAL", "bot_id": "bot/1",
                 "query_id": "trial/1", "bundle_id": "bundle/1",
                 "graph_snapshot_ref": "memory-query:trial/1",
                 "current_source": None, "missing_count": 2,
                 "content_truncated": False, "truncated": False,
-                "association_sampled": True,
+                "truncation_reason": None, "association_sampled": True,
                 "item_indexes": list(range(6)),
                 "evidence_refs": [{"payload_id": f"unit/{index}"}
                                   for index in range(6)],
@@ -101,7 +101,7 @@ async def test_trial_result_rejects_another_bot_evidence():
     class Payloads:
         async def read_bytes(self, supplied):
             return json.dumps({
-                "protocol": "forest.memory-trial-evidence/1",
+                "protocol": "forest.memory-trial-evidence/2",
                 "input_kind": "ADMIN_TRIAL", "bot_id": "bot/other",
                 "query_id": "trial/1", "current_source": None,
                 "item_indexes": [], "evidence_refs": [],
@@ -131,7 +131,7 @@ async def test_trial_image_chunks_are_bounded_and_come_from_attributed_evidence(
         "owner_id": "bundle/1",
     }
     evidence = {
-        "protocol": "forest.memory-trial-evidence/1", "input_kind": "ADMIN_TRIAL",
+        "protocol": "forest.memory-trial-evidence/2", "input_kind": "ADMIN_TRIAL",
         "bot_id": "bot/1", "query_id": "trial/1", "bundle_id": "bundle/1",
         "current_source": None, "item_indexes": [0],
         "evidence_refs": [{"payload_id": "unit-payload/1"}],

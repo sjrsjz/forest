@@ -1169,6 +1169,8 @@ CREATE TABLE retrieval_bundles (
     accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch>=0),
     read_count integer NOT NULL CHECK (read_count BETWEEN 0 AND 64),
     truncated boolean NOT NULL,
+    truncation_reason text CHECK (truncation_reason IN ('SEED_LIMIT','NODE_LIMIT','SEED_AND_NODE_LIMIT')),
+    CHECK (truncated = (truncation_reason IS NOT NULL)),
     association_sampled boolean NOT NULL,
     seed_count integer NOT NULL CHECK (seed_count BETWEEN 0 AND 64),
     result_count integer NOT NULL CHECK (result_count BETWEEN seed_count AND 64),
@@ -2624,10 +2626,11 @@ $$;
 CREATE FUNCTION memory_read_retrieval_record(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     SELECT jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
-        (SELECT jsonb_build_object('protocol','forest.memory-retrieval-record/1',
+        (SELECT jsonb_build_object('protocol','forest.memory-retrieval-record/2',
             'query_id',b.query_id,'bundle_id',b.bundle_id,'result_count',b.result_count,
             'seed_count',b.seed_count,'read_count',b.read_count,
             'deletion_epoch',b.accepted_deletion_epoch,'truncated',b.truncated,
+            'truncation_reason',b.truncation_reason,
             'association_sampled',b.association_sampled)
          FROM __forest_module_schema__.retrieval_bundles b
          WHERE b.bot_id=context->>'bot_id' AND b.query_id=input->>'query_id'));
@@ -2674,6 +2677,19 @@ BEGIN
     SELECT COALESCE(jsonb_agg(value ORDER BY ordinality),'[]'::jsonb) INTO seed_set
     FROM jsonb_array_elements(seed_view#>'{value,result,seeds}') WITH ORDINALITY
     WHERE ordinality<=(policy->>'max_graph_nodes')::integer;
+    IF NOT (body ? 'truncation_reason')
+       OR (body->>'truncated')::boolean IS DISTINCT FROM
+          ((body->>'truncation_reason') IS NOT NULL)
+       OR (body->>'truncation_reason') IS NOT NULL AND
+          (body->>'truncation_reason') NOT IN
+          ('SEED_LIMIT','NODE_LIMIT','SEED_AND_NODE_LIMIT')
+       OR (jsonb_array_length(seed_view#>'{value,result,seeds}')>
+           (policy->>'max_graph_nodes')::integer) IS DISTINCT FROM
+          COALESCE((body->>'truncation_reason') IN ('SEED_LIMIT','SEED_AND_NODE_LIMIT'),false) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_RETRIEVAL_INVALID',
+                'message','Retrieval truncation reason is inconsistent','status',422));
+    END IF;
     IF jsonb_array_length(nodes)>(policy->>'max_graph_nodes')::integer
        OR (body->>'read_count')::integer NOT BETWEEN jsonb_array_length(nodes)
             AND (policy->>'max_graph_nodes')::integer
@@ -2747,11 +2763,11 @@ BEGIN
         jsonb_build_array(context->>'bot_id',query_row.query_id)::text,'UTF8')),'hex');
     INSERT INTO __forest_module_schema__.retrieval_bundles(
         bot_id,bundle_id,query_id,operation_id,input_digest,accepted_deletion_epoch,
-        read_count,truncated,association_sampled,seed_count,result_count)
+        read_count,truncated,truncation_reason,association_sampled,seed_count,result_count)
     VALUES(context->>'bot_id',bundle_value,query_row.query_id,context->>'operation_id',
         context->>'participant_input_digest',(epoch_value->>'deletion_epoch')::bigint,
         (body->>'read_count')::integer,(body->>'truncated')::boolean,
-        (body->>'association_sampled')::boolean,seed_count,jsonb_array_length(nodes));
+        body->>'truncation_reason',(body->>'association_sampled')::boolean,seed_count,jsonb_array_length(nodes));
     FOR item IN SELECT value FROM jsonb_array_elements(nodes) LOOP
         INSERT INTO __forest_module_schema__.retrieval_items(
             bot_id,bundle_id,item_index,source_unit_id,source_revision,rank_score,
@@ -3075,7 +3091,8 @@ BEGIN
             WHERE bot_id=bundle_row.bot_id AND query_id=bundle_row.query_id),
         'current_source',current_source,'max_retrieval_chars',max_chars,
         'max_retrieval_media_bytes',max_media_bytes,
-        'truncated',bundle_row.truncated,'association_sampled',bundle_row.association_sampled,
+        'truncated',bundle_row.truncated,'truncation_reason',bundle_row.truncation_reason,
+        'association_sampled',bundle_row.association_sampled,
         'read_count',bundle_row.read_count,'evidence_ref',projection_row.evidence_ref,
         'item_indexes',COALESCE(to_jsonb(projection_row.item_indexes),'[]'::jsonb),
         'content_truncated',projection_row.content_truncated,'missing_count',projection_row.missing_count));

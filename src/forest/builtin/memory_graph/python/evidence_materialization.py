@@ -134,12 +134,13 @@ async def materialize(ctx, query_id, digest):
             content_truncated |= unit_truncated
         trial_input = state["input_kind"] == "ADMIN_TRIAL"
         document = {
-            "protocol": "forest.memory-trial-evidence/1" if trial_input else "forest.memory-evidence/2",
+            "protocol": "forest.memory-trial-evidence/2" if trial_input else "forest.memory-evidence/3",
             "bot_id": ctx.identity["bot_id"],
             "query_id": query_id, "bundle_id": bundle_id, "graph_snapshot_ref": "memory-query:" + query_id,
             "current_source": state["current_source"],
             "content_truncated": content_truncated, "missing_count": missing_count,
-            "truncated": state["truncated"], "association_sampled": state["association_sampled"],
+            "truncated": state["truncated"], "truncation_reason": state["truncation_reason"],
+            "association_sampled": state["association_sampled"],
             "read_count": state["read_count"], "max_retrieval_chars": state["max_retrieval_chars"],
             "max_retrieval_media_bytes": state["max_retrieval_media_bytes"],
             "selected_media_bytes": selected_media_bytes,
@@ -164,8 +165,9 @@ async def materialize(ctx, query_id, digest):
 
 
 def receipt(query_id, state):
-    return {"protocol": "forest.memory-evidence-receipt/1", "query_id": query_id,
+    return {"protocol": "forest.memory-evidence-receipt/2", "query_id": query_id,
             "bundle_id": state["bundle_id"], "evidence_ref": state["evidence_ref"],
             "evidence_count": len(state["item_indexes"]), "missing_count": state["missing_count"],
             "content_truncated": state["content_truncated"], "truncated": state["truncated"],
+            "truncation_reason": state["truncation_reason"],
             "association_sampled": state["association_sampled"]}

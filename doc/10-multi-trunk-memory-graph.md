@@ -304,7 +304,7 @@ MemoryQuery
 
 当前入口最多读取 64 个节点，每点最多接收 128 条联想边和两条时序边，扩散阶段限时 20 秒；默认仍为 32 个节点及 32 条联想边。节点预算包含不可用节点的读取尝试，预算在读取前执行；不会先遍历完整图再裁结果。区域返回源单元身份、出处、激活值及前驱，不包含正文；节点预算耗尽与联想采样分别报告。区域仍是只读中间结果，最终删除/授权重验、EvidenceBundle 冻结及 Agent 投影没有被这个入口替代。扩大单帧节点/边上限之前必须改变返回协议或分块策略，不能配置出超过 Worker 消息帧的返回值。
 
-当前官方扩散契约为 `qiyu-graph-region/1`：
+当前官方扩散契约为 `qiyu-graph-region/2`：
 
 1. 最多保留 `seed_limit` 个 ANN 直接种子，每个种子激活值为 `1.0`。
 2. 路径分数是沿途边权乘积；同一节点只保留最大乘积路径。低于 `min_graph_relevance` 的候选不再入队，按激活值从高到低确定性出队，最多物化 `max_graph_nodes` 个节点。
@@ -318,7 +318,7 @@ MemoryQuery
 
 联想晋升与来源遗忘必须沿同一锁序合流：归档在持有本群来源写锁时只置 `promotion_ready`，不得同步等待另一群来源；包的 claim 事务只领取 journal，不锁来源。Worker 的晋升命令先只读定位日志的两个端点，按 `source_unit_id` 顺序锁定两条来源单元，再以 token、attempt、租约锁定并复核 journal，之后才写关联贡献及证据；遗忘同样先锁来源单元，再抑制日志和撤销关联。不能先持有日志锁再等待证据外键对来源单元的锁，否则与遗忘形成环形等待。遗忘先提交时晋升返回未提升，晋升先提交时遗忘撤销其贡献；两种顺序都不得留下指向已遗忘来源的活动边。
 
-同一端点对的多份成功学习日志可能引用不同的 `ContentPart`。`relation_evidence` 只保存关系创建事务的两条必要证据，不再冒充全部学习依据；每次晋升的 `association_journal` 保存两端准确 part、回复和查询身份，并记录晋升事务 xid。管理端按稳定 `journal_id` 分页读取全部已晋升日志，复核同一快照和当前遗忘资格；日志数不累加边权。冻结召回结果另有 `memory.read-retrieval-association-evidence` 只读端口：调用者给出 query 与 item 序号，Memory 重新验证该项从种子到当前节点的整条冻结路径，只允许读取其直属且由模型学习的联想边，并以查询冻结的图快照分页返回各次成功学习的触发/种子 part、群、主干和作者。种子、时序边、规则边与已失效路径不能借此枚举日志。边的有效性仍由创建时的必要证据判定；后续学习日志只解释该边，不累加边权，也不会无界注入模型输入。Agent 当前的 `forest.memory-evidence/2` 仍是有界来源节点投影，尚未提供模型主动请求全部日志的工具。
+同一端点对的多份成功学习日志可能引用不同的 `ContentPart`。`relation_evidence` 只保存关系创建事务的两条必要证据，不再冒充全部学习依据；每次晋升的 `association_journal` 保存两端准确 part、回复和查询身份，并记录晋升事务 xid。管理端按稳定 `journal_id` 分页读取全部已晋升日志，复核同一快照和当前遗忘资格；日志数不累加边权。冻结召回结果另有 `memory.read-retrieval-association-evidence` 只读端口：调用者给出 query 与 item 序号，Memory 重新验证该项从种子到当前节点的整条冻结路径，只允许读取其直属且由模型学习的联想边，并以查询冻结的图快照分页返回各次成功学习的触发/种子 part、群、主干和作者。种子、时序边、规则边与已失效路径不能借此枚举日志。边的有效性仍由创建时的必要证据判定；后续学习日志只解释该边，不累加边权，也不会无界注入模型输入。Agent 当前的 `forest.memory-evidence/3` 仍是有界来源节点投影，尚未提供模型主动请求全部日志的工具。
 
 管理召回试验的 `memory.trial.association-evidence` 只读服务先按管理员主体、当前 Generation、试验有效期及已发布 EvidenceBundle 确认所选可见项，再把界面中的证据序号映射到冻结图项目序号，读取该项的关联学习日志。没有学习关联的种子、时序边或规则边返回明确的不可用状态；失效路径、遗忘或授权变化则拒绝读取。结果按需分页，管理入口声明敏感读取审计，不把全部日志注入模型提示词。
 
@@ -348,9 +348,9 @@ query_parts允许文本、图片和有序混合输入，支持文搜图、图搜
 
 `memory.query.freeze/1` 是独立的幂等写入阶段，输入只有已完成匹配的 query_id。Worker 按匹配准备时固定的策略扩散，再通过包 manifest 声明的 `memory.freeze-retrieval` UnitOfWork 提交区域。事务先取得 Kernel Payload 删除屏障，再锁定查询；重新检查完整输入成员、当前合法种子、每个源修订及每条父路径的邻接资格。非种子必须引用在结果中较早出现的父节点，激活值严格等于父激活值乘固定策略权重，不能接受自报分数或环。任何复核失败均在写入前返回错误。
 
-`retrieval_bundles` 保存查询、删除 epoch、读取计数、截断/采样标志与种子/结果数量；策略只引用 `query_match_preparations` 中的不可变记录，不复制字段。`retrieval_items` 保存源修订、浮点排名与激活值、种子标志和父路径；`retrieval_relations` 保存实际采用的边、贡献引用及策略权重。父节点和关系两端通过复合外键约束为同一 bundle 内的项目。三张表不可变，同一查询只能冻结一个结果，并发提交返回首次成功记录；查询从 OPEN 转为 FROZEN。
+`retrieval_bundles` 保存查询、删除 epoch、读取计数、截断原因及布尔标志、采样标志与种子/结果数量；策略只引用 `query_match_preparations` 中的不可变记录，不复制字段。`retrieval_items` 保存源修订、浮点排名与激活值、种子标志和父路径；`retrieval_relations` 保存实际采用的边、贡献引用及策略权重。父节点和关系两端通过复合外键约束为同一 bundle 内的项目。三张表不可变，同一查询只能冻结一个结果，并发提交返回首次成功记录；查询从 OPEN 转为 FROZEN。
 
-冻结服务返回 `forest.memory-retrieval-record/1` 元数据回执，不返回正文。冻结后重放仍返回原回执，即使部分来源已经遗忘；它只证明曾提交该检索结果，不授予读取内容的权限。只读种子及区域诊断仍按当前失效状态过滤。后续原文物化必须读取冻结项目并重验来源、证据与 Payload，不能重新扩散替换已冻结结果，也不能凭旧 epoch 恢复已撤销内容。此阶段尚未生成完整 EvidenceBundle、规范正文 Payload 或模型输入投影。
+冻结服务返回 `forest.memory-retrieval-record/2` 元数据回执，不返回正文。冻结后重放仍返回原回执，即使部分来源已经遗忘；它只证明曾提交该检索结果，不授予读取内容的权限。只读种子及区域诊断仍按当前失效状态过滤。后续原文物化必须读取冻结项目并重验来源、证据与 Payload，不能重新扩散替换已冻结结果，也不能凭旧 epoch 恢复已撤销内容。此阶段尚未生成完整 EvidenceBundle、规范正文 Payload 或模型输入投影。
 
 冻结后原始内容引用由包私有只读端口 `memory.read-retrieval-parts/1` 分页读取。调用固定 query_id、item_index 和 part_index 游标，每页最多 32 个 parts；节点、已冻结激活值/父路径、来源群/主干、作者、发生时间、源顺序、当前来源标志及准确命中 part ID 同页返回。端口沿同一 bundle 的父链重验每个源修订、边的当前资格与原种子；最长 64 个节点。任一父节点、关系证据或根种子失效，该节点及内容引用返回空，不跳过失效父节点拼接新路径。不存在的结果索引同样返回空，未冻结查询则明确拒绝。已冻结检索项目始终保持原序，不从当前图扩散替换。
 
@@ -358,9 +358,9 @@ query_parts允许文本、图片和有序混合输入，支持文搜图、图搜
 
 ### 7.3 规范证据物化与发布
 
-`memory.query.materialize/1` 是包内幂等写入服务，要求查询已有冻结区域；不调用 ANN、Embedding 或 LLM。Worker 从固定项目顺序读取原始 parts，正文按 UTF-8 解码，图片保留完整 Managed PayloadRef、媒体类型和尺寸，图文原序不变。原作者身份 Payload 中的事件时身份与主键同时保存；身份快照必须为最多 64 KiB 的 UTF-8 JSON 对象，超限或格式不符明确拒绝，不构造假身份。`forest.memory-evidence/1` 规范载荷记录 Bot/query/bundle、当前群来源、图快照引用，以及每项原群/主干/作者/时间/顺序、命中 parts、种子/激活值和父路径。
+`memory.query.materialize/1` 是包内幂等写入服务，要求查询已有冻结区域；不调用 ANN、Embedding 或 LLM。Worker 从固定项目顺序读取原始 parts，正文按 UTF-8 解码，图片保留完整 Managed PayloadRef、媒体类型和尺寸，图文原序不变。原作者身份 Payload 中的事件时身份与主键同时保存；身份快照必须为最多 64 KiB 的 UTF-8 JSON 对象，超限或格式不符明确拒绝，不构造假身份。`forest.memory-evidence/3` 规范载荷记录 Bot/query/bundle、当前群来源、图快照引用，以及每项原群/主干/作者/时间/顺序、命中 parts、种子/激活值和父路径。
 
-正文预算使用匹配准备时固定的 `max_retrieval_chars`，按 Unicode 字符截取，不产生记忆摘要或 API 调用。每源单元最多物化 64 个原序 parts；正文截取及 part 上限均标出 `content_truncated`，保留原始 part_count。图预算的 `truncated`、联想采样的 `association_sampled` 与失效项目的 `missing_count` 分别记录。已失效项目不能用新图邻居顶替；物化中途失效则明确拒绝，不拼接半份来源。
+正文预算使用匹配准备时固定的 `max_retrieval_chars`，按 Unicode 字符截取，不产生记忆摘要或 API 调用。每源单元最多物化 64 个原序 parts；正文截取及 part 上限均标出 `content_truncated`，保留原始 part_count。图预算的 `truncated` 由 `truncation_reason`（`SEED_LIMIT`、`NODE_LIMIT`、`SEED_AND_NODE_LIMIT` 或 `null`）解释并与之保持一致；联想采样的 `association_sampled` 与失效项目的 `missing_count` 分别记录。已失效项目不能用新图邻居顶替；物化中途失效则明确拒绝，不拼接半份来源。
 
 Payload lineage 同时包含查询输入、每项实际 parts、父路径上的全部来源锚点和关系的全部必要证据来源锚点。私有依赖端口每页最多 32 个锚点；每条贡献最多 64 项证据，由 evidence_index CHECK 与创建事务封闭共同约束。64 节点路径最多 4160 个依赖锚点。依赖按 64 个一组写受管载荷，查询输入也按页建立父链，再合成为源单元载荷和最终规范证据；每次写入遵守 Kernel 的 256 父引用上限。最终回执只返回准确 PayloadRef，正文与图片引用不内联入组件帧。120 秒物化 deadline 内未能完成不发布记录。
 
@@ -511,7 +511,7 @@ MemoryRelationView
 
 试验图片 part 必须保存尺寸并与受管图片 Payload 同时冻结，文本 part 的尺寸为空。嵌入 claim 按输入种类读取各自的权威表；试验任务在认领和 API handoff 前核验 Bot、Generation、输入修订、part/PayloadRef 和有效期。向量发布前再次核验这些约束；过期或换代的已计算向量写入仅含 ref 的删除 outbox，Memory 抑制其权威 facet。发布 Worker 只拿 ref、空间、用途及向量，不接收群来源字段；群来源及试验身份均留在 Memory 的 PostgreSQL 事实中。即便临时向量已发布，试验读取仍须按有效期拒绝结果。常驻删除 Worker 有界扫描过期试验并删除其向量 ref；试验查询、part 与 Payload 的物理回收必须在未决效果结算及索引删除后按依赖顺序完成。
 
-`memory.trial.start` 在 Memory 自有事务里一次性固定试验查询、按序 part、Bot/管理员/Generation、到期时间与召回工作；所有输入 PayloadRef 在进入该事务前由 Kernel Payload 核对身份、媒体类型及字节数。每个 part 的 Payload owner_id 固定为 `trial:` 加上 `SHA-256(UTF8(query_id) || 0x00 || UTF8(part_id))` 的小写十六进制，避免同一试验的图文 part 争用 Kernel Payload 的唯一 owner 身份；Memory 表约束和启动命令都复核这一身份。`memory.trial.get` 是仅管理员可调用的查询，Web 网关注入登录主体，Memory 同时复核 Bot、主体、Generation 与有效期；不匹配主体返回不存在。独立取消 action 使用同样的主体和 Generation 约束及 `ADMIN_CANCELLED` 原因；Agent 公开的查询请求、取消、进度及状态服务只接受 `SOURCE_UNIT`。试验证据采用 `forest.memory-trial-evidence/1`，声明 `input_kind=ADMIN_TRIAL` 且 `current_source=null`，逐项命中仍保留真实群、主干和作者归因，不能送入 Agent 的群来源证据投影。结果分页一次最多返回 8 项；图片按需经管理员限定的 `memory.trial.image` 端口读取精确证据 part，每次只传最多 96 KiB 的原图分块，浏览器复核整体 SHA-256 后显示，单图上限 32 MiB。不让隔离 Worker 导入宿主图像库，也不把原图塞进分页或单个组件调用帧。
+`memory.trial.start` 在 Memory 自有事务里一次性固定试验查询、按序 part、Bot/管理员/Generation、到期时间与召回工作；所有输入 PayloadRef 在进入该事务前由 Kernel Payload 核对身份、媒体类型及字节数。每个 part 的 Payload owner_id 固定为 `trial:` 加上 `SHA-256(UTF8(query_id) || 0x00 || UTF8(part_id))` 的小写十六进制，避免同一试验的图文 part 争用 Kernel Payload 的唯一 owner 身份；Memory 表约束和启动命令都复核这一身份。`memory.trial.get` 是仅管理员可调用的查询，Web 网关注入登录主体，Memory 同时复核 Bot、主体、Generation 与有效期；不匹配主体返回不存在。独立取消 action 使用同样的主体和 Generation 约束及 `ADMIN_CANCELLED` 原因；Agent 公开的查询请求、取消、进度及状态服务只接受 `SOURCE_UNIT`。试验证据采用 `forest.memory-trial-evidence/2`，声明 `input_kind=ADMIN_TRIAL` 且 `current_source=null`，逐项命中仍保留真实群、主干和作者归因，不能送入 Agent 的群来源证据投影。结果分页一次最多返回 8 项；图片按需经管理员限定的 `memory.trial.image` 端口读取精确证据 part，每次只传最多 96 KiB 的原图分块，浏览器复核整体 SHA-256 后显示，单图上限 32 MiB。不让隔离 Worker 导入宿主图像库，也不把原图塞进分页或单个组件调用帧。
 
 试验结果与图片端口属于包清单中的 `visibility=management` 只读服务。它们只由包自身的管理查询绑定，经 Web authority 校验后调用；依赖求解和 RuntimeGraph 不公布跨组件路由。管理员主体由管理网关注入，其他模块不能靠传入 `requested_by` 调用这两个端口。
 

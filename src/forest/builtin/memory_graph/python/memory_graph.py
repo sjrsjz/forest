@@ -367,9 +367,10 @@ class MemoryGraph(Plugin):
             "path_parent_source_unit_id", "path_edge_id",
         )
         body = {
-            "protocol": "forest.memory-retrieval-freeze/1", "query_id": query_id,
+            "protocol": "forest.memory-retrieval-freeze/2", "query_id": query_id,
             "nodes": [{key: node[key] for key in fields} for node in region["nodes"]],
             "read_count": region["read_count"], "truncated": region["truncated"],
+            "truncation_reason": region["truncation_reason"],
             "association_sampled": region["association_sampled"],
             "deletion_epoch_step_id": "payload_epoch",
         }
@@ -411,7 +412,7 @@ class MemoryGraph(Plugin):
                 "MEMORY_GRAPH_DEADLINE", "Graph expansion exceeded its deadline", 504
             ) from exc
         return {
-            "protocol": "forest.memory-query-region/1", "query_id": query_id,
+            "protocol": "forest.memory-query-region/2", "query_id": query_id,
             "space_id": seeds["space_id"], "policy_revision": policy["policy_revision"],
             **region,
         }

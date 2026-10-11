@@ -30,7 +30,8 @@ def _context(*, images=1, dependencies=3, query_parts=1, text=b"abc", budget=256
              "input_kind": input_kind, "max_retrieval_chars": budget,
              "max_retrieval_media_bytes": media_budget,
              "current_source": None if input_kind == "ADMIN_TRIAL" else {"source_id": "group/query"},
-             "truncated": False, "association_sampled": False, "read_count": 1}
+             "truncated": False, "truncation_reason": None,
+             "association_sampled": False, "read_count": 1}
 
     async def query(port, body, **_kwargs):
         if port == "memory.read-retrieval-materialization":
@@ -114,7 +115,7 @@ async def test_management_trial_evidence_has_independent_revocable_items():
     ctx, documents, ancestry, _published = _context(input_kind="ADMIN_TRIAL")
     result = await materialize(ctx, "query/test", digest_json)
     document = documents[result["evidence_ref"]["payload_id"]]
-    assert document["protocol"] == "forest.memory-trial-evidence/1"
+    assert document["protocol"] == "forest.memory-trial-evidence/2"
     assert document["input_kind"] == "ADMIN_TRIAL"
     assert document["current_source"] is None
     assert "evidence" not in document

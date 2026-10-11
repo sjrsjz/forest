@@ -558,15 +558,16 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
             [{"source_unit_id": "seed", "rank_score": 1.0 / 61}], policy,
         )
         assert len(region["nodes"]) == 32 and region["truncated"]
+        assert region["truncation_reason"] == "NODE_LIMIT"
         fields = ("source_unit_id", "source_revision", "rank_score", "activation", "is_seed",
                   "path_parent_source_unit_id", "path_edge_id")
         body = {**region, "nodes": [{key: item[key] for key in fields} for item in region["nodes"]],
-                "protocol": "forest.memory-retrieval-freeze/1", "query_id": "query/one",
+                "protocol": "forest.memory-retrieval-freeze/2", "query_id": "query/one",
                 "deletion_epoch_step_id": "epoch"}
 
-        async def freeze(nodes):
+        async def freeze(nodes, **metadata):
             envelope = {"protocol": "forest.uow-step/1", "caller": {"component_id": "memory.graph"},
-                        "input": {**body, "nodes": nodes},
+                        "input": {**body, "nodes": nodes, **metadata},
                         "prior": {"epoch": {"protocol": "forest.payload-epoch/1", "deletion_epoch": 0}}}
             async with conn.transaction():
                 row = await (await execute(
@@ -588,10 +589,14 @@ async def test_neighbour_sampling_is_bounded_snapshot_visible_and_source_attribu
             rejected = await freeze(changed)
             assert not rejected["ok"] and rejected["error"]["code"] == code
             assert (await (await execute("SELECT count(*) AS n FROM {}.retrieval_bundles", ())).fetchone())["n"] == 0
+        bad_reason = await freeze(body["nodes"], truncation_reason=None)
+        assert not bad_reason["ok"]
+        assert bad_reason["error"]["code"] == "MEMORY_RETRIEVAL_INVALID"
         frozen = await freeze(body["nodes"])
         assert frozen["ok"], frozen
         assert frozen["value"]["result_count"] == 32
         assert frozen["value"]["seed_count"] == 1
+        assert frozen["value"]["truncation_reason"] == "NODE_LIMIT"
         assert await freeze([]) == frozen  # Historic metadata is immutable, not a new region.
         retired_query = (await (await execute(
             "SELECT index_ref_id,space_id,state FROM {}.vector_index_deletions "
