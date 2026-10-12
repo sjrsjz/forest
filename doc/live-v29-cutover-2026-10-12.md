@@ -8,4 +8,6 @@
 
 正式 v29 管理入口对从 v28 已归档 Payload 只读提取、SHA-256 核对的 1,352,134 字节 GIF 完成 6 分块上传；`memory.trial.start` 成功，试验从 CLAIMED/PENDING 进入 READY，`memory.trial.result` 返回 0 项。v29 从空记忆开始，0 项只能证明 GIF 输入的资产、Memory 登记、VL 嵌入及查询链没有旧版 500；尚不能证明 GIF 来源的结果展示。此轮没有主动向 QQ 发消息，许可群真实显式 @→Agent→Provider→发送及长期负载仍待验收。
 
+部署控制图热重载复验：经正式 Web 管理查询预览当前 `deployment.audit` 工件的 REPLACE，影响集仅准备/排空该组件，另 7 个部署组件保持原代。提交同一包摘要的管理动作后，请求 `QUEUED → RUNNING → SUCCEEDED`，部署图修订 1→2；`deployment.audit` Generation 更新，另 7 个 Generation ID 不变。v29 Bot 保持 READY/ONLINE，Supervisor healthy、重启 0，OneBot 连接为 1。此试验证明当前在线实例的定点热重载，不证明不同包版本或存储基线的在线升级。
+
 回退顺序：先通过 v29 管理面将 `forest-main-v29` 设为 OFFLINE 并确认观测状态及 OneBot 连接释放，再通过 v28 管理面将 `forest-main-v28` 设为 ONLINE。两套库独立，回退不会合并 v29 新产生的消息和记忆。
