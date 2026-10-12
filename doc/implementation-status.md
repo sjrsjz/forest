@@ -26,7 +26,7 @@
 
 | 范围 | 当前证据 | 仍需证明或完成 |
 | --- | --- | --- |
-| 微内核、Bot 身份与包生命周期 | v29 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；在线 `deployment.audit` 同工件定点重载使部署图修订 1→2，仅该组件换代，其余 7 个 Generation 保留；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作。完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
+| 微内核、Bot 身份与包生命周期 | v29 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；在线 `deployment.audit` 同工件重载和官方 1.0.1→1.0.2 换包使部署图修订 1→2→3，每次仅该组件换代，其余 7 个 Generation 保留；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作。完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
 | 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例接入过真实 VL 嵌入和 Milvus；v28 的在线文本/PNG 试验各召回 8 项并标明群号和主干，v29 的真实 GIF 输入试验 READY、当时无 ELIGIBLE 来源而返回 0 项。 | 许可群显式 @→回复、GIF 来源结果展示、长期图文成本、百万级筛选与物理索引恢复的运营闭环仍未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算与 Worker 硬退出恢复各 1 passed。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
@@ -35,7 +35,7 @@
 
 记忆大选择集遗忘复核（2026-10-12）：同一当前源码镜像在另一个隔离 PostgreSQL 库运行 `test_memory_forget_batch_scale.py`，预置 100,000 条旧来源及 192 条持有真实 Payload anchor 的新来源，冻结选择共 100,192 条。连续执行前三个 64 条批次，逐次验证 claim/settle、进度水位和删除 epoch；最终仅 192 条目标来源为 SUPPRESSED，100,000 条填充来源仍为 ELIGIBLE，`1 passed in 33.14s`，临时数据库已清理。该证据覆盖大选择集上的连续有界批次，不代表一次删除十万条或覆盖崩溃后所有外部效果恢复。
 
-控制 builtin 本地新版发布入口（2026-10-12）：`forest plugin publish-official-deployment` 和 `publish-official-host` 复用 Bot 的本地目录所有者授权与 ZIP/包/manifest 准确摘要核对，只接受当前发行物相应作用域 `auto_install` 的组件身份、原包 ID 和运行时，原子登记对应作用域的官方来源。隔离目录用实际 `deployment.audit` 与 `host.audit` 新版 ZIP 验证跨作用域拒绝、错误摘要拒绝、旧新版同时保留、普通导入不取得官方来源；Bot 原命令一并复核，定向 `3 passed`，Ruff 通过。另在隔离 Host PostgreSQL 上让真实控制图用 ZIP 登记后的准确摘要替换组件，图修订递增且管理查询保持可用，`1 passed in 4.35s`，临时数据库已清理。此入口只发布可选工件，不自动提交 Graph 或替换 Generation；生产包卷发布和在线控制图热替换仍待单独验收，也不放宽普通第三方包的 SQL 权限。
+控制 builtin 本地新版发布入口（2026-10-12）：`forest plugin publish-official-deployment` 和 `publish-official-host` 复用 Bot 的本地目录所有者授权与 ZIP/包/manifest 准确摘要核对，只接受当前发行物相应作用域 `auto_install` 的组件身份、原包 ID 和运行时，原子登记对应作用域的官方来源。隔离目录用实际 `deployment.audit` 与 `host.audit` 新版 ZIP 验证跨作用域拒绝、错误摘要拒绝、旧新版同时保留、普通导入不取得官方来源；Bot 原命令一并复核，定向 `3 passed`，Ruff 通过。另在隔离 Host PostgreSQL 上让真实控制图用 ZIP 登记后的准确摘要替换组件，图修订递增且管理查询保持可用，`1 passed in 4.35s`，临时数据库已清理。此入口只发布可选工件，不自动提交 Graph 或替换 Generation；v29 私有生产包卷的官方工件发布和在线控制图跨版本热替换已另行验收，但不放宽普通第三方包的 SQL 权限。
 
 普通控制包状态归位（2026-10-12）：从新建 deployment/host 内核基线删除共享 `component_state_*` 表和触发器，改由宿主为每个无自带 SQL 的控制包生成固定配置＋状态 bundle，安装到该包的独立 schema。`ctx.state` 的契约、不可变值与操作步骤、CAS head 均留在同一包 schema，Generation 准确绑定该 bundle；候选预检仅在既有包 schema 已登记时检查状态契约，新包不读取尚不存在的表，已登记却缺表仍失败。普通包只能匹配宿主生成的完整 SQL 字节、schema 身份和摘要，上传的官方 SQL 仍被拒绝。隔离 PostgreSQL 的 deployment/Host 热替换与控制面回归 37 passed，包编译及运行时契约回归 123 passed，Ruff 与差异检查通过。本改动改变未上线的新库基线，不向在线 v27 旧库迁移；普通插件尚无自定义领域 SQL/Effect 能力。
 
@@ -1328,3 +1328,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-12 v29 GIF 修复在线接管：提交 97bf3ff 的独立 deployment/Host/Bot 数据库及包卷已供应。v28 先 OFFLINE 且双方 OneBot 连接均为 0，v29 后 ONLINE；v29 图修订 1 为 22/22 ACTIVE，Memory 1.93.4 / SQL 3.92.0，Supervisor healthy、重启 0，连接数 v28/v29 为 0/1。已归档 GIF 经正式管理端 6 分块上传、试验进入 READY，空库返回 0 项；这验证 GIF 输入链，不证明 GIF 结果展示或许可群真实回复。未主动发 QQ。详见 doc/live-v29-cutover-2026-10-12.md。
 
 2026-10-12 v29 部署控制图在线定点热重载：正式 Web 管理预览确认 `deployment.audit` 是唯一准备/排空成员，7 个部署组件保留。提交同工件 REPLACE 后持久请求由 QUEUED/RUNNING 结算 SUCCEEDED，图修订 1→2，准确 Audit Generation 变化且其余 7 个不变；Bot 仍 READY/ONLINE，Supervisor healthy、重启 0、OneBot 连接 1。此证据不覆盖不同版本工件或存储基线的在线升级。详见 `doc/live-v29-cutover-2026-10-12.md`。
+
+2026-10-12 v29 官方控制包跨版本热替换：`deployment.audit` 的 1.0.2 候选仅提升 manifest 包版本，代码和 SQL 不变；官方编译/导出后以 ZIP、包、manifest 三层摘要经目录所有者 CLI 原子发布到 v29 私有包卷。正式预览只影响 Audit；管理动作 SUCCEEDED，部署图 2→3，Audit 活动包 1.0.1→1.0.2 且 Generation 更新，另 7 个不变、存储基线摘要不变。Bot 仍 READY/ONLINE，Supervisor healthy、重启 0、OneBot 连接 1。该结果不证明普通第三方 SQL 或存储基线在线升级；详见 `doc/live-v29-cutover-2026-10-12.md`。

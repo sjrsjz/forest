@@ -10,4 +10,6 @@
 
 部署控制图热重载复验：经正式 Web 管理查询预览当前 `deployment.audit` 工件的 REPLACE，影响集仅准备/排空该组件，另 7 个部署组件保持原代。提交同一包摘要的管理动作后，请求 `QUEUED → RUNNING → SUCCEEDED`，部署图修订 1→2；`deployment.audit` Generation 更新，另 7 个 Generation ID 不变。v29 Bot 保持 READY/ONLINE，Supervisor healthy、重启 0，OneBot 连接为 1。此试验证明当前在线实例的定点热重载，不证明不同包版本或存储基线的在线升级。
 
+随后从当前发行物的 `deployment.audit` 源目录复制出仅提升 manifest 版本的官方候选 1.0.2，代码和业务 SQL 未变；用插件编译器构建、导出 ZIP，经包目录所有者本地命令 `publish-official-deployment` 核对 ZIP/包/manifest 三层摘要后，在 **v29 私有包卷**登记官方来源。包摘要为 `sha256:46465cc07027428bab7ce9dd1202f721085e3e4097afcfb0630bf06e5c427457`，ZIP 摘要为 `sha256:37146ef73eb6fbf112d263725136fdd2d3a8dd22467a4e6676f4e269258fe40d`。正式候选预览仍只影响 `deployment.audit`；管理动作结算 SUCCEEDED，部署图修订 2→3，活动包版本由 1.0.1→1.0.2，准确 Generation 改变，另 7 个 Generation 不变，Audit 存储基线摘要不变。Bot 保持 READY/ONLINE，Supervisor healthy、重启 0，OneBot 连接 1。临时 ZIP 中转卷已清理，正式包目录保留不可变工件。此证据覆盖官方控制包的真实跨版本热替换；普通第三方领域 SQL、存储基线在线升级及 Supervisor 重启恢复仍未由这次操作证明。
+
 回退顺序：先通过 v29 管理面将 `forest-main-v29` 设为 OFFLINE 并确认观测状态及 OneBot 连接释放，再通过 v28 管理面将 `forest-main-v28` 设为 ONLINE。两套库独立，回退不会合并 v29 新产生的消息和记忆。
