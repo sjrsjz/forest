@@ -2,7 +2,7 @@
 
 ## 当前快照（2026-10-12）
 
-在线 v27 仍运行提交 `b669fde` 的镜像；当前源码之后已调整控制包私有状态与 Memory 的 GIF 试验契约，不能把当前源码当作在线版本。v27 在线运行 `agent.runtime` 4.51.0 / 私有 SQL 2.33.0、`memory.graph` 1.93.2、`vector.index` 2.23.0 / 私有 SQL 2.22.0，部署、Host 和 Bot 数据库及包卷均与 v26 隔离。完整模拟 BotHost 验证和实际切换分别见下方记录与[切换记录](live-v27-cutover-2026-10-12.md)。
+在线 v28 已运行由提交 `89138c8` 构建的 `forest:runtime-candidate-89138c8` 镜像，包含控制包私有状态与 Memory GIF 契约的现行源码。`forest-main-v27` 已退至 OFFLINE/OFFLINE；`forest-main-v28` 使用独立的部署、Host、Bot 数据库及包卷，现为 READY/ONLINE，Bot 运行图 22 个模块、22 个 schema bundle 均已就绪。树莓派旧 `alicebot.service` 为 inactive，OneBot 端口只有 1 条已建立连接。新 Bot 尚无许可群 `933179609` 的入站记录，真实低频 @→Agent→Provider→发送链和在线图文召回结果仍未验收。详见 [v28 切换记录](live-v28-cutover-2026-10-12.md)；v27 的历史证据见 [v27 记录](live-v27-cutover-2026-10-12.md)。
 
 2026-10-12 08:00（北京时间）完成 v26→v27 切换：`forest-main-v26` 的期望与观测状态均为 OFFLINE，`forest-main-v27` 为 READY/ONLINE；v27 运行图 22/22 ACTIVE、schema bundle 22/22 READY，四次只读采样无违规、活动 Agent Run、并发会话或待发送消息。树莓派 OneBot 端口仅见一条来自本机的远端连接。v27 是新 Bot，未复制 v26 消息或记忆；许可群 `933179609` 尚无入站记录，真实低频 @→Agent→Provider→发送链仍未验收。此轮没有主动向 QQ 发送消息。
 
@@ -14,7 +14,7 @@
 
 权威边界已核对：部署内核的 `bots`、`runtime_intents` 与监督器观测账本持有 Bot 基础身份和运行意图；可热替换的 `deployment.bot-catalog` 通过清单声明的受限 kernel query/command 端口贡献目录管理 UI，不复制 Bot 状态或拥有目标 Bot 的模块配置。后续重构必须保持此边界。
 
-工具 PREPARED Effect 在 Run 截止时的跨参与者结算与 Agent Worker 硬退出后的恢复均已通过隔离 PostgreSQL 回归；真实低频触发、长期多群图文负载与成本验收尚未完成。v27 新隔离 Bot 数据库及当前包基线已通过完整装配与上线观察；v26 旧 SQL 基线不作为当前源码的热替换目标。
+工具 PREPARED Effect 在 Run 截止时的跨参与者结算与 Agent Worker 硬退出后的恢复均已通过隔离 PostgreSQL 回归；真实低频触发、长期多群图文负载与成本验收尚未完成。v28 新隔离 Bot 数据库及当前包基线已通过正式供应与上线观察；旧版本 SQL 基线不作为当前源码的热替换目标。
 
 ### 当前验收边界
 
@@ -22,9 +22,9 @@
 
 | 范围 | 当前证据 | 仍需证明或完成 |
 | --- | --- | --- |
-| 微内核、Bot 身份与包生命周期 | v27 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作；完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
+| 微内核、Bot 身份与包生命周期 | v28 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作；完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
-| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例接入过真实 VL 嵌入和 Milvus；v27 自然入站已产生多个主干。 | 许可群真实 @→回复仍无入站验证；在线 GIF 管理结果仍使用旧契约，当前源码修正尚未装载；长期图文成本、百万级筛选与物理索引恢复的运营闭环未验收。 |
+| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例接入过真实 VL 嵌入和 Milvus；v27 自然入站曾产生多个主干，v28 已开始采集新群消息并装载 GIF 修正。 | 许可群真实 @→回复仍无入站验证；v28 尚无非空图文召回结果；长期图文成本、百万级筛选与物理索引恢复的运营闭环未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算与 Worker 硬退出恢复各 1 passed。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
 
 普通控制包状态归位（2026-10-12）：从新建 deployment/host 内核基线删除共享 `component_state_*` 表和触发器，改由宿主为每个无自带 SQL 的控制包生成固定配置＋状态 bundle，安装到该包的独立 schema。`ctx.state` 的契约、不可变值与操作步骤、CAS head 均留在同一包 schema，Generation 准确绑定该 bundle；候选预检仅在既有包 schema 已登记时检查状态契约，新包不读取尚不存在的表，已登记却缺表仍失败。普通包只能匹配宿主生成的完整 SQL 字节、schema 身份和摘要，上传的官方 SQL 仍被拒绝。隔离 PostgreSQL 的 deployment/Host 热替换与控制面回归 37 passed，包编译及运行时契约回归 123 passed，Ruff 与差异检查通过。本改动改变未上线的新库基线，不向在线 v27 旧库迁移；普通插件尚无自定义领域 SQL/Effect 能力。
