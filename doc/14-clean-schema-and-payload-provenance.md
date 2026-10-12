@@ -98,7 +98,7 @@ scope = "bot"
 repository_contract = "forest.memory.repository/1"
 ```
 
-`package_digest` 不写入 manifest，因为包不能稳定地自引用自己的摘要；宿主在完整包快照通过校验后派生该值，并把它与上述字段、Runtime Generation、Repository contract 和管理 UI 摘要一起写入描述符事实及安装账本。缺少包摘要或任一字段不一致都不能按幂等安装处理。
+运行包摘要不写入 manifest，因为包不能稳定地自引用自身摘要。宿主校验完整 PackageSnapshot 后，分别计算运行包摘要与存储 bundle 摘要：后者只绑定组件/schema 身份、版本、渲染前基线摘要、Repository contract 和执行 profile。描述符与 Generation 同时冻结两种身份；安装账本的历史列名 `package_digest` 保存存储摘要，不能因同一 SQL 的 Python 或 UI 更新而改变。运行包缺失、存储摘要不符或任一存储字段不一致都不能按幂等安装处理。
 
 Schema bundle 使用两个不可混淆的执行档位。可安装包固定为 `declarative`，只允许宿主审计器接受的表、类型、索引、序列和注释，不能声明函数、触发器、`ALTER`、跨 namespace 引用或数据语句。随 Forest 官方 distribution 摘要发布且描述符 `trust_level=official` 的模块可以使用 `official` 档位承载函数、触发器和完整约束；该档位是对已经能够执行宿主 Python 的官方代码做完整性校验，不是 SQL 沙箱。Runtime registry 必须复核 artifact trust level，安装器把 `execution_profile` 写入不可变 bundle 账本；第三方描述符选择 `official` 时在执行任何 SQL 前拒绝。
 
