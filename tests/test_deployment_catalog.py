@@ -1138,11 +1138,15 @@ output_schema = "schemas/bump-output.json"
             expected_graph_revision=added.graph_identity.graph_revision,
         )
         assert await bump(replaced, "deployment-bump/two") == {"count": 2}
+        state_namespace = next(
+            item.storage.spec.namespace for item in replaced.descriptors
+            if item.component_id == "deployment.sample"
+        )
         async with repository.store.pool.connection() as conn:
             rows = await (await conn.execute(
-                "SELECT revision FROM forest_deployment.component_state_heads "
+                sql.SQL("SELECT revision FROM {}.component_state_heads "
                 "WHERE deployment_id=%s AND component_id='deployment.sample' "
-                "AND state_key='counter'",
+                "AND state_key='counter'").format(sql.Identifier(state_namespace)),
                 (repository.store.deployment_id,),
             )).fetchall()
         assert [row["revision"] for row in rows] == [2]

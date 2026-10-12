@@ -30,6 +30,8 @@
 
 宿主业务 Runtime、直接 Repository 装配和为某个 builtin 特设的路由都是重构期间的待删除对象；现行 `bot_host` 等组合根及最小部署/存储句柄不属于业务 Runtime。把 Python 文件移动进 `builtin`、从宿主 import 一个包内类、或给旧对象外面套一个 descriptor，都不构成插件化。生产组合根完成切换前，系统应明确报告为混合图，不得宣称 builtin 模块系统已经闭合。
 
+普通 deployment/host 包的配置与小型 `ctx.state` 也属于该包的私有持久状态。宿主可以为没有自带领域 SQL 的包生成固定的配置＋状态 bundle，首次安装即建立独立 schema；从无状态版本启用 `state.read/write` 时仍沿用同一 schema。该 SQL 的允许来源必须由宿主按准确字节、schema 身份和存储摘要核验，并进入 Generation 存储绑定；这不授予上传包官方 SQL 权限，也不能替代复杂模块声明的私有 Domain Query/Command、UnitOfWork participant 或 Effect 端口。候选预检应跳过尚未安装的包状态表，但已登记 schema 缺表必须报错，既有状态契约变化必须拒绝隐式升级。
+
 ## 2. 本阶段重构策略
 
 Forest 尚未上线，本阶段采用直接重构：允许删除错误抽象、端点、表和测试，允许重建开发数据库，不增加旧 DTO、旧表或旧页面的兼容层。只有真实外部边界保留稳定性，包括 OneBot 协议、包工件校验、群消息身份/顺序、外部副作用账本和已经验证的安全不变量。

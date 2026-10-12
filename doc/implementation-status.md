@@ -20,7 +20,9 @@
 
 | 范围 | 当前证据 | 仍需证明或完成 |
 | --- | --- | --- |
-| 微内核、Bot 身份与包生命周期 | v27 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作；完整隔离 BotHost 用例覆盖热替换、停机和重启。 | 普通 deployment 插件的私有存储、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
+| 微内核、Bot 身份与包生命周期 | v27 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作；完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
+
+普通控制包状态归位（2026-10-12）：从新建 deployment/host 内核基线删除共享 `component_state_*` 表和触发器，改由宿主为每个无自带 SQL 的控制包生成固定配置＋状态 bundle，安装到该包的独立 schema。`ctx.state` 的契约、不可变值与操作步骤、CAS head 均留在同一包 schema，Generation 准确绑定该 bundle；候选预检仅在既有包 schema 已登记时检查状态契约，新包不读取尚不存在的表，已登记却缺表仍失败。普通包只能匹配宿主生成的完整 SQL 字节、schema 身份和摘要，上传的官方 SQL 仍被拒绝。隔离 PostgreSQL 的 deployment/Host 热替换与控制面回归 37 passed，包编译及运行时契约回归 123 passed，Ruff 与差异检查通过。本改动改变未上线的新库基线，不向在线 v27 旧库迁移；普通插件尚无自定义领域 SQL/Effect 能力。
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
 | 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例接入过真实 VL 嵌入和 Milvus；v27 自然入站已产生多个主干。 | v27 尚未出现许可群真实 @，当前自然消息尚未触发 Agent 或产生就绪 facet；长期图文成本、百万级筛选与物理索引恢复的运营闭环未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算与 Worker 硬退出恢复各 1 passed。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |

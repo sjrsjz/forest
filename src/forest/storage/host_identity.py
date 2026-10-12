@@ -125,22 +125,15 @@ class HostIdentityAuthority:
                 != {"host_identity", "schema_bundles", "runtime_graph_clock",
                     "runtime_graphs", "runtime_generations", "runtime_graph_members",
                     "runtime_package_selection",
-                    "package_service_operations", "component_state_contracts",
-                    "component_state_payloads",
-                    "component_state_steps", "component_state_heads",
+                    "package_service_operations",
                     "runtime_graph_change_requests",
                     "web_authority_receipts", "audit_records", "supervisor_lease"}
                 or {row["proname"] for row in functions}
                 != {"reject_identity_change", "reject_receipt_change",
-                    "guard_runtime_graph_change",
-                    "reject_component_state_fact_change",
-                    "guard_component_state_head_change"}
+                    "guard_runtime_graph_change"}
                 or {row["tgname"] for row in triggers}
                 != {"host_identity_immutable", "runtime_graph_change_transition",
-                    "web_authority_receipt_immutable", "host_audit_record_immutable",
-                    "component_state_contract_immutable",
-                    "component_state_payload_immutable", "component_state_step_immutable",
-                    "component_state_head_transition"}
+                    "web_authority_receipt_immutable", "host_audit_record_immutable"}
                 or [row["host_id"] for row in lease] != [self.store.host_id]
                 or [row["host_id"] for row in clocks] != [self.store.host_id]
                 or {row["nspname"] for row in namespaces}

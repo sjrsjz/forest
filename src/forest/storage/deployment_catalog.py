@@ -165,10 +165,6 @@ class DeploymentCatalogRepository:
             "runtime_graph_members",
             "runtime_package_selection",
             "package_service_operations",
-            "component_state_contracts",
-            "component_state_payloads",
-            "component_state_steps",
-            "component_state_heads",
             "runtime_graph_change_requests",
             "supervisor_lease",
             "web_accounts",
@@ -218,8 +214,6 @@ class DeploymentCatalogRepository:
             "guard_web_session_change",
             "guard_web_setup_change",
             "guard_runtime_graph_change",
-            "reject_component_state_fact_change",
-            "guard_component_state_head_change",
             "bot_catalog_page",
             "bot_rename",
             "bot_set_desired",
@@ -238,15 +232,10 @@ class DeploymentCatalogRepository:
                 "AND t.tgname LIKE 'component_state_%'"
             )
         ).fetchall()
-        if {row["tgname"] for row in state_triggers} != {
-            "component_state_contract_immutable",
-            "component_state_payload_immutable",
-            "component_state_step_immutable",
-            "component_state_head_transition",
-        }:
+        if state_triggers:
             raise ForestError(
                 "DEPLOYMENT_SCHEMA_TAMPERED",
-                "Deployment component state guards differ", 409,
+                "Deployment kernel contains component state guards", 409,
             )
         registered = await (
             await conn.execute(

@@ -7,7 +7,9 @@ from dataclasses import dataclass
 from importlib.resources import files
 
 from jsonschema import Draft202012Validator
+from psycopg import sql
 
+from forest.control_generated_storage import generated_control_storage
 from forest.deployment_kernel_management import (
     DeploymentKernelManagementAuthority,
     DeploymentKernelQueryAuthority,
@@ -64,27 +66,12 @@ class _BuiltinGrantSet:
     grant_set_digest: str
 
 
-def _configuration_storage(component_id: str, scope_kind: str) -> tuple[StorageBundleSpec, bytes]:
-    baseline = files("forest.storage.official").joinpath(
-        "control_module_configuration.sql"
-    ).read_bytes()
-    schema_id = f"forest.{scope_kind}.config." + hashlib.sha256(
-        component_id.encode()
-    ).hexdigest()[:32]
-    return StorageBundleSpec(
-        component_id=component_id, schema_id=schema_id, schema_version="1.0.0",
-        baseline_sha256=hashlib.sha256(baseline).hexdigest(),
-        repository_contract=f"forest.{scope_kind}-configuration.repository/1",
-        scope=scope_kind,
-    ), baseline
-
-
 def control_storage_bundle(snapshot, scope_kind: str) -> RuntimeStorageBundle:
     """Project the exact SQL bundle installed for a control package."""
 
     declared = snapshot.storage_bundle()
     if declared is None:
-        spec, baseline = _configuration_storage(snapshot.component["id"], scope_kind)
+        spec, baseline = generated_control_storage(snapshot.component["id"], scope_kind)
     else:
         metadata, owned_sql = declared
         if metadata["execution_profile"] != "official":
@@ -425,13 +412,26 @@ async def bootstrap_installed_control_package(
     )
     state = (
         ControlPackageStateAuthority(
-            runtime, state_schema=component["state_schema"],
+            runtime, component_id=component["id"], namespace=spec.namespace,
+            state_schema=component["state_schema"],
             value_schema=snapshot.schema(component["state_value_schema"]),
         )
         if requested else None
     )
     if state is not None:
-        await state.verify_contract(component["id"])
+        if plan_only:
+            async with runtime.store.pool.connection() as conn:
+                registered = await (await conn.execute(sql.SQL(
+                    "SELECT 1 FROM {}.schema_bundles "
+                    "WHERE {}=%s AND schema_id=%s"
+                ).format(
+                    sql.Identifier("forest_" + scope_kind),
+                    sql.Identifier(scope_kind + "_id"),
+                ), (runtime.scope_id, spec.schema_id))).fetchone()
+            if registered is not None:
+                await state.verify_contract(component["id"])
+        else:
+            await state.verify_contract(component["id"])
     ui = snapshot.management_ui()
     management = (configuration_management_contribution(
         component["id"], scope_kinds=(scope_kind,),
@@ -457,7 +457,7 @@ async def bootstrap_installed_control_package(
         service_operation_ledger=(
             runtime.service_operation_ledger if "state.write" in requested else None
         ),
-        storage=None, trust_level="installed",
+        storage=bundle, trust_level="installed",
         management=management,
         management_contract_factory=lambda adapter: PackageManagementContract(
             configuration, adapter=adapter, schema=config_schema,

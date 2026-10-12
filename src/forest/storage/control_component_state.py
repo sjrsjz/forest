@@ -8,6 +8,7 @@ import json
 import psycopg
 from psycopg import sql
 
+from forest.control_generated_storage import generated_control_storage
 from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope
 from forest.packages import digest_json
@@ -30,17 +31,24 @@ def _bounded(value: object, field: str, limit: int) -> str:
 class ControlPackageStateAuthority:
     """One control scope's immutable values, operation steps and CAS heads."""
 
-    def __init__(self, runtime, *, state_schema: int, value_schema: dict) -> None:
+    def __init__(
+        self, runtime, *, component_id: str, namespace: str,
+        state_schema: int, value_schema: dict,
+    ) -> None:
         self.runtime = runtime
         self.scope_kind = runtime.scope_kind
         if (
             self.scope_kind not in {"deployment", "host"}
+            or namespace != generated_control_storage(
+                component_id, self.scope_kind
+            )[0].namespace
             or type(state_schema) is not int or state_schema <= 0
             or not isinstance(value_schema, dict)
         ):
             raise ValueError("Control state needs a declared scope and value contract")
         self.scope_id = runtime.scope_id
-        self.schema = "forest_" + self.scope_kind
+        self.component_id = component_id
+        self.schema = namespace
         self.scope_column = self.scope_kind + "_id"
         self.state_schema = state_schema
         self.contract_digest = digest_json({
@@ -53,6 +61,7 @@ class ControlPackageStateAuthority:
             or scope.scope_kind != self.scope_kind
             or scope.scope_id != self.scope_id
             or scope.bot_id is not None
+            or scope.component_id != self.component_id
         ):
             raise ForestError(
                 "PACKAGE_CAPABILITY_SCOPE_MISMATCH",

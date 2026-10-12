@@ -23,6 +23,7 @@ from importlib.resources import files
 from typing import Any
 from uuid import UUID, uuid4
 
+from forest.control_generated_storage import is_generated_control_storage
 from forest.errors import ForestError
 from forest.packages import (
     SHELL_P0_MAX_TIMEOUT_SECONDS,
@@ -1581,6 +1582,9 @@ class RuntimeModuleRegistry:
                         or (
                             descriptor.storage.execution_profile == "official"
                             and descriptor.artifact.trust_level != "official"
+                            and not is_generated_control_storage(
+                                descriptor.storage, identity, self.scope_kind
+                            )
                         )
                     )
                 )

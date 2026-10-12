@@ -6,6 +6,7 @@ import re
 
 from psycopg.types.json import Jsonb
 
+from forest.control_generated_storage import is_generated_control_storage_fact
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_generation import (
@@ -51,7 +52,11 @@ async def _storage_binding_in(
             "state": "READY",
         }.items()
     ) or (
-        storage["execution_profile"] == "official" and binding["package"]["trust_level"] != "official"
+        storage["execution_profile"] == "official"
+        and binding["package"]["trust_level"] != "official"
+        and not is_generated_control_storage_fact(
+            storage, binding["component_id"], schema.removeprefix("forest_")
+        )
     ):
         raise ForestError(
             "RUNTIME_STORAGE_BINDING_MISMATCH",

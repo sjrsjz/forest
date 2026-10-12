@@ -340,8 +340,13 @@ output_schema = "schemas/bump-output.json"
 
         assert await bump(state_registry, "bump/one") == {"count": 1}
         assert await bump(state_registry, "bump/one") == {"count": 1}
+        state_namespace = next(
+            item.storage.spec.namespace for item in state_registry.descriptors
+            if item.component_id == "host.sample"
+        )
         state = ControlPackageStateAuthority(
-            runtime, state_schema=1,
+            runtime, component_id="host.sample", namespace=state_namespace,
+            state_schema=1,
             value_schema=state_registry.get("host.sample").state_contract,
         )
         generation = state_registry.get("host.sample").generation_identity.generation_id
@@ -366,6 +371,11 @@ output_schema = "schemas/bump-output.json"
                 replace(scope, scope_id="host/" + "f" * 32), state_key="counter",
             )
         assert wrong_scope.value.code == "PACKAGE_CAPABILITY_SCOPE_MISMATCH"
+        with pytest.raises(ForestError) as wrong_component:
+            await state.read_state(
+                replace(scope, component_id="host.other"), state_key="counter",
+            )
+        assert wrong_component.value.code == "PACKAGE_CAPABILITY_SCOPE_MISMATCH"
         manifest.write_text(
             manifest.read_text(encoding="utf-8").replace(
                 'version = "1.1.0"', 'version = "1.1.1"', 1,
@@ -380,12 +390,16 @@ output_schema = "schemas/bump-output.json"
         assert await bump(next_registry, "bump/two") == {"count": 2}
         async with store.pool.connection() as conn:
             payloads = await (await conn.execute(
-                "SELECT count(*) AS count FROM forest_host.component_state_payloads "
-                "WHERE host_id=%s AND component_id='host.sample'", (host_id,),
+                sql.SQL("SELECT count(*) AS count FROM {}.component_state_payloads "
+                "WHERE host_id=%s AND component_id='host.sample'").format(
+                    sql.Identifier(state_namespace)
+                ), (host_id,),
             )).fetchone()
             steps = await (await conn.execute(
-                "SELECT count(*) AS count FROM forest_host.component_state_steps "
-                "WHERE host_id=%s AND component_id='host.sample'", (host_id,),
+                sql.SQL("SELECT count(*) AS count FROM {}.component_state_steps "
+                "WHERE host_id=%s AND component_id='host.sample'").format(
+                    sql.Identifier(state_namespace)
+                ), (host_id,),
             )).fetchone()
         assert payloads["count"] == steps["count"] == 2
         state_schema_file = source / "schemas/state.json"
@@ -442,8 +456,10 @@ output_schema = "schemas/bump-output.json"
         }
         async with store.pool.connection() as conn:
             count = await (await conn.execute(
-                "SELECT count(*) AS count FROM forest_host.component_state_steps "
-                "WHERE host_id=%s AND component_id='host.sample'", (host_id,),
+                sql.SQL("SELECT count(*) AS count FROM {}.component_state_steps "
+                "WHERE host_id=%s AND component_id='host.sample'").format(
+                    sql.Identifier(state_namespace)
+                ), (host_id,),
             )).fetchone()
         assert count["count"] == 4
     finally:
