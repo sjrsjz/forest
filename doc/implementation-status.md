@@ -2,13 +2,13 @@
 
 ## 当前快照（2026-10-12）
 
-当前源码与在线实例须分开判断。源码包含 `agent.runtime` 4.51.0 / 私有 SQL 2.33.0 的 Run 截止时间结算、`memory.graph` 1.93.2 和 `vector.index` 2.23.0 / 私有 SQL 2.22.0 的包内向量审计裁决；各项隔离回归及完整模拟 BotHost 验证见下方按日期记录。在线 v26 仍运行较早的 Agent 4.50.0 与 Vector 2.22.0，不能把源码回归视作在线升级验收。
+当前源码已用提交 `b669fde` 的镜像建立隔离 v27 实例；后续 `8e95b26` 只修改文档。v27 在线运行 `agent.runtime` 4.51.0 / 私有 SQL 2.33.0、`memory.graph` 1.93.2、`vector.index` 2.23.0 / 私有 SQL 2.22.0，部署、Host 和 Bot 数据库及包卷均与 v26 隔离。完整模拟 BotHost 验证和实际切换分别见下方记录与[切换记录](live-v27-cutover-2026-10-12.md)。
 
-2026-10-12 06:57（北京时间）的两次只读在线采样显示：`forest-main-v26` 为 READY/ONLINE，运行图 22/22 ACTIVE，未见生命周期违规；Memory 有 220 条来源、6 个群主干，活动 Agent Run、逾期 Run、待发送与活动任务均为 0。许可群 `933179609` 尚无入站记录，因此真实低频 @→Agent→Provider→发送链仍未验收。采样未读取群消息正文，也未向 QQ 发送消息。
+2026-10-12 08:00（北京时间）完成 v26→v27 切换：`forest-main-v26` 的期望与观测状态均为 OFFLINE，`forest-main-v27` 为 READY/ONLINE；v27 运行图 22/22 ACTIVE、schema bundle 22/22 READY，四次只读采样无违规、活动 Agent Run、并发会话或待发送消息。树莓派 OneBot 端口仅见一条来自本机的远端连接。v27 是新 Bot，未复制 v26 消息或记忆；许可群 `933179609` 尚无入站记录，真实低频 @→Agent→Provider→发送链仍未验收。此轮没有主动向 QQ 发送消息。
 
 权威边界已核对：部署内核的 `bots`、`runtime_intents` 与监督器观测账本持有 Bot 基础身份和运行意图；可热替换的 `deployment.bot-catalog` 通过清单声明的受限 kernel query/command 端口贡献目录管理 UI，不复制 Bot 状态或拥有目标 Bot 的模块配置。后续重构必须保持此边界。
 
-仍需单独验证工具 PREPARED Effect 在 Run 截止时的跨参与者结算及进程硬退出恢复，完成长期多群图文负载验收，并在新隔离 Bot 数据库上验证当前包基线；现有 v26 旧 SQL 基线不可直接作为新源码的热替换目标。
+仍需单独验证工具 PREPARED Effect 在 Run 截止时的跨参与者结算及进程硬退出恢复，并完成真实低频触发、长期多群图文负载与成本验收。v27 新隔离 Bot 数据库及当前包基线已通过完整装配与上线观察；v26 旧 SQL 基线不作为当前源码的热替换目标。
 
 Effect 放弃回执重放核验（2026-10-12）：内核 Effect authority 在按 `abandonment_operation_id` 返回已有 PREPARED 放弃回执时，现从不可变 attempt 账本核对调用方给出的 `effect_operation_id`；同一 attempt、原因与取消标志但错误 Effect ID 返回 `EFFECT_ABANDONMENT_CONFLICT`。回执摘要和数据库格式不变，既有正确重放仍可用。独立 PostgreSQL 的 Effect 状态回归 1 passed，Ruff 通过；测试容器已移除，在线 v26 未切换，未发送 QQ 消息。
 
