@@ -292,6 +292,27 @@ class LargePngMediaClient(FakeMediaClient):
         return type(self)._capture
 
 
+class LargePngAndGifMediaClient(LargePngMediaClient):
+    _gif_capture = None
+
+    async def fetch(self, locator):
+        if not locator.get("uri", "").endswith("/same-test-gif"):
+            return await super().fetch(locator)
+        self.fetched.append(locator)
+        if type(self)._gif_capture is None:
+            first = Image.new("RGB", (64, 64), (12, 32, 52))
+            second = first.copy()
+            first.paste((60, 220, 240), (12, 12, 52, 52))
+            second.paste((60, 220, 240), (16, 12, 56, 52))
+            buffer = io.BytesIO()
+            first.save(buffer, format="GIF", save_all=True,
+                       append_images=[second], duration=120, loop=0)
+            type(self)._gif_capture = CapturedImage(
+                buffer.getvalue(), "image/gif", 64, 64, 4096,
+            )
+        return type(self)._gif_capture
+
+
 def qiyu_embedding_config(path: str) -> dict[str, str]:
     wanted = {
         "EMBEDDING_PROVIDER", "EMBEDDING_MODEL", "EMBEDDING_DIMENSION",
@@ -6011,7 +6032,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
 
 
 @pytest.mark.postgres
-async def test_real_vl_large_image_auto_archive_cross_group_recall_and_management_trial(
+async def test_real_vl_png_and_gif_archive_cross_group_recall_and_management_trial(
     tmp_path,
 ):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -6058,7 +6079,7 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
 
     host = BotHost(
         settings, model_client_factory=RecordingModelClient,
-        media_client_factory=LargePngMediaClient,
+        media_client_factory=LargePngAndGifMediaClient,
         websocket_client_factory=create_websocket,
         package_catalog=PackageCatalog(tmp_path / "cross-vl-packages"),
     )
@@ -6115,14 +6136,15 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
                     break
                 await asyncio.sleep(0.1)
 
-        async def ingest(group_id, user_id, message_id, text_value, *, mention, image=True):
+        async def ingest(group_id, user_id, message_id, text_value, *, mention,
+                         image=True, image_name="same-test-image"):
             message = []
             if mention:
                 message.append({"type": "at", "data": {"qq": settings.onebot_self_id}})
             message.append({"type": "text", "data": {"text": text_value}})
             if image:
                 message.append({"type": "image", "data": {
-                    "file": "same-test-image", "url": "https://media.example/same-test-image",
+                    "file": image_name, "url": "https://media.example/" + image_name,
                 }})
             await clients[-1].handler(json.dumps({
                 "self_id": int(settings.onebot_self_id), "post_type": "message",
@@ -6135,10 +6157,13 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
             }).encode())
 
         await ingest(933179609, 20001, 97001, "The blue glass orb is here.", mention=False)
-        for index in range(2, 5):
+        await ingest(933179609, 20001, 97002, "The bright cyan square moves in this GIF.",
+                     mention=False, image_name="same-test-gif")
+        for index in range(3, 6):
             await ingest(933179609, 20001, 97000 + index,
                          f"Background conversation {index}.", mention=False, image=False)
-        document_unit = "onebot-unit:" + hashlib.sha256(b"binding/main\x0097001").hexdigest()
+        png_unit = "onebot-unit:" + hashlib.sha256(b"binding/main\x0097001").hexdigest()
+        document_unit = "onebot-unit:" + hashlib.sha256(b"binding/main\x0097002").hexdigest()
         async with asyncio.timeout(180):
             while True:
                 async with host.store.pool.connection() as conn:
@@ -6161,8 +6186,24 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
                 await asyncio.sleep(0.2)
         assert {row["modality"] for row in document_facets} == {"TEXT", "IMAGE"}
         assert all(row["index_ref_id"] for row in document_facets)
+        async with host.store.pool.connection() as conn:
+            png_source = await (await conn.execute(
+                sql.SQL("SELECT eligibility_state FROM {}.source_units "
+                        "WHERE bot_id=%s AND source_unit_id=%s")
+                .format(sql.Identifier(namespace)), (settings.bot_id, png_unit),
+            )).fetchone()
+            png_facets = await (await conn.execute(
+                sql.SQL("SELECT modality,state FROM {}.embedding_facets "
+                        "WHERE bot_id=%s AND purpose='DOCUMENT' AND source_unit_id=%s")
+                .format(sql.Identifier(namespace)), (settings.bot_id, png_unit),
+            )).fetchall()
+        assert png_source["eligibility_state"] == "ELIGIBLE"
+        assert {(row["modality"], row["state"]) for row in png_facets} == {
+            ("TEXT", "READY"), ("IMAGE", "READY"),
+        }
 
-        await ingest(933179610, 20002, 97102, "Where is the blue glass orb?", mention=True)
+        await ingest(933179610, 20002, 97102, "Where is the moving cyan square?",
+                     mention=True, image_name="same-test-gif")
         async with asyncio.timeout(180):
             while not RecordingModelClient.requests:
                 await asyncio.sleep(0.2)
@@ -6288,16 +6329,16 @@ async def test_real_vl_large_image_auto_archive_cross_group_recall_and_managemen
                 "payload": saved["payload"],
             }
 
-        trial_png = io.BytesIO()
-        Image.new("RGB", (64, 64), (33, 91, 147)).save(trial_png, format="PNG")
+        trial_gif = LargePngAndGifMediaClient._gif_capture
+        assert trial_gif is not None
         trial_parts = [
             await upload_trial_part(
                 "part/text", "TEXT", "text/plain",
-                b"Where is the blue glass orb?", None, None,
+                b"Where is the moving cyan square?", None, None,
             ),
             await upload_trial_part(
-                "part/image", "IMAGE", "image/png",
-                trial_png.getvalue(), 64, 64,
+                "part/image", "IMAGE", "image/gif",
+                trial_gif.content, 64, 64,
             ),
         ]
         trial_authorization = SimpleNamespace(
