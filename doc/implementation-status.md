@@ -1329,6 +1329,6 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 
 2026-10-12 v29 部署控制图在线定点热重载：正式 Web 管理预览确认 `deployment.audit` 是唯一准备/排空成员，7 个部署组件保留。提交同工件 REPLACE 后持久请求由 QUEUED/RUNNING 结算 SUCCEEDED，图修订 1→2，准确 Audit Generation 变化且其余 7 个不变；Bot 仍 READY/ONLINE，Supervisor healthy、重启 0、OneBot 连接 1。此证据不覆盖不同版本工件或存储基线的在线升级。详见 `doc/live-v29-cutover-2026-10-12.md`。
 
-2026-10-12 v29 官方控制包跨版本热替换：`deployment.audit` 的 1.0.2 候选仅提升 manifest 包版本，代码和 SQL 不变；官方编译/导出后以 ZIP、包、manifest 三层摘要经目录所有者 CLI 原子发布到 v29 私有包卷。正式预览只影响 Audit；管理动作 SUCCEEDED，部署图 2→3，Audit 活动包 1.0.1→1.0.2 且 Generation 更新，另 7 个不变、存储基线摘要不变。Bot 仍 READY/ONLINE，Supervisor healthy、重启 0、OneBot 连接 1。该结果不证明普通第三方 SQL 或存储基线在线升级；详见 `doc/live-v29-cutover-2026-10-12.md`。
+2026-10-12 v29 官方控制包跨版本热替换：`deployment.audit` 的 1.0.2 候选仅提升 manifest 包版本，代码和 SQL 不变；官方编译/导出后以 ZIP、包、manifest 三层摘要经目录所有者 CLI 原子发布到 v29 私有包卷。正式预览只影响 Audit；管理动作 SUCCEEDED，部署图 2→3，Audit 活动包 1.0.1→1.0.2 且 Generation 更新，另 7 个不变、存储基线摘要不变。Bot 仍 READY/ONLINE，Supervisor healthy、重启 0、OneBot 连接 1。仓库 builtin manifest 已同步为 1.0.2，干净缓存构建得到与线上相同的包/manifest 摘要。该结果不证明普通第三方 SQL 或存储基线在线升级；详见 `doc/live-v29-cutover-2026-10-12.md`。
 
 2026-10-12 v29 官方包选择的进程恢复：Agent Run 为 0 时受控 `docker restart` v29 Supervisor；重启后的部署图修订 4 为 8/8 ACTIVE，准确恢复 `deployment.audit` 1.0.2，Bot 从 STARTING 收敛为 READY/ONLINE，Bot 图修订 3 为 22/22 ACTIVE、Memory 仍为 1.93.4 / SQL 3.92.0，OneBot 连接恢复为 1。Supervisor healthy，Docker 重启计数 0 表示没有额外崩溃重试；该证据不覆盖活动 Agent Run 中断。详见 `doc/live-v29-cutover-2026-10-12.md`。

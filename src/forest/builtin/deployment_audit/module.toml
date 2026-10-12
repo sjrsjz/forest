@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.deployment-audit"
-version = "1.0.1"
+version = "1.0.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "deployment_audit:DeploymentAudit"
