@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -17,10 +19,16 @@ from forest.packages import PackageCatalog
 
 
 @pytest.mark.postgres
-async def test_group_source_browse_at_one_hundred_thousand_units(
+async def test_group_source_browse_at_scale(
     clean_authority, tmp_path,
 ):
     store, installer = clean_authority
+    units_per_group = int(os.environ.get("FOREST_TEST_BROWSE_UNITS_PER_GROUP", "50000"))
+    assert 50000 <= units_per_group <= 500000
+    deep_position = units_per_group // 2
+    deep_time = (datetime(2025, 1, 1, tzinfo=timezone.utc)
+                 + timedelta(seconds=deep_position)).isoformat().replace("+00:00", "Z")
+
     kernel = await bootstrap_kernel(store, installer)
     package = await bootstrap_builtin_package(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
@@ -62,10 +70,10 @@ async def test_group_source_browse_at_one_hundred_thousand_units(
                 "'author/'||%s||'/'||n,0,'ELIGIBLE',clock_timestamp(),"
                 "pg_current_xact_id(),"
                 "TIMESTAMPTZ '2025-01-01' + n*INTERVAL '1 second' "
-                "FROM generate_series(1,50000) n"
+                "FROM generate_series(1,%s) n"
             ).format(namespace), (
                 store.bot_id, group, group, digest, source, trunk, digest,
-                group, digest, group,
+                group, digest, group, units_per_group,
             ))
         await conn.execute(sql.SQL("ANALYZE {}.source_units").format(namespace))
         await conn.execute(sql.SQL("ANALYZE {}.memory_sources").format(namespace))
@@ -85,7 +93,8 @@ async def test_group_source_browse_at_one_hundred_thousand_units(
     first, first_seconds = await page({"external_group_id": "933179609", "limit": 50})
     assert first["has_more"] is True
     assert [item["source_unit_id"] for item in first["items"]] == [
-        f"unit/933179609/{number:06d}" for number in range(50000, 49950, -1)
+        f"unit/933179609/{number:06d}"
+        for number in range(units_per_group, units_per_group - 50, -1)
     ]
     assert all(item["external_group_id"] == "933179609" for item in first["items"])
 
@@ -99,18 +108,20 @@ async def test_group_source_browse_at_one_hundred_thousand_units(
     }
     second, second_seconds = await page(cursor)
     assert [item["source_unit_id"] for item in second["items"]] == [
-        f"unit/933179609/{number:06d}" for number in range(49950, 49900, -1)
+        f"unit/933179609/{number:06d}"
+        for number in range(units_per_group - 50, units_per_group - 100, -1)
     ]
 
-    # This is the same filter/snapshot-bound cursor advanced to a known deep
-    # key; it exercises the 25,000th position without 500 HTTP round trips.
+    # Advance the same filter/snapshot-bound cursor to the middle of the
+    # dataset without paying for thousands of intermediate HTTP pages.
     deep, deep_seconds = await page({
         **cursor,
-        "after_occurred_at": "2025-01-01T06:56:40Z",
-        "after_source_unit_id": "unit/933179609/025000",
+        "after_occurred_at": deep_time,
+        "after_source_unit_id": f"unit/933179609/{deep_position:06d}",
     })
     assert [item["source_unit_id"] for item in deep["items"]] == [
-        f"unit/933179609/{number:06d}" for number in range(24999, 24949, -1)
+        f"unit/933179609/{number:06d}"
+        for number in range(deep_position - 1, deep_position - 51, -1)
     ]
     no_facets, coverage_seconds = await page({
         "external_group_id": "933179609", "index_coverage": "NO_FACETS",
@@ -134,18 +145,18 @@ async def test_group_source_browse_at_one_hundred_thousand_units(
             "'scale/op/'||lpad(n::text,5,'0'),%s,"
             "'scale/relation/'||lpad(n::text,5,'0'),"
             "'ASSOCIATES_WITH','SOURCE_UNIT',"
-            "'unit/933179609/'||lpad((CASE WHEN n=8193 THEN 50000 ELSE n END)"
+            "'unit/933179609/'||lpad((CASE WHEN n=8193 THEN %s ELSE n END)"
             "::text,6,'0'),'SOURCE_UNIT',"
             "'unit/933179610/'||lpad(n::text,6,'0'),"
             "'RULE',500000,0,true FROM generate_series(1,8193) n"
-        ).format(namespace), (store.bot_id, digest_a))
+        ).format(namespace), (store.bot_id, digest_a, units_per_group))
         await conn.execute(sql.SQL("ANALYZE {}.relation_contributions").format(namespace))
     related, relation_seconds = await page({
         "external_group_id": "933179609", "relation_kind": "ASSOCIATES_WITH",
         "relation_cross_trunk": True, "limit": 1,
     })
     assert [item["source_unit_id"] for item in related["items"]] == [
-        "unit/933179609/050000"
+        f"unit/933179609/{units_per_group:06d}"
     ]
     assert related["has_more"] is True
     unrelated, _ = await page({
@@ -153,12 +164,31 @@ async def test_group_source_browse_at_one_hundred_thousand_units(
         "limit": 1,
     })
     assert unrelated["items"] == []
+    started = time.perf_counter()
+    async with store.pool.connection() as conn:
+        frozen = await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_freeze_forget_selection(%s,%s) AS result"
+        ).format(namespace), (
+            Jsonb({"bot_id": store.bot_id, "operation_id": "scale/forget/relations"}),
+            Jsonb({
+                "selection_id": "scale/forget/relations",
+                "requested_by": "subject/scale-admin",
+                "filters": {
+                    "external_group_id": "933179609",
+                    "relation_kind": "ASSOCIATES_WITH",
+                    "relation_cross_trunk": True,
+                },
+            }),
+        ))).fetchone()
+    selection_seconds = time.perf_counter() - started
+    assert frozen["result"]["ok"], frozen
+    assert frozen["result"]["value"]["member_count"] == 8193
     # The sparse missing-projection path must not omit a late source when
     # 8193 distinct sources exceed the bounded candidate threshold.
     async with store.pool.connection() as conn, conn.transaction():
         members = (
             "SELECT n FROM generate_series(1,8192) n "
-            "UNION ALL SELECT 50000"
+            f"UNION ALL SELECT {units_per_group}"
         )
         await conn.execute(sql.SQL(
             "INSERT INTO {}.source_parts "
@@ -196,14 +226,15 @@ async def test_group_source_browse_at_one_hundred_thousand_units(
         "only_missing_text_projection": True, "limit": 1,
     })
     assert [item["source_unit_id"] for item in missing_text["items"]] == [
-        "unit/933179609/050000"
+        f"unit/933179609/{units_per_group:06d}"
     ]
     assert missing_text["has_more"] is True
     print(
-        "source_browse_seconds first={:.3f} second={:.3f} deep={:.3f} "
-        "coverage={:.3f} unknown={:.3f} relation={:.3f} missing_text={:.3f}".format(
-            first_seconds, second_seconds, deep_seconds,
+        "source_browse_units={} seconds first={:.3f} second={:.3f} deep={:.3f} "
+        "coverage={:.3f} unknown={:.3f} relation={:.3f} "
+        "relation_selection={:.3f} missing_text={:.3f}".format(
+            units_per_group * 2, first_seconds, second_seconds, deep_seconds,
             coverage_seconds, unknown_seconds, relation_seconds,
-            missing_text_seconds,
+            selection_seconds, missing_text_seconds,
         )
     )

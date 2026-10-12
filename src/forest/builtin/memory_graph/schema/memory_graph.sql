@@ -9675,6 +9675,28 @@ LANGUAGE sql STABLE AS $$
            u.occurred_at<(filters->>'occurred_to')::timestamptz);
 $$;
 
+CREATE FUNCTION memory_relation_source_candidates(
+    requested_bot text, filters jsonb, snapshot_value pg_snapshot)
+RETURNS TABLE (source_unit_id text)
+LANGUAGE sql STABLE AS $$
+    WITH relation_rows AS MATERIALIZED (
+        SELECT c.left_kind,c.left_id,c.right_kind,c.right_id
+        FROM __forest_module_schema__.relation_contributions c
+        WHERE c.bot_id=requested_bot AND c.active
+          AND (c.left_kind='SOURCE_UNIT' OR c.right_kind='SOURCE_UNIT')
+          AND pg_catalog.pg_visible_in_snapshot(c.created_xid,snapshot_value)
+          AND (filters->>'relation_kind' IS NULL OR
+               c.relation_kind=filters->>'relation_kind')
+          AND (filters->>'relation_cross_trunk' IS NULL OR
+               c.cross_trunk=(filters->>'relation_cross_trunk')::boolean)
+    )
+    SELECT left_id AS source_unit_id FROM relation_rows
+    WHERE left_kind='SOURCE_UNIT'
+    UNION
+    SELECT right_id FROM relation_rows
+    WHERE right_kind='SOURCE_UNIT';
+$$;
+
 CREATE FUNCTION memory_query_sources(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE
@@ -9695,7 +9717,6 @@ DECLARE
     selected_text text := input->>'text_contains';
     selected_relation_filter boolean := input ? 'relation_kind' OR
                                         input ? 'relation_cross_trunk';
-    candidate_relation_count integer;
     candidate_source_ids text[];
     items jsonb;
     more boolean;
@@ -9801,38 +9822,13 @@ BEGIN
                     AND t.content_digest=f.facet_content_digest)
             ORDER BY f.source_unit_id LIMIT 8193
         ) candidate;
-    ELSIF selected_relation_filter THEN
-        -- If more than 8192 contribution rows qualify, use the ordered source
-        -- scan. A partial candidate list must never silently omit sources.
-        WITH candidate_relations AS MATERIALIZED (
-            SELECT c.left_kind,c.left_id,c.right_kind,c.right_id
-            FROM __forest_module_schema__.relation_contributions c
-            WHERE c.bot_id=context->>'bot_id' AND c.active
-              AND (c.left_kind='SOURCE_UNIT' OR c.right_kind='SOURCE_UNIT')
-              AND pg_visible_in_snapshot(c.created_xid,snapshot_value)
-              AND (selected_relation_kind IS NULL OR
-                   c.relation_kind=selected_relation_kind)
-              AND (NOT input ? 'relation_cross_trunk' OR
-                   c.cross_trunk=(input->>'relation_cross_trunk')::boolean)
-            ORDER BY c.contribution_id LIMIT 8193
-        ), relation_members AS (
-            SELECT left_id AS source_unit_id FROM candidate_relations
-            WHERE left_kind='SOURCE_UNIT'
-            UNION
-            SELECT right_id FROM candidate_relations
-            WHERE right_kind='SOURCE_UNIT'
-        )
-        SELECT (SELECT count(*) FROM candidate_relations),
-               (SELECT array_agg(source_unit_id) FROM relation_members)
-        INTO candidate_relation_count,candidate_source_ids;
     END IF;
     IF input ? 'source_unit_id' OR
        (selected_text IS NOT NULL AND
         COALESCE(cardinality(candidate_source_ids),0)<=8192) OR
        ((selected_unknown OR selected_missing_text OR
          selected_index_coverage IN ('COMPLETE','PARTIAL')) AND
-        COALESCE(cardinality(candidate_source_ids),0)<=8192) OR
-       (selected_relation_filter AND candidate_relation_count<=8192) THEN
+        COALESCE(cardinality(candidate_source_ids),0)<=8192) THEN
         WITH page AS (
             SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
                 u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
@@ -9841,6 +9837,36 @@ BEGIN
                 u.ready_document_facet_count,u.failed_document_facet_count,
                 u.unknown_document_facet_count,u.index_coverage
             FROM unnest(COALESCE(candidate_source_ids,ARRAY[]::text[])) candidate(source_unit_id)
+            JOIN __forest_module_schema__.memory_filtered_source_units(
+                context->>'bot_id',input,snapshot_time,snapshot_value) u
+              ON u.source_unit_id=candidate.source_unit_id
+            WHERE after_time IS NULL OR
+                (u.occurred_at,u.source_unit_id)<
+                (after_time,input->>'after_source_unit_id')
+            ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT page_limit+1
+        ), visible AS (
+            SELECT * FROM page ORDER BY occurred_at DESC,source_unit_id DESC LIMIT page_limit
+        )
+        SELECT COALESCE((SELECT jsonb_agg(to_jsonb(v) ORDER BY v.occurred_at DESC,v.source_unit_id DESC)
+                         FROM visible v),'[]'::jsonb),
+               (SELECT count(*)>page_limit FROM page),
+               (SELECT jsonb_build_object('occurred_at',v.occurred_at,
+                           'source_unit_id',v.source_unit_id)
+                FROM visible v ORDER BY v.occurred_at,v.source_unit_id LIMIT 1)
+        INTO items,more,cursor_value;
+    ELSIF selected_relation_filter THEN
+        -- Relation-first browsing keeps sparse links off the million-row
+        -- ordered source scan. The final source filter rechecks visibility,
+        -- eligibility and evidence at the frozen browse snapshot.
+        WITH page AS (
+            SELECT u.source_unit_id,u.source_id,u.trunk_id,u.source_kind,
+                u.platform,u.realm_id,u.external_group_id,u.author_subject_ref,
+                u.unit_kind,u.modality,u.occurred_at,u.source_order_seq,u.part_count,
+                u.eligibility_state,u.source_status,u.document_facet_count,
+                u.ready_document_facet_count,u.failed_document_facet_count,
+                u.unknown_document_facet_count,u.index_coverage
+            FROM __forest_module_schema__.memory_relation_source_candidates(
+                context->>'bot_id',input,snapshot_value) candidate
             JOIN __forest_module_schema__.memory_filtered_source_units(
                 context->>'bot_id',input,snapshot_time,snapshot_value) u
               ON u.source_unit_id=candidate.source_unit_id
@@ -10778,19 +10804,39 @@ BEGIN
     IF validation->>'ok' IS DISTINCT FROM 'true' THEN
         RETURN validation;
     END IF;
-    INSERT INTO __forest_module_schema__.forget_selection_members(
-        bot_id,selection_id,ordinal,source_unit_id,source_revision,
-        anchor_payload_id)
-    SELECT requested_bot,requested_selection,
-           row_number() OVER (ORDER BY chosen.occurred_at DESC,
-               chosen.source_unit_id DESC),
-           chosen.source_unit_id,chosen.source_revision,chosen.author_payload_id
-    FROM (
-        SELECT source_unit_id,source_revision,author_payload_id,occurred_at
-        FROM __forest_module_schema__.memory_filtered_source_units(
-            requested_bot,requested_filters,snapshot_time,snapshot_value)
-        ORDER BY occurred_at DESC,source_unit_id DESC LIMIT 1000001
-    ) chosen;
+    IF requested_filters ? 'relation_kind' OR
+       requested_filters ? 'relation_cross_trunk' THEN
+        INSERT INTO __forest_module_schema__.forget_selection_members(
+            bot_id,selection_id,ordinal,source_unit_id,source_revision,
+            anchor_payload_id)
+        SELECT requested_bot,requested_selection,
+               row_number() OVER (ORDER BY chosen.occurred_at DESC,
+                   chosen.source_unit_id DESC),
+               chosen.source_unit_id,chosen.source_revision,chosen.author_payload_id
+        FROM (
+            SELECT u.source_unit_id,u.source_revision,u.author_payload_id,u.occurred_at
+            FROM __forest_module_schema__.memory_relation_source_candidates(
+                requested_bot,requested_filters,snapshot_value) candidate
+            JOIN __forest_module_schema__.memory_filtered_source_units(
+                requested_bot,requested_filters,snapshot_time,snapshot_value) u
+              ON u.source_unit_id=candidate.source_unit_id
+            ORDER BY u.occurred_at DESC,u.source_unit_id DESC LIMIT 1000001
+        ) chosen;
+    ELSE
+        INSERT INTO __forest_module_schema__.forget_selection_members(
+            bot_id,selection_id,ordinal,source_unit_id,source_revision,
+            anchor_payload_id)
+        SELECT requested_bot,requested_selection,
+               row_number() OVER (ORDER BY chosen.occurred_at DESC,
+                   chosen.source_unit_id DESC),
+               chosen.source_unit_id,chosen.source_revision,chosen.author_payload_id
+        FROM (
+            SELECT source_unit_id,source_revision,author_payload_id,occurred_at
+            FROM __forest_module_schema__.memory_filtered_source_units(
+                requested_bot,requested_filters,snapshot_time,snapshot_value)
+            ORDER BY occurred_at DESC,source_unit_id DESC LIMIT 1000001
+        ) chosen;
+    END IF;
     GET DIAGNOSTICS selected_count = ROW_COUNT;
     IF selected_count=0 OR selected_count>1000000 THEN
         DELETE FROM __forest_module_schema__.forget_selection_members

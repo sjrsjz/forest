@@ -28,8 +28,10 @@
 | --- | --- | --- |
 | 微内核、Bot 身份与包生命周期 | v29 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；在线 `deployment.audit` 同工件重载和官方 1.0.1→1.0.2 换包使部署图修订 1→2→3，每次仅该组件换代，其余 7 个 Generation 保留；Supervisor 受控重启后仍从目录恢复 1.0.2，Bot 图与唯一 OneBot 连接重新收敛；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作。完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
-| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证大 PNG 和动画 GIF 同时归档、GIF 图像跨群召回及管理结果来源归因；v28 的在线文本/PNG 试验各召回 8 项并标明群号和主干，v29 的真实 GIF 输入试验 READY、当时无 ELIGIBLE 来源而返回 0 项。 | 许可群显式 @→回复、在线 GIF 来源结果展示、长期图文成本、百万级筛选与物理索引恢复的运营闭环仍未验收。 |
+| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证大 PNG 和动画 GIF 同时归档、GIF 图像跨群召回及管理结果来源归因；v28 的在线文本/PNG 试验各召回 8 项并标明群号和主干，v29 的真实 GIF 输入试验 READY、当时无 ELIGIBLE 来源而返回 0 项。 | 许可群显式 @→回复、在线 GIF 来源结果展示、长期图文成本、百万级混合图文筛选与物理索引恢复的运营闭环仍未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算与 Worker 硬退出恢复各 1 passed。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
+
+百万来源关联筛选与遗忘选择（2026-10-12）：隔离 PostgreSQL 中扩展现有规模场景为两群各 500,000 条 ELIGIBLE 来源、8193 条跨主干关系。旧 SQL 在相同分布下的关联首页用时 5.598 秒；Memory 包 1.93.5 / SQL 3.92.1 改用包内共用的关系候选函数，最终关联首页 0.394 秒，按同一关系与群条件冻结 8193 个遗忘成员 0.921 秒，普通首页/深页 0.012/0.004 秒，缺失文本投影筛选 0.841 秒；结果、跨主干条件和游标断言均通过，1 passed in 168.80s。另有两个隔离 PostgreSQL 的关系快照与遗忘选择回归通过；包按完整 Bot 嵌入配置构建、Ruff 与差异检查通过。样本关系稀疏、Payload 为合成引用；这些数字不代表百万条真实图文及高密度关系的服务级延迟，也没有更新在线 v29 的旧包。
 
 动画 GIF 来源整链验证（2026-10-12）：将原有隔离跨群真实 VL 用例扩展为同一 Bot 中大 PNG 与双帧 GIF 分别归档，并用完全相同的 GIF 触发跨群图片召回和管理试验。真实 QiYu Qwen3-VL-Embedding-8B 与 Milvus 下，两个来源的 TEXT/IMAGE 文档 facet 均 READY；GIF 的 IMAGE→IMAGE 种子命中、群 933179609 和作者 qq:20001 的来源归因、跨主干联想及管理结果均通过，1 passed in 220.51s。OneBot 与聊天模型均为测试替身，没有向 QQ 发送消息；这不代替 v29 在线库自然消息达到裁剪水位后的 GIF 结果展示或长时间成本验收。
 
