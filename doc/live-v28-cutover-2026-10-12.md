@@ -8,6 +8,8 @@
 
 北京时间约 13:45 的只读采样：v28 Supervisor healthy，部署图 8/8 ACTIVE，Bot 为 READY/ONLINE、运行状态 ACTIVE，Bot 图 22 个模块和 22 个 schema bundle 全部就绪。实际包版本为 `forest.agent-runtime` 4.51.0、`forest.memory-graph` 1.93.3、`forest.vector-index.milvus` 2.23.0。树莓派旧 `alicebot.service` 为 inactive，OneBot `8080` 端口仅有 1 条已建立连接。v27 Supervisor 仍 healthy，Bot 保持 OFFLINE，作为隔离回退对象。
 
-新 Bot 的入站和 Memory 来源账本已随自然群消息增长；首个采样分别为 12 条，随后入站 13 条，均被分类为 `group_not_allowed`。许可群 `933179609` 的入站仍为 0，Agent Run 为 0；因此这里没有宣称真实 @→Agent→Provider→发送链、在线 GIF 图片召回结果或长期成本已经通过。此轮未主动向 QQ 发消息。自然入站账本有增长并不能代替许可群触发验收。
+新 Bot 的入站和 Memory 来源账本已随自然群消息增长；首个采样分别为 12 条，随后入站 13 条，均被分类为 `group_not_allowed`。随后许可群 `933179609` 有 5 条自然入站，分类均为 `NO_TRIGGER/mention_required`，Agent Run 为 0：这些记录不能作为显式 @→Agent→Provider→发送链的验收。此轮未主动向 QQ 发消息。
+
+北京时间约 15:30 的在线记忆试验：来源账本中 62 个 source unit 为 ELIGIBLE，75 个嵌入 facet；经 Bot 管理 scope 的标准资产上传与 `memory.trial.start/get/result/image` 端口，对文本「你有什么功能」发起一次试验，约 10 秒 READY，返回 8 项带准确来源群号和主干 ID 的结果。结果第 6 项包含 790×296 PNG，经模块 `trial.image` 分块读取并核对 SHA-256 后，将原图作为独立图片输入再次试验，约 10 秒 READY，返回 8 项；首页 4 项均有图片且为直接种子，群号和主干 ID 齐全。两个试验各调用一次嵌入，均未发送 QQ 消息。这证明本实例的管理侧文本/图片召回及结果归因能工作；尚未证明 GIF 来源恰好进入召回结果，也未证明许可群真实 @ 回复或长期负载。
 
 回退顺序：先通过 v28 管理面将 `forest-main-v28` 设为 OFFLINE 并确认观测状态，再通过 v27 管理面将 `forest-main-v27` 设为 ONLINE；两套数据库及包卷独立保留，回退不会合并 v28 新产生的消息和记忆。
