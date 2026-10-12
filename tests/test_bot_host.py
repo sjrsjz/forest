@@ -4211,7 +4211,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real")
+    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real", "vector-web-recover")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -4245,7 +4245,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
     )
     qiyu_env_file = os.environ.get("FOREST_TEST_QIYU_ENV_FILE") if scenario == "visual" else None
     real_transport = bool(qiyu_env_file)
-    real_vector = scenario == "vector-web-real"
+    real_vector = scenario in {"vector-web-real", "vector-web-recover"}
     if real_vector:
         milvus_uri = os.environ.get("FOREST_TEST_MILVUS_URI")
         if not milvus_uri:
@@ -4365,7 +4365,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 expected_desired_revision=desired.revision,
             )
             await host.replace_runtime_graph()
-        if scenario in {"vector-web", "vector-web-real"}:
+        if scenario in {"vector-web", "vector-web-real", "vector-web-recover"}:
             document_ref = None
             if real_vector:
                 conversation = host.registry.get("conversation.scheduler")
@@ -4425,6 +4425,38 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                         await asyncio.sleep(0.2)
                 assert document_ref
                 assert not clients[-1].sent
+                if scenario == "vector-web-recover":
+                    driver = host.registry.get("vector.index")._effect_drivers[
+                        "vector.transport.search"
+                    ]
+                    physical = AsyncMilvusClient(uri=settings.vector_index_endpoint)
+                    try:
+                        assert (await physical.get(
+                            collection_name=driver.collection_name,
+                            ids=[document_ref], output_fields=["ref_id"],
+                            consistency_level="Strong",
+                        )) == [{"ref_id": document_ref}]
+                        await physical.drop_collection(
+                            collection_name=driver.collection_name
+                        )
+                    finally:
+                        await physical.close()
+                    with pytest.raises(ForestError) as missing_index:
+                        await driver.invoke(
+                            {"query_ref_id": "probe",
+                             "space_id": driver.configuration["space_id"],
+                             "limit": 1,
+                             "binding": {
+                                 "binding_revision": driver.binding_revision,
+                                 "collection_id": driver.collection_id,
+                                 "collection_name": driver.collection_name,
+                             }},
+                            scope=driver.identity,
+                            invocation=SimpleNamespace(
+                                operation_id="vector-web-recovery-probe"
+                            ),
+                        )
+                    assert missing_index.value.code == "VECTOR_INDEX_REBUILD_REQUIRED"
 
             class VectorWebSupervisor:
                 async def management_scopes(self):
@@ -4474,7 +4506,10 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                         headers=headers, json={},
                     )
                     assert overview.status_code == 200, overview.text
-                    assert overview.json()["health_state"] == "READY"
+                    assert overview.json()["health_state"] == (
+                        "REBUILD_REQUIRED" if scenario == "vector-web-recover"
+                        else "READY"
+                    )
                     assert overview.json()["binding"]["binding_revision"] == 1
                     old_collection_name = overview.json()["binding"]["collection_name"]
                     action_headers = {**headers, "idempotency-key": "vector-web-rebuild"}
@@ -4531,13 +4566,21 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                         assert new_collection_name != old_collection_name
                         physical = AsyncMilvusClient(uri=settings.vector_index_endpoint)
                         try:
-                            for collection_name in (old_collection_name, new_collection_name):
-                                rows = await physical.get(
-                                    collection_name=collection_name,
+                            if scenario == "vector-web-recover":
+                                assert not await physical.has_collection(
+                                    collection_name=old_collection_name
+                                )
+                            else:
+                                assert (await physical.get(
+                                    collection_name=old_collection_name,
                                     ids=[document_ref], output_fields=["ref_id"],
                                     consistency_level="Strong",
-                                )
-                                assert rows == [{"ref_id": document_ref}]
+                                )) == [{"ref_id": document_ref}]
+                            assert (await physical.get(
+                                collection_name=new_collection_name,
+                                ids=[document_ref], output_fields=["ref_id"],
+                                consistency_level="Strong",
+                            )) == [{"ref_id": document_ref}]
                             async with asyncio.timeout(25):
                                 while True:
                                     page = await web.post(
