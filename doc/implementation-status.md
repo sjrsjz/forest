@@ -8,6 +8,8 @@
 
 08:28 复查发现树莓派旧 `alicebot.service` 已因自启恢复运行；现已停止并禁用自启。OneBot 到 v27 的远端连接保持一条，v27 仍为 READY/ONLINE、22/22 ACTIVE、零观察违规；自然群消息使新库来源达到 12、主干达到 5，但许可群仍无入站记录。详见[切换记录](live-v27-cutover-2026-10-12.md)。
 
+09:57（北京时间）只读复查：v27 Supervisor 容器健康；Bot 库有 7 条 `memory_sources` 来源身份、84 条逐消息 `source_units`、84 条 occurrence 与 84 条 capture operation。七条 Conversation lane 的入站、分类和上下文应用累计水位均为 84，Memory 待处理输入事件为 0；84 条单元都处于 REGISTERED，嵌入 facet 为 0。许可群 `933179609` 仍无来源单元，Agent Run 为 0。来源身份数不能当作逐消息捕获数；当前观察不证明归档后的资格提升、嵌入成本或真实回复链。
+
 权威边界已核对：部署内核的 `bots`、`runtime_intents` 与监督器观测账本持有 Bot 基础身份和运行意图；可热替换的 `deployment.bot-catalog` 通过清单声明的受限 kernel query/command 端口贡献目录管理 UI，不复制 Bot 状态或拥有目标 Bot 的模块配置。后续重构必须保持此边界。
 
 工具 PREPARED Effect 在 Run 截止时的跨参与者结算与 Agent Worker 硬退出后的恢复均已通过隔离 PostgreSQL 回归；真实低频触发、长期多群图文负载与成本验收尚未完成。v27 新隔离 Bot 数据库及当前包基线已通过完整装配与上线观察；v26 旧 SQL 基线不作为当前源码的热替换目标。
