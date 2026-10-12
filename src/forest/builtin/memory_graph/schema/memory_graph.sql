@@ -1665,7 +1665,7 @@ BEGIN
                    p->>'media_type'<>'text/plain' OR p->>'width' IS NOT NULL
                    OR p->>'height' IS NOT NULL OR (p->>'byte_length')::bigint>65536))
                OR (p->>'modality'='IMAGE' AND (
-                   p->>'media_type' NOT IN ('image/png','image/jpeg','image/webp')
+                   p->>'media_type' NOT IN ('image/png','image/jpeg','image/webp','image/gif')
                    OR p->>'width' !~ '^[1-9][0-9]*$'
                    OR p->>'height' !~ '^[1-9][0-9]*$'
                    OR (p->>'width')::integer>100000 OR (p->>'height')::integer>100000))

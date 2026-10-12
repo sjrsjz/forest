@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import os
 import socket
@@ -13,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 from jsonschema import Draft202012Validator
+from PIL import Image
 from psycopg import errors, sql
 from psycopg.types.json import Jsonb
 from test_deployment_management_app import _IdentityAuthority
@@ -2096,18 +2098,19 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
             assert ticket is not None
         assets = ManagementAssetAuthority(kernel.payload)
 
-        async def uploaded(part_id, upload_id, content):
+        async def uploaded(part_id, upload_id, content, *,
+                           target_ref="query/authority", media_type="text/plain"):
             part_digest = "sha256:" + hashlib.sha256(content).hexdigest()
             async with store.pool.connection() as conn, conn.transaction():
                 await assets.begin_in(
                     conn, upload_id=upload_id, component_id="memory.graph",
                     asset_id="trial.input", actor_subject_ref="admin-1",
-                    generation_id=generation_id, target_ref="query/authority",
+                    generation_id=generation_id, target_ref=target_ref,
                     part_id=part_id, owner_kind="trial.input",
-                    owner_id=_trial_owner_id("query/authority", part_id),
-                    media_type="text/plain", byte_length=len(content),
+                    owner_id=_trial_owner_id(target_ref, part_id),
+                    media_type=media_type, byte_length=len(content),
                     content_digest=part_digest, chunk_count=1,
-                    allowed_media_types=("text/plain",), max_bytes=8388608,
+                    allowed_media_types=(media_type,), max_bytes=8388608,
                 )
                 await assets.put_chunk_in(
                     conn, upload_id=upload_id, component_id="memory.graph",
@@ -2186,6 +2189,23 @@ async def test_management_trial_action_requires_live_exact_payload_reference(
             authorization=web_actor,
         )
         assert viewed["query_id"] == "query/authority"
+        image_bytes = io.BytesIO()
+        Image.new("RGB", (12, 10), "red").save(image_bytes, format="GIF")
+        gif_content = image_bytes.getvalue()
+        gif_ref = await uploaded(
+            "image/0", "upload-authority-gif", gif_content,
+            target_ref="query/authority-gif", media_type="image/gif",
+        )
+        gif_body = {"query_id": "query/authority-gif", "parts": [{
+            "part_id": "image/0", "modality": "IMAGE", "media_type": "image/gif",
+            "byte_length": len(gif_content), "width": 12, "height": 10,
+            "payload": gif_ref,
+        }]}
+        gif_started = await instance.management_contract.action(
+            "memory.trial.start", operation_id="web:trial-gif", payload=gif_body,
+            authorization=web_actor, authorization_guard=accept_fixture_ticket,
+        )
+        assert gif_started["query_id"] == "query/authority-gif"
         cancelled = await instance.management_contract.action(
             "memory.trial.cancel", operation_id="web:trial-cancel",
             payload={"query_id": "query/authority"},
@@ -2231,7 +2251,7 @@ async def test_management_trial_registers_mixed_input_and_separate_cancellation(
         }
 
     body = {"query_id": "query/management", "requested_by": "web:admin",
-            "parts": [part(0, "TEXT", "text/plain"), part(1, "IMAGE", "image/png")]}
+            "parts": [part(0, "TEXT", "text/plain"), part(1, "IMAGE", "image/gif")]}
 
     async def invoke(function, context, payload):
         if function == "memory_read_management_trial":

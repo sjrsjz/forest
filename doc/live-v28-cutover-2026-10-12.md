@@ -12,4 +12,6 @@
 
 北京时间约 15:45 的在线记忆试验：来源账本中 62 个 source unit 为 ELIGIBLE，75 个嵌入 facet；经 Bot 管理 scope 的标准资产上传与 `memory.trial.start/get/result/image` 端口，对文本「你有什么功能」发起一次试验，约 10 秒 READY，返回 8 项带准确来源群号和主干 ID 的结果。结果第 6 项包含 790×296 PNG，经模块 `trial.image` 分块读取并核对 SHA-256 后，将原图作为独立图片输入再次试验，约 10 秒 READY，返回 8 项；首页 4 项均有图片且为直接种子，群号和主干 ID 齐全。两个试验各调用一次嵌入，均未发送 QQ 消息。这证明本实例的管理侧文本/图片召回及结果归因能工作；来源管理端另查到 3 个符合资格的 GIF 来源单元，但本次返回的 8 项中没有 GIF，因此尚未证明 GIF 管理结果实际展示，也未证明许可群真实 @ 回复或长期负载。
 
+随后按来源页定位到 3 个 ELIGIBLE GIF，仅读取其中一张已归档图片（1,352,134 字节）作为试验样本，摘要与来源账本一致。v28 旧镜像的 `trial.input` 上传声明返回 HTTP 500；容器日志确认内核 `management_asset_uploads_media_type_check` 拒绝 `image/gif`。源码审计还发现 Memory 试验 SQL 输入白名单漏了 GIF。当前源码已修正两处 SQL，Memory 包为 1.93.4 / SQL 3.92.0；隔离 PostgreSQL 的 GIF 资产上传、认证资产交接及试验登记 3 passed，Ruff 通过。v28 在线旧镜像及旧库仍有此缺陷，需独立新 Bot 库验收 GIF 管理结果。
+
 回退顺序：先通过 v28 管理面将 `forest-main-v28` 设为 OFFLINE 并确认观测状态，再通过 v27 管理面将 `forest-main-v27` 设为 ONLINE；两套数据库及包卷独立保留，回退不会合并 v28 新产生的消息和记忆。

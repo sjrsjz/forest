@@ -166,7 +166,7 @@ CREATE TABLE management_asset_uploads (
     owner_kind text NOT NULL CHECK (octet_length(owner_kind) BETWEEN 1 AND 128),
     owner_id text NOT NULL CHECK (octet_length(owner_id) BETWEEN 1 AND 512),
     media_type text NOT NULL CHECK (media_type IN (
-        'text/plain','image/png','image/jpeg','image/webp')),
+        'text/plain','image/png','image/jpeg','image/webp','image/gif')),
     byte_length integer NOT NULL CHECK (byte_length BETWEEN 1 AND 8388608),
     content_digest text NOT NULL CHECK (content_digest ~ '^sha256:[a-f0-9]{64}$'),
     chunk_count integer NOT NULL CHECK (chunk_count BETWEEN 1 AND 32),

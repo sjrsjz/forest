@@ -115,6 +115,46 @@ async def test_management_asset_chunks_publish_one_bound_payload(clean_authority
 
 
 @pytest.mark.postgres
+async def test_management_gif_asset_matches_declared_trial_media(clean_authority):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    authority = ManagementAssetAuthority(kernel.payload)
+    output = io.BytesIO()
+    Image.new("RGB", (12, 10), "red").save(output, format="GIF")
+    content = output.getvalue()
+    digest = "sha256:" + hashlib.sha256(content).hexdigest()
+    target_ref, part_id = "query/gif", "image/0"
+    owner_id = "trial:" + hashlib.sha256(
+        (target_ref + "\0" + part_id).encode()
+    ).hexdigest()
+    async with store.pool.connection() as conn, conn.transaction():
+        begin = await authority.begin_in(
+            conn, upload_id="trial-gif", component_id="memory.graph",
+            asset_id="trial.input", actor_subject_ref="admin-1",
+            generation_id="generation-1", target_ref=target_ref,
+            part_id=part_id, owner_kind="trial.input", owner_id=owner_id,
+            media_type="image/gif", byte_length=len(content),
+            content_digest=digest, chunk_count=1,
+            allowed_media_types=("image/gif",), max_bytes=8 * 1024 * 1024,
+        )
+        assert begin["state"] == "OPEN"
+        await authority.put_chunk_in(
+            conn, upload_id="trial-gif", component_id="memory.graph",
+            asset_id="trial.input", actor_subject_ref="admin-1",
+            generation_id="generation-1", chunk_index=0, content=content,
+            content_digest=digest,
+        )
+        result = await authority.finalize_in(
+            conn, upload_id="trial-gif", component_id="memory.graph",
+            asset_id="trial.input", actor_subject_ref="admin-1",
+            generation_id="generation-1",
+        )
+        assert result["media_type"] == "image/gif"
+        assert (result["width"], result["height"]) == (12, 10)
+        assert result["payload"]["owner_id"] == owner_id
+
+
+@pytest.mark.postgres
 async def test_management_asset_expiry_revokes_payload(clean_authority):
     store, installer = clean_authority
     kernel = await bootstrap_kernel(store, installer)
