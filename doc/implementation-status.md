@@ -26,7 +26,7 @@
 
 | 范围 | 当前证据 | 仍需证明或完成 |
 | --- | --- | --- |
-| 微内核、Bot 身份与包生命周期 | v29 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；在线 `deployment.audit` 同工件重载和官方 1.0.1→1.0.2 换包使部署图修订 1→2→3，每次仅该组件换代，其余 7 个 Generation 保留；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作。完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
+| 微内核、Bot 身份与包生命周期 | v29 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；在线 `deployment.audit` 同工件重载和官方 1.0.1→1.0.2 换包使部署图修订 1→2→3，每次仅该组件换代，其余 7 个 Generation 保留；Supervisor 受控重启后仍从目录恢复 1.0.2，Bot 图与唯一 OneBot 连接重新收敛；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作。完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
 | 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例接入过真实 VL 嵌入和 Milvus；v28 的在线文本/PNG 试验各召回 8 项并标明群号和主干，v29 的真实 GIF 输入试验 READY、当时无 ELIGIBLE 来源而返回 0 项。 | 许可群显式 @→回复、GIF 来源结果展示、长期图文成本、百万级筛选与物理索引恢复的运营闭环仍未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算与 Worker 硬退出恢复各 1 passed。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
@@ -1330,3 +1330,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-12 v29 部署控制图在线定点热重载：正式 Web 管理预览确认 `deployment.audit` 是唯一准备/排空成员，7 个部署组件保留。提交同工件 REPLACE 后持久请求由 QUEUED/RUNNING 结算 SUCCEEDED，图修订 1→2，准确 Audit Generation 变化且其余 7 个不变；Bot 仍 READY/ONLINE，Supervisor healthy、重启 0、OneBot 连接 1。此证据不覆盖不同版本工件或存储基线的在线升级。详见 `doc/live-v29-cutover-2026-10-12.md`。
 
 2026-10-12 v29 官方控制包跨版本热替换：`deployment.audit` 的 1.0.2 候选仅提升 manifest 包版本，代码和 SQL 不变；官方编译/导出后以 ZIP、包、manifest 三层摘要经目录所有者 CLI 原子发布到 v29 私有包卷。正式预览只影响 Audit；管理动作 SUCCEEDED，部署图 2→3，Audit 活动包 1.0.1→1.0.2 且 Generation 更新，另 7 个不变、存储基线摘要不变。Bot 仍 READY/ONLINE，Supervisor healthy、重启 0、OneBot 连接 1。该结果不证明普通第三方 SQL 或存储基线在线升级；详见 `doc/live-v29-cutover-2026-10-12.md`。
+
+2026-10-12 v29 官方包选择的进程恢复：Agent Run 为 0 时受控 `docker restart` v29 Supervisor；重启后的部署图修订 4 为 8/8 ACTIVE，准确恢复 `deployment.audit` 1.0.2，Bot 从 STARTING 收敛为 READY/ONLINE，Bot 图修订 3 为 22/22 ACTIVE、Memory 仍为 1.93.4 / SQL 3.92.0，OneBot 连接恢复为 1。Supervisor healthy，Docker 重启计数 0 表示没有额外崩溃重试；该证据不覆盖活动 Agent Run 中断。详见 `doc/live-v29-cutover-2026-10-12.md`。
