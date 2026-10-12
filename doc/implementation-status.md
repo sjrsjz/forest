@@ -1320,3 +1320,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-12 v28 在线记忆试验：许可群 933179609 的 5 条自然入站均为 `NO_TRIGGER/mention_required`，Agent Run 仍为 0。Bot 管理端经标准资产端口分别以文本与实际来源 PNG 发起试验，均约 10 秒 READY、返回 8 项群/主干归因证据；PNG 从试验结果端口分块取回并校验摘要，图片输入结果首页 4 项都有图片且为直接种子。未向 QQ 发消息，真实显式 @ 到回复和长期负载仍待验收。详见 `doc/live-v28-cutover-2026-10-12.md`。
 
 2026-10-12 GIF 管理试验缺陷：v28 已归档 GIF 在正式资产上传声明处返回 500，根因为内核资产表媒体约束漏掉 `image/gif`；Memory 试验 SQL 输入检查也漏掉该类型。当前源码同步修正两处基线，Memory 包 1.93.4 / SQL 3.92.0；隔离 PostgreSQL 的真实 GIF 资产上传/发布、认证资产交接与 Memory GIF 试验登记 3 passed，Ruff 通过。v28 在线旧镜像/旧库仍有此缺陷，需独立新 Bot 库完成真实 GIF 结果验收；未原位迁移旧内核 SQL。详见 `doc/live-v28-cutover-2026-10-12.md`。
+
+2026-10-12 v29 GIF 修复在线接管：提交 97bf3ff 的独立 deployment/Host/Bot 数据库及包卷已供应。v28 先 OFFLINE 且双方 OneBot 连接均为 0，v29 后 ONLINE；v29 图修订 1 为 22/22 ACTIVE，Memory 1.93.4 / SQL 3.92.0，Supervisor healthy、重启 0，连接数 v28/v29 为 0/1。已归档 GIF 经正式管理端 6 分块上传、试验进入 READY，空库返回 0 项；这验证 GIF 输入链，不证明 GIF 结果展示或许可群真实回复。未主动发 QQ。详见 doc/live-v29-cutover-2026-10-12.md。
