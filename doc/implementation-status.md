@@ -12,6 +12,19 @@
 
 仍需单独验证工具 PREPARED Effect 在 Run 截止时的跨参与者结算及进程硬退出恢复，并完成真实低频触发、长期多群图文负载与成本验收。v27 新隔离 Bot 数据库及当前包基线已通过完整装配与上线观察；v26 旧 SQL 基线不作为当前源码的热替换目标。
 
+### 当前验收边界
+
+下表描述**当前代码及运行证据**；本页后续按日期排列的记录是当时状态，不能把旧记录中的“尚未实现”直接当作当前结论。
+
+| 范围 | 当前证据 | 仍需证明或完成 |
+| --- | --- | --- |
+| 微内核、Bot 身份与包生命周期 | v27 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作；完整隔离 BotHost 用例覆盖热替换、停机和重启。 | 普通 deployment 插件的私有存储、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
+| 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
+| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例接入过真实 VL 嵌入和 Milvus；v27 自然入站已产生多个主干。 | v27 尚未出现许可群真实 @，当前自然消息尚未触发 Agent 或产生就绪 facet；长期图文成本、百万级筛选与物理索引恢复的运营闭环未验收。 |
+| 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed。 | 许可群真实入站→Agent→Provider→发送、工具 PREPARED Effect 在 Run 截止时的双参与者结算及硬退出恢复，均不能用纯逻辑测试代替。 |
+
+上一项定向回归在本机默认 Python 3.10 下因 `datetime.UTC` 不可用而未能收集；改用既有 Python 3.11 测试镜像和当前源码只读挂载，`test_conversation_model_view_selection.py`、`test_agent_expired_unknown.py`、`test_shell_priority_contract.py` 共 9 passed。此验证没有改动在线实例，也未发送 QQ 消息。
+
 Effect 放弃回执重放核验（2026-10-12）：内核 Effect authority 在按 `abandonment_operation_id` 返回已有 PREPARED 放弃回执时，现从不可变 attempt 账本核对调用方给出的 `effect_operation_id`；同一 attempt、原因与取消标志但错误 Effect ID 返回 `EFFECT_ABANDONMENT_CONFLICT`。回执摘要和数据库格式不变，既有正确重放仍可用。独立 PostgreSQL 的 Effect 状态回归 1 passed，Ruff 通过；测试容器已移除，在线 v26 未切换，未发送 QQ 消息。
 
 同一源码的 Agent 包持久状态回归已在另一隔离 PostgreSQL 库复跑，`test_agent_package_owns_run_snapshot_and_epoch_fenced_lease` 1 passed（66.22 秒），覆盖既有 Run/Session、工具 PREPARED 管理员取消、模型 PREPARED 截止时间结算与回执重放。测试库及容器已移除。此复跑不等于工具 PREPARED 截止时间或进程硬退出的单独证明，也没有切换在线 v26。
