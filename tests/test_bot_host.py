@@ -4190,13 +4190,13 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real")
+    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
-    if scenario in {"reload-lost-receipt", "prepared-crash"}:
+    if scenario in {"reload-lost-receipt", "prepared-crash", "prepared-tool-crash"}:
         monkeypatch.setattr("forest.bot_host._HOST_LEASE_TTL", timedelta(seconds=15))
     name = "forest_recall_" + uuid4().hex
     admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
@@ -4264,7 +4264,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         if scenario in {"success", "result-ledger-recovery", "result-payload-recovery", "cross-group", "prepared-crash"} else None
     )
     RecordingModelClient.reply_factory = None
-    if scenario == "tool-continuation":
+    if scenario in {"tool-continuation", "prepared-tool-crash"}:
         def tool_then_answer(prepared, invocation_number):
             if invocation_number == 1:
                 trigger_ref = prepared.manifest["trigger_claims"][0]["last_trigger_ref"]
@@ -4326,6 +4326,24 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 if domain is not None and domain["state"] == "READY":
                     break
                 await asyncio.sleep(0.1)
+        if scenario == "prepared-tool-crash":
+            agent = host.registry.get("agent.runtime")
+            configuration = agent.module_configuration
+            desired = await configuration.desired(include_value=True)
+            short_run = deepcopy(desired.value)
+            short_run["run_timeout_seconds"] = 45
+            plan = await configuration.plan(
+                operation_id="prepared-tool-crash-short-run-plan",
+                expected_desired_revision=desired.revision,
+                value=short_run,
+                validation_digest=digest_json(agent.snapshot.schema("schemas/config.json")),
+            )
+            await configuration.apply(
+                operation_id="prepared-tool-crash-short-run-apply",
+                plan_id=plan["plan_id"],
+                expected_desired_revision=desired.revision,
+            )
+            await host.replace_runtime_graph()
         if scenario in {"vector-web", "vector-web-real"}:
             document_ref = None
             if real_vector:
@@ -4597,6 +4615,30 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             monkeypatch.setattr(
                 PostgresPackageUnitOfWorkCoordinator, "execute", crash_after_prepare
             )
+        if scenario == "prepared-tool-crash":
+            original_execute = PostgresPackageUnitOfWorkCoordinator.execute
+
+            async def crash_after_tool_prepare(
+                coordinator, scope, declaration, payload, **kwargs
+            ):
+                result = await original_execute(
+                    coordinator, scope, declaration, payload, **kwargs
+                )
+                if (declaration["name"] == "agent.prepare-tool-effect"
+                        and not prepared_crash.is_set()):
+                    victim = host.registry.get("agent.runtime")._worker
+                    assert victim.alive
+                    victim.process.kill()
+                    prepared_crash.set()
+                    raise ForestError(
+                        "TEST_PREPARED_TOOL_WORKER_CRASH",
+                        "Agent Worker died after preparing its Tool Effect", 503,
+                    )
+                return result
+
+            monkeypatch.setattr(
+                PostgresPackageUnitOfWorkCoordinator, "execute", crash_after_tool_prepare
+            )
         if scenario == "result-ledger-recovery":
             original_execute = PostgresPackageUnitOfWorkCoordinator.execute
 
@@ -4654,6 +4696,97 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 }}] if scenario == "visual" else []),
             ],
         }).encode())
+        if scenario == "prepared-tool-crash":
+            async with asyncio.timeout(90):
+                await prepared_crash.wait()
+            assert len(RecordingModelClient.requests) == 1
+            agent_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "agent.runtime"
+            )
+            effect_schema = host._kernel.effect.namespace
+            async with host.store.pool.connection() as conn:
+                prepared = await (await conn.execute(sql.SQL(
+                    "SELECT r.state AS run_state,t.state AS tool_state,"
+                    "o.state AS effect_state,a.state AS attempt_state,"
+                    "a.handoff_operation_id "
+                    "FROM {}.agent_runs r JOIN {}.tool_calls t "
+                    "ON t.bot_id=r.bot_id AND t.run_id=r.run_id "
+                    "JOIN {}.effect_operations o "
+                    "ON o.bot_id=t.bot_id AND o.effect_operation_id=t.effect_operation_ref "
+                    "JOIN {}.effect_attempts a "
+                    "ON a.bot_id=o.bot_id AND a.attempt_id=t.effect_attempt_id "
+                    "WHERE r.bot_id=%s"
+                ).format(sql.Identifier(agent_schema), sql.Identifier(agent_schema),
+                         sql.Identifier(effect_schema), sql.Identifier(effect_schema)),
+                    (settings.bot_id,))).fetchone()
+            assert prepared == {
+                "run_state": "WAIT_TOOL", "tool_state": "PROPOSED",
+                "effect_state": "PREPARED", "attempt_state": "PREPARED",
+                "handoff_operation_id": None,
+            }
+            runtime_schema = host._kernel.runtime.namespace
+            try:
+                await host.close()
+            except ForestError as exc:
+                assert exc.code == "RUNTIME_MODULE_CLEANUP_FAILED"
+            observer = await psycopg.AsyncConnection.connect(uri)
+            try:
+                async with asyncio.timeout(120):
+                    while True:
+                        ready = await (await observer.execute(sql.SQL(
+                            "SELECT h.expires_at<=clock_timestamp() AS host_expired,"
+                            "r.absolute_deadline<=clock_timestamp() AS run_expired "
+                            "FROM {}.host_lease h JOIN {}.agent_runs r "
+                            "ON r.bot_id=h.bot_id WHERE h.bot_id=%s"
+                        ).format(sql.Identifier(runtime_schema),
+                                 sql.Identifier(agent_schema)),
+                            (settings.bot_id,))).fetchone()
+                        assert ready is not None
+                        if ready[0] and ready[1]:
+                            break
+                        await asyncio.sleep(0.25)
+                # The test advances only the dead Worker's lease, avoiding a
+                # five-minute wait. The immutable Run deadline elapsed naturally.
+                moved = await observer.execute(sql.SQL(
+                    "UPDATE {}.agent_runs SET "
+                    "owner_expires_at=clock_timestamp()-interval '1 second' "
+                    "WHERE bot_id=%s AND state='WAIT_TOOL' AND owner_id IS NOT NULL"
+                ).format(sql.Identifier(agent_schema)), (settings.bot_id,))
+                assert moved.rowcount == 1
+                await observer.commit()
+            finally:
+                await observer.close()
+            host = create_host("recall-prepared-tool-crash-restarted")
+            await host.start()
+            async with asyncio.timeout(90):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        settled = await (await conn.execute(sql.SQL(
+                            "SELECT r.state AS run_state,r.error_code,"
+                            "t.state AS tool_state,o.state AS effect_state,"
+                            "a.state AS attempt_state,a.handoff_operation_id "
+                            "FROM {}.agent_runs r JOIN {}.tool_calls t "
+                            "ON t.bot_id=r.bot_id AND t.run_id=r.run_id "
+                            "JOIN {}.effect_operations o "
+                            "ON o.bot_id=t.bot_id AND o.effect_operation_id=t.effect_operation_ref "
+                            "JOIN {}.effect_attempts a "
+                            "ON a.bot_id=o.bot_id AND a.attempt_id=t.effect_attempt_id "
+                            "WHERE r.bot_id=%s"
+                        ).format(sql.Identifier(agent_schema), sql.Identifier(agent_schema),
+                                 sql.Identifier(effect_schema), sql.Identifier(effect_schema)),
+                            (settings.bot_id,))).fetchone()
+                    if settled is not None and settled["run_state"] == "FAILED":
+                        break
+                    await asyncio.sleep(0.25)
+            assert settled == {
+                "run_state": "FAILED", "error_code": "AGENT_DEADLINE_EXCEEDED",
+                "tool_state": "FAILED", "effect_state": "CANCELLED",
+                "attempt_state": "ABANDONED", "handoff_operation_id": None,
+            }
+            assert len(RecordingModelClient.requests) == 1
+            assert clients[-1].sent == []
+            return
         if scenario == "prepared-crash":
             async with asyncio.timeout(90):
                 await prepared_crash.wait()
