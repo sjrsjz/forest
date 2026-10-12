@@ -375,6 +375,68 @@ async def test_host_local_command_publishes_only_bundled_bot_identity(tmp_path, 
     assert catalog.get_official_bot(source.digest).digest == source.digest
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope,folder", (
+    ("deployment", "deployment_audit"),
+    ("host", "host_audit"),
+))
+async def test_host_local_command_publishes_bundled_control_package(
+    tmp_path, capsys, scope, folder,
+):
+    source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin" / folder
+    staging = PackageCatalog(tmp_path / "staging")
+    default = staging.build(source_root)
+    updated_root = tmp_path / "updated"
+    shutil.copytree(source_root, updated_root)
+    manifest_path = updated_root / "module.toml"
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            f'version = "{default.manifest["version"]}"',
+            'version = "99.0.0"', 1,
+        ), encoding="utf-8",
+    )
+    updated = staging.build(updated_root)
+    archive = staging.export_archive(updated.digest)
+    archive_path = tmp_path / "updated.zip"
+    archive_path.write_bytes(archive)
+    catalog = PackageCatalog(tmp_path / "production")
+    assert catalog.build_official(source_root, scope=scope).digest == default.digest
+    args = Namespace(
+        command="plugin", plugin_command=f"publish-official-{scope}",
+        archive=archive_path, catalog_dir=catalog.root,
+        archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+        package_digest=updated.digest,
+        manifest_digest=packages.digest_json(updated.manifest),
+        package_id=updated.manifest["package_id"],
+        component_id=updated.component["id"],
+    )
+    with pytest.raises(ForestError) as wrong_scope:
+        await run_plugin_command(Namespace(**{
+            **vars(args), "plugin_command": "publish-official-" + (
+                "host" if scope == "deployment" else "deployment"
+            ),
+        }))
+    assert wrong_scope.value.code == "OFFICIAL_RELEASE_COMPONENT_UNKNOWN"
+    with pytest.raises(ForestError) as wrong_digest:
+        await run_plugin_command(Namespace(**{
+            **vars(args), "package_digest": "sha256:" + "0" * 64,
+        }))
+    assert wrong_digest.value.code == "OFFICIAL_PACKAGE_DIGEST_MISMATCH"
+    assert len(catalog.list()) == 1
+    await run_plugin_command(args)
+    released = json.loads(capsys.readouterr().out)
+    assert released["status"] == f"published-official-{scope}"
+    assert released["package_digest"] == updated.digest
+    assert len(catalog.list()) == 2
+    assert getattr(catalog, f"is_official_{scope}")(updated.digest)
+    assert not getattr(catalog, "is_official_" + (
+        "host" if scope == "deployment" else "deployment"
+    ))(updated.digest)
+    ordinary = PackageCatalog(tmp_path / "ordinary")
+    ordinary.import_archive(archive)
+    assert not getattr(ordinary, f"is_official_{scope}")(updated.digest)
+
+
 def test_bot_official_selection_resolves_exact_registered_artifact(tmp_path):
     source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/memory_graph"
     catalog = PackageCatalog(tmp_path / "catalog")

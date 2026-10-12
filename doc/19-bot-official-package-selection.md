@@ -40,6 +40,16 @@
 forest plugin publish-official-bot routing-2.1.0.zip --catalog-dir /var/lib/forest-packages --archive-sha256 sha256:<ZIP摘要> --package-digest sha256:<内容摘要> --manifest-digest sha256:<manifest摘要> --package-id forest.routing-graph --component-id routing.graph
 ```
 
+### Deployment 与 Host builtin 的本地发布
+
+`forest plugin publish-official-deployment` 与 `forest plugin publish-official-host` 复用上述 ZIP、三层摘要、包 ID、组件 ID 和绝对私有目录参数。命令从当前发行物的 `auto_install` 清单核对目标作用域、组件 ID、包 ID 与运行时，再通过同一个原子目录入口把工件登记到**对应作用域**的官方来源表；部署与 Host 来源不能互相借用。它们只在持有目录写权限的本地进程中发布；Web、Shell、Worker 管理契约不暴露官方来源写端口，普通 ZIP 导入也不授予该来源。发布只增加准确可选工件，不改变运行图、配置或目标组件的 Generation；替换仍需各作用域现有的预检、授权 Graph 提交和 drain 生命周期。这个入口仅覆盖随当前发行物登记的 builtin 身份，不是第三方包自报官方 SQL 的通道。
+
+例如，准备并检查 Host 审计包 ZIP 后可执行：
+
+```text
+forest plugin publish-official-host host-audit-next.zip --catalog-dir /var/lib/forest-packages --archive-sha256 sha256:<ZIP摘要> --package-digest sha256:<内容摘要> --manifest-digest sha256:<manifest摘要> --package-id forest.host-audit --component-id host.audit
+```
+
 ## 当前实现与验收缺口
 
 Linux 运行镜像已在 UID 10001、无网络、只读根文件系统和独立包卷中实际运行本地发布命令，新旧 `routing.graph` 官方工件同时可读；该隔离验收没有修改在线包卷或 Bot 选择。真实生产目录发布、在线热换代和长期负载仍是独立验收项。

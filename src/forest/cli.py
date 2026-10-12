@@ -71,16 +71,18 @@ def _parser() -> argparse.ArgumentParser:
     archive = actions.add_parser("import", help="验证并导入模块 ZIP")
     archive.add_argument("archive", type=Path)
     archive.add_argument("--cache-dir", type=Path, default=Path(".forest/packages"))
-    release = actions.add_parser(
-        "publish-official-bot", help="由宿主操作员向生产目录发布官方 Bot 包"
-    )
-    release.add_argument("archive", type=Path)
-    release.add_argument("--catalog-dir", type=Path, required=True)
-    release.add_argument("--archive-sha256", required=True)
-    release.add_argument("--package-digest", required=True)
-    release.add_argument("--manifest-digest", required=True)
-    release.add_argument("--package-id", required=True)
-    release.add_argument("--component-id", required=True)
+    for scope in ("bot", "deployment", "host"):
+        release = actions.add_parser(
+            f"publish-official-{scope}",
+            help=f"由宿主操作员发布 {scope} 官方包",
+        )
+        release.add_argument("archive", type=Path)
+        release.add_argument("--catalog-dir", type=Path, required=True)
+        release.add_argument("--archive-sha256", required=True)
+        release.add_argument("--package-digest", required=True)
+        release.add_argument("--manifest-digest", required=True)
+        release.add_argument("--package-id", required=True)
+        release.add_argument("--component-id", required=True)
     return parser
 
 
@@ -125,7 +127,9 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
         )
         print(json.dumps(result, ensure_ascii=False))
         return
-    if args.plugin_command == "publish-official-bot":
+    if args.plugin_command in {
+        "publish-official-bot", "publish-official-deployment", "publish-official-host",
+    }:
         await run_official_release_command(args)
         return
     if args.plugin_command in {"lock", "import", "export"}:
@@ -258,26 +262,31 @@ async def run_official_release_command(args: argparse.Namespace) -> None:
         validate_source_package,
     )
 
+    scope = args.plugin_command.removeprefix("publish-official-")
+    if scope not in {"bot", "deployment", "host"}:
+        raise ForestError(
+            "OFFICIAL_RELEASE_SCOPE_INVALID", "Official release scope is invalid", 422,
+        )
     catalog_root = args.catalog_dir
     if not catalog_root.is_absolute() or not catalog_root.is_dir():
         raise ForestError(
             "OFFICIAL_RELEASE_CATALOG_INVALID",
             "Official release requires an existing absolute catalog directory", 422,
         )
-    if args.component_id == "component.worker-host":
+    if scope == "bot" and args.component_id == "component.worker-host":
         raise ForestError(
             "OFFICIAL_RELEASE_COMPONENT_UNSUPPORTED",
             "Worker Host cannot be selected by an official Bot package digest", 422,
         )
     source = None
     bundled_runtime = None
-    for candidate in auto_install_official_sources("bot"):
+    for candidate in auto_install_official_sources(scope):
         try:
             manifest = tomllib.loads(candidate.joinpath("module.toml").read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError):
             raise ForestError(
                 "OFFICIAL_RELEASE_SOURCE_INVALID",
-                "Bundled official Bot source is invalid", 500,
+                "Bundled official source is invalid", 500,
             ) from None
         if manifest["components"][0]["id"] == args.component_id:
             source = candidate
@@ -291,7 +300,7 @@ async def run_official_release_command(args: argparse.Namespace) -> None:
     if source is None:
         raise ForestError(
             "OFFICIAL_RELEASE_COMPONENT_UNKNOWN",
-            "Official release target is not a bundled Bot component", 422,
+            "Official release target is not a bundled component in its scope", 422,
         )
     await asyncio.to_thread(validate_source_package, source)
     try:
@@ -305,7 +314,7 @@ async def run_official_release_command(args: argparse.Namespace) -> None:
     snapshot = await asyncio.to_thread(
         catalog.publish_official_archive,
         content,
-        scope="bot",
+        scope=scope,
         expected_archive_sha256=args.archive_sha256,
         expected_package_digest=args.package_digest,
         expected_manifest_digest=args.manifest_digest,
@@ -314,7 +323,7 @@ async def run_official_release_command(args: argparse.Namespace) -> None:
         expected_runtime=bundled_runtime,
     )
     print(json.dumps({
-        "status": "published-official-bot",
+        "status": f"published-official-{scope}",
         "package_digest": snapshot.digest,
         "manifest_digest": args.manifest_digest,
         "package_id": snapshot.manifest["package_id"],

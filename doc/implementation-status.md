@@ -31,6 +31,8 @@
 
 记忆大选择集遗忘复核（2026-10-12）：同一当前源码镜像在另一个隔离 PostgreSQL 库运行 `test_memory_forget_batch_scale.py`，预置 100,000 条旧来源及 192 条持有真实 Payload anchor 的新来源，冻结选择共 100,192 条。连续执行前三个 64 条批次，逐次验证 claim/settle、进度水位和删除 epoch；最终仅 192 条目标来源为 SUPPRESSED，100,000 条填充来源仍为 ELIGIBLE，`1 passed in 33.14s`，临时数据库已清理。该证据覆盖大选择集上的连续有界批次，不代表一次删除十万条或覆盖崩溃后所有外部效果恢复。
 
+控制 builtin 本地新版发布入口（2026-10-12）：`forest plugin publish-official-deployment` 和 `publish-official-host` 复用 Bot 的本地目录所有者授权与 ZIP/包/manifest 准确摘要核对，只接受当前发行物相应作用域 `auto_install` 的组件身份、原包 ID 和运行时，原子登记对应作用域的官方来源。隔离目录用实际 `deployment.audit` 与 `host.audit` 新版 ZIP 验证跨作用域拒绝、错误摘要拒绝、旧新版同时保留、普通导入不取得官方来源；Bot 原命令一并复核，定向 `3 passed`，Ruff 通过。此入口只发布可选工件，不自动提交 Graph 或替换 Generation；生产包卷发布和在线控制图热替换仍待单独验收，也不放宽普通第三方包的 SQL 权限。
+
 普通控制包状态归位（2026-10-12）：从新建 deployment/host 内核基线删除共享 `component_state_*` 表和触发器，改由宿主为每个无自带 SQL 的控制包生成固定配置＋状态 bundle，安装到该包的独立 schema。`ctx.state` 的契约、不可变值与操作步骤、CAS head 均留在同一包 schema，Generation 准确绑定该 bundle；候选预检仅在既有包 schema 已登记时检查状态契约，新包不读取尚不存在的表，已登记却缺表仍失败。普通包只能匹配宿主生成的完整 SQL 字节、schema 身份和摘要，上传的官方 SQL 仍被拒绝。隔离 PostgreSQL 的 deployment/Host 热替换与控制面回归 37 passed，包编译及运行时契约回归 123 passed，Ruff 与差异检查通过。本改动改变未上线的新库基线，不向在线 v27 旧库迁移；普通插件尚无自定义领域 SQL/Effect 能力。
 
 工具 PREPARED 截止结算核验（2026-10-12）：在独立 PostgreSQL 17.10 容器中，从已提交的工具调用事实复制出隔离的过期 Run/Session，并建立真实 PREPARED Kernel Effect。`effect.abandon` 与 `agent.expire-run-record` 使用同一事务和包参与者执行；断言 Run、Session、工具调用为 FAILED，Effect 为 CANCELLED、Attempt 为 ABANDONED。`test_agent_package_owns_run_snapshot_and_epoch_fenced_lease` 1 passed（59.47 秒），Ruff 与差异检查通过。该用例在事务末尾回滚测试夹具，未模拟进程硬退出、真实供应商调用或 QQ 消息；在线 v27 未更换镜像。
