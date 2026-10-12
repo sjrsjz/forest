@@ -10,4 +10,6 @@ v27 通过正式 Web 管理动作先完成 Host 存储结算、冻结 bootstrap 
 
 本轮未主动发送 QQ 消息，也没有在 v27 观察窗口内看到许可群入站记录。因此上述证据证明实例供应、模块装配、运行意图和实际 OneBot TCP 连接，不证明真实 @→Agent→Provider→发送链、图文记忆质量或长期费用。后续真实验证应在许可群低频进行，并观察入站分类、Run、模型回执及出站回执；避免重复触发造成费用或消息干扰。
 
+08:28（北京时间）复查时发现树莓派旧 `alicebot.service` 因自启再次处于 `active`，与先前停用旧机器人服务的要求冲突。已执行 `systemctl disable --now alicebot.service`，随后确认它为 `inactive/disabled`；OneBot `192.168.31.117:8080` 仍有且仅有一条来自本机的远端连接。v27 继续 READY/ONLINE、22/22 ACTIVE、观察器零违规；自然入站使 Memory 来源达到 12、群主干达到 5，未观察到活动 Run 或待发送。许可群 `933179609` 仍未出现入站记录，因此未把其他群的 `group_not_allowed` 分类视为真实许可群回复验收。
+
 需要回退时，先通过 v27 管理面将 `forest-main-v27` 置为 `OFFLINE`，确认观测状态和 OneBot 连接退出，再将 v26 置为 `ONLINE`。两套数据库和包卷均保留；回退不会自动合并 v27 新产生的消息和记忆。

@@ -6,6 +6,8 @@
 
 2026-10-12 08:00（北京时间）完成 v26→v27 切换：`forest-main-v26` 的期望与观测状态均为 OFFLINE，`forest-main-v27` 为 READY/ONLINE；v27 运行图 22/22 ACTIVE、schema bundle 22/22 READY，四次只读采样无违规、活动 Agent Run、并发会话或待发送消息。树莓派 OneBot 端口仅见一条来自本机的远端连接。v27 是新 Bot，未复制 v26 消息或记忆；许可群 `933179609` 尚无入站记录，真实低频 @→Agent→Provider→发送链仍未验收。此轮没有主动向 QQ 发送消息。
 
+08:28 复查发现树莓派旧 `alicebot.service` 已因自启恢复运行；现已停止并禁用自启。OneBot 到 v27 的远端连接保持一条，v27 仍为 READY/ONLINE、22/22 ACTIVE、零观察违规；自然群消息使新库来源达到 12、主干达到 5，但许可群仍无入站记录。详见[切换记录](live-v27-cutover-2026-10-12.md)。
+
 权威边界已核对：部署内核的 `bots`、`runtime_intents` 与监督器观测账本持有 Bot 基础身份和运行意图；可热替换的 `deployment.bot-catalog` 通过清单声明的受限 kernel query/command 端口贡献目录管理 UI，不复制 Bot 状态或拥有目标 Bot 的模块配置。后续重构必须保持此边界。
 
 仍需单独验证工具 PREPARED Effect 在 Run 截止时的跨参与者结算及进程硬退出恢复，并完成真实低频触发、长期多群图文负载与成本验收。v27 新隔离 Bot 数据库及当前包基线已通过完整装配与上线观察；v26 旧 SQL 基线不作为当前源码的热替换目标。
