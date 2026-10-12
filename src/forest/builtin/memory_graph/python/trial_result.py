@@ -190,7 +190,7 @@ async def read_image(ctx, payload):
     if image_part is None:
         raise ForestError("MEMORY_TRIAL_IMAGE_NOT_FOUND", "Image is not in trial evidence", 404)
     media_type = image_part.get("media_type")
-    if media_type not in ("image/png", "image/jpeg", "image/webp"):
+    if media_type not in ("image/png", "image/jpeg", "image/webp", "image/gif"):
         raise ForestError("MEMORY_EVIDENCE_INVALID", "Evidence image type is invalid", 409)
     image_ref = image_part.get("media_ref")
     if not isinstance(image_ref, dict):

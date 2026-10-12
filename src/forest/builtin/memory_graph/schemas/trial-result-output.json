@@ -46,7 +46,7 @@
               "required": ["part_id", "media_type", "width", "height", "media_ref"],
               "properties": {
                 "part_id": {"type": "string"},
-                "media_type": {"enum": ["image/png", "image/jpeg", "image/webp"]},
+                "media_type": {"enum": ["image/png", "image/jpeg", "image/webp", "image/gif"]},
                 "width": {"type": "integer", "minimum": 1, "maximum": 100000},
                 "height": {"type": "integer", "minimum": 1, "maximum": 100000},
                 "media_ref": {

@@ -71,7 +71,7 @@
     <p class="muted">在当前 Bot 的全局记忆中试验图文召回；输入不会写入群消息或长期记忆。一次试验最多 8 个 part，10 分钟后失效。</p>
     <div class="filters"><input id="trial-query" class="trial-id" placeholder="试验 ID；开始时自动生成，也可填入已有 ID 查询"><button id="trial-source-hits">查看向量命中来源</button><button id="trial-get">查询状态</button><button id="trial-cancel" class="danger">取消</button></div>
     <div><label for="trial-text">文本输入</label></div><textarea id="trial-text" class="trial-input" maxlength="65536" placeholder="可选；UTF-8 最多 64 KiB"></textarea>
-    <div class="filters"><label>图片输入 <input id="trial-images" type="file" accept="image/png,image/jpeg,image/webp" multiple></label><span class="muted">每张最多 8 MiB；含文本最多 7 张，纯图片最多 8 张</span></div>
+    <div class="filters"><label>图片输入 <input id="trial-images" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label><span class="muted">每张最多 8 MiB；含文本最多 7 张，纯图片最多 8 张</span></div>
     <div class="pager"><button id="trial-start">上传并启动试验</button></div>
     <div id="trial-state" class="detail"></div>
     <div id="trial-results"></div><div class="pager"><span id="trial-count" class="muted"></span><button id="trial-next" disabled>下一页证据</button></div>
@@ -704,7 +704,7 @@
       inputs.push({part_id:'text/0',modality:'TEXT',media_type:'text/plain',content:bytes.buffer});
     }
     for(const [index,file] of files.entries()){
-      if(!['image/png','image/jpeg','image/webp'].includes(file.type)||file.size<1||file.size>8388608)
+      if(!['image/png','image/jpeg','image/webp','image/gif'].includes(file.type)||file.size<1||file.size>8388608)
         throw Error('图片类型或大小无效');
       inputs.push({part_id:`image/${index}`,modality:'IMAGE',media_type:file.type,content:await file.arrayBuffer()});
     }

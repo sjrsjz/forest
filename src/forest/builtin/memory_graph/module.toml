@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.93.2"
+version = "1.93.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -844,7 +844,7 @@ timeout_s = 15
 id = "trial.input"
 owner_kind = "trial.input"
 owner_prefix = "trial"
-media_types = ["text/plain", "image/png", "image/jpeg", "image/webp"]
+media_types = ["text/plain", "image/png", "image/jpeg", "image/webp", "image/gif"]
 max_bytes = 8388608
 
 [[components.unit_of_work_participants]]

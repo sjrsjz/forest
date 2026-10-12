@@ -2,13 +2,15 @@
 
 ## 当前快照（2026-10-12）
 
-当前源码已用提交 `b669fde` 的镜像建立隔离 v27 实例；后续 `8e95b26` 只修改文档。v27 在线运行 `agent.runtime` 4.51.0 / 私有 SQL 2.33.0、`memory.graph` 1.93.2、`vector.index` 2.23.0 / 私有 SQL 2.22.0，部署、Host 和 Bot 数据库及包卷均与 v26 隔离。完整模拟 BotHost 验证和实际切换分别见下方记录与[切换记录](live-v27-cutover-2026-10-12.md)。
+在线 v27 仍运行提交 `b669fde` 的镜像；当前源码之后已调整控制包私有状态与 Memory 的 GIF 试验契约，不能把当前源码当作在线版本。v27 在线运行 `agent.runtime` 4.51.0 / 私有 SQL 2.33.0、`memory.graph` 1.93.2、`vector.index` 2.23.0 / 私有 SQL 2.22.0，部署、Host 和 Bot 数据库及包卷均与 v26 隔离。完整模拟 BotHost 验证和实际切换分别见下方记录与[切换记录](live-v27-cutover-2026-10-12.md)。
 
 2026-10-12 08:00（北京时间）完成 v26→v27 切换：`forest-main-v26` 的期望与观测状态均为 OFFLINE，`forest-main-v27` 为 READY/ONLINE；v27 运行图 22/22 ACTIVE、schema bundle 22/22 READY，四次只读采样无违规、活动 Agent Run、并发会话或待发送消息。树莓派 OneBot 端口仅见一条来自本机的远端连接。v27 是新 Bot，未复制 v26 消息或记忆；许可群 `933179609` 尚无入站记录，真实低频 @→Agent→Provider→发送链仍未验收。此轮没有主动向 QQ 发送消息。
 
 08:28 复查发现树莓派旧 `alicebot.service` 已因自启恢复运行；现已停止并禁用自启。OneBot 到 v27 的远端连接保持一条，v27 仍为 READY/ONLINE、22/22 ACTIVE、零观察违规；自然群消息使新库来源达到 12、主干达到 5，但许可群仍无入站记录。详见[切换记录](live-v27-cutover-2026-10-12.md)。
 
 09:57（北京时间）只读复查：v27 Supervisor 容器健康；Bot 库有 7 条 `memory_sources` 来源身份、84 条逐消息 `source_units`、84 条 occurrence 与 84 条 capture operation。七条 Conversation lane 的入站、分类和上下文应用累计水位均为 84，Memory 待处理输入事件为 0；84 条单元都处于 REGISTERED，嵌入 facet 为 0。许可群 `933179609` 仍无来源单元，Agent Run 为 0。来源身份数不能当作逐消息捕获数；当前观察不证明归档后的资格提升、嵌入成本或真实回复链。
+
+12:12–12:28（北京时间）自然流量复查：v27 的静默裁剪已将 6 条消息升为 ELIGIBLE，19 个文档 facet（13 文本、6 图片）均 READY；随后非空文本管理试验以 21 token 返回 8 条带群号和主干的结果。同期自然归档使 ELIGIBLE 增至 134，日预算 30 笔、21157 token、UNKNOWN 为 0；这些自然成本不属于单次查询。复用一张已归档 JPEG 做图片试验时，VL 查询到 READY，但旧版管理结果的第 3 项携带已采集的 GIF，返回 `RUNTIME_SERVICE_OUTPUT_INVALID`。当前源码已把 GIF 与媒体采集、嵌入 Provider 的声明对齐；官方 Memory 包构建及 114 项相邻回归通过，在线 v27 尚未切换。详见[实例记录](live-v27-cutover-2026-10-12.md)。
 
 权威边界已核对：部署内核的 `bots`、`runtime_intents` 与监督器观测账本持有 Bot 基础身份和运行意图；可热替换的 `deployment.bot-catalog` 通过清单声明的受限 kernel query/command 端口贡献目录管理 UI，不复制 Bot 状态或拥有目标 Bot 的模块配置。后续重构必须保持此边界。
 
@@ -21,11 +23,11 @@
 | 范围 | 当前证据 | 仍需证明或完成 |
 | --- | --- | --- |
 | 微内核、Bot 身份与包生命周期 | v27 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作；完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
+| 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
+| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例接入过真实 VL 嵌入和 Milvus；v27 自然入站已产生多个主干。 | 许可群真实 @→回复仍无入站验证；在线 GIF 管理结果仍使用旧契约，当前源码修正尚未装载；长期图文成本、百万级筛选与物理索引恢复的运营闭环未验收。 |
+| 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算与 Worker 硬退出恢复各 1 passed。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
 
 普通控制包状态归位（2026-10-12）：从新建 deployment/host 内核基线删除共享 `component_state_*` 表和触发器，改由宿主为每个无自带 SQL 的控制包生成固定配置＋状态 bundle，安装到该包的独立 schema。`ctx.state` 的契约、不可变值与操作步骤、CAS head 均留在同一包 schema，Generation 准确绑定该 bundle；候选预检仅在既有包 schema 已登记时检查状态契约，新包不读取尚不存在的表，已登记却缺表仍失败。普通包只能匹配宿主生成的完整 SQL 字节、schema 身份和摘要，上传的官方 SQL 仍被拒绝。隔离 PostgreSQL 的 deployment/Host 热替换与控制面回归 37 passed，包编译及运行时契约回归 123 passed，Ruff 与差异检查通过。本改动改变未上线的新库基线，不向在线 v27 旧库迁移；普通插件尚无自定义领域 SQL/Effect 能力。
-| 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
-| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例接入过真实 VL 嵌入和 Milvus；v27 自然入站已产生多个主干。 | v27 尚未出现许可群真实 @，当前自然消息尚未触发 Agent 或产生就绪 facet；长期图文成本、百万级筛选与物理索引恢复的运营闭环未验收。 |
-| 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算与 Worker 硬退出恢复各 1 passed。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
 
 工具 PREPARED 截止结算核验（2026-10-12）：在独立 PostgreSQL 17.10 容器中，从已提交的工具调用事实复制出隔离的过期 Run/Session，并建立真实 PREPARED Kernel Effect。`effect.abandon` 与 `agent.expire-run-record` 使用同一事务和包参与者执行；断言 Run、Session、工具调用为 FAILED，Effect 为 CANCELLED、Attempt 为 ABANDONED。`test_agent_package_owns_run_snapshot_and_epoch_fenced_lease` 1 passed（59.47 秒），Ruff 与差异检查通过。该用例在事务末尾回滚测试夹具，未模拟进程硬退出、真实供应商调用或 QQ 消息；在线 v27 未更换镜像。
 

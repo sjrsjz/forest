@@ -11,6 +11,7 @@ from PIL import Image
 
 from forest.builtin.memory_graph.python.trial_result import read_image, read_page
 from forest.errors import ForestError
+from forest.storage.management_asset_authority import inspect_management_asset
 
 
 @pytest.mark.asyncio
@@ -38,6 +39,19 @@ async def test_trial_result_pages_keep_group_and_author_attribution():
             if supplied != reference:
                 index = int(supplied["payload_id"].split("/")[-1])
                 assert index != 1  # This item's Payload was revoked by forgetting.
+                parts = [{"kind": "text", "text": f"text {index}"}]
+                if index == 2:
+                    parts.append({
+                        "kind": "image", "part_id": "part/gif",
+                        "media_type": "image/gif", "width": 2, "height": 2,
+                        "media_ref": {
+                            "payload_id": "image/gif",
+                            "digest": "sha256:" + "b" * 64,
+                            "owner_component_id": "media.capture",
+                            "owner_kind": "media.asset",
+                            "owner_id": "media/gif",
+                        },
+                    })
                 return json.dumps({
                     "source_unit_id": f"unit/{index}",
                     "source_id": f"source/{index}",
@@ -48,7 +62,7 @@ async def test_trial_result_pages_keep_group_and_author_attribution():
                     "occurred_at": "2026-09-28T00:00:00+00:00",
                     "is_seed": index == 0, "rank_score": 0.5,
                     "content_truncated": False,
-                    "parts": [{"kind": "text", "text": f"text {index}"}],
+                    "parts": parts,
                 }).encode()
             return json.dumps({
                 "protocol": "forest.memory-trial-evidence/2",
@@ -80,6 +94,7 @@ async def test_trial_result_pages_keep_group_and_author_attribution():
         "group/0", "group/2", "group/3", "group/4",
     ]
     assert first["items"][0]["author_subject_ref"] == "user/0"
+    assert first["items"][1]["images"][0]["media_type"] == "image/gif"
     assert [item["source_unit_id"] for item in second["items"]] == ["unit/5"]
     assert not second["has_more"]
     assert len(calls) == 6
@@ -115,10 +130,17 @@ async def test_trial_result_rejects_another_bot_evidence():
     assert rejected.value.code == "MEMORY_EVIDENCE_INVALID"
 
 
+@pytest.mark.parametrize("image_format,media_type", [
+    ("PNG", "image/png"), ("GIF", "image/gif"),
+])
 @pytest.mark.asyncio
-async def test_trial_image_chunks_are_bounded_and_come_from_attributed_evidence():
+async def test_trial_image_chunks_are_bounded_and_come_from_attributed_evidence(
+    image_format, media_type,
+):
     image_bytes = io.BytesIO()
-    Image.effect_noise((512, 512), 100).convert("RGB").save(image_bytes, format="PNG")
+    Image.effect_noise((512, 512), 100).convert("RGB").save(
+        image_bytes, format=image_format,
+    )
     raw_image = image_bytes.getvalue()
     media_ref = {
         "payload_id": "image/1", "digest": "sha256:" + hashlib.sha256(raw_image).hexdigest(),
@@ -155,7 +177,7 @@ async def test_trial_image_chunks_are_bounded_and_come_from_attributed_evidence(
                 return json.dumps(evidence).encode()
             assert reference == {"payload_id": "unit-payload/1"}
             return json.dumps({"source_unit_id": "unit/1", "parts": [{
-                "kind": "image", "part_id": "part/1", "media_type": "image/png",
+                "kind": "image", "part_id": "part/1", "media_type": media_type,
                 "width": 512, "height": 512, "media_ref": media_ref,
             }]}).encode()
 
@@ -175,7 +197,7 @@ async def test_trial_image_chunks_are_bounded_and_come_from_attributed_evidence(
     offset = 0
     while True:
         result = await read_image(ctx, {**request, "offset": offset})
-        assert result["media_type"] == "image/png"
+        assert result["media_type"] == media_type
         assert result["width"] == result["height"] == 512
         assert result["digest"] == media_ref["digest"]
         assert result["offset"] == offset
@@ -198,3 +220,12 @@ async def test_trial_image_chunks_are_bounded_and_come_from_attributed_evidence(
             "source_unit_id": "unit/other", "part_id": "part/1",
         })
     assert rejected.value.code == "MEMORY_TRIAL_IMAGE_NOT_FOUND"
+
+
+def test_trial_gif_upload_validates_real_image_format():
+    content = io.BytesIO()
+    Image.new("RGB", (2, 3), "red").save(content, format="GIF")
+    assert inspect_management_asset(content.getvalue(), "image/gif") == (2, 3)
+    with pytest.raises(ForestError) as rejected:
+        inspect_management_asset(content.getvalue(), "image/png")
+    assert rejected.value.code == "MANAGEMENT_ASSET_INVALID"

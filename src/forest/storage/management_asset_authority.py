@@ -21,6 +21,7 @@ _FORMATS = {
     "image/png": "PNG",
     "image/jpeg": "JPEG",
     "image/webp": "WEBP",
+    "image/gif": "GIF",
 }
 
 

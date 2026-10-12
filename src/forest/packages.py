@@ -851,9 +851,9 @@ MANIFEST_SCHEMA = {
                                 "owner_kind": {"type": "string"},
                                 "owner_prefix": {"type": "string"},
                                 "media_types": {
-                                    "type": "array", "minItems": 1, "maxItems": 4,
+                                    "type": "array", "minItems": 1, "maxItems": 5,
                                     "uniqueItems": True,
-                                    "items": {"enum": ["text/plain", "image/png", "image/jpeg", "image/webp"]},
+                                    "items": {"enum": ["text/plain", "image/png", "image/jpeg", "image/webp", "image/gif"]},
                                 },
                                 "max_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608},
                             },

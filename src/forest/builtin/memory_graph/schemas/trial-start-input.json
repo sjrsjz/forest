@@ -14,7 +14,7 @@
         "properties": {
           "part_id": {"type": "string", "minLength": 1, "maxLength": 256},
           "modality": {"enum": ["TEXT", "IMAGE"]},
-          "media_type": {"enum": ["text/plain", "image/png", "image/jpeg", "image/webp"]},
+          "media_type": {"enum": ["text/plain", "image/png", "image/jpeg", "image/webp", "image/gif"]},
           "byte_length": {"type": "integer", "minimum": 1, "maximum": 8388608},
           "width": {"type": ["integer", "null"], "minimum": 1, "maximum": 100000},
           "height": {"type": ["integer", "null"], "minimum": 1, "maximum": 100000},
@@ -35,7 +35,7 @@
            "then": {"properties": {"media_type": {"const": "text/plain"},
               "byte_length": {"maximum": 65536}, "width": {"type": "null"}, "height": {"type": "null"}}}},
           {"if": {"properties": {"modality": {"const": "IMAGE"}}},
-           "then": {"properties": {"media_type": {"enum": ["image/png", "image/jpeg", "image/webp"]},
+           "then": {"properties": {"media_type": {"enum": ["image/png", "image/jpeg", "image/webp", "image/gif"]},
              "width": {"type": "integer"}, "height": {"type": "integer"}}}}
         ]
       }
