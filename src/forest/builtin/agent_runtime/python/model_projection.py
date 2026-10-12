@@ -257,9 +257,9 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
             "identity_origin": "memory_verified"}, author=True)
         if (type(row["is_seed"]) is not bool or type(row["is_current_source"]) is not bool
                 or type(row["content_truncated"]) is not bool
-                or not isinstance(row["activation"], (int, float))
+                or type(row["activation"]) not in (int, float)
                 or not 0 < row["activation"] <= 1
-                or not isinstance(row["rank_score"], (int, float))
+                or type(row["rank_score"]) not in (int, float)
                 or row["rank_score"] < 0
                 or type(row["part_count"]) is not int or row["part_count"] < 1
                 or not isinstance(row["occurred_at"], str)
