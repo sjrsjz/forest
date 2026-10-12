@@ -16,6 +16,8 @@
 
 ### 当前边界与验收
 
+Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 4.52.0 将现有 `agent.protocol.describe` 声明为管理专用只读服务，并由 `agent.protocol` 管理查询提供当前包 Generation 的核心提示词、摘要、解析器版本；管理 iframe 按需读取并显示，Bootstrap 编辑器只编辑 Bot 行为预设。固定核心仍由 `agent_protocol.CORE_PROMPT` 持有，预设不能改写。隔离 Worker 查询回归、官方包检查、Ruff 与前端脚本语法通过。此变更尚未切换到在线 v29。
+
 权威边界已核对：部署内核的 `bots`、`runtime_intents` 与监督器观测账本持有 Bot 基础身份和运行意图；可热替换的 `deployment.bot-catalog` 通过清单声明的受限 kernel query/command 端口贡献目录管理 UI，不复制 Bot 状态或拥有目标 Bot 的模块配置。后续重构必须保持此边界。
 
 工具 PREPARED Effect 在 Run 截止时的跨参与者结算与 Agent Worker 硬退出后的恢复均已通过隔离 PostgreSQL 回归；真实低频触发、长期多群图文负载与成本验收尚未完成。v29 新隔离 Bot 数据库及 GIF 修正后的包基线已通过正式供应与上线观察；v28 旧 SQL 基线不作为当前源码的热替换目标。

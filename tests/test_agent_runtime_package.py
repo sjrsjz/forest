@@ -10,7 +10,6 @@ from forest.builtin.agent_runtime.python.agent_protocol import (
 )
 from forest.package_runtime import PackageGenerationAdapter
 from forest.packages import PackageCatalog, digest_json
-from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationContext
 
 
@@ -131,28 +130,13 @@ async def test_agent_protocol_is_owned_by_an_isolated_builtin_generation(tmp_pat
         assert adapter._worker.identity.configuration_owner_id == "revision:1"
         adapter.activate_generation()
         assert ("agent.execute", 2) in adapter.runtime_service_handlers()
-        endpoint = adapter.runtime_service_handlers()[("agent.protocol.describe", 1)]
-        route = FrozenServiceRoute(
-            service_id="agent.protocol.describe",
-            version=1,
-            caller_component_id="kernel.management",
-            provider_component_id="agent.runtime",
-            provider_generation_id=identity.generation_id,
-            graph_id=identity.graph_id,
-            graph_revision=identity.graph_revision,
-            admission_lane="CONTROL",
-            owned_work=False,
+        assert ("agent.protocol.describe", 1) not in adapter.runtime_service_handlers()
+        protocol_port = next(
+            item for item in adapter.component["provides"]
+            if item["name"] == "agent.protocol.describe"
         )
-        result = await endpoint.invoke_routed(
-            route,
-            RuntimeServiceInvocation(
-                "agent-protocol-describe:1",
-                10,
-                "test.agent-runtime-package",
-                "agent-protocol:1",
-            ),
-            ({},),
-            {},
+        result = await adapter.invoke_management_query(
+            protocol_port, {}, timeout_seconds=10,
         )
         assert result == {
             "protocol_id": "forest-agent-protocol",

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.51.0"
+version = "4.52.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -18,7 +18,7 @@ configuration_apply = "worker-host/1"
 
 [components.bootstrap_contribution]
 label = "Agent Runtime"
-description = "Core system-prompt preset injected into every Agent run."
+description = "Optional Bot behavior preset; the Agent core protocol is immutable."
 order = 60
 schema = "schemas/bootstrap-config.json"
 initial_value = "bootstrap-setup.json"
@@ -196,6 +196,12 @@ contract = "1.0"
 semantics = "read"
 input_schema = "schemas/protocol-describe-input.json"
 output_schema = "schemas/protocol-describe-output.json"
+visibility = "management"
+
+[[components.management_queries]]
+id = "agent.protocol"
+port = "agent.protocol.describe"
+timeout_s = 10
 
 [[components.provides]]
 name = "agent.execution.policy"

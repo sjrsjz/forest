@@ -20,6 +20,7 @@
     dl div{min-width:0}dt{color:#a9c1b2}dd{margin:3px 0 0;overflow-wrap:anywhere}
     details{margin-top:10px;border-top:1px solid #284036;padding-top:8px}summary{cursor:pointer}
     .step-list{max-height:240px;overflow:auto}.step-list div{padding:7px 0;border-bottom:1px solid #284036;overflow-wrap:anywhere}
+    #core-prompt{max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;border:1px solid #284036;border-radius:8px;background:#09130f;color:#dcebe2}
     [hidden]{display:none!important}
     @media(max-width:760px){.item{grid-template-columns:1fr 1fr}dl{grid-template-columns:1fr 1fr}}
   </style>
@@ -28,6 +29,12 @@
   <main>
     <h1>Agent 执行记录</h1>
     <p>按 Bot、群聊或 Session 追踪执行；列表只展示执行元数据。</p>
+    <details id="protocol-browser">
+      <summary>Agent 核心协议（只读）</summary>
+      <p>这里显示当前 Agent 包 Generation 的固定核心提示词。Bot 行为预设另行配置，不会改写此协议。</p>
+      <p id="protocol-identity"></p>
+      <pre id="core-prompt"></pre>
+    </details>
     <details id="session-browser">
       <summary>浏览 Session</summary>
       <div class="filters">
@@ -74,6 +81,7 @@
   (()=>{'use strict';
     let port,nonce,sequence=0,pageCursor=null,filter={},selectedRun='',selectedSession='';
     let sessionCursor=null,sessionFilter={};
+    let protocolLoaded=false;
     const stepCursors={MODEL_TURN:null,TOOL_CALL:null};let effectCursor=null;
     const pending=new Map(),el=id=>document.getElementById(id);
     const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
@@ -84,6 +92,13 @@
     });
     const call=(operation_id,value)=>request('query',operation_id,value);
     const status=message=>{el('status').textContent=message||'';resize();};
+    async function loadProtocol(){
+      if(protocolLoaded)return;
+      const descriptor=await call('agent.protocol',{});
+      el('protocol-identity').textContent=[descriptor.protocol_id+' v'+descriptor.protocol_version,descriptor.parser_revision,descriptor.core_prompt_digest,descriptor.core_prompt_bytes+' bytes'].join(' · ');
+      el('core-prompt').textContent=descriptor.core_prompt;
+      protocolLoaded=true;resize();
+    }
     function currentFilter(){
       const conversation_ref=el('conversation').value.trim(),state=el('state').value;
       if(conversation_ref.length>256)throw new Error('会话引用过长');
@@ -223,6 +238,7 @@
       };
       port.start();send('ready');
     },{once:true});
+    el('protocol-browser').ontoggle=()=>{if(el('protocol-browser').open)loadProtocol().catch(error=>status(error.message));};
     el('session-browser').ontoggle=()=>{if(el('session-browser').open)loadSessions().catch(error=>status(error.message));};
     el('search-sessions').onclick=()=>loadSessions().catch(error=>status(error.message));
     el('next-sessions').onclick=()=>loadSessions(true).catch(error=>status(error.message));

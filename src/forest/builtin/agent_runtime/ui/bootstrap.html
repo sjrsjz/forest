@@ -20,8 +20,8 @@
   </style>
 </head>
 <body>
-  <header><h3>Agent 核心提示词</h3><button id="add" type="button">添加一段</button></header>
-  <p>按顺序注入 Agent 的 system 提示。留空即可使用包内默认行为。</p>
+  <header><h3>Bot 行为预设</h3><button id="add" type="button">添加一段</button></header>
+  <p>按顺序加入 Bot 的行为预设。Agent 核心协议由包固定，不能在此修改；留空则不添加预设。</p>
   <div id="prompts"></div>
   <script>
     let port = null;
@@ -33,7 +33,7 @@
         row.className = 'prompt';
         const input = document.createElement('textarea');
         input.value = value;
-        input.setAttribute('aria-label', 'Agent system 提示词');
+        input.setAttribute('aria-label', 'Bot 行为预设');
         const remove = document.createElement('button');
         remove.type = 'button';
         remove.textContent = '移除';
