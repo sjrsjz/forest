@@ -50,6 +50,8 @@ forest plugin publish-official-bot routing-2.1.0.zip --catalog-dir /var/lib/fore
 forest plugin publish-official-host host-audit-next.zip --catalog-dir /var/lib/forest-packages --archive-sha256 sha256:<ZIP摘要> --package-digest sha256:<内容摘要> --manifest-digest sha256:<manifest摘要> --package-id forest.host-audit --component-id host.audit
 ```
 
+Host 控制图在隔离 PostgreSQL 中进一步验证了发布后替换：候选新版从 ZIP 经 `publish_official_archive(scope="host")` 登记到持久目录，`HostPackageController.replace` 随后按该摘要发布新图，修订递增、准确组件摘要切换，管理查询仍可调用；用例 `1 passed in 4.35s`，临时 Host 数据库已清理。这与上述本地 CLI 的身份/摘要用例共同覆盖目录发布到图替换，但未操作生产包卷或在线 Host 图。
+
 ## 当前实现与验收缺口
 
 Linux 运行镜像已在 UID 10001、无网络、只读根文件系统和独立包卷中实际运行本地发布命令，新旧 `routing.graph` 官方工件同时可读；该隔离验收没有修改在线包卷或 Bot 选择。真实生产目录发布、在线热换代和长期负载仍是独立验收项。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -166,7 +167,18 @@ async def test_host_package_compiles_into_real_generation(tmp_path):
             ),
             encoding="utf-8",
         )
-        replacement = catalog.build_official(source, scope="host")
+        staging = PackageCatalog(tmp_path / "release-staging")
+        candidate = staging.build(source)
+        archive = staging.export_archive(candidate.digest)
+        replacement = catalog.publish_official_archive(
+            archive, scope="host",
+            expected_archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+            expected_package_digest=candidate.digest,
+            expected_manifest_digest=digest_json(candidate.manifest),
+            expected_package_id=candidate.manifest["package_id"],
+            expected_component_id=candidate.component["id"],
+            expected_runtime=candidate.manifest["runtime"],
+        )
         replaced = await controller.replace(
             "host.sample", replacement.digest,
             expected_graph_revision=graph.graph_revision,
