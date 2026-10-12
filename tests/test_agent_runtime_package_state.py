@@ -137,6 +137,19 @@ async def _seed_prepared_effect(
     ))
 
 
+async def _clone_agent_fact(conn, namespace, table, key, source_id, bot_id, changes):
+    """Make a bounded expiry fixture from already committed package facts."""
+    target = sql.Identifier(namespace)
+    relation = sql.Identifier(table)
+    copied = await conn.execute(sql.SQL(
+        "INSERT INTO {}.{} SELECT (pg_catalog.jsonb_populate_record("
+        "NULL::{}.{},pg_catalog.to_jsonb(source)||%s::jsonb)).* "
+        "FROM {}.{} source WHERE source.bot_id=%s AND source.{}=%s"
+    ).format(target, relation, target, relation, target, relation,
+             sql.Identifier(key)), (Jsonb(changes), bot_id, source_id))
+    assert copied.rowcount == 1
+
+
 def _owner_ref(owner):
     return {key: owner[key] for key in ("run_id", "owner_id", "epoch")}
 
@@ -2811,6 +2824,177 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 ), (store.bot_id, "tool-effect/package/repair"))).fetchone()
                 assert effect_state == {
                     "operation_state": "CANCELLED", "attempt_state": "ABANDONED",
+                }
+                raise _RollbackVerification
+        # Preserve the causal shape of a committed tool turn, but give the
+        # isolated copy an already elapsed deadline. Both real participants
+        # below run in one PostgreSQL transaction; rollback leaves the normal
+        # tool dispatch path in this test untouched.
+        expired_tool_run = "run/agent-package/expired-tool"
+        expired_tool_session = "session/agent-package/expired-tool"
+        expired_tool_request = "model-request/package/expired-tool"
+        expired_model_attempt = "model-attempt/package/expired-tool"
+        expired_tool_turn = "model-turn/package/expired-tool"
+        expired_tool_call = "tool-call/package/expired-tool"
+        expired_tool_effect = "tool-effect/package/expired-tool"
+        expired_tool_attempt = "tool-attempt/package/expired-tool"
+        expired_tool_state = await _payload(
+            kernel, owner_kind="checkpoint.state",
+            owner_id="checkpoint/package/expired-tool",
+            value=b'{"phase":"FAILED","error_code":"AGENT_DEADLINE_EXCEEDED"}',
+        )
+        with pytest.raises(_RollbackVerification):
+            async with store.pool.connection() as conn, conn.transaction():
+                namespace = package.configuration.namespace
+                await _clone_agent_fact(
+                    conn, namespace, "agent_sessions", "session_id",
+                    "session/agent-package/model-port", store.bot_id, {
+                        "session_id": expired_tool_session,
+                        "conversation_ref": "conversation/onebot/group/expired-tool",
+                        "start_operation_id": "agent-session-start/package/expired-tool",
+                        "active_run_id": expired_tool_run,
+                    },
+                )
+                await _clone_agent_fact(
+                    conn, namespace, "agent_runs", "run_id",
+                    "run/agent-package/model-port", store.bot_id, {
+                        "run_id": expired_tool_run,
+                        "session_id": expired_tool_session,
+                        "conversation_ref": "conversation/onebot/group/expired-tool",
+                        "start_operation_id": "agent-run-start/package/expired-tool",
+                        "absolute_deadline": (
+                            datetime.now(timezone.utc) - timedelta(seconds=1)
+                        ).isoformat(),
+                        "state": "WAIT_TOOL",
+                        "owner_id": "agent-worker/expired-tool",
+                        "owner_epoch": 1,
+                        "owner_expires_at": (
+                            datetime.now(timezone.utc) + timedelta(minutes=2)
+                        ).isoformat(),
+                        "current_model_request_id": expired_tool_request,
+                        "current_tool_call_id": expired_tool_call,
+                        "checkpoint_seq": 0,
+                    },
+                )
+                await _clone_agent_fact(
+                    conn, namespace, "model_requests", "request_id",
+                    "model-request/package/repair", store.bot_id, {
+                        "request_id": expired_tool_request,
+                        "run_id": expired_tool_run,
+                        "request_kind": "PRIMARY", "request_revision": 1,
+                        "predecessor_request_id": None,
+                        "current_attempt_id": expired_model_attempt,
+                    },
+                )
+                await _clone_agent_fact(
+                    conn, namespace, "model_transport_attempts", "attempt_id",
+                    "model-attempt/package/repair", store.bot_id, {
+                        "attempt_id": expired_model_attempt,
+                        "request_id": expired_tool_request,
+                        "effect_operation_ref": "model-effect/package/expired-tool",
+                    },
+                )
+                await _clone_agent_fact(
+                    conn, namespace, "model_turns", "turn_id",
+                    "model-turn/package/repair", store.bot_id, {
+                        "turn_id": expired_tool_turn,
+                        "run_id": expired_tool_run,
+                        "request_id": expired_tool_request,
+                        "repair_of_request_id": None,
+                    },
+                )
+                await _clone_agent_fact(
+                    conn, namespace, "tool_calls", "tool_call_id",
+                    "tool-call/package/repair", store.bot_id, {
+                        "tool_call_id": expired_tool_call,
+                        "run_id": expired_tool_run,
+                        "turn_id": expired_tool_turn,
+                        "effect_operation_ref": expired_tool_effect,
+                        "effect_attempt_id": expired_tool_attempt,
+                        "authorization_ticket_id": "ticket/" + expired_tool_attempt,
+                        "state": "PROPOSED",
+                        "approval_required": False, "approval_ref": None,
+                    },
+                )
+                await _seed_prepared_effect(
+                    conn, kernel, store,
+                    operation_id=expired_tool_effect,
+                    attempt_id=expired_tool_attempt, wire=tool_wire,
+                    generation_id=caller["generation_id"],
+                    executor_component_id="tool.echo",
+                    authorization_action="tool.invoke",
+                )
+                progress = await (await conn.execute(sql.SQL(
+                    "SELECT input_revision,next_step_seq,checkpoint_seq "
+                    "FROM {}.agent_runs WHERE bot_id=%s AND run_id=%s"
+                ).format(sql.Identifier(namespace)),
+                    (store.bot_id, expired_tool_run))).fetchone()
+                abandonment_id = "abandon/package/expired-tool"
+                abandoned = await registry.get(
+                    "kernel.effect"
+                ).unit_of_work_participant().invoke_in(
+                    conn, "effect.abandon", {
+                        "protocol": "forest.uow-step/1", "caller": caller,
+                        "input": {
+                            "protocol": "forest.effect-abandon/1",
+                            "effect_operation_id": expired_tool_effect,
+                            "attempt_id": expired_tool_attempt,
+                            "abandonment_operation_id": abandonment_id,
+                            "reason_code": "AGENT_DEADLINE_EXCEEDED",
+                            "cancel_effect": True,
+                        }, "prior": {},
+                    },
+                    operation_id="effect-abandon/package/expired-tool",
+                    causal_root_kind="agent.run", causal_root_id=expired_tool_run,
+                    parent_call_id="call:agent-package/expired-tool/abandon",
+                    timeout_seconds=10,
+                )
+                expired_tool = await participant.invoke_in(
+                    conn, "agent.expire-run-record", {
+                        "protocol": "forest.uow-step/1", "caller": caller,
+                        "input": {
+                            "owner": {
+                                "run_id": expired_tool_run,
+                                "owner_id": "agent-worker/expired-tool", "epoch": 1,
+                            },
+                            "checkpoint_id": expired_tool_state.owner_id,
+                            "state": expired_tool_state.canonical(),
+                            "prepared": {
+                                "kind": "TOOL",
+                                "effect_operation_id": expired_tool_effect,
+                                "attempt_id": expired_tool_attempt,
+                                "abandonment_operation_id": abandonment_id,
+                            },
+                            "input_revision": progress["input_revision"],
+                            "step_seq": progress["next_step_seq"],
+                            "checkpoint_seq": progress["checkpoint_seq"],
+                        }, "prior": {"effect": abandoned},
+                    },
+                    operation_id="agent-expire/package/expired-tool",
+                    causal_root_kind="agent.run", causal_root_id=expired_tool_run,
+                    parent_call_id="call:agent-package/expired-tool/expire",
+                    timeout_seconds=10,
+                )
+                assert expired_tool["state"] == "FAILED"
+                assert expired_tool["session"]["state"] == "FAILED"
+                assert expired_tool["error_code"] == "AGENT_DEADLINE_EXCEEDED"
+                states = await (await conn.execute(sql.SQL(
+                    "SELECT r.state AS run_state,t.state AS tool_state,"
+                    "o.state AS effect_state,a.state AS attempt_state "
+                    "FROM {}.agent_runs r JOIN {}.tool_calls t "
+                    "ON t.bot_id=r.bot_id AND t.run_id=r.run_id "
+                    "JOIN {}.effect_operations o "
+                    "ON o.bot_id=r.bot_id AND o.effect_operation_id=t.effect_operation_ref "
+                    "JOIN {}.effect_attempts a "
+                    "ON a.bot_id=o.bot_id AND a.effect_operation_id=o.effect_operation_id "
+                    "WHERE r.bot_id=%s AND r.run_id=%s"
+                ).format(sql.Identifier(namespace), sql.Identifier(namespace),
+                         sql.Identifier(kernel.effect.namespace),
+                         sql.Identifier(kernel.effect.namespace)),
+                    (store.bot_id, expired_tool_run))).fetchone()
+                assert states == {
+                    "run_state": "FAILED", "tool_state": "FAILED",
+                    "effect_state": "CANCELLED", "attempt_state": "ABANDONED",
                 }
                 raise _RollbackVerification
         handoff_tool_envelope = {

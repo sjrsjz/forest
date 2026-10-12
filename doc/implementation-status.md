@@ -10,7 +10,7 @@
 
 权威边界已核对：部署内核的 `bots`、`runtime_intents` 与监督器观测账本持有 Bot 基础身份和运行意图；可热替换的 `deployment.bot-catalog` 通过清单声明的受限 kernel query/command 端口贡献目录管理 UI，不复制 Bot 状态或拥有目标 Bot 的模块配置。后续重构必须保持此边界。
 
-仍需单独验证工具 PREPARED Effect 在 Run 截止时的跨参与者结算及进程硬退出恢复，并完成真实低频触发、长期多群图文负载与成本验收。v27 新隔离 Bot 数据库及当前包基线已通过完整装配与上线观察；v26 旧 SQL 基线不作为当前源码的热替换目标。
+工具 PREPARED Effect 在 Run 截止时的跨参与者结算已通过隔离 PostgreSQL 回归；进程硬退出恢复仍需单独验证，真实低频触发、长期多群图文负载与成本验收也尚未完成。v27 新隔离 Bot 数据库及当前包基线已通过完整装配与上线观察；v26 旧 SQL 基线不作为当前源码的热替换目标。
 
 ### 当前验收边界
 
@@ -21,7 +21,9 @@
 | 微内核、Bot 身份与包生命周期 | v27 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作；完整隔离 BotHost 用例覆盖热替换、停机和重启。 | 普通 deployment 插件的私有存储、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
 | 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例接入过真实 VL 嵌入和 Milvus；v27 自然入站已产生多个主干。 | v27 尚未出现许可群真实 @，当前自然消息尚未触发 Agent 或产生就绪 facet；长期图文成本、百万级筛选与物理索引恢复的运营闭环未验收。 |
-| 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed。 | 许可群真实入站→Agent→Provider→发送、工具 PREPARED Effect 在 Run 截止时的双参与者结算及硬退出恢复，均不能用纯逻辑测试代替。 |
+| 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算 1 passed。 | 许可群真实入站→Agent→Provider→发送，以及工具 Effect 结算的进程硬退出恢复仍需验证。 |
+
+工具 PREPARED 截止结算核验（2026-10-12）：在独立 PostgreSQL 17.10 容器中，从已提交的工具调用事实复制出隔离的过期 Run/Session，并建立真实 PREPARED Kernel Effect。`effect.abandon` 与 `agent.expire-run-record` 使用同一事务和包参与者执行；断言 Run、Session、工具调用为 FAILED，Effect 为 CANCELLED、Attempt 为 ABANDONED。`test_agent_package_owns_run_snapshot_and_epoch_fenced_lease` 1 passed（59.47 秒），Ruff 与差异检查通过。该用例在事务末尾回滚测试夹具，未模拟进程硬退出、真实供应商调用或 QQ 消息；在线 v27 未更换镜像。
 
 上一项定向回归在本机默认 Python 3.10 下因 `datetime.UTC` 不可用而未能收集；改用既有 Python 3.11 测试镜像和当前源码只读挂载，`test_conversation_model_view_selection.py`、`test_agent_expired_unknown.py`、`test_shell_priority_contract.py` 共 9 passed。此验证没有改动在线实例，也未发送 QQ 消息。
 
