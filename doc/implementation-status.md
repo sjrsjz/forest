@@ -1,10 +1,10 @@
 # Forest 实现状态
 
-## 当前快照（2026-10-12）
+## 当前快照（2026-10-13）
 
-在线实例现为提交 `97bf3ff` 构建的 `forest:runtime-candidate-97bf3ff`：`forest-main-v29` 使用独立的 deployment、Host、Bot 数据库及包卷，处于 READY/ONLINE，Bot 图修订 1 的 22 个模块均 ACTIVE；`forest-main-v28` 已收敛至 OFFLINE/OFFLINE。两套 Supervisor 均 healthy、重启 0 次，v28/v29 到 OneBot 8080 的已建立连接为 0/1。v28 有带来源归因的非空文本和 PNG 在线召回，v29 已用真实 GIF 完成上传、VL 嵌入和召回试验，当时尚无 ELIGIBLE 来源而返回 0 项。v29 许可群 `933179609` 的两条自然入站均为 `NO_TRIGGER/mention_required`，Agent Run 为 0；真实显式 @→Agent→Provider→发送、在线 GIF 来源结果展示和长期负载仍待验收。详见 [v29 切换记录](live-v29-cutover-2026-10-12.md) 与 [v28 实测记录](live-v28-cutover-2026-10-12.md)。
+在线实例仍为提交 `97bf3ff` 构建的 `forest:runtime-candidate-97bf3ff`：`forest-main-v29` 在独立 deployment、Host、Bot 数据库及包卷运行，2026-10-13 13:00 UTC 只读采样为 READY/ONLINE、Bot 图修订 3 的 22 个模块 ACTIVE、Supervisor healthy。Memory 已有 3,985 条来源、4,575 个 READY 文档 facet；许可群 `933179609` 的入站/分类/Context 水位均为 109，最近一条仍为 `NO_TRIGGER/mention_required`，无 Agent Run 或待发送。在线同一 GIF 管理试验已返回 8 条带群/主干来源的证据，其中直接种子 GIF 的媒体摘要与输入相同。观察器仍报 `DOCUMENT_EMBEDDING_UNKNOWN`：28 个文档 facet 分属 4 笔前一日超时的 UNKNOWN 请求，冻结预算合计 131,072 token，未自动重试。真实显式 @→Agent→Provider→发送及长期负载仍待验收。详见 [v29 切换与后续观察](live-v29-cutover-2026-10-12.md)。
 
-### 同日历史观察（v27/v28，均非当前在线 Bot）
+### 历史观察（v27/v28，均非当前在线 Bot）
 
 2026-10-12 08:00（北京时间）完成 v26→v27 切换：`forest-main-v26` 的期望与观测状态均为 OFFLINE，`forest-main-v27` 为 READY/ONLINE；v27 运行图 22/22 ACTIVE、schema bundle 22/22 READY，四次只读采样无违规、活动 Agent Run、并发会话或待发送消息。树莓派 OneBot 端口仅见一条来自本机的远端连接。v27 是新 Bot，未复制 v26 消息或记忆；许可群 `933179609` 尚无入站记录，真实低频 @→Agent→Provider→发送链仍未验收。此轮没有主动向 QQ 发送消息。
 
@@ -15,6 +15,8 @@
 12:12–12:28（北京时间）自然流量复查：v27 的静默裁剪已将 6 条消息升为 ELIGIBLE，19 个文档 facet（13 文本、6 图片）均 READY；随后非空文本管理试验以 21 token 返回 8 条带群号和主干的结果。同期自然归档使 ELIGIBLE 增至 134，日预算 30 笔、21157 token、UNKNOWN 为 0；这些自然成本不属于单次查询。复用一张已归档 JPEG 做图片试验时，VL 查询到 READY，但旧版管理结果的第 3 项携带已采集的 GIF，返回 `RUNTIME_SERVICE_OUTPUT_INVALID`。当前源码已把 GIF 与媒体采集、嵌入 Provider 的声明对齐；官方 Memory 包构建及 114 项相邻回归通过，在线 v27 尚未切换。详见[实例记录](live-v27-cutover-2026-10-12.md)。
 
 ### 当前边界与验收
+
+在线 v29 的 GIF 来源召回和 UNKNOWN 预算敞口已按 2026-10-13 的真实管理查询与只读数据库快照复核；后文 2026-10-12 的 v29 初始试验返回 0 项是当时尚无 ELIGIBLE 来源的历史结果，不再代表当前召回状态。
 
 Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 4.52.0 将现有 `agent.protocol.describe` 声明为管理专用只读服务，并由 `agent.protocol` 管理查询提供当前包 Generation 的核心提示词、摘要、解析器版本；管理 iframe 按需读取并显示，Bootstrap 编辑器只编辑 Bot 行为预设。固定核心仍由 `agent_protocol.CORE_PROMPT` 持有，预设不能改写。隔离 Worker 查询回归、官方包检查、Ruff 与前端脚本语法通过。此变更尚未切换到在线 v29。
 
@@ -30,7 +32,7 @@ Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 
 | --- | --- | --- |
 | 微内核、Bot 身份与包生命周期 | v29 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；在线 `deployment.audit` 同工件重载和官方 1.0.1→1.0.2 换包使部署图修订 1→2→3，每次仅该组件换代，其余 7 个 Generation 保留；Supervisor 受控重启后仍从目录恢复 1.0.2，Bot 图与唯一 OneBot 连接重新收敛；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作。完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
-| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证大 PNG 和动画 GIF 同时归档、GIF 图像跨群召回及管理结果来源归因；v28 的在线文本/PNG 试验各召回 8 项并标明群号和主干，v29 的真实 GIF 输入试验 READY、当时无 ELIGIBLE 来源而返回 0 项。 | 许可群显式 @→回复、在线 GIF 来源结果展示、长期图文成本、百万级混合图文筛选与物理索引恢复的运营闭环仍未验收。 |
+| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证大 PNG 和动画 GIF 同时归档、GIF 图像跨群召回及管理结果来源归因；v28 的在线文本/PNG 试验各召回 8 项并标明群号和主干，v29 的同一 GIF 在线试验已在自然来源入库后返回 8 条带群/主干来源的证据，直接种子 GIF 媒体摘要与输入一致。 | 许可群显式 @→回复、在线 GIF 证据进入 Agent 模型输入、长期图文成本、百万级混合图文筛选与物理索引恢复的运营闭环仍未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算与 Worker 硬退出恢复各 1 passed。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
 
 真实 Milvus 非空索引重建与丢失恢复（2026-10-12）：在隔离 PostgreSQL Bot 库和真实 Milvus 中，现有 Web 重建场景从四条非触发群消息生成 ELIGIBLE 来源与 READY 文本 facet，原来源 ref 已写入旧集合；管理员通过 Web 管理动作重建后，旧、新两代集合均持有该 ref，发布修订从 1 到 2，旧集合随后由包内回收任务删除，`vector-web-real` 1 passed in 147.61s。新增故障变体先删除该测试 Bot 的准确旧集合，经带冻结 binding 的物理调用使包记录 `REBUILD_REQUIRED`；相同 Web 重建链将权威 ReplayLocator 回放到新集合、发布修订 2，原来源 ref 仍可从新集合精确读取，缺失旧集合的回收也结算，`vector-web-recover` 1 passed in 144.00s。两者使用假 OneBot 与假嵌入、真实 Milvus；测试只操作随机测试 Bot 的隔离集合并清理数据库和集合，不证明在线 v29 的真实故障恢复、百万级重建时间或跨系统外部篡改一致性。

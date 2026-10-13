@@ -294,6 +294,24 @@ async def _bot_state(
                     (bot_id,),
                 )
             ).fetchall()
+            unknown_exposure = await (
+                await connection.execute(
+                    sql.SQL(
+                        "SELECT count(*) AS attempts,"
+                        "coalesce(sum(reserved_tokens),0)::bigint AS frozen_reserved_tokens "
+                        "FROM (SELECT DISTINCT a.attempt_id,r.reserved_tokens "
+                        "FROM {m}.embedding_facets f "
+                        "JOIN {m}.embedding_batch_attempts a "
+                        "ON a.bot_id=f.bot_id AND a.attempt_id=f.current_attempt_id "
+                        "JOIN {m}.embedding_budget_reservations r "
+                        "ON r.bot_id=a.bot_id AND r.reservation_id=a.reservation_id "
+                        "WHERE f.bot_id=%s AND f.purpose='DOCUMENT' "
+                        "AND f.state='UNKNOWN' AND a.state='UNKNOWN' "
+                        "AND r.state='UNKNOWN') current_attempts"
+                    ).format(m=sql.Identifier(MEMORY)),
+                    (bot_id,),
+                )
+            ).fetchone()
             embedding_budget = await (
                 await connection.execute(
                     sql.SQL(
@@ -481,6 +499,8 @@ async def _bot_state(
                 f"{row['state']}.{row['error_code'] or 'NONE'}": row["count"]
                 for row in attempt_failures
             },
+            "attempt_failures_scope": "all_time",
+            "unknown_attempt_exposure": dict(unknown_exposure),
             "embedding_budget_today": dict(embedding_budget) if embedding_budget else None,
         },
         "concurrency": dict(concurrency),

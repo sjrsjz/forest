@@ -15,3 +15,11 @@
 跨版本选择恢复：在 Agent Run 总数为 0 时，对 v29 Supervisor 做一次受控重启。新进程从持久包目录恢复 `deployment.audit` 1.0.2，部署图修订 4、8/8 ACTIVE；Bot 从 STARTING 收敛至 READY/ONLINE，Bot 图修订 3 的 22/22 模块 ACTIVE，Memory 仍为 1.93.4 / SQL 3.92.0，OneBot 已建立连接重新收敛为 1。Supervisor healthy、Docker 重启计数 0（此次为人工 `docker restart`，不是崩溃重试）。这证明准确版本选择和独立 Bot 运行意图跨 Supervisor 进程恢复，不证明带活动 Agent Run 的重启窗口。
 
 回退顺序：先通过 v29 管理面将 `forest-main-v29` 设为 OFFLINE 并确认观测状态及 OneBot 连接释放，再通过 v28 管理面将 `forest-main-v28` 设为 ONLINE。两套库独立，回退不会合并 v29 新产生的消息和记忆。
+
+## 2026-10-13 在线只读复核与 GIF 来源召回
+
+13:00 UTC 使用跟踪源码的只读观察器采样两次：Supervisor healthy，Bot READY/ONLINE、图修订 3 的 22/22 模块 ACTIVE，许可群 `933179609` 的入站、分类和 Context 应用水位均为 109，无活动 Agent Run、待发送，该群无已记录的聊天发送。Memory 为 3,985 条来源、4,575 个 READY 文档 facet。观察器退出码 1 的唯一违反项是 `DOCUMENT_EMBEDDING_UNKNOWN`；不把 Supervisor 健康误报为记忆全健康。
+
+通过正式管理资产入口对原 1,352,134 字节 GIF 仅发起一次新试验 `trial:live-v28-gif-239a2916527e4a1d81642c6ca228b67a`。试验从 CLAIMED/PENDING 进入 READY，结果共 8 条；首 4 条为直接向量种子，含一条来源群 `864533524` 的 GIF。只读复取冻结结果确认该 GIF 的 `media_ref.digest` 与输入文件 SHA-256 相同，结果包含非空来源主干和作者引用；其余证据分别标出各自群号与主干。它证明 v29 在已有自然 ELIGIBLE 来源后可用图片跨群召回并正确归因，不证明 LLM 已消费这些证据或真实 QQ 回复。本轮没有向 QQ 发送消息。
+
+随后以只读事务汇总 UNKNOWN：28 个文档 facet（6 个 IMAGE、22 个 TEXT）归属于 4 笔 2026-10-12 11:17–11:18 UTC 的 `EMBEDDING_TIMEOUT` 请求；对应 attempt 与预算均为 UNKNOWN，冻结预算总计 131,072 token，实际供应商计费未知。包管理动作允许审阅后明确承认可能重复计费再逐笔重排；目前未执行重试。观察器现输出 `attempt_failures_scope=all_time` 和 `unknown_attempt_exposure`，避免把累计超时数误读为最近一小时事件，也不把冻结预算当成实耗。
