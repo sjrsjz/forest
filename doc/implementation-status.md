@@ -4,7 +4,7 @@
 
 `forest-main-v30` 使用完整源码镜像 `forest:runtime-candidate-fb8199b`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 2 的 22/22 个组件 ACTIVE，`agent.runtime` 4.52.0 / SQL 2.33.0、`memory.graph` 1.93.5 / SQL 3.92.1。v29 已 OFFLINE，旧库和包卷保留供回退，不与 v30 合并记忆。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
 
-v30 的 GIF 管理试验已将一个 IMAGE 查询 facet 结算为 READY，嵌入费用 82 token、UNKNOWN 为 0；试验时 v30 尚无来源，结果为 0 项；当前已收到 1 条其他群自然消息，来源仍为 REGISTERED、无可召回文档 facet。树莓派 NapCat 曾短暂报告 QQ 账号离线，之后本机状态接口恢复 `READY`；进程健康与 OneBot TCP 连接不能单独证明 QQ 登录。v30 目前只观察到其他群的 `NO_TRIGGER/group_not_allowed` 自然入站，许可群 `933179609` 尚无新消息，真实 @→Agent→Provider→发送仍待验收。v29 曾有非空跨群 GIF 召回和 28 个 UNKNOWN 文档 facet，均属于旧库历史事实。
+v30 的 GIF 管理试验已将一个 IMAGE 查询 facet 结算为 READY，嵌入费用 82 token、UNKNOWN 为 0；试验时 v30 尚无来源，结果为 0 项；截至 03:11 已收到 2 条其他群自然消息，来源仍为 REGISTERED、无可召回文档 facet。树莓派 NapCat 曾短暂报告 QQ 账号离线，随后本机状态接口恢复 `READY`，只读 OneBot `get_status` 返回 `online=true`、`good=true`，v30 保持一条连接；进程健康与 TCP 连接不能单独证明 QQ 登录。v30 目前只观察到其他群的 `NO_TRIGGER/group_not_allowed` 自然入站，许可群 `933179609` 尚无新消息，真实 @→Agent→Provider→发送仍待验收。v29 曾有非空跨群 GIF 召回和 28 个 UNKNOWN 文档 facet，均属于旧库历史事实。
 
 ### 历史观察（v27/v28，均非当前在线 Bot）
 
