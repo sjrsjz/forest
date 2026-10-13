@@ -1349,3 +1349,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-14 v29 QQ 恢复与 Agent 官方热替换：树莓派 QQ 3.2.33→3.2.34、会话版本配置同步，扫码后 OneBot 8080 与 v29 Bot 恢复；旧 AliceBot 仍停用。Host 包预检消除重复完整校验并将官方包验证至多 4 路并发，111 项包测试、2 项组件选择测试及 Ruff 通过；18 包只读基准约 12→6 秒，线上正式预检 31.73 秒（此前超过 45 秒截止）。保留 v29 builtin 基线的 Host 修复镜像经双网络接入启动 ONLINE，官方 Agent 4.52.0 的选择请求内核 SUCCEEDED，Bot Graph 183→184，22/22 ACTIVE，Agent 与 5 个依赖组件换代。完整源码镜像尚不能直接冷启动 v29 旧 SQL 基线；许可群新显式 @ 到 QQ 回复、长期负载及 28 个 UNKNOWN facet 的计费处置仍待验收。详见 doc/live-v29-cutover-2026-10-12.md。
 
 2026-10-14 v29 Agent 4.52.0 进程恢复：在无活动 Run/Job/待发送时受控重启 Supervisor，Bot Graph 修订 186 恢复 22/22 ACTIVE、Agent 仍为 4.52.0，树莓派 OneBot TCP 连接重新建立。活动 Run 中断与新显式 @ 端到端回复仍待验证。
+
+2026-10-14 v30 完整源码候选接管：因当前 Memory 1.93.5 / SQL 3.92.1 与 v29 基线不同，建立独立 deployment、Host、Bot 库和包卷，经正式 API 供应 22 个 READY schema bundle。v29 无活动 Run/Job/待发送后先 OFFLINE、OneBot 连接归零，v30 后 ONLINE；v30 图修订 1 为 22/22 ACTIVE，Agent 4.52.0 / SQL 2.33.0、Memory 1.93.5 / SQL 3.92.1，观察器无违规，树莓派仅 1 条 OneBot 连接。v30 记忆从空库开始，旧 v29 数据保留供回退；许可群新显式 @ 的端到端回复尚待验收。详见 `doc/live-v30-cutover-2026-10-14.md`。
