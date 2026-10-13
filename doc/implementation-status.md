@@ -1351,3 +1351,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-14 v29 Agent 4.52.0 进程恢复：在无活动 Run/Job/待发送时受控重启 Supervisor，Bot Graph 修订 186 恢复 22/22 ACTIVE、Agent 仍为 4.52.0，树莓派 OneBot TCP 连接重新建立。活动 Run 中断与新显式 @ 端到端回复仍待验证。
 
 2026-10-14 v30 完整源码候选接管：因当前 Memory 1.93.5 / SQL 3.92.1 与 v29 基线不同，建立独立 deployment、Host、Bot 库和包卷，经正式 API 供应 22 个 READY schema bundle。v29 无活动 Run/Job/待发送后先 OFFLINE、OneBot 连接归零，v30 后 ONLINE；v30 图修订 1 为 22/22 ACTIVE，Agent 4.52.0 / SQL 2.33.0、Memory 1.93.5 / SQL 3.92.1，观察器无违规，树莓派仅 1 条 OneBot 连接。v30 记忆从空库开始，旧 v29 数据保留供回退；许可群新显式 @ 的端到端回复尚待验收。详见 `doc/live-v30-cutover-2026-10-14.md`。
+
+2026-10-14 v30 正式 GIF 管理试验：已核对的 1,352,134 字节 GIF 经 6 分块上传，查询从 CLAIMED/PENDING 到 READY；空记忆库返回 0 项。只读账本为 `QUERY.READY` 1、已结算请求 1、嵌入 token 82、UNKNOWN 0，Bot 22/22 ACTIVE 且观察器无违规。此试验不证明非空图片召回或许可群真实回复；详见 `doc/live-v30-cutover-2026-10-14.md`。
