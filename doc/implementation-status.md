@@ -1,10 +1,10 @@
 # Forest 实现状态
 
-## 当前快照（2026-10-13）
+## 当前快照（2026-10-14）
 
-14:50 UTC 更新：下段 13:00 UTC 的 ONLINE 状态已成为历史快照。树莓派 NapCat/QQ 在 22:19 北京时间重启后持续报告 `Login Error (ErrType 1, ErrCode 3)`，配置的 OneBot 8080 端口没有监听；v29 Supervisor 仍 healthy、Bot 期望 ONLINE，但观测为 STARTING，活动 Bot 图为空。只读 Bot 账本已有多次 `adapter.onebot/ONEBOT_API_UNAVAILABLE` 的 STOPPED 启动图，替换请求账本为空；许可群最新水位 110 仍为 `NO_TRIGGER/mention_required`，没有 Agent Run 或发送。`agent.runtime` 4.52.0 已经由官方发布命令按 ZIP、包和 manifest 摘要写入 v29 私有包目录，完整存储身份与在线 4.51.0 匹配；**尚未通过 `component.worker-host` 选择或加载**。当前源码已修正 Supervisor 的 `STARTING` 清零失败串问题，隔离 PostgreSQL 定向回归和 Ruff 通过；v29 镜像仍采用旧重试逻辑，不能把源码修复当作在线修复。真实回复与 Bot 包换代验收需等 QQ 登录和 OneBot 8080 恢复。
+`forest-main-v30` 使用完整源码镜像 `forest:runtime-candidate-fb8199b`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 1 的 22/22 个组件 ACTIVE，`agent.runtime` 4.52.0 / SQL 2.33.0、`memory.graph` 1.93.5 / SQL 3.92.1。v29 已 OFFLINE，旧库和包卷保留供回退，不与 v30 合并记忆。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
 
-在线实例仍为提交 `97bf3ff` 构建的 `forest:runtime-candidate-97bf3ff`：`forest-main-v29` 在独立 deployment、Host、Bot 数据库及包卷运行，2026-10-13 13:00 UTC 只读采样为 READY/ONLINE、Bot 图修订 3 的 22 个模块 ACTIVE、Supervisor healthy。Memory 已有 3,985 条来源、4,575 个 READY 文档 facet；许可群 `933179609` 的入站/分类/Context 水位均为 109，最近一条仍为 `NO_TRIGGER/mention_required`，无 Agent Run 或待发送。在线同一 GIF 管理试验已返回 8 条带群/主干来源的证据，其中直接种子 GIF 的媒体摘要与输入相同。观察器仍报 `DOCUMENT_EMBEDDING_UNKNOWN`：28 个文档 facet 分属 4 笔前一日超时的 UNKNOWN 请求，冻结预算合计 131,072 token，未自动重试。真实显式 @→Agent→Provider→发送及长期负载仍待验收。详见 [v29 切换与后续观察](live-v29-cutover-2026-10-12.md)。
+v30 的 GIF 管理试验已将一个 IMAGE 查询 facet 结算为 READY，嵌入费用 82 token、UNKNOWN 为 0；试验时 v30 尚无来源，结果为 0 项；当前已收到 1 条其他群自然消息，来源仍为 REGISTERED、无可召回文档 facet。树莓派 NapCat 曾短暂报告 QQ 账号离线，之后本机状态接口恢复 `READY`；进程健康与 OneBot TCP 连接不能单独证明 QQ 登录。v30 目前只观察到其他群的 `NO_TRIGGER/group_not_allowed` 自然入站，许可群 `933179609` 尚无新消息，真实 @→Agent→Provider→发送仍待验收。v29 曾有非空跨群 GIF 召回和 28 个 UNKNOWN 文档 facet，均属于旧库历史事实。
 
 ### 历史观察（v27/v28，均非当前在线 Bot）
 
@@ -18,13 +18,13 @@
 
 ### 当前边界与验收
 
-在线 v29 的 GIF 来源召回和 UNKNOWN 预算敞口已按 2026-10-13 的真实管理查询与只读数据库快照复核；后文 2026-10-12 的 v29 初始试验返回 0 项是当时尚无 ELIGIBLE 来源的历史结果，不再代表当前召回状态。
+当前 v30 有 1 条 REGISTERED 自然来源，尚无 ELIGIBLE 来源或文档 facet；此前 GIF 管理试验验证资产、VL 嵌入和当时的空库查询链，不能证明图片命中。v29 旧库曾在自然来源入库后返回 8 条带群/主干归因的 GIF 召回证据，其 28 个 UNKNOWN 文档 facet 未复制或自动重试；这些历史结果不能当作 v30 的非空召回验收。
 
-Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 4.52.0 将现有 `agent.protocol.describe` 声明为管理专用只读服务，并由 `agent.protocol` 管理查询提供当前包 Generation 的核心提示词、摘要、解析器版本；管理 iframe 按需读取并显示，Bootstrap 编辑器只编辑 Bot 行为预设。固定核心仍由 `agent_protocol.CORE_PROMPT` 持有，预设不能改写。隔离 Worker 查询回归、官方包检查、Ruff 与前端脚本语法通过。此变更尚未切换到在线 v29。
+Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 4.52.0 将 `agent.protocol.describe` 声明为管理专用只读服务，管理 iframe 可读取当前 Generation 的核心提示词、摘要和解析器版本，Bootstrap 编辑器只编辑 Bot 行为预设。固定核心仍由 `agent_protocol.CORE_PROMPT` 持有，预设不能改写；v30 运行图已装载 4.52.0，但许可群真实模型请求尚未发生。
 
 权威边界已核对：部署内核的 `bots`、`runtime_intents` 与监督器观测账本持有 Bot 基础身份和运行意图；可热替换的 `deployment.bot-catalog` 通过清单声明的受限 kernel query/command 端口贡献目录管理 UI，不复制 Bot 状态或拥有目标 Bot 的模块配置。后续重构必须保持此边界。
 
-工具 PREPARED Effect 在 Run 截止时的跨参与者结算与 Agent Worker 硬退出后的恢复均已通过隔离 PostgreSQL 回归；真实低频触发、长期多群图文负载与成本验收尚未完成。v29 新隔离 Bot 数据库及 GIF 修正后的包基线已通过正式供应与上线观察；v28 旧 SQL 基线不作为当前源码的热替换目标。
+工具 PREPARED Effect 在 Run 截止时的跨参与者结算与 Agent Worker 硬退出后的恢复已通过隔离 PostgreSQL 回归；真实低频触发、长期多群图文负载与成本验收尚未完成。v30 完整源码包基线已在独立 Bot 数据库正式供应并上线；旧 v29 SQL 基线不作为当前源码的原位热替换目标。
 
 ### 当前验收边界
 
@@ -32,10 +32,10 @@ Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 
 
 | 范围 | 当前证据 | 仍需证明或完成 |
 | --- | --- | --- |
-| 微内核、Bot 身份与包生命周期 | v29 的 8 个 deployment、2 个 Host、22 个 Bot 模块已按真实图装配；在线 `deployment.audit` 同工件重载和官方 1.0.1→1.0.2 换包使部署图修订 1→2→3，每次仅该组件换代，其余 7 个 Generation 保留；Supervisor 受控重启后仍从目录恢复 1.0.2，Bot 图与唯一 OneBot 连接重新收敛；内核目录持有 Bot 身份/意图，`deployment.bot-catalog` 只经受限端口操作。完整隔离 BotHost 用例覆盖热替换、停机和重启。当前源码的普通 deployment/host 包把持久 JSON 状态放进包私有 schema，并将准确存储身份绑定 Generation。 | 普通控制包的领域 SQL、通用写/Effect 端口及长期多 Bot 负载尚未完成或验收；不能把传输 Effect Driver 当成业务模块。 |
+| 微内核、Bot 身份与包生命周期 | v30 独立 Bot 图修订 1 的 22/22 成员 ACTIVE；v29 在线官方 Agent 4.52.0 选择与 5 个依赖组件换代，以及 `deployment.audit` 官方跨版本定点热替换和重启恢复，证明同存储基线的真实包热重载。Bot 身份/意图仍由部署内核持有，管理 builtin 只经受限端口操作。 | 存储 schema/baseline 变化时，当前安装器对同一 Bot 库返回 `SCHEMA_BUNDLE_MISMATCH`，尚不能宣称保留状态的原库热升级；普通控制包领域 SQL 与长期多 Bot 负载也尚待完成或验收。 |
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
-| 记忆与向量 | `memory.graph` 包中已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包中已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证大 PNG 和动画 GIF 同时归档、GIF 图像跨群召回及管理结果来源归因；v28 的在线文本/PNG 试验各召回 8 项并标明群号和主干，v29 的同一 GIF 在线试验已在自然来源入库后返回 8 条带群/主干来源的证据，直接种子 GIF 媒体摘要与输入一致。 | 许可群显式 @→回复、在线 GIF 证据进入 Agent 模型输入、长期图文成本、百万级混合图文筛选与物理索引恢复的运营闭环仍未验收。 |
-| 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行与跨群独立 Actor、静默维护、Shell 优先级均有包契约；本轮 Python 3.11 定向逻辑回归 9 passed，隔离 PostgreSQL 中工具 PREPARED Effect 的截止结算与 Worker 硬退出恢复各 1 passed。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
+| 记忆与向量 | `memory.graph` 包已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证跨群图文召回；v29 非空 GIF 管理试验返回 8 条带来源归因的证据；v30 在空库时的 GIF 查询 READY、结算 82 token、UNKNOWN 0、结果 0 项。 | v30 许可群真实 @→回复、非空图片证据进入模型输入、长期图文成本、百万级真实混合图文和在线物理索引恢复仍未验收。 |
+| 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行、跨群独立、静默维护和 Shell 优先级已有包契约及隔离 PostgreSQL 验证；v30 自然入站出现 `NO_TRIGGER/group_not_allowed`，无并发 Run 或待发送。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
 
 真实 Milvus 非空索引重建与丢失恢复（2026-10-12）：在隔离 PostgreSQL Bot 库和真实 Milvus 中，现有 Web 重建场景从四条非触发群消息生成 ELIGIBLE 来源与 READY 文本 facet，原来源 ref 已写入旧集合；管理员通过 Web 管理动作重建后，旧、新两代集合均持有该 ref，发布修订从 1 到 2，旧集合随后由包内回收任务删除，`vector-web-real` 1 passed in 147.61s。新增故障变体先删除该测试 Bot 的准确旧集合，经带冻结 binding 的物理调用使包记录 `REBUILD_REQUIRED`；相同 Web 重建链将权威 ReplayLocator 回放到新集合、发布修订 2，原来源 ref 仍可从新集合精确读取，缺失旧集合的回收也结算，`vector-web-recover` 1 passed in 144.00s。两者使用假 OneBot 与假嵌入、真实 Milvus；测试只操作随机测试 Bot 的隔离集合并清理数据库和集合，不证明在线 v29 的真实故障恢复、百万级重建时间或跨系统外部篡改一致性。
 
