@@ -2,9 +2,9 @@
 
 ## 当前快照（2026-10-14）
 
-`forest-main-v30` 使用完整源码镜像 `forest:runtime-candidate-fb8199b`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 2 的 22/22 个组件 ACTIVE，`agent.runtime` 4.52.0 / SQL 2.33.0、`memory.graph` 1.93.5 / SQL 3.92.1。v29 已 OFFLINE，旧库和包卷保留供回退，不与 v30 合并记忆。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
+`forest-main-v30` 使用完整源码镜像 `forest:runtime-candidate-f631613`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 4 的 22/22 个组件 ACTIVE，`agent.runtime` 4.52.0 / SQL 2.33.0、`memory.graph` 1.93.5 / SQL 3.92.1。v29 已 OFFLINE，旧库和包卷保留供回退，不与 v30 合并记忆。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
 
-v30 的 GIF 管理试验已将一个 IMAGE 查询 facet 结算为 READY，嵌入费用 82 token、UNKNOWN 为 0；试验时 v30 尚无来源，结果为 0 项；截至 03:11 已收到 2 条其他群自然消息，来源仍为 REGISTERED、无可召回文档 facet。树莓派 NapCat 曾短暂报告 QQ 账号离线，随后本机状态接口恢复 `READY`，只读 OneBot `get_status` 返回 `online=true`、`good=true`，v30 保持一条连接；进程健康与 TCP 连接不能单独证明 QQ 登录。v30 目前只观察到其他群的 `NO_TRIGGER/group_not_allowed` 自然入站，许可群 `933179609` 尚无新消息，真实 @→Agent→Provider→发送仍待验收。v29 曾有非空跨群 GIF 召回和 28 个 UNKNOWN 文档 facet，均属于旧库历史事实。
+v30 的 GIF 管理试验已将一个 IMAGE 查询 facet 结算为 READY，嵌入费用 82 token、UNKNOWN 为 0；试验时 v30 尚无来源，结果为 0 项；截至 04:10 已收到 6 条其他群自然消息，来源均为 REGISTERED、无可召回文档 facet。树莓派 NapCat 曾短暂报告 QQ 账号离线，随后本机状态接口恢复 `READY`，只读 OneBot `get_status` 返回 `online=true`、`good=true`，v30 保持一条连接；进程健康与 TCP 连接不能单独证明 QQ 登录。v30 目前只观察到其他群的 `NO_TRIGGER/group_not_allowed` 自然入站，许可群 `933179609` 尚无新消息，真实 @→Agent→Provider→发送仍待验收。v29 曾有非空跨群 GIF 召回和 28 个 UNKNOWN 文档 facet，均属于旧库历史事实。
 
 ### 历史观察（v27/v28，均非当前在线 Bot）
 
@@ -18,7 +18,7 @@ v30 的 GIF 管理试验已将一个 IMAGE 查询 facet 结算为 READY，嵌入
 
 ### 当前边界与验收
 
-当前 v30 有 1 条 REGISTERED 自然来源，尚无 ELIGIBLE 来源或文档 facet；此前 GIF 管理试验验证资产、VL 嵌入和当时的空库查询链，不能证明图片命中。v29 旧库曾在自然来源入库后返回 8 条带群/主干归因的 GIF 召回证据，其 28 个 UNKNOWN 文档 facet 未复制或自动重试；这些历史结果不能当作 v30 的非空召回验收。
+当前 v30 有 6 条 REGISTERED 自然来源，尚无 ELIGIBLE 来源或文档 facet；此前 GIF 管理试验验证资产、VL 嵌入和当时的空库查询链，不能证明图片命中。v29 旧库曾在自然来源入库后返回 8 条带群/主干归因的 GIF 召回证据，其 28 个 UNKNOWN 文档 facet 未复制或自动重试；这些历史结果不能当作 v30 的非空召回验收。
 
 Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 4.52.0 将 `agent.protocol.describe` 声明为管理专用只读服务，管理 iframe 可读取当前 Generation 的核心提示词、摘要和解析器版本，Bootstrap 编辑器只编辑 Bot 行为预设。固定核心仍由 `agent_protocol.CORE_PROMPT` 持有，预设不能改写；v30 运行图已装载 4.52.0，但许可群真实模型请求尚未发生。
 
@@ -37,7 +37,7 @@ Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 
 | 记忆与向量 | `memory.graph` 包已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证跨群图文召回；v29 非空 GIF 管理试验返回 8 条带来源归因的证据；v30 在空库时的 GIF 查询 READY、结算 82 token、UNKNOWN 0、结果 0 项。 | v30 许可群真实 @→回复、非空图片证据进入模型输入、长期图文成本、百万级真实混合图文和在线物理索引恢复仍未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行、跨群独立、静默维护和 Shell 优先级已有包契约及隔离 PostgreSQL 验证；v30 自然入站出现 `NO_TRIGGER/group_not_allowed`，无并发 Run 或待发送。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
 
-OneBot 连接与账号就绪的启动边界（2026-10-14）：当前源码在 Adapter Generation 准备时先核对 `get_login_info` 的准确账号，再以只读 `get_status` 要求 `online=true` 且 `good=true`；账号离线或状态异常时关闭候选 socket、拒绝该 Generation 进入活动图。WebSocket/Effect Driver 定向回归 7 passed，隔离 PostgreSQL 的完整 BotHost 文本回复链 1 passed in 92.15s，临时库为 0，Ruff 通过。此门禁只检查启动瞬间，不构成运行期 QQ 登录态连续监测；在线 v30 仍运行此前的 `forest:runtime-candidate-fb8199b` 镜像，尚未装入本次源码。
+OneBot 连接与账号就绪的启动边界（2026-10-14）：当前源码在 Adapter Generation 准备时先核对 `get_login_info` 的准确账号，再以只读 `get_status` 要求 `online=true` 且 `good=true`；账号离线或状态异常时关闭候选 socket、拒绝该 Generation 进入活动图。WebSocket/Effect Driver 定向回归 7 passed，隔离 PostgreSQL 的完整 BotHost 文本回复链 1 passed in 92.15s，临时库为 0，Ruff 通过。此门禁只检查启动瞬间，不构成运行期 QQ 登录态连续监测；v30 于 04:10 以 `forest:runtime-candidate-f631613` 重启，真实 NapCat 的启动门禁通过；运行期持续监测仍未实现。
 
 当前源码的在途 Agent 热重载复验（2026-10-14）：隔离 PostgreSQL 中仅运行已有的 `test_group_trigger_recall_reaches_provider_request[reload-publish]`。假模型首个请求保持在途时，旧 Agent Run 进入 `RELOAD_WAIT`，随后发布新 Generation 并恢复请求；用例断言旧代和新代准确换代、请求继承以及没有重复的首轮模型调用。`1 passed in 137.98s`，临时 `forest_recall_%` 数据库为 0。OneBot 和模型均为替身，未发送真实 QQ 消息或调用付费模型；这项证据不证明在线 v30 在真实模型请求期间的排空。
 
