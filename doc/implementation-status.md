@@ -2,6 +2,8 @@
 
 ## 当前快照（2026-10-13）
 
+14:50 UTC 更新：下段 13:00 UTC 的 ONLINE 状态已成为历史快照。树莓派 NapCat/QQ 在 22:19 北京时间重启后持续报告 `Login Error (ErrType 1, ErrCode 3)`，配置的 OneBot 8080 端口没有监听；v29 Supervisor 仍 healthy、Bot 期望 ONLINE，但观测为 STARTING，活动 Bot 图为空。只读 Bot 账本已有多次 `adapter.onebot/ONEBOT_API_UNAVAILABLE` 的 STOPPED 启动图，替换请求账本为空；许可群最新水位 110 仍为 `NO_TRIGGER/mention_required`，没有 Agent Run 或发送。`agent.runtime` 4.52.0 已经由官方发布命令按 ZIP、包和 manifest 摘要写入 v29 私有包目录，完整存储身份与在线 4.51.0 匹配；**尚未通过 `component.worker-host` 选择或加载**。当前源码已修正 Supervisor 的 `STARTING` 清零失败串问题，隔离 PostgreSQL 定向回归和 Ruff 通过；v29 镜像仍采用旧重试逻辑，不能把源码修复当作在线修复。真实回复与 Bot 包换代验收需等 QQ 登录和 OneBot 8080 恢复。
+
 在线实例仍为提交 `97bf3ff` 构建的 `forest:runtime-candidate-97bf3ff`：`forest-main-v29` 在独立 deployment、Host、Bot 数据库及包卷运行，2026-10-13 13:00 UTC 只读采样为 READY/ONLINE、Bot 图修订 3 的 22 个模块 ACTIVE、Supervisor healthy。Memory 已有 3,985 条来源、4,575 个 READY 文档 facet；许可群 `933179609` 的入站/分类/Context 水位均为 109，最近一条仍为 `NO_TRIGGER/mention_required`，无 Agent Run 或待发送。在线同一 GIF 管理试验已返回 8 条带群/主干来源的证据，其中直接种子 GIF 的媒体摘要与输入相同。观察器仍报 `DOCUMENT_EMBEDDING_UNKNOWN`：28 个文档 facet 分属 4 笔前一日超时的 UNKNOWN 请求，冻结预算合计 131,072 token，未自动重试。真实显式 @→Agent→Provider→发送及长期负载仍待验收。详见 [v29 切换与后续观察](live-v29-cutover-2026-10-12.md)。
 
 ### 历史观察（v27/v28，均非当前在线 Bot）

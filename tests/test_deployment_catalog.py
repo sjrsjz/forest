@@ -3452,6 +3452,13 @@ async def test_deployment_failure_backoff_is_fenced_and_visible(deployment_catal
         error_code="BOT_START_FAILED",
         retry_seconds=30,
     )
+    starting = await repository.observe(
+        lease,
+        bot_id=bot["bot_id"],
+        observed_state="STARTING",
+        expected_intent_revision=(await repository.inspect(bot["bot_id"]))["intent_revision"],
+    )
+    assert starting["consecutive_failures"] == first["consecutive_failures"] == 1
     second = await repository.observe(
         lease,
         bot_id=bot["bot_id"],
@@ -3460,6 +3467,8 @@ async def test_deployment_failure_backoff_is_fenced_and_visible(deployment_catal
         retry_seconds=60,
     )
     assert second["consecutive_failures"] == first["consecutive_failures"] + 1 == 2
+    retry_delay = (second["retry_not_before"] - second["updated_at"]).total_seconds()
+    assert 119 <= retry_delay <= 121
     projected = await repository.inspect(bot["bot_id"])
     assert projected["desired_state"] == "ONLINE"
     assert projected["observed_state"] == "FAILED"
@@ -3498,6 +3507,7 @@ async def test_deployment_failure_backoff_is_fenced_and_visible(deployment_catal
         lease, bot_id=bot["bot_id"], observed_state="FAILED",
         error_code="BOT_RUNTIME_CLOSE_FAILED",
     )
+    assert close_failed["consecutive_failures"] == 1
     assert await repository.list_failed_offline_bots_page() == ()
     assert not await repository.settle_failed_offline(
         lease, bot_id=bot["bot_id"],

@@ -767,9 +767,14 @@ class DeploymentCatalogRepository:
                     "supervisor_incarnation=excluded.supervisor_incarnation,graph_id=excluded.graph_id,"
                     "error_code=excluded.error_code,consecutive_failures=CASE "
                     "WHEN excluded.observed_state='FAILED' THEN "
-                    "forest_deployment.runtime_observations.consecutive_failures+1 ELSE 0 END,"
+                    "forest_deployment.runtime_observations.consecutive_failures+1 "
+                    "WHEN excluded.observed_state='STARTING' THEN "
+                    "forest_deployment.runtime_observations.consecutive_failures ELSE 0 END,"
                     "retry_not_before=CASE WHEN excluded.observed_state='FAILED' THEN "
-                    "clock_timestamp()+make_interval(secs => %s) END,revision="
+                    "clock_timestamp()+make_interval(secs => LEAST(3600, "
+                    "%s * (1 << LEAST("
+                    "forest_deployment.runtime_observations.consecutive_failures,10)))) "
+                    "END,revision="
                     "forest_deployment.runtime_observations.revision+1,updated_at=clock_timestamp() "
                     "RETURNING *",
                     (

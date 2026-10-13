@@ -1,6 +1,6 @@
 # 干净生产启动链
 
-截至 2026-10-11，在线 Bot 为 `forest-main-v25`，Supervisor 使用 `forest:runtime-candidate-3577fc2`；当前状态、管理入口、独立数据库和回退边界见 [v25 在线验收记录](live-v25-cutover-2026-10-11.md)。v24 Bot 保持 OFFLINE，v21–v24 与下文 v15/v16 的切换记录均为历史快照，不能据此操作当前实例。
+截至 2026-10-13，当前候选为 `forest-main-v29`，Supervisor 使用 `forest:runtime-candidate-97bf3ff`；其身份、管理入口、独立数据库和实时可用性见 [v29 在线记录](live-v29-cutover-2026-10-12.md)。14:50 UTC 的树莓派 QQ 登录故障使 OneBot 8080 不监听，Bot 期望 ONLINE 但观测 STARTING；不能把 Supervisor HTTP healthy 当作 Bot 在线。v25 及更早版本与下文旧切换记录均为历史快照。
 
 本文记录多 Bot Supervisor 的生产启动入口，以及独立 `forest bot` 诊断路径。宿主持有进程、数据库连接、HostLease 和 RuntimeGraph 生命周期；Adapter、触发策略、Conversation、Agent、Memory、Provider 与 Delivery 作为 Bot 作用域的平级 Generation 成员运行。Bot 基础身份和期望运行意图归部署内核，管理 builtin 通过受限端口操作。
 

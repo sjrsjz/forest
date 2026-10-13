@@ -23,3 +23,11 @@
 通过正式管理资产入口对原 1,352,134 字节 GIF 仅发起一次新试验 `trial:live-v28-gif-239a2916527e4a1d81642c6ca228b67a`。试验从 CLAIMED/PENDING 进入 READY，结果共 8 条；首 4 条为直接向量种子，含一条来源群 `864533524` 的 GIF。只读复取冻结结果确认该 GIF 的 `media_ref.digest` 与输入文件 SHA-256 相同，结果包含非空来源主干和作者引用；其余证据分别标出各自群号与主干。它证明 v29 在已有自然 ELIGIBLE 来源后可用图片跨群召回并正确归因，不证明 LLM 已消费这些证据或真实 QQ 回复。本轮没有向 QQ 发送消息。
 
 随后以只读事务汇总 UNKNOWN：28 个文档 facet（6 个 IMAGE、22 个 TEXT）归属于 4 笔 2026-10-12 11:17–11:18 UTC 的 `EMBEDDING_TIMEOUT` 请求；对应 attempt 与预算均为 UNKNOWN，冻结预算总计 131,072 token，实际供应商计费未知。包管理动作允许审阅后明确承认可能重复计费再逐笔重排；目前未执行重试。观察器现输出 `attempt_failures_scope=all_time` 和 `unknown_attempt_exposure`，避免把累计超时数误读为最近一小时事件，也不把冻结预算当成实耗。
+
+## 2026-10-13 OneBot 外部故障与 Agent 官方候选
+
+13:51 UTC v29 仍为 READY/ONLINE、Bot 图修订 3 的 22/22 成员 ACTIVE，Agent Run 与待发送均为 0。随后从当前源码构建 Agent 4.52.0，包摘要 `sha256:c3c51fd49058b3c95d253236b70e2614c05bf696b5911e4c588fc0518b09427b`、manifest 摘要 `sha256:32fef60476d36cb935f17c8ef6fd57949c82b87cb09f83f4c0283f3fdf047f52`、ZIP 摘要 `sha256:0cb768ddcecaf2d336b48457b4613be9dfccda6641155c99c7a42d6fb246883a`。候选的完整存储基线和存储包摘要与 v29 现有 Agent 绑定逐字段一致；清单中的业务 SQL 文件摘要不能与完整安装基线直接比较。官方目录命令已按三层摘要发布该包，尚未通过 `component.worker-host` 选择或加载。
+
+14:19 UTC 起 Bot 启动失败。14:50 UTC 只读账本显示期望 ONLINE、观测 STARTING，活动图头修订 4、graph_id 为空，最近多次启动图均 STOPPED，失败点为 `adapter.onebot/ONEBOT_API_UNAVAILABLE`，图替换请求为空。树莓派的冻结 OneBot 端点 `ws://192.168.31.117:8080` 无监听；NapCat 服务虽 active，QQ 日志持续报告 `Login Error (ErrType 1, ErrCode 3)`。未向 QQ 发消息，也未提交 Agent 包选择。Bot 管理入口在启动期间返回 `BOT_MANAGEMENT_UNAVAILABLE`，待 QQ 重新登录且 8080 恢复后再做正式预览和热替换。
+
+故障还暴露 v29 旧 Supervisor 每次进入 STARTING 都清零失败次数，导致重复首次间隔重建运行图。当前源码已修正为持久失败串与最多 3600 秒的指数退避；隔离 PostgreSQL 定向回归和 Ruff 通过。v29 镜像尚未装入修复。
