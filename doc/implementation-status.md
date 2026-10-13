@@ -2,7 +2,7 @@
 
 ## 当前快照（2026-10-14）
 
-`forest-main-v30` 使用完整源码镜像 `forest:runtime-candidate-fb8199b`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 1 的 22/22 个组件 ACTIVE，`agent.runtime` 4.52.0 / SQL 2.33.0、`memory.graph` 1.93.5 / SQL 3.92.1。v29 已 OFFLINE，旧库和包卷保留供回退，不与 v30 合并记忆。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
+`forest-main-v30` 使用完整源码镜像 `forest:runtime-candidate-fb8199b`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 2 的 22/22 个组件 ACTIVE，`agent.runtime` 4.52.0 / SQL 2.33.0、`memory.graph` 1.93.5 / SQL 3.92.1。v29 已 OFFLINE，旧库和包卷保留供回退，不与 v30 合并记忆。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
 
 v30 的 GIF 管理试验已将一个 IMAGE 查询 facet 结算为 READY，嵌入费用 82 token、UNKNOWN 为 0；试验时 v30 尚无来源，结果为 0 项；当前已收到 1 条其他群自然消息，来源仍为 REGISTERED、无可召回文档 facet。树莓派 NapCat 曾短暂报告 QQ 账号离线，之后本机状态接口恢复 `READY`；进程健康与 OneBot TCP 连接不能单独证明 QQ 登录。v30 目前只观察到其他群的 `NO_TRIGGER/group_not_allowed` 自然入站，许可群 `933179609` 尚无新消息，真实 @→Agent→Provider→发送仍待验收。v29 曾有非空跨群 GIF 召回和 28 个 UNKNOWN 文档 facet，均属于旧库历史事实。
 
@@ -32,7 +32,7 @@ Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 
 
 | 范围 | 当前证据 | 仍需证明或完成 |
 | --- | --- | --- |
-| 微内核、Bot 身份与包生命周期 | v30 独立 Bot 图修订 1 的 22/22 成员 ACTIVE；v29 在线官方 Agent 4.52.0 选择与 5 个依赖组件换代，以及 `deployment.audit` 官方跨版本定点热替换和重启恢复，证明同存储基线的真实包热重载。Bot 身份/意图仍由部署内核持有，管理 builtin 只经受限端口操作。 | 存储 schema/baseline 变化时，当前安装器对同一 Bot 库返回 `SCHEMA_BUNDLE_MISMATCH`，尚不能宣称保留状态的原库热升级；普通控制包领域 SQL 与长期多 Bot 负载也尚待完成或验收。 |
+| 微内核、Bot 身份与包生命周期 | v30 独立 Bot 图经 Memory 同工件热重载达到修订 2，22/22 成员 ACTIVE；Memory 与 6 个依赖成员换代，其余 15 个保留且原来源事实未变；v29 在线官方 Agent 4.52.0 选择与 5 个依赖组件换代，以及 `deployment.audit` 官方跨版本定点热替换和重启恢复，证明同存储基线的真实包热重载。Bot 身份/意图仍由部署内核持有，管理 builtin 只经受限端口操作。 | 存储 schema/baseline 变化时，当前安装器对同一 Bot 库返回 `SCHEMA_BUNDLE_MISMATCH`，尚不能宣称保留状态的原库热升级；普通控制包领域 SQL 与长期多 Bot 负载也尚待完成或验收。 |
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
 | 记忆与向量 | `memory.graph` 包已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证跨群图文召回；v29 非空 GIF 管理试验返回 8 条带来源归因的证据；v30 在空库时的 GIF 查询 READY、结算 82 token、UNKNOWN 0、结果 0 项。 | v30 许可群真实 @→回复、非空图片证据进入模型输入、长期图文成本、百万级真实混合图文和在线物理索引恢复仍未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行、跨群独立、静默维护和 Shell 优先级已有包契约及隔离 PostgreSQL 验证；v30 自然入站出现 `NO_TRIGGER/group_not_allowed`，无并发 Run 或待发送。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
@@ -1355,3 +1355,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-14 v30 正式 GIF 管理试验：已核对的 1,352,134 字节 GIF 经 6 分块上传，查询从 CLAIMED/PENDING 到 READY；空记忆库返回 0 项。只读账本为 `QUERY.READY` 1、已结算请求 1、嵌入 token 82、UNKNOWN 0，Bot 22/22 ACTIVE 且观察器无违规。此试验不证明非空图片召回或许可群真实回复；详见 `doc/live-v30-cutover-2026-10-14.md`。
 
 2026-10-14 v30 外部 QQ 状态辨析：NapCat 日志 02:38:49 曾报账号离线，OneBot TCP 当时仍连接；稍后本机状态 API 返回登录/核心 READY，说明连接数不能证明 QQ 登录。新增只读 `scripts/observe_napcat_login.py`，在树莓派实测 READY，不输出令牌或二维码，运维说明已更新到 v30。许可群新 @ 仍未发生，端到端回复继续待验收。
+
+2026-10-14 v30 Memory 同工件在线热重载：正式管理动作的包内请求 `SUBMITTED`，内核图替换请求 `SUCCEEDED`，Graph 1→2。Memory 及 `adapter.onebot`、`agent.runtime`、`conversation.scheduler`、`delivery`、`media.capture`、`shell.command` 共 7 个成员换代，其余 15 个保留；来源数 1 与非内容指纹不变，22/22 ACTIVE、观察器无违规、QQ 单连接且登录态 READY。未验证跨 schema 保留数据升级或活动 Run 排空。详见 `doc/live-v30-cutover-2026-10-14.md`。
