@@ -31,3 +31,14 @@
 14:19 UTC 起 Bot 启动失败。14:50 UTC 只读账本显示期望 ONLINE、观测 STARTING，活动图头修订 4、graph_id 为空，最近多次启动图均 STOPPED，失败点为 `adapter.onebot/ONEBOT_API_UNAVAILABLE`，图替换请求为空。树莓派的冻结 OneBot 端点 `ws://192.168.31.117:8080` 无监听；NapCat 服务虽 active，QQ 日志持续报告 `Login Error (ErrType 1, ErrCode 3)`。未向 QQ 发消息，也未提交 Agent 包选择。Bot 管理入口在启动期间返回 `BOT_MANAGEMENT_UNAVAILABLE`，待 QQ 重新登录且 8080 恢复后再做正式预览和热替换。
 
 故障还暴露 v29 旧 Supervisor 每次进入 STARTING 都清零失败次数，导致重复首次间隔重建运行图。当前源码已修正为持久失败串与最多 3600 秒的指数退避；隔离 PostgreSQL 定向回归和 Ruff 通过。v29 镜像尚未装入修复。
+
+
+## 2026-10-14 QQ 恢复、包预检与 Agent 热替换
+
+树莓派上的 Linux QQ 从 3.2.33-52892 升至腾讯官方 ARM64 包 3.2.34-53644，并将会话配置中仍为 3.2.19-39038 的 baseVersion、curVersion、buildId 同步为新版本。原 QQ 程序目录保留在 /home/sjz1/Napcat/opt/QQ.backup-20261014；手机 QQ 重新扫码后，NapCat 的 8080 OneBot 端口恢复，v29 Bot 自动收敛为 ONLINE。旧 alicebot.service 保持停用。为避免资源争用和重复连接，已停止 v19、v22–v28 的旧候选 Supervisor，保留共享 PostgreSQL、Milvus 和各持久卷。
+
+Agent 4.52.0 的正式管理预检曾因 45 秒 Worker 截止而返回 504。定位到 PackageCatalog.get 对同一捕获内容重复完整校验，官方包解析还串行验证全部包。源码改为一次捕获完成 manifest 与 digest 校验，官方包在保持输入顺序及逐包来源验证的前提下至多 4 路并发；包测试 111 passed、组件选择测试 2 passed、Ruff 通过。对 v29 私有包卷 18 个已注册官方包的只读验证耗时从约 12.0 秒降到 6.0 秒。运行镜像仅覆盖这两处 Host 源文件，保留 v29 原 builtin 基线；首次重建遗漏 forest-clean_default 网络，导致 vector.index/VECTOR_INDEX_UNAVAILABLE，补接 Milvus 网络后 Graph 恢复 ONLINE。一次直接用当前完整源码镜像冷启动则因未先选择 Agent 新版而触发 SCHEMA_BUNDLE_MISMATCH，已回退；未把该试验镜像留作活动实例。
+
+修复镜像中的正式 Web 管理预检耗时 31.73 秒，返回的影响集为替换 agent.runtime、media.capture、conversation.scheduler、shell.command、adapter.onebot、delivery，保留其余 16 个成员。提交同一 plan_digest 后，选择修订 0→1，请求 selection:ff11560b4e91147d0de8caf16ee4ac6e 的内核状态为 SUCCEEDED，Bot Graph 183→184；管理运行态显示 22/22 ACTIVE，Agent 4.51.0→4.52.0，六个受影响组件均为新 Generation。提交前无活跃 Run、Job 或待发送。尚未以许可群的新显式 @ 消息验证 4.52.0 的真实 Agent→Provider→QQ 回复；28 个旧 UNKNOWN 文档 facet 仍冻结，未发起可能重复计费的嵌入重试。
+
+受控重启持久恢复：在 0 个活动 Run/Job/待发送时重启同一 v29 Supervisor，原图结束后新 Graph 修订 186 达到 READY/ONLINE、22/22 ACTIVE；Bot 库活动图明确记录 agent.runtime 4.52.0 的新 Generation，树莓派 8080 的 TCP 连接重新建立。此验证覆盖官方包选择的进程恢复，不覆盖正在执行的 Agent Run 中断，也未主动发送 QQ 消息。

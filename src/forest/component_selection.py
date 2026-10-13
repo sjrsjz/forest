@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
@@ -149,13 +150,19 @@ def resolve_official_package_snapshots(
         raise ForestError(
             "COMPONENT_SELECTION_INVALID", "Official component identities are duplicated", 409
         )
-    for snapshot in defaults:
-        catalog.get_official_bot(snapshot.digest)
-        if snapshot.manifest["runtime"] != "python-worker":
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        verified = tuple(executor.map(
+            catalog.get_official_bot, (snapshot.digest for snapshot in defaults)
+        ))
+    for default, snapshot in zip(defaults, verified, strict=True):
+        if (
+            snapshot.manifest != default.manifest
+            or snapshot.manifest["runtime"] != "python-worker"
+        ):
             raise ForestError(
                 "COMPONENT_SELECTION_INVALID", "Bot official runtime is invalid", 409
             )
-    selected = dict(by_id)
+    selected = {snapshot.component["id"]: snapshot for snapshot in verified}
     for entry in selection.entries:
         if entry.source_kind != "official":
             continue
@@ -166,7 +173,11 @@ def resolve_official_package_snapshots(
                 "Pinned official component is not in the Bot release",
                 409,
             )
-        snapshot = catalog.get_official_bot(entry.package_digest)
+        snapshot = (
+            selected[entry.component_id]
+            if selected[entry.component_id].digest == entry.package_digest
+            else catalog.get_official_bot(entry.package_digest)
+        )
         if (
             snapshot.component["id"] != entry.component_id
             or snapshot.manifest["package_id"] != default.manifest["package_id"]

@@ -3038,9 +3038,13 @@ class PackageCatalog:
             raise ForestError("PACKAGE_NOT_FOUND", "Package artifact is not registered", 404)
         root = self.root / digest.removeprefix("sha256:")
         files = _capture(root)
-        snapshot = PackageSnapshot(root, digest, _manifest(files))
-        snapshot.verify()
-        return snapshot
+        manifest = _manifest(files)
+        actual = digest_json({
+            name: hashlib.sha256(value).hexdigest() for name, value in files.items()
+        })
+        if actual != digest:
+            _fail("PACKAGE_TAMPERED", "The immutable package no longer matches its captured digest")
+        return PackageSnapshot(root, digest, manifest)
 
     def find(self, package_id: str, version: str) -> PackageSnapshot:
         rows = self._rows(
