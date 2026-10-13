@@ -1363,4 +1363,4 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-14 v30 Memory 同工件在线热重载：正式管理动作的包内请求 `SUBMITTED`，内核图替换请求 `SUCCEEDED`，Graph 1→2。Memory 及 `adapter.onebot`、`agent.runtime`、`conversation.scheduler`、`delivery`、`media.capture`、`shell.command` 共 7 个成员换代，其余 15 个保留；来源数 1 与非内容指纹不变，22/22 ACTIVE、观察器无违规、QQ 单连接且登录态 READY。未验证跨 schema 保留数据升级或活动 Run 排空。详见 `doc/live-v30-cutover-2026-10-14.md`。
 
 
-2026-10-14 OneBot 运行期登录状态监督：`adapter.onebot` 启动门禁之后，transport Effect Driver 增加 30 秒周期的 `get_status` 任务并通过 Generation 的 `owned_tasks` 暴露；QQ 静默离线而 WebSocket 仍打开时上报 `ONEBOT_ACCOUNT_NOT_READY`，现有宿主监督和部署退避接管。关闭与热替换取消并等待该任务。针对性 OneBot/运行图替换用例 6 passed，Ruff 通过。该改动尚未构建或切换到 v30 真实实例；当前 QQ 仍待扫码。
+2026-10-14 OneBot 运行期登录状态监督：`adapter.onebot` 启动门禁之后，transport Effect Driver 增加 30 秒周期的 `get_status` 任务并通过 Generation 的 `owned_tasks` 暴露；QQ 静默离线而 WebSocket 仍打开时上报 `ONEBOT_ACCOUNT_NOT_READY`，现有宿主监督和部署退避接管。关闭与热替换取消并等待该任务。针对性 OneBot/运行图替换用例 6 passed，Ruff 通过。该改动已构建为 `forest:runtime-candidate-8c31ac5`，镜像内 OneBot transport 源文件摘要与提交一致；尚未切换到 v30 真实实例，当前 QQ 仍待扫码。
