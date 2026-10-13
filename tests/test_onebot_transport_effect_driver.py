@@ -159,11 +159,13 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
     await driver.start()
     transport_task = asyncio.create_task(asyncio.Event().wait())
     client.owned_tasks = lambda: (transport_task,)
-    assert driver.owned_tasks() == (transport_task,)
+    account_status_task = driver._account_status_task
+    assert account_status_task is not None
+    assert driver.owned_tasks() == (transport_task, account_status_task)
     generation = object.__new__(PackageGenerationAdapter)
     generation._owned_work = None
     generation._effect_drivers = {"adapter.onebot.transport.send": driver}
-    assert generation.owned_tasks() == (transport_task,)
+    assert generation.owned_tasks() == (transport_task, account_status_task)
     assert resolved == [("secret://onebot/main", 11)]
     assert not client.active
 
@@ -239,7 +241,7 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
     assert len(client.sent) == 1
 
     await driver.close()
-    assert client.closed
+    assert client.closed and account_status_task.done()
     transport_task.cancel()
     await asyncio.gather(transport_task, return_exceptions=True)
 
@@ -291,3 +293,59 @@ async def test_onebot_transport_rejects_offline_account_before_activation():
     assert caught.value.code == "ONEBOT_ACCOUNT_NOT_READY"
     assert client.closed
     assert driver._bindings == {}
+
+
+async def test_onebot_transport_detects_account_offline_on_open_socket(monkeypatch):
+    monkeypatch.setattr(
+        "forest.onebot_transport_effect_driver._ACCOUNT_STATUS_POLL_SECONDS", 0.01
+    )
+    client = FakeClient()
+    client.owned_tasks = lambda: ()
+
+    async def client_factory(*_args, **_kwargs):
+        return client
+
+    async def credential_resolver(*_args):
+        return "token"
+
+    driver = OneBotTransportEffectDriver(
+        {
+            "bindings": [{
+                "enabled": True,
+                "binding_ref": "binding/main",
+                "self_id": "123456789",
+                "credential_ref": "secret://onebot/main",
+                "websocket_url": "ws://onebot.invalid/",
+                "timeout_seconds": 15,
+                "event_capacity": 32,
+                "pending_capacity": 8,
+                "binding_epoch": 1,
+            }],
+        },
+        1,
+        SimpleNamespace(
+            component_id="adapter.onebot",
+            generation_id="generation:onebot:runtime-offline",
+            graph_id="graph:onebot:runtime-offline",
+            graph_revision=1,
+        ),
+        {
+            "name": "adapter.onebot.transport.send",
+            "kind": "onebot.websocket-v11",
+            "ingress": {"name": "adapter.onebot.transport.frame"},
+        },
+        effects=object(),
+        runtime=object(),
+        credential_resolver=credential_resolver,
+        client_factory=client_factory,
+    )
+    driver.bind_ingress(lambda *_args, **_kwargs: None)
+    await driver.start()
+    monitor, = driver.owned_tasks()
+    assert not client.closed
+    client.status = {"online": False, "good": True}
+    with pytest.raises(ForestError) as caught:
+        await asyncio.wait_for(monitor, 1)
+    assert caught.value.code == "ONEBOT_ACCOUNT_NOT_READY"
+    await driver.close()
+    assert client.closed

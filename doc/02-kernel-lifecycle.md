@@ -290,6 +290,8 @@ Bot 宿主必须持续监督当前 RuntimeGraph 报告的全部 owned task、Hos
 
 Generation 持有的 Effect Driver 若启动长期任务，必须通过 `owned_tasks` 端口将任务逐级交给 Package Generation 和 RuntimeGraph；WebSocket 读取、入站消费等任务不能只由 Driver 私下持有。当前图中的连接读取任务即使正常返回，也表示该传输已停止，宿主应按上述故障路径关闭本代并让 Supervisor 依据运行意图重试。HTTP 健康检查只能说明管理进程可连接，不能代替 Bot 图与外部传输的运行观察。
 
+OneBot transport 的账号就绪是持续的 Generation 资源约束：启动时验证 `get_login_info` 与 `get_status`，运行中由 Effect Driver 自有且上报 `owned_tasks` 的任务每 30 秒重新检查 `online/good`。状态为 false 或查询失败时，该任务按现有宿主监督路径令 Bot 观察为失败并交由 Supervisor 按意图退避重试；WebSocket Ping 仅证明连接可用，不能证明 QQ 账号在线。关闭或热替换时先取消并等待状态任务退出，再关闭传输，避免旧代继续查询。
+
 当 Bot 启动失败且 Host 已关闭时，Supervisor 记录 `FAILED` 和有界重试时间。失败次数由部署库的观察行持有；下一次 `STARTING` 不清零，失败结算在同一行更新中按该次数计算指数退避，默认从 5 秒开始、最多 3600 秒。成功 `ONLINE` 或明确停止流程才清零，因此外部 OneBot 长期不可用不会使 Bot 每次都以首次失败的间隔重建运行图。管理员随后把运行意图撤为 `OFFLINE`，管理动作只修改内核意图，不伪造运行观察；Supervisor 回收该 Bot runner 后，按当前 Supervisor lease、意图修订和 `FAILED` 观察修订在同一事务中结算为 `OFFLINE`，并清除重试时间。任一修订变化、意图重新变为 `ONLINE`、观察不再是无图的 `FAILED`，都不得覆盖新状态。若 Host 清理失败（`BOT_RUNTIME_CLOSE_FAILED`），不得将故障观察伪装为 OFFLINE，必须保留故障供人工处理。其他 Bot 的运行不受该结算影响。
 
 Bot 正常停止、取消和运行异常都必须先拒绝新的管理准入，等待已准入的管理请求退出，再关闭该 BotHost；异常路径不能绕过这道排空屏障。等待仅覆盖当前 Bot 的管理请求，其他 Bot 的管理入口继续服务。

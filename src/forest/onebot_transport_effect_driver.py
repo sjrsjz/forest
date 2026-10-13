@@ -14,6 +14,8 @@ from forest.adapters.onebot import OneBotWebSocketClient, PreparedSend
 from forest.errors import ForestError
 from forest.packages import digest_json
 
+_ACCOUNT_STATUS_POLL_SECONDS = 30
+
 
 async def _call(port, *args):
     result = port(*args)
@@ -95,6 +97,7 @@ class OneBotTransportEffectDriver:
         self.client_factory = client_factory
         self._ingress = None
         self._bindings: dict[str, _BindingTransport] = {}
+        self._account_status_task: asyncio.Task | None = None
         self._send_admission = False
         self._ingress_admission = False
         self._frame_lock = asyncio.Lock()
@@ -112,11 +115,26 @@ class OneBotTransportEffectDriver:
         self._ingress = handler
 
     def owned_tasks(self) -> tuple[asyncio.Task, ...]:
-        return tuple(
+        transport_tasks = tuple(
             task
             for transport in self._bindings.values()
             for task in transport.client.owned_tasks()
         )
+        return transport_tasks + (
+            (self._account_status_task,) if self._account_status_task is not None else ()
+        )
+
+    async def _monitor_account_status(self) -> None:
+        while True:
+            await asyncio.sleep(_ACCOUNT_STATUS_POLL_SECONDS)
+            for transport in tuple(self._bindings.values()):
+                status = await transport.client.get_status(timeout=5)
+                if not status["online"] or not status["good"]:
+                    raise ForestError(
+                        "ONEBOT_ACCOUNT_NOT_READY",
+                        "OneBot account became unavailable while transport remained connected",
+                        503,
+                    )
 
     async def start(self) -> None:
         if self._ingress is None:
@@ -181,6 +199,10 @@ class OneBotTransportEffectDriver:
             self._bindings.clear()
             raise
         self._send_admission = True
+        if self._bindings:
+            self._account_status_task = asyncio.create_task(
+                self._monitor_account_status(), name="onebot-account-status"
+            )
 
     def activate_ingress(self) -> None:
         if self._ingress is None:
@@ -343,6 +365,10 @@ class OneBotTransportEffectDriver:
     async def close(self) -> None:
         self._ingress_admission = False
         self._send_admission = False
+        account_status_task, self._account_status_task = self._account_status_task, None
+        if account_status_task is not None:
+            account_status_task.cancel()
+            await asyncio.gather(account_status_task, return_exceptions=True)
         transports, self._bindings = tuple(self._bindings.values()), {}
         results = await asyncio.gather(
             *(transport.client.aclose() for transport in transports),

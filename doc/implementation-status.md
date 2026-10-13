@@ -1361,3 +1361,6 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-14 v30 外部 QQ 状态辨析：NapCat 日志 02:38:49 曾报账号离线，OneBot TCP 当时仍连接；稍后本机状态 API 返回登录/核心 READY，说明连接数不能证明 QQ 登录。新增只读 `scripts/observe_napcat_login.py`，在树莓派实测 READY，不输出令牌或二维码，运维说明已更新到 v30。许可群新 @ 仍未发生，端到端回复继续待验收。
 
 2026-10-14 v30 Memory 同工件在线热重载：正式管理动作的包内请求 `SUBMITTED`，内核图替换请求 `SUCCEEDED`，Graph 1→2。Memory 及 `adapter.onebot`、`agent.runtime`、`conversation.scheduler`、`delivery`、`media.capture`、`shell.command` 共 7 个成员换代，其余 15 个保留；来源数 1 与非内容指纹不变，22/22 ACTIVE、观察器无违规、QQ 单连接且登录态 READY。未验证跨 schema 保留数据升级或活动 Run 排空。详见 `doc/live-v30-cutover-2026-10-14.md`。
+
+
+2026-10-14 OneBot 运行期登录状态监督：`adapter.onebot` 启动门禁之后，transport Effect Driver 增加 30 秒周期的 `get_status` 任务并通过 Generation 的 `owned_tasks` 暴露；QQ 静默离线而 WebSocket 仍打开时上报 `ONEBOT_ACCOUNT_NOT_READY`，现有宿主监督和部署退避接管。关闭与热替换取消并等待该任务。针对性 OneBot/运行图替换用例 6 passed，Ruff 通过。该改动尚未构建或切换到 v30 真实实例；当前 QQ 仍待扫码。
