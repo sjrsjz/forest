@@ -11,3 +11,5 @@ v30 是空的独立记忆库，切换时 0 条来源和 0 个 facet。v29 历史
 回退顺序：先通过 v30 管理面令 `forest-main-v30` OFFLINE，确认观测状态和 OneBot 连接释放；再通过 v29 管理面令 `forest-main-v29` ONLINE。两库独立，回退不会自动合并 v30 期间的新消息或记忆。
 
 正式 v30 管理入口对 SHA-256 已核对的 1,352,134 字节 GIF 进行 6 分块上传，发起单次试验 `trial:live-v30-gif-2605cf6edc8945a7955315f284ed3211`。试验从 CLAIMED/PENDING 到 READY，结果 0 项（新库没有来源）。只读账本显示 1 个 `QUERY.READY` facet、当日已结算 1 次请求与 82 个嵌入 token，UNKNOWN 请求/保留 token 均为 0；无活动工作及观察器违规。该证据覆盖 v30 的 GIF 资产、VL 嵌入与空库查询链，不证明非空图片命中或真实 QQ 回复；此轮没有主动发送 QQ 消息。
+
+02:38:49 树莓派 NapCat 日志曾记录一次账号离线，虽然进程和 OneBot TCP 始终存在。随后在 02:45 左右用 NapCat 本机 `CheckLoginStatus` 验证 `isLogin=true`、`isOffline=false`、`coreReady=true`、`loginPhase=ready`、无登录错误；这说明该次离线已恢复，不能仅凭 TCP 判定 QQ 登录态。该时段许可群没有新入站，v30 来源数仍为 0，真实 @ 端到端验收继续待定。

@@ -1,6 +1,6 @@
 # 干净生产启动链
 
-截至 2026-10-13，当前候选为 `forest-main-v29`，Supervisor 使用 `forest:runtime-candidate-97bf3ff`；其身份、管理入口、独立数据库和实时可用性见 [v29 在线记录](live-v29-cutover-2026-10-12.md)。14:50 UTC 的树莓派 QQ 登录故障使 OneBot 8080 不监听，Bot 期望 ONLINE 但观测 STARTING；不能把 Supervisor HTTP healthy 当作 Bot 在线。v25 及更早版本与下文旧切换记录均为历史快照。
+截至 2026-10-14，当前在线候选为 `forest-main-v30`，Supervisor 使用完整源码镜像 `forest:runtime-candidate-fb8199b`；独立数据库、组件版本与实时证据见 [v30 在线记录](live-v30-cutover-2026-10-14.md)。v29 及更早版本是保留的历史或回退实例。Supervisor HTTP healthy、Bot ONLINE 与 OneBot TCP 已连接分别只证明各自层级存活，不能单独证明 QQ 账号已登录或群聊回复链可用。
 
 本文记录多 Bot Supervisor 的生产启动入口，以及独立 `forest bot` 诊断路径。宿主持有进程、数据库连接、HostLease 和 RuntimeGraph 生命周期；Adapter、触发策略、Conversation、Agent、Memory、Provider 与 Delivery 作为 Bot 作用域的平级 Generation 成员运行。Bot 基础身份和期望运行意图归部署内核，管理 builtin 通过受限端口操作。
 
@@ -110,6 +110,15 @@ docker run --rm --no-healthcheck --network forest-clean_default `
   forest:local python /tmp/observe_live_bot.py --bot-id forest-main `
   --duration-seconds 3600 --interval-seconds 30
 ```
+
+NapCat 运行在另一台树莓派时，还需独立查询实际 QQ 登录态。当前树莓派的 WebUI 状态端口只在本机读取；`scripts/observe_napcat_login.py` 从本机 `webui.json` 读取令牌并取得短时认证，仅输出 `is_login`、`is_offline`、`core_ready`、登录阶段和是否有登录错误，不输出令牌、短时凭证或二维码。退出码 0 表示 `READY`，2 表示明确未就绪，1 表示无法判断；它是运维诊断，不改变微内核 Bot 运行意图。当前树莓派可从工作区执行：
+
+```powershell
+Get-Content -Raw -Encoding UTF8 scripts/observe_napcat_login.py |
+  ssh sjz1@192.168.31.117 python3 - --config /home/sjz1/Napcat/opt/QQ/resources/app/app_launcher/napcat/config/webui.json
+```
+
+QQ 登录态 `READY` 仍须结合许可群一次低频真实 @→Agent→发送验收；不以心跳或管理页状态替代回复证据。
 
 验收部署级包时追加 `--deployment-component-id deployment.provisioning`。探针会在部署库的只读 repeatable-read 快照中报告当前 Graph、该组件的 Generation 状态与控制入口；Graph 非 ACTIVE，或指定组件缺席、非 ACTIVE、无控制入口，均产生违反项。该选项默认不启用，以便先观察旧镜像和旧部署图；它只能证明包已发布并允许控制调用，不能单独证明供应 Job 已改由包编排。
 
