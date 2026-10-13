@@ -158,6 +158,13 @@ class OneBotTransportEffectDriver:
                         "OneBot API account differs from the configured Binding",
                         409,
                     )
+                status = await client.get_status(timeout=5)
+                if not status["online"] or not status["good"]:
+                    raise ForestError(
+                        "ONEBOT_ACCOUNT_NOT_READY",
+                        "OneBot account is not online and ready",
+                        503,
+                    )
                 binding_ref = binding["binding_ref"]
                 self._bindings[binding_ref] = _BindingTransport(
                     dict(binding),

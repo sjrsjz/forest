@@ -37,6 +37,8 @@ Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 
 | 记忆与向量 | `memory.graph` 包已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证跨群图文召回；v29 非空 GIF 管理试验返回 8 条带来源归因的证据；v30 在空库时的 GIF 查询 READY、结算 82 token、UNKNOWN 0、结果 0 项。 | v30 许可群真实 @→回复、非空图片证据进入模型输入、长期图文成本、百万级真实混合图文和在线物理索引恢复仍未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行、跨群独立、静默维护和 Shell 优先级已有包契约及隔离 PostgreSQL 验证；v30 自然入站出现 `NO_TRIGGER/group_not_allowed`，无并发 Run 或待发送。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
 
+OneBot 连接与账号就绪的启动边界（2026-10-14）：当前源码在 Adapter Generation 准备时先核对 `get_login_info` 的准确账号，再以只读 `get_status` 要求 `online=true` 且 `good=true`；账号离线或状态异常时关闭候选 socket、拒绝该 Generation 进入活动图。WebSocket/Effect Driver 定向回归 7 passed，隔离 PostgreSQL 的完整 BotHost 文本回复链 1 passed in 92.15s，临时库为 0，Ruff 通过。此门禁只检查启动瞬间，不构成运行期 QQ 登录态连续监测；在线 v30 仍运行此前的 `forest:runtime-candidate-fb8199b` 镜像，尚未装入本次源码。
+
 当前源码的在途 Agent 热重载复验（2026-10-14）：隔离 PostgreSQL 中仅运行已有的 `test_group_trigger_recall_reaches_provider_request[reload-publish]`。假模型首个请求保持在途时，旧 Agent Run 进入 `RELOAD_WAIT`，随后发布新 Generation 并恢复请求；用例断言旧代和新代准确换代、请求继承以及没有重复的首轮模型调用。`1 passed in 137.98s`，临时 `forest_recall_%` 数据库为 0。OneBot 和模型均为替身，未发送真实 QQ 消息或调用付费模型；这项证据不证明在线 v30 在真实模型请求期间的排空。
 
 真实 Milvus 非空索引重建与丢失恢复（2026-10-12）：在隔离 PostgreSQL Bot 库和真实 Milvus 中，现有 Web 重建场景从四条非触发群消息生成 ELIGIBLE 来源与 READY 文本 facet，原来源 ref 已写入旧集合；管理员通过 Web 管理动作重建后，旧、新两代集合均持有该 ref，发布修订从 1 到 2，旧集合随后由包内回收任务删除，`vector-web-real` 1 passed in 147.61s。新增故障变体先删除该测试 Bot 的准确旧集合，经带冻结 binding 的物理调用使包记录 `REBUILD_REQUIRED`；相同 Web 重建链将权威 ReplayLocator 回放到新集合、发布修订 2，原来源 ref 仍可从新集合精确读取，缺失旧集合的回收也结算，`vector-web-recover` 1 passed in 144.00s。两者使用假 OneBot 与假嵌入、真实 Milvus；测试只操作随机测试 Bot 的隔离集合并清理数据库和集合，不证明在线 v29 的真实故障恢复、百万级重建时间或跨系统外部篡改一致性。

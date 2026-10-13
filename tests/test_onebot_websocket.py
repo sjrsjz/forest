@@ -57,6 +57,18 @@ class FakeSocket:
                     separators=(",", ":"),
                 )
             )
+        elif value["action"] == "get_status":
+            await self.incoming.put(
+                json.dumps(
+                    {
+                        "status": "ok",
+                        "retcode": 0,
+                        "data": {"online": True, "good": True},
+                        "echo": value["echo"],
+                    },
+                    separators=(",", ":"),
+                )
+            )
 
     async def close(self, **_kwargs):
         if not self.closed:
@@ -81,6 +93,7 @@ async def create_client(monkeypatch, *, event_capacity=256):
     )
     identity = await client.get_login_info()
     assert identity == {"self_id": "123456789", "nickname": "Forest"}
+    assert await client.get_status() == {"online": True, "good": True}
     socket.sent_event.clear()
     return client, socket
 

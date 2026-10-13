@@ -493,6 +493,9 @@ class FakeWebSocketClient:
     async def get_login_info(self, *, timeout=None):
         return {"self_id": self.self_id, "nickname": "Forest"}
 
+    async def get_status(self, *, timeout=None):
+        return {"online": True, "good": True}
+
     def activate_events(self, handler) -> None:
         self.handler = handler
 

@@ -694,6 +694,27 @@ class OneBotWebSocketClient:
                 "ONEBOT_API_UNAVAILABLE", "Could not verify the OneBot API account", 502
             ) from None
 
+    async def get_status(self, *, timeout: float | None = None) -> dict[str, bool]:
+        try:
+            body = await self._request("get_status", {}, self._timeout(timeout))
+            result = _json(body, MAX_RESPONSE_BYTES)
+            if (
+                not isinstance(result, dict)
+                or result.get("status") != "ok"
+                or type(result.get("retcode")) is not int
+                or result["retcode"] != 0
+                or not isinstance(result.get("data"), dict)
+            ):
+                raise _invalid()
+            data = result["data"]
+            if type(data.get("online")) is not bool or type(data.get("good")) is not bool:
+                raise _invalid()
+            return {"online": data["online"], "good": data["good"]}
+        except (ForestError, _ActionError, ValueError, TypeError):
+            raise ForestError(
+                "ONEBOT_API_UNAVAILABLE", "Could not verify the OneBot account status", 502
+            ) from None
+
     async def send(self, prepared: PreparedSend, *, timeout: float | None = None) -> SendResult:
         if not isinstance(prepared, PreparedSend):
             raise _invalid("A frozen prepared send is required")

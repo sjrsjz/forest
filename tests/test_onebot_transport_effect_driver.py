@@ -35,9 +35,13 @@ class FakeClient:
         self.active = False
         self.closed = False
         self.sent = []
+        self.status = {"online": True, "good": True}
 
     async def get_login_info(self, *, timeout):
         return {"self_id": "123456789", "nickname": "Forest"}
+
+    async def get_status(self, *, timeout):
+        return self.status
 
     def activate_events(self, handler):
         assert self.handler is None
@@ -238,3 +242,52 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
     assert client.closed
     transport_task.cancel()
     await asyncio.gather(transport_task, return_exceptions=True)
+
+
+async def test_onebot_transport_rejects_offline_account_before_activation():
+    client = FakeClient()
+    client.status = {"online": False, "good": True}
+
+    async def client_factory(*_args, **_kwargs):
+        return client
+
+    async def credential_resolver(*_args):
+        return "token"
+
+    driver = OneBotTransportEffectDriver(
+        {
+            "bindings": [{
+                "enabled": True,
+                "binding_ref": "binding/main",
+                "self_id": "123456789",
+                "credential_ref": "secret://onebot/main",
+                "websocket_url": "ws://onebot.invalid/",
+                "timeout_seconds": 15,
+                "event_capacity": 32,
+                "pending_capacity": 8,
+                "binding_epoch": 1,
+            }],
+        },
+        1,
+        SimpleNamespace(
+            component_id="adapter.onebot",
+            generation_id="generation:onebot:offline",
+            graph_id="graph:onebot:offline",
+            graph_revision=1,
+        ),
+        {
+            "name": "adapter.onebot.transport.send",
+            "kind": "onebot.websocket-v11",
+            "ingress": {"name": "adapter.onebot.transport.frame"},
+        },
+        effects=object(),
+        runtime=object(),
+        credential_resolver=credential_resolver,
+        client_factory=client_factory,
+    )
+    driver.bind_ingress(lambda *_args, **_kwargs: None)
+    with pytest.raises(ForestError) as caught:
+        await driver.start()
+    assert caught.value.code == "ONEBOT_ACCOUNT_NOT_READY"
+    assert client.closed
+    assert driver._bindings == {}
