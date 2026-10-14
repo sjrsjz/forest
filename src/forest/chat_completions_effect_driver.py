@@ -315,7 +315,7 @@ class ChatCompletionsEffectDriver:
         )
         self.accepting = True
 
-    async def _verify_effect(self, payload: dict, *, producer_component_id: str) -> None:
+    async def _verify_effect(self, payload: dict, *, producer_component_id: str) -> dict:
         await self.runtime.verify_generation_member(
             component_id=self.identity.component_id,
             generation_id=self.identity.generation_id,
@@ -342,6 +342,27 @@ class ChatCompletionsEffectDriver:
                 "Provider effect no longer authorizes this HTTP handoff",
                 409,
             )
+        return attempt
+
+    async def _verify_payload_handoff(self, projection: dict, wire: dict, attempt: dict) -> None:
+        """Serialize final HTTP admission with Payload forget across all input refs."""
+        effect_wire = {
+            "payload_id": attempt["wire_payload_id"],
+            "digest": attempt["wire_payload_digest"],
+            "owner_component_id": "kernel.effect",
+            "owner_kind": "effect.wire",
+            "owner_id": attempt["attempt_id"],
+        }
+        async with self.payloads.store.pool.connection() as conn, conn.transaction():
+            for reference in (projection, wire, effect_wire):
+                await self.payloads.verify_in(
+                    conn,
+                    payload_id=reference["payload_id"],
+                    digest=reference["digest"],
+                    owner_component_id=reference["owner_component_id"],
+                    owner_kind=reference["owner_kind"],
+                    owner_id=reference["owner_id"],
+                )
 
     async def invoke(self, payload, *, scope, invocation):
         if (
@@ -364,10 +385,11 @@ class ChatCompletionsEffectDriver:
                 raise ForestError(
                     "PROVIDER_REQUEST_FENCE_MISMATCH", "Provider request identity changed", 409
                 )
-            await self._verify_effect(
+            attempt = await self._verify_effect(
                 payload,
                 producer_component_id=projection["owner_component_id"],
             )
+            await self._verify_payload_handoff(projection, wire, attempt)
 
         result = await self.client.dispatch(prepared, permitcheck=permitcheck)
         return await self._materialize_result(
