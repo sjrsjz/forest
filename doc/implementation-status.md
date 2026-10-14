@@ -14,6 +14,17 @@ v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + �
 
 普通安装包扩展边界审计（2026-10-15）：普通 Bot 包目前要求精确批准的自有能力和受限的声明式存储；装配器明确拒绝其自带 Domain Query/Command、UnitOfWork participant、持久 owned-work handler 与 Effect service。部署/Host 范围的普通控制包目前只开放受限组件状态端口。受限包的热加入、定点热替换和进程恢复已有隔离验证，但这不能表述为任意第三方私有 SQL 或外部 Effect 可热重载。官方 builtin 包的完整领域 SQL/Effect 路径也不能通过删除普通包的拒绝条件直接转授；开放这两类能力需要明确的安装信任、数据库角色与驱动批准边界。
 
+### v31 当前验收门禁
+
+| 要求 | 已有直接证据 | 尚缺证据或实现 |
+| --- | --- | --- |
+| 微内核、builtin 代际与热重载 | v31 在线图 22/22 ACTIVE；v30 同 SQL 的 Memory 定点热替换、v29 官方包跨版本热替换均保留无关 Generation。 | 普通第三方包的完整 SQL/Effect 扩展能力仍未开放；不同存储基线的在线换代未验收。 |
+| Bot 全局多主干图文记忆与独立向量索引 | 隔离 PostgreSQL + 真实 QiYu VL/Milvus 的跨群 PNG/GIF 归档、图片种子召回、关联晋升与来源归因通过；v30 非空管理召回与 50,000/500,000 来源规模探针通过。 | v31 当前自然来源尚无非空图片召回；长期混合图文写入和费用分布未验收。 |
+| 群聊排队与 Agent/Provider | 隔离 BotHost 的同群排队、下一模型调用安全点、跨群同时进入 Provider、用户归因、文本模型去图投影通过；模型准入与遗忘两种 PostgreSQL 竞争顺序通过。 | v31 许可群新显式 @→真实 Agent/Provider→QQ 回复及 HTTP 实际在途竞争仍未验收。 |
+| Shell、WebUI 与管理 | Shell 优先级和受权管理动作经隔离 PostgreSQL 验证；模块 UI、Memory 来源筛选/游标/关系证据与试验端口已接入。 | 真实 QQ Shell 命令、浏览器长期管理操作负载未验收。 |
+| 多 Bot 生命周期与长时稳定性 | 隔离多 Bot/热重载链路通过；v31 正在进行一小时只读观察，当前没有生命周期违约。 | 多 Bot 同时接真实平台的长期验收、一小时观察终态仍待记录。 |
+
+
 ## v30 切换前快照与候选源码验证
 
 `forest-main-v30` 使用镜像 `forest:runtime-candidate-8c31ac5`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 40 的 22/22 个组件 ACTIVE。在线 Adapter 同工件热重载的内核替换账本为 SUCCEEDED，Memory Generation 保留。QQ 本机登录态为 READY，树莓派 OneBot 8080 只有一条已建立连接。旧 `alicebot.service` 继续停用，切换前的 `forest:runtime-candidate-f631613` 容器保留供回退。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
