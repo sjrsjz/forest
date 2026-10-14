@@ -12,6 +12,8 @@
 
 05:57（北京时间）树莓派的系统 QQ 安装从 3.2.19-39038 升至腾讯官方 3.2.34-53644 ARM64 包，NapCat 独立 QQ 安装原已为 3.2.34-53644。升级后 NapCat 登录观察器 READY，OneBot 本地 `get_status` 返回 online、`get_login_info` 成功，8080 到 Forest 保持一条已建立 WebSocket；旧 `alicebot.service` 为 inactive。v31 只读采样 3 次无违规，图修订 2、22/22 ACTIVE、0 活动 Run/Job/待发送；自然来源 4 条、群主干 1 个，最近入站决策为非许可群的 `NO_TRIGGER/group_not_allowed`，许可群 `933179609` 尚无入站。此检查未主动发送群消息。
 
+06:30（北京时间）以提交 `352eb5b` 构建新宿主镜像 `forest:runtime-candidate-352eb5b`（`sha256:c8ba1d3d37de1cf965f7421496d7579d339ba9306cf8ceb5507ccf08a8c50d53`）。新旧镜像 29 个官方 builtin 包的摘要指纹同为 `97d638fa5c3d3cb7a526a2a72f52f905ba88cf6107ec66a986a8c95bda345d40`，没有改变包存储基线；切换前 v31 无活动 Run、Job、待发送。停旧容器并重命名为 `forest-candidate-v31-supervisor-prev-6c9a36f` 保留回退，按原 env、Secret 卷、包卷、端口和双网络创建并启动新容器。健康探针在启动期短暂失败，约 47 秒后进入 healthy，重启次数 0；Bot 复归 READY/ONLINE、图修订 4、22/22 ACTIVE。连续 3 次只读采样零违规、0 活动 Run/Job/待发送，Memory 自然来源 9 条、群主干 1 个，许可群仍未观察到入站；NapCat READY，8080 仅一条 Forest 连接。本轮没有主动发送 QQ 消息或调用聊天模型。
+
 v31 是独立空记忆库，上线时来源、主干和 facet 均为 0；v30 的 241 条来源没有复制，也没有自动重复嵌入计费。切换操作没有主动发送 QQ 消息或调用模型；后续单次图片管理试验调用了 VL 嵌入，未调用聊天模型。许可群新显式 @→Agent→Provider→QQ 回复、自然图片归档后的非空图片召回、跨群长期负载及成本仍待验收；运行图健康不能替代这些证据。
 
 回退顺序：先经 v31 正式管理面令 `forest-main-v31` OFFLINE，确认 OneBot 连接降为 0；再经 v30 管理面令 `forest-main-v30` ONLINE，并核对图、登录态和单连接。两库独立，回退不会自动合并 v31 期间的新消息或记忆。
