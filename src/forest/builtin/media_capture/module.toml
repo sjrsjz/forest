@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.media-capture"
-version = "2.3.1"
+version = "2.4.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "media_capture:MediaCapture"
@@ -65,7 +65,7 @@ startup_dependency = false
 
 [[components.requires]]
 name = "memory.source.capture"
-contract = ">=1.0,<2.0"
+contract = ">=2.0,<3.0"
 required = true
 startup_dependency = true
 

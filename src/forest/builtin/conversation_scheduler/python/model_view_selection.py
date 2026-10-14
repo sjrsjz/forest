@@ -79,11 +79,15 @@ def evidence_unit_cost(
             raise ViewSelectionError("Memory evidence part is invalid")
         if part.get("kind") != "image" or part.get("projection_state") != "READY":
             continue
-        length, width, height = (part.get(key) for key in ("byte_length", "width", "height"))
-        if any(type(value) is not int or value < 1 for value in (length, width, height)):
+        length, width, height, pixels = (
+            part.get(key) for key in ("byte_length", "width", "height", "decoded_pixels")
+        )
+        if (any(type(value) is not int or value < 1
+                for value in (length, width, height, pixels))
+                or pixels < width * height or pixels > 16777216):
             raise ViewSelectionError("Memory image cost is invalid")
         media_bytes += length
-        decoded_bytes += width * height * 4
+        decoded_bytes += pixels * 4
     return ViewCost((size + bytes_per_token - 1) // bytes_per_token + unit_overhead,
                     media_bytes, decoded_bytes)
 

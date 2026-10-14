@@ -90,6 +90,7 @@ async def materialize(ctx, query_id, digest):
                         parts.append({**common, "kind": "image", "media_ref": part["payload"],
                                       "media_type": part["media_type"], "width": part["width"],
                                       "height": part["height"], "byte_length": byte_length,
+                                      "decoded_pixels": part["decoded_pixels"],
                                       "projection_state": "READY" if include_media else "OMITTED_BUDGET"})
                 if not page["has_more"]:
                     break

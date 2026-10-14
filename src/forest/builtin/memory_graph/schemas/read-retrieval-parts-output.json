@@ -261,6 +261,7 @@
         "part_kind",
         "media_type",
         "byte_length",
+        "decoded_pixels",
         "payload",
         "width",
         "height"
@@ -303,6 +304,14 @@
             "null"
           ],
           "minimum": 1
+        },
+        "decoded_pixels": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 16777216
         }
       }
     }

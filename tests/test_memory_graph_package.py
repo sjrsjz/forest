@@ -166,9 +166,9 @@ async def test_embedding_claim_budgets_bounded_image_renditions(clean_authority,
                 "INSERT INTO {}.source_parts "
                 "(bot_id,source_unit_id,part_id,part_index,part_kind,media_type,"
                 "payload_id,payload_digest,payload_owner_component_id,payload_owner_kind,"
-                "payload_owner_id,width,height,byte_length) VALUES "
+                "payload_owner_id,width,height,byte_length,decoded_pixels) VALUES "
                 "(%s,%s,%s,0,'IMAGE','image/png',%s,%s,'adapter.onebot',"
-                "'context.image',%s,2048,2048,%s)"
+                "'context.image',%s,2048,2048,%s,4194304)"
             ).format(namespace), (
                 store.bot_id, unit, part, f"payload/image/{index}", digest,
                 f"payload-owner/image/{index}", byte_length * 1024 * 1024,

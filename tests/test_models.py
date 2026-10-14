@@ -324,7 +324,7 @@ def test_native_memory_image_obeys_bound_model_modality():
     evidence = native_evidence(parts=[
         {"part_id": "image", "part_index": 0, "kind": "image",
          "media_ref": reference, "media_type": "image/png", "width": 1, "height": 1,
-         "byte_length": len(picture.content), "projection_state": "READY"}])
+         "byte_length": len(picture.content), "decoded_pixels": 1, "projection_state": "READY"}])
     evidence["evidence"][0]["matched_part_ids"] = ["image"]
     evidence["evidence"][0].update(is_seed=True, path_parent_source_unit_id=None,
                                    path_edge_id=None)
@@ -354,7 +354,7 @@ def test_memory_budget_omission_is_visible_and_cannot_claim_selected_pixels():
     evidence = native_evidence(parts=[
         {"part_id": "image", "part_index": 0, "kind": "image",
          "media_ref": reference, "media_type": "image/png", "width": 1, "height": 1,
-         "byte_length": len(picture.content), "projection_state": "OMITTED_BUDGET"},
+         "byte_length": len(picture.content), "decoded_pixels": 1, "projection_state": "OMITTED_BUDGET"},
     ])
     request = prepared(value, capabilities(input_modalities=("text", "image")),
                        evidence=evidence)

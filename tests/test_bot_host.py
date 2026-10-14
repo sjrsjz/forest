@@ -308,7 +308,7 @@ class LargePngAndGifMediaClient(LargePngMediaClient):
             first.save(buffer, format="GIF", save_all=True,
                        append_images=[second], duration=120, loop=0)
             type(self)._gif_capture = CapturedImage(
-                buffer.getvalue(), "image/gif", 64, 64, 4096,
+                buffer.getvalue(), "image/gif", 64, 64, 8192,
             )
         return type(self)._gif_capture
 

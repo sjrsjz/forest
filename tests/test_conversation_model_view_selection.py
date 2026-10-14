@@ -115,7 +115,8 @@ def test_joint_view_keeps_causal_and_recent_context_before_ranked_memory():
     evidence = [
         {"source_unit_id": "first", "parts": [{"kind": "text", "text": "recalled"}]},
         {"source_unit_id": "second", "parts": [{"kind": "image", "projection_state": "READY",
-                                                 "byte_length": 100, "width": 10, "height": 10}]},
+                                                 "byte_length": 100, "width": 10, "height": 10,
+                                                 "decoded_pixels": 100}]},
     ]
     plan = select_joint_view(
         units, evidence, required_unit_ids=("input:1",),
@@ -167,3 +168,32 @@ def test_joint_view_returns_unused_memory_reservation_to_group_history():
     )
     assert plan.context.selected_unit_ids == tuple(f"input:{index}" for index in range(1, 6))
     assert plan.selected_evidence_unit_ids == ()
+
+
+def test_multiframe_memory_image_charges_all_decoded_pixels():
+    evidence = [{
+        "source_unit_id": "animated",
+        "parts": [{
+            "kind": "image", "projection_state": "READY",
+            "byte_length": 100, "width": 10, "height": 10,
+            "decoded_pixels": 300,
+        }],
+    }]
+    kwargs = {
+        "required_unit_ids": (),
+        "previous_selected_unit_ids": (),
+        "previous_considered_unit_ids": (),
+        "fixed_cost": ViewCost(),
+        "bytes_per_token": 4,
+        "unit_overhead": 0,
+    }
+    too_small = select_joint_view(
+        [], evidence, budget=ViewCost(tokens=1000, media_bytes=1000, decoded_bytes=800),
+        **kwargs,
+    )
+    assert too_small.omitted_evidence_unit_ids == ("evidence:animated",)
+    enough = select_joint_view(
+        [], evidence, budget=ViewCost(tokens=1000, media_bytes=1000, decoded_bytes=1200),
+        **kwargs,
+    )
+    assert enough.selected_evidence_unit_ids == ("evidence:animated",)

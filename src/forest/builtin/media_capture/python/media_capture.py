@@ -180,7 +180,7 @@ class MediaCapture(Plugin):
                 "author_subject_ref": current["author_subject_ref"],
                 "author": current["author"],
                 "parts": [
-                    {key: value for key, value in part.items() if key != "decoded_pixels"}
+                    dict(part)
                     for part in ready
                 ],
                 "occurrence": {
@@ -194,6 +194,7 @@ class MediaCapture(Plugin):
                 "occurred_at": current["occurred_at"],
             },
             operation_id=ctx.operations.stable("memory-publish"),
+            contract_major=2,
             timeout=30,
         )
         partial = any(part["state"] == "FAILED" for part in current["parts"])

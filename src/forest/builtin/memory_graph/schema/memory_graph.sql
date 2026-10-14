@@ -188,12 +188,15 @@ CREATE TABLE source_parts (
     width integer CHECK (width IS NULL OR width BETWEEN 1 AND 100000),
     height integer CHECK (height IS NULL OR height BETWEEN 1 AND 100000),
     byte_length bigint CHECK (byte_length IS NULL OR byte_length BETWEEN 0 AND 33554432),
+    decoded_pixels bigint CHECK (decoded_pixels IS NULL OR decoded_pixels BETWEEN 1 AND 16777216),
     PRIMARY KEY (bot_id,source_unit_id,part_id),
     UNIQUE (bot_id,source_unit_id,part_index),
     FOREIGN KEY (bot_id,source_unit_id) REFERENCES source_units(bot_id,source_unit_id),
     CHECK (
-        (part_kind='TEXT' AND width IS NULL AND height IS NULL)
-        OR (part_kind='IMAGE' AND width IS NOT NULL AND height IS NOT NULL)
+        (part_kind='TEXT' AND width IS NULL AND height IS NULL AND decoded_pixels IS NULL)
+        OR (part_kind='IMAGE' AND width IS NOT NULL AND height IS NOT NULL
+            AND decoded_pixels IS NOT NULL
+            AND decoded_pixels >= width::bigint * height::bigint)
     )
 );
 
@@ -2902,7 +2905,7 @@ BEGIN
         node_value := node_value||jsonb_build_object('matched_part_ids',matched_parts);
         SELECT COALESCE(jsonb_agg(jsonb_build_object(
             'part_id',p.part_id,'part_index',p.part_index,'part_kind',p.part_kind,'media_type',p.media_type,
-            'byte_length',p.byte_length,
+            'byte_length',p.byte_length,'decoded_pixels',p.decoded_pixels,
             'width',p.width,'height',p.height,'payload',jsonb_build_object(
                 'payload_id',p.payload_id,'digest',p.payload_digest,
                 'owner_component_id',p.payload_owner_component_id,'owner_kind',p.payload_owner_kind,
@@ -6950,11 +6953,12 @@ BEGIN
         FOR part IN SELECT value FROM jsonb_array_elements(parts_value) LOOP
             INSERT INTO __forest_module_schema__.source_parts(
                 bot_id,source_unit_id,part_id,part_index,part_kind,media_type,payload_id,payload_digest,
-                payload_owner_component_id,payload_owner_kind,payload_owner_id,width,height,byte_length)
+                payload_owner_component_id,payload_owner_kind,payload_owner_id,width,height,byte_length,decoded_pixels)
             VALUES(requested_bot,unit_id_value,part->>'part_id',(part->>'part_index')::integer,
                 part->>'part_kind',part->>'media_type',part#>>'{payload,payload_id}',part#>>'{payload,digest}',
                 part#>>'{payload,owner_component_id}',part#>>'{payload,owner_kind}',part#>>'{payload,owner_id}',
-                (part->>'width')::integer,(part->>'height')::integer,(part->>'byte_length')::bigint);
+                (part->>'width')::integer,(part->>'height')::integer,(part->>'byte_length')::bigint,
+                (part->>'decoded_pixels')::bigint);
         END LOOP;
     END IF;
     PERFORM pg_advisory_xact_lock(hashtextextended(

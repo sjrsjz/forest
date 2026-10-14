@@ -311,7 +311,9 @@ class AdapterOneBot(Plugin):
             }
             memory_capture = None
         else:
-            memory_capture = {**capture, "parts": memory_parts}
+            memory_capture = {**capture, "parts": [
+                {**part, "decoded_pixels": None} for part in memory_parts
+            ]}
             media_capture = None
         projected = {**normalized, "segments": context_parts}
         shell = await ctx.services.call(

@@ -300,7 +300,7 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
                 projected_parts.append({"part_id": part_id, "type": "text", "text": part["text"]})
             elif part.get("kind") == "image" and set(part) == {
                     "part_id", "part_index", "kind", "media_ref", "media_type", "width",
-                    "height", "byte_length", "projection_state"}:
+                    "height", "byte_length", "decoded_pixels", "projection_state"}:
                 image_ref = part["media_ref"]
                 if (not isinstance(image_ref, dict) or set(image_ref) != {
                         "payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"}
@@ -309,7 +309,10 @@ def _memory_bundle(value: Any, snapshot: dict, units: list[dict]) -> tuple[dict,
                         or part["media_type"] not in {
                             "image/png", "image/jpeg", "image/webp", "image/gif"}
                         or type(part["width"]) is not int or not 0 < part["width"] <= 100000
-                        or type(part["height"]) is not int or not 0 < part["height"] <= 100000):
+                        or type(part["height"]) is not int or not 0 < part["height"] <= 100000
+                        or type(part["decoded_pixels"]) is not int
+                        or not 0 < part["decoded_pixels"] <= 16_777_216
+                        or part["decoded_pixels"] < part["width"] * part["height"]):
                     raise _error("MODEL_INPUT_INVALID", "Memory image reference is invalid")
                 if (type(part["byte_length"]) is not int
                         or not 0 < part["byte_length"] <= 33_554_432

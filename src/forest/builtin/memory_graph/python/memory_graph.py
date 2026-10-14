@@ -585,7 +585,7 @@ class MemoryGraph(Plugin):
     @service(
         "memory.source.capture",
         semantics="idempotent",
-        contract="1.0",
+        contract="2.0",
         input_schema="schemas/capture-service-input.json",
         output_schema="schemas/capture-output.json",
     )
@@ -616,6 +616,7 @@ class MemoryGraph(Plugin):
                     "width",
                     "height",
                     "byte_length",
+                    "decoded_pixels",
                 )
             }
             for part in value["parts"]

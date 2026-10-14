@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.93.5"
+version = "1.94.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -177,7 +177,7 @@ output_schema = "schemas/domain-record-output.json"
 
 [[components.provides]]
 name = "memory.source.capture"
-contract = "1.0"
+contract = "2.0"
 semantics = "idempotent"
 input_schema = "schemas/capture-service-input.json"
 output_schema = "schemas/capture-output.json"
@@ -290,9 +290,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.92.1"
+schema_version = "3.93.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "86f53aa254d27c60eb25803646b3dadb3f3b93311bf4fec84c3c3468dfc5bc4e"
+baseline_sha256 = "ae11dfcbf7217f418cee803a5f5b4f3fcf022c31942aa7dec63e5591a68194da"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
