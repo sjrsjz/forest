@@ -4794,6 +4794,18 @@ async def test_kernel_payload_repository_closes_sources_and_forget_descendants(
         with pytest.raises(ForestError) as caught:
             await repository.read_bytes_in(conn, child.payload_id, expected_deletion_epoch=1)
         assert caught.value.code == "PAYLOAD_REVOKED"
+    for content in (b'{"request":1}', b'{"request":2}'):
+        with pytest.raises(ForestError) as caught:
+            await repository.put_bytes(
+                owner_component_id="agent.runtime",
+                owner_kind="model.request",
+                owner_id="request/1",
+                media_type="application/json",
+                content=content,
+                parents=(parent.payload_id,),
+                expected_deletion_epoch=1,
+            )
+        assert caught.value.code == "PAYLOAD_REVOKED"
     with pytest.raises(ForestError) as caught:
         await repository.put_bytes(
             owner_component_id="memory.graph",

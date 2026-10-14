@@ -8,6 +8,8 @@ QQ 恢复后，正式管理 API 的一次合成文本召回试验结算为 READY
 
 候选源码增量（2026-10-15 03:13，北京时间）：Memory `1.94.0` / 私有 SQL `3.93.0`、Adapter `2.5.0`、Media Capture `2.4.0`、Agent `4.53.0` 将采集器提供的总帧 `decoded_pixels` 贯通来源 part、图文召回证据与 Conversation 联合模型视图；文本 part 明确使用 null，Agent 严格校验证据图片的总像素数。原先多帧 GIF 只按首帧宽高估算解码资源的缺口已修正。隔离真实 QiYu VL + Milvus + PostgreSQL 的合成 PNG/GIF 跨群整链和管理试验 1 passed（167.87 秒），官方包构建、定向 PostgreSQL 与选择/投影回归共 12 passed，Ruff 通过。期间的失败复验查出 Adapter 文本双端口输入与 Agent 旧严格证据集合，已修复；临时诊断代码均已移除。此候选仍未供应到在线 v30；Memory SQL 基线变化需要新 Bot 私有库，不能把源码通过视为线上图片召回或 QQ 实际回复验收。
 
+03:35 只读线上复查：v30 仍为 READY/ONLINE、图修订 40、22/22 ACTIVE；自然来源 241 条、9 个主干、5 个 DOCUMENT.READY facet，活动 Run、Job、待发送及观察器违规均为 0。许可群 `933179609` 仍只有 1 条 `NO_TRIGGER/mention_required` 入站，没有真实 @ 回复样本。源码侧另修复内核 Payload 幂等写入在原载荷被遗忘后仍返回已撤销引用的重放缺口：同 owner 的相同或不同内容重放均明确拒绝为 `PAYLOAD_REVOKED`；隔离 PostgreSQL 定向用例通过。该修复仅收紧 Payload 入口，不代表跨包模型计划与外发之间的删除屏障已验收。
+
 ### 历史观察（v27/v28，均非当前在线 Bot）
 
 2026-10-12 08:00（北京时间）完成 v26→v27 切换：`forest-main-v26` 的期望与观测状态均为 OFFLINE，`forest-main-v27` 为 READY/ONLINE；v27 运行图 22/22 ACTIVE、schema bundle 22/22 READY，四次只读采样无违规、活动 Agent Run、并发会话或待发送消息。树莓派 OneBot 端口仅见一条来自本机的远端连接。v27 是新 Bot，未复制 v26 消息或记忆；许可群 `933179609` 尚无入站记录，真实低频 @→Agent→Provider→发送链仍未验收。此轮没有主动向 QQ 发送消息。

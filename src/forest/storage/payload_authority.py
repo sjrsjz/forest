@@ -339,6 +339,8 @@ class KernelPayloadRepository:
             )
         ).fetchone()
         if existing is not None:
+            if existing["state"] != "ACTIVE":
+                raise ForestError("PAYLOAD_REVOKED", "Payload body is unavailable", 410)
             if existing["input_digest"] != input_digest:
                 raise ForestError(
                     "PAYLOAD_ID_CONFLICT", "Payload owner already has different content", 409
