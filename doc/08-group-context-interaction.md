@@ -507,7 +507,7 @@ Agent 在每次模型安全点提交不可变 `ModelViewQuote`：精确的 Run/�
 
 Conversation 在当前 Actor/Session/Run 围栏内读取完整活动 Context 与已归档来源范围，核对所有待答触发的必要原文，再先计 CorePrompt、Preset、工具、Run 因果组、Memory 证据、来源标题和输出预留；这些是本次报价的固定/必要成本。首次调用选择必留 Context 单元后，按 Context 提交顺序从近到远纳入能完整放下的可选单元，并冻结所选 ID 与省略范围。同一 Run 的下一次模型调用仅扩展新接入的 Context 因果后缀及新完成的工具/模型因果组；先前已选历史成员不得因预算或热重载而重新选择。必要集合加固定成本越界时，Context 返回确定性失败，不删除触发、截断工具配对或把超额估算交给 Provider 拒绝。
 
-当前实现先写不可变 `model.view.quote` Payload；Conversation 逐页读取 Context，在 Actor/Session/Run 围栏下复核 Context 与媒体修订、冻结策略、活动源集和 CLAIMED 触发，再计算 Context/Memory 联合选择，写不可变 `model.view.plan` Payload，并以稳定 operation ID 调用 `conversation.model-view.publish`。发布命令按计划和父计划执行 CAS；同一步重放读取已发布结果，报价变化则冲突。CAS 失败的候选 Payload 不得供 Agent 使用。Agent 只按已发布计划的成员投影历史和证据，并在模型调用前再次核对报价与计划。当前发布协议未单列删除 epoch，不能把仅有的修订围栏描述成已验证的跨包删除屏障。
+当前实现先写不可变 `model.view.quote` Payload；Conversation 逐页读取 Context，在 Actor/Session/Run 围栏下复核 Context 与媒体修订、冻结策略、活动源集和 CLAIMED 触发，再计算 Context/Memory 联合选择，写不可变 `model.view.plan` Payload，并以稳定 operation ID 调用 `conversation.model-view.publish`。发布命令按计划和父计划执行 CAS；同一步重放读取已发布结果，报价变化则冲突。CAS 失败的候选 Payload 不得供 Agent 使用。Agent 只按已发布计划的成员投影历史和证据，并在模型调用前再次核对报价与计划。发布命令在同一数据库事务内先由内核按包声明验证 quote 与 plan 的精确 Payload 身份和 ACTIVE 状态，并持有删除时钟共享锁，再执行 Conversation CAS；遗忘使用同一时钟的排他锁。隔离 PostgreSQL 竞争验证覆盖了发布先行与遗忘先行：前者提交的计划会随其来源后代撤销，后者在引用校验处拒绝发布。Agent 的后续读取和 Effect 外发仍分别受自己的活动引用围栏约束。
 
 每个模型步骤只接受一份已发布计划，后继步骤带父计划摘要；旧步骤已选 Context 成员不可被重选或丢弃，新触发与工具因果在下一模型安全点加入。真实投影越过传输硬界时，在模型 Effect 前按不可发送输入终态结算，并保留已发布计划供诊断。归档仍先可靠落库；省略标记不能伪称模型看过原文。跨包遗忘与删除对已发布但尚未发送的模型步骤是否形成完整屏障，仍需专项验证。
 
@@ -515,7 +515,7 @@ Conversation 在当前 Actor/Session/Run 围栏内读取完整活动 Context 与
 
 先可靠写 Archive 及来源映射，再以 `context_compactions` 发布裁剪视图。持久裁剪器只计算确定性的保留/移出计划：归档引用、token 计数和来源覆盖，不能输出自然语言摘要；它与每次模型调用的 `model.view.plan` 是不同的事实。Context 发布经Actor/会话协调事务；后台任务不能修改正在使用的共享消息数组。可靠归档已完成但Embedding/图邻接仍滞后时，裁剪可以完成，召回显式报告索引水位。
 
-当前模型计划冻结有序 Context 源集摘要、Context/媒体修订、Run 策略摘要、预算、必留触发、父计划及 Context/Memory 成员；发布时由包命令核验围栏，晚到输入或媒体使旧候选失效。持久裁剪另以连续旧前缀归档，不能覆盖当前完整后缀。Agent 的模型投影只消费发布成员，不生成第二套历史选择清单。跨包删除屏障仍遵守[06](06-concurrent-convergence.md)，但当前模型计划没有独立的删除 epoch 字段。
+当前模型计划冻结有序 Context 源集摘要、Context/媒体修订、Run 策略摘要、预算、必留触发、父计划及 Context/Memory 成员；发布时由包命令核验围栏，晚到输入或媒体使旧候选失效。持久裁剪另以连续旧前缀归档，不能覆盖当前完整后缀。Agent 的模型投影只消费发布成员，不生成第二套历史选择清单。跨包删除屏障遵守[06](06-concurrent-convergence.md)：模型计划无需独立保存删除 epoch，发布命令的受管引用校验与 CAS 共用事务和删除时钟锁；计划提交后的使用还必须在后续安全点重新校验。
 
 当前基线以 `context_view_unit_count/context_archived_unit_count` 避免为判断阈值反复扫描完整历史。一次发布先写受管 `context.archive` JSON 引用，再写 `context_compactions` 和精确 `context_compaction_units` 成员关系，最后单调推进 `context_view_revision`；原 `context_units` 与 Payload 不更新、不删除。快照用反连接只物化活动单元，并在最前面加入最新机器可读归档引用。裁剪只能取按 Context 顺序排列的连续最旧前缀：遇到未决触发或当前 Session 的必留单元即停止，不能跳过该单元继续归档更晚消息；即便因此暂时高于水位，也要等待触发结算或下一安全边界。新 Run 的触发输入和当前必要后缀受保护；ViewPlan 发布后，该 Run 在所有后续模型步骤保持同一 `context_view_revision`，只追加因果单元。
 

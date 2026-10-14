@@ -4,7 +4,7 @@
 
 `forest-main-v31` 已用独立 deployment、Host、Bot 库和包卷接管 QQ：READY/ONLINE、图修订 2、22/22 ACTIVE，30 秒四次只读采样无违规、活动 Run/Job 或待发送；树莓派 NapCat 登录 READY，8080 恰好一条连接。旧 v30 期望与观测均 OFFLINE，原 241 条来源仍保存在独立旧库。v31 使用 Adapter `2.5.0`、Media Capture `2.4.0`、Memory `1.94.0` / SQL `3.93.0`、Agent `4.53.0`；22 个 schema bundle READY。详见 [v31 切换记录](live-v31-cutover-2026-10-15.md)。
 
-v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + 真实 QiYu VL/Milvus 的 PNG/GIF 跨群整链已经通过，但自然流量归档、许可群新显式 @→Agent→Provider→QQ 回复、非空图片召回进入真实模型输入、长期多群负载与费用仍需在 v31 验收。模型计划与外发之间的跨包删除屏障仍需专项验证；切换操作没有主动发送 QQ 消息或调用聊天模型。切换后一次 64×64 PNG 正式管理试验结算 READY、结果 0 项，消耗 22 个 VL 嵌入 token、UNKNOWN 0；空库零命中不证明非空图片召回。
+v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + 真实 QiYu VL/Milvus 的 PNG/GIF 跨群整链已经通过，但自然流量归档、许可群新显式 @→Agent→Provider→QQ 回复、非空图片召回进入真实模型输入、长期多群负载与费用仍需在 v31 验收。模型计划发布与 Payload 遗忘的两种事务竞争顺序已在隔离 PostgreSQL 验证；模型计划提交后到外发之间的安全点仍需专项验证；切换操作没有主动发送 QQ 消息或调用聊天模型。切换后一次 64×64 PNG 正式管理试验结算 READY、结果 0 项，消耗 22 个 VL 嵌入 token、UNKNOWN 0；空库零命中不证明非空图片召回。
 
 ## v30 切换前快照与候选源码验证
 
