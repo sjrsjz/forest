@@ -10,7 +10,7 @@
 
 05:57 再次只读采样 3 次均无违规：22/22 ACTIVE、READY/ONLINE、0 个活动 Run/Job/待发送，Memory 自然来源 4 条、群主干 1 个，最新入站为非许可群的 `NO_TRIGGER/group_not_allowed`，许可群 `933179609` 尚未观察到。树莓派系统 QQ 已从 3.2.19 升至 3.2.34，NapCat 使用独立 3.2.34；OneBot `get_status` 为 online，`get_login_info` 成功，Forest 与 NapCat 保持一条 WebSocket 连接。旧 `alicebot.service` 仍停用；没有主动发送 QQ 消息。
 
-v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + 真实 QiYu VL/Milvus 的 PNG/GIF 跨群整链已经通过，但自然流量归档、许可群新显式 @→Agent→Provider→QQ 回复、非空图片召回进入真实模型输入、长期多群负载与费用仍需在 v31 验收。模型计划发布与 Payload 遗忘的两种事务竞争顺序已在隔离 PostgreSQL 验证；源码侧已在 Provider 最终 HTTP 许可复核三种受管 Payload，撤销后不进入 dispatch 的三种回归用例通过；隔离 PostgreSQL + 假 Provider 的群触发到模型请求整链单场景通过。隔离 PostgreSQL 的遗忘先行竞争用例还证明许可等待并在撤销后拒绝；许可先行后的实际 HTTP 在途边界仍需整链竞争验证，修复已随新宿主镜像部署到 v31；切换操作没有主动发送 QQ 消息或调用聊天模型。切换后一次 64×64 PNG 正式管理试验结算 READY、结果 0 项，消耗 22 个 VL 嵌入 token、UNKNOWN 0；空库零命中不证明非空图片召回。
+v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + 真实 QiYu VL/Milvus 的 PNG/GIF 跨群整链已经通过，但自然流量归档、许可群新显式 @→Agent→Provider→QQ 回复、非空图片召回进入真实模型输入、长期多群负载与费用仍需在 v31 验收。模型计划发布与 Payload 遗忘的两种事务竞争顺序已在隔离 PostgreSQL 验证；源码侧已在 Provider 最终 HTTP 许可复核三种受管 Payload，撤销后不进入 dispatch 的三种回归用例通过；隔离 PostgreSQL + 假 Provider 的群触发到模型请求整链单场景通过。隔离 PostgreSQL 的最终许可与遗忘两种竞争顺序均已验证：遗忘先行时许可等待并在撤销后拒绝；许可先行时遗忘等待准入事务提交。准入提交后到 HTTP 真正发出之间仍可发生遗忘，已获准请求按在途处理，实际网络边界仍需整链竞争验证；修复已随新宿主镜像部署到 v31；切换操作没有主动发送 QQ 消息或调用聊天模型。切换后一次 64×64 PNG 正式管理试验结算 READY、结果 0 项，消耗 22 个 VL 嵌入 token、UNKNOWN 0；空库零命中不证明非空图片召回。
 
 ## v30 切换前快照与候选源码验证
 

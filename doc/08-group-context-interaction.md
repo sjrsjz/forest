@@ -509,7 +509,7 @@ Conversation 在当前 Actor/Session/Run 围栏内读取完整活动 Context 与
 
 当前实现先写不可变 `model.view.quote` Payload；Conversation 逐页读取 Context，在 Actor/Session/Run 围栏下复核 Context 与媒体修订、冻结策略、活动源集和 CLAIMED 触发，再计算 Context/Memory 联合选择，写不可变 `model.view.plan` Payload，并以稳定 operation ID 调用 `conversation.model-view.publish`。发布命令按计划和父计划执行 CAS；同一步重放读取已发布结果，报价变化则冲突。CAS 失败的候选 Payload 不得供 Agent 使用。Agent 只按已发布计划的成员投影历史和证据，并在模型调用前再次核对报价与计划。发布命令在同一数据库事务内先由内核按包声明验证 quote 与 plan 的精确 Payload 身份和 ACTIVE 状态，并持有删除时钟共享锁，再执行 Conversation CAS；遗忘使用同一时钟的排他锁。隔离 PostgreSQL 竞争验证覆盖了发布先行与遗忘先行：前者提交的计划会随其来源后代撤销，后者在引用校验处拒绝发布。Agent 的后续读取和 Effect 外发仍分别受自己的活动引用围栏约束。
 
-每个模型步骤只接受一份已发布计划，后继步骤带父计划摘要；旧步骤已选 Context 成员不可被重选或丢弃，新触发与工具因果在下一模型安全点加入。真实投影越过传输硬界时，在模型 Effect 前按不可发送输入终态结算，并保留已发布计划供诊断。归档仍先可靠落库；省略标记不能伪称模型看过原文。当前源码的 Provider 最终 HTTP 许可在占用发送并发槽后，重新验证 model.projection、model.wire 与 effect.wire 的精确 Payload 身份和 ACTIVE 状态；校验事务持有删除时钟共享锁。撤销先于许可时拒绝外发，许可先完成时按已在途请求处理。隔离 PostgreSQL 已验证遗忘先取得删除时钟排他锁时，最终许可等待并在撤销提交后拒绝；许可先行后的实际 HTTP 在途边界仍需整链竞争验证。
+每个模型步骤只接受一份已发布计划，后继步骤带父计划摘要；旧步骤已选 Context 成员不可被重选或丢弃，新触发与工具因果在下一模型安全点加入。真实投影越过传输硬界时，在模型 Effect 前按不可发送输入终态结算，并保留已发布计划供诊断。归档仍先可靠落库；省略标记不能伪称模型看过原文。当前源码的 Provider 最终 HTTP 许可在占用发送并发槽后，重新验证 model.projection、model.wire 与 effect.wire 的精确 Payload 身份和 ACTIVE 状态；校验事务持有删除时钟共享锁。撤销先于许可时拒绝外发，许可先完成时按已在途请求处理。隔离 PostgreSQL 已验证两种事务顺序：遗忘先取得删除时钟排他锁时，最终许可等待并在撤销提交后拒绝；许可先持有共享锁时，遗忘等待准入事务提交。准入事务提交后到真正发出 HTTP 字节之间仍有窗口；此时后到遗忘不能撤销已获准的外部请求，实际 HTTP 在途边界仍需整链竞争验证。
 
 ### 8.2 确定性视图发布与合流
 
