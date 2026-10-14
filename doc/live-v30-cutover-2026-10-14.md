@@ -26,3 +26,11 @@ v30 是空的独立记忆库，切换时 0 条来源和 0 个 facet。v29 历史
 
 
 QQ 待扫码期间继续做不依赖运行图的只读索引验收：按 `index_ref_id` 将 5 个 `DOCUMENT.READY` facet 与 `vector.index` 私有账本逐条关联，2 个图片、3 个文本 ref 均为 `ACTIVE/DOCUMENT`，space 与 vector digest 一致，当前 collection 绑定 `READY`、物理 ID `469447031268509105`。直接从 Milvus 以 Strong consistency GET 这 5 个 ref，5 行的 Bot/space/purpose/input digest 与 PostgreSQL 账本一致，4096 维 float32 物理摘要也全部一致。以其中一个图片 facet 的已存向量做限定 Bot/space/DOCUMENT 的物理搜索，返回 5 个命中，该 ref 排第一、余弦相似度 1.0，来源仍指向群 `598445021`。此项证明独立物理向量索引与引用账本可读且一致；它不等于管理召回试验、文本/图片新查询嵌入或 QiYu 式图扩散已通过。
+
+15:51–15:57 UTC 再次只读复核时，树莓派 NapCat `CheckLoginStatus` 已返回 `READY`、`is_login=true`、`core_ready=true`；本轮没有观察到实际重新登录的操作，因此只记录当前状态。v30 原先为 `desired=ONLINE / observed=FAILED / ONEBOT_API_UNAVAILABLE`，通过正式 `deployment.bot-catalog` 管理动作先切 OFFLINE、再切 ONLINE，恢复到图修订 37、22/22 ACTIVE、OneBot 单连接；原来源和 facet 账本未重建。
+
+在该图上发起一次合成文本的正式 Memory 管理试验，查询结算为 READY。首次读取结果时本地验收脚本误用 `limit=20`，超过 `memory.trial.result` 的不可变 schema 上限 8，网关按契约返回 422；随后复用同一 query_id，以 `limit=8` 读取成功，没有重复发起付费嵌入。结果共 4 条、跨两个群聊主干，2 条带图片、3 条直接种子和 1 条扩散证据，均有群聊与主干归因，`truncated=false`、`association_sampled=false`。查询预算当日显示 1 笔已结算、25 token、0 UNKNOWN；没有导出群聊原文或图片字节。这证明 v30 的正式非空文本召回、物理向量 ref 到多主干证据的路径，不证明新的图片查询命中或真实 Agent 模型输入。
+
+将已构建且定向验证过的 `forest:runtime-candidate-8c31ac5` 作为未启动容器预备，逐项核对环境、用户、命令、健康检查、挂载、端口与双网络均和当前 Supervisor 一致；然后停旧容器并保留为 `forest-candidate-v30-supervisor-prev-8c31ac5`，启动新容器。启动期健康检查一度显示 unhealthy，随后自动达到 healthy，未执行回退。新镜像含由 Adapter Generation 持有、每 30 秒检查 `get_status` 的运行期 QQ 状态任务。切换后 v30 READY/ONLINE、图修订 39、22/22 ACTIVE、27 条来源、4 个主干、5 个 DOCUMENT.READY 与 1 个 QUERY.READY facet；活动 Run、Job、待发送、UNKNOWN 嵌入和观察器违规均为 0。树莓派 QQ 登录仍 READY，OneBot 恰好一条连接。没有主动向 QQ 发送消息；许可群显式 @→回复和运行期真实离线回收仍待验收。
+
+16:07 UTC 再以现场生成的 256×256 PNG 通过正式管理资产上传和 `memory.trial.start` 发起一次图片查询。查询结算 READY，结果 0 项；图像与现有群聊图片语义不相关，因此不能用零命中推断图片召回失效，也不能把 READY 当作非空召回验收。只读预算记录当日文本＋图片两次查询共 107 token、0 UNKNOWN；v30 图 39 仍 22/22 ACTIVE、0 活动 Run/Job/待发送或观察违规。自然入站增至 32 条来源、5 个主干，许可群 `933179609` 仍无入站记录。
