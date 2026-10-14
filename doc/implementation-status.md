@@ -1,10 +1,10 @@
 # Forest 实现状态
 
-## 当前快照（2026-10-15 00:07 北京时间）
+## 当前快照（2026-10-15 00:24 北京时间）
 
-`forest-main-v30` 使用镜像 `forest:runtime-candidate-8c31ac5`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 39 的 22/22 个组件 ACTIVE。QQ 本机登录态为 READY，树莓派 OneBot 8080 只有一条已建立连接。旧 `alicebot.service` 继续停用，切换前的 `forest:runtime-candidate-f631613` 容器保留供回退。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
+`forest-main-v30` 使用镜像 `forest:runtime-candidate-8c31ac5`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 40 的 22/22 个组件 ACTIVE。在线 Adapter 同工件热重载的内核替换账本为 SUCCEEDED，Memory Generation 保留。QQ 本机登录态为 READY，树莓派 OneBot 8080 只有一条已建立连接。旧 `alicebot.service` 继续停用，切换前的 `forest:runtime-candidate-f631613` 容器保留供回退。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
 
-QQ 恢复后，正式管理 API 的一次合成文本召回试验结算为 READY，返回 4 条证据，分别归属两个群聊主干，其中 2 条携带图片，3 条为直接种子、1 条为图扩散结果；结果未截断。读取结果时先因本地验收脚本请求超过包 schema 的页大小上限而收到 422，随后以同一 query_id 和合法的 8 条页大小成功读取，没有再次发起嵌入。00:07 的只读观察为 32 条自然来源、5 个主干、5 个 DOCUMENT.READY facet 与 1 个 QUERY.READY facet，活动 Run、Job、待发送、UNKNOWN 嵌入和观察器违规均为 0。现场生成的 256×256 PNG 图片查询也结算为 READY，但没有命中现有记忆；当日两次查询共结算 107 token。许可群 `933179609` 的新显式 @→Agent→Provider→QQ 回复与长期负载仍待验收。
+QQ 恢复后，正式管理 API 的一次合成文本召回试验结算为 READY，返回 4 条证据，分别归属两个群聊主干，其中 2 条携带图片，3 条为直接种子、1 条为图扩散结果；结果未截断。读取结果时先因本地验收脚本请求超过包 schema 的页大小上限而收到 422，随后以同一 query_id 和合法的 8 条页大小成功读取，没有再次发起嵌入。00:24 的只读观察为 95 条自然来源、6 个主干、5 个 DOCUMENT.READY facet，试验 QUERY facet 已回收；活动 Run、Job、待发送、UNKNOWN 嵌入和观察器违规均为 0。现场生成的 256×256 PNG 图片查询也结算为 READY，但没有命中现有记忆；当日两次查询共结算 107 token。许可群 `933179609` 的新显式 @→Agent→Provider→QQ 回复与长期负载仍待验收。
 
 ### 历史观察（v27/v28，均非当前在线 Bot）
 
@@ -32,7 +32,7 @@ Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 
 
 | 范围 | 当前证据 | 仍需证明或完成 |
 | --- | --- | --- |
-| 微内核、Bot 身份与包生命周期 | v30 独立 Bot 图经 Memory 同工件热重载达到修订 2，22/22 成员 ACTIVE；Memory 与 6 个依赖成员换代，其余 15 个保留且原来源事实未变；v29 在线官方 Agent 4.52.0 选择与 5 个依赖组件换代，以及 `deployment.audit` 官方跨版本定点热替换和重启恢复，证明同存储基线的真实包热重载。Bot 身份/意图仍由部署内核持有，管理 builtin 只经受限端口操作。 | 存储 schema/baseline 变化时，当前安装器对同一 Bot 库返回 `SCHEMA_BUNDLE_MISMATCH`，尚不能宣称保留状态的原库热升级；普通控制包领域 SQL 与长期多 Bot 负载也尚待完成或验收。 |
+| 微内核、Bot 身份与包生命周期 | v30 Adapter 同工件热重载经内核账本 SUCCEEDED，图 39→40、Adapter 换代而 Memory Generation 保留，22/22 成员 ACTIVE；此前 Memory 同工件热重载达到修订 2，当时 Memory 与 6 个依赖成员换代，其余 15 个保留且原来源事实未变；v29 在线官方 Agent 4.52.0 选择与 5 个依赖组件换代，以及 `deployment.audit` 官方跨版本定点热替换和重启恢复，证明同存储基线的真实包热重载。Bot 身份/意图仍由部署内核持有，管理 builtin 只经受限端口操作。 | 存储 schema/baseline 变化时，当前安装器对同一 Bot 库返回 `SCHEMA_BUNDLE_MISMATCH`，尚不能宣称保留状态的原库热升级；普通控制包领域 SQL 与长期多 Bot 负载也尚待完成或验收。 |
 | 供应 Job | 内核持有唯一供应 Job 账本和 Bot READY/OFFLINE 发布事务；`deployment.provisioning` 的 owned-work handler、管理 UI 随 Generation 热替换。 | 不得为“包化”再建第二份包私有供应队列；跨进程未知效果和大规模供应恢复仍需专项验收。 |
 | 记忆与向量 | `memory.graph` 包已有多主干来源、图文 facet、预算/嵌入工作、跨主干联想、有界图扩散、召回试验与遗忘；`vector.index` 包已有 ref 账本、物理审计和候选重建/发布。隔离用例用真实 QiYu VL 与 Milvus 验证跨群图文召回；v29 非空 GIF 管理试验返回 8 条带来源归因的证据；v30 正式合成文本试验返回 4 条跨两个群聊主干的图文证据；旧 GIF 空库试验另有 82 token、UNKNOWN 0 的记录。 | v30 许可群真实 @→回复、非空图片证据进入模型输入、长期图文成本、百万级真实混合图文和在线物理索引恢复仍未验收。 |
 | 对话、Shell 与模型输入 | Conversation 包发布 Context/Memory 联合模型视图，同群串行、跨群独立、静默维护和 Shell 优先级已有包契约及隔离 PostgreSQL 验证；v30 自然入站出现 `NO_TRIGGER/group_not_allowed`，无并发 Run 或待发送。 | 许可群真实入站→Agent→Provider→发送及长期多群负载仍需验证。 |
