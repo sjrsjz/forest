@@ -1,12 +1,18 @@
 # Forest 实现状态
 
-## 当前线上观察（2026-10-15 01:10 北京时间）与候选源码验证（03:13）
+## 当前在线（2026-10-15 05:05 北京时间）
+
+`forest-main-v31` 已用独立 deployment、Host、Bot 库和包卷接管 QQ：READY/ONLINE、图修订 2、22/22 ACTIVE，30 秒四次只读采样无违规、活动 Run/Job 或待发送；树莓派 NapCat 登录 READY，8080 恰好一条连接。旧 v30 期望与观测均 OFFLINE，原 241 条来源仍保存在独立旧库。v31 使用 Adapter `2.5.0`、Media Capture `2.4.0`、Memory `1.94.0` / SQL `3.93.0`、Agent `4.53.0`；22 个 schema bundle READY。详见 [v31 切换记录](live-v31-cutover-2026-10-15.md)。
+
+v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + 真实 QiYu VL/Milvus 的 PNG/GIF 跨群整链已经通过，但自然流量归档、许可群新显式 @→Agent→Provider→QQ 回复、非空图片召回进入真实模型输入、长期多群负载与费用仍需在 v31 验收。模型计划与外发之间的跨包删除屏障仍需专项验证；切换操作没有主动发送 QQ 消息或调用聊天模型。切换后一次 64×64 PNG 正式管理试验结算 READY、结果 0 项，消耗 22 个 VL 嵌入 token、UNKNOWN 0；空库零命中不证明非空图片召回。
+
+## v30 切换前快照与候选源码验证
 
 `forest-main-v30` 使用镜像 `forest:runtime-candidate-8c31ac5`，在独立 deployment、Host、Bot 数据库和包卷中 READY/ONLINE；运行图修订 40 的 22/22 个组件 ACTIVE。在线 Adapter 同工件热重载的内核替换账本为 SUCCEEDED，Memory Generation 保留。QQ 本机登录态为 READY，树莓派 OneBot 8080 只有一条已建立连接。旧 `alicebot.service` 继续停用，切换前的 `forest:runtime-candidate-f631613` 容器保留供回退。详情见 [v30 切换记录](live-v30-cutover-2026-10-14.md)。
 
 QQ 恢复后，正式管理 API 的一次合成文本召回试验结算为 READY，返回 4 条证据，分别归属两个群聊主干，其中 2 条携带图片，3 条为直接种子、1 条为图扩散结果；结果未截断。读取结果时先因本地验收脚本请求超过包 schema 的页大小上限而收到 422，随后以同一 query_id 和合法的 8 条页大小成功读取，没有再次发起嵌入。01:10 的只读观察为 211 条自然来源、9 个主干、5 个 DOCUMENT.READY facet；活动 Run、Job、待发送、UNKNOWN 嵌入和观察器违规均为 0。许可群 `933179609` 已有一条新入站，但分类为 `NO_TRIGGER/mention_required`，没有生成 Agent 回复。现场生成的 256×256 PNG 图片查询也结算为 READY，但没有命中现有记忆；当日两次查询共结算 107 token。许可群 `933179609` 的新显式 @→Agent→Provider→QQ 回复与长期负载仍待验收。
 
-候选源码增量（2026-10-15 03:13，北京时间）：Memory `1.94.0` / 私有 SQL `3.93.0`、Adapter `2.5.0`、Media Capture `2.4.0`、Agent `4.53.0` 将采集器提供的总帧 `decoded_pixels` 贯通来源 part、图文召回证据与 Conversation 联合模型视图；文本 part 明确使用 null，Agent 严格校验证据图片的总像素数。原先多帧 GIF 只按首帧宽高估算解码资源的缺口已修正。隔离真实 QiYu VL + Milvus + PostgreSQL 的合成 PNG/GIF 跨群整链和管理试验 1 passed（167.87 秒），官方包构建、定向 PostgreSQL 与选择/投影回归共 12 passed，Ruff 通过。期间的失败复验查出 Adapter 文本双端口输入与 Agent 旧严格证据集合，已修复；临时诊断代码均已移除。此候选仍未供应到在线 v30；Memory SQL 基线变化需要新 Bot 私有库，不能把源码通过视为线上图片召回或 QQ 实际回复验收。
+候选源码增量（2026-10-15 03:13，北京时间）：Memory `1.94.0` / 私有 SQL `3.93.0`、Adapter `2.5.0`、Media Capture `2.4.0`、Agent `4.53.0` 将采集器提供的总帧 `decoded_pixels` 贯通来源 part、图文召回证据与 Conversation 联合模型视图；文本 part 明确使用 null，Agent 严格校验证据图片的总像素数。原先多帧 GIF 只按首帧宽高估算解码资源的缺口已修正。隔离真实 QiYu VL + Milvus + PostgreSQL 的合成 PNG/GIF 跨群整链和管理试验 1 passed（167.87 秒），官方包构建、定向 PostgreSQL 与选择/投影回归共 12 passed，Ruff 通过。期间的失败复验查出 Adapter 文本双端口输入与 Agent 旧严格证据集合，已修复；临时诊断代码均已移除。该候选已供应到独立 v31 Bot 库；没有在 v30 原库替换 SQL，隔离测试和上线健康仍不能代替真实图片召回或 QQ 回复验收。
 
 03:35 只读线上复查：v30 仍为 READY/ONLINE、图修订 40、22/22 ACTIVE；自然来源 241 条、9 个主干、5 个 DOCUMENT.READY facet，活动 Run、Job、待发送及观察器违规均为 0。许可群 `933179609` 仍只有 1 条 `NO_TRIGGER/mention_required` 入站，没有真实 @ 回复样本。源码侧另修复内核 Payload 幂等写入在原载荷被遗忘后仍返回已撤销引用的重放缺口：同 owner 的相同或不同内容重放均明确拒绝为 `PAYLOAD_REVOKED`；隔离 PostgreSQL 定向用例通过。该修复仅收紧 Payload 入口，不代表跨包模型计划与外发之间的删除屏障已验收。
 
@@ -20,9 +26,9 @@ QQ 恢复后，正式管理 API 的一次合成文本召回试验结算为 READY
 
 12:12–12:28（北京时间）自然流量复查：v27 的静默裁剪已将 6 条消息升为 ELIGIBLE，19 个文档 facet（13 文本、6 图片）均 READY；随后非空文本管理试验以 21 token 返回 8 条带群号和主干的结果。同期自然归档使 ELIGIBLE 增至 134，日预算 30 笔、21157 token、UNKNOWN 为 0；这些自然成本不属于单次查询。复用一张已归档 JPEG 做图片试验时，VL 查询到 READY，但旧版管理结果的第 3 项携带已采集的 GIF，返回 `RUNTIME_SERVICE_OUTPUT_INVALID`。当前源码已把 GIF 与媒体采集、嵌入 Provider 的声明对齐；官方 Memory 包构建及 114 项相邻回归通过，在线 v27 尚未切换。详见[实例记录](live-v27-cutover-2026-10-12.md)。
 
-### 当前边界与验收
+### v30 当时边界与验收
 
-当前 v30 已有非空跨群图文召回：正式合成文本查询返回 4 条明确群聊与主干归因的证据，其中 2 条带图片。原先的 GIF 空库试验只验证资产上传、VL 查询嵌入和空结果链；现场生成的图片查询结算 READY，但结果为 0，尚未验收 v30 的非空图片召回，也没有证明图片证据进入真实 Agent 模型输入。v29 旧库的 28 个 UNKNOWN 文档 facet 未复制或自动重试；历史事实不能代替 v30 的端到端回复验收。
+切换前 v30 已有非空跨群图文召回：正式合成文本查询返回 4 条明确群聊与主干归因的证据，其中 2 条带图片。原先的 GIF 空库试验只验证资产上传、VL 查询嵌入和空结果链；现场生成的图片查询结算 READY，但结果为 0，尚未验收 v30 的非空图片召回，也没有证明图片证据进入真实 Agent 模型输入。v29 旧库的 28 个 UNKNOWN 文档 facet 未复制或自动重试；历史事实不能代替 v30 的端到端回复验收。
 
 Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 4.52.0 将 `agent.protocol.describe` 声明为管理专用只读服务，管理 iframe 可读取当前 Generation 的核心提示词、摘要和解析器版本，Bootstrap 编辑器只编辑 Bot 行为预设。固定核心仍由 `agent_protocol.CORE_PROMPT` 持有，预设不能改写；许可群真实模型请求尚未发生。
 
@@ -30,9 +36,9 @@ Agent 固定协议与可编辑预设现已在模块 UI 分开：`agent.runtime` 
 
 工具 PREPARED Effect 在 Run 截止时的跨参与者结算与 Agent Worker 硬退出后的恢复已通过隔离 PostgreSQL 回归；真实低频触发、长期多群图文负载与成本验收尚未完成。v30 完整源码包基线已在独立 Bot 数据库正式供应并上线；旧 v29 SQL 基线不作为当前源码的原位热替换目标。
 
-### 当前验收边界
+### v30 当时验收边界
 
-下表描述**当前代码及运行证据**；本页后续按日期排列的记录是当时状态，不能把旧记录中的“尚未实现”直接当作当前结论。
+下表记录**v30 切换前的代码及运行证据**；本页后续按日期排列的记录是当时状态，不能把旧记录中的“尚未实现”直接当作当前结论。
 
 | 范围 | 当前证据 | 仍需证明或完成 |
 | --- | --- | --- |

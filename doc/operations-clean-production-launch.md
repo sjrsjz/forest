@@ -1,6 +1,6 @@
 # 干净生产启动链
 
-截至 2026-10-14，当前在线候选为 `forest-main-v30`，Supervisor 使用完整源码镜像 `forest:runtime-candidate-f631613`；独立数据库、组件版本与实时证据见 [v30 在线记录](live-v30-cutover-2026-10-14.md)。v29 及更早版本是保留的历史或回退实例。Supervisor HTTP healthy、Bot ONLINE 与 OneBot TCP 已连接分别只证明各自层级存活，不能单独证明 QQ 账号已登录或群聊回复链可用。
+截至 2026-10-15，当前在线候选为 `forest-main-v31`，Supervisor 使用已提交源码镜像 `forest:runtime-candidate-6c9a36f`；独立数据库、组件版本与实时证据见 [v31 在线记录](live-v31-cutover-2026-10-15.md)。v30 及更早版本是保留的历史或回退实例。Supervisor HTTP healthy、Bot ONLINE 与 OneBot TCP 已连接分别只证明各自层级存活，不能单独证明 QQ 账号已登录或群聊回复链可用。
 
 本文记录多 Bot Supervisor 的生产启动入口，以及独立 `forest bot` 诊断路径。宿主持有进程、数据库连接、HostLease 和 RuntimeGraph 生命周期；Adapter、触发策略、Conversation、Agent、Memory、Provider 与 Delivery 作为 Bot 作用域的平级 Generation 成员运行。Bot 基础身份和期望运行意图归部署内核，管理 builtin 通过受限端口操作。
 
@@ -72,7 +72,7 @@ FOREST_AGENT_SYSTEM_PROMPT=...
 
 `vector.index` 独占 Milvus client 和 Bot collection，提供 `upsert/search/delete` 三个冻结服务。PostgreSQL 不再保存可查询向量列或执行全量余弦扫描，只保存稳定 `index_ref_id` 与权威内容、来源和关系；Milvus 命中必须回 PostgreSQL 复核后才能进入 EvidenceBundle。`space_id`、维度和度量与 Bot 生命周期绑定，配置只允许替换兼容 endpoint、凭据引用和超时。
 
-`media.capture` 独占 OneBot 临时图片定位符、下载客户端、重试租约和受管图片资产。Adapter 在 ingress 事务里只向 Conversation 发布稳定 `media_ref`，并登记异步捕获任务；签名 URL 不进入规范 Context。Worker 完成有界下载和图片解码验证后，通过 `memory.source.capture/1` 发布保持原段顺序的图文来源。Agent 在下一次模型调用前从 `media.context.resolve/1` 取得当前 Context 的不可变像素快照；text-only Provider 仍只在该次投影中省略图片。
+`media.capture` 独占 OneBot 临时图片定位符、下载客户端、重试租约和受管图片资产。Adapter 在 ingress 事务里只向 Conversation 发布稳定 `media_ref`，并登记异步捕获任务；签名 URL 不进入规范 Context。Worker 完成有界下载和图片解码验证后，通过 `memory.source.capture/2` 发布保持原段顺序的图文来源。Agent 在下一次模型调用前从 `media.context.resolve/1` 取得当前 Context 的不可变像素快照；text-only Provider 仍只在该次投影中省略图片。
 
 直接 `forest bot` 时，环境变量只承担无部署控制面的显式链路诊断。生产 Compose 的部署控制面监听 `127.0.0.1:8080`（容器内 `8081`）；浏览器使用持久管理账号和服务端可撤销会话，不保存共享管理 token。页面从准确 RuntimeGraph Registry 加载模块贡献，支持模块配置 plan/apply、热替换、Memory 的主干/来源/关系查询、Agent PresetContext/CorePrompt、Run/Tool/Job 控制以及 OneBot Binding 管理。
 
