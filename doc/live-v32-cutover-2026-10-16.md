@@ -18,4 +18,4 @@ v32 在线记忆预算已通过模块配置计划与应用动作从修订 1 调�
 
 树莓派 NapCat 对获准群 `933179609` 的只读 `get_group_msg_history` 返回最近消息时间 `2026-10-15T17:05:44Z`（北京时间 10 月 16 日 01:05:44），早于 v32 的在线切换。因此该群在本次观察窗口没有切换后的消息可供入站验收；这项核对不证明其他群的流量或真实 `@` 回复。
 
-在确认 0 活动 Agent Run、任务和待发送后，对同一个 v32 Supervisor 容器执行一次受控重启。重启前 Graph 3 的 Memory 为 1.96.1；重启后同一镜像与包卷恢复为 Graph 5 ACTIVE、22/22 成员 ACTIVE，Memory 仍为官方选择的精确包摘要 `sha256:903222f7b5e575824f1e0ff2e6fdae377c3d8d288e8cc6cea81dd2f5f4f3dca5` / 1.96.1，配置期望/生效修订仍为 2，嵌入账本仍为已结算 1 次／22 tokens、UNKNOWN 和预留为 0。Graph 3 为 STOPPED，数据库没有 Graph 4 记录；仅据此记录修订间隙，不推断其原因。观察器两次采样零违规、无活动工作；NapCat 登录 READY，OneBot 连接先降为 0 再收敛为 1。本次未发送 QQ 消息，获准群真实 `@` 回复仍未验收。
+在确认 0 活动 Agent Run、任务和待发送后，对同一个 v32 Supervisor 容器执行一次受控重启。重启前 Graph 3 的 Memory 为 1.96.1；重启后同一镜像与包卷恢复为 Graph 5 ACTIVE、22/22 成员 ACTIVE，Memory 仍为官方选择的精确包摘要 `sha256:903222f7b5e575824f1e0ff2e6fdae377c3d8d288e8cc6cea81dd2f5f4f3dca5` / 1.96.1，配置期望/生效修订仍为 2，嵌入账本仍为已结算 1 次／22 tokens、UNKNOWN 和预留为 0。Graph 3 为 STOPPED，数据库没有 Graph 4 行；对照 `kernel.runtime` 的 `retire_graph` 实现，退役先占用修订 4 并把图头置空，不创建实体图，随后冷启动发布 Graph 5。该代码路径解释了观察到的修订间隙，不能把缺失的图行写成一次失败的图发布。观察器两次采样零违规、无活动工作；NapCat 登录 READY，OneBot 连接先降为 0 再收敛为 1。本次未发送 QQ 消息，获准群真实 `@` 回复仍未验收。

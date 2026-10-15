@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-2026-10-16 v32 官方工件冷启动恢复：在 0 活动 Run/Job/待发送的前提下，受控重启同一个 Supervisor 容器；原 Graph 3 STOPPED，新 Graph 5 ACTIVE、22/22 ACTIVE，Memory 继续从选择账本固定的官方包摘要恢复为 1.96.1。配置修订 2 和嵌入已结算 1 次／22 tokens 的账本保持，观察器两次采样零违规；NapCat READY，OneBot 连接先为 0、后回到 1。Graph 4 无数据库行，原因未推断；本次未发 QQ 消息，真实 `@` 回复待验收。
+2026-10-16 v32 官方工件冷启动恢复：在 0 活动 Run/Job/待发送的前提下，受控重启同一个 Supervisor 容器；原 Graph 3 STOPPED，新 Graph 5 ACTIVE、22/22 ACTIVE，Memory 继续从选择账本固定的官方包摘要恢复为 1.96.1。配置修订 2 和嵌入已结算 1 次／22 tokens 的账本保持，观察器两次采样零违规；NapCat READY，OneBot 连接先为 0、后回到 1。Graph 4 是退役时占用、用于清空图头而无实体图行的修订；本次未发 QQ 消息，真实 `@` 回复待验收。
 
 2026-10-16 v32 官方 Memory 1.96.1 在线热换代：从已提交源码构建并按 ZIP、包和 Manifest 三重 SHA-256 摘要发布到 v32 专用包目录；`component.worker-host` 预检保留配置修订 2 与原存储摘要，正式官方工件选择请求 `selection:26fb63e86202180c7162375b1a272850` 的内核结果为 SUCCEEDED，Graph 2→3。Bot 数据库权威账本证明 22 个成员中 7 个换代、15 个 Generation 保留，旧 7 个均 DISPOSED，旧图 RETIRED、新图 ACTIVE。Memory 现为 1.96.1 / SQL 3.94.0，22/22 ACTIVE，观察器两次采样无违规、预算仍结算 1 次／22 tokens；NapCat READY、OneBot 单连接。获准群最近历史消息仍在切换前，真实 `@` 回复尚待验收。详见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。
 
