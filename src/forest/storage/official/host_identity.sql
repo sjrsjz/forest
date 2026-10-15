@@ -178,6 +178,40 @@ CREATE TABLE forest_host.runtime_graph_change_requests (
 CREATE INDEX runtime_graph_change_queue
     ON forest_host.runtime_graph_change_requests(host_id,state,created_at,operation_id);
 
+CREATE TABLE forest_host.driver_transition_consumers (
+    host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
+    host_activation_id text NOT NULL,
+    bot_id text NOT NULL CHECK (octet_length(bot_id) BETWEEN 1 AND 128),
+    bot_activation_id text NOT NULL CHECK (
+        bot_activation_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ),
+    source_bot_graph_id text NOT NULL CHECK (octet_length(source_bot_graph_id) BETWEEN 1 AND 256),
+    source_bot_graph_revision bigint NOT NULL CHECK (source_bot_graph_revision > 0),
+    state text NOT NULL DEFAULT 'PENDING'
+        CHECK (state IN ('PENDING','SUCCEEDED','FAILED','PARTIAL')),
+    result_bot_graph_id text,
+    result_bot_graph_revision bigint CHECK (
+        result_bot_graph_revision IS NULL OR result_bot_graph_revision > 0
+    ),
+    error_code text CHECK (error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'),
+    prepared_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (host_id,host_activation_id,bot_id),
+    UNIQUE (host_id,host_activation_id,bot_activation_id),
+    FOREIGN KEY (host_id,host_activation_id)
+        REFERENCES forest_host.runtime_graphs(host_id,activation_id),
+    CHECK (
+        (state='PENDING' AND result_bot_graph_id IS NULL
+            AND result_bot_graph_revision IS NULL AND error_code IS NULL)
+        OR (state='SUCCEEDED' AND result_bot_graph_id IS NOT NULL
+            AND result_bot_graph_revision IS NOT NULL AND error_code IS NULL)
+        OR (state='FAILED' AND result_bot_graph_id IS NULL
+            AND result_bot_graph_revision IS NULL AND error_code IS NOT NULL)
+        OR (state='PARTIAL' AND result_bot_graph_id IS NOT NULL
+            AND result_bot_graph_revision IS NOT NULL AND error_code IS NOT NULL)
+    )
+);
+
 CREATE TABLE forest_host.web_authority_receipts (
     host_id text NOT NULL REFERENCES forest_host.host_identity(host_id),
     ticket_id text NOT NULL CHECK (octet_length(ticket_id) BETWEEN 1 AND 256),
@@ -284,6 +318,39 @@ $$;
 CREATE TRIGGER runtime_graph_change_transition
     BEFORE UPDATE OR DELETE ON forest_host.runtime_graph_change_requests
     FOR EACH ROW EXECUTE FUNCTION forest_host.guard_runtime_graph_change();
+
+CREATE FUNCTION forest_host.guard_driver_transition_consumer() RETURNS trigger
+LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Host driver transition consumer cannot be deleted';
+    END IF;
+    IF OLD.state <> 'PENDING'
+       OR ROW(OLD.host_id,OLD.host_activation_id,OLD.bot_id,OLD.bot_activation_id,
+              OLD.source_bot_graph_id,OLD.source_bot_graph_revision,OLD.prepared_at)
+          IS DISTINCT FROM
+          ROW(NEW.host_id,NEW.host_activation_id,NEW.bot_id,NEW.bot_activation_id,
+              NEW.source_bot_graph_id,NEW.source_bot_graph_revision,NEW.prepared_at)
+       OR NEW.state NOT IN ('SUCCEEDED','FAILED','PARTIAL')
+       OR (
+           NEW.state IN ('SUCCEEDED','PARTIAL')
+           AND NOT EXISTS (
+               SELECT 1 FROM forest_host.runtime_graphs g
+               WHERE g.host_id=OLD.host_id
+                 AND g.activation_id=OLD.host_activation_id
+                 AND g.state IN ('ACTIVE','RETIRED')
+           )
+       )
+       OR NEW.updated_at < OLD.updated_at THEN
+        RAISE EXCEPTION 'Invalid Host driver consumer transition';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER driver_transition_consumer_terminal
+    BEFORE UPDATE OR DELETE ON forest_host.driver_transition_consumers
+    FOR EACH ROW EXECUTE FUNCTION forest_host.guard_driver_transition_consumer();
 
 CREATE TABLE forest_host.supervisor_lease (
     singleton boolean NOT NULL DEFAULT true UNIQUE CHECK (singleton),

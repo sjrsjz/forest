@@ -909,8 +909,13 @@ $('graph-replace-form').onsubmit = async event => {
       const status = await api('/management/v1/modules/$runtime/queries/module.change.status', {
         method: 'POST', body: JSON.stringify({operation_id: saved.operation_id}),
       });
-      output.textContent = `请求 ${saved.operation_id}：${status.state}`
-        + (status.error_code ? ` · ${status.error_code}` : '');
+      const botResults = (status.bot_results || [])
+        .map(item => `${item.bot_id}: ${item.state}`
+          + (item.error_code ? ` (${item.error_code})` : ''))
+        .join('; ');
+      output.textContent = `\u8bf7\u6c42 ${saved.operation_id}\uff1a${status.state}`
+        + (status.error_code ? ` \u9519\u8bef ${status.error_code}` : '')
+        + (botResults ? ` | Bot ${botResults}` : '');
       if (['SUCCEEDED', 'FAILED', 'PARTIAL'].includes(status.state)) {
         delete form.dataset.operationKey;
         resetGraphPreview(false);

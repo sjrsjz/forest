@@ -3,12 +3,14 @@
 import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
+from uuid import NAMESPACE_URL, uuid5
 
 import pytest
 
 from forest.control_driver_joint_transition import (
     execute_joint_host_driver_transition,
 )
+from forest.control_package_controller import ControlPackageController
 from forest.errors import ForestError
 
 
@@ -17,8 +19,8 @@ class _Graph:
         self.trace = trace
         self.name = name
         self.fail_at = fail_at
-        self.activation_id = name + "-activation"
-        self.graph_identity = SimpleNamespace(graph_id=name)
+        self.activation_id = str(uuid5(NAMESPACE_URL, name))
+        self.graph_identity = SimpleNamespace(graph_id=name, graph_revision=1)
         self.publication_committed = False
         self.order = ("consumer",)
         self.descriptors = (SimpleNamespace(
@@ -47,6 +49,8 @@ class _Graph:
 
     async def close(self):
         self.trace.append(self.name + "-close")
+        if self.fail_at == "close":
+            return [ForestError("CLOSE_FAILED", "Injected close failure", 503)]
         return []
 
     def preview_graph_transition(self, _previous):
@@ -84,10 +88,26 @@ class _Bot:
         self.selection_reader = _SelectionReader()
         self.trace = trace
 
+        async def graph_for_activation(activation_id):
+            assert activation_id == self.candidate.activation_id
+            if not self.candidate.publication_committed:
+                return None
+            return {
+                "graph_id": self.candidate.graph_identity.graph_id,
+                "graph_revision": self.candidate.graph_identity.graph_revision,
+                "activation_id": self.candidate.activation_id,
+                "state": "ACTIVE",
+            }
+
+        self._kernel = SimpleNamespace(
+            runtime=SimpleNamespace(graph_for_activation=graph_for_activation)
+        )
+
     async def _assemble_candidate(self, *, activation_id, prepared_host_graph):
         self.trace.append("bot-assemble")
         assert len(activation_id) == 36
         assert prepared_host_graph[0].name == "new-host"
+        self.candidate.activation_id = activation_id
         return SimpleNamespace(
             registry=self.candidate,
             selection=SimpleNamespace(revision=1, digest="selection"),
@@ -109,6 +129,34 @@ class _Gate:
         self.trace.append("gate-refresh")
 
 
+class _Ledger:
+    def __init__(self, trace):
+        self.trace = trace
+        self.rows = {}
+
+    async def stage_consumers(self, _lease, *, host_activation_id, consumers):
+        self.trace.append("journal-stage")
+        self.rows = {
+            item["bot_id"]: {
+                **item,
+                "host_activation_id": host_activation_id,
+                "state": "PENDING",
+            }
+            for item in consumers
+        }
+        return tuple(self.rows.values())
+
+    async def finish_consumer(
+        self, _lease, *, host_activation_id, bot_id, state,
+        graph=None, error_code=None,
+    ):
+        self.trace.append("journal-" + state)
+        row = self.rows[bot_id]
+        assert row["host_activation_id"] == host_activation_id
+        row.update(state=state, graph=graph, error_code=error_code)
+        return row
+
+
 class _Controller:
     def __init__(self, trace):
         self.trace = trace
@@ -117,7 +165,9 @@ class _Controller:
         self._snapshots = {"driver": object()}
         self.failed = None
         self.runtime = SimpleNamespace(
-            generation_authority=SimpleNamespace(current_graph=None)
+            generation_authority=SimpleNamespace(current_graph=None),
+            graph_change_authority=_Ledger(trace),
+            authority_lease=lambda: object(),
         )
 
     def driver_exports(self):
@@ -149,7 +199,12 @@ async def test_joint_transition_starts_bot_proxy_only_after_host_publication():
     assert trace.index("old-bot-drain") < trace.index("new-host-publish")
     assert trace.index("new-host-publish") < trace.index("new-bot-prewarm")
     assert trace.index("new-bot-publish") < trace.index("gate-refresh")
-    assert trace[-2:] == ["old-bot-close", "old-host-close"]
+    assert trace[-3:] == [
+        "old-bot-close", "journal-SUCCEEDED", "old-host-close",
+    ]
+    assert controller.runtime.graph_change_authority.rows["bot/one"]["state"] == (
+        "SUCCEEDED"
+    )
 
 
 @pytest.mark.asyncio
@@ -196,6 +251,31 @@ async def test_bot_activation_failure_after_host_commit_never_resumes_old_source
     assert "new-host-publish" in trace
     assert "old-bot-resume" not in trace
     assert "old-host-resume" not in trace
+    assert controller.runtime.graph_change_authority.rows["bot/one"]["state"] == (
+        "FAILED"
+    )
+
+
+@pytest.mark.asyncio
+async def test_published_bot_with_failed_old_close_has_partial_result():
+    trace = []
+    controller = _Controller(trace)
+    old_host = controller._registry
+    new_host = _Graph(trace, "new-host")
+    bot = _Bot(trace, "new-source")
+    bot.registry.fail_at = "close"
+
+    with pytest.raises(ForestError) as error:
+        await execute_joint_host_driver_transition(
+            controller, old_host, new_host, {"driver": object()},
+            ("driver",), (bot,),
+        )
+
+    assert error.value.code == "CONTROL_DRIVER_JOINT_POST_PUBLICATION_FAILURE"
+    result = controller.runtime.graph_change_authority.rows["bot/one"]
+    assert result["state"] == "PARTIAL"
+    assert result["graph"]["graph_id"] == bot.candidate.graph_identity.graph_id
+    assert "old-bot-resume" not in trace
 
 
 @pytest.mark.asyncio
@@ -228,3 +308,40 @@ async def test_two_consumers_drain_before_shared_host_publication():
     assert trace.index("new-host-publish") < trace.index("new-bot-a-prewarm")
     assert trace.index("new-host-publish") < trace.index("new-bot-b-prewarm")
     assert not any(entry.endswith("-c-prepare") for entry in trace)
+
+
+@pytest.mark.asyncio
+async def test_recovered_host_publication_with_pending_bot_is_partial():
+    request = {
+        "activation_id": str(uuid5(NAMESPACE_URL, "host-interrupted")),
+        "operation_id": "host-change/interrupted",
+    }
+    settled = []
+    owner = SimpleNamespace(
+        scope_kind="host",
+        _closed=False,
+        runtime=SimpleNamespace(authority_lease=lambda: object()),
+    )
+
+    class Authority:
+        scope = "host"
+
+        async def claim(self, _lease):
+            return request
+
+        async def published_graph(self, _request):
+            return {"graph_id": "new-host", "graph_revision": 2}
+
+        async def consumer_results(self, _activation_id):
+            return ({"bot_id": "bot/one", "state": "PENDING"},)
+
+        async def settle(self, _lease, **result):
+            settled.append(result)
+            owner._closed = True
+
+    await ControlPackageController.serve_graph_changes(owner, Authority())
+    assert settled == [{
+        "operation_id": request["operation_id"],
+        "graph": {"graph_id": "new-host", "graph_revision": 2},
+        "error_code": "CONTROL_DRIVER_JOINT_INCOMPLETE",
+    }]

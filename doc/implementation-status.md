@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-2026-10-15 跨作用域驱动联合换代开发态：Supervisor 已接入共享门闩内的 Bot 候选准备、Host 先发布、Bot 后激活；Host 持久发布后 Bot 失败可记录 `PARTIAL` 回执，新 Host 基线 PostgreSQL 验证通过。受影响 Bot 的逐项持久结果、进程恢复以及双 Bot PostgreSQL/真实实例验证仍缺失；此代码未装载到在线 v31，不能声明联合热重载验收完成。
+2026-10-15 跨作用域驱动联合换代开发态：Supervisor 已接入共享门闩内的 Bot 候选准备、Host 先发布、Bot 后激活；Host 持久发布后 Bot 失败可记录 `PARTIAL` 回执，新 Host 基线 PostgreSQL 验证通过。受影响 Bot 的逐项结果已持久记录，Host 图已发布但仍有 PENDING Bot 时恢复分支会把请求结算为 PARTIAL；PENDING Bot 的主动证据复核与自动补接、双 Bot PostgreSQL/真实实例验证仍缺失；此代码未装载到在线 v31，不能声明联合热重载验收完成。
 
 
 ## 当前在线（2026-10-15 10:03 北京时间）

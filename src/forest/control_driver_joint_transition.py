@@ -17,15 +17,21 @@ class _BotTransition:
     drain: tuple[str, ...] = ()
     capacity: object | None = None
     drained: bool = False
+    finished: bool = False
 
 
 def _fatal(controller, transitions: list[_BotTransition], code: str, message: str,
-           cause: BaseException) -> ForestError:
+           cause: BaseException, *, ledger_errors: tuple[BaseException, ...] = ()
+           ) -> ForestError:
     failure = controller._fail(ForestError(
         code, message, 503,
         details={
             "bot_ids": [item.host.settings.bot_id for item in transitions],
             "cause": getattr(cause, "code", type(cause).__name__),
+            "ledger_errors": [
+                getattr(item, "code", type(item).__name__)
+                for item in ledger_errors
+            ],
         },
     ))
     for item in transitions:
@@ -69,10 +75,16 @@ async def execute_joint_host_driver_transition(
     """
 
     gate = controller._driver_binding_gate
-    if gate is None or not consumers:
-        raise ValueError("Joint driver transition needs exact active consumers")
+    ledger = controller.runtime.graph_change_authority
+    if gate is None or not consumers or ledger is None:
+        raise ForestError(
+            "CONTROL_DRIVER_JOINT_AUTHORITY_UNAVAILABLE",
+            "Joint driver transition needs the gate and Host result ledger", 503,
+        )
+    lease = controller.runtime.authority_lease()
     transitions: list[_BotTransition] = []
     host_drained = False
+    journal_staged = False
     old_sources = frozenset(
         export["source_ref"] for export in controller.driver_exports()
         if export["component_id"] in set(affected)
@@ -130,6 +142,19 @@ async def execute_joint_host_driver_transition(
                 await host._admit_worker_capacity(item.capacity)
                 await bot_candidate.prepare()
 
+            await ledger.stage_consumers(
+                lease,
+                host_activation_id=candidate.activation_id,
+                consumers=tuple({
+                    "bot_id": item.host.settings.bot_id,
+                    "bot_activation_id": item.assembled.registry.activation_id,
+                    "source_bot_graph_id": item.previous.graph_identity.graph_id,
+                    "source_bot_graph_revision": (
+                        item.previous.graph_identity.graph_revision
+                    ),
+                } for item in transitions),
+            )
+            journal_staged = True
             for item in transitions:
                 await stack.enter_async_context(
                     item.host.selection_reader.publication_fence(
@@ -184,6 +209,25 @@ async def execute_joint_host_driver_transition(
                 errors = await item.previous.close()
                 if errors:
                     raise errors[0]
+                graph = await item.host._kernel.runtime.graph_for_activation(
+                    item.assembled.registry.activation_id
+                )
+                if (
+                    graph is None
+                    or graph["state"] not in {"ACTIVE", "RETIRED"}
+                    or graph["graph_id"]
+                    != item.assembled.registry.graph_identity.graph_id
+                ):
+                    raise ForestError(
+                        "CONTROL_DRIVER_BOT_PUBLICATION_UNPROVEN",
+                        "Bot handoff has no matching durable graph evidence", 503,
+                    )
+                await ledger.finish_consumer(
+                    lease, host_activation_id=candidate.activation_id,
+                    bot_id=item.host.settings.bot_id,
+                    state="SUCCEEDED", graph=graph,
+                )
+                item.finished = True
             errors = await previous.close()
             if errors:
                 raise errors[0]
@@ -199,16 +243,53 @@ async def execute_joint_host_driver_transition(
                 except BaseException:
                     committed = True
             if committed:
+                ledger_errors = []
+                if journal_staged:
+                    for item in transitions:
+                        if item.finished:
+                            continue
+                        try:
+                            graph = await item.host._kernel.runtime.graph_for_activation(
+                                item.assembled.registry.activation_id
+                            )
+                            if (
+                                graph is None
+                                or graph["state"] not in {"ACTIVE", "RETIRED"}
+                                or graph["graph_id"]
+                                != item.assembled.registry.graph_identity.graph_id
+                            ):
+                                graph = None
+                            await ledger.finish_consumer(
+                                lease, host_activation_id=candidate.activation_id,
+                                bot_id=item.host.settings.bot_id,
+                                state="PARTIAL" if graph is not None else "FAILED",
+                                graph=graph,
+                                error_code="CONTROL_DRIVER_JOINT_POST_PUBLICATION_FAILURE",
+                            )
+                        except BaseException as ledger_error:
+                            # The PENDING row remains durable for recovery.
+                            ledger_errors.append(ledger_error)
                 failure = _fatal(
                     controller, transitions,
                     "CONTROL_DRIVER_JOINT_POST_PUBLICATION_FAILURE",
                     "Host driver published but a Bot consumer did not complete",
-                    error,
+                    error, ledger_errors=tuple(ledger_errors),
                 )
                 raise failure from error
             failures = await _rollback(
                 candidate, previous, transitions, host_drained
             )
+            if journal_staged:
+                for item in transitions:
+                    try:
+                        await ledger.finish_consumer(
+                            lease, host_activation_id=candidate.activation_id,
+                            bot_id=item.host.settings.bot_id,
+                            state="FAILED",
+                            error_code="CONTROL_DRIVER_JOINT_ABORTED",
+                        )
+                    except BaseException as ledger_error:
+                        failures.append(ledger_error)
             if failures or (
                 isinstance(error, ForestError)
                 and error.code == "RUNTIME_GRAPH_REPLACEMENT_ROLLBACK_FAILED"

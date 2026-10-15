@@ -672,7 +672,14 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
         )
         staged.plan_graph_transition(registry, target_component_id="host.sample")
         try:
-            await staged.prepare()
+            await staged.prewarm()
+            async with store.pool.connection() as conn:
+                prepared_graph = await (await conn.execute(
+                    "SELECT state FROM forest_host.runtime_graphs "
+                    "WHERE host_id=%s AND activation_id=%s",
+                    (store.host_id, staged.activation_id),
+                )).fetchone()
+            assert prepared_graph["state"] == "PREPARED"
             future_exports = controller._driver_exports_for(staged, staged_snapshots)
             assert len(future_exports) == 1
             assert future_exports[0]["generation_id"] == (

@@ -126,14 +126,16 @@ class HostIdentityAuthority:
                     "runtime_graphs", "runtime_generations", "runtime_graph_members",
                     "runtime_package_selection",
                     "package_service_operations",
-                    "runtime_graph_change_requests",
+                    "runtime_graph_change_requests", "driver_transition_consumers",
                     "web_authority_receipts", "audit_records", "supervisor_lease"}
                 or {row["proname"] for row in functions}
                 != {"reject_identity_change", "reject_receipt_change",
-                    "guard_runtime_graph_change"}
+                    "guard_runtime_graph_change",
+                    "guard_driver_transition_consumer"}
                 or {row["tgname"] for row in triggers}
                 != {"host_identity_immutable", "runtime_graph_change_transition",
-                    "web_authority_receipt_immutable", "host_audit_record_immutable"}
+                    "web_authority_receipt_immutable", "host_audit_record_immutable",
+                    "driver_transition_consumer_terminal"}
                 or [row["host_id"] for row in lease] != [self.store.host_id]
                 or [row["host_id"] for row in clocks] != [self.store.host_id]
                 or {row["nspname"] for row in namespaces}

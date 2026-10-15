@@ -380,11 +380,67 @@ CREATE TABLE host_sample_native (value text NOT NULL);
         newer = await generations.prepare_graph(
             lease, [newer_binding], change_request["activation_id"],
         )
+        bot_activation_id = str(uuid4())
+        roster = await changes.stage_consumers(
+            lease, host_activation_id=change_request["activation_id"],
+            consumers=({
+                "bot_id": "bot/fixture",
+                "bot_activation_id": bot_activation_id,
+                "source_bot_graph_id": "graph:previous-bot",
+                "source_bot_graph_revision": 1,
+            },),
+        )
+        assert len(roster) == 1
+        assert roster[0]["state"] == "PENDING"
+        assert roster[0]["bot_activation_id"] == bot_activation_id
+        with pytest.raises(psycopg.errors.RaiseException):
+            await changes.finish_consumer(
+                lease, host_activation_id=change_request["activation_id"],
+                bot_id="bot/fixture", state="SUCCEEDED",
+                graph={
+                    "graph_id": "graph:premature-bot",
+                    "activation_id": bot_activation_id,
+                    "graph_revision": 2,
+                    "state": "ACTIVE",
+                },
+            )
         assert await generations.publish_graph(
             lease, newer, configuration_activators={"host.sample": configuration},
         ) == newer.graph_revision
         proof = await changes.published_graph(change_request)
         assert proof["graph_id"] == newer.graph_id
+        with pytest.raises(ForestError) as wrong_bot_activation:
+            await changes.finish_consumer(
+                lease, host_activation_id=change_request["activation_id"],
+                bot_id="bot/fixture", state="SUCCEEDED",
+                graph={
+                    "graph_id": "graph:unrelated-bot",
+                    "activation_id": str(uuid4()),
+                    "graph_revision": 2,
+                    "state": "ACTIVE",
+                },
+            )
+        assert wrong_bot_activation.value.code == "HOST_DRIVER_CONSUMER_RESULT_INVALID"
+        bot_result = await changes.finish_consumer(
+            lease, host_activation_id=change_request["activation_id"],
+            bot_id="bot/fixture", state="PARTIAL",
+            graph={
+                "graph_id": "graph:published-bot",
+            "activation_id": bot_activation_id,
+                "graph_revision": 2,
+                "state": "ACTIVE",
+            },
+            error_code="TEST_BOT_ACTIVATION_FAILED",
+        )
+        assert bot_result["state"] == "PARTIAL"
+        assert bot_result["result_bot_graph_id"] == "graph:published-bot"
+        with pytest.raises(ForestError) as changed_result:
+            await changes.finish_consumer(
+                lease, host_activation_id=change_request["activation_id"],
+                bot_id="bot/fixture", state="FAILED",
+                error_code="TEST_OTHER_ERROR",
+            )
+        assert changed_result.value.code == "HOST_DRIVER_CONSUMER_RESULT_CONFLICT"
         # A committed Host graph and a failed Bot takeover must coexist in
         # one durable receipt; neither fact can be inferred from the other.
         partial = await changes.settle(
@@ -394,6 +450,9 @@ CREATE TABLE host_sample_native (value text NOT NULL);
         assert partial["state"] == "PARTIAL"
         assert partial["result_graph_id"] == newer.graph_id
         assert partial["error_code"] == "TEST_BOT_ACTIVATION_FAILED"
+        result_view = await changes.get(change_request["operation_id"])
+        assert result_view["bot_results"][0]["state"] == "PARTIAL"
+        assert result_view["bot_results"][0]["bot_id"] == "bot/fixture"
         assert (await changes.settle(
             lease, operation_id=change_request["operation_id"], graph=proof,
             error_code="TEST_BOT_ACTIVATION_FAILED",

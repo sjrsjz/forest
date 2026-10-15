@@ -711,6 +711,18 @@ class ControlPackageController:
                             "Published control Graph has no durable evidence",
                             503,
                         )
+                if self.scope_kind == "host" and evidence is not None:
+                    consumers = await authority.consumer_results(
+                        request["activation_id"]
+                    )
+                    if any(item["state"] != "SUCCEEDED" for item in consumers):
+                        await authority.settle(
+                            self.runtime.authority_lease(),
+                            operation_id=request["operation_id"],
+                            graph=evidence,
+                            error_code="CONTROL_DRIVER_JOINT_INCOMPLETE",
+                        )
+                        continue
                 await authority.settle(
                     self.runtime.authority_lease(),
                     operation_id=request["operation_id"],

@@ -1,6 +1,6 @@
 # 跨范围驱动联合换代
 
-本设计约束 Host/Deployment 控制包导出的 Effect 驱动与 Bot 包消费方之间的运行时热替换。当前实现已经冻结来源、核对契约并在活动 Bot 仍消费旧来源时拒绝 Host 换代；下述联合换代协议已接入 Supervisor 的候选换代路径，但多 Bot PostgreSQL、进程恢复和真实实例验收仍未完成。这里的 Agent、Memory 等业务包只通过 `effect_services.kind` 声明消费，不参与调度本协议。
+本设计约束 Host/Deployment 控制包导出的 Effect 驱动与 Bot 包消费方之间的运行时热替换。当前实现已冻结来源、核对契约，并由 Supervisor 在活动 Bot 消费旧来源时执行联合候选换代；缺少协调端口则拒绝该变更。多 Bot PostgreSQL、完整进程恢复和真实实例验收仍未完成。这里的 Agent、Memory 等业务包只通过 `effect_services.kind` 声明消费，不参与调度本协议。
 
 ## 权威与身份
 
@@ -29,7 +29,7 @@ Host 图变更在持有跨图围栏时读取活动 Bot 绑定。Bot 启动、换
 | 边界 | 允许的动作 |
 | --- | --- |
 | Host 发布之前 | 关闭所有已准备候选；逆序恢复已冻结 Bot 图和 Host 图。任一恢复或清理失败必须使相应宿主进入致命状态，不能偷偷开放旧入口。 |
-| Host 已发布、某 Bot 尚未发布 | 绝不恢复该 Bot 的旧来源。继续尝试其已准备候选；失败时冻结并停用该 Bot，记录可审计的错误，使冷恢复按新 Host 来源重新装配。不得把仍运行的旧 Bot 报为 ONLINE。 |
+| Host 已发布、某 Bot 尚未发布 | 绝不恢复该 Bot 的旧来源。当前协调器记录逐 Bot 失败并使 Host 与受影响 Bot 进入致命状态；Supervisor 停止后冷启动按新 Host 来源重新装配。已准备候选的进程内续接尚未实现，不能把仍运行的旧 Bot 报为 ONLINE。 |
 | Bot 已发布、旧图关闭失败 | 新图保持权威；标记该 Bot 运行失败并阻止旧实例继续工作，不能回滚 Host。 |
 | 进程中断 | 重启先恢复 Host 控制图，再启动 Bot。每个 Bot 从当前 Host 导出重建候选来源；已提交的 Host 变更以持久 Graph 证据结算，未提交的请求按原有重放规则处理。 |
 | 无关 Host 图修订 | 提供方 Generation 与来源未变，Bot 不换代。 |
@@ -44,4 +44,6 @@ Host 图变更在持有跨图围栏时读取活动 Bot 绑定。Bot 启动、换
 
 Supervisor 已按精确旧 `source_ref` 选取 Bot 消费者，在共享门闩下准备 Bot 候选、排空旧图，随后发布 Host 并激活 Bot；Bot activation ID 由 Host activation ID 与 Bot ID 稳定派生。Host 发布后的接管失败会使受影响 Bot 和 Host 进入致命状态，Host 图变更回执以 `PARTIAL` 同时保留图证据与错误码，WebUI 将其显示为终态。Host `PARTIAL` 约束目前只存在于新的 Host 数据库基线，不能直接加载到现行 v31 数据库。
 
-尚未完成：受影响 Bot 的逐项持久结果与中断后联合操作恢复；两个 Bot 共享驱动及无关 Bot 的真实 PostgreSQL 换代用例；在途 Effect 调用、失败注入和许可群低频实测。单元顺序验证与 Host PostgreSQL 回执验证不能代替这些验收。
+Host 作用域在候选图 PREPARED 且 Bot 候选均准备完成后，一次性冻结受影响 Bot 名册，记录旧 Bot 图、目标 activation ID 和 PENDING 状态。Bot 图发布并由其内核图账本证实、旧 Bot 图关闭后，逐项结算 SUCCEEDED；异常项按是否有已发布 Bot 图证据结算 FAILED 或 PARTIAL。数据库触发器拒绝在 Host 图发布前把 Bot 记为 SUCCEEDED/PARTIAL，终态不可改写。管理状态返回逐 Bot 结果；进程重启看到 Host 图已发布而名册仍有 PENDING 时，会把 Host 请求结算为 PARTIAL，绝不误报 SUCCEEDED。
+
+尚未完成：PENDING Bot 的主动证据复核、自动补接及最终结果收敛；两个 Bot 共享驱动及无关 Bot 的真实 PostgreSQL 换代用例；在途 Effect 调用、失败注入和许可群低频实测。单元顺序验证与 Host PostgreSQL 回执验证不能代替这些验收。
