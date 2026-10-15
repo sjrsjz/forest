@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-16 v32 在线记忆预算热配置：通过正式配置计划与应用动作，将每日嵌入上限从 1000 次／1000 万 tokens 调为 300 次／30 万 tokens；期望和生效修订均为 2，运行图修订号 2、22/22 ACTIVE。两次只读采样零违规，NapCat READY 且 OneBot 单连接，账本保留已结算 1 次／22 tokens、无 UNKNOWN 或预留。
+
 2026-10-16 当前源码隔离图文整链复验：测试镜像挂载当前 `src` 与 `tests`，在独立临时 PostgreSQL 库、独立 Milvus 集合与 QiYu 真实 Qwen3-VL 嵌入端点上运行 PNG/GIF 跨群归档和召回用例，`1 passed in 155.44s`。用例核对 TEXT/IMAGE 文档 facet READY、IMAGE→IMAGE 种子、原群及原作者归因、跨主干关联和管理试验。测试使用假 OneBot/聊天模型，未发送 QQ 消息；测试后只读核对 `forest_cross_vl_%` 临时数据库数为 0。这不代替 v32 在线群聊真实入站与 Agent 回复验收。
 
 2026-10-16 v32 在线切换：先令 v31 OFFLINE 并确认 NapCat OneBot 连接数为 0，再令独立数据库的 v32 ONLINE；v32 为 22/22 ACTIVE，树莓派维持一条 OneBot 连接，NapCat 登录态与 OneBot `online/good` 正常，获准群只读查询成功。Memory 1.96.0 / SQL 3.94.0 的真实图片试运行 READY，空库召回 0 条，账本结算 1 次、22 tokens，UNKNOWN 与预留均为 0；v31 历史记忆未迁入。v32 尚无获准群真实入站，端到端 Agent 回复仍待低频验收。详见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。
