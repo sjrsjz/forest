@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-16 当前源码隔离图文整链复验：测试镜像挂载当前 `src` 与 `tests`，在独立临时 PostgreSQL 库、独立 Milvus 集合与 QiYu 真实 Qwen3-VL 嵌入端点上运行 PNG/GIF 跨群归档和召回用例，`1 passed in 155.44s`。用例核对 TEXT/IMAGE 文档 facet READY、IMAGE→IMAGE 种子、原群及原作者归因、跨主干关联和管理试验。测试使用假 OneBot/聊天模型，未发送 QQ 消息；测试后只读核对 `forest_cross_vl_%` 临时数据库数为 0。这不代替 v32 在线群聊真实入站与 Agent 回复验收。
+
 2026-10-16 v32 在线切换：先令 v31 OFFLINE 并确认 NapCat OneBot 连接数为 0，再令独立数据库的 v32 ONLINE；v32 为 22/22 ACTIVE，树莓派维持一条 OneBot 连接，NapCat 登录态与 OneBot `online/good` 正常，获准群只读查询成功。Memory 1.96.0 / SQL 3.94.0 的真实图片试运行 READY，空库召回 0 条，账本结算 1 次、22 tokens，UNKNOWN 与预留均为 0；v31 历史记忆未迁入。v32 尚无获准群真实入站，端到端 Agent 回复仍待低频验收。详见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。
 
 2026-10-16 Host/Bot 驱动在途换代验收：隔离 PostgreSQL 中，消费 Bot 的 Effect service 经冻结代理进入旧 Host Worker 并保持一笔调用在途；联合换代到旧 Bot 排空入口时尚未发布新图。释放后该调用返回一次，旧路由拒绝后续调用，两个消费 Bot 改绑新 Host 来源，无关 Bot 图保持，Host 逐 Bot 结果均为 SUCCEEDED。完整场景 `1 passed in 462.62s`，仅用假 OneBot/模型；进程故障与 UNKNOWN 在途效果、失败注入和真实 QQ 仍待验证。
@@ -13,7 +15,7 @@
 2026-10-15 跨作用域驱动联合换代开发态：Supervisor 已接入联合候选准备、Host 先发布、Bot 后激活和逐 Bot 持久账本。重启后的 PENDING 行由恢复器等待 Bot 上线，核对当前 Host/Bot 图与绑定后结算；ONLINE 意图下的启动重试不提前失败，撤销意图才记 FAILED。Host PostgreSQL 账本 7 项、恢复器/协调器定向测试 10 项及同库同包目录新宿主冷重建 PostgreSQL 用例 1 项通过；隔离 PostgreSQL 的独立进程硬退出用例两次通过，故障注入及真实实例仍待验收，在线 v31 未装载此候选代码。
 
 
-## 当前在线（2026-10-15 10:03 北京时间）
+## v31 历史在线记录（2026-10-15 10:03 北京时间）
 
 10:03 只读在线复核：树莓派 OneBot `get_status` 返回 `online=true, good=true`，`get_login_info` 为 `3605196653`，NapCat `4.18.38` 与 Linux QQ `3.2.34-53644` 正在运行，8080 对 Forest 保持一条 TCP 连接。v31 两次只读采样零违规，图修订 4、22/22 ACTIVE、170 条自然来源、7 个群主干、0 活动 Run/Job/待发送、0 DOCUMENT facet；许可群 `933179609` 仍未观察到新入站。因此真实显式 @ 回复和自然图片召回仍未验收。本次未发送 QQ 消息或调用付费模型。
 
