@@ -258,7 +258,7 @@ forest plugin import hello.zip
 
 普通包的 components.capabilities.requests 只能列出该包已声明的自身服务、领域操作、状态、事件或任务端口；部署批准必须与此请求集合准确一致。宿主随代码交付的官方 Bot 包可另在 components.capabilities.official_bot_grants 中声明 capability 与显式 delegable 布尔值，资源始终由内核绑定为当前 Bot，包不得填写任意 Bot ID。只有官方 bootstrap 路径会将该声明纳入带策略修订的 GrantSet；普通安装包只要出现此字段就会在数据库访问前被拒绝，ZIP 导入或 manifest 自报不能取得官方身份。该声明属于内容寻址工件，热重载时按准确包摘要重新装配授予；BotHost 不维护按组件名分派的授权表。
 
-## 受审查的高权限扩展包（目标契约；当前尚未开放）
+## 受审查的高权限扩展包（私有 SQL 与既有 Effect 已开放；动态驱动仍未开放）
 
 普通 `installed` 包继续使用受限的声明式存储与自身能力批准；ZIP 导入、manifest 的 `execution_profile` 或 Web 管理员选中包都不能把它升为可信代码。需要私有 SQL 函数或原生 Effect 的扩展，必须经过部署目录所有者单独批准**准确 ZIP、包、manifest、组件、scope 和运行时身份**。批准事实与不可变工件索引在同一目录事务发布；不同字节、不同组件或重建出的新摘要都要重新批准，热重载预检与冷启动都重新核对。Bot 选择仍固定包和 manifest 摘要，授权 capability 仍按该 Bot 的精确选择批准；受审查包不能声明 `official_bot_grants`，也不能冒用发行版 builtin 身份。
 
@@ -267,6 +267,8 @@ forest plugin import hello.zip
 Effect 有两个独立批准：Bot 包声明的 `effect_services.kind` 必须由部署批准的宿主驱动契约提供；驱动代码本身不得从 Bot 包 manifest 路径直接 import 到宿主。新增驱动实现应作为独立的 Host/Deployment 组件工件捕获、换代，Bot 组件通过声明依赖绑定其准确 Generation。驱动换代按依赖闭包冻结入口、排空在途效果、发布新图并保留旧效果身份；旧代的晚到回执仍回到旧代对账。通用 HTTP 效果也应只按已批准的 endpoint、Secret 和预算派发。当前宿主只有内置驱动注册表，动态第三方驱动工件及此批准链尚未实现，不能将受限包热替换的通过记录称为完整第三方 SQL/Effect 热重载。
 
 当前实现阶段（2026-10-15）：目录所有者可用 `forest plugin publish-reviewed-bot` 按准确归档、包、manifest、组件、Bot scope 与 Python Worker 身份发布独立 reviewed 来源；普通 ZIP 导入、manifest 声明和 Bot 选择都不能自行提升信任。Bot 装配与候选图编译在重新核对该来源及精确 capability 批准后，允许 reviewed 包安装自身 official-profile SQL 基线并绑定部署 Host 已注册的 Effect kind；官方内核管理端口和 `official_bot_grants` 仍只属于发行版官方包。隔离 PostgreSQL 已验证普通导入拒绝、reviewed 私有 SQL 安装与 Generation 启动，以及缺少 Host 驱动时拒绝候选编译。隔离 PostgreSQL 已验证 reviewed 包在相同 SQL 基线下跨版本热替换、旧代排空和内核代际保留；完整 BotHost 中也已通过 Worker Host 的 `validate → module.enable` 选择与换代，并在关闭后用同一数据库和包目录新建 BotHost 恢复所选 reviewed 版本。该试验使用假 OneBot/模型，不能代替独立操作系统进程中断或真实 QQ 在线验证。动态第三方 Host/Deployment 驱动工件尚未实现。
+
+受审查的 Host/Deployment 控制包现可用 `forest plugin publish-reviewed-host` / `publish-reviewed-deployment` 发布准确 Python Worker ZIP。控制图在预检、换代和冷启动时核对独立 reviewed 来源，允许该包安装自身 official-profile SQL、调用自身领域端口，并绑定宿主已注册的 Effect kind；`kernel_commands`、`kernel_queries` 与内核拥有的持久工作仍只属于官方包。隔离 PostgreSQL 已验证普通导入拒绝、受审查 Host 私有 SQL 与 Effect 在同一基线下换代，以及关闭后由新控制器恢复 reviewed 身份；部署范围的发布来源和内核命令拒绝已由目录用例验证。此路径尚不提供新的驱动实现工件，也不建立 Bot 到准确 Host Generation 的驱动依赖。
 
 原生 Effect Driver 可在宿主驱动注册表中附带配置安全校验器。包通过 effect_services.kind 选择驱动种类；通用包装配器按该声明组合校验器，在创建期、配置提交与 Generation 准备中使用同一边界，不按组件目录名分派。校验器属于宿主提供的受信任驱动代码，普通插件不得以 manifest 路径要求宿主加载自身 Python 函数；包内运行时 schema 仍负责公开配置形状。
 

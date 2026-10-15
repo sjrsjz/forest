@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
+from argparse import Namespace
 from dataclasses import replace
 from pathlib import Path
+from shutil import copytree
 from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
@@ -15,6 +18,7 @@ import psycopg
 import pytest
 from psycopg import sql
 
+from forest.cli import run_plugin_command
 from forest.deployment_packages import bootstrap_builtin_deployment_package
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
@@ -486,3 +490,241 @@ output_schema = "schemas/bump-output.json"
         await store.close()
         await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
         await admin.close()
+
+
+@pytest.mark.postgres
+async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archive(tmp_path):
+    dsn = os.environ.get("FOREST_TEST_DSN")
+    if not dsn:
+        pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
+    name = "forest_host_" + uuid4().hex
+    host_id = "host/" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    parsed = urlsplit(dsn)
+    uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
+    store = HostStore(uri, host_id)
+    await store.open()
+    supervisor = HostSupervisor(HostIdentityAuthority(store))
+    controller = None
+
+    class EchoEffect:
+        async def start(self):
+            return None
+
+        async def quiesce(self):
+            return None
+
+        async def resume(self):
+            return None
+
+        async def close(self):
+            return None
+
+        async def invoke(self, payload, *, scope, invocation):
+            return payload
+
+    try:
+        await supervisor.start()
+        source = tmp_path / "host-reviewed-source"
+        _host_package(source)
+        baseline = b"CREATE TABLE reviewed_notes (id text PRIMARY KEY);\n"
+        (source / "schema").mkdir()
+        (source / "schema/storage.sql").write_bytes(baseline)
+        manifest = source / "module.toml"
+        value = manifest.read_text(encoding="utf-8").replace(
+            "requests = []", 'requests = ["service.call:host.sample.effect"]', 1,
+        )
+        value += (
+            "\n[components.storage]\n"
+            'schema_id = "forest.host.sample"\n'
+            'schema_version = "1.0.0"\n'
+            'baseline = "schema/storage.sql"\n'
+            f'baseline_sha256 = "{hashlib.sha256(baseline).hexdigest()}"\n'
+            'scope = "host"\n'
+            'repository_contract = "forest.host-sample.repository/1"\n'
+            'execution_profile = "official"\n'
+            "\n[[components.effect_services]]\n"
+            'name = "host.sample.effect"\n'
+            'contract = "1.0"\n'
+            'kind = "tests.host.echo"\n'
+            'semantics = "read"\n'
+            'input_schema = "schemas/echo.json"\n'
+            'output_schema = "schemas/echo.json"\n'
+        )
+        manifest.write_text(value, encoding="utf-8")
+        catalog = PackageCatalog(tmp_path / "reviewed-host-catalog")
+        first = catalog.build_official(source, scope="host")
+        runtime = HostRuntimeScope(
+            store, supervisor,
+            effect_driver_factories={
+                "tests.host.echo": lambda *_args: EchoEffect(),
+            },
+        )
+        controller = HostPackageController(
+            runtime, catalog, official_sources=(source,),
+        )
+        registry = await controller.start()
+        assert registry.get("host.sample").snapshot.digest == first.digest
+        assert registry.generation_bindings["host.sample"].trust_level == "official"
+        reviewed_source = tmp_path / "host-reviewed-v2"
+        copytree(source, reviewed_source)
+        (reviewed_source / "module.toml").write_text(
+            value.replace('version = "1.0.0"', 'version = "1.0.1"', 1),
+            encoding="utf-8",
+        )
+        staging = PackageCatalog(tmp_path / "reviewed-host-staging")
+        candidate = staging.build(reviewed_source)
+        archive = staging.export_archive(candidate.digest)
+        catalog.import_archive(archive)
+        assert not catalog.is_reviewed_control(candidate.digest, scope="host")
+        with pytest.raises(ForestError) as ordinary:
+            await controller.preview_change(
+                operation_kind="REPLACE", component_id="host.sample",
+                package_digest=candidate.digest,
+                expected_graph_revision=registry.graph_identity.graph_revision,
+            )
+        assert ordinary.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
+        catalog.publish_reviewed_control_archive(
+            archive, scope="host",
+            expected_archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+            expected_package_digest=candidate.digest,
+            expected_manifest_digest=digest_json(candidate.manifest),
+            expected_package_id=candidate.manifest["package_id"],
+            expected_component_id=candidate.component["id"],
+            expected_runtime="python-worker",
+        )
+        assert catalog.is_reviewed_control(candidate.digest, scope="host")
+        assert not catalog.is_official_host(candidate.digest)
+        preview = await controller.preview_change(
+            operation_kind="REPLACE", component_id="host.sample",
+            package_digest=candidate.digest,
+            expected_graph_revision=registry.graph_identity.graph_revision,
+        )
+        assert preview["package_digest"] == candidate.digest
+        replaced = await controller.replace(
+            "host.sample", candidate.digest,
+            expected_graph_revision=registry.graph_identity.graph_revision,
+        )
+        member = replaced.get("host.sample")
+        assert member.snapshot.digest == candidate.digest
+        assert replaced.generation_bindings["host.sample"].trust_level == "reviewed"
+        assert member.generation_identity.generation_id != (
+            registry.graph_identity.generations["host.sample"]
+        )
+        assert await member.management_contract.query(
+            "echo", {"value": "reviewed"},
+        ) == {"value": "reviewed"}
+        namespace = replaced.generation_bindings["host.sample"].storage.namespace
+        async with store.pool.connection() as conn:
+            row = await (await conn.execute(
+                sql.SQL("SELECT count(*) AS count FROM {}.reviewed_notes").format(
+                    sql.Identifier(namespace)
+                )
+            )).fetchone()
+        assert row["count"] == 0
+        await controller.close()
+        controller = HostPackageController(
+            runtime, catalog, official_sources=(source,),
+        )
+        restored = await controller.start()
+        assert restored.get("host.sample").snapshot.digest == candidate.digest
+        assert restored.generation_bindings["host.sample"].trust_level == "reviewed"
+        assert await restored.get("host.sample").management_contract.query(
+            "echo", {"value": "restored"},
+        ) == {"value": "restored"}
+    finally:
+        if controller is not None:
+            await controller.close()
+        await supervisor.close()
+        await store.close()
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
+            sql.Identifier(name)
+        ))
+        await admin.close()
+
+
+def test_reviewed_control_archive_has_scope_specific_owner_provenance(tmp_path):
+    source = tmp_path / "host-source"
+    _host_package(source)
+    staging = PackageCatalog(tmp_path / "host-staging")
+    candidate = staging.build(source)
+    archive = staging.export_archive(candidate.digest)
+    catalog = PackageCatalog(tmp_path / "host-catalog")
+    catalog.import_archive(archive)
+    assert not catalog.is_reviewed_control(candidate.digest, scope="host")
+    expected = {
+        "scope": "host",
+        "expected_archive_sha256": "sha256:" + hashlib.sha256(archive).hexdigest(),
+        "expected_package_digest": candidate.digest,
+        "expected_manifest_digest": digest_json(candidate.manifest),
+        "expected_package_id": candidate.manifest["package_id"],
+        "expected_component_id": candidate.component["id"],
+        "expected_runtime": "python-worker",
+    }
+    for changed, code in (
+        ({"scope": "deployment"}, "REVIEWED_PACKAGE_SOURCE_INVALID"),
+        ({"expected_archive_sha256": "sha256:" + "0" * 64}, "PACKAGE_ARCHIVE_DIGEST_MISMATCH"),
+        ({"expected_manifest_digest": "sha256:" + "0" * 64}, "REVIEWED_PACKAGE_DIGEST_MISMATCH"),
+    ):
+        with pytest.raises(ForestError) as rejected:
+            catalog.publish_reviewed_control_archive(
+                archive, **{**expected, **changed},
+            )
+        assert rejected.value.code == code
+        assert not catalog.is_reviewed_control(candidate.digest, scope="host")
+    released = catalog.publish_reviewed_control_archive(archive, **expected)
+    assert catalog.get_reviewed_control(released.digest, scope="host").digest == (
+        candidate.digest
+    )
+    assert catalog.is_reviewed_control(candidate.digest, scope="host")
+    assert not catalog.is_reviewed_control(candidate.digest, scope="deployment")
+    assert not catalog.is_official_host(candidate.digest)
+
+
+def test_reviewed_deployment_archive_cannot_claim_kernel_commands(tmp_path):
+    source = Path(__file__).parents[1] / "src/forest/builtin/deployment_accounts"
+    staging = PackageCatalog(tmp_path / "deployment-staging")
+    candidate = staging.build(source)
+    archive = staging.export_archive(candidate.digest)
+    catalog = PackageCatalog(tmp_path / "deployment-catalog")
+    with pytest.raises(ForestError) as rejected:
+        catalog.publish_reviewed_control_archive(
+            archive, scope="deployment",
+            expected_archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+            expected_package_digest=candidate.digest,
+            expected_manifest_digest=digest_json(candidate.manifest),
+            expected_package_id=candidate.manifest["package_id"],
+            expected_component_id=candidate.component["id"],
+            expected_runtime="python-worker",
+        )
+    assert rejected.value.code == "REVIEWED_PACKAGE_SOURCE_INVALID"
+    assert catalog.list() == []
+
+
+@pytest.mark.asyncio
+async def test_reviewed_host_release_cli_publishes_exact_archive(tmp_path, capsys):
+    source = tmp_path / "host-cli-source"
+    _host_package(source)
+    staging = PackageCatalog(tmp_path / "host-cli-staging")
+    candidate = staging.build(source)
+    archive = staging.export_archive(candidate.digest)
+    path = tmp_path / "host-reviewed.zip"
+    path.write_bytes(archive)
+    root = tmp_path / "host-owner-catalog"
+    root.mkdir()
+    await run_plugin_command(Namespace(
+        plugin_command="publish-reviewed-host",
+        archive=path, catalog_dir=root,
+        archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+        package_digest=candidate.digest,
+        manifest_digest=digest_json(candidate.manifest),
+        package_id=candidate.manifest["package_id"],
+        component_id=candidate.component["id"],
+    ))
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "published-reviewed-host"
+    assert receipt["package_digest"] == candidate.digest
+    catalog = PackageCatalog(root)
+    assert catalog.is_reviewed_control(candidate.digest, scope="host")
+    assert not catalog.is_official_host(candidate.digest)

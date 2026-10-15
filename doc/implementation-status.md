@@ -1,6 +1,8 @@
 # Forest 实现状态
 
-## 当前在线（2026-10-15 06:30 北京时间）
+## 当前在线（2026-10-15 10:03 北京时间）
+
+10:03 只读在线复核：树莓派 OneBot `get_status` 返回 `online=true, good=true`，`get_login_info` 为 `3605196653`，NapCat `4.18.38` 与 Linux QQ `3.2.34-53644` 正在运行，8080 对 Forest 保持一条 TCP 连接。v31 两次只读采样零违规，图修订 4、22/22 ACTIVE、170 条自然来源、7 个群主干、0 活动 Run/Job/待发送、0 DOCUMENT facet；许可群 `933179609` 仍未观察到新入站。因此真实显式 @ 回复和自然图片召回仍未验收。本次未发送 QQ 消息或调用付费模型。
 
 `forest-main-v31` 已用独立 deployment、Host、Bot 库和包卷接管 QQ：READY/ONLINE、图修订 4、22/22 ACTIVE，30 秒四次只读采样无违规、活动 Run/Job 或待发送；树莓派 NapCat 登录 READY，8080 恰好一条连接。旧 v30 期望与观测均 OFFLINE，原 241 条来源仍保存在独立旧库。v31 使用 Adapter `2.5.0`、Media Capture `2.4.0`、Memory `1.94.0` / SQL `3.93.0`、Agent `4.53.0`；22 个 schema bundle READY。详见 [v31 切换记录](live-v31-cutover-2026-10-15.md)。
 
@@ -16,6 +18,8 @@ v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + �
 
 受审查 Bot 工件来源第一阶段（2026-10-15）：目录所有者 CLI `publish-reviewed-bot` 以准确 ZIP、包、manifest、package/component ID 与 Python Worker 运行时身份原子发布独立 reviewed 来源；普通 ZIP 导入无法获得该身份，试图声明 `official_bot_grants` 的工件被拒。该来源不是 official builtin，也尚未改变 `installed` 包的 SQL/Effect 拒绝路径。定向发布/隔离用例 4 passed；包目录完整回归 114 passed、1 个既有重复 ZIP 名称警告；Ruff 通过。下一阶段须让候选编译、Bot 选择和热重载在准确 reviewed 来源下绑定私有 SQL 与已批准驱动，不能据此宣称高权限插件已可运行。
 受审查 Bot 包运行时第二阶段（2026-10-15）：Bot 装配、候选编译、Generation 身份及持久图账本现区分 `reviewed` 与普通 `installed`；准确目录来源和 Bot capability 批准通过后，reviewed 包可安装私有 official-profile SQL 并绑定部署 Host 已注册的 Effect kind。普通归档仍被 SQL/Effect 边界拒绝，缺失 Host 驱动的 reviewed 候选编译失败，官方内核管理端口与 `official_bot_grants` 未下放。隔离 PostgreSQL 两项用例通过，覆盖私有 SQL 执行、Generation 启动与 Effect 驱动绑定/拒绝；包目录与 Worker Host 选择回归 116 passed、1 个既有重复 ZIP 警告，Ruff 通过。现有 Host 驱动可绑定不等于动态第三方驱动可安装；隔离 PostgreSQL 中同 SQL 基线的 reviewed 包跨版本换代已通过，旧代排空、内核代际保留和新代启动均已核验。正式 BotHost 管理契约的 `validate → module.enable` 两次选择和同数据库/包目录的新 BotHost 冷恢复已在隔离 PostgreSQL 中通过（1 passed，289.08 秒）：所选 reviewed 包 v1→v2、Generation 换代、内核代际保留，恢复后准确 v2 与 reviewed 身份。试验使用假 OneBot/模型；独立操作系统进程中断、真实 QQ 在线切换和动态第三方 Host 驱动仍待验收。v31 在线实例未装载此候选代码。
+
+受审查控制包运行时第一阶段（2026-10-15）：Host/Deployment 的准确 ZIP、包、manifest、组件、scope 和 Python Worker 身份现可经目录所有者 CLI 原子发布独立 reviewed 来源；普通导入不能取得该身份，含内核命令或内核拥有工作声明的归档在发布时拒绝。控制图核对来源后允许自身 official-profile SQL、领域端口和现有宿主 Effect kind，代际账本保留 reviewed 身份。隔离 PostgreSQL 中 Host 包在相同 SQL 基线下由 official v1 换为 reviewed v2，旧代排空、新代查询与私有表均通过，新控制器从相同数据库和目录冷恢复 reviewed 身份与服务；目录与 CLI 定向 3 项通过，Ruff 通过。尚未实现第三方驱动实现作为 Host/Deployment Generation 提供给 Bot、依赖闭包换代或不同 SQL 基线在线升级；当前在线 v31 镜像也不包含该候选代码。
 
 ### v31 当前验收门禁
 

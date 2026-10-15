@@ -83,17 +83,18 @@ def _parser() -> argparse.ArgumentParser:
         release.add_argument("--manifest-digest", required=True)
         release.add_argument("--package-id", required=True)
         release.add_argument("--component-id", required=True)
-    reviewed = actions.add_parser(
-        "publish-reviewed-bot",
-        help="Publish an operator-reviewed Bot extension by exact archive identity",
-    )
-    reviewed.add_argument("archive", type=Path)
-    reviewed.add_argument("--catalog-dir", type=Path, required=True)
-    reviewed.add_argument("--archive-sha256", required=True)
-    reviewed.add_argument("--package-digest", required=True)
-    reviewed.add_argument("--manifest-digest", required=True)
-    reviewed.add_argument("--package-id", required=True)
-    reviewed.add_argument("--component-id", required=True)
+    for scope in ("bot", "deployment", "host"):
+        reviewed = actions.add_parser(
+            f"publish-reviewed-{scope}",
+            help=f"Publish an operator-reviewed {scope} extension by exact archive identity",
+        )
+        reviewed.add_argument("archive", type=Path)
+        reviewed.add_argument("--catalog-dir", type=Path, required=True)
+        reviewed.add_argument("--archive-sha256", required=True)
+        reviewed.add_argument("--package-digest", required=True)
+        reviewed.add_argument("--manifest-digest", required=True)
+        reviewed.add_argument("--package-id", required=True)
+        reviewed.add_argument("--component-id", required=True)
     return parser
 
 
@@ -143,7 +144,9 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
     }:
         await run_official_release_command(args)
         return
-    if args.plugin_command == "publish-reviewed-bot":
+    if args.plugin_command in {
+        "publish-reviewed-bot", "publish-reviewed-deployment", "publish-reviewed-host",
+    }:
         await run_reviewed_release_command(args)
         return
     if args.plugin_command in {"lock", "import", "export"}:
@@ -347,7 +350,7 @@ async def run_official_release_command(args: argparse.Namespace) -> None:
 
 
 async def run_reviewed_release_command(args: argparse.Namespace) -> None:
-    """Publish privileged Bot code only under the local catalog owner's OS authority."""
+    """Publish reviewed code only under the local catalog owner's OS authority."""
     from forest.packages import MAX_ARCHIVE_BYTES, PackageCatalog
 
     catalog_root = args.catalog_dir
@@ -364,9 +367,16 @@ async def run_reviewed_release_command(args: argparse.Namespace) -> None:
             "PACKAGE_IO_FAILED", "Unable to read the reviewed package archive", 422,
         ) from None
     catalog = PackageCatalog(catalog_root)
+    scope = args.plugin_command.removeprefix("publish-reviewed-")
+    release = (
+        catalog.publish_reviewed_bot_archive
+        if scope == "bot" else catalog.publish_reviewed_control_archive
+    )
+    scope_arg = {} if scope == "bot" else {"scope": scope}
     snapshot = await asyncio.to_thread(
-        catalog.publish_reviewed_bot_archive,
+        release,
         content,
+        **scope_arg,
         expected_archive_sha256=args.archive_sha256,
         expected_package_digest=args.package_digest,
         expected_manifest_digest=args.manifest_digest,
@@ -375,7 +385,7 @@ async def run_reviewed_release_command(args: argparse.Namespace) -> None:
         expected_runtime="python-worker",
     )
     print(json.dumps({
-        "status": "published-reviewed-bot",
+        "status": f"published-reviewed-{scope}",
         "package_digest": snapshot.digest,
         "manifest_digest": args.manifest_digest,
         "package_id": snapshot.manifest["package_id"],

@@ -1,6 +1,6 @@
 # 干净生产启动链
 
-截至 2026-10-15，当前在线候选为 `forest-main-v31`，Supervisor 使用已提交源码镜像 `forest:runtime-candidate-6c9a36f`；独立数据库、组件版本与实时证据见 [v31 在线记录](live-v31-cutover-2026-10-15.md)。v30 及更早版本是保留的历史或回退实例。Supervisor HTTP healthy、Bot ONLINE 与 OneBot TCP 已连接分别只证明各自层级存活，不能单独证明 QQ 账号已登录或群聊回复链可用。
+截至 2026-10-15，当前在线候选为 `forest-main-v31`，Supervisor 使用已提交源码镜像 `forest:runtime-candidate-352eb5b`；独立数据库、组件版本与实时证据见 [v31 在线记录](live-v31-cutover-2026-10-15.md)。v30 及更早版本是保留的历史或回退实例。Supervisor HTTP healthy、Bot ONLINE 与 OneBot TCP 已连接分别只证明各自层级存活，不能单独证明 QQ 账号已登录或群聊回复链可用。
 
 本文记录多 Bot Supervisor 的生产启动入口，以及独立 `forest bot` 诊断路径。宿主持有进程、数据库连接、HostLease 和 RuntimeGraph 生命周期；Adapter、触发策略、Conversation、Agent、Memory、Provider 与 Delivery 作为 Bot 作用域的平级 Generation 成员运行。Bot 基础身份和期望运行意图归部署内核，管理 builtin 通过受限端口操作。
 

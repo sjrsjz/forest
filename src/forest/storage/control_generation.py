@@ -53,7 +53,7 @@ async def _storage_binding_in(
         }.items()
     ) or (
         storage["execution_profile"] == "official"
-        and binding["package"]["trust_level"] != "official"
+        and binding["package"]["trust_level"] not in {"official", "reviewed"}
         and not is_generated_control_storage_fact(
             storage, binding["component_id"], schema.removeprefix("forest_")
         )

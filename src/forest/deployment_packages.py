@@ -1,8 +1,8 @@
 ﻿"""Deployment bindings for the shared control-scope package compiler."""
 
 from forest.control_packages import (
-    bootstrap_builtin_control_package,
     bootstrap_installed_control_package,
+    bootstrap_trusted_control_package,
 )
 from forest.errors import ForestError
 
@@ -18,7 +18,7 @@ async def bootstrap_builtin_deployment_package(
     snapshot, runtime, *, plan_only=False, frozen_configuration=None,
 ):
     _require_deployment(runtime)
-    return await bootstrap_builtin_control_package(
+    return await bootstrap_trusted_control_package(
         snapshot, runtime, plan_only=plan_only,
         frozen_configuration=frozen_configuration,
     )

@@ -7,8 +7,8 @@ import re
 from pathlib import Path
 
 from forest.control_packages import (
-    bootstrap_builtin_control_package,
     bootstrap_installed_control_package,
+    bootstrap_trusted_control_package,
     control_storage_bundle,
 )
 from forest.errors import ForestError
@@ -64,24 +64,37 @@ class ControlPackageController:
             official = getattr(
                 self.catalog, f"is_official_{self.scope_kind}"
             )(snapshot.digest)
-            if declared is not None and declared[0]["execution_profile"] == "official" and not official:
-                raise ForestError(
-                    "OFFICIAL_PACKAGE_NOT_REGISTERED",
-                    "Control artifact has no host-issued official provenance", 403,
-                )
-            compile_package = (
-                bootstrap_builtin_control_package
-                if official else bootstrap_installed_control_package
+            reviewed = self.catalog.is_reviewed_control(
+                snapshot.digest, scope=self.scope_kind,
             )
-            descriptors.append(await compile_package(
-                snapshot, self.runtime, plan_only=plan_only,
-                frozen_configuration=(frozen_configurations or {}).get(snapshot.component["id"]),
-            ))
+            if (
+                declared is not None
+                and declared[0]["execution_profile"] == "official"
+                and not (official or reviewed)
+            ):
+                raise ForestError(
+                    "REVIEWED_PACKAGE_NOT_REGISTERED",
+                    "Control artifact has no owner-issued trusted provenance", 403,
+                )
+            if official or reviewed:
+                descriptor = await bootstrap_trusted_control_package(
+                    snapshot, self.runtime, plan_only=plan_only,
+                    frozen_configuration=(frozen_configurations or {}).get(snapshot.component["id"]),
+                    trust_level="official" if official else "reviewed",
+                )
+            else:
+                descriptor = await bootstrap_installed_control_package(
+                    snapshot, self.runtime, plan_only=plan_only,
+                    frozen_configuration=(frozen_configurations or {}).get(snapshot.component["id"]),
+                )
+            descriptors.append(descriptor)
         return RuntimeModuleRegistry(self.runtime, tuple(descriptors), activation_id=activation_id)
 
     def _selected_snapshot(self, digest: str) -> PackageSnapshot:
         snapshot = self.catalog.get(digest)
         declared = snapshot.storage_bundle()
+        if self.catalog.is_reviewed_control(digest, scope=self.scope_kind):
+            return self.catalog.get_reviewed_control(digest, scope=self.scope_kind)
         if declared is not None and declared[0]["execution_profile"] == "official":
             return getattr(self.catalog, f"get_official_{self.scope_kind}")(digest)
         return snapshot

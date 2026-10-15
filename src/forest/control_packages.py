@@ -54,15 +54,15 @@ def _scope_bindings(runtime):
 
 
 @dataclass(frozen=True)
-class _BuiltinGrant:
+class _ControlGrant:
     capability: str
     resource_kind: str
     resource_id: str
 
 
 @dataclass(frozen=True)
-class _BuiltinGrantSet:
-    entries: tuple[_BuiltinGrant, ...]
+class _ControlGrantSet:
+    entries: tuple[_ControlGrant, ...]
     grant_set_digest: str
 
 
@@ -127,11 +127,16 @@ def _validate_management_configuration(value, schema: dict) -> None:
         )
 
 
-async def bootstrap_builtin_control_package(
+async def bootstrap_trusted_control_package(
     snapshot, runtime, *, plan_only=False, frozen_configuration=None,
+    trust_level="official",
 ):
-    """Install an official control package with bounded native port grants."""
+    """Install an owner-trusted control package with bounded native ports."""
 
+    if trust_level not in {"official", "reviewed"}:
+        raise ForestError(
+            "CONTROL_PACKAGE_TRUST_INVALID", "Control package trust is invalid", 500,
+        )
     configuration_type, command_type, query_type = _scope_bindings(runtime)
     scope_kind = runtime.scope_kind
     component = snapshot.component
@@ -140,6 +145,16 @@ async def bootstrap_builtin_control_package(
     kernel_work = tuple(
         item for item in owned_work if item.get("authority", "package") == "kernel"
     )
+    if trust_level == "reviewed" and (
+        kernel_work
+        or component.get("kernel_commands")
+        or component.get("kernel_queries")
+        or "official_bot_grants" in component.get("capabilities", {})
+    ):
+        raise ForestError(
+            f"{scope_kind.upper()}_PACKAGE_PORT_UNAVAILABLE",
+            "Reviewed control packages cannot claim official kernel authority", 403,
+        )
     if kernel_work and (
         len(kernel_work) != len(owned_work)
         or component["id"] not in runtime.kernel_owned_work_authorities
@@ -175,7 +190,7 @@ async def bootstrap_builtin_control_package(
     ):
         raise ForestError(
             f"{scope_kind.upper()}_PACKAGE_PORT_UNAVAILABLE",
-            "Official control effect port has no permitted native binding", 503,
+            "Trusted control effect port has no permitted native binding", 503,
         )
     artifact_commands = {
         item[key]
@@ -239,7 +254,7 @@ async def bootstrap_builtin_control_package(
     config_value = snapshot.bootstrap_configuration()
     if not Draft202012Validator(config_schema).is_valid(config_value):
         raise ForestError(
-            "PACKAGE_CONFIGURATION_INVALID", "Official bootstrap configuration is invalid", 422
+            "PACKAGE_CONFIGURATION_INVALID", "Trusted bootstrap configuration is invalid", 422
         )
     configuration = configuration_type(
         runtime.store, component_id=component["id"], namespace=spec.namespace,
@@ -260,10 +275,10 @@ async def bootstrap_builtin_control_package(
             )
     else:
         prepared_configuration = None
-    grants = _BuiltinGrantSet(
-        tuple(_BuiltinGrant(item, "component", component["id"]) for item in requested),
+    grants = _ControlGrantSet(
+        tuple(_ControlGrant(item, "component", component["id"]) for item in requested),
         digest_json([
-            f"forest.{scope_kind}.official-capability-grants/1",
+            f"forest.{scope_kind}.{trust_level}-capability-grants/1",
             snapshot.digest, component["id"], requested,
         ]),
     )
@@ -324,7 +339,7 @@ async def bootstrap_builtin_control_package(
             if kernel_work else domain if owned_work else None
         ),
         service_operation_ledger=runtime.service_operation_ledger,
-        storage=storage, trust_level="official",
+        storage=storage, trust_level=trust_level,
         effect_driver_factories=effect_factories,
         management=management,
         management_contract_factory=lambda adapter: PackageManagementContract(
@@ -403,8 +418,8 @@ async def bootstrap_installed_control_package(
             )
     else:
         prepared_configuration = None
-    grants = _BuiltinGrantSet(
-        tuple(_BuiltinGrant(item, "component", component["id"]) for item in requested),
+    grants = _ControlGrantSet(
+        tuple(_ControlGrant(item, "component", component["id"]) for item in requested),
         digest_json([
             f"forest.{scope_kind}.installed-grants/1", snapshot.digest,
             component["id"], requested,

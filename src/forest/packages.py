@@ -2704,6 +2704,19 @@ class PackageCatalog:
                 "OFFICIAL_PACKAGE_SOURCE_INVALID", "Official package scope is invalid", 422,
             ) from exc
 
+    @staticmethod
+    def _reviewed_table(scope: str) -> str:
+        try:
+            return {
+                "bot": "reviewed_bot_artifacts",
+                "deployment": "reviewed_deployment_artifacts",
+                "host": "reviewed_host_artifacts",
+            }[scope]
+        except (KeyError, TypeError) as exc:
+            raise ForestError(
+                "REVIEWED_PACKAGE_SOURCE_INVALID", "Reviewed package scope is invalid", 422,
+            ) from exc
+
     def build_official(self, source: Path, *, scope: str = "deployment") -> PackageSnapshot:
         """Register a host-supplied source as a trusted artifact for one scope.
 
@@ -2756,6 +2769,7 @@ class PackageCatalog:
         digest_error: str,
         require_python_worker: bool = False,
         forbid_official_grants: bool = False,
+        forbid_control_kernel: bool = False,
     ) -> PackageSnapshot:
         """Atomically publish an exact archive and a separately issued trust fact."""
         if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_ARCHIVE_BYTES:
@@ -2779,6 +2793,17 @@ class PackageCatalog:
             or (
                 forbid_official_grants
                 and "official_bot_grants" in component.get("capabilities", {})
+            )
+            or (
+                forbid_control_kernel
+                and (
+                    component.get("kernel_commands")
+                    or component.get("kernel_queries")
+                    or any(
+                        item.get("authority") == "kernel"
+                        for item in component.get("owned_work_handlers", ())
+                    )
+                )
             )
         ):
             _fail(identity_error, "Trusted package identity or authority is invalid")
@@ -2832,6 +2857,41 @@ class PackageCatalog:
             expected_runtime=expected_runtime,
             identity_error="OFFICIAL_PACKAGE_SOURCE_INVALID",
             digest_error="OFFICIAL_PACKAGE_DIGEST_MISMATCH",
+        )
+
+    def publish_reviewed_control_archive(
+        self,
+        data: bytes,
+        *,
+        scope: str,
+        expected_archive_sha256: str,
+        expected_package_digest: str,
+        expected_manifest_digest: str,
+        expected_package_id: str,
+        expected_component_id: str,
+        expected_runtime: str,
+    ) -> PackageSnapshot:
+        """Record exact owner approval for a Host or Deployment Worker artifact."""
+        if scope not in {"host", "deployment"}:
+            raise ForestError(
+                "REVIEWED_PACKAGE_SOURCE_INVALID",
+                "Reviewed control package scope is invalid", 422,
+            )
+        return self._publish_trusted_archive(
+            data,
+            scope=scope,
+            table=self._reviewed_table(scope),
+            expected_archive_sha256=expected_archive_sha256,
+            expected_package_digest=expected_package_digest,
+            expected_manifest_digest=expected_manifest_digest,
+            expected_package_id=expected_package_id,
+            expected_component_id=expected_component_id,
+            expected_runtime=expected_runtime,
+            identity_error="REVIEWED_PACKAGE_SOURCE_INVALID",
+            digest_error="REVIEWED_PACKAGE_DIGEST_MISMATCH",
+            require_python_worker=True,
+            forbid_control_kernel=True,
+            forbid_official_grants=True,
         )
 
     def publish_reviewed_bot_archive(
@@ -2936,6 +2996,44 @@ class PackageCatalog:
         )
         return (
             snapshot.component["scope"] == "bot"
+            and len(rows) == 1
+            and rows[0][0] == snapshot.component["id"]
+        )
+
+    def get_reviewed_control(self, digest: str, *, scope: str) -> PackageSnapshot:
+        table = self._reviewed_table(scope)
+        if scope == "bot":
+            raise ForestError(
+                "REVIEWED_PACKAGE_SOURCE_INVALID",
+                "Bot artifacts use the Bot reviewed authority", 422,
+            )
+        snapshot = self.get(digest)
+        rows = self._rows(
+            f"SELECT component_id FROM {table} WHERE digest=?",
+            (digest,), table=table,
+        )
+        if (
+            snapshot.component["scope"] != scope
+            or len(rows) != 1
+            or rows[0][0] != snapshot.component["id"]
+        ):
+            _fail(
+                "REVIEWED_PACKAGE_NOT_REGISTERED",
+                "Artifact has no owner-issued reviewed control provenance",
+            )
+        return snapshot
+
+    def is_reviewed_control(self, digest: str, *, scope: str) -> bool:
+        table = self._reviewed_table(scope)
+        if scope == "bot":
+            return False
+        snapshot = self.get(digest)
+        rows = self._rows(
+            f"SELECT component_id FROM {table} WHERE digest=?",
+            (digest,), table=table,
+        )
+        return (
+            snapshot.component["scope"] == scope
             and len(rows) == 1
             and rows[0][0] == snapshot.component["id"]
         )
