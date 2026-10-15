@@ -6,6 +6,7 @@ import asyncio
 import re
 from pathlib import Path
 
+from forest.control_driver_binding_gate import ControlDriverBindingGate
 from forest.control_packages import (
     bootstrap_installed_control_package,
     bootstrap_trusted_control_package,
@@ -20,7 +21,8 @@ from forest.schema_bundle_preflight import require_installable_storage_in
 
 class ControlPackageController:
     def __init__(
-        self, runtime, catalog: PackageCatalog, *, official_sources: tuple[Path, ...]
+        self, runtime, catalog: PackageCatalog, *, official_sources: tuple[Path, ...],
+        driver_binding_gate: ControlDriverBindingGate | None = None,
     ) -> None:
         if getattr(runtime, "scope_kind", None) not in {"deployment", "host"}:
             raise ValueError("Control package controller requires a control scope")
@@ -28,6 +30,9 @@ class ControlPackageController:
         self.scope_kind = runtime.scope_kind
         self.catalog = catalog
         self.official_sources = official_sources
+        if driver_binding_gate is not None and self.scope_kind != "host":
+            raise ValueError("Only Host scope can coordinate Bot driver bindings")
+        self._driver_binding_gate = driver_binding_gate
         self._registry: RuntimeModuleRegistry | None = None
         self._snapshots: dict[str, PackageSnapshot] = {}
         self._lock = asyncio.Lock()
@@ -227,6 +232,22 @@ class ControlPackageController:
         self, *, operation_kind: str, component_id: str,
         package_digest: str, expected_graph_revision: int,
     ) -> dict:
+        options = {
+            "operation_kind": operation_kind,
+            "component_id": component_id,
+            "package_digest": package_digest,
+            "expected_graph_revision": expected_graph_revision,
+        }
+        gate = self._driver_binding_gate
+        if gate is None:
+            return await self._preview_without_driver_gate(**options)
+        async with gate:
+            return await self._preview_without_driver_gate(**options)
+
+    async def _preview_without_driver_gate(
+        self, *, operation_kind: str, component_id: str,
+        package_digest: str, expected_graph_revision: int,
+    ) -> dict:
         """Validate a candidate and calculate Graph impact without provisioning."""
 
         if not isinstance(operation_kind, str) or operation_kind not in {"ADD", "REPLACE"}:
@@ -279,6 +300,12 @@ class ControlPackageController:
             impact = candidate.preview_graph_transition(
                 previous, target_component_id=component_id
             )
+            if self._driver_binding_gate is not None:
+                changed = set(impact.replace) | set(impact.remove)
+                self._driver_binding_gate.require_unbound(tuple(
+                    item for item in self.driver_exports()
+                    if item["component_id"] in changed
+                ))
             facts = {
                 "protocol": f"forest.{self.scope_kind}-graph-change-preview/1",
                 "operation_kind": operation_kind,
@@ -423,7 +450,32 @@ class ControlPackageController:
         adding: bool,
         configuration_binding: dict | None = None,
     ) -> RuntimeModuleRegistry:
+        options = {
+            "expected_graph_revision": expected_graph_revision,
+            "activation_id": activation_id,
+            "adding": adding,
+            "configuration_binding": configuration_binding,
+        }
+        gate = self._driver_binding_gate
+        if gate is None:
+            return await self._change_without_driver_gate(
+                component_id, package_digest, **options
+            )
+        async with gate:
+            return await self._change_without_driver_gate(
+                component_id, package_digest, **options
+            )
 
+    async def _change_without_driver_gate(
+        self,
+        component_id: str,
+        package_digest: str,
+        *,
+        expected_graph_revision: int,
+        activation_id: str | None,
+        adding: bool,
+        configuration_binding: dict | None = None,
+    ) -> RuntimeModuleRegistry:
         async with self._lock:
             previous = self.registry
             if previous.graph_identity.graph_revision != expected_graph_revision:
@@ -471,6 +523,12 @@ class ControlPackageController:
                 frozen_configurations=frozen,
             )
             affected = candidate.plan_graph_transition(previous, target_component_id=component_id)
+            if self._driver_binding_gate is not None:
+                changed = set(affected)
+                self._driver_binding_gate.require_unbound(tuple(
+                    item for item in self.driver_exports()
+                    if item["component_id"] in changed
+                ))
             drained = False
             try:
                 await candidate.prewarm()
@@ -642,6 +700,15 @@ class ControlPackageController:
                     raise self._fatal from error
 
     async def close(self) -> None:
+        gate = self._driver_binding_gate
+        if gate is None:
+            await self._close_without_driver_gate()
+            return
+        async with gate:
+            gate.require_empty()
+            await self._close_without_driver_gate()
+
+    async def _close_without_driver_gate(self) -> None:
         async with self._lock:
             self._closed = True
             registry = self._registry

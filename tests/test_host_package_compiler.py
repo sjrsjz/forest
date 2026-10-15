@@ -19,6 +19,7 @@ import pytest
 from psycopg import sql
 
 from forest.cli import run_plugin_command
+from forest.control_driver_binding_gate import ControlDriverBindingGate
 from forest.control_effect_driver import control_export_effect_driver_factory
 from forest.deployment_packages import bootstrap_builtin_deployment_package
 from forest.errors import ForestError
@@ -592,6 +593,7 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
         )
         manifest.write_text(value, encoding="utf-8")
         catalog = PackageCatalog(tmp_path / "reviewed-host-catalog")
+        gate = ControlDriverBindingGate()
         first = catalog.build_official(source, scope="host")
         runtime = HostRuntimeScope(
             store, supervisor,
@@ -601,6 +603,7 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
         )
         controller = HostPackageController(
             runtime, catalog, official_sources=(source,),
+            driver_binding_gate=gate,
         )
         registry = await controller.start()
         assert registry.get("host.sample").snapshot.digest == first.digest
@@ -697,6 +700,35 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
                 "bot:effect/one", 5, "bot.test", "bot/fixture",
             ),
         ) == {"value": "through-host-router"}
+        bound_bot = SimpleNamespace(
+            settings=SimpleNamespace(bot_id="bot/fixture"),
+            registry=SimpleNamespace(descriptors=(
+                SimpleNamespace(effect_driver_bindings=(
+                    ("fixture.effect", exports[0]["kind"], exports[0]["source_ref"]),
+                )),
+            )),
+        )
+        async with gate:
+            gate.attach(bound_bot)
+        with pytest.raises(ForestError) as blocked_preview:
+            await controller.preview_change(
+                operation_kind="REPLACE", component_id="host.sample",
+                package_digest=candidate.digest,
+                expected_graph_revision=replaced.graph_identity.graph_revision,
+            )
+        assert blocked_preview.value.code == "CONTROL_DRIVER_CONSUMERS_ACTIVE"
+        with pytest.raises(ForestError) as blocked_change:
+            await controller.replace(
+                "host.sample", candidate.digest,
+                expected_graph_revision=replaced.graph_identity.graph_revision,
+            )
+        assert blocked_change.value.code == "CONTROL_DRIVER_CONSUMERS_ACTIVE"
+        with pytest.raises(ForestError) as blocked_close:
+            await controller.close()
+        assert blocked_close.value.code == "CONTROL_DRIVER_CONSUMERS_ACTIVE"
+        assert controller.registry.graph_identity == replaced.graph_identity
+        async with gate:
+            gate.detach(bound_bot)
         assert member.generation_identity.generation_id != (
             registry.graph_identity.generations["host.sample"]
         )
@@ -714,6 +746,7 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
         await controller.close()
         controller = HostPackageController(
             runtime, catalog, official_sources=(source,),
+            driver_binding_gate=gate,
         )
         restored = await controller.start()
         assert restored.get("host.sample").snapshot.digest == candidate.digest

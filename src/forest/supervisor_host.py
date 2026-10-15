@@ -17,6 +17,7 @@ import uvicorn
 
 from forest.bootstrap_contributions import BootstrapConfigurationRegistry
 from forest.bot_host import BotHost
+from forest.control_driver_binding_gate import ControlDriverBindingGate
 from forest.deployment_access_settings import DeploymentAccessSettings
 from forest.deployment_access_settings import bounded_environment_int as _positive_int
 from forest.deployment_access_settings import required_environment as _required
@@ -256,6 +257,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
     )
     deployment_controller = None
     host_controller = None
+    driver_binding_gate = ControlDriverBindingGate()
 
     async def read_deployment_packages(query_id: str, payload: dict) -> dict:
         if deployment_controller is None:
@@ -271,6 +273,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             package_registry_reader=read_deployment_packages,
             credential_resolver=secrets.resolve_text_for_purpose,
             host_driver_controller_provider=lambda: host_controller,
+            driver_binding_gate=driver_binding_gate,
         )
 
     settings_resolver = OfficialBotSettingsResolver(
@@ -346,6 +349,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         host_controller = HostPackageController(
             host_runtime, package_catalog,
             official_sources=auto_install_official_sources("host"),
+            driver_binding_gate=driver_binding_gate,
         )
         await host_controller.start()
         await supervisor.start()
@@ -550,15 +554,15 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         if management_task is not None:
             await asyncio.gather(management_task, return_exceptions=True)
         try:
-            if deployment_controller is not None:
-                await deployment_controller.close()
+            await supervisor.close()
         finally:
             try:
-                if host_controller is not None:
-                    await host_controller.close()
+                if deployment_controller is not None:
+                    await deployment_controller.close()
             finally:
                 try:
-                    await supervisor.close()
+                    if host_controller is not None:
+                        await host_controller.close()
                 finally:
                     try:
                         await host_supervisor.close()

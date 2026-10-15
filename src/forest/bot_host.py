@@ -35,6 +35,7 @@ from forest.component_selection import (
     select_package_members,
 )
 from forest.component_selection_commit import resolve_selection_commit_preflight
+from forest.control_driver_binding_gate import ControlDriverBindingGate
 from forest.control_effect_driver import control_export_effect_driver_factory
 from forest.core_runtime import bootstrap_kernel
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
@@ -353,6 +354,7 @@ class BotHost:
         package_catalog=None,
         package_registry_reader=None,
         host_driver_controller_provider=None,
+        driver_binding_gate: ControlDriverBindingGate | None = None,
     ) -> None:
         if isinstance(settings, BotRuntimeSettings) and credential_resolver is None:
             raise ForestError(
@@ -388,6 +390,7 @@ class BotHost:
         )
         self.package_registry_reader = package_registry_reader
         self._host_driver_controller_provider = host_driver_controller_provider
+        self._driver_binding_gate = driver_binding_gate
         self.selection_reader: ComponentSelectionReader | None = None
 
     @property
@@ -751,6 +754,19 @@ class BotHost:
         )
 
     async def start(self) -> None:
+        gate = self._driver_binding_gate
+        if gate is None:
+            await self._start_without_driver_gate()
+            return
+        async with gate:
+            await self._start_without_driver_gate()
+            try:
+                gate.attach(self)
+            except BaseException:
+                await self._close_without_driver_gate()
+                raise
+
+    async def _start_without_driver_gate(self) -> None:
         await self.store.open()
         try:
             self._kernel = await bootstrap_kernel(self.store, self.schema_bundle_installer)
@@ -798,7 +814,7 @@ class BotHost:
                 name=f"bot-runtime-supervision:{self.settings.bot_id}",
             )
         except BaseException:
-            await self.close()
+            await self._close_without_driver_gate()
             raise
 
     async def provision(self) -> tuple[str, ...]:
@@ -885,6 +901,30 @@ class BotHost:
                     )
 
     async def replace_runtime_graph(
+        self,
+        *,
+        activation_id: str | None = None,
+        expected_graph_revision: int | None = None,
+        target_component_id: str | None = None,
+        selection_revision: int | None = None,
+        selection_digest: str | None = None,
+    ) -> RuntimeModuleRegistry:
+        options = {
+            "activation_id": activation_id,
+            "expected_graph_revision": expected_graph_revision,
+            "target_component_id": target_component_id,
+            "selection_revision": selection_revision,
+            "selection_digest": selection_digest,
+        }
+        gate = self._driver_binding_gate
+        if gate is None:
+            return await self._replace_without_driver_gate(**options)
+        async with gate:
+            result = await self._replace_without_driver_gate(**options)
+            gate.refresh(self)
+            return result
+
+    async def _replace_without_driver_gate(
         self,
         *,
         activation_id: str | None = None,
@@ -1238,6 +1278,15 @@ class BotHost:
             )
 
     async def close(self) -> None:
+        gate = self._driver_binding_gate
+        if gate is None:
+            await self._close_without_driver_gate()
+            return
+        async with gate:
+            await self._close_without_driver_gate()
+            gate.detach(self)
+
+    async def _close_without_driver_gate(self) -> None:
         lock = self._replacement_lock
         if lock is None:
             await self._close_locked()

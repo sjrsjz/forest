@@ -30,6 +30,7 @@ from forest.bot_host import BotGraphCandidate, BotHost, BotRuntimeSettings, BotS
 from forest.builtin_packages import bootstrap_installed_package
 from forest.component_graph_preview import preview_selected_graph
 from forest.component_selection import ComponentSelectionEntry, ComponentSelectionSnapshot
+from forest.control_driver_binding_gate import ControlDriverBindingGate
 from forest.deployment_management_app import create_deployment_management_app
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
 from forest.errors import ForestError
@@ -6571,6 +6572,7 @@ async def test_reviewed_bot_package_selection_hot_swap_and_cold_restore(tmp_path
         return FakeWebSocketClient(settings.onebot_self_id)
 
     catalog_root = tmp_path / "reviewed-bot-catalog"
+    driver_binding_gate = ControlDriverBindingGate()
 
     def make_host():
         return BotHost(
@@ -6582,6 +6584,7 @@ async def test_reviewed_bot_package_selection_hot_swap_and_cold_restore(tmp_path
             vector_index_audit_client_factory=FakeMilvusAuditClient,
             websocket_client_factory=create_websocket,
             package_catalog=PackageCatalog(catalog_root),
+            driver_binding_gate=driver_binding_gate,
         )
 
     staging = PackageCatalog(tmp_path / "reviewed-staging")
