@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-2026-10-15 Memory 包设置补全：`memory.graph` 1.95.0 的模块 UI 现可直接调整按 Bot 所有群聊合计的每日嵌入请求/token 上限、单批预留 token，以及检索证据的文本和图片预算；Embedding 模型身份仍随 Bot 生命周期冻结。页面在提交草稿前校验数值范围和 `seed_limit <= max_graph_nodes`，Worker 准备阶段也拒绝会静默丢失直接种子的矛盾配置。官方包构建、页面脚本语法和组件准备定向验证通过；尚未将此版本装载到在线实例。
+2026-10-15 Memory 包设置补全：`memory.graph` 1.95.1 的模块 UI 可调整按 Bot 所有群聊合计的每日嵌入请求/token 阈值、单批预留 token，以及检索证据的文本和图片预算；Embedding 模型身份仍随 Bot 生命周期冻结。页面和配置 schema 与 SQL 数值上限一致，并拒绝单批预留额超过日 token 阈值；Worker 准备阶段也拒绝此矛盾配置及 `seed_limit > max_graph_nodes`。日 token 阈值约束后续准入；已发生的实际计费若高于预留仍如实入账。官方包构建和定向验证通过；尚未将此版本装载到在线实例。
 
 2026-10-15 跨作用域驱动联合换代开发态：Supervisor 已接入联合候选准备、Host 先发布、Bot 后激活和逐 Bot 持久账本。重启后的 PENDING 行由恢复器等待 Bot 上线，核对当前 Host/Bot 图与绑定后结算；ONLINE 意图下的启动重试不提前失败，撤销意图才记 FAILED。Host PostgreSQL 账本 7 项、恢复器/协调器定向测试 10 项及同库同包目录新宿主冷重建 PostgreSQL 用例 1 项通过；独立操作系统进程中断、故障注入及真实实例仍待验收，在线 v31 未装载此候选代码。
 

@@ -48,9 +48,9 @@
       "required": ["policy_revision", "daily_request_limit", "daily_token_limit", "reservation_tokens"],
       "properties": {
         "policy_revision": {"const": "daily-cost-cap/1"},
-        "daily_request_limit": {"type": "integer", "minimum": 1},
-        "daily_token_limit": {"type": "integer", "minimum": 1},
-        "reservation_tokens": {"type": "integer", "minimum": 1}
+        "daily_request_limit": {"type": "integer", "minimum": 1, "maximum": 1000000},
+        "daily_token_limit": {"type": "integer", "minimum": 1, "maximum": 1000000000000},
+        "reservation_tokens": {"type": "integer", "minimum": 1, "maximum": 1000000000}
       }
     }
   }

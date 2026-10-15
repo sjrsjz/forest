@@ -69,6 +69,12 @@ class MemoryGraph(Plugin):
                 "MEMORY_CONFIGURATION_INVALID",
                 "Graph node budget must cover every direct seed", 422,
             )
+        if (value["embedding_budget"]["reservation_tokens"]
+                > value["embedding_budget"]["daily_token_limit"]):
+            raise ForestError(
+                "MEMORY_CONFIGURATION_INVALID",
+                "One embedding reservation cannot exceed the daily token threshold", 422,
+            )
         self.profile = value
         self.profile_digest = _digest(value)
 
