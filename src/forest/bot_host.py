@@ -459,6 +459,7 @@ class BotHost:
         self, activation_id: str | None = None,
         *, bootstrap_package_digests: dict[str, str] | None = None,
         bootstrap_settings: BotSettings | BotBootstrapSettings | None = None,
+        prepared_host_graph: tuple[RuntimeModuleRegistry, dict[str, PackageSnapshot]] | None = None,
     ) -> BotGraphCandidate:
         initial_settings = self.settings if isinstance(self.settings, BotSettings) else None
         async def resolve_provider_secret(secret_ref, _revision):
@@ -600,10 +601,25 @@ class BotHost:
         source_refs = {kind: "forest.host-native/1" for kind in effect_factories}
         contract_facts = {}
         controller_provider = self._host_driver_controller_provider
+        if prepared_host_graph is not None and controller_provider is None:
+            raise ForestError(
+                "CONTROL_DRIVER_EXPORT_UNAVAILABLE",
+                "Future Host exports require a bound Host controller", 503,
+            )
         if controller_provider is not None:
             controller = controller_provider()
+            if controller is None and prepared_host_graph is not None:
+                raise ForestError(
+                    "CONTROL_DRIVER_EXPORT_UNAVAILABLE",
+                    "Future Host exports require an active Host controller", 503,
+                )
             if controller is not None:
-                for export in controller.driver_exports():
+                exports = (
+                    controller.driver_exports()
+                    if prepared_host_graph is None
+                    else controller._driver_exports_for(*prepared_host_graph)
+                )
+                for export in exports:
                     kind = export["kind"]
                     if kind in effect_factories:
                         raise ForestError(

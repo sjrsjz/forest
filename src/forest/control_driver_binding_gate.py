@@ -78,14 +78,19 @@ class ControlDriverBindingGate:
             )
 
     def require_unbound(self, exports: tuple[dict, ...]) -> None:
-        sources = frozenset(item["source_ref"] for item in exports)
-        affected = tuple(sorted(
-            bot_id for bot_id, (_host, bindings) in self._active.items()
-            if sources & bindings
-        ))
+        affected = self.consumers_for(exports)
         if affected:
             raise ForestError(
                 "CONTROL_DRIVER_CONSUMERS_ACTIVE",
                 "Host driver replacement requires a joint Bot transition", 409,
-                details={"bot_ids": list(affected)},
+                details={"bot_ids": [host.settings.bot_id for host in affected]},
             )
+
+    def consumers_for(self, exports: tuple[dict, ...]) -> tuple[object, ...]:
+        """Return active consumers of exact source identities in Bot ID order."""
+
+        sources = frozenset(item["source_ref"] for item in exports)
+        return tuple(
+            host for _bot_id, (host, bindings) in sorted(self._active.items())
+            if sources & bindings
+        )
