@@ -1,8 +1,10 @@
 # Forest 实现状态
 
+2026-10-15 Host/Bot 驱动联合换代进程硬退出验收：隔离 PostgreSQL 中，子进程在 Host 图与受影响 Bot 图均已发布、逐 Bot 账本仍为 PENDING 时被 SIGKILL 终止；旧 Host/Bot 租约到期后，另一进程从同库同包目录取得更高 owner_epoch，重建当前驱动绑定，将消费者和 Host 请求结算为 SUCCEEDED。两次通过（405.37 秒、397.35 秒），测试只用替身 OneBot/模型。更早一次运行在账本已成功后退出等待超过 44 分钟，原因尚未定位且后续两次未复现；在途 Effect、故障注入、真实 QQ 和长期关闭稳定性仍待验收。
+
 2026-10-15 Memory 包设置补全：`memory.graph` 1.95.1 的模块 UI 可调整按 Bot 所有群聊合计的每日嵌入请求/token 阈值、单批预留 token，以及检索证据的文本和图片预算；Embedding 模型身份仍随 Bot 生命周期冻结。页面和配置 schema 与 SQL 数值上限一致，并拒绝单批预留额超过日 token 阈值；Worker 准备阶段也拒绝此矛盾配置及 `seed_limit > max_graph_nodes`。日 token 阈值约束后续准入；已发生的实际计费若高于预留仍如实入账。官方包构建和定向验证通过；尚未将此版本装载到在线实例。
 
-2026-10-15 跨作用域驱动联合换代开发态：Supervisor 已接入联合候选准备、Host 先发布、Bot 后激活和逐 Bot 持久账本。重启后的 PENDING 行由恢复器等待 Bot 上线，核对当前 Host/Bot 图与绑定后结算；ONLINE 意图下的启动重试不提前失败，撤销意图才记 FAILED。Host PostgreSQL 账本 7 项、恢复器/协调器定向测试 10 项及同库同包目录新宿主冷重建 PostgreSQL 用例 1 项通过；独立操作系统进程中断、故障注入及真实实例仍待验收，在线 v31 未装载此候选代码。
+2026-10-15 跨作用域驱动联合换代开发态：Supervisor 已接入联合候选准备、Host 先发布、Bot 后激活和逐 Bot 持久账本。重启后的 PENDING 行由恢复器等待 Bot 上线，核对当前 Host/Bot 图与绑定后结算；ONLINE 意图下的启动重试不提前失败，撤销意图才记 FAILED。Host PostgreSQL 账本 7 项、恢复器/协调器定向测试 10 项及同库同包目录新宿主冷重建 PostgreSQL 用例 1 项通过；隔离 PostgreSQL 的独立进程硬退出用例两次通过，故障注入及真实实例仍待验收，在线 v31 未装载此候选代码。
 
 
 ## 当前在线（2026-10-15 10:03 北京时间）
