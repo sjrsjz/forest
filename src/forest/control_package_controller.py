@@ -23,6 +23,7 @@ class ControlPackageController:
     def __init__(
         self, runtime, catalog: PackageCatalog, *, official_sources: tuple[Path, ...],
         driver_binding_gate: ControlDriverBindingGate | None = None,
+        joint_driver_transition=None,
     ) -> None:
         if getattr(runtime, "scope_kind", None) not in {"deployment", "host"}:
             raise ValueError("Control package controller requires a control scope")
@@ -33,6 +34,9 @@ class ControlPackageController:
         if driver_binding_gate is not None and self.scope_kind != "host":
             raise ValueError("Only Host scope can coordinate Bot driver bindings")
         self._driver_binding_gate = driver_binding_gate
+        if joint_driver_transition is not None and driver_binding_gate is None:
+            raise ValueError("Joint driver transition requires the binding gate")
+        self._joint_driver_transition = joint_driver_transition
         self._registry: RuntimeModuleRegistry | None = None
         self._snapshots: dict[str, PackageSnapshot] = {}
         self._lock = asyncio.Lock()
@@ -327,10 +331,12 @@ class ControlPackageController:
             )
             if self._driver_binding_gate is not None:
                 changed = set(impact.replace) | set(impact.remove)
-                self._driver_binding_gate.require_unbound(tuple(
+                exports = tuple(
                     item for item in self.driver_exports()
                     if item["component_id"] in changed
-                ))
+                )
+                if self._joint_driver_transition is None:
+                    self._driver_binding_gate.require_unbound(exports)
             facts = {
                 "protocol": f"forest.{self.scope_kind}-graph-change-preview/1",
                 "operation_kind": operation_kind,
@@ -550,10 +556,17 @@ class ControlPackageController:
             affected = candidate.plan_graph_transition(previous, target_component_id=component_id)
             if self._driver_binding_gate is not None:
                 changed = set(affected)
-                self._driver_binding_gate.require_unbound(tuple(
+                exports = tuple(
                     item for item in self.driver_exports()
                     if item["component_id"] in changed
-                ))
+                )
+                consumers = self._driver_binding_gate.consumers_for(exports)
+                if consumers:
+                    if self._joint_driver_transition is None:
+                        self._driver_binding_gate.require_unbound(exports)
+                    return await self._joint_driver_transition(
+                        self, previous, candidate, snapshots, affected, consumers,
+                    )
             drained = False
             try:
                 await candidate.prewarm()
@@ -713,7 +726,7 @@ class ControlPackageController:
                     graph=evidence,
                     error_code=(
                         None
-                        if evidence is not None
+                        if evidence is not None and self.scope_kind != "host"
                         else (
                             error.code
                             if isinstance(error, ForestError)

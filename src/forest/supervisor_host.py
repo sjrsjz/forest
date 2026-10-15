@@ -18,6 +18,7 @@ import uvicorn
 from forest.bootstrap_contributions import BootstrapConfigurationRegistry
 from forest.bot_host import BotHost
 from forest.control_driver_binding_gate import ControlDriverBindingGate
+from forest.control_driver_joint_transition import execute_joint_host_driver_transition
 from forest.deployment_access_settings import DeploymentAccessSettings
 from forest.deployment_access_settings import bounded_environment_int as _positive_int
 from forest.deployment_access_settings import required_environment as _required
@@ -350,6 +351,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             host_runtime, package_catalog,
             official_sources=auto_install_official_sources("host"),
             driver_binding_gate=driver_binding_gate,
+            joint_driver_transition=execute_joint_host_driver_transition,
         )
         await host_controller.start()
         await supervisor.start()

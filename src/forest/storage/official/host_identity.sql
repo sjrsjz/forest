@@ -144,7 +144,7 @@ CREATE TABLE forest_host.runtime_graph_change_requests (
     activation_id text NOT NULL,
     receipt_ticket_id text NOT NULL,
     state text NOT NULL DEFAULT 'QUEUED'
-        CHECK (state IN ('QUEUED','RUNNING','SUCCEEDED','FAILED')),
+        CHECK (state IN ('QUEUED','RUNNING','SUCCEEDED','FAILED','PARTIAL')),
     owner_epoch bigint CHECK (owner_epoch IS NULL OR owner_epoch > 0),
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     result_graph_id text,
@@ -171,6 +171,8 @@ CREATE TABLE forest_host.runtime_graph_change_requests (
             AND result_graph_id IS NOT NULL AND result_graph_revision IS NOT NULL AND error_code IS NULL)
         OR (state='FAILED' AND owner_epoch IS NOT NULL AND attempt_count>0
             AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NOT NULL)
+        OR (state='PARTIAL' AND owner_epoch IS NOT NULL AND attempt_count>0
+            AND result_graph_id IS NOT NULL AND result_graph_revision IS NOT NULL AND error_code IS NOT NULL)
     )
 );
 CREATE INDEX runtime_graph_change_queue
@@ -262,14 +264,14 @@ BEGIN
            NEW.target_component_id,NEW.package_digest,NEW.configuration_revision,
            NEW.configuration_payload_digest,NEW.expected_graph_revision,
            NEW.activation_id,NEW.receipt_ticket_id,NEW.created_at)
-       OR OLD.state IN ('SUCCEEDED','FAILED')
+       OR OLD.state IN ('SUCCEEDED','FAILED','PARTIAL')
        OR NOT (
            (OLD.state='QUEUED' AND NEW.state='RUNNING'
                 AND NEW.attempt_count=OLD.attempt_count+1 AND NEW.owner_epoch>0)
            OR (OLD.state='RUNNING' AND NEW.state='RUNNING'
                 AND NEW.attempt_count=OLD.attempt_count+1
                 AND NEW.owner_epoch>OLD.owner_epoch)
-           OR (OLD.state='RUNNING' AND NEW.state IN ('SUCCEEDED','FAILED')
+           OR (OLD.state='RUNNING' AND NEW.state IN ('SUCCEEDED','FAILED','PARTIAL')
                 AND NEW.attempt_count=OLD.attempt_count
                 AND NEW.owner_epoch=OLD.owner_epoch)
        ) OR NEW.updated_at<OLD.updated_at THEN

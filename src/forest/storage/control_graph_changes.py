@@ -412,8 +412,13 @@ class ControlGraphChangeAuthority:
         graph: dict | None = None,
         error_code: str | None = None,
     ) -> dict:
-        if (graph is None) == (error_code is None) or (
-            error_code is not None and re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", error_code) is None
+        if (
+            (graph is None and error_code is None)
+            or (graph is not None and error_code is not None and self.scope != "host")
+            or (
+                error_code is not None
+                and re.fullmatch(r"[A-Z][A-Z0-9_]{0,127}", error_code) is None
+            )
         ):
             raise ForestError(f"{self.scope.upper()}_GRAPH_CHANGE_RESULT_INVALID", "Invalid result", 422)
         async with self.store.pool.connection() as conn, conn.transaction():
@@ -427,9 +432,13 @@ class ControlGraphChangeAuthority:
             ).fetchone()
             if row is None:
                 raise ForestError(f"{self.scope.upper()}_GRAPH_CHANGE_NOT_FOUND", "Request is absent", 404)
-            if row["state"] in {"SUCCEEDED", "FAILED"}:
+            state = (
+                "PARTIAL" if graph is not None and error_code is not None
+                else "SUCCEEDED" if graph is not None else "FAILED"
+            )
+            if row["state"] in {"SUCCEEDED", "FAILED", "PARTIAL"}:
                 if (
-                    row["state"] != ("SUCCEEDED" if graph is not None else "FAILED")
+                    row["state"] != state
                     or row["result_graph_id"] != (graph["graph_id"] if graph is not None else None)
                     or row["result_graph_revision"]
                     != (graph["graph_revision"] if graph is not None else None)
@@ -479,7 +488,7 @@ class ControlGraphChangeAuthority:
                     "updated_at=clock_timestamp() WHERE __scope_id_column__=%s AND operation_id=%s "
                     "RETURNING *",
                     (
-                        "SUCCEEDED" if graph is not None else "FAILED",
+                        state,
                         graph["graph_id"] if graph is not None else None,
                         graph["graph_revision"] if graph is not None else None,
                         error_code,

@@ -1,6 +1,6 @@
 # 跨范围驱动联合换代
 
-本设计约束 Host/Deployment 控制包导出的 Effect 驱动与 Bot 包消费方之间的运行时热替换。当前实现已经冻结来源、核对契约并在活动 Bot 仍消费旧来源时拒绝 Host 换代；下述联合换代协议尚待实现。这里的 Agent、Memory 等业务包只通过 `effect_services.kind` 声明消费，不参与调度本协议。
+本设计约束 Host/Deployment 控制包导出的 Effect 驱动与 Bot 包消费方之间的运行时热替换。当前实现已经冻结来源、核对契约并在活动 Bot 仍消费旧来源时拒绝 Host 换代；下述联合换代协议已接入 Supervisor 的候选换代路径，但多 Bot PostgreSQL、进程恢复和真实实例验收仍未完成。这里的 Agent、Memory 等业务包只通过 `effect_services.kind` 声明消费，不参与调度本协议。
 
 ## 权威与身份
 
@@ -39,3 +39,9 @@ Host 图变更在持有跨图围栏时读取活动 Bot 绑定。Bot 启动、换
 ## 必需验证
 
 隔离 PostgreSQL 用例至少覆盖两个 Bot 共用一个 Host 驱动、一个无关 Bot、在途 Effect 调用、Host 候选预热失败、Bot 准备失败、Host 发布后 Bot 激活失败与进程冷恢复。证明受影响 Bot 及其依赖闭包换代、无关 Generation 保留、旧来源没有新调用、所有在途调用只结算一次；再用低频许可群实例验证真实 Bot 图不中断群聊串行语义。当前单图围栏的回归只能证明拒绝不安全发布，不能算作这些验收。
+
+## 实现状态（2026-10-15）
+
+Supervisor 已按精确旧 `source_ref` 选取 Bot 消费者，在共享门闩下准备 Bot 候选、排空旧图，随后发布 Host 并激活 Bot；Bot activation ID 由 Host activation ID 与 Bot ID 稳定派生。Host 发布后的接管失败会使受影响 Bot 和 Host 进入致命状态，Host 图变更回执以 `PARTIAL` 同时保留图证据与错误码，WebUI 将其显示为终态。Host `PARTIAL` 约束目前只存在于新的 Host 数据库基线，不能直接加载到现行 v31 数据库。
+
+尚未完成：受影响 Bot 的逐项持久结果与中断后联合操作恢复；两个 Bot 共享驱动及无关 Bot 的真实 PostgreSQL 换代用例；在途 Effect 调用、失败注入和许可群低频实测。单元顺序验证与 Host PostgreSQL 回执验证不能代替这些验收。

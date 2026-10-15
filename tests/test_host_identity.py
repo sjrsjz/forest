@@ -385,9 +385,19 @@ CREATE TABLE host_sample_native (value text NOT NULL);
         ) == newer.graph_revision
         proof = await changes.published_graph(change_request)
         assert proof["graph_id"] == newer.graph_id
+        # A committed Host graph and a failed Bot takeover must coexist in
+        # one durable receipt; neither fact can be inferred from the other.
+        partial = await changes.settle(
+            lease, operation_id=change_request["operation_id"], graph=proof,
+            error_code="TEST_BOT_ACTIVATION_FAILED",
+        )
+        assert partial["state"] == "PARTIAL"
+        assert partial["result_graph_id"] == newer.graph_id
+        assert partial["error_code"] == "TEST_BOT_ACTIVATION_FAILED"
         assert (await changes.settle(
             lease, operation_id=change_request["operation_id"], graph=proof,
-        ))["state"] == "SUCCEEDED"
+            error_code="TEST_BOT_ACTIVATION_FAILED",
+        ))["state"] == "PARTIAL"
         replace_body = {
             "component_id": "host.sample", "package_digest": package_digest,
             "expected_graph_revision": newer.graph_revision,

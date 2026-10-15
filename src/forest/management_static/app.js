@@ -899,10 +899,10 @@ $('graph-replace-form').onsubmit = async event => {
     output.textContent = `请求 ${saved.operation_id}：${saved.state}`;
     const deadline = Date.now() + 180000;
     while (apiBase === scope && workspaceEpoch === epoch && Date.now() < deadline) {
-      if (['SUCCEEDED', 'FAILED'].includes(saved.state)) {
+      if (['SUCCEEDED', 'FAILED', 'PARTIAL'].includes(saved.state)) {
         delete form.dataset.operationKey;
         resetGraphPreview(false);
-        if (saved.state === 'SUCCEEDED') await refresh();
+        if (saved.state !== 'FAILED') await refresh();
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 1000));
@@ -911,10 +911,10 @@ $('graph-replace-form').onsubmit = async event => {
       });
       output.textContent = `请求 ${saved.operation_id}：${status.state}`
         + (status.error_code ? ` · ${status.error_code}` : '');
-      if (['SUCCEEDED', 'FAILED'].includes(status.state)) {
+      if (['SUCCEEDED', 'FAILED', 'PARTIAL'].includes(status.state)) {
         delete form.dataset.operationKey;
         resetGraphPreview(false);
-        if (status.state === 'SUCCEEDED') await refresh();
+        if (status.state !== 'FAILED') await refresh();
         break;
       }
     }

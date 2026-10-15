@@ -1,0 +1,224 @@
+"""Coordinate Host driver publication with the Bot graphs that bind its source."""
+
+from __future__ import annotations
+
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
+from uuid import NAMESPACE_URL, uuid5
+
+from forest.errors import ForestError
+
+
+@dataclass
+class _BotTransition:
+    host: object
+    previous: object
+    assembled: object
+    drain: tuple[str, ...] = ()
+    capacity: object | None = None
+    drained: bool = False
+
+
+def _fatal(controller, transitions: list[_BotTransition], code: str, message: str,
+           cause: BaseException) -> ForestError:
+    failure = controller._fail(ForestError(
+        code, message, 503,
+        details={
+            "bot_ids": [item.host.settings.bot_id for item in transitions],
+            "cause": getattr(cause, "code", type(cause).__name__),
+        },
+    ))
+    for item in transitions:
+        item.host._fatal_replacement_error = failure
+    return failure
+
+
+async def _rollback(candidate, previous, transitions, host_drained):
+    failures = []
+    for item in reversed(transitions):
+        try:
+            failures.extend(await item.assembled.registry.close())
+        except BaseException as exc:
+            failures.append(exc)
+    try:
+        failures.extend(await candidate.close())
+    except BaseException as exc:
+        failures.append(exc)
+    for item in reversed(transitions):
+        if item.drained:
+            try:
+                await item.previous.resume_owned_work_after_failed_replacement()
+            except BaseException as exc:
+                failures.append(exc)
+    if host_drained:
+        try:
+            await previous.resume_owned_work_after_failed_replacement()
+        except BaseException as exc:
+            failures.append(exc)
+    return failures
+
+
+async def execute_joint_host_driver_transition(
+    controller, previous, candidate, snapshots, affected, consumers,
+):
+    """Run the irreversible Host then Bot publication under the admission gate.
+
+    The caller holds the Host controller lock and shared driver-binding gate.
+    Only this supervisor-provided coordinator may pass a prepared Host graph to
+    Bot candidate assembly. Normal Bot replacement still reads active exports.
+    """
+
+    gate = controller._driver_binding_gate
+    if gate is None or not consumers:
+        raise ValueError("Joint driver transition needs exact active consumers")
+    transitions: list[_BotTransition] = []
+    host_drained = False
+    old_sources = frozenset(
+        export["source_ref"] for export in controller.driver_exports()
+        if export["component_id"] in set(affected)
+    )
+    async with AsyncExitStack() as stack:
+        try:
+            for host in consumers:
+                lock = host._replacement_lock
+                if lock is None or host.registry is None or host._closing:
+                    raise ForestError(
+                        "CONTROL_DRIVER_CONSUMER_UNAVAILABLE",
+                        "A Bot consumer cannot enter the joint transition", 503,
+                    )
+                await stack.enter_async_context(lock)
+                if host.registry is None or host._closing:
+                    raise ForestError(
+                        "CONTROL_DRIVER_CONSUMER_UNAVAILABLE",
+                        "A Bot consumer stopped before candidate assembly", 503,
+                    )
+
+            await candidate.prewarm()
+            prepared_host_graph = (candidate, snapshots)
+            for host in consumers:
+                previous_bot = host.registry
+                bot_activation_id = str(uuid5(
+                    NAMESPACE_URL,
+                    f"forest.control-driver-joint/1:{candidate.activation_id}:"
+                    f"{host.settings.bot_id}",
+                ))
+                assembled = await host._assemble_candidate(
+                    activation_id=bot_activation_id,
+                    prepared_host_graph=prepared_host_graph,
+                )
+                item = _BotTransition(host, previous_bot, assembled)
+                transitions.append(item)
+                bot_candidate = assembled.registry
+                plan = bot_candidate.preview_graph_transition(previous_bot)
+                item.drain = bot_candidate.plan_graph_transition(previous_bot)
+                item.capacity = plan.worker_capacity
+                if not item.drain:
+                    raise ForestError(
+                        "CONTROL_DRIVER_CONSUMER_PLAN_INVALID",
+                        "Changing a bound Host source must replace its Bot consumer",
+                        409,
+                    )
+                if any(
+                    source in old_sources
+                    for descriptor in bot_candidate.descriptors
+                    for _service, _kind, source in descriptor.effect_driver_bindings
+                ):
+                    raise ForestError(
+                        "CONTROL_DRIVER_SOURCE_STALE",
+                        "Bot candidate still binds a replaced Host source", 409,
+                    )
+                await host._admit_worker_capacity(item.capacity)
+                await bot_candidate.prepare()
+
+            for item in transitions:
+                await stack.enter_async_context(
+                    item.host.selection_reader.publication_fence(
+                        expected_revision=item.assembled.selection.revision,
+                        expected_digest=item.assembled.selection.digest,
+                    )
+                )
+            for item in transitions:
+                await item.previous.drain_owned_work_for_replacement(
+                    item.assembled.registry.activation_id,
+                    components=(
+                        item.drain
+                        if len(item.drain) < len(item.previous.order) else None
+                    ),
+                    candidate_components=(
+                        item.assembled.registry.prepared_replacement_facts()
+                    ),
+                )
+                item.drained = True
+            if affected:
+                await previous.drain_owned_work_for_replacement(
+                    candidate.activation_id,
+                    components=(
+                        affected if len(affected) < len(previous.order) else None
+                    ),
+                    candidate_components=candidate.prepared_replacement_facts(),
+                )
+                host_drained = True
+
+            await candidate.start()
+            candidate.accept_retained_ownership()
+            controller._registry = candidate
+            controller._snapshots = snapshots
+
+            for item in transitions:
+                host = item.host
+                bot_candidate = item.assembled.registry
+                await host._admit_worker_capacity(item.capacity)
+                await bot_candidate.prewarm()
+                await bot_candidate.start()
+                bot_candidate.accept_retained_ownership()
+                host.registry = bot_candidate
+                host._official_descriptors = item.assembled.official_descriptors
+                host._official_defaults = item.assembled.official_defaults
+                host._official_effect_drivers = (
+                    item.assembled.official_effect_drivers
+                )
+                host.selection_reader = item.assembled.selection_reader
+                gate.refresh(host)
+
+            for item in transitions:
+                errors = await item.previous.close()
+                if errors:
+                    raise errors[0]
+            errors = await previous.close()
+            if errors:
+                raise errors[0]
+            return candidate
+        except BaseException as error:
+            committed = bool(candidate.publication_committed)
+            if host_drained and not committed and candidate.graph_identity is not None:
+                try:
+                    head = await controller.runtime.generation_authority.current_graph()
+                    committed = (
+                        head is None or head.graph_id != previous.graph_identity.graph_id
+                    )
+                except BaseException:
+                    committed = True
+            if committed:
+                failure = _fatal(
+                    controller, transitions,
+                    "CONTROL_DRIVER_JOINT_POST_PUBLICATION_FAILURE",
+                    "Host driver published but a Bot consumer did not complete",
+                    error,
+                )
+                raise failure from error
+            failures = await _rollback(
+                candidate, previous, transitions, host_drained
+            )
+            if failures or (
+                isinstance(error, ForestError)
+                and error.code == "RUNTIME_GRAPH_REPLACEMENT_ROLLBACK_FAILED"
+            ):
+                cause = failures[0] if failures else error
+                failure = _fatal(
+                    controller, transitions,
+                    "CONTROL_DRIVER_JOINT_ROLLBACK_FAILED",
+                    "Joint driver transition could not restore the old graphs",
+                    cause,
+                )
+                raise failure from cause
+            raise

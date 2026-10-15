@@ -1,5 +1,8 @@
 # Forest 实现状态
 
+2026-10-15 跨作用域驱动联合换代开发态：Supervisor 已接入共享门闩内的 Bot 候选准备、Host 先发布、Bot 后激活；Host 持久发布后 Bot 失败可记录 `PARTIAL` 回执，新 Host 基线 PostgreSQL 验证通过。受影响 Bot 的逐项持久结果、进程恢复以及双 Bot PostgreSQL/真实实例验证仍缺失；此代码未装载到在线 v31，不能声明联合热重载验收完成。
+
+
 ## 当前在线（2026-10-15 10:03 北京时间）
 
 10:03 只读在线复核：树莓派 OneBot `get_status` 返回 `online=true, good=true`，`get_login_info` 为 `3605196653`，NapCat `4.18.38` 与 Linux QQ `3.2.34-53644` 正在运行，8080 对 Forest 保持一条 TCP 连接。v31 两次只读采样零违规，图修订 4、22/22 ACTIVE、170 条自然来源、7 个群主干、0 活动 Run/Job/待发送、0 DOCUMENT facet；许可群 `933179609` 仍未观察到新入站。因此真实显式 @ 回复和自然图片召回仍未验收。本次未发送 QQ 消息或调用付费模型。
