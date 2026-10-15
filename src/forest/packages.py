@@ -2740,24 +2740,24 @@ class PackageCatalog:
                 )
         return snapshot
 
-    def publish_official_archive(
+    def _publish_trusted_archive(
         self,
         data: bytes,
         *,
         scope: str,
+        table: str,
         expected_archive_sha256: str,
         expected_package_digest: str,
         expected_manifest_digest: str,
         expected_package_id: str,
         expected_component_id: str,
         expected_runtime: str,
+        identity_error: str,
+        digest_error: str,
+        require_python_worker: bool = False,
+        forbid_official_grants: bool = False,
     ) -> PackageSnapshot:
-        """Commit a preauthorized ZIP and its official provenance together.
-
-        The caller owns authorization and the expected identities. Ordinary ZIP
-        import never calls this entry and cannot create official provenance.
-        """
-        table = self._official_table(scope)
+        """Atomically publish an exact archive and a separately issued trust fact."""
         if not isinstance(data, bytes) or not 1 <= len(data) <= MAX_ARCHIVE_BYTES:
             _fail("PACKAGE_TOO_LARGE", "Package ZIP exceeds the upload limit")
         if (
@@ -2775,8 +2775,13 @@ class PackageCatalog:
             or component["id"] != expected_component_id
             or component["scope"] != scope
             or (storage is not None and storage.get("execution_profile") != "official")
+            or (require_python_worker and manifest["runtime"] != "python-worker")
+            or (
+                forbid_official_grants
+                and "official_bot_grants" in component.get("capabilities", {})
+            )
         ):
-            _fail("OFFICIAL_PACKAGE_SOURCE_INVALID", "Official package identity is invalid")
+            _fail(identity_error, "Trusted package identity or authority is invalid")
         content_digest = digest_json(
             {name: hashlib.sha256(value).hexdigest() for name, value in captured.items()}
         )
@@ -2784,7 +2789,7 @@ class PackageCatalog:
             content_digest != expected_package_digest
             or digest_json(manifest) != expected_manifest_digest
         ):
-            _fail("OFFICIAL_PACKAGE_DIGEST_MISMATCH", "Official package contents differ")
+            _fail(digest_error, "Trusted package contents differ")
         with self._prepared_artifact(captured, manifest) as prepared:
             with closing(sqlite3.connect(self.root / "catalog.sqlite3", timeout=30)) as db, db:
                 self._prepare_catalog_tables(db, imports=False)
@@ -2801,6 +2806,61 @@ class PackageCatalog:
                     (snapshot.digest, component["id"]),
                 )
         return snapshot
+
+    def publish_official_archive(
+        self,
+        data: bytes,
+        *,
+        scope: str,
+        expected_archive_sha256: str,
+        expected_package_digest: str,
+        expected_manifest_digest: str,
+        expected_package_id: str,
+        expected_component_id: str,
+        expected_runtime: str,
+    ) -> PackageSnapshot:
+        """Commit a preauthorized ZIP and its official provenance together."""
+        return self._publish_trusted_archive(
+            data,
+            scope=scope,
+            table=self._official_table(scope),
+            expected_archive_sha256=expected_archive_sha256,
+            expected_package_digest=expected_package_digest,
+            expected_manifest_digest=expected_manifest_digest,
+            expected_package_id=expected_package_id,
+            expected_component_id=expected_component_id,
+            expected_runtime=expected_runtime,
+            identity_error="OFFICIAL_PACKAGE_SOURCE_INVALID",
+            digest_error="OFFICIAL_PACKAGE_DIGEST_MISMATCH",
+        )
+
+    def publish_reviewed_bot_archive(
+        self,
+        data: bytes,
+        *,
+        expected_archive_sha256: str,
+        expected_package_digest: str,
+        expected_manifest_digest: str,
+        expected_package_id: str,
+        expected_component_id: str,
+        expected_runtime: str,
+    ) -> PackageSnapshot:
+        """Record explicit owner trust without claiming builtin provenance."""
+        return self._publish_trusted_archive(
+            data,
+            scope="bot",
+            table="reviewed_bot_artifacts",
+            expected_archive_sha256=expected_archive_sha256,
+            expected_package_digest=expected_package_digest,
+            expected_manifest_digest=expected_manifest_digest,
+            expected_package_id=expected_package_id,
+            expected_component_id=expected_component_id,
+            expected_runtime=expected_runtime,
+            identity_error="REVIEWED_PACKAGE_SOURCE_INVALID",
+            digest_error="REVIEWED_PACKAGE_DIGEST_MISMATCH",
+            require_python_worker=True,
+            forbid_official_grants=True,
+        )
 
     def _get_official(self, digest: str, scope: str) -> PackageSnapshot:
         """Open only artifacts admitted for this exact control scope."""
@@ -2847,6 +2907,38 @@ class PackageCatalog:
 
     def is_official_host(self, digest: str) -> bool:
         return self._is_official(digest, "host")
+
+    def get_reviewed_bot(self, digest: str) -> PackageSnapshot:
+        """Open only an exact Bot artifact admitted by the catalog owner."""
+        snapshot = self.get(digest)
+        rows = self._rows(
+            "SELECT component_id FROM reviewed_bot_artifacts WHERE digest=?",
+            (digest,),
+            table="reviewed_bot_artifacts",
+        )
+        if (
+            snapshot.component["scope"] != "bot"
+            or len(rows) != 1
+            or rows[0][0] != snapshot.component["id"]
+        ):
+            _fail(
+                "REVIEWED_PACKAGE_NOT_REGISTERED",
+                "Artifact has no owner-issued reviewed Bot provenance",
+            )
+        return snapshot
+
+    def is_reviewed_bot(self, digest: str) -> bool:
+        snapshot = self.get(digest)
+        rows = self._rows(
+            "SELECT component_id FROM reviewed_bot_artifacts WHERE digest=?",
+            (digest,),
+            table="reviewed_bot_artifacts",
+        )
+        return (
+            snapshot.component["scope"] == "bot"
+            and len(rows) == 1
+            and rows[0][0] == snapshot.component["id"]
+        )
 
     def import_archive(
         self,

@@ -286,6 +286,93 @@ def test_official_archive_requires_exact_declared_bytes_and_identity(tmp_path):
     assert catalog.publish_official_archive(archive, **expected).digest == released.digest
 
 
+def test_reviewed_bot_archive_requires_exact_owner_provenance(tmp_path):
+    staging = PackageCatalog(tmp_path / "staging")
+    source = staging.build(EXAMPLE)
+    archive = staging.export_archive(source.digest)
+    expected = {
+        "expected_archive_sha256": "sha256:" + hashlib.sha256(archive).hexdigest(),
+        "expected_package_digest": source.digest,
+        "expected_manifest_digest": packages.digest_json(source.manifest),
+        "expected_package_id": source.manifest["package_id"],
+        "expected_component_id": source.component["id"],
+        "expected_runtime": "python-worker",
+    }
+    catalog = PackageCatalog(tmp_path / "release")
+    for changed, code in (
+        ({"expected_archive_sha256": "sha256:" + "0" * 64}, "PACKAGE_ARCHIVE_DIGEST_MISMATCH"),
+        ({"expected_package_digest": "sha256:" + "0" * 64}, "REVIEWED_PACKAGE_DIGEST_MISMATCH"),
+        ({"expected_manifest_digest": "sha256:" + "0" * 64}, "REVIEWED_PACKAGE_DIGEST_MISMATCH"),
+        ({"expected_component_id": "another.component"}, "REVIEWED_PACKAGE_SOURCE_INVALID"),
+        ({"expected_runtime": "another-runtime"}, "REVIEWED_PACKAGE_SOURCE_INVALID"),
+    ):
+        with pytest.raises(ForestError) as rejected:
+            catalog.publish_reviewed_bot_archive(archive, **{**expected, **changed})
+        assert rejected.value.code == code
+        assert catalog.list() == []
+    released = catalog.publish_reviewed_bot_archive(archive, **expected)
+    assert released.digest == source.digest
+    assert catalog.get_reviewed_bot(released.digest).digest == released.digest
+    assert catalog.is_reviewed_bot(released.digest)
+    assert not catalog.is_official_bot(released.digest)
+    assert catalog.publish_reviewed_bot_archive(archive, **expected).digest == released.digest
+
+    imported = PackageCatalog(tmp_path / "ordinary-import")
+    imported.import_archive(archive)
+    assert not imported.is_reviewed_bot(released.digest)
+    with pytest.raises(ForestError) as rejected:
+        imported.get_reviewed_bot(released.digest)
+    assert rejected.value.code == "REVIEWED_PACKAGE_NOT_REGISTERED"
+
+
+def test_reviewed_bot_archive_rejects_official_bot_grants(tmp_path):
+    staging = PackageCatalog(tmp_path / "staging")
+    source = staging.build(
+        Path(__file__).parents[1] / "src/forest/builtin/job_scheduler"
+    )
+    archive = staging.export_archive(source.digest)
+    catalog = PackageCatalog(tmp_path / "review")
+    with pytest.raises(ForestError) as rejected:
+        catalog.publish_reviewed_bot_archive(
+            archive,
+            expected_archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+            expected_package_digest=source.digest,
+            expected_manifest_digest=packages.digest_json(source.manifest),
+            expected_package_id=source.manifest["package_id"],
+            expected_component_id=source.component["id"],
+            expected_runtime="python-worker",
+        )
+    assert rejected.value.code == "REVIEWED_PACKAGE_SOURCE_INVALID"
+    assert catalog.list() == []
+
+
+@pytest.mark.asyncio
+async def test_reviewed_bot_release_command_publishes_exact_archive(tmp_path, capsys):
+    staging = PackageCatalog(tmp_path / "staging")
+    source = staging.build(EXAMPLE)
+    archive = staging.export_archive(source.digest)
+    path = tmp_path / "reviewed.zip"
+    path.write_bytes(archive)
+    root = tmp_path / "owner-catalog"
+    root.mkdir()
+    await run_plugin_command(Namespace(
+        plugin_command="publish-reviewed-bot",
+        archive=path,
+        catalog_dir=root,
+        archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+        package_digest=source.digest,
+        manifest_digest=packages.digest_json(source.manifest),
+        package_id=source.manifest["package_id"],
+        component_id=source.component["id"],
+    ))
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "published-reviewed-bot"
+    assert receipt["package_digest"] == source.digest
+    catalog = PackageCatalog(root)
+    assert catalog.get_reviewed_bot(source.digest).digest == source.digest
+    assert not catalog.is_official_bot(source.digest)
+
+
 def test_official_archive_registration_failure_rolls_back_index(tmp_path):
     staging = PackageCatalog(tmp_path / "staging")
     source = staging.build(EXAMPLE)

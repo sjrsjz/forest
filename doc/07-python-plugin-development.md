@@ -258,6 +258,16 @@ forest plugin import hello.zip
 
 普通包的 components.capabilities.requests 只能列出该包已声明的自身服务、领域操作、状态、事件或任务端口；部署批准必须与此请求集合准确一致。宿主随代码交付的官方 Bot 包可另在 components.capabilities.official_bot_grants 中声明 capability 与显式 delegable 布尔值，资源始终由内核绑定为当前 Bot，包不得填写任意 Bot ID。只有官方 bootstrap 路径会将该声明纳入带策略修订的 GrantSet；普通安装包只要出现此字段就会在数据库访问前被拒绝，ZIP 导入或 manifest 自报不能取得官方身份。该声明属于内容寻址工件，热重载时按准确包摘要重新装配授予；BotHost 不维护按组件名分派的授权表。
 
+## 受审查的高权限扩展包（目标契约；当前尚未开放）
+
+普通 `installed` 包继续使用受限的声明式存储与自身能力批准；ZIP 导入、manifest 的 `execution_profile` 或 Web 管理员选中包都不能把它升为可信代码。需要私有 SQL 函数或原生 Effect 的扩展，必须经过部署目录所有者单独批准**准确 ZIP、包、manifest、组件、scope 和运行时身份**。批准事实与不可变工件索引在同一目录事务发布；不同字节、不同组件或重建出的新摘要都要重新批准，热重载预检与冷启动都重新核对。Bot 选择仍固定包和 manifest 摘要，授权 capability 仍按该 Bot 的精确选择批准；受审查包不能声明 `official_bot_grants`，也不能冒用发行版 builtin 身份。
+
+任意 SQL 函数不属于现有普通包的数据库沙箱：Bot Domain Authority 当前在宿主数据库连接上执行包函数。受审查 SQL 因此是与官方包同级的**部署所有者可信代码**，不是把普通包的拒绝分支删除。它只可拥有自身 schema 和领域端口的权威语义；要给不可信作者开放 SQL，须先有隔离数据库身份与跨包 UnitOfWork 的原子提交方案，不能用同一高权限连接上的 `SET ROLE` 冒充隔离。包的存储基线身份仍在 Graph 中冻结；不同基线的在线升级必须另有迁移协议，不能用热重载偷偷覆盖已安装表。
+
+Effect 有两个独立批准：Bot 包声明的 `effect_services.kind` 必须由部署批准的宿主驱动契约提供；驱动代码本身不得从 Bot 包 manifest 路径直接 import 到宿主。新增驱动实现应作为独立的 Host/Deployment 组件工件捕获、换代，Bot 组件通过声明依赖绑定其准确 Generation。驱动换代按依赖闭包冻结入口、排空在途效果、发布新图并保留旧效果身份；旧代的晚到回执仍回到旧代对账。通用 HTTP 效果也应只按已批准的 endpoint、Secret 和预算派发。当前宿主只有内置驱动注册表，动态第三方驱动工件及此批准链尚未实现，不能将受限包热替换的通过记录称为完整第三方 SQL/Effect 热重载。
+
+当前实现阶段（2026-10-15）：目录所有者可用 `forest plugin publish-reviewed-bot <archive> --catalog-dir <absolute-path> --archive-sha256 <sha256:...> --package-digest <sha256:...> --manifest-digest <sha256:...> --package-id <id> --component-id <id>` 写入独立的 reviewed Bot 工件来源。命令要求完整准确的归档与声明身份，登记和工件索引原子提交；普通导入不能产生该来源，reviewed 来源也不等于 official 来源。此阶段只建立可审核的信任事实；Bot 装配仍拒绝普通包的领域 SQL/Effect，reviewed 工件尚不能因此执行这些能力。
+
 原生 Effect Driver 可在宿主驱动注册表中附带配置安全校验器。包通过 effect_services.kind 选择驱动种类；通用包装配器按该声明组合校验器，在创建期、配置提交与 Generation 准备中使用同一边界，不按组件目录名分派。校验器属于宿主提供的受信任驱动代码，普通插件不得以 manifest 路径要求宿主加载自身 Python 函数；包内运行时 schema 仍负责公开配置形状。
 
 Effect Driver 若需改变本包的持久领域状态，须由 effect service 在清单中逐项声明 `startup_commands` 或 `runtime_commands`，且目标必须是本包 Domain Command。前者只接纳 PREPARED Generation 的启动观察，后者只接纳当前 ACTIVE Generation 的运行期观察；内核逐次验证输入/输出 schema、操作 ID 与代际围栏。驱动不得直接读写包私有表，也不能把运行期事件偷走启动端口。`vector.index` 的 Milvus 身份异常据此调用包内隔离命令；集合健康事实始终属于包。

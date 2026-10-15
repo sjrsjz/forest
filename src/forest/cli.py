@@ -83,6 +83,17 @@ def _parser() -> argparse.ArgumentParser:
         release.add_argument("--manifest-digest", required=True)
         release.add_argument("--package-id", required=True)
         release.add_argument("--component-id", required=True)
+    reviewed = actions.add_parser(
+        "publish-reviewed-bot",
+        help="Publish an operator-reviewed Bot extension by exact archive identity",
+    )
+    reviewed.add_argument("archive", type=Path)
+    reviewed.add_argument("--catalog-dir", type=Path, required=True)
+    reviewed.add_argument("--archive-sha256", required=True)
+    reviewed.add_argument("--package-digest", required=True)
+    reviewed.add_argument("--manifest-digest", required=True)
+    reviewed.add_argument("--package-id", required=True)
+    reviewed.add_argument("--component-id", required=True)
     return parser
 
 
@@ -131,6 +142,9 @@ async def run_plugin_command(args: argparse.Namespace) -> None:
         "publish-official-bot", "publish-official-deployment", "publish-official-host",
     }:
         await run_official_release_command(args)
+        return
+    if args.plugin_command == "publish-reviewed-bot":
+        await run_reviewed_release_command(args)
         return
     if args.plugin_command in {"lock", "import", "export"}:
         await run_artifact_command(args)
@@ -324,6 +338,44 @@ async def run_official_release_command(args: argparse.Namespace) -> None:
     )
     print(json.dumps({
         "status": f"published-official-{scope}",
+        "package_digest": snapshot.digest,
+        "manifest_digest": args.manifest_digest,
+        "package_id": snapshot.manifest["package_id"],
+        "component_id": snapshot.component["id"],
+        "catalog": str(catalog.root),
+    }, ensure_ascii=False))
+
+
+async def run_reviewed_release_command(args: argparse.Namespace) -> None:
+    """Publish privileged Bot code only under the local catalog owner's OS authority."""
+    from forest.packages import MAX_ARCHIVE_BYTES, PackageCatalog
+
+    catalog_root = args.catalog_dir
+    if not catalog_root.is_absolute() or not catalog_root.is_dir():
+        raise ForestError(
+            "REVIEWED_RELEASE_CATALOG_INVALID",
+            "Reviewed release requires an existing absolute catalog directory", 422,
+        )
+    try:
+        with args.archive.open("rb") as stream:
+            content = stream.read(MAX_ARCHIVE_BYTES + 1)
+    except OSError:
+        raise ForestError(
+            "PACKAGE_IO_FAILED", "Unable to read the reviewed package archive", 422,
+        ) from None
+    catalog = PackageCatalog(catalog_root)
+    snapshot = await asyncio.to_thread(
+        catalog.publish_reviewed_bot_archive,
+        content,
+        expected_archive_sha256=args.archive_sha256,
+        expected_package_digest=args.package_digest,
+        expected_manifest_digest=args.manifest_digest,
+        expected_package_id=args.package_id,
+        expected_component_id=args.component_id,
+        expected_runtime="python-worker",
+    )
+    print(json.dumps({
+        "status": "published-reviewed-bot",
         "package_digest": snapshot.digest,
         "manifest_digest": args.manifest_digest,
         "package_id": snapshot.manifest["package_id"],

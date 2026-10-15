@@ -14,6 +14,8 @@ v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + �
 
 普通安装包扩展边界审计（2026-10-15）：普通 Bot 包目前要求精确批准的自有能力和受限的声明式存储；装配器明确拒绝其自带 Domain Query/Command、UnitOfWork participant、持久 owned-work handler 与 Effect service。部署/Host 范围的普通控制包目前只开放受限组件状态端口。受限包的热加入、定点热替换和进程恢复已有隔离验证，但这不能表述为任意第三方私有 SQL 或外部 Effect 可热重载。官方 builtin 包的完整领域 SQL/Effect 路径也不能通过删除普通包的拒绝条件直接转授；开放这两类能力需要明确的安装信任、数据库角色与驱动批准边界。
 
+受审查 Bot 工件来源第一阶段（2026-10-15）：目录所有者 CLI `publish-reviewed-bot` 以准确 ZIP、包、manifest、package/component ID 与 Python Worker 运行时身份原子发布独立 reviewed 来源；普通 ZIP 导入无法获得该身份，试图声明 `official_bot_grants` 的工件被拒。该来源不是 official builtin，也尚未改变 `installed` 包的 SQL/Effect 拒绝路径。定向发布/隔离用例 4 passed；包目录完整回归 114 passed、1 个既有重复 ZIP 名称警告；Ruff 通过。下一阶段须让候选编译、Bot 选择和热重载在准确 reviewed 来源下绑定私有 SQL 与已批准驱动，不能据此宣称高权限插件已可运行。
+
 ### v31 当前验收门禁
 
 | 要求 | 已有直接证据 | 尚缺证据或实现 |
