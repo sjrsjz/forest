@@ -663,6 +663,32 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
             expected_graph_revision=registry.graph_identity.graph_revision,
         )
         assert preview["package_digest"] == candidate.digest
+        staged_snapshots = {**controller._snapshots, "host.sample": candidate}
+        staged = await controller._assemble(
+            staged_snapshots,
+            frozen_configurations=await controller._active_configurations(
+                registry.graph_identity
+            ),
+        )
+        staged.plan_graph_transition(registry, target_component_id="host.sample")
+        try:
+            await staged.prepare()
+            future_exports = controller._driver_exports_for(staged, staged_snapshots)
+            assert len(future_exports) == 1
+            assert future_exports[0]["generation_id"] == (
+                staged.graph_identity.generations["host.sample"]
+            )
+            assert controller.driver_exports() == ()
+            with pytest.raises(ForestError) as mismatched_snapshot:
+                controller._driver_exports_for(staged, {"host.sample": first})
+            assert mismatched_snapshot.value.code == (
+                "CONTROL_DRIVER_EXPORT_SNAPSHOT_MISMATCH"
+            )
+        finally:
+            await staged.close()
+        with pytest.raises(ForestError) as stopped_candidate:
+            controller._driver_exports_for(staged, staged_snapshots)
+        assert stopped_candidate.value.code == "CONTROL_DRIVER_EXPORT_UNAVAILABLE"
         replaced = await controller.replace(
             "host.sample", candidate.digest,
             expected_graph_revision=registry.graph_identity.graph_revision,

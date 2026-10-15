@@ -68,15 +68,40 @@ class ControlPackageController:
         This read port does not admit Bot calls or lease the provider.
         """
 
-        registry = self.registry
+        return self._driver_exports_for(self.registry, self._snapshots)
+
+    def _driver_exports_for(
+        self, registry: RuntimeModuleRegistry, snapshots: dict[str, PackageSnapshot]
+    ) -> tuple[dict, ...]:
+        """Project driver facts from an active or prepared exact control graph."""
+
         graph = registry.graph_identity
-        if graph is None:
+        descriptors = {
+            item.component_id: item for item in registry.descriptors
+        }
+        if (
+            graph is None
+            or set(snapshots) != set(descriptors)
+            or set(snapshots) != set(graph.generations)
+            or any(
+                getattr(state, "value", None) not in {"PREPARED", "ACTIVE"}
+                for state in registry.states.values()
+            )
+        ):
             raise ForestError(
                 "CONTROL_DRIVER_EXPORT_UNAVAILABLE",
-                "Control Graph has no published Generation identity", 503,
+                "Control Graph has no matching Generation snapshot", 503,
             )
         exports = []
-        for component_id, snapshot in sorted(self._snapshots.items()):
+        for component_id, snapshot in sorted(snapshots.items()):
+            if (
+                snapshot.component["id"] != component_id
+                or descriptors[component_id].artifact.package_digest != snapshot.digest
+            ):
+                raise ForestError(
+                    "CONTROL_DRIVER_EXPORT_SNAPSHOT_MISMATCH",
+                    "Driver export snapshot differs from its prepared Graph", 409,
+                )
             declarations = snapshot.component.get("effect_driver_exports", ())
             if not declarations:
                 continue
