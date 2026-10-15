@@ -6538,3 +6538,185 @@ async def test_real_vl_png_and_gif_archive_cross_group_recall_and_management_tri
                     sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database))
                 )
                 await admin.close()
+
+
+@pytest.mark.postgres
+async def test_reviewed_bot_package_selection_hot_swap_and_cold_restore(tmp_path):
+    dsn = os.environ.get("FOREST_TEST_DSN")
+    if not dsn:
+        pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
+    name = "forest_reviewed_bot_" + uuid4().hex
+    admin = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    await admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    parsed = urlsplit(dsn)
+    uri = urlunsplit((parsed.scheme, parsed.netloc, "/" + name, "", ""))
+    settings = BotSettings(
+        bot_id="bot-reviewed-package", dsn=uri,
+        model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
+        model="test-model", model_deployment_id="provider.chat-completions/test",
+        model_max_output_tokens=1024, model_input_modalities=("text",),
+        embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
+        embedding_api_key="test-embedding-key",
+        embedding_deployment_id="embedding.multimodal/qiyu-vl/test",
+        embedding_model_revision="test-revision/1",
+        embedding_model="Qwen/Qwen3-VL-Embedding-8B", embedding_dimensions=4096,
+        onebot_self_id="123456789", onebot_websocket_url="ws://127.0.0.1:3001/",
+        onebot_access_token="test-onebot-token",
+        allowed_group_ids=("933179609",), group_trigger_mode="MENTION",
+        private_enabled=True, shell_administrator_ids=("42",),
+        agent_system_prompt="Reviewed package lifecycle fixture.",
+    )
+
+    async def create_websocket(_url, _token, **_limits):
+        return FakeWebSocketClient(settings.onebot_self_id)
+
+    catalog_root = tmp_path / "reviewed-bot-catalog"
+
+    def make_host():
+        return BotHost(
+            settings,
+            model_client_factory=FakeModelClient,
+            embedding_client_factory=FakeEmbeddingClient,
+            media_client_factory=FakeMediaClient,
+            vector_index_client_factory=FakeMilvusClient,
+            vector_index_audit_client_factory=FakeMilvusAuditClient,
+            websocket_client_factory=create_websocket,
+            package_catalog=PackageCatalog(catalog_root),
+        )
+
+    staging = PackageCatalog(tmp_path / "reviewed-staging")
+    source_root = Path(__file__).parents[1] / "src/forest/builtin/counter"
+    source = staging.build(source_root)
+    approved = tuple(source.component["capabilities"]["requests"])
+
+    def publish(catalog, snapshot):
+        archive = staging.export_archive(snapshot.digest)
+        catalog.publish_reviewed_bot_archive(
+            archive,
+            expected_archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+            expected_package_digest=snapshot.digest,
+            expected_manifest_digest=digest_json(snapshot.manifest),
+            expected_package_id=snapshot.manifest["package_id"],
+            expected_component_id=snapshot.component["id"],
+            expected_runtime="python-worker",
+        )
+
+    async def select(host, snapshot, *, selection_revision, graph_revision, operation_id):
+        payload = {
+            "component_id": "forest.counter",
+            "source_kind": "installed",
+            "package_digest": snapshot.digest,
+            "manifest_digest": digest_json(snapshot.manifest),
+            "approved_capabilities": list(approved),
+            "desired_enabled": True,
+            "expected_configuration_revision": 1,
+            "expected_selection_revision": selection_revision,
+            "expected_graph_revision": graph_revision,
+        }
+        contract = host.registry.get("component.worker-host").management_contract
+        preview = await contract.query("validate", payload)
+        assert preview["plan_digest"].startswith("sha256:")
+        receipt = await contract.action(
+            "module.enable", operation_id=operation_id,
+            payload={**payload, "plan_digest": preview["plan_digest"]},
+            authorization=SimpleNamespace(actor_ref="subject/host-admin"),
+            authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+        )
+        async with asyncio.timeout(180):
+            while True:
+                graph = host.registry.graph_identity
+                active = next(
+                    (item for item in host.registry.descriptors
+                     if item.component_id == "forest.counter"), None
+                )
+                latest = (await host._kernel.runtime.status())["latest_replacement"]
+                if latest is not None and latest["state"] == "FAILED":
+                    pytest.fail(f"Reviewed package replacement failed: {latest}")
+                if (
+                    active is not None
+                    and active.artifact.package_digest == snapshot.digest
+                    and latest is not None
+                    and latest["state"] == "SUCCEEDED"
+                    and graph.graph_revision > graph_revision
+                ):
+                    return receipt, graph
+                await asyncio.sleep(0.2)
+
+    try:
+        host = make_host()
+        try:
+            await host.start()
+            publish(host.package_catalog, source)
+            await bootstrap_installed_package(
+                source.digest, host.package_catalog, host.store,
+                host.schema_bundle_installer, kernel=host._kernel,
+                initial_configuration={"label": "reviewed", "multiplier": 1},
+                approved_capabilities=approved,
+            )
+            before = host.registry.graph_identity
+            first_receipt, first_graph = await select(
+                host, source, selection_revision=0, graph_revision=before.graph_revision,
+                operation_id="selection/reviewed-counter-v1",
+            )
+            assert first_receipt["selection_revision"] == 1
+            assert first_graph.generations["kernel.runtime"] == before.generations["kernel.runtime"]
+            first_descriptor = next(
+                item for item in host.registry.descriptors
+                if item.component_id == "forest.counter"
+            )
+            assert first_descriptor.artifact.trust_level == "reviewed"
+
+            updated_root = tmp_path / "counter-v2"
+            copytree(source_root, updated_root)
+            manifest = updated_root / "module.toml"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    'version = "0.7.2"', 'version = "0.7.3"', 1
+                ),
+                encoding="utf-8",
+            )
+            worker = updated_root / "python" / "counter.py"
+            worker.write_text(
+                worker.read_text(encoding="utf-8") + "\nREVIEWED_GENERATION = 2\n",
+                encoding="utf-8",
+            )
+            updated = staging.build(updated_root)
+            publish(host.package_catalog, updated)
+            second_receipt, second_graph = await select(
+                host, updated, selection_revision=1,
+                graph_revision=first_graph.graph_revision,
+                operation_id="selection/reviewed-counter-v2",
+            )
+            assert second_receipt["selection_revision"] == 2
+            assert second_graph.generations["forest.counter"] != (
+                first_graph.generations["forest.counter"]
+            )
+            assert second_graph.generations["kernel.runtime"] == (
+                first_graph.generations["kernel.runtime"]
+            )
+        finally:
+            await host.close()
+
+        restored = make_host()
+        try:
+            await restored.start()
+            descriptor = next(
+                item for item in restored.registry.descriptors
+                if item.component_id == "forest.counter"
+            )
+            assert descriptor.artifact.package_digest == updated.digest
+            assert descriptor.artifact.trust_level == "reviewed"
+            assert "forest.counter" in restored.registry.graph_identity.generations
+            selection = await restored.registry.get(
+                "component.worker-host"
+            ).management_contract.query("selection", {})
+            assert selection["revision"] == 2
+            assert selection["entries"][0]["package_digest"] == updated.digest
+        finally:
+            await restored.close()
+    finally:
+        assert name.startswith("forest_reviewed_bot_") and len(name) == 52
+        await admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(
+            sql.Identifier(name)
+        ))
+        await admin.close()
