@@ -1,6 +1,6 @@
 # 跨范围驱动联合换代
 
-本设计约束 Host/Deployment 控制包导出的 Effect 驱动与 Bot 包消费方之间的运行时热替换。当前实现已冻结来源、核对契约，并由 Supervisor 在活动 Bot 消费旧来源时执行联合候选换代；缺少协调端口则拒绝该变更。多 Bot PostgreSQL、完整进程恢复和真实实例验收仍未完成。这里的 Agent、Memory 等业务包只通过 `effect_services.kind` 声明消费，不参与调度本协议。
+本设计约束 Host/Deployment 控制包导出的 Effect 驱动与 Bot 包消费方之间的运行时热替换。当前实现冻结来源、核对契约，并由 Supervisor 在活动 Bot 消费旧来源时执行联合候选换代；缺少协调端口则拒绝该变更。两个消费 Bot 和一个无关 Bot 的真实 PostgreSQL 换代用例已通过；在途 Effect、失败注入、完整进程恢复和许可群低频实例验收仍未完成。Agent、Memory 等业务包只通过 `effect_services.kind` 声明消费，不参与调度本协议。
 
 ## 权威与身份
 
@@ -46,4 +46,4 @@ Supervisor 已按精确旧 `source_ref` 选取 Bot 消费者，在共享门闩�
 
 Host 作用域在候选图 PREPARED 且 Bot 候选均准备完成后，一次性冻结受影响 Bot 名册，记录旧 Bot 图、目标 activation ID 和 PENDING 状态。Bot 图发布并由其内核图账本证实、旧 Bot 图关闭后，逐项结算 SUCCEEDED；异常项按是否有已发布 Bot 图证据结算 FAILED 或 PARTIAL。数据库触发器拒绝在 Host 图发布前把 Bot 记为 SUCCEEDED/PARTIAL，终态不可改写。管理状态返回逐 Bot 结果；进程重启看到 Host 图已发布而名册仍有 PENDING 时，会把 Host 请求结算为 PARTIAL，绝不误报 SUCCEEDED。
 
-尚未完成：PENDING Bot 的主动证据复核、自动补接及最终结果收敛；两个 Bot 共享驱动及无关 Bot 的真实 PostgreSQL 换代用例；在途 Effect 调用、失败注入和许可群低频实测。单元顺序验证与 Host PostgreSQL 回执验证不能代替这些验收。
+尚未完成：PENDING Bot 的主动证据复核、自动补接及最终结果收敛；在途 Effect 调用、Host 候选预热失败、Bot 准备失败、Host 发布后 Bot 激活失败、进程冷恢复，以及许可群低频实测。真实 PostgreSQL 用例已覆盖两个 Bot 共享 Host 驱动、无关 Bot 保持原 Graph、受影响 Bot 换代与逐 Bot SUCCEEDED 账本；它尚不能证明上述失败与恢复路径。

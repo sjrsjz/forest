@@ -12,9 +12,9 @@ class ControlDriverBindingGate:
 
     The registry remains the authority for each Bot's binding facts. This gate
     only keeps a process-local snapshot while that Bot graph is active. It
-    rejects a provider replacement that would strand an active consumer; a
-    future joint transition can use the same fence to drain and republish both
-    graphs before releasing admission.
+    gives the Host controller the exact active consumers before replacement.
+    The joint coordinator drains and republishes those graphs while holding
+    this fence; without that coordinator, replacement is rejected.
     """
 
     def __init__(self) -> None:

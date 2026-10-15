@@ -28,19 +28,20 @@ v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + �
 Effect 驱动来源冻结（2026-10-15）：包编译器现在要求每个已声明 Effect service 显式绑定驱动来源；Bot 的部署宿主驱动注册表把服务名、kind 和来源组成不可变事实，外部来源标识进入 RuntimeModule 描述符摘要。仅当来源不是现有 `forest.host-native/1` 时增加持久描述符字段，保留现有原生驱动图的摘要。定向 RuntimeGraph 与包编译回归 16 passed。此改动只建立代际身份围栏；Host/Deployment 包尚不能导出新的驱动实现，Bot 也还没有跨 scope 的驱动调用与依赖排空，因此不能称为动态第三方驱动可热重载。
 
 
-Host 驱动导出事实（2026-10-15）：包 manifest 新增受信任控制包的 `effect_driver_exports`，每个 kind 精确指向自身公开服务；普通包的受限编译路径仍拒绝。控制器只读端口按活动 Host/Deployment Generation、包摘要、契约、语义和 schema 摘要生成来源标识，排除无关图修订。隔离 PostgreSQL 6 项通过，覆盖受审查 Host 包换代、导出身份和冷恢复新 Generation；静态声明边界 1 项通过。Bot 到 Host 的冻结来源调用已在后续阶段接通；依赖排空与联合换代仍未实现，v31 在线实例未装载本次源码。
+Host 驱动导出事实（2026-10-15）：受信任控制包以 `effect_driver_exports` 将 kind 精确指向自身公开服务；来源标识绑定 Host Generation、包摘要、契约、语义及双 schema。Bot 描述符冻结精确来源，Supervisor 按旧来源选取消费者并协调换代。隔离 PostgreSQL 的 Host 包用例及双消费 Bot/无关 Bot 联合换代用例通过；在途 Effect 与冷恢复尚未验收，在线 v31 未装载本次源码。
 
 Host 导出驱动消费（2026-10-15）：BotHost 候选装配合并当前 Host 控制器已审查的驱动 kind；Bot 包编译核对服务契约、语义和输入/输出 schema 摘要，并将来源标识冻结进消费方 Generation。Bot 所有的代理携自身 Generation 身份，通过受信任跨范围端口调用准确 Host Generation；Host 路由和持久权威再次围栏提供方，旧来源在 Host 换代后拒绝。隔离 PostgreSQL 的 Host 6 项和 Bot 3 项通过；完整 BotHost 官方包选择、热替换和冷恢复回归 1 项通过，但该完整用例未安装第三方消费包。跨图依赖闭包排空、Host 换代时消费方自动重装配及在线 v31 装载仍未完成。
 
-跨图驱动绑定围栏（2026-10-15）：Supervisor 在 Host 控制图变更与 Bot 图启动、换代、关闭之间使用同一个进程内准入锁。活动 Bot 的 Generation 描述符来源被登记为只读绑定事实；Host 提供方进入影响闭包且仍被消费时，预检、正式换代及 Host 关闭均以 `CONTROL_DRIVER_CONSUMERS_ACTIVE` 拒绝，保留旧图。Bot 成功关闭后才解除绑定，关闭失败则保守保留，避免静默断开仍在运行的消费方。隔离 PostgreSQL 的 Host 控制包 6 项通过，覆盖该拒绝和原图保留；完整 BotHost 的受审查包选择、热替换与冷恢复回归 1 项通过。此围栏是联合排空与发布前的安全边界，不等于跨图热重载；联合协议及失败恢复顺序见[跨范围驱动联合换代](20-cross-scope-driver-hot-reload.md)。在线 v31 未装载本次源码。
+跨图驱动绑定与联合换代（2026-10-15）：Supervisor 在同一准入围栏下准备 Host 与受影响 Bot 候选，按 Bot ID 排空旧消费图，再发布 Host 和 Bot 图。Host 持久账本逐 Bot 记录 PENDING、SUCCEEDED、FAILED 或 PARTIAL，未完成接管不能误报成功。真实 PostgreSQL 用例证明两个消费 Bot 的来源与 Generation 换代、无关 Bot Graph 不变；在途调用、故障注入、冷恢复及真实实例仍待验收。详见[跨范围驱动联合换代](20-cross-scope-driver-hot-reload.md)。
 
-Host 候选导出来源（2026-10-15）：控制器的导出投影现同时接受活动或已准备但未发布的准确控制图，并要求包快照、描述符工件的包摘要、Graph 成员及 Generation 状态一致；错误快照和已关闭候选均拒绝。隔离 PostgreSQL 的 Host 6 项通过，其中受审查包用例验证未来来源可在发布前取得、活动来源仍保持不变。Bot 候选编译接入未来导出与联合协调尚未实现，当前围栏仍拒绝有活动消费方的 Host 换代。
+Host 候选导出来源（2026-10-15）：控制器只从精确的活动或已准备 Host 图及其包快照投影驱动事实，拒绝错误快照和关闭后的候选。Bot 候选编译已接入该未来导出，真实 PostgreSQL 联合用例确认新来源仅进入两个受影响 Bot；无关 Bot 保留原 Graph。
 
 ### v31 当前验收门禁
 
 | 要求 | 已有直接证据 | 尚缺证据或实现 |
 | --- | --- | --- |
 | 微内核、builtin 代际与热重载 | v31 在线图 22/22 ACTIVE；v30 同 SQL 的 Memory 定点热替换、v29 官方包跨版本热替换均保留无关 Generation。 | 普通第三方包的完整 SQL/Effect 扩展能力仍未开放；不同存储基线的在线换代未验收。 |
+| Host 驱动跨 Bot 联合换代 | 隔离 PostgreSQL 中两个 Bot 共享 Host 驱动，Host 换代后两个 Bot 均绑定新来源并获 SUCCEEDED 账本；第三个无关 Bot 的 Graph 完全未变。 | 在途 Effect、故障注入、进程冷恢复和许可群低频实测尚缺。 |
 | Bot 全局多主干图文记忆与独立向量索引 | 隔离 PostgreSQL + 真实 QiYu VL/Milvus 的跨群 PNG/GIF 归档、图片种子召回、关联晋升与来源归因通过；v30 非空管理召回与 50,000/500,000 来源规模探针通过。 | v31 当前自然来源尚无非空图片召回；长期混合图文写入和费用分布未验收。 |
 | 群聊排队与 Agent/Provider | 隔离 BotHost 的同群排队、下一模型调用安全点、跨群同时进入 Provider、用户归因、文本模型去图投影通过；模型准入与遗忘两种 PostgreSQL 竞争顺序通过。 | v31 许可群新显式 @→真实 Agent/Provider→QQ 回复及 HTTP 实际在途竞争仍未验收。 |
 | Shell、WebUI 与管理 | Shell 优先级和受权管理动作经隔离 PostgreSQL 验证；模块 UI、Memory 来源筛选/游标/关系证据与试验端口已接入。 | 真实 QQ Shell 命令、浏览器长期管理操作负载未验收。 |
