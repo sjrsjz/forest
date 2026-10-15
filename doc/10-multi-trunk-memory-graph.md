@@ -191,6 +191,8 @@ READY：相同 ref_id 已幂等写入目标 space，PostgreSQL 发布引用已�
 
 `memory.graph` 在包清单中声明 `/embedding` 为 Bot 生命周期内不可变配置。通用模块配置仓库在规划和应用配置时按当前有效修订核验这个路径，启动时也拒绝与已有 Memory 有效配置冲突的模型身份；检索参数和嵌入预算可以通过新 Generation 调整。模型 endpoint 与凭据属于 `embedding.multimodal` 的连接配置，不放进 Memory 的模型身份字段。
 
+包内设置 UI 必须允许管理员调整每 Bot 共享的嵌入日预算、单批预留额与检索证据文本/图片上限；模型身份仍由 Bot 生命周期冻结。检索策略必须满足 `seed_limit <= max_graph_nodes`，否则装配应拒绝，不能静默丢掉已选直接种子。
+
 Memory 包的持久域绑定任务在运行时通过冻结的 `embedding.profile.bind` 服务读取实际模型身份，逐字段对照自己的不可变配置，再以包拥有的 UnitOfWork 写入 `memory_domains`。相同空间的重试幂等，身份不一致显式冲突；绑定失败按持久租约退避重试，不在归档事务中调用 Embedding 服务，也不阻塞消息归档。这一步只绑定身份，不调用嵌入模型 API。
 
 归档事务首次把源单元提升为 `ELIGIBLE` 时，仅幂等登记 `facet_preparation_work`。Memory 自有的持久 Worker 在域绑定完成后按源单元租约读取有界的 part 分页；过期租约按到期时间经索引和 `SKIP LOCKED` 每次最多回收 32 条，连续领取收敛积压，避免单次领取更新全部历史任务。Worker 使用固定 `unicode-codepoints-2048-128/1` 规则把非空文本切成 2048 字符、重叠 128 字符的片段，并为每张图片保留一个独立 facet。facet ID 包含来源、修订、part、原始内容摘要、空间和跨度；每批最多 16 个，经包内 UnitOfWork 再次核验归档资格、原始 payload 引用和空间后写入 `PENDING`。崩溃重试复用相同批次操作 ID，不会把重复消息写成多份 facet。这一步尚不发起嵌入或向量索引请求；后续派发仍必须先通过预算预留和删除屏障。

@@ -64,6 +64,11 @@ class MemoryGraph(Plugin):
                 "Memory Graph requires one lifecycle-bound text-image embedding kind",
                 422,
             )
+        if value["retrieval"]["seed_limit"] > value["retrieval"]["max_graph_nodes"]:
+            raise ForestError(
+                "MEMORY_CONFIGURATION_INVALID",
+                "Graph node budget must cover every direct seed", 422,
+            )
         self.profile = value
         self.profile_digest = _digest(value)
 
