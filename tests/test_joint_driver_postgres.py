@@ -411,6 +411,75 @@ async def test_joint_host_driver_replaces_two_consumers_but_not_unrelated_bot(tm
                 for _service, _kind, source in item.effect_driver_bindings
             }
         assert bots[2].registry.graph_identity == unrelated_before
+
+        source_v3 = tmp_path / "host-v3"
+        copytree(source_v2, source_v3)
+        manifest = source_v3 / "module.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                'version = "1.0.1"', 'version = "1.0.2"', 1,
+            ), encoding="utf-8",
+        )
+        postcommit = reviewed_staging.build(source_v3)
+        archive = reviewed_staging.export_archive(postcommit.digest)
+        host_catalog.publish_reviewed_control_archive(
+            archive, scope="host",
+            expected_archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+            expected_package_digest=postcommit.digest,
+            expected_manifest_digest=digest_json(postcommit.manifest),
+            expected_package_id=postcommit.manifest["package_id"],
+            expected_component_id=postcommit.component["id"],
+            expected_runtime="python-worker",
+        )
+        published_host = controller.registry
+        published_bots = [bot.registry for bot in bots[:2]]
+        postcommit_activation_id = str(uuid4())
+        original_assemble_for_activation = bots[0]._assemble_candidate
+
+        async def reject_bot_activation(*args, **kwargs):
+            assembled = await original_assemble_for_activation(*args, **kwargs)
+
+            async def fail_prewarm():
+                raise ForestError(
+                    "TEST_BOT_ACTIVATION_FAILURE", "Injected Bot activation failure", 503,
+                )
+
+            assembled.registry.prewarm = fail_prewarm
+            return assembled
+
+        bots[0]._assemble_candidate = reject_bot_activation
+        try:
+            with pytest.raises(ForestError) as rejected_activation:
+                await controller.replace(
+                    "host.sample", postcommit.digest,
+                    expected_graph_revision=published_host.graph_identity.graph_revision,
+                    activation_id=postcommit_activation_id,
+                )
+            assert rejected_activation.value.code == (
+                "CONTROL_DRIVER_JOINT_POST_PUBLICATION_FAILURE"
+            )
+            assert rejected_activation.value.details["cause"] == (
+                "TEST_BOT_ACTIVATION_FAILURE"
+            )
+        finally:
+            bots[0]._assemble_candidate = original_assemble_for_activation
+        assert controller.fatal_error is rejected_activation.value
+        assert controller.fatal_event.is_set()
+        assert controller._registry.graph_identity.graph_revision > (
+            published_host.graph_identity.graph_revision
+        )
+        assert published_host._closed
+        assert [bot.registry for bot in bots[:2]] == published_bots
+        assert all(bot._fatal_replacement_error is rejected_activation.value
+                   for bot in bots[:2])
+        assert bots[2].registry.graph_identity == unrelated_before
+        assert [(row["bot_id"], row["state"]) for row in
+                await changes.consumer_results(postcommit_activation_id)] == [
+            ("joint-consumer-a", "FAILED"),
+            ("joint-consumer-b", "FAILED"),
+        ]
+        assert rejected_activation.value.details["ledger_errors"] == []
+        assert rejected_activation.value.details["cleanup_errors"] == []
     finally:
         for bot in reversed(bots):
             await bot.close()

@@ -1429,4 +1429,6 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 
 2026-10-14 QiYu 图扩散语义复核：直接读取 `../RAG/libs/agentlib/agentlib/memory/graph.py` 的 `strongest_path_activations`，确认参考算法为最大乘积路径，而非多路径求和 PPR；Forest 的 `qiyu-graph-region/2` 在 100 个合成有向图（每图 12 节点、35 边、1–3 种子、序列权重 0.55、联想权重 0.9）中，与 QiYu 对所有可见节点给出的激活分数一致，单次读取不超过 12 节点。此只读对照不覆盖 PostgreSQL 可见性、关联边采样、真实向量种子或端到端 Agent 召回；后者仍按各自验收门禁处理。
 
-2026-10-16 Host/Bot 驱动联合换代的发布前失败验收：隔离 PostgreSQL 三 Bot 用例分别注入 Host 预热与首个消费 Bot 准备失败，均返回原始错误，Host 与 Bot 活动图身份不变；之后在途旧 Effect 单次结算、双消费 Bot 换代、无关 Bot 保留、账本结算均通过（1 passed in 509.22s）。失败预备图可占用修订号，活动图回滚与修订单调才是契约。发布后 Bot 激活失败、跨进程在途 Effect 与许可群低频实测仍待验证。树莓派 NapCat/QQ 同日只读核对：OneBot get_status 为 online/good，QQ 3.2.34-53644，NapCat 4.18.38，旧 alicebot.service 停用；未重启或发送群消息。
+2026-10-16 Host/Bot 驱动联合换代的发布前失败验收：隔离 PostgreSQL 三 Bot 用例分别注入 Host 预热与首个消费 Bot 准备失败，均返回原始错误，Host 与 Bot 活动图身份不变；之后在途旧 Effect 单次结算、双消费 Bot 换代、无关 Bot 保留、账本结算均通过（`1 passed in 509.22s`）。失败预备图可占用修订号，活动图回滚与修订单调才是契约。跨进程在途 Effect 与许可群低频实测仍待验证。树莓派 NapCat/QQ 同日只读核对：OneBot `get_status` 为 online/good，QQ 3.2.34-53644，NapCat 4.18.38，旧 `alicebot.service` 停用；未重启或发送群消息。
+
+2026-10-16 Host/Bot 联合换代发布后失败验收：隔离 PostgreSQL 用例在 Host 新图发布后注入首个消费 Bot 预热失败，保留原始原因，Host 与两个受影响 Bot 进入致命状态；两个 Bot 的消费账本均为 FAILED，无关 Bot 图不变，旧 Host 图已关闭，账本和清理错误列表为空。协调器现在清理已失去宿主引用的候选/旧图，活动图仍由宿主关闭。完整场景 `1 passed in 591.82s`；跨进程在途 Effect、UNKNOWN 外部效果和许可群低频实测仍待验收。

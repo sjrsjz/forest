@@ -20,9 +20,11 @@ class _BotTransition:
     finished: bool = False
 
 
-def _fatal(controller, transitions: list[_BotTransition], code: str, message: str,
-           cause: BaseException, *, ledger_errors: tuple[BaseException, ...] = ()
-           ) -> ForestError:
+def _fatal(
+    controller, transitions: list[_BotTransition], code: str, message: str,
+    cause: BaseException, *, ledger_errors: tuple[BaseException, ...] = (),
+    cleanup_errors: tuple[BaseException, ...] = (),
+) -> ForestError:
     failure = controller._fail(ForestError(
         code, message, 503,
         details={
@@ -31,6 +33,10 @@ def _fatal(controller, transitions: list[_BotTransition], code: str, message: st
             "ledger_errors": [
                 getattr(item, "code", type(item).__name__)
                 for item in ledger_errors
+            ],
+            "cleanup_errors": [
+                getattr(item, "code", type(item).__name__)
+                for item in cleanup_errors
             ],
         },
     ))
@@ -302,11 +308,28 @@ async def execute_joint_host_driver_transition(
                         except BaseException as ledger_error:
                             # The PENDING row remains durable for recovery.
                             ledger_errors.append(ledger_error)
+                cleanup_errors = []
+                for item in reversed(transitions):
+                    registry = (
+                        item.previous
+                        if item.host.registry is item.assembled.registry
+                        else item.assembled.registry
+                    )
+                    try:
+                        cleanup_errors.extend(await registry.close())
+                    except BaseException as cleanup_error:
+                        cleanup_errors.append(cleanup_error)
+                registry = previous if controller._registry is candidate else candidate
+                try:
+                    cleanup_errors.extend(await registry.close())
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
                 failure = _fatal(
                     controller, transitions,
                     "CONTROL_DRIVER_JOINT_POST_PUBLICATION_FAILURE",
                     "Host driver published but a Bot consumer did not complete",
                     error, ledger_errors=tuple(ledger_errors),
+                    cleanup_errors=tuple(cleanup_errors),
                 )
                 raise failure from error
             failures = await _rollback(
