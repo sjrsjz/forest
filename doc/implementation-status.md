@@ -1432,3 +1432,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-16 Host/Bot 驱动联合换代的发布前失败验收：隔离 PostgreSQL 三 Bot 用例分别注入 Host 预热与首个消费 Bot 准备失败，均返回原始错误，Host 与 Bot 活动图身份不变；之后在途旧 Effect 单次结算、双消费 Bot 换代、无关 Bot 保留、账本结算均通过（`1 passed in 509.22s`）。失败预备图可占用修订号，活动图回滚与修订单调才是契约。跨进程在途 Effect 与许可群低频实测仍待验证。树莓派 NapCat/QQ 同日只读核对：OneBot `get_status` 为 online/good，QQ 3.2.34-53644，NapCat 4.18.38，旧 `alicebot.service` 停用；未重启或发送群消息。
 
 2026-10-16 Host/Bot 联合换代发布后失败验收：隔离 PostgreSQL 用例在 Host 新图发布后注入首个消费 Bot 预热失败，保留原始原因，Host 与两个受影响 Bot 进入致命状态；两个 Bot 的消费账本均为 FAILED，无关 Bot 图不变，旧 Host 图已关闭，账本和清理错误列表为空。协调器现在清理已失去宿主引用的候选/旧图，活动图仍由宿主关闭。完整场景 `1 passed in 591.82s`；跨进程在途 Effect、UNKNOWN 外部效果和许可群低频实测仍待验收。
+
+2026-10-16 v32 离线候选：当前已提交源码 `284cc17` 构建独立 deployment 与 Bot 数据库；供应任务 SUCCEEDED，Bot READY/OFFLINE，22/22 Bot schema bundle READY，Memory SQL 3.94.0。在线 v31 仍为 Memory 1.94.0 / SQL 3.93.0，且树莓派只有一条 OneBot 连接；v32 尚未接管 QQ。只读 v31 管理观察见 [v32 离线候选记录](live-v32-offline-candidate-2026-10-16.md)：11 个群主干，存在 ELIGIBLE 来源与 UNKNOWN facet，但许可群来源为空。新旧数据库不自动合并。
