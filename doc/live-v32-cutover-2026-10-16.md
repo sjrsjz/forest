@@ -13,3 +13,7 @@ v32 的新 Bot 数据库起初为空：群主干、记忆来源和 facet 均为 
 同一当前源码另在隔离 PostgreSQL 与测试专用 Milvus 集合中，用真实 QiYu VL 重跑 PNG/GIF 跨群非空召回整链，`1 passed in 155.44s`；测试后 `forest_cross_vl_%` 临时数据库为 0。该用例验证非空图文召回、原群/作者归因与管理试验，但 OneBot 和聊天模型是替身，不证明 v32 在线群聊端到端回复。
 
 v32 在线记忆预算已通过模块配置计划与应用动作从修订 1 调整到期望/生效修订 2：按 UTC 日最多 300 次嵌入请求、300000 tokens，单次预留仍为 32768 tokens。该设置仅约束后续嵌入准入，不修改已结算账本。配置热重建后运行图修订号 2、22/22 ACTIVE，观察脚本两次采样零违规；NapCat 登录 READY，树莓派 OneBot 仍只有一条连接。预算账本保持已结算 1 次、22 tokens，UNKNOWN/预留为 0。
+
+随后将官方 `memory.graph` 1.96.1 的精确 ZIP 工件发布到 v32 专用包目录：ZIP SHA-256 为 `b440f596d30741956f9fc749297094e52849cee8dd06190bd5b495f19e05145c`，包摘要为 `sha256:903222f7b5e575824f1e0ff2e6fdae377c3d8d288e8cc6cea81dd2f5f4f3dca5`，Manifest 摘要为 `sha256:af15b9108063f0ab78b1fd45b88d319f624bc39d2d7e30989385a3c689d02cbc`。当前 Supervisor 进程没有重启；正式官方工件选择请求 `selection:26fb63e86202180c7162375b1a272850` 的内核账本一次尝试 `SUCCEEDED`，Graph 2→3。预检保留 Memory 配置修订 2 和存储摘要；Bot 数据库权威图账本显示 22 个成员中实际换代 Memory、Agent、Media Capture、Conversation Scheduler、Shell、Adapter 和 Delivery 共 7 个，另 15 个 Generation ID 保留。旧 7 个状态均为 `DISPOSED`，Graph 2 为 `RETIRED`，Graph 3 为 `ACTIVE`。换代后 22/22 ACTIVE，观察器两次采样零违规，预算仍已结算 1 次／22 tokens 且无 UNKNOWN 或预留，QQ 登录 READY、OneBot 单连接。当前在线 Memory 为 1.96.1 / SQL 3.94.0；选择账本已固定该官方工件摘要；本次未通过重启验证冷启动恢复。
+
+树莓派 NapCat 对获准群 `933179609` 的只读 `get_group_msg_history` 返回最近消息时间 `2026-10-15T17:05:44Z`（北京时间 10 月 16 日 01:05:44），早于 v32 的在线切换。因此该群在本次观察窗口没有切换后的消息可供入站验收；这项核对不证明其他群的流量或真实 `@` 回复。

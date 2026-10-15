@@ -1,16 +1,18 @@
 # Forest 实现状态
 
-2026-10-16 Memory 新建 Bot 默认费用围栏：官方 `memory.graph` 1.96.1 把首次配置的嵌入上限从每日 1000 次／1000 万 tokens 收紧为 300 次／30 万 tokens，单批预留仍为 32768 tokens；现有 Bot 的持久配置不因包出厂值变化而重写。当前 v32 已经通过配置账本单独设为相同上限，在线包仍是 1.96.0，后续需通过正式包发布换代才会见到 1.96.1。
+2026-10-16 v32 官方 Memory 1.96.1 在线热换代：从已提交源码构建并按 ZIP、包和 Manifest 三重 SHA-256 摘要发布到 v32 专用包目录；`component.worker-host` 预检保留配置修订 2 与原存储摘要，正式官方工件选择请求 `selection:26fb63e86202180c7162375b1a272850` 的内核结果为 SUCCEEDED，Graph 2→3。Bot 数据库权威账本证明 22 个成员中 7 个换代、15 个 Generation 保留，旧 7 个均 DISPOSED，旧图 RETIRED、新图 ACTIVE。Memory 现为 1.96.1 / SQL 3.94.0，22/22 ACTIVE，观察器两次采样无违规、预算仍结算 1 次／22 tokens；NapCat READY、OneBot 单连接。获准群最近历史消息仍在切换前，真实 `@` 回复尚待验收。详见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。
+
+2026-10-16 Memory 新建 Bot 默认费用围栏：官方 `memory.graph` 1.96.1 把首次配置的嵌入上限从每日 1000 次／1000 万 tokens 收紧为 300 次／30 万 tokens，单批预留仍为 32768 tokens；现有 Bot 的持久配置不因包出厂值变化而重写。v32 先通过配置账本单独设为相同上限，随后完成下述官方工件在线热换代。
 
 2026-10-16 v32 在线记忆预算热配置：通过正式配置计划与应用动作，将每日嵌入上限从 1000 次／1000 万 tokens 调为 300 次／30 万 tokens；期望和生效修订均为 2，运行图修订号 2、22/22 ACTIVE。两次只读采样零违规，NapCat READY 且 OneBot 单连接，账本保留已结算 1 次／22 tokens、无 UNKNOWN 或预留。
 
 2026-10-16 当前源码隔离图文整链复验：测试镜像挂载当前 `src` 与 `tests`，在独立临时 PostgreSQL 库、独立 Milvus 集合与 QiYu 真实 Qwen3-VL 嵌入端点上运行 PNG/GIF 跨群归档和召回用例，`1 passed in 155.44s`。用例核对 TEXT/IMAGE 文档 facet READY、IMAGE→IMAGE 种子、原群及原作者归因、跨主干关联和管理试验。测试使用假 OneBot/聊天模型，未发送 QQ 消息；测试后只读核对 `forest_cross_vl_%` 临时数据库数为 0。这不代替 v32 在线群聊真实入站与 Agent 回复验收。
 
-2026-10-16 v32 在线切换：先令 v31 OFFLINE 并确认 NapCat OneBot 连接数为 0，再令独立数据库的 v32 ONLINE；v32 为 22/22 ACTIVE，树莓派维持一条 OneBot 连接，NapCat 登录态与 OneBot `online/good` 正常，获准群只读查询成功。Memory 1.96.0 / SQL 3.94.0 的真实图片试运行 READY，空库召回 0 条，账本结算 1 次、22 tokens，UNKNOWN 与预留均为 0；v31 历史记忆未迁入。v32 尚无获准群真实入站，端到端 Agent 回复仍待低频验收。详见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。
+2026-10-16 v32 在线切换：先令 v31 OFFLINE 并确认 NapCat OneBot 连接数为 0，再令独立数据库的 v32 ONLINE；v32 为 22/22 ACTIVE，树莓派维持一条 OneBot 连接，NapCat 登录态与 OneBot `online/good` 正常，获准群只读查询成功。切换初始 Memory 1.96.0 / SQL 3.94.0 的真实图片试运行 READY，空库召回 0 条，账本结算 1 次、22 tokens，UNKNOWN 与预留均为 0；v31 历史记忆未迁入。v32 尚无获准群真实入站，端到端 Agent 回复仍待低频验收。详见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。
 
 2026-10-16 Host/Bot 驱动在途换代验收：隔离 PostgreSQL 中，消费 Bot 的 Effect service 经冻结代理进入旧 Host Worker 并保持一笔调用在途；联合换代到旧 Bot 排空入口时尚未发布新图。释放后该调用返回一次，旧路由拒绝后续调用，两个消费 Bot 改绑新 Host 来源，无关 Bot 图保持，Host 逐 Bot 结果均为 SUCCEEDED。完整场景 `1 passed in 462.62s`，仅用假 OneBot/模型；进程故障与 UNKNOWN 在途效果、失败注入和真实 QQ 仍待验证。
 
-2026-10-16 Memory 成本可观测性开发态：`memory.graph` 1.96.0 增加按 Bot/UTC 日读取预算账本的包内领域查询和管理员设置页读数，分开呈现已结算、在途预留与未知占额；累计计数以十进制字符串传输。新查询只读且限 ADMIN 管理端口；官方包构建、UI 语法与隔离 PostgreSQL 预算并发用例通过；在线实例仍是旧 SQL 基线，不能原库热装此版本；按首发前约定须用新 Bot 库供应。
+2026-10-16 Memory 成本可观测性开发态：`memory.graph` 1.96.0 增加按 Bot/UTC 日读取预算账本的包内领域查询和管理员设置页读数，分开呈现已结算、在途预留与未知占额；累计计数以十进制字符串传输。新查询只读且限 ADMIN 管理端口；官方包构建、UI 语法与隔离 PostgreSQL 预算并发用例通过；当时在线实例仍是旧 SQL 基线，不能原库热装此版本；按首发前约定须用新 Bot 库供应。
 
 2026-10-15 Host/Bot 驱动联合换代进程硬退出验收：隔离 PostgreSQL 中，子进程在 Host 图与受影响 Bot 图均已发布、逐 Bot 账本仍为 PENDING 时被 SIGKILL 终止；旧 Host/Bot 租约到期后，另一进程从同库同包目录取得更高 owner_epoch，重建当前驱动绑定，将消费者和 Host 请求结算为 SUCCEEDED。两次通过（405.37 秒、397.35 秒），测试只用替身 OneBot/模型。更早一次运行在账本已成功后退出等待超过 44 分钟，原因尚未定位且后续两次未复现；在途 Effect、故障注入、真实 QQ 和长期关闭稳定性仍待验收。
 
