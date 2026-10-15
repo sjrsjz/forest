@@ -28,10 +28,12 @@ from forest.bot_host import BotHost, BotSettings
 from forest.builtin_packages import bootstrap_installed_package
 from forest.control_driver_binding_gate import ControlDriverBindingGate
 from forest.control_driver_joint_transition import execute_joint_host_driver_transition
+from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
 from forest.host_runtime import HostRuntimeScope
 from forest.host_supervisor import HostSupervisor
 from forest.packages import PackageCatalog, digest_json
+from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority
 from forest.storage.host_store import HostStore
@@ -63,6 +65,26 @@ def _exporting_host_source(path: Path) -> None:
           "        return payload\n",
         encoding="utf-8",
     )
+
+
+def _holdable_host_driver(source: Path) -> None:
+    worker = source / "python/host_sample.py"
+    text = worker.read_text(encoding="utf-8")
+    original = "    async def driver(self, payload, ctx):\n        return payload\n"
+    assert text.count(original) == 1
+    replacement = '''    async def driver(self, payload, ctx):
+        if payload["value"].startswith("hold:"):
+            import asyncio
+            from pathlib import Path
+
+            gate = Path(payload["value"][5:])
+            with gate.with_suffix(".entered").open("a", encoding="utf-8") as marker:
+                marker.write("entered\\n")
+            while not gate.with_suffix(".release").exists():
+                await asyncio.sleep(0.02)
+        return payload
+'''
+    worker.write_text(text.replace(original, replacement, 1), encoding="utf-8")
 
 
 def _consuming_bot_source(path: Path, host_source: Path) -> None:
@@ -184,6 +206,7 @@ async def test_joint_host_driver_replaces_two_consumers_but_not_unrelated_bot(tm
         gate = ControlDriverBindingGate()
         source_v1 = tmp_path / "host-v1"
         _exporting_host_source(source_v1)
+        _holdable_host_driver(source_v1)
         host_catalog = PackageCatalog(tmp_path / "host-catalog")
         host_catalog.build_official(source_v1, scope="host")
         controller = HostPackageController(
@@ -251,11 +274,63 @@ async def test_joint_host_driver_replaces_two_consumers_but_not_unrelated_bot(tm
             expected_component_id=reviewed.component["id"],
             expected_runtime="python-worker",
         )
+        old_bot_registry = bots[0].registry
+        old_bot_graph = old_bot_registry.graph_identity
+        route = FrozenServiceRoute(
+            service_id="tests.host.driver", version=1,
+            caller_component_id="tests.joint",
+            provider_component_id="forest.counter",
+            provider_generation_id=old_bot_graph.generations["forest.counter"],
+            graph_id=old_bot_graph.graph_id,
+            graph_revision=old_bot_graph.graph_revision,
+            admission_lane="DATA", owned_work=False,
+        )
+        gate_path = tmp_path / "driver-inflight"
+        payload = {"value": "hold:" + str(gate_path)}
+        invoke = RuntimeServiceInvocation(
+            "joint-driver/inflight/one", 60, "tests.joint", "handoff",
+        )
+        inflight = None
+        drain_entered = asyncio.Event()
+        original_drain = old_bot_registry.drain_owned_work_for_replacement
+
+        async def observe_drain(*args, **kwargs):
+            nonlocal inflight
+            inflight = asyncio.create_task(
+                old_bot_registry.contract_router.invoke_external(route, invoke, payload)
+            )
+            async with asyncio.timeout(15):
+                while not gate_path.with_suffix(".entered").exists():
+                    if inflight.done():
+                        await inflight
+                    await asyncio.sleep(0.05)
+            drain_entered.set()
+            return await original_drain(*args, **kwargs)
+
+        old_bot_registry.drain_owned_work_for_replacement = observe_drain
         previous_host = controller.registry.graph_identity
-        replaced = await controller.replace(
+        replacement_task = asyncio.create_task(controller.replace(
             "host.sample", reviewed.digest,
             expected_graph_revision=previous_host.graph_revision,
-        )
+        ))
+        try:
+            await asyncio.wait_for(drain_entered.wait(), timeout=180)
+            await asyncio.sleep(0.2)
+            assert not replacement_task.done()
+            assert inflight is not None and not inflight.done()
+        finally:
+            gate_path.with_suffix(".release").write_text("release", encoding="utf-8")
+        assert await inflight == payload
+        replaced = await replacement_task
+        assert gate_path.with_suffix(".entered").read_text(
+            encoding="utf-8"
+        ).splitlines() == ["entered"]
+        with pytest.raises(ForestError):
+            await old_bot_registry.contract_router.invoke_external(
+                route, RuntimeServiceInvocation(
+                    "joint-driver/inflight/stale", 5, "tests.joint", "handoff",
+                ), payload,
+            )
         new_source = controller.driver_exports()[0]["source_ref"]
         assert new_source != old_source
         assert replaced.graph_identity.graph_revision == previous_host.graph_revision + 1
