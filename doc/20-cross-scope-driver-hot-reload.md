@@ -36,6 +36,14 @@ Host 图变更在持有跨图围栏时读取活动 Bot 绑定。Bot 启动、换
 
 控制包的正式变更回执不能把“Host 图已发布但部分 Bot 未接管”压成无条件成功；管理面须显示 Host 持久发布结果和每个受影响 Bot 的结算/失败。由可验证的 Host Graph 证据决定是否进入“发布后”路径，不根据内存布尔值猜测。
 
+### 冷启动后的接管证据
+
+联合换代在 Host 图进入 PREPARED 后冻结每个 Bot 的旧图 ID/revision、计划 activation ID，以及受影响 Effect 服务的旧/目标 `(service, kind, source_ref)` 三元组。Host 已发布而 Bot 行仍为 PENDING 时，不能仅凭 Host 图或计划 activation ID 判定成功，也不能在 Bot Supervisor 尚在异步启动时立即判失败。
+
+冷启动会重建 Host Generation，因而 `source_ref` 和 Bot activation ID 可能与中断前计划不同。恢复端必须分别保存计划身份和实际发布身份：从当前 Host 图投影已受审查的导出契约，再以 Bot 内核的当前图、Graph revision 和活动描述符绑定核对同一服务与 kind 已转向当前 Host 来源，且旧来源不再可调用。不能用重建后的图冒充原计划图；原 Host 请求仍保留原发布证据。
+
+Bot 仍处于 STARTING 或证据不可得时保持 PENDING，并暂停该 Host 变更结果的最终结算；Bot ONLINE 且图证据和绑定核对成立时记录带恢复标记的实际 Host/Bot 图并收敛为 SUCCEEDED；明确启动失败或运行意图撤销时记录 FAILED，Host 请求为 PARTIAL。结算必须受进程内准入围栏和持久租约保护，重试只接受完全相同的证明。以上为恢复实现约束，当前代码尚未完成该收敛。
+
 ## 必需验证
 
 隔离 PostgreSQL 用例至少覆盖两个 Bot 共用一个 Host 驱动、一个无关 Bot、在途 Effect 调用、Host 候选预热失败、Bot 准备失败、Host 发布后 Bot 激活失败与进程冷恢复。证明受影响 Bot 及其依赖闭包换代、无关 Generation 保留、旧来源没有新调用、所有在途调用只结算一次；再用低频许可群实例验证真实 Bot 图不中断群聊串行语义。当前单图围栏的回归只能证明拒绝不安全发布，不能算作这些验收。

@@ -5,10 +5,29 @@ from __future__ import annotations
 import re
 from uuid import UUID
 
+from psycopg.types.json import Jsonb
+
 from forest.errors import ForestError
 from forest.storage.control_graph_changes import ControlGraphChangeAuthority
 
 _ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,127}")
+
+
+def _binding_triples(value) -> tuple[tuple[str, str, str], ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise ValueError("Driver binding plan must be nonempty")
+    triples = []
+    for item in value:
+        if (
+            not isinstance(item, (list, tuple)) or len(item) != 3
+            or any(not isinstance(part, str) or not part or len(part.encode("utf-8")) > 256
+                   for part in item)
+        ):
+            raise ValueError("Driver binding plan contains an invalid triple")
+        triples.append(tuple(item))
+    if tuple(triples) != tuple(sorted(set(triples))):
+        raise ValueError("Driver binding plan must be sorted and unique")
+    return tuple(triples)
 
 
 class HostGraphChangeAuthority(ControlGraphChangeAuthority):
@@ -29,6 +48,16 @@ class HostGraphChangeAuthority(ControlGraphChangeAuthority):
                 raise ValueError
             for row in consumers:
                 UUID(row["bot_activation_id"])
+                source_bindings = _binding_triples(row["source_bindings"])
+                target_bindings = _binding_triples(row["target_bindings"])
+                if (
+                    tuple((service, kind) for service, kind, _source in source_bindings)
+                    != tuple((service, kind) for service, kind, _source in target_bindings)
+                    or any(old[2] == target[2] for old, target in zip(
+                        source_bindings, target_bindings, strict=True
+                    ))
+                ):
+                    raise ValueError("Driver binding plan does not change exact sources")
                 if (
                     not isinstance(row["bot_id"], str)
                     or not 1 <= len(row["bot_id"].encode("utf-8")) <= 128
@@ -59,12 +88,14 @@ class HostGraphChangeAuthority(ControlGraphChangeAuthority):
                 await conn.execute(
                     "INSERT INTO forest_host.driver_transition_consumers("
                     "host_id,host_activation_id,bot_id,bot_activation_id,"
-                    "source_bot_graph_id,source_bot_graph_revision) "
-                    "VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                    "source_bot_graph_id,source_bot_graph_revision,"
+                    "source_bindings,target_bindings) "
+                    "VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
                     (
                         self.scope_id, host_activation_id, row["bot_id"],
                         row["bot_activation_id"], row["source_bot_graph_id"],
                         row["source_bot_graph_revision"],
+                        Jsonb(row["source_bindings"]), Jsonb(row["target_bindings"]),
                     ),
                 )
             saved = await (await conn.execute(
@@ -78,9 +109,13 @@ class HostGraphChangeAuthority(ControlGraphChangeAuthority):
                     saved[index]["bot_activation_id"],
                     saved[index]["source_bot_graph_id"],
                     saved[index]["source_bot_graph_revision"],
+                    _binding_triples(saved[index]["source_bindings"]),
+                    _binding_triples(saved[index]["target_bindings"]),
                 ) != (
                     row["bot_id"], row["bot_activation_id"],
                     row["source_bot_graph_id"], row["source_bot_graph_revision"],
+                    _binding_triples(row["source_bindings"]),
+                    _binding_triples(row["target_bindings"]),
                 )
                 for index, row in enumerate(consumers)
             ):

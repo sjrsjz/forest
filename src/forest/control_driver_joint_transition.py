@@ -64,6 +64,31 @@ async def _rollback(candidate, previous, transitions, host_drained):
     return failures
 
 
+def _handoff_bindings(item: _BotTransition, old_sources: frozenset[str]):
+    source = tuple(sorted({
+        binding for descriptor in item.previous.descriptors
+        for binding in descriptor.effect_driver_bindings
+        if binding[2] in old_sources
+    }))
+    keys = {(service, kind) for service, kind, _source in source}
+    target = tuple(sorted({
+        binding for descriptor in item.assembled.registry.descriptors
+        for binding in descriptor.effect_driver_bindings
+        if (binding[0], binding[1]) in keys
+    }))
+    if (
+        not source or len(source) != len(keys) or len(target) != len(source)
+        or tuple((service, kind) for service, kind, _source in source)
+        != tuple((service, kind) for service, kind, _source in target)
+        or any(old[2] == new[2] for old, new in zip(source, target, strict=True))
+    ):
+        raise ForestError(
+            "CONTROL_DRIVER_CONSUMER_PLAN_INVALID",
+            "The Bot handoff must replace each exact bound driver source", 409,
+        )
+    return [list(binding) for binding in source], [list(binding) for binding in target]
+
+
 async def execute_joint_host_driver_transition(
     controller, previous, candidate, snapshots, affected, consumers,
 ):
@@ -142,17 +167,25 @@ async def execute_joint_host_driver_transition(
                 await host._admit_worker_capacity(item.capacity)
                 await bot_candidate.prepare()
 
-            await ledger.stage_consumers(
-                lease,
-                host_activation_id=candidate.activation_id,
-                consumers=tuple({
+            roster = []
+            for item in transitions:
+                source_bindings, target_bindings = _handoff_bindings(
+                    item, old_sources
+                )
+                roster.append({
                     "bot_id": item.host.settings.bot_id,
                     "bot_activation_id": item.assembled.registry.activation_id,
                     "source_bot_graph_id": item.previous.graph_identity.graph_id,
                     "source_bot_graph_revision": (
                         item.previous.graph_identity.graph_revision
                     ),
-                } for item in transitions),
+                    "source_bindings": source_bindings,
+                    "target_bindings": target_bindings,
+                })
+            await ledger.stage_consumers(
+                lease,
+                host_activation_id=candidate.activation_id,
+                consumers=tuple(roster),
             )
             journal_staged = True
             for item in transitions:

@@ -388,11 +388,19 @@ CREATE TABLE host_sample_native (value text NOT NULL);
                 "bot_activation_id": bot_activation_id,
                 "source_bot_graph_id": "graph:previous-bot",
                 "source_bot_graph_revision": 1,
+                "source_bindings": [["bot.effect", "test.driver", "old-source"]],
+                "target_bindings": [["bot.effect", "test.driver", "new-source"]],
             },),
         )
         assert len(roster) == 1
         assert roster[0]["state"] == "PENDING"
         assert roster[0]["bot_activation_id"] == bot_activation_id
+        assert roster[0]["source_bindings"] == [[
+            "bot.effect", "test.driver", "old-source"
+        ]]
+        assert roster[0]["target_bindings"] == [[
+            "bot.effect", "test.driver", "new-source"
+        ]]
         with pytest.raises(psycopg.errors.RaiseException):
             await changes.finish_consumer(
                 lease, host_activation_id=change_request["activation_id"],

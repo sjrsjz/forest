@@ -34,6 +34,8 @@ Host 导出驱动消费（2026-10-15）：BotHost 候选装配合并当前 Host 
 
 跨图驱动绑定与联合换代（2026-10-15）：Supervisor 在同一准入围栏下准备 Host 与受影响 Bot 候选，按 Bot ID 排空旧消费图，再发布 Host 和 Bot 图。Host 持久账本逐 Bot 记录 PENDING、SUCCEEDED、FAILED 或 PARTIAL，未完成接管不能误报成功。真实 PostgreSQL 用例证明两个消费 Bot 的来源与 Generation 换代、无关 Bot Graph 不变；在途调用、故障注入、冷恢复及真实实例仍待验收。详见[跨范围驱动联合换代](20-cross-scope-driver-hot-reload.md)。
 
+Host 接管账本已在 PREPARED 阶段冻结每个 Bot 的旧/目标 `(service, kind, source_ref)` 绑定三元组，并由数据库禁止事后改写；隔离 PostgreSQL 与协调器测试通过。冷启动后 Host/Bot 实际 Graph 身份与原计划不同，账本主动复核和最终自动收敛仍未实现。
+
 Host 候选导出来源（2026-10-15）：控制器只从精确的活动或已准备 Host 图及其包快照投影驱动事实，拒绝错误快照和关闭后的候选。Bot 候选编译已接入该未来导出，真实 PostgreSQL 联合用例确认新来源仅进入两个受影响 Bot；无关 Bot 保留原 Graph。
 
 ### v31 当前验收门禁

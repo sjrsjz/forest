@@ -202,9 +202,14 @@ async def test_joint_transition_starts_bot_proxy_only_after_host_publication():
     assert trace[-3:] == [
         "old-bot-close", "journal-SUCCEEDED", "old-host-close",
     ]
-    assert controller.runtime.graph_change_authority.rows["bot/one"]["state"] == (
-        "SUCCEEDED"
-    )
+    recorded = controller.runtime.graph_change_authority.rows["bot/one"]
+    assert recorded["state"] == "SUCCEEDED"
+    assert recorded["source_bindings"] == [[
+        "consumer.effect", "test.driver", "old-source"
+    ]]
+    assert recorded["target_bindings"] == [[
+        "consumer.effect", "test.driver", "new-source"
+    ]]
 
 
 @pytest.mark.asyncio

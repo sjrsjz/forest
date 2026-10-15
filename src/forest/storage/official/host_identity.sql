@@ -187,6 +187,12 @@ CREATE TABLE forest_host.driver_transition_consumers (
     ),
     source_bot_graph_id text NOT NULL CHECK (octet_length(source_bot_graph_id) BETWEEN 1 AND 256),
     source_bot_graph_revision bigint NOT NULL CHECK (source_bot_graph_revision > 0),
+    source_bindings jsonb NOT NULL CHECK (
+        jsonb_typeof(source_bindings)='array' AND jsonb_array_length(source_bindings)>0
+    ),
+    target_bindings jsonb NOT NULL CHECK (
+        jsonb_typeof(target_bindings)='array' AND jsonb_array_length(target_bindings)>0
+    ),
     state text NOT NULL DEFAULT 'PENDING'
         CHECK (state IN ('PENDING','SUCCEEDED','FAILED','PARTIAL')),
     result_bot_graph_id text,
@@ -327,10 +333,12 @@ BEGIN
     END IF;
     IF OLD.state <> 'PENDING'
        OR ROW(OLD.host_id,OLD.host_activation_id,OLD.bot_id,OLD.bot_activation_id,
-              OLD.source_bot_graph_id,OLD.source_bot_graph_revision,OLD.prepared_at)
+              OLD.source_bot_graph_id,OLD.source_bot_graph_revision,
+              OLD.source_bindings,OLD.target_bindings,OLD.prepared_at)
           IS DISTINCT FROM
           ROW(NEW.host_id,NEW.host_activation_id,NEW.bot_id,NEW.bot_activation_id,
-              NEW.source_bot_graph_id,NEW.source_bot_graph_revision,NEW.prepared_at)
+              NEW.source_bot_graph_id,NEW.source_bot_graph_revision,
+              NEW.source_bindings,NEW.target_bindings,NEW.prepared_at)
        OR NEW.state NOT IN ('SUCCEEDED','FAILED','PARTIAL')
        OR (
            NEW.state IN ('SUCCEEDED','PARTIAL')
