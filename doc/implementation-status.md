@@ -15,7 +15,7 @@ v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + �
 普通安装包扩展边界审计（2026-10-15）：普通 Bot 包目前要求精确批准的自有能力和受限的声明式存储；装配器明确拒绝其自带 Domain Query/Command、UnitOfWork participant、持久 owned-work handler 与 Effect service。部署/Host 范围的普通控制包目前只开放受限组件状态端口。受限包的热加入、定点热替换和进程恢复已有隔离验证，但这不能表述为任意第三方私有 SQL 或外部 Effect 可热重载。官方 builtin 包的完整领域 SQL/Effect 路径也不能通过删除普通包的拒绝条件直接转授；开放这两类能力需要明确的安装信任、数据库角色与驱动批准边界。
 
 受审查 Bot 工件来源第一阶段（2026-10-15）：目录所有者 CLI `publish-reviewed-bot` 以准确 ZIP、包、manifest、package/component ID 与 Python Worker 运行时身份原子发布独立 reviewed 来源；普通 ZIP 导入无法获得该身份，试图声明 `official_bot_grants` 的工件被拒。该来源不是 official builtin，也尚未改变 `installed` 包的 SQL/Effect 拒绝路径。定向发布/隔离用例 4 passed；包目录完整回归 114 passed、1 个既有重复 ZIP 名称警告；Ruff 通过。下一阶段须让候选编译、Bot 选择和热重载在准确 reviewed 来源下绑定私有 SQL 与已批准驱动，不能据此宣称高权限插件已可运行。
-受审查 Bot 包运行时第二阶段（2026-10-15）：Bot 装配、候选编译、Generation 身份及持久图账本现区分 `reviewed` 与普通 `installed`；准确目录来源和 Bot capability 批准通过后，reviewed 包可安装私有 official-profile SQL 并绑定部署 Host 已注册的 Effect kind。普通归档仍被 SQL/Effect 边界拒绝，缺失 Host 驱动的 reviewed 候选编译失败，官方内核管理端口与 `official_bot_grants` 未下放。隔离 PostgreSQL 两项用例通过，覆盖私有 SQL 执行、Generation 启动与 Effect 驱动绑定/拒绝；包目录与 Worker Host 选择回归 116 passed、1 个既有重复 ZIP 警告，Ruff 通过。现有 Host 驱动可绑定不等于动态第三方驱动可安装；reviewed 包在线热替换、进程恢复和多版本同基线切换尚待验收。v31 在线实例未装载此候选代码。
+受审查 Bot 包运行时第二阶段（2026-10-15）：Bot 装配、候选编译、Generation 身份及持久图账本现区分 `reviewed` 与普通 `installed`；准确目录来源和 Bot capability 批准通过后，reviewed 包可安装私有 official-profile SQL 并绑定部署 Host 已注册的 Effect kind。普通归档仍被 SQL/Effect 边界拒绝，缺失 Host 驱动的 reviewed 候选编译失败，官方内核管理端口与 `official_bot_grants` 未下放。隔离 PostgreSQL 两项用例通过，覆盖私有 SQL 执行、Generation 启动与 Effect 驱动绑定/拒绝；包目录与 Worker Host 选择回归 116 passed、1 个既有重复 ZIP 警告，Ruff 通过。现有 Host 驱动可绑定不等于动态第三方驱动可安装；隔离 PostgreSQL 中同 SQL 基线的 reviewed 包跨版本换代已通过，旧代排空、内核代际保留和新代启动均已核验。正式 BotHost 选择链、进程恢复与 QQ 在线切换仍待验收；v31 在线实例未装载此候选代码。
 
 ### v31 当前验收门禁
 

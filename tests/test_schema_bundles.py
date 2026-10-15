@@ -5380,8 +5380,74 @@ async def test_reviewed_bot_archive_binds_private_sql_only_with_exact_catalog_pr
         host, _isolated_runtime_descriptors(*core.descriptors, provisioned.descriptor)
     )
     await registry.start()
-    assert "forest.counter" in registry.graph_identity.generations
+    first_graph = registry.graph_identity
+    assert "forest.counter" in first_graph.generations
+
+    updated_root = tmp_path / "reviewed-counter-v2"
+    copytree(Path(__file__).parents[1] / "src/forest/builtin/counter", updated_root)
+    manifest = updated_root / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'version = "0.7.2"', 'version = "0.7.3"', 1
+        ),
+        encoding="utf-8",
+    )
+    worker_source = updated_root / "python" / "counter.py"
+    worker_source.write_text(
+        worker_source.read_text(encoding="utf-8") + "\nREVIEWED_GENERATION = 2\n",
+        encoding="utf-8",
+    )
+    updated_source = staging.build(updated_root)
+    updated_archive = staging.export_archive(updated_source.digest)
+    reviewed.publish_reviewed_bot_archive(
+        updated_archive,
+        expected_archive_sha256="sha256:" + hashlib.sha256(updated_archive).hexdigest(),
+        expected_package_digest=updated_source.digest,
+        expected_manifest_digest=digest_json(updated_source.manifest),
+        expected_package_id=updated_source.manifest["package_id"],
+        expected_component_id=updated_source.component["id"],
+        expected_runtime="python-worker",
+    )
+    planned, descriptor = await compile_installed_candidate_descriptor(
+        updated_source.digest, reviewed, store, kernel=core,
+        approved_capabilities=approved,
+        expected_manifest_digest=digest_json(updated_source.manifest),
+        expected_configuration_revision=1,
+    )
+    assert planned.trust_level == descriptor.artifact.trust_level == "reviewed"
+    assert descriptor.factory is None
+    assert descriptor.storage.package_digest == provisioned.descriptor.storage.package_digest
+
+    updated = await bootstrap_installed_package(
+        updated_source.digest, reviewed, store, installer, kernel=core,
+        initial_configuration=None, approved_capabilities=approved,
+    )
+    candidate = RuntimeModuleRegistry(
+        host, _isolated_runtime_descriptors(*core.descriptors, updated.descriptor)
+    )
+    plan = candidate.preview_graph_transition(
+        registry, target_component_id="forest.counter"
+    )
+    assert plan.replace == ("forest.counter",)
+    assert all(item.startswith("kernel.") for item in plan.retain)
+    affected = candidate.plan_retained_generations(registry, "forest.counter")
+    await candidate.prewarm()
+    await registry.drain_owned_work_for_replacement(
+        candidate.activation_id,
+        components=affected if len(affected) < len(registry.order) else None,
+    )
+    await candidate.start()
+    candidate.accept_retained_ownership()
     assert await registry.close() == []
+    assert candidate.graph_identity.generations["forest.counter"] != (
+        first_graph.generations["forest.counter"]
+    )
+    for component_id in first_graph.generations:
+        if component_id.startswith("kernel."):
+            assert candidate.graph_identity.generations[component_id] == (
+                first_graph.generations[component_id]
+            )
+    assert await candidate.close() == []
 
 
 @pytest.mark.postgres

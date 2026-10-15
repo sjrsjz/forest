@@ -266,7 +266,7 @@ forest plugin import hello.zip
 
 Effect 有两个独立批准：Bot 包声明的 `effect_services.kind` 必须由部署批准的宿主驱动契约提供；驱动代码本身不得从 Bot 包 manifest 路径直接 import 到宿主。新增驱动实现应作为独立的 Host/Deployment 组件工件捕获、换代，Bot 组件通过声明依赖绑定其准确 Generation。驱动换代按依赖闭包冻结入口、排空在途效果、发布新图并保留旧效果身份；旧代的晚到回执仍回到旧代对账。通用 HTTP 效果也应只按已批准的 endpoint、Secret 和预算派发。当前宿主只有内置驱动注册表，动态第三方驱动工件及此批准链尚未实现，不能将受限包热替换的通过记录称为完整第三方 SQL/Effect 热重载。
 
-当前实现阶段（2026-10-15）：目录所有者可用 `forest plugin publish-reviewed-bot` 按准确归档、包、manifest、组件、Bot scope 与 Python Worker 身份发布独立 reviewed 来源；普通 ZIP 导入、manifest 声明和 Bot 选择都不能自行提升信任。Bot 装配与候选图编译在重新核对该来源及精确 capability 批准后，允许 reviewed 包安装自身 official-profile SQL 基线并绑定部署 Host 已注册的 Effect kind；官方内核管理端口和 `official_bot_grants` 仍只属于发行版官方包。隔离 PostgreSQL 已验证普通导入拒绝、reviewed 私有 SQL 安装与 Generation 启动，以及缺少 Host 驱动时拒绝候选编译。此验证不覆盖 reviewed 包的在线跨版本热替换，也不提供动态第三方 Host/Deployment 驱动工件；后两者仍须单独实现和验收。
+当前实现阶段（2026-10-15）：目录所有者可用 `forest plugin publish-reviewed-bot` 按准确归档、包、manifest、组件、Bot scope 与 Python Worker 身份发布独立 reviewed 来源；普通 ZIP 导入、manifest 声明和 Bot 选择都不能自行提升信任。Bot 装配与候选图编译在重新核对该来源及精确 capability 批准后，允许 reviewed 包安装自身 official-profile SQL 基线并绑定部署 Host 已注册的 Effect kind；官方内核管理端口和 `official_bot_grants` 仍只属于发行版官方包。隔离 PostgreSQL 已验证普通导入拒绝、reviewed 私有 SQL 安装与 Generation 启动，以及缺少 Host 驱动时拒绝候选编译。隔离 PostgreSQL 已验证 reviewed 包在相同 SQL 基线下跨版本热替换、旧代排空和内核代际保留；正式 BotHost 选择链及进程恢复仍待验收。动态第三方 Host/Deployment 驱动工件尚未实现。
 
 原生 Effect Driver 可在宿主驱动注册表中附带配置安全校验器。包通过 effect_services.kind 选择驱动种类；通用包装配器按该声明组合校验器，在创建期、配置提交与 Generation 准备中使用同一边界，不按组件目录名分派。校验器属于宿主提供的受信任驱动代码，普通插件不得以 manifest 路径要求宿主加载自身 Python 函数；包内运行时 schema 仍负责公开配置形状。
 
