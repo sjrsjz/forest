@@ -1,12 +1,69 @@
 {
-  "$schema":"https://json-schema.org/draft/2020-12/schema",
-  "type":["object","null"],
-  "properties":{
-    "protocol":{"const":"forest.shell-ingress/2"},"shell_generation_id":{"type":"string"},
-    "request_id":{"type":"string"},"command_id":{"type":"string"},"command_version":{"type":"integer","minimum":1},
-    "arguments":{"type":"object"},"rejection":{"$ref":"#/$defs/rejection"}
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "const": "forest.shell-ingress/2"
+    },
+    "shell_generation_id": {
+      "type": "string"
+    },
+    "request_id": {
+      "type": "string"
+    },
+    "command_id": {
+      "type": "string"
+    },
+    "command_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "arguments": {
+      "type": "object"
+    },
+    "rejection": {
+      "$ref": "#/$defs/rejection"
+    }
   },
-  "required":["protocol","shell_generation_id","request_id","command_id","command_version","arguments","rejection"],
-  "additionalProperties":false,
-  "$defs":{"rejection":{"type":"object","properties":{"owner_id":{"type":"string","minLength":1,"maxLength":512},"value":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":4096}},"required":["text"],"additionalProperties":false}},"required":["owner_id","value"],"additionalProperties":false}}
+  "required": [
+    "protocol",
+    "shell_generation_id",
+    "request_id",
+    "command_id",
+    "command_version",
+    "arguments",
+    "rejection"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "rejection": {
+      "type": "object",
+      "properties": {
+        "owner_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "value": {
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "owner_id",
+        "value"
+      ],
+      "additionalProperties": false
+    }
+  }
 }

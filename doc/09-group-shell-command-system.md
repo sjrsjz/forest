@@ -1,6 +1,6 @@
 # 群聊 Shell、管理命令与优先级详细设计
 
-> 当前实现说明（2026-10-09）：Adapter 先调用可热重载的 `shell.ingress.inspect` Worker，再进入 Inbox/分类事务；尚无下文所述的内核 ShellGate、ingress proof 或脱离 Shell 包的最小救援路由。下文是目标设计，最终归属待明确后须同步代码与协议。
+> 当前源码（2026-10-16）：内核 `shell.gate.inspect` 只认领完整 `#forest` 前缀，Adapter 仅在已认领时调用可热重载的 `shell.ingress.inspect`，已认领命令的 Shell 返回空值会按协议错误终止，不能落回 Agent。Shell 包仍负责确定性命令解析、管理员资格、当前目录路由、持久请求和优先级工作。门禁当前输出是有界词法识别结果，尚不是下文要求的不可持久复用 ingress proof；Binding/principal 的内核复核、同事务 proof 核验及脱离 Shell 包的最小救援路由仍未实现。在线 v32 未加载本次源码改动；下文保留完整目标协议。
 
 ## 1. 目标与边界
 

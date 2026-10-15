@@ -10,6 +10,13 @@ from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin.shell_command.python.shell_command import ShellCommand
+from forest.kernel_shell_gate import shell_gate_inspect_service
+
+
+async def _gate(normalized):
+    return await shell_gate_inspect_service(None)({
+        "protocol": "forest.shell-gate-request/1", "normalized": normalized,
+    })
 
 
 @pytest.mark.parametrize("trailing", [
@@ -20,50 +27,43 @@ async def test_reserved_shell_prefix_with_nontext_tail_is_rejected_by_shell(trai
     async def no_directory_lookup():
         pytest.fail("Malformed Shell input must not resolve or execute a command")
 
+    gate = await _gate({
+        "self_id": "10000",
+        "segments": [{"type": "text", "text": "#forest core status"}, trailing],
+    })
+    assert gate["claimed"] is True
     context = SimpleNamespace(
         identity={"generation_id": "shell/generation"},
         shell_commands=SimpleNamespace(list=no_directory_lookup),
     )
-    ingress = await ShellCommand().inspect({
-        "normalized": {
-            "self_id": "10000",
-            "segments": [
-                {"type": "text", "text": "#forest core status"},
-                trailing,
-            ],
-        },
-        "event_ref": "event/1",
-    }, context)
-
+    ingress = await ShellCommand().inspect(
+        {"gate": gate, "event_ref": "event/1"}, context,
+    )
     assert ingress["command_id"] == "shell.invalid"
     assert ingress["arguments"] == {"error_code": "SHELL_SYNTAX_INVALID"}
-    assert ingress["protocol"] == "forest.shell-ingress/2"
 
 
 async def test_incomplete_shell_prefix_is_not_claimed():
-    context = SimpleNamespace(identity={"generation_id": "shell/generation"})
-    ingress = await ShellCommand().inspect({
-        "normalized": {
-            "self_id": "10000",
-            "segments": [
-                {"type": "text", "text": "#forestX core status"},
-                {"type": "mention", "external_user_id": "10000"},
-            ],
-        },
-        "event_ref": "event/2",
-    }, context)
-    assert ingress is None
+    gate = await _gate({
+        "self_id": "10000",
+        "segments": [
+            {"type": "text", "text": "#forestX core status"},
+            {"type": "mention", "external_user_id": "10000"},
+        ],
+    })
+    assert gate == {"protocol": "forest.shell-gate/1", "claimed": False}
 
 
 async def test_reserved_shell_prefix_with_line_break_is_rejected_by_shell():
+    gate = await _gate({
+        "self_id": "10000",
+        "segments": [{"type": "text", "text": "#forest\ncore status"}],
+    })
+    assert gate["claimed"] is True
     context = SimpleNamespace(identity={"generation_id": "shell/generation"})
-    ingress = await ShellCommand().inspect({
-        "normalized": {
-            "self_id": "10000",
-            "segments": [{"type": "text", "text": "#forest\ncore status"}],
-        },
-        "event_ref": "event/3",
-    }, context)
+    ingress = await ShellCommand().inspect(
+        {"gate": gate, "event_ref": "event/3"}, context,
+    )
     assert ingress["command_id"] == "shell.invalid"
     assert ingress["arguments"] == {"error_code": "SHELL_SYNTAX_INVALID"}
 

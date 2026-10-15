@@ -27,37 +27,6 @@ def _digest(value):
     return "sha256:" + hashlib.sha256(body).hexdigest()
 
 
-def _direct_text(normalized):
-    segments = normalized.get("segments")
-    self_id = normalized.get("self_id")
-    if not isinstance(segments, list) or not isinstance(self_id, str):
-        return None
-    index = 0
-    if segments and isinstance(segments[0], dict):
-        first = segments[0]
-        if first.get("type") == "mention" and first.get("external_user_id") == self_id:
-            index = 1
-    texts = []
-    text_only = True
-    for segment in segments[index:]:
-        if not isinstance(segment, dict) or segment.get("type") != "text":
-            text_only = False
-            break
-        text = segment.get("text")
-        if not isinstance(text, str):
-            text_only = False
-            break
-        texts.append(text)
-    value = "".join(texts).lstrip(" \t")
-    if value == "#forest":
-        return "", text_only
-    if not value.startswith("#forest") or not value[len("#forest")].isspace():
-        return None
-    if value[len("#forest")] not in " \t":
-        return "", False
-    return value[len("#forest") :].lstrip(" \t"), text_only
-
-
 def _tokenize(value):
     if not isinstance(value, str) or len(value.encode("utf-8")) > 4096:
         raise ValueError
@@ -200,10 +169,15 @@ class ShellCommand(Plugin):
     @service("shell.ingress.inspect", semantics="read")
     async def inspect(self, payload, ctx):
         value = _plain(payload)
-        direct_command = _direct_text(value["normalized"])
-        if direct_command is None:
-            return None
-        command_text, text_only = direct_command
+        gate = value["gate"]
+        if (
+            gate.get("protocol") != "forest.shell-gate/1"
+            or gate.get("claimed") is not True
+            or not isinstance(gate.get("command_text"), str)
+            or type(gate.get("text_only")) is not bool
+        ):
+            raise ForestError("SHELL_GATE_CLAIM_INVALID", "Shell gate claim is invalid", 422)
+        command_text, text_only = gate["command_text"], gate["text_only"]
         if text_only:
             directory = await ctx.shell_commands.list()
             command_id, command_version, arguments = _parse(command_text, directory)

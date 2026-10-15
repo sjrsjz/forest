@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.5.0"
+version = "2.5.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -50,6 +50,7 @@ requests = [
   "service.call:onebot.codec.normalize",
   "service.call:onebot.codec.prepare-send",
   "service.call:conversation.trigger.classify",
+  "service.call:shell.gate.inspect",
   "service.call:shell.ingress.inspect",
   "uow.execute:adapter.ingress-data-memory",
   "uow.execute:adapter.ingress-data-media",
@@ -73,6 +74,12 @@ startup_dependency = true
 
 [[components.requires]]
 name = "conversation.trigger.classify"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = true
+
+[[components.requires]]
+name = "shell.gate.inspect"
 contract = ">=1.0,<2.0"
 required = true
 startup_dependency = true

@@ -31,6 +31,7 @@ from forest.kernel_runtime_graph_snapshot import (
     runtime_status_snapshot_service,
 )
 from forest.kernel_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
+from forest.kernel_shell_gate import shell_gate_inspect_service
 from forest.module_management_contract import (
     AuditManagementContract,
     ModuleConfigurationContract,
@@ -88,6 +89,7 @@ _KERNEL_READ_SERVICES = frozenset({
     "deployment.package-registry.packages",
     "deployment.package-registry.artifact",
     "agent.tool.runtime-status",
+    "shell.gate.inspect",
 })
 
 
@@ -173,6 +175,7 @@ _MODULES = {
             "deployment.package-registry.packages",
             "deployment.package-registry.artifact",
             "agent.tool.runtime-status",
+            "shell.gate.inspect",
         ),
         "capabilities": (
             "runtime.graph.publish",
@@ -189,6 +192,7 @@ _MODULES = {
             "runtime.component-candidate.preview",
             "deployment.package-registry.packages",
             "deployment.package-registry.artifact",
+            "shell.gate.inspect",
         ),
     },
 }
@@ -926,6 +930,10 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                         RUNTIME_STATUS_TOOL.version,
                         ("kernel.runtime", "kernel.payload"),
                         runtime_status_tool_service,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "shell.gate.inspect", 1, ("kernel.runtime",),
+                        shell_gate_inspect_service,
                     ),
                     RuntimeKernelServiceSpec(
                         "runtime.graph.snapshot",

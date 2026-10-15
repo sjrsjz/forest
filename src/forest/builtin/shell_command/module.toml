@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.shell-command"
-version = "1.3.6"
+version = "1.3.7"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "shell_command:ShellCommand"

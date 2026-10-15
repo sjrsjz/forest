@@ -316,24 +316,41 @@ class AdapterOneBot(Plugin):
             ]}
             media_capture = None
         projected = {**normalized, "segments": context_parts}
-        shell = await ctx.services.call(
-            "shell.ingress.inspect",
-            {
-                "normalized": projected,
-                "binding_ref": binding["binding_ref"],
-                "binding_epoch": binding["binding_epoch"],
-                "connection_epoch": frame["connection_epoch"],
-                "client_incarnation": frame["client_incarnation"],
-                "adapter_generation_id": frame["adapter_generation_id"],
-                "executor_fence_digest": frame["transport_digest"],
-                "conversation_ref": conversation_ref,
-                "event_ref": event_id,
-                "principal_ref": author_subject_ref,
-            },
-            operation_id=ctx.operations.stable("shell-inspect"),
+        gate = await ctx.services.call(
+            "shell.gate.inspect",
+            {"protocol": "forest.shell-gate-request/1", "normalized": projected},
+            operation_id=ctx.operations.stable("shell-gate"),
         )
+        if (
+            not isinstance(gate, dict)
+            or gate.get("protocol") != "forest.shell-gate/1"
+            or type(gate.get("claimed")) is not bool
+        ):
+            raise ForestError("SHELL_GATE_RESULT_INVALID", "Shell gate result is invalid", 503)
+        shell = None
+        if gate["claimed"]:
+            shell = await ctx.services.call(
+                "shell.ingress.inspect",
+                {
+                    "gate": gate,
+                    "binding_ref": binding["binding_ref"],
+                    "binding_epoch": binding["binding_epoch"],
+                    "connection_epoch": frame["connection_epoch"],
+                    "client_incarnation": frame["client_incarnation"],
+                    "adapter_generation_id": frame["adapter_generation_id"],
+                    "executor_fence_digest": frame["transport_digest"],
+                    "conversation_ref": conversation_ref,
+                    "event_ref": event_id,
+                    "principal_ref": author_subject_ref,
+                },
+                operation_id=ctx.operations.stable("shell-inspect"),
+            )
+            if not isinstance(shell, dict) or shell.get("protocol") != "forest.shell-ingress/2":
+                raise ForestError(
+                    "SHELL_INGRESS_RESULT_INVALID", "Claimed Shell ingress is invalid", 503,
+                )
         classification = None
-        if shell is None:
+        if not gate["claimed"]:
             classification = await ctx.services.call(
                 "conversation.trigger.classify",
                 {"normalized": projected},
@@ -422,7 +439,7 @@ class AdapterOneBot(Plugin):
                 },
                 "conversation_step_id": "conversation",
             }
-        if shell is None:
+        if not gate["claimed"]:
             is_trigger = classification["decision"] == "TRIGGER"
             plan["classification"] = {
                 "conversation_id": conversation_ref,
