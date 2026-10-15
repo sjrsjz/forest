@@ -376,6 +376,19 @@ MANIFEST_SCHEMA = {
                             },
                         },
                     },
+                    "effect_driver_exports": {
+                        "type": "array",
+                        "maxItems": 16,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["kind", "service"],
+                            "properties": {
+                                "kind": {"type": "string"},
+                                "service": {"type": "string"},
+                            },
+                        },
+                    },
                     "effect_services": {
                         "type": "array",
                         "maxItems": 16,
@@ -1660,6 +1673,25 @@ def _manifest(files: dict[str, bytes]) -> dict:
     _storage_bundle(files, component)
     services = component.get("provides", [])
     effect_services = component.get("effect_services", [])
+    driver_exports = component.get("effect_driver_exports", [])
+    public_services = {
+        item["name"]: item for item in services
+        if item.get("visibility", "public") == "public"
+    }
+    if driver_exports and (
+        component["scope"] not in {"host", "deployment"}
+        or len({item["kind"] for item in driver_exports}) != len(driver_exports)
+        or len({item["service"] for item in driver_exports}) != len(driver_exports)
+        or any(
+            not IDENTIFIER.fullmatch(item["kind"])
+            or item["service"] not in public_services
+            for item in driver_exports
+        )
+    ):
+        _fail(
+            "INVALID_EFFECT_DRIVER_EXPORT",
+            "Driver exports require unique kinds and public control services",
+        )
     domain_queries = component.get("domain_queries", [])
     domain_commands = component.get("domain_commands", [])
     kernel_queries = component.get("kernel_queries", [])

@@ -113,6 +113,42 @@ timeout_s = 5
     )
 
 
+async def test_driver_export_requires_public_control_service_and_control_scope(tmp_path):
+    source = tmp_path / "driver-source"
+    _host_package(source)
+    manifest = source / "module.toml"
+    original = manifest.read_text(encoding="utf-8")
+    declaration = (
+        "\n[[components.effect_driver_exports]]\n"
+        'kind = "tests.host.echo"\n'
+        'service = "host.sample.echo"\n'
+    )
+    catalog = PackageCatalog(tmp_path / "catalog")
+    manifest.write_text(original + declaration, encoding="utf-8")
+    with pytest.raises(ForestError) as private:
+        catalog.build(source)
+    assert private.value.code == "INVALID_EFFECT_DRIVER_EXPORT"
+
+    public = original.replace('visibility = "management"', 'visibility = "public"')
+    manifest.write_text(public + declaration, encoding="utf-8")
+    exported = catalog.build(source)
+    assert exported.component["effect_driver_exports"] == [
+        {"kind": "tests.host.echo", "service": "host.sample.echo"}
+    ]
+    with pytest.raises(ForestError) as unreviewed:
+        await bootstrap_installed_host_package(
+            exported, SimpleNamespace(scope_kind="host"), plan_only=True,
+        )
+    assert unreviewed.value.code == "HOST_PACKAGE_PORT_UNAVAILABLE"
+    manifest.write_text(
+        public.replace('scope = "host"', 'scope = "bot"', 1) + declaration,
+        encoding="utf-8",
+    )
+    with pytest.raises(ForestError) as wrong_scope:
+        catalog.build(source)
+    assert wrong_scope.value.code == "INVALID_EFFECT_DRIVER_EXPORT"
+
+
 @pytest.mark.postgres
 async def test_host_package_compiles_into_real_generation(tmp_path):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -570,7 +606,27 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
         reviewed_source = tmp_path / "host-reviewed-v2"
         copytree(source, reviewed_source)
         (reviewed_source / "module.toml").write_text(
-            value.replace('version = "1.0.0"', 'version = "1.0.1"', 1),
+            value.replace('version = "1.0.0"', 'version = "1.0.1"', 1)
+            + (
+                "\n[[components.provides]]\n"
+                'name = "host.sample.driver"\n'
+                'contract = "1.0"\n'
+                'semantics = "at-most-once"\n'
+                'visibility = "public"\n'
+                'input_schema = "schemas/echo.json"\n'
+                'output_schema = "schemas/echo.json"\n'
+                "\n[[components.effect_driver_exports]]\n"
+                'kind = "tests.host.exported-driver"\n'
+                'service = "host.sample.driver"\n'
+            ),
+            encoding="utf-8",
+        )
+        worker = reviewed_source / "python/host_sample.py"
+        worker.write_text(
+            worker.read_text(encoding="utf-8")
+            + "    @service('host.sample.driver', semantics='at-most-once')\n"
+              "    async def driver(self, payload, ctx):\n"
+              "        return payload\n",
             encoding="utf-8",
         )
         staging = PackageCatalog(tmp_path / "reviewed-host-staging")
@@ -609,6 +665,14 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
         member = replaced.get("host.sample")
         assert member.snapshot.digest == candidate.digest
         assert replaced.generation_bindings["host.sample"].trust_level == "reviewed"
+        exports = controller.driver_exports()
+        assert len(exports) == 1
+        assert exports[0]["kind"] == "tests.host.exported-driver"
+        assert exports[0]["service_id"] == "host.sample.driver"
+        assert exports[0]["semantics"] == "at-most-once"
+        assert exports[0]["generation_id"] == member.generation_identity.generation_id
+        assert exports[0]["package_digest"] == candidate.digest
+        assert exports[0]["source_ref"].startswith("sha256:")
         assert member.generation_identity.generation_id != (
             registry.graph_identity.generations["host.sample"]
         )
@@ -630,6 +694,12 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
         restored = await controller.start()
         assert restored.get("host.sample").snapshot.digest == candidate.digest
         assert restored.generation_bindings["host.sample"].trust_level == "reviewed"
+        recovered_export = controller.driver_exports()[0]
+        assert recovered_export["source_ref"] != exports[0]["source_ref"]
+        assert recovered_export["generation_id"] == (
+            restored.get("host.sample").generation_identity.generation_id
+        )
+        assert recovered_export["package_digest"] == candidate.digest
         assert await restored.get("host.sample").management_contract.query(
             "echo", {"value": "restored"},
         ) == {"value": "restored"}

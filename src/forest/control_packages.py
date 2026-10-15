@@ -141,6 +141,9 @@ async def bootstrap_trusted_control_package(
     scope_kind = runtime.scope_kind
     component = snapshot.component
     effects = tuple(component.get("effect_services", ()))
+    exported_services = {
+        item["service"] for item in component.get("effect_driver_exports", ())
+    }
     owned_work = tuple(component.get("owned_work_handlers", ()))
     kernel_work = tuple(
         item for item in owned_work if item.get("authority", "package") == "kernel"
@@ -222,7 +225,9 @@ async def bootstrap_trusted_control_package(
         ))
         or bool(internal_commands & (artifact_commands | action_commands))
         or any(
-            item["semantics"] != "read" and "internal_command" not in item
+            item["semantics"] != "read"
+            and "internal_command" not in item
+            and item["name"] not in exported_services
             for item in component.get("provides", ())
         )
         or any(

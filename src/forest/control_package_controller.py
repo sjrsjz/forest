@@ -54,10 +54,78 @@ class ControlPackageController:
             )
         return self._registry
 
+    def driver_exports(self) -> tuple[dict, ...]:
+        """Describe active, trusted Worker services offered as driver kinds.
+
+        The source reference excludes the graph revision: an unrelated control
+        package replacement must retain the same provider Generation identity.
+        This read port does not admit Bot calls or lease the provider.
+        """
+
+        registry = self.registry
+        graph = registry.graph_identity
+        if graph is None:
+            raise ForestError(
+                "CONTROL_DRIVER_EXPORT_UNAVAILABLE",
+                "Control Graph has no published Generation identity", 503,
+            )
+        exports = []
+        for component_id, snapshot in sorted(self._snapshots.items()):
+            declarations = snapshot.component.get("effect_driver_exports", ())
+            if not declarations:
+                continue
+            generation = registry.generation_bindings[component_id]
+            if generation.trust_level not in {"official", "reviewed"}:
+                raise ForestError(
+                    "CONTROL_DRIVER_EXPORT_UNTRUSTED",
+                    "Untrusted control Generation cannot export a driver", 403,
+                )
+            services = {
+                item["name"]: item for item in snapshot.component["provides"]
+            }
+            for declaration in declarations:
+                service = services[declaration["service"]]
+                identity = {
+                    "protocol": "forest.control-effect-driver-source/1",
+                    "scope": self.scope_kind,
+                    "scope_id": self.runtime.scope_id,
+                    "component_id": component_id,
+                    "generation_id": graph.generations[component_id],
+                    "package_digest": snapshot.digest,
+                    "trust_level": generation.trust_level,
+                    "kind": declaration["kind"],
+                    "service_id": service["name"],
+                    "contract": service["contract"],
+                    "semantics": service["semantics"],
+                    "input_schema_digest": digest_json(
+                        snapshot.schema(service["input_schema"])
+                    ),
+                    "output_schema_digest": digest_json(
+                        snapshot.schema(service["output_schema"])
+                    ),
+                }
+                exports.append({
+                    **identity,
+                    "source_ref": digest_json(identity),
+                    "graph_id": graph.graph_id,
+                    "graph_revision": graph.graph_revision,
+                })
+        return tuple(sorted(exports, key=lambda item: (item["kind"], item["component_id"])))
+
     async def _assemble(
         self, snapshots: dict[str, PackageSnapshot], *, activation_id: str | None = None,
         plan_only: bool = False, frozen_configurations: dict[str, dict] | None = None,
     ) -> RuntimeModuleRegistry:
+        exported_kinds = [
+            declaration["kind"]
+            for snapshot in snapshots.values()
+            for declaration in snapshot.component.get("effect_driver_exports", ())
+        ]
+        if len(exported_kinds) != len(set(exported_kinds)):
+            raise ForestError(
+                "CONTROL_DRIVER_KIND_CONFLICT",
+                "Control Graph cannot publish duplicate driver kinds", 409,
+            )
         descriptors = []
         for _component_id, snapshot in sorted(snapshots.items()):
             declared = snapshot.storage_bundle()

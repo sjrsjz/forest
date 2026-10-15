@@ -24,6 +24,9 @@ v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + �
 
 Effect 驱动来源冻结（2026-10-15）：包编译器现在要求每个已声明 Effect service 显式绑定驱动来源；Bot 的部署宿主驱动注册表把服务名、kind 和来源组成不可变事实，外部来源标识进入 RuntimeModule 描述符摘要。仅当来源不是现有 `forest.host-native/1` 时增加持久描述符字段，保留现有原生驱动图的摘要。定向 RuntimeGraph 与包编译回归 16 passed。此改动只建立代际身份围栏；Host/Deployment 包尚不能导出新的驱动实现，Bot 也还没有跨 scope 的驱动调用与依赖排空，因此不能称为动态第三方驱动可热重载。
 
+
+Host 驱动导出事实（2026-10-15）：包 manifest 新增受信任控制包的 `effect_driver_exports`，每个 kind 精确指向自身公开服务；普通包的受限编译路径仍拒绝。控制器只读端口按活动 Host/Deployment Generation、包摘要、契约、语义和 schema 摘要生成来源标识，排除无关图修订。隔离 PostgreSQL 6 项通过，覆盖受审查 Host 包换代、导出身份和冷恢复新 Generation；静态声明边界 1 项通过。Bot 到 Host 的调用、依赖排空与联合换代尚未接通，v31 在线实例未装载本次源码。
+
 ### v31 当前验收门禁
 
 | 要求 | 已有直接证据 | 尚缺证据或实现 |
