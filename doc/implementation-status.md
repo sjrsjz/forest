@@ -1,6 +1,6 @@
 # Forest 实现状态
 
-2026-10-15 跨作用域驱动联合换代开发态：Supervisor 已接入共享门闩内的 Bot 候选准备、Host 先发布、Bot 后激活；Host 持久发布后 Bot 失败可记录 `PARTIAL` 回执，新 Host 基线 PostgreSQL 验证通过。受影响 Bot 的逐项结果已持久记录，Host 图已发布但仍有 PENDING Bot 时恢复分支会把请求结算为 PARTIAL；PENDING Bot 的主动证据复核与自动补接、双 Bot PostgreSQL/真实实例验证仍缺失；此代码未装载到在线 v31，不能声明联合热重载验收完成。
+2026-10-15 跨作用域驱动联合换代开发态：Supervisor 已接入联合候选准备、Host 先发布、Bot 后激活和逐 Bot 持久账本。重启后的 PENDING 行由恢复器等待 Bot 上线，核对当前 Host/Bot 图与绑定后结算；ONLINE 意图下的启动重试不提前失败，撤销意图才记 FAILED。Host PostgreSQL 账本 7 项与恢复器/协调器定向测试 9 项通过；完整进程中断、故障注入及真实实例仍待验收，在线 v31 未装载此候选代码。
 
 
 ## 当前在线（2026-10-15 10:03 北京时间）
@@ -32,9 +32,9 @@ Host 驱动导出事实（2026-10-15）：受信任控制包以 `effect_driver_e
 
 Host 导出驱动消费（2026-10-15）：BotHost 候选装配合并当前 Host 控制器已审查的驱动 kind；Bot 包编译核对服务契约、语义和输入/输出 schema 摘要，并将来源标识冻结进消费方 Generation。Bot 所有的代理携自身 Generation 身份，通过受信任跨范围端口调用准确 Host Generation；Host 路由和持久权威再次围栏提供方，旧来源在 Host 换代后拒绝。隔离 PostgreSQL 的 Host 6 项和 Bot 3 项通过；完整 BotHost 官方包选择、热替换和冷恢复回归 1 项通过，但该完整用例未安装第三方消费包。跨图依赖闭包排空、Host 换代时消费方自动重装配及在线 v31 装载仍未完成。
 
-跨图驱动绑定与联合换代（2026-10-15）：Supervisor 在同一准入围栏下准备 Host 与受影响 Bot 候选，按 Bot ID 排空旧消费图，再发布 Host 和 Bot 图。Host 持久账本逐 Bot 记录 PENDING、SUCCEEDED、FAILED 或 PARTIAL，未完成接管不能误报成功。真实 PostgreSQL 用例证明两个消费 Bot 的来源与 Generation 换代、无关 Bot Graph 不变；在途调用、故障注入、冷恢复及真实实例仍待验收。详见[跨范围驱动联合换代](20-cross-scope-driver-hot-reload.md)。
+跨图驱动绑定与联合换代（2026-10-15）：Supervisor 在同一准入围栏下准备 Host 与受影响 Bot 候选，按 Bot ID 排空旧消费图，再发布 Host 和 Bot 图。Host 持久账本记录逐 Bot PENDING、SUCCEEDED、FAILED 或 PARTIAL；恢复器只在当前图与绑定证明成立后收敛 PENDING。真实 PostgreSQL 用例证明两个消费 Bot 换代、无关 Bot Graph 不变；在途调用、故障注入、完整冷恢复及真实实例仍待验收。详见[跨范围驱动联合换代](20-cross-scope-driver-hot-reload.md)。
 
-Host 接管账本已在 PREPARED 阶段冻结每个 Bot 的旧/目标 `(service, kind, source_ref)` 绑定三元组，并由数据库禁止事后改写；隔离 PostgreSQL 与协调器测试通过。冷启动后 Host/Bot 实际 Graph 身份与原计划不同，账本主动复核和最终自动收敛仍未实现。
+Host 接管账本在 PREPARED 阶段冻结每个 Bot 的旧/目标 `(service, kind, source_ref)` 绑定三元组，数据库禁止事后改写。冷启动后的 Host/Bot 图身份另行记录，恢复器通过受限管理端口和准入围栏核对当前 Host 导出、Bot 持久图及实际绑定；账本与恢复器定向测试通过。完整独立进程中断与真实实例仍待验收。
 
 Host 候选导出来源（2026-10-15）：控制器只从精确的活动或已准备 Host 图及其包快照投影驱动事实，拒绝错误快照和关闭后的候选。Bot 候选编译已接入该未来导出，真实 PostgreSQL 联合用例确认新来源仅进入两个受影响 Bot；无关 Bot 保留原 Graph。
 

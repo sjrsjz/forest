@@ -381,6 +381,7 @@ CREATE TABLE host_sample_native (value text NOT NULL);
             lease, [newer_binding], change_request["activation_id"],
         )
         bot_activation_id = str(uuid4())
+        cold_planned_activation_id = str(uuid4())
         roster = await changes.stage_consumers(
             lease, host_activation_id=change_request["activation_id"],
             consumers=({
@@ -390,9 +391,16 @@ CREATE TABLE host_sample_native (value text NOT NULL);
                 "source_bot_graph_revision": 1,
                 "source_bindings": [["bot.effect", "test.driver", "old-source"]],
                 "target_bindings": [["bot.effect", "test.driver", "new-source"]],
-            },),
+            }, {
+                "bot_id": "bot/recovered",
+                "bot_activation_id": cold_planned_activation_id,
+                "source_bot_graph_id": "graph:old-recovered-bot",
+                "source_bot_graph_revision": 1,
+                "source_bindings": [["bot.effect", "test.driver", "old-source"]],
+                "target_bindings": [["bot.effect", "test.driver", "new-source"]],
+            }),
         )
-        assert len(roster) == 1
+        assert len(roster) == 2
         assert roster[0]["state"] == "PENDING"
         assert roster[0]["bot_activation_id"] == bot_activation_id
         assert roster[0]["source_bindings"] == [[
@@ -417,6 +425,45 @@ CREATE TABLE host_sample_native (value text NOT NULL);
         ) == newer.graph_revision
         proof = await changes.published_graph(change_request)
         assert proof["graph_id"] == newer.graph_id
+        actual_bot_activation_id = str(uuid4())
+        cold_bot_graph = {
+            "graph_id": "graph:recovered-bot",
+            "graph_revision": 2,
+            "activation_id": actual_bot_activation_id,
+            "state": "ACTIVE",
+        }
+        host_graph_proof = {
+            "graph_id": newer.graph_id,
+            "graph_revision": newer.graph_revision,
+            "activation_id": newer.activation_id,
+        }
+        with pytest.raises(ForestError) as stale_cold_binding:
+            await changes.recover_consumer(
+                lease, host_activation_id=change_request["activation_id"],
+                bot_id="bot/recovered", host_graph=host_graph_proof,
+                bot_graph=cold_bot_graph,
+                current_sources={"test.driver": "new-source"},
+                bot_bindings=(("bot.effect", "test.driver", "old-source"),),
+            )
+        assert stale_cold_binding.value.code == "HOST_DRIVER_RECOVERY_BINDING_MISMATCH"
+        cold_result = await changes.recover_consumer(
+            lease, host_activation_id=change_request["activation_id"],
+            bot_id="bot/recovered", host_graph=host_graph_proof,
+            bot_graph=cold_bot_graph,
+            current_sources={"test.driver": "new-source"},
+            bot_bindings=(("bot.effect", "test.driver", "new-source"),),
+        )
+        assert cold_result["state"] == "SUCCEEDED"
+        assert cold_result["recovery_mode"] == "COLD_REBOUND"
+        assert cold_result["result_bot_activation_id"] == actual_bot_activation_id
+        assert cold_result["result_host_graph_id"] == newer.graph_id
+        assert await changes.recover_consumer(
+            lease, host_activation_id=change_request["activation_id"],
+            bot_id="bot/recovered", host_graph=host_graph_proof,
+            bot_graph=cold_bot_graph,
+            current_sources={"test.driver": "new-source"},
+            bot_bindings=(("bot.effect", "test.driver", "new-source"),),
+        ) == cold_result
         with pytest.raises(ForestError) as wrong_bot_activation:
             await changes.finish_consumer(
                 lease, host_activation_id=change_request["activation_id"],

@@ -1,6 +1,6 @@
 # 跨范围驱动联合换代
 
-本设计约束 Host/Deployment 控制包导出的 Effect 驱动与 Bot 包消费方之间的运行时热替换。当前实现冻结来源、核对契约，并由 Supervisor 在活动 Bot 消费旧来源时执行联合候选换代；缺少协调端口则拒绝该变更。两个消费 Bot 和一个无关 Bot 的真实 PostgreSQL 换代用例已通过；在途 Effect、失败注入、完整进程恢复和许可群低频实例验收仍未完成。Agent、Memory 等业务包只通过 `effect_services.kind` 声明消费，不参与调度本协议。
+本设计约束 Host/Deployment 控制包导出的 Effect 驱动与 Bot 消费方之间的热替换。Supervisor 已在活动消费方存在时执行联合图换代，并通过 Host 持久账本跟踪每个 Bot 的接管；进程重启后会等待 Bot 上线，核对当前 Host/Bot 图和实际绑定后再收敛结果。在途 Effect、失败注入、完整进程冷恢复和许可群低频实例验收仍待完成。Agent、Memory 等业务包只声明驱动消费，不参与本协议调度。
 
 ## 权威与身份
 
@@ -42,7 +42,7 @@ Host 图变更在持有跨图围栏时读取活动 Bot 绑定。Bot 启动、换
 
 冷启动会重建 Host Generation，因而 `source_ref` 和 Bot activation ID 可能与中断前计划不同。恢复端必须分别保存计划身份和实际发布身份：从当前 Host 图投影已受审查的导出契约，再以 Bot 内核的当前图、Graph revision 和活动描述符绑定核对同一服务与 kind 已转向当前 Host 来源，且旧来源不再可调用。不能用重建后的图冒充原计划图；原 Host 请求仍保留原发布证据。
 
-Bot 仍处于 STARTING 或证据不可得时保持 PENDING，并暂停该 Host 变更结果的最终结算；Bot ONLINE 且图证据和绑定核对成立时记录带恢复标记的实际 Host/Bot 图并收敛为 SUCCEEDED；明确启动失败或运行意图撤销时记录 FAILED，Host 请求为 PARTIAL。结算必须受进程内准入围栏和持久租约保护，重试只接受完全相同的证明。以上为恢复实现约束，当前代码尚未完成该收敛。
+Bot 仍处于 STARTING 或 ONLINE 意图下暂时启动失败时，账本保持 PENDING，Host 请求暂停最终结算。Bot 上线后，恢复器在共享准入围栏内核对当前 Host 包与导出来源、Bot 持久图和活动绑定；同进程恢复记录原计划图，冷启动重建记录实际 Host/Bot 图和 COLD_REBOUND 标记。运行意图明确撤销时记 FAILED，Host 请求结算 PARTIAL；旧来源仍绑定时使 Host 控制器进入致命状态，不能报告成功。数据库租约和终态不可改写约束保护重试。
 
 ## 必需验证
 
@@ -52,6 +52,6 @@ Bot 仍处于 STARTING 或证据不可得时保持 PENDING，并暂停该 Host �
 
 Supervisor 已按精确旧 `source_ref` 选取 Bot 消费者，在共享门闩下准备 Bot 候选、排空旧图，随后发布 Host 并激活 Bot；Bot activation ID 由 Host activation ID 与 Bot ID 稳定派生。Host 发布后的接管失败会使受影响 Bot 和 Host 进入致命状态，Host 图变更回执以 `PARTIAL` 同时保留图证据与错误码，WebUI 将其显示为终态。Host `PARTIAL` 约束目前只存在于新的 Host 数据库基线，不能直接加载到现行 v31 数据库。
 
-Host 作用域在候选图 PREPARED 且 Bot 候选均准备完成后，一次性冻结受影响 Bot 名册，记录旧 Bot 图、目标 activation ID 和 PENDING 状态。Bot 图发布并由其内核图账本证实、旧 Bot 图关闭后，逐项结算 SUCCEEDED；异常项按是否有已发布 Bot 图证据结算 FAILED 或 PARTIAL。数据库触发器拒绝在 Host 图发布前把 Bot 记为 SUCCEEDED/PARTIAL，终态不可改写。管理状态返回逐 Bot 结果；进程重启看到 Host 图已发布而名册仍有 PENDING 时，会把 Host 请求结算为 PARTIAL，绝不误报 SUCCEEDED。
+Host 作用域在候选图 PREPARED 且 Bot 候选均已准备后冻结每个 Bot 的旧/目标绑定三元组、旧图与目标 activation ID。Bot 图发布并由内核图账本证实后，逐项结算 SUCCEEDED；异常项记录 FAILED 或 PARTIAL。数据库触发器拒绝 Host 图发布前把 Bot 记为 SUCCEEDED/PARTIAL，终态不可改写。进程重启遇到 PENDING 时先等待 Bot 的异步启动并主动复核图证据，不再立即把 Host 请求结算为 PARTIAL。
 
-尚未完成：PENDING Bot 的主动证据复核、自动补接及最终结果收敛；在途 Effect 调用、Host 候选预热失败、Bot 准备失败、Host 发布后 Bot 激活失败、进程冷恢复，以及许可群低频实测。真实 PostgreSQL 用例已覆盖两个 Bot 共享 Host 驱动、无关 Bot 保持原 Graph、受影响 Bot 换代与逐 Bot SUCCEEDED 账本；它尚不能证明上述失败与恢复路径。
+尚未完成：在途 Effect 调用、Host 候选预热失败、Bot 准备失败、Host 发布后 Bot 激活失败、完整进程中断冷恢复，以及许可群低频实测。恢复器与账本已有定向测试；真实 PostgreSQL 联合换代用例覆盖两个消费 Bot、一个无关 Bot 和逐 Bot SUCCEEDED，但尚不能证明上述故障与进程恢复路径。

@@ -661,7 +661,7 @@ class ControlPackageController:
                 raise failure from errors[0]
             return candidate
 
-    async def serve_graph_changes(self, authority) -> None:
+    async def serve_graph_changes(self, authority, *, recover_consumers=None) -> None:
         """Reconcile durable requests before executing another Graph transition."""
 
         if getattr(authority, "scope", None) != self.scope_kind:
@@ -712,9 +712,17 @@ class ControlPackageController:
                             503,
                         )
                 if self.scope_kind == "host" and evidence is not None:
-                    consumers = await authority.consumer_results(
-                        request["activation_id"]
-                    )
+                    while True:
+                        consumers = await authority.consumer_results(
+                            request["activation_id"]
+                        )
+                        pending = tuple(
+                            item for item in consumers if item["state"] == "PENDING"
+                        )
+                        if not pending or recover_consumers is None:
+                            break
+                        await recover_consumers(request, pending)
+                        await asyncio.sleep(0.5)
                     if any(item["state"] != "SUCCEEDED" for item in consumers):
                         await authority.settle(
                             self.runtime.authority_lease(),

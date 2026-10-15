@@ -19,6 +19,7 @@ from forest.bootstrap_contributions import BootstrapConfigurationRegistry
 from forest.bot_host import BotHost
 from forest.control_driver_binding_gate import ControlDriverBindingGate
 from forest.control_driver_joint_transition import execute_joint_host_driver_transition
+from forest.control_driver_recovery import HostDriverHandoffRecovery
 from forest.deployment_access_settings import DeploymentAccessSettings
 from forest.deployment_access_settings import bounded_environment_int as _positive_int
 from forest.deployment_access_settings import required_environment as _required
@@ -507,7 +508,13 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             name="deployment-package-graph-changes",
         )
         host_graph_change_task = asyncio.create_task(
-            host_controller.serve_graph_changes(host_graph_changes),
+            host_controller.serve_graph_changes(
+                host_graph_changes,
+                recover_consumers=HostDriverHandoffRecovery(
+                    supervisor=supervisor, controller=host_controller,
+                    gate=driver_binding_gate, ledger=host_graph_changes,
+                ),
+            ),
             name="host-package-graph-changes",
         )
         fatal_task = asyncio.create_task(

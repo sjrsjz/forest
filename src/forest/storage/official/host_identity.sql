@@ -199,6 +199,13 @@ CREATE TABLE forest_host.driver_transition_consumers (
     result_bot_graph_revision bigint CHECK (
         result_bot_graph_revision IS NULL OR result_bot_graph_revision > 0
     ),
+    result_bot_activation_id text CHECK (
+        result_bot_activation_id IS NULL OR
+        result_bot_activation_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    ),
+    result_host_graph_id text,
+    recovery_mode text NOT NULL DEFAULT 'NONE'
+        CHECK (recovery_mode IN ('NONE','COLD_REBOUND')),
     error_code text CHECK (error_code IS NULL OR error_code ~ '^[A-Z][A-Z0-9_]{0,127}$'),
     prepared_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -208,13 +215,21 @@ CREATE TABLE forest_host.driver_transition_consumers (
         REFERENCES forest_host.runtime_graphs(host_id,activation_id),
     CHECK (
         (state='PENDING' AND result_bot_graph_id IS NULL
-            AND result_bot_graph_revision IS NULL AND error_code IS NULL)
+            AND result_bot_graph_revision IS NULL
+            AND result_bot_activation_id IS NULL AND result_host_graph_id IS NULL
+            AND recovery_mode='NONE' AND error_code IS NULL)
         OR (state='SUCCEEDED' AND result_bot_graph_id IS NOT NULL
-            AND result_bot_graph_revision IS NOT NULL AND error_code IS NULL)
+            AND result_bot_graph_revision IS NOT NULL
+            AND result_bot_activation_id IS NOT NULL AND result_host_graph_id IS NOT NULL
+            AND error_code IS NULL)
         OR (state='FAILED' AND result_bot_graph_id IS NULL
-            AND result_bot_graph_revision IS NULL AND error_code IS NOT NULL)
+            AND result_bot_graph_revision IS NULL
+            AND result_bot_activation_id IS NULL AND result_host_graph_id IS NULL
+            AND recovery_mode='NONE' AND error_code IS NOT NULL)
         OR (state='PARTIAL' AND result_bot_graph_id IS NOT NULL
-            AND result_bot_graph_revision IS NOT NULL AND error_code IS NOT NULL)
+            AND result_bot_graph_revision IS NOT NULL
+            AND result_bot_activation_id IS NOT NULL AND result_host_graph_id IS NOT NULL
+            AND recovery_mode='NONE' AND error_code IS NOT NULL)
     )
 );
 
