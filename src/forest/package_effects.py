@@ -99,6 +99,24 @@ class PackageEffectDriverRegistry:
     configuration_validators: Mapping[str, Callable[[object], Awaitable[None]]] = field(
         default_factory=dict
     )
+    source_refs: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.source_refs and (
+            set(self.source_refs) != set(self.factories)
+            or any(not isinstance(ref, str) or not ref for ref in self.source_refs.values())
+        ):
+            raise ValueError("Effect driver sources must identify every registered kind")
+
+    def binding_facts(self, declarations: tuple[dict, ...]) -> tuple[tuple[str, str, str], ...]:
+        """Freeze the host-selected driver source into each consuming Generation."""
+
+        self.resolve(declarations)
+        return tuple(sorted(
+            (item["name"], item["kind"],
+             self.source_refs.get(item["kind"], "forest.host-native/1"))
+            for item in declarations
+        ))
 
     def configuration_validator(
         self, declarations: tuple[dict, ...]

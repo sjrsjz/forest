@@ -788,6 +788,9 @@ def _compile_package_descriptor(
         ),
         configuration_validator=configuration_validator,
         effect_driver_factories=effect_driver_factories,
+        effect_driver_bindings=effect_driver_registry.binding_facts(
+            tuple(snapshot.component.get("effect_services", ()))
+        ),
         storage=storage,
         management=management,
         management_contract_factory=lambda adapter: PackageManagementContract(

@@ -722,6 +722,7 @@ class RuntimeModuleDescriptor:
     contribution_directories: tuple[str, ...] = ()
     owned_work_lifecycle: OwnedWorkLifecycle = OwnedWorkLifecycle.NONE
     provided_services: tuple[tuple[str, str], ...] = ()
+    effect_driver_bindings: tuple[tuple[str, str, str], ...] = ()
     startup_service_requires: tuple[tuple[str, str], ...] = ()
     retention_requires: tuple[str, ...] = ()
     retention_service_requires: tuple[tuple[str, str], ...] = ()
@@ -784,6 +785,16 @@ class RuntimeModuleDescriptor:
             raise ValueError("Runtime owned-work lifecycle declaration is invalid")
         if len(self.provided_services) != len(set(self.provided_services)):
             raise ValueError("Runtime provided service identities must be unique")
+        if (
+            not isinstance(self.effect_driver_bindings, tuple)
+            or any(not isinstance(binding, tuple) or len(binding) != 3
+                or any(not isinstance(part, str) or not part for part in binding)
+                for binding in self.effect_driver_bindings)
+            or tuple(sorted(self.effect_driver_bindings)) != self.effect_driver_bindings
+            or len({binding[0] for binding in self.effect_driver_bindings})
+            != len(self.effect_driver_bindings)
+        ):
+            raise ValueError("Runtime effect driver bindings must be immutable unique facts")
         if len(self.startup_service_requires) != len(set(self.startup_service_requires)):
             raise ValueError("Runtime startup service requirements must be unique")
         if (
@@ -1290,6 +1301,17 @@ class RuntimeModuleRegistry:
             "component_jobs": [item.as_fact() for item in descriptor.component_jobs],
             "owned_work_lifecycle": descriptor.owned_work_lifecycle,
         }
+        # Native driver selection is already implied by the installed host
+        # runtime. Only an external provider must alter the persisted member
+        # digest when its exact source Generation changes.
+        if any(
+            source_ref != "forest.host-native/1"
+            for _, _, source_ref in descriptor.effect_driver_bindings
+        ):
+            fact["effect_driver_bindings"] = [
+                {"service_id": service_id, "kind": kind, "source_ref": source_ref}
+                for service_id, kind, source_ref in descriptor.effect_driver_bindings
+            ]
         return {**fact, "descriptor_digest": digest_json(fact)}
 
     def preview_descriptor_digests(

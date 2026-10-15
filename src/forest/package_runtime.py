@@ -3369,6 +3369,7 @@ def package_runtime_descriptor(
     service_operation_ledger: PackageServiceOperationLedger,
     configuration_validator: Callable[[object], Any] | None = None,
     effect_driver_factories: Mapping[str, PackageEffectDriverFactory] | None = None,
+    effect_driver_bindings: tuple[tuple[str, str, str], ...] | None = None,
     storage=None,
     management=(),
     management_contract=None,
@@ -3429,6 +3430,32 @@ def package_runtime_descriptor(
                 "declared": sorted(declared_effect_services),
                 "bound": sorted(effect_driver_factories),
             },
+        )
+    if effect_driver_bindings is None:
+        effect_driver_bindings = ()
+    declared_effect_bindings = {
+        item["name"]: item["kind"]
+        for item in component.get("effect_services", ())
+    }
+    if (
+        not isinstance(effect_driver_bindings, tuple)
+        or any(
+            not isinstance(binding, tuple)
+            or len(binding) != 3
+            or any(not isinstance(part, str) or not part for part in binding)
+            for binding in effect_driver_bindings
+        )
+        or tuple(sorted(effect_driver_bindings)) != effect_driver_bindings
+        or len(effect_driver_bindings) != len(declared_effect_bindings)
+        or any(
+            declared_effect_bindings.get(service_id) != kind
+            for service_id, kind, _source_ref in effect_driver_bindings
+        )
+    ):
+        raise ForestError(
+            "PACKAGE_EFFECT_DRIVER_SOURCE_INVALID",
+            "Effect driver source facts must match the declared service kinds",
+            500,
         )
     requested = frozenset(component.get("capabilities", {}).get("requests", ()))
     gateway_capabilities = {
@@ -3787,6 +3814,7 @@ def package_runtime_descriptor(
                 *component.get("effect_services", ()),
             )
         ),
+        effect_driver_bindings=effect_driver_bindings,
         startup_service_requires=tuple(
             (item["name"], item["contract"])
             for item in component.get("requires", ())

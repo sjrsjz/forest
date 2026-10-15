@@ -341,6 +341,10 @@ async def bootstrap_trusted_control_package(
         service_operation_ledger=runtime.service_operation_ledger,
         storage=storage, trust_level=trust_level,
         effect_driver_factories=effect_factories,
+        effect_driver_bindings=tuple(sorted(
+            (item["name"], item["kind"], "forest.host-native/1")
+            for item in effects
+        )),
         management=management,
         management_contract_factory=lambda adapter: PackageManagementContract(
             configuration, adapter=adapter, schema=config_schema,

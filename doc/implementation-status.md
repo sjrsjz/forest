@@ -21,6 +21,9 @@ v31 新库在接管时来源、主干和 facet 均为 0。隔离 PostgreSQL + �
 
 受审查控制包运行时第一阶段（2026-10-15）：Host/Deployment 的准确 ZIP、包、manifest、组件、scope 和 Python Worker 身份现可经目录所有者 CLI 原子发布独立 reviewed 来源；普通导入不能取得该身份，含内核命令或内核拥有工作声明的归档在发布时拒绝。控制图核对来源后允许自身 official-profile SQL、领域端口和现有宿主 Effect kind，代际账本保留 reviewed 身份。隔离 PostgreSQL 中 Host 包在相同 SQL 基线下由 official v1 换为 reviewed v2，旧代排空、新代查询与私有表均通过，新控制器从相同数据库和目录冷恢复 reviewed 身份与服务；目录与 CLI 定向 3 项通过，Ruff 通过。尚未实现第三方驱动实现作为 Host/Deployment Generation 提供给 Bot、依赖闭包换代或不同 SQL 基线在线升级；当前在线 v31 镜像也不包含该候选代码。
 
+
+Effect 驱动来源冻结（2026-10-15）：包编译器现在要求每个已声明 Effect service 显式绑定驱动来源；Bot 的部署宿主驱动注册表把服务名、kind 和来源组成不可变事实，外部来源标识进入 RuntimeModule 描述符摘要。仅当来源不是现有 `forest.host-native/1` 时增加持久描述符字段，保留现有原生驱动图的摘要。定向 RuntimeGraph 与包编译回归 16 passed。此改动只建立代际身份围栏；Host/Deployment 包尚不能导出新的驱动实现，Bot 也还没有跨 scope 的驱动调用与依赖排空，因此不能称为动态第三方驱动可热重载。
+
 ### v31 当前验收门禁
 
 | 要求 | 已有直接证据 | 尚缺证据或实现 |

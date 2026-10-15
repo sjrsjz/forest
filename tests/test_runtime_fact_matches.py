@@ -11,7 +11,7 @@ from forest.runtime_modules import (
 )
 
 
-def _descriptor(component_id, *, requires=(), fact_matches=()):
+def _descriptor(component_id, *, requires=(), fact_matches=(), effect_bindings=()):
     return RuntimeModuleDescriptor(
         component_id=component_id,
         requires=requires,
@@ -25,6 +25,7 @@ def _descriptor(component_id, *, requires=(), fact_matches=()):
             trust_level="official",
         ),
         fact_matches=fact_matches,
+        effect_driver_bindings=effect_bindings,
     )
 
 
@@ -74,3 +75,33 @@ def test_candidate_fact_match_fences_space_and_dimensions_before_publication():
     with pytest.raises(ForestError) as caught:
         _candidate(space, {"space_id": space["space_id"]})._validate_fact_matches()
     assert caught.value.code == "RUNTIME_GRAPH_FACT_MISSING"
+
+
+def test_effect_driver_source_is_part_of_generation_descriptor_digest():
+    old = _descriptor(
+        "consumer",
+        effect_bindings=(("send", "transport.example", "host:old-generation"),),
+    )
+    replacement = _descriptor(
+        "consumer",
+        effect_bindings=(("send", "transport.example", "host:new-generation"),),
+    )
+    old_registry = RuntimeModuleRegistry(SimpleNamespace(), (old,))
+    candidate = RuntimeModuleRegistry(SimpleNamespace(), (replacement,))
+    old_digest = old_registry._descriptor_fact(old)["descriptor_digest"]
+    new_digest = candidate.preview_descriptor_digests(old_registry)[0][1]
+    assert old_digest != new_digest
+    assert candidate._descriptor_fact(replacement)["effect_driver_bindings"] == [
+        {
+            "service_id": "send",
+            "kind": "transport.example",
+            "source_ref": "host:new-generation",
+        }
+    ]
+    native = _descriptor(
+        "consumer",
+        effect_bindings=(("send", "transport.example", "forest.host-native/1"),),
+    )
+    assert "effect_driver_bindings" not in RuntimeModuleRegistry(
+        SimpleNamespace(), (native,)
+    )._descriptor_fact(native)
