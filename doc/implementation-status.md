@@ -1446,3 +1446,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-16 Host/Bot 联合换代发布后失败验收：隔离 PostgreSQL 用例在 Host 新图发布后注入首个消费 Bot 预热失败，保留原始原因，Host 与两个受影响 Bot 进入致命状态；两个 Bot 的消费账本均为 FAILED，无关 Bot 图不变，旧 Host 图已关闭，账本和清理错误列表为空。协调器现在清理已失去宿主引用的候选/旧图，活动图仍由宿主关闭。完整场景 `1 passed in 591.82s`；跨进程在途 Effect、UNKNOWN 外部效果和许可群低频实测仍待验收。
 
 2026-10-16 v32 离线候选：当前已提交源码 `284cc17` 构建独立 deployment 与 Bot 数据库；供应任务 SUCCEEDED，Bot READY/OFFLINE，22/22 Bot schema bundle READY，Memory SQL 3.94.0。在线 v31 仍为 Memory 1.94.0 / SQL 3.93.0，且树莓派只有一条 OneBot 连接；v32 尚未接管 QQ。只读 v31 管理观察见 [v32 离线候选记录](live-v32-offline-candidate-2026-10-16.md)：11 个群主干，存在 ELIGIBLE 来源与 UNKNOWN facet，但许可群来源为空。新旧数据库不自动合并。
+
+2026-10-16 v32 现役状态：v31 已 OFFLINE，v32 是唯一在线 Bot。官方 memory.graph 1.96.1 工件已通过正式包目录和选择账本热替换，随后一次受控 Supervisor 重启从该精确工件与配置修订 2 恢复为 Graph 5、22/22 ACTIVE；Graph 4 只是退役时占用的空图头修订，没有实体图行。当前记忆预算为 UTC 日 300 次嵌入请求、300000 tokens，已结算 1 次、22 tokens，UNKNOWN 与预留均为 0。树莓派 QQ 3.2.34-53644 当前登录 READY，OneBot get_status 为在线且 8080 只有一条已建立连接；10 月 13 日的“请下载最新版 QQ”登录错误没有在本次只读检查中复现，腾讯官网当前 ARM64 发布版本仍为 3.2.34。许可群在 v32 接管后尚无新消息，因此真实 @ → Agent → Provider → Delivery 回复未验收。工件摘要、切换、冷启动和只读观察证据见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。
