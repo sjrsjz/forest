@@ -9470,6 +9470,27 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION memory_read_embedding_budget_day(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
+    SELECT jsonb_build_object(
+        'protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object(
+            'budget_day',today.budget_day::text,
+            'reserved_requests',COALESCE(day.reserved_requests,0)::text,
+            'settled_requests',COALESCE(day.settled_requests,0)::text,
+            'unknown_requests',COALESCE(day.unknown_requests,0)::text,
+            'reserved_tokens',COALESCE(day.reserved_tokens,0)::text,
+            'charged_tokens',COALESCE(day.charged_tokens,0)::text,
+            'unknown_tokens',COALESCE(day.unknown_tokens,0)::text,
+            'revision',COALESCE(day.revision,0)::text,
+            'updated_at',day.updated_at
+        )
+    )
+    FROM (SELECT (statement_timestamp() AT TIME ZONE 'UTC')::date AS budget_day) today
+    LEFT JOIN __forest_module_schema__.embedding_budget_days day
+      ON day.bot_id=context->>'bot_id' AND day.budget_day=today.budget_day;
+$$;
+
 CREATE FUNCTION memory_list_trunks(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
 DECLARE

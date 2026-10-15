@@ -412,6 +412,25 @@ async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
             ).fetchone()
         return row["result"]
 
+    async def budget_snapshot(bot_id):
+        async with store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}.memory_read_embedding_budget_day("
+                            "%s::jsonb,%s::jsonb) AS result").format(
+                        sql.Identifier(namespace)
+                    ),
+                    (Jsonb({"bot_id": bot_id}), Jsonb({})),
+                )
+            ).fetchone()
+        assert row["result"]["ok"] is True
+        return row["result"]["value"]
+
+    empty = await budget_snapshot(store.bot_id)
+    assert empty["reserved_requests"] == "0"
+    assert empty["charged_tokens"] == "0"
+    assert empty["updated_at"] is None
+
     bound = await invoke("memory_bind_domain", "domain/budget", {
         "protocol": "forest.memory-domain-bind/1",
         "space_id": "sha256:" + "a" * 64,
@@ -517,6 +536,16 @@ async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
             )
         ).fetchone()
     assert tuple(row.values()) == (0, 0, 1, 150, 1, 100)
+    snapshot = await budget_snapshot(store.bot_id)
+    assert (snapshot["reserved_requests"], snapshot["reserved_tokens"],
+            snapshot["settled_requests"], snapshot["charged_tokens"],
+            snapshot["unknown_requests"], snapshot["unknown_tokens"]) == (
+                "0", "0", "1", "150", "1", "100")
+    assert snapshot["updated_at"] is not None
+    other_bot = await budget_snapshot("other-bot")
+    assert other_bot["charged_tokens"] == "0"
+    assert other_bot["unknown_requests"] == "0"
+
 
 
 @pytest.mark.postgres

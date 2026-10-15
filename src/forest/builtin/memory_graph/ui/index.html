@@ -82,6 +82,7 @@
       <label>种子数<input data-path="seed_limit" type="number" min="1" max="64"></label><label>每模态候选<input data-path="candidate_limit_per_facet" type="number" min="1" max="256"></label><label>最大图节点<input data-path="max_graph_nodes" type="number" min="1" max="64"></label><label>每点联想边<input data-path="max_association_edges_per_node" type="number" min="1" max="128"></label><label>最小向量相似度<input data-path="min_similarity" type="number" min="-1" max="1" step="0.01"></label><label>最小图相关度<input data-path="min_graph_relevance" type="number" min="0.000001" max="1" step="any"></label><label>序列权重<input data-path="sequence_weight" type="number" min="0.000001" max="1" step="any"></label><label>联想权重<input data-path="association_weight" type="number" min="0.000001" max="1" step="any"></label>
       <label>证据文本上限（字符）<input data-path="max_retrieval_chars" type="number" min="256" max="1000000" step="1"></label><label>证据图片上限（字节）<input data-path="max_retrieval_media_bytes" type="number" min="1" max="33554432" step="1"></label>
       <div class="wide muted">预算按 Bot 全群聊、UTC 日合计；实际计费可能高于预留，超额会阻止后续新请求。</div>
+      <div class="wide detail"><span id="budget-usage">打开设置后读取今日预算账本</span> <button id="budget-refresh" type="button">刷新</button></div>
       <label>每日嵌入请求上限<input data-budget-path="daily_request_limit" type="number" min="1" max="1000000" step="1"></label><label>每日嵌入 token 阈值<input data-budget-path="daily_token_limit" type="number" min="1" max="1000000000000" step="1"></label><label>单批预留 token<input data-budget-path="reservation_tokens" type="number" min="1" max="1000000000" step="1"></label>
     </div><div class="pager"><button id="plan" disabled>校验并生成计划</button></div>
   </section>
@@ -102,7 +103,7 @@
   const status=text=>$('status').textContent=text||'';
   const cell=(row,value)=>{const node=row.insertCell();node.textContent=value??'—';return node;};
   const stamp=value=>value?new Date(value).toLocaleString():'—';
-  function show(tab){for(const panel of ['sources','relations','trial','forget','settings'])$(panel).classList.toggle('hidden',panel!==tab);document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));}
+  function show(tab){for(const panel of ['sources','relations','trial','forget','settings'])$(panel).classList.toggle('hidden',panel!==tab);document.querySelectorAll('[data-tab]').forEach(button=>button.classList.toggle('active',button.dataset.tab===tab));if(tab==='settings'&&port)loadBudgetStatus();}
   function sourceInput(){
     const value={limit:50,eligibility_state:$('eligibility-state').value,
       source_status:$('source-status').value};
@@ -861,8 +862,17 @@
     $('trial-state').textContent=`${cancelled.status} · ${query_id}`;
     await loadTrial(query_id);
   }
+  async function loadBudgetStatus(){
+    const target=$('budget-usage');
+    target.textContent="\u8bfb\u53d6\u4eca\u65e5\u9884\u7b97\u8d26\u672c\u4e2d\u2026";
+    try{
+      const value=await call('memory.embedding-budget.today',{});
+      target.textContent=value.budget_day+' UTC \u00b7 '+"\u8bf7\u6c42"+' '+"\u5df2\u7ed3\u7b97"+' '+value.settled_requests+' / '+"\u5728\u9014"+' '+value.reserved_requests+' / '+"\u672a\u77e5"+' '+value.unknown_requests+' \u00b7 token '+"\u5df2\u8ba1\u8d39"+' '+value.charged_tokens+' / '+"\u5728\u9014"+' '+value.reserved_tokens+' / '+"\u672a\u77e5"+' '+value.unknown_tokens+' / r'+value.revision;
+    }catch(error){target.textContent="\u8bfb\u53d6\u9884\u7b97\u8d26\u672c\u5931\u8d25\uff1a"+error.message;}
+  }
   function renderSettings(){const {embedding,retrieval,embedding_budget:budget}=draft;for(const [id,value] of [["deployment",embedding.deployment_id],["model",embedding.model],["kind",embedding.model_kind],["dimensions",embedding.dimensions]])$(id).value=value;document.querySelectorAll("[data-path]").forEach(input=>input.value=retrieval[input.dataset.path]);document.querySelectorAll("[data-budget-path]").forEach(input=>input.value=budget[input.dataset.budgetPath]);}
   function changeSettings(){const next=structuredClone(draft);for(const input of document.querySelectorAll("[data-path],[data-budget-path]")){if(input.value===""||!input.checkValidity()){status("请检查设置字段的数值范围");return false;}const path=input.dataset.path??input.dataset.budgetPath;const target=input.dataset.path?next.retrieval:next.embedding_budget;target[path]=Number(input.value);}if(next.retrieval.seed_limit>next.retrieval.max_graph_nodes){status("最大图节点必须不少于种子数");return false;}if(next.embedding_budget.reservation_tokens>next.embedding_budget.daily_token_limit){status("单批预留 token 不得超过每日 token 阈值");return false;}draft=next;send("set-draft",{value:draft});status("设置草稿已更新");return true;}
+  $('budget-refresh').onclick=loadBudgetStatus;
   document.querySelectorAll('[data-tab]').forEach(button=>button.onclick=()=>show(button.dataset.tab));document.querySelectorAll('[data-path],[data-budget-path]').forEach(input=>input.onchange=changeSettings);
   $('trunk-search').onclick=()=>loadTrunks().catch(error=>status(error.message));$('trunk-next').onclick=()=>loadTrunks(true).catch(error=>status(error.message));$('trunk-browser').ontoggle=()=>{if($('trunk-browser').open&&!trunkPage)loadTrunks().catch(error=>status(error.message));};
   $('source-search').onclick=()=>loadSources().catch(error=>status(error.message));$('source-next').onclick=()=>loadSources(true).catch(error=>status(error.message));$('facet-refresh').onclick=()=>loadSourceFacets().catch(error=>status(error.message));$('facet-state').onchange=()=>{facetPage=null;loadSourceFacets().catch(error=>status(error.message));};$('facet-next').onclick=()=>loadSourceFacets(true).catch(error=>status(error.message));$('relation-search').onclick=()=>loadRelations().catch(error=>status(error.message));$('relation-global').onclick=()=>loadRelations(false,true).catch(error=>status(error.message));$('relation-neighbourhood').onclick=()=>loadNeighbourhood().catch(error=>status(error.message));$('relation-next').onclick=()=>loadRelations(true).catch(error=>status(error.message));$('journal-search').onclick=()=>loadAssociationJournals().catch(error=>status(error.message));$('journal-next').onclick=()=>loadAssociationJournals(true).catch(error=>status(error.message));$('journal-browser').ontoggle=()=>{if($('journal-browser').open&&!journalPage)loadAssociationJournals().catch(error=>status(error.message));};$('plan').onclick=()=>{if(!changeSettings())return;send('request-plan');status('服务端校验中');};

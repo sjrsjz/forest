@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.95.1"
+version = "1.96.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -60,6 +60,7 @@ requests = [
   "domain.query:memory.read-retrieval-materialization",
   "domain.query:memory.qualify-vector-candidates",
   "domain.query:memory.read-embedding-candidates",
+  "domain.query:memory.read-embedding-budget-day",
   "domain.query:memory.list-trunks",
   "domain.query:memory.query-sources",
   "domain.query:memory.query-text-projection-rebuild",
@@ -290,9 +291,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.93.0"
+schema_version = "3.94.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "ae11dfcbf7217f418cee803a5f5b4f3fcf022c31942aa7dec63e5591a68194da"
+baseline_sha256 = "e22ce9dc2f5ebf1d1c2bc65d72e8b3e78564445f2e60370411459f96a32bb196"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -324,6 +325,13 @@ contract = "1.0"
 function = "memory_read_exact_sources"
 input_schema = "schemas/read-exact-input.json"
 output_schema = "schemas/read-exact-output.json"
+
+[[components.domain_queries]]
+name = "memory.read-embedding-budget-day"
+contract = "1.0"
+function = "memory_read_embedding_budget_day"
+input_schema = "schemas/read-embedding-budget-day-input.json"
+output_schema = "schemas/read-embedding-budget-day-output.json"
 
 [[components.domain_queries]]
 name = "memory.list-trunks"
@@ -576,6 +584,13 @@ contract = "1.0"
 function = "memory_cancel_management_trial"
 input_schema = "schemas/trial-cancel-input.json"
 output_schema = "schemas/trial-cancel-output.json"
+
+[[components.management_queries]]
+id = "memory.embedding-budget.today"
+port = "memory.read-embedding-budget-day"
+required_role = "ADMIN"
+audit = "SECURITY"
+timeout_s = 10
 
 [[components.management_queries]]
 id = "memory.trunks.list"
