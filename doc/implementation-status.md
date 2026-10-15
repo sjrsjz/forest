@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-16 v32 在线切换：先令 v31 OFFLINE 并确认 NapCat OneBot 连接数为 0，再令独立数据库的 v32 ONLINE；v32 为 22/22 ACTIVE，树莓派维持一条 OneBot 连接，NapCat 登录态与 OneBot `online/good` 正常，获准群只读查询成功。Memory 1.96.0 / SQL 3.94.0 的真实图片试运行 READY，空库召回 0 条，账本结算 1 次、22 tokens，UNKNOWN 与预留均为 0；v31 历史记忆未迁入。v32 尚无获准群真实入站，端到端 Agent 回复仍待低频验收。详见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。
+
 2026-10-16 Host/Bot 驱动在途换代验收：隔离 PostgreSQL 中，消费 Bot 的 Effect service 经冻结代理进入旧 Host Worker 并保持一笔调用在途；联合换代到旧 Bot 排空入口时尚未发布新图。释放后该调用返回一次，旧路由拒绝后续调用，两个消费 Bot 改绑新 Host 来源，无关 Bot 图保持，Host 逐 Bot 结果均为 SUCCEEDED。完整场景 `1 passed in 462.62s`，仅用假 OneBot/模型；进程故障与 UNKNOWN 在途效果、失败注入和真实 QQ 仍待验证。
 
 2026-10-16 Memory 成本可观测性开发态：`memory.graph` 1.96.0 增加按 Bot/UTC 日读取预算账本的包内领域查询和管理员设置页读数，分开呈现已结算、在途预留与未知占额；累计计数以十进制字符串传输。新查询只读且限 ADMIN 管理端口；官方包构建、UI 语法与隔离 PostgreSQL 预算并发用例通过；在线实例仍是旧 SQL 基线，不能原库热装此版本；按首发前约定须用新 Bot 库供应。

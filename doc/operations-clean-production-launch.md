@@ -1,6 +1,6 @@
 # 干净生产启动链
 
-2026-10-16 更新：v31 仍是唯一连接 QQ 的在线 Bot；[v32 离线候选](live-v32-offline-candidate-2026-10-16.md)已供应为 READY/OFFLINE，使用独立数据库与 Memory SQL 3.94.0，尚未切换或合并旧记忆。
+2026-10-16 更新：当前唯一连接 QQ 的在线 Bot 已切换为 `forest-main-v32`；v31 为 OFFLINE，旧数据库保留。v32 的独立 Memory SQL 3.94.0 已随新 Bot 库供应，真实图片嵌入试运行结算成功；获准群端到端回复仍待验收。切换顺序、登录核对和回退边界见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。此前的 [v32 离线候选记录](live-v32-offline-candidate-2026-10-16.md)是切换前历史。
 
 截至 2026-10-15，当前在线候选为 `forest-main-v31`，Supervisor 使用已提交源码镜像 `forest:runtime-candidate-352eb5b`；独立数据库、组件版本与实时证据见 [v31 在线记录](live-v31-cutover-2026-10-15.md)。v30 及更早版本是保留的历史或回退实例。Supervisor HTTP healthy、Bot ONLINE 与 OneBot TCP 已连接分别只证明各自层级存活，不能单独证明 QQ 账号已登录或群聊回复链可用。
 

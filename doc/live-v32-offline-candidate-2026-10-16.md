@@ -1,5 +1,7 @@
 # v32 独立记忆基线的离线候选（2026-10-16）
 
+本页记录切换前状态；v32 已于当日转为唯一在线 Bot。当前状态见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。
+
 当前已提交源码 `284cc17` 构建为 `forest:runtime-candidate-284cc17`，镜像摘要为 `sha256:a478091ee7ea0084e3902657210c3212b98bd9866f3c15be324df5fc615a5c63`。源码 `memory.graph` 为 1.96.0 / SQL 3.94.0；在线 v31 仍为 1.94.0 / SQL 3.93.0，不能把新 SQL 包直接装入旧 Bot 数据库。
 
 切换前只读观察：v31 Bot 图修订 4 为 ACTIVE，Memory 管理页的主干分页返回 11 条且无后续页。来源分页分别证明至少两条 ELIGIBLE、至少两条 REGISTERED，`only_unknown_facets` 也有至少两条匹配；每类只请求一条并观察到 `has_more=true`，因此这里没有推断总数。许可群 `933179609` 的来源查询为空。v31 不提供当前源码中的 `memory.embedding-budget.today` 管理查询，返回 `MODULE_MANAGEMENT_OPERATION_NOT_FOUND`；这反映在线包版本差异，不是当前源码查询失败。
