@@ -202,7 +202,7 @@ def validate_prepared_bindings(
             or _IDENTIFIER.fullmatch(item.component_id) is None
             or any(not isinstance(value, str) or not value for value in strings)
             or any(not isinstance(value, str) or _DIGEST.fullmatch(value) is None for value in digests)
-            or item.trust_level not in {"official", "installed"}
+            or item.trust_level not in {"official", "reviewed", "installed"}
             or type(item.config_revision) is not int or item.config_revision <= 0
             or type(item.state_schema) is not int or item.state_schema <= 0
             or type(item.data_admission) is not bool

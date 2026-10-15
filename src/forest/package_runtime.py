@@ -3399,7 +3399,7 @@ def package_runtime_descriptor(
     compiled_schemas = snapshot.schemas(_component_schema_references(component))
     if (
         component.get("storage", {}).get("execution_profile") == "official"
-        and trust_level != "official"
+        and trust_level not in {"official", "reviewed"}
     ):
         raise ForestError(
             "PACKAGE_STORAGE_TRUST_REQUIRED",
@@ -3477,7 +3477,7 @@ def package_runtime_descriptor(
             503,
         )
     if (
-        trust_level != "official"
+        trust_level not in {"official", "reviewed"}
         and (
             any(plan.get("read_only", False) for plan in component.get("unit_of_work_plans", ()))
             or any(item.get("read_only", False) for item in component.get("unit_of_work_participants", ()))

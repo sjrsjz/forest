@@ -279,7 +279,7 @@ CREATE TABLE runtime_graph_modules (
     package_version text NOT NULL,
     package_digest text NOT NULL CHECK (package_digest ~ '^sha256:[a-f0-9]{64}$'),
     driver text NOT NULL,
-    trust_level text NOT NULL CHECK (trust_level IN ('official', 'installed')),
+    trust_level text NOT NULL CHECK (trust_level IN ('official', 'reviewed', 'installed')),
     descriptor_digest text NOT NULL CHECK (descriptor_digest ~ '^sha256:[a-f0-9]{64}$'),
     route_contract_digest text NOT NULL CHECK (route_contract_digest ~ '^sha256:[a-f0-9]{64}$'),
     management_contract_digest text NOT NULL CHECK (

@@ -65,7 +65,7 @@ class RuntimeArtifactIdentity:
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", self.package_digest)
             or self.scope not in {"deployment", "host", "bot"}
             or not re.fullmatch(r"[a-z][a-z0-9._-]*/[1-9][0-9]*", self.driver)
-            or self.trust_level not in {"official", "installed"}
+            or self.trust_level not in {"official", "reviewed", "installed"}
         ):
             raise ValueError("Runtime artifact identity is invalid")
 
@@ -1581,7 +1581,7 @@ class RuntimeModuleRegistry:
                         )
                         or (
                             descriptor.storage.execution_profile == "official"
-                            and descriptor.artifact.trust_level != "official"
+                            and descriptor.artifact.trust_level not in {"official", "reviewed"}
                             and not is_generated_control_storage(
                                 descriptor.storage, identity, self.scope_kind
                             )

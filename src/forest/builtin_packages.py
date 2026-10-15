@@ -232,12 +232,15 @@ def _installed_configuration_storage(component_id: str) -> RuntimeStorageBundle:
     )
 
 
-def _installed_domain_storage(snapshot: PackageSnapshot) -> RuntimeStorageBundle | None:
+def _installed_domain_storage(
+    snapshot: PackageSnapshot, *, reviewed: bool = False
+) -> RuntimeStorageBundle | None:
     declared = snapshot.storage_bundle()
     if declared is None:
         return None
     metadata, baseline = declared
-    if metadata["execution_profile"] != "declarative":
+    profile = metadata["execution_profile"]
+    if profile != "declarative" and not (reviewed and profile == "official"):
         raise ForestError(
             "PACKAGE_STORAGE_TRUST_REQUIRED",
             "Installed package SQL must use the declarative profile",
@@ -253,8 +256,8 @@ def _installed_domain_storage(snapshot: PackageSnapshot) -> RuntimeStorageBundle
     return RuntimeStorageBundle(
         spec,
         baseline,
-        storage_bundle_digest(spec, "declarative"),
-        execution_profile="declarative",
+        storage_bundle_digest(spec, profile),
+        execution_profile=profile,
     )
 
 
@@ -262,6 +265,8 @@ def _installed_package_layout(
     snapshot: PackageSnapshot,
     approved_capabilities: tuple[str, ...] | None,
     initial_configuration: dict[str, Any] | None = None,
+    *,
+    reviewed: bool = False,
 ) -> _InstalledPackageLayout:
     component = snapshot.component
     if component["scope"] != "bot":
@@ -303,20 +308,27 @@ def _installed_package_layout(
             "Initial package configuration violates its declared schema",
             422,
         )
-    storage = _installed_domain_storage(snapshot)
-    if any(
+    storage = _installed_domain_storage(snapshot, reviewed=reviewed)
+    has_domain_authority = any(
         component.get(name)
         for name in (
             "domain_queries", "domain_commands", "unit_of_work_participants",
             "owned_work_handlers",
         )
-    ):
+    )
+    if has_domain_authority and not reviewed:
         raise ForestError(
             "PACKAGE_DOMAIN_AUTHORITY_UNAVAILABLE",
             "Installed package SQL procedures require a separate reviewed authority",
             422,
         )
-    if component.get("effect_services"):
+    if has_domain_authority and (storage is None or storage.execution_profile != "official"):
+        raise ForestError(
+            "PACKAGE_DOMAIN_AUTHORITY_UNAVAILABLE",
+            "Reviewed domain ports require their exact trusted SQL bundle",
+            422,
+        )
+    if component.get("effect_services") and not reviewed:
         raise ForestError(
             "PACKAGE_EFFECT_DRIVER_BINDING_INVALID",
             "Installed package has no approved host effect driver binding",
@@ -428,8 +440,11 @@ async def _inspect_installed_snapshot(
     approved_capabilities: tuple[str, ...],
     expected_configuration_revision: int | None = None,
     conn=None,
+    reviewed: bool = False,
 ) -> tuple[PackageCandidateInspection, _InstalledPackageLayout, ModuleConfigurationRepository]:
-    layout = _installed_package_layout(snapshot, approved_capabilities)
+    layout = _installed_package_layout(
+        snapshot, approved_capabilities, reviewed=reviewed
+    )
     configuration = ModuleConfigurationRepository(
         store,
         component_id=snapshot.component["id"],
@@ -442,7 +457,8 @@ async def _inspect_installed_snapshot(
         conn=conn,
     )
     inspected = PackageCandidateInspection(
-        snapshot.component["id"], "installed", snapshot.digest, digest_json(snapshot.manifest),
+        snapshot.component["id"], "reviewed" if reviewed else "installed",
+        snapshot.digest, digest_json(snapshot.manifest),
         desired.revision, desired.payload_id, desired.payload_digest,
         layout.schema_digest,
         layout.storage.package_digest if layout.storage is not None else None,
@@ -485,6 +501,7 @@ async def inspect_installed_package(
         kernel=kernel,
         approved_capabilities=approved_capabilities,
         expected_configuration_revision=expected_configuration_revision,
+        reviewed=catalog.is_reviewed_bot(package_digest),
     )
     return inspected
 
@@ -655,14 +672,16 @@ async def bootstrap_installed_package(
     approved_capabilities: tuple[str, ...],
     resolved_contracts: dict[str, str] | None = None,
     work_notifier: Callable[[], None] | None = None,
+    effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
 ) -> ProvisionedPackageModule:
     """Bind an approved artifact to its own initialized configuration ledger."""
 
     snapshot = catalog.get(package_digest)
+    reviewed = catalog.is_reviewed_bot(package_digest)
     if initial_configuration is None:
         await _inspect_installed_snapshot(
             snapshot, store, kernel=kernel,
-            approved_capabilities=approved_capabilities,
+            approved_capabilities=approved_capabilities, reviewed=reviewed,
         )
     return await _bootstrap_package_snapshot(
         snapshot,
@@ -673,7 +692,8 @@ async def bootstrap_installed_package(
         resolved_contracts=resolved_contracts,
         approved_capabilities=approved_capabilities,
         work_notifier=work_notifier,
-        trust_level="installed",
+        effect_driver_registry=effect_driver_registry,
+        trust_level="reviewed" if reviewed else "installed",
     )
 
 
@@ -791,26 +811,31 @@ async def compile_installed_candidate_descriptor(
     expected_manifest_digest: str,
     expected_configuration_revision: int | None = None,
     conn=None,
+    effect_driver_registry: PackageEffectDriverRegistry = EMPTY_PACKAGE_EFFECT_DRIVERS,
 ) -> tuple[PackageCandidateInspection, RuntimeModuleDescriptor]:
     """Compile an exact package into the production Graph rules without provisioning."""
 
     snapshot = _pinned_installed_snapshot(
         package_digest, catalog, expected_manifest_digest
     )
+    reviewed = catalog.is_reviewed_bot(package_digest)
     inspected, layout, configuration = await _inspect_installed_snapshot(
         snapshot,
         store,
         kernel=kernel,
         approved_capabilities=approved_capabilities,
         expected_configuration_revision=expected_configuration_revision,
-        conn=conn,
+        conn=conn, reviewed=reviewed,
     )
     descriptor = _compile_package_descriptor(
         snapshot, store, kernel=kernel, configuration=configuration,
         configuration_schema=layout.schema, storage=layout.storage, grants=None,
         resolved_contracts=None,
-        effect_driver_registry=EMPTY_PACKAGE_EFFECT_DRIVERS,
-        configuration_validator=None, trust_level="installed", plan_only=True,
+        effect_driver_registry=effect_driver_registry,
+        configuration_validator=effect_driver_registry.configuration_validator(
+            tuple(snapshot.component.get("effect_services", ()))
+        ),
+        trust_level="reviewed" if reviewed else "installed", plan_only=True,
     )
     return inspected, descriptor
 
@@ -832,9 +857,10 @@ async def _bootstrap_package_snapshot(
     if trust_level == "official":
         configuration_schema = snapshot.schema(snapshot.component["config_schema"])
         configuration_storage = storage = _configuration_storage(snapshot)
-    elif trust_level == "installed":
+    elif trust_level in {"installed", "reviewed"}:
         layout = _installed_package_layout(
-            snapshot, approved_capabilities, initial_configuration
+            snapshot, approved_capabilities, initial_configuration,
+            reviewed=trust_level == "reviewed",
         )
         configuration_schema = layout.schema
         configuration_storage = layout.configuration_storage
@@ -856,7 +882,7 @@ async def _bootstrap_package_snapshot(
         await _official_desired(
             configuration, configuration_schema, schema_digest, configuration_validator
         )
-    if trust_level == "installed" and storage is not None:
+    if trust_level in {"installed", "reviewed"} and storage is not None:
         await installer.install(
             storage.spec,
             storage.baseline,
@@ -883,7 +909,7 @@ async def _bootstrap_package_snapshot(
             value=initial_configuration,
             validation_digest=schema_digest,
         )
-    if trust_level == "installed":
+    if trust_level in {"installed", "reviewed"}:
         await _installed_desired(layout, configuration)
     elif initial_configuration is not None:
         await configuration.assert_immutable(initial_configuration)

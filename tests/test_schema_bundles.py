@@ -5306,3 +5306,145 @@ async def test_routing_builtin_owns_worker_storage_and_lifecycle(
     }
     await registry.close()
     assert instance.state.value == "STOPPED"
+
+
+@pytest.mark.postgres
+async def test_reviewed_bot_archive_binds_private_sql_only_with_exact_catalog_provenance(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    core = await bootstrap_kernel(store, installer)
+    staging = PackageCatalog(tmp_path / "reviewed-staging")
+    source = staging.build(Path(__file__).parents[1] / "src/forest/builtin/counter")
+    archive = staging.export_archive(source.digest)
+    approved = tuple(source.component["capabilities"]["requests"])
+    configuration = {"label": "reviewed", "multiplier": 1}
+
+    ordinary = PackageCatalog(tmp_path / "ordinary")
+    ordinary.import_archive(archive)
+    with pytest.raises(ForestError) as denied:
+        await bootstrap_installed_package(
+            source.digest, ordinary, store, installer, kernel=core,
+            initial_configuration=configuration, approved_capabilities=approved,
+        )
+    assert denied.value.code == "PACKAGE_STORAGE_TRUST_REQUIRED"
+
+    reviewed = PackageCatalog(tmp_path / "reviewed")
+    reviewed.publish_reviewed_bot_archive(
+        archive,
+        expected_archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+        expected_package_digest=source.digest,
+        expected_manifest_digest=digest_json(source.manifest),
+        expected_package_id=source.manifest["package_id"],
+        expected_component_id=source.component["id"],
+        expected_runtime="python-worker",
+    )
+    provisioned = await bootstrap_installed_package(
+        source.digest, reviewed, store, installer, kernel=core,
+        initial_configuration=configuration, approved_capabilities=approved,
+    )
+    assert provisioned.descriptor.artifact.trust_level == "reviewed"
+    assert provisioned.descriptor.storage.execution_profile == "official"
+    inspection, candidate = await compile_installed_candidate_descriptor(
+        source.digest, reviewed, store, kernel=core,
+        approved_capabilities=approved,
+        expected_manifest_digest=digest_json(source.manifest),
+        expected_configuration_revision=1,
+    )
+    assert inspection.trust_level == candidate.artifact.trust_level == "reviewed"
+    namespace = provisioned.descriptor.storage.spec.namespace
+    async with store.pool.connection() as conn:
+        row = await (
+            await conn.execute(
+                sql.SQL("SELECT {}.counter_current(%s::jsonb, %s::jsonb) AS result").format(
+                    sql.Identifier(namespace)
+                ),
+                (Jsonb({}), Jsonb({})),
+            )
+        ).fetchone()
+    assert row["result"] == {
+        "protocol": "forest.domain-result/1",
+        "ok": True,
+        "value": {"value": None, "revision": 0},
+    }
+    lease = await core.runtime.claim_host("host-reviewed-sql", "inc-reviewed-sql")
+    host = SimpleNamespace(
+        scope_kind="bot",
+        bot=SimpleNamespace(store=store),
+        kernel=SimpleNamespace(_authority=lambda **_kwargs: lease),
+        authority_lease=lambda **_kwargs: lease,
+        schema_bundle_installer=installer,
+        generation_authority=core.runtime,
+    )
+    registry = RuntimeModuleRegistry(
+        host, _isolated_runtime_descriptors(*core.descriptors, provisioned.descriptor)
+    )
+    await registry.start()
+    assert "forest.counter" in registry.graph_identity.generations
+    assert await registry.close() == []
+
+
+@pytest.mark.postgres
+async def test_reviewed_bot_effect_requires_owner_bound_host_driver(clean_authority, tmp_path):
+    store, installer = clean_authority
+    core = await bootstrap_kernel(store, installer)
+    package_root = tmp_path / "effect-source"
+    copytree(Path(__file__).parent / "fixtures" / "routing_component", package_root)
+    with (package_root / "module.toml").open("a", encoding="utf-8") as manifest:
+        manifest.write(
+            "\n[[components.effect_services]]\n"
+            'name = "tests.reviewed.echo"\n'
+            'contract = "1.0"\n'
+            'kind = "tests.reviewed.echo"\n'
+            'semantics = "read"\n'
+            'input_schema = "schemas/value.json"\n'
+            'output_schema = "schemas/value.json"\n'
+        )
+    staging = PackageCatalog(tmp_path / "effect-staging")
+    source = staging.build(package_root)
+    archive = staging.export_archive(source.digest)
+    approved = tuple(source.component["capabilities"]["requests"])
+    ordinary = PackageCatalog(tmp_path / "effect-ordinary")
+    ordinary.import_archive(archive)
+    with pytest.raises(ForestError) as denied:
+        await bootstrap_installed_package(
+            source.digest, ordinary, store, installer, kernel=core,
+            initial_configuration={}, approved_capabilities=approved,
+        )
+    assert denied.value.code == "PACKAGE_EFFECT_DRIVER_BINDING_INVALID"
+
+    catalog = PackageCatalog(tmp_path / "effect-reviewed")
+    catalog.publish_reviewed_bot_archive(
+        archive,
+        expected_archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+        expected_package_digest=source.digest,
+        expected_manifest_digest=digest_json(source.manifest),
+        expected_package_id=source.manifest["package_id"],
+        expected_component_id=source.component["id"],
+        expected_runtime="python-worker",
+    )
+    registry = PackageEffectDriverRegistry({
+        "tests.reviewed.echo": lambda _settings, _revision, _generation, _deps: None,
+    })
+    provisioned = await bootstrap_installed_package(
+        source.digest, catalog, store, installer, kernel=core,
+        initial_configuration={}, approved_capabilities=approved,
+        effect_driver_registry=registry,
+    )
+    assert provisioned.descriptor.artifact.trust_level == "reviewed"
+    with pytest.raises(ForestError) as missing:
+        await compile_installed_candidate_descriptor(
+            source.digest, catalog, store, kernel=core,
+            approved_capabilities=approved,
+            expected_manifest_digest=digest_json(source.manifest),
+            expected_configuration_revision=1,
+        )
+    assert missing.value.code == "PACKAGE_EFFECT_DRIVER_UNAVAILABLE"
+    inspection, candidate = await compile_installed_candidate_descriptor(
+        source.digest, catalog, store, kernel=core,
+        approved_capabilities=approved,
+        expected_manifest_digest=digest_json(source.manifest),
+        expected_configuration_revision=1,
+        effect_driver_registry=registry,
+    )
+    assert inspection.trust_level == candidate.artifact.trust_level == "reviewed"

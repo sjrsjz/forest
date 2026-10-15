@@ -23,7 +23,7 @@ from forest.kernel_resource_admission import (
     WorkerCapacityAdmission,
     assess_worker_capacity_in,
 )
-from forest.package_effects import PackageEffectDriverRegistry
+from forest.package_effects import EMPTY_PACKAGE_EFFECT_DRIVERS, PackageEffectDriverRegistry
 from forest.packages import PackageCatalog, PackageSnapshot, digest_json
 from forest.runtime_modules import (
     RuntimeGraphTransitionPlan,
@@ -233,6 +233,7 @@ async def _preview_selected_graph_in(
             expected_manifest_digest=entry.manifest_digest,
             expected_configuration_revision=pinned_revisions.get(entry.component_id),
             conn=conn,
+            effect_driver_registry=official_effect_drivers or EMPTY_PACKAGE_EFFECT_DRIVERS,
         )
         if descriptor.component_id != entry.component_id:
             raise ForestError(

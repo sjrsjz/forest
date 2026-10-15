@@ -707,6 +707,7 @@ class BotHost:
                 work_notifier=self.notify,
                 initial_configuration=None,
                 approved_capabilities=entry.approved_capabilities,
+                effect_driver_registry=automatic_effect_drivers,
             )
             if provisioned.descriptor.component_id != entry.component_id:
                 raise ForestError(
