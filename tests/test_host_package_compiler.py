@@ -19,6 +19,7 @@ import pytest
 from psycopg import sql
 
 from forest.cli import run_plugin_command
+from forest.control_effect_driver import control_export_effect_driver_factory
 from forest.deployment_packages import bootstrap_builtin_deployment_package
 from forest.errors import ForestError
 from forest.host_package_controller import HostPackageController
@@ -31,6 +32,7 @@ from forest.host_supervisor import HostSupervisor
 from forest.package_capabilities import PackageCallScope
 from forest.packages import PackageCatalog, digest_json
 from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
+from forest.runtime_generation import BoundGenerationIdentity
 from forest.storage.control_component_state import ControlPackageStateAuthority
 from forest.storage.host_graph_changes import HostGraphChangeAuthority
 from forest.storage.host_identity import HostIdentityAuthority
@@ -673,6 +675,28 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
         assert exports[0]["generation_id"] == member.generation_identity.generation_id
         assert exports[0]["package_digest"] == candidate.digest
         assert exports[0]["source_ref"].startswith("sha256:")
+        bot_identity = BoundGenerationIdentity(
+            "fixture.bot-consumer", "generation:bot-test",
+            "graph:bot-test", 1, "sha256:" + "a" * 64, "activation:bot-test",
+        )
+        bot_scope = PackageCallScope(
+            bot_id="bot/fixture", component_id="fixture.bot-consumer",
+            generation_id=bot_identity.generation_id,
+            instance_id="instance:bot-test", worker_incarnation="worker:bot-test",
+            call_id="call:bot-test", call_operation_id="bot:effect/one",
+            causal_root_kind="bot.test", causal_root_id="bot/fixture",
+        )
+        proxy = control_export_effect_driver_factory(
+            export=exports[0], controller_provider=lambda: controller,
+        )({}, 1, bot_identity, {})
+        await proxy.start()
+        assert await proxy.invoke(
+            {"value": "through-host-router"},
+            scope=bot_scope,
+            invocation=RuntimeServiceInvocation(
+                "bot:effect/one", 5, "bot.test", "bot/fixture",
+            ),
+        ) == {"value": "through-host-router"}
         assert member.generation_identity.generation_id != (
             registry.graph_identity.generations["host.sample"]
         )
@@ -700,6 +724,36 @@ async def test_reviewed_host_sql_and_effect_replace_only_from_exact_owner_archiv
             restored.get("host.sample").generation_identity.generation_id
         )
         assert recovered_export["package_digest"] == candidate.digest
+        with pytest.raises(ForestError) as stale_export:
+            await controller.invoke_driver_export(
+                kind=exports[0]["kind"],
+                source_ref=exports[0]["source_ref"],
+                caller_component_id="fixture.bot-consumer",
+                payload={"value": "stale"},
+                invocation=RuntimeServiceInvocation(
+                    "driver:host-test/stale", 5, "bot.test", "bot/fixture",
+                ),
+            )
+        assert stale_export.value.code == "CONTROL_DRIVER_SOURCE_STALE"
+        with pytest.raises(ForestError) as stale_proxy:
+            await proxy.invoke(
+                {"value": "stale-bot-proxy"},
+                scope=bot_scope,
+                invocation=RuntimeServiceInvocation(
+                    "bot:effect/stale", 5, "bot.test", "bot/fixture",
+                ),
+            )
+        assert stale_proxy.value.code == "CONTROL_DRIVER_SOURCE_STALE"
+        await proxy.close()
+        assert await controller.invoke_driver_export(
+            kind=recovered_export["kind"],
+            source_ref=recovered_export["source_ref"],
+            caller_component_id="fixture.bot-consumer",
+            payload={"value": "restored-driver"},
+            invocation=RuntimeServiceInvocation(
+                "driver:host-test/restored", 5, "bot.test", "bot/fixture",
+            ),
+        ) == {"value": "restored-driver"}
         assert await restored.get("host.sample").management_contract.query(
             "echo", {"value": "restored"},
         ) == {"value": "restored"}

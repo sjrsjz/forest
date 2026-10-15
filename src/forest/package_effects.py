@@ -9,6 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from forest.errors import ForestError
 from forest.package_capabilities import PackageCallScope
+from forest.packages import digest_json
 from forest.runtime_contracts import RuntimeServiceInvocation
 from forest.runtime_generation import BoundGenerationIdentity
 
@@ -100,6 +101,7 @@ class PackageEffectDriverRegistry:
         default_factory=dict
     )
     source_refs: Mapping[str, str] = field(default_factory=dict)
+    contract_facts: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.source_refs and (
@@ -107,6 +109,34 @@ class PackageEffectDriverRegistry:
             or any(not isinstance(ref, str) or not ref for ref in self.source_refs.values())
         ):
             raise ValueError("Effect driver sources must identify every registered kind")
+        if any(
+            kind not in self.factories
+            or fact.get("kind") != kind
+            or fact.get("source_ref")
+            != self.source_refs.get(kind, "forest.host-native/1")
+            for kind, fact in self.contract_facts.items()
+        ):
+            raise ValueError("Effect driver contract facts must match their source")
+
+    def validate_declarations(self, snapshot, declarations: tuple[dict, ...]) -> None:
+        for declaration in declarations:
+            fact = self.contract_facts.get(declaration["kind"])
+            if fact is None:
+                continue
+            if (
+                declaration["contract"] != fact["contract"]
+                or declaration["semantics"] != fact["semantics"]
+                or digest_json(snapshot.schema(declaration["input_schema"]))
+                != fact["input_schema_digest"]
+                or digest_json(snapshot.schema(declaration["output_schema"]))
+                != fact["output_schema_digest"]
+            ):
+                raise ForestError(
+                    "PACKAGE_EFFECT_CONTRACT_MISMATCH",
+                    "Bot effect declaration differs from its control driver export",
+                    422,
+                    details={"kind": declaration["kind"], "service_id": declaration["name"]},
+                )
 
     def binding_facts(self, declarations: tuple[dict, ...]) -> tuple[tuple[str, str, str], ...]:
         """Freeze the host-selected driver source into each consuming Generation."""

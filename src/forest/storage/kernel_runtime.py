@@ -726,6 +726,14 @@ class KernelRuntimeRepository:
             graph_revision=head["graph_revision"],
         )
 
+    async def verify_active_route_in(
+        self, conn, *, component_id: str, generation_id: str, admission_lane: str
+    ) -> ActiveGenerationRoute:
+        return await self.verify_active_generation_in(
+            conn, component_id=component_id, generation_id=generation_id,
+            admission_lane=admission_lane,
+        )
+
     async def verify_generation_member_in(
         self,
         conn,

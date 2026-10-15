@@ -5489,9 +5489,22 @@ async def test_reviewed_bot_effect_requires_owner_bound_host_driver(clean_author
         expected_component_id=source.component["id"],
         expected_runtime="python-worker",
     )
-    registry = PackageEffectDriverRegistry({
-        "tests.reviewed.echo": lambda _settings, _revision, _generation, _deps: None,
-    })
+    source_ref = "sha256:" + "a" * 64
+    contract_fact = {
+        "kind": "tests.reviewed.echo",
+        "source_ref": source_ref,
+        "contract": "1.0",
+        "semantics": "read",
+        "input_schema_digest": digest_json(source.schema("schemas/value.json")),
+        "output_schema_digest": digest_json(source.schema("schemas/value.json")),
+    }
+    def factory(_settings, _revision, _generation, _deps):
+        return None
+    registry = PackageEffectDriverRegistry(
+        {"tests.reviewed.echo": factory},
+        source_refs={"tests.reviewed.echo": source_ref},
+        contract_facts={"tests.reviewed.echo": contract_fact},
+    )
     provisioned = await bootstrap_installed_package(
         source.digest, catalog, store, installer, kernel=core,
         initial_configuration={}, approved_capabilities=approved,
@@ -5514,3 +5527,25 @@ async def test_reviewed_bot_effect_requires_owner_bound_host_driver(clean_author
         effect_driver_registry=registry,
     )
     assert inspection.trust_level == candidate.artifact.trust_level == "reviewed"
+    assert candidate.effect_driver_bindings == (
+        ("tests.reviewed.echo", "tests.reviewed.echo", source_ref),
+    )
+    invalid_registry = PackageEffectDriverRegistry(
+        {"tests.reviewed.echo": factory},
+        source_refs={"tests.reviewed.echo": source_ref},
+        contract_facts={
+            "tests.reviewed.echo": {
+                **contract_fact,
+                "output_schema_digest": "sha256:" + "0" * 64,
+            },
+        },
+    )
+    with pytest.raises(ForestError) as incompatible:
+        await compile_installed_candidate_descriptor(
+            source.digest, catalog, store, kernel=core,
+            approved_capabilities=approved,
+            expected_manifest_digest=digest_json(source.manifest),
+            expected_configuration_revision=1,
+            effect_driver_registry=invalid_registry,
+        )
+    assert incompatible.value.code == "PACKAGE_EFFECT_CONTRACT_MISMATCH"

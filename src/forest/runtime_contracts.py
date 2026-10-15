@@ -778,7 +778,7 @@ class RuntimeContractRouter:
                         generation_id=route.provider_generation_id,
                     )
                 else:
-                    accepted = await authority.verify_active_generation_in(
+                    accepted = await authority.verify_active_route_in(
                         conn,
                         component_id=route.provider_component_id,
                         generation_id=route.provider_generation_id,
@@ -801,7 +801,7 @@ class RuntimeContractRouter:
                             generation_id=caller_generation_id,
                         )
                     else:
-                        await authority.verify_active_generation_in(
+                        await authority.verify_active_route_in(
                             conn,
                             component_id=route.caller_component_id,
                             generation_id=caller_generation_id,
@@ -812,6 +812,85 @@ class RuntimeContractRouter:
                         graph_id=accepted.graph_id,
                         graph_revision=accepted.graph_revision,
                     )
+        return await self._dispatch_route(route, invocation, args, kwargs)
+
+    async def invoke_external(
+        self,
+        route: FrozenServiceRoute,
+        invocation: RuntimeServiceInvocation,
+        payload: dict,
+    ):
+        """Admit one host-owned cross-scope route to an exact provider Generation.
+
+        The privileged caller must independently fence its own consumer
+        Generation. This port validates the provider through the same Host
+        authority and dispatches through the ordinary sealed service handler.
+        """
+
+        self._validate(route.service_id, route.version, route.admission_lane)
+        if (
+            not self._sealed
+            or not self.graph_admission.is_set()
+            or route.owned_work
+            or route.admission_lane != "DATA"
+            or not isinstance(route.caller_component_id, str)
+            or _SERVICE_ID.fullmatch(route.caller_component_id) is None
+        ):
+            raise ForestError(
+                "RUNTIME_EXTERNAL_ROUTE_INVALID",
+                "External route is not admitted by this RuntimeGraph", 409,
+            )
+        graph = self.registry.graph_identity
+        if (
+            graph is None
+            or graph.generations.get(route.provider_component_id)
+            != route.provider_generation_id
+        ):
+            raise ForestError(
+                "RUNTIME_SERVICE_ROUTE_STALE",
+                "External route does not identify the current provider Generation", 409,
+            )
+        if graph.graph_id != route.graph_id or graph.graph_revision != route.graph_revision:
+            route = replace(
+                route, graph_id=graph.graph_id, graph_revision=graph.graph_revision,
+            )
+        if getattr(self.registry.states.get(route.provider_component_id), "value", None) != (
+            "ACTIVE"
+        ):
+            raise ForestError(
+                "RUNTIME_SERVICE_PROVIDER_NOT_ACTIVE",
+                "External provider is not accepting calls", 409,
+            )
+        authority = self.registry.generation_authority
+        if authority is None:
+            raise ForestError(
+                "RUNTIME_GENERATION_AUTHORITY_UNAVAILABLE",
+                "External routes require a persistent provider authority", 503,
+            )
+        async with authority.store.pool.connection() as conn, conn.transaction():
+            accepted = await authority.verify_active_route_in(
+                conn,
+                component_id=route.provider_component_id,
+                generation_id=route.provider_generation_id,
+                admission_lane="DATA",
+            )
+            if (
+                accepted.graph_id != route.graph_id
+                or accepted.graph_revision != route.graph_revision
+            ):
+                route = replace(
+                    route, graph_id=accepted.graph_id,
+                    graph_revision=accepted.graph_revision,
+                )
+        return await self._dispatch_route(route, invocation, (payload,), {})
+
+    async def _dispatch_route(
+        self,
+        route: FrozenServiceRoute,
+        invocation: RuntimeServiceInvocation | None,
+        args: tuple,
+        kwargs: dict,
+    ):
         service_key = (route.service_id, route.version)
         if invocation is not None and invocation.read_only and (
             service_key not in self._read_only_services
@@ -821,13 +900,14 @@ class RuntimeContractRouter:
                 "Read-only service cannot invoke a mutating or unclassified service",
                 403,
             )
-        provider_component_id, handler = self._providers[service_key]
-        if provider_component_id != route.provider_component_id:
+        provider = self._providers.get(service_key)
+        if provider is None or provider[0] != route.provider_component_id:
             raise ForestError(
                 "RUNTIME_SERVICE_ROUTE_STALE",
                 "Runtime service provider changed after graph sealing",
                 409,
             )
+        _provider_component_id, handler = provider
         if isinstance(handler, RoutedServiceEndpoint):
             if invocation is None:
                 raise ForestError(

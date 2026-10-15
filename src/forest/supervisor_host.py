@@ -270,6 +270,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
             bot_settings, package_catalog=package_catalog,
             package_registry_reader=read_deployment_packages,
             credential_resolver=secrets.resolve_text_for_purpose,
+            host_driver_controller_provider=lambda: host_controller,
         )
 
     settings_resolver = OfficialBotSettingsResolver(

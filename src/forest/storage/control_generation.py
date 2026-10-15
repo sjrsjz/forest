@@ -10,6 +10,7 @@ from forest.control_generated_storage import is_generated_control_storage_fact
 from forest.errors import ForestError
 from forest.packages import digest_json
 from forest.runtime_generation import (
+    ActiveGenerationRoute,
     PreparedGenerationBinding,
     RuntimeGenerationGraph,
     validate_prepared_bindings,
@@ -814,7 +815,8 @@ class ControlGenerationAuthority:
             raise ForestError("RUNTIME_ADMISSION_LANE_INVALID", "Admission lane is invalid", 422)
         row = await (
             await self._execute(conn,
-                "SELECT m.*,g.state,g.owner_epoch FROM __scope_schema__.runtime_graph_clock h "
+                "SELECT m.*,h.active_revision AS graph_revision,g.state,g.owner_epoch "
+                "FROM __scope_schema__.runtime_graph_clock h "
                 "JOIN __scope_schema__.runtime_graph_members m ON "
                 "m.__scope_id_column__=h.__scope_id_column__ AND m.graph_id=h.active_graph_id "
                 "JOIN __scope_schema__.runtime_generations g ON "
@@ -836,6 +838,22 @@ class ControlGenerationAuthority:
         ):
             raise ForestError("RUNTIME_GENERATION_NOT_ACTIVE", "Generation is not admitted", 409)
         return dict(row)
+
+    async def verify_active_route_in(
+        self, conn, *, component_id: str, generation_id: str, admission_lane: str
+    ) -> ActiveGenerationRoute:
+        row = await self.verify_active_generation_in(
+            conn, component_id=component_id, generation_id=generation_id,
+            admission_lane=admission_lane,
+        )
+        return ActiveGenerationRoute(
+            component_id=row["component_id"],
+            generation_id=row["generation_id"],
+            route_epoch=row["route_epoch"],
+            admission_lane=admission_lane,
+            graph_id=row["graph_id"],
+            graph_revision=row["graph_revision"],
+        )
 
     async def verify_generation_member_in(
         self, conn, *, component_id: str, generation_id: str

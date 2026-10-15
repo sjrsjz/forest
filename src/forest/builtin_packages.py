@@ -714,9 +714,9 @@ def _compile_package_descriptor(
     work_notifier: Callable[[], None] | None = None,
 ) -> RuntimeModuleDescriptor:
     component_id = snapshot.component["id"]
-    effect_driver_factories = effect_driver_registry.resolve(
-        tuple(snapshot.component.get("effect_services", ()))
-    )
+    effect_declarations = tuple(snapshot.component.get("effect_services", ()))
+    effect_driver_registry.validate_declarations(snapshot, effect_declarations)
+    effect_driver_factories = effect_driver_registry.resolve(effect_declarations)
     has_domain_authority = bool(
         snapshot.component.get("domain_queries")
         or snapshot.component.get("domain_commands")

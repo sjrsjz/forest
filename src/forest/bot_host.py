@@ -35,6 +35,7 @@ from forest.component_selection import (
     select_package_members,
 )
 from forest.component_selection_commit import resolve_selection_commit_preflight
+from forest.control_effect_driver import control_export_effect_driver_factory
 from forest.core_runtime import bootstrap_kernel
 from forest.embedding_effect_driver import multimodal_embedding_effect_driver_factory
 from forest.errors import ForestError
@@ -351,6 +352,7 @@ class BotHost:
         credential_resolver=None,
         package_catalog=None,
         package_registry_reader=None,
+        host_driver_controller_provider=None,
     ) -> None:
         if isinstance(settings, BotRuntimeSettings) and credential_resolver is None:
             raise ForestError(
@@ -385,6 +387,7 @@ class BotHost:
             Path(os.environ.get("FOREST_PACKAGE_CATALOG_ROOT", ".forest/packages"))
         )
         self.package_registry_reader = package_registry_reader
+        self._host_driver_controller_provider = host_driver_controller_provider
         self.selection_reader: ComponentSelectionReader | None = None
 
     @property
@@ -571,8 +574,7 @@ class BotHost:
             credential_resolver=resolve_onebot_secret,
             **adapter_driver_options,
         )
-        automatic_effect_drivers = PackageEffectDriverRegistry(
-            {
+        effect_factories = {
                 "chat-completions.http": provider_effect_factory,
                 "chat-completions.result-lookup": provider_effect_factory,
                 "embedding.multimodal.http": embedding_effect_factory,
@@ -591,10 +593,32 @@ class BotHost:
                     runtime=self._kernel.runtime,
                     payloads=self._kernel.payload,
                 ),
-            },
+        }
+        source_refs = {kind: "forest.host-native/1" for kind in effect_factories}
+        contract_facts = {}
+        controller_provider = self._host_driver_controller_provider
+        if controller_provider is not None:
+            controller = controller_provider()
+            if controller is not None:
+                for export in controller.driver_exports():
+                    kind = export["kind"]
+                    if kind in effect_factories:
+                        raise ForestError(
+                            "CONTROL_DRIVER_KIND_CONFLICT",
+                            "Control driver kind conflicts with a native Host driver", 409,
+                        )
+                    effect_factories[kind] = control_export_effect_driver_factory(
+                        export=export, controller_provider=controller_provider,
+                    )
+                    source_refs[kind] = export["source_ref"]
+                    contract_facts[kind] = export
+        automatic_effect_drivers = PackageEffectDriverRegistry(
+            effect_factories,
             configuration_validators={
                 "process.native": validate_process_executor_configuration,
             },
+            source_refs=source_refs,
+            contract_facts=contract_facts,
         )
         automatic = []
         expected_packages = bootstrap_package_digests or {}

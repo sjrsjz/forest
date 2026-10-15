@@ -13,6 +13,7 @@ from forest.control_packages import (
 )
 from forest.errors import ForestError
 from forest.packages import PackageCatalog, PackageSnapshot, digest_json
+from forest.runtime_contracts import FrozenServiceRoute, RuntimeServiceInvocation
 from forest.runtime_modules import RuntimeModuleRegistry
 from forest.schema_bundle_preflight import require_installable_storage_in
 
@@ -111,6 +112,48 @@ class ControlPackageController:
                     "graph_revision": graph.graph_revision,
                 })
         return tuple(sorted(exports, key=lambda item: (item["kind"], item["component_id"])))
+
+    async def invoke_driver_export(
+        self, *, kind: str, source_ref: str, caller_component_id: str,
+        payload: dict, invocation: RuntimeServiceInvocation,
+    ) -> dict:
+        """Invoke only the selected active provider through the Host router."""
+
+        registry = self.registry
+        if not isinstance(payload, dict) or not isinstance(
+            invocation, RuntimeServiceInvocation
+        ):
+            raise ForestError(
+                "CONTROL_DRIVER_INPUT_INVALID",
+                "Driver calls require one JSON object and an invocation identity", 422,
+            )
+        export = next(
+            (item for item in self.driver_exports() if item["kind"] == kind),
+            None,
+        )
+        if export is None or export["source_ref"] != source_ref:
+            raise ForestError(
+                "CONTROL_DRIVER_SOURCE_STALE",
+                "Driver source no longer names the active provider Generation", 409,
+            )
+        route = FrozenServiceRoute(
+            service_id=export["service_id"],
+            version=int(export["contract"].split(".", 1)[0]),
+            caller_component_id=caller_component_id,
+            provider_component_id=export["component_id"],
+            provider_generation_id=export["generation_id"],
+            graph_id=export["graph_id"],
+            graph_revision=export["graph_revision"],
+            admission_lane="DATA",
+            owned_work=False,
+        )
+        result = await registry.contract_router.invoke_external(route, invocation, payload)
+        if not isinstance(result, dict):
+            raise ForestError(
+                "CONTROL_DRIVER_OUTPUT_INVALID",
+                "Driver provider returned a non-object result", 502,
+            )
+        return result
 
     async def _assemble(
         self, snapshots: dict[str, PackageSnapshot], *, activation_id: str | None = None,
