@@ -1428,3 +1428,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-14 OneBot 运行期登录状态监督：`adapter.onebot` 启动门禁之后，transport Effect Driver 增加 30 秒周期的 `get_status` 任务并通过 Generation 的 `owned_tasks` 暴露；QQ 静默离线而 WebSocket 仍打开时上报 `ONEBOT_ACCOUNT_NOT_READY`，现有宿主监督和部署退避接管。关闭与热替换取消并等待该任务。针对性 OneBot/运行图替换用例 6 passed，Ruff 通过。该改动已构建为 `forest:runtime-candidate-8c31ac5`，镜像内 OneBot transport 源文件摘要与提交一致；尚未切换到 v30 真实实例，当前 QQ 仍待扫码。
 
 2026-10-14 QiYu 图扩散语义复核：直接读取 `../RAG/libs/agentlib/agentlib/memory/graph.py` 的 `strongest_path_activations`，确认参考算法为最大乘积路径，而非多路径求和 PPR；Forest 的 `qiyu-graph-region/2` 在 100 个合成有向图（每图 12 节点、35 边、1–3 种子、序列权重 0.55、联想权重 0.9）中，与 QiYu 对所有可见节点给出的激活分数一致，单次读取不超过 12 节点。此只读对照不覆盖 PostgreSQL 可见性、关联边采样、真实向量种子或端到端 Agent 召回；后者仍按各自验收门禁处理。
+
+2026-10-16 Host/Bot 驱动联合换代的发布前失败验收：隔离 PostgreSQL 三 Bot 用例分别注入 Host 预热与首个消费 Bot 准备失败，均返回原始错误，Host 与 Bot 活动图身份不变；之后在途旧 Effect 单次结算、双消费 Bot 换代、无关 Bot 保留、账本结算均通过（1 passed in 509.22s）。失败预备图可占用修订号，活动图回滚与修订单调才是契约。发布后 Bot 激活失败、跨进程在途 Effect 与许可群低频实测仍待验证。树莓派 NapCat/QQ 同日只读核对：OneBot get_status 为 online/good，QQ 3.2.34-53644，NapCat 4.18.38，旧 alicebot.service 停用；未重启或发送群消息。

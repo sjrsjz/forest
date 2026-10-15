@@ -274,6 +274,63 @@ async def test_joint_host_driver_replaces_two_consumers_but_not_unrelated_bot(tm
             expected_component_id=reviewed.component["id"],
             expected_runtime="python-worker",
         )
+        previous_host = controller.registry.graph_identity
+        original_joint = controller._joint_driver_transition
+
+        async def reject_host_prewarm(
+            target, previous, candidate, snapshots, affected, consumers,
+        ):
+            async def fail_prewarm():
+                raise ForestError(
+                    "TEST_HOST_PREWARM_FAILURE", "Injected Host candidate failure", 503,
+                )
+
+            candidate.prewarm = fail_prewarm
+            return await original_joint(
+                target, previous, candidate, snapshots, affected, consumers,
+            )
+
+        controller._joint_driver_transition = reject_host_prewarm
+        try:
+            with pytest.raises(ForestError) as rejected_host:
+                await controller.replace(
+                    "host.sample", reviewed.digest,
+                    expected_graph_revision=previous_host.graph_revision,
+                )
+            assert rejected_host.value.code == "TEST_HOST_PREWARM_FAILURE"
+        finally:
+            controller._joint_driver_transition = original_joint
+        assert controller.registry.graph_identity == previous_host
+        assert [bot.registry.graph_identity for bot in bots[:2]] == before_consumers
+        assert bots[2].registry.graph_identity == unrelated_before
+
+        original_assemble_bot = bots[0]._assemble_candidate
+
+        async def reject_bot_prepare(*args, **kwargs):
+            assembled = await original_assemble_bot(*args, **kwargs)
+
+            async def fail_prepare():
+                raise ForestError(
+                    "TEST_BOT_PREPARE_FAILURE", "Injected Bot candidate failure", 503,
+                )
+
+            assembled.registry.prepare = fail_prepare
+            return assembled
+
+        bots[0]._assemble_candidate = reject_bot_prepare
+        try:
+            with pytest.raises(ForestError) as rejected_bot:
+                await controller.replace(
+                    "host.sample", reviewed.digest,
+                    expected_graph_revision=previous_host.graph_revision,
+                )
+            assert rejected_bot.value.code == "TEST_BOT_PREPARE_FAILURE"
+        finally:
+            bots[0]._assemble_candidate = original_assemble_bot
+        assert controller.registry.graph_identity == previous_host
+        assert [bot.registry.graph_identity for bot in bots[:2]] == before_consumers
+        assert bots[2].registry.graph_identity == unrelated_before
+
         old_bot_registry = bots[0].registry
         old_bot_graph = old_bot_registry.graph_identity
         route = FrozenServiceRoute(
@@ -308,7 +365,6 @@ async def test_joint_host_driver_replaces_two_consumers_but_not_unrelated_bot(tm
             return await original_drain(*args, **kwargs)
 
         old_bot_registry.drain_owned_work_for_replacement = observe_drain
-        previous_host = controller.registry.graph_identity
         replacement_task = asyncio.create_task(controller.replace(
             "host.sample", reviewed.digest,
             expected_graph_revision=previous_host.graph_revision,
@@ -333,7 +389,7 @@ async def test_joint_host_driver_replaces_two_consumers_but_not_unrelated_bot(tm
             )
         new_source = controller.driver_exports()[0]["source_ref"]
         assert new_source != old_source
-        assert replaced.graph_identity.graph_revision == previous_host.graph_revision + 1
+        assert replaced.graph_identity.graph_revision > previous_host.graph_revision
         results = await changes.consumer_results(replaced.activation_id)
         assert [(row["bot_id"], row["state"]) for row in results] == [
             ("joint-consumer-a", "SUCCEEDED"),
@@ -341,7 +397,7 @@ async def test_joint_host_driver_replaces_two_consumers_but_not_unrelated_bot(tm
         ]
         for index, bot in enumerate(bots[:2]):
             graph = bot.registry.graph_identity
-            assert graph.graph_revision == before_consumers[index].graph_revision + 1
+            assert graph.graph_revision > before_consumers[index].graph_revision
             assert graph.generations["forest.counter"] != (
                 before_consumers[index].generations["forest.counter"]
             )

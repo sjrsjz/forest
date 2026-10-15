@@ -54,8 +54,10 @@ Supervisor 已按精确旧 `source_ref` 选取 Bot 消费者，在共享门闩�
 
 Host 作用域在候选图 PREPARED 且 Bot 候选均已准备后冻结每个 Bot 的旧/目标绑定三元组、旧图与目标 activation ID。Bot 图发布并由内核图账本证实后，逐项结算 SUCCEEDED；异常项记录 FAILED 或 PARTIAL。数据库触发器拒绝 Host 图发布前把 Bot 记为 SUCCEEDED/PARTIAL，终态不可改写。进程重启遇到 PENDING 时先等待 Bot 的异步启动并主动复核图证据，不再立即把 Host 请求结算为 PARTIAL。
 
-尚未完成：在途调用的进程故障与 UNKNOWN 变体、Host 候选预热失败、Bot 准备失败、Host 发布后 Bot 激活失败，以及许可群低频实测。真实 PostgreSQL 用例已覆盖两个 Bot 共享 Host 驱动、无关 Bot 保持原 Graph；另一隔离用例从签名 Web 请求的 RUNNING 状态和 PENDING Bot 行出发，关闭旧 Host/Bot 宿主并在同一数据库与包目录中重建实例，由新租约自动领取、复核新 source 并将 Host/Bot 结果结算为 SUCCEEDED。
+尚未完成：在途调用的进程故障与 UNKNOWN 变体、Host 发布后 Bot 激活失败，以及许可群低频实测。真实 PostgreSQL 用例已覆盖两个 Bot 共享 Host 驱动、无关 Bot 保持原 Graph；另一隔离用例从签名 Web 请求的 RUNNING 状态和 PENDING Bot 行出发，关闭旧 Host/Bot 宿主并在同一数据库与包目录中重建实例，由新租约自动领取、复核新 source 并将 Host/Bot 结果结算为 SUCCEEDED。
 
 另一个独立进程用例在 Host 发布、Bot 已换代且逐 Bot 结果仍为 PENDING 时以 SIGKILL 杀死整个子进程组；旧 Host 与 Bot 租约到期后，新宿主从同库同包目录获得更高 owner_epoch、核对当前驱动绑定，并将消费者与请求结算为 SUCCEEDED。该用例两次通过（405.37 秒、397.35 秒），使用替身 OneBot/模型，尚未验证在途 Effect。一次早期运行在账本成功后退出等待超过 44 分钟，尚未定位且后续两次未复现；关闭生命周期仍需继续观察。
 
 2026-10-16 在途调用定向验收：隔离 PostgreSQL 的双消费 Bot/无关 Bot 完整图场景中，第一消费 Bot 的 `tests.host.driver` 通过本代 Bot Effect service、冻结来源代理进入旧 Host Worker，并在 Worker 内等待释放。联合换代进入旧 Bot 图排空后，旧调用仍在途且替换尚未完成；释放后该调用返回原值，Host Worker 的执行标记仅一条。随后两个消费 Bot 的驱动来源改为新 Host Generation，无关 Bot 图身份不变，旧 Bot 路由的新调用被拒绝，Host 逐 Bot 账本均为 SUCCEEDED。用例 `1 passed in 462.62s`，仅用假 OneBot/模型。此前两次用例失败均发生在测试夹具 60 秒候选准备等待窗，未进入所需排空断言；第三次把挂起调用延后到排空入口并给候选准备 180 秒等待窗后通过。该证据不覆盖跨进程中断时的在途调用、未知外部效果或真实 QQ。
+
+2026-10-16 发布前失败验收：同一隔离 PostgreSQL 三 Bot 场景在正常换代前，分别注入 Host 候选 prewarm() 失败与首个消费 Bot 候选 prepare() 失败。两次失败都返回原始故障码，Host 与全部 Bot 的活动图身份保持原值；随后旧路由仍能接纳一笔在途调用，联合换代完成且逐 Bot 账本均为 SUCCEEDED。失败的 PREPARED 候选可能占用持久修订号，因此验收检查活动图身份回滚与后续修订单调增加，不假定最终修订号仅加一。完整用例 1 passed in 509.22s，使用假 OneBot/模型，不覆盖 Host 发布后的 Bot 激活失败。
