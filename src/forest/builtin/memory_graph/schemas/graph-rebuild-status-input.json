@@ -3,7 +3,6 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "generation_id",
     "requested_by"
   ],
   "properties": {

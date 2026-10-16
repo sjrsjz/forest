@@ -114,9 +114,14 @@ async def test_graph_rebuild_work_requeues_progress_and_settles_publication(
         assert progress["value"]["state"] == "QUEUED"
         assert progress["value"]["replayed_through"] == 1
         assert progress["value"]["active_revision"] == 1
+        latest = await call(
+            conn, "memory_query_graph_rebuild", base,
+            {"requested_by": "admin"},
+        )
+        assert latest["value"]["generation_id"] == generation_id
         hidden = await call(
             conn, "memory_query_graph_rebuild", base,
-            {"generation_id": generation_id, "requested_by": "someone-else"},
+            {"requested_by": "someone-else"},
         )
         assert hidden["error"]["code"] == "MEMORY_GRAPH_REBUILD_NOT_FOUND"
 
@@ -169,6 +174,16 @@ async def test_graph_rebuild_work_requeues_progress_and_settles_publication(
             {"requested_by": "admin"},
         )
         recovery_id = another["value"]["generation_id"]
+        latest = await call(
+            conn, "memory_query_graph_rebuild", base,
+            {"requested_by": "admin"},
+        )
+        assert latest["value"]["generation_id"] == recovery_id
+        earlier = await call(
+            conn, "memory_query_graph_rebuild", base,
+            {"generation_id": generation_id, "requested_by": "admin"},
+        )
+        assert earlier["value"]["generation_id"] == generation_id
         expired = await call(
             conn, "memory_claim_graph_rebuild", base,
             {**claim("claim/expired"), "lease_seconds": 3},

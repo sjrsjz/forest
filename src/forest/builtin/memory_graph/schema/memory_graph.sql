@@ -680,6 +680,8 @@ CREATE UNIQUE INDEX graph_rebuild_one_open_work
 CREATE INDEX graph_rebuild_ready_work
     ON graph_rebuild_work(bot_id,next_attempt_at,generation_id)
     WHERE state='QUEUED';
+CREATE INDEX graph_rebuild_recent_by_actor
+    ON graph_rebuild_work(bot_id,requested_by,created_at DESC,generation_id DESC);
 
 CREATE TABLE graph_rebuild_retry_operations (
     bot_id text NOT NULL,
@@ -1055,9 +1057,15 @@ DECLARE
     current_generation text;
     current_revision bigint;
 BEGIN
-    SELECT * INTO work_row FROM __forest_module_schema__.graph_rebuild_work
-    WHERE bot_id=context->>'bot_id' AND generation_id=input->>'generation_id'
-      AND requested_by=input->>'requested_by';
+    IF input->>'generation_id' IS NULL THEN
+        SELECT * INTO work_row FROM __forest_module_schema__.graph_rebuild_work
+        WHERE bot_id=context->>'bot_id' AND requested_by=input->>'requested_by'
+        ORDER BY created_at DESC,generation_id DESC LIMIT 1;
+    ELSE
+        SELECT * INTO work_row FROM __forest_module_schema__.graph_rebuild_work
+        WHERE bot_id=context->>'bot_id' AND generation_id=input->>'generation_id'
+          AND requested_by=input->>'requested_by';
+    END IF;
     IF NOT FOUND THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_NOT_FOUND',
