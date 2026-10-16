@@ -167,6 +167,7 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
         "seed", "target"}
     assert (await sources_with_review("APPROVED"))["items"] == []
     before = await query("query/before")
+    assert (before["graph_generation_id"], before["graph_revision"]) == ("primary", 2)
     assert not [edge for edge in before["edges"] if edge["relation"] == "ASSOCIATED"]
     async with store.pool.connection() as conn, conn.transaction():
         await conn.execute(sql.SQL(
@@ -199,6 +200,7 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
         {"query_id": "query/before", "source_unit_id": "seed", "association_limit": 8},
     ))["value"]["edges"] if edge["relation"] == "ASSOCIATED"]
     after = await query("query/after")
+    assert (after["graph_generation_id"], after["graph_revision"]) == ("primary", 3)
     assert [(edge["target_id"], edge["contribution_id"]) for edge in after["edges"]
             if edge["relation"] == "ASSOCIATED"] == [
                 ("target", candidate["contribution_id"])
@@ -212,6 +214,7 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
     assert (await sources_with_review("UNREVIEWED"))["items"] == []
     assert (await sources_with_review("APPROVED"))["items"] == []
     final = await query("query/final")
+    assert (final["graph_generation_id"], final["graph_revision"]) == ("primary", 4)
     assert not [edge for edge in final["edges"] if edge["relation"] == "ASSOCIATED"]
 
     async with store.pool.connection() as conn, conn.transaction():
@@ -248,3 +251,26 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
         "revision": 5, "event_kind": "SOURCE_UNIT_VISIBILITY",
         "before_state": "REGISTERED", "after_state": "ELIGIBLE",
     }
+    async with store.pool.connection() as conn:
+        head = await (await conn.execute(sql.SQL(
+            "SELECT active_generation_id,active_graph_revision "
+            "FROM {}.graph_projection_heads WHERE bot_id=%s"
+        ).format(namespace), (store.bot_id,))).fetchone()
+        nodes = await (await conn.execute(sql.SQL(
+            "SELECT source_unit_id,from_revision,to_revision "
+            "FROM {}.graph_node_versions WHERE bot_id=%s ORDER BY source_unit_id"
+        ).format(namespace), (store.bot_id,))).fetchall()
+        edges = await (await conn.execute(sql.SQL(
+            "SELECT contribution_id,from_revision,to_revision "
+            "FROM {}.graph_edge_versions WHERE bot_id=%s"
+        ).format(namespace), (store.bot_id,))).fetchall()
+    assert head == {"active_generation_id": "primary", "active_graph_revision": 5}
+    assert nodes == [
+        {"source_unit_id": "query-input", "from_revision": 5, "to_revision": None},
+        {"source_unit_id": "seed", "from_revision": 1, "to_revision": None},
+        {"source_unit_id": "target", "from_revision": 1, "to_revision": None},
+    ]
+    assert edges == [{
+        "contribution_id": candidate["contribution_id"],
+        "from_revision": 3, "to_revision": 4,
+    }]

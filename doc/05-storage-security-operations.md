@@ -119,10 +119,10 @@ Episode/Archive 使用 `archive_units(archive_id, source_unit_ids, source_contex
 | `memory_source_units` | 固定`source_unit_id, source_id, source_identity, source_order_seq, source_event_id/context_unit_id, source_conversation_id?, thread_id?, source_ingress_seq?, author_snapshot, occurred_at, accepted_at, source_revision, visibility`；同源位置及稳定source identity唯一，多观察的会话快捷字段不替代occurrences，保留内容版本与删除依据 |
 | `memory_source_occurrences` | occurrence_id、source_unit_id、binding_id、inbox_message_id、source_conversation_id、source_ingress_seq、input_batch_refs、eligibility_state；源与Inbox观察关联唯一，可验证的同一跨Binding事件共用源身份，保留每个会话的独立输入边界 |
 | `memory_trunks` | 每个 `(bot_id, group_source_id)` 恰有一条逻辑主干；根节点与主干身份稳定，Binding 重建、会话重开、线程变化或群改名不产生第二条同群主干 |
-| `graph_generations` | `bot_id, generation_id, schema_version, reducer_version, build_state, manifest_ref`；候选重建使用独立物理命名空间，稳定来源身份不随 generation 改变 |
-| `graph_revisions` | `bot_id, graph_revision, generation_id, source_revision, deletion_epoch, manifest_ref, coverage_ref, status`；不可变可读快照及明确覆盖范围 |
-| `graph_nodes / graph_edges` | 同 Bot 规范节点/边 ID、类型和源/断言/工件引用；使用 generation 下的版本可见区间或不可变分片 manifest 固定修订读取 |
-| `graph_heads` | `bot_id, active_generation_id, active_graph_revision`；同 Bot 短事务 CAS 是唯一图发布点，指向全部主干与跨主干关系的兼容快照 |
+| `graph_generations` | 当前保存 `bot_id, generation_id, schema_version, reducer_version, state`；候选构建水位/manifest 账本仍待加入 |
+| `graph_revisions` | 当前保存 `bot_id, graph_revision, generation_id, status`，并关联同 revision 的拓扑事务；不可变 |
+| `graph_node_versions / graph_edge_versions` | 同 Bot、generation 的稳定节点/贡献引用、端点与半开修订区间；查询固定 revision 并再次复核权威来源资格 |
+| `graph_projection_heads` | `bot_id, active_generation_id, active_graph_revision`；当前活动图在权威事务中按 Bot 行锁推进，候选代际 CAS 尚待实现 |
 
 普通平台消息在权威 Inbox 接纳事务中固定来源单元和源内顺序；模型/工具闭合记录在自身事实提交中固定。Inbox 登记只确定身份与位置，群消息必须经过合法 InputBatch/静默输入且源载荷可靠归档后，才能发布为图成员/可检索索引。后台归档、分词、向量化和图投影只复用这些身份及位置，不再分配“最新节点”。`source_order_seq` 表示该群来源账本的确定位置，不代表消息已进入 Agent 的当前输入；同群未过本次模型 InputBatch 切口的排队尾部必须在检索和派生来源传递时继续过滤。
 

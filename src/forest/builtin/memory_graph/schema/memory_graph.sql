@@ -609,6 +609,83 @@ CREATE TABLE graph_topology_events (
         REFERENCES graph_topology_journal_transactions(bot_id,revision)
 );
 
+CREATE TABLE graph_generations (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    generation_id text NOT NULL CHECK (octet_length(generation_id) BETWEEN 1 AND 256),
+    schema_version text NOT NULL,
+    reducer_version text NOT NULL,
+    state text NOT NULL CHECK (state IN ('ACTIVE','CANDIDATE','RETIRED')),
+    PRIMARY KEY (bot_id,generation_id)
+);
+
+CREATE TABLE graph_projection_heads (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    active_generation_id text NOT NULL,
+    active_graph_revision bigint NOT NULL DEFAULT 0
+        CHECK (active_graph_revision >= 0),
+    FOREIGN KEY (bot_id,active_generation_id)
+        REFERENCES graph_generations(bot_id,generation_id)
+);
+
+CREATE TABLE graph_revisions (
+    bot_id text NOT NULL,
+    graph_revision bigint NOT NULL CHECK (graph_revision > 0),
+    generation_id text NOT NULL,
+    status text NOT NULL DEFAULT 'PUBLISHED' CHECK (status='PUBLISHED'),
+    created_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    PRIMARY KEY (bot_id,graph_revision),
+    FOREIGN KEY (bot_id,graph_revision)
+        REFERENCES graph_topology_journal_transactions(bot_id,revision),
+    FOREIGN KEY (bot_id,generation_id)
+        REFERENCES graph_generations(bot_id,generation_id)
+);
+
+CREATE TABLE graph_node_versions (
+    bot_id text NOT NULL,
+    generation_id text NOT NULL,
+    source_unit_id text NOT NULL,
+    source_id text NOT NULL,
+    trunk_id text,
+    source_order_seq bigint NOT NULL,
+    source_revision bigint NOT NULL,
+    from_revision bigint NOT NULL CHECK (from_revision > 0),
+    to_revision bigint CHECK (to_revision IS NULL OR to_revision >= from_revision),
+    PRIMARY KEY (bot_id,generation_id,source_unit_id,from_revision),
+    FOREIGN KEY (bot_id,generation_id)
+        REFERENCES graph_generations(bot_id,generation_id)
+);
+CREATE UNIQUE INDEX graph_node_active_unique ON graph_node_versions(
+    bot_id,generation_id,source_unit_id) WHERE to_revision IS NULL;
+CREATE INDEX graph_node_sequence_idx ON graph_node_versions(
+    bot_id,generation_id,source_id,source_order_seq,from_revision);
+
+CREATE TABLE graph_edge_versions (
+    bot_id text NOT NULL,
+    generation_id text NOT NULL,
+    contribution_id text NOT NULL,
+    relation_id text NOT NULL,
+    relation_kind text NOT NULL,
+    origin_kind text NOT NULL,
+    left_kind text NOT NULL,
+    left_id text NOT NULL,
+    right_kind text NOT NULL,
+    right_id text NOT NULL,
+    cross_trunk boolean NOT NULL,
+    weight_micros bigint NOT NULL,
+    sample_key text COLLATE "C" NOT NULL,
+    from_revision bigint NOT NULL CHECK (from_revision > 0),
+    to_revision bigint CHECK (to_revision IS NULL OR to_revision >= from_revision),
+    PRIMARY KEY (bot_id,generation_id,contribution_id,from_revision),
+    FOREIGN KEY (bot_id,generation_id)
+        REFERENCES graph_generations(bot_id,generation_id)
+);
+CREATE UNIQUE INDEX graph_edge_active_unique ON graph_edge_versions(
+    bot_id,generation_id,contribution_id) WHERE to_revision IS NULL;
+CREATE INDEX graph_edge_left_sample_idx ON graph_edge_versions(
+    bot_id,generation_id,left_kind,left_id,relation_kind,sample_key,contribution_id);
+CREATE INDEX graph_edge_right_sample_idx ON graph_edge_versions(
+    bot_id,generation_id,right_kind,right_id,relation_kind,sample_key,contribution_id);
+
 CREATE FUNCTION record_graph_topology_event()
 RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE
@@ -668,6 +745,135 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION publish_graph_topology_event()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    current_generation text;
+    current_revision bigint;
+    source_state text;
+    relation_state boolean;
+BEGIN
+    INSERT INTO __forest_module_schema__.graph_generations(
+        bot_id,generation_id,schema_version,reducer_version,state)
+    VALUES (NEW.bot_id,'primary','1','1','ACTIVE')
+    ON CONFLICT (bot_id,generation_id) DO NOTHING;
+    INSERT INTO __forest_module_schema__.graph_projection_heads(
+        bot_id,active_generation_id)
+    VALUES (NEW.bot_id,'primary')
+    ON CONFLICT (bot_id) DO NOTHING;
+    SELECT active_generation_id,active_graph_revision
+    INTO current_generation,current_revision
+    FROM __forest_module_schema__.graph_projection_heads
+    WHERE bot_id=NEW.bot_id FOR UPDATE;
+    IF current_revision NOT IN (NEW.revision-1,NEW.revision) THEN
+        RAISE EXCEPTION 'Graph projection revision is not contiguous'
+            USING ERRCODE='55000';
+    END IF;
+    INSERT INTO __forest_module_schema__.graph_revisions(
+        bot_id,graph_revision,generation_id)
+    VALUES (NEW.bot_id,NEW.revision,current_generation)
+    ON CONFLICT (bot_id,graph_revision) DO NOTHING;
+
+    IF NEW.event_kind='SOURCE_UNIT_VISIBILITY' THEN
+        source_state := NEW.after_value->>'eligibility_state';
+        IF source_state='ELIGIBLE' THEN
+            INSERT INTO __forest_module_schema__.graph_node_versions(
+                bot_id,generation_id,source_unit_id,source_id,trunk_id,
+                source_order_seq,source_revision,from_revision)
+            SELECT NEW.bot_id,current_generation,u.source_unit_id,u.source_id,
+                   u.trunk_id,u.source_order_seq,u.source_revision,NEW.revision
+            FROM __forest_module_schema__.source_units u
+            WHERE u.bot_id=NEW.bot_id AND u.source_unit_id=NEW.entity_id
+              AND NOT EXISTS (
+                  SELECT 1 FROM __forest_module_schema__.graph_node_versions n
+                  WHERE n.bot_id=NEW.bot_id AND n.generation_id=current_generation
+                    AND n.source_unit_id=NEW.entity_id AND n.to_revision IS NULL);
+        ELSE
+            UPDATE __forest_module_schema__.graph_node_versions n
+            SET to_revision=NEW.revision
+            WHERE n.bot_id=NEW.bot_id AND n.generation_id=current_generation
+              AND n.source_unit_id=NEW.entity_id AND n.to_revision IS NULL;
+        END IF;
+    ELSIF NEW.event_kind IN ('RELATION_CONTRIBUTION','RELATION_APPROVAL') THEN
+        relation_state := NEW.after_value->>'active'='true';
+        IF NEW.event_kind='RELATION_APPROVAL' THEN
+            relation_state := true;
+        END IF;
+        IF relation_state THEN
+            INSERT INTO __forest_module_schema__.graph_edge_versions(
+                bot_id,generation_id,contribution_id,relation_id,relation_kind,
+                origin_kind,left_kind,left_id,right_kind,right_id,cross_trunk,
+                weight_micros,sample_key,from_revision)
+            SELECT c.bot_id,current_generation,c.contribution_id,c.relation_id,
+                   c.relation_kind,c.origin_kind,c.left_kind,c.left_id,
+                   c.right_kind,c.right_id,c.cross_trunk,c.weight_micros,
+                   c.sample_key,NEW.revision
+            FROM __forest_module_schema__.relation_contributions c
+            WHERE c.bot_id=NEW.bot_id AND c.contribution_id=NEW.entity_id
+              AND c.active AND (c.origin_kind<>'MANUAL' OR EXISTS (
+                  SELECT 1 FROM __forest_module_schema__.relation_approvals a
+                  WHERE a.bot_id=c.bot_id AND a.contribution_id=c.contribution_id))
+              AND NOT EXISTS (
+                  SELECT 1 FROM __forest_module_schema__.graph_edge_versions e
+                  WHERE e.bot_id=NEW.bot_id AND e.generation_id=current_generation
+                    AND e.contribution_id=NEW.entity_id AND e.to_revision IS NULL);
+        ELSE
+            UPDATE __forest_module_schema__.graph_edge_versions e
+            SET to_revision=NEW.revision
+            WHERE e.bot_id=NEW.bot_id AND e.generation_id=current_generation
+              AND e.contribution_id=NEW.entity_id AND e.to_revision IS NULL;
+        END IF;
+    END IF;
+    IF current_revision<>NEW.revision THEN
+        UPDATE __forest_module_schema__.graph_projection_heads
+        SET active_graph_revision=NEW.revision WHERE bot_id=NEW.bot_id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION guard_graph_projection_version()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'Graph projection version cannot be deleted'
+            USING ERRCODE='55000';
+    END IF;
+    IF OLD.to_revision IS NOT NULL
+       OR NEW.to_revision IS NULL
+       OR NEW.to_revision<OLD.from_revision
+       OR to_jsonb(NEW)-'to_revision' IS DISTINCT FROM
+          to_jsonb(OLD)-'to_revision' THEN
+        RAISE EXCEPTION 'Graph projection version is immutable'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION stamp_graph_query_revision()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+BEGIN
+    INSERT INTO __forest_module_schema__.graph_generations(
+        bot_id,generation_id,schema_version,reducer_version,state)
+    VALUES (NEW.bot_id,'primary','1','1','ACTIVE')
+    ON CONFLICT (bot_id,generation_id) DO NOTHING;
+    INSERT INTO __forest_module_schema__.graph_projection_heads(
+        bot_id,active_generation_id)
+    VALUES (NEW.bot_id,'primary')
+    ON CONFLICT (bot_id) DO NOTHING;
+    SELECT active_generation_id,active_graph_revision
+    INTO NEW.graph_generation_id,NEW.graph_revision
+    FROM __forest_module_schema__.graph_projection_heads
+    WHERE bot_id=NEW.bot_id;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Graph projection head is unavailable'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE FUNCTION guard_graph_topology_event()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
@@ -703,6 +909,8 @@ CREATE TABLE memory_queries (
         CHECK (octet_length(fusion_policy_revision) BETWEEN 1 AND 256),
     accepted_deletion_epoch bigint NOT NULL CHECK (accepted_deletion_epoch >= 0),
     graph_snapshot pg_snapshot NOT NULL DEFAULT pg_current_snapshot(),
+    graph_generation_id text NOT NULL DEFAULT 'primary',
+    graph_revision bigint NOT NULL DEFAULT 0 CHECK (graph_revision >= 0),
     state text NOT NULL DEFAULT 'OPEN' CHECK (state IN ('OPEN','FROZEN')),
     bundle_id text CHECK (bundle_id IS NULL OR octet_length(bundle_id) BETWEEN 1 AND 256),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -2289,7 +2497,8 @@ $$;
 
 CREATE FUNCTION memory_graph_unit_visible(
     requested_bot text, requested_unit text, graph_snapshot pg_snapshot,
-    excluded_query text, current_conversation text, cut_seq bigint
+    excluded_query text, current_conversation text, cut_seq bigint,
+    graph_generation_value text, graph_revision_value bigint
 ) RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     SELECT EXISTS (
         SELECT 1 FROM __forest_module_schema__.source_units u
@@ -2297,6 +2506,13 @@ CREATE FUNCTION memory_graph_unit_visible(
         WHERE u.bot_id=requested_bot AND u.source_unit_id=requested_unit
           AND u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE'
           AND pg_visible_in_snapshot(u.eligible_xid,graph_snapshot)
+          AND EXISTS (
+              SELECT 1 FROM __forest_module_schema__.graph_node_versions n
+              WHERE n.bot_id=u.bot_id AND n.generation_id=graph_generation_value
+                AND n.source_unit_id=u.source_unit_id
+                AND n.from_revision<=graph_revision_value
+                AND (n.to_revision IS NULL OR n.to_revision>graph_revision_value)
+          )
           AND EXISTS (
               SELECT 1 FROM __forest_module_schema__.source_occurrences o
               WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
@@ -2366,7 +2582,8 @@ BEGIN
       ON s.bot_id=u.bot_id AND s.source_id=u.source_id
     WHERE __forest_module_schema__.memory_graph_unit_visible(
         requested_bot,u.source_unit_id,query_row.graph_snapshot,
-        requested_query,conversation_value,cut_value);
+        requested_query,conversation_value,cut_value,
+        query_row.graph_generation_id,query_row.graph_revision);
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
         'value',jsonb_build_object('candidates',candidates_value));
 END;
@@ -2375,7 +2592,8 @@ $$;
 CREATE FUNCTION memory_graph_association_visible(
     requested_bot text, contribution_ref text, contribution_xid xid8,
     origin_kind_value text, target_ref text, graph_snapshot_value pg_snapshot, requested_query text,
-    conversation_value text, cut_value bigint
+    conversation_value text, cut_value bigint,
+    graph_generation_value text, graph_revision_value bigint
 ) RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog AS $$
     SELECT pg_visible_in_snapshot(contribution_xid,graph_snapshot_value)
        AND (origin_kind_value<>'MANUAL' OR EXISTS (
@@ -2385,7 +2603,8 @@ CREATE FUNCTION memory_graph_association_visible(
        ))
        AND __forest_module_schema__.memory_graph_unit_visible(
            requested_bot,target_ref,graph_snapshot_value,
-           requested_query,conversation_value,cut_value)
+           requested_query,conversation_value,cut_value,
+           graph_generation_value,graph_revision_value)
        AND EXISTS (
            SELECT 1 FROM __forest_module_schema__.relation_evidence e
            WHERE e.bot_id=requested_bot AND e.contribution_id=contribution_ref
@@ -2394,7 +2613,8 @@ CREATE FUNCTION memory_graph_association_visible(
            WHERE e.bot_id=requested_bot AND e.contribution_id=contribution_ref
              AND NOT __forest_module_schema__.memory_graph_unit_visible(
                  requested_bot,e.source_unit_id,graph_snapshot_value,
-                 requested_query,conversation_value,cut_value)
+                 requested_query,conversation_value,cut_value,
+                 graph_generation_value,graph_revision_value)
        )
 $$;
 
@@ -2434,9 +2654,13 @@ BEGIN
     WHERE qp.bot_id=requested_bot AND qp.query_id=requested_query;
     IF NOT __forest_module_schema__.memory_graph_unit_visible(
         requested_bot,requested_unit,query_row.graph_snapshot,
-        requested_query,conversation_value,cut_value) THEN
+        requested_query,conversation_value,cut_value,
+        query_row.graph_generation_id,query_row.graph_revision) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
-            'value',jsonb_build_object('node',NULL,'edges','[]'::jsonb,'association_sampled',false));
+            'value',jsonb_build_object(
+                'graph_generation_id',query_row.graph_generation_id,
+                'graph_revision',query_row.graph_revision,
+                'node',NULL,'edges','[]'::jsonb,'association_sampled',false));
     END IF;
     SELECT * INTO unit_row FROM __forest_module_schema__.source_units
     WHERE bot_id=requested_bot AND source_unit_id=requested_unit;
@@ -2457,70 +2681,104 @@ BEGIN
         'relation_id',NULL,'contribution_id',NULL) ORDER BY source_order_seq),'[]'::jsonb)
     INTO sequence_edges FROM (
         (SELECT u.source_unit_id,u.source_order_seq
-         FROM __forest_module_schema__.source_units u
-         WHERE u.bot_id=requested_bot AND u.source_id=unit_row.source_id
+         FROM __forest_module_schema__.graph_node_versions u
+         WHERE u.bot_id=requested_bot
+           AND u.generation_id=query_row.graph_generation_id
+           AND u.source_id=unit_row.source_id
+           AND u.from_revision<=query_row.graph_revision
+           AND (u.to_revision IS NULL OR u.to_revision>query_row.graph_revision)
            AND u.source_order_seq<unit_row.source_order_seq
            AND __forest_module_schema__.memory_graph_unit_visible(
                requested_bot,u.source_unit_id,query_row.graph_snapshot,
-               requested_query,conversation_value,cut_value)
+               requested_query,conversation_value,cut_value,
+               query_row.graph_generation_id,query_row.graph_revision)
          ORDER BY u.source_order_seq DESC LIMIT 1)
         UNION ALL
         (SELECT u.source_unit_id,u.source_order_seq
-         FROM __forest_module_schema__.source_units u
-         WHERE u.bot_id=requested_bot AND u.source_id=unit_row.source_id
+         FROM __forest_module_schema__.graph_node_versions u
+         WHERE u.bot_id=requested_bot
+           AND u.generation_id=query_row.graph_generation_id
+           AND u.source_id=unit_row.source_id
+           AND u.from_revision<=query_row.graph_revision
+           AND (u.to_revision IS NULL OR u.to_revision>query_row.graph_revision)
            AND u.source_order_seq>unit_row.source_order_seq
            AND __forest_module_schema__.memory_graph_unit_visible(
                requested_bot,u.source_unit_id,query_row.graph_snapshot,
-               requested_query,conversation_value,cut_value)
+               requested_query,conversation_value,cut_value,
+               query_row.graph_generation_id,query_row.graph_revision)
          ORDER BY u.source_order_seq LIMIT 1)
     ) neighbours;
     -- Four bounded index seeks cover both edge orientations and both sides of
     -- the query's random pivot. Only the small merged set is sorted; hidden
     -- candidates are filtered before each seek reaches its limit.
     WITH candidates AS MATERIALIZED (
-        (SELECT c.contribution_id,c.relation_id,c.right_id AS target_id,c.sample_key
-         FROM __forest_module_schema__.relation_contributions c
-         WHERE c.bot_id=requested_bot AND c.left_kind='SOURCE_UNIT'
-           AND c.left_id=requested_unit AND c.right_kind='SOURCE_UNIT'
-           AND c.relation_kind='ASSOCIATES_WITH' AND c.active
-           AND c.sample_key>=sample_pivot
+        (SELECT e.contribution_id,e.relation_id,e.right_id AS target_id,e.sample_key
+         FROM __forest_module_schema__.graph_edge_versions e
+         JOIN __forest_module_schema__.relation_contributions c
+           ON c.bot_id=e.bot_id AND c.contribution_id=e.contribution_id
+         WHERE e.bot_id=requested_bot
+           AND e.generation_id=query_row.graph_generation_id
+           AND e.from_revision<=query_row.graph_revision
+           AND (e.to_revision IS NULL OR e.to_revision>query_row.graph_revision) AND e.left_kind='SOURCE_UNIT'
+           AND e.left_id=requested_unit AND e.right_kind='SOURCE_UNIT'
+           AND e.relation_kind='ASSOCIATES_WITH' AND c.active
+           AND e.sample_key>=sample_pivot
            AND __forest_module_schema__.memory_graph_association_visible(
-               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,c.right_id,
-               query_row.graph_snapshot,requested_query,conversation_value,cut_value)
-         ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
+               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,e.right_id,
+               query_row.graph_snapshot,requested_query,conversation_value,cut_value,
+               query_row.graph_generation_id,query_row.graph_revision)
+         ORDER BY e.sample_key,c.contribution_id LIMIT association_limit+1)
         UNION ALL
-        (SELECT c.contribution_id,c.relation_id,c.right_id AS target_id,c.sample_key
-         FROM __forest_module_schema__.relation_contributions c
-         WHERE c.bot_id=requested_bot AND c.left_kind='SOURCE_UNIT'
-           AND c.left_id=requested_unit AND c.right_kind='SOURCE_UNIT'
-           AND c.relation_kind='ASSOCIATES_WITH' AND c.active
-           AND c.sample_key<sample_pivot
+        (SELECT e.contribution_id,e.relation_id,e.right_id AS target_id,e.sample_key
+         FROM __forest_module_schema__.graph_edge_versions e
+         JOIN __forest_module_schema__.relation_contributions c
+           ON c.bot_id=e.bot_id AND c.contribution_id=e.contribution_id
+         WHERE e.bot_id=requested_bot
+           AND e.generation_id=query_row.graph_generation_id
+           AND e.from_revision<=query_row.graph_revision
+           AND (e.to_revision IS NULL OR e.to_revision>query_row.graph_revision) AND e.left_kind='SOURCE_UNIT'
+           AND e.left_id=requested_unit AND e.right_kind='SOURCE_UNIT'
+           AND e.relation_kind='ASSOCIATES_WITH' AND c.active
+           AND e.sample_key<sample_pivot
            AND __forest_module_schema__.memory_graph_association_visible(
-               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,c.right_id,
-               query_row.graph_snapshot,requested_query,conversation_value,cut_value)
-         ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
+               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,e.right_id,
+               query_row.graph_snapshot,requested_query,conversation_value,cut_value,
+               query_row.graph_generation_id,query_row.graph_revision)
+         ORDER BY e.sample_key,c.contribution_id LIMIT association_limit+1)
         UNION ALL
-        (SELECT c.contribution_id,c.relation_id,c.left_id AS target_id,c.sample_key
-         FROM __forest_module_schema__.relation_contributions c
-         WHERE c.bot_id=requested_bot AND c.right_kind='SOURCE_UNIT'
-           AND c.right_id=requested_unit AND c.left_kind='SOURCE_UNIT'
-           AND c.relation_kind='ASSOCIATES_WITH' AND c.active
-           AND c.sample_key>=sample_pivot
+        (SELECT e.contribution_id,e.relation_id,e.left_id AS target_id,e.sample_key
+         FROM __forest_module_schema__.graph_edge_versions e
+         JOIN __forest_module_schema__.relation_contributions c
+           ON c.bot_id=e.bot_id AND c.contribution_id=e.contribution_id
+         WHERE e.bot_id=requested_bot
+           AND e.generation_id=query_row.graph_generation_id
+           AND e.from_revision<=query_row.graph_revision
+           AND (e.to_revision IS NULL OR e.to_revision>query_row.graph_revision) AND e.right_kind='SOURCE_UNIT'
+           AND e.right_id=requested_unit AND e.left_kind='SOURCE_UNIT'
+           AND e.relation_kind='ASSOCIATES_WITH' AND c.active
+           AND e.sample_key>=sample_pivot
            AND __forest_module_schema__.memory_graph_association_visible(
-               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,c.left_id,
-               query_row.graph_snapshot,requested_query,conversation_value,cut_value)
-         ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
+               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,e.left_id,
+               query_row.graph_snapshot,requested_query,conversation_value,cut_value,
+               query_row.graph_generation_id,query_row.graph_revision)
+         ORDER BY e.sample_key,c.contribution_id LIMIT association_limit+1)
         UNION ALL
-        (SELECT c.contribution_id,c.relation_id,c.left_id AS target_id,c.sample_key
-         FROM __forest_module_schema__.relation_contributions c
-         WHERE c.bot_id=requested_bot AND c.right_kind='SOURCE_UNIT'
-           AND c.right_id=requested_unit AND c.left_kind='SOURCE_UNIT'
-           AND c.relation_kind='ASSOCIATES_WITH' AND c.active
-           AND c.sample_key<sample_pivot
+        (SELECT e.contribution_id,e.relation_id,e.left_id AS target_id,e.sample_key
+         FROM __forest_module_schema__.graph_edge_versions e
+         JOIN __forest_module_schema__.relation_contributions c
+           ON c.bot_id=e.bot_id AND c.contribution_id=e.contribution_id
+         WHERE e.bot_id=requested_bot
+           AND e.generation_id=query_row.graph_generation_id
+           AND e.from_revision<=query_row.graph_revision
+           AND (e.to_revision IS NULL OR e.to_revision>query_row.graph_revision) AND e.right_kind='SOURCE_UNIT'
+           AND e.right_id=requested_unit AND e.left_kind='SOURCE_UNIT'
+           AND e.relation_kind='ASSOCIATES_WITH' AND c.active
+           AND e.sample_key<sample_pivot
            AND __forest_module_schema__.memory_graph_association_visible(
-               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,c.left_id,
-               query_row.graph_snapshot,requested_query,conversation_value,cut_value)
-         ORDER BY c.sample_key,c.contribution_id LIMIT association_limit+1)
+               requested_bot,c.contribution_id,c.created_xid,c.origin_kind,e.left_id,
+               query_row.graph_snapshot,requested_query,conversation_value,cut_value,
+               query_row.graph_generation_id,query_row.graph_revision)
+         ORDER BY e.sample_key,c.contribution_id LIMIT association_limit+1)
     ), sampled AS MATERIALIZED (
         SELECT * FROM candidates
         ORDER BY (sample_key<sample_pivot),sample_key,contribution_id,target_id
@@ -2536,7 +2794,10 @@ BEGIN
         FILTER (WHERE rank<=association_limit),'[]'::jsonb),count(*)>association_limit
     INTO association_edges,association_sampled FROM ranked;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
-        'value',jsonb_build_object('node',node_value,'edges',sequence_edges||association_edges,
+        'value',jsonb_build_object(
+            'graph_generation_id',query_row.graph_generation_id,
+            'graph_revision',query_row.graph_revision,
+            'node',node_value,'edges',sequence_edges||association_edges,
             'association_sampled',association_sampled));
 END;
 $$;
@@ -2714,7 +2975,8 @@ BEGIN
         WHERE m.bot_id=preparation.bot_id AND m.query_id=preparation.query_id
           AND __forest_module_schema__.memory_graph_unit_visible(
               preparation.bot_id,m.source_unit_id,query_row.graph_snapshot,
-              preparation.query_id,conversation_value,cut_value)
+              preparation.query_id,conversation_value,cut_value,
+              query_row.graph_generation_id,query_row.graph_revision)
         GROUP BY m.source_unit_id,m.source_revision
         ORDER BY rank_score DESC,m.source_unit_id LIMIT (preparation.policy->>'seed_limit')::integer
     )
@@ -4578,12 +4840,14 @@ BEGIN
     IF ROW(NEW.bot_id,NEW.query_id,NEW.operation_id,NEW.input_digest,
            NEW.input_kind,NEW.current_source_id,NEW.input_batch_ref,NEW.context_revision,
            NEW.query_mode,NEW.fusion_policy_revision,NEW.accepted_deletion_epoch,
-           NEW.created_at,NEW.graph_snapshot::text)
+           NEW.created_at,NEW.graph_snapshot::text,
+           NEW.graph_generation_id,NEW.graph_revision)
        IS DISTINCT FROM
        ROW(OLD.bot_id,OLD.query_id,OLD.operation_id,OLD.input_digest,
            OLD.input_kind,OLD.current_source_id,OLD.input_batch_ref,OLD.context_revision,
            OLD.query_mode,OLD.fusion_policy_revision,OLD.accepted_deletion_epoch,
-           OLD.created_at,OLD.graph_snapshot::text) THEN
+           OLD.created_at,OLD.graph_snapshot::text,
+           OLD.graph_generation_id,OLD.graph_revision) THEN
         RAISE EXCEPTION 'Memory query identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.state='OPEN' AND NEW.state='FROZEN' THEN RETURN NEW; END IF;
@@ -4807,6 +5071,22 @@ BEGIN
     RAISE EXCEPTION 'Invalid embedding claim transition' USING ERRCODE='55000';
 END;
 $$;
+
+CREATE TRIGGER graph_query_revision
+    BEFORE INSERT ON memory_queries
+    FOR EACH ROW EXECUTE FUNCTION stamp_graph_query_revision();
+CREATE TRIGGER graph_event_publication
+    AFTER INSERT OR UPDATE ON graph_topology_events
+    FOR EACH ROW EXECUTE FUNCTION publish_graph_topology_event();
+CREATE TRIGGER graph_revisions_immutable
+    BEFORE UPDATE OR DELETE ON graph_revisions
+    FOR EACH ROW EXECUTE FUNCTION reject_immutable_row();
+CREATE TRIGGER graph_nodes_version_guard
+    BEFORE UPDATE OR DELETE ON graph_node_versions
+    FOR EACH ROW EXECUTE FUNCTION guard_graph_projection_version();
+CREATE TRIGGER graph_edges_version_guard
+    BEFORE UPDATE OR DELETE ON graph_edge_versions
+    FOR EACH ROW EXECUTE FUNCTION guard_graph_projection_version();
 
 CREATE TRIGGER graph_source_visibility_event
     AFTER INSERT OR UPDATE ON source_units

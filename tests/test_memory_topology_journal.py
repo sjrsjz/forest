@@ -82,3 +82,55 @@ async def test_topology_revision_serializes_writers_and_rollback_leaves_no_gap(
          "active": "false", "created": True},
     ]
     assert head["revision"] == 4
+    async with store.pool.connection() as conn:
+        published = await (await conn.execute(sql.SQL(
+            "SELECT active_graph_revision FROM {}.graph_projection_heads "
+            "WHERE bot_id=%s"
+        ).format(namespace), (store.bot_id,))).fetchone()
+        edges = await (await conn.execute(sql.SQL(
+            "SELECT contribution_id,from_revision,to_revision "
+            "FROM {}.graph_edge_versions WHERE bot_id=%s "
+            "ORDER BY from_revision"
+        ).format(namespace), (store.bot_id,))).fetchall()
+    assert published["active_graph_revision"] == 4
+    assert edges == [
+        {"contribution_id": "contribution/first",
+         "from_revision": 1, "to_revision": None},
+        {"contribution_id": "contribution/second",
+         "from_revision": 2, "to_revision": None},
+        {"contribution_id": "contribution/third",
+         "from_revision": 3, "to_revision": None},
+        {"contribution_id": "contribution/coalesced",
+         "from_revision": 4, "to_revision": 4},
+    ]
+
+
+@pytest.mark.postgres
+async def test_empty_query_freezes_real_graph_head(clean_authority, tmp_path):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    package = await bootstrap_builtin_package(
+        Path(__file__).parents[1] / "src/forest/builtin/memory_graph",
+        PackageCatalog(tmp_path / "empty-graph-packages"), store, installer,
+        kernel=kernel, initial_configuration=_configuration(), resolved_contracts={},
+    )
+    namespace = sql.Identifier(package.descriptor.storage.spec.namespace)
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_queries("
+            "bot_id,query_id,operation_id,input_digest,input_kind,query_mode,"
+            "fusion_policy_revision,accepted_deletion_epoch) VALUES "
+            "(%s,'empty/query','empty/operation',%s,'ADMIN_TRIAL','TEXT',"
+            "'independent-facets/1',0)"
+        ).format(namespace), (store.bot_id, "sha256:" + "a" * 64))
+    async with store.pool.connection() as conn:
+        row = await (await conn.execute(sql.SQL(
+            "SELECT q.graph_generation_id,q.graph_revision,"
+            "h.active_generation_id,h.active_graph_revision "
+            "FROM {}.memory_queries q JOIN {}.graph_projection_heads h "
+            "ON h.bot_id=q.bot_id WHERE q.bot_id=%s AND q.query_id='empty/query'"
+        ).format(namespace, namespace), (store.bot_id,))).fetchone()
+    assert row == {
+        "graph_generation_id": "primary", "graph_revision": 0,
+        "active_generation_id": "primary", "active_graph_revision": 0,
+    }

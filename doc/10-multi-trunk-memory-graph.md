@@ -157,20 +157,20 @@ Context 按自身策略判断超预算时，先保证待移出单元已有可靠
 | memory_source_units | 上述稳定源单元字段；source_identity 唯一，来源内位置唯一；不得按归档完成覆盖位置 |
 | memory_source_occurrences | 源单元到每个Binding/Inbox/Conversation观察的关联及输入资格；多观察不能压成单个source_ingress_seq |
 | memory_operations / memory_relations | 复用 06 操作与关系账本，保存有来源的联想、证据、撤回和矛盾操作 |
-| graph_generations | bot_id、generation_id、schema_version、reducer_version、build_state、manifest_ref；重建/热替换候选的物理命名空间 |
-| graph_revisions | bot_id、graph_revision、generation_id、source_revision、deletion_epoch、manifest_ref、coverage_ref、status；不可变已发布快照 |
-| graph_nodes / graph_edges | bot_id、generation_id、版本可见区间或不可变分片引用、规范 ID、类型、source/assertion/artifact refs；读取必须固定 graph_revision |
-| graph_heads | bot_id、active_generation_id、active_graph_revision；短事务 CAS 发布 |
+| graph_generations | 当前列为 bot_id、generation_id、schema_version、reducer_version、state；候选重建还需独立构建水位与 manifest 账本 |
+| graph_revisions | 当前列为 bot_id、graph_revision、generation_id、status；与同 revision 拓扑事务关联的不可变发布记录 |
+| graph_node_versions / graph_edge_versions | Bot、generation、稳定单元/贡献 ID、来源/端点及半开修订区间；不保存来源正文 |
+| graph_projection_heads | bot_id、active_generation_id、active_graph_revision；当前按 Bot 行锁同事务推进，候选代际切换仍需短事务 CAS |
 
 图 head 是投影指针，不取代来源时钟、memory_scope_heads 或事实库 source_revision。物理驱动可用不可变分片 manifest 或 MVCC 版本区间实现快照，不要求每次发布复制整个图；契约是一个查询不能混读版本。
 
 发布图的写入协议必须与权威事实同事务，而不是让管理页面或 Agent 读取一个异步、无水位的缓存。包内以 Bot 为单位持有短事务拓扑 head：来源单元首次成为可见节点、迟到归档改变相邻边、关系贡献创建或批准、撤回与遗忘改变图可见性时，写入者在同一事务锁定 head，把该事务的一组拓扑差量记为一个连续的 revision，更新当前 generation 的节点/边版本区间和 head。回滚不消耗 revision；多个源单元的一次归档可以合并为一个 revision。同一 revision 的差量按实体合流为无序集合，reducer 必须原子应用整组，不能借行插入顺序推导事务内因果。所有写入路径必须通过同一个包内发布原语，不能让某个维护 Worker 直接改权威关系行却遗漏拓扑差量；人工批准和撤回必须先取得 head，再锁关系贡献，避免与遗忘的来源抑制→关系撤回形成反向锁序。head 行锁只覆盖短事务的差量提交，不包住嵌入、向量、LLM、Payload 读取或大规模重建 I/O；需要按 Bot 压测该串行点。
 
-投影边使用稳定规范 ID 与半开可见区间 `[from_revision,to_revision)`，并保存关系贡献、来源、证据及批准事实的引用，不复制来源正文。来源内确定性 `TRUNK_NEXT` 在迟到位置接入时，同一 revision 关闭旧相邻边并发布两条新边；联想边的自动与人工来源必须保留区别。查询登记时冻结 `(generation_id,graph_revision,deletion_epoch)`，该查询的全部扩散步骤只读这一版本的投影；跨步分页、采样和证据路径不能混用新 head。遗忘及当前来源资格仍在每次物化和展示前复核：旧图快照不能复活已抑制来源，投影也不能替代权威权限裁决。缺少可用发布 head 时须明确报告图阶段未执行或降级，不能把直接扫关系表的 MVCC 视图冒称为发布版本。
+投影边使用稳定规范 ID 与半开可见区间 `[from_revision,to_revision)`，并保存关系贡献、来源、证据及批准事实的引用，不复制来源正文。来源内确定性 `TRUNK_NEXT` 可由冻结版本的节点及稳定 `source_order_seq` 相邻查询派生；这样查询特定的当前会话排除与删除屏障也能跳过不可见节点，无须为每个查询维护物理顺序边。联想边的自动与人工来源必须保留区别。查询登记时冻结 `(generation_id,graph_revision,deletion_epoch)`，该查询的全部扩散步骤只读这一版本的投影；跨步分页、采样和证据路径不能混用新 head。遗忘及当前来源资格仍在每次物化和展示前复核：旧图快照不能复活已抑制来源，投影也不能替代权威权限裁决。缺少可用发布 head 时须明确报告图阶段未执行或降级，不能把直接扫关系表的 MVCC 视图冒称为发布版本。
 
 重建新 generation 时，从完整的不可变拓扑差量日志或与同一 reducer/version 匹配的可信 checkpoint 开始，按 revision 键集有界重放；每个差量保存稳定操作身份和输入摘要以便崩溃重试合流。构建期间旧 generation 继续服务；候选追到活动 head 后，在锁住 Bot head 的短事务中复核 reducer/schema、连续水位和来源删除纪元，再 CAS 切换 generation 指针。只读 graph head 和管理关系回执需分别标明实际发布 revision 与当前权威事实状态，不能把候选 generation 或未批准人工关系展示成已发布可召回边。验收至少覆盖 103→101→102 的乱序归档、并发批准/撤回/遗忘、构建中新增边、进程中断后的无重复重放、旧查询跨步骤版本稳定及切换后当前删除仍不可见。
 
-当前代码仍在 `memory_read_graph_neighbours` 中直接按 PostgreSQL `pg_snapshot` 读取权威来源与关系；它满足单次查询的事实快照与即时资格复核。包私有 SQL 已在来源资格、来源状态、关系创建、批准和撤回事务中记录同事务拓扑差量，同一事务按实体合流为一个连续 revision；该日志尚无消费它的 reducer、持久发布 head、版本区间和重建链，不能在试验诊断中填充虚构的 `projection_revision`。实施该协议时先让同事务差量覆盖所有拓扑写入者，再切换 Agent 与管理试验读口，最后启用重建发布；中途保持诊断明确标识当前事实读取模式。
+当前包私有 SQL 已在来源资格、来源状态、关系创建、批准和撤回事务中记录同事务拓扑差量，同一事务按实体合流为连续 revision；同一事务的触发器维护 `graph_node_versions`、`graph_edge_versions` 和 `graph_projection_heads`。查询登记冻结 `(generation_id,graph_revision)`，`memory_read_graph_neighbours` 从该版本的节点/边索引出发，按 `pg_snapshot` 与当前权威资格复核，回执给出真实冻结版本。顺序邻接由冻结节点与稳定来源顺序派生。已验证旧查询不会读到之后批准的人工边，撤回会立即隐藏关系，10 万关系的隔离读写用例通过。当前仅有 `primary` 活动 generation：候选 generation 的持久重建、有界日志重放、追平与 CAS 切换尚未实现；管理关系浏览仍读取权威事实，不宣称已读取发布图。诊断若未直接使用查询冻结的版本，不得填充 `projection_revision`。
 
 ### 5.1 专用向量数据库与引用边界
 
@@ -599,7 +599,7 @@ MemoryStoreProfile 整库迁移导出来源注册表、来源时钟、单元、�
 
 当前实现边界：隔离 Memory 包已完成查询登记、facet 嵌入、向量索引引用、图文种子回表、受预算约束的图扩散、区域冻结、原生多模态证据发布与成功回复后的联想日志/归档提升。Agent 包已调用公开召回端口，按输入版本等待、取消和投影证据。跨主干联想已通过隔离 PostgreSQL 的等待归档、一次提升与重复召回验证；隔离 BotHost 已用假 OneBot、真实 QiYu VL 和 Milvus 验证跨群学习及管理试验；获准群真实触发与回复、数月规模查询性能与长期多群负载尚未验收。阶段测试和局部包测试不能代替完整验收。
 
-关系浏览现另有 `memory.relations.search` 全局只读端口：无需已知节点，可按关系类型、贡献来源、跨主干状态，以及同一条证据的群号、主干和作者组合筛选。它和单节点 `memory.relations.query` 共用事实可见性、20 条上限、固定 `pg_snapshot` 与绑定全部筛选条件的键集游标；全局结果的有向边标为 `CANONICAL`，表示规范左右端点，不能误读成相对某个种子的出入方向。私有表对活动关系顺序、跨主干状态和证据来源建立索引。`cross_trunk` 是关系贡献写入时固定的派生事实：生产联想写入在同一事务读取两个稳定主干并写入关系及证据；后续关系写入者也须从最终端点与证据主干求值，在关系可见前原子提交，不能把缺失值默认为同主干。来源退役和遗忘通过 `active` 与当前证据资格屏蔽关系，不改写历史跨主干事实。关系端口现在返回贡献来源、候选人及审核事实；人工 ASSOCIATES_WITH 仅在批准事实可见时参与 Agent 扩散，自动关系不以人工批准为召回门槛。它仍不声称关系已进入独立发布图投影；其他复杂筛选与多月规模的查询延迟尚需专门压测。
+关系浏览现另有 `memory.relations.search` 全局只读端口：无需已知节点，可按关系类型、贡献来源、跨主干状态，以及同一条证据的群号、主干和作者组合筛选。它和单节点 `memory.relations.query` 共用事实可见性、20 条上限、固定 `pg_snapshot` 与绑定全部筛选条件的键集游标；全局结果的有向边标为 `CANONICAL`，表示规范左右端点，不能误读成相对某个种子的出入方向。私有表对活动关系顺序、跨主干状态和证据来源建立索引。`cross_trunk` 是关系贡献写入时固定的派生事实：生产联想写入在同一事务读取两个稳定主干并写入关系及证据；后续关系写入者也须从最终端点与证据主干求值，在关系可见前原子提交，不能把缺失值默认为同主干。来源退役和遗忘通过 `active` 与当前证据资格屏蔽关系，不改写历史跨主干事实。关系端口现在返回贡献来源、候选人及审核事实；人工 ASSOCIATES_WITH 仅在批准事实可见时参与 Agent 扩散，自动关系不以人工批准为召回门槛。Agent 扩散已从发布图边索引起步；该管理关系端口仍读取权威关系事实。其他复杂筛选与多月规模的查询延迟尚需专门压测。
 
 
 跨群联想闭环的现有整链证据（2026-10-07）：隔离 BotHost 以假 OneBot/聊天模型、真实 QiYu VL 嵌入和 Milvus 验证群甲图文归档、群乙图片触发召回、最终回复只对实际投影直接种子登记联想、群乙后续普通消息触发静默归档后提升为两端准确且 `cross_trunk=true` 的关系；同场景管理图文试验仍成功。测试通过，独立数据库和向量集合已清理。该证据不涉及在线 QQ，也不代替数月规模的写入合流与查询延迟验收。
