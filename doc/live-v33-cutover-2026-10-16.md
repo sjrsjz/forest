@@ -10,4 +10,6 @@
 
 在真实 v33 实例中，Memory 管理端先用空代际 ID 查询最近图重建，得到预期的 NOT_FOUND；发起一次包声明的图代际重建后，任务经历 CLAIMED → SUCCEEDED，发布到修订 0，按管理员最近任务查询与按代际 ID 精确查询一致。数据库的图重建工作项为 SUCCEEDED，发布修订 0。这个验收不调用聊天或嵌入模型，也不证明非空图扩散性能。
 
+v33 Supervisor 的 Docker 重启策略已设为 unless-stopped，容器仍健康运行；PostgreSQL 与 Milvus 亦为 unless-stopped。v32 Bot 的期望状态保持 OFFLINE，避免引擎重启后双 Bot 接管 QQ。这个设置仅证明自动启动配置已安装，尚未通过实际重启 Docker 引擎验收恢复链路。
+
 待验收项仍包括许可群真实用户的低频 @ → Agent → Provider → Delivery 回复、v33 新库内非空图文召回与长时间流式负载。没有把 QQ 登录、单连接或空图重建当作端到端 Agent 回复证明。若需回退，先确认 v33 没有活动 Agent/任务/待发送，令 v33 OFFLINE 并核对 OneBot 连接数为 0，再令 v32 ONLINE；两套记忆数据库仍独立。
