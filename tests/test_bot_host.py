@@ -6211,7 +6211,7 @@ async def test_real_vl_png_and_gif_archive_cross_group_recall_and_management_tri
                          f"Background conversation {index}.", mention=False, image=False)
         png_unit = "onebot-unit:" + hashlib.sha256(b"binding/main\x0097001").hexdigest()
         document_unit = "onebot-unit:" + hashlib.sha256(b"binding/main\x0097002").hexdigest()
-        async with asyncio.timeout(180):
+        async with asyncio.timeout(300):
             while True:
                 async with host.store.pool.connection() as conn:
                     source = await (await conn.execute(
@@ -6226,24 +6226,27 @@ async def test_real_vl_png_and_gif_archive_cross_group_recall_and_management_tri
                         .format(sql.Identifier(namespace)),
                         (settings.bot_id, document_unit),
                     )).fetchall()
+                    png_source = await (await conn.execute(
+                        sql.SQL("SELECT eligibility_state FROM {}.source_units "
+                                "WHERE bot_id=%s AND source_unit_id=%s")
+                        .format(sql.Identifier(namespace)), (settings.bot_id, png_unit),
+                    )).fetchone()
+                    png_facets = await (await conn.execute(
+                        sql.SQL("SELECT modality,state FROM {}.embedding_facets "
+                                "WHERE bot_id=%s AND purpose='DOCUMENT' AND source_unit_id=%s")
+                        .format(sql.Identifier(namespace)), (settings.bot_id, png_unit),
+                    )).fetchall()
                 if (source is not None and source["eligibility_state"] == "ELIGIBLE"
                         and len(document_facets) == 2
-                        and all(row["state"] == "READY" for row in document_facets)):
+                        and all(row["state"] == "READY" for row in document_facets)
+                        and png_source is not None
+                        and png_source["eligibility_state"] == "ELIGIBLE"
+                        and len(png_facets) == 2
+                        and all(row["state"] == "READY" for row in png_facets)):
                     break
                 await asyncio.sleep(0.2)
         assert {row["modality"] for row in document_facets} == {"TEXT", "IMAGE"}
         assert all(row["index_ref_id"] for row in document_facets)
-        async with host.store.pool.connection() as conn:
-            png_source = await (await conn.execute(
-                sql.SQL("SELECT eligibility_state FROM {}.source_units "
-                        "WHERE bot_id=%s AND source_unit_id=%s")
-                .format(sql.Identifier(namespace)), (settings.bot_id, png_unit),
-            )).fetchone()
-            png_facets = await (await conn.execute(
-                sql.SQL("SELECT modality,state FROM {}.embedding_facets "
-                        "WHERE bot_id=%s AND purpose='DOCUMENT' AND source_unit_id=%s")
-                .format(sql.Identifier(namespace)), (settings.bot_id, png_unit),
-            )).fetchall()
         assert png_source["eligibility_state"] == "ELIGIBLE"
         assert {(row["modality"], row["state"]) for row in png_facets} == {
             ("TEXT", "READY"), ("IMAGE", "READY"),

@@ -13,3 +13,5 @@
 v33 Supervisor 的 Docker 重启策略已设为 unless-stopped，容器仍健康运行；PostgreSQL 与 Milvus 亦为 unless-stopped。v32 Bot 的期望状态保持 OFFLINE，避免引擎重启后双 Bot 接管 QQ。这个设置仅证明自动启动配置已安装，尚未通过实际重启 Docker 引擎验收恢复链路。
 
 待验收项仍包括许可群真实用户的低频 @ → Agent → Provider → Delivery 回复、v33 新库内非空图文召回与长时间流式负载。没有把 QQ 登录、单连接或空图重建当作端到端 Agent 回复证明。若需回退，先确认 v33 没有活动 Agent/任务/待发送，令 v33 OFFLINE 并核对 OneBot 连接数为 0，再令 v32 ONLINE；两套记忆数据库仍独立。
+
+2026-10-16 当前源码非空多模态复验：在与在线 v33 隔离的随机 PostgreSQL Bot 库和临时 Milvus 集合中运行 test_real_vl_png_and_gif_archive_cross_group_recall_and_management_trial。测试用 QiYu .env 声明的真实 VL 嵌入端点处理 PNG/GIF 文档与图片查询，验证 TEXT/IMAGE DOCUMENT facet READY、跨群 IMAGE→IMAGE 直接种子、原群/作者归因、跨主干联想和管理图文试验；OneBot、媒体抓取和聊天模型仍为测试替身。原测试只等待 GIF facet READY 就立即断言 PNG 也 READY，第一次可达供应商的运行在 PNG 尚为 DISPATCHED 时错误失败；改为同时等待两个独立来源结算后，1 passed in 151.33s。首次失败运行与复验均可能产生供应商计费，未获得供应商费用回执。测试 finally 删除独立 Milvus 集合与随机数据库，事后 forest_cross_vl_% 数据库为 0，测试容器已移除。此结果证明当前源码的非空图文链路，但不证明在线 v33 新库已有可召回 facet，也不证明真实 QQ @ 回复。
