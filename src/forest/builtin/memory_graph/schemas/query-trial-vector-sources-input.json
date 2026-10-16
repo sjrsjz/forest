@@ -105,6 +105,9 @@
     "relation_cross_trunk": {
       "type": "boolean"
     },
+    "relation_review_state": {
+      "enum": ["UNREVIEWED", "APPROVED"]
+    },
     "source_order_from": {
       "type": "integer",
       "minimum": 1,

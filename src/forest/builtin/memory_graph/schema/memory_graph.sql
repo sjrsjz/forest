@@ -9614,7 +9614,8 @@ LANGUAGE sql STABLE AS $$
           WHERE o.bot_id=u.bot_id AND o.source_unit_id=u.source_unit_id
             AND o.binding_ref=filters->>'binding_ref'))
       AND ((filters->>'relation_kind' IS NULL AND
-            filters->>'relation_cross_trunk' IS NULL) OR
+            filters->>'relation_cross_trunk' IS NULL AND
+            filters->>'relation_review_state' IS NULL) OR
            (u.eligibility_state='ELIGIBLE' AND s.status='ACTIVE' AND
             pg_catalog.pg_visible_in_snapshot(u.eligible_xid,snapshot_value) AND
             EXISTS (
@@ -9627,6 +9628,11 @@ LANGUAGE sql STABLE AS $$
                      c.relation_kind=filters->>'relation_kind')
                 AND (filters->>'relation_cross_trunk' IS NULL OR
                      c.cross_trunk=(filters->>'relation_cross_trunk')::boolean)
+                AND (filters->>'relation_review_state' IS NULL OR
+                     (filters->>'relation_review_state'='APPROVED') = EXISTS (
+                       SELECT 1 FROM __forest_module_schema__.relation_approvals a
+                       WHERE a.bot_id=c.bot_id AND a.contribution_id=c.contribution_id
+                         AND pg_catalog.pg_visible_in_snapshot(a.created_xid,snapshot_value)))
                 AND (c.left_kind<>'SOURCE_UNIT' OR c.left_id=u.source_unit_id
                      OR EXISTS (
                        SELECT 1 FROM __forest_module_schema__.source_units ul
@@ -9714,6 +9720,11 @@ LANGUAGE sql STABLE AS $$
                c.relation_kind=filters->>'relation_kind')
           AND (filters->>'relation_cross_trunk' IS NULL OR
                c.cross_trunk=(filters->>'relation_cross_trunk')::boolean)
+          AND (filters->>'relation_review_state' IS NULL OR
+               (filters->>'relation_review_state'='APPROVED') = EXISTS (
+                 SELECT 1 FROM __forest_module_schema__.relation_approvals a
+                 WHERE a.bot_id=c.bot_id AND a.contribution_id=c.contribution_id
+                   AND pg_catalog.pg_visible_in_snapshot(a.created_xid,snapshot_value)))
     )
     SELECT left_id AS source_unit_id FROM relation_rows
     WHERE left_kind='SOURCE_UNIT'
@@ -9741,7 +9752,8 @@ DECLARE
     selected_relation_kind text := input->>'relation_kind';
     selected_text text := input->>'text_contains';
     selected_relation_filter boolean := input ? 'relation_kind' OR
-                                        input ? 'relation_cross_trunk';
+                                        input ? 'relation_cross_trunk' OR
+                                        input ? 'relation_review_state';
     candidate_source_ids text[];
     items jsonb;
     more boolean;
@@ -9769,6 +9781,8 @@ BEGIN
            ('NO_FACETS','NOT_READY','PARTIAL','COMPLETE')) OR
        (selected_relation_kind IS NOT NULL AND selected_relation_kind NOT IN
            ('ASSOCIATES_WITH','EVIDENCE','CONTRADICTS','SUBJECT_OF')) OR
+       (input ? 'relation_review_state' AND
+           input->>'relation_review_state' NOT IN ('UNREVIEWED','APPROVED')) OR
        (selected_text IS NOT NULL AND
            (char_length(selected_text) NOT BETWEEN 2 AND 64 OR
             octet_length(selected_text)>256)) OR

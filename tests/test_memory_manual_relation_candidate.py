@@ -151,6 +151,20 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
         assert result["ok"], result
         return result["value"]
 
+    async def sources_with_review(state, snapshot=None):
+        filters = {"limit": 10, "relation_kind": "ASSOCIATES_WITH",
+                   "relation_review_state": state}
+        if snapshot is not None:
+            filters["snapshot_accepted_at"] = snapshot["snapshot_accepted_at"]
+            filters["snapshot_xid"] = snapshot["snapshot_xid"]
+        result = await call("memory_query_sources", {"bot_id": store.bot_id}, filters)
+        assert result["ok"], result
+        return result["value"]
+
+    before_sources = await sources_with_review("UNREVIEWED")
+    assert {item["source_unit_id"] for item in before_sources["items"]} == {
+        "seed", "target"}
+    assert (await sources_with_review("APPROVED"))["items"] == []
     before = await query("query/before")
     assert not [edge for edge in before["edges"] if edge["relation"] == "ASSOCIATED"]
     approval = await call("memory_approve_management_relation",
@@ -159,6 +173,12 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
                            "contribution_id": candidate["contribution_id"],
                            "requested_by": "admin/reviewer"})
     assert approval["ok"], approval
+    assert {item["source_unit_id"] for item in
+            (await sources_with_review("UNREVIEWED", before_sources))["items"]} == {
+                "seed", "target"}
+    assert (await sources_with_review("UNREVIEWED"))["items"] == []
+    assert {item["source_unit_id"] for item in
+            (await sources_with_review("APPROVED"))["items"]} == {"seed", "target"}
     assert not [edge for edge in (await call(
         "memory_read_graph_neighbours", {"bot_id": store.bot_id},
         {"query_id": "query/before", "source_unit_id": "seed", "association_limit": 8},
@@ -174,5 +194,7 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
                             "contribution_id": candidate["contribution_id"],
                             "reason_code": "INCORRECT", "requested_by": "admin/reviewer"})
     assert retracted["ok"], retracted
+    assert (await sources_with_review("UNREVIEWED"))["items"] == []
+    assert (await sources_with_review("APPROVED"))["items"] == []
     final = await query("query/final")
     assert not [edge for edge in final["edges"] if edge["relation"] == "ASSOCIATED"]
