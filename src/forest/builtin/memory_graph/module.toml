@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.98.0"
+version = "1.99.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -71,6 +71,9 @@ requests = [
   "domain.command:memory.create-management-relation-candidate",
   "domain.query:memory.forget-work-status",
   "domain.command:memory.promote-claimed-association",
+  "domain.command:memory.begin-graph-rebuild",
+  "domain.command:memory.replay-graph-revision",
+  "uow.execute:memory.publish-graph-rebuild",
   "domain.command:memory.stage-text-projection-rebuild",
   "domain.command:memory.publish-text-projection-rebuild",
   "uow.execute:memory.capture-source",
@@ -291,9 +294,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.96.0"
+schema_version = "3.97.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "12de3b1e2c4d9f3757816eef09c9a7c0910d0945bc8710064b344fa258a04459"
+baseline_sha256 = "358e6e51cc6e2b2e5302f2a45f44ce9b1be1532927c74acc0a336366f0ec580e"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -479,6 +482,20 @@ contract = "1.0"
 function = "memory_assert_public_query"
 input_schema = "schemas/query-prepare-input.json"
 output_schema = "schemas/public-query-output.json"
+
+[[components.domain_commands]]
+name = "memory.begin-graph-rebuild"
+contract = "1.0"
+function = "memory_begin_graph_rebuild"
+input_schema = "schemas/graph-rebuild-begin-input.json"
+output_schema = "schemas/graph-rebuild-begin-output.json"
+
+[[components.domain_commands]]
+name = "memory.replay-graph-revision"
+contract = "1.0"
+function = "memory_replay_graph_revision"
+input_schema = "schemas/graph-rebuild-replay-input.json"
+output_schema = "schemas/graph-rebuild-replay-output.json"
 
 [[components.domain_commands]]
 name = "memory.enqueue-text-projection-rebuild"
@@ -861,6 +878,13 @@ owner_kind = "trial.input"
 owner_prefix = "trial"
 media_types = ["text/plain", "image/png", "image/jpeg", "image/webp", "image/gif"]
 max_bytes = 8388608
+
+[[components.unit_of_work_participants]]
+name = "memory.publish-graph-rebuild-record"
+contract = "1.0"
+function = "memory_publish_graph_rebuild"
+input_schema = "schemas/graph-rebuild-publish-envelope.json"
+output_schema = "schemas/graph-rebuild-publish-output.json"
 
 [[components.unit_of_work_participants]]
 name = "memory.begin-query-record"
@@ -1316,6 +1340,17 @@ claim_timeout_s = 5
 handler_timeout_s = 45
 settle_timeout_s = 5
 lease_seconds = 75
+
+[[components.unit_of_work_plans]]
+name = "memory.publish-graph-rebuild"
+contract = "1.0"
+input_schema = "schemas/graph-rebuild-publish-plan-input.json"
+output_schema = "schemas/graph-rebuild-publish-output.json"
+timeout_s = 15
+steps = [
+  { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
+  { id = "memory", component_id = "memory.graph", participant = "memory.publish-graph-rebuild-record", input_path = "/memory" }
+]
 
 [[components.unit_of_work_plans]]
 name = "memory.begin-query"

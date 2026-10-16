@@ -28,6 +28,19 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
     digest = "sha256:" + "a" * 64
 
     async def call(function, context, body):
+        if function == "memory_publish_graph_rebuild":
+            body = {
+                "protocol": "forest.uow-step/1",
+                "caller": {"component_id": "memory.graph", "generation_id": "test"},
+                "input": {
+                    "protocol": "forest.memory-graph-publish/1",
+                    "deletion_epoch_step_id": "payload_epoch",
+                    **body,
+                },
+                "prior": {"payload_epoch": {
+                    "protocol": "forest.payload-epoch/1", "deletion_epoch": 0,
+                }},
+            }
         async with store.pool.connection() as conn, conn.transaction():
             row = await (await conn.execute(sql.SQL(
                 "SELECT {}.{}(%s::jsonb,%s::jsonb) AS result"
@@ -274,3 +287,97 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
         "contribution_id": candidate["contribution_id"],
         "from_revision": 3, "to_revision": 4,
     }]
+
+    rebuild_context = {"bot_id": store.bot_id, "operation_id": "rebuild/one"}
+    begin = await call("memory_begin_graph_rebuild", rebuild_context,
+                       {"generation_id": "candidate/one"})
+    assert begin["ok"], begin
+    Draft202012Validator(json.loads((Path(__file__).parents[1] /
+        "src/forest/builtin/memory_graph/schemas/graph-rebuild-begin-output.json"
+    ).read_text(encoding="utf-8"))).validate(begin["value"])
+    assert begin["value"] == {
+        "generation_id": "candidate/one",
+        "base_generation_id": "primary",
+        "base_revision": 5,
+        "replayed_through": 0,
+    }
+    assert await call("memory_begin_graph_rebuild", rebuild_context,
+                      {"generation_id": "candidate/one"}) == begin
+    premature = await call("memory_replay_graph_revision",
+                           {"bot_id": store.bot_id},
+                           {"generation_id": "candidate/one", "revision": 2})
+    assert premature["error"]["code"] == "MEMORY_GRAPH_REPLAY_NOT_NEXT"
+    for revision in range(1, 6):
+        applied = await call("memory_replay_graph_revision",
+                             {"bot_id": store.bot_id},
+                             {"generation_id": "candidate/one",
+                              "revision": revision})
+        assert applied["value"] == {
+            "generation_id": "candidate/one",
+            "replayed_through": revision, "applied": True,
+        }
+    duplicate = await call("memory_replay_graph_revision",
+                           {"bot_id": store.bot_id},
+                           {"generation_id": "candidate/one", "revision": 3})
+    assert duplicate["value"]["replayed_through"] == 5
+    assert duplicate["value"]["applied"] is False
+    async with store.pool.connection() as conn:
+        rebuilt_nodes = await (await conn.execute(sql.SQL(
+            "SELECT source_unit_id,from_revision,to_revision FROM {}.graph_node_versions "
+            "WHERE bot_id=%s AND generation_id='candidate/one' "
+            "ORDER BY source_unit_id"
+        ).format(namespace), (store.bot_id,))).fetchall()
+        rebuilt_edges = await (await conn.execute(sql.SQL(
+            "SELECT contribution_id,from_revision,to_revision FROM {}.graph_edge_versions "
+            "WHERE bot_id=%s AND generation_id='candidate/one'"
+        ).format(namespace), (store.bot_id,))).fetchall()
+    assert rebuilt_nodes == nodes
+    assert rebuilt_edges == edges
+
+    old_target = await call(
+        "memory_read_graph_neighbours", {"bot_id": store.bot_id},
+        {"query_id": "query/after", "source_unit_id": "target",
+         "association_limit": 8},
+    )
+    assert old_target["value"]["node"]["source_unit_id"] == "target"
+    switched = await call(
+        "memory_publish_graph_rebuild",
+        {"bot_id": store.bot_id, "operation_id": "publish/one"},
+        {"generation_id": "candidate/one",
+         "expected_active_generation_id": "primary",
+         "expected_active_revision": 5},
+    )
+    assert switched["value"] == {
+        "generation_id": "candidate/one",
+        "previous_generation_id": "primary",
+        "graph_revision": 5,
+        "deletion_epoch": 0,
+    }
+    new_view = await query("query/switched")
+    assert (new_view["graph_generation_id"], new_view["graph_revision"]) == (
+        "candidate/one", 5)
+    unchanged_old = await call(
+        "memory_read_graph_neighbours", {"bot_id": store.bot_id},
+        {"query_id": "query/after", "source_unit_id": "target",
+         "association_limit": 8},
+    )
+    assert unchanged_old["value"] == old_target["value"]
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "UPDATE {}.memory_sources SET status='RETIRED' "
+            "WHERE bot_id=%s AND source_id='source/b'"
+        ).format(namespace), (store.bot_id,))
+    suppressed_old = await call(
+        "memory_read_graph_neighbours", {"bot_id": store.bot_id},
+        {"query_id": "query/after", "source_unit_id": "target",
+         "association_limit": 8},
+    )
+    assert suppressed_old["value"]["node"] is None
+    assert suppressed_old["value"]["graph_generation_id"] == "primary"
+    suppressed_new = await call(
+        "memory_read_graph_neighbours", {"bot_id": store.bot_id},
+        {"query_id": "query/switched", "source_unit_id": "target",
+         "association_limit": 8},
+    )
+    assert suppressed_new["value"]["node"] is None
+    assert suppressed_new["value"]["graph_generation_id"] == "candidate/one"

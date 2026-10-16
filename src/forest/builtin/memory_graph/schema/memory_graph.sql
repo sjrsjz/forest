@@ -580,7 +580,7 @@ CREATE TABLE relation_approvals (
 );
 
 -- Topology changes are journalled in the same transaction as their authority.
--- This is an input to the future published graph, not itself a published head.
+-- The journal feeds both the active projection and independent candidate replays.
 CREATE TABLE graph_topology_journal_heads (
     bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
     revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0)
@@ -618,6 +618,9 @@ CREATE TABLE graph_generations (
     PRIMARY KEY (bot_id,generation_id)
 );
 
+CREATE UNIQUE INDEX graph_generation_active_unique
+    ON graph_generations(bot_id) WHERE state='ACTIVE';
+
 CREATE TABLE graph_projection_heads (
     bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
     active_generation_id text NOT NULL,
@@ -626,6 +629,31 @@ CREATE TABLE graph_projection_heads (
     FOREIGN KEY (bot_id,active_generation_id)
         REFERENCES graph_generations(bot_id,generation_id)
 );
+
+CREATE TABLE graph_generation_builds (
+    bot_id text NOT NULL,
+    generation_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    base_generation_id text NOT NULL,
+    base_revision bigint NOT NULL CHECK (base_revision >= 0),
+    replayed_through bigint NOT NULL DEFAULT 0 CHECK (replayed_through >= 0),
+    publish_operation_id text CHECK (
+        publish_operation_id IS NULL OR octet_length(publish_operation_id) BETWEEN 1 AND 256),
+    published_revision bigint CHECK (published_revision >= 0),
+    published_deletion_epoch bigint CHECK (published_deletion_epoch >= 0),
+    CHECK ((publish_operation_id IS NULL) = (published_revision IS NULL)
+       AND (publish_operation_id IS NULL) = (published_deletion_epoch IS NULL)),
+    PRIMARY KEY (bot_id,generation_id),
+    UNIQUE (bot_id,operation_id),
+    FOREIGN KEY (bot_id,generation_id)
+        REFERENCES graph_generations(bot_id,generation_id),
+    FOREIGN KEY (bot_id,base_generation_id)
+        REFERENCES graph_generations(bot_id,generation_id)
+);
+
+CREATE INDEX graph_event_entity_revision_idx ON graph_topology_events(
+    bot_id,event_kind,entity_id,revision DESC);
 
 CREATE TABLE graph_revisions (
     bot_id text NOT NULL,
@@ -845,6 +873,404 @@ BEGIN
        OR to_jsonb(NEW)-'to_revision' IS DISTINCT FROM
           to_jsonb(OLD)-'to_revision' THEN
         RAISE EXCEPTION 'Graph projection version is immutable'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION memory_begin_graph_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_generation text := input->>'generation_id';
+    requested_digest text;
+    existing __forest_module_schema__.graph_generation_builds%ROWTYPE;
+    base_generation text;
+    base_revision bigint;
+BEGIN
+    IF requested_bot IS NULL
+       OR requested_operation IS NULL
+       OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR requested_generation IS NULL
+       OR octet_length(requested_generation) NOT BETWEEN 1 AND 256
+       OR requested_generation='primary' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_INPUT_INVALID',
+                'message','Graph rebuild request is invalid','status',422));
+    END IF;
+    requested_digest := 'sha256:'||encode(sha256(convert_to(input::text,'UTF8')),'hex');
+    INSERT INTO __forest_module_schema__.graph_generations(
+        bot_id,generation_id,schema_version,reducer_version,state)
+    VALUES (requested_bot,'primary','1','1','ACTIVE')
+    ON CONFLICT (bot_id,generation_id) DO NOTHING;
+    INSERT INTO __forest_module_schema__.graph_projection_heads(
+        bot_id,active_generation_id)
+    VALUES (requested_bot,'primary') ON CONFLICT (bot_id) DO NOTHING;
+    SELECT active_generation_id,active_graph_revision
+    INTO base_generation,base_revision
+    FROM __forest_module_schema__.graph_projection_heads
+    WHERE bot_id=requested_bot FOR UPDATE;
+    SELECT * INTO existing FROM __forest_module_schema__.graph_generation_builds
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF FOUND THEN
+        IF existing.generation_id<>requested_generation
+           OR existing.input_digest<>requested_digest THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_CONFLICT',
+                    'message','Graph rebuild operation was reused','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('generation_id',existing.generation_id,
+                'base_generation_id',existing.base_generation_id,
+                'base_revision',existing.base_revision,
+                'replayed_through',existing.replayed_through));
+    END IF;
+    INSERT INTO __forest_module_schema__.graph_generations(
+        bot_id,generation_id,schema_version,reducer_version,state)
+    VALUES (requested_bot,requested_generation,'1','1','CANDIDATE')
+    ON CONFLICT (bot_id,generation_id) DO NOTHING;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_CONFLICT',
+                'message','Graph generation already exists','status',409));
+    END IF;
+    INSERT INTO __forest_module_schema__.graph_generation_builds(
+        bot_id,generation_id,operation_id,input_digest,
+        base_generation_id,base_revision)
+    VALUES (requested_bot,requested_generation,requested_operation,
+            requested_digest,base_generation,base_revision);
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('generation_id',requested_generation,
+            'base_generation_id',base_generation,'base_revision',base_revision,
+            'replayed_through',0));
+END;
+$$;
+
+CREATE FUNCTION memory_replay_graph_revision(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_generation text := input->>'generation_id';
+    requested_revision bigint := (input->>'revision')::bigint;
+    build __forest_module_schema__.graph_generation_builds%ROWTYPE;
+BEGIN
+    IF requested_generation IS NULL
+       OR octet_length(requested_generation) NOT BETWEEN 1 AND 256
+       OR requested_revision IS NULL OR requested_revision<1 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REPLAY_INPUT_INVALID',
+                'message','Graph replay request is invalid','status',422));
+    END IF;
+    SELECT b.* INTO build
+    FROM __forest_module_schema__.graph_generation_builds b
+    JOIN __forest_module_schema__.graph_generations g
+      ON g.bot_id=b.bot_id AND g.generation_id=b.generation_id
+    WHERE b.bot_id=requested_bot AND b.generation_id=requested_generation
+      AND g.state='CANDIDATE'
+      AND g.schema_version='1' AND g.reducer_version='1'
+    FOR UPDATE OF b;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REPLAY_UNAVAILABLE',
+                'message','Graph candidate is unavailable','status',409));
+    END IF;
+    IF requested_revision<=build.replayed_through THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('generation_id',requested_generation,
+                'replayed_through',build.replayed_through,'applied',false));
+    END IF;
+    IF requested_revision<>build.replayed_through+1 OR NOT EXISTS (
+        SELECT 1 FROM __forest_module_schema__.graph_topology_journal_transactions t
+        WHERE t.bot_id=requested_bot AND t.revision=requested_revision
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REPLAY_NOT_NEXT',
+                'message','Graph revision is not the next committed revision','status',409));
+    END IF;
+
+    UPDATE __forest_module_schema__.graph_node_versions n
+    SET to_revision=requested_revision
+    FROM __forest_module_schema__.graph_topology_events e
+    WHERE e.bot_id=requested_bot AND e.revision=requested_revision
+      AND e.event_kind='SOURCE_UNIT_VISIBILITY'
+      AND e.after_value->>'eligibility_state'<>'ELIGIBLE'
+      AND n.bot_id=e.bot_id AND n.generation_id=requested_generation
+      AND n.source_unit_id=e.entity_id AND n.to_revision IS NULL;
+    INSERT INTO __forest_module_schema__.graph_node_versions(
+        bot_id,generation_id,source_unit_id,source_id,trunk_id,
+        source_order_seq,source_revision,from_revision)
+    SELECT requested_bot,requested_generation,e.entity_id,
+           e.after_value->>'source_id',e.after_value->>'trunk_id',
+           (e.after_value->>'source_order_seq')::bigint,
+           (e.after_value->>'source_revision')::bigint,requested_revision
+    FROM __forest_module_schema__.graph_topology_events e
+    WHERE e.bot_id=requested_bot AND e.revision=requested_revision
+      AND e.event_kind='SOURCE_UNIT_VISIBILITY'
+      AND e.after_value->>'eligibility_state'='ELIGIBLE'
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.graph_node_versions n
+          WHERE n.bot_id=requested_bot AND n.generation_id=requested_generation
+            AND n.source_unit_id=e.entity_id AND n.to_revision IS NULL);
+
+    WITH changed AS MATERIALIZED (
+        SELECT DISTINCT entity_id FROM __forest_module_schema__.graph_topology_events
+        WHERE bot_id=requested_bot AND revision=requested_revision
+          AND event_kind IN (
+              'RELATION_CONTRIBUTION','RELATION_APPROVAL','RELATION_RETRACTION')
+    ), effective AS MATERIALIZED (
+        SELECT changed.entity_id,latest.after_value AS contribution,
+               EXISTS (
+                   SELECT 1 FROM __forest_module_schema__.graph_topology_events a
+                   WHERE a.bot_id=requested_bot AND a.entity_id=changed.entity_id
+                     AND a.event_kind='RELATION_APPROVAL'
+                     AND a.revision<=requested_revision
+               ) AS approved
+        FROM changed
+        CROSS JOIN LATERAL (
+            SELECT after_value FROM __forest_module_schema__.graph_topology_events c
+            WHERE c.bot_id=requested_bot AND c.entity_id=changed.entity_id
+              AND c.event_kind='RELATION_CONTRIBUTION'
+              AND c.revision<=requested_revision
+            ORDER BY c.revision DESC LIMIT 1
+        ) latest
+    )
+    UPDATE __forest_module_schema__.graph_edge_versions v
+    SET to_revision=requested_revision
+    FROM effective e
+    WHERE v.bot_id=requested_bot AND v.generation_id=requested_generation
+      AND v.contribution_id=e.entity_id AND v.to_revision IS NULL
+      AND NOT ((e.contribution->>'active')::boolean
+               AND (e.contribution->>'origin_kind'<>'MANUAL' OR e.approved));
+
+    WITH changed AS MATERIALIZED (
+        SELECT DISTINCT entity_id FROM __forest_module_schema__.graph_topology_events
+        WHERE bot_id=requested_bot AND revision=requested_revision
+          AND event_kind IN (
+              'RELATION_CONTRIBUTION','RELATION_APPROVAL','RELATION_RETRACTION')
+    ), effective AS MATERIALIZED (
+        SELECT changed.entity_id,latest.after_value AS contribution,
+               EXISTS (
+                   SELECT 1 FROM __forest_module_schema__.graph_topology_events a
+                   WHERE a.bot_id=requested_bot AND a.entity_id=changed.entity_id
+                     AND a.event_kind='RELATION_APPROVAL'
+                     AND a.revision<=requested_revision
+               ) AS approved
+        FROM changed
+        CROSS JOIN LATERAL (
+            SELECT after_value FROM __forest_module_schema__.graph_topology_events c
+            WHERE c.bot_id=requested_bot AND c.entity_id=changed.entity_id
+              AND c.event_kind='RELATION_CONTRIBUTION'
+              AND c.revision<=requested_revision
+            ORDER BY c.revision DESC LIMIT 1
+        ) latest
+    )
+    INSERT INTO __forest_module_schema__.graph_edge_versions(
+        bot_id,generation_id,contribution_id,relation_id,relation_kind,
+        origin_kind,left_kind,left_id,right_kind,right_id,cross_trunk,
+        weight_micros,sample_key,from_revision)
+    SELECT requested_bot,requested_generation,e.entity_id,
+           e.contribution->>'relation_id',e.contribution->>'relation_kind',
+           e.contribution->>'origin_kind',e.contribution->>'left_kind',
+           e.contribution->>'left_id',e.contribution->>'right_kind',
+           e.contribution->>'right_id',
+           (e.contribution->>'cross_trunk')::boolean,
+           (e.contribution->>'weight_micros')::bigint,
+           e.contribution->>'sample_key',requested_revision
+    FROM effective e
+    WHERE (e.contribution->>'active')::boolean
+      AND (e.contribution->>'origin_kind'<>'MANUAL' OR e.approved)
+      AND NOT EXISTS (
+          SELECT 1 FROM __forest_module_schema__.graph_edge_versions v
+          WHERE v.bot_id=requested_bot AND v.generation_id=requested_generation
+            AND v.contribution_id=e.entity_id AND v.to_revision IS NULL);
+
+    UPDATE __forest_module_schema__.graph_generation_builds
+    SET replayed_through=requested_revision
+    WHERE bot_id=requested_bot AND generation_id=requested_generation;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('generation_id',requested_generation,
+            'replayed_through',requested_revision,'applied',true));
+END;
+$$;
+
+CREATE FUNCTION apply_graph_rebuild_switch(
+    context jsonb, input jsonb, verified_deletion_epoch bigint
+)
+RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_generation text := input->>'generation_id';
+    expected_generation text := input->>'expected_active_generation_id';
+    expected_revision bigint := (input->>'expected_active_revision')::bigint;
+    current_generation text;
+    current_revision bigint;
+    build __forest_module_schema__.graph_generation_builds%ROWTYPE;
+    candidate __forest_module_schema__.graph_generations%ROWTYPE;
+BEGIN
+    IF requested_operation IS NULL
+       OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR requested_generation IS NULL OR expected_generation IS NULL
+       OR expected_revision IS NULL OR expected_revision<0
+       OR verified_deletion_epoch IS NULL OR verified_deletion_epoch<0 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_PUBLISH_INPUT_INVALID',
+                'message','Graph publish request is invalid','status',422));
+    END IF;
+    SELECT active_generation_id,active_graph_revision
+    INTO current_generation,current_revision
+    FROM __forest_module_schema__.graph_projection_heads
+    WHERE bot_id=requested_bot FOR UPDATE;
+    SELECT * INTO build FROM __forest_module_schema__.graph_generation_builds
+    WHERE bot_id=requested_bot AND generation_id=requested_generation FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_PUBLISH_UNAVAILABLE',
+                'message','Graph candidate is unavailable','status',409));
+    END IF;
+    IF build.publish_operation_id IS NOT NULL THEN
+        IF build.publish_operation_id<>requested_operation THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_GRAPH_PUBLISH_CONFLICT',
+                    'message','Graph candidate was published by another operation','status',409));
+        END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',jsonb_build_object('generation_id',requested_generation,
+                'previous_generation_id',build.base_generation_id,
+                'graph_revision',build.published_revision,
+                'deletion_epoch',build.published_deletion_epoch));
+    END IF;
+    SELECT * INTO candidate FROM __forest_module_schema__.graph_generations
+    WHERE bot_id=requested_bot AND generation_id=requested_generation;
+    IF candidate.state<>'CANDIDATE'
+       OR candidate.schema_version<>'1'
+       OR candidate.reducer_version<>'1'
+       OR build.base_generation_id<>expected_generation
+       OR current_generation IS DISTINCT FROM expected_generation
+       OR current_revision IS DISTINCT FROM expected_revision
+       OR build.replayed_through<>current_revision THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_PUBLISH_STALE',
+                'message','Graph candidate is not caught up with the active head','status',409));
+    END IF;
+    UPDATE __forest_module_schema__.graph_generations
+    SET state='RETIRED'
+    WHERE bot_id=requested_bot AND generation_id=current_generation
+      AND state='ACTIVE';
+    UPDATE __forest_module_schema__.graph_generations
+    SET state='ACTIVE'
+    WHERE bot_id=requested_bot AND generation_id=requested_generation
+      AND state='CANDIDATE';
+    UPDATE __forest_module_schema__.graph_projection_heads
+    SET active_generation_id=requested_generation
+    WHERE bot_id=requested_bot
+      AND active_generation_id=expected_generation
+      AND active_graph_revision=expected_revision;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Graph head CAS failed after row lock'
+            USING ERRCODE='55000';
+    END IF;
+    UPDATE __forest_module_schema__.graph_generation_builds
+    SET publish_operation_id=requested_operation,
+        published_revision=current_revision,
+        published_deletion_epoch=verified_deletion_epoch
+    WHERE bot_id=requested_bot AND generation_id=requested_generation;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('generation_id',requested_generation,
+            'previous_generation_id',current_generation,
+            'graph_revision',current_revision,
+            'deletion_epoch',verified_deletion_epoch));
+END;
+$$;
+
+CREATE FUNCTION memory_publish_graph_rebuild(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    epoch_value jsonb := envelope->'prior'->(body->>'deletion_epoch_step_id');
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'memory.graph'
+       OR body->>'protocol' IS DISTINCT FROM 'forest.memory-graph-publish/1'
+       OR epoch_value->>'protocol' IS DISTINCT FROM 'forest.payload-epoch/1'
+       OR epoch_value->>'deletion_epoch' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_PUBLISH_PROOF_INVALID',
+                'message','Graph publication requires current Payload epoch','status',422));
+    END IF;
+    RETURN __forest_module_schema__.apply_graph_rebuild_switch(
+        context,body,(epoch_value->>'deletion_epoch')::bigint);
+END;
+$$;
+
+CREATE FUNCTION guard_graph_generation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'Graph generation cannot be deleted'
+            USING ERRCODE='55000';
+    END IF;
+    IF ROW(NEW.bot_id,NEW.generation_id,NEW.schema_version,NEW.reducer_version)
+       IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.generation_id,OLD.schema_version,OLD.reducer_version)
+       OR NOT ((OLD.state='CANDIDATE' AND NEW.state='ACTIVE')
+               OR (OLD.state='ACTIVE' AND NEW.state='RETIRED')) THEN
+        RAISE EXCEPTION 'Invalid graph generation transition'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION guard_graph_projection_head()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'Graph projection head cannot be deleted'
+            USING ERRCODE='55000';
+    END IF;
+    IF NEW.bot_id<>OLD.bot_id
+       OR NOT (
+           (NEW.active_generation_id=OLD.active_generation_id
+            AND NEW.active_graph_revision=OLD.active_graph_revision+1)
+           OR (NEW.active_generation_id<>OLD.active_generation_id
+               AND NEW.active_graph_revision=OLD.active_graph_revision)
+       ) THEN
+        RAISE EXCEPTION 'Invalid graph projection head transition'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION guard_graph_generation_build()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'Graph generation build cannot be deleted'
+            USING ERRCODE='55000';
+    END IF;
+    IF OLD.publish_operation_id IS NOT NULL
+       OR ROW(NEW.bot_id,NEW.generation_id,NEW.operation_id,NEW.input_digest,
+              NEW.base_generation_id,NEW.base_revision)
+          IS DISTINCT FROM
+          ROW(OLD.bot_id,OLD.generation_id,OLD.operation_id,OLD.input_digest,
+              OLD.base_generation_id,OLD.base_revision)
+       OR NOT (
+           (OLD.publish_operation_id IS NULL
+            AND NEW.publish_operation_id IS NULL
+            AND NEW.published_revision IS NULL
+            AND NEW.published_deletion_epoch IS NULL
+            AND NEW.replayed_through=OLD.replayed_through+1)
+           OR (OLD.publish_operation_id IS NULL
+               AND NEW.publish_operation_id IS NOT NULL
+               AND NEW.published_revision=OLD.replayed_through
+               AND NEW.published_deletion_epoch IS NOT NULL
+               AND NEW.replayed_through=OLD.replayed_through)
+       ) THEN
+        RAISE EXCEPTION 'Invalid graph generation build transition'
             USING ERRCODE='55000';
     END IF;
     RETURN NEW;
@@ -5071,6 +5497,16 @@ BEGIN
     RAISE EXCEPTION 'Invalid embedding claim transition' USING ERRCODE='55000';
 END;
 $$;
+
+CREATE TRIGGER graph_generation_guard
+    BEFORE UPDATE OR DELETE ON graph_generations
+    FOR EACH ROW EXECUTE FUNCTION guard_graph_generation();
+CREATE TRIGGER graph_projection_head_guard
+    BEFORE UPDATE OR DELETE ON graph_projection_heads
+    FOR EACH ROW EXECUTE FUNCTION guard_graph_projection_head();
+CREATE TRIGGER graph_generation_build_guard
+    BEFORE UPDATE OR DELETE ON graph_generation_builds
+    FOR EACH ROW EXECUTE FUNCTION guard_graph_generation_build();
 
 CREATE TRIGGER graph_query_revision
     BEFORE INSERT ON memory_queries

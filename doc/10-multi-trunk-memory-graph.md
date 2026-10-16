@@ -170,7 +170,7 @@ Context 按自身策略判断超预算时，先保证待移出单元已有可靠
 
 重建新 generation 时，从完整的不可变拓扑差量日志或与同一 reducer/version 匹配的可信 checkpoint 开始，按 revision 键集有界重放；每个差量保存稳定操作身份和输入摘要以便崩溃重试合流。构建期间旧 generation 继续服务；候选追到活动 head 后，在锁住 Bot head 的短事务中复核 reducer/schema、连续水位和来源删除纪元，再 CAS 切换 generation 指针。只读 graph head 和管理关系回执需分别标明实际发布 revision 与当前权威事实状态，不能把候选 generation 或未批准人工关系展示成已发布可召回边。验收至少覆盖 103→101→102 的乱序归档、并发批准/撤回/遗忘、构建中新增边、进程中断后的无重复重放、旧查询跨步骤版本稳定及切换后当前删除仍不可见。
 
-当前包私有 SQL 已在来源资格、来源状态、关系创建、批准和撤回事务中记录同事务拓扑差量，同一事务按实体合流为连续 revision；同一事务的触发器维护 `graph_node_versions`、`graph_edge_versions` 和 `graph_projection_heads`。查询登记冻结 `(generation_id,graph_revision)`，`memory_read_graph_neighbours` 从该版本的节点/边索引出发，按 `pg_snapshot` 与当前权威资格复核，回执给出真实冻结版本。顺序邻接由冻结节点与稳定来源顺序派生。已验证旧查询不会读到之后批准的人工边，撤回会立即隐藏关系，10 万关系的隔离读写用例通过。当前仅有 `primary` 活动 generation：候选 generation 的持久重建、有界日志重放、追平与 CAS 切换尚未实现；管理关系浏览仍读取权威事实，不宣称已读取发布图。诊断若未直接使用查询冻结的版本，不得填充 `projection_revision`。
+当前包私有 SQL 已在来源资格、来源状态、关系创建、批准和撤回事务中记录同事务拓扑差量，同一事务按实体合流为连续 revision；同一事务的触发器维护 `graph_node_versions`、`graph_edge_versions` 和 `graph_projection_heads`。查询登记冻结 `(generation_id,graph_revision)`，`memory_read_graph_neighbours` 从该版本的节点/边索引出发，按 `pg_snapshot` 与当前权威资格复核，回执给出真实冻结版本。顺序邻接由冻结节点与稳定来源顺序派生。已验证旧查询不会读到之后批准的人工边，撤回会立即隐藏关系，10 万关系的隔离读写用例通过。当前包还提供独立候选 generation 的持久构建账本、逐修订日志重放与 head 追平后的 CAS 切换。重复构建操作、重复修订重放和重复切换合流；跳号和构建期间活动 head 增长会拒绝过期切换。旧查询保留退役 generation 的版本区间，切换后新拓扑写入新活动代际。已在隔离 PostgreSQL 验证人工审批/撤回、同事务创建撤回、并发构建、构建中新增边、旧新查询冻结和来源退役即时隐藏。切换已通过 Memory 包声明的 UoW 计划取得 kernel.payload 在同事务共享锁下的删除纪元，并在发布回执中持久记录该纪元。低层 begin/replay 仍未封装成自动续跑的模块持久任务，管理端尚不开放一键重建，不能宣称重建工作流完成。管理关系浏览仍读取权威事实，不宣称已读取发布图。诊断若未直接使用查询冻结的版本，不得填充 `projection_revision`。
 
 ### 5.1 专用向量数据库与引用边界
 
