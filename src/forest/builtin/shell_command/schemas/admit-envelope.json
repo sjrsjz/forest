@@ -1,14 +1,196 @@
 {
-  "$schema":"https://json-schema.org/draft/2020-12/schema","type":"object",
-  "properties":{"protocol":{"const":"forest.uow-step/1"},"caller":{"type":"object"},"prior":{"type":"object"},
-    "input":{"type":"object","properties":{
-      "protocol":{"const":"forest.shell-admission/2"},"request_id":{"type":"string"},"shell_generation_id":{"type":"string"},
-      "binding_ref":{"type":"string"},"binding_epoch":{"type":"integer","minimum":1},"connection_epoch":{"type":"integer","minimum":1},
-      "client_incarnation":{"type":"string"},"adapter_generation_id":{"type":"string"},"executor_fence_digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},
-      "conversation_ref":{"type":"string"},"event_ref":{"type":"string"},"principal_ref":{"type":"string"},
-      "command_id":{"type":"string"},"command_version":{"type":"integer","minimum":1},"arguments":{"type":"object"},
-      "rejection":{"type":"object","properties":{"owner_id":{"type":"string","minLength":1,"maxLength":512},"value":{"type":"object","properties":{"text":{"type":"string","minLength":1,"maxLength":4096}},"required":["text"],"additionalProperties":false}},"required":["owner_id","value"],"additionalProperties":false},
-      "received_at":{"type":"string","format":"date-time"},"admission_deadline":{"type":"string","format":"date-time"}
-    },"required":["protocol","request_id","shell_generation_id","binding_ref","binding_epoch","connection_epoch","client_incarnation","adapter_generation_id","executor_fence_digest","conversation_ref","event_ref","principal_ref","command_id","command_version","arguments","rejection","received_at","admission_deadline"],"additionalProperties":false}
-  },"required":["protocol","caller","input","prior"],"additionalProperties":false
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "protocol": {
+      "const": "forest.uow-step/1"
+    },
+    "caller": {
+      "type": "object"
+    },
+    "prior": {
+      "type": "object",
+      "required": [
+        "gate"
+      ],
+      "properties": {
+        "gate": {
+          "type": "object",
+          "required": [
+            "protocol",
+            "event_ref",
+            "binding_ref",
+            "binding_epoch",
+            "conversation_ref",
+            "principal_ref",
+            "ingress_seq",
+            "adapter_generation_id",
+            "received_at",
+            "admission_deadline",
+            "normalized_payload_digest"
+          ],
+          "properties": {
+            "protocol": {
+              "const": "forest.shell-ingress-proof/1"
+            },
+            "event_ref": {
+              "type": "string"
+            },
+            "binding_ref": {
+              "type": "string"
+            },
+            "binding_epoch": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "conversation_ref": {
+              "type": "string"
+            },
+            "principal_ref": {
+              "type": "string"
+            },
+            "ingress_seq": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "adapter_generation_id": {
+              "type": "string"
+            },
+            "received_at": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "admission_deadline": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "normalized_payload_digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "input": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "const": "forest.shell-admission/2"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "shell_generation_id": {
+          "type": "string"
+        },
+        "binding_ref": {
+          "type": "string"
+        },
+        "binding_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "connection_epoch": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "client_incarnation": {
+          "type": "string"
+        },
+        "adapter_generation_id": {
+          "type": "string"
+        },
+        "executor_fence_digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "conversation_ref": {
+          "type": "string"
+        },
+        "event_ref": {
+          "type": "string"
+        },
+        "principal_ref": {
+          "type": "string"
+        },
+        "command_id": {
+          "type": "string"
+        },
+        "command_version": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "arguments": {
+          "type": "object"
+        },
+        "rejection": {
+          "type": "object",
+          "properties": {
+            "owner_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512
+            },
+            "value": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "owner_id",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        "received_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "admission_deadline": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "protocol",
+        "request_id",
+        "shell_generation_id",
+        "binding_ref",
+        "binding_epoch",
+        "connection_epoch",
+        "client_incarnation",
+        "adapter_generation_id",
+        "executor_fence_digest",
+        "conversation_ref",
+        "event_ref",
+        "principal_ref",
+        "command_id",
+        "command_version",
+        "arguments",
+        "rejection",
+        "received_at",
+        "admission_deadline"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "protocol",
+    "caller",
+    "input",
+    "prior"
+  ],
+  "additionalProperties": false
 }

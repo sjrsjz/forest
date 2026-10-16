@@ -1,10 +1,41 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "type": "object", "additionalProperties": false,
-  "required": ["adapter", "conversation", "position", "payload_epoch", "memory", "shell", "shell_classification"],
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "adapter",
+    "conversation",
+    "gate",
+    "position",
+    "payload_epoch",
+    "memory",
+    "shell",
+    "shell_classification"
+  ],
   "properties": {
-    "adapter": {"type": "object"}, "conversation": {"type": "object"}, "position": {"type": "object"},
-    "payload_epoch": {"type": "object"}, "memory": {"type": "object"},
-    "shell": {"type": "object"}, "shell_classification": {"type": "object"}
+    "adapter": {
+      "type": "object"
+    },
+    "conversation": {
+      "type": "object"
+    },
+    "position": {
+      "type": "object"
+    },
+    "payload_epoch": {
+      "type": "object"
+    },
+    "memory": {
+      "type": "object"
+    },
+    "shell": {
+      "type": "object"
+    },
+    "shell_classification": {
+      "type": "object"
+    },
+    "gate": {
+      "type": "object"
+    }
   }
 }

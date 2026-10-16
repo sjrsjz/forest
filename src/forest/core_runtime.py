@@ -31,7 +31,10 @@ from forest.kernel_runtime_graph_snapshot import (
     runtime_status_snapshot_service,
 )
 from forest.kernel_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
-from forest.kernel_shell_gate import shell_gate_inspect_service
+from forest.kernel_shell_gate import (
+    KernelShellGateUnitOfWorkParticipant,
+    shell_gate_inspect_service,
+)
 from forest.module_management_contract import (
     AuditManagementContract,
     ModuleConfigurationContract,
@@ -566,15 +569,19 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
 class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
     """Publish the Bot-wide Worker admission policy from kernel.runtime."""
 
-    def __init__(self, *args, runtime_host) -> None:
+    def __init__(self, *args, runtime_host, payloads) -> None:
         super().__init__(*args)
         self.runtime_host = runtime_host
+        self.payloads = payloads
         self.management_contract = ModuleConfigurationContract(
             self.module_configuration,
             schema=KERNEL_RESOURCE_POLICY_SCHEMA,
             validator=validate_kernel_resource_policy,
             apply_callback=self.apply_configuration,
         )
+
+    def unit_of_work_participant(self):
+        return KernelShellGateUnitOfWorkParticipant(self, self.payloads)
 
     async def apply_configuration(self, **kwargs) -> dict:
         lock = self.runtime_host._replacement_lock
@@ -850,7 +857,7 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
             if component_id == "kernel.effect":
                 return PreparedEffectAuthorityModule(*arguments, payload)
             module = (
-                prepared_type(*arguments, runtime_host=_runtime)
+                prepared_type(*arguments, runtime_host=_runtime, payloads=payload)
                 if component_id == "kernel.runtime"
                 else prepared_type(*arguments)
             )

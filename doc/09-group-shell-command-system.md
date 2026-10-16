@@ -1,6 +1,6 @@
 # 群聊 Shell、管理命令与优先级详细设计
 
-> 当前源码（2026-10-16）：内核 `shell.gate.inspect` 只认领完整 `#forest` 前缀，Adapter 仅在已认领时调用可热重载的 `shell.ingress.inspect`，已认领命令的 Shell 返回空值会按协议错误终止，不能落回 Agent。Shell 包仍负责确定性命令解析、管理员资格、当前目录路由、持久请求和优先级工作。门禁当前输出是有界词法识别结果，尚不是下文要求的不可持久复用 ingress proof；Binding/principal 的内核复核、同事务 proof 核验及脱离 Shell 包的最小救援路由仍未实现。在线 v32 未加载本次源码改动；下文保留完整目标协议。
+> 当前源码（2026-10-16）：内核 `shell.gate.inspect` 只认领完整 `#forest` 前缀；Adapter 仅在已认领时调用可热重载的 `shell.ingress.inspect`，已认领命令的 Shell 返回空值会按协议错误终止，不能落回 Agent。Shell 包负责确定性命令解析、管理员资格、目录路由、持久请求和优先级工作。内核 `shell.gate-prove-ingress` 现作为 Adapter 的同一 UnitOfWork 参与者，在 Adapter 和 Conversation 持久接纳后，按原始 Payload 引用读取已持久化的规范化消息，复算前缀识别，并把事件、群聊、作者、接入序号与两项接纳收据核对；只在该事务中生成不持久化、不可复用的 `forest.shell-ingress-proof/1`。Shell admission 必须核对该证明。内核尚未独立复核 Binding/self_id 与 principal 的真实绑定，脱离 Shell 包的最小救援路由亦未实现；在线 v32 未加载本次源码改动。下文保留完整目标协议。
 
 ## 1. 目标与边界
 

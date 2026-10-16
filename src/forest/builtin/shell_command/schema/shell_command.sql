@@ -187,12 +187,26 @@ $$;
 
 CREATE FUNCTION shell_admit_ingress(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
-DECLARE input jsonb:=envelope->'input'; snapshot record; route record; existing record;
+DECLARE input jsonb:=envelope->'input'; gate jsonb:=envelope#>'{prior,gate}';
+        snapshot record; route record; existing record;
         allowed boolean; next_state text; rejection_code text; result jsonb;
 BEGIN
   IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
      OR input->>'protocol' IS DISTINCT FROM 'forest.shell-admission/2'
-     OR input->>'shell_generation_id' IS DISTINCT FROM context->>'generation_id' THEN
+     OR input->>'shell_generation_id' IS DISTINCT FROM context->>'generation_id'
+     OR gate->>'protocol' IS DISTINCT FROM 'forest.shell-ingress-proof/1'
+     OR gate->>'event_ref' IS DISTINCT FROM input->>'event_ref'
+     OR gate->>'binding_ref' IS DISTINCT FROM input->>'binding_ref'
+     OR gate->'binding_epoch' IS DISTINCT FROM input->'binding_epoch'
+     OR gate->>'conversation_ref' IS DISTINCT FROM input->>'conversation_ref'
+     OR gate->>'principal_ref' IS DISTINCT FROM input->>'principal_ref'
+     OR gate->>'adapter_generation_id' IS DISTINCT FROM input->>'adapter_generation_id'
+     OR gate->>'adapter_generation_id' IS DISTINCT FROM envelope#>>'{caller,generation_id}'
+     OR gate->>'received_at' IS DISTINCT FROM input->>'received_at'
+     OR gate->>'admission_deadline' IS DISTINCT FROM input->>'admission_deadline'
+     OR jsonb_typeof(gate->'ingress_seq') IS DISTINCT FROM 'number'
+     OR gate->'ingress_seq' IS DISTINCT FROM envelope#>'{prior,conversation,ingress_seq}'
+     OR gate->>'normalized_payload_digest' !~ '^sha256:[a-f0-9]{64}$' THEN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
       jsonb_build_object('code','SHELL_ADMISSION_INVALID','message','Shell admission is invalid','status',422));
   END IF;

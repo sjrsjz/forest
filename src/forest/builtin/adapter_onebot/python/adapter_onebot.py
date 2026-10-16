@@ -459,6 +459,7 @@ class AdapterOneBot(Plugin):
                 else "adapter.ingress-data-media"
             )
         else:
+            plan["gate"] = {"self_id": binding["self_id"], "inspection": gate}
             plan["shell"] = {
                 "protocol": "forest.shell-admission/2",
                 "request_id": shell["request_id"],

@@ -68,6 +68,33 @@ async def test_reserved_shell_prefix_with_line_break_is_rejected_by_shell():
     assert ingress["arguments"] == {"error_code": "SHELL_SYNTAX_INVALID"}
 
 
+def _admission_envelope(ingress):
+    return {
+        "protocol": "forest.uow-step/1",
+        "caller": {
+            "component_id": "adapter.onebot",
+            "generation_id": ingress["adapter_generation_id"],
+        },
+        "input": ingress,
+        "prior": {
+            "conversation": {"ingress_seq": 1},
+            "gate": {
+                "protocol": "forest.shell-ingress-proof/1",
+                "event_ref": ingress["event_ref"],
+                "binding_ref": ingress["binding_ref"],
+                "binding_epoch": ingress["binding_epoch"],
+                "conversation_ref": ingress["conversation_ref"],
+                "principal_ref": ingress["principal_ref"],
+                "ingress_seq": 1,
+                "adapter_generation_id": ingress["adapter_generation_id"],
+                "received_at": ingress["received_at"],
+                "admission_deadline": ingress["admission_deadline"],
+                "normalized_payload_digest": "sha256:" + "d" * 64,
+            },
+        },
+    }
+
+
 @pytest.mark.postgres
 async def test_shell_admission_preserves_rejections_and_priority_capacity(clean_authority):
     store, _installer = clean_authority
@@ -129,13 +156,37 @@ async def test_shell_admission_preserves_rejections_and_priority_capacity(clean_
                     sql.SQL("SELECT {}.shell_admit_ingress(%s,%s)").format(
                         sql.Identifier(schema_name)
                     ),
-                    (Jsonb(context), Jsonb({"protocol": "forest.uow-step/1", "input": ingress})),
+                    (Jsonb(context), Jsonb(_admission_envelope(ingress))),
                 )
             ).fetchone()
             receipt = result["shell_admit_ingress"]
             assert receipt["ok"] is True
             assert receipt["value"]["state"] == "REJECTION_PENDING"
             assert receipt["value"]["rejection_code"] == expected_code
+
+        forged = deepcopy(ingress)
+        forged["request_id"] = "request/forged-proof"
+        forged_envelope = _admission_envelope(forged)
+        forged_envelope["prior"]["gate"]["principal_ref"] = "qq:forged"
+        forged_result = await (
+            await conn.execute(
+                sql.SQL("SELECT {}.shell_admit_ingress(%s,%s)").format(
+                    sql.Identifier(schema_name)
+                ),
+                (
+                    Jsonb({
+                        "bot_id": "bot-bundle", "generation_id": "generation/shell",
+                        "input_digest": "sha256:" + "f" * 64,
+                        "operation_id": "operation/forged-proof",
+                    }),
+                    Jsonb(forged_envelope),
+                ),
+            )
+        ).fetchone()
+        assert forged_result["shell_admit_ingress"]["ok"] is False
+        assert forged_result["shell_admit_ingress"]["error"]["code"] == (
+            "SHELL_ADMISSION_INVALID"
+        )
 
         for offset, (command_id, service_class) in enumerate((
             ("core.status", "P0"), ("module.reload", "P1"),
@@ -177,7 +228,7 @@ async def test_shell_admission_preserves_rejections_and_priority_capacity(clean_
                         "bot_id": "bot-bundle", "generation_id": "generation/shell",
                         "input_digest": "sha256:" + format(offset + 1, "064x"),
                         "operation_id": f"operation/{offset}",
-                    }), Jsonb({"protocol": "forest.uow-step/1", "input": queued})),
+                    }), Jsonb(_admission_envelope(queued))),
                 )
             ).fetchone()
             assert admitted["shell_admit_ingress"]["value"]["state"] == "QUEUED"
