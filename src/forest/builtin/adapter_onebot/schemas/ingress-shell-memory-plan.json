@@ -10,7 +10,8 @@
     "payload_epoch",
     "memory",
     "shell",
-    "shell_classification"
+    "shell_classification",
+    "shell_origin"
   ],
   "properties": {
     "adapter": {
@@ -36,6 +37,18 @@
     },
     "gate": {
       "type": "object"
+    },
+    "shell_origin": {
+      "type": "object",
+      "required": [
+        "raw_frame"
+      ],
+      "properties": {
+        "raw_frame": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

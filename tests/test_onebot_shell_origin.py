@@ -1,0 +1,95 @@
+"""The package proves QQ origin after the kernel binds the raw Payload."""
+
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from psycopg import sql
+from psycopg.types.json import Jsonb
+from test_schema_bundles import clean_authority as clean_authority
+
+
+@pytest.mark.postgres
+async def test_shell_origin_checks_raw_qq_identity_in_same_transaction(clean_authority):
+    store, _installer = clean_authority
+    schema_name = "onebot_shell_origin_test"
+    source = Path(__file__).resolve().parents[1] / (
+        "src/forest/builtin/adapter_onebot/schema/adapter_onebot.sql"
+    )
+    baseline = source.read_text(encoding="utf-8").replace(
+        "__forest_module_schema__", '"' + schema_name + '"'
+    )
+    event_ref = "onebot-event:" + "a" * 64
+    conversation_ref = "onebot:group:933179609"
+    now = datetime.now(timezone.utc)
+    raw = {
+        "post_type": "message", "message_type": "group",
+        "self_id": 10000, "user_id": 42, "group_id": 933179609,
+        "message_id": 7, "time": int(now.timestamp()),
+        "sender": {"user_id": 42}, "message": "#forest core status",
+    }
+    gate = {
+        "protocol": "forest.shell-ingress-proof/1",
+        "event_ref": event_ref, "binding_ref": "binding/1", "binding_epoch": 1,
+        "conversation_ref": conversation_ref, "principal_ref": "qq:42",
+        "adapter_generation_id": "generation/adapter", "self_id": "10000",
+    }
+    envelope = {
+        "protocol": "forest.uow-step/1",
+        "caller": {"component_id": "adapter.onebot",
+                   "generation_id": "generation/adapter"},
+        "input": {"raw_frame": raw},
+        "prior": {
+            "adapter": {"event_id": event_ref, "binding_ref": "binding/1",
+                        "binding_epoch": 1},
+            "conversation": {"conversation_id": conversation_ref},
+            "gate": gate,
+        },
+    }
+    async with store.pool.connection() as conn:
+        await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name)))
+        await conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name)))
+        await conn.execute(baseline)
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.platform_events (event_id,operation_id,binding_ref,"
+                "binding_epoch,client_incarnation,platform_message_ref,event_kind,"
+                "channel_kind,channel_ref,conversation_ref,author_subject_ref,"
+                "raw_payload,normalized_payload,author_payload,received_at,"
+                "classification_deadline,sent_at,input_payload) VALUES "
+                "(%s,'operation/1','binding/1',1,'client/1','7','group.message',"
+                "'GROUP','933179609',%s,'qq:42',%s,%s,%s,%s,%s,%s,%s)"
+            ).format(sql.Identifier(schema_name)),
+            (event_ref, conversation_ref, Jsonb({"payload_id": "raw/1"}),
+             Jsonb({"payload_id": "normalized/1"}), Jsonb({"payload_id": "author/1"}),
+             now, now + timedelta(minutes=2), now, Jsonb({"operation_id": "operation/1"})),
+        )
+
+        async def prove(candidate):
+            row = await (await conn.execute(
+                sql.SQL("SELECT {}.adapter_prove_shell_origin(%s,%s) AS result").format(
+                    sql.Identifier(schema_name)
+                ),
+                (Jsonb({"generation_id": "generation/adapter"}), Jsonb(candidate)),
+            )).fetchone()
+            return row["result"]
+
+        accepted = await prove(envelope)
+        assert accepted["ok"] is True
+        assert accepted["value"]["principal_ref"] == "qq:42"
+        for path, forged_value in (
+            (("input", "raw_frame", "user_id"), 43),
+            (("input", "raw_frame", "self_id"), 99999),
+            (("input", "raw_frame", "group_id"), 12345),
+            (("input", "raw_frame", "message_id"), 8),
+            (("input", "raw_frame", "sender"), {"user_id": 43}),
+        ):
+            forged = deepcopy(envelope)
+            cursor = forged
+            for key in path[:-1]:
+                cursor = cursor[key]
+            cursor[path[-1]] = forged_value
+            rejected = await prove(forged)
+            assert rejected["ok"] is False
+            assert rejected["error"]["code"] == "ONEBOT_SHELL_ORIGIN_INVALID"

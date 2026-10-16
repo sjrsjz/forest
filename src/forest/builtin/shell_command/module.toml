@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.shell-command"
-version = "1.3.8"
+version = "1.3.9"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "shell_command:ShellCommand"
@@ -70,9 +70,9 @@ output_schema = "schemas/payload-write-output.json"
 
 [components.storage]
 schema_id = "forest.shell.command"
-schema_version = "2.2.4"
+schema_version = "2.2.5"
 baseline = "schema/shell_command.sql"
-baseline_sha256 = "29aa3c29ec135068f6a32d41900f57fb068ce7ef7c8eb8e8c04b25a5a442c9d8"
+baseline_sha256 = "890c28e5640f7d73562a65c214a05458614b725bfb62c7e6670d494159e81ec7"
 scope = "bot"
 repository_contract = "forest.shell-command.repository/2"
 execution_profile = "official"

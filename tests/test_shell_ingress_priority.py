@@ -96,6 +96,18 @@ def _admission_envelope(ingress):
                 "received_at": ingress["received_at"],
                 "admission_deadline": ingress["admission_deadline"],
                 "normalized_payload_digest": "sha256:" + "d" * 64,
+                "self_id": "10000",
+            },
+            "origin": {
+                "protocol": "forest.onebot-shell-origin-proof/1",
+                "event_ref": ingress["event_ref"],
+                "binding_ref": ingress["binding_ref"],
+                "binding_epoch": ingress["binding_epoch"],
+                "conversation_ref": ingress["conversation_ref"],
+                "principal_ref": ingress["principal_ref"],
+                "self_id": "10000",
+                "adapter_generation_id": ingress["adapter_generation_id"],
+                "platform_message_ref": "message/1",
             },
         },
     }
@@ -334,7 +346,8 @@ async def test_shell_proof_requires_the_transports_original_frame_root():
     envelope = {
         "protocol": "forest.uow-step/1",
         "caller": {"component_id": "adapter.onebot", "generation_id": "adapter/generation"},
-        "input": {"adapter": adapter, "conversation": conversation, "shell": shell, "gate": gate},
+        "input": {"adapter": adapter, "conversation": conversation, "shell": shell, "gate": gate,
+                  "shell_origin": {"raw_frame": json.loads(raw_body)}},
         "prior": {
             "adapter": {"event_id": event_ref, "binding_ref": "binding/1", "binding_epoch": 1},
             "conversation": {
@@ -366,7 +379,16 @@ async def test_shell_proof_requires_the_transports_original_frame_root():
         causal_root_kind="adapter.platform-frame", causal_root_id=frame_ref,
     )
     assert proof["protocol"] == "forest.shell-ingress-proof/1"
+    assert proof["self_id"] == "10000"
     assert proof["principal_ref"] == "qq:42"
+    forged_origin = deepcopy(envelope)
+    forged_origin["input"]["shell_origin"]["raw_frame"]["self_id"] = 99999
+    with pytest.raises(ForestError) as error:
+        await participant.invoke_in(
+            None, "shell.gate-prove-ingress", forged_origin,
+            causal_root_kind="adapter.platform-frame", causal_root_id=frame_ref,
+        )
+    assert error.value.code == "SHELL_GATE_PROOF_INVALID"
     with pytest.raises(ForestError) as error:
         await participant.invoke_in(
             None, "shell.gate-prove-ingress", envelope,

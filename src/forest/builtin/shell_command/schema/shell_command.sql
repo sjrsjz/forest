@@ -188,6 +188,7 @@ $$;
 CREATE FUNCTION shell_admit_ingress(context jsonb, envelope jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE input jsonb:=envelope->'input'; gate jsonb:=envelope#>'{prior,gate}';
+        origin jsonb:=envelope#>'{prior,origin}';
         snapshot record; route record; existing record;
         allowed boolean; next_state text; rejection_code text; result jsonb;
 BEGIN
@@ -195,6 +196,14 @@ BEGIN
      OR input->>'protocol' IS DISTINCT FROM 'forest.shell-admission/2'
      OR input->>'shell_generation_id' IS DISTINCT FROM context->>'generation_id'
      OR gate->>'protocol' IS DISTINCT FROM 'forest.shell-ingress-proof/1'
+     OR origin->>'protocol' IS DISTINCT FROM 'forest.onebot-shell-origin-proof/1'
+     OR origin->>'event_ref' IS DISTINCT FROM gate->>'event_ref'
+     OR origin->>'binding_ref' IS DISTINCT FROM gate->>'binding_ref'
+     OR origin->'binding_epoch' IS DISTINCT FROM gate->'binding_epoch'
+     OR origin->>'conversation_ref' IS DISTINCT FROM gate->>'conversation_ref'
+     OR origin->>'principal_ref' IS DISTINCT FROM gate->>'principal_ref'
+     OR origin->>'adapter_generation_id' IS DISTINCT FROM gate->>'adapter_generation_id'
+     OR origin->>'self_id' IS DISTINCT FROM gate->>'self_id'
      OR gate->>'event_ref' IS DISTINCT FROM input->>'event_ref'
      OR gate->>'binding_ref' IS DISTINCT FROM input->>'binding_ref'
      OR gate->'binding_epoch' IS DISTINCT FROM input->'binding_epoch'

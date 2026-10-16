@@ -460,6 +460,7 @@ class AdapterOneBot(Plugin):
             )
         else:
             plan["gate"] = {"self_id": binding["self_id"], "inspection": gate}
+            plan["shell_origin"] = {"raw_frame": json.loads(raw_body.decode("utf-8"))}
             plan["shell"] = {
                 "protocol": "forest.shell-admission/2",
                 "request_id": shell["request_id"],

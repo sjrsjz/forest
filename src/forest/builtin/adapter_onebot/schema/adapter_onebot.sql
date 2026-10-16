@@ -69,3 +69,101 @@ WHEN invalid_text_representation OR datetime_field_overflow OR not_null_violatio
       jsonb_build_object('code','ONEBOT_INGRESS_INPUT_INVALID','message','OneBot ingress participant input is invalid','status',422));
 END;
 $$;
+
+
+-- OneBot protocol ownership stays in this reloadable package. The kernel has
+-- already compared raw_frame with the immutable Raw Payload in the same UoW.
+CREATE FUNCTION onebot_normalize_id(value jsonb, message_id boolean DEFAULT false)
+RETURNS text LANGUAGE plpgsql IMMUTABLE SET search_path=pg_catalog AS $$
+DECLARE raw text; number numeric;
+BEGIN
+    IF value IS NULL OR jsonb_typeof(value) NOT IN ('string','number') THEN
+        RETURN NULL;
+    END IF;
+    raw:=value#>>'{}';
+    IF raw !~ '^-?(0|[1-9][0-9]{0,18})$' THEN
+        RETURN NULL;
+    END IF;
+    number:=raw::numeric;
+    IF message_id THEN
+        IF number < -2147483648 OR number >= 2147483648 THEN RETURN NULL; END IF;
+    ELSIF number < 1 OR number >= 9223372036854775808 THEN
+        RETURN NULL;
+    END IF;
+    RETURN number::bigint::text;
+END;
+$$;
+
+CREATE FUNCTION adapter_prove_shell_origin(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    raw jsonb:=envelope#>'{input,raw_frame}';
+    gate jsonb:=envelope#>'{prior,gate}';
+    recorded __forest_module_schema__.platform_events%ROWTYPE;
+    raw_self text; raw_user text; raw_channel text; raw_message text;
+    raw_sender text; anonymous jsonb; anonymous_id text; expected_principal text;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'adapter.onebot'
+       OR envelope#>>'{caller,generation_id}' IS DISTINCT FROM context->>'generation_id'
+       OR gate->>'protocol' IS DISTINCT FROM 'forest.shell-ingress-proof/1'
+       OR jsonb_typeof(raw) IS DISTINCT FROM 'object'
+       OR raw->>'post_type' IS DISTINCT FROM 'message'
+       OR raw->>'message_type' IS DISTINCT FROM 'group' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','ONEBOT_SHELL_ORIGIN_INVALID','message','OneBot Shell origin is invalid','status',409));
+    END IF;
+    SELECT * INTO recorded FROM __forest_module_schema__.platform_events
+      WHERE event_id=gate->>'event_ref';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','ONEBOT_SHELL_ORIGIN_INVALID','message','OneBot Shell origin is invalid','status',409));
+    END IF;
+    raw_self:=__forest_module_schema__.onebot_normalize_id(raw->'self_id');
+    raw_user:=__forest_module_schema__.onebot_normalize_id(raw->'user_id');
+    raw_channel:=__forest_module_schema__.onebot_normalize_id(raw->'group_id');
+    raw_message:=__forest_module_schema__.onebot_normalize_id(raw->'message_id',true);
+    raw_sender:=__forest_module_schema__.onebot_normalize_id(raw#>'{sender,user_id}');
+    anonymous:=raw->'anonymous';
+    IF anonymous IS NOT NULL AND anonymous <> 'null'::jsonb THEN
+        anonymous_id:=__forest_module_schema__.onebot_normalize_id(anonymous->'id');
+        expected_principal:='onebot:anonymous:'||anonymous_id;
+    ELSIF raw->>'sub_type'='anonymous' THEN
+        expected_principal:='onebot:anonymous:'||substring(recorded.event_id from 14 for 20);
+    ELSE
+        expected_principal:='qq:'||raw_user;
+    END IF;
+    IF raw_self IS NULL OR raw_user IS NULL OR raw_channel IS NULL
+       OR raw_message IS NULL OR expected_principal IS NULL
+       OR (raw#>'{sender,user_id}' IS NOT NULL
+           AND raw#>'{sender,user_id}' <> 'null'::jsonb
+           AND raw_sender IS DISTINCT FROM raw_user)
+       OR gate->>'self_id' IS DISTINCT FROM raw_self
+       OR gate->>'event_ref' IS DISTINCT FROM recorded.event_id
+       OR gate->>'binding_ref' IS DISTINCT FROM recorded.binding_ref
+       OR gate->'binding_epoch' IS DISTINCT FROM to_jsonb(recorded.binding_epoch)
+       OR gate->>'conversation_ref' IS DISTINCT FROM recorded.conversation_ref
+       OR gate->>'principal_ref' IS DISTINCT FROM expected_principal
+       OR gate->>'adapter_generation_id' IS DISTINCT FROM envelope#>>'{caller,generation_id}'
+       OR envelope#>>'{prior,adapter,event_id}' IS DISTINCT FROM recorded.event_id
+       OR envelope#>>'{prior,adapter,binding_ref}' IS DISTINCT FROM recorded.binding_ref
+       OR envelope#>'{prior,adapter,binding_epoch}' IS DISTINCT FROM to_jsonb(recorded.binding_epoch)
+       OR recorded.channel_kind IS DISTINCT FROM 'GROUP'
+       OR recorded.channel_ref IS DISTINCT FROM raw_channel
+       OR recorded.conversation_ref IS DISTINCT FROM 'onebot:group:'||raw_channel
+       OR recorded.platform_message_ref IS DISTINCT FROM raw_message
+       OR recorded.author_subject_ref IS DISTINCT FROM expected_principal
+       OR recorded.event_kind IS DISTINCT FROM 'group.message'
+       OR envelope#>>'{prior,conversation,conversation_id}' IS DISTINCT FROM recorded.conversation_ref THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','ONEBOT_SHELL_ORIGIN_INVALID','message','OneBot Shell origin is invalid','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+      jsonb_build_object('protocol','forest.onebot-shell-origin-proof/1',
+        'event_ref',recorded.event_id,'binding_ref',recorded.binding_ref,
+        'binding_epoch',recorded.binding_epoch,'conversation_ref',recorded.conversation_ref,
+        'principal_ref',expected_principal,'self_id',raw_self,
+        'adapter_generation_id',context->>'generation_id',
+        'platform_message_ref',raw_message));
+END;
+$$;

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.5.2"
+version = "2.5.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -137,9 +137,9 @@ order = 5
 
 [components.storage]
 schema_id = "forest.adapter.onebot"
-schema_version = "2.1.0"
+schema_version = "2.1.1"
 baseline = "schema/adapter_onebot.sql"
-baseline_sha256 = "113f170d1195102bb792008fbaf71440c968dd1ff92f23cb69bd41a9b0631cbf"
+baseline_sha256 = "c976e198533ca7d80d6d283e7c09823d3a88f300e1486e683b6bc00f5abd75f5"
 scope = "bot"
 repository_contract = "forest.adapter-onebot.repository/2"
 execution_profile = "official"
@@ -168,6 +168,13 @@ path = "/input/event/author"
 owner_component = "adapter.onebot"
 owner_kind = "onebot.author-snapshot"
 owner_id_path = "/input/event/event_id"
+
+[[components.unit_of_work_participants]]
+name = "adapter.prove-shell-origin"
+contract = "1.0"
+function = "adapter_prove_shell_origin"
+input_schema = "schemas/prove-shell-origin-envelope.json"
+output_schema = "schemas/prove-shell-origin-output.json"
 
 [[components.unit_of_work_plans]]
 name = "adapter.ingress-data-memory"
@@ -208,6 +215,7 @@ steps = [
   { id = "adapter", component_id = "adapter.onebot", participant = "adapter.record-ingress", input_path = "/adapter" },
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.admit-message", input_path = "/conversation" },
   { id = "gate", component_id = "kernel.runtime", participant = "shell.gate-prove-ingress" },
+  { id = "origin", component_id = "adapter.onebot", participant = "adapter.prove-shell-origin", input_path = "/shell_origin" },
   { id = "position", component_id = "memory.graph", participant = "memory.reserve-source-position-record", input_path = "/position" },
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
   { id = "memory", component_id = "memory.graph", participant = "memory.capture-source-record", input_path = "/memory" },
@@ -225,6 +233,7 @@ steps = [
   { id = "adapter", component_id = "adapter.onebot", participant = "adapter.record-ingress", input_path = "/adapter" },
   { id = "conversation", component_id = "conversation.scheduler", participant = "conversation.admit-message", input_path = "/conversation" },
   { id = "gate", component_id = "kernel.runtime", participant = "shell.gate-prove-ingress" },
+  { id = "origin", component_id = "adapter.onebot", participant = "adapter.prove-shell-origin", input_path = "/shell_origin" },
   { id = "position", component_id = "memory.graph", participant = "memory.reserve-source-position-record", input_path = "/position" },
   { id = "media", component_id = "media.capture", participant = "media.register-ingress", input_path = "/media" },
   { id = "shell", component_id = "shell.command", participant = "shell.admit-ingress", input_path = "/shell" },

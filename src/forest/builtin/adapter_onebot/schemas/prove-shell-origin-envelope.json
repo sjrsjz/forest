@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "protocol",
+    "caller",
+    "input",
+    "prior"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "protocol": {
+      "const": "forest.uow-step/1"
+    },
+    "caller": {
+      "type": "object",
+      "required": [
+        "component_id",
+        "generation_id"
+      ],
+      "properties": {
+        "component_id": {
+          "const": "adapter.onebot"
+        },
+        "generation_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "raw_frame"
+      ],
+      "properties": {
+        "raw_frame": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    },
+    "prior": {
+      "type": "object",
+      "required": [
+        "adapter",
+        "conversation",
+        "gate"
+      ],
+      "properties": {
+        "adapter": {
+          "type": "object"
+        },
+        "conversation": {
+          "type": "object"
+        },
+        "gate": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

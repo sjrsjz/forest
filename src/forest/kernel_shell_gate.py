@@ -159,6 +159,15 @@ class KernelShellGateUnitOfWorkParticipant:
         raw_body = await self.payloads.read_bytes_in(conn, raw_ref["payload_id"])
         if len(raw_body) > 262144:
             invalid()
+        origin = plan.get("shell_origin")
+        if not isinstance(origin, dict) or set(origin) != {"raw_frame"}:
+            invalid()
+        try:
+            raw_frame = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            invalid()
+        if not isinstance(raw_frame, dict) or raw_frame != origin["raw_frame"]:
+            invalid()
         frame_digest = hashlib.sha256(
             adapter["binding_ref"].encode("utf-8")
             + b"\0"
@@ -200,4 +209,5 @@ class KernelShellGateUnitOfWorkParticipant:
             "received_at": event["received_at"],
             "admission_deadline": event["classification_deadline"],
             "normalized_payload_digest": normalized_ref["digest"],
+            "self_id": gate["self_id"],
         }
