@@ -61,8 +61,9 @@ class JointViewSelection:
 
 def evidence_unit_cost(
     unit: Mapping[str, object], *, bytes_per_token: int, unit_overhead: int,
+    include_images: bool,
 ) -> ViewCost:
-    """Charge one complete ranked Memory source, including its ready images."""
+    """Charge one ranked Memory source and only images sent to this model."""
     if bytes_per_token < 1 or unit_overhead < 0:
         raise ViewSelectionError("Invalid frozen estimator")
     try:
@@ -86,8 +87,9 @@ def evidence_unit_cost(
                 for value in (length, width, height, pixels))
                 or pixels < width * height or pixels > 16777216):
             raise ViewSelectionError("Memory image cost is invalid")
-        media_bytes += length
-        decoded_bytes += pixels * 4
+        if include_images:
+            media_bytes += length
+            decoded_bytes += pixels * 4
     return ViewCost((size + bytes_per_token - 1) // bytes_per_token + unit_overhead,
                     media_bytes, decoded_bytes)
 
@@ -102,6 +104,7 @@ def select_joint_view(
     required_unit_ids: Sequence[str], previous_selected_unit_ids: Sequence[str],
     previous_considered_unit_ids: Sequence[str], fixed_cost: ViewCost,
     budget: ViewCost, bytes_per_token: int, unit_overhead: int,
+    include_images: bool,
 ) -> JointViewSelection:
     """Keep causal Context, then recent Context, ranked Memory, and older Context.
 
@@ -122,7 +125,7 @@ def select_joint_view(
     for unit in units:
         if unit.get("unit_id") in fixed_ids:
             baseline += unit_cost(unit, bytes_per_token=bytes_per_token,
-                                  unit_overhead=unit_overhead)
+                                  unit_overhead=unit_overhead, include_images=include_images)
     recent_budget = ViewCost(max(baseline.tokens, budget.tokens - reserve),
                              budget.media_bytes, budget.decoded_bytes)
     recent = select_context_units(
@@ -131,6 +134,7 @@ def select_joint_view(
         previous_considered_unit_ids=previous_considered_unit_ids,
         fixed_cost=fixed_cost, budget=recent_budget,
         bytes_per_token=bytes_per_token, unit_overhead=unit_overhead,
+        include_images=include_images,
     )
     selected_evidence: list[str] = []
     omitted_evidence: list[str] = []
@@ -138,7 +142,7 @@ def select_joint_view(
     total = recent.total_cost
     for unit_id, row in zip(evidence_ids, evidence, strict=True):
         cost = evidence_unit_cost(row, bytes_per_token=bytes_per_token,
-                                  unit_overhead=unit_overhead)
+                                  unit_overhead=unit_overhead, include_images=include_images)
         if _fits(total + cost, budget):
             selected_evidence.append(unit_id)
             evidence_cost += cost
@@ -151,6 +155,7 @@ def select_joint_view(
         previous_considered_unit_ids=previous_considered_unit_ids,
         fixed_cost=fixed_cost + evidence_cost, budget=budget,
         bytes_per_token=bytes_per_token, unit_overhead=unit_overhead,
+        include_images=include_images,
     )
     return JointViewSelection(context, tuple(selected_evidence),
                               tuple(omitted_evidence), evidence_cost)
@@ -158,8 +163,9 @@ def select_joint_view(
 
 def unit_cost(
     unit: Mapping[str, object], *, bytes_per_token: int, unit_overhead: int,
+    include_images: bool,
 ) -> ViewCost:
-    """Charge complete source units, including materialized media facts."""
+    """Charge complete Context units, including media only when projected."""
     if bytes_per_token < 1 or unit_overhead < 0:
         raise ViewSelectionError("Invalid frozen estimator")
     byte_length = unit.get("payload_byte_length")
@@ -174,8 +180,9 @@ def unit_cost(
         pixels = part.get("decoded_pixels")
         if type(length) is not int or length < 1 or type(pixels) is not int or pixels < 1:
             raise ViewSelectionError("Context media cost is invalid")
-        media_bytes += length
-        decoded_bytes += pixels * 4
+        if include_images:
+            media_bytes += length
+            decoded_bytes += pixels * 4
     return ViewCost(
         (byte_length + bytes_per_token - 1) // bytes_per_token + unit_overhead,
         media_bytes,
@@ -193,6 +200,7 @@ def select_context_units(
     budget: ViewCost,
     bytes_per_token: int,
     unit_overhead: int,
+    include_images: bool,
 ) -> ViewSelection:
     """Freeze nearest complete optional units without revisiting an old choice.
 
@@ -233,7 +241,8 @@ def select_context_units(
     ):
         raise ViewSelectionError("Frozen source set is missing or reordered")
     costs = {
-        unit_id: unit_cost(unit, bytes_per_token=bytes_per_token, unit_overhead=unit_overhead)
+        unit_id: unit_cost(unit, bytes_per_token=bytes_per_token, unit_overhead=unit_overhead,
+                           include_images=include_images)
         for unit_id, unit in zip(ids, units, strict=True)
     }
     selected = required | frozen

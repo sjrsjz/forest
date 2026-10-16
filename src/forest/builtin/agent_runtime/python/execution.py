@@ -679,7 +679,7 @@ class AgentExecution:
         )
 
     async def _model_snapshot(
-        self, request: dict, run: dict, step_seq: int, *,
+        self, request: dict, run: dict, step_seq: int, *, request_id: str,
         preset_context: list[str], tools: list[dict], evidence_ref: dict | None,
     ) -> dict:
         envelope = await self.ctx.services.call(
@@ -713,12 +713,15 @@ class AgentExecution:
             logical_step_id=logical_step_id,
             selected_context_unit_ids=frozenset(),
         )
+        profile, target = await self.model._profile(request_id)
         plan = await quote_and_read_plan(
             self.ctx, request=request, run=run, step_seq=step_seq,
             raw_snapshot=snapshot, fixed_view=fixed_view,
             preset_ref=self._preset_ref(), preset_context=preset_context,
             tools=tools, evidence_ref=evidence_ref,
             output_tokens=self.config["output_tokens"],
+            input_modalities=target.input_modalities,
+            model_capability_digest=profile["capability_digest"],
         )
         model_snapshot = await reader.model_view(
             snapshot, run=run, history=history, logical_step_id=logical_step_id,
@@ -1308,7 +1311,8 @@ class AgentExecution:
                             continue
                     try:
                         snapshot = await self._model_snapshot(
-                            request, run, step_seq, preset_context=preset_context,
+                            request, run, step_seq, request_id=request_id,
+                            preset_context=preset_context,
                             tools=declarations, evidence_ref=evidence_ref,
                         )
                     except ForestError as exc:

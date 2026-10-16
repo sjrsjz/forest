@@ -474,9 +474,9 @@ async def silent_drain_or_close(conversation_id, actor_fence, operation_id):
 
 新 Run 准备第一次模型调用时冻结当时的持久 ContextView，并加入本 Run 当前 RAG、触发输入和必要因果后缀。这里的“一次”指每个 Run 只做一次模型视图选择，不表示空闲期停止持久裁剪。同一 Run 后续模型、工具、思考、修复以及安全点接入消息只调用 `extend`，不得重新选择历史前缀；活动 Run 期间也不发布会改写该冻结前缀的后台裁剪。Run 的步骤数、工具数和排队接入量由 Agent 自身上限约束。
 
-持久 ViewPlan 按明确 `context_view_profile_ref` 管理完整多模态近期窗口、归档引用和本地资源预算，不随当前 LLM 是否支持图片而改变保存语义。Context 是历史选择与裁剪的唯一所有者；Provider 只按目标能力序列化已经定稿的 ModelInputProjection，不能读取 `context_view_profile_ref`，也不能删减历史或 RAG 证据。模型或能力变化只重建当次能力投影，不把去图结果写回 `context_compactions`。正常持久裁剪仍可按既定保留策略整体移出已归档旧单元，但“不支持模态”不能成为删除原图或永久移出图片的理由。
+持久 ViewPlan 按明确 `context_view_profile_ref` 管理完整多模态近期窗口、归档引用和本地资源预算，不随当前 LLM 是否支持图片而改变保存语义。Context 是历史选择与裁剪的唯一所有者；Provider 只按目标能力序列化已经定稿的 ModelInputProjection，不能读取 `context_view_profile_ref`，也不能删减历史或 RAG 证据。模型能力由 Agent 在本次模型步骤报价时从已绑定 Provider Profile 冻结。Conversation 按该能力计算本步骤会发送的图片媒体成本：纯文本模型不计未发送图片的媒体字节与解码字节，视觉模型仍计完整图片成本。后续步骤能力变化可以改变新步骤的媒体报价，但不能重选先前省略的历史或改写旧 ViewPlan；去图结果不写回 `context_compactions`。正常持久裁剪仍可按既定保留策略整体移出已归档旧单元，但“不支持模态”不能成为删除原图或永久移出图片的理由。
 
-确定性选择先计固定开销与必留集合，再按 Context 提交顺序从近到远选择完整可选单元；同序号按稳定 unit_id 决胜，不按 Worker 读取完成先后选择。持久归档使用活动 Context 的高低水位，Run 模型视图选择使用独立的 `model_view_budget`；第一个可选旧单元放不下时停止扩展旧窗口，整组省略，不切断 call/result 配对。预算估算只在 Context 内按固定版本完成，不调用远端模型，也不进入 Provider manifest。
+确定性选择先计固定开销与必留集合，再按 Context 提交顺序从近到远选择完整可选单元；同序号按稳定 unit_id 决胜，不按 Worker 读取完成先后选择。持久归档使用活动 Context 的高低水位，Run 模型视图选择使用独立的 `model_view_budget`；第一个可选旧单元放不下时停止扩展旧窗口，整组省略，不切断 call/result 配对。预算估算只在 Context 内按固定版本完成；已绑定模型能力只是不可变报价输入，不把预算计算交给 Provider，也不调用远端模型。
 
 完整归档覆盖清单保存在事实库；Prompt只保留有界的归档提示及manifest引用，不随历史增长逐条累积占位。多个省略范围可引用同一不可变manifest，准确映射仍可按权限查询。证据来源头、近期原文和必要原文全部计入实际预算，不能因引用在数据库里而声称对应正文已进入模型。
 

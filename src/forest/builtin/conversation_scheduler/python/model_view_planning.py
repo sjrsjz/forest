@@ -42,6 +42,16 @@ def fixed_cost(quote: dict, *, per_token: int, overhead: int, bot_id: str) -> Vi
     output = quote.get("output_tokens")
     if type(output) is not int or not 1 <= output <= 1_048_576:
         raise ForestError("CONTEXT_MODEL_VIEW_QUOTE_INVALID", "Model output reservation is invalid", 409)
+    modalities = quote.get("input_modalities")
+    capability_digest = quote.get("model_capability_digest")
+    if (not isinstance(modalities, list) or "text" not in modalities
+            or set(modalities) - {"text", "image"}
+            or len(set(modalities)) != len(modalities)
+            or not isinstance(capability_digest, str)
+            or not capability_digest.startswith("sha256:")
+            or len(capability_digest) != 71):
+        raise ForestError("CONTEXT_MODEL_VIEW_QUOTE_INVALID",
+                          "Quoted model capability is invalid", 409)
     evidence = quote.get("evidence")
     if evidence is not None:
         if (not isinstance(evidence, dict) or evidence.get("protocol") != "forest.memory-evidence/3"
@@ -154,6 +164,7 @@ async def publish_model_view(scheduler, payload: dict, ctx) -> dict:
             previous_considered_unit_ids=previous_ids, fixed_cost=fixed,
             budget=budget, bytes_per_token=profile["utf8_bytes_per_estimated_token"],
             unit_overhead=profile["unit_overhead_estimated_tokens"],
+            include_images="image" in quote["input_modalities"],
         )
     except ViewSelectionError as exc:
         raise ForestError("CONTEXT_MODEL_VIEW_BUDGET_EXCEEDED", str(exc), 413) from exc

@@ -218,12 +218,14 @@ class ModelExecution:
         request_kind: str,
     ) -> dict:
         graph_id, graph_revision, bot_id = self._identity()
+        profile, target = await self._profile(request_id)
         if repair is None:
             await verify_model_view(
                 self.ctx, snapshot=snapshot, preset_context=preset_context,
                 tools=tools, evidence_ref=evidence_ref, output_tokens=output_tokens,
+                input_modalities=target.input_modalities,
+                model_capability_digest=profile["capability_digest"],
             )
-        profile, target = await self._profile(request_id)
         capabilities = profile["capabilities"]
         images = {}
         media_parents = []

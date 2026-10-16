@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from forest.errors import ForestError
 from forest.packages import digest_json
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src/forest/builtin/agent_runtime/python"))
@@ -88,8 +89,11 @@ async def test_agent_filters_only_conversation_members_and_preserves_causal_hist
         step_seq=1, raw_snapshot=raw, fixed_view=view,
         preset_ref=preset_ref, preset_context=["persona"], tools=[],
         evidence_ref=None, output_tokens=1024,
+        input_modalities=("text",),
+        model_capability_digest="sha256:" + "4" * 64,
     )
     assert selection["selected_unit_ids"] == ["ctx:2"]
+    assert bodies["quote/1"]["input_modalities"] == ["text"]
     assert bodies["quote/1"]["fixed_units"] == [{"unit_id": "agent-turn:1", "role": "assistant"}]
     selected = {
         **view,
@@ -104,4 +108,15 @@ async def test_agent_filters_only_conversation_members_and_preserves_causal_hist
     await verify_model_view(
         ctx, snapshot=selected, preset_context=["persona"], tools=[],
         evidence_ref=None, output_tokens=1024,
+        input_modalities=("text",),
+        model_capability_digest="sha256:" + "4" * 64,
     )
+
+    with pytest.raises(ForestError) as mismatch:
+        await verify_model_view(
+            ctx, snapshot=selected, preset_context=["persona"], tools=[],
+            evidence_ref=None, output_tokens=1024,
+            input_modalities=("text", "image"),
+            model_capability_digest="sha256:" + "4" * 64,
+        )
+    assert mismatch.value.code == "AGENT_MODEL_VIEW_PLAN_INVALID"

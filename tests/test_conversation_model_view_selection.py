@@ -45,7 +45,7 @@ def _select(units, required=(), selected=(), considered=(), *, fixed=0, budget=5
         fixed_cost=ViewCost(tokens=fixed),
         budget=ViewCost(tokens=budget, media_bytes=1000, decoded_bytes=4000),
         bytes_per_token=2,
-        unit_overhead=0,
+        unit_overhead=0, include_images=True,
     )
 
 
@@ -93,7 +93,7 @@ def test_media_charge_can_stop_optional_selection_without_dropping_required_imag
         fixed_cost=ViewCost(),
         budget=ViewCost(tokens=100, media_bytes=90, decoded_bytes=360),
         bytes_per_token=2,
-        unit_overhead=0,
+        unit_overhead=0, include_images=True,
     )
     assert plan.selected_unit_ids == ("input:2", "input:3")
     assert plan.total_cost.media_bytes == 90
@@ -106,7 +106,7 @@ def test_media_charge_can_stop_optional_selection_without_dropping_required_imag
             fixed_cost=ViewCost(),
             budget=ViewCost(tokens=100, media_bytes=69, decoded_bytes=360),
             bytes_per_token=2,
-            unit_overhead=0,
+            unit_overhead=0, include_images=True,
         )
 
 
@@ -123,7 +123,7 @@ def test_joint_view_keeps_causal_and_recent_context_before_ranked_memory():
         previous_selected_unit_ids=(), previous_considered_unit_ids=(),
         fixed_cost=ViewCost(),
         budget=ViewCost(tokens=33, media_bytes=20, decoded_bytes=400),
-        bytes_per_token=20, unit_overhead=0,
+        bytes_per_token=20, unit_overhead=0, include_images=True,
     )
     assert "input:1" in plan.context.selected_unit_ids
     assert "input:6" in plan.context.selected_unit_ids
@@ -141,7 +141,7 @@ def test_joint_view_never_reselects_old_context_omissions_when_memory_changes():
         previous_selected_unit_ids=(), previous_considered_unit_ids=(),
         fixed_cost=ViewCost(),
         budget=ViewCost(tokens=30, media_bytes=1000, decoded_bytes=4000),
-        bytes_per_token=2, unit_overhead=0,
+        bytes_per_token=2, unit_overhead=0, include_images=True,
     )
     assert first.context.omitted_unit_ids
     next_plan = select_joint_view(
@@ -150,7 +150,7 @@ def test_joint_view_never_reselects_old_context_omissions_when_memory_changes():
         previous_considered_unit_ids=first.context.considered_unit_ids,
         fixed_cost=ViewCost(),
         budget=ViewCost(tokens=70, media_bytes=1000, decoded_bytes=4000),
-        bytes_per_token=2, unit_overhead=0,
+        bytes_per_token=2, unit_overhead=0, include_images=True,
     )
     assert "input:6" in next_plan.context.selected_unit_ids
     assert set(first.context.omitted_unit_ids).isdisjoint(next_plan.context.selected_unit_ids)
@@ -164,7 +164,7 @@ def test_joint_view_returns_unused_memory_reservation_to_group_history():
         previous_selected_unit_ids=(), previous_considered_unit_ids=(),
         fixed_cost=ViewCost(),
         budget=ViewCost(tokens=50, media_bytes=1000, decoded_bytes=4000),
-        bytes_per_token=2, unit_overhead=0,
+        bytes_per_token=2, unit_overhead=0, include_images=True,
     )
     assert plan.context.selected_unit_ids == tuple(f"input:{index}" for index in range(1, 6))
     assert plan.selected_evidence_unit_ids == ()
@@ -186,6 +186,7 @@ def test_multiframe_memory_image_charges_all_decoded_pixels():
         "fixed_cost": ViewCost(),
         "bytes_per_token": 4,
         "unit_overhead": 0,
+        "include_images": True,
     }
     too_small = select_joint_view(
         [], evidence, budget=ViewCost(tokens=1000, media_bytes=1000, decoded_bytes=800),
@@ -197,3 +198,34 @@ def test_multiframe_memory_image_charges_all_decoded_pixels():
         **kwargs,
     )
     assert enough.selected_evidence_unit_ids == ("evidence:animated",)
+
+
+def test_text_only_model_does_not_charge_unsent_image_media():
+    units = [_unit(1, media=500)]
+    kwargs = dict(
+        required_unit_ids=("input:1",),
+        previous_selected_unit_ids=(),
+        previous_considered_unit_ids=(),
+        fixed_cost=ViewCost(),
+        budget=ViewCost(tokens=100, media_bytes=100, decoded_bytes=400),
+        bytes_per_token=2,
+        unit_overhead=0,
+    )
+    text_only = select_joint_view(units, [], include_images=False, **kwargs)
+    assert text_only.context.selected_unit_ids == ("input:1",)
+    assert text_only.context.total_cost.media_bytes == 0
+    with pytest.raises(ViewSelectionError, match="Fixed and required"):
+        select_joint_view(units, [], include_images=True, **kwargs)
+    image_evidence = [{
+        "source_unit_id": "recalled-image",
+        "parts": [{"kind": "image", "projection_state": "READY",
+                   "byte_length": 500, "width": 10, "height": 10,
+                   "decoded_pixels": 100}],
+    }]
+    no_context = {**kwargs, "required_unit_ids": ()}
+    text_evidence = select_joint_view([], image_evidence, include_images=False,
+                                      **no_context)
+    assert text_evidence.selected_evidence_unit_ids == ("evidence:recalled-image",)
+    visual_evidence = select_joint_view([], image_evidence, include_images=True,
+                                        **no_context)
+    assert visual_evidence.omitted_evidence_unit_ids == ("evidence:recalled-image",)

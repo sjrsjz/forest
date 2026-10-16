@@ -305,7 +305,7 @@ manifest 的 source_manifest 描述批准进入请求的文本/图片及其必�
 2. 解析本次真正使用的 Provider、模型修订与能力快照；该快照不包含 Context 预算或裁剪策略。
 3. 从规范事实构建独立 ModelView；对所有角色、历史消息、引用/转发、工具结果、RAG 证据及嵌套内容逐段执行允许模态规则。
 4. 移除不支持的内容段，保留真实作者、来源头、文本和工具协议结构；记录被省略段和原因。
-5. 完整投影 Context 已发布的本步骤 ViewPlan 和 Memory 已选定的证据；serializer 不估算 token 预算，不删除单元、不截断证据。Agent 在新 Run 首次调用前提交不可变成本报价，请求 Context 所有者选择历史；后续模型调用只请求追加因果后缀的新版本，不重选旧历史。需要原图变换时保存具体派生引用，不得自动调用 LLM 摘要补洞。
+5. 完整投影 Context 已发布的本步骤 ViewPlan 和 Memory 已选定的证据；serializer 不估算 token 预算，不删除单元、不截断证据。Agent 在新 Run 首次调用前提交包含已绑定模型能力摘要和输入模态的不可变成本报价，请求 Context 所有者选择历史；Conversation 仅对该模态会投影的图片计模型视图媒体成本，文本模型的图片事实仍保留在规范 Context 和记忆中。实际模型调用前，Agent 再核对 Profile 能力摘要与报价一致；后续模型调用只请求追加因果后缀的新版本，不重选旧历史。需要原图变换时保存具体派生引用，不得自动调用 LLM 摘要补洞。
 
 6. 事务外按冻结来源与当前授权物化媒体，由 adapter 使用固定序列化版本构建精确 API 请求体；此时可申请仅覆盖本次需要的短效媒体 URL。计算请求体字节的 payload_digest，不记录令牌明文，也不在此时发出模型调用。
 7. 短事务重验权限、删除状态、输入切口、运行 fence、能力和媒体物化绑定，为该精确载荷签发限时发送许可，并原子保存语义 manifest 与不可变 transport attempt。锁内不下载媒体、不签 URL、不做编码或网络请求。
@@ -349,7 +349,7 @@ Memory 检索策略 `qiyu-graph-region/2` 为证据物化增加 `max_retrieval_m
 
 ## 11. ContextView、缓存与重试
 
-规范活动视图由独立且版本化的 `context_view_profile` 管理年龄、条目、估算 token/字节和媒体引用上限；持续维护的高低水位与一次模型请求的 `model_view_budget` 分别配置。预算算法、pin、历史选择与归档都属于 Context 模块。空闲 `SILENT_DRAIN` 持续执行持久维护；Agent 在新 Run 第一次调用模型前取得已发布 ViewPlan，此后同一 Run 只追加有界因果单元。Provider 能力和请求 manifest 不包含这套策略。
+规范活动视图由独立且版本化的 `context_view_profile` 管理年龄、条目、估算 token/字节和媒体引用上限；持续维护的高低水位与一次模型请求的 `model_view_budget` 分别配置。预算算法、pin、历史选择与归档都属于 Context 模块。空闲 `SILENT_DRAIN` 持续执行持久维护；Agent 在新 Run 第一次调用模型前取得已发布 ViewPlan，此后同一 Run 只追加有界因果单元。Provider 能力可作为不可变报价事实，但 Provider 与请求 manifest 不包含 Context 裁剪策略。
 
 持久 ViewPlan 可以依据既定策略将旧的完整源单元移出活动窗口，保留可靠归档与必要 pin；不能因为当前 LLM 不支持图片而从事实或规范活动视图删除图像段。每请求投影只允许做由目标 API 能力必然要求的模态转换，例如文本模型用明确缺失标记替代图片；不得再按 token/image 估算选择历史或 RAG 证据。原始触发的图片 pin、持久 Context 裁剪记录与本请求 omitted_part_refs 是三类不同事实，不能相互替代。
 
@@ -404,7 +404,7 @@ Run checkpoint 保存本次 ModelRequestManifest、ModelTransportAttempt 引用�
 | MM-17 | 原文有人类说明或已授权 OCR | 保留说明及派生来源，不假称模型看过原图 |
 | MM-18 | 下一合法调用切回视觉模型 | 从规范来源重建图片输入，重验权限和预算 |
 | MM-19 | 视觉 Provider 失败后 fallback 到文字部署 | 同一输入切口生成新 manifest，图片移除，不吸入后续消息 |
-| MM-20 | 图像预算不足或 tokenizer/成本规则变化 | 固定能力与预算版本，明确拒绝/受限投影，不把图片成本计零 |
+| MM-20 | 图像预算不足或 tokenizer/成本规则变化 | 冻结能力与预算版本；视觉模型不足时明确拒绝或受限投影，纯文本模型对未发送图片不计模型视图媒体成本且保留规范图片事实 |
 | MM-21 | 请求准备后源被删除或权限撤销 | 发送前守卫拒绝失效证据；晚媒体/向量任务不能复活来源 |
 | MM-22 | 删除同图的一条来源，另一条仍合法 | 被删来源立即不可检索；剩余来源不丢失，物理回收尊重合法引用 |
 | MM-23 | 热重载并恢复正在等待工具的多模态 Run | 恢复实际 manifest 和原始输入，不重做已确认效果或篡改所见图片 |

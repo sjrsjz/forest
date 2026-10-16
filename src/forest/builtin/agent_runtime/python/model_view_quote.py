@@ -26,6 +26,7 @@ async def quote_and_read_plan(
     ctx, *, request: dict, run: dict, step_seq: int, raw_snapshot: dict,
     fixed_view: dict, preset_ref: dict, preset_context: list[str],
     tools: list[dict], evidence_ref: dict | None, output_tokens: int,
+    input_modalities: tuple[str, ...], model_capability_digest: str,
 ) -> dict:
     """Quote causal sources; only Conversation chooses Context membership."""
     active_ids = {
@@ -57,6 +58,8 @@ async def quote_and_read_plan(
         "evidence_ref": _exact(evidence_ref) if evidence_ref else None,
         "evidence": evidence,
         "output_tokens": output_tokens,
+        "input_modalities": list(input_modalities),
+        "model_capability_digest": model_capability_digest,
     }
     owner_id = f"model-view:{run['run_id']}:step:{step_seq}:{_digest(quote)}"
     parents = [fixed_view["context_snapshot_ref"], preset_ref]
@@ -126,6 +129,7 @@ async def quote_and_read_plan(
 async def verify_model_view(
     ctx, *, snapshot: dict, preset_context: list[str], tools: list[dict],
     evidence_ref: dict | None, output_tokens: int,
+    input_modalities: tuple[str, ...], model_capability_digest: str,
 ) -> None:
     """Reject a model call whose inputs drifted after the selected plan was published."""
     plan_ref = snapshot.get("model_view_plan_ref")
@@ -153,6 +157,8 @@ async def verify_model_view(
         or quote.get("preset_context") != preset_context
         or quote.get("tools") != tools
         or quote.get("output_tokens") != output_tokens
+        or quote.get("input_modalities") != list(input_modalities)
+        or quote.get("model_capability_digest") != model_capability_digest
         or quote.get("evidence_ref") != evidence_ref
         or quote.get("core_prompt") != compose_core_instructions(
             [{"type": "function", "function": tool} for tool in tools]
