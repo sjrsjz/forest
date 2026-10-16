@@ -164,6 +164,14 @@ Context 按自身策略判断超预算时，先保证待移出单元已有可靠
 
 图 head 是投影指针，不取代来源时钟、memory_scope_heads 或事实库 source_revision。物理驱动可用不可变分片 manifest 或 MVCC 版本区间实现快照，不要求每次发布复制整个图；契约是一个查询不能混读版本。
 
+发布图的写入协议必须与权威事实同事务，而不是让管理页面或 Agent 读取一个异步、无水位的缓存。包内以 Bot 为单位持有短事务拓扑 head：来源单元首次成为可见节点、迟到归档改变相邻边、关系贡献创建或批准、撤回与遗忘改变图可见性时，写入者在同一事务锁定 head，把该事务的一组拓扑差量记为一个连续的 revision，更新当前 generation 的节点/边版本区间和 head。回滚不消耗 revision；多个源单元的一次归档可以合并为一个 revision。所有写入路径必须通过同一个包内发布原语，不能让某个维护 Worker 直接改权威关系行却遗漏拓扑差量。head 行锁只覆盖短事务的差量提交，不包住嵌入、向量、LLM、Payload 读取或大规模重建 I/O；需要按 Bot 压测该串行点。
+
+投影边使用稳定规范 ID 与半开可见区间 `[from_revision,to_revision)`，并保存关系贡献、来源、证据及批准事实的引用，不复制来源正文。来源内确定性 `TRUNK_NEXT` 在迟到位置接入时，同一 revision 关闭旧相邻边并发布两条新边；联想边的自动与人工来源必须保留区别。查询登记时冻结 `(generation_id,graph_revision,deletion_epoch)`，该查询的全部扩散步骤只读这一版本的投影；跨步分页、采样和证据路径不能混用新 head。遗忘及当前来源资格仍在每次物化和展示前复核：旧图快照不能复活已抑制来源，投影也不能替代权威权限裁决。缺少可用发布 head 时须明确报告图阶段未执行或降级，不能把直接扫关系表的 MVCC 视图冒称为发布版本。
+
+重建新 generation 时，从完整的不可变拓扑差量日志或与同一 reducer/version 匹配的可信 checkpoint 开始，按 revision 键集有界重放；每个差量保存稳定操作身份和输入摘要以便崩溃重试合流。构建期间旧 generation 继续服务；候选追到活动 head 后，在锁住 Bot head 的短事务中复核 reducer/schema、连续水位和来源删除纪元，再 CAS 切换 generation 指针。只读 graph head 和管理关系回执需分别标明实际发布 revision 与当前权威事实状态，不能把候选 generation 或未批准人工关系展示成已发布可召回边。验收至少覆盖 103→101→102 的乱序归档、并发批准/撤回/遗忘、构建中新增边、进程中断后的无重复重放、旧查询跨步骤版本稳定及切换后当前删除仍不可见。
+
+当前代码仍在 `memory_read_graph_neighbours` 中直接按 PostgreSQL `pg_snapshot` 读取权威来源与关系；它满足单次查询的事实快照与即时资格复核，但尚无上述持久发布 head、版本区间和重建链，不能在试验诊断中填充虚构的 `projection_revision`。实施该协议时先让同事务差量覆盖所有拓扑写入者，再切换 Agent 与管理试验读口，最后启用重建发布；中途保持诊断明确标识当前事实读取模式。
+
 ### 5.1 专用向量数据库与引用边界
 
 向量查询不得在 PostgreSQL 中以 `real[]`、逐元素函数或全表扫描实现。官方实现把职责拆成三个平级模块：`embedding.multimodal` 生成文本/图片对齐向量，`vector.index` 独占 Milvus 客户端和 collection，`memory.graph` 独占内容、来源、关系、资格和召回语义。三者只经 RuntimeGraph 中冻结的服务契约通信。
