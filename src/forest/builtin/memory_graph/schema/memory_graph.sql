@@ -579,6 +579,115 @@ CREATE TABLE relation_approvals (
         REFERENCES relation_contributions(bot_id,contribution_id)
 );
 
+-- Topology changes are journalled in the same transaction as their authority.
+-- This is an input to the future published graph, not itself a published head.
+CREATE TABLE graph_topology_journal_heads (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    revision bigint NOT NULL DEFAULT 0 CHECK (revision >= 0)
+);
+
+CREATE TABLE graph_topology_journal_transactions (
+    bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
+    transaction_id xid8 NOT NULL,
+    revision bigint NOT NULL CHECK (revision > 0),
+    PRIMARY KEY (bot_id,transaction_id),
+    UNIQUE (bot_id,revision)
+);
+
+CREATE TABLE graph_topology_events (
+    bot_id text NOT NULL,
+    revision bigint NOT NULL,
+    event_kind text NOT NULL CHECK (event_kind IN
+        ('SOURCE_UNIT_VISIBILITY','SOURCE_STATUS','RELATION_CONTRIBUTION',
+         'RELATION_APPROVAL','RELATION_RETRACTION')),
+    entity_id text NOT NULL CHECK (octet_length(entity_id) BETWEEN 1 AND 256),
+    before_value jsonb,
+    after_value jsonb NOT NULL,
+    recording_xid xid8 NOT NULL DEFAULT pg_current_xact_id(),
+    PRIMARY KEY (bot_id,revision,event_kind,entity_id),
+    FOREIGN KEY (bot_id,revision)
+        REFERENCES graph_topology_journal_transactions(bot_id,revision)
+);
+
+CREATE FUNCTION record_graph_topology_event()
+RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    event_kind_value text;
+    entity_value text;
+    before_value_value jsonb;
+    journal_revision bigint;
+BEGIN
+    IF TG_TABLE_NAME='source_units' THEN
+        IF TG_OP='INSERT' THEN
+            IF NEW.eligibility_state<>'ELIGIBLE' THEN RETURN NEW; END IF;
+        ELSIF OLD.eligibility_state IS NOT DISTINCT FROM NEW.eligibility_state THEN
+            RETURN NEW;
+        END IF;
+        event_kind_value := 'SOURCE_UNIT_VISIBILITY';
+        entity_value := NEW.source_unit_id;
+    ELSIF TG_TABLE_NAME='memory_sources' THEN
+        IF OLD.status IS NOT DISTINCT FROM NEW.status THEN RETURN NEW; END IF;
+        event_kind_value := 'SOURCE_STATUS';
+        entity_value := NEW.source_id;
+    ELSIF TG_TABLE_NAME='relation_contributions' THEN
+        IF TG_OP='UPDATE' THEN
+            IF OLD.active IS NOT DISTINCT FROM NEW.active THEN RETURN NEW; END IF;
+        END IF;
+        event_kind_value := 'RELATION_CONTRIBUTION';
+        entity_value := NEW.contribution_id;
+    ELSIF TG_TABLE_NAME='relation_approvals' THEN
+        event_kind_value := 'RELATION_APPROVAL';
+        entity_value := NEW.contribution_id;
+    ELSIF TG_TABLE_NAME='relation_retractions' THEN
+        event_kind_value := 'RELATION_RETRACTION';
+        entity_value := NEW.contribution_id;
+    ELSE
+        RAISE EXCEPTION 'Unsupported graph topology event source: %',TG_TABLE_NAME;
+    END IF;
+    IF TG_OP='UPDATE' THEN before_value_value := to_jsonb(OLD); END IF;
+    INSERT INTO __forest_module_schema__.graph_topology_journal_heads(bot_id)
+    VALUES (NEW.bot_id) ON CONFLICT (bot_id) DO NOTHING;
+    SELECT revision INTO journal_revision
+    FROM __forest_module_schema__.graph_topology_journal_transactions
+    WHERE bot_id=NEW.bot_id AND transaction_id=pg_current_xact_id();
+    IF journal_revision IS NULL THEN
+        UPDATE __forest_module_schema__.graph_topology_journal_heads
+        SET revision=revision+1 WHERE bot_id=NEW.bot_id
+        RETURNING revision INTO journal_revision;
+        INSERT INTO __forest_module_schema__.graph_topology_journal_transactions(
+            bot_id,transaction_id,revision)
+        VALUES (NEW.bot_id,pg_current_xact_id(),journal_revision);
+    END IF;
+    INSERT INTO __forest_module_schema__.graph_topology_events(
+        bot_id,revision,event_kind,entity_id,before_value,after_value)
+    VALUES (NEW.bot_id,journal_revision,event_kind_value,
+            entity_value,before_value_value,to_jsonb(NEW))
+    ON CONFLICT (bot_id,revision,event_kind,entity_id)
+    DO UPDATE SET after_value=EXCLUDED.after_value;
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION guard_graph_topology_event()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'Topology journal event is immutable'
+            USING ERRCODE='55000';
+    END IF;
+    IF OLD.recording_xid<>pg_current_xact_id()
+       OR ROW(NEW.bot_id,NEW.revision,NEW.event_kind,NEW.entity_id,
+              NEW.before_value,NEW.recording_xid)
+          IS DISTINCT FROM
+          ROW(OLD.bot_id,OLD.revision,OLD.event_kind,OLD.entity_id,
+              OLD.before_value,OLD.recording_xid) THEN
+        RAISE EXCEPTION 'Topology journal event is immutable'
+            USING ERRCODE='55000';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
 CREATE TABLE memory_queries (
     bot_id text NOT NULL REFERENCES forest_kernel.bot_identity(bot_id),
     query_id text NOT NULL CHECK (octet_length(query_id) BETWEEN 1 AND 256),
@@ -4699,6 +4808,25 @@ BEGIN
 END;
 $$;
 
+CREATE TRIGGER graph_source_visibility_event
+    AFTER INSERT OR UPDATE ON source_units
+    FOR EACH ROW EXECUTE FUNCTION record_graph_topology_event();
+CREATE TRIGGER graph_source_status_event
+    AFTER UPDATE OF status ON memory_sources
+    FOR EACH ROW EXECUTE FUNCTION record_graph_topology_event();
+CREATE TRIGGER graph_relation_contribution_event
+    AFTER INSERT OR UPDATE OF active ON relation_contributions
+    FOR EACH ROW EXECUTE FUNCTION record_graph_topology_event();
+CREATE TRIGGER graph_relation_approval_event
+    AFTER INSERT ON relation_approvals
+    FOR EACH ROW EXECUTE FUNCTION record_graph_topology_event();
+CREATE TRIGGER graph_relation_retraction_event
+    AFTER INSERT ON relation_retractions
+    FOR EACH ROW EXECUTE FUNCTION record_graph_topology_event();
+CREATE TRIGGER graph_topology_events_guard
+    BEFORE UPDATE OR DELETE ON graph_topology_events
+    FOR EACH ROW EXECUTE FUNCTION guard_graph_topology_event();
+
 CREATE TRIGGER memory_domain_immutable BEFORE UPDATE OR DELETE ON memory_domains
     FOR EACH ROW EXECUTE FUNCTION guard_memory_domain();
 CREATE TRIGGER memory_source_guard BEFORE UPDATE OR DELETE ON memory_sources
@@ -7456,6 +7584,10 @@ BEGIN
                 'relation_id',requested_relation,'contribution_id',requested_contribution,
                 'approved_at',previous_record.created_at));
     END IF;
+    -- Forget may hold the topology head before it retracts this contribution.
+    -- Acquire that head before the contribution lock to keep the lock order.
+    PERFORM 1 FROM __forest_module_schema__.graph_topology_journal_heads
+    WHERE bot_id=requested_bot FOR UPDATE;
     SELECT c.relation_id,c.active INTO target_record
     FROM __forest_module_schema__.relation_contributions c
     WHERE c.bot_id=requested_bot AND c.contribution_id=requested_contribution
@@ -7531,6 +7663,10 @@ BEGIN
                 'reason_code',previous_record.reason_code,
                 'retracted_at',previous_record.created_at));
     END IF;
+    -- Forget may hold the topology head before it retracts this contribution.
+    -- Acquire that head before the contribution lock to keep the lock order.
+    PERFORM 1 FROM __forest_module_schema__.graph_topology_journal_heads
+    WHERE bot_id=requested_bot FOR UPDATE;
     SELECT c.relation_id,c.active INTO target_record
     FROM __forest_module_schema__.relation_contributions c
     WHERE c.bot_id=requested_bot AND c.contribution_id=requested_contribution

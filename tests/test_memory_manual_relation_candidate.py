@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 from pathlib import Path
@@ -167,11 +168,25 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
     assert (await sources_with_review("APPROVED"))["items"] == []
     before = await query("query/before")
     assert not [edge for edge in before["edges"] if edge["relation"] == "ASSOCIATED"]
-    approval = await call("memory_approve_management_relation",
-                          {"bot_id": store.bot_id, "operation_id": "approve/one"},
-                          {"relation_id": candidate["relation_id"],
-                           "contribution_id": candidate["contribution_id"],
-                           "requested_by": "admin/reviewer"})
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "SELECT 1 FROM {}.graph_topology_journal_heads "
+            "WHERE bot_id=%s FOR UPDATE"
+        ).format(namespace), (store.bot_id,))
+        pending_approval = asyncio.create_task(call(
+            "memory_approve_management_relation",
+            {"bot_id": store.bot_id, "operation_id": "approve/one"},
+            {"relation_id": candidate["relation_id"],
+             "contribution_id": candidate["contribution_id"],
+             "requested_by": "admin/reviewer"},
+        ))
+        await asyncio.sleep(0.1)
+        assert not pending_approval.done()
+        await conn.execute(sql.SQL(
+            "SELECT 1 FROM {}.relation_contributions "
+            "WHERE bot_id=%s AND contribution_id=%s FOR UPDATE NOWAIT"
+        ).format(namespace), (store.bot_id, candidate["contribution_id"]))
+    approval = await pending_approval
     assert approval["ok"], approval
     assert {item["source_unit_id"] for item in
             (await sources_with_review("UNREVIEWED", before_sources))["items"]} == {
@@ -198,3 +213,38 @@ async def test_manual_relation_requires_approval_in_query_snapshot(clean_authori
     assert (await sources_with_review("APPROVED"))["items"] == []
     final = await query("query/final")
     assert not [edge for edge in final["edges"] if edge["relation"] == "ASSOCIATED"]
+
+    async with store.pool.connection() as conn, conn.transaction():
+        rows = await (await conn.execute(sql.SQL(
+            "SELECT revision,event_kind,entity_id FROM {}.graph_topology_events "
+            "WHERE bot_id=%s ORDER BY revision,event_kind,entity_id"
+        ).format(namespace), (store.bot_id,))).fetchall()
+    assert [(row["revision"], row["event_kind"], row["entity_id"]) for row in rows] == [
+        (1, "SOURCE_UNIT_VISIBILITY", "seed"),
+        (1, "SOURCE_UNIT_VISIBILITY", "target"),
+        (2, "RELATION_CONTRIBUTION", candidate["contribution_id"]),
+        (3, "RELATION_APPROVAL", candidate["contribution_id"]),
+        (4, "RELATION_CONTRIBUTION", candidate["contribution_id"]),
+        (4, "RELATION_RETRACTION", candidate["contribution_id"]),
+    ]
+
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "UPDATE {}.source_occurrences SET eligibility_state='ELIGIBLE' "
+            "WHERE bot_id=%s AND source_unit_id='query-input'"
+        ).format(namespace), (store.bot_id,))
+        await conn.execute(sql.SQL(
+            "UPDATE {}.source_units SET eligibility_state='ELIGIBLE', "
+            "eligibility_revision=eligibility_revision+1,eligible_at=clock_timestamp() "
+            "WHERE bot_id=%s AND source_unit_id='query-input'"
+        ).format(namespace), (store.bot_id,))
+    async with store.pool.connection() as conn, conn.transaction():
+        row = await (await conn.execute(sql.SQL(
+            "SELECT revision,event_kind,before_value->>'eligibility_state' AS before_state, "
+            "after_value->>'eligibility_state' AS after_state "
+            "FROM {}.graph_topology_events WHERE bot_id=%s AND revision=5"
+        ).format(namespace), (store.bot_id,))).fetchone()
+    assert row == {
+        "revision": 5, "event_kind": "SOURCE_UNIT_VISIBILITY",
+        "before_state": "REGISTERED", "after_state": "ELIGIBLE",
+    }
