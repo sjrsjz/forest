@@ -24,7 +24,9 @@ Shell 不是任意系统终端。默认保留前缀为 `#forest`；内核只实�
   -> CONTROL Delivery 回原会话
 ```
 
-ShellGate 位于稳定内核边界，只做有界本地工作：确认完整前缀 token、已认证 Binding/principal、输入大小、Core grammar 形状和接入容量，并形成不可持久复用的 ingress proof。它不解释管理员名单、不拥有 Shell 策略或命令请求，也不载入模块 Python、不联网、不访问 LLM。`shell.command` 在同一 UnitOfWork 中用自己的当前策略与 RouteGraph 复核 proof，写自己的接纳事实；`conversation.scheduler` 同时写 Inbox。任一 participant 失败时两边都不提交。
+ShellGate 位于稳定内核边界，只做有界本地工作：确认完整前缀 token、输入大小、Core grammar 形状和接入容量，并形成绑定当前入站事件的 ingress proof。Binding 与 QQ principal 由 OneBot Adapter 包在同一接纳事务内核对，不能由内核解释 OneBot 配置。它不解释管理员名单、不拥有 Shell 策略或命令请求，也不载入模块 Python、不联网、不访问 LLM。`shell.command` 在同一 UnitOfWork 中用自己的当前策略与 RouteGraph 复核 proof，写自己的接纳事实；`conversation.scheduler` 同时写 Inbox。任一 participant 失败时两边都不提交。
+
+每个 OneBot Generation 发布时，通用包发布端口在 RuntimeGraph 事务内读取并验证该模块准确的有效配置，再交给 Adapter 包声明的 SQL 函数。Adapter 仅投影该代的 `binding_ref / binding_epoch / self_id / enabled` 和配置修订；凭据引用与 WebSocket 地址不进入投影。普通入站只接受当前代已启用且 epoch 相符的 Binding；Shell 来源证明还将原始帧的 `self_id`、作者、群、消息 ID 与该代投影及同事务记录的事件逐项核对。旧代或 Worker 自报的 Binding 字段不能代替当前发布事实。
 
 一条消息在接纳事务中冻结：
 

@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "generation_id",
+    "config_revision",
+    "binding_count"
+  ],
+  "properties": {
+    "generation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "config_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "binding_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16
+    }
+  }
+}

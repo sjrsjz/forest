@@ -143,6 +143,16 @@ MANIFEST_SCHEMA = {
                     },
                     "scope": {"enum": ["bot", "deployment", "host"]},
                     "configuration_apply": {"const": "worker-host/1"},
+                    "configuration_publication": {
+                        "type": "object", "additionalProperties": False,
+                        "required": ["name", "function", "input_schema", "output_schema"],
+                        "properties": {
+                            "name": {"type": "string"},
+                            "function": {"type": "string"},
+                            "input_schema": {"type": "string"},
+                            "output_schema": {"type": "string"},
+                        },
+                    },
                     "bootstrap_config": {"type": "string"},
                     "bootstrap_materialization": {"type": "string"},
                     "bootstrap_projection": {
@@ -1957,9 +1967,20 @@ def _manifest(files: dict[str, bytes]) -> dict:
             "INVALID_CONTROL_INTERNAL_COMMAND",
             "Control internal service must bind one exact private idempotent Command",
         )
+    publication = component.get("configuration_publication")
+    if publication is not None:
+        if (
+            component["scope"] != "bot"
+            or "storage" not in component
+            or not IDENTIFIER.fullmatch(publication["name"])
+            or not SQL_FUNCTION.fullmatch(publication["function"])
+        ):
+            _fail("INVALID_CONFIGURATION_PUBLICATION", "Configuration publication requires a Bot storage function")
+        _schema(files, publication["input_schema"])
+        _schema(files, publication["output_schema"])
     functions = [
         item["function"] for item in (*domain_queries, *domain_commands, *unit_of_work_participants)
-    ] + [
+    ] + ([publication["function"]] if publication is not None else []) + [
         function
         for item in owned_work_handlers
         if item.get("authority", "package") == "package"

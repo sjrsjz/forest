@@ -102,6 +102,9 @@ _PAYLOAD_STAGING_BYTES = 32 * 1024 * 1024
 
 def _component_schema_references(component: Mapping[str, Any]) -> tuple[str, ...]:
     references: list[str] = [component["config_schema"]]
+    publication = component.get("configuration_publication")
+    if publication is not None:
+        references.extend((publication["input_schema"], publication["output_schema"]))
     state_value_schema = component.get("state_value_schema")
     if state_value_schema is not None:
         references.append(state_value_schema)
@@ -676,6 +679,78 @@ class PackageGenerationAdapter:
             self._service_inflight -= 1
             if self._service_inflight == 0:
                 self._services_drained.set()
+
+    async def publish_generation_in(
+        self, conn, *, generation_id: str, graph_id: str
+    ) -> None:
+        """Publish package-owned configuration facts with the RuntimeGraph."""
+        declaration = self.component.get("configuration_publication")
+        if declaration is None:
+            return
+        identity = self.generation_identity
+        prepared = self._prepared_binding
+        authority = self._unit_of_work_authority
+        if (
+            identity is None or prepared is None or authority is None
+            or self.state is not PackageGenerationState.WORKER_READY
+            or identity.generation_id != generation_id
+        ):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_PUBLICATION_UNAVAILABLE",
+                "Configuration publication requires its prepared Generation", 409,
+            )
+        selected = await self.module_configuration.effective_in(
+            conn, include_value=True
+        )
+        if (
+            selected.revision != prepared.config_revision
+            or selected.payload_id != prepared.config_payload_id
+            or selected.payload_digest != prepared.config_payload_digest
+        ):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_PUBLICATION_CONFLICT",
+                "Published Generation adopted a different configuration", 409,
+            )
+        payload = {
+            "protocol": "forest.configuration-publication/1",
+            "generation_id": generation_id,
+            "graph_id": graph_id,
+            "revision": selected.revision,
+            "payload_digest": selected.payload_digest,
+            "value": selected.value,
+        }
+        if not Draft202012Validator(
+            self._compiled_schemas[declaration["input_schema"]]
+        ).is_valid(payload):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_PUBLICATION_INPUT_INVALID",
+                "Verified configuration violates the publication contract", 409,
+            )
+        scope = PackageCallScope(
+            bot_id=self.bot_id,
+            scope_kind=self.scope_kind,
+            scope_id=self.scope_id,
+            component_id=self.component_id,
+            generation_id=generation_id,
+            instance_id=prepared.instance_id,
+            worker_incarnation=prepared.worker_incarnation,
+            call_id="call:" + uuid4().hex,
+            call_operation_id=f"runtime-publish:{graph_id}:{self.component_id}",
+            causal_root_kind="runtime.graph-publication",
+            causal_root_id=graph_id,
+            recovered_generation=self._recovered_generation,
+        )
+        result = await authority.invoke_generation_publication_in(
+            conn, scope, declaration, payload,
+            parent_call_id=f"runtime-publish:{graph_id}",
+        )
+        if not Draft202012Validator(
+            self._compiled_schemas[declaration["output_schema"]]
+        ).is_valid(result):
+            raise ForestError(
+                "PACKAGE_CONFIGURATION_PUBLICATION_OUTPUT_INVALID",
+                "Package publication result violates its contract", 502,
+            )
 
     def unit_of_work_participant(self) -> PackageUnitOfWorkParticipant:
         """Resolve a narrow handle bound to this exact package Generation."""

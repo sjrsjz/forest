@@ -373,6 +373,19 @@ class PostgresPackageDomainAuthority:
                 "DOMAIN_AUTHORITY_FAILED", "Domain authority transaction failed", 503
             ) from exc
 
+    async def invoke_generation_publication_in(
+        self, conn, scope: PackageCallScope, declaration: dict, payload: dict,
+        *, parent_call_id: str,
+    ) -> Any:
+        """Invoke a package-owned publication hook inside graph publication."""
+        # RuntimeGraph.publish_graph has already fenced this READY member
+        # in the same transaction; the ordinary service fence requires ACTIVE.
+        return await self._invoke_in(
+            conn, "publication", scope, declaration, payload,
+            parent_call_id=parent_call_id, timeout_seconds=10,
+            generation_verified=True,
+        )
+
     async def invoke_artifact_command_in(
         self, conn, scope: PackageCallScope, declaration: dict, payload: dict,
         *, parent_call_id: str, timeout_seconds: float, result_validator,
@@ -582,6 +595,7 @@ class PostgresPackageDomainAuthority:
                 "command",
                 "management_action",
                 "participant",
+                "publication",
                 "owned_claim",
                 "owned_renew",
                 "owned_settle",

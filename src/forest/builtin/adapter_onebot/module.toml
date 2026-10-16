@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.5.3"
+version = "2.6.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -15,6 +15,12 @@ bootstrap_config = "bootstrap.json"
 bootstrap_materialization = "bootstrap-materialization.json"
 auto_install = true
 configuration_apply = "worker-host/1"
+
+[components.configuration_publication]
+name = "adapter.publish-configuration"
+function = "adapter_publish_configuration"
+input_schema = "schemas/configuration-publication-input.json"
+output_schema = "schemas/configuration-publication-output.json"
 
 [components.bootstrap_contribution]
 label = "OneBot Adapter"
@@ -137,9 +143,9 @@ order = 5
 
 [components.storage]
 schema_id = "forest.adapter.onebot"
-schema_version = "2.1.1"
+schema_version = "2.2.0"
 baseline = "schema/adapter_onebot.sql"
-baseline_sha256 = "c976e198533ca7d80d6d283e7c09823d3a88f300e1486e683b6bc00f5abd75f5"
+baseline_sha256 = "df66b9a75263ab62e2197153936fb11f448e11edf67d88d0e109667425cd0f19"
 scope = "bot"
 repository_contract = "forest.adapter-onebot.repository/2"
 execution_profile = "official"

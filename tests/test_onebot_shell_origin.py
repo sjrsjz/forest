@@ -51,14 +51,36 @@ async def test_shell_origin_checks_raw_qq_identity_in_same_transaction(clean_aut
         await conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema_name)))
         await conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema_name)))
         await conn.execute(baseline)
+        publication = {
+            "protocol": "forest.configuration-publication/1",
+            "generation_id": "generation/adapter",
+            "graph_id": "graph/adapter",
+            "revision": 1,
+            "payload_digest": "sha256:" + "b" * 64,
+            "value": {
+                "protocol": "forest.adapter.onebot/2",
+                "bindings": [{
+                    "binding_ref": "binding/1", "binding_epoch": 1,
+                    "self_id": "10000", "enabled": True,
+                }],
+            },
+        }
+        published = await (await conn.execute(
+            sql.SQL("SELECT {}.adapter_publish_configuration(%s,%s) AS result").format(
+                sql.Identifier(schema_name)
+            ),
+            (Jsonb({"port_kind": "publication", "component_id": "adapter.onebot",
+                    "generation_id": "generation/adapter"}), Jsonb(publication)),
+        )).fetchone()
+        assert published["result"]["ok"] is True
         await conn.execute(
             sql.SQL(
-                "INSERT INTO {}.platform_events (event_id,operation_id,binding_ref,"
+                "INSERT INTO {}.platform_events (event_id,generation_id,operation_id,binding_ref,"
                 "binding_epoch,client_incarnation,platform_message_ref,event_kind,"
                 "channel_kind,channel_ref,conversation_ref,author_subject_ref,"
                 "raw_payload,normalized_payload,author_payload,received_at,"
                 "classification_deadline,sent_at,input_payload) VALUES "
-                "(%s,'operation/1','binding/1',1,'client/1','7','group.message',"
+                "(%s,'generation/adapter','operation/1','binding/1',1,'client/1','7','group.message',"
                 "'GROUP','933179609',%s,'qq:42',%s,%s,%s,%s,%s,%s,%s)"
             ).format(sql.Identifier(schema_name)),
             (event_ref, conversation_ref, Jsonb({"payload_id": "raw/1"}),
@@ -78,6 +100,37 @@ async def test_shell_origin_checks_raw_qq_identity_in_same_transaction(clean_aut
         accepted = await prove(envelope)
         assert accepted["ok"] is True
         assert accepted["value"]["principal_ref"] == "qq:42"
+        stale_event = {
+            "event_id": "onebot-event:" + "b" * 64,
+            "platform_message_ref": "8", "event_kind": "group.message",
+            "channel_kind": "GROUP", "channel_ref": "933179609",
+            "conversation_ref": conversation_ref, "author_subject_ref": "qq:42",
+            "raw": {}, "normalized": {}, "author": {},
+            "received_at": now.isoformat(),
+            "classification_deadline": (now + timedelta(minutes=2)).isoformat(),
+            "sent_at": now.isoformat(),
+        }
+        stale_ingress = {
+            "protocol": "forest.uow-step/1",
+            "caller": {"component_id": "adapter.onebot",
+                       "generation_id": "generation/adapter"},
+            "input": {
+                "operation_id": "operation/2", "binding_ref": "binding/1",
+                "binding_epoch": 2, "client_incarnation": "client/1",
+                "event": stale_event,
+            },
+        }
+        stale_result = await (await conn.execute(
+            sql.SQL("SELECT {}.adapter_record_ingress(%s,%s) AS result").format(
+                sql.Identifier(schema_name)
+            ),
+            (Jsonb({"generation_id": "generation/adapter"}), Jsonb(stale_ingress)),
+        )).fetchone()
+        assert stale_result["result"]["error"]["code"] == "ONEBOT_BINDING_NOT_CURRENT"
+        forged_binding = deepcopy(envelope)
+        forged_binding["input"]["raw_frame"]["self_id"] = 99999
+        forged_binding["prior"]["gate"]["self_id"] = "99999"
+        assert (await prove(forged_binding))["error"]["code"] == "ONEBOT_SHELL_ORIGIN_INVALID"
         for path, forged_value in (
             (("input", "raw_frame", "user_id"), 43),
             (("input", "raw_frame", "self_id"), 99999),
