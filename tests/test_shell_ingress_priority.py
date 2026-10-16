@@ -1,3 +1,5 @@
+import hashlib
+import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -10,7 +12,11 @@ from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin.shell_command.python.shell_command import ShellCommand
-from forest.kernel_shell_gate import shell_gate_inspect_service
+from forest.errors import ForestError
+from forest.kernel_shell_gate import (
+    KernelShellGateUnitOfWorkParticipant,
+    shell_gate_inspect_service,
+)
 
 
 async def _gate(normalized):
@@ -283,3 +289,88 @@ async def test_shell_admission_preserves_rejections_and_priority_capacity(clean_
         correct_lane = await call("shell_settle_work_p0", settlement)
         assert correct_lane["ok"] is True
         assert correct_lane["value"]["work_id"] == "request/P0"
+
+
+async def test_shell_proof_requires_the_transports_original_frame_root():
+    raw_body = b'{"post_type":"message","self_id":10000}'
+    parts = [{"type": "text", "text": "#forest core status"}]
+    normalized_body = json.dumps({"parts": parts}).encode()
+    event_ref = "onebot-event:sample"
+    conversation_ref = "onebot:group:933179609"
+    event = {
+        "event_id": event_ref,
+        "conversation_ref": conversation_ref,
+        "author_subject_ref": "qq:42",
+        "received_at": "2026-10-16T00:00:00+00:00",
+        "classification_deadline": "2026-10-16T00:02:00+00:00",
+        "raw": {"payload_id": "raw/1", "digest": "sha256:" + "a" * 64},
+        "normalized": {"payload_id": "normalized/1", "digest": "sha256:" + "b" * 64},
+    }
+    adapter = {
+        "binding_ref": "binding/1", "binding_epoch": 1,
+        "client_incarnation": "onebot-client:sample", "event": event,
+    }
+    conversation = {
+        "conversation_id": conversation_ref,
+        "event_id": "onebot:" + event_ref,
+        "source_event_ref": event_ref,
+        "binding_ref": "binding/1",
+        "author_subject_ref": "qq:42",
+        "content": event["normalized"],
+        "content_byte_length": len(normalized_body),
+    }
+    shell = {
+        "event_ref": event_ref, "binding_ref": "binding/1", "binding_epoch": 1,
+        "client_incarnation": "onebot-client:sample", "connection_epoch": 9,
+        "principal_ref": "qq:42", "conversation_ref": conversation_ref,
+        "adapter_generation_id": "adapter/generation",
+        "received_at": event["received_at"],
+        "admission_deadline": event["classification_deadline"],
+    }
+    gate = {
+        "self_id": "10000",
+        "inspection": await _gate({"self_id": "10000", "segments": parts}),
+    }
+    envelope = {
+        "protocol": "forest.uow-step/1",
+        "caller": {"component_id": "adapter.onebot", "generation_id": "adapter/generation"},
+        "input": {"adapter": adapter, "conversation": conversation, "shell": shell, "gate": gate},
+        "prior": {
+            "adapter": {"event_id": event_ref, "binding_ref": "binding/1", "binding_epoch": 1},
+            "conversation": {
+                "conversation_id": conversation_ref,
+                "event_id": "onebot:" + event_ref, "ingress_seq": 1,
+            },
+        },
+    }
+
+    class Payloads:
+        async def verify_in(self, _conn, **_reference):
+            return None
+
+        async def read_bytes_in(self, _conn, payload_id):
+            return raw_body if payload_id == "raw/1" else normalized_body
+
+    participant = KernelShellGateUnitOfWorkParticipant(
+        SimpleNamespace(
+            service=object(),
+            generation_identity=SimpleNamespace(generation_id="runtime/generation"),
+        ),
+        Payloads(),
+    )
+    frame_ref = "onebot-frame:" + hashlib.sha256(
+        b"binding/1\0" + b"9\0" + raw_body
+    ).hexdigest()
+    proof = await participant.invoke_in(
+        None, "shell.gate-prove-ingress", envelope,
+        causal_root_kind="adapter.platform-frame", causal_root_id=frame_ref,
+    )
+    assert proof["protocol"] == "forest.shell-ingress-proof/1"
+    assert proof["principal_ref"] == "qq:42"
+    with pytest.raises(ForestError) as error:
+        await participant.invoke_in(
+            None, "shell.gate-prove-ingress", envelope,
+            causal_root_kind="adapter.platform-frame",
+            causal_root_id="onebot-frame:" + "0" * 64,
+        )
+    assert error.value.code == "SHELL_GATE_PROOF_INVALID"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 from forest.errors import ForestError
@@ -113,10 +114,12 @@ class KernelShellGateUnitOfWorkParticipant:
             invalid()
         event = adapter.get("event")
         normalized_ref = event.get("normalized") if isinstance(event, dict) else None
+        raw_ref = event.get("raw") if isinstance(event, dict) else None
         event_ref = event.get("event_id") if isinstance(event, dict) else None
         if (
             not isinstance(event_ref, str) or not event_ref
             or not isinstance(normalized_ref, dict)
+            or not isinstance(raw_ref, dict)
             or normalized_ref != conversation.get("content")
             or prior["adapter"].get("event_id") != event_ref
             or prior["adapter"].get("binding_ref") != adapter.get("binding_ref")
@@ -130,6 +133,9 @@ class KernelShellGateUnitOfWorkParticipant:
             or shell.get("event_ref") != event_ref
             or shell.get("binding_ref") != adapter.get("binding_ref")
             or shell.get("binding_epoch") != adapter.get("binding_epoch")
+            or shell.get("client_incarnation") != adapter.get("client_incarnation")
+            or type(shell.get("connection_epoch")) is not int
+            or shell["connection_epoch"] < 1
             or shell.get("principal_ref") != event.get("author_subject_ref")
             or shell.get("conversation_ref") != event.get("conversation_ref")
             or shell.get("adapter_generation_id") != caller["generation_id"]
@@ -139,7 +145,28 @@ class KernelShellGateUnitOfWorkParticipant:
             or prior["conversation"]["ingress_seq"] < 1
             or not isinstance(gate.get("self_id"), str)
             or not gate["self_id"]
+            or _invocation.get("causal_root_kind") != "adapter.platform-frame"
         ):
+            invalid()
+        await self.payloads.verify_in(
+            conn,
+            payload_id=raw_ref.get("payload_id"),
+            digest=raw_ref.get("digest"),
+            owner_component_id="adapter.onebot",
+            owner_kind="onebot.raw-event",
+            owner_id=event_ref,
+        )
+        raw_body = await self.payloads.read_bytes_in(conn, raw_ref["payload_id"])
+        if len(raw_body) > 262144:
+            invalid()
+        frame_digest = hashlib.sha256(
+            adapter["binding_ref"].encode("utf-8")
+            + b"\0"
+            + str(shell["connection_epoch"]).encode("ascii")
+            + b"\0"
+            + raw_body
+        ).hexdigest()
+        if _invocation.get("causal_root_id") != "onebot-frame:" + frame_digest:
             invalid()
         await self.payloads.verify_in(
             conn,
