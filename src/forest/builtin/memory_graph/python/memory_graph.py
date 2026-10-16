@@ -13,6 +13,7 @@ from facet_preparation import (
     query_part_facets,
     query_part_operation_id,
 )
+from graph_rebuild_work import advance as advance_graph_rebuild
 from graph_region import expand as expand_graph
 from query_matching import prepare as prepare_matching
 from recall_work import advance as advance_recall
@@ -458,6 +459,10 @@ class MemoryGraph(Plugin):
                 timeout=20,
             )
         return {"disposition": "READY", "facet_count": len(facets), "error_code": None}
+
+    @job("memory.graph.rebuild")
+    async def rebuild_graph(self, task, ctx):
+        return await advance_graph_rebuild(ctx, task)
 
     @job("memory.text-projection.rebuild")
     async def rebuild_text_projection(self, task, ctx):

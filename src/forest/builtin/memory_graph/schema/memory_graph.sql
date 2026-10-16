@@ -620,6 +620,8 @@ CREATE TABLE graph_generations (
 
 CREATE UNIQUE INDEX graph_generation_active_unique
     ON graph_generations(bot_id) WHERE state='ACTIVE';
+CREATE UNIQUE INDEX graph_generation_candidate_unique
+    ON graph_generations(bot_id) WHERE state='CANDIDATE';
 
 CREATE TABLE graph_projection_heads (
     bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
@@ -650,6 +652,52 @@ CREATE TABLE graph_generation_builds (
         REFERENCES graph_generations(bot_id,generation_id),
     FOREIGN KEY (bot_id,base_generation_id)
         REFERENCES graph_generations(bot_id,generation_id)
+);
+
+CREATE TABLE graph_rebuild_work (
+    bot_id text NOT NULL,
+    generation_id text NOT NULL,
+    requested_by text NOT NULL CHECK (octet_length(requested_by) BETWEEN 1 AND 256),
+    state text NOT NULL DEFAULT 'QUEUED'
+        CHECK (state IN ('QUEUED','CLAIMED','SUCCEEDED','FAILED')),
+    attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    retry_base_attempt integer NOT NULL DEFAULT 0
+        CHECK (retry_base_attempt >= 0 AND retry_base_attempt <= attempt_count),
+    claim_token text CHECK (claim_token IS NULL OR octet_length(claim_token) BETWEEN 1 AND 256),
+    lease_deadline timestamptz,
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    error_code text,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    CHECK ((state='CLAIMED') = (claim_token IS NOT NULL AND lease_deadline IS NOT NULL)),
+    PRIMARY KEY (bot_id,generation_id),
+    UNIQUE (bot_id,claim_token),
+    FOREIGN KEY (bot_id,generation_id)
+        REFERENCES graph_generation_builds(bot_id,generation_id)
+);
+CREATE UNIQUE INDEX graph_rebuild_one_open_work
+    ON graph_rebuild_work(bot_id) WHERE state IN ('QUEUED','CLAIMED');
+CREATE INDEX graph_rebuild_ready_work
+    ON graph_rebuild_work(bot_id,next_attempt_at,generation_id)
+    WHERE state='QUEUED';
+
+CREATE TABLE graph_rebuild_retry_operations (
+    bot_id text NOT NULL,
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    generation_id text NOT NULL,
+    requested_by text NOT NULL,
+    result_payload jsonb NOT NULL,
+    PRIMARY KEY (bot_id,operation_id),
+    FOREIGN KEY (bot_id,generation_id)
+        REFERENCES graph_rebuild_work(bot_id,generation_id)
+);
+
+CREATE TABLE graph_rebuild_settlements (
+    bot_id text NOT NULL,
+    claim_token text NOT NULL,
+    input_payload jsonb NOT NULL,
+    result_payload jsonb NOT NULL,
+    PRIMARY KEY (bot_id,claim_token)
 );
 
 CREATE INDEX graph_event_entity_revision_idx ON graph_topology_events(
@@ -927,6 +975,14 @@ BEGIN
                 'base_revision',existing.base_revision,
                 'replayed_through',existing.replayed_through));
     END IF;
+    IF EXISTS (
+        SELECT 1 FROM __forest_module_schema__.graph_generations
+        WHERE bot_id=requested_bot AND state='CANDIDATE'
+    ) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_IN_PROGRESS',
+                'message','Bot already has a graph candidate','status',409));
+    END IF;
     INSERT INTO __forest_module_schema__.graph_generations(
         bot_id,generation_id,schema_version,reducer_version,state)
     VALUES (requested_bot,requested_generation,'1','1','CANDIDATE')
@@ -945,6 +1001,298 @@ BEGIN
         'value',jsonb_build_object('generation_id',requested_generation,
             'base_generation_id',base_generation,'base_revision',base_revision,
             'replayed_through',0));
+END;
+$$;
+
+CREATE FUNCTION memory_enqueue_graph_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    requested_actor text := input->>'requested_by';
+    candidate_id text;
+    begun jsonb;
+    work_row __forest_module_schema__.graph_rebuild_work%ROWTYPE;
+BEGIN
+    IF requested_bot IS NULL OR requested_operation IS NULL
+       OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR requested_actor IS NULL
+       OR octet_length(requested_actor) NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_INPUT_INVALID',
+                'message','Graph rebuild request is invalid','status',422));
+    END IF;
+    candidate_id := 'rebuild-'||substr(encode(sha256(convert_to(
+        requested_bot||'/'||requested_operation,'UTF8')),'hex'),1,48);
+    begun := __forest_module_schema__.memory_begin_graph_rebuild(
+        context,jsonb_build_object('generation_id',candidate_id));
+    IF begun->>'ok' IS DISTINCT FROM 'true' THEN RETURN begun; END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.graph_rebuild_work
+    WHERE bot_id=requested_bot AND generation_id=candidate_id;
+    IF FOUND THEN
+        IF work_row.requested_by<>requested_actor THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+                'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_CONFLICT',
+                    'message','Graph rebuild operation was reused','status',409));
+        END IF;
+    ELSE
+        INSERT INTO __forest_module_schema__.graph_rebuild_work(
+            bot_id,generation_id,requested_by)
+        VALUES(requested_bot,candidate_id,requested_actor)
+        RETURNING * INTO work_row;
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-graph-rebuild-enqueued/1',
+            'generation_id',candidate_id,'state',work_row.state));
+END;
+$$;
+
+CREATE FUNCTION memory_query_graph_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE
+    work_row __forest_module_schema__.graph_rebuild_work%ROWTYPE;
+    build __forest_module_schema__.graph_generation_builds%ROWTYPE;
+    current_generation text;
+    current_revision bigint;
+BEGIN
+    SELECT * INTO work_row FROM __forest_module_schema__.graph_rebuild_work
+    WHERE bot_id=context->>'bot_id' AND generation_id=input->>'generation_id'
+      AND requested_by=input->>'requested_by';
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_NOT_FOUND',
+                'message','Graph rebuild request does not exist','status',404));
+    END IF;
+    SELECT * INTO build FROM __forest_module_schema__.graph_generation_builds
+    WHERE bot_id=work_row.bot_id AND generation_id=work_row.generation_id;
+    SELECT active_generation_id,active_graph_revision
+    INTO current_generation,current_revision
+    FROM __forest_module_schema__.graph_projection_heads
+    WHERE bot_id=work_row.bot_id;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-graph-rebuild/1',
+            'generation_id',work_row.generation_id,
+            'base_generation_id',build.base_generation_id,
+            'base_revision',build.base_revision,
+            'active_generation_id',current_generation,
+            'active_revision',current_revision,
+            'replayed_through',build.replayed_through,
+            'published_revision',build.published_revision,
+            'state',CASE WHEN build.publish_operation_id IS NOT NULL
+                         THEN 'SUCCEEDED' ELSE work_row.state END,
+            'attempt_count',work_row.attempt_count,
+            'error_code',work_row.error_code,
+            'created_at',work_row.created_at,
+            'updated_at',work_row.updated_at));
+END;
+$$;
+
+CREATE FUNCTION memory_retry_graph_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_operation text := context->>'operation_id';
+    prior __forest_module_schema__.graph_rebuild_retry_operations%ROWTYPE;
+    work_row __forest_module_schema__.graph_rebuild_work%ROWTYPE;
+    candidate_state text;
+    result_value jsonb;
+BEGIN
+    IF requested_operation IS NULL
+       OR octet_length(requested_operation) NOT BETWEEN 1 AND 256
+       OR input->>'generation_id' IS NULL
+       OR octet_length(input->>'generation_id') NOT BETWEEN 1 AND 256
+       OR input->>'requested_by' IS NULL
+       OR octet_length(input->>'requested_by') NOT BETWEEN 1 AND 256 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_RETRY_INVALID',
+                'message','Graph rebuild retry request is invalid','status',422));
+    END IF;
+    PERFORM pg_advisory_xact_lock(hashtextextended(
+        'forest.memory.graph/rebuild-retry/'||requested_bot||'/'||
+        requested_operation,0));
+    SELECT * INTO prior FROM __forest_module_schema__.graph_rebuild_retry_operations
+    WHERE bot_id=requested_bot AND operation_id=requested_operation;
+    IF FOUND THEN
+        IF prior.generation_id=input->>'generation_id'
+           AND prior.requested_by=input->>'requested_by'
+        THEN RETURN prior.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_RETRY_CONFLICT',
+                'message','Graph rebuild retry operation was reused','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.graph_rebuild_work
+    WHERE bot_id=requested_bot AND generation_id=input->>'generation_id'
+      AND requested_by=input->>'requested_by' FOR UPDATE;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_NOT_FOUND',
+                'message','Graph rebuild request does not exist','status',404));
+    END IF;
+    SELECT state INTO candidate_state FROM __forest_module_schema__.graph_generations
+    WHERE bot_id=requested_bot AND generation_id=work_row.generation_id;
+    IF work_row.state<>'FAILED' OR candidate_state<>'CANDIDATE' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_RETRY_UNAVAILABLE',
+                'message','Graph rebuild is not a failed candidate','status',409));
+    END IF;
+    UPDATE __forest_module_schema__.graph_rebuild_work
+    SET state='QUEUED',retry_base_attempt=attempt_count,
+        next_attempt_at=clock_timestamp(),error_code=NULL,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND generation_id=work_row.generation_id;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.memory-graph-rebuild-enqueued/1',
+            'generation_id',work_row.generation_id,'state','QUEUED'));
+    INSERT INTO __forest_module_schema__.graph_rebuild_retry_operations(
+        bot_id,operation_id,generation_id,requested_by,result_payload)
+    VALUES(requested_bot,requested_operation,work_row.generation_id,
+        work_row.requested_by,result_value);
+    RETURN result_value;
+END;
+$$;
+
+CREATE FUNCTION memory_claim_graph_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    requested_token text := input->>'claim_token';
+    requested_lease integer := (input->>'lease_seconds')::integer;
+    expired record;
+    work_row __forest_module_schema__.graph_rebuild_work%ROWTYPE;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-claim-request/1'
+       OR requested_token IS NULL OR octet_length(requested_token) NOT BETWEEN 1 AND 256
+       OR requested_lease IS NULL OR requested_lease NOT BETWEEN 3 AND 86400 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_CLAIM_INVALID',
+                'message','Graph rebuild claim is invalid','status',422));
+    END IF;
+    FOR expired IN
+        SELECT w.generation_id,w.attempt_count,w.retry_base_attempt,
+               b.publish_operation_id
+        FROM __forest_module_schema__.graph_rebuild_work w
+        JOIN __forest_module_schema__.graph_generation_builds b
+          ON b.bot_id=w.bot_id AND b.generation_id=w.generation_id
+        WHERE w.bot_id=requested_bot AND w.state='CLAIMED'
+          AND w.lease_deadline<=clock_timestamp()
+        ORDER BY w.lease_deadline,w.generation_id
+        FOR UPDATE OF w SKIP LOCKED LIMIT 16
+    LOOP
+        UPDATE __forest_module_schema__.graph_rebuild_work
+        SET state=CASE WHEN expired.publish_operation_id IS NOT NULL THEN 'SUCCEEDED'
+                       WHEN expired.attempt_count-expired.retry_base_attempt>=3
+                       THEN 'FAILED' ELSE 'QUEUED' END,
+            claim_token=NULL,lease_deadline=NULL,
+            next_attempt_at=clock_timestamp(),updated_at=clock_timestamp(),
+            error_code=CASE WHEN expired.publish_operation_id IS NOT NULL THEN NULL
+                            ELSE 'MEMORY_GRAPH_REBUILD_LEASE_EXPIRED' END
+        WHERE bot_id=requested_bot AND generation_id=expired.generation_id;
+    END LOOP;
+    UPDATE __forest_module_schema__.graph_rebuild_work w
+    SET state='SUCCEEDED',updated_at=clock_timestamp(),error_code=NULL
+    FROM __forest_module_schema__.graph_generation_builds b
+    WHERE w.bot_id=requested_bot AND w.state='QUEUED'
+      AND b.bot_id=w.bot_id AND b.generation_id=w.generation_id
+      AND b.publish_operation_id IS NOT NULL;
+    SELECT w.* INTO work_row
+    FROM __forest_module_schema__.graph_rebuild_work w
+    JOIN __forest_module_schema__.graph_generations g
+      ON g.bot_id=w.bot_id AND g.generation_id=w.generation_id
+    WHERE w.bot_id=requested_bot AND w.state='QUEUED'
+      AND w.next_attempt_at<=clock_timestamp() AND g.state='CANDIDATE'
+    ORDER BY w.next_attempt_at,w.generation_id
+    FOR UPDATE OF w SKIP LOCKED LIMIT 1;
+    IF NOT FOUND THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+            'value',NULL);
+    END IF;
+    UPDATE __forest_module_schema__.graph_rebuild_work
+    SET state='CLAIMED',claim_token=requested_token,
+        lease_deadline=clock_timestamp()+(requested_lease*interval '1 second'),
+        attempt_count=attempt_count+1,error_code=NULL,
+        updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND generation_id=work_row.generation_id
+    RETURNING * INTO work_row;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-claim/1',
+            'work_id',work_row.generation_id,
+            'claim_token',work_row.claim_token,'attempt',work_row.attempt_count,
+            'operation_id','memory-graph-rebuild:'||encode(sha256(convert_to(
+                requested_bot||'/'||work_row.generation_id||'/'||
+                work_row.attempt_count,'UTF8')),'hex'),
+            'causal_root_kind','memory.graph-rebuild',
+            'causal_root_id',work_row.generation_id,
+            'payload',jsonb_build_object('generation_id',work_row.generation_id,
+                'requested_by',work_row.requested_by)));
+END;
+$$;
+
+CREATE FUNCTION memory_settle_graph_rebuild(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql SET search_path = pg_catalog AS $$
+DECLARE
+    requested_bot text := context->>'bot_id';
+    old_settlement __forest_module_schema__.graph_rebuild_settlements%ROWTYPE;
+    work_row __forest_module_schema__.graph_rebuild_work%ROWTYPE;
+    publication text;
+    next_state text;
+    next_error text;
+    result_value jsonb;
+BEGIN
+    IF input->>'protocol' IS DISTINCT FROM 'forest.owned-work-settle-request/1'
+       OR input->>'claim_token' IS NULL OR input->>'work_id' IS NULL
+       OR input->>'attempt' IS NULL
+       OR input#>>'{outcome,status}' NOT IN ('SUCCEEDED','FAILED') THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_SETTLEMENT_INVALID',
+                'message','Graph rebuild settlement is invalid','status',422));
+    END IF;
+    SELECT * INTO old_settlement FROM __forest_module_schema__.graph_rebuild_settlements
+    WHERE bot_id=requested_bot AND claim_token=input->>'claim_token';
+    IF FOUND THEN
+        IF old_settlement.input_payload=input THEN RETURN old_settlement.result_payload; END IF;
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_SETTLEMENT_CONFLICT',
+                'message','Graph rebuild claim was settled differently','status',409));
+    END IF;
+    SELECT * INTO work_row FROM __forest_module_schema__.graph_rebuild_work
+    WHERE bot_id=requested_bot AND generation_id=input->>'work_id' FOR UPDATE;
+    IF NOT FOUND OR work_row.state<>'CLAIMED'
+       OR work_row.claim_token IS DISTINCT FROM input->>'claim_token'
+       OR work_row.attempt_count IS DISTINCT FROM (input->>'attempt')::integer THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_GRAPH_REBUILD_CLAIM_LOST',
+                'message','Graph rebuild claim is no longer current','status',409));
+    END IF;
+    SELECT publish_operation_id INTO publication
+    FROM __forest_module_schema__.graph_generation_builds
+    WHERE bot_id=requested_bot AND generation_id=work_row.generation_id;
+    next_state := CASE WHEN publication IS NOT NULL THEN 'SUCCEEDED'
+        WHEN input#>>'{outcome,status}'='SUCCEEDED' THEN 'QUEUED'
+        WHEN work_row.attempt_count-work_row.retry_base_attempt<3 THEN 'QUEUED'
+        ELSE 'FAILED' END;
+    next_error := CASE WHEN next_state='SUCCEEDED'
+                        OR input#>>'{outcome,status}'='SUCCEEDED' THEN NULL
+                       ELSE COALESCE(input#>>'{outcome,error,code}',
+                           'MEMORY_GRAPH_REBUILD_INCOMPLETE') END;
+    UPDATE __forest_module_schema__.graph_rebuild_work
+    SET state=next_state,claim_token=NULL,lease_deadline=NULL,
+        retry_base_attempt=CASE WHEN next_state='QUEUED'
+            AND input#>>'{outcome,status}'='SUCCEEDED'
+            THEN attempt_count ELSE retry_base_attempt END,
+        next_attempt_at=CASE WHEN next_state='QUEUED'
+            AND input#>>'{outcome,status}'='FAILED'
+            THEN clock_timestamp()+(LEAST(power(2,
+                work_row.attempt_count-work_row.retry_base_attempt),30)*interval '1 second')
+            ELSE clock_timestamp() END,
+        error_code=next_error,updated_at=clock_timestamp()
+    WHERE bot_id=requested_bot AND generation_id=work_row.generation_id;
+    result_value := jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+        'value',jsonb_build_object('protocol','forest.owned-work-settled/1',
+            'work_id',work_row.generation_id));
+    INSERT INTO __forest_module_schema__.graph_rebuild_settlements(
+        bot_id,claim_token,input_payload,result_payload)
+    VALUES(requested_bot,input->>'claim_token',input,result_value);
+    RETURN result_value;
 END;
 $$;
 
@@ -1274,6 +1622,55 @@ BEGIN
             USING ERRCODE='55000';
     END IF;
     RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION guard_graph_rebuild_work()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF TG_OP='DELETE' THEN
+        RAISE EXCEPTION 'Graph rebuild work cannot be deleted'
+            USING ERRCODE='55000';
+    END IF;
+    IF ROW(NEW.bot_id,NEW.generation_id,NEW.requested_by,NEW.created_at)
+       IS DISTINCT FROM
+       ROW(OLD.bot_id,OLD.generation_id,OLD.requested_by,OLD.created_at)
+       OR NEW.updated_at<OLD.updated_at THEN
+        RAISE EXCEPTION 'Graph rebuild work identity changed'
+            USING ERRCODE='55000';
+    END IF;
+    IF OLD.state='QUEUED' AND NEW.state='CLAIMED'
+       AND NEW.attempt_count=OLD.attempt_count+1
+       AND NEW.retry_base_attempt=OLD.retry_base_attempt
+       AND NEW.claim_token IS NOT NULL AND NEW.lease_deadline IS NOT NULL
+       AND NEW.lease_deadline>clock_timestamp() THEN RETURN NEW; END IF;
+    IF OLD.state='QUEUED' AND NEW.state='SUCCEEDED'
+       AND NEW.attempt_count=OLD.attempt_count
+       AND NEW.retry_base_attempt=OLD.retry_base_attempt
+       AND NEW.claim_token IS NULL THEN RETURN NEW; END IF;
+    IF OLD.state='CLAIMED' AND NEW.state IN ('QUEUED','SUCCEEDED','FAILED')
+       AND NEW.attempt_count=OLD.attempt_count
+       AND (NEW.retry_base_attempt=OLD.retry_base_attempt
+            OR (NEW.state='QUEUED' AND NEW.error_code IS NULL
+                AND NEW.retry_base_attempt=OLD.attempt_count))
+       AND NEW.claim_token IS NULL AND NEW.lease_deadline IS NULL
+       THEN RETURN NEW; END IF;
+    IF OLD.state='FAILED' AND NEW.state='QUEUED'
+       AND NEW.attempt_count=OLD.attempt_count
+       AND NEW.retry_base_attempt=OLD.attempt_count
+       AND NEW.claim_token IS NULL AND NEW.lease_deadline IS NULL
+       THEN RETURN NEW; END IF;
+    IF NEW IS NOT DISTINCT FROM OLD THEN RETURN NEW; END IF;
+    RAISE EXCEPTION 'Invalid graph rebuild work transition'
+        USING ERRCODE='55000';
+END;
+$$;
+
+CREATE FUNCTION guard_graph_rebuild_retry_operation()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'Graph rebuild retry operation is immutable'
+        USING ERRCODE='55000';
 END;
 $$;
 
@@ -5507,6 +5904,12 @@ CREATE TRIGGER graph_projection_head_guard
 CREATE TRIGGER graph_generation_build_guard
     BEFORE UPDATE OR DELETE ON graph_generation_builds
     FOR EACH ROW EXECUTE FUNCTION guard_graph_generation_build();
+CREATE TRIGGER graph_rebuild_work_guard
+    BEFORE UPDATE OR DELETE ON graph_rebuild_work
+    FOR EACH ROW EXECUTE FUNCTION guard_graph_rebuild_work();
+CREATE TRIGGER graph_rebuild_retry_operation_guard
+    BEFORE UPDATE OR DELETE ON graph_rebuild_retry_operations
+    FOR EACH ROW EXECUTE FUNCTION guard_graph_rebuild_retry_operation();
 
 CREATE TRIGGER graph_query_revision
     BEFORE INSERT ON memory_queries

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.memory-graph"
-version = "1.99.0"
+version = "2.0.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "memory_graph:MemoryGraph"
@@ -71,6 +71,9 @@ requests = [
   "domain.command:memory.create-management-relation-candidate",
   "domain.query:memory.forget-work-status",
   "domain.command:memory.promote-claimed-association",
+  "domain.query:memory.query-graph-rebuild",
+  "domain.command:memory.enqueue-graph-rebuild",
+  "domain.command:memory.retry-graph-rebuild",
   "domain.command:memory.begin-graph-rebuild",
   "domain.command:memory.replay-graph-revision",
   "uow.execute:memory.publish-graph-rebuild",
@@ -294,9 +297,9 @@ order = 10
 
 [components.storage]
 schema_id = "forest.memory.graph"
-schema_version = "3.97.0"
+schema_version = "3.98.0"
 baseline = "schema/memory_graph.sql"
-baseline_sha256 = "358e6e51cc6e2b2e5302f2a45f44ce9b1be1532927c74acc0a336366f0ec580e"
+baseline_sha256 = "94c805035daa739296eaf8ebd58eec1de57c821317b7931545111a94506e9ee1"
 scope = "bot"
 repository_contract = "forest.memory-graph.repository/2"
 execution_profile = "official"
@@ -483,6 +486,27 @@ function = "memory_assert_public_query"
 input_schema = "schemas/query-prepare-input.json"
 output_schema = "schemas/public-query-output.json"
 
+[[components.domain_queries]]
+name = "memory.query-graph-rebuild"
+contract = "1.0"
+function = "memory_query_graph_rebuild"
+input_schema = "schemas/graph-rebuild-status-input.json"
+output_schema = "schemas/graph-rebuild-status-output.json"
+
+[[components.domain_commands]]
+name = "memory.enqueue-graph-rebuild"
+contract = "1.0"
+function = "memory_enqueue_graph_rebuild"
+input_schema = "schemas/graph-rebuild-request-input.json"
+output_schema = "schemas/graph-rebuild-request-output.json"
+
+[[components.domain_commands]]
+name = "memory.retry-graph-rebuild"
+contract = "1.0"
+function = "memory_retry_graph_rebuild"
+input_schema = "schemas/graph-rebuild-retry-input.json"
+output_schema = "schemas/graph-rebuild-request-output.json"
+
 [[components.domain_commands]]
 name = "memory.begin-graph-rebuild"
 contract = "1.0"
@@ -632,6 +656,14 @@ audit = "SECURITY"
 default_limit = 50
 max_limit = 50
 timeout_s = 15
+
+[[components.management_queries]]
+id = "memory.graph.rebuild-status"
+port = "memory.query-graph-rebuild"
+required_role = "ADMIN"
+actor_field = "requested_by"
+audit = "SECURITY"
+timeout_s = 10
 
 [[components.management_queries]]
 id = "memory.text-index.rebuild-status"
@@ -799,6 +831,20 @@ required_role = "ADMIN"
 actor_field = "requested_by"
 audit = "SECURITY"
 timeout_s = 30
+
+[[components.management_actions]]
+id = "memory.graph.rebuild"
+port = "memory.enqueue-graph-rebuild"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 15
+
+[[components.management_actions]]
+id = "memory.graph.rebuild-retry"
+port = "memory.retry-graph-rebuild"
+priority = "P1"
+actor_field = "requested_by"
+timeout_s = 15
 
 [[components.management_actions]]
 id = "memory.text-index.rebuild"
@@ -1190,6 +1236,21 @@ steps = [
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
   { id = "memory", component_id = "memory.graph", participant = "memory.capture-source-record", input_path = "/memory" }
 ]
+
+[[components.owned_work_handlers]]
+name = "memory.graph.rebuild"
+contract = "1.0"
+handler = "memory.graph.rebuild"
+claim_function = "memory_claim_graph_rebuild"
+settle_function = "memory_settle_graph_rebuild"
+input_schema = "schemas/graph-rebuild-work-input.json"
+output_schema = "schemas/graph-rebuild-work-output.json"
+max_concurrency = 1
+poll_interval_ms = 1000
+claim_timeout_s = 5
+handler_timeout_s = 180
+settle_timeout_s = 5
+lease_seconds = 240
 
 [[components.owned_work_handlers]]
 name = "memory.text-projection.rebuild"

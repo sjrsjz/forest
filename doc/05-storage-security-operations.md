@@ -119,7 +119,7 @@ Episode/Archive 使用 `archive_units(archive_id, source_unit_ids, source_contex
 | `memory_source_units` | 固定`source_unit_id, source_id, source_identity, source_order_seq, source_event_id/context_unit_id, source_conversation_id?, thread_id?, source_ingress_seq?, author_snapshot, occurred_at, accepted_at, source_revision, visibility`；同源位置及稳定source identity唯一，多观察的会话快捷字段不替代occurrences，保留内容版本与删除依据 |
 | `memory_source_occurrences` | occurrence_id、source_unit_id、binding_id、inbox_message_id、source_conversation_id、source_ingress_seq、input_batch_refs、eligibility_state；源与Inbox观察关联唯一，可验证的同一跨Binding事件共用源身份，保留每个会话的独立输入边界 |
 | `memory_trunks` | 每个 `(bot_id, group_source_id)` 恰有一条逻辑主干；根节点与主干身份稳定，Binding 重建、会话重开、线程变化或群改名不产生第二条同群主干 |
-| `graph_generations / graph_generation_builds` | 前者保存 Bot、代际、schema/reducer 版本与状态，后者保存候选起点、幂等操作和逐修订重放水位；自动任务仍待加入；切换由 UoW 捕获 kernel.payload 删除纪元 |
+| `graph_generations / graph_generation_builds` | 前者保存 Bot、代际、schema/reducer 版本与状态，后者保存候选起点、幂等操作和逐修订重放水位；包内持久任务记录请求人、租约、尝试次数与续跑状态；切换由 UoW 捕获 kernel.payload 删除纪元 |
 | `graph_revisions` | 当前保存 `bot_id, graph_revision, generation_id, status`，并关联同 revision 的拓扑事务；不可变 |
 | `graph_node_versions / graph_edge_versions` | 同 Bot、generation 的稳定节点/贡献引用、端点与半开修订区间；查询固定 revision 并再次复核权威来源资格 |
 | `graph_projection_heads` | `bot_id, active_generation_id, active_graph_revision`；活动图在权威事务中按 Bot 行锁推进，候选追平后在短事务内按预期代际与修订 CAS 切换 |

@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol",
+    "generation_id",
+    "base_generation_id",
+    "base_revision",
+    "active_generation_id",
+    "active_revision",
+    "replayed_through",
+    "published_revision",
+    "state",
+    "attempt_count",
+    "error_code",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.memory-graph-rebuild/1"
+    },
+    "generation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "base_generation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "base_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "active_generation_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "active_revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "replayed_through": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "published_revision": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "state": {
+      "type": "string",
+      "enum": [
+        "QUEUED",
+        "CLAIMED",
+        "SUCCEEDED",
+        "FAILED"
+      ]
+    },
+    "attempt_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "error_code": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}
