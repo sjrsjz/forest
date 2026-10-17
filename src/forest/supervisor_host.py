@@ -563,7 +563,7 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
         if management_task is not None:
             await asyncio.gather(management_task, return_exceptions=True)
         try:
-            await supervisor.close()
+            await supervisor.quiesce()
         finally:
             try:
                 if deployment_controller is not None:
@@ -574,9 +574,12 @@ async def run_supervisor(settings: SupervisorSettings) -> None:
                         await host_controller.close()
                 finally:
                     try:
-                        await host_supervisor.close()
+                        await supervisor.close()
                     finally:
                         try:
-                            await host_store.close()
+                            await host_supervisor.close()
                         finally:
-                            await store.close()
+                            try:
+                                await host_store.close()
+                            finally:
+                                await store.close()

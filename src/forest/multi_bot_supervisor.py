@@ -148,9 +148,13 @@ class MultiBotSupervisor:
                 selected.management_inflight -= 1
                 selected.management_condition.notify_all()
 
-    async def close(self) -> None:
-        self._closing = True
-        self._wake.set()
+    async def quiesce(self) -> None:
+        """Drain Bot runners while retaining the lease for control-graph teardown."""
+
+        task, self._reconcile_task = self._reconcile_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         runners = tuple(self._runners.values())
         for runner in runners:
             runner.management_accepting = False
@@ -163,12 +167,15 @@ class MultiBotSupervisor:
             )
         self._runners.clear()
         self._scope_bots.clear()
-        for name in ("_reconcile_task", "_renewal_task"):
-            task = getattr(self, name)
-            setattr(self, name, None)
-            if task is not None:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+
+    async def close(self) -> None:
+        await self.quiesce()
+        self._closing = True
+        self._wake.set()
+        task, self._renewal_task = self._renewal_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         lease, self.lease = self.lease, None
         if lease is not None:
             try:
