@@ -676,3 +676,59 @@ async def test_association_waits_for_archive_and_repeated_recall_does_not_add_we
             "snapshot_xid": snapshot, "limit": 16,
         })))).fetchone())["result"]
         assert revoked["error"]["code"] == "MEMORY_RELATION_NOT_VISIBLE"
+
+    # A direct-message source has no trunk. Promotion must preserve the
+    # group/direct boundary as a real boolean, not SQL NULL.
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.memory_sources(bot_id,source_id,registration_operation_id,"
+            "input_digest,source_kind,platform,realm_id,identity_incarnation,"
+            "identity_digest) VALUES (%s,'direct/source','register/direct',%s,"
+            "'DIRECT','qq','realm',1,%s)"
+        ).format(schema), (bot, digest, "sha256:" + "d" * 64))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.source_units(bot_id,source_unit_id,capture_operation_id,"
+            "input_digest,source_id,source_order_seq,source_revision,unit_kind,"
+            "modality,part_count,content_manifest_digest,author_subject_ref,author_payload_id,"
+            "author_payload_digest,author_owner_component_id,author_owner_kind,author_owner_id,"
+            "accepted_deletion_epoch,eligibility_state,eligible_at,occurred_at) VALUES "
+            "(%s,'direct/unit','capture/direct',%s,'direct/source',1,1,'DIRECT_MESSAGE',"
+            "'TEXT',1,%s,'qq:direct','author/direct',%s,'adapter.onebot',"
+            "'message.author','direct/unit',0,'ELIGIBLE',clock_timestamp(),clock_timestamp())"
+        ).format(schema), (bot, digest, digest, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.source_parts(bot_id,source_unit_id,part_id,part_index,"
+            "part_kind,media_type,payload_id,payload_digest,payload_owner_component_id,"
+            "payload_owner_kind,payload_owner_id,byte_length) VALUES "
+            "(%s,'direct/unit','text',0,'TEXT','text/plain','payload/direct',%s,"
+            "'adapter.onebot','context.input','direct/unit',1)"
+        ).format(schema), (bot, digest))
+        await conn.execute(sql.SQL(
+            "INSERT INTO {}.association_journal(bot_id,journal_id,operation_id,"
+            "input_digest,reply_ref,bundle_id,query_id,trigger_ref,"
+            "trigger_source_unit_id,trigger_source_revision,trigger_part_id,"
+            "seed_source_unit_id,seed_source_revision,seed_part_id,"
+            "seed_rank_score,promotion_ready) VALUES "
+            "(%s,'journal/direct','reply/direct',%s,'reply/direct','bundle/test',"
+            "'query/test','trigger/direct','direct/unit',1,'text','seed',1,'text',0.8,true)"
+        ).format(schema), (bot, digest))
+        promoted = await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_promote_association(%s,%s) AS value"
+        ).format(schema), (bot, "journal/direct"))).fetchone()
+        assert promoted["value"] is True
+        relation = await (await conn.execute(sql.SQL(
+            "SELECT cross_trunk FROM {}.relation_contributions WHERE bot_id=%s "
+            "AND left_id='direct/unit' AND right_id='seed'"
+        ).format(schema), (bot,))).fetchone()
+        assert relation == {"cross_trunk": True}
+    async with store.pool.connection() as conn:
+        page = await (await conn.execute(sql.SQL(
+            "SELECT {}.memory_query_association_journals(%s::jsonb,%s::jsonb) AS value"
+        ).format(schema), (
+            Jsonb({"bot_id": bot}), Jsonb({"journal_id": "journal/direct"}),
+        ))).fetchone()
+        item = page["value"]["value"]["items"][0]
+        assert item["trigger_evidence"]["source_kind"] == "DIRECT"
+        assert item["trigger_evidence"]["external_group_id"] is None
+        assert item["seed_evidence"]["external_group_id"] == "memory"
+        assert item["cross_trunk"] is True

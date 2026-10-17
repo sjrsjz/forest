@@ -7634,7 +7634,7 @@ BEGIN
         'sha256:' || pair_digest,'association:' || pair_digest,'ASSOCIATES_WITH',
         'SOURCE_UNIT',left_ref,'SOURCE_UNIT',right_ref,'MODEL',900000,
         GREATEST(trigger_unit.accepted_deletion_epoch,seed_unit.accepted_deletion_epoch),
-        trigger_unit.trunk_id<>seed_unit.trunk_id
+        trigger_unit.trunk_id IS DISTINCT FROM seed_unit.trunk_id
     FROM __forest_module_schema__.source_units trigger_unit
     CROSS JOIN __forest_module_schema__.source_units seed_unit
     WHERE trigger_unit.bot_id=requested_bot
