@@ -3880,6 +3880,30 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
     await current.start()
     graph = current.graph_identity
 
+    before = await core.runtime.status()
+    with pytest.raises(RuntimeError, match="roll back rescue effects"):
+        async with store.pool.connection() as conn, conn.transaction():
+            disabled = await core.runtime.set_data_admission_in(
+                conn, lease,
+                expected_maintenance_epoch=before["maintenance_epoch"],
+                data_admission=False,
+            )
+            assert disabled["data_admission"] is False
+            staged = await core.runtime.request_graph_replacement_in(
+                conn, lease,
+                operation_id="reload/rolled-back",
+                expected_graph_revision=graph.graph_revision,
+                requested_by="qq:42",
+            )
+            assert staged["state"] == "QUEUED"
+            assert (await core.runtime.status_in(conn))["data_admission"] is False
+            raise RuntimeError("roll back rescue effects")
+    assert (await core.runtime.status())["maintenance_epoch"] == before["maintenance_epoch"]
+    assert (await core.runtime.status())["data_admission"] is True
+    with pytest.raises(ForestError) as rolled_back:
+        await core.runtime.graph_replacement("reload/rolled-back")
+    assert rolled_back.value.code == "RUNTIME_REPLACEMENT_NOT_FOUND"
+
     with pytest.raises(ForestError) as missing_target:
         await core.runtime.request_graph_replacement(
             lease,
@@ -3915,11 +3939,57 @@ async def test_graph_replacement_queue_is_revision_fenced_claimed_and_idempotent
         )
     assert caught.value.code == "RUNTIME_REPLACEMENT_CONFLICT"
 
+    cancellable = await core.runtime.request_graph_replacement(
+        lease,
+        operation_id="reload/cancel-me",
+        expected_graph_revision=graph.graph_revision,
+        requested_by="qq:42",
+    )
+    assert cancellable["state"] == "QUEUED"
+    async with store.pool.connection() as conn, conn.transaction():
+        cancelled = await core.runtime.cancel_graph_replacement_in(
+            conn, lease,
+            operation_id="reload/cancel-me",
+            expected_graph_revision=graph.graph_revision,
+            cancel_operation_id="cancel/one",
+            cancelled_by="qq:42",
+        )
+    assert cancelled["state"] == "CANCELLED"
+    assert cancelled["cancel_operation_id"] == "cancel/one"
+    async with store.pool.connection() as conn, conn.transaction():
+        assert await core.runtime.cancel_graph_replacement_in(
+            conn, lease,
+            operation_id="reload/cancel-me",
+            expected_graph_revision=graph.graph_revision,
+            cancel_operation_id="cancel/one",
+            cancelled_by="qq:42",
+        ) == cancelled
+        with pytest.raises(ForestError) as changed_cancel:
+            await core.runtime.cancel_graph_replacement_in(
+                conn, lease,
+                operation_id="reload/one",
+                expected_graph_revision=graph.graph_revision,
+                cancel_operation_id="cancel/one",
+                cancelled_by="qq:42",
+            )
+        assert changed_cancel.value.code == "RUNTIME_REPLACEMENT_CANCEL_CONFLICT"
+    assert (await core.runtime.graph_replacement("reload/cancel-me"))["state"] == "CANCELLED"
+
     claim = await core.runtime.claim_graph_replacement(lease)
     assert claim["operation_id"] == "reload/one"
     assert claim["state"] == "RUNNING"
     assert claim["attempt_count"] == 1
     assert await core.runtime.claim_graph_replacement(lease) is None
+    async with store.pool.connection() as conn, conn.transaction():
+        with pytest.raises(ForestError) as claimed_cancel:
+            await core.runtime.cancel_graph_replacement_in(
+                conn, lease,
+                operation_id="reload/one",
+                expected_graph_revision=graph.graph_revision,
+                cancel_operation_id="cancel/claimed",
+                cancelled_by="qq:42",
+            )
+        assert claimed_cancel.value.code == "RUNTIME_REPLACEMENT_CANCEL_CONFLICT"
 
     candidate = RuntimeModuleRegistry(
         host,

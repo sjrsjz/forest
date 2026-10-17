@@ -457,7 +457,7 @@ CREATE TABLE graph_replacement_requests (
     ),
     activation_id text NOT NULL,
     state text NOT NULL DEFAULT 'QUEUED'
-        CHECK (state IN ('QUEUED','RUNNING','SUCCEEDED','FAILED')),
+        CHECK (state IN ('QUEUED','RUNNING','SUCCEEDED','FAILED','CANCELLED')),
     owner_host_id text,
     owner_incarnation text,
     owner_epoch bigint,
@@ -466,6 +466,10 @@ CREATE TABLE graph_replacement_requests (
     result_graph_id text,
     result_graph_revision bigint CHECK (result_graph_revision IS NULL OR result_graph_revision > 0),
     error_code text CHECK (error_code IS NULL OR octet_length(error_code) BETWEEN 1 AND 128),
+    cancel_operation_id text CHECK (
+        cancel_operation_id IS NULL OR octet_length(cancel_operation_id) BETWEEN 1 AND 256
+    ),
+    cancelled_by text CHECK (cancelled_by IS NULL OR octet_length(cancelled_by) BETWEEN 1 AND 256),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,operation_id),
@@ -475,21 +479,30 @@ CREATE TABLE graph_replacement_requests (
     CHECK (selection_revision IS NULL OR target_component_id IS NOT NULL),
     CHECK ((owner_host_id IS NULL) = (owner_incarnation IS NULL)),
     CHECK ((owner_host_id IS NULL) = (owner_epoch IS NULL)),
+    CHECK ((cancel_operation_id IS NULL) = (cancelled_by IS NULL)),
     CHECK (
         (state='QUEUED' AND owner_host_id IS NULL AND attempt_count=0
-            AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NULL)
+            AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NULL
+            AND cancel_operation_id IS NULL)
         OR (state='RUNNING' AND owner_host_id IS NOT NULL AND attempt_count>0
-            AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NULL)
+            AND result_graph_id IS NULL AND result_graph_revision IS NULL AND error_code IS NULL
+            AND cancel_operation_id IS NULL)
         OR (state='SUCCEEDED' AND owner_host_id IS NOT NULL AND attempt_count>0
             AND result_graph_id IS NOT NULL AND result_graph_revision IS NOT NULL
-            AND error_code IS NULL)
+            AND error_code IS NULL AND cancel_operation_id IS NULL)
         OR (state='FAILED' AND owner_host_id IS NOT NULL AND attempt_count>0
             AND result_graph_id IS NULL AND result_graph_revision IS NULL
-            AND error_code IS NOT NULL)
+            AND error_code IS NOT NULL AND cancel_operation_id IS NULL)
+        OR (state='CANCELLED' AND owner_host_id IS NULL AND attempt_count=0
+            AND result_graph_id IS NULL AND result_graph_revision IS NULL
+            AND error_code IS NULL AND cancel_operation_id IS NOT NULL)
     )
 );
 CREATE INDEX graph_replacement_recent
     ON graph_replacement_requests(bot_id,created_at DESC,operation_id DESC);
+CREATE UNIQUE INDEX graph_replacement_cancel_operation_unique
+    ON graph_replacement_requests(bot_id,cancel_operation_id)
+    WHERE cancel_operation_id IS NOT NULL;
 
 CREATE FUNCTION reject_fact_mutation() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
@@ -607,12 +620,12 @@ BEGIN
     ) THEN
         RAISE EXCEPTION 'Forest graph replacement identity is immutable' USING ERRCODE = '55000';
     END IF;
-    IF OLD.state IN ('SUCCEEDED','FAILED') THEN
+    IF OLD.state IN ('SUCCEEDED','FAILED','CANCELLED') THEN
         RAISE EXCEPTION 'Forest graph replacement terminal state is immutable'
             USING ERRCODE = '55000';
     END IF;
     IF NOT (
-        (OLD.state='QUEUED' AND NEW.state='RUNNING')
+        (OLD.state='QUEUED' AND NEW.state IN ('RUNNING','CANCELLED'))
         OR (OLD.state='RUNNING' AND NEW.state IN ('RUNNING','SUCCEEDED','FAILED'))
     ) THEN
         RAISE EXCEPTION 'Illegal graph replacement transition' USING ERRCODE = '55000';

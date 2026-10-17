@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -34,10 +35,27 @@ class KernelRuntimeRepository:
     def _table(self, name: str):
         return sql.Identifier(self.namespace, name)
 
+    @asynccontextmanager
+    async def _control_connection(self, caller_conn):
+        if caller_conn is not None:
+            yield caller_conn
+        else:
+            async with self.store.pool.connection() as conn, conn.transaction():
+                yield conn
+
     async def status(self) -> dict:
         """Return a bounded view of the current Bot runtime graph for control planes."""
 
-        async with self.store.pool.connection() as conn:
+        return await self._status_in(None)
+
+    async def status_in(self, conn) -> dict:
+        """Read the bounded runtime projection in the caller's transaction."""
+
+        return await self._status_in(conn)
+
+    async def _status_in(self, caller_conn) -> dict:
+
+        async with self._control_connection(caller_conn) as conn:
             runtime = await (
                 await conn.execute(
                     sql.SQL(
@@ -141,6 +159,53 @@ class KernelRuntimeRepository:
     ) -> dict:
         """Persist one exact graph or component reload intent."""
 
+        return await self._request_graph_replacement(
+            None, lease,
+            operation_id=operation_id,
+            expected_graph_revision=expected_graph_revision,
+            requested_by=requested_by,
+            target_component_id=target_component_id,
+            selection_revision=selection_revision,
+            selection_digest=selection_digest,
+        )
+
+    async def request_graph_replacement_in(
+        self,
+        conn,
+        lease: HostLease,
+        *,
+        operation_id: str,
+        expected_graph_revision: int,
+        requested_by: str,
+        target_component_id: str | None = None,
+        selection_revision: int | None = None,
+        selection_digest: str | None = None,
+    ) -> dict:
+        """Persist a replacement request in the caller's control transaction."""
+
+        return await self._request_graph_replacement(
+            conn, lease,
+            operation_id=operation_id,
+            expected_graph_revision=expected_graph_revision,
+            requested_by=requested_by,
+            target_component_id=target_component_id,
+            selection_revision=selection_revision,
+            selection_digest=selection_digest,
+        )
+
+    async def _request_graph_replacement(
+        self,
+        caller_conn,
+        lease: HostLease,
+        *,
+        operation_id: str,
+        expected_graph_revision: int,
+        requested_by: str,
+        target_component_id: str | None,
+        selection_revision: int | None,
+        selection_digest: str | None,
+    ) -> dict:
+
         for value, field in ((operation_id, "operation_id"), (requested_by, "requested_by")):
             if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
                 raise ForestError("RUNTIME_REPLACEMENT_INPUT_INVALID", f"Invalid {field}", 422)
@@ -180,7 +245,7 @@ class KernelRuntimeRepository:
         activation_id = str(
             uuid5(NAMESPACE_URL, f"forest:{self.store.bot_id}:reload:{operation_id}")
         )
-        async with self.store.pool.connection() as conn, conn.transaction():
+        async with self._control_connection(caller_conn) as conn:
             await self._identity_in(conn)
             await self._host_in(conn, lease)
             await conn.execute(
@@ -257,6 +322,108 @@ class KernelRuntimeRepository:
                 )
             ).fetchone()
             return dict(saved)
+
+    async def cancel_graph_replacement_in(
+        self,
+        conn,
+        lease: HostLease,
+        *,
+        operation_id: str,
+        expected_graph_revision: int,
+        cancel_operation_id: str,
+        cancelled_by: str,
+    ) -> dict:
+        """Cancel an unclaimed replacement under the caller's control transaction."""
+
+        for value, field in (
+            (operation_id, "operation_id"),
+            (cancel_operation_id, "cancel_operation_id"),
+            (cancelled_by, "cancelled_by"),
+        ):
+            if not isinstance(value, str) or not 1 <= len(value.encode()) <= 256:
+                raise ForestError("RUNTIME_REPLACEMENT_INPUT_INVALID", f"Invalid {field}", 422)
+        if type(expected_graph_revision) is not int or expected_graph_revision <= 0:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_INPUT_INVALID", "Invalid graph revision", 422
+            )
+        await self._identity_in(conn)
+        await self._host_in(conn, lease)
+        await conn.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+            (f"forest.kernel.runtime/cancel/{self.store.bot_id}/{cancel_operation_id}",),
+        )
+        prior = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND cancel_operation_id=%s"
+                ).format(self._table("graph_replacement_requests")),
+                (self.store.bot_id, cancel_operation_id),
+            )
+        ).fetchone()
+        if prior is not None:
+            if (
+                prior["operation_id"] == operation_id
+                and prior["expected_graph_revision"] == expected_graph_revision
+                and prior["cancelled_by"] == cancelled_by
+                and prior["state"] == "CANCELLED"
+            ):
+                return dict(prior)
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_CANCEL_CONFLICT",
+                "Cancellation operation input differs",
+                409,
+            )
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND operation_id=%s FOR UPDATE"
+                ).format(self._table("graph_replacement_requests")),
+                (self.store.bot_id, operation_id),
+            )
+        ).fetchone()
+        if row is None:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_NOT_FOUND", "Graph replacement does not exist", 404
+            )
+        if row["state"] != "QUEUED":
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_CANCEL_CONFLICT",
+                "Only an unclaimed graph replacement can be cancelled",
+                409,
+                details={"state": row["state"]},
+            )
+        head = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT graph_revision FROM {} WHERE bot_id=%s FOR SHARE"
+                ).format(self._table("runtime_graph_head")),
+                (self.store.bot_id,),
+            )
+        ).fetchone()
+        if head is None or head["graph_revision"] != expected_graph_revision:
+            raise ForestError(
+                "RUNTIME_GRAPH_REVISION_CONFLICT",
+                "RuntimeGraph revision changed",
+                409,
+                details={"graph_revision": None if head is None else head["graph_revision"]},
+            )
+        if row["expected_graph_revision"] != expected_graph_revision:
+            raise ForestError(
+                "RUNTIME_REPLACEMENT_CANCEL_CONFLICT",
+                "Cancellation targets a different graph revision",
+                409,
+            )
+        saved = await (
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET state='CANCELLED',cancel_operation_id=%s,"
+                    "cancelled_by=%s,updated_at=clock_timestamp() "
+                    "WHERE bot_id=%s AND operation_id=%s RETURNING *"
+                ).format(self._table("graph_replacement_requests")),
+                (cancel_operation_id, cancelled_by, self.store.bot_id, operation_id),
+            )
+        ).fetchone()
+        return dict(saved)
 
     async def claim_graph_replacement(
         self,
@@ -472,6 +639,23 @@ class KernelRuntimeRepository:
     ) -> dict:
         """Atomically pause or resume DATA while leaving CONTROL available."""
 
+        async with self.store.pool.connection() as conn, conn.transaction():
+            return await self.set_data_admission_in(
+                conn, lease,
+                expected_maintenance_epoch=expected_maintenance_epoch,
+                data_admission=data_admission,
+            )
+
+    async def set_data_admission_in(
+        self,
+        conn,
+        lease: HostLease,
+        *,
+        expected_maintenance_epoch: int,
+        data_admission: bool,
+    ) -> dict:
+        """Commit a maintenance CAS in the caller's control transaction."""
+
         if (
             type(expected_maintenance_epoch) is not int
             or expected_maintenance_epoch <= 0
@@ -482,43 +666,42 @@ class KernelRuntimeRepository:
                 "Maintenance epoch or DATA admission is invalid",
                 422,
             )
-        async with self.store.pool.connection() as conn, conn.transaction():
-            await self._identity_in(conn)
-            await self._host_in(conn, lease)
-            current = await (
-                await conn.execute(
-                    sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
-                        self._table("runtime_state")
-                    ),
-                    (self.store.bot_id,),
-                )
-            ).fetchone()
-            if current is None:
-                raise ForestError(
-                    "KERNEL_RUNTIME_NOT_INITIALIZED", "Runtime state is unavailable", 503
-                )
-            if current["maintenance_epoch"] != expected_maintenance_epoch:
-                raise ForestError(
-                    "RUNTIME_MAINTENANCE_CONFLICT",
-                    "Maintenance intent changed",
-                    409,
-                )
-            if current["status"] != "ACTIVE" or not current["control_admission"]:
-                raise ForestError(
-                    "RUNTIME_CONTROL_ADMISSION_CLOSED",
-                    "Runtime control admission is unavailable",
-                    409,
-                )
-            saved = await (
-                await conn.execute(
-                    sql.SQL(
-                        "UPDATE {} SET maintenance_epoch=maintenance_epoch+1,"
-                        "data_admission=%s WHERE bot_id=%s RETURNING *"
-                    ).format(self._table("runtime_state")),
-                    (data_admission, self.store.bot_id),
-                )
-            ).fetchone()
-            return dict(saved)
+        await self._identity_in(conn)
+        await self._host_in(conn, lease)
+        current = await (
+            await conn.execute(
+                sql.SQL("SELECT * FROM {} WHERE bot_id=%s FOR UPDATE").format(
+                    self._table("runtime_state")
+                ),
+                (self.store.bot_id,),
+            )
+        ).fetchone()
+        if current is None:
+            raise ForestError(
+                "KERNEL_RUNTIME_NOT_INITIALIZED", "Runtime state is unavailable", 503
+            )
+        if current["maintenance_epoch"] != expected_maintenance_epoch:
+            raise ForestError(
+                "RUNTIME_MAINTENANCE_CONFLICT",
+                "Maintenance intent changed",
+                409,
+            )
+        if current["status"] != "ACTIVE" or not current["control_admission"]:
+            raise ForestError(
+                "RUNTIME_CONTROL_ADMISSION_CLOSED",
+                "Runtime control admission is unavailable",
+                409,
+            )
+        saved = await (
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET maintenance_epoch=maintenance_epoch+1,"
+                    "data_admission=%s WHERE bot_id=%s RETURNING *"
+                ).format(self._table("runtime_state")),
+                (data_admission, self.store.bot_id),
+            )
+        ).fetchone()
+        return dict(saved)
 
     async def claim_host(
         self,
