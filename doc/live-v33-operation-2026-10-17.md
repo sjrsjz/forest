@@ -1,5 +1,9 @@
 # v33 运行与候选镜像核验（2026-10-17）
 
+10 月 17 日 17:28 CST 复核：树莓派 NapCat 的本地只读登录诊断返回 `READY / is_login=true / is_offline=false / core_ready=true`，没有当前登录错误；QQ 群消息日志持续更新，v33 Supervisor 仍为 healthy。QQ 为 `3.2.34-53644`，实际注入的 NapCat 为 `4.18.38`。此时 `alicebot.service` 已于 16:41 恢复运行，NapCat 8080 同时有树莓派本地 AliceBot 与 PC 上 Forest 两条 WebSocket 连接；因此本页下方较早的“唯一/一条连接”只描述当时采样，不能代表此刻。当前未为诊断重启服务、替换客户端或发送消息；旧 AliceBot 的运行意图需在正式切换前重新核对。
+
+同日最新源码镜像 `forest:test-worker-host-release-95474cba` 在另一套测试 PostgreSQL 中创建独立 Bot 库，通过完整假 Bot 的启动、Shell/Web、Memory、Graph 换代及冷恢复回归（`1 passed in 581.72s`）；测试库在用例结束时删除，容器退出。它没有连接 QQ，也没有把新 SQL 基线装入 v33 库。
+
 10 月 17 日 16:00 CST 再次通过 SSH 核查：`nc_3605196653.service` 仍为 active，QQ 实际版本 `3.2.34-53644`，NapCat 持续接收实时群消息，树莓派 8080 端口保有一条来自 Forest 的 ESTABLISHED 连接；现役 Supervisor `forest-candidate-v33-supervisor` 为 healthy。日志里的“下载最新版 QQ”是 10 月 13 日的失败登录尝试，10 月 16 日 23:08 已自动快速登录成功。此次检查未重启 QQ、未重置登录态、未发送群消息。隔离 PostgreSQL 的官方包选择并发初始化用例通过（1/1），完整 Bot Host 生命周期用例通过（1/1，560.56 秒）；未把新基线部署到 v33 旧库。
 
 树莓派上的 `nc_3605196653.service` 仍在运行，实际 Linux QQ 为 3.2.34-53644、NapCat 为 4.18.38。NapCat 日志记录 10 月 16 日 23:07 账号离线、约一分钟后自动快速登录成功；10 月 17 日通过本机 OneBot `get_status` 只读调用得到 `retcode=0`、`online=true`、`good=true`。没有重启 QQ、清理登录态或主动发送群消息。

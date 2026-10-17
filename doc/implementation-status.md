@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 最新源码新库全链路复验：从提交 `95474cba` 构建隔离测试镜像 `forest:test-worker-host-release-95474cba`，在测试 PostgreSQL 中创建新的 Bot 数据库并运行完整 BotHost 用例。22 组件 ACTIVE、Shell/Web 管理、Memory 遗忘、Graph 换代与发行镜像携带新版 Worker Host 时的已发布工件冷恢复均通过（`1 passed in 581.72s`）；用例末尾强制删除该测试库，容器退出。只读容器产生一条 pytest 缓存写入警告。假 OneBot/模型/向量服务不能代替最新源码的独立 Supervisor 进程部署、真实 QQ 群聊回复或长期成本验收；现役 v33 保持旧镜像运行。
+
 2026-10-17 Worker Host 自热换代的发布入口：本地 `plugin publish-official-bot` 现在允许发行物内的自举 Worker Host 身份，同时继续按原组件 ID、包 ID、运行时和三重摘要登记准确 ZIP。自动安装成员枚举仍排除自举包，发布不改变 Bot 的运行选择。路由包与 Worker Host 包的本地 CLI 发布用例 `2 passed`，Ruff 通过；在线 v33 未改动。
 
 2026-10-17 Worker Host 官方工件自热换代：包私有选择协议现在允许自身选中已启用的精确 `official` 工件，拒绝自停用、`builtin` 跟随镜像和普通安装包冒名。内核通用候选预览移除了按该组件名称拒绝官方工件的旧特例；预览编译目标包，装配以已发布旧包读取/围栏选择，再装配目标包并在 Graph 发布后交接管理端口。包目录 UI 可直接选择工件填入摘要，Worker Host 表单只允许官方启用。隔离 PostgreSQL 的选择 CAS/重放用例 `1 passed`；完整假 Bot 用例验证其他官方包选择、失败回退、Worker Host 新代码工件在线换代、旧代释放及冷启动恢复新摘要 `1 passed`（791.94 秒），Ruff、包构建及嵌入脚本语法检查通过。现役 v33 仍为旧镜像/旧 SQL 基线，不能用旧协议原地自升级；新基线须在独立 Bot 库验收。SQL baseline 变化尚没有在线存储升级协议，不能宣称任意 schema 版本热升级。
