@@ -3983,8 +3983,12 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     if selected["revision"] == selection["revision"] + 1:
                         break
                     await asyncio.sleep(0.1)
-            assert selected["entries"][-1]["component_id"] == "process.executor"
-            assert selected["entries"][-1]["desired_enabled"] is True
+            process_selection = next(
+                entry for entry in selected["entries"]
+                if entry["component_id"] == "process.executor"
+            )
+            assert process_selection["source_kind"] == "builtin"
+            assert process_selection["desired_enabled"] is True
             async with asyncio.timeout(90):
                 while True:
                     latest = (await restarted._kernel.runtime.status())["latest_replacement"]
@@ -4111,7 +4115,11 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                     if disabled["revision"] == selected["revision"] + 1:
                         break
                     await asyncio.sleep(0.1)
-            assert disabled["entries"][-1]["desired_enabled"] is False
+            process_selection = next(
+                entry for entry in disabled["entries"]
+                if entry["component_id"] == "process.executor"
+            )
+            assert process_selection["desired_enabled"] is False
             try:
                 async with asyncio.timeout(90):
                     while "process.executor" in restarted.registry.graph_identity.generations:

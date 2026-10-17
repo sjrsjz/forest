@@ -32,6 +32,7 @@ from forest.component_selection import (
     ComponentSelectionEntry,
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
+    resolve_official_package_snapshots,
 )
 from forest.component_selection_commit import resolve_selection_commit_preflight
 from forest.core_runtime import (
@@ -212,6 +213,56 @@ async def test_kernel_replacement_service_preserves_frozen_selection_credentials
         await request({**payload, "selection_digest": "sha256:bad"})
     assert malformed.value.code == "RUNTIME_REPLACEMENT_INPUT_INVALID"
     assert len(calls) == 1
+
+
+@pytest.mark.postgres
+async def test_official_selection_bootstrap_pins_artifacts_across_release_change(
+    clean_authority, tmp_path
+):
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    catalog = PackageCatalog(tmp_path / "official-selection-packages")
+    root = Path(__file__).parents[1] / "src/forest/builtin"
+    worker = catalog.build_official(root / "component_worker_host", scope="bot")
+    adapter = catalog.build_official(root / "adapter_onebot", scope="bot")
+    shell = catalog.build_official(root / "shell_command", scope="bot")
+    storage = _configuration_storage(worker)
+    await installer.install(
+        storage.spec, storage.baseline, storage.package_digest,
+        execution_profile="official",
+    )
+    reader = ComponentSelectionReader(store, worker)
+    frozen, replay = await asyncio.gather(
+        reader.initialize_defaults((shell, adapter)),
+        reader.initialize_defaults((adapter, shell)),
+    )
+    assert frozen.revision == 1
+    assert replay == frozen
+    assert [(entry.component_id, entry.package_digest, entry.desired_revision)
+            for entry in frozen.entries] == [
+        ("adapter.onebot", adapter.digest, 1),
+        ("shell.command", shell.digest, 1),
+    ]
+    with pytest.raises(ForestError) as conflict:
+        await reader.initialize_defaults((adapter,))
+    assert conflict.value.code == "COMPONENT_SELECTION_BOOTSTRAP_CONFLICT"
+    assert await reader.snapshot() == frozen
+
+    changed_source = tmp_path / "next-adapter"
+    copytree(root / "adapter_onebot", changed_source)
+    manifest = changed_source / "module.toml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            'version = "2.6.0"', 'version = "2.6.1"', 1
+        ),
+        encoding="utf-8",
+    )
+    newer_adapter = catalog.build_official(changed_source, scope="bot")
+    assert newer_adapter.digest != adapter.digest
+    selected = resolve_official_package_snapshots(
+        frozen, (newer_adapter, shell), catalog
+    )
+    assert tuple(item.digest for item in selected) == (adapter.digest, shell.digest)
 
 
 @pytest.mark.postgres

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.component-worker-host"
-version = "1.6.24"
+version = "1.7.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "component_worker_host:ComponentWorkerHost"
@@ -58,9 +58,9 @@ order = 2
 
 [components.storage]
 schema_id = "forest.component.worker-host"
-schema_version = "1.9.0"
+schema_version = "1.10.0"
 baseline = "schema/control.sql"
-baseline_sha256 = "b74afb4b3e1e4f1d1622a1c1d02a7d4cd53e99dd5454a4e06465a8299eb2980a"
+baseline_sha256 = "8910f17d2dce6fd696767ad015011ec66bc733807fa6036ab8fe2497edf1bb60"
 scope = "bot"
 repository_contract = "forest.component-worker-host.repository/1"
 execution_profile = "official"
@@ -372,6 +372,13 @@ timeout_s = 30
 id = "module"
 port = "component.host.module"
 timeout_s = 10
+
+[[components.domain_commands]]
+name = "component.selection.initialize-defaults"
+contract = "1.0"
+function = "component_selection_initialize_defaults"
+input_schema = "schemas/selection-bootstrap-input.json"
+output_schema = "schemas/selection-snapshot-output.json"
 
 [[components.domain_commands]]
 name = "component.reload.enqueue"

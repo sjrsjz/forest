@@ -561,6 +561,13 @@ def test_bot_official_selection_resolves_exact_registered_artifact(tmp_path):
     with pytest.raises(ForestError) as rejected:
         resolve_official_package_snapshots(selection, (default,), untrusted)
     assert rejected.value.code == "OFFICIAL_PACKAGE_NOT_REGISTERED"
+    added = catalog.build_official(
+        Path(__file__).resolve().parents[1] / "src/forest/builtin/routing_graph",
+        scope="bot",
+    )
+    with pytest.raises(ForestError) as rejected:
+        resolve_official_package_snapshots(selection, (default, added), catalog)
+    assert rejected.value.code == "COMPONENT_SELECTION_INCOMPLETE"
     untrusted.build_official(source_root, scope="bot")
     with pytest.raises(ForestError) as rejected:
         resolve_official_package_snapshots(selection, (default,), untrusted)

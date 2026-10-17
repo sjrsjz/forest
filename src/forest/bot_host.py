@@ -687,6 +687,10 @@ class BotHost:
                     "A frozen Bot bootstrap package is absent from the install catalog",
                     409,
                 )
+        if bootstrap_settings is not None and selection.revision == 0:
+            selection = await candidate_reader.initialize_defaults(
+                default_official_snapshots
+            )
         resolved_official = await asyncio.to_thread(
             resolve_official_package_snapshots,
             selection, tuple(snapshot for _source, snapshot in automatic_sources),

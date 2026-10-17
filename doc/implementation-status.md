@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 当前现役仍为 v33 的旧镜像 `forest:runtime-candidate-c732bad`：一次新镜像启动先遇到 Docker 挂载来源名称交换后的等待，改用旧容器固定 ID 后容器可启动，但 v33 旧 Bot 库以 `SCHEMA_BUNDLE_MISMATCH` 拒绝 Adapter/Shell 新 SQL 基线；两次均已回退，没有把新版 Adapter 热重载宣称为成功。Docker Desktop 后来退出并重启，PostgreSQL 健康后旧 Supervisor 自动恢复，Bot 图修订 20 为 22/22 ACTIVE、部署 READY/ONLINE、树莓派 OneBot 单连接。3 笔历史 UNKNOWN 嵌入仍冻结；本 UTC 日另有正常后台嵌入结算，详见 [v33 运行记录](live-v33-operation-2026-10-17.md)。源码现已让 `component.worker-host` 于 Bot 首次物化时冻结其他自动安装官方包的准确工件，避免以后更换宿主镜像隐式替换包；隔离 PostgreSQL 并发初始化用例与完整 Bot Host 生命周期用例均通过。v33 旧库保持原样，新基线仍须在独立 Bot 库验收。
+
 2026-10-16 v32 官方工件冷启动恢复：在 0 活动 Run/Job/待发送的前提下，受控重启同一个 Supervisor 容器；原 Graph 3 STOPPED，新 Graph 5 ACTIVE、22/22 ACTIVE，Memory 继续从选择账本固定的官方包摘要恢复为 1.96.1。配置修订 2 和嵌入已结算 1 次／22 tokens 的账本保持，观察器两次采样零违规；NapCat READY，OneBot 连接先为 0、后回到 1。Graph 4 是退役时占用、用于清空图头而无实体图行的修订；本次未发 QQ 消息，真实 `@` 回复待验收。
 
 2026-10-16 v32 官方 Memory 1.96.1 在线热换代：从已提交源码构建并按 ZIP、包和 Manifest 三重 SHA-256 摘要发布到 v32 专用包目录；`component.worker-host` 预检保留配置修订 2 与原存储摘要，正式官方工件选择请求 `selection:26fb63e86202180c7162375b1a272850` 的内核结果为 SUCCEEDED，Graph 2→3。Bot 数据库权威账本证明 22 个成员中 7 个换代、15 个 Generation 保留，旧 7 个均 DISPOSED，旧图 RETIRED、新图 ACTIVE。Memory 现为 1.96.1 / SQL 3.94.0，22/22 ACTIVE，观察器两次采样无违规、预算仍结算 1 次／22 tokens；NapCat READY、OneBot 单连接。获准群最近历史消息仍在切换前，真实 `@` 回复尚待验收。详见 [v32 在线切换记录](live-v32-cutover-2026-10-16.md)。

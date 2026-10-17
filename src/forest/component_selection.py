@@ -150,6 +150,17 @@ def resolve_official_package_snapshots(
         raise ForestError(
             "COMPONENT_SELECTION_INVALID", "Official component identities are duplicated", 409
         )
+    if selection.revision > 0:
+        selected_official_ids = {
+            entry.component_id for entry in selection.entries
+            if entry.source_kind in {"builtin", "official"}
+        }
+        if selected_official_ids != set(by_id):
+            raise ForestError(
+                "COMPONENT_SELECTION_INCOMPLETE",
+                "Official release membership differs from the Bot's frozen selection",
+                409,
+            )
     with ThreadPoolExecutor(max_workers=4) as executor:
         verified = tuple(executor.map(
             catalog.get_official_bot, (snapshot.digest for snapshot in defaults)
@@ -280,6 +291,10 @@ class ComponentSelectionReader:
             item["name"]: item["function"]
             for item in component.get("domain_queries", ())
         }
+        commands = {
+            item["name"]: item["function"]
+            for item in component.get("domain_commands", ())
+        }
         required = (
             "component.selection.snapshot",
             "component.selection.project",
@@ -298,6 +313,63 @@ class ComponentSelectionReader:
             )
         self.namespace = module_schema_namespace(storage["schema_id"])
         self.functions = queries
+        self.initialize_function = commands.get("component.selection.initialize-defaults")
+
+    async def initialize_defaults(
+        self, snapshots: tuple[PackageSnapshot, ...]
+    ) -> ComponentSelectionSnapshot:
+        """Freeze the provisioned official artifacts before the first runtime graph."""
+        if self.initialize_function is None:
+            raise ForestError(
+                "COMPONENT_SELECTION_BINDING_INVALID",
+                "Selection authority has no official-default initialization port",
+                503,
+            )
+        ordered = tuple(sorted(snapshots, key=lambda item: item.component["id"]))
+        ids = tuple(item.component["id"] for item in ordered)
+        if not 1 <= len(ordered) <= 128 or len(set(ids)) != len(ids):
+            raise ForestError(
+                "COMPONENT_SELECTION_BOOTSTRAP_INVALID",
+                "Initial official package set is invalid",
+                422,
+            )
+        for snapshot in ordered:
+            snapshot.verify()
+            if snapshot.component["scope"] != "bot" or snapshot.component["id"] == "component.worker-host":
+                raise ForestError(
+                    "COMPONENT_SELECTION_BOOTSTRAP_INVALID",
+                    "Initial official package set is invalid",
+                    422,
+                )
+        payload = {
+            "protocol": "forest.component-selection-bootstrap/1",
+            "packages": [
+                {
+                    "component_id": item.component["id"],
+                    "package_digest": item.digest,
+                    "manifest_digest": digest_json(item.manifest),
+                }
+                for item in ordered
+            ],
+        }
+        async with self.store.pool.connection() as conn, conn.transaction():
+            await self.exclusive_fence_in(conn)
+            row = await (
+                await conn.execute(
+                    sql.SQL("SELECT {}(%s::jsonb,%s::jsonb) AS result").format(
+                        sql.Identifier(self.namespace, self.initialize_function)
+                    ),
+                    (
+                        Jsonb({
+                            "bot_id": self.store.bot_id,
+                            "port_kind": "command",
+                            "port_name": "component.selection.initialize-defaults",
+                        }),
+                        Jsonb(payload),
+                    ),
+                )
+            ).fetchone()
+            return self._decode_snapshot(row["result"], allow_error=True)
 
     async def exclusive_fence_in(self, conn) -> None:
         """Serialize a caller-owned selection write transaction with publication."""
@@ -472,6 +544,8 @@ class ComponentSelectionReader:
                     "COMPONENT_SELECTION_INVALID",
                     "COMPONENT_SELECTION_REVISION_CONFLICT",
                     "COMPONENT_SELECTION_LIMIT",
+                    "COMPONENT_SELECTION_BOOTSTRAP_INVALID",
+                    "COMPONENT_SELECTION_BOOTSTRAP_CONFLICT",
                 }
                 and isinstance(error.get("message"), str)
                 and type(error.get("status")) is int

@@ -99,6 +99,100 @@ SELECT jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
         WHERE bot_id=context->>'bot_id'),'[]'::jsonb)))
 $$;
 
+-- Creation freezes every automatic official package in this package-owned
+-- selection ledger. A later host image may supply newer defaults, but only an
+-- explicit selection command changes the artifact used by an existing Bot.
+CREATE FUNCTION component_selection_initialize_defaults(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    bot text:=context->>'bot_id';
+    packages jsonb:=input->'packages';
+    item jsonb;
+    requested jsonb;
+    current jsonb;
+    revision bigint;
+BEGIN
+    IF context->>'port_kind' IS DISTINCT FROM 'command'
+       OR context->>'port_name' IS DISTINCT FROM 'component.selection.initialize-defaults'
+       OR bot IS NULL OR length(bot) NOT BETWEEN 1 AND 128
+       OR input->>'protocol' IS DISTINCT FROM 'forest.component-selection-bootstrap/1'
+       OR jsonb_typeof(packages) IS DISTINCT FROM 'array' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','COMPONENT_SELECTION_BOOTSTRAP_INVALID',
+                             'message','Official selection bootstrap is invalid','status',422));
+    END IF;
+    IF jsonb_array_length(packages) NOT BETWEEN 1 AND 128 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','COMPONENT_SELECTION_BOOTSTRAP_INVALID',
+                             'message','Official selection bootstrap is invalid','status',422));
+    END IF;
+    FOR item IN SELECT value FROM jsonb_array_elements(packages) LOOP
+        IF jsonb_typeof(item) IS DISTINCT FROM 'object' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+              jsonb_build_object('code','COMPONENT_SELECTION_BOOTSTRAP_INVALID',
+                                 'message','Official selection bootstrap is invalid','status',422));
+        END IF;
+        IF (SELECT count(*) FROM jsonb_object_keys(item)) <> 3
+           OR NOT (item ? 'component_id' AND item ? 'package_digest'
+                   AND item ? 'manifest_digest')
+           OR jsonb_typeof(item->'component_id') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(item->'package_digest') IS DISTINCT FROM 'string'
+           OR jsonb_typeof(item->'manifest_digest') IS DISTINCT FROM 'string'
+           OR item->>'component_id' !~ '^[a-z0-9][a-z0-9._-]{0,127}$'
+           OR item->>'component_id' = 'component.worker-host'
+           OR item->>'package_digest' !~ '^sha256:[a-f0-9]{64}$'
+           OR item->>'manifest_digest' !~ '^sha256:[a-f0-9]{64}$' THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+              jsonb_build_object('code','COMPONENT_SELECTION_BOOTSTRAP_INVALID',
+                                 'message','Official selection bootstrap is invalid','status',422));
+        END IF;
+    END LOOP;
+    IF (SELECT count(DISTINCT value->>'component_id')
+        FROM jsonb_array_elements(packages)) <> jsonb_array_length(packages) THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','COMPONENT_SELECTION_BOOTSTRAP_INVALID',
+                             'message','Official selection bootstrap is invalid','status',422));
+    END IF;
+    SELECT jsonb_agg(jsonb_build_object(
+        'component_id',value->>'component_id','source_kind','official',
+        'package_digest',value->>'package_digest',
+        'manifest_digest',value->>'manifest_digest',
+        'approved_capabilities','[]'::jsonb,'desired_enabled',true,
+        'desired_revision',1) ORDER BY value->>'component_id') INTO requested
+      FROM jsonb_array_elements(packages);
+    PERFORM pg_advisory_xact_lock(hashtextextended('forest.component.selection/'||bot,0));
+    INSERT INTO __forest_module_schema__.selection_heads(bot_id,revision)
+      VALUES(bot,0) ON CONFLICT (bot_id) DO NOTHING;
+    SELECT heads.revision INTO revision FROM __forest_module_schema__.selection_heads AS heads
+      WHERE heads.bot_id=bot FOR UPDATE;
+    IF revision=0 THEN
+        IF EXISTS (SELECT 1 FROM __forest_module_schema__.selection_entries WHERE bot_id=bot) THEN
+            RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+              jsonb_build_object('code','COMPONENT_SELECTION_BOOTSTRAP_CONFLICT',
+                                 'message','Official selection is already initialized','status',409));
+        END IF;
+        INSERT INTO __forest_module_schema__.selection_entries(
+          bot_id,component_id,source_kind,package_digest,manifest_digest,
+          approved_capabilities,desired_enabled,desired_revision)
+        SELECT bot,value->>'component_id','official',value->>'package_digest',
+          value->>'manifest_digest','[]'::jsonb,true,1
+          FROM jsonb_array_elements(packages);
+        UPDATE __forest_module_schema__.selection_heads SET revision=1 WHERE bot_id=bot;
+    ELSIF revision<>1 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','COMPONENT_SELECTION_BOOTSTRAP_CONFLICT',
+                             'message','Official selection is already initialized','status',409));
+    END IF;
+    current:=__forest_module_schema__.component_selection_snapshot(context,'{}'::jsonb);
+    IF current#>'{value,entries}' IS DISTINCT FROM requested THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','COMPONENT_SELECTION_BOOTSTRAP_CONFLICT',
+                             'message','Official selection differs from the frozen bootstrap','status',409));
+    END IF;
+    RETURN current;
+END;
+$$;
+
 CREATE FUNCTION component_selection_project(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
 DECLARE source text:=input->>'source_kind'; target text:=input->>'component_id';
