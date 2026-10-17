@@ -13,6 +13,8 @@
 
 2026-10-18 Core Agent Run 取消边界：Agent 包内 `checkpoint_seq` 初值与取消端口允许值均为 0，但 Core Gate 和内核救援请求表原先要求所有期望修订大于 0。隔离完整 BotHost 场景在活动模型请求期间发送授权群聊 `core cancel run:<id> --expect-revision 0`，首次稳定复现 `rescue_requests_expected_revision_check` 拒绝，未能写入 Core 请求；现将 Gate 与 SQL 约束按目标区分，只有 Run 取消允许 0。重跑同一场景后，Core 请求 `SUCCEEDED`、Agent 包内取消账本保存了准确 Run、checkpoint、QQ 主体和原因，模型调用释放后 Run 最终为 `CANCELLED/AGENT_CANCELLED_BY_ADMIN`（1 passed in 92.59s）。另有 Core 接纳并发容量/同键重放及撤权发送顺序 2 passed，语法 11 passed，Ruff 与差异检查通过。全部使用隔离 PostgreSQL 与模拟 OneBot/模型端口；未验证现役 v38 或真实 QQ 群命令。
 
+包含该新 SQL 基线的生产镜像为 `forest:runtime-core-rescue-94decb70`（镜像 ID `sha256:5d39c71938897dba14a345ba202f42af078a169c3479681a3b98da0b686d7050`）；无网络导入检查及镜像内 SQL 内容核对通过。上一候选 `forest:runtime-core-rescue-2960cc5b` 不包含 Run checkpoint 0 修正，不再是当前发布候选；现役 v38 未切换。
+
 2026-10-18 Core 整图维护与排队取消验收：当前源码的完整假 OneBot BotHost 用例先在停用 `shell.command`、关闭 DATA 后，从群消息执行 `core reload`，核对持久替换请求由 `QUEUED` 到 `SUCCEEDED`、graph revision 前进一代、DATA 继续关闭且 CONTROL 回执为 `SENT`（1 passed in 782.10s）。随后发现 Core Gate 原先拒绝返回的 `core:<摘要>/reload` 中的 `/`，使该请求无法从群聊取消；现已允许原样操作 ID，语法用例 9 passed。完整 BotHost 复验让图替换领取器暂时空闲，第二条群聊 `core reload` 保持 `QUEUED`，再以回执中的完整 ID 发送 `core cancel --expect-revision`；请求成为 `CANCELLED`，graph revision 未前进（1 passed in 753.62s）。Ruff 和差异检查通过。两次均复用隔离 PostgreSQL 与模拟 OneBot/模型/向量端口，未向 QQ 发消息；现役 v38 仍是旧镜像，群聊 Agent Run 取消和真实 QQ 管理操作尚未端到端验收。
 
 同一源码提交 `2960cc5b` 的生产运行镜像已构建为 `forest:runtime-core-rescue-2960cc5b`（镜像 ID `sha256:6954f56b238bce6f36103061f0875a271e727d51fc454fea6d9df992fc63c1ab`），无网络容器内核导入通过。该镜像仅作为后续隔离部署候选，未替换正在观察的 v38。
