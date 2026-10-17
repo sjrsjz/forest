@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.conversation-scheduler"
-version = "4.39.1"
+version = "4.40.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "conversation_scheduler:ConversationScheduler"
@@ -102,9 +102,9 @@ output_schema = "schemas/select-input-output.json"
 
 [components.storage]
 schema_id = "forest.conversation.scheduler"
-schema_version = "4.32.0"
+schema_version = "4.33.0"
 baseline = "schema/conversation_scheduler.sql"
-baseline_sha256 = "42936c89032ea0183d1f52d0b0cd1f190525f38dd3ec1c422f19d791d575c352"
+baseline_sha256 = "a58faf09613e586232fe07098f8dbd14ab4d2ba24c5852816d4f912962b0fa6f"
 scope = "bot"
 repository_contract = "forest.conversation-scheduler.repository/3"
 execution_profile = "official"
@@ -252,6 +252,13 @@ name = "conversation.classify-shell-ingress"
 contract = "1.0"
 function = "conversation_classify_shell_ingress"
 input_schema = "schemas/shell-classify-envelope.json"
+output_schema = "schemas/classify-output.json"
+
+[[components.unit_of_work_participants]]
+name = "conversation.classify-core-rescue-ingress"
+contract = "1.0"
+function = "conversation_classify_core_rescue_ingress"
+input_schema = "schemas/core-rescue-classify-envelope.json"
 output_schema = "schemas/classify-output.json"
 
 [[components.unit_of_work_participants]]

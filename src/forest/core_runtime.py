@@ -20,6 +20,10 @@ from forest.kernel_package_catalog_snapshot import (
     package_catalog_page_service,
 )
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
+from forest.kernel_rescue_ingress import (
+    KernelCoreRescueAdmission,
+    KernelRuntimeIngressParticipant,
+)
 from forest.kernel_rescue_management import RuntimeRescueManagementContract
 from forest.kernel_resource_admission import (
     KERNEL_RESOURCE_POLICY_DEFAULT,
@@ -575,10 +579,11 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
 class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
     """Publish the Bot-wide Worker admission policy from kernel.runtime."""
 
-    def __init__(self, *args, runtime_host, payloads, rescue_policy) -> None:
+    def __init__(self, *args, runtime_host, payloads, rescue_policy, audit) -> None:
         super().__init__(*args)
         self.runtime_host = runtime_host
         self.payloads = payloads
+        self.rescue_admission = KernelCoreRescueAdmission(self, rescue_policy, audit)
         self.management_contract = RuntimeRescueManagementContract(
             self.module_configuration,
             policy=rescue_policy,
@@ -588,7 +593,10 @@ class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
         )
 
     def unit_of_work_participant(self):
-        return KernelShellGateUnitOfWorkParticipant(self, self.payloads)
+        return KernelRuntimeIngressParticipant(
+            KernelShellGateUnitOfWorkParticipant(self, self.payloads),
+            self.rescue_admission,
+        )
 
     async def apply_configuration(self, **kwargs) -> dict:
         lock = self.runtime_host._replacement_lock
@@ -870,7 +878,7 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
             module = (
                 prepared_type(
                     *arguments, runtime_host=_runtime, payloads=payload,
-                    rescue_policy=rescue_policy,
+                    rescue_policy=rescue_policy, audit=audit,
                 )
                 if component_id == "kernel.runtime"
                 else prepared_type(*arguments)

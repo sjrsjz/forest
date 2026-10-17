@@ -1537,6 +1537,61 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION conversation_classify_core_rescue_ingress(context jsonb, envelope jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+VOLATILE
+SET search_path = pg_catalog
+AS $$
+DECLARE
+    body jsonb := envelope->'input';
+    prior jsonb := envelope->'prior';
+    admitted jsonb := prior->(body->>'conversation_step_id');
+    rescue jsonb := prior->(body->>'rescue_step_id');
+    projected jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'adapter.onebot'
+       OR body->>'conversation_step_id' IS DISTINCT FROM 'conversation'
+       OR body->>'rescue_step_id' IS DISTINCT FROM 'rescue'
+       OR admitted->>'conversation_id' IS DISTINCT FROM body->>'conversation_id'
+       OR admitted->>'event_id' IS DISTINCT FROM body->>'event_id'
+       OR rescue->>'protocol' IS DISTINCT FROM 'forest.core-rescue-admission/1'
+       OR rescue->>'request_id' IS NULL
+       OR rescue->>'kernel_generation_id' IS NULL
+       OR rescue->>'policy_revision' !~ '^[1-9][0-9]*$'
+       OR rescue->>'state' NOT IN ('QUEUED','REJECTED')
+       OR (rescue->>'state'='QUEUED' AND rescue->>'rejection_code' IS NOT NULL)
+       OR (rescue->>'state'='REJECTED' AND rescue->>'rejection_code' IS NULL) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','CONVERSATION_CORE_RESCUE_CLASSIFICATION_INVALID',
+                'message','Core rescue admission evidence is invalid','status',422
+            )
+        );
+    END IF;
+    projected := jsonb_build_object(
+        'protocol','forest.uow-step/1',
+        'caller',envelope->'caller',
+        'input',jsonb_build_object(
+            'conversation_id',body->>'conversation_id',
+            'event_id',body->>'event_id',
+            'decision','CONTROL_COMMAND',
+            'classifier_component_id','kernel.runtime',
+            'classifier_generation_id',rescue->>'kernel_generation_id',
+            'rule_revision','core-rescue-policy:'||(rescue->>'policy_revision'),
+            'reason_code',COALESCE(rescue->>'rejection_code','CORE_RESCUE_ACCEPTED'),
+            'route_ref',rescue->>'request_id',
+            'trigger_id',NULL,
+            'principal_ref',NULL
+        ),
+        'prior',prior
+    );
+    RETURN __forest_module_schema__.conversation_complete_classification(context, projected);
+END;
+$$;
+
 CREATE FUNCTION conversation_authorize_run_trigger(context jsonb, envelope jsonb)
 RETURNS jsonb
 LANGUAGE plpgsql

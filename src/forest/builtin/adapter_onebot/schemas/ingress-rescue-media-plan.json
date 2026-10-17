@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object", "additionalProperties": false,
+  "required": ["adapter", "conversation", "gate", "shell_origin", "position", "media", "rescue", "rescue_classification"],
+  "properties": {
+    "adapter": {"type": "object"},
+    "conversation": {"type": "object"},
+    "gate": {"type": "object"},
+    "shell_origin": {
+      "type": "object", "additionalProperties": false,
+      "required": ["raw_frame"],
+      "properties": {"raw_frame": {"type": "object"}}
+    },
+    "position": {"type": "object"},
+    "media": {"type": "object"},
+    "rescue": {"type": "object"},
+    "rescue_classification": {"type": "object"}
+  }
+}

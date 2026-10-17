@@ -239,14 +239,18 @@ class KernelRescuePolicyAuthority:
             )
         return self._receipt(operation_id, next_revision, changed)
 
-    async def authorize_in(
-        self, conn, *, binding_ref: str, group_ref: str, principal_ref: str, action: str
-    ) -> int:
-        binding_ref, group_ref, principal_ref = self._key(
-            binding_ref, group_ref, principal_ref
-        )
-        if action not in _ACTIONS:
-            raise ForestError("RESCUE_ACTION_INVALID", "Unknown Core rescue action", 422)
+    async def scope_actions_in(
+        self, conn, *, binding_ref: str, group_ref: str, principal_ref: str
+    ) -> tuple[int, tuple[str, ...]]:
+        if (
+            not isinstance(binding_ref, str)
+            or not 1 <= len(binding_ref.encode("utf-8")) <= 256
+            or not isinstance(group_ref, str)
+            or _GROUP.fullmatch(group_ref) is None
+            or not isinstance(principal_ref, str)
+            or not 1 <= len(principal_ref.encode("utf-8")) <= 256
+        ):
+            raise ForestError("RESCUE_POLICY_INPUT_INVALID", "Invalid rescue scope", 422)
         state = await (
             await conn.execute(
                 sql.SQL("SELECT revision FROM {} WHERE bot_id=%s FOR SHARE").format(
@@ -266,9 +270,23 @@ class KernelRescuePolicyAuthority:
                 (self.store.bot_id, binding_ref, group_ref, principal_ref),
             )
         ).fetchone()
-        if grant is None or not grant[_ACTION_COLUMNS[action]]:
+        actions = () if grant is None else tuple(
+            action for action, column in _ACTION_COLUMNS.items() if grant[column]
+        )
+        return state["revision"], actions
+
+    async def authorize_in(
+        self, conn, *, binding_ref: str, group_ref: str, principal_ref: str, action: str
+    ) -> int:
+        if action not in _ACTIONS:
+            raise ForestError("RESCUE_ACTION_INVALID", "Unknown Core rescue action", 422)
+        revision, actions = await self.scope_actions_in(
+            conn, binding_ref=binding_ref, group_ref=group_ref,
+            principal_ref=principal_ref,
+        )
+        if action not in actions:
             raise ForestError("RESCUE_PRINCIPAL_DENIED", "Core rescue action denied", 403)
-        return state["revision"]
+        return revision
 
     @staticmethod
     def _receipt(operation_id: str, revision: int, changed: bool) -> dict:

@@ -3844,10 +3844,10 @@ def package_runtime_descriptor(
             adapter.management_contract = management_contract_factory(adapter)
         return adapter
 
-    retained_services = {
-        item["name"] for item in component.get("requires", ())
-        if item.get("required", True)
-    }
+    # An optional requirement may be absent from a graph, but once resolved it
+    # still produces a generation-frozen service handle. Replace its consumer
+    # with the provider so a retained Worker never calls a retired Generation.
+    retained_services = {item["name"] for item in component.get("requires", ())}
     # UnitOfWork peers resolve against the sealed RuntimeGraph at call time.
     # A non-retained peer can disappear with its package: only plans that
     # actually call it fail, while independent plans remain available.

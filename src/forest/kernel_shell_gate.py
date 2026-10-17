@@ -162,7 +162,7 @@ class KernelShellGateUnitOfWorkParticipant:
                 "Shell ingress does not match its admitted event", 409,
             )
 
-        if name != "shell.gate-prove-ingress":
+        if name not in {"shell.gate-prove-ingress", "core.rescue.prove-ingress"}:
             invalid()
         if not isinstance(envelope, dict) or envelope.get("protocol") != "forest.uow-step/1":
             invalid()
@@ -180,7 +180,9 @@ class KernelShellGateUnitOfWorkParticipant:
             invalid()
         adapter = plan.get("adapter")
         conversation = plan.get("conversation")
-        shell = plan.get("shell")
+        shell = plan.get(
+            "shell" if name == "shell.gate-prove-ingress" else "rescue"
+        )
         gate = plan.get("gate")
         if not all(isinstance(item, dict) for item in (
             adapter, conversation, shell, gate,
@@ -272,7 +274,14 @@ class KernelShellGateUnitOfWorkParticipant:
         inspection = _inspect({"self_id": gate["self_id"], "segments": normalized["parts"]})
         if inspection.get("claimed") is not True or inspection != gate.get("inspection"):
             invalid()
-        return {
+        core_inspection = None
+        if name == "core.rescue.prove-ingress":
+            core_inspection = _inspect_core_rescue(inspection)
+            if core_inspection.get("claimed") is not True or core_inspection != shell.get(
+                "inspection"
+            ):
+                invalid()
+        result = {
             "protocol": "forest.shell-ingress-proof/1",
             "event_ref": event_ref,
             "binding_ref": adapter["binding_ref"],
@@ -286,3 +295,6 @@ class KernelShellGateUnitOfWorkParticipant:
             "normalized_payload_digest": normalized_ref["digest"],
             "self_id": gate["self_id"],
         }
+        if core_inspection is not None:
+            result["core_inspection"] = core_inspection
+        return result

@@ -4072,6 +4072,68 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                     ],
                 }, separators=(",", ":")).encode())
 
+            rescue_policy = restarted._kernel.rescue_policy
+            rescue_revision = (await rescue_policy.read())["revision"]
+
+            async def grant_guard(_conn, **_values):
+                return None
+
+            await rescue_policy.put(
+                operation_id="test:core-rescue-status-grant",
+                expected_revision=rescue_revision,
+                binding_ref="binding/main", group_ref="933179609",
+                principal_ref="qq:42", actions=["status"],
+                actor_ref="web:test-admin", authorization=None,
+                authorization_guard=grant_guard,
+            )
+            await send_shell(81000, 42, "#forest core status")
+            rescue_namespace = rescue_policy.namespace
+            conversation_namespace = next(
+                item.storage.spec.namespace for item in restarted.registry.descriptors
+                if item.component_id == "conversation.scheduler"
+            )
+            shell_namespace = next(
+                item.storage.spec.namespace for item in restarted.registry.descriptors
+                if item.component_id == "shell.command"
+            )
+            rescue_event = "onebot-event:" + hashlib.sha256(
+                b"binding/main\x0081000"
+            ).hexdigest()
+            async with asyncio.timeout(20):
+                while True:
+                    async with restarted.store.pool.connection() as conn:
+                        admitted_rescue = await (await conn.execute(
+                            sql.SQL("SELECT state,action,policy_revision FROM {}.rescue_requests "
+                                    "WHERE bot_id=%s AND event_ref=%s").format(
+                                sql.Identifier(rescue_namespace)
+                            ), (settings.bot_id, rescue_event),
+                        )).fetchone()
+                        classified_rescue = await (await conn.execute(
+                            sql.SQL("SELECT classification_state,trigger_decision,"
+                                    "classifier_component_id FROM {}.inbox_messages "
+                                    "WHERE bot_id=%s AND platform_message_ref=%s").format(
+                                sql.Identifier(conversation_namespace)
+                            ), (settings.bot_id, "81000"),
+                        )).fetchone()
+                        shell_fallback = await (await conn.execute(
+                            sql.SQL("SELECT request_id FROM {}.shell_requests "
+                                    "WHERE bot_id=%s AND event_ref=%s").format(
+                                sql.Identifier(shell_namespace)
+                            ), (settings.bot_id, rescue_event),
+                        )).fetchone()
+                    if admitted_rescue is not None and classified_rescue is not None:
+                        break
+                    await asyncio.sleep(0.1)
+            assert admitted_rescue["state"] == "QUEUED"
+            assert admitted_rescue["action"] == "status"
+            assert admitted_rescue["policy_revision"] == rescue_revision + 1
+            assert classified_rescue == {
+                "classification_state": "FINAL",
+                "trigger_decision": "CONTROL_COMMAND",
+                "classifier_component_id": "kernel.runtime",
+            }
+            assert shell_fallback is None
+
             shell_command = (
                 "#forest module enable --component-id process.executor "
                 f"--plan-digest {preview['plan_digest']} "
@@ -4171,12 +4233,13 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                 while True:
                     async with restarted.store.pool.connection() as conn:
                         invalid = await (await conn.execute(
-                            sql.SQL("SELECT state,rejection_code FROM {}.shell_requests "
-                                    "WHERE bot_id=%s AND principal_ref=%s "
-                                    "AND command_id='shell.invalid'").format(
-                                sql.Identifier(shell_namespace)
+                            sql.SQL("SELECT state,rejection_code FROM {}.rescue_requests "
+                                    "WHERE bot_id=%s AND event_ref=%s").format(
+                                sql.Identifier(rescue_namespace)
                             ),
-                            (settings.bot_id, "qq:42"),
+                            (settings.bot_id, "onebot-event:" + hashlib.sha256(
+                                b"binding/main\x0081004"
+                            ).hexdigest()),
                         )).fetchone()
                         classified = await (await conn.execute(
                             sql.SQL("SELECT classification_state,trigger_decision "
@@ -4189,7 +4252,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                     if invalid is not None and invalid["state"] == "REJECTED" and classified:
                         break
                     await asyncio.sleep(0.1)
-            assert invalid["rejection_code"] == "SHELL_SYNTAX_INVALID"
+            assert invalid["rejection_code"] == "CORE_RESCUE_SYNTAX_INVALID"
             assert classified == {
                 "classification_state": "FINAL",
                 "trigger_decision": "CONTROL_COMMAND",

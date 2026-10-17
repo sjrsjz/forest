@@ -38,6 +38,48 @@ CREATE TABLE rescue_policy_operations (
     PRIMARY KEY (bot_id,operation_id)
 );
 
+CREATE TABLE rescue_requests (
+    bot_id text NOT NULL REFERENCES rescue_policy_state(bot_id),
+    request_id text NOT NULL CHECK (octet_length(request_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    event_ref text NOT NULL CHECK (octet_length(event_ref) BETWEEN 1 AND 256),
+    conversation_ref text NOT NULL CHECK (octet_length(conversation_ref) BETWEEN 1 AND 256),
+    binding_ref text NOT NULL CHECK (octet_length(binding_ref) BETWEEN 1 AND 256),
+    binding_epoch bigint NOT NULL CHECK (binding_epoch > 0),
+    connection_epoch bigint NOT NULL CHECK (connection_epoch > 0),
+    client_incarnation text NOT NULL CHECK (octet_length(client_incarnation) BETWEEN 1 AND 256),
+    adapter_generation_id text NOT NULL CHECK (octet_length(adapter_generation_id) BETWEEN 1 AND 256),
+    executor_fence_digest text NOT NULL CHECK (executor_fence_digest ~ '^sha256:[a-f0-9]{64}$'),
+    group_ref text NOT NULL CHECK (group_ref ~ '^[1-9][0-9]{0,19}$'),
+    principal_ref text NOT NULL CHECK (octet_length(principal_ref) BETWEEN 1 AND 256),
+    ingress_seq bigint NOT NULL CHECK (ingress_seq > 0),
+    policy_revision bigint NOT NULL CHECK (policy_revision > 0),
+    kernel_generation_id text NOT NULL CHECK (octet_length(kernel_generation_id) BETWEEN 1 AND 256),
+    action text CHECK (action IN ('status','cancel','disable','reload')),
+    target_ref text,
+    expected_revision bigint CHECK (expected_revision > 0),
+    service_class text CHECK (service_class IN ('P0','P1')),
+    admission_state text NOT NULL CHECK (admission_state IN ('QUEUED','REJECTED')),
+    state text NOT NULL CHECK (state IN ('QUEUED','REJECTED')),
+    rejection_code text,
+    received_at timestamptz NOT NULL,
+    admission_deadline timestamptz NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,request_id),
+    UNIQUE (bot_id,event_ref),
+    CHECK (
+        (admission_state = 'QUEUED' AND action IS NOT NULL
+            AND service_class IS NOT NULL AND rejection_code IS NULL)
+        OR (admission_state = 'REJECTED' AND rejection_code IN (
+            'CORE_RESCUE_SYNTAX_INVALID','CORE_RESCUE_PRINCIPAL_DENIED',
+            'CORE_RESCUE_QUEUE_FULL'
+        ))
+    )
+);
+
+CREATE INDEX rescue_requests_queue_idx
+    ON rescue_requests(bot_id,state,created_at,request_id);
+
 CREATE TABLE host_lease (
     bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
     host_id text,

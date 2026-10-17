@@ -328,27 +328,42 @@ class AdapterOneBot(Plugin):
         ):
             raise ForestError("SHELL_GATE_RESULT_INVALID", "Shell gate result is invalid", 503)
         shell = None
+        core_rescue = None
         if gate["claimed"]:
-            shell = await ctx.services.call(
-                "shell.ingress.inspect",
-                {
-                    "gate": gate,
-                    "binding_ref": binding["binding_ref"],
-                    "binding_epoch": binding["binding_epoch"],
-                    "connection_epoch": frame["connection_epoch"],
-                    "client_incarnation": frame["client_incarnation"],
-                    "adapter_generation_id": frame["adapter_generation_id"],
-                    "executor_fence_digest": frame["transport_digest"],
-                    "conversation_ref": conversation_ref,
-                    "event_ref": event_id,
-                    "principal_ref": author_subject_ref,
-                },
-                operation_id=ctx.operations.stable("shell-inspect"),
+            core_rescue = await ctx.services.call(
+                "core.rescue.inspect",
+                {"protocol": "forest.core-rescue-inspect-request/1", "gate": gate},
+                operation_id=ctx.operations.stable("core-rescue-inspect"),
             )
-            if not isinstance(shell, dict) or shell.get("protocol") != "forest.shell-ingress/2":
+            if (
+                not isinstance(core_rescue, dict)
+                or core_rescue.get("protocol") != "forest.core-rescue-inspection/1"
+                or type(core_rescue.get("claimed")) is not bool
+            ):
                 raise ForestError(
-                    "SHELL_INGRESS_RESULT_INVALID", "Claimed Shell ingress is invalid", 503,
+                    "CORE_RESCUE_RESULT_INVALID", "Core rescue inspection is invalid", 503,
                 )
+            if not core_rescue["claimed"]:
+                shell = await ctx.services.call(
+                    "shell.ingress.inspect",
+                    {
+                        "gate": gate,
+                        "binding_ref": binding["binding_ref"],
+                        "binding_epoch": binding["binding_epoch"],
+                        "connection_epoch": frame["connection_epoch"],
+                        "client_incarnation": frame["client_incarnation"],
+                        "adapter_generation_id": frame["adapter_generation_id"],
+                        "executor_fence_digest": frame["transport_digest"],
+                        "conversation_ref": conversation_ref,
+                        "event_ref": event_id,
+                        "principal_ref": author_subject_ref,
+                    },
+                    operation_id=ctx.operations.stable("shell-inspect"),
+                )
+                if not isinstance(shell, dict) or shell.get("protocol") != "forest.shell-ingress/2":
+                    raise ForestError(
+                        "SHELL_INGRESS_RESULT_INVALID", "Claimed Shell ingress is invalid", 503,
+                    )
         classification = None
         if not gate["claimed"]:
             classification = await ctx.services.call(
@@ -461,37 +476,66 @@ class AdapterOneBot(Plugin):
         else:
             plan["gate"] = {"self_id": binding["self_id"], "inspection": gate}
             plan["shell_origin"] = {"raw_frame": json.loads(raw_body.decode("utf-8"))}
-            plan["shell"] = {
-                "protocol": "forest.shell-admission/2",
-                "request_id": shell["request_id"],
-                "shell_generation_id": shell["shell_generation_id"],
-                "binding_ref": binding["binding_ref"],
-                "binding_epoch": binding["binding_epoch"],
-                "connection_epoch": frame["connection_epoch"],
-                "client_incarnation": frame["client_incarnation"],
-                "adapter_generation_id": frame["adapter_generation_id"],
-                "executor_fence_digest": frame["transport_digest"],
-                "conversation_ref": conversation_ref,
-                "event_ref": event_id,
-                "principal_ref": author_subject_ref,
-                "command_id": shell["command_id"],
-                "command_version": shell["command_version"],
-                "arguments": shell["arguments"],
-                "rejection": shell["rejection"],
-                "received_at": event["received_at"],
-                "admission_deadline": event["classification_deadline"],
-            }
-            plan["shell_classification"] = {
-                "conversation_id": conversation_ref,
-                "event_id": conversation_event_id,
-                "conversation_step_id": "conversation",
-                "shell_step_id": "shell",
-            }
-            plan_name = (
-                "adapter.ingress-shell-memory"
-                if memory_capture is not None
-                else "adapter.ingress-shell-media"
-            )
+            if core_rescue["claimed"]:
+                plan["rescue"] = {
+                    "protocol": "forest.core-rescue-admit/1",
+                    "binding_ref": binding["binding_ref"],
+                    "binding_epoch": binding["binding_epoch"],
+                    "connection_epoch": frame["connection_epoch"],
+                    "client_incarnation": frame["client_incarnation"],
+                    "adapter_generation_id": frame["adapter_generation_id"],
+                    "executor_fence_digest": frame["transport_digest"],
+                    "conversation_ref": conversation_ref,
+                    "event_ref": event_id,
+                    "principal_ref": author_subject_ref,
+                    "group_ref": channel_ref,
+                    "received_at": event["received_at"],
+                    "admission_deadline": event["classification_deadline"],
+                    "inspection": core_rescue,
+                }
+                plan["rescue_classification"] = {
+                    "conversation_id": conversation_ref,
+                    "event_id": conversation_event_id,
+                    "conversation_step_id": "conversation",
+                    "rescue_step_id": "rescue",
+                }
+                plan_name = (
+                    "adapter.ingress-rescue-memory"
+                    if memory_capture is not None
+                    else "adapter.ingress-rescue-media"
+                )
+            else:
+                plan["shell"] = {
+                    "protocol": "forest.shell-admission/2",
+                    "request_id": shell["request_id"],
+                    "shell_generation_id": shell["shell_generation_id"],
+                    "binding_ref": binding["binding_ref"],
+                    "binding_epoch": binding["binding_epoch"],
+                    "connection_epoch": frame["connection_epoch"],
+                    "client_incarnation": frame["client_incarnation"],
+                    "adapter_generation_id": frame["adapter_generation_id"],
+                    "executor_fence_digest": frame["transport_digest"],
+                    "conversation_ref": conversation_ref,
+                    "event_ref": event_id,
+                    "principal_ref": author_subject_ref,
+                    "command_id": shell["command_id"],
+                    "command_version": shell["command_version"],
+                    "arguments": shell["arguments"],
+                    "rejection": shell["rejection"],
+                    "received_at": event["received_at"],
+                    "admission_deadline": event["classification_deadline"],
+                }
+                plan["shell_classification"] = {
+                    "conversation_id": conversation_ref,
+                    "event_id": conversation_event_id,
+                    "conversation_step_id": "conversation",
+                    "shell_step_id": "shell",
+                }
+                plan_name = (
+                    "adapter.ingress-shell-memory"
+                    if memory_capture is not None
+                    else "adapter.ingress-shell-media"
+                )
         await ctx.uow.call(
             plan_name,
             plan,

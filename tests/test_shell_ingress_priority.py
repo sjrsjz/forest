@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 from copy import deepcopy
@@ -12,7 +13,9 @@ from psycopg.types.json import Jsonb
 from test_schema_bundles import clean_authority as clean_authority
 
 from forest.builtin.shell_command.python.shell_command import ShellCommand
+from forest.core_runtime import bootstrap_kernel
 from forest.errors import ForestError
+from forest.kernel_rescue_ingress import KernelCoreRescueAdmission
 from forest.kernel_shell_gate import (
     KernelShellGateUnitOfWorkParticipant,
     core_rescue_inspect_service,
@@ -55,6 +58,88 @@ async def test_core_rescue_has_fixed_grammar_without_shell_fallback(
     if claimed:
         assert inspection["action"] == action
         assert inspection["error_code"] == error_code
+
+
+@pytest.mark.postgres
+async def test_core_rescue_admission_serializes_replay_and_queue_capacity(clean_authority):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    policy = kernel.rescue_policy
+
+    async def authorized(_conn, **_values):
+        return None
+
+    await policy.put(
+        operation_id="test:rescue-grant", expected_revision=1,
+        binding_ref="binding/main", group_ref="933179609",
+        principal_ref="qq:42", actions=["status"],
+        actor_ref="web:test", authorization=None, authorization_guard=authorized,
+    )
+    admission = KernelCoreRescueAdmission(
+        SimpleNamespace(generation_identity=SimpleNamespace(generation_id="kernel/one")),
+        policy, kernel.audit,
+    )
+    received = datetime.now(timezone.utc)
+    inspection = {
+        "protocol": "forest.core-rescue-inspection/1", "claimed": True,
+        "action": "status", "target_ref": None, "expected_revision": None,
+        "error_code": None,
+    }
+    body = {
+        "protocol": "forest.core-rescue-admit/1", "binding_ref": "binding/main",
+        "binding_epoch": 1, "connection_epoch": 1,
+        "client_incarnation": "client/one", "adapter_generation_id": "adapter/one",
+        "executor_fence_digest": "sha256:" + "a" * 64,
+        "conversation_ref": "onebot:group:933179609",
+        "event_ref": "event/0", "principal_ref": "qq:42",
+        "group_ref": "933179609", "received_at": received.isoformat(),
+        "admission_deadline": (received + timedelta(seconds=30)).isoformat(),
+        "inspection": inspection,
+    }
+    envelope = {
+        "protocol": "forest.uow-step/1",
+        "caller": {"component_id": "adapter.onebot", "generation_id": "adapter/one"},
+        "input": body,
+        "prior": {
+            "adapter": {"event_id": body["event_ref"], "binding_ref": "binding/main",
+                        "binding_epoch": 1},
+            "conversation": {"conversation_id": body["conversation_ref"], "ingress_seq": 1},
+            "gate": {
+                "protocol": "forest.shell-ingress-proof/1",
+                "core_inspection": inspection,
+                "conversation_ref": body["conversation_ref"],
+                "event_ref": body["event_ref"], "binding_ref": "binding/main",
+                "binding_epoch": 1, "adapter_generation_id": "adapter/one",
+                "principal_ref": "qq:42", "received_at": body["received_at"],
+                "admission_deadline": body["admission_deadline"], "ingress_seq": 1,
+            },
+            "origin": {
+                "protocol": "forest.onebot-shell-origin-proof/1",
+                "conversation_ref": body["conversation_ref"],
+                "event_ref": body["event_ref"], "binding_ref": "binding/main",
+                "binding_epoch": 1, "adapter_generation_id": "adapter/one",
+                "principal_ref": "qq:42",
+            },
+        },
+    }
+
+    async def admit(index):
+        request = deepcopy(envelope)
+        event_ref = f"event/{index}"
+        request["input"]["event_ref"] = event_ref
+        for proof in ("adapter", "gate", "origin"):
+            request["prior"][proof]["event_id" if proof == "adapter" else "event_ref"] = event_ref
+        request["prior"]["conversation"]["ingress_seq"] = index + 1
+        request["prior"]["gate"]["ingress_seq"] = index + 1
+        async with store.pool.connection() as conn, conn.transaction():
+            return await admission.invoke_in(conn, request)
+
+    results = await asyncio.gather(*(admit(index) for index in range(20)))
+    assert sum(item["state"] == "QUEUED" for item in results) == 16
+    assert sum(item["rejection_code"] == "CORE_RESCUE_QUEUE_FULL" for item in results) == 4
+    assert len({item["request_id"] for item in results}) == 20
+    duplicate = await asyncio.gather(admit(0), admit(0))
+    assert duplicate == [{**results[0], "duplicate": True}] * 2
 
 
 @pytest.mark.parametrize("trailing", [
