@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 现役 v33 真实 VL 成本诊断：18:32 CST 的 UTC 当日账本为 188 次已结算、136015 charged tokens，4 次 UNKNOWN 冻结 131072 tokens、0 在途预留；每日 300000 token 阈值仅余 32913，单批预留 32768。UNKNOWN 是 1 次 HTTP 不确定和 3 次 60 秒超时，均已派发，不可当作免费失败自动释放。为给自然群消息留预算，未在现役 v33 发起额外 IMAGE 管理试验或重试未知请求。详见 [v33 运行记录](live-v33-operation-2026-10-17.md)。
+
 2026-10-17 v34 隔离候选图片来源整链：先前许可群 GIF 的 QQ CDN 旧地址已被 HTTP 拒绝并删除暂存；随后用公开 100×100 PNG 向只读假 OneBot 注入图片和两条被动文本。真实媒体抓取 READY，静默裁剪后 IMAGE 来源 ELIGIBLE、`DOCUMENT/IMAGE` facet READY 且有向量引用。新 IMAGE 管理试验 READY，5 条可见证据包含该图片直接种子及两群文本，来源群/作者正确；累计嵌入 9 次已结算、UNKNOWN/预留 0、假端点报告 0 tokens。第二 Bot 库仍为空，候选 Bot 已 OFFLINE，假端点零发送动作，v33 healthy。固定向量与公开图片不证明真实 VL 语义质量、实际费用或最终候选的真实 QQ 图片入站。详见 [v34 图片查询与来源验收](live-v34-image-query-2026-10-17.md)。
 
 2026-10-17 v34 隔离候选 IMAGE 管理召回：正式资产上传一张 64×64 PNG，`memory.trial.start` 从 CLAIMED/PENDING 到 READY，`QUERY/IMAGE` facet READY 且有向量引用；`memory.trial.result` 返回遗忘后剩余 3 条跨两群文本来源，群主干与作者归因正确。累计嵌入已结算 6 次、UNKNOWN/预留 0，假端点报告 0 tokens；Bot 已 OFFLINE，假 OneBot 已停止。本次固定向量只证明图片查询的流程与归因，未证明真实语义质量、图片来源归档或以图查图。详见 [v34 图片查询验收](live-v34-image-query-2026-10-17.md)。

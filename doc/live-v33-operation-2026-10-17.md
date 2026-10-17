@@ -1,5 +1,7 @@
 # v33 运行与候选镜像核验（2026-10-17）
 
+10 月 17 日 18:32 CST 对现役 v33 的真实 VL 嵌入账本作只读成本核查：当前 UTC 日已有 188 次成功结算、136015 charged tokens，另有 4 次 UNKNOWN 各冻结 32768 tokens，合计未知暴露 131072 tokens；0 在途预留。按当前每日 300000 token 阈值，账面余量仅 32913 tokens，单批预留为 32768 tokens，因此当时最多只能再准入一批。4 次 UNKNOWN 分别为 1 次 `EMBEDDING_HTTP_UNCERTAIN`（6 facets）与 3 次 `EMBEDDING_TIMEOUT`（4、1、1 facets），均为已派发后结算的不确定外部效果；它们不能因超时就当作未计费或擅自释放预算。当天另有 188 次 SUCCEEDED，最后一次在 18:09 CST 结算；这说明超时并非整个端点持续不可用。为了保留自然群消息的预算，没有在现役 v33 发起额外 IMAGE 管理试验，也没有重试 UNKNOWN、发 QQ 消息或修改配置。快照会随后台流量变化，不代表日终值。
+
 10 月 17 日 17:28 CST 复核：树莓派 NapCat 的本地只读登录诊断返回 `READY / is_login=true / is_offline=false / core_ready=true`，没有当前登录错误；QQ 群消息日志持续更新，v33 Supervisor 仍为 healthy。QQ 为 `3.2.34-53644`，实际注入的 NapCat 为 `4.18.38`。此时 `alicebot.service` 已于 16:41 恢复运行，NapCat 8080 同时有树莓派本地 AliceBot 与 PC 上 Forest 两条 WebSocket 连接；因此本页下方较早的“唯一/一条连接”只描述当时采样，不能代表此刻。当前未为诊断重启服务、替换客户端或发送消息；旧 AliceBot 的运行意图需在正式切换前重新核对。
 
 同日最新源码镜像 `forest:test-worker-host-release-95474cba` 在另一套测试 PostgreSQL 中创建独立 Bot 库，通过完整假 Bot 的启动、Shell/Web、Memory、Graph 换代及冷恢复回归（`1 passed in 581.72s`）；测试库在用例结束时删除，容器退出。它没有连接 QQ，也没有把新 SQL 基线装入 v33 库。
