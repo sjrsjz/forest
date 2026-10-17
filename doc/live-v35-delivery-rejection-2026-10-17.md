@@ -9,3 +9,5 @@
 验收结束后正式运行意图和观测都回到 OFFLINE；假 OneBot、v35 Supervisor、PostgreSQL 容器已停止，卷和账本保留。v34 隔离候选亦已停止。现役 v33 保持 healthy，树莓派旧 `alicebot.service` 已按此前授权停用，NapCat 仍为 READY，8080 只保留一条来自 Forest 的连接。本试验没有真实 QQ 出站、付费模型调用或真实 VL 嵌入；v35 含固定假向量和假配置，不能改绑真实 QQ。v33 仍运行旧工件，正式交接须在新的真实配置 Bot 与独立库上进行。
 
 在上述镜像验收之后，源码 Delivery 进一步加入 `retry_ready_at`：可重试的确定未发送按 attempt 次数做 1、2、4……最多 60 秒的持久退避，claim 只取到期的 part；明确拒绝的终态不变。新源码版本为 Delivery 0.4.6 / SQL 3.1.3，单独在 v35 隔离 PostgreSQL 中用干净测试库验证了“未到期不能再 claim”。该版本尚未进入 v35 镜像或运行图，不能把先前的端到端与热重载结果写成 3.1.3 的验证。
+
+后续源码 Delivery 0.4.7 / SQL 3.1.4 接通 `delivery_observations`：观察参与者消费同一 UnitOfWork 的 Effect 回执，拒绝不匹配的 attempt/operation/状态/证据；把接受结果和与已终结 attempt 冲突的晚到结果分别写成不可变事实，只有接受且需要转换状态时才推进 part/intent。v35 隔离 PostgreSQL 的新干净测试库验证了拒绝观察 `DISPATCHING→REJECTED`、晚到冲突 `REJECTED→REJECTED` 且 intent 仍 FAILED，以及可重试路径的退避。该版本也未装进先前 v35 镜像；尚未通过完整 UnitOfWork 与真实晚到调和入口验收。

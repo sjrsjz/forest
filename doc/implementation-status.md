@@ -1,6 +1,8 @@
 # Forest 实现状态
 
-2026-10-17 Delivery 可重试确定未发送的退避：源码包 0.4.6 / SQL 3.1.3 为 part 增加持久 `retry_ready_at`，按 attempt 序号指数退避至最多 60 秒，到期前不可领取。隔离 PostgreSQL 的状态机测试通过；该版本尚未打包进入 v35 镜像。设计审计同时发现 `delivery_observations` 目前只建表、观察函数不写该表，私有观察审计仍未完成，不能宣称晚到和冲突观察已留痕。
+2026-10-17 Delivery 私有观察账本接通：源码包 0.4.7 / SQL 3.1.4 校验同事务 `kernel.effect` 回执并持久记录接受/冲突观察；隔离 PostgreSQL 测试证实明确拒绝的接受行和晚到冲突行并存，冲突不改变 FAILED/REJECTED 终态，退避测试仍通过。尚未构建新版完整运行镜像，也未验证真实调和入口或完整 UnitOfWork；现役 v33 不变。
+
+2026-10-17 Delivery 可重试确定未发送的退避：源码包 0.4.6 / SQL 3.1.3 为 part 增加持久 `retry_ready_at`，按 attempt 序号指数退避至最多 60 秒，到期前不可领取。隔离 PostgreSQL 的状态机测试通过；该版本尚未打包进入 v35 镜像。设计审计当时发现 `delivery_observations` 只建表、观察函数不写该表，随后在 0.4.7 / SQL 3.1.4 中接通。
 
 2026-10-17 v35 隔离验收：新镜像 `forest:runtime-46a23592` 在独立库供应 OFFLINE Bot，22/22 schema bundle READY（Adapter SQL 2.2.0、Delivery SQL 3.1.2）。假 OneBot 的一次显式 `@` 经 Agent 回复进入 Delivery 后明确拒绝发送：intent/part `FAILED`、attempt `REJECTED`、尝试次数 1；Delivery 官方模块热重载 r4→r5 后仍是 1 次，没有重发。假 Bot 已 OFFLINE、v35/v34 隔离容器已停止；旧 AliceBot 再次按授权停用，NapCat 保持 READY、真实 QQ 仍由 v33 单连接。v35 含假向量，不可接真实 QQ；v33 尚未升级。详见 [v35 Delivery 隔离验收](live-v35-delivery-rejection-2026-10-17.md)。
 

@@ -2106,7 +2106,19 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
                     "observed_status": "REJECTED_NOT_APPLIED",
                     "error_code": "PLATFORM_REJECTED",
                     "receipt": None,
-                }
+                    "effect": {
+                        "observation_operation_id": "effect-observe:rejected",
+                        "status": "NOT_APPLIED",
+                        "evidence_kind": "executor",
+                    },
+                },
+                "prior": {"effect": {
+                    "attempt_id": work["attempt_id"],
+                    "observation_operation_id": "effect-observe:rejected",
+                    "observed_status": "NOT_APPLIED",
+                    "evidence_kind": "executor",
+                    "accepted": True,
+                }},
             },
             operation_id="observe:rejected",
         )
@@ -2130,6 +2142,57 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
         assert row["intent_state"] == "FAILED" and row["completed_at"] is not None
         assert row["part_state"] == "FAILED" and row["attempt_state"] == "REJECTED"
         assert row["attempt_count"] == 1
+        rejected_observation = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT accepted,previous_state,resulting_state "
+                    "FROM {}.delivery_observations WHERE bot_id=%s AND observation_operation_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, "observe:rejected"),
+            )
+        ).fetchone()
+        assert dict(rejected_observation) == {
+            "accepted": True, "previous_state": "DISPATCHING", "resulting_state": "REJECTED"
+        }
+        late = await call(
+            "delivery_record_observe",
+            {
+                "input": {
+                    "work": work,
+                    "observed_status": "UNKNOWN",
+                    "error_code": "LATE_UNCERTAIN",
+                    "receipt": None,
+                    "effect": {
+                        "observation_operation_id": "effect-observe:late",
+                        "status": "UNKNOWN",
+                        "evidence_kind": "executor",
+                    },
+                },
+                "prior": {"effect": {
+                    "attempt_id": work["attempt_id"],
+                    "observation_operation_id": "effect-observe:late",
+                    "observed_status": "UNKNOWN",
+                    "evidence_kind": "executor",
+                    "accepted": False,
+                    "conflict_code": "EFFECT_EVIDENCE_CONFLICT",
+                }},
+            },
+            operation_id="observe:late",
+        )
+        assert late["value"] == {"intent_id": "intent/1", "state": "FAILED"}
+        late_row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT accepted,previous_state,resulting_state,conflict_code "
+                    "FROM {}.delivery_observations WHERE bot_id=%s AND observation_operation_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, "observe:late"),
+            )
+        ).fetchone()
+        assert dict(late_row) == {
+            "accepted": False, "previous_state": "REJECTED",
+            "resulting_state": "REJECTED", "conflict_code": "EFFECT_EVIDENCE_CONFLICT",
+        }
 
         second = {
             **request,
@@ -2198,7 +2261,19 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
                     "observed_status": "RETRYABLE_NOT_APPLIED",
                     "error_code": "ONEBOT_WEBSOCKET_CLOSED",
                     "receipt": None,
-                }
+                    "effect": {
+                        "observation_operation_id": "effect-observe:retryable",
+                        "status": "NOT_APPLIED",
+                        "evidence_kind": "executor",
+                    },
+                },
+                "prior": {"effect": {
+                    "attempt_id": retry_work["attempt_id"],
+                    "observation_operation_id": "effect-observe:retryable",
+                    "observed_status": "NOT_APPLIED",
+                    "evidence_kind": "executor",
+                    "accepted": True,
+                }},
             },
             operation_id="observe:retryable",
         )

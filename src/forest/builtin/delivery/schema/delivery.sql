@@ -234,7 +234,7 @@ CREATE TABLE delivery_observations (
         previous_state IN ('DISPATCHING','SENT','NOT_APPLIED','REJECTED','UNKNOWN')
     ),
     resulting_state text NOT NULL CHECK (
-        resulting_state IN ('SENT','NOT_APPLIED','REJECTED','UNKNOWN')
+        resulting_state IN ('DISPATCHING','SENT','NOT_APPLIED','REJECTED','UNKNOWN')
     ),
     conflict_code text,
     observed_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -808,14 +808,63 @@ CREATE FUNCTION delivery_record_observe(context jsonb, input jsonb)
 RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
 DECLARE plan jsonb:=input->'input'; work jsonb:=plan->'work'; attempt record; intent record;
         requested text:=plan->>'observed_status'; resulting text; receipt jsonb:=plan->'receipt';
+        effect jsonb:=input->'prior'->'effect'; existing record; prior_state text;
+        target_state text; expected_effect_state text; accepted boolean; conflict text;
 BEGIN
     SELECT * INTO attempt FROM __forest_module_schema__.transport_attempts
      WHERE bot_id=context->>'bot_id' AND attempt_id=work->>'attempt_id' FOR UPDATE;
     SELECT * INTO intent FROM __forest_module_schema__.send_intents
      WHERE bot_id=context->>'bot_id' AND intent_id=work->>'intent_id' FOR UPDATE;
-    IF NOT FOUND OR attempt.state NOT IN ('DISPATCHING','UNKNOWN') THEN
+    IF attempt.attempt_id IS NULL OR intent.intent_id IS NULL
+       OR attempt.intent_id<>intent.intent_id THEN
       RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
         jsonb_build_object('code','DELIVERY_OBSERVATION_CONFLICT','message','Delivery attempt is not observable','status',409));
+    END IF;
+    target_state:=CASE requested WHEN 'SENT' THEN 'SENT'
+                  WHEN 'RETRYABLE_NOT_APPLIED' THEN 'NOT_APPLIED'
+                  WHEN 'REJECTED_NOT_APPLIED' THEN 'REJECTED'
+                  WHEN 'UNKNOWN' THEN 'UNKNOWN' END;
+    expected_effect_state:=CASE requested WHEN 'SENT' THEN 'SUCCEEDED'
+                           WHEN 'UNKNOWN' THEN 'UNKNOWN' ELSE 'NOT_APPLIED' END;
+    IF target_state IS NULL OR jsonb_typeof(effect->'accepted')<>'boolean'
+       OR effect->>'attempt_id' IS DISTINCT FROM attempt.effect_attempt_ref
+       OR effect->>'observation_operation_id' IS DISTINCT FROM plan->'effect'->>'observation_operation_id'
+       OR effect->>'observed_status' IS DISTINCT FROM expected_effect_state
+       OR plan->'effect'->>'status' IS DISTINCT FROM expected_effect_state
+       OR effect->>'evidence_kind' IS DISTINCT FROM plan->'effect'->>'evidence_kind' THEN
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+        jsonb_build_object('code','DELIVERY_OBSERVATION_CONFLICT','message','Effect observation differs from Delivery plan','status',409));
+    END IF;
+    SELECT * INTO existing FROM __forest_module_schema__.delivery_observations
+     WHERE bot_id=context->>'bot_id' AND observation_operation_id=context->>'operation_id';
+    IF FOUND THEN
+      IF existing.input_digest IS DISTINCT FROM context->>'input_digest'
+         OR existing.effect_observation_operation_id IS DISTINCT FROM effect->>'observation_operation_id' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','DELIVERY_OBSERVATION_CONFLICT','message','Observation operation differs','status',409));
+      END IF;
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+        jsonb_build_object('intent_id',intent.intent_id,'state',intent.state));
+    END IF;
+    prior_state:=attempt.state;
+    accepted:=(effect->>'accepted')::boolean AND (
+      prior_state='DISPATCHING' OR prior_state=target_state
+      OR (prior_state='UNKNOWN' AND upper(effect->>'evidence_kind')='RECONCILIATION'
+          AND target_state<>'UNKNOWN')
+    );
+    conflict:=CASE WHEN accepted THEN NULL ELSE
+              COALESCE(effect->>'conflict_code','DELIVERY_EVIDENCE_CONFLICT') END;
+    INSERT INTO __forest_module_schema__.delivery_observations(
+      bot_id,observation_operation_id,effect_observation_operation_id,attempt_id,
+      input_digest,evidence_kind,observed_status,receipt_payload_id,receipt_payload_digest,
+      error_code,accepted,previous_state,resulting_state,conflict_code)
+    VALUES(context->>'bot_id',context->>'operation_id',effect->>'observation_operation_id',
+      attempt.attempt_id,context->>'input_digest',upper(effect->>'evidence_kind'),requested,
+      receipt->>'payload_id',receipt->>'digest',plan->>'error_code',accepted,
+      prior_state,CASE WHEN accepted THEN target_state ELSE prior_state END,conflict);
+    IF NOT accepted OR prior_state=target_state THEN
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+        jsonb_build_object('intent_id',intent.intent_id,'state',intent.state));
     END IF;
     IF requested='SENT' THEN
       UPDATE __forest_module_schema__.transport_attempts SET state='SENT',settled_at=clock_timestamp(),
