@@ -4,8 +4,83 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from forest.errors import ForestError
+
+_RESCUE_TARGET = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,255}\Z")
+_RESCUE_REVISION = re.compile(r"[1-9][0-9]{0,18}\Z")
+
+
+def _inspect_core_rescue(gate: dict) -> dict:
+    if (
+        not isinstance(gate, dict)
+        or gate.get("protocol") != "forest.shell-gate/1"
+        or gate.get("claimed") is not True
+        or not isinstance(gate.get("command_text"), str)
+        or type(gate.get("text_only")) is not bool
+        or len(gate["command_text"].encode("utf-8")) > 4096
+    ):
+        raise ForestError("CORE_RESCUE_GATE_INVALID", "Core rescue gate is invalid", 422)
+    text = gate["command_text"]
+    if not text.startswith("core") or (len(text) > 4 and not text[4].isspace()):
+        return {"protocol": "forest.core-rescue-inspection/1", "claimed": False}
+    result = {
+        "protocol": "forest.core-rescue-inspection/1",
+        "claimed": True,
+        "action": None,
+        "target_ref": None,
+        "expected_revision": None,
+        "error_code": "CORE_RESCUE_SYNTAX_INVALID",
+    }
+    if not gate["text_only"] or any(char.isspace() and char not in " \t" for char in text):
+        return result
+    parts = text.split()
+    if len(parts) < 2 or parts[0] != "core":
+        return result
+    action = parts[1]
+    if action not in {"status", "cancel", "disable", "reload"}:
+        return result
+    result["action"] = action
+    if action == "status" and len(parts) == 2:
+        result["error_code"] = None
+        return result
+    if action == "cancel":
+        if len(parts) != 5 or _RESCUE_TARGET.fullmatch(parts[2]) is None:
+            return result
+        option, revision = parts[3:]
+        if option != "--expect-revision":
+            return result
+        result["target_ref"] = parts[2]
+    elif action in {"disable", "reload"}:
+        if len(parts) != 4:
+            return result
+        option, revision = parts[2:]
+        if option != ("--expect-maintenance" if action == "disable" else "--expect-graph"):
+            return result
+    else:
+        return result
+    if _RESCUE_REVISION.fullmatch(revision) is None:
+        return result
+    expected = int(revision)
+    if expected > 9223372036854775807:
+        return result
+    result["expected_revision"] = expected
+    result["error_code"] = None
+    return result
+
+
+def core_rescue_inspect_service(_context):
+    async def inspect(request):
+        if (
+            not isinstance(request, dict)
+            or set(request) != {"protocol", "gate"}
+            or request.get("protocol") != "forest.core-rescue-inspect-request/1"
+        ):
+            raise ForestError("CORE_RESCUE_INPUT_INVALID", "Core rescue request is invalid", 422)
+        return _inspect_core_rescue(request["gate"])
+
+    return inspect
 
 
 def _inspect(normalized: dict) -> dict:

@@ -15,6 +15,7 @@ from forest.builtin.shell_command.python.shell_command import ShellCommand
 from forest.errors import ForestError
 from forest.kernel_shell_gate import (
     KernelShellGateUnitOfWorkParticipant,
+    core_rescue_inspect_service,
     shell_gate_inspect_service,
 )
 
@@ -23,6 +24,37 @@ async def _gate(normalized):
     return await shell_gate_inspect_service(None)({
         "protocol": "forest.shell-gate-request/1", "normalized": normalized,
     })
+
+
+@pytest.mark.parametrize(
+    ("text", "claimed", "action", "error_code"),
+    [
+        ("#forest core status", True, "status", None),
+        ("#forest core cancel run:42 --expect-revision 3", True, "cancel", None),
+        ("#forest core disable --expect-maintenance 2", True, "disable", None),
+        ("#forest core reload --expect-graph 4", True, "reload", None),
+        ("#forest coreX status", False, None, None),
+        ("#forest core status extra", True, "status", "CORE_RESCUE_SYNTAX_INVALID"),
+        ("#forest core reload --expect-graph 0", True, "reload", "CORE_RESCUE_SYNTAX_INVALID"),
+        ("#forest core\nstatus", True, None, "CORE_RESCUE_SYNTAX_INVALID"),
+    ],
+)
+async def test_core_rescue_has_fixed_grammar_without_shell_fallback(
+    text, claimed, action, error_code
+):
+    gate = await _gate({
+        "self_id": "10000", "segments": [{"type": "text", "text": text}],
+    })
+    if not gate["claimed"]:
+        assert not claimed
+        return
+    inspection = await core_rescue_inspect_service(None)({
+        "protocol": "forest.core-rescue-inspect-request/1", "gate": gate,
+    })
+    assert inspection["claimed"] is claimed
+    if claimed:
+        assert inspection["action"] == action
+        assert inspection["error_code"] == error_code
 
 
 @pytest.mark.parametrize("trailing", [

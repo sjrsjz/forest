@@ -962,6 +962,7 @@ MANIFEST_SCHEMA = {
                                             "participant_generation_field": {
                                                 "type": "string"
                                             },
+                                            "retention_required": {"type": "boolean"},
                                         },
                                     },
                                 },

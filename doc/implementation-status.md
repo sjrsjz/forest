@@ -17,6 +17,8 @@
 
 2026-10-17 Core 救援授权候选：`kernel.runtime` 的新 SQL 基线持有每 Bot 至多 32 条 `(binding_ref, group_ref, qq principal)` 精确授权、四项动作位、全局修订与不可变幂等操作账本；Web 管理动作经同一事务中的当前 Bot 授权和审计，以期望修订 CAS 改动，内核服务可在救援接纳事务中持共享锁复核授权。独立 PostgreSQL 临时 Bot 库完成基线、作用域、并发同键重放、撤销及拒绝验证；Python 编译、JS 语法与差异检查通过。此候选尚未切换现役 v38 的 SQL/镜像，也没有独立的 Adapter 接入、请求、执行和回执链，WebUI 明确标明授权暂不使救援命令可用。
 
+2026-10-17 Core 救援分流候选：内核新增严格识别 `#forest core` 四种固定语法的只读服务，畸形 Core 文本仍由 Core 认领，不交给普通 Agent；`adapter.onebot` 2.6.2 把 Shell 解析服务和两条普通 Shell 入站事务中的 Shell participant 标记为可选、非保留生命周期边，缺少提供者时仅这些调用失败关闭。官方 Adapter 工件构建和冻结描述符检查确认不再从 Adapter 保留 Shell，Conversation/Memory 仍保留；独立临时 Bot 的内核引导通过。尚未把 Adapter 的 Core 分流接到独立 UOW，也没有救援请求与执行回执；现役 v38 仍运行旧工件，不具备无 Shell 包的 Core 救援能力。
+
 2026-10-17 v38 非空向量重建与热重载：同部署隔离 Bot 的真实 Milvus 集合经正式管理动作从绑定修订 1 发布到 2，发布时 12 条 ref 水位不变；原图片来源在重建后、`vector.index` 正式热替换后均作为真实 VL 图片查询的直接种子命中。隔离图 6→7，8 个依赖成员换代、14 个保留；旧集合保留期到后由包自有 GC 结算为 DELETED，待回收数 1→0。隔离 Bot 累计嵌入 9 次/333 tokens、UNKNOWN/预留 0，已退役；现役主 Bot 仍 ONLINE、图 4、22/22 ACTIVE、账本 2 次/44 tokens，树莓派 QQ 登录态 READY。许可群真实 @ 回复、长期负载和故障注入仍待验收。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。
 
 2026-10-17 v38 真实 VL 图片直接种子验收：同部署隔离 Bot 从模拟 OneBot 接收公开 PNG 图片，静默裁剪后来源为 `IMAGE/ELIGIBLE/COMPLETE`、1 个 READY 文档 facet；相同 PNG 的正式 IMAGE 管理试验 READY，原图片来源以 `is_seed=true`、`image_count=1` 命中，群号与作者正确。隔离 Bot 累计 7 次已结算、279 tokens、UNKNOWN/预留 0，已再次退役，模拟服务已停止。主 Bot 保持 ONLINE、图修订 4、22/22 ACTIVE、账本 2 次/44 tokens；树莓派 NapCat 独立登录态 READY、无登录错误。真实许可群 @ 回复和长期负载仍待验收。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。

@@ -20,13 +20,13 @@ from forest.kernel_package_catalog_snapshot import (
     package_catalog_page_service,
 )
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
+from forest.kernel_rescue_management import RuntimeRescueManagementContract
 from forest.kernel_resource_admission import (
     KERNEL_RESOURCE_POLICY_DEFAULT,
     KERNEL_RESOURCE_POLICY_SCHEMA,
     assess_worker_capacity,
     validate_kernel_resource_policy,
 )
-from forest.kernel_rescue_management import RuntimeRescueManagementContract
 from forest.kernel_runtime_graph_snapshot import (
     runtime_graph_snapshot_service,
     runtime_status_snapshot_service,
@@ -34,6 +34,7 @@ from forest.kernel_runtime_graph_snapshot import (
 from forest.kernel_runtime_tool import RUNTIME_STATUS_TOOL, runtime_status_tool_service
 from forest.kernel_shell_gate import (
     KernelShellGateUnitOfWorkParticipant,
+    core_rescue_inspect_service,
     shell_gate_inspect_service,
 )
 from forest.module_management_contract import (
@@ -57,8 +58,8 @@ from forest.storage.authorization_authority import (
 )
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import KernelAuditRepository
-from forest.storage.kernel_runtime import KernelRuntimeRepository
 from forest.storage.kernel_rescue_policy import KernelRescuePolicyAuthority
+from forest.storage.kernel_runtime import KernelRuntimeRepository
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.payload_authority import KernelPayloadRepository
@@ -95,6 +96,7 @@ _KERNEL_READ_SERVICES = frozenset({
     "deployment.package-registry.artifact",
     "agent.tool.runtime-status",
     "shell.gate.inspect",
+    "core.rescue.inspect",
 })
 
 
@@ -181,6 +183,7 @@ _MODULES = {
             "deployment.package-registry.artifact",
             "agent.tool.runtime-status",
             "shell.gate.inspect",
+            "core.rescue.inspect",
         ),
         "capabilities": (
             "runtime.graph.publish",
@@ -198,6 +201,7 @@ _MODULES = {
             "deployment.package-registry.packages",
             "deployment.package-registry.artifact",
             "shell.gate.inspect",
+            "core.rescue.inspect",
         ),
     },
 }
@@ -961,6 +965,10 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                     RuntimeKernelServiceSpec(
                         "shell.gate.inspect", 1, ("kernel.runtime",),
                         shell_gate_inspect_service,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "core.rescue.inspect", 1, ("kernel.runtime",),
+                        core_rescue_inspect_service,
                     ),
                     RuntimeKernelServiceSpec(
                         "runtime.graph.snapshot",

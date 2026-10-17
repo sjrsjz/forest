@@ -71,7 +71,7 @@ Worker Host 的私有表只存选择、启停、验证与控制回执，不存�
 
 组件自身的业务管理 query/action 仍归组件自己，Worker Host 不成为 Agent、Memory、OneBot 或 Routing 的总管理代理。`service.invoke` 只给受限的通用服务调用提供入口，不能替代那些组件的管理契约。Worker Host 自带的组件目录、配置表单、历史和生命周期页面随它的 Generation 发布；包内 UI 的字节和来源证明仍由所选包快照提供。壳层只处理通用 scope、授权票据和受限 artifact 传输。
 
-`module.validate` 的依赖、接管和资源判断必须使用与实际候选图装配相同的冻结描述符及 `RuntimeModuleRegistry` 规划规则。启动依赖参与有向无环启动顺序；普通服务句柄、UnitOfWork 与配置控制属于保留依赖，允许成环但影响换代闭包。旧 `module_validation.py` 把所有服务要求合成单一 DAG，生产路径也未使用它，现已删除；不得将它的规则复制进 Worker Host 查询以制造与实际发布不同的第二套规划器。
+`module.validate` 的依赖、接管和资源判断必须使用与实际候选图装配相同的冻结描述符及 `RuntimeModuleRegistry` 规划规则。启动依赖参与有向无环启动顺序；默认情况下，普通服务句柄、UnitOfWork 与配置控制属于保留依赖，允许成环但影响换代闭包。包可将真正可选的服务声明为 `required = false`，并将仅属于该可选分支的 UnitOfWork step 声明为 `retention_required = false`；这只移除生命周期保留边，不授予替代路由，调用时缺少准确提供者仍须失败关闭。旧 `module_validation.py` 把所有服务要求合成单一 DAG，生产路径也未使用它，现已删除；不得将它的规则复制进 Worker Host 查询以制造与实际发布不同的第二套规划器。
 
 ## 并发、失败和删除
 
@@ -123,7 +123,7 @@ Registry 的候选规划现从当前已发布图及冻结描述符计算 `replac
 
 ### 目标组件与保留依赖的当前落地
 
-Worker Host 已把目标 `component_id` 随 `runtime.graph-replacement.request/2` 写入内核持久请求；内核在期望 Graph revision 上核对目标成员，并把目标纳入幂等摘要。`RuntimeModuleRegistry.replacement_closure()` 按启动依赖和单独的保留依赖计算需要换代的反向闭包。保留依赖包括普通服务句柄、UnitOfWork participant 和配置控制引用；这些引用可以成环，不能并入启动 DAG。冻结 Generation 绑定及内核图事实分别记录保留依赖，候选图保留旧 Generation 时会验证其所依赖的组件也被保留。
+Worker Host 已把目标 `component_id` 随 `runtime.graph-replacement.request/2` 写入内核持久请求；内核在期望 Graph revision 上核对目标成员，并把目标纳入幂等摘要。`RuntimeModuleRegistry.replacement_closure()` 按启动依赖和单独的保留依赖计算需要换代的反向闭包。保留依赖默认包括普通服务句柄、UnitOfWork participant 和配置控制引用；仅准确声明为可选的服务及对应 UOW step 不形成保留边，调用时仍需目标成员存在。这些引用可以成环，不能并入启动 DAG。冻结 Generation 绑定及内核图事实分别记录保留依赖，候选图保留旧 Generation 时会验证其所依赖的组件也被保留。
 
 宿主现消费持久请求中的目标，比较候选与当前冻结描述符，再只为目标、描述符变化者、新增成员及其依赖消费者创建新 Generation。候选预热借用闭包外实例，发布前不接管关闭所有权；成功发布后接管，旧 Registry 只释放被换代或移除的实例。隔离 PostgreSQL 的最小真实图、Counter 包成员增删及完整官方包宿主用例已验证这一执行边界。Worker Host 持久选择、启停和部署工件安装权威仍待完成；静态宿主装配尚不会自行改变成员集合。
 

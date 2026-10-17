@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.6.1"
+version = "2.6.2"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -93,8 +93,8 @@ startup_dependency = true
 [[components.requires]]
 name = "shell.ingress.inspect"
 contract = ">=1.0,<2.0"
-required = true
-startup_dependency = true
+required = false
+startup_dependency = false
 
 [[components.provides]]
 name = "adapter.onebot.delivery.prepare"
@@ -225,7 +225,7 @@ steps = [
   { id = "position", component_id = "memory.graph", participant = "memory.reserve-source-position-record", input_path = "/position" },
   { id = "payload_epoch", component_id = "kernel.payload", participant = "payload.capture-deletion-epoch", input_path = "/payload_epoch" },
   { id = "memory", component_id = "memory.graph", participant = "memory.capture-source-record", input_path = "/memory" },
-  { id = "shell", component_id = "shell.command", participant = "shell.admit-ingress", input_path = "/shell" },
+  { id = "shell", component_id = "shell.command", participant = "shell.admit-ingress", input_path = "/shell", retention_required = false },
   { id = "classification", component_id = "conversation.scheduler", participant = "conversation.classify-shell-ingress", input_path = "/shell_classification" }
 ]
 
@@ -242,6 +242,6 @@ steps = [
   { id = "origin", component_id = "adapter.onebot", participant = "adapter.prove-shell-origin", input_path = "/shell_origin" },
   { id = "position", component_id = "memory.graph", participant = "memory.reserve-source-position-record", input_path = "/position" },
   { id = "media", component_id = "media.capture", participant = "media.register-ingress", input_path = "/media" },
-  { id = "shell", component_id = "shell.command", participant = "shell.admit-ingress", input_path = "/shell" },
+  { id = "shell", component_id = "shell.command", participant = "shell.admit-ingress", input_path = "/shell", retention_required = false },
   { id = "classification", component_id = "conversation.scheduler", participant = "conversation.classify-shell-ingress", input_path = "/shell_classification" }
 ]

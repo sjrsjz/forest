@@ -3844,9 +3844,13 @@ def package_runtime_descriptor(
             adapter.management_contract = management_contract_factory(adapter)
         return adapter
 
-    # UnitOfWork participant handles resolve against the sealed RuntimeGraph at
-    # call time.  They are transactional peers, not lifecycle dependencies;
-    # turning plan edges into startup edges would reject valid cyclic workflows.
+    retained_services = {
+        item["name"] for item in component.get("requires", ())
+        if item.get("required", True)
+    }
+    # UnitOfWork peers resolve against the sealed RuntimeGraph at call time.
+    # A non-retained peer can disappear with its package: only plans that
+    # actually call it fail, while independent plans remain available.
     return RuntimeModuleDescriptor(
         component_id=component["id"],
         requires=tuple(
@@ -3911,6 +3915,7 @@ def package_runtime_descriptor(
                         step["component_id"]
                         for plan in component.get("unit_of_work_plans", ())
                         for step in plan["steps"]
+                        if step.get("retention_required", True)
                     }
                     | (
                         {"component.worker-host"}
@@ -3921,7 +3926,13 @@ def package_runtime_descriptor(
                 - {component["id"]}
             )
         ),
-        retention_service_requires=tuple(sorted(resolved_contracts.items())),
+        retention_service_requires=tuple(
+            sorted(
+                (name, contract)
+                for name, contract in resolved_contracts.items()
+                if name in retained_services
+            )
+        ),
         fact_matches=tuple(
             RuntimeFactMatch(
                 match["component_id"], match["own_pointer"], match["other_pointer"]
