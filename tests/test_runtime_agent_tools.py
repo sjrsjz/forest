@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from forest.errors import ForestError
+from forest.runtime_contracts import RuntimeContractRouter
 from forest.runtime_modules import (
     ModuleLifecycleState,
     OwnedWorkLifecycle,
@@ -116,6 +117,42 @@ def test_replacement_closure_includes_service_and_transaction_references():
     with pytest.raises(ForestError) as error:
         registry.replacement_closure("module.missing")
     assert error.value.code == "RUNTIME_MODULE_NOT_FOUND"
+
+
+def test_optional_service_absence_and_bound_provider_replacement_are_distinct():
+    requirement = (("demo.request", ">=1.0,<2.0"),)
+    consumer = RuntimeModuleDescriptor(
+        "module.consumer", (), lambda *_: object(), _ARTIFACT,
+        retention_service_requires=requirement,
+        optional_service_requires=requirement,
+    )
+    absent = RuntimeModuleRegistry(_runtime(), (consumer,))
+    assert absent.order == ["module.consumer"]
+
+    provider = RuntimeModuleDescriptor(
+        "module.provider", (), lambda *_: object(), _ARTIFACT,
+        provided_services=(("demo.request", "1.0"),),
+    )
+    bound = RuntimeModuleRegistry(_runtime(), (consumer, provider))
+    assert set(bound.replacement_closure("module.provider")) == {
+        "module.provider", "module.consumer",
+    }
+
+    caller = SimpleNamespace(runtime_contract={
+        "requires": [{"service_id": "demo.request", "version": 1, "optional": True}],
+    })
+    routing = RuntimeContractRouter(SimpleNamespace(
+        graph_identity=SimpleNamespace(graph_id="graph/1", graph_revision=1),
+        instances={"module.consumer": caller},
+    ))
+    handle = routing.request(
+        caller_component_id="module.consumer", service_id="demo.request",
+        version=1, admission_lane="DATA", owned_work=True,
+    )
+    routing.seal()
+    with pytest.raises(ForestError) as unavailable:
+        _ = handle.route
+    assert unavailable.value.code == "RUNTIME_SERVICE_ROUTE_UNAVAILABLE"
 
 
 def test_worker_claims_cover_old_and_new_generations_during_graph_prewarm():

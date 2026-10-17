@@ -669,7 +669,7 @@ class RuntimeContractRouter:
             caller = self.registry.instances.get(caller_component_id)
             provider = self._providers.get((service_id, version))
             requirements = {
-                (item.get("service_id"), item.get("version"))
+                (item.get("service_id"), item.get("version")): item
                 for item in getattr(caller, "runtime_contract", {}).get("requires", ())
                 if isinstance(item, dict)
             }
@@ -685,6 +685,8 @@ class RuntimeContractRouter:
                     },
                 )
             if provider is None:
+                if requirements[(service_id, version)].get("optional") is True:
+                    continue
                 raise ForestError(
                     "RUNTIME_SERVICE_PROVIDER_UNAVAILABLE",
                     "Declared runtime service has no provider in this graph",

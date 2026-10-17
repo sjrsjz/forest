@@ -726,6 +726,7 @@ class RuntimeModuleDescriptor:
     startup_service_requires: tuple[tuple[str, str], ...] = ()
     retention_requires: tuple[str, ...] = ()
     retention_service_requires: tuple[tuple[str, str], ...] = ()
+    optional_service_requires: tuple[tuple[str, str], ...] = ()
     fact_matches: tuple[RuntimeFactMatch, ...] = ()
     worker_limits: WorkerLimits | None = None
 
@@ -810,6 +811,12 @@ class RuntimeModuleDescriptor:
             or self.component_id in self.retention_requires
             or len(self.retention_service_requires)
             != len(set(self.retention_service_requires))
+            or len(self.optional_service_requires)
+            != len(set(self.optional_service_requires))
+            or not set(self.optional_service_requires).issubset(
+                self.retention_service_requires
+            )
+            or set(self.optional_service_requires) & set(self.startup_service_requires)
         ):
             raise ValueError("Runtime retention requirements must be unique and external")
 
@@ -1014,6 +1021,11 @@ class RuntimeModuleRegistry:
                 for service_id, contract in requirements:
                     lower_major = contract_range(contract)[0][0]
                     provider = providers.get((service_id, lower_major))
+                    if provider is None and (
+                        destination is self._service_retention_requires
+                        and (service_id, contract) in descriptor.optional_service_requires
+                    ):
+                        continue
                     if provider is None or not contract_matches(contract, provider[1]):
                         raise ForestError(
                             "RUNTIME_SERVICE_DEPENDENCY_MISSING",

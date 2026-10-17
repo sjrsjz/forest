@@ -4378,6 +4378,73 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                             assert kernel_state != "FAILED", web_state
                             await asyncio.sleep(0.2)
                     assert "process.executor" in restarted.registry.graph_identity.generations
+
+                    shell_selection = await restarted.registry.get(
+                        "component.worker-host"
+                    ).management_contract.query("selection", {})
+                    shell_disable = {
+                        **candidate,
+                        "component_id": "shell.command",
+                        "desired_enabled": False,
+                        "expected_selection_revision": shell_selection["revision"],
+                        "expected_graph_revision": (
+                            restarted.registry.graph_identity.graph_revision
+                        ),
+                    }
+                    checked = await web.post(
+                        f"{base}/queries/validate", headers=headers, json=shell_disable,
+                    )
+                    assert checked.status_code == 200, checked.text
+                    accepted = await web.post(
+                        f"{base}/actions/module.disable",
+                        headers={**headers, "idempotency-key": "disable-shell-for-core"},
+                        json={**shell_disable, "plan_digest": checked.json()["plan_digest"]},
+                    )
+                    assert accepted.status_code == 200, accepted.text
+                    async with asyncio.timeout(90):
+                        while True:
+                            response = await web.post(
+                                f"{base}/queries/selection-application",
+                                headers=headers,
+                                json={"request_id": accepted.json()["request_id"]},
+                            )
+                            assert response.status_code == 200, response.text
+                            state = (response.json().get("kernel") or {}).get("state")
+                            if state == "SUCCEEDED":
+                                break
+                            assert state != "FAILED", response.json()
+                            await asyncio.sleep(0.2)
+                    assert "shell.command" not in restarted.registry.graph_identity.generations
+                    assert "adapter.onebot" in restarted.registry.graph_identity.generations
+
+                    await send_shell(81005, 42, "#forest core status")
+                    rescue_event = "onebot-event:" + hashlib.sha256(
+                        b"binding/main\x0081005"
+                    ).hexdigest()
+                    async with asyncio.timeout(20):
+                        while True:
+                            async with restarted.store.pool.connection() as conn:
+                                admitted = await (await conn.execute(
+                                    sql.SQL("SELECT state,action FROM {}.rescue_requests "
+                                            "WHERE bot_id=%s AND event_ref=%s").format(
+                                        sql.Identifier(rescue_namespace)
+                                    ), (settings.bot_id, rescue_event),
+                                )).fetchone()
+                                classified = await (await conn.execute(
+                                    sql.SQL("SELECT classification_state,trigger_decision "
+                                            "FROM {}.inbox_messages WHERE bot_id=%s "
+                                            "AND platform_message_ref=%s").format(
+                                        sql.Identifier(conversation_namespace)
+                                    ), (settings.bot_id, "81005"),
+                                )).fetchone()
+                            if admitted is not None and classified is not None:
+                                break
+                            await asyncio.sleep(0.1)
+                    assert admitted == {"state": "QUEUED", "action": "status"}
+                    assert classified == {
+                        "classification_state": "FINAL",
+                        "trigger_decision": "CONTROL_COMMAND",
+                    }
         finally:
             await restarted.close()
         assert clients[-1].closed is True

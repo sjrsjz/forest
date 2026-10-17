@@ -477,8 +477,16 @@ class PackageGenerationAdapter:
             {"service_id": service_id, "version": 1}
             for _item, _validator, service_id in self._component_jobs.values()
         )
+        optional_services = {
+            item["name"] for item in self.component.get("requires", ())
+            if not item.get("required", True)
+        }
         requirements = [
-            {"service_id": name, "version": _major(contract)}
+            {
+                "service_id": name,
+                "version": _major(contract),
+                **({"optional": True} if name in optional_services else {}),
+            }
             for name, contract in sorted(self._resolved_contracts.items())
         ]
         local_effects = {item["name"]: item for item in self.component.get("effect_services", ())}
@@ -3848,6 +3856,10 @@ def package_runtime_descriptor(
     # still produces a generation-frozen service handle. Replace its consumer
     # with the provider so a retained Worker never calls a retired Generation.
     retained_services = {item["name"] for item in component.get("requires", ())}
+    optional_services = {
+        item["name"] for item in component.get("requires", ())
+        if not item.get("required", True)
+    }
     # UnitOfWork peers resolve against the sealed RuntimeGraph at call time.
     # A non-retained peer can disappear with its package: only plans that
     # actually call it fail, while independent plans remain available.
@@ -3931,6 +3943,13 @@ def package_runtime_descriptor(
                 (name, contract)
                 for name, contract in resolved_contracts.items()
                 if name in retained_services
+            )
+        ),
+        optional_service_requires=tuple(
+            sorted(
+                (name, contract)
+                for name, contract in resolved_contracts.items()
+                if name in optional_services
             )
         ),
         fact_matches=tuple(

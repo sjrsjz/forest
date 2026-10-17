@@ -25,7 +25,11 @@ from forest.runtime_contracts import (
     RuntimeServiceInvocation,
 )
 from forest.runtime_generation import BoundGenerationIdentity, PreparedGenerationContext
-from forest.runtime_modules import RuntimeModuleRegistry
+from forest.runtime_modules import (
+    RuntimeArtifactIdentity,
+    RuntimeModuleDescriptor,
+    RuntimeModuleRegistry,
+)
 
 
 class NoServiceLedger:
@@ -145,6 +149,62 @@ def test_deployment_package_descriptor_has_no_bot_kernel_dependency(tmp_path):
         (descriptor,),
     )
     assert registry.order == ["example.counter"]
+
+
+def test_official_onebot_adapter_graph_can_omit_optional_shell_provider(tmp_path):
+    source = Path(__file__).parents[1] / "src/forest/builtin/adapter_onebot"
+    snapshot = PackageCatalog(tmp_path / "catalog").build_official(source, scope="bot")
+    effects = snapshot.component["effect_services"]
+    descriptor = package_runtime_descriptor(
+        snapshot, bot_id="bot/optional-shell", module_configuration=object(),
+        grants=SimpleNamespace(entries=()),
+        resolved_contracts={item["name"]: "1.0" for item in snapshot.component["requires"]},
+        generation_verifier=object(), generation_member_verifier=object(),
+        state_queries=object(), state_commands=object(),
+        service_operation_ledger=object(), unit_of_work_authority=object(),
+        unit_of_work_coordinator_factory=lambda *_args: object(),
+        configuration_apply_coordinator_factory=lambda *_args: object(),
+        effect_driver_factories={item["name"]: object() for item in effects},
+        effect_driver_bindings=tuple(sorted(
+            (item["name"], item["kind"], "fixture/source") for item in effects
+        )),
+        trust_level="official", plan_only=True,
+    )
+    assert ("shell.ingress.inspect", "1.0") in descriptor.optional_service_requires
+
+    artifact = RuntimeArtifactIdentity(
+        "test.optional-shell", "1.0.0", "sha256:" + "f" * 64,
+        "bot", "test.in-process/1", "installed",
+    )
+    provider_services = {
+        "kernel.runtime": (
+            ("shell.gate.inspect", "1.0"), ("core.rescue.inspect", "1.0"),
+        ),
+        "conversation.scheduler": (("conversation.trigger.classify", "1.0"),),
+        "codec.provider": (
+            ("onebot.codec.normalize", "1.0"),
+            ("onebot.codec.prepare-send", "1.0"),
+        ),
+    }
+    provider_ids = (
+        set(descriptor.requires) | set(descriptor.retention_requires)
+        | set(provider_services)
+    )
+    stubs = tuple(
+        RuntimeModuleDescriptor(
+            component_id, (), lambda *_: object(), artifact,
+            provided_services=provider_services.get(component_id, ()),
+        )
+        for component_id in sorted(provider_ids)
+    )
+    registry = RuntimeModuleRegistry(
+        SimpleNamespace(scope_kind="bot", generation_authority=None),
+        (*stubs, descriptor),
+    )
+    assert "shell.command" not in registry.order
+    assert registry._service_retention_requires["adapter.onebot"] == (
+        "codec.provider", "conversation.scheduler", "kernel.runtime",
+    )
 
 
 async def test_management_preflight_wraps_the_domain_transaction(tmp_path):
