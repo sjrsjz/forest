@@ -1899,7 +1899,8 @@ async def test_delivery_core_rescue_intent_has_separate_owner_and_cause(
         }),
         resolved_contracts={},
     )
-    request_id = "core:test/1"
+    request_id = "core:" + "a" * 64
+    intent_id = "core-intent:" + "a" * 64
     saved = await kernel.payload.put_bytes(
         owner_component_id="kernel.runtime",
         owner_kind="core.rescue.result",
@@ -1912,12 +1913,14 @@ async def test_delivery_core_rescue_intent_has_separate_owner_and_cause(
     context = {
         "bot_id": store.bot_id,
         "generation_id": "generation/delivery-core-test",
-        "operation_id": "core-delivery/1",
+        "port_kind": "participant",
+        "port_name": "delivery.create-core-rescue-intent-uow",
+        "operation_id": intent_id + "/create",
         "input_digest": digest_json({"request_id": request_id}),
     }
     intent = {
         "protocol": "forest.delivery-intent/1",
-        "intent_id": "core-intent/1",
+        "intent_id": intent_id,
         "binding_ref": "binding/main",
         "lane_kind": "CONTROL",
         "ordering_key": "onebot:group:933179609",
@@ -1930,8 +1933,8 @@ async def test_delivery_core_rescue_intent_has_separate_owner_and_cause(
         "delivery_generation_id": "generation/delivery-core-test",
         "reply_ref": None,
         "parts": [{
-            "part_operation_id": "core-part/1",
-            "effect_operation_ref": "core-effect/1",
+            "part_operation_id": intent_id + "/part",
+            "effect_operation_ref": intent_id + "/effect",
             "payload": {
                 "payload_id": saved.payload_id,
                 "digest": saved.content_digest,
@@ -1977,18 +1980,62 @@ async def test_delivery_core_rescue_intent_has_separate_owner_and_cause(
         assert wrong_owner["value"]["error"]["code"] == (
             "DELIVERY_CORE_RESCUE_INPUT_INVALID"
         )
+        wrong_effect = await (await conn.execute(
+            sql.SQL("SELECT {}.delivery_create_core_rescue_intent_uow(%s::jsonb,%s::jsonb) "
+                    "AS value").format(namespace),
+            (psycopg.types.json.Jsonb(context), psycopg.types.json.Jsonb({
+                **envelope,
+                "input": {
+                    **intent,
+                    "parts": [{
+                        **intent["parts"][0],
+                        "effect_operation_ref": "effect/unprotected",
+                    }],
+                },
+            })),
+        )).fetchone()
+        assert wrong_effect["value"]["error"]["code"] == (
+            "DELIVERY_CORE_RESCUE_INPUT_INVALID"
+        )
+        generic_spoof = await (await conn.execute(
+            sql.SQL("SELECT {}.delivery_create_control_intent_uow(%s::jsonb,%s::jsonb) "
+                    "AS value").format(namespace),
+            (psycopg.types.json.Jsonb({
+                **context, "port_name": "delivery.create-control-intent-uow",
+            }), psycopg.types.json.Jsonb(envelope)),
+        )).fetchone()
+        assert generic_spoof["value"]["error"]["code"] == "DELIVERY_CAUSE_INVALID"
+        generic_effect_spoof = await (await conn.execute(
+            sql.SQL("SELECT {}.delivery_create_control_intent_uow(%s::jsonb,%s::jsonb) "
+                    "AS value").format(namespace),
+            (psycopg.types.json.Jsonb({
+                **context, "port_name": "delivery.create-control-intent-uow",
+            }), psycopg.types.json.Jsonb({
+                **envelope,
+                "input": {
+                    **intent,
+                    "intent_id": "ordinary-control/1",
+                    "cause_component_id": "shell.command",
+                    "cause_kind": "shell.result",
+                    "cause_id": "shell/1",
+                },
+            })),
+        )).fetchone()
+        assert generic_effect_spoof["value"]["error"]["code"] == (
+            "DELIVERY_CAUSE_INVALID"
+        )
         created = await (await conn.execute(
             sql.SQL("SELECT {}.delivery_create_core_rescue_intent_uow(%s::jsonb,%s::jsonb) "
                     "AS value").format(namespace),
             (psycopg.types.json.Jsonb(context), psycopg.types.json.Jsonb(envelope)),
         )).fetchone()
     assert created["value"]["ok"] is True
-    assert created["value"]["value"]["intent_id"] == "core-intent/1"
+    assert created["value"]["value"]["intent_id"] == intent_id
     async with store.pool.connection() as conn:
         row = await (await conn.execute(
             sql.SQL("SELECT cause_component_id,cause_kind,cause_id,lane_kind "
                     "FROM {}.send_intents WHERE bot_id=%s AND intent_id=%s").format(namespace),
-            (store.bot_id, "core-intent/1"),
+            (store.bot_id, intent_id),
         )).fetchone()
     assert row == {
         "cause_component_id": "kernel.runtime",

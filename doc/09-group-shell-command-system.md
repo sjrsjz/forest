@@ -220,4 +220,6 @@ WebUI 的模块页从描述符展示命令目录、参数 schema、权限和最�
 
 Core 回执交接以救援请求账本为唯一游标：请求效果及结果先原子结算为 `PENDING`，后续独立事务锁定该结果、重新证明当前 Binding 与授权、经 Delivery 包的受限事务端口创建一条 CONTROL 意图，并在同一事务把账本标记 `QUEUED`。因此 Delivery 暂不可用不会造成结果丢失，也不能由内核直接发送 OneBot。Delivery 的工作领取协议必须保留 `cause_component_id/cause_kind/cause_id`；仅当来源是 `kernel.runtime/core.rescue.request` 时，派发 Worker 才调用 `core.rescue.delivery-permit`，许可端口核对准确意图、结果 Payload、当前 Binding、当前授权修订及动作。许可失败但确定未开始网络调用时以 NOT_APPLIED 证据结算；暂时故障重试，确定撤权则终止。Adapter 实际发送边界对 Core 意图的准确 Effect ID 再调用内核发送围栏；围栏复核救援账本、当前 Generation、Binding 和授权，在网络调用期间持有救援策略行的共享锁。策略撤权须取得同一行的更新锁，故撤权先提交时发送被拒绝，发送先取得围栏时撤权提交等待该调用结束。这个有时限的长事务仅用于极少量 Core 救援回执；普通聊天仍按 Delivery 的短事务交接。网络结果未知仍保留 UNKNOWN 事实，不能因为围栏事务释放就推断未发送。
 
+Core 请求 ID 固定为 `core:<64 位小写十六进制摘要>`，其唯一回执意图、分片操作与网络 Effect ID 分别为 `core-intent:<摘要>`、`<意图 ID>/part`、`<意图 ID>/effect`，创建操作为 `<意图 ID>/create`。Delivery 的 Core 专用接纳端口必须在持久写入前核对整组身份；普通意图端口不得使用 Core 意图或 Effect 命名空间，也不得自报 `kernel.runtime/core.rescue.request` 来源。发送围栏据持久 Effect ID 追溯准确请求，不能把 Worker 自报的因果字段作为唯一判断。
+
 维护态的准确边界是 DATA 新业务准入关闭，CONTROL 的入站救援、执行、Delivery 结算和 OneBot 回执保持可用。Delivery 许可错误按语义归类：明确撤权、协议无效或 Binding 失配终止；图热替换导致的路由过期等暂时错误保留意图并按未发送重试，不能单凭错误状态码 409 判断为撤权。

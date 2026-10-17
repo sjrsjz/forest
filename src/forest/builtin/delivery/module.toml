@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.5.2"
+version = "0.6.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -92,9 +92,9 @@ order = 20
 
 [components.storage]
 schema_id = "forest.delivery"
-schema_version = "3.2.0"
+schema_version = "3.3.0"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "4c529863c4a713266021eec9ae27e36f84dd64bd44fc042e190080a40e93ac53"
+baseline_sha256 = "764a5b2b2986a0caa0ed66be70a04f46a4baea4d2c9fe8bed97daeea5827fd06"
 scope = "bot"
 repository_contract = "forest.delivery.repository/3"
 execution_profile = "official"

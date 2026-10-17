@@ -440,6 +440,24 @@ BEGIN
             )
         );
     END IF;
+    IF context->>'port_name' IS DISTINCT FROM 'delivery.create-core-rescue-intent-uow'
+       AND (
+           requested_intent LIKE 'core-intent:%'
+           OR (input->>'cause_component_id' = 'kernel.runtime'
+               AND input->>'cause_kind' = 'core.rescue.request')
+           OR EXISTS (
+               SELECT 1 FROM jsonb_array_elements(input->'parts') AS part_value
+               WHERE part_value->>'effect_operation_ref' LIKE 'core-intent:%'
+           )
+       ) THEN
+        RETURN jsonb_build_object(
+            'protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object(
+                'code','DELIVERY_CAUSE_INVALID',
+                'message','Core rescue identity requires the Core rescue port','status',422
+            )
+        );
+    END IF;
     IF requested_lane='CHAT' AND (
         input->>'conversation_ref' IS NULL
         OR input->>'reply_ref' IS NULL
@@ -577,7 +595,9 @@ DECLARE
     input jsonb := envelope->'input';
     result_part jsonb;
 BEGIN
-    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+    IF context->>'port_kind' IS DISTINCT FROM 'participant'
+       OR context->>'port_name' IS DISTINCT FROM 'delivery.create-core-rescue-intent-uow'
+       OR envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
        OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'kernel.runtime'
        OR envelope#>>'{caller,generation_id}' IS NULL
        OR jsonb_typeof(input) IS DISTINCT FROM 'object'
@@ -589,7 +609,11 @@ BEGIN
        OR input->>'conversation_ref' IS NOT NULL
        OR input->>'cause_component_id' IS DISTINCT FROM 'kernel.runtime'
        OR input->>'cause_kind' IS DISTINCT FROM 'core.rescue.request'
-       OR input->>'cause_id' IS NULL
+       OR input->>'cause_id' !~ '^core:[a-f0-9]{64}$'
+       OR input->>'intent_id' IS DISTINCT FROM
+          'core-intent:' || substring(input->>'cause_id' from 6)
+       OR context->>'operation_id' IS DISTINCT FROM
+          (input->>'intent_id') || '/create'
        OR jsonb_typeof(input->'parts') IS DISTINCT FROM 'array'
     THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
@@ -602,7 +626,11 @@ BEGIN
                 'message','Core rescue delivery requires one part','status',422));
     END IF;
     result_part := input->'parts'->0;
-    IF result_part#>>'{payload,owner_component_id}' IS DISTINCT FROM 'kernel.runtime'
+    IF result_part->>'part_operation_id' IS DISTINCT FROM
+          (input->>'intent_id') || '/part'
+       OR result_part->>'effect_operation_ref' IS DISTINCT FROM
+          (input->>'intent_id') || '/effect'
+       OR result_part#>>'{payload,owner_component_id}' IS DISTINCT FROM 'kernel.runtime'
        OR result_part#>>'{payload,owner_kind}' IS DISTINCT FROM 'core.rescue.result'
        OR result_part#>>'{payload,owner_id}' IS DISTINCT FROM input->>'cause_id'
     THEN
