@@ -8,7 +8,7 @@ import re
 
 from forest.errors import ForestError
 
-_RESCUE_TARGET = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._-]{0,255}\Z")
+_RESCUE_TARGET = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}\Z")
 _RESCUE_REVISION = re.compile(r"[1-9][0-9]{0,18}\Z")
 
 

@@ -4558,6 +4558,165 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                     assert rescue_after_disable["result_value"]["value"][
                         "data_admission"
                     ] is False
+
+                    before_core_reload = await restarted._kernel.runtime.status()
+                    next_policy_revision = (await rescue_policy.read())["revision"]
+                    await rescue_policy.put(
+                        operation_id="test:core-rescue-reload-grant",
+                        expected_revision=next_policy_revision,
+                        binding_ref="binding/main", group_ref="933179609",
+                        principal_ref="qq:42", actions=["status", "disable", "reload"],
+                        actor_ref="web:test-admin", authorization=None,
+                        authorization_guard=grant_guard,
+                    )
+                    await send_shell(
+                        81008, 42,
+                        "#forest core reload --expect-graph "
+                        + str(before_core_reload["graph_revision"]),
+                    )
+                    reload_event = "onebot-event:" + hashlib.sha256(
+                        b"binding/main\x0081008"
+                    ).hexdigest()
+                    async with asyncio.timeout(45):
+                        while True:
+                            async with restarted.store.pool.connection() as conn:
+                                reloaded_rescue = await (await conn.execute(
+                                    sql.SQL("SELECT state,result_value,delivery_intent_id "
+                                            "FROM {}.rescue_requests WHERE bot_id=%s "
+                                            "AND event_ref=%s").format(
+                                        sql.Identifier(rescue_namespace)
+                                    ), (settings.bot_id, reload_event),
+                                )).fetchone()
+                            if reloaded_rescue and reloaded_rescue["state"] in {
+                                "SUCCEEDED", "FAILED", "DENIED",
+                            }:
+                                break
+                            await asyncio.sleep(0.1)
+                    assert reloaded_rescue["state"] == "SUCCEEDED", reloaded_rescue
+                    reload_operation_id = reloaded_rescue["result_value"]["value"][
+                        "operation_id"
+                    ]
+                    assert reloaded_rescue["result_value"]["value"]["state"] == "QUEUED"
+                    assert reload_operation_id.endswith("/reload")
+                    async with asyncio.timeout(120):
+                        while True:
+                            replacement = await restarted._kernel.runtime.graph_replacement(
+                                reload_operation_id
+                            )
+                            if replacement["state"] in {"SUCCEEDED", "FAILED"}:
+                                break
+                            await asyncio.sleep(0.2)
+                    assert replacement["state"] == "SUCCEEDED", replacement
+                    assert replacement["result_graph_revision"] == (
+                        before_core_reload["graph_revision"] + 1
+                    )
+                    assert (await restarted._kernel.runtime.status())[
+                        "data_admission"
+                    ] is False
+                    async with asyncio.timeout(45):
+                        while True:
+                            async with restarted.store.pool.connection() as conn:
+                                current_reload = await (await conn.execute(
+                                    sql.SQL("SELECT delivery_intent_id FROM {}.rescue_requests "
+                                            "WHERE bot_id=%s AND event_ref=%s").format(
+                                        sql.Identifier(rescue_namespace)
+                                    ), (settings.bot_id, reload_event),
+                                )).fetchone()
+                                reload_delivery = None
+                                if current_reload["delivery_intent_id"]:
+                                    reload_delivery = await (await conn.execute(
+                                        sql.SQL("SELECT state FROM {}.send_intents "
+                                                "WHERE bot_id=%s AND intent_id=%s").format(
+                                            sql.Identifier(delivery_namespace)
+                                        ), (settings.bot_id, current_reload["delivery_intent_id"]),
+                                    )).fetchone()
+                            if reload_delivery and reload_delivery["state"] in {
+                                "SENT", "FAILED", "UNKNOWN",
+                            }:
+                                break
+                            await asyncio.sleep(0.1)
+                    assert reload_delivery["state"] == "SENT", reload_delivery
+
+                    next_policy_revision = (await rescue_policy.read())["revision"]
+                    await rescue_policy.put(
+                        operation_id="test:core-rescue-cancel-grant",
+                        expected_revision=next_policy_revision,
+                        binding_ref="binding/main", group_ref="933179609",
+                        principal_ref="qq:42",
+                        actions=["status", "disable", "reload", "cancel"],
+                        actor_ref="web:test-admin", authorization=None,
+                        authorization_guard=grant_guard,
+                    )
+                    graph_revision_to_keep = (
+                        await restarted._kernel.runtime.status()
+                    )["graph_revision"]
+                    original_claim = restarted._kernel.runtime.claim_graph_replacement
+
+                    async def pause_replacement_claim(_lease, *, lease_seconds=120):
+                        return None
+
+                    monkeypatch.setattr(
+                        restarted._kernel.runtime,
+                        "claim_graph_replacement", pause_replacement_claim,
+                    )
+                    try:
+                        async def wait_core_terminal(message_id):
+                            event_ref = "onebot-event:" + hashlib.sha256(
+                                f"binding/main\x00{message_id}".encode()
+                            ).hexdigest()
+                            async with asyncio.timeout(45):
+                                while True:
+                                    async with restarted.store.pool.connection() as conn:
+                                        row = await (await conn.execute(
+                                            sql.SQL("SELECT state,result_value "
+                                                    "FROM {}.rescue_requests "
+                                                    "WHERE bot_id=%s AND event_ref=%s")
+                                            .format(sql.Identifier(rescue_namespace)),
+                                            (settings.bot_id, event_ref),
+                                        )).fetchone()
+                                    if row and row["state"] in {
+                                        "SUCCEEDED", "FAILED", "DENIED",
+                                    }:
+                                        return row
+                                    await asyncio.sleep(0.1)
+
+                        await send_shell(
+                            81009, 42,
+                            "#forest core reload --expect-graph "
+                            + str(graph_revision_to_keep),
+                        )
+                        queued_rescue = await wait_core_terminal(81009)
+                        assert queued_rescue["state"] == "SUCCEEDED", queued_rescue
+                        queued_operation_id = queued_rescue["result_value"]["value"][
+                            "operation_id"
+                        ]
+                        assert queued_operation_id.endswith("/reload")
+                        assert (await restarted._kernel.runtime.graph_replacement(
+                            queued_operation_id
+                        ))["state"] == "QUEUED"
+
+                        await send_shell(
+                            81010, 42,
+                            "#forest core cancel " + queued_operation_id
+                            + " --expect-revision " + str(graph_revision_to_keep),
+                        )
+                        cancelled_rescue = await wait_core_terminal(81010)
+                        assert cancelled_rescue["state"] == "SUCCEEDED", cancelled_rescue
+                        assert cancelled_rescue["result_value"]["value"] == {
+                            "operation_id": queued_operation_id,
+                            "state": "CANCELLED",
+                        }
+                        assert (await restarted._kernel.runtime.graph_replacement(
+                            queued_operation_id
+                        ))["state"] == "CANCELLED"
+                    finally:
+                        monkeypatch.setattr(
+                            restarted._kernel.runtime,
+                            "claim_graph_replacement", original_claim,
+                        )
+                    assert (await restarted._kernel.runtime.status())[
+                        "graph_revision"
+                    ] == graph_revision_to_keep
         finally:
             await restarted.close()
         assert clients[-1].closed is True

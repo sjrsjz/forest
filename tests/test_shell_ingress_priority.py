@@ -35,6 +35,10 @@ async def _gate(normalized):
     [
         ("#forest core status", True, "status", None),
         ("#forest core cancel run:42 --expect-revision 3", True, "cancel", None),
+        (
+            "#forest core cancel core:" + "a" * 64 + "/reload --expect-revision 4",
+            True, "cancel", None,
+        ),
         ("#forest core disable --expect-maintenance 2", True, "disable", None),
         ("#forest core reload --expect-graph 4", True, "reload", None),
         ("#forest coreX status", False, None, None),
@@ -59,6 +63,8 @@ async def test_core_rescue_has_fixed_grammar_without_shell_fallback(
     if claimed:
         assert inspection["action"] == action
         assert inspection["error_code"] == error_code
+        if text.startswith("#forest core cancel core:"):
+            assert inspection["target_ref"] == "core:" + "a" * 64 + "/reload"
 
 
 @pytest.mark.postgres

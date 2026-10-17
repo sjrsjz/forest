@@ -6,10 +6,12 @@
 | --- | --- | --- |
 | 微内核与包生命周期 | 现役主 Bot 22/22 ACTIVE，Delivery、Memory 正式热替换；隔离 Bot 的非空 `vector.index` 集合重建后图片直接召回保持，Vector 正式热替换 8 个依赖成员、14 个成员保留。首次发布前的不同 SQL 基线按[控制面合同](13-microkernel-control-plane-redesign.md)用新库切换，不要求旧库原位迁移。 | 发布后跨 SQL 基线升级图尚未设计或验证；长期多 Bot 运行和发布后故障变体尚无完整生产证据。 |
 | Bot 全局多主干图文记忆 | 同部署隔离 Bot 的两个群主干、真实 VL 文本/图片查询、真实图片直接种子、来源群与作者、永久费用账本已核对；跨主干联想另有隔离 PostgreSQL/真实 VL 用例。 | 数月混合图文负载、在线非空自然记忆与大规模并发写入的长期费用分布尚未验证。 |
-| 群聊 Agent 与外部回复 | 隔离端到端用例覆盖同群串行、跨群并行、下一次模型调用切口和工具续轮；v38 只读观察无重叠会话。 | 现役许可群 `933179609` 仍无新入站，真实 `@ → Agent → Provider → Delivery → QQ` 回复尚无样本。 |
-| 群聊 Shell 与管理 | 内核前缀门禁、同事务 ingress proof、Adapter 平台身份复核和可热替换 Shell 包已接通。 | 脱离 `shell.command` 包的最小 Core 救援路由尚未实现；真实 QQ Shell 管理操作和浏览器长期负载尚未验收。 |
+| 群聊 Agent 与外部回复 | 隔离端到端用例覆盖同群串行、跨群并行、下一次模型调用切口和工具续轮；v38 只读观察无重叠会话。 | 现役许可群 `933179609` 仅观察到一条未触发对话的入站消息，真实 `@ → Agent → Provider → Delivery → QQ` 回复尚无样本。 |
+| 群聊 Shell 与管理 | 当前源码已接通内核前缀门禁、同事务 ingress proof、Adapter 平台身份复核、可热替换 Shell 包，以及脱离 Shell 包的 Core `status`、`disable`、`reload` 和排队图替换 `cancel`；隔离 BotHost 用例已验证 Shell 停用后的维护态、整图替换、取消与 CONTROL 回执。 | 现役 v38 仍是旧镜像，尚未加载当前 Core 救援实现；群聊取消 Agent Run、真实 QQ Shell 管理操作和浏览器长期负载仍待验收。 |
 
 下文为按实施时间保留的证据记录。较早版本条目中的“当前”和“尚未”只描述当时状态；以上表及最新现役记录为准。
+
+2026-10-18 Core 整图维护与排队取消验收：当前源码的完整假 OneBot BotHost 用例先在停用 `shell.command`、关闭 DATA 后，从群消息执行 `core reload`，核对持久替换请求由 `QUEUED` 到 `SUCCEEDED`、graph revision 前进一代、DATA 继续关闭且 CONTROL 回执为 `SENT`（1 passed in 782.10s）。随后发现 Core Gate 原先拒绝返回的 `core:<摘要>/reload` 中的 `/`，使该请求无法从群聊取消；现已允许原样操作 ID，语法用例 9 passed。完整 BotHost 复验让图替换领取器暂时空闲，第二条群聊 `core reload` 保持 `QUEUED`，再以回执中的完整 ID 发送 `core cancel --expect-revision`；请求成为 `CANCELLED`，graph revision 未前进（1 passed in 753.62s）。Ruff 和差异检查通过。两次均复用隔离 PostgreSQL 与模拟 OneBot/模型/向量端口，未向 QQ 发消息；现役 v38 仍是旧镜像，群聊 Agent Run 取消和真实 QQ 管理操作尚未端到端验收。
 
 2026-10-17 21:03 CST 启动现役只读浸泡观察：独立容器 `forest-v38-soak-20261017` 运行仓库 `scripts/observe_live_bot.py`，对主 Bot `forest-main-v38` 每 300 秒采样一次、预定持续 24 小时；只读部署/Bot PostgreSQL 与管理健康端口，不发送 QQ 消息或调用模型。首次样本显示主 Bot `READY/ONLINE`、图修订 4、22/22 ACTIVE、195 条来源/4 个群主干、0 重叠 Agent Session、0 过期 Run/待发消息/异常费用，累计嵌入 2 次/44 tokens，违规项空；许可群 `933179609` 尚无入站观察。容器当前仍在运行，24 小时结论、期间故障和真实许可群回复均不能由首次样本推出。
 
