@@ -4486,6 +4486,78 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                         "classification_state": "FINAL",
                         "trigger_decision": "CONTROL_COMMAND",
                     }
+
+                    before_disable = await restarted._kernel.runtime.status()
+                    next_policy_revision = (await rescue_policy.read())["revision"]
+                    await rescue_policy.put(
+                        operation_id="test:core-rescue-disable-grant",
+                        expected_revision=next_policy_revision,
+                        binding_ref="binding/main", group_ref="933179609",
+                        principal_ref="qq:42", actions=["status", "disable"],
+                        actor_ref="web:test-admin", authorization=None,
+                        authorization_guard=grant_guard,
+                    )
+                    await send_shell(
+                        81006, 42,
+                        "#forest core disable --expect-maintenance "
+                        + str(before_disable["maintenance_epoch"]),
+                    )
+                    disable_event = "onebot-event:" + hashlib.sha256(
+                        b"binding/main\x0081006"
+                    ).hexdigest()
+                    async with asyncio.timeout(30):
+                        while True:
+                            async with restarted.store.pool.connection() as conn:
+                                disabled_rescue = await (await conn.execute(
+                                    sql.SQL("SELECT state,delivery_state,delivery_intent_id "
+                                            "FROM {}.rescue_requests WHERE bot_id=%s "
+                                            "AND event_ref=%s").format(
+                                        sql.Identifier(rescue_namespace)
+                                    ), (settings.bot_id, disable_event),
+                                )).fetchone()
+                                disabled_delivery = None
+                                if disabled_rescue and disabled_rescue["delivery_intent_id"]:
+                                    disabled_delivery = await (await conn.execute(
+                                        sql.SQL("SELECT state FROM {}.send_intents "
+                                                "WHERE bot_id=%s AND intent_id=%s")
+                                        .format(sql.Identifier(delivery_namespace)),
+                                        (settings.bot_id, disabled_rescue["delivery_intent_id"]),
+                                    )).fetchone()
+                            if disabled_delivery and disabled_delivery["state"] in {
+                                "SENT", "FAILED", "UNKNOWN",
+                            }:
+                                break
+                            await asyncio.sleep(0.1)
+                    assert disabled_rescue["state"] == "SUCCEEDED", disabled_rescue
+                    assert disabled_rescue["delivery_state"] == "QUEUED"
+                    assert disabled_delivery["state"] == "SENT", disabled_delivery
+                    after_disable = await restarted._kernel.runtime.status()
+                    assert after_disable["data_admission"] is False
+                    assert after_disable["maintenance_epoch"] == (
+                        before_disable["maintenance_epoch"] + 1
+                    )
+                    await send_shell(81007, 42, "#forest core status")
+                    after_disable_event = "onebot-event:" + hashlib.sha256(
+                        b"binding/main\x0081007"
+                    ).hexdigest()
+                    async with asyncio.timeout(30):
+                        while True:
+                            async with restarted.store.pool.connection() as conn:
+                                rescue_after_disable = await (await conn.execute(
+                                    sql.SQL("SELECT state,result_value FROM {}.rescue_requests "
+                                            "WHERE bot_id=%s AND event_ref=%s").format(
+                                        sql.Identifier(rescue_namespace)
+                                    ), (settings.bot_id, after_disable_event),
+                                )).fetchone()
+                            if rescue_after_disable and rescue_after_disable["state"] in {
+                                "SUCCEEDED", "FAILED", "DENIED",
+                            }:
+                                break
+                            await asyncio.sleep(0.1)
+                    assert rescue_after_disable["state"] == "SUCCEEDED"
+                    assert rescue_after_disable["result_value"]["value"][
+                        "data_admission"
+                    ] is False
         finally:
             await restarted.close()
         assert clients[-1].closed is True

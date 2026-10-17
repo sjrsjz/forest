@@ -6,6 +6,12 @@ from datetime import UTC, datetime, timedelta
 from forest.errors import ForestError
 from forest.sdk import Plugin, job
 
+_CORE_RESCUE_DELIVERY_DENIALS = frozenset({
+    "CORE_RESCUE_DELIVERY_REVOKED",
+    "CORE_RESCUE_DELIVERY_INVALID",
+    "ONEBOT_RESCUE_BINDING_STALE",
+})
+
 
 def _plain(value):
     if hasattr(value, "items"):
@@ -189,7 +195,7 @@ class Delivery(Plugin):
                         operation_id=ctx.operations.stable("core-rescue-delivery-permit"),
                     )
                 except ForestError as error:
-                    retryable = error.status >= 500
+                    retryable = error.code not in _CORE_RESCUE_DELIVERY_DENIALS
                     await self._observe(
                         work, ctx,
                         "RETRYABLE_NOT_APPLIED" if retryable else "REJECTED_NOT_APPLIED",
