@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 v38 真实 VL 图片直接种子验收：同部署隔离 Bot 从模拟 OneBot 接收公开 PNG 图片，静默裁剪后来源为 `IMAGE/ELIGIBLE/COMPLETE`、1 个 READY 文档 facet；相同 PNG 的正式 IMAGE 管理试验 READY，原图片来源以 `is_seed=true`、`image_count=1` 命中，群号与作者正确。隔离 Bot 累计 7 次已结算、279 tokens、UNKNOWN/预留 0，已再次退役，模拟服务已停止。主 Bot 保持 ONLINE、图修订 4、22/22 ACTIVE、账本 2 次/44 tokens；树莓派 NapCat 独立登录态 READY、无登录错误。真实许可群 @ 回复和长期负载仍待验收。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。
+
 2026-10-17 v38 真实 VL 非空记忆验收：同部署临时 Bot 使用独立数据库和本机模拟 OneBot，正式配置 2→1 空闲窗口后，两个模拟群的被动消息静默归档为各 2 条 `ELIGIBLE/COMPLETE` 来源；文本查询和合成极光 PNG 图片查询各自从群 `933179609` 命中 2 条，群/作者/主干归因正确。临时 Bot 成本 4 次已结算、202 tokens、UNKNOWN/预留 0，已退役；主 Bot 仍 ONLINE、22/22 ACTIVE，树莓派 NapCat active 且 OneBot 单连接。追加模拟服务时 Compose 重建过主 PostgreSQL/Supervisor，数据卷未变，主 Bot 已恢复。真实许可群 @ 回复仍待直接验证。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。
 
 2026-10-17 v38 现役切换：在独立部署/新 Bot 库中复制 v33 冻结配置并重新加密凭据，22/22 schema bundle READY；停用 v33 后令 `forest-main-v38` ONLINE。官方 Delivery、Memory 热重载均 SUCCEEDED，图修订 1→2→3，22/22 ACTIVE 且树莓派 OneBot 始终单连接。真实 VL 的 64×64 PNG 管理 IMAGE 试验在换代前后各一次 READY，永久预算账本累计 2 次、44 tokens、UNKNOWN/预留 0；旧试验输入跨代按契约返回 410，新库为空，召回 0 条。非许可群入站均 `NO_TRIGGER/group_not_allowed`；许可群尚无新入站，真实回复链仍待验证。v33 保持 OFFLINE 供回退。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。
