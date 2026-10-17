@@ -65,13 +65,13 @@
     </details>
     <details id="candidate-preview">
       <summary>候选图预检</summary>
-      <p>按当前选择修订投影一笔启停意图，检查依赖与换代影响；预检不会修改 Bot。</p>
+      <p>按当前选择修订投影一笔启停意图，检查依赖与换代影响；预检不会修改 Bot。Worker Host 自身只允许选择已登记的官方工件并保持启用。</p>
       <div class="row">
         <label>组件 ID<input id="preview-component-id" value="component.worker-host" autocomplete="off"></label>
-        <label>来源<select id="preview-source-kind"><option value="builtin">当前内置包</option><option value="official">已登记官方工件</option><option value="installed">已登记外部包</option></select></label>
+        <label>来源<select id="preview-source-kind"><option value="builtin">当前内置包</option><option value="official" selected>已登记官方工件</option><option value="installed">已登记外部包</option></select></label>
         <label>意图<select id="preview-enabled"><option value="true">启用</option><option value="false">停用</option></select></label>
       </div>
-      <div id="preview-installed" hidden>
+      <div id="preview-installed">
         <div class="row">
           <label>工件摘要<input id="preview-package-digest" placeholder="sha256:..."></label>
           <label>Manifest 摘要<input id="preview-manifest-digest" placeholder="sha256:..."></label>
@@ -142,6 +142,7 @@
       if(graphId!==value.graph_id){graphId='';await list();return;}
       selected=component_id;graphRevision=value.graph_revision;
       byId('preview-component-id').value=component_id;
+      syncPreviewForm();
       const member=value.member;
       byId('graph').textContent=`${value.bot_id} / r${value.graph_revision}`;
       byId('state').textContent=`${member.component_id} / ${member.status} / config r${member.config_revision}`;
@@ -170,7 +171,10 @@
         const inspectButton=document.createElement('button');
         inspectButton.type='button';inspectButton.textContent='检查声明';
         inspectButton.onclick=()=>inspectArtifact(item.package_digest).catch(error=>notice(error.message));
-        box.append(name,facts,inspectButton);byId('package-items').append(box);
+        const selectButton=document.createElement('button');
+        selectButton.type='button';selectButton.textContent='选为候选';
+        selectButton.onclick=()=>selectArtifact(item.package_digest).catch(error=>notice(error.message));
+        box.append(name,facts,inspectButton,selectButton);byId('package-items').append(box);
       }
       if(!page.items.length&&!next)byId('package-items').textContent='目录中没有已登记工件。';
       byId('more-packages').hidden=!catalogNext;resize();
@@ -185,6 +189,19 @@
       byId('artifact-requires').textContent=item.requires.map(value=>`${value.name} ${value.contract}${value.startup_dependency?' · 启动依赖':''}`).join('\n')||'无';
       byId('artifact-provides').textContent=item.provides.map(value=>`${value.name} ${value.contract}`).join('\n')||'无';
       byId('artifact-details').hidden=false;resize();
+    }
+    async function selectArtifact(packageDigest){
+      const item=await call('query','artifact',{package_digest:packageDigest});
+      if(item.package_digest!==packageDigest||item.scope!=='bot')throw new Error('候选工件不是 Bot 组件');
+      if(item.component_id==='component.worker-host'&&!item.official_registered)throw new Error('Worker Host 只能选择已登记官方工件');
+      byId('preview-component-id').value=item.component_id;
+      byId('preview-source-kind').value=item.official_registered?'official':'installed';
+      byId('preview-enabled').value='true';
+      byId('preview-package-digest').value=item.package_digest;
+      byId('preview-manifest-digest').value=item.manifest_digest;
+      syncPreviewForm();
+      byId('candidate-preview').open=true;
+      byId('candidate-preview').scrollIntoView({block:'nearest'});
     }
     async function selectionSnapshot(){
       const snapshot=await call('query','selection',{});
@@ -259,6 +276,21 @@
         byId('preview-note').textContent='预检完成；提交前会重新核对选择、Graph、配置及容量。';
         return {...proposal,plan_digest:value.plan_digest};
       }finally{button.disabled=false;resize();}
+    }
+    function syncPreviewForm(){
+      const self=byId('preview-component-id').value.trim()==='component.worker-host';
+      const source=byId('preview-source-kind');
+      const enabled=byId('preview-enabled');
+      source.querySelector('[value="builtin"]').disabled=self;
+      source.querySelector('[value="installed"]').disabled=self;
+      enabled.querySelector('[value="false"]').disabled=self;
+      if(self){source.value='official';enabled.value='true';}
+      const kind=source.value;
+      byId('preview-installed').hidden=kind==='builtin';
+      byId('preview-config-field').hidden=kind!=='installed';
+      byId('preview-capabilities-field').hidden=kind!=='installed';
+      byId('submit-selection').hidden=true;
+      resize();
     }
     async function submitSelection(){
       const button=byId('submit-selection');button.disabled=true;
@@ -336,13 +368,10 @@
     byId('refresh-selection-snapshot').onclick=()=>selectionSnapshot().catch(error=>notice(error.message));
     byId('run-preview').onclick=()=>previewCandidate().catch(error=>{byId('preview-note').textContent='预检失败';notice(error.message);});
     byId('submit-selection').onclick=()=>submitSelection().catch(error=>notice(error.message));
-    byId('preview-source-kind').onchange=()=>{
-      const kind=byId('preview-source-kind').value;
-      byId('preview-installed').hidden=kind==='builtin';
-      byId('preview-config-field').hidden=kind!=='installed';
-      byId('preview-capabilities-field').hidden=kind!=='installed';
-      resize();
-    };
+    byId('preview-component-id').oninput=syncPreviewForm;
+    byId('preview-source-kind').onchange=syncPreviewForm;
+    byId('preview-enabled').onchange=syncPreviewForm;
+    syncPreviewForm();
     byId('more').onclick=()=>list(nextAfter).catch(error=>notice(error.message));
     byId('load-packages').onclick=()=>listPackages().catch(error=>notice(error.message));
     byId('more-packages').onclick=()=>listPackages(true).catch(error=>notice(error.message));

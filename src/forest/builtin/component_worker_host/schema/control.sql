@@ -202,7 +202,8 @@ BEGIN
      OR context->>'port_name' IS DISTINCT FROM 'component.selection.project'
      OR target IS NULL OR target !~ '^[a-z0-9][a-z0-9._-]{0,127}$'
      OR source IS NULL OR source NOT IN ('builtin','official','installed')
-     OR (source='official' AND target='component.worker-host')
+     OR (target='component.worker-host' AND
+         (source<>'official' OR input->'desired_enabled' IS DISTINCT FROM 'true'::jsonb))
      OR jsonb_typeof(input->'desired_enabled') IS DISTINCT FROM 'boolean'
      OR jsonb_typeof(input->'expected_selection_revision') IS DISTINCT FROM 'number'
      OR jsonb_typeof(input->'approved_capabilities') IS DISTINCT FROM 'array'
@@ -313,7 +314,7 @@ BEGIN
      OR target IS NULL OR target !~ '^[a-z0-9][a-z0-9._-]{0,127}$'
      OR (NOT enabled AND target='component.worker-host')
      OR source IS NULL OR source NOT IN ('builtin','official','installed')
-     OR (source='official' AND target='component.worker-host')
+     OR (target='component.worker-host' AND source<>'official')
      OR (source='builtin' AND (input->'package_digest' IS DISTINCT FROM 'null'::jsonb
          OR input->'manifest_digest' IS DISTINCT FROM 'null'::jsonb
          OR input->'approved_capabilities' IS DISTINCT FROM '[]'::jsonb))

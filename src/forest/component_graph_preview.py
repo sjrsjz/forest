@@ -16,6 +16,7 @@ from forest.component_selection import (
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
     resolve_official_package_snapshots,
+    resolve_worker_host_snapshot,
     select_package_members,
 )
 from forest.errors import ForestError
@@ -212,6 +213,34 @@ async def _preview_selected_graph_in(
                 kernel=kernel, effect_driver_registry=official_effect_drivers,
             ))
         official_descriptors = tuple(compiled_official)
+    if any(entry.component_id == "component.worker-host" for entry in selection.entries):
+        worker_descriptor = next(
+            (item for item in official_descriptors
+             if item.component_id == "component.worker-host"),
+            None,
+        )
+        if worker_descriptor is None:
+            raise ForestError(
+                "COMPONENT_SELECTION_INVALID",
+                "Worker Host is absent from the official Graph", 409,
+            )
+        worker_snapshot = await asyncio.to_thread(
+            catalog.get_official_bot, worker_descriptor.artifact.package_digest
+        )
+        selected_worker = await asyncio.to_thread(
+            resolve_worker_host_snapshot, selection, worker_snapshot, catalog
+        )
+        if selected_worker.digest != worker_snapshot.digest:
+            candidate_worker = await asyncio.to_thread(
+                compile_official_candidate_descriptor,
+                selected_worker, catalog, store,
+                kernel=kernel,
+                effect_driver_registry=official_effect_drivers or EMPTY_PACKAGE_EFFECT_DRIVERS,
+            )
+            official_descriptors = tuple(
+                candidate_worker if item.component_id == "component.worker-host" else item
+                for item in official_descriptors
+            )
     selected = await asyncio.to_thread(
         select_package_members, selection, official_descriptors, catalog
     )

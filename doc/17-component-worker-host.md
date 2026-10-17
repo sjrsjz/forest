@@ -8,6 +8,8 @@
 
 Worker Host 不能负责物理启动或停止自己，也不能握住其他 Worker 对象。内核的 RuntimeGraph 执行器仅按冻结候选图执行通用的 prepare、prewarm、drain、start、publish、stop、rollback；这些动作不理解组件选择政策或配置内容。Worker Host 经受限的 `runtime.graph-replacement.request/2` 端口提交冻结控制意图，Bot Host 的租约监督循环领取请求并驱动内核执行器。Worker Host 热重载时，它自己的旧 Generation 与其他组件一样被排空；原操作的持久回执和替换请求不依赖旧 Python 对象存活。Worker Host 失效时，已有业务 Generation 可以继续运行，但组件控制写入拒绝；不得回退到 Web gateway 的直接写路径。
 
+Worker Host 自身的包选择不存在第二个内核业务账本。冷启动先由 `kernel.runtime` 最后一张已发布图给出准确旧工件摘要；首次物化没有图时才捕获发行包。旧工件的包自有选择端口读取完整快照、以 revision CAS 接受一个已启用的 `official` 新工件并提交替换请求；通用候选预览按摘要编译新描述符，装配时仍先通过旧工件读取和围栏快照，再验证新包的选择投影与存储身份一致。旧读端口的共享发布围栏持续到内核 Graph 发布；成功后新 Generation 接管管理端口，旧 Generation 排空并释放。未发布候选不能成为下次冷启动的引导来源。自停用、`builtin` 跟随镜像、自选普通安装包均拒绝。代码工件可在相同私有 SQL 基线上在线换代；改变 SQL 基线需要独立的存储升级协议，不能把旧库强行覆盖或称作热重载成功。
+
 `kernel.runtime` 继续拥有 Bot 整体 admission、Graph/Generation 事实、Host lease 和通用图替换队列。Shell 的 `core reload` 是整个 RuntimeGraph 的维护请求，属于内核；`component reload/enable/disable/validate` 是 Worker Host 的独立操作，不能把 `core reload` 伪称为单组件热重载。若候选图暂时只能整体重新实例化，必须在结果中明示影响的所有 Generation；在能保留未变化 Generation 之前，不宣称已实现局部重载。
 
 首个包的边界必须按下表落地，不能借用当前 gateway 的对象引用作为依赖注入：

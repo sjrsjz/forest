@@ -566,11 +566,18 @@ async def test_worker_host_selection_revision_cas_and_operation_replay(
     assert (await call("enable", "selection/official-grants", bad_grants))[
         "error"
     ]["code"] == "COMPONENT_SELECTION_INVALID"
-    bad_self = {**official, "component_id": "component.worker-host",
-                "expected_selection_revision": 4}
-    assert (await call("enable", "selection/official-self", bad_self))[
+    self_upgrade = {**official, "component_id": "component.worker-host",
+                    "expected_selection_revision": 4}
+    assert (await call("enable", "selection/official-self", self_upgrade))["ok"]
+    bad_self = {**self_upgrade, "source_kind": "builtin",
+                "package_digest": None, "manifest_digest": None,
+                "expected_selection_revision": 5}
+    assert (await call("enable", "selection/builtin-self", bad_self))[
         "error"
     ]["code"] == "COMPONENT_SELECTION_INVALID"
+    assert (await call("disable", "selection/disable-self", {
+        **self_upgrade, "expected_selection_revision": 5,
+    }))["error"]["code"] == "COMPONENT_SELECTION_INVALID"
 
 
 @pytest.mark.postgres

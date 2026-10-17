@@ -29,7 +29,7 @@ from forest.adapters.onebot import SendResult
 from forest.bot_host import BotGraphCandidate, BotHost, BotRuntimeSettings, BotSettings
 from forest.builtin_packages import bootstrap_installed_package
 from forest.component_graph_preview import preview_selected_graph
-from forest.component_selection import ComponentSelectionEntry, ComponentSelectionSnapshot
+from forest.component_selection import ComponentSelectionSnapshot
 from forest.control_driver_binding_gate import ControlDriverBindingGate
 from forest.deployment_management_app import create_deployment_management_app
 from forest.embeddings import EmbeddingProfile, EmbeddingResult, EmbeddingVector
@@ -1764,18 +1764,19 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                 encoding="utf-8",
             )
             updated = host.package_catalog.build_official(updated_root, scope="bot")
-            entry = ComponentSelectionEntry(
-                "routing.graph", "official", updated.digest,
-                digest_json(updated.manifest), (), True, 1,
-            )
-            frozen = {
-                "protocol": "forest.component-selection-snapshot/1",
-                "revision": 1,
-                "entries": [entry.as_dict()],
-            }
+            initial_selection = await host.selection_reader.snapshot()
+            async with host.store.pool.connection() as conn, conn.transaction():
+                projected = await host.selection_reader.project_in(
+                    conn,
+                    component_id="routing.graph", source_kind="official",
+                    package_digest=updated.digest,
+                    manifest_digest=digest_json(updated.manifest),
+                    approved_capabilities=(), desired_enabled=True,
+                    expected_selection_revision=initial_selection.revision,
+                )
             preview = await preview_selected_graph(
                 host.registry,
-                ComponentSelectionSnapshot(1, (entry,), digest_json(frozen)),
+                projected,
                 host._official_descriptors, host.package_catalog, host.store,
                 kernel=host._kernel,
                 target_component_id="routing.graph",
@@ -1795,7 +1796,7 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                 "manifest_digest": digest_json(updated.manifest),
                 "approved_capabilities": [], "desired_enabled": True,
                 "expected_configuration_revision": None,
-                "expected_selection_revision": 0,
+                "expected_selection_revision": initial_selection.revision,
                 "expected_graph_revision": before.graph_revision,
             }
             contract = host.registry.get("component.worker-host").management_contract
@@ -1808,7 +1809,7 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                 authorization=SimpleNamespace(actor_ref="subject/host-admin"),
                 authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
             )
-            assert selected["selection_revision"] == 1
+            assert selected["selection_revision"] == initial_selection.revision + 1
             async with asyncio.timeout(180):
                 while host.registry.graph_identity.graph_id == before.graph_id:
                     latest = (await host._kernel.runtime.status())["latest_replacement"]
@@ -1846,6 +1847,9 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                 other_contract = other.registry.get(
                     "component.worker-host"
                 ).management_contract
+                other_proposal["expected_selection_revision"] = (
+                    await other.selection_reader.snapshot()
+                ).revision
                 other_validated = await other_contract.query("validate", other_proposal)
                 other_selected = await other_contract.action(
                     "module.enable", operation_id="selection/pin-other-routing-official",
@@ -1853,7 +1857,9 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                     authorization=SimpleNamespace(actor_ref="subject/host-admin"),
                     authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
                 )
-                assert other_selected["selection_revision"] == 1
+                assert other_selected["selection_revision"] == (
+                    other_proposal["expected_selection_revision"] + 1
+                )
                 async with asyncio.timeout(180):
                     while other.registry.graph_identity.graph_id == other_before.graph_id:
                         latest = (await other._kernel.runtime.status())["latest_replacement"]
@@ -1937,7 +1943,7 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                 **proposal,
                 "package_digest": failing.digest,
                 "manifest_digest": digest_json(failing.manifest),
-                "expected_selection_revision": 1,
+                "expected_selection_revision": selected["selection_revision"],
                 "expected_graph_revision": after.graph_revision,
             }
             failing_validated = await new_worker_host.management_contract.query(
@@ -1951,7 +1957,9 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                 authorization=SimpleNamespace(actor_ref="subject/host-admin"),
                 authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
             )
-            assert failed_selection["selection_revision"] == 2
+            assert failed_selection["selection_revision"] == (
+                selected["selection_revision"] + 1
+            )
             async with asyncio.timeout(180):
                 while True:
                     latest = (await host._kernel.runtime.status())["latest_replacement"]
@@ -1964,7 +1972,7 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
             assert len(still_serving["members"]) == len(after.generations)
             restore = {
                 **proposal,
-                "expected_selection_revision": 2,
+                "expected_selection_revision": failed_selection["selection_revision"],
                 "expected_graph_revision": after.graph_revision,
             }
             restore_validated = await new_worker_host.management_contract.query(
@@ -1976,7 +1984,9 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                 authorization=SimpleNamespace(actor_ref="subject/host-admin"),
                 authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
             )
-            assert restored_selection["selection_revision"] == 3
+            assert restored_selection["selection_revision"] == (
+                failed_selection["selection_revision"] + 1
+            )
             async with asyncio.timeout(180):
                 while True:
                     latest = (await host._kernel.runtime.status())["latest_replacement"]
@@ -1987,6 +1997,63 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
                 item for item in host.registry.descriptors
                 if item.component_id == "routing.graph"
             ).artifact.package_digest == updated.digest
+            worker_before = host.registry.graph_identity
+            worker_snapshot = host.package_catalog.get_official_bot(next(
+                item.artifact.package_digest for item in host.registry.descriptors
+                if item.component_id == "component.worker-host"
+            ))
+            worker_root = Path(__file__).resolve().parents[1] / (
+                "src/forest/builtin/component_worker_host"
+            )
+            upgraded_worker_root = tmp_path / "worker-host-official-upgrade"
+            copytree(worker_root, upgraded_worker_root)
+            worker_manifest = upgraded_worker_root / "module.toml"
+            worker_text = worker_manifest.read_text(encoding="utf-8")
+            worker_version = f'version = "{worker_snapshot.manifest["version"]}"'
+            assert worker_version in worker_text
+            worker_manifest.write_text(
+                worker_text.replace(worker_version, 'version = "99.0.0"', 1),
+                encoding="utf-8",
+            )
+            upgraded_worker = host.package_catalog.build_official(
+                upgraded_worker_root, scope="bot"
+            )
+            current_selection = await host.selection_reader.snapshot()
+            worker_proposal = {
+                "component_id": "component.worker-host", "source_kind": "official",
+                "package_digest": upgraded_worker.digest,
+                "manifest_digest": digest_json(upgraded_worker.manifest),
+                "approved_capabilities": [], "desired_enabled": True,
+                "expected_configuration_revision": None,
+                "expected_selection_revision": current_selection.revision,
+                "expected_graph_revision": worker_before.graph_revision,
+            }
+            current_contract = host.registry.get(
+                "component.worker-host"
+            ).management_contract
+            worker_preview = await current_contract.query("validate", worker_proposal)
+            worker_selected = await current_contract.action(
+                "module.enable", operation_id="selection/upgrade-worker-host",
+                payload={**worker_proposal, "plan_digest": worker_preview["plan_digest"]},
+                authorization=SimpleNamespace(actor_ref="subject/host-admin"),
+                authorization_guard=lambda _conn, **_kwargs: asyncio.sleep(0),
+            )
+            assert worker_selected["selection_revision"] == current_selection.revision + 1
+            async with asyncio.timeout(180):
+                while host.registry.graph_identity.graph_id == worker_before.graph_id:
+                    latest = (await host._kernel.runtime.status())["latest_replacement"]
+                    if latest is not None and latest["state"] == "FAILED":
+                        pytest.fail(f"Worker Host official upgrade failed: {latest}")
+                    await asyncio.sleep(0.1)
+                while (await host._kernel.runtime.status())["latest_replacement"]["state"] != "SUCCEEDED":
+                    await asyncio.sleep(0.1)
+            assert host.registry.graph_identity.generations["component.worker-host"] != (
+                worker_before.generations["component.worker-host"]
+            )
+            assert next(
+                item.artifact.package_digest for item in host.registry.descriptors
+                if item.component_id == "component.worker-host"
+            ) == upgraded_worker.digest
         finally:
             await host.close()
         restarted = BotHost(
@@ -2002,12 +2069,20 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
         try:
             await restarted.start()
             assert next(
+                item.artifact.package_digest for item in restarted.registry.descriptors
+                if item.component_id == "component.worker-host"
+            ) == upgraded_worker.digest
+            assert next(
                 item for item in restarted.registry.descriptors
                 if item.component_id == "routing.graph"
             ).artifact.package_digest == updated.digest
             selection = await restarted.selection_reader.snapshot()
-            assert selection.entries[0].source_kind == "official"
-            assert selection.entries[0].package_digest == updated.digest
+            routing_entry = next(
+                entry for entry in selection.entries
+                if entry.component_id == "routing.graph"
+            )
+            assert routing_entry.source_kind == "official"
+            assert routing_entry.package_digest == updated.digest
             audit = next(
                 item for item in restarted._official_defaults
                 if item.component["id"] == "audit.console"
@@ -3936,9 +4011,11 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
         )
         copied_manifest = copied_worker_host / "module.toml"
         copied_source = copied_manifest.read_text(encoding="utf-8")
-        assert 'version = "1.7.0"' in copied_source
+        published_worker = package_catalog.get_official_bot(published_worker_digest)
+        version_line = f'version = "{published_worker.manifest["version"]}"'
+        assert version_line in copied_source
         copied_manifest.write_text(
-            copied_source.replace('version = "1.7.0"', 'version = "1.7.1"', 1),
+            copied_source.replace(version_line, 'version = "99.0.0"', 1),
             encoding="utf-8",
         )
         newer_worker = package_catalog.build_official(copied_worker_host, scope="bot")

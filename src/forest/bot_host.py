@@ -32,6 +32,7 @@ from forest.component_selection import (
     ComponentSelectionReader,
     ComponentSelectionSnapshot,
     resolve_official_package_snapshots,
+    resolve_worker_host_snapshot,
     select_package_members,
 )
 from forest.component_selection_commit import resolve_selection_commit_preflight
@@ -533,6 +534,36 @@ class BotHost:
             selection = await candidate_reader.snapshot()
         else:
             async with active_reader.publication_fence() as selection:
+                if await candidate_reader.snapshot() != selection:
+                    raise ForestError(
+                        "COMPONENT_SELECTION_BINDING_CHANGED",
+                        "Candidate selection query differs from the active selection ledger",
+                        409,
+                    )
+        selected_worker_snapshot = await asyncio.to_thread(
+            resolve_worker_host_snapshot,
+            selection, worker_host.snapshot, self.package_catalog,
+        )
+        if selected_worker_snapshot.digest != worker_host.snapshot.digest:
+            worker_host = await bootstrap_builtin_snapshot(
+                selected_worker_snapshot,
+                self.store,
+                self.schema_bundle_installer,
+                kernel=self._kernel,
+                work_notifier=self.notify,
+                initial_configuration=None,
+            )
+            candidate_reader = ComponentSelectionReader(self.store, worker_host.snapshot)
+            if candidate_reader.namespace != active_reader.namespace:
+                raise ForestError(
+                    "COMPONENT_SELECTION_BINDING_CHANGED",
+                    "Selection storage identity cannot change during Graph replacement",
+                    409,
+                )
+            async with active_reader.publication_fence(
+                expected_revision=selection.revision,
+                expected_digest=selection.digest,
+            ):
                 if await candidate_reader.snapshot() != selection:
                     raise ForestError(
                         "COMPONENT_SELECTION_BINDING_CHANGED",

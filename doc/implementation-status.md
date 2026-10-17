@@ -1,6 +1,8 @@
 # Forest 实现状态
 
-2026-10-17 Worker Host 冷恢复固定：`kernel.runtime` 的运行图现在只在发布事务中记录 `published_at`；组合根首次物化从发行捕获 `component.worker-host`，此后从最后一张已发布图的准确官方包摘要恢复，忽略仅准备而未发布的候选图。缺失工件或身份不符时闭锁失败，不再随宿主镜像暗中切换该引导包。独立 PostgreSQL 发布/退役证据用例 `1 passed`，完整假 Bot 生命周期用例模拟宿主带新版 Worker Host，验证旧工件冷恢复及后续 Shell/Web 链路 `1 passed`（563.64 秒），Ruff 通过。此改动尚未部署到现役 v33；Worker Host 自身在线热换代仍缺根选择协议，不能宣称插件完全热重载。
+2026-10-17 Worker Host 官方工件自热换代：包私有选择协议现在允许自身选中已启用的精确 `official` 工件，拒绝自停用、`builtin` 跟随镜像和普通安装包冒名。内核通用候选预览移除了按该组件名称拒绝官方工件的旧特例；预览编译目标包，装配以已发布旧包读取/围栏选择，再装配目标包并在 Graph 发布后交接管理端口。包目录 UI 可直接选择工件填入摘要，Worker Host 表单只允许官方启用。隔离 PostgreSQL 的选择 CAS/重放用例 `1 passed`；完整假 Bot 用例验证其他官方包选择、失败回退、Worker Host 新代码工件在线换代、旧代释放及冷启动恢复新摘要 `1 passed`（791.94 秒），Ruff、包构建及嵌入脚本语法检查通过。现役 v33 仍为旧镜像/旧 SQL 基线，不能用旧协议原地自升级；新基线须在独立 Bot 库验收。SQL baseline 变化尚没有在线存储升级协议，不能宣称任意 schema 版本热升级。
+
+2026-10-17 Worker Host 冷恢复固定：`kernel.runtime` 的运行图现在只在发布事务中记录 `published_at`；组合根首次物化从发行捕获 `component.worker-host`，此后从最后一张已发布图的准确官方包摘要恢复，忽略仅准备而未发布的候选图。缺失工件或身份不符时闭锁失败，不再随宿主镜像暗中切换该引导包。独立 PostgreSQL 发布/退役证据用例 `1 passed`，完整假 Bot 生命周期用例模拟宿主带新版 Worker Host，验证旧工件冷恢复及后续 Shell/Web 链路 `1 passed`（563.64 秒），Ruff 通过。此阶段尚未部署到现役 v33；当时缺少的根选择协议由上方的自热换代改动补齐。
 
 2026-10-17 当前现役仍为 v33 的旧镜像 `forest:runtime-candidate-c732bad`：一次新镜像启动先遇到 Docker 挂载来源名称交换后的等待，改用旧容器固定 ID 后容器可启动，但 v33 旧 Bot 库以 `SCHEMA_BUNDLE_MISMATCH` 拒绝 Adapter/Shell 新 SQL 基线；两次均已回退，没有把新版 Adapter 热重载宣称为成功。Docker Desktop 后来退出并重启，PostgreSQL 健康后旧 Supervisor 自动恢复，Bot 图修订 20 为 22/22 ACTIVE、部署 READY/ONLINE、树莓派 OneBot 单连接。3 笔历史 UNKNOWN 嵌入仍冻结；本 UTC 日另有正常后台嵌入结算，详见 [v33 运行记录](live-v33-operation-2026-10-17.md)。源码现已让 `component.worker-host` 于 Bot 首次物化时冻结其他自动安装官方包的准确工件，避免以后更换宿主镜像隐式替换包；隔离 PostgreSQL 并发初始化用例与完整 Bot Host 生命周期用例均通过。v33 旧库保持原样，新基线仍须在独立 Bot 库验收。
 

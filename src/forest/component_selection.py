@@ -154,6 +154,7 @@ def resolve_official_package_snapshots(
         selected_official_ids = {
             entry.component_id for entry in selection.entries
             if entry.source_kind in {"builtin", "official"}
+            and entry.component_id != "component.worker-host"
         }
         if selected_official_ids != set(by_id):
             raise ForestError(
@@ -176,6 +177,8 @@ def resolve_official_package_snapshots(
     selected = {snapshot.component["id"]: snapshot for snapshot in verified}
     for entry in selection.entries:
         if entry.source_kind != "official":
+            continue
+        if entry.component_id == "component.worker-host":
             continue
         default = by_id.get(entry.component_id)
         if default is None:
@@ -204,6 +207,43 @@ def resolve_official_package_snapshots(
     return tuple(selected[snapshot.component["id"]] for snapshot in defaults)
 
 
+def resolve_worker_host_snapshot(
+    selection: ComponentSelectionSnapshot,
+    current: PackageSnapshot,
+    catalog: PackageCatalog,
+) -> PackageSnapshot:
+    """Resolve the selection authority through its current published package."""
+    entry = next(
+        (item for item in selection.entries if item.component_id == "component.worker-host"),
+        None,
+    )
+    if entry is None:
+        return current
+    if entry.source_kind != "official" or not entry.desired_enabled:
+        raise ForestError(
+            "COMPONENT_SELECTION_INVALID",
+            "Worker Host must select an enabled official package", 409,
+        )
+    snapshot = (
+        current if current.digest == entry.package_digest
+        else catalog.get_official_bot(entry.package_digest)
+    )
+    if (
+        current.component["id"] != "component.worker-host"
+        or current.manifest["package_id"] != "forest.component-worker-host"
+        or snapshot.component["id"] != "component.worker-host"
+        or snapshot.component["scope"] != "bot"
+        or snapshot.manifest["package_id"] != current.manifest["package_id"]
+        or snapshot.manifest["runtime"] != "python-worker"
+        or digest_json(snapshot.manifest) != entry.manifest_digest
+    ):
+        raise ForestError(
+            "COMPONENT_SELECTION_ARTIFACT_CHANGED",
+            "Selected Worker Host artifact differs from its frozen identity", 409,
+        )
+    return snapshot
+
+
 def select_package_members(
     selection: ComponentSelectionSnapshot,
     official_descriptors: tuple[RuntimeModuleDescriptor, ...],
@@ -221,10 +261,12 @@ def select_package_members(
                 "Kernel authorities cannot be selected as packages",
                 409,
             )
-        if entry.source_kind == "official" and entry.component_id == "component.worker-host":
+        if entry.component_id == "component.worker-host" and (
+            entry.source_kind != "official" or not entry.desired_enabled
+        ):
             raise ForestError(
                 "COMPONENT_SELECTION_INVALID",
-                "Selection authority must be bootstrapped from the host release",
+                "Worker Host must select an enabled official package",
                 409,
             )
         if entry.source_kind in {"builtin", "official"}:

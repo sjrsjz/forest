@@ -55,8 +55,7 @@ def component_candidate_preview_service(context):
             or (
                 source_kind == "official"
                 and (
-                    request["component_id"] == "component.worker-host"
-                    or not isinstance(request["package_digest"], str)
+                    not isinstance(request["package_digest"], str)
                     or _DIGEST.fullmatch(request["package_digest"]) is None
                     or not isinstance(request["manifest_digest"], str)
                     or _DIGEST.fullmatch(request["manifest_digest"]) is None
