@@ -4137,6 +4137,41 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
             }
             assert shell_fallback is None
 
+            delivery_namespace = next(
+                item.storage.spec.namespace for item in restarted.registry.descriptors
+                if item.component_id == "delivery"
+            )
+            async with asyncio.timeout(60):
+                while True:
+                    async with restarted.store.pool.connection() as conn:
+                        rescue_delivery = await (await conn.execute(
+                            sql.SQL("SELECT delivery_state,delivery_intent_id FROM "
+                                    "{}.rescue_requests WHERE bot_id=%s AND event_ref=%s")
+                            .format(sql.Identifier(rescue_namespace)),
+                            (settings.bot_id, rescue_event),
+                        )).fetchone()
+                        delivery_result = None
+                        if rescue_delivery["delivery_intent_id"] is not None:
+                            delivery_result = await (await conn.execute(
+                                sql.SQL("SELECT state,cause_component_id,cause_kind,cause_id "
+                                        "FROM {}.send_intents WHERE bot_id=%s AND intent_id=%s")
+                                .format(sql.Identifier(delivery_namespace)),
+                                (settings.bot_id, rescue_delivery["delivery_intent_id"]),
+                            )).fetchone()
+                    if delivery_result is not None and delivery_result["state"] in {
+                        "SENT", "FAILED", "UNKNOWN",
+                    }:
+                        break
+                    await asyncio.sleep(0.1)
+            assert rescue_delivery["delivery_state"] == "QUEUED"
+            assert delivery_result == {
+                "state": "SENT", "cause_component_id": "kernel.runtime",
+                "cause_kind": "core.rescue.request",
+                "cause_id": "core:" + hashlib.sha256(
+                    (settings.bot_id + "\0" + rescue_event).encode()
+                ).hexdigest(),
+            }
+
             shell_command = (
                 "#forest module enable --component-id process.executor "
                 f"--plan-digest {preview['plan_digest']} "

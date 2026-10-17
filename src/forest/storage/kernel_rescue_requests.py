@@ -156,6 +156,20 @@ class KernelRescueRequestRepository:
         ).fetchone()
         return dict(row) if row is not None else None
 
+    async def delivery_in(self, conn, lease, request_id: str) -> dict | None:
+        """Read one settled request under the caller's authorization transaction."""
+
+        await self.runtime.verify_host_lease_in(conn, lease)
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT * FROM {} WHERE bot_id=%s AND request_id=%s FOR SHARE"
+                ).format(self._table()),
+                (self.store.bot_id, request_id),
+            )
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     async def mark_delivery_in(
         self, conn, lease, *, request_id: str, intent_id: str | None
     ) -> dict:

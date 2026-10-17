@@ -25,6 +25,7 @@ from forest.kernel_rescue_executor import KernelCoreRescueExecutor
 from forest.kernel_rescue_ingress import (
     KernelCoreRescueAdmission,
     KernelRuntimeIngressParticipant,
+    core_rescue_delivery_permit_service,
 )
 from forest.kernel_rescue_management import RuntimeRescueManagementContract
 from forest.kernel_resource_admission import (
@@ -104,6 +105,7 @@ _KERNEL_READ_SERVICES = frozenset({
     "agent.tool.runtime-status",
     "shell.gate.inspect",
     "core.rescue.inspect",
+    "core.rescue.delivery-permit",
 })
 
 
@@ -191,6 +193,7 @@ _MODULES = {
             "agent.tool.runtime-status",
             "shell.gate.inspect",
             "core.rescue.inspect",
+            "core.rescue.delivery-permit",
         ),
         "capabilities": (
             "runtime.graph.publish",
@@ -209,6 +212,7 @@ _MODULES = {
             "deployment.package-registry.artifact",
             "shell.gate.inspect",
             "core.rescue.inspect",
+            "core.rescue.delivery-permit",
         ),
     },
 }
@@ -609,6 +613,7 @@ class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
         return KernelRuntimeIngressParticipant(
             KernelShellGateUnitOfWorkParticipant(self, self.payloads),
             self.rescue_admission,
+            self.rescue_executor,
         )
 
     def activate_generation(self) -> None:
@@ -633,8 +638,10 @@ class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
             try:
                 if await self.rescue_executor.run_once(self):
                     continue
+                if await self.rescue_executor.run_delivery_once(self):
+                    continue
             except Exception:
-                _log.exception("Core rescue executor could not settle a request")
+                _log.exception("Core rescue executor could not process pending work")
                 await asyncio.sleep(2)
             try:
                 await asyncio.wait_for(self._rescue_wake.wait(), timeout=5)
@@ -1049,6 +1056,10 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                     RuntimeKernelServiceSpec(
                         "core.rescue.inspect", 1, ("kernel.runtime",),
                         core_rescue_inspect_service,
+                    ),
+                    RuntimeKernelServiceSpec(
+                        "core.rescue.delivery-permit", 1, ("kernel.runtime",),
+                        core_rescue_delivery_permit_service,
                     ),
                     RuntimeKernelServiceSpec(
                         "runtime.graph.snapshot",

@@ -17,9 +17,10 @@ class KernelRuntimeIngressParticipant:
 
     component_id = "kernel.runtime"
 
-    def __init__(self, gate, rescue) -> None:
+    def __init__(self, gate, rescue, executor=None) -> None:
         self.gate = gate
         self.rescue = rescue
+        self.executor = executor
         self.service = gate.service
 
     @property
@@ -32,6 +33,20 @@ class KernelRuntimeIngressParticipant:
         if name == "core.rescue.admit":
             return await self.rescue.invoke_in(conn, envelope, **invocation)
         raise ForestError("RUNTIME_UOW_PARTICIPANT_INVALID", "Unknown runtime ingress port", 404)
+
+    async def permit_delivery(self, request: dict) -> dict:
+        if self.executor is None:
+            raise ForestError("CORE_RESCUE_UNAVAILABLE", "Core rescue is unavailable", 503)
+        return await self.executor.permit_delivery(request)
+
+
+def core_rescue_delivery_permit_service(context):
+    participant = context.participant("kernel.runtime")
+
+    async def permit(request):
+        return await participant.permit_delivery(request)
+
+    return permit
 
 
 class KernelCoreRescueAdmission:

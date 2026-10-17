@@ -641,6 +641,7 @@ BEGIN
             jsonb_build_object('code','DELIVERY_CLAIM_INPUT_INVALID','message','Delivery claim request is invalid','status',422));
     END IF;
     SELECT p.*,i.binding_ref,i.lane_kind,i.ordering_key,i.lane_sequence,
+           i.cause_component_id,i.cause_kind,i.cause_id,
            i.channel_kind,i.channel_ref,a.attempt_id AS existing_attempt_id,a.state AS attempt_state
       INTO selected
       FROM __forest_module_schema__.send_parts p
@@ -655,6 +656,7 @@ BEGIN
                          WHEN 'DISPATCHING' THEN 'RECOVER_DISPATCHING' ELSE 'DISPATCH' END;
     ELSE
         SELECT p.*,i.binding_ref,i.lane_kind,i.ordering_key,i.lane_sequence,
+               i.cause_component_id,i.cause_kind,i.cause_id,
                i.channel_kind,i.channel_ref,a.attempt_id AS existing_attempt_id,a.state AS attempt_state
           INTO selected
           FROM __forest_module_schema__.send_parts p
@@ -687,6 +689,7 @@ BEGIN
                             WHERE p.bot_id=i.bot_id AND p.intent_id=i.intent_id
                               AND p.part_index=i.current_part_index AND p.state='QUEUED');
             SELECT p.*,i.binding_ref,i.lane_kind,i.ordering_key,i.lane_sequence,
+                   i.cause_component_id,i.cause_kind,i.cause_id,
                    i.channel_kind,i.channel_ref,NULL::text AS existing_attempt_id,NULL::text AS attempt_state
               INTO selected
               FROM __forest_module_schema__.send_parts p
@@ -728,6 +731,8 @@ BEGIN
           'part_operation_id',selected.part_operation_id,'effect_operation_ref',selected.effect_operation_ref,
           'attempt_id',COALESCE(selected.existing_attempt_id,requested_token),
           'semantic_digest',selected.semantic_digest,'binding_ref',selected.binding_ref,
+          'cause_component_id',selected.cause_component_id,
+          'cause_kind',selected.cause_kind,'cause_id',selected.cause_id,
           'lane_kind',selected.lane_kind,'ordering_key',selected.ordering_key,'lane_sequence',selected.lane_sequence,
           'channel_kind',selected.channel_kind,'channel_ref',selected.channel_ref,
           'owner_epoch',selected.owner_epoch,'owner_expires_at',selected.owner_expires_at,

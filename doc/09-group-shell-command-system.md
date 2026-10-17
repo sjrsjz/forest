@@ -217,3 +217,5 @@ WebUI 的模块页从描述符展示命令目录、参数 schema、权限和最�
 `runtime.health-snapshot` 是由 `component.worker-host` builtin 包声明、执行和热替换的只读 JobType，不再由 `kernel.runtime` 直接注册 Job handler。内核只拥有 `runtime.status.snapshot/1` 只读端口，返回当前 Graph、接纳状态与成员生命周期的有界状态投影；包通过冻结的服务路由消费该端口，并发布 `forest.runtime-health-snapshot/1` 结果。JobScheduler 仍只拥有排队、领取、取消和结算，不知道健康检查字段。
 
 取消意图在 Scheduler 派发前以及目标包 Job handler 入队前复核；已开始的只读状态读取可完成，不能把已产生的结果重写成“未执行”。换代时 JobType 的 provider Generation 随 `component.worker-host` 一起冻结或替换，旧队列项必须按原 Generation 身份结算或获得明确失败，不能临时改路由到新包。
+
+Core 回执交接以救援请求账本为唯一游标：请求效果及结果先原子结算为 `PENDING`，后续独立事务锁定该结果、重新证明当前 Binding 与授权、经 Delivery 包的受限事务端口创建一条 CONTROL 意图，并在同一事务把账本标记 `QUEUED`。因此 Delivery 暂不可用不会造成结果丢失，也不能由内核直接发送 OneBot。Delivery 的工作领取协议必须保留 `cause_component_id/cause_kind/cause_id`；仅当来源是 `kernel.runtime/core.rescue.request` 时，派发 Worker 才调用 `core.rescue.delivery-permit`，许可端口核对准确意图、结果 Payload、当前 Binding、当前授权修订及动作。许可失败但确定未开始网络调用时以 NOT_APPLIED 证据结算；暂时故障重试，确定撤权则终止。该许可调用与外部网络发送无法共享 PostgreSQL 事务，故当前承诺是紧贴发送前复核，不能宣称与并发撤权完全线性化；若要求撤权提交后零发送，须在 Adapter 实际发送边界加入可持有至派发的权威围栏。

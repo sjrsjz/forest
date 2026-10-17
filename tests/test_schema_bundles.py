@@ -1996,6 +1996,22 @@ async def test_delivery_core_rescue_intent_has_separate_owner_and_cause(
         "cause_id": request_id,
         "lane_kind": "CONTROL",
     }
+    async with store.pool.connection() as conn, conn.transaction():
+        claimed = (await (await conn.execute(
+            sql.SQL("SELECT {}.delivery_claim_work(%s::jsonb,%s::jsonb) AS value")
+            .format(namespace),
+            (
+                psycopg.types.json.Jsonb({"bot_id": store.bot_id}),
+                psycopg.types.json.Jsonb({
+                    "protocol": "forest.owned-work-claim-request/1",
+                    "claim_token": "core-claim/1", "lease_seconds": 60,
+                }),
+            ),
+        )).fetchone())["value"]["value"]["payload"]
+    assert (
+        claimed["cause_component_id"], claimed["cause_kind"],
+        claimed["cause_id"], claimed["payload"]["owner_id"],
+    ) == ("kernel.runtime", "core.rescue.request", request_id, request_id)
 
 
 @pytest.mark.postgres

@@ -171,6 +171,34 @@ class Delivery(Plugin):
                 operation_id=ctx.operations.stable("handoff-transaction"),
             )
             handed_off = True
+            if (
+                work["cause_component_id"] == "kernel.runtime"
+                and work["cause_kind"] == "core.rescue.request"
+            ):
+                try:
+                    await ctx.services.call(
+                        "core.rescue.delivery-permit",
+                        {
+                            "protocol": "forest.core-rescue-delivery-permit/1",
+                            "request_id": work["cause_id"],
+                            "intent_id": work["intent_id"],
+                            "binding_ref": work["binding_ref"],
+                            "channel_ref": work["channel_ref"],
+                            "payload": work["payload"],
+                        },
+                        operation_id=ctx.operations.stable("core-rescue-delivery-permit"),
+                    )
+                except ForestError as error:
+                    retryable = error.status >= 500
+                    await self._observe(
+                        work, ctx,
+                        "RETRYABLE_NOT_APPLIED" if retryable else "REJECTED_NOT_APPLIED",
+                        None, error.code,
+                    )
+                    return {
+                        "intent_id": work["intent_id"],
+                        "state": "QUEUED" if retryable else "FAILED",
+                    }
             result = await ctx.services.call(
                 "adapter.onebot.delivery.dispatch",
                 {
