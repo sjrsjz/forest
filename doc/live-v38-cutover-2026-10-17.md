@@ -8,4 +8,6 @@
 
 通过 `memory.graph` 官方管理试验上传一张本地生成的 64×64 PNG（186 字节），以真实 VL endpoint 发起 IMAGE 查询，状态 `CLAIMED → PENDING → READY`。试验结果为 0 条来源，符合新 Bot 空记忆库；本次只证明真实图片请求、Embedding Effect、向量/查询链可结算，不证明非空图片召回质量。成本账本为 1 次已结算、22 charged tokens、0 UNKNOWN、0 预留。没有发送 QQ 测试消息。许可群在观察窗口内尚无新入站，因此真实 `@ → Agent → Provider → Delivery → QQ` 回复仍待低频验收。
 
+随后在 v38 ONLINE 时通过官方 `module.reload` 先后热替换 Delivery 和 Memory：两次请求均 SUCCEEDED，Bot 图修订 1→2→3，每次仍有 22/22 ACTIVE 成员。依赖链的 Adapter、Agent、Conversation、Media、Shell 等 Generation 随图换代，但树莓派始终只有一条 OneBot ESTABLISHED 连接，旧 v33 保持 OFFLINE，Delivery 发送意图保持 0。Memory 旧试验的 Generation 绑定输入在换代后按契约返回 `410 MEMORY_TRIAL_INPUT_UNAVAILABLE`；用新试验 ID 再发一次同样的真实 PNG 查询获得 READY。成本账本跨代保留为 2 次已结算、44 charged tokens、0 UNKNOWN、0 预留。这个验证覆盖运行时包换代和永久预算账本，不意味着限时管理试验输入可跨代继续读取。
+
 现役 v38 PostgreSQL 与 Supervisor 容器均设为 `unless-stopped`，已核对在线容器的实际重启策略和健康状态。回退入口仍是 v33 部署的管理意图：须先令 v38 OFFLINE、确认 OneBot 连接消失，再令 v33 ONLINE。两个 Bot 数据库独立，v33 记忆未迁入 v38；当前 v38 配置与临时运维脚本保存在被 Git 忽略的 `.cache/accept-v38`，数据库卷保留。
