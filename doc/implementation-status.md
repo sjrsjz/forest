@@ -1579,3 +1579,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 2026-10-18 Supervisor 停机租约补验：加入活动 Bot runner 的因果测试，验证 `STARTING → ONLINE → STOPPING → Host.close → OFFLINE` 都发生在租约释放前，Bot 排空后部署控制图仍可取得该租约，控制图关闭后才释放。生命周期定向用例现为 4 passed，Ruff 通过。此为模拟 Host 与目录的边界验证，不替代真实活跃 Bot 的进程停机试验。提交源码 `b17285a9` 对应候选镜像 `forest:runtime-core-shutdown-b17285a9`；在线 v38 仍保持原镜像。
 
 2026-10-18 Supervisor 正式组合与镜像复核：隔离 PostgreSQL 中 `test_supervisor_settles_host_storage_then_provisions_offline_bot` 以真实 Deployment/Host 控制图、存储供应和 22 个 Bot schema bundle 运行并在取消时关闭，`1 passed in 125.62s`；测试临时 Deployment/Host/Bot 数据库及角色已清除。由已提交源码构建的 `forest:runtime-core-shutdown-b17285a9`（`sha256:4477c877877e545f159c22f97fb2eaa4991168d4b0e34bc5b38cbc09489ae7ea`）在另一隔离空部署中健康启动、管理 HTTP 200，正常 SIGTERM 退出码 0，无租约不可用错误。在线 v38 保持 ONLINE、观察样本 62 无违约。正式组合用例的 Bot 保持 OFFLINE，故活跃真实 Bot 停机仍未验收。
+
+2026-10-18 活动 Bot 停机组合补验：同一隔离 PostgreSQL 用例在完整供应 22 个 schema bundle 后，通过正式管理动作将 Bot 从 OFFLINE 置为 ONLINE；真实 Supervisor 启动 runner，使用无外部连接的模拟 BotHost 验证取消进程时其 `close()` 仍能取得部署租约，最终目录观察为 OFFLINE，`1 passed in 125.90s`。测试临时 Deployment/Host/Bot 库和角色已清除；在线 v38 的观察样本 63 无违约。该证据覆盖真实 Supervisor/控制图/数据库组合及活动 runner，但模拟 BotHost 不覆盖真实模块图的进程停机，后者仍待隔离验收。

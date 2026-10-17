@@ -8,6 +8,7 @@ import socket
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
+from types import SimpleNamespace
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -22,6 +23,7 @@ from forest.deployment_web_bootstrap import DeploymentWebBootstrap
 from forest.embeddings import EmbeddingProfile
 from forest.errors import ForestError
 from forest.model_contract import ModelCapabilities
+from forest.multi_bot_supervisor import MultiBotSupervisor
 from forest.official_bot_provisioning import (
     official_bootstrap_contributions,
     official_bootstrap_schema_digests,
@@ -93,6 +95,33 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
         management_port=management_port,
         management_origin=f"http://127.0.0.1:{management_port}",
         poll_seconds=0.1,
+    )
+    bot_host_started = asyncio.Event()
+    bot_host_closed = asyncio.Event()
+    supervisors = []
+
+    class IsolatedBotHost:
+        def __init__(self, _settings):
+            self.registry = SimpleNamespace(
+                graph_identity=SimpleNamespace(graph_id="graph/supervisor-acceptance")
+            )
+            self._supervision_task = None
+
+        async def start(self):
+            bot_host_started.set()
+
+        async def close(self):
+            assert supervisors[0].authority_lease().deployment_id == deployment_id
+            bot_host_closed.set()
+
+    class IsolatedMultiBotSupervisor(MultiBotSupervisor):
+        def __init__(self, *args, **kwargs):
+            kwargs["host_factory"] = IsolatedBotHost
+            super().__init__(*args, **kwargs)
+            supervisors.append(self)
+
+    monkeypatch.setattr(
+        "forest.supervisor_host.MultiBotSupervisor", IsolatedMultiBotSupervisor,
     )
     package_root = tmp_path / "packages"
     monkeypatch.setenv("FOREST_PACKAGE_CATALOG_ROOT", str(package_root))
@@ -443,9 +472,44 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
             assert row["count"] == 22
         finally:
             await target_store.close()
+        async with AsyncClient(
+            base_url=f"http://127.0.0.1:{management_port}", timeout=15,
+            trust_env=False,
+        ) as client:
+            login = await client.post(
+                "/management/v1/auth/login",
+                headers={"origin": settings.management_origin},
+                json={"username": "admin",
+                      "password": "supervisor-acceptance-admin-password"},
+            )
+            assert login.status_code == 200, login.text
+            headers = {
+                "origin": settings.management_origin,
+                "x-forest-csrf": client.cookies["forest_management_csrf"],
+                "idempotency-key": "supervisor-acceptance/online",
+            }
+            online_intent = await client.post(
+                "/management/v1/scopes/deployment/deployment/modules/"
+                "deployment.bot-catalog/actions/bot.set-desired",
+                headers=headers,
+                json={"bot_id": request.bot_id, "desired_state": "ONLINE",
+                      "expected_revision": bot["intent_revision"]},
+            )
+            assert online_intent.status_code == 200, online_intent.text
+
+        async def online_bot():
+            current = await DeploymentCatalogRepository(store).inspect(request.bot_id)
+            return current if current["observed_state"] == "ONLINE" else None
+
+        await _until(online_bot, supervisor_task, seconds=30)
+        assert bot_host_started.is_set()
     finally:
         supervisor_task.cancel()
         await asyncio.gather(supervisor_task, return_exceptions=True)
+        stopped_bot = (
+            await DeploymentCatalogRepository(store).inspect(request.bot_id)
+            if bot_host_started.is_set() else None
+        )
         await store.close()
         host_admin = await psycopg.AsyncConnection.connect(host_dsn, autocommit=True)
         try:
@@ -479,3 +543,6 @@ async def test_supervisor_settles_host_storage_then_provisions_offline_bot(
             sql.Identifier(deployment_name),
         ))
         await admin.close()
+        if stopped_bot is not None:
+            assert bot_host_closed.is_set()
+            assert stopped_bot["observed_state"] == "OFFLINE"
