@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 v38 真实 VL 非空记忆验收：同部署临时 Bot 使用独立数据库和本机模拟 OneBot，正式配置 2→1 空闲窗口后，两个模拟群的被动消息静默归档为各 2 条 `ELIGIBLE/COMPLETE` 来源；文本查询和合成极光 PNG 图片查询各自从群 `933179609` 命中 2 条，群/作者/主干归因正确。临时 Bot 成本 4 次已结算、202 tokens、UNKNOWN/预留 0，已退役；主 Bot 仍 ONLINE、22/22 ACTIVE，树莓派 NapCat active 且 OneBot 单连接。追加模拟服务时 Compose 重建过主 PostgreSQL/Supervisor，数据卷未变，主 Bot 已恢复。真实许可群 @ 回复仍待直接验证。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。
+
 2026-10-17 v38 现役切换：在独立部署/新 Bot 库中复制 v33 冻结配置并重新加密凭据，22/22 schema bundle READY；停用 v33 后令 `forest-main-v38` ONLINE。官方 Delivery、Memory 热重载均 SUCCEEDED，图修订 1→2→3，22/22 ACTIVE 且树莓派 OneBot 始终单连接。真实 VL 的 64×64 PNG 管理 IMAGE 试验在换代前后各一次 READY，永久预算账本累计 2 次、44 tokens、UNKNOWN/预留 0；旧试验输入跨代按契约返回 410，新库为空，召回 0 条。非许可群入站均 `NO_TRIGGER/group_not_allowed`；许可群尚无新入站，真实回复链仍待验证。v33 保持 OFFLINE 供回退。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。
 
 2026-10-17 v37 Delivery UNKNOWN 人工调和：源码包 `forest.delivery` 0.4.8 / SQL 3.1.5 通过模块声明的管理查询、P0 管理动作和跨 `kernel.effect` / Delivery 的 UnitOfWork 接入。独立部署与新 Bot 库中，假群 `@` 经假模型生成回复，假 OneBot 在收到发送动作后断开，产生 UNKNOWN；管理 API 列表与详情返回尝试和观察记录。管理员提供可复核证据后，`REJECTED_NOT_APPLIED` 原子收敛为 Effect `NOT_APPLIED`、Delivery intent `FAILED`、attempt `REJECTED`，保留解决时间与证据；矛盾的后续 `SENT` 裁决返回 `EFFECT_EVIDENCE_CONFLICT`，两个账本状态不变。测试未触及真实 QQ；现役 v33 不变。详见 [v37 Delivery 调和验收](live-v37-delivery-reconciliation-2026-10-17.md)。

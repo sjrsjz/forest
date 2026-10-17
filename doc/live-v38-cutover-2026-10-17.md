@@ -11,3 +11,7 @@
 随后在 v38 ONLINE 时通过官方 `module.reload` 先后热替换 Delivery 和 Memory：两次请求均 SUCCEEDED，Bot 图修订 1→2→3，每次仍有 22/22 ACTIVE 成员。依赖链的 Adapter、Agent、Conversation、Media、Shell 等 Generation 随图换代，但树莓派始终只有一条 OneBot ESTABLISHED 连接，旧 v33 保持 OFFLINE，Delivery 发送意图保持 0。Memory 旧试验的 Generation 绑定输入在换代后按契约返回 `410 MEMORY_TRIAL_INPUT_UNAVAILABLE`；用新试验 ID 再发一次同样的真实 PNG 查询获得 READY。成本账本跨代保留为 2 次已结算、44 charged tokens、0 UNKNOWN、0 预留。这个验证覆盖运行时包换代和永久预算账本，不意味着限时管理试验输入可跨代继续读取。
 
 现役 v38 PostgreSQL 与 Supervisor 容器均设为 `unless-stopped`，已核对在线容器的实际重启策略和健康状态。回退入口仍是 v33 部署的管理意图：须先令 v38 OFFLINE、确认 OneBot 连接消失，再令 v33 ONLINE。两个 Bot 数据库独立，v33 记忆未迁入 v38；当前 v38 配置与临时运维脚本保存在被 Git 忽略的 `.cache/accept-v38`，数据库卷保留。
+
+同日追加真实 VL 的非空记忆验收：在 v38 部署中经正式供应端口创建独立数据库的临时 Bot `bot/accept-v38-real-vl-fixture-20261017`，只接本机模拟 OneBot `10001`，沿用 v38 受控 VL 密钥引用和 Qwen3-VL-Embedding-8B 模型身份。正式配置端口把此 Bot 的空闲上下文窗口设为 2→1。向两个模拟群各注入 3 条不含 @ 的被动消息后，静默裁剪形成两个主干，各有 2 条 `ELIGIBLE/COMPLETE` 来源；作者准确区分 `qq:20001`、`qq:20002`、`qq:20003`、`qq:20004`。以文本“紫色极光照亮北方森林”及本地合成的紫色极光/森林 PNG 分别发起正式管理试验，两次均 `READY`，各召回群 `933179609` 的 2 条文本来源，群号、作者和主干来源一致，另一群没有被误归因。临时 Bot 的嵌入账本为 4 次已结算、202 charged tokens、0 UNKNOWN、0 预留；v38 主 Bot 账本仍为 2 次、44 tokens。这个试验证明真实 VL 的 TEXT 与 IMAGE 查询都能命中非空归档文本；没有测试真实 QQ 图片入站或长期语义质量。
+
+为加入本机模拟服务，Compose 一次 `up` 意外重建了 v38 PostgreSQL 和 Supervisor 容器，原数据卷保留；主 Bot 在冷启动约数分钟后恢复 `READY/ONLINE`、图修订 4、22/22 ACTIVE。临时 Bot 已经正式退到 `OFFLINE/OFFLINE`，模拟服务已停止。最后核对 v38 PostgreSQL 和 Supervisor 均 healthy、树莓派 NapCat 服务 active，OneBot 8080 恰有 1 条来自 Forest 主机的 ESTABLISHED 连接。获准群真实新 `@ → Agent → Provider → Delivery → QQ` 回复仍没有直接验收样本。
