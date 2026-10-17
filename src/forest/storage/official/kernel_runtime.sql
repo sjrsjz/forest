@@ -76,6 +76,11 @@ CREATE TABLE rescue_requests (
         delivery_intent_id IS NULL OR octet_length(delivery_intent_id) BETWEEN 1 AND 256
     ),
     completed_at timestamptz,
+    next_attempt_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    transient_failures bigint NOT NULL DEFAULT 0 CHECK (transient_failures >= 0),
+    last_transient_code text CHECK (
+        last_transient_code IS NULL OR octet_length(last_transient_code) BETWEEN 1 AND 128
+    ),
     received_at timestamptz NOT NULL,
     admission_deadline timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -90,6 +95,7 @@ CREATE TABLE rescue_requests (
         ))
     ),
     CHECK ((result_payload_id IS NULL) = (result_payload_digest IS NULL)),
+    CHECK ((transient_failures=0) = (last_transient_code IS NULL)),
     CHECK (
         (state IN ('QUEUED','REJECTED') AND result_code IS NULL AND result_value IS NULL
             AND result_payload_id IS NULL AND delivery_state IS NULL
@@ -103,7 +109,7 @@ CREATE TABLE rescue_requests (
 );
 
 CREATE INDEX rescue_requests_queue_idx
-    ON rescue_requests(bot_id,state,created_at,request_id);
+    ON rescue_requests(bot_id,state,next_attempt_at,created_at,request_id);
 CREATE INDEX rescue_requests_pending_delivery_idx
     ON rescue_requests(bot_id,completed_at,request_id)
     WHERE delivery_state='PENDING';
@@ -564,6 +570,20 @@ BEGIN
         RAISE EXCEPTION 'Forest Core rescue request identity is immutable' USING ERRCODE = '55000';
     END IF;
     IF OLD.state='QUEUED' AND NEW.state IN ('SUCCEEDED','FAILED','DENIED') THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.state='QUEUED' AND NEW.state='QUEUED'
+       AND NEW.transient_failures=OLD.transient_failures+1
+       AND NEW.next_attempt_at>OLD.next_attempt_at
+       AND NEW.last_transient_code IS NOT NULL
+       AND ROW(OLD.result_code,OLD.result_value,OLD.result_payload_id,
+               OLD.result_payload_digest,OLD.delivery_state,OLD.delivery_intent_id,
+               OLD.completed_at)
+           IS NOT DISTINCT FROM
+           ROW(NEW.result_code,NEW.result_value,NEW.result_payload_id,
+               NEW.result_payload_digest,NEW.delivery_state,NEW.delivery_intent_id,
+               NEW.completed_at)
+    THEN
         RETURN NEW;
     END IF;
     IF OLD.state IN ('SUCCEEDED','FAILED','DENIED')

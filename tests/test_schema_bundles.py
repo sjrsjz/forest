@@ -4032,6 +4032,15 @@ async def test_core_rescue_ledger_rolls_back_execution_and_freezes_result(clean_
             assert staged["delivery_state"] == "SUPPRESSED"
             raise RuntimeError("roll back execution")
     assert (await kernel.rescue_requests.result(request_id))["state"] == "QUEUED"
+    async with store.pool.connection() as conn, conn.transaction():
+        deferred = await kernel.rescue_requests.defer_transient_in(
+            conn, lease, request_id=request_id, error_code="ADAPTER_TEMPORARILY_UNAVAILABLE"
+        )
+        assert deferred["state"] == "QUEUED"
+        assert deferred["transient_failures"] == 1
+    async with store.pool.connection() as conn, conn.transaction():
+        assert await kernel.rescue_requests.next_queued_in(conn, lease) is None
+    await asyncio.sleep(1.05)
     payload = await kernel.payload.put_bytes(
         owner_component_id="kernel.runtime", owner_kind="core.rescue.result",
         owner_id=request_id, media_type="application/json",

@@ -4103,7 +4103,8 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                 while True:
                     async with restarted.store.pool.connection() as conn:
                         admitted_rescue = await (await conn.execute(
-                            sql.SQL("SELECT state,action,policy_revision FROM {}.rescue_requests "
+                            sql.SQL("SELECT state,action,policy_revision,result_value "
+                                    "FROM {}.rescue_requests "
                                     "WHERE bot_id=%s AND event_ref=%s").format(
                                 sql.Identifier(rescue_namespace)
                             ), (settings.bot_id, rescue_event),
@@ -4121,12 +4122,14 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                                 sql.Identifier(shell_namespace)
                             ), (settings.bot_id, rescue_event),
                         )).fetchone()
-                    if admitted_rescue is not None and classified_rescue is not None:
+                    if (admitted_rescue is not None and classified_rescue is not None
+                            and admitted_rescue["state"] in {"SUCCEEDED", "FAILED", "DENIED"}):
                         break
                     await asyncio.sleep(0.1)
-            assert admitted_rescue["state"] == "QUEUED"
+            assert admitted_rescue["state"] == "SUCCEEDED", admitted_rescue
             assert admitted_rescue["action"] == "status"
             assert admitted_rescue["policy_revision"] == rescue_revision + 1
+            assert admitted_rescue["result_value"]["value"]["runtime_status"] == "ACTIVE"
             assert classified_rescue == {
                 "classification_state": "FINAL",
                 "trigger_decision": "CONTROL_COMMAND",
@@ -4425,7 +4428,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                         while True:
                             async with restarted.store.pool.connection() as conn:
                                 admitted = await (await conn.execute(
-                                    sql.SQL("SELECT state,action FROM {}.rescue_requests "
+                                    sql.SQL("SELECT state,action,result_value FROM {}.rescue_requests "
                                             "WHERE bot_id=%s AND event_ref=%s").format(
                                         sql.Identifier(rescue_namespace)
                                     ), (settings.bot_id, rescue_event),
@@ -4437,10 +4440,13 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
                                         sql.Identifier(conversation_namespace)
                                     ), (settings.bot_id, "81005"),
                                 )).fetchone()
-                            if admitted is not None and classified is not None:
+                            if (admitted is not None and classified is not None
+                                    and admitted["state"] in {"SUCCEEDED", "FAILED", "DENIED"}):
                                 break
                             await asyncio.sleep(0.1)
-                    assert admitted == {"state": "QUEUED", "action": "status"}
+                    assert admitted["state"] == "SUCCEEDED", admitted
+                    assert admitted["action"] == "status"
+                    assert admitted["result_value"]["value"]["runtime_status"] == "ACTIVE"
                     assert classified == {
                         "classification_state": "FINAL",
                         "trigger_decision": "CONTROL_COMMAND",

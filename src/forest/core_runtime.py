@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from dataclasses import dataclass
 from uuid import uuid4
@@ -20,6 +21,7 @@ from forest.kernel_package_catalog_snapshot import (
     package_catalog_page_service,
 )
 from forest.kernel_payload_participant import KernelPayloadUnitOfWorkParticipant
+from forest.kernel_rescue_executor import KernelCoreRescueExecutor
 from forest.kernel_rescue_ingress import (
     KernelCoreRescueAdmission,
     KernelRuntimeIngressParticipant,
@@ -577,14 +579,24 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
         return KernelAuthorizationUnitOfWorkParticipant(self, self.service)
 
 
+_log = logging.getLogger(__name__)
+
+
 class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
     """Publish the Bot-wide Worker admission policy from kernel.runtime."""
 
-    def __init__(self, *args, runtime_host, payloads, rescue_policy, audit) -> None:
+    def __init__(
+        self, *args, runtime_host, payloads, rescue_policy, rescue_requests, audit
+    ) -> None:
         super().__init__(*args)
         self.runtime_host = runtime_host
         self.payloads = payloads
         self.rescue_admission = KernelCoreRescueAdmission(self, rescue_policy, audit)
+        self.rescue_executor = KernelCoreRescueExecutor(
+            runtime_host, self.service, rescue_policy, rescue_requests, payloads, audit
+        )
+        self._rescue_wake = asyncio.Event()
+        self._rescue_task: asyncio.Task | None = None
         self.management_contract = RuntimeRescueManagementContract(
             self.module_configuration,
             policy=rescue_policy,
@@ -598,6 +610,59 @@ class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
             KernelShellGateUnitOfWorkParticipant(self, self.payloads),
             self.rescue_admission,
         )
+
+    def activate_generation(self) -> None:
+        if self._rescue_task is not None:
+            raise ForestError(
+                "CORE_RESCUE_EXECUTOR_ALREADY_ACTIVATED",
+                "Core rescue executor already belongs to this Generation", 409,
+            )
+        super().activate_generation()
+        self._rescue_wake.set()
+        self._rescue_task = asyncio.create_task(
+            self._run_rescue(),
+            name=f"core-rescue:{self.generation_identity.generation_id}",
+        )
+
+    def notify(self) -> None:
+        self._rescue_wake.set()
+
+    async def _run_rescue(self) -> None:
+        while True:
+            self._rescue_wake.clear()
+            try:
+                if await self.rescue_executor.run_once(self):
+                    continue
+            except Exception:
+                _log.exception("Core rescue executor could not settle a request")
+                await asyncio.sleep(2)
+            try:
+                await asyncio.wait_for(self._rescue_wake.wait(), timeout=5)
+            except TimeoutError:
+                pass
+
+    def owned_tasks(self) -> tuple[asyncio.Task, ...]:
+        return (self._rescue_task,) if self._rescue_task is not None else ()
+
+    async def _stop_rescue(self) -> None:
+        task = self._rescue_task
+        if task is None:
+            return
+        task.cancel()
+        outcome, = await asyncio.gather(task, return_exceptions=True)
+        self._rescue_task = None
+        if isinstance(outcome, BaseException) and not isinstance(
+            outcome, asyncio.CancelledError
+        ):
+            raise outcome
+
+    async def quiesce(self) -> None:
+        await self._stop_rescue()
+        await super().quiesce()
+
+    async def close(self) -> None:
+        await self._stop_rescue()
+        await super().close()
 
     async def apply_configuration(self, **kwargs) -> dict:
         lock = self.runtime_host._replacement_lock
@@ -883,7 +948,8 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
             module = (
                 prepared_type(
                     *arguments, runtime_host=_runtime, payloads=payload,
-                    rescue_policy=rescue_policy, audit=audit,
+                    rescue_policy=rescue_policy, rescue_requests=rescue_requests,
+                    audit=audit,
                 )
                 if component_id == "kernel.runtime"
                 else prepared_type(*arguments)
@@ -967,6 +1033,7 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                 else ()
             ),
             storage=bundles[component_id],
+            wakes_on_work=(component_id == "kernel.runtime"),
             kernel_services=(
                 (
                     RuntimeKernelServiceSpec(

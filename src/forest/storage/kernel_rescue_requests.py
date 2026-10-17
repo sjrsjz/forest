@@ -33,6 +33,7 @@ class KernelRescueRequestRepository:
             await conn.execute(
                 sql.SQL(
                     "SELECT * FROM {} WHERE bot_id=%s AND state='QUEUED' "
+                    "AND next_attempt_at<=clock_timestamp() "
                     "ORDER BY CASE service_class WHEN 'P0' THEN 0 ELSE 1 END,"
                     "created_at,request_id FOR UPDATE SKIP LOCKED LIMIT 1"
                 ).format(self._table()),
@@ -40,6 +41,38 @@ class KernelRescueRequestRepository:
             )
         ).fetchone()
         return dict(row) if row is not None else None
+
+    async def defer_transient_in(
+        self, conn, lease, *, request_id: str, error_code: str
+    ) -> dict:
+        """Move a retryable request aside so other P0 work can proceed."""
+
+        await self.runtime.verify_host_lease_in(conn, lease)
+        if (
+            not isinstance(request_id, str)
+            or not 1 <= len(request_id.encode()) <= 256
+            or not isinstance(error_code, str)
+            or not 1 <= len(error_code.encode()) <= 128
+        ):
+            raise ForestError("CORE_RESCUE_RETRY_INVALID", "Invalid rescue retry", 422)
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "UPDATE {} SET transient_failures=transient_failures+1,"
+                    "last_transient_code=%s,next_attempt_at=clock_timestamp()+"
+                    "make_interval(secs => LEAST(60,"
+                    "power(2,LEAST(transient_failures,5))::integer)) "
+                    "WHERE bot_id=%s AND request_id=%s AND state='QUEUED' "
+                    "RETURNING *"
+                ).format(self._table()),
+                (error_code, self.store.bot_id, request_id),
+            )
+        ).fetchone()
+        if row is None:
+            raise ForestError(
+                "CORE_RESCUE_REQUEST_STALE", "Rescue request is no longer queued", 409
+            )
+        return dict(row)
 
     async def complete_in(
         self,
