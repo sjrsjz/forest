@@ -13,6 +13,8 @@
 
 2026-10-18 Core 整图维护与排队取消验收：当前源码的完整假 OneBot BotHost 用例先在停用 `shell.command`、关闭 DATA 后，从群消息执行 `core reload`，核对持久替换请求由 `QUEUED` 到 `SUCCEEDED`、graph revision 前进一代、DATA 继续关闭且 CONTROL 回执为 `SENT`（1 passed in 782.10s）。随后发现 Core Gate 原先拒绝返回的 `core:<摘要>/reload` 中的 `/`，使该请求无法从群聊取消；现已允许原样操作 ID，语法用例 9 passed。完整 BotHost 复验让图替换领取器暂时空闲，第二条群聊 `core reload` 保持 `QUEUED`，再以回执中的完整 ID 发送 `core cancel --expect-revision`；请求成为 `CANCELLED`，graph revision 未前进（1 passed in 753.62s）。Ruff 和差异检查通过。两次均复用隔离 PostgreSQL 与模拟 OneBot/模型/向量端口，未向 QQ 发消息；现役 v38 仍是旧镜像，群聊 Agent Run 取消和真实 QQ 管理操作尚未端到端验收。
 
+同一源码提交 `2960cc5b` 的生产运行镜像已构建为 `forest:runtime-core-rescue-2960cc5b`（镜像 ID `sha256:6954f56b238bce6f36103061f0875a271e727d51fc454fea6d9df992fc63c1ab`），无网络容器内核导入通过。该镜像仅作为后续隔离部署候选，未替换正在观察的 v38。
+
 2026-10-17 21:03 CST 启动现役只读浸泡观察：独立容器 `forest-v38-soak-20261017` 运行仓库 `scripts/observe_live_bot.py`，对主 Bot `forest-main-v38` 每 300 秒采样一次、预定持续 24 小时；只读部署/Bot PostgreSQL 与管理健康端口，不发送 QQ 消息或调用模型。首次样本显示主 Bot `READY/ONLINE`、图修订 4、22/22 ACTIVE、195 条来源/4 个群主干、0 重叠 Agent Session、0 过期 Run/待发消息/异常费用，累计嵌入 2 次/44 tokens，违规项空；许可群 `933179609` 尚无入站观察。容器当前仍在运行，24 小时结论、期间故障和真实许可群回复均不能由首次样本推出。
 
 2026-10-17 Core 救援依赖审计：`adapter.onebot` 的准确包清单把 `shell.ingress.inspect` 声明为必需启动依赖，已认领前缀的两条正式入站事务均含 `shell.command` participant；当前内核 `shell.gate.inspect` 仅识别保留前缀，没有独立的救援请求结算。因此现役 v38 在 Shell 包失效时不能凭 Core Gate 独立处理群聊 `core` 命令。目标救援链的身份、授权、独立事务和回执边界已在[群聊 Shell 设计](09-group-shell-command-system.md)写明；不能用普通 `component.worker-host` 的 `core.status/pause/resume/reload` 贡献冒充该能力。不同 SQL 基线在首次发布前按新库切换，缺少同库迁移不是此阶段的验收缺陷。
