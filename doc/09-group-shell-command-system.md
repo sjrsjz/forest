@@ -63,6 +63,8 @@ Core Gate 只规范化到既有 operation、Conversation Run 和 module lifecycl
 
 Adapter 对完整 `#forest core` 前缀选择独立的有界接纳事务，先保存平台事件与群历史，再核对两份入站证明及救援授权，最后把准确命令、期望修订和来源冻结为内核救援请求；该事务不得包含 `shell.command` participant，Adapter 的启动依赖也不能要求 `shell.ingress.inspect` 常驻。其他 `#forest` 命令仍交给可替换的 Shell 包；Shell 不可用时它们保持失败关闭，不回落到 Agent。救援命令即使语法或授权错误也不能变成普通触发消息。若群历史或来源归档暂时不可用，救援接纳必须显式失败并保留可诊断的入站观察，不得假装已经成功写入完整上下文。
 
+接纳请求须保存由 OneBot 原始帧核验过的 `self_id`、原 Adapter Generation 与客户端 incarnation，不能只存群号或消息文字。执行和发送回执前，内核通过当前图中的 `adapter.prove-rescue-binding` 只读 participant 核对历史平台事件、原 Binding epoch、当前已启用 Binding 和当前 `self_id`；它不读取 Adapter 私表。Adapter 热替换允许原事件属于旧 Generation，但证明必须由当前 Generation 出具；旧 Binding epoch、停用 Binding、改绑账号、作者或群来源变化均拒绝。证明与 HostLease、授权修订和目标 CAS 在同一控制事务内完成，图发布不得跨过这笔事务的围栏。
+
 最小救援执行器只调用已有内核 Runtime、Operation 和模块生命周期受限端口，使用 Bot、HostLease、Binding、授权修订和目标修订围栏；它不解析业务命令、不直接调用进程终止或模块私表。`status` 只读有界健康投影，`cancel` 登记目标 operation/Run 的取消意图，`disable` 以 maintenance epoch CAS 关闭 DATA，`reload` 以 graph revision CAS 登记 replacement request。回执通过正常 CONTROL Delivery 发送；Delivery 不可用时保留持久结果供 Web/CLI 查询，不绕过发送账本直接调用 OneBot。`shell.command` Worker 停止、报错或热替换时，应以假 OneBot 验证四种救援语义、撤权竞争、同键重放、跨群/Binding 拒绝和 Agent 不触发；实现与验收状态仍以[实现状态](implementation-status.md)为准。
 
 其他命令由模块描述符注册：

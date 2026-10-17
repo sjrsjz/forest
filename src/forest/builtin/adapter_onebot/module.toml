@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.7.0"
+version = "2.8.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -152,9 +152,9 @@ order = 5
 
 [components.storage]
 schema_id = "forest.adapter.onebot"
-schema_version = "2.2.0"
+schema_version = "2.3.0"
 baseline = "schema/adapter_onebot.sql"
-baseline_sha256 = "df66b9a75263ab62e2197153936fb11f448e11edf67d88d0e109667425cd0f19"
+baseline_sha256 = "76813b3a17ac6f83aaf6228cd9651c3ff1ddfd854f48a95b1ba7d3a020ec6fa3"
 scope = "bot"
 repository_contract = "forest.adapter-onebot.repository/2"
 execution_profile = "official"
@@ -190,6 +190,14 @@ contract = "1.0"
 function = "adapter_prove_shell_origin"
 input_schema = "schemas/prove-shell-origin-envelope.json"
 output_schema = "schemas/prove-shell-origin-output.json"
+
+[[components.unit_of_work_participants]]
+name = "adapter.prove-rescue-binding"
+contract = "1.0"
+function = "adapter_prove_rescue_binding"
+read_only = true
+input_schema = "schemas/prove-rescue-binding-envelope.json"
+output_schema = "schemas/prove-rescue-binding-output.json"
 
 [[components.unit_of_work_plans]]
 name = "adapter.ingress-data-memory"

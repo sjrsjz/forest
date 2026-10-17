@@ -23,6 +23,8 @@
 
 2026-10-17 可选服务缺席的图契约：包清单中 `required=false` 的服务若在候选图内没有 Provider，图可封存而该服务句柄调用时明确不可用；若 Provider 存在，冻结路由照常使消费者进入其热替换闭包。官方 OneBot Adapter 2.7.0 的无 `shell.command` 干运行图装配与通用路由/替换闭包用例通过，相关包与图回归 31 passed；完整 BotHost 的有 Shell 生命周期回归 `1 passed in 560.89s`。进一步通过 Web 管理动作停用 `shell.command` 并发布新图后，Adapter 仍为活动成员，假 OneBot 的 `#forest core status` 独立 UOW 成功写入 Core 请求与 Conversation 的 `FINAL / CONTROL_COMMAND`，完整用例 `1 passed in 580.01s`。这只证明接纳，不证明命令已执行或回执已发送；现役 v38 未切换该代码。
 
+2026-10-17 Core 执行前身份围栏候选：内核救援请求现持久保存接纳时由 OneBot 原始帧与 ShellGate 双重核对的 `self_id`。`adapter.onebot` 2.8.0 提供只读 `adapter.prove-rescue-binding` participant，由当前 Adapter Generation 对旧平台事件、原客户端 incarnation、群/作者、Binding epoch 与当前启用状态及 `self_id` 出具证明；旧事件允许跨 Adapter 热替换，内核仍不读 Adapter 私表。官方 Bot 包构建成功，隔离 PostgreSQL 中 16 项 OneBot/救援接纳定向测试通过，包含跨代有效证明与错误群、作者、改绑、停用等拒绝；最终源码的包回归 114 passed、1 skipped，完整 BotHost 生命周期回归 `1 passed in 538.06s`，Ruff 和差异检查通过。本候选的证明端口尚未接入 Core 执行器，四个动作和 CONTROL Delivery 回执仍未实现；现役 v38 未装载该候选。
+
 2026-10-17 v38 非空向量重建与热重载：同部署隔离 Bot 的真实 Milvus 集合经正式管理动作从绑定修订 1 发布到 2，发布时 12 条 ref 水位不变；原图片来源在重建后、`vector.index` 正式热替换后均作为真实 VL 图片查询的直接种子命中。隔离图 6→7，8 个依赖成员换代、14 个保留；旧集合保留期到后由包自有 GC 结算为 DELETED，待回收数 1→0。隔离 Bot 累计嵌入 9 次/333 tokens、UNKNOWN/预留 0，已退役；现役主 Bot 仍 ONLINE、图 4、22/22 ACTIVE、账本 2 次/44 tokens，树莓派 QQ 登录态 READY。许可群真实 @ 回复、长期负载和故障注入仍待验收。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。
 
 2026-10-17 v38 真实 VL 图片直接种子验收：同部署隔离 Bot 从模拟 OneBot 接收公开 PNG 图片，静默裁剪后来源为 `IMAGE/ELIGIBLE/COMPLETE`、1 个 READY 文档 facet；相同 PNG 的正式 IMAGE 管理试验 READY，原图片来源以 `is_seed=true`、`image_count=1` 命中，群号与作者正确。隔离 Bot 累计 7 次已结算、279 tokens、UNKNOWN/预留 0，已再次退役，模拟服务已停止。主 Bot 保持 ONLINE、图修订 4、22/22 ACTIVE、账本 2 次/44 tokens；树莓派 NapCat 独立登录态 READY、无登录错误。真实许可群 @ 回复和长期负载仍待验收。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。

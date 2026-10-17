@@ -46,6 +46,7 @@ CREATE TABLE rescue_requests (
     conversation_ref text NOT NULL CHECK (octet_length(conversation_ref) BETWEEN 1 AND 256),
     binding_ref text NOT NULL CHECK (octet_length(binding_ref) BETWEEN 1 AND 256),
     binding_epoch bigint NOT NULL CHECK (binding_epoch > 0),
+    self_id text NOT NULL CHECK (self_id ~ '^[1-9][0-9]{0,18}$'),
     connection_epoch bigint NOT NULL CHECK (connection_epoch > 0),
     client_incarnation text NOT NULL CHECK (octet_length(client_incarnation) BETWEEN 1 AND 256),
     adapter_generation_id text NOT NULL CHECK (octet_length(adapter_generation_id) BETWEEN 1 AND 256),

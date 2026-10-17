@@ -79,6 +79,7 @@ class KernelCoreRescueAdmission:
         )):
             invalid()
         group_ref = body["group_ref"]
+        self_id = origin.get("self_id")
         if (
             gate.get("protocol") != "forest.shell-ingress-proof/1"
             or origin.get("protocol") != "forest.onebot-shell-origin-proof/1"
@@ -90,6 +91,12 @@ class KernelCoreRescueAdmission:
             or not group_ref.isdecimal()
             or not 1 <= len(group_ref) <= 20
             or group_ref[0] == "0"
+            or not isinstance(self_id, str)
+            or not self_id.isascii()
+            or not self_id.isdecimal()
+            or not 1 <= len(self_id) <= 19
+            or self_id[0] == "0"
+            or self_id != gate.get("self_id")
             or body.get("conversation_ref") != "onebot:group:" + group_ref
             or body.get("conversation_ref") != conversation.get("conversation_id")
             or body.get("conversation_ref") != gate.get("conversation_ref")
@@ -144,7 +151,7 @@ class KernelCoreRescueAdmission:
             await conn.execute(
                 sql.SQL(
                     "SELECT request_id,input_digest,admission_state,policy_revision,"
-                    "kernel_generation_id,"
+                    "kernel_generation_id,self_id,"
                     "rejection_code FROM {} WHERE bot_id=%s AND event_ref=%s FOR SHARE"
                 ).format(self._table()),
                 (self.policy.store.bot_id, event_ref),
@@ -154,6 +161,7 @@ class KernelCoreRescueAdmission:
             if (
                 prior_request["request_id"] != request_id
                 or prior_request["input_digest"] != input_digest
+                or prior_request["self_id"] != self_id
             ):
                 raise ForestError("CORE_RESCUE_REQUEST_CONFLICT", "Core rescue replay differs", 409)
             return self._receipt(prior_request, duplicate=True)
@@ -199,19 +207,20 @@ class KernelCoreRescueAdmission:
             await conn.execute(
                 sql.SQL(
                     "INSERT INTO {}(bot_id,request_id,input_digest,event_ref,"
-                    "conversation_ref,binding_ref,binding_epoch,connection_epoch,"
+                    "conversation_ref,binding_ref,binding_epoch,self_id,connection_epoch,"
                     "client_incarnation,adapter_generation_id,executor_fence_digest,"
                     "group_ref,principal_ref,ingress_seq,policy_revision,"
                     "kernel_generation_id,action,target_ref,"
                     "expected_revision,service_class,admission_state,state,rejection_code,"
                     "received_at,admission_deadline) VALUES ("
-                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                    "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                     "RETURNING request_id,admission_state,policy_revision,"
                     "kernel_generation_id,rejection_code"
                 ).format(self._table()),
                 (
                     self.policy.store.bot_id, request_id, input_digest, event_ref,
                     body["conversation_ref"], body["binding_ref"], body["binding_epoch"],
+                    self_id,
                     body["connection_epoch"], body["client_incarnation"],
                     body["adapter_generation_id"], body["executor_fence_digest"],
                     group_ref, body["principal_ref"],

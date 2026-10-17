@@ -205,6 +205,74 @@ END;
 $$;
 
 
+-- A Core rescue request retains its admission identity across Adapter reloads.
+-- The host binds context.generation_id to the current Adapter participant;
+-- the recorded event may belong to an older, immutable generation.
+CREATE FUNCTION adapter_prove_rescue_binding(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE
+    value jsonb:=envelope->'input';
+    recorded __forest_module_schema__.platform_events%ROWTYPE;
+    published __forest_module_schema__.published_bindings%ROWTYPE;
+BEGIN
+    IF jsonb_typeof(value) IS DISTINCT FROM 'object' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','ONEBOT_RESCUE_PROOF_INVALID','message','Core rescue binding proof input is invalid','status',422));
+    END IF;
+    IF context->>'port_kind' IS DISTINCT FROM 'participant'
+       OR context->>'component_id' IS DISTINCT FROM 'adapter.onebot'
+       OR envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'kernel.runtime'
+       OR value->>'protocol' IS DISTINCT FROM 'forest.core-rescue-binding-check/1'
+       OR (SELECT count(*) FROM jsonb_object_keys(value)) <> 10
+       OR value->>'event_ref' IS NULL
+       OR value->>'binding_ref' IS NULL
+       OR jsonb_typeof(value->'binding_epoch') IS DISTINCT FROM 'number'
+       OR value->>'self_id' IS NULL
+       OR value->>'adapter_generation_id' IS NULL
+       OR value->>'conversation_ref' IS NULL
+       OR value->>'group_ref' IS NULL
+       OR value->>'principal_ref' IS NULL
+       OR value->>'client_incarnation' IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','ONEBOT_RESCUE_PROOF_INVALID','message','Core rescue binding proof input is invalid','status',422));
+    END IF;
+    SELECT * INTO recorded FROM __forest_module_schema__.platform_events
+      WHERE event_id=value->>'event_ref';
+    SELECT * INTO published FROM __forest_module_schema__.published_bindings
+      WHERE generation_id=context->>'generation_id'
+        AND binding_ref=value->>'binding_ref';
+    IF recorded.event_id IS NULL OR published.binding_ref IS NULL
+       OR NOT published.enabled
+       OR published.binding_epoch IS DISTINCT FROM recorded.binding_epoch
+       OR to_jsonb(published.binding_epoch) IS DISTINCT FROM value->'binding_epoch'
+       OR published.self_id IS DISTINCT FROM value->>'self_id'
+       OR recorded.generation_id IS DISTINCT FROM value->>'adapter_generation_id'
+       OR recorded.binding_ref IS DISTINCT FROM value->>'binding_ref'
+       OR recorded.client_incarnation IS DISTINCT FROM value->>'client_incarnation'
+       OR recorded.event_kind IS DISTINCT FROM 'group.message'
+       OR recorded.channel_kind IS DISTINCT FROM 'GROUP'
+       OR recorded.channel_ref IS DISTINCT FROM value->>'group_ref'
+       OR recorded.conversation_ref IS DISTINCT FROM value->>'conversation_ref'
+       OR recorded.conversation_ref IS DISTINCT FROM ('onebot:group:'||(value->>'group_ref'))
+       OR recorded.author_subject_ref IS DISTINCT FROM value->>'principal_ref' THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','ONEBOT_RESCUE_BINDING_STALE','message','Core rescue binding is no longer current','status',409));
+    END IF;
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+      jsonb_build_object('protocol','forest.onebot-rescue-binding-proof/1',
+        'event_ref',recorded.event_id,'binding_ref',recorded.binding_ref,
+        'binding_epoch',recorded.binding_epoch,'self_id',published.self_id,
+        'conversation_ref',recorded.conversation_ref,
+        'group_ref',recorded.channel_ref,'principal_ref',recorded.author_subject_ref,
+        'source_adapter_generation_id',recorded.generation_id,
+        'client_incarnation',recorded.client_incarnation,
+        'adapter_generation_id',context->>'generation_id',
+        'adapter_config_revision',published.config_revision));
+END;
+$$;
+
+
 -- This port is called only by the generic RuntimeGraph publication transaction.
 -- It receives a verified module configuration and stores only public binding
 -- identity facts; credentials and endpoints never enter the projection.

@@ -110,7 +110,8 @@ async def test_core_rescue_admission_serializes_replay_and_queue_capacity(clean_
                 "conversation_ref": body["conversation_ref"],
                 "event_ref": body["event_ref"], "binding_ref": "binding/main",
                 "binding_epoch": 1, "adapter_generation_id": "adapter/one",
-                "principal_ref": "qq:42", "received_at": body["received_at"],
+                "principal_ref": "qq:42", "self_id": "10000",
+                "received_at": body["received_at"],
                 "admission_deadline": body["admission_deadline"], "ingress_seq": 1,
             },
             "origin": {
@@ -118,7 +119,7 @@ async def test_core_rescue_admission_serializes_replay_and_queue_capacity(clean_
                 "conversation_ref": body["conversation_ref"],
                 "event_ref": body["event_ref"], "binding_ref": "binding/main",
                 "binding_epoch": 1, "adapter_generation_id": "adapter/one",
-                "principal_ref": "qq:42",
+                "principal_ref": "qq:42", "self_id": "10000",
             },
         },
     }
@@ -140,6 +141,14 @@ async def test_core_rescue_admission_serializes_replay_and_queue_capacity(clean_
     assert len({item["request_id"] for item in results}) == 20
     duplicate = await asyncio.gather(admit(0), admit(0))
     assert duplicate == [{**results[0], "duplicate": True}] * 2
+    async with store.pool.connection() as conn:
+        saved = await (await conn.execute(
+            sql.SQL("SELECT self_id FROM {}.rescue_requests WHERE bot_id=%s AND event_ref=%s").format(
+                sql.Identifier(policy.namespace)
+            ),
+            (store.bot_id, "event/0"),
+        )).fetchone()
+    assert saved["self_id"] == "10000"
 
 
 @pytest.mark.parametrize("trailing", [
