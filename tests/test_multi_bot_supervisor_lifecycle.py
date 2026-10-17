@@ -1,8 +1,81 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from forest.errors import ForestError
 from forest.multi_bot_supervisor import MultiBotSupervisor, _BotRunner
+from forest.storage.deployment_catalog import DeploymentSupervisorLease
+
+
+async def test_quiesce_drains_online_bot_before_supervisor_lease_release():
+    online = asyncio.Event()
+    events = []
+    released = False
+
+    class Catalog:
+        async def observe(self, _lease, *, observed_state, **_kwargs):
+            assert not released
+            events.append(observed_state)
+            if observed_state == "ONLINE":
+                online.set()
+
+        async def release_supervisor(self, _lease):
+            nonlocal released
+            events.append("LEASE_RELEASED")
+            released = True
+
+    class StorageProfiles:
+        async def resolve(self, **_kwargs):
+            return SimpleNamespace(dsn="postgresql://test")
+
+    class Host:
+        def __init__(self, _settings):
+            self.registry = SimpleNamespace(
+                graph_identity=SimpleNamespace(graph_id="graph/test")
+            )
+            self._supervision_task = None
+
+        async def start(self):
+            pass
+
+        async def close(self):
+            assert not released
+            events.append("HOST_CLOSED")
+
+    supervisor = MultiBotSupervisor(
+        Catalog(), storage_profiles=StorageProfiles(),
+        settings_resolver=lambda bot, storage: SimpleNamespace(
+            bot_id=bot["bot_id"], dsn=storage.dsn,
+        ), host_factory=Host, host_id="host/lifecycle-test",
+    )
+    lease = DeploymentSupervisorLease(
+        deployment_id="deployment/test", host_id="host/lifecycle-test",
+        incarnation="incarnation/test", owner_epoch=1,
+        expires_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+    )
+    supervisor.lease = lease
+    bot = {
+        "bot_id": "bot/test", "storage_profile_ref": "storage/test",
+        "storage_generation": 1, "intent_revision": 2,
+    }
+    runner = _BotRunner(asyncio.Event())
+    runner.task = asyncio.create_task(supervisor._run_bot(bot, runner))
+    supervisor._runners[bot["bot_id"]] = runner
+    try:
+        await asyncio.wait_for(online.wait(), timeout=2)
+        await asyncio.wait_for(supervisor.quiesce(), timeout=2)
+        assert supervisor.authority_lease() is lease
+        events.append("CONTROL_GRAPH_CLOSED")
+        await supervisor.close()
+        assert events == [
+            "STARTING", "ONLINE", "STOPPING", "HOST_CLOSED", "OFFLINE",
+            "CONTROL_GRAPH_CLOSED", "LEASE_RELEASED",
+        ]
+        assert released
+    finally:
+        if not runner.task.done():
+            runner.task.cancel()
+            await asyncio.gather(runner.task, return_exceptions=True)
 
 
 async def test_failed_bot_drains_admitted_management_before_closing_host():
