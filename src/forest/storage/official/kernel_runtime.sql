@@ -8,6 +8,36 @@ CREATE TABLE runtime_state (
     control_admission boolean NOT NULL DEFAULT true
 );
 
+CREATE TABLE rescue_policy_state (
+    bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
+    revision bigint NOT NULL DEFAULT 1 CHECK (revision > 0)
+);
+
+CREATE TABLE rescue_grants (
+    bot_id text NOT NULL REFERENCES rescue_policy_state(bot_id),
+    binding_ref text NOT NULL CHECK (octet_length(binding_ref) BETWEEN 1 AND 256),
+    group_ref text NOT NULL CHECK (group_ref ~ '^[1-9][0-9]{0,19}$'),
+    principal_ref text NOT NULL CHECK (principal_ref ~ '^qq:[1-9][0-9]{0,19}$'),
+    allow_status boolean NOT NULL,
+    allow_cancel boolean NOT NULL,
+    allow_disable boolean NOT NULL,
+    allow_reload boolean NOT NULL,
+    changed_revision bigint NOT NULL CHECK (changed_revision > 1),
+    PRIMARY KEY (bot_id,binding_ref,group_ref,principal_ref),
+    CHECK (allow_status OR allow_cancel OR allow_disable OR allow_reload)
+);
+
+CREATE TABLE rescue_policy_operations (
+    bot_id text NOT NULL REFERENCES rescue_policy_state(bot_id),
+    operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),
+    input_digest text NOT NULL CHECK (input_digest ~ '^sha256:[a-f0-9]{64}$'),
+    actor_ref text NOT NULL CHECK (octet_length(actor_ref) BETWEEN 1 AND 256),
+    resulting_revision bigint NOT NULL CHECK (resulting_revision > 1),
+    changed boolean NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (bot_id,operation_id)
+);
+
 CREATE TABLE host_lease (
     bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
     host_id text,
@@ -563,6 +593,9 @@ CREATE TRIGGER graph_replacement_transition BEFORE UPDATE OR DELETE ON graph_rep
     FOR EACH ROW EXECUTE FUNCTION graph_replacement_guard();
 CREATE TRIGGER state_steps_immutable BEFORE UPDATE OR DELETE ON state_steps
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
+CREATE TRIGGER rescue_policy_operations_immutable
+    BEFORE UPDATE OR DELETE ON rescue_policy_operations
+    FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
 CREATE TRIGGER runtime_graph_modules_immutable BEFORE UPDATE OR DELETE ON runtime_graph_modules
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
 CREATE TRIGGER runtime_graph_dependencies_immutable BEFORE UPDATE OR DELETE ON runtime_graph_dependencies
@@ -572,5 +605,6 @@ CREATE TRIGGER runtime_graph_lifecycle_facts_immutable
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
 
 INSERT INTO runtime_state(bot_id) SELECT bot_id FROM forest_kernel.bot_identity;
+INSERT INTO rescue_policy_state(bot_id) SELECT bot_id FROM forest_kernel.bot_identity;
 INSERT INTO host_lease(bot_id) SELECT bot_id FROM forest_kernel.bot_identity;
 INSERT INTO runtime_graph_clock(bot_id) SELECT bot_id FROM forest_kernel.bot_identity;

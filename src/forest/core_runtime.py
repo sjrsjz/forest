@@ -26,6 +26,7 @@ from forest.kernel_resource_admission import (
     assess_worker_capacity,
     validate_kernel_resource_policy,
 )
+from forest.kernel_rescue_management import RuntimeRescueManagementContract
 from forest.kernel_runtime_graph_snapshot import (
     runtime_graph_snapshot_service,
     runtime_status_snapshot_service,
@@ -57,6 +58,7 @@ from forest.storage.authorization_authority import (
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import KernelAuditRepository
 from forest.storage.kernel_runtime import KernelRuntimeRepository
+from forest.storage.kernel_rescue_policy import KernelRescuePolicyAuthority
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.module_configuration import ModuleConfigurationRepository
 from forest.storage.payload_authority import KernelPayloadRepository
@@ -569,12 +571,13 @@ class PreparedAuthorizationAuthorityModule(PreparedAuthorityModule):
 class PreparedRuntimeAuthorityModule(PreparedAuthorityModule):
     """Publish the Bot-wide Worker admission policy from kernel.runtime."""
 
-    def __init__(self, *args, runtime_host, payloads) -> None:
+    def __init__(self, *args, runtime_host, payloads, rescue_policy) -> None:
         super().__init__(*args)
         self.runtime_host = runtime_host
         self.payloads = payloads
-        self.management_contract = ModuleConfigurationContract(
+        self.management_contract = RuntimeRescueManagementContract(
             self.module_configuration,
+            policy=rescue_policy,
             schema=KERNEL_RESOURCE_POLICY_SCHEMA,
             validator=validate_kernel_resource_policy,
             apply_callback=self.apply_configuration,
@@ -709,6 +712,7 @@ class PreparedPayloadAuthorityModule(PreparedAuthorityModule):
 @dataclass(frozen=True)
 class KernelModules:
     runtime: KernelRuntimeRepository
+    rescue_policy: KernelRescuePolicyAuthority
     payload: KernelPayloadRepository
     authorization: KernelAuthorizationRepository
     effect: KernelEffectRepository
@@ -745,6 +749,9 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
         store, namespace=bundles["kernel.authorization"].spec.namespace
     )
     runtime = KernelRuntimeRepository(store, bundles["kernel.runtime"].spec.namespace)
+    rescue_policy = KernelRescuePolicyAuthority(
+        store, bundles["kernel.runtime"].spec.namespace
+    )
 
     async def verify_effect_fence(
         conn,
@@ -857,7 +864,10 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
             if component_id == "kernel.effect":
                 return PreparedEffectAuthorityModule(*arguments, payload)
             module = (
-                prepared_type(*arguments, runtime_host=_runtime, payloads=payload)
+                prepared_type(
+                    *arguments, runtime_host=_runtime, payloads=payload,
+                    rescue_policy=rescue_policy,
+                )
                 if component_id == "kernel.runtime"
                 else prepared_type(*arguments)
             )
@@ -924,6 +934,16 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
                         style="/static/modules/kernel-runtime-capacity.css",
                         group="runtime",
                         order=2,
+                    ),
+                    RuntimeManagementContribution(
+                        "core-rescue",
+                        "群聊 Core 救援授权",
+                        ("bot",),
+                        "/static/modules/kernel-core-rescue.html",
+                        "/static/kernel-core-rescue.js",
+                        style="/static/modules/kernel-core-rescue.css",
+                        group="security",
+                        order=3,
                     ),
                 )
                 if component_id == "kernel.runtime"
@@ -1017,6 +1037,7 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
     )
     return KernelModules(
         runtime,
+        rescue_policy,
         payload,
         authorization,
         effect,
