@@ -840,6 +840,16 @@ BEGIN
         AND intent_id=attempt.intent_id AND part_index=attempt.part_index;
       UPDATE __forest_module_schema__.send_intents SET state='QUEUED',error_code=plan->>'error_code',
         updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND intent_id=intent.intent_id;
+    ELSIF requested='REJECTED_NOT_APPLIED' THEN
+      resulting:='FAILED';
+      UPDATE __forest_module_schema__.transport_attempts SET state='REJECTED',settled_at=clock_timestamp(),
+        error_code=plan->>'error_code' WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
+      UPDATE __forest_module_schema__.send_parts SET state='FAILED',owner_id=NULL,owner_expires_at=NULL,
+        updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id'
+        AND intent_id=attempt.intent_id AND part_index=attempt.part_index;
+      UPDATE __forest_module_schema__.send_intents SET state='FAILED',error_code=plan->>'error_code',
+        completed_at=clock_timestamp(),updated_at=clock_timestamp()
+        WHERE bot_id=context->>'bot_id' AND intent_id=intent.intent_id;
     ELSE
       resulting:='UNKNOWN';
       UPDATE __forest_module_schema__.transport_attempts SET state='UNKNOWN',settled_at=clock_timestamp(),

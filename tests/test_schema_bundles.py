@@ -2026,6 +2026,107 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
         )["value"]
     assert released["value"] == {"intent_id": "intent/1", "state": "QUEUED"}
 
+    # A platform refusal is a final delivery outcome, even though the generic
+    # effect was certainly not applied. It must never become claimable again.
+    claim_request["claim_token"] = "claim:delivery-rejected"
+    async with store.pool.connection() as conn, conn.transaction():
+        async def call(function, payload, *, operation_id):
+            result = await conn.execute(
+                sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS value").format(
+                    sql.Identifier(namespace), sql.Identifier(function)
+                ),
+                (
+                    Jsonb({**context, "operation_id": operation_id}),
+                    Jsonb(payload),
+                ),
+            )
+            return (await result.fetchone())["value"]
+
+        claimed = await call("delivery_claim_work", claim_request, operation_id="claim:2")
+        work = claimed["value"]["payload"]
+        now = datetime.now(timezone.utc).isoformat()
+        plan = {
+            "work": work,
+            "adapter": {
+                "binding_ref": work["binding_ref"],
+                "binding_epoch": 1,
+                "connection_epoch": 1,
+                "client_incarnation": "client/test",
+                "adapter_generation_id": "generation/adapter-test",
+                "transport_digest": "sha256:" + "a" * 64,
+                "prepared": {"action": "send_group_msg"},
+            },
+            "wire": {"payload_id": saved.payload_id, "digest": saved.content_digest},
+            "authorization": {"ticket_id": "ticket/test"},
+            "effect": {"deadline_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()},
+        }
+        prepared = await call(
+            "delivery_record_prepare",
+            {
+                "input": plan,
+                "prior": {
+                    "authorization": {"ticket": {"ticket_id": "ticket/test"}},
+                    "effect": {
+                        "effect_operation_id": work["effect_operation_ref"],
+                        "attempt_id": work["attempt_id"],
+                        "attempt_no": 1,
+                    },
+                },
+            },
+            operation_id="prepare:rejected",
+        )
+        assert prepared["value"]["state"] == "PREPARED"
+        handed_off = await call(
+            "delivery_record_handoff",
+            {
+                "input": {
+                    "work": work,
+                    "effect": {"handoff_operation_id": "handoff:rejected"},
+                },
+                "prior": {
+                    "effect": {
+                        "attempt_id": work["attempt_id"],
+                        "state": "DISPATCHING",
+                        "started_at": now,
+                    }
+                },
+            },
+            operation_id="handoff:rejected",
+        )
+        assert handed_off["value"]["state"] == "DISPATCHING"
+        observed = await call(
+            "delivery_record_observe",
+            {
+                "input": {
+                    "work": work,
+                    "observed_status": "REJECTED_NOT_APPLIED",
+                    "error_code": "PLATFORM_REJECTED",
+                    "receipt": None,
+                }
+            },
+            operation_id="observe:rejected",
+        )
+        assert observed["value"] == {"intent_id": "intent/1", "state": "FAILED"}
+        again = await call("delivery_claim_work", {
+            **claim_request, "claim_token": "claim:after-rejected"
+        }, operation_id="claim:after-rejected")
+        assert again["value"] is None
+        row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT i.state AS intent_state,i.completed_at,p.state AS part_state,"
+                    "p.attempt_count,a.state AS attempt_state "
+                    "FROM {}.send_intents i JOIN {}.send_parts p USING(bot_id,intent_id) "
+                    "JOIN {}.transport_attempts a ON a.bot_id=p.bot_id "
+                    "AND a.attempt_id=p.current_attempt_id WHERE i.bot_id=%s AND i.intent_id=%s"
+                ).format(*(sql.Identifier(namespace) for _ in range(3))),
+                (store.bot_id, "intent/1"),
+            )
+        ).fetchone()
+        assert row["intent_state"] == "FAILED" and row["completed_at"] is not None
+        assert row["part_state"] == "FAILED" and row["attempt_state"] == "REJECTED"
+        assert row["attempt_count"] == 1
+
 
 @pytest.mark.postgres
 async def test_clean_runtime_rejects_uninstalled_storage_and_stale_host(clean_authority):

@@ -160,7 +160,7 @@ async def test_real_socket_sends_exact_frozen_body_and_token_once(monkeypatch):
 @pytest.mark.parametrize(
     "body,expected",
     [
-        ({"status": "failed", "retcode": 100, "data": None}, "NOT_SENT"),
+        ({"status": "failed", "retcode": 100, "data": None}, "REJECTED"),
         ({"status": "async", "retcode": 1, "data": None}, "UNKNOWN"),
         ({"status": "ok", "retcode": 0, "data": {}}, "UNKNOWN"),
         ({"status": "ok", "retcode": False, "data": {"message_id": 1}}, "UNKNOWN"),
@@ -183,11 +183,11 @@ async def test_socket_platform_results_preserve_uncertainty(body, expected):
 @pytest.mark.parametrize(
     "status,expected",
     [
-        (400, "NOT_SENT"),
-        (401, "NOT_SENT"),
-        (403, "NOT_SENT"),
-        (404, "NOT_SENT"),
-        (406, "NOT_SENT"),
+        (400, "REJECTED"),
+        (401, "REJECTED"),
+        (403, "REJECTED"),
+        (404, "REJECTED"),
+        (406, "REJECTED"),
         (429, "UNKNOWN"),
         (500, "UNKNOWN"),
         (503, "UNKNOWN"),

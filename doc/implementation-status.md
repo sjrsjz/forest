@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 Delivery 明确拒绝的终态修复：v34 假 OneBot 的两条失败回复在旧版中累计重试 184 次，原因是 Adapter 把明确拒绝当作可重试 `NOT_SENT`，Delivery 没接通已设计的 `REJECTED_NOT_APPLIED`。新源码将其终结为 `FAILED`，保留通用效果 `NOT_APPLIED`；43 个 OneBot/Delivery 测试、8 个传输测试及隔离 PostgreSQL 的终态与不可再领取测试通过。新包尚未部署，v33/v34 运行工件未改。同期 SSH 只读检查树莓派 NapCat 为 READY、仍在接收群消息，当前 Linux QQ 3.2.34-53644；最近版本过低登录错误属于 9 月 17 日，未重启或发送 QQ 消息。
+
 2026-10-17 v34 隔离候选 Agent 并发验收：正式配置把第一 Bot 的 Provider 指向受控假模型、触发策略纳入第二假群，图 r22、22/22 ACTIVE。首群第 1 次模型调用暂停时，同群后到 `@` 排队，第二群模型调用先于首群释放完成；假模型最终请求顺序为首群第 1 步、第二群第 1 步、首群第 2 步。首群一个 Run 的输入修订 1→2 对应两次模型请求，第二次包含排队消息；两条同群触发在第二步后共同结算。假 OneBot 拒绝发送，两个 Delivery intent 仍 `QUEUED / PLATFORM_REJECTED`，该候选 Bot 已 OFFLINE 且不得改绑真实 QQ，v33 未改。详见 [v34 Agent 并发验收](live-v34-agent-concurrency-2026-10-17.md)。
 
 2026-10-17 现役 v33 真实 VL 成本诊断：18:32 CST 的 UTC 当日账本为 188 次已结算、136015 charged tokens，4 次 UNKNOWN 冻结 131072 tokens、0 在途预留；每日 300000 token 阈值仅余 32913，单批预留 32768。UNKNOWN 是 1 次 HTTP 不确定和 3 次 60 秒超时，均已派发，不可当作免费失败自动释放。为给自然群消息留预算，未在现役 v33 发起额外 IMAGE 管理试验或重试未知请求。详见 [v33 运行记录](live-v33-operation-2026-10-17.md)。

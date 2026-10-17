@@ -224,7 +224,7 @@ class _FixedEndpointConnect(connect):
 
 @dataclass(frozen=True)
 class SendResult:
-    status: Literal["SENT", "NOT_SENT", "UNKNOWN"]
+    status: Literal["SENT", "NOT_SENT", "REJECTED", "UNKNOWN"]
     message_id: str | None = None
     error_code: str | None = None
 
@@ -292,7 +292,7 @@ class OneBotHTTPClient:
         try:
             status_code, body = await self._post(prepared.action, prepared.wire_body, timeout)
             if status_code in {400, 401, 403, 404, 406}:
-                return SendResult("NOT_SENT", error_code="HTTP_REJECTED")
+                return SendResult("REJECTED", error_code="HTTP_REJECTED")
             if status_code != 200:
                 return SendResult("UNKNOWN", error_code="HTTP_UNCERTAIN")
             return _send_result(body)
@@ -761,7 +761,7 @@ def _send_result(body: bytes) -> SendResult:
             raise _invalid()
         status, code = result.get("status"), result["retcode"]
         if status == "failed" and code not in {0, 1}:
-            return SendResult("NOT_SENT", error_code="PLATFORM_REJECTED")
+            return SendResult("REJECTED", error_code="PLATFORM_REJECTED")
         if status == "ok" and code == 0 and isinstance(result.get("data"), dict):
             return SendResult(
                 "SENT", message_id=_id(result["data"].get("message_id"), message=True)

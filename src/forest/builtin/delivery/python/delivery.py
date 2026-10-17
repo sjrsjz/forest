@@ -218,16 +218,28 @@ class Delivery(Plugin):
             )
             await self._observe(work, ctx, "SENT", evidence["payload"], None)
             return {"intent_id": work["intent_id"], "state": "SENT"}
-        status = "RETRYABLE_NOT_APPLIED" if result["status"] == "NOT_SENT" else "UNKNOWN"
+        status = {
+            "NOT_SENT": "RETRYABLE_NOT_APPLIED",
+            "REJECTED": "REJECTED_NOT_APPLIED",
+            "UNKNOWN": "UNKNOWN",
+        }[result["status"]]
         await self._observe(
             work, ctx, status, None, result.get("error_code") or "DELIVERY_RESULT_UNKNOWN"
         )
-        return {"intent_id": work["intent_id"], "state": "QUEUED" if status != "UNKNOWN" else "UNKNOWN"}
+        return {
+            "intent_id": work["intent_id"],
+            "state": {
+                "RETRYABLE_NOT_APPLIED": "QUEUED",
+                "REJECTED_NOT_APPLIED": "FAILED",
+                "UNKNOWN": "UNKNOWN",
+            }[status],
+        }
 
     async def _observe(self, work, ctx, status, evidence, error_code):
         effect_status = {
             "SENT": "SUCCEEDED",
             "RETRYABLE_NOT_APPLIED": "NOT_APPLIED",
+            "REJECTED_NOT_APPLIED": "NOT_APPLIED",
             "UNKNOWN": "UNKNOWN",
         }[status]
         observation_id = ctx.operations.stable("effect-observation")
