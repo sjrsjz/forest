@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 v34 隔离候选双 Bot 并存验收：第二个 Bot 经正式 Host 存储/供应链结算 `SUCCEEDED`，两个 Bot 具有不同假 OneBot 账号、不同物理 PostgreSQL 库及各自 22/22 READY 基线。两个 Bot 曾同时 `READY/ONLINE`、各有 22/22 ACTIVE 组件；先退役原 Bot 时第二个仍 ONLINE，随后也退役至 OFFLINE，两库均无 ACTIVE 图。假端点无发送动作，v33 保持 healthy。此证据不包含非空记忆内容隔离或真实 QQ。详见 [v34 双 Bot 隔离验收](live-v34-multibot-isolation-2026-10-17.md)。
+
 2026-10-17 v34 隔离候选在线生命周期与 Worker Host 自热重载：使用只读状态成功、发送动作一律拒绝的本机假 OneBot，经正式管理意图把离线供应的 Bot 拉起到 ONLINE；Bot 图 r1 ACTIVE、22/22 成员。Worker Host 包自身的 `module.reload` 请求跨代结算 SUCCEEDED，图升为 r2 ACTIVE、22/22 成员，21 个 Generation 换代、`kernel.payload` 保留。再经正式意图退回 OFFLINE，r1/r2 图均 STOPPED，假 OneBot 停止；未连接 QQ 或调用模型，v33 保持 healthy。详见 [v34 假 OneBot 在线与自热重载验收](live-v34-mock-online-reload-2026-10-17.md)。
 
 2026-10-17 独立 v34 候选生产进程：`forest:runtime-95474cba` 在全新 `forest-accept-v34` 部署/Host/包卷上启动，部署图 8/8 与 Host 图 2/2 ACTIVE；通过正式 Secret、Host 存储编排、Bootstrap Contributor 和供应 Job 创建 `bot/accept-v34-offline-20261017`，Job `SUCCEEDED`，Bot `READY/OFFLINE`。新 Bot 库 22/22 个 bundle READY（Worker Host SQL `1.11.0`、Memory SQL `3.99.0`），运行图 0；重启 Supervisor 后部署/Host 图均恢复为修订 2 ACTIVE，Bot 与数据库状态保持。候选只监听本机管理端口，使用占位外部凭据，未连接 QQ 或调用模型；现役 v33 仍健康。详见 [v34 独立离线候选](live-v34-offline-candidate-2026-10-17.md)。
