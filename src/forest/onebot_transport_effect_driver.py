@@ -74,6 +74,7 @@ class OneBotTransportEffectDriver:
         effects,
         runtime,
         credential_resolver,
+        send_guard=None,
         client_factory=OneBotWebSocketClient.create,
     ) -> None:
         ingress = declaration.get("ingress")
@@ -94,6 +95,7 @@ class OneBotTransportEffectDriver:
         self.effects = effects
         self.runtime = runtime
         self.credential_resolver = credential_resolver
+        self.send_guard = send_guard
         self.client_factory = client_factory
         self._ingress = None
         self._bindings: dict[str, _BindingTransport] = {}
@@ -345,9 +347,27 @@ class OneBotTransportEffectDriver:
             )
         await self._verify_effect(payload, transport)
         prepared = PreparedSend.from_codec_result(payload["prepared"])
-        result = await transport.client.send(
-            prepared, timeout=float(payload["timeout_seconds"])
-        )
+        async def send():
+            return await transport.client.send(
+                prepared, timeout=float(payload["timeout_seconds"])
+            )
+
+        if not payload["effect_operation_id"].startswith("core-intent:"):
+            result = await send()
+        else:
+            if self.send_guard is None:
+                raise ForestError(
+                    "CORE_RESCUE_GUARD_UNAVAILABLE", "Core rescue send guard is unavailable", 503
+                )
+            wire = json.loads(prepared.wire_body)
+            target_key = "group_id" if prepared.action == "send_group_msg" else "user_id"
+            result = await self.send_guard(
+                effect_operation_id=payload["effect_operation_id"],
+                binding_ref=payload["binding_ref"],
+                channel_kind="group" if target_key == "group_id" else "private",
+                channel_ref=str(wire[target_key]),
+                send=send,
+            )
         return {"protocol": "forest.onebot-send-result/2", **result.as_dict()}
 
     async def quiesce(self) -> None:
@@ -389,6 +409,7 @@ def onebot_transport_effect_driver_factory(
     effects,
     runtime,
     credential_resolver,
+    send_guard=None,
     client_factory=OneBotWebSocketClient.create,
 ):
     def create(configuration, configuration_revision, identity, declaration):
@@ -400,6 +421,7 @@ def onebot_transport_effect_driver_factory(
             effects=effects,
             runtime=runtime,
             credential_resolver=credential_resolver,
+            send_guard=send_guard,
             client_factory=client_factory,
         )
 

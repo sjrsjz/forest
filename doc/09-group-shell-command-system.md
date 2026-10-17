@@ -218,6 +218,6 @@ WebUI 的模块页从描述符展示命令目录、参数 schema、权限和最�
 
 取消意图在 Scheduler 派发前以及目标包 Job handler 入队前复核；已开始的只读状态读取可完成，不能把已产生的结果重写成“未执行”。换代时 JobType 的 provider Generation 随 `component.worker-host` 一起冻结或替换，旧队列项必须按原 Generation 身份结算或获得明确失败，不能临时改路由到新包。
 
-Core 回执交接以救援请求账本为唯一游标：请求效果及结果先原子结算为 `PENDING`，后续独立事务锁定该结果、重新证明当前 Binding 与授权、经 Delivery 包的受限事务端口创建一条 CONTROL 意图，并在同一事务把账本标记 `QUEUED`。因此 Delivery 暂不可用不会造成结果丢失，也不能由内核直接发送 OneBot。Delivery 的工作领取协议必须保留 `cause_component_id/cause_kind/cause_id`；仅当来源是 `kernel.runtime/core.rescue.request` 时，派发 Worker 才调用 `core.rescue.delivery-permit`，许可端口核对准确意图、结果 Payload、当前 Binding、当前授权修订及动作。许可失败但确定未开始网络调用时以 NOT_APPLIED 证据结算；暂时故障重试，确定撤权则终止。该许可调用与外部网络发送无法共享 PostgreSQL 事务，故当前承诺是紧贴发送前复核，不能宣称与并发撤权完全线性化；若要求撤权提交后零发送，须在 Adapter 实际发送边界加入可持有至派发的权威围栏。
+Core 回执交接以救援请求账本为唯一游标：请求效果及结果先原子结算为 `PENDING`，后续独立事务锁定该结果、重新证明当前 Binding 与授权、经 Delivery 包的受限事务端口创建一条 CONTROL 意图，并在同一事务把账本标记 `QUEUED`。因此 Delivery 暂不可用不会造成结果丢失，也不能由内核直接发送 OneBot。Delivery 的工作领取协议必须保留 `cause_component_id/cause_kind/cause_id`；仅当来源是 `kernel.runtime/core.rescue.request` 时，派发 Worker 才调用 `core.rescue.delivery-permit`，许可端口核对准确意图、结果 Payload、当前 Binding、当前授权修订及动作。许可失败但确定未开始网络调用时以 NOT_APPLIED 证据结算；暂时故障重试，确定撤权则终止。Adapter 实际发送边界对 Core 意图的准确 Effect ID 再调用内核发送围栏；围栏复核救援账本、当前 Generation、Binding 和授权，在网络调用期间持有救援策略行的共享锁。策略撤权须取得同一行的更新锁，故撤权先提交时发送被拒绝，发送先取得围栏时撤权提交等待该调用结束。这个有时限的长事务仅用于极少量 Core 救援回执；普通聊天仍按 Delivery 的短事务交接。网络结果未知仍保留 UNKNOWN 事实，不能因为围栏事务释放就推断未发送。
 
 维护态的准确边界是 DATA 新业务准入关闭，CONTROL 的入站救援、执行、Delivery 结算和 OneBot 回执保持可用。Delivery 许可错误按语义归类：明确撤权、协议无效或 Binding 失配终止；图热替换导致的路由过期等暂时错误保留意图并按未发送重试，不能单凭错误状态码 409 判断为撤权。

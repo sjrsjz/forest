@@ -629,10 +629,22 @@ class BotHost:
         adapter_driver_options = {}
         if self._websocket_client_factory is not None:
             adapter_driver_options["client_factory"] = self._websocket_client_factory
+
+        async def guard_onebot_send(**request):
+            registry = self.registry
+            if registry is None:
+                raise ForestError(
+                    "KERNEL_UNAVAILABLE", "RuntimeGraph is unavailable", 503
+                )
+            return await registry.instances[
+                "kernel.runtime"
+            ].rescue_executor.dispatch_with_policy_guard(**request)
+
         onebot_effect_factory = onebot_transport_effect_driver_factory(
             effects=self._kernel.effect,
             runtime=self._kernel.runtime,
             credential_resolver=resolve_onebot_secret,
+            send_guard=guard_onebot_send,
             **adapter_driver_options,
         )
         effect_factories = {

@@ -226,7 +226,15 @@ class Delivery(Plugin):
                 timeout=25,
                 contract_major=2,
             )
-        except ForestError:
+        except ForestError as error:
+            if (
+                handed_off
+                and work["cause_component_id"] == "kernel.runtime"
+                and work["cause_kind"] == "core.rescue.request"
+                and error.code in _CORE_RESCUE_DELIVERY_DENIALS
+            ):
+                await self._observe(work, ctx, "REJECTED_NOT_APPLIED", None, error.code)
+                return {"intent_id": work["intent_id"], "state": "FAILED"}
             if handed_off:
                 await self._observe(work, ctx, "UNKNOWN", None, "DELIVERY_RESULT_UNKNOWN")
             elif prepared_recorded:

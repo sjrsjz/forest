@@ -202,6 +202,8 @@ NOT_APPLIED → 同一 part/effect 的新 attempt（策略允许时）
 
 claim 使用 `delivery_owner_epoch`，只授予准备权。Delivery 在短事务中锁定 lane/intent/part 与对应 `kernel.effect` operation，复核当前授权、Binding/client fence、目标、payload 和取消事实后建立 `PREPARED` attempt；实际 I/O 前再用第二个短事务把 effect 与 attempt 一起交接为 `DISPATCHING`，提交后才调用 Adapter。它不锁或修改 Agent Run；已完成 Run 的合法回复按已提交 cause 继续发送。交接是不可撤回边界，稍后撤权不能把在途网络请求改写成未执行。账本分别记录许可、交接、观察与对账。
 
+Core 救援回执在 Adapter 发送边界另有专用授权围栏：网络调用期间持有该 Bot 救援策略的共享行锁，使群管理员救援授权的撤权提交与这条发送严格排序。普通 CHAT 和其他 CONTROL 回执不持有该锁；救援围栏也不改变已经交接的 Effect 对网络结果 `UNKNOWN` 的保守结算规则。
+
 平台支持幂等键时传稳定 operation_id；支持查询时按平台消息标识对账。若两者都不支持，断线后 UNKNOWN 默认不自动重发，提供查询/人工决定。不能用“失败后换新 echo 再发”冒充可靠重试。
 
 一个 ReplyProposal 分成多个平台消息时，子项使用稳定 `(intent_id, part_index)`，据此派生各自的 `part_operation_id` 并作为平台幂等键，不能所有分片共用父键；记录部分成功。重试仅补确定未发送部分，UNKNOWN 子项先对账。

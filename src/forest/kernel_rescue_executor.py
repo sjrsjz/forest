@@ -7,6 +7,8 @@ Generation's typed UnitOfWork participant.
 
 from __future__ import annotations
 
+import re
+
 from forest.errors import ForestError
 from forest.runtime_contracts import RuntimeUnitOfWorkParticipantHandle
 from forest.storage.kernel_audit import AuditEnvelope
@@ -21,6 +23,7 @@ _ACTION_FAILURES = frozenset({
     "AGENT_RUN_NOT_FOUND",
     "AGENT_CANCEL_ALREADY_REQUESTED",
 })
+_RESCUE_EFFECT = re.compile(r"core-intent:([0-9a-f]{64})/effect\Z")
 
 
 class KernelCoreRescueExecutor:
@@ -236,37 +239,71 @@ class KernelCoreRescueExecutor:
             raise ForestError("KERNEL_UNAVAILABLE", "Runtime Generation is unavailable", 503)
         lease = self.runtime_host.authority_lease()
         async with self.runtime.store.pool.connection() as conn, conn.transaction():
-            row = await self.requests.delivery_in(conn, lease, request["request_id"])
-            if (
-                row is None or row["delivery_state"] != "QUEUED"
-                or row["delivery_intent_id"] != request["intent_id"]
-                or row["binding_ref"] != request["binding_ref"]
-                or row["group_ref"] != request["channel_ref"]
-                or request["payload"] != {
-                    "payload_id": row["result_payload_id"],
-                    "digest": row["result_payload_digest"],
-                    "owner_component_id": "kernel.runtime",
-                    "owner_kind": "core.rescue.result",
-                    "owner_id": row["request_id"],
-                }
-            ):
-                raise ForestError(
-                    "CORE_RESCUE_DELIVERY_REVOKED", "Rescue result is not sendable", 409
-                )
-            await self.runtime.verify_active_generation_in(
-                conn, component_id="kernel.runtime",
-                generation_id=generation.generation_id, admission_lane="CONTROL",
-            )
-            await self._prove_binding_in(conn, row, generation.generation_id)
-            revision, actions = await self.policy.scope_actions_in(
-                conn, binding_ref=row["binding_ref"],
-                group_ref=row["group_ref"], principal_ref=row["principal_ref"],
-            )
-            if revision != row["policy_revision"] or row["action"] not in actions:
-                raise ForestError(
-                    "CORE_RESCUE_DELIVERY_REVOKED", "Rescue authority changed", 409
-                )
+            await self._authorize_delivery_in(conn, lease, generation.generation_id, request)
         return {"protocol": "forest.core-rescue-delivery-permit/1", "allowed": True}
+
+    async def dispatch_with_policy_guard(
+        self, *, effect_operation_id: str, binding_ref: str,
+        channel_kind: str, channel_ref: str, send,
+    ):
+        """Serialize a Core result's network send with rescue-policy mutation."""
+
+        if not effect_operation_id.startswith("core-intent:"):
+            return await send()
+        match = _RESCUE_EFFECT.fullmatch(effect_operation_id)
+        if match is None or channel_kind != "group":
+            raise ForestError("CORE_RESCUE_DELIVERY_INVALID", "Invalid rescue effect", 422)
+        request_id = "core:" + match.group(1)
+        registry = getattr(self.runtime_host, "registry", None)
+        if registry is None:
+            raise ForestError("KERNEL_UNAVAILABLE", "RuntimeGraph is unavailable", 503)
+        generation = registry.instances["kernel.runtime"].generation_identity
+        if generation is None:
+            raise ForestError("KERNEL_UNAVAILABLE", "Runtime Generation is unavailable", 503)
+        lease = self.runtime_host.authority_lease()
+        request = {
+            "request_id": request_id,
+            "intent_id": "core-intent:" + match.group(1),
+            "binding_ref": binding_ref,
+            "channel_ref": channel_ref,
+        }
+        async with self.runtime.store.pool.connection() as conn, conn.transaction():
+            await self._authorize_delivery_in(conn, lease, generation.generation_id, request)
+            # scope_actions_in holds a shared policy row lock until this send
+            # returns. A concurrent grant change cannot commit in the gap.
+            return await send()
+
+    async def _authorize_delivery_in(self, conn, lease, generation_id: str, request: dict):
+        row = await self.requests.delivery_in(conn, lease, request["request_id"])
+        if (
+            row is None or row["delivery_state"] != "QUEUED"
+            or row["delivery_intent_id"] != request["intent_id"]
+            or row["binding_ref"] != request["binding_ref"]
+            or row["group_ref"] != request["channel_ref"]
+            or ("payload" in request and request["payload"] != {
+                "payload_id": row["result_payload_id"],
+                "digest": row["result_payload_digest"],
+                "owner_component_id": "kernel.runtime",
+                "owner_kind": "core.rescue.result",
+                "owner_id": row["request_id"],
+            })
+        ):
+            raise ForestError(
+                "CORE_RESCUE_DELIVERY_REVOKED", "Rescue result is not sendable", 409
+            )
+        await self.runtime.verify_active_generation_in(
+            conn, component_id="kernel.runtime",
+            generation_id=generation_id, admission_lane="CONTROL",
+        )
+        await self._prove_binding_in(conn, row, generation_id)
+        revision, actions = await self.policy.scope_actions_in(
+            conn, binding_ref=row["binding_ref"],
+            group_ref=row["group_ref"], principal_ref=row["principal_ref"],
+        )
+        if revision != row["policy_revision"] or row["action"] not in actions:
+            raise ForestError(
+                "CORE_RESCUE_DELIVERY_REVOKED", "Rescue authority changed", 409
+            )
 
     async def _prove_binding_in(self, conn, row: dict, kernel_generation_id: str):
         adapter = self._participant("adapter.onebot")

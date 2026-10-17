@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import json
 from importlib.resources import files
 from pathlib import Path
 from types import SimpleNamespace
@@ -5,6 +8,8 @@ from unittest.mock import ANY, AsyncMock
 
 import pytest
 
+from forest.builtin.delivery.python.delivery import Delivery
+from forest.errors import ForestError
 from forest.kernel_authorization_participant import (
     KernelAuthorizationUnitOfWorkParticipant,
 )
@@ -49,6 +54,70 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
         "delivery.reconcile",
     ]
     assert snapshot.management_ui() is not None
+
+
+@pytest.mark.asyncio
+async def test_core_revoke_at_adapter_boundary_is_settled_as_unsent():
+    wire_body = json.dumps({
+        "action": "send_group_msg", "params": {"group_id": 933179609, "message": "ok"},
+    }).encode()
+    wire_digest = hashlib.sha256(wire_body).hexdigest()
+    adapter = {
+        "binding_ref": "binding/main", "binding_epoch": 1,
+        "connection_epoch": 1, "client_incarnation": "client/1",
+        "adapter_generation_id": "adapter/1", "graph_id": "graph/1",
+        "graph_revision": 1, "transport_digest": "sha256:" + "b" * 64,
+        "prepared": {
+            "wire_body_b64": base64.b64encode(wire_body).decode(),
+            "wire_digest": wire_digest,
+        },
+    }
+    work = {
+        "mode": "NEW", "intent_id": "core-intent:" + "a" * 64,
+        "cause_component_id": "kernel.runtime", "cause_kind": "core.rescue.request",
+        "cause_id": "core:" + "a" * 64,
+        "payload": {"payload_id": "payload/1"},
+        "binding_ref": "binding/main", "channel_kind": "GROUP",
+        "channel_ref": "933179609", "semantic_digest": "sha256:" + "c" * 64,
+        "attempt_id": "attempt/1", "effect_operation_ref": "effect/1",
+    }
+    calls = []
+
+    async def service_call(name, _request, **_options):
+        calls.append(name)
+        if name == "kernel.payload.json-read":
+            return {"value": {"text": "ok"}}
+        if name == "adapter.onebot.delivery.prepare":
+            return adapter
+        if name == "kernel.effect.json-materialize":
+            return {"payload": {"payload_id": "wire/1", "digest": "sha256:" + wire_digest}}
+        if name == "core.rescue.delivery-permit":
+            return {"allowed": True}
+        if name == "adapter.onebot.delivery.dispatch":
+            raise ForestError(
+                "CORE_RESCUE_DELIVERY_REVOKED", "Authorization was revoked", 409
+            )
+        pytest.fail(f"Unexpected service {name}")
+
+    async def uow_call(name, _request, **_options):
+        calls.append(name)
+        return {"permit": {"effect_operation_id": "effect/1"}}
+
+    delivery = Delivery()
+    observed = AsyncMock()
+    delivery._observe = observed
+    ctx = SimpleNamespace(
+        services=SimpleNamespace(call=service_call),
+        uow=SimpleNamespace(call=uow_call),
+        operations=SimpleNamespace(stable=lambda suffix: "op/" + suffix),
+        identity={"bot_id": "bot/1"},
+    )
+    result = await delivery.dispatch({"payload": work}, ctx)
+    assert result == {"intent_id": work["intent_id"], "state": "FAILED"}
+    assert calls.index("delivery.handoff") < calls.index("adapter.onebot.delivery.dispatch")
+    observed.assert_awaited_once_with(
+        work, ctx, "REJECTED_NOT_APPLIED", None, "CORE_RESCUE_DELIVERY_REVOKED"
+    )
 
 
 @pytest.mark.asyncio

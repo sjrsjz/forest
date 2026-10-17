@@ -15,6 +15,7 @@ from test_schema_bundles import clean_authority as clean_authority
 from forest.builtin.shell_command.python.shell_command import ShellCommand
 from forest.core_runtime import bootstrap_kernel
 from forest.errors import ForestError
+from forest.kernel_rescue_executor import KernelCoreRescueExecutor
 from forest.kernel_rescue_ingress import KernelCoreRescueAdmission
 from forest.kernel_shell_gate import (
     KernelShellGateUnitOfWorkParticipant,
@@ -149,6 +150,103 @@ async def test_core_rescue_admission_serializes_replay_and_queue_capacity(clean_
             (store.bot_id, "event/0"),
         )).fetchone()
     assert saved["self_id"] == "10000"
+
+
+@pytest.mark.postgres
+async def test_core_rescue_policy_revoke_waits_for_inflight_network_send(clean_authority):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    policy = kernel.rescue_policy
+
+    async def authorized(_conn, **_values):
+        return None
+
+    await policy.put(
+        operation_id="test:grant-send", expected_revision=1,
+        binding_ref="binding/main", group_ref="933179609",
+        principal_ref="qq:42", actions=["status"],
+        actor_ref="web:test", authorization=None, authorization_guard=authorized,
+    )
+    request_id = "core:" + "a" * 64
+    intent_id = "core-intent:" + "a" * 64
+    row = {
+        "request_id": request_id,
+        "delivery_state": "QUEUED",
+        "delivery_intent_id": intent_id,
+        "binding_ref": "binding/main",
+        "group_ref": "933179609",
+        "principal_ref": "qq:42",
+        "policy_revision": 2,
+        "action": "status",
+    }
+
+    class Requests:
+        async def delivery_in(self, _conn, _lease, selected_id):
+            assert selected_id == request_id
+            return row
+
+    async def verify_active_generation_in(_conn, **_values):
+        return None
+
+    host = SimpleNamespace(
+        registry=SimpleNamespace(instances={
+            "kernel.runtime": SimpleNamespace(
+                generation_identity=SimpleNamespace(generation_id="kernel/test")
+            )
+        }),
+        authority_lease=lambda: object(),
+    )
+    runtime = SimpleNamespace(
+        store=store, verify_active_generation_in=verify_active_generation_in,
+    )
+    executor = KernelCoreRescueExecutor(host, runtime, policy, Requests(), None, None)
+
+    async def prove_binding(_conn, _row, _generation_id):
+        return None
+
+    executor._prove_binding_in = prove_binding
+    entered_send = asyncio.Event()
+    release_send = asyncio.Event()
+    entered_revoke = asyncio.Event()
+
+    async def send():
+        entered_send.set()
+        await release_send.wait()
+        return "SENT"
+
+    kwargs = {
+        "effect_operation_id": intent_id + "/effect",
+        "binding_ref": "binding/main",
+        "channel_kind": "group",
+        "channel_ref": "933179609",
+    }
+    inflight = asyncio.create_task(executor.dispatch_with_policy_guard(**kwargs, send=send))
+    await asyncio.wait_for(entered_send.wait(), 5)
+
+    async def revoke_guard(_conn, **_values):
+        entered_revoke.set()
+
+    revoked = asyncio.create_task(policy.put(
+        operation_id="test:revoke-send", expected_revision=2,
+        binding_ref="binding/main", group_ref="933179609",
+        principal_ref="qq:42", actions=[], actor_ref="web:test",
+        authorization=None, authorization_guard=revoke_guard,
+    ))
+    try:
+        await asyncio.wait_for(entered_revoke.wait(), 5)
+        await asyncio.sleep(0.1)
+        assert not revoked.done()
+    finally:
+        release_send.set()
+    assert await inflight == "SENT"
+    assert (await revoked)["revision"] == 3
+
+    async def unexpected_send():
+        pytest.fail("A revoked Core result must never reach OneBot")
+
+    with pytest.raises(ForestError) as denied:
+        await executor.dispatch_with_policy_guard(**kwargs, send=unexpected_send)
+    assert denied.value.code == "CORE_RESCUE_DELIVERY_REVOKED"
 
 
 @pytest.mark.parametrize("trailing", [

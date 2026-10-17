@@ -134,6 +134,9 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
     async def client_factory(*_args, **_kwargs):
         return client
 
+    async def unexpected_rescue_guard(**_request):
+        pytest.fail("Ordinary OneBot sends must not enter the Core rescue guard")
+
     declaration = {
         "name": "adapter.onebot.transport.send",
         "kind": "onebot.websocket-v11",
@@ -147,6 +150,7 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
         effects=Effects(),
         runtime=Runtime(),
         credential_resolver=credential_resolver,
+        send_guard=unexpected_rescue_guard,
         client_factory=client_factory,
     )
     frames = []
