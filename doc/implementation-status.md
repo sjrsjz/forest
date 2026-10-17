@@ -7,9 +7,11 @@
 | 微内核与包生命周期 | 现役主 Bot 22/22 ACTIVE，Delivery、Memory 正式热替换；隔离 Bot 的非空 `vector.index` 集合重建后图片直接召回保持，Vector 正式热替换 8 个依赖成员、14 个成员保留。首次发布前的不同 SQL 基线按[控制面合同](13-microkernel-control-plane-redesign.md)用新库切换，不要求旧库原位迁移。 | 发布后跨 SQL 基线升级图尚未设计或验证；长期多 Bot 运行和发布后故障变体尚无完整生产证据。 |
 | Bot 全局多主干图文记忆 | 同部署隔离 Bot 的两个群主干、真实 VL 文本/图片查询、真实图片直接种子、来源群与作者、永久费用账本已核对；跨主干联想另有隔离 PostgreSQL/真实 VL 用例。 | 数月混合图文负载、在线非空自然记忆与大规模并发写入的长期费用分布尚未验证。 |
 | 群聊 Agent 与外部回复 | 隔离端到端用例覆盖同群串行、跨群并行、下一次模型调用切口和工具续轮；v38 只读观察无重叠会话。 | 现役许可群 `933179609` 仅观察到一条未触发对话的入站消息，真实 `@ → Agent → Provider → Delivery → QQ` 回复尚无样本。 |
-| 群聊 Shell 与管理 | 当前源码已接通内核前缀门禁、同事务 ingress proof、Adapter 平台身份复核、可热替换 Shell 包，以及脱离 Shell 包的 Core `status`、`disable`、`reload` 和排队图替换 `cancel`；隔离 BotHost 用例已验证 Shell 停用后的维护态、整图替换、取消与 CONTROL 回执。 | 现役 v38 仍是旧镜像，尚未加载当前 Core 救援实现；群聊取消 Agent Run、真实 QQ Shell 管理操作和浏览器长期负载仍待验收。 |
+| 群聊 Shell 与管理 | 当前源码已接通内核前缀门禁、同事务 ingress proof、Adapter 平台身份复核、可热替换 Shell 包，以及脱离 Shell 包的 Core `status`、`disable`、`reload`、图替换 `cancel` 和 Agent Run `cancel`；隔离 BotHost 用例已验证维护态、整图替换、两类取消及 CONTROL 回执路径。 | 现役 v38 仍是旧镜像，尚未加载当前 Core 救援实现；真实 QQ Shell 管理操作和浏览器长期负载仍待验收。 |
 
 下文为按实施时间保留的证据记录。较早版本条目中的“当前”和“尚未”只描述当时状态；以上表及最新现役记录为准。
+
+2026-10-18 Core Agent Run 取消边界：Agent 包内 `checkpoint_seq` 初值与取消端口允许值均为 0，但 Core Gate 和内核救援请求表原先要求所有期望修订大于 0。隔离完整 BotHost 场景在活动模型请求期间发送授权群聊 `core cancel run:<id> --expect-revision 0`，首次稳定复现 `rescue_requests_expected_revision_check` 拒绝，未能写入 Core 请求；现将 Gate 与 SQL 约束按目标区分，只有 Run 取消允许 0。重跑同一场景后，Core 请求 `SUCCEEDED`、Agent 包内取消账本保存了准确 Run、checkpoint、QQ 主体和原因，模型调用释放后 Run 最终为 `CANCELLED/AGENT_CANCELLED_BY_ADMIN`（1 passed in 92.59s）。另有 Core 接纳并发容量/同键重放及撤权发送顺序 2 passed，语法 11 passed，Ruff 与差异检查通过。全部使用隔离 PostgreSQL 与模拟 OneBot/模型端口；未验证现役 v38 或真实 QQ 群命令。
 
 2026-10-18 Core 整图维护与排队取消验收：当前源码的完整假 OneBot BotHost 用例先在停用 `shell.command`、关闭 DATA 后，从群消息执行 `core reload`，核对持久替换请求由 `QUEUED` 到 `SUCCEEDED`、graph revision 前进一代、DATA 继续关闭且 CONTROL 回执为 `SENT`（1 passed in 782.10s）。随后发现 Core Gate 原先拒绝返回的 `core:<摘要>/reload` 中的 `/`，使该请求无法从群聊取消；现已允许原样操作 ID，语法用例 9 passed。完整 BotHost 复验让图替换领取器暂时空闲，第二条群聊 `core reload` 保持 `QUEUED`，再以回执中的完整 ID 发送 `core cancel --expect-revision`；请求成为 `CANCELLED`，graph revision 未前进（1 passed in 753.62s）。Ruff 和差异检查通过。两次均复用隔离 PostgreSQL 与模拟 OneBot/模型/向量端口，未向 QQ 发消息；现役 v38 仍是旧镜像，群聊 Agent Run 取消和真实 QQ 管理操作尚未端到端验收。
 

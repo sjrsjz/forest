@@ -53,7 +53,7 @@ Shell 接纳事务先复核 Binding、接纳时限与当前管理员资格，再
 #forest core reload --expect-graph <graph-revision>
 ```
 
-`core reload` 回执中的 `operation_id` 是取消命令的完整目标，例如 `core:<64 位摘要>/reload`；Core Gate 必须原样接纳其中的 `/`，不能要求管理员改写 ID。取消图替换时 `--expect-revision` 是当前 graph revision，且只允许把尚未领取的 `QUEUED` 请求改为 `CANCELLED`；取消 `run:<id>` 时该参数对应 Agent Run 的 checkpoint 序号。
+`core reload` 回执中的 `operation_id` 是取消命令的完整目标，例如 `core:<64 位摘要>/reload`；Core Gate 必须原样接纳其中的 `/`，不能要求管理员改写 ID。取消图替换时 `--expect-revision` 是当前 graph revision（从 1 起），且只允许把尚未领取的 `QUEUED` 请求改为 `CANCELLED`；取消 `run:<id>` 时该参数对应 Agent Run 的 checkpoint 序号，初值 0 也合法。
 
 `status/cancel/disable` 可以声明 P0，`reload` 为 P1。普通 `core.status/pause/resume/reload` 由 `component.worker-host` 包贡献，包内 Worker 通过受限 `kernel.runtime` 服务端口查询状态、以 maintenance epoch CAS 更改 DATA admission，或以 graph revision CAS 提交整图 replacement request。内核负责 HostLease 围栏与状态写入，不解析普通 Shell 命令；独立救援路由只能调用这些受限权威，不能把 Shell 包的业务状态复制进内核。单组件 reload 由 Worker Host 的 `module.reload` 生命周期动作提供，Shell 不把整图换代假装成局部替换。命令只写持久 replacement request 并返回，宿主监督循环在该 operation 完成后领取请求，避免执行者同步排空自身造成死锁。`disable` 关闭当前 Bot 的 data admission 并保留 CONTROL，不等于卸载某个模块；模块停用使用模块自己的 lifecycle action。普通 Shell 的 P0 资格仍由当前 `shell.command` 管理员策略与 `kernel.authorization` 精确能力共同决定；独立救援命令使用下述内核救援授权，不借用失效包的最近一次管理员快照。两条路径都不能仅凭文本或平台群角色取得保留槽，执行和回执前须再次核对授权、Binding epoch、Host lease、目标 revision 和资源所有权。
 

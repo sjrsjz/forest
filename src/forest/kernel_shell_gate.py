@@ -10,6 +10,7 @@ from forest.errors import ForestError
 
 _RESCUE_TARGET = re.compile(r"[A-Za-z0-9][A-Za-z0-9:._/-]{0,255}\Z")
 _RESCUE_REVISION = re.compile(r"[1-9][0-9]{0,18}\Z")
+_RESCUE_CHECKPOINT = re.compile(r"(?:0|[1-9][0-9]{0,18})\Z")
 
 
 def _inspect_core_rescue(gate: dict) -> dict:
@@ -60,7 +61,12 @@ def _inspect_core_rescue(gate: dict) -> dict:
             return result
     else:
         return result
-    if _RESCUE_REVISION.fullmatch(revision) is None:
+    revision_pattern = (
+        _RESCUE_CHECKPOINT
+        if action == "cancel" and result["target_ref"].startswith("run:")
+        else _RESCUE_REVISION
+    )
+    if revision_pattern.fullmatch(revision) is None:
         return result
     expected = int(revision)
     if expected > 9223372036854775807:

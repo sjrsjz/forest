@@ -35,6 +35,11 @@ async def _gate(normalized):
     [
         ("#forest core status", True, "status", None),
         ("#forest core cancel run:42 --expect-revision 3", True, "cancel", None),
+        ("#forest core cancel run:42 --expect-revision 0", True, "cancel", None),
+        (
+            "#forest core cancel core:" + "a" * 64 + "/reload --expect-revision 0",
+            True, "cancel", "CORE_RESCUE_SYNTAX_INVALID",
+        ),
         (
             "#forest core cancel core:" + "a" * 64 + "/reload --expect-revision 4",
             True, "cancel", None,
@@ -63,6 +68,8 @@ async def test_core_rescue_has_fixed_grammar_without_shell_fallback(
     if claimed:
         assert inspection["action"] == action
         assert inspection["error_code"] == error_code
+        if text == "#forest core cancel run:42 --expect-revision 0":
+            assert inspection["expected_revision"] == 0
         if text.startswith("#forest core cancel core:"):
             assert inspection["target_ref"] == "core:" + "a" * 64 + "/reload"
 

@@ -58,7 +58,11 @@ CREATE TABLE rescue_requests (
     kernel_generation_id text NOT NULL CHECK (octet_length(kernel_generation_id) BETWEEN 1 AND 256),
     action text CHECK (action IN ('status','cancel','disable','reload')),
     target_ref text,
-    expected_revision bigint CHECK (expected_revision > 0),
+    expected_revision bigint CHECK (
+        expected_revision IS NULL OR expected_revision > 0
+        OR (expected_revision = 0
+            AND COALESCE(action = 'cancel' AND target_ref LIKE 'run:%',false))
+    ),
     service_class text CHECK (service_class IN ('P0','P1')),
     admission_state text NOT NULL CHECK (admission_state IN ('QUEUED','REJECTED')),
     state text NOT NULL CHECK (state IN ('QUEUED','REJECTED','SUCCEEDED','FAILED','DENIED')),

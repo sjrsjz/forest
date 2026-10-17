@@ -4729,7 +4729,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real", "vector-web-recover")
+    "scenario", ("text", "visual", "cross-group", "success", "core-run-cancel", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real", "vector-web-recover")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -4789,7 +4789,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
     clients = []
     RecordingModelClient.requests = []
     RecordingModelClient.first_gate = (
-        asyncio.Event() if scenario in {"cross-group", "tool-continuation", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "long-model-lease"} else None
+        asyncio.Event() if scenario in {"cross-group", "core-run-cancel", "tool-continuation", "requeue", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "long-model-lease"} else None
     )
     RecordingModelClient.not_sent_attempts = (
         3 if scenario in {"requeue", "transport-exhausted"} else 2 if scenario == "reload-full"
@@ -4800,7 +4800,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         '<valid_agent_protocol_content_block block_type="ModelTurn"><payload><blocks>'
         '<block block_type="Assistant"><content><text>Forest success fixture</text>'
         '</content></block></blocks></payload></valid_agent_protocol_content_block>'
-        if scenario in {"success", "result-ledger-recovery", "result-payload-recovery", "cross-group", "prepared-crash"} else None
+        if scenario in {"success", "core-run-cancel", "result-ledger-recovery", "result-payload-recovery", "cross-group", "prepared-crash"} else None
     )
     RecordingModelClient.reply_factory = None
     if scenario in {"tool-continuation", "prepared-tool-crash"}:
@@ -5606,6 +5606,95 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         assert manifest["memory_evidence"]["current_source"]["external_group_id"] == "933179609"
         assert any(item["author"]["principal_ref"] == "qq:20001"
                    for item in manifest["source_manifest"])
+        if scenario == "core-run-cancel":
+            agent_schema = next(
+                item.storage.spec.namespace for item in host.registry.descriptors
+                if item.component_id == "agent.runtime"
+            )
+            async with host.store.pool.connection() as conn:
+                active_run = await (await conn.execute(
+                    sql.SQL("SELECT run_id,checkpoint_seq,state FROM {}.agent_runs "
+                            "WHERE bot_id=%s").format(sql.Identifier(agent_schema)),
+                    (settings.bot_id,),
+                )).fetchone()
+            assert active_run["run_id"] == manifest["run_id"]
+            assert active_run["run_id"].startswith("run:")
+            assert active_run["state"] not in {"COMPLETED", "FAILED", "CANCELLED"}
+            rescue_policy = host._kernel.rescue_policy
+
+            async def grant_guard(_conn, **_values):
+                return None
+
+            await rescue_policy.put(
+                operation_id="test:core-run-cancel-grant",
+                expected_revision=(await rescue_policy.read())["revision"],
+                binding_ref="binding/main", group_ref="933179609",
+                principal_ref="qq:42", actions=["cancel"],
+                actor_ref="web:test-admin", authorization=None,
+                authorization_guard=grant_guard,
+            )
+            await clients[-1].handler(json.dumps({
+                "self_id": int(settings.onebot_self_id),
+                "post_type": "message", "message_type": "group",
+                "sub_type": "normal", "time": int(datetime.now(timezone.utc).timestamp()),
+                "message_id": 90005, "user_id": 42, "group_id": 933179609,
+                "sender": {"user_id": 42, "nickname": "Operator", "card": "",
+                           "role": "admin"},
+                "message": [{"type": "text", "data": {"text": (
+                    "#forest core cancel " + active_run["run_id"]
+                    + " --expect-revision " + str(active_run["checkpoint_seq"])
+                )}}],
+            }).encode())
+            rescue_event = "onebot-event:" + hashlib.sha256(
+                b"binding/main\x0090005"
+            ).hexdigest()
+            async with asyncio.timeout(45):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        rescue = await (await conn.execute(
+                            sql.SQL("SELECT state,result_value FROM {}.rescue_requests "
+                                    "WHERE bot_id=%s AND event_ref=%s").format(
+                                sql.Identifier(rescue_policy.namespace)
+                            ), (settings.bot_id, rescue_event),
+                        )).fetchone()
+                    if rescue and rescue["state"] in {
+                        "SUCCEEDED", "FAILED", "DENIED",
+                    }:
+                        break
+                    await asyncio.sleep(0.1)
+            assert rescue["state"] == "SUCCEEDED", rescue
+            assert rescue["result_value"]["value"]["run_id"] == active_run["run_id"]
+            assert rescue["result_value"]["value"]["state"] == "REQUESTED"
+            async with host.store.pool.connection() as conn:
+                cancellation = await (await conn.execute(
+                    sql.SQL("SELECT run_id,expected_checkpoint_seq,requested_by,reason_code "
+                            "FROM {}.run_cancel_requests WHERE bot_id=%s").format(
+                        sql.Identifier(agent_schema)
+                    ), (settings.bot_id,),
+                )).fetchone()
+            assert cancellation == {
+                "run_id": active_run["run_id"],
+                "expected_checkpoint_seq": active_run["checkpoint_seq"],
+                "requested_by": "qq:42",
+                "reason_code": "CORE_RESCUE_CANCEL",
+            }
+            RecordingModelClient.first_gate.set()
+            async with asyncio.timeout(90):
+                while True:
+                    async with host.store.pool.connection() as conn:
+                        cancelled_run = await (await conn.execute(
+                            sql.SQL("SELECT state,error_code FROM {}.agent_runs "
+                                    "WHERE bot_id=%s AND run_id=%s").format(
+                                sql.Identifier(agent_schema)
+                            ), (settings.bot_id, active_run["run_id"]),
+                        )).fetchone()
+                    if cancelled_run["state"] in {"COMPLETED", "FAILED", "CANCELLED"}:
+                        break
+                    await asyncio.sleep(0.1)
+            assert cancelled_run == {
+                "state": "CANCELLED", "error_code": "AGENT_CANCELLED_BY_ADMIN",
+            }
+            return
         if real_transport:
             vector_schema = next(
                 item.storage.spec.namespace for item in host.registry.descriptors
