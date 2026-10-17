@@ -8,6 +8,6 @@
 
 随后在同一 v39 候选中，通过正式管理动作供应独立测试 Bot `bot/accept-v39-shutdown-fixture-20261018`，其 OneBot、Provider 和嵌入端点均指向隔离的本机模拟服务。主 Bot `forest-main-v39` 始终保持 `READY/OFFLINE`。测试 Bot 达到 `ONLINE`，管理运行视图确认 Bot 图 `ACTIVE`、修订号 1、22 个模块；模拟 OneBot 记录一条连接。对运行中的 Supervisor 执行 `docker stop -t 45` 后，进程退出码为 0，目录中测试 Bot 的观察状态转为 `OFFLINE`、错误码为空，模拟 OneBot 记录连接关闭，日志未出现 `DEPLOYMENT_RUNTIME_UNAVAILABLE`。这覆盖了实际 BotHost 模块图的进程级正常停机，但没有覆盖真实 QQ 或付费模型调用。
 
-重启 v39 后，通过正式管理动作将测试 Bot 的期望状态改回 `OFFLINE`，并等待观察状态也成为 `OFFLINE`；再次正常停机退出码为 0。当前 v39 和模拟服务均已停止；候选库中的主 Bot 与测试 Bot 均无 ONLINE 意图。现役 v38 仍为 `running/healthy`，树莓派 OneBot 8080 仍只有一条已建立连接。数据库与包卷保留。
+重启 v39 后，通过正式管理动作将测试 Bot 的期望状态改回 `OFFLINE`，并等待观察状态也成为 `OFFLINE`；再次正常停机退出码为 0。随后再次启动候选，使用 `deployment.retirement` 的正式 `bot.retire` 动作退役测试 Bot：目录状态 `READY → DELETING → DELETED`，退役 Job 经一次 `RETIREMENT_WAITING` 后为 `SUCCEEDED`，Host 资源回收完成；独立 PostgreSQL 中只剩 v38 的两个 Bot 库与 v39 主 Bot 库。主 Bot 始终为 `READY/OFFLINE`。当前 v39 与模拟服务均已停止，v39 目录中的测试 Bot 仅留下不可再启动的 `DELETED` 记录；现役 v38 仍为 `running/healthy`，树莓派 OneBot 8080 仍只有一条已建立连接。候选主 Bot 数据库与包卷保留。
 
-切换前须完成 v38 的 24 小时观察并复核样本；之后启动 v39，复核包选择、管理图以及主 Bot 和测试 Bot 均为 OFFLINE。只在 v38 的 Bot 通过正式管理意图转为 OFFLINE、树莓派确认旧 OneBot 连接归零后，才允许将 v39 主 Bot 设为 ONLINE。随后核对 22/22 ACTIVE、准确 QQ Binding、单连接和许可群的一条低频真实 @ 回复。当前没有执行这些切换步骤，不能将隔离 BotHost 停机试验当作真实 QQ 回复或长期负载验收。
+切换前须完成 v38 的 24 小时观察并复核样本；之后启动 v39，复核包选择、管理图、主 Bot 为 READY/OFFLINE，且测试 Bot 为 DELETED。只在 v38 的 Bot 通过正式管理意图转为 OFFLINE、树莓派确认旧 OneBot 连接归零后，才允许将 v39 主 Bot 设为 ONLINE。随后核对 22/22 ACTIVE、准确 QQ Binding、单连接和许可群的一条低频真实 @ 回复。当前没有执行这些切换步骤，不能将隔离 BotHost 停机试验当作真实 QQ 回复或长期负载验收。
