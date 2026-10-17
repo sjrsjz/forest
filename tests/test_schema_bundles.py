@@ -275,9 +275,14 @@ async def test_official_selection_bootstrap_pins_artifacts_across_release_change
     changed_source = tmp_path / "next-adapter"
     copytree(root / "adapter_onebot", changed_source)
     manifest = changed_source / "module.toml"
+    current_version = adapter.manifest["version"]
+    version_parts = current_version.split(".")
+    next_version = ".".join((*version_parts[:2], str(int(version_parts[2]) + 1)))
+    original_manifest = manifest.read_text(encoding="utf-8")
+    assert f'version = "{current_version}"' in original_manifest
     manifest.write_text(
-        manifest.read_text(encoding="utf-8").replace(
-            'version = "2.6.0"', 'version = "2.6.1"', 1
+        original_manifest.replace(
+            f'version = "{current_version}"', f'version = "{next_version}"', 1
         ),
         encoding="utf-8",
     )
@@ -3567,6 +3572,7 @@ async def test_runtime_graph_adds_and_removes_a_package_without_restarting_kerne
     assert add_plan.add == add_plan.prepare == ("forest.counter",)
     controller = object.__new__(BotHost)
     controller._replacement_lock = asyncio.Lock()
+    controller._driver_binding_gate = None
     controller._closing = False
     controller.registry = first
     async def admit_capacity(_capacity):
@@ -3975,6 +3981,108 @@ async def test_post_publication_activation_failure_retires_retained_generations(
     assert rejected.value.code == "RUNTIME_GRAPH_NOT_CURRENT"
     assert await candidate.close() == []
     assert await previous.close() == []
+
+
+@pytest.mark.postgres
+async def test_core_rescue_ledger_rolls_back_execution_and_freezes_result(clean_authority):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    lease = await kernel.runtime.claim_host(
+        "core-rescue-ledger-host", "core-rescue-ledger-incarnation",
+        ttl=timedelta(minutes=5),
+    )
+    request_id = "core:test-ledger"
+    namespace = sql.Identifier(kernel.rescue_policy.namespace)
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.rescue_requests("
+                "bot_id,request_id,input_digest,event_ref,conversation_ref,"
+                "binding_ref,binding_epoch,self_id,connection_epoch,"
+                "client_incarnation,adapter_generation_id,executor_fence_digest,"
+                "group_ref,principal_ref,ingress_seq,policy_revision,"
+                "kernel_generation_id,action,service_class,admission_state,state,"
+                "received_at,admission_deadline) VALUES ("
+                "%s,%s,%s,%s,%s,%s,1,%s,1,%s,%s,%s,%s,%s,1,1,%s,%s,%s,'QUEUED',"
+                "'QUEUED',clock_timestamp(),clock_timestamp()+interval '30 seconds')"
+            ).format(namespace),
+            (
+                store.bot_id, request_id, digest_json({"core": request_id}),
+                "onebot-event:test-ledger", "onebot:group:933179609",
+                "binding/main", "3605196653", "client/test", "adapter/test",
+                digest_json({"executor": "test"}), "933179609", "qq:42",
+                "kernel/test", "status", "P0",
+            ),
+        )
+    result = {
+        "protocol": "forest.core-rescue-result/1",
+        "request_id": request_id,
+        "state": "SUCCEEDED",
+        "action": "status",
+        "value": {"data_admission": True},
+    }
+    with pytest.raises(RuntimeError, match="roll back execution"):
+        async with store.pool.connection() as conn, conn.transaction():
+            claimed = await kernel.rescue_requests.next_queued_in(conn, lease)
+            assert claimed["request_id"] == request_id
+            staged = await kernel.rescue_requests.complete_in(
+                conn, lease, request_id=request_id, state="SUCCEEDED",
+                result_value=result, result_code=None, payload_ref=None,
+            )
+            assert staged["delivery_state"] == "SUPPRESSED"
+            raise RuntimeError("roll back execution")
+    assert (await kernel.rescue_requests.result(request_id))["state"] == "QUEUED"
+    payload = await kernel.payload.put_bytes(
+        owner_component_id="kernel.runtime", owner_kind="core.rescue.result",
+        owner_id=request_id, media_type="application/json",
+        content=b'{"text":"Core status ready"}',
+        expected_deletion_epoch=await kernel.payload.epoch(),
+    )
+    wrong_payload = await kernel.payload.put_bytes(
+        owner_component_id="kernel.runtime", owner_kind="core.rescue.result",
+        owner_id="core:wrong-owner", media_type="application/json",
+        content=b'{"text":"wrong"}',
+        expected_deletion_epoch=await kernel.payload.epoch(),
+    )
+    async with store.pool.connection() as conn, conn.transaction():
+        with pytest.raises(ForestError) as wrong_owner:
+            await kernel.rescue_requests.complete_in(
+                conn, lease, request_id=request_id, state="SUCCEEDED",
+                result_value=result, result_code=None,
+                payload_ref={
+                    "payload_id": wrong_payload.payload_id,
+                    "digest": wrong_payload.content_digest,
+                },
+            )
+        assert wrong_owner.value.code == "PAYLOAD_IDENTITY_CONFLICT"
+    async with store.pool.connection() as conn, conn.transaction():
+        assert (await kernel.rescue_requests.next_queued_in(conn, lease))["request_id"] == (
+            request_id
+        )
+        settled = await kernel.rescue_requests.complete_in(
+            conn, lease, request_id=request_id, state="SUCCEEDED",
+            result_value=result, result_code=None,
+            payload_ref={"payload_id": payload.payload_id, "digest": payload.content_digest},
+        )
+        assert settled["delivery_state"] == "PENDING"
+        queued = await kernel.rescue_requests.mark_delivery_in(
+            conn, lease, request_id=request_id, intent_id="core-intent/test-ledger"
+        )
+        assert queued["delivery_state"] == "QUEUED"
+    async with store.pool.connection() as conn, conn.transaction():
+        assert await kernel.rescue_requests.next_queued_in(conn, lease) is None
+        assert await kernel.rescue_requests.next_pending_delivery_in(conn, lease) is None
+    assert (await kernel.rescue_requests.result(request_id))["delivery_intent_id"] == (
+        "core-intent/test-ledger"
+    )
+    with pytest.raises(psycopg.Error):
+        async with store.pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                sql.SQL("UPDATE {}.rescue_requests SET result_code='TAMPERED' "
+                        "WHERE bot_id=%s AND request_id=%s").format(namespace),
+                (store.bot_id, request_id),
+            )
+    assert (await kernel.rescue_requests.result(request_id))["result_code"] is None
 
 
 @pytest.mark.postgres

@@ -61,8 +61,21 @@ CREATE TABLE rescue_requests (
     expected_revision bigint CHECK (expected_revision > 0),
     service_class text CHECK (service_class IN ('P0','P1')),
     admission_state text NOT NULL CHECK (admission_state IN ('QUEUED','REJECTED')),
-    state text NOT NULL CHECK (state IN ('QUEUED','REJECTED')),
+    state text NOT NULL CHECK (state IN ('QUEUED','REJECTED','SUCCEEDED','FAILED','DENIED')),
     rejection_code text,
+    result_code text CHECK (result_code IS NULL OR octet_length(result_code) BETWEEN 1 AND 128),
+    result_value jsonb CHECK (result_value IS NULL OR octet_length(result_value::text) <= 8192),
+    result_payload_id text CHECK (
+        result_payload_id IS NULL OR octet_length(result_payload_id) BETWEEN 1 AND 256
+    ),
+    result_payload_digest text CHECK (
+        result_payload_digest IS NULL OR result_payload_digest ~ '^sha256:[a-f0-9]{64}$'
+    ),
+    delivery_state text CHECK (delivery_state IN ('PENDING','QUEUED','SUPPRESSED')),
+    delivery_intent_id text CHECK (
+        delivery_intent_id IS NULL OR octet_length(delivery_intent_id) BETWEEN 1 AND 256
+    ),
+    completed_at timestamptz,
     received_at timestamptz NOT NULL,
     admission_deadline timestamptz NOT NULL,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -71,15 +84,29 @@ CREATE TABLE rescue_requests (
     CHECK (
         (admission_state = 'QUEUED' AND action IS NOT NULL
             AND service_class IS NOT NULL AND rejection_code IS NULL)
-        OR (admission_state = 'REJECTED' AND rejection_code IN (
+        OR (admission_state = 'REJECTED' AND state='REJECTED' AND rejection_code IN (
             'CORE_RESCUE_SYNTAX_INVALID','CORE_RESCUE_PRINCIPAL_DENIED',
             'CORE_RESCUE_QUEUE_FULL'
         ))
+    ),
+    CHECK ((result_payload_id IS NULL) = (result_payload_digest IS NULL)),
+    CHECK (
+        (state IN ('QUEUED','REJECTED') AND result_code IS NULL AND result_value IS NULL
+            AND result_payload_id IS NULL AND delivery_state IS NULL
+            AND delivery_intent_id IS NULL AND completed_at IS NULL)
+        OR (state IN ('SUCCEEDED','FAILED','DENIED') AND result_value IS NOT NULL
+            AND completed_at IS NOT NULL AND delivery_state IS NOT NULL
+            AND (state='SUCCEEDED' OR result_code IS NOT NULL)
+            AND (delivery_state='SUPPRESSED' OR result_payload_id IS NOT NULL)
+            AND ((delivery_state='QUEUED') = (delivery_intent_id IS NOT NULL)))
     )
 );
 
 CREATE INDEX rescue_requests_queue_idx
     ON rescue_requests(bot_id,state,created_at,request_id);
+CREATE INDEX rescue_requests_pending_delivery_idx
+    ON rescue_requests(bot_id,completed_at,request_id)
+    WHERE delivery_state='PENDING';
 
 CREATE TABLE host_lease (
     bot_id text PRIMARY KEY REFERENCES forest_kernel.bot_identity(bot_id),
@@ -511,6 +538,50 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION rescue_request_guard() RETURNS trigger
+LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'Forest Core rescue request cannot be deleted' USING ERRCODE = '55000';
+    END IF;
+    IF ROW(
+        OLD.bot_id,OLD.request_id,OLD.input_digest,OLD.event_ref,OLD.conversation_ref,
+        OLD.binding_ref,OLD.binding_epoch,OLD.self_id,OLD.connection_epoch,
+        OLD.client_incarnation,OLD.adapter_generation_id,OLD.executor_fence_digest,
+        OLD.group_ref,OLD.principal_ref,OLD.ingress_seq,OLD.policy_revision,
+        OLD.kernel_generation_id,OLD.action,OLD.target_ref,OLD.expected_revision,
+        OLD.service_class,OLD.admission_state,OLD.rejection_code,
+        OLD.received_at,OLD.admission_deadline,OLD.created_at
+    ) IS DISTINCT FROM ROW(
+        NEW.bot_id,NEW.request_id,NEW.input_digest,NEW.event_ref,NEW.conversation_ref,
+        NEW.binding_ref,NEW.binding_epoch,NEW.self_id,NEW.connection_epoch,
+        NEW.client_incarnation,NEW.adapter_generation_id,NEW.executor_fence_digest,
+        NEW.group_ref,NEW.principal_ref,NEW.ingress_seq,NEW.policy_revision,
+        NEW.kernel_generation_id,NEW.action,NEW.target_ref,NEW.expected_revision,
+        NEW.service_class,NEW.admission_state,NEW.rejection_code,
+        NEW.received_at,NEW.admission_deadline,NEW.created_at
+    ) THEN
+        RAISE EXCEPTION 'Forest Core rescue request identity is immutable' USING ERRCODE = '55000';
+    END IF;
+    IF OLD.state='QUEUED' AND NEW.state IN ('SUCCEEDED','FAILED','DENIED') THEN
+        RETURN NEW;
+    END IF;
+    IF OLD.state IN ('SUCCEEDED','FAILED','DENIED')
+       AND NEW.state=OLD.state
+       AND OLD.delivery_state='PENDING'
+       AND NEW.delivery_state IN ('QUEUED','SUPPRESSED')
+       AND ROW(OLD.result_code,OLD.result_value,OLD.result_payload_id,
+               OLD.result_payload_digest,OLD.completed_at)
+           IS NOT DISTINCT FROM
+           ROW(NEW.result_code,NEW.result_value,NEW.result_payload_id,
+               NEW.result_payload_digest,NEW.completed_at)
+    THEN
+        RETURN NEW;
+    END IF;
+    RAISE EXCEPTION 'Illegal Forest Core rescue request transition' USING ERRCODE = '55000';
+END;
+$$;
+
 CREATE FUNCTION generation_identity_guard() RETURNS trigger
 LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
 BEGIN
@@ -636,6 +707,8 @@ $$;
 
 CREATE TRIGGER host_incarnations_immutable BEFORE UPDATE OR DELETE ON host_incarnations
     FOR EACH ROW EXECUTE FUNCTION reject_fact_mutation();
+CREATE TRIGGER rescue_request_transition BEFORE UPDATE OR DELETE ON rescue_requests
+    FOR EACH ROW EXECUTE FUNCTION rescue_request_guard();
 CREATE TRIGGER generation_identity BEFORE UPDATE ON generations
     FOR EACH ROW EXECUTE FUNCTION generation_identity_guard();
 CREATE TRIGGER service_operation_transition BEFORE UPDATE OR DELETE ON service_operations

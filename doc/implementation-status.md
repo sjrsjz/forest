@@ -1551,3 +1551,5 @@ Memory 关系审核语义与在线同 SQL 热替换（2026-10-11）：`memory.gr
 
 
 2026-10-17 Adapter 发布期绑定证明：`adapter.onebot` 2.6.0 / 私有 SQL 2.2.0 声明通用 `configuration_publication` 端口。RuntimeGraph 发布事务先激活并验证准确的配置修订，再向包 SQL 交付配置值；包只保存当前 Generation 的 Binding 标识、epoch、QQ self ID、启用状态和配置修订，不保存凭据引用或 endpoint。普通入站在包 SQL 里拒绝未发布、已停用或 epoch 不符的 Binding；Shell 来源证明进一步要求原始帧 self ID 等于该代发布事实，并核对事件的 Generation、作者、群和消息 ID。端口只在图发布期使用 READY 成员围栏，不暴露给普通 Worker 服务或 UnitOfWork。隔离 PostgreSQL 的 Shell 原始帧/当前绑定用例 `1 passed`，17 个包运行时相关用例通过；完整 BotHost 启动、退役、冷启动回归 `1 passed`（657.33 秒），包校验和 Ruff 通过。在线 v33 仍运行旧工件，此证据不表示真实 QQ Shell 已验收；无 Shell 包时的最小救援路由仍待完成。
+
+2026-10-17 Core 救援执行候选（未接入宿主循环）：内核 Runtime 的维护 CAS 与图替换请求可在调用方控制事务中执行，未领取的图替换请求可按 graph revision CAS 取消；agent.runtime 4.53.3 提供仅供 kernel.runtime 使用的 Run checkpoint CAS 取消参与端口，delivery 0.4.9 提供独立来源和载荷所有权的 Core CONTROL 意图端口。救援请求账本新增 QUEUED 到终态的单向结算、待回执状态、HostLease 围栏与结果载荷所有权校验；隔离 PostgreSQL 的事务回滚、终态冻结、Agent 取消及 Delivery 来源用例已通过。实际救援工作循环、执行前与发送前的 Adapter Binding/授权复核、Delivery 不可用后的回执重试及无 Shell 的完整 BotHost 验收仍未完成；在线实例未切入这些候选，也未发送 QQ 消息。

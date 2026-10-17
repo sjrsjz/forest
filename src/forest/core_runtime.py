@@ -63,6 +63,7 @@ from forest.storage.authorization_authority import (
 from forest.storage.effect_authority import KernelEffectRepository
 from forest.storage.kernel_audit import KernelAuditRepository
 from forest.storage.kernel_rescue_policy import KernelRescuePolicyAuthority
+from forest.storage.kernel_rescue_requests import KernelRescueRequestRepository
 from forest.storage.kernel_runtime import KernelRuntimeRepository
 from forest.storage.management_asset_authority import ManagementAssetAuthority
 from forest.storage.module_configuration import ModuleConfigurationRepository
@@ -725,6 +726,7 @@ class PreparedPayloadAuthorityModule(PreparedAuthorityModule):
 class KernelModules:
     runtime: KernelRuntimeRepository
     rescue_policy: KernelRescuePolicyAuthority
+    rescue_requests: KernelRescueRequestRepository
     payload: KernelPayloadRepository
     authorization: KernelAuthorizationRepository
     effect: KernelEffectRepository
@@ -763,6 +765,9 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
     runtime = KernelRuntimeRepository(store, bundles["kernel.runtime"].spec.namespace)
     rescue_policy = KernelRescuePolicyAuthority(
         store, bundles["kernel.runtime"].spec.namespace
+    )
+    rescue_requests = KernelRescueRequestRepository(
+        store, bundles["kernel.runtime"].spec.namespace, runtime, payload
     )
 
     async def verify_effect_fence(
@@ -1054,6 +1059,7 @@ async def bootstrap_kernel(store, installer) -> KernelModules:
     return KernelModules(
         runtime,
         rescue_policy,
+        rescue_requests,
         payload,
         authorization,
         effect,

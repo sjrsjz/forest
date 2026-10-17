@@ -2197,6 +2197,12 @@ class KernelRuntimeRepository:
                 409,
             )
 
+    async def verify_host_lease_in(self, conn, lease: HostLease) -> None:
+        """Fence a kernel-owned control transaction to the current Bot host."""
+
+        await self._identity_in(conn)
+        await self._host_in(conn, lease)
+
     async def _host_in(self, conn, lease: HostLease) -> None:
         if lease.bot_id != self.store.bot_id:
             raise ForestError("BOT_SCOPE_MISMATCH", "Host lease belongs to another Bot", 403)
