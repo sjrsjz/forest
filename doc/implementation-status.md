@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 v34 隔离候选非空记忆验收：Bot 经正式配置端口把嵌入 endpoint 指向本机假服务、模型 profile 不变，并把空闲上下文窗口设为 2→1。两个假群各注入 3 条被动消息，形成两个主干、每群 2 条 ELIGIBLE 与 1 条 REGISTERED；4 个 DOCUMENT facet READY 且有向量引用。两次正式管理召回试验分别返回单群 2 条与跨主干 4 条，群号/作者归因正确；管理筛选按群、状态和索引覆盖率可读。成本账本 4 次已结算、UNKNOWN 0；另一 Bot 独立库始终 0 源/单元/facet。Bot 退役后重新物化保留记忆及配置，最终重归 OFFLINE。测试向量固定，未证明真实语义质量或跨主干联想边；未接触真实 QQ。详见 [v34 非空双主干记忆验收](live-v34-memory-nonempty-2026-10-17.md)。
+
 2026-10-17 v34 隔离候选双 Bot 并存验收：第二个 Bot 经正式 Host 存储/供应链结算 `SUCCEEDED`，两个 Bot 具有不同假 OneBot 账号、不同物理 PostgreSQL 库及各自 22/22 READY 基线。两个 Bot 曾同时 `READY/ONLINE`、各有 22/22 ACTIVE 组件；先退役原 Bot 时第二个仍 ONLINE，随后也退役至 OFFLINE，两库均无 ACTIVE 图。假端点无发送动作，v33 保持 healthy。此证据不包含非空记忆内容隔离或真实 QQ。详见 [v34 双 Bot 隔离验收](live-v34-multibot-isolation-2026-10-17.md)。
 
 2026-10-17 v34 隔离候选在线生命周期与 Worker Host 自热重载：使用只读状态成功、发送动作一律拒绝的本机假 OneBot，经正式管理意图把离线供应的 Bot 拉起到 ONLINE；Bot 图 r1 ACTIVE、22/22 成员。Worker Host 包自身的 `module.reload` 请求跨代结算 SUCCEEDED，图升为 r2 ACTIVE、22/22 成员，21 个 Generation 换代、`kernel.payload` 保留。再经正式意图退回 OFFLINE，r1/r2 图均 STOPPED，假 OneBot 停止；未连接 QQ 或调用模型，v33 保持 healthy。详见 [v34 假 OneBot 在线与自热重载验收](live-v34-mock-online-reload-2026-10-17.md)。
