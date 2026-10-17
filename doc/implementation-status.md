@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 v34 隔离候选在线生命周期与 Worker Host 自热重载：使用只读状态成功、发送动作一律拒绝的本机假 OneBot，经正式管理意图把离线供应的 Bot 拉起到 ONLINE；Bot 图 r1 ACTIVE、22/22 成员。Worker Host 包自身的 `module.reload` 请求跨代结算 SUCCEEDED，图升为 r2 ACTIVE、22/22 成员，21 个 Generation 换代、`kernel.payload` 保留。再经正式意图退回 OFFLINE，r1/r2 图均 STOPPED，假 OneBot 停止；未连接 QQ 或调用模型，v33 保持 healthy。详见 [v34 假 OneBot 在线与自热重载验收](live-v34-mock-online-reload-2026-10-17.md)。
+
 2026-10-17 独立 v34 候选生产进程：`forest:runtime-95474cba` 在全新 `forest-accept-v34` 部署/Host/包卷上启动，部署图 8/8 与 Host 图 2/2 ACTIVE；通过正式 Secret、Host 存储编排、Bootstrap Contributor 和供应 Job 创建 `bot/accept-v34-offline-20261017`，Job `SUCCEEDED`，Bot `READY/OFFLINE`。新 Bot 库 22/22 个 bundle READY（Worker Host SQL `1.11.0`、Memory SQL `3.99.0`），运行图 0；重启 Supervisor 后部署/Host 图均恢复为修订 2 ACTIVE，Bot 与数据库状态保持。候选只监听本机管理端口，使用占位外部凭据，未连接 QQ 或调用模型；现役 v33 仍健康。详见 [v34 独立离线候选](live-v34-offline-candidate-2026-10-17.md)。
 
 2026-10-17 最新源码新库全链路复验：从提交 `95474cba` 构建隔离测试镜像 `forest:test-worker-host-release-95474cba`，在测试 PostgreSQL 中创建新的 Bot 数据库并运行完整 BotHost 用例。22 组件 ACTIVE、Shell/Web 管理、Memory 遗忘、Graph 换代与发行镜像携带新版 Worker Host 时的已发布工件冷恢复均通过（`1 passed in 581.72s`）；用例末尾强制删除该测试库，容器退出。只读容器产生一条 pytest 缓存写入警告。假 OneBot/模型/向量服务不能代替最新源码的独立 Supervisor 进程部署、真实 QQ 群聊回复或长期成本验收；现役 v33 保持旧镜像运行。
