@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 Delivery 可重试确定未发送的退避：源码包 0.4.6 / SQL 3.1.3 为 part 增加持久 `retry_ready_at`，按 attempt 序号指数退避至最多 60 秒，到期前不可领取。隔离 PostgreSQL 的状态机测试通过；该版本尚未打包进入 v35 镜像。设计审计同时发现 `delivery_observations` 目前只建表、观察函数不写该表，私有观察审计仍未完成，不能宣称晚到和冲突观察已留痕。
+
 2026-10-17 v35 隔离验收：新镜像 `forest:runtime-46a23592` 在独立库供应 OFFLINE Bot，22/22 schema bundle READY（Adapter SQL 2.2.0、Delivery SQL 3.1.2）。假 OneBot 的一次显式 `@` 经 Agent 回复进入 Delivery 后明确拒绝发送：intent/part `FAILED`、attempt `REJECTED`、尝试次数 1；Delivery 官方模块热重载 r4→r5 后仍是 1 次，没有重发。假 Bot 已 OFFLINE、v35/v34 隔离容器已停止；旧 AliceBot 再次按授权停用，NapCat 保持 READY、真实 QQ 仍由 v33 单连接。v35 含假向量，不可接真实 QQ；v33 尚未升级。详见 [v35 Delivery 隔离验收](live-v35-delivery-rejection-2026-10-17.md)。
 
 2026-10-17 Delivery 明确拒绝的终态修复：v34 假 OneBot 的两条失败回复在旧版中累计重试 184 次，原因是 Adapter 把明确拒绝当作可重试 `NOT_SENT`，Delivery 没接通已设计的 `REJECTED_NOT_APPLIED`。新源码将其终结为 `FAILED`，保留通用效果 `NOT_APPLIED`；43 个 OneBot/Delivery 测试、8 个传输测试及隔离 PostgreSQL 的终态与不可再领取测试通过。新包尚未部署，v33/v34 运行工件未改。同期 SSH 只读检查树莓派 NapCat 为 READY、仍在接收群消息，当前 Linux QQ 3.2.34-53644；最近版本过低登录错误属于 9 月 17 日，未重启或发送 QQ 消息。

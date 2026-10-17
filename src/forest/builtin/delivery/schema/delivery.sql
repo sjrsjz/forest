@@ -87,6 +87,7 @@ CREATE TABLE send_parts (
     owner_expires_at timestamptz,
     current_attempt_id text,
     attempt_count integer NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    retry_ready_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     PRIMARY KEY (bot_id,intent_id,part_index),
@@ -649,6 +650,7 @@ BEGIN
               JOIN __forest_module_schema__.send_intents i
                 ON i.bot_id=p.bot_id AND i.intent_id=p.intent_id
              WHERE p.bot_id=requested_bot AND p.state='QUEUED' AND i.state='QUEUED'
+               AND p.retry_ready_at<=clock_timestamp()
                AND p.part_index=i.current_part_index
                AND NOT EXISTS (
                    SELECT 1 FROM __forest_module_schema__.send_intents earlier
@@ -836,7 +838,10 @@ BEGIN
       UPDATE __forest_module_schema__.transport_attempts SET state='NOT_APPLIED',settled_at=clock_timestamp(),
         error_code=plan->>'error_code' WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
       UPDATE __forest_module_schema__.send_parts SET state='QUEUED',owner_id=NULL,owner_expires_at=NULL,
-        current_attempt_id=NULL,updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id'
+        current_attempt_id=NULL,
+        retry_ready_at=clock_timestamp()+make_interval(
+          secs=>LEAST(60,1 << LEAST(attempt.attempt_no-1,6))),
+        updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id'
         AND intent_id=attempt.intent_id AND part_index=attempt.part_index;
       UPDATE __forest_module_schema__.send_intents SET state='QUEUED',error_code=plan->>'error_code',
         updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND intent_id=intent.intent_id;

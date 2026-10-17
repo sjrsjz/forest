@@ -2030,13 +2030,17 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
     # effect was certainly not applied. It must never become claimable again.
     claim_request["claim_token"] = "claim:delivery-rejected"
     async with store.pool.connection() as conn, conn.transaction():
-        async def call(function, payload, *, operation_id):
+        async def call(function, payload, *, operation_id, input_digest=None):
             result = await conn.execute(
                 sql.SQL("SELECT {}.{}(%s::jsonb,%s::jsonb) AS value").format(
                     sql.Identifier(namespace), sql.Identifier(function)
                 ),
                 (
-                    Jsonb({**context, "operation_id": operation_id}),
+                    Jsonb({
+                        **context,
+                        "operation_id": operation_id,
+                        "input_digest": input_digest or context["input_digest"],
+                    }),
                     Jsonb(payload),
                 ),
             )
@@ -2126,6 +2130,96 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
         assert row["intent_state"] == "FAILED" and row["completed_at"] is not None
         assert row["part_state"] == "FAILED" and row["attempt_state"] == "REJECTED"
         assert row["attempt_count"] == 1
+
+        second = {
+            **request,
+            "intent_id": "intent/2",
+            "parts": [{
+                **request["parts"][0],
+                "part_operation_id": "part/2",
+                "effect_operation_ref": "effect/2",
+            }],
+        }
+        created = await call(
+            "delivery_create_chat_intent", second,
+            operation_id="delivery:create:2", input_digest=digest_json(second),
+        )
+        assert created["value"]["state"] == "QUEUED"
+        retry_claim = await call(
+            "delivery_claim_work",
+            {**claim_request, "claim_token": "claim:retryable"},
+            operation_id="claim:retryable",
+        )
+        retry_work = retry_claim["value"]["payload"]
+        retry_plan = {
+            **plan,
+            "work": retry_work,
+            "adapter": {**plan["adapter"], "binding_ref": retry_work["binding_ref"]},
+        }
+        prepared_retry = await call(
+            "delivery_record_prepare",
+            {
+                "input": retry_plan,
+                "prior": {
+                    "authorization": {"ticket": {"ticket_id": "ticket/test"}},
+                    "effect": {
+                        "effect_operation_id": retry_work["effect_operation_ref"],
+                        "attempt_id": retry_work["attempt_id"],
+                        "attempt_no": 1,
+                    },
+                },
+            },
+            operation_id="prepare:retryable",
+        )
+        assert prepared_retry["value"]["state"] == "PREPARED"
+        handed_retry = await call(
+            "delivery_record_handoff",
+            {
+                "input": {
+                    "work": retry_work,
+                    "effect": {"handoff_operation_id": "handoff:retryable"},
+                },
+                "prior": {
+                    "effect": {
+                        "attempt_id": retry_work["attempt_id"],
+                        "state": "DISPATCHING",
+                        "started_at": now,
+                    }
+                },
+            },
+            operation_id="handoff:retryable",
+        )
+        assert handed_retry["value"]["state"] == "DISPATCHING"
+        deferred = await call(
+            "delivery_record_observe",
+            {
+                "input": {
+                    "work": retry_work,
+                    "observed_status": "RETRYABLE_NOT_APPLIED",
+                    "error_code": "ONEBOT_WEBSOCKET_CLOSED",
+                    "receipt": None,
+                }
+            },
+            operation_id="observe:retryable",
+        )
+        assert deferred["value"] == {"intent_id": "intent/2", "state": "QUEUED"}
+        retry_row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT state,attempt_count,retry_ready_at>clock_timestamp() AS deferred "
+                    "FROM {}.send_parts WHERE bot_id=%s AND intent_id=%s"
+                ).format(sql.Identifier(namespace)),
+                (store.bot_id, "intent/2"),
+            )
+        ).fetchone()
+        assert retry_row["state"] == "QUEUED" and retry_row["attempt_count"] == 1
+        assert retry_row["deferred"] is True
+        not_ready = await call(
+            "delivery_claim_work",
+            {**claim_request, "claim_token": "claim:too-early"},
+            operation_id="claim:too-early",
+        )
+        assert not_ready["value"] is None
 
 
 @pytest.mark.postgres

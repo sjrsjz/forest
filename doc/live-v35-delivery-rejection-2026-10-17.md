@@ -7,3 +7,5 @@
 随后通过 `component.worker-host` 的正式 `module.reload` 动作重载目标 `delivery`。请求的内核结果为 `SUCCEEDED`，运行图 r4→r5，22 个成员仍在 ACTIVE 图中；变化的 Generation 仅为依赖闭包内的 `adapter.onebot`、`agent.runtime`、`conversation.scheduler`、`delivery`、`media.capture`、`shell.command`。重载后原失败意图仍是 `FAILED / REJECTED`，transport attempt 总数仍为 1，没有重放发送。
 
 验收结束后正式运行意图和观测都回到 OFFLINE；假 OneBot、v35 Supervisor、PostgreSQL 容器已停止，卷和账本保留。v34 隔离候选亦已停止。现役 v33 保持 healthy，树莓派旧 `alicebot.service` 已按此前授权停用，NapCat 仍为 READY，8080 只保留一条来自 Forest 的连接。本试验没有真实 QQ 出站、付费模型调用或真实 VL 嵌入；v35 含固定假向量和假配置，不能改绑真实 QQ。v33 仍运行旧工件，正式交接须在新的真实配置 Bot 与独立库上进行。
+
+在上述镜像验收之后，源码 Delivery 进一步加入 `retry_ready_at`：可重试的确定未发送按 attempt 次数做 1、2、4……最多 60 秒的持久退避，claim 只取到期的 part；明确拒绝的终态不变。新源码版本为 Delivery 0.4.6 / SQL 3.1.3，单独在 v35 隔离 PostgreSQL 中用干净测试库验证了“未到期不能再 claim”。该版本尚未进入 v35 镜像或运行图，不能把先前的端到端与热重载结果写成 3.1.3 的验证。
