@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 v35 隔离验收：新镜像 `forest:runtime-46a23592` 在独立库供应 OFFLINE Bot，22/22 schema bundle READY（Adapter SQL 2.2.0、Delivery SQL 3.1.2）。假 OneBot 的一次显式 `@` 经 Agent 回复进入 Delivery 后明确拒绝发送：intent/part `FAILED`、attempt `REJECTED`、尝试次数 1；Delivery 官方模块热重载 r4→r5 后仍是 1 次，没有重发。假 Bot 已 OFFLINE、v35/v34 隔离容器已停止；旧 AliceBot 再次按授权停用，NapCat 保持 READY、真实 QQ 仍由 v33 单连接。v35 含假向量，不可接真实 QQ；v33 尚未升级。详见 [v35 Delivery 隔离验收](live-v35-delivery-rejection-2026-10-17.md)。
+
 2026-10-17 Delivery 明确拒绝的终态修复：v34 假 OneBot 的两条失败回复在旧版中累计重试 184 次，原因是 Adapter 把明确拒绝当作可重试 `NOT_SENT`，Delivery 没接通已设计的 `REJECTED_NOT_APPLIED`。新源码将其终结为 `FAILED`，保留通用效果 `NOT_APPLIED`；43 个 OneBot/Delivery 测试、8 个传输测试及隔离 PostgreSQL 的终态与不可再领取测试通过。新包尚未部署，v33/v34 运行工件未改。同期 SSH 只读检查树莓派 NapCat 为 READY、仍在接收群消息，当前 Linux QQ 3.2.34-53644；最近版本过低登录错误属于 9 月 17 日，未重启或发送 QQ 消息。
 
 2026-10-17 v34 隔离候选 Agent 并发验收：正式配置把第一 Bot 的 Provider 指向受控假模型、触发策略纳入第二假群，图 r22、22/22 ACTIVE。首群第 1 次模型调用暂停时，同群后到 `@` 排队，第二群模型调用先于首群释放完成；假模型最终请求顺序为首群第 1 步、第二群第 1 步、首群第 2 步。首群一个 Run 的输入修订 1→2 对应两次模型请求，第二次包含排队消息；两条同群触发在第二步后共同结算。假 OneBot 拒绝发送，两个 Delivery intent 仍 `QUEUED / PLATFORM_REJECTED`，该候选 Bot 已 OFFLINE 且不得改绑真实 QQ，v33 未改。详见 [v34 Agent 并发验收](live-v34-agent-concurrency-2026-10-17.md)。
