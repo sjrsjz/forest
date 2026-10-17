@@ -2068,7 +2068,7 @@ async def test_worker_host_official_selection_and_replacement_lifecycle(tmp_path
 
 
 @pytest.mark.postgres
-async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
+async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
     if not dsn:
         pytest.skip("FOREST_TEST_DSN must name a private PostgreSQL test instance")
@@ -3919,14 +3919,41 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path):
                 ).fetchone()
             assert previous_state["state"] == "STOPPED"
             replaced_graph_id = replacement_graph.graph_identity.graph_id
+            published_worker_digest = next(
+                item["package_digest"]
+                for item in (await host._kernel.runtime.status())["members"]
+                if item["component_id"] == "component.worker-host"
+            )
         finally:
             await host.close()
         assert clients[-1].closed is True
+
+        next_release = tmp_path / "next-worker-host-release"
+        copied_worker_host = next_release / "builtin/component_worker_host"
+        copytree(
+            Path(__file__).resolve().parents[1] / "src/forest/builtin/component_worker_host",
+            copied_worker_host,
+        )
+        copied_manifest = copied_worker_host / "module.toml"
+        copied_source = copied_manifest.read_text(encoding="utf-8")
+        assert 'version = "1.7.0"' in copied_source
+        copied_manifest.write_text(
+            copied_source.replace('version = "1.7.0"', 'version = "1.7.1"', 1),
+            encoding="utf-8",
+        )
+        newer_worker = package_catalog.build_official(copied_worker_host, scope="bot")
+        assert newer_worker.digest != published_worker_digest
+        monkeypatch.setattr("forest.bot_host.files", lambda _package: next_release)
 
         restarted = create_host()
         await restarted.start()
         try:
             assert restarted.registry.graph_identity.graph_id != replaced_graph_id
+            assert next(
+                item["package_digest"]
+                for item in (await restarted._kernel.runtime.status())["members"]
+                if item["component_id"] == "component.worker-host"
+            ) == published_worker_digest
             assert set(restarted.registry.states.values()) == {ModuleLifecycleState.ACTIVE}
             restarted_work = await restarted.registry.get(
                 "memory.graph"

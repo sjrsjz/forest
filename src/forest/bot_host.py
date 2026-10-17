@@ -480,10 +480,36 @@ class BotHost:
             credential_resolver=resolve_provider_secret,
             **provider_driver_options,
         )
-        worker_host_source = Path(str(files("forest").joinpath("builtin/component_worker_host")))
-        worker_host_snapshot = await asyncio.to_thread(
-            self.package_catalog.build_official, worker_host_source, scope="bot"
+        worker_host_identity = await self._kernel.runtime.last_published_package(
+            "component.worker-host"
         )
+        if worker_host_identity is None:
+            worker_host_source = Path(str(files("forest").joinpath("builtin/component_worker_host")))
+            worker_host_snapshot = await asyncio.to_thread(
+                self.package_catalog.build_official, worker_host_source, scope="bot"
+            )
+        else:
+            if (
+                worker_host_identity["package_id"] != "forest.component-worker-host"
+                or worker_host_identity["trust_level"] != "official"
+            ):
+                raise ForestError(
+                    "WORKER_HOST_BOOTSTRAP_INVALID",
+                    "Published Worker Host package identity is invalid", 409,
+                )
+            worker_host_snapshot = await asyncio.to_thread(
+                self.package_catalog.get_official_bot,
+                worker_host_identity["package_digest"],
+            )
+            if (
+                worker_host_snapshot.component["id"] != "component.worker-host"
+                or worker_host_snapshot.manifest["package_id"] != "forest.component-worker-host"
+                or worker_host_snapshot.manifest["runtime"] != "python-worker"
+            ):
+                raise ForestError(
+                    "WORKER_HOST_BOOTSTRAP_INVALID",
+                    "Published Worker Host package identity is invalid", 409,
+                )
         worker_host = await bootstrap_builtin_snapshot(
             worker_host_snapshot,
             self.store,

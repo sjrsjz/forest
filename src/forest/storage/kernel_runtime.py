@@ -97,6 +97,37 @@ class KernelRuntimeRepository:
             "latest_replacement": dict(replacement) if replacement is not None else None,
         }
 
+    async def last_published_package(self, component_id: str) -> dict | None:
+        """Read an immutable package identity from the last published Bot graph."""
+        if not isinstance(component_id, str) or _IDENTIFIER.fullmatch(component_id) is None:
+            raise ForestError(
+                "RUNTIME_COMPONENT_ID_INVALID", "Runtime component identity is invalid", 422
+            )
+        async with self.store.pool.connection() as conn:
+            row = await (
+                await conn.execute(
+                    sql.SQL(
+                        "SELECT g.graph_id,g.graph_revision,m.package_id,m.package_digest,"
+                        "m.trust_level FROM {} g LEFT JOIN {} m ON m.bot_id=g.bot_id "
+                        "AND m.graph_id=g.graph_id AND m.component_id=%s "
+                        "WHERE g.bot_id=%s AND g.published_at IS NOT NULL "
+                        "ORDER BY g.graph_revision DESC LIMIT 1"
+                    ).format(
+                        self._table("runtime_graphs"),
+                        self._table("runtime_graph_modules"),
+                    ),
+                    (component_id, self.store.bot_id),
+                )
+            ).fetchone()
+        if row is None:
+            return None
+        if row["package_digest"] is None:
+            raise ForestError(
+                "RUNTIME_BOOTSTRAP_COMPONENT_MISSING",
+                "Last published graph lacks the bootstrap component", 409,
+            )
+        return dict(row)
+
     async def request_graph_replacement(
         self,
         lease: HostLease,
@@ -1563,7 +1594,8 @@ class KernelRuntimeRepository:
                             conn, head["graph_id"], item["component_id"], "QUIESCING"
                         )
             await conn.execute(
-                sql.SQL("UPDATE {} SET state='ACTIVE' WHERE bot_id=%s AND graph_id=%s").format(
+                sql.SQL("UPDATE {} SET state='ACTIVE',published_at=COALESCE("
+                        "published_at,clock_timestamp()) WHERE bot_id=%s AND graph_id=%s").format(
                     self._table("runtime_graphs")
                 ),
                 (self.store.bot_id, graph.graph_id),

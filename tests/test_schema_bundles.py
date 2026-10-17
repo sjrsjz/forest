@@ -216,6 +216,30 @@ async def test_kernel_replacement_service_preserves_frozen_selection_credentials
 
 
 @pytest.mark.postgres
+async def test_last_published_package_ignores_unpublished_candidate(clean_authority):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    runtime = kernel.runtime
+    lease = await runtime.claim_host("package-pin-host", "package-pin-incarnation")
+    first = await runtime.prepare_graph(
+        lease, [runtime_binding("component.worker-host", marker="a")], str(uuid4())
+    )
+    assert await runtime.last_published_package("component.worker-host") is None
+    await runtime.publish_graph(lease, first)
+    selected = await runtime.last_published_package("component.worker-host")
+    assert selected["graph_id"] == first.graph_id
+    assert selected["graph_revision"] == first.graph_revision
+
+    await runtime.prepare_graph(
+        lease, [runtime_binding("component.worker-host", marker="b")],
+        str(uuid4()),
+    )
+    assert await runtime.last_published_package("component.worker-host") == selected
+    await runtime.retire_graph(lease, first)
+    assert await runtime.last_published_package("component.worker-host") == selected
+
+
+@pytest.mark.postgres
 async def test_official_selection_bootstrap_pins_artifacts_across_release_change(
     clean_authority, tmp_path
 ):

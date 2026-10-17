@@ -264,6 +264,7 @@ CREATE TABLE runtime_graphs (
     source_graph_id text,
     state text NOT NULL CHECK (state IN ('PREPARED', 'ACTIVE', 'RETIRED', 'FAILED', 'STOPPED')),
     created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    published_at timestamptz,
     PRIMARY KEY (bot_id, graph_id),
     UNIQUE (bot_id, graph_revision),
     UNIQUE (bot_id, activation_id),
