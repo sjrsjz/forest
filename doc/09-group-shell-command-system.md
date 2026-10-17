@@ -1,6 +1,6 @@
 # 群聊 Shell、管理命令与优先级详细设计
 
-> 当前源码（2026-10-16）：内核 `shell.gate.inspect` 只认领完整 `#forest` 前缀；Adapter 仅在已认领时调用可热重载的 `shell.ingress.inspect`，已认领命令的 Shell 返回空值会按协议错误终止，不能落回 Agent。Shell 包负责确定性解析、管理员资格、目录路由、持久请求和优先级工作。同一 UnitOfWork 中，内核 `shell.gate-prove-ingress` 核对 Adapter/Conversation 接纳收据、已保存的 Raw/规范化 Payload、驱动帧因果根、临时原始 JSON 帧与命令前缀，只生成通用 `forest.shell-ingress-proof/1`；内核不解释 QQ 身份。随后可热重载的 `adapter.onebot` 私有 SQL 用原始帧核对 `self_id/user_id/group_id/message_id`、匿名身份、已记录事件和 gate 回执，生成 `forest.onebot-shell-origin-proof/1`；Shell admission 必须同时核对两份事务内回执。原始 JSON 帧只作为 Shell 事务输入，持久化仍只有既有 Raw Payload。当前传输配置的代际核对仍由 Adapter Worker 入站围栏完成，尚无脱离 Shell 包的最小救援路由。`component.worker-host` 实际贡献 `core.status/pause/resume/reload`；下文的 `core.cancel/disable` 仍是目标设计。在线 v33 尚未加载本次源码改动。下文保留完整目标协议。
+本文描述目标契约；当前实现、验收证据和暂时缺口以[实现状态](implementation-status.md)为准。
 
 ## 1. 目标与边界
 
@@ -44,7 +44,7 @@ Shell 接纳事务先复核 Binding、接纳时限与当前管理员资格，再
 
 ## 3. Core Gate 与模块命令
 
-内核保留以下救援语义：
+内核须独立于 `shell.command` 保留以下救援语义：
 
 ```text
 #forest core status
@@ -53,9 +53,9 @@ Shell 接纳事务先复核 Binding、接纳时限与当前管理员资格，再
 #forest core reload --expect-graph <graph-revision>
 ```
 
-`status/cancel/disable` 可以声明 P0，`reload` 为 P1。`core.status/pause/resume/reload` 由 `component.worker-host` 包贡献，包内 Worker 通过受限 `kernel.runtime` 服务端口查询状态、以 maintenance epoch CAS 更改 DATA admission，或以 graph revision CAS 提交整图 replacement request；内核负责 HostLease 围栏与状态写入，不解析 Shell 命令。单组件 reload 由同包的 `module.reload` 生命周期动作提供，Shell 不把整图换代假装成局部替换。命令只写持久 replacement request 并返回，宿主监督循环在该 Shell operation 完成后领取请求，避免执行者同步排空自身造成死锁。`disable` 关闭当前 Bot 的 data admission 并保留 CONTROL，不等于卸载某个模块；模块停用使用模块自己的 lifecycle action。只有接纳时命中 `shell.command` 对当前 Binding/群生效的管理员策略，并通过 `kernel.authorization` 精确能力检查的主体才能保留 P0；否则命令拒绝或降为普通 P1 查询，不能仅凭文本或平台群角色取得保留槽。执行和回执前再次查询当前授权、Binding epoch、Host lease、目标 revision 和资源所有权。
+`status/cancel/disable` 可以声明 P0，`reload` 为 P1。普通 `core.status/pause/resume/reload` 由 `component.worker-host` 包贡献，包内 Worker 通过受限 `kernel.runtime` 服务端口查询状态、以 maintenance epoch CAS 更改 DATA admission，或以 graph revision CAS 提交整图 replacement request。内核负责 HostLease 围栏与状态写入，不解析 Shell 命令；独立救援路由只能调用这些受限权威，不能把 Shell 包的业务状态复制进内核。单组件 reload 由 Worker Host 的 `module.reload` 生命周期动作提供，Shell 不把整图换代假装成局部替换。命令只写持久 replacement request 并返回，宿主监督循环在该 Shell operation 完成后领取请求，避免执行者同步排空自身造成死锁。`disable` 关闭当前 Bot 的 data admission 并保留 CONTROL，不等于卸载某个模块；模块停用使用模块自己的 lifecycle action。只有接纳时命中 `shell.command` 对当前 Binding/群生效的管理员策略，并通过 `kernel.authorization` 精确能力检查的主体才能保留 P0；否则命令拒绝或降为普通 P1 查询，不能仅凭文本或平台群角色取得保留槽。执行和回执前再次查询当前授权、Binding epoch、Host lease、目标 revision 和资源所有权。
 
-Core Gate 只规范化到既有 operation、Conversation Run 和 module lifecycle 权威。它不复制 Agent/Memory/Scheduler 状态机，不直接停止线程或改数据库行。正常模块不可用时，Core 命令仍能撤下路由、请求取消或读取最小健康信息。
+Core Gate 只规范化到既有 operation、Conversation Run 和 module lifecycle 权威。它不复制 Agent/Memory/Scheduler 状态机，不直接停止线程或改数据库行。正常模块不可用时，Core 命令仍须能撤下路由、请求取消或读取最小健康信息；实现状态不由本目标文档断言。
 
 其他命令由模块描述符注册：
 
@@ -71,7 +71,7 @@ RuntimeShellCommandContribution {
 
 示例：Agent 模块注册 `run list/inspect/cancel`，Memory 模块注册 `memory sources/query/forget-*`，Conversation 模块注册 `context inspect/compact/reset`，Job 模块注册 `jobs list/run/cancel`。控制台和 Shell 都从同一 management operation catalog 发现这些动作；控制台不会因此出现硬编码 Agent/Memory 顶层页面。
 
-当前 `memory.graph` 已作为首个非内核命令贡献者提供 `memory trunks`、`memory sources` 和 `memory relations`。群聊输出只给最多十项的短投影；来源项明确标注作者、模态和来源群，关系项明确标注证据来自哪些群。需要稳定游标、组合筛选或展开完整证据时，回执引导管理员进入同一模块的 WebUI 查询面，不能在群里倾倒大页数据。
+`memory.graph` 可作为非内核命令贡献者提供 `memory trunks`、`memory sources` 和 `memory relations`。群聊输出只给最多十项的短投影；来源项明确标注作者、模态和来源群，关系项明确标注证据来自哪些群。需要稳定游标、组合筛选或展开完整证据时，回执引导管理员进入同一模块的 WebUI 查询面，不能在群里倾倒大页数据。
 
 当前 `job.scheduler` 提供 `jobs list/inspect/run/cancel`，但不拥有具体任务语义。执行模块通过 `RuntimeJobTypeContribution` 声明稳定任务类型、版本、输入 schema、服务、超时、最大尝试和并发上限；Scheduler 在 claim 时冻结准确 provider Generation，并以持久 lease/token 拒绝旧 Worker 的迟到结果。热替换先排空旧 Scheduler 已领取任务，新 Generation 才继续领取排队任务。`jobs cancel` 使用调用者看到的 job revision：排队任务直接终结，运行中任务只登记可观察的取消意图，由执行器在安全点响应；已经产生的真实结果不能被改写成“从未执行”。首个内置类型为只读 `runtime.health-snapshot`。
 
@@ -93,7 +93,7 @@ Shell claim 由当前 RuntimeGraph 中声明消费 `shell-commands` 目录的组
 
 Shell 回执只报告持久 `request_id` 和状态；Graph 替换仍由 Worker Host 的独立任务提出并由宿主执行，不在群命令栈内同步排空自身。准确重放沿用原 operation ID 与输入摘要；同一 ID 改输入冲突。Web 与 Shell 对同一选择修订竞争时，最多一笔提交成功。命令执行结果未知时按 operation ID 查询，而不是重新生成选择请求。Shell claim 过期、管理员撤销、路由换代或计划变更都拒绝新写入，已经提交的请求保持真实状态。验证器属于 `shell.command` 包边界，内核只编排版本化验证契约与事务，不读取 Shell 私表。
 
-当前实现中，`component.worker-host` 贡献 `module.validate/enable/disable`，Shell 包解析命令并把 claim token 及其自身 Generation 送至冻结的目录路由。启停命令的 manifest 显式标记 `management_action`，通用包适配器据此直接调用同一管理 action，而不调用一个拥有选择写权限的 Shell 服务；未标记的命令不能获得这条入口。`shell.command` 的私有 UnitOfWork 验证器在 action 写事务内检查 claim、已消费的授权 ticket、租约、发言者与群、原命令/参数、目标服务及 Generation，并复核当前管理员资格。目标 Graph 控制准入、选择计划预检、Worker Host 选择写入和来源明确的审计在同一事务完成。Shell `module.validate` 只返回短预览，启停命令只返回持久请求 ID；完整事实仍由模块管理查询查看。
+`component.worker-host` 应贡献 `module.validate/enable/disable`，Shell 包解析命令并把 claim token 及其自身 Generation 送至冻结的目录路由。启停命令的 manifest 显式标记 `management_action`，通用包适配器据此直接调用同一管理 action，而不调用一个拥有选择写权限的 Shell 服务；未标记的命令不能获得这条入口。`shell.command` 的私有 UnitOfWork 验证器在 action 写事务内检查 claim、已消费的授权 ticket、租约、发言者与群、原命令/参数、目标服务及 Generation，并复核当前管理员资格。目标 Graph 控制准入、选择计划预检、Worker Host 选择写入和来源明确的审计在同一事务完成。Shell `module.validate` 只返回短预览，启停命令只返回持久请求 ID；完整事实仍由模块管理查询查看。
 
 命令贡献还会形成生命周期依赖：`shell.command` 必须在所有命令提供者之后启动，并在它们之前停止接纳和排空；Agent 工具目录同理使 `agent.runtime` 依赖工具提供者。该依赖进入 Generation 描述事实与拓扑排序，贡献者反向依赖 Shell 时会作为环在图构建期拒绝。这样旧图热替换时，Shell 已领取的命令不会遇到先被 quiesce 的提供者。
 

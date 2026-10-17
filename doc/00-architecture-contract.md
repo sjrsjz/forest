@@ -139,8 +139,6 @@ dispatch trace 只读投影上述事实，按稳定 `caused_by`、RuntimeGraph �
 
 ## 4. 命令与 Shell 策略
 
-> 当前实现说明（2026-10-09）：Adapter 先调用可热重载的 `shell.ingress.inspect` Worker，再进入 Inbox/分类事务；尚无本节所述的内核 ShellGate、ingress proof 或独立救援路由。这里描述目标边界，最终归属待明确后须同步代码与协议。
-
 ShellGate 只保留有界 `#forest` 前缀识别、入口容量隔离和最小救援能力。管理员名单、群/Binding 策略、命令 schema、优先级和执行结果属于 `shell.command`。
 
 - P0/P1 是经当前策略计算出的控制服务资格，只影响调度资源，不改变群历史顺序。
