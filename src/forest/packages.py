@@ -2052,7 +2052,8 @@ def _manifest(files: dict[str, bytes]) -> dict:
     )
     command_ports = {item["name"] for item in domain_commands}
     management_command_ports = command_ports | {
-        item["name"] for item in kernel_commands
+        item["name"] for item in (*kernel_commands, *unit_of_work_plans)
+        if not item.get("read_only", False)
     }
     management_ids = set()
     for declaration in (*management_queries, *management_actions, *management_artifacts):
@@ -2154,7 +2155,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         if declaration.get("port") not in management_command_ports:
             _fail(
                 "INVALID_MANAGEMENT_OPERATIONS",
-                "Management actions must bind an exact Domain or kernel Command port",
+                "Management actions must bind an exact Command or writable UnitOfWork plan",
             )
         preflight = declaration.get("transaction_preflight")
         if preflight is not None and not IDENTIFIER.fullmatch(preflight):
@@ -2171,7 +2172,7 @@ def _manifest(files: dict[str, bytes]) -> dict:
         actor_field = declaration.get("actor_field")
         if actor_field is not None:
             port = next(
-                item for item in (*domain_commands, *kernel_commands)
+                item for item in (*domain_commands, *kernel_commands, *unit_of_work_plans)
                 if item["name"] == declaration["port"]
             )
             input_schema = _schema(files, port["input_schema"])

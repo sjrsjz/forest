@@ -2107,6 +2107,7 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
                     "error_code": "PLATFORM_REJECTED",
                     "receipt": None,
                     "effect": {
+                        "effect_operation_id": work["effect_operation_ref"],
                         "observation_operation_id": "effect-observe:rejected",
                         "status": "NOT_APPLIED",
                         "evidence_kind": "executor",
@@ -2122,7 +2123,10 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
             },
             operation_id="observe:rejected",
         )
-        assert observed["value"] == {"intent_id": "intent/1", "state": "FAILED"}
+        assert observed["value"] == {
+            "intent_id": "intent/1", "state": "FAILED",
+            "accepted": True, "conflict_code": None,
+        }
         again = await call("delivery_claim_work", {
             **claim_request, "claim_token": "claim:after-rejected"
         }, operation_id="claim:after-rejected")
@@ -2163,6 +2167,7 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
                     "error_code": "LATE_UNCERTAIN",
                     "receipt": None,
                     "effect": {
+                        "effect_operation_id": work["effect_operation_ref"],
                         "observation_operation_id": "effect-observe:late",
                         "status": "UNKNOWN",
                         "evidence_kind": "executor",
@@ -2179,7 +2184,10 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
             },
             operation_id="observe:late",
         )
-        assert late["value"] == {"intent_id": "intent/1", "state": "FAILED"}
+        assert late["value"] == {
+            "intent_id": "intent/1", "state": "FAILED",
+            "accepted": False, "conflict_code": "EFFECT_EVIDENCE_CONFLICT",
+        }
         late_row = await (
             await conn.execute(
                 sql.SQL(
@@ -2262,6 +2270,7 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
                     "error_code": "ONEBOT_WEBSOCKET_CLOSED",
                     "receipt": None,
                     "effect": {
+                        "effect_operation_id": retry_work["effect_operation_ref"],
                         "observation_operation_id": "effect-observe:retryable",
                         "status": "NOT_APPLIED",
                         "evidence_kind": "executor",
@@ -2277,7 +2286,10 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
             },
             operation_id="observe:retryable",
         )
-        assert deferred["value"] == {"intent_id": "intent/2", "state": "QUEUED"}
+        assert deferred["value"] == {
+            "intent_id": "intent/2", "state": "QUEUED",
+            "accepted": True, "conflict_code": None,
+        }
         retry_row = await (
             await conn.execute(
                 sql.SQL(
@@ -2295,6 +2307,176 @@ async def test_delivery_builtin_owns_transactional_intent_creation(clean_authori
             operation_id="claim:too-early",
         )
         assert not_ready["value"] is None
+
+        uncertain_request = {
+            **request,
+            "intent_id": "intent/3",
+            "ordering_key": "conversation/3",
+            "conversation_ref": "conversation/3",
+            "parts": [{
+                **request["parts"][0],
+                "part_operation_id": "part/3",
+                "effect_operation_ref": "effect/3",
+            }],
+        }
+        await call(
+            "delivery_create_chat_intent", uncertain_request,
+            operation_id="delivery:create:3", input_digest=digest_json(uncertain_request),
+        )
+        uncertain_claim = await call(
+            "delivery_claim_work",
+            {**claim_request, "claim_token": "claim:uncertain"},
+            operation_id="claim:uncertain",
+        )
+        uncertain_work = uncertain_claim["value"]["payload"]
+        assert uncertain_work["intent_id"] == "intent/3"
+        uncertain_plan = {
+            **plan,
+            "work": uncertain_work,
+        }
+        await call(
+            "delivery_record_prepare",
+            {
+                "input": uncertain_plan,
+                "prior": {
+                    "authorization": {"ticket": {"ticket_id": "ticket/test"}},
+                    "effect": {
+                        "effect_operation_id": uncertain_work["effect_operation_ref"],
+                        "attempt_id": uncertain_work["attempt_id"],
+                        "attempt_no": 1,
+                    },
+                },
+            },
+            operation_id="prepare:uncertain",
+        )
+        await call(
+            "delivery_record_handoff",
+            {
+                "input": {
+                    "work": uncertain_work,
+                    "effect": {"handoff_operation_id": "handoff:uncertain"},
+                },
+                "prior": {"effect": {
+                    "attempt_id": uncertain_work["attempt_id"],
+                    "state": "DISPATCHING", "started_at": now,
+                }},
+            },
+            operation_id="handoff:uncertain",
+        )
+        uncertain_effect = {
+            "effect_operation_id": uncertain_work["effect_operation_ref"],
+            "observation_operation_id": "effect-observe:uncertain",
+            "status": "UNKNOWN", "evidence_kind": "executor",
+        }
+        uncertain = await call(
+            "delivery_record_observe",
+            {
+                "input": {
+                    "work": uncertain_work,
+                    "observed_status": "UNKNOWN",
+                    "error_code": "DELIVERY_RESULT_UNKNOWN",
+                    "receipt": None, "effect": uncertain_effect,
+                },
+                "prior": {"effect": {
+                    "attempt_id": uncertain_work["attempt_id"],
+                    "observation_operation_id": uncertain_effect["observation_operation_id"],
+                    "observed_status": "UNKNOWN", "evidence_kind": "executor",
+                    "accepted": True,
+                }},
+            },
+            operation_id="observe:uncertain",
+        )
+        assert uncertain["value"]["state"] == "UNKNOWN"
+        unknown_page = await call(
+            "delivery_list_unknown", {"lane_kind": "CHAT", "channel_ref": "933179609"},
+            operation_id="query:unknown",
+        )
+        assert [item["intent_id"] for item in unknown_page["value"]["items"]] == ["intent/3"]
+        detail = await call(
+            "delivery_get_unknown", {"intent_id": "intent/3"},
+            operation_id="query:unknown-detail",
+        )
+        assert detail["value"]["attempt"]["effect_attempt_ref"] == uncertain_work["attempt_id"]
+        assert detail["value"]["observations"][0]["observed_status"] == "UNKNOWN"
+        reconciliation_effect = {
+            "effect_operation_id": uncertain_work["effect_operation_ref"],
+            "observation_operation_id": "effect-observe:reconcile",
+            "status": "SUCCEEDED", "evidence_kind": "reconciliation",
+        }
+        reconciled = await call(
+            "delivery_record_observe",
+            {
+                "input": {
+                    "work": uncertain_work, "observed_status": "SENT",
+                    "error_code": None, "receipt": None,
+                    "effect": reconciliation_effect,
+                    "evidence": {"kind": "platform-log", "reference": "log/77"},
+                    "requested_by": "web/admin",
+                },
+                "prior": {"effect": {
+                    "attempt_id": uncertain_work["attempt_id"],
+                    "observation_operation_id": reconciliation_effect["observation_operation_id"],
+                    "observed_status": "SUCCEEDED", "evidence_kind": "reconciliation",
+                    "accepted": True,
+                }},
+            },
+            operation_id="observe:reconcile",
+        )
+        assert reconciled["ok"], reconciled
+        assert reconciled["value"] == {
+            "intent_id": "intent/3", "state": "SENT",
+            "accepted": True, "conflict_code": None,
+        }
+        accepted_row = await (
+            await conn.execute(
+                sql.SQL(
+                    "SELECT a.state,a.resolved_at,o.evidence_details "
+                    "FROM {}.transport_attempts a JOIN {}.delivery_observations o "
+                    "ON o.bot_id=a.bot_id AND o.attempt_id=a.attempt_id "
+                    "WHERE a.bot_id=%s AND o.observation_operation_id=%s"
+                ).format(sql.Identifier(namespace), sql.Identifier(namespace)),
+                (store.bot_id, "observe:reconcile"),
+            )
+        ).fetchone()
+        assert accepted_row["state"] == "SENT" and accepted_row["resolved_at"] is not None
+        assert accepted_row["evidence_details"] == {
+            "protocol": "forest.delivery-reconciliation-evidence/1",
+            "kind": "platform-log", "reference": "log/77",
+            "requested_by": "web/admin",
+        }
+        conflicting = await call(
+            "delivery_record_observe",
+            {
+                "input": {
+                    "work": uncertain_work,
+                    "observed_status": "RETRYABLE_NOT_APPLIED",
+                    "error_code": "DELIVERY_ADMIN_NOT_APPLIED",
+                    "receipt": None,
+                    "effect": {
+                        "effect_operation_id": uncertain_work["effect_operation_ref"],
+                        "observation_operation_id": "effect-observe:contradictory",
+                        "status": "NOT_APPLIED", "evidence_kind": "reconciliation",
+                    },
+                    "evidence": {"kind": "case-file", "reference": "case/88"},
+                    "requested_by": "web/second-admin",
+                },
+                "prior": {"effect": {
+                    "attempt_id": uncertain_work["attempt_id"],
+                    "observation_operation_id": "effect-observe:contradictory",
+                    "observed_status": "NOT_APPLIED", "evidence_kind": "reconciliation",
+                    "accepted": False, "conflict_code": "EFFECT_EVIDENCE_CONFLICT",
+                }},
+            },
+            operation_id="observe:contradictory",
+        )
+        assert conflicting["value"] == {
+            "intent_id": "intent/3", "state": "SENT",
+            "accepted": False, "conflict_code": "EFFECT_EVIDENCE_CONFLICT",
+        }
+        no_longer_unknown = await call(
+            "delivery_list_unknown", {}, operation_id="query:resolved",
+        )
+        assert no_longer_unknown["value"]["items"] == []
 
 
 @pytest.mark.postgres

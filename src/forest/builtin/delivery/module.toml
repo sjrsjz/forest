@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.4.7"
+version = "0.4.8"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -85,9 +85,9 @@ order = 20
 
 [components.storage]
 schema_id = "forest.delivery"
-schema_version = "3.1.4"
+schema_version = "3.1.5"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "240e7a12076b958ec6131060bd81626590f379e427c5d2d09f78d892941e5b79"
+baseline_sha256 = "0db925bce79122c81e090d57323d6b5cc79a2f9342efebed030aa49aeb4018db"
 scope = "bot"
 repository_contract = "forest.delivery.repository/3"
 execution_profile = "official"
@@ -186,6 +186,54 @@ steps = [
   { id = "effect", component_id = "kernel.effect", participant = "effect.observe", input_path = "/effect" },
   { id = "delivery", component_id = "delivery", participant = "delivery.record-observe" }
 ]
+
+[[components.unit_of_work_plans]]
+name = "delivery.reconcile"
+contract = "1.0"
+input_schema = "schemas/reconcile-plan.json"
+output_schema = "schemas/delivery-result.json"
+timeout_s = 15
+steps = [
+  { id = "effect", component_id = "kernel.effect", participant = "effect.observe", input_path = "/effect" },
+  { id = "delivery", component_id = "delivery", participant = "delivery.record-observe" }
+]
+
+[[components.domain_queries]]
+name = "delivery.list-unknown"
+contract = "1.0"
+function = "delivery_list_unknown"
+input_schema = "schemas/unknown-list-input.json"
+output_schema = "schemas/unknown-list-output.json"
+
+[[components.domain_queries]]
+name = "delivery.get-unknown"
+contract = "1.0"
+function = "delivery_get_unknown"
+input_schema = "schemas/unknown-detail-input.json"
+output_schema = "schemas/unknown-detail-output.json"
+
+[[components.management_queries]]
+id = "delivery.unknown.list"
+port = "delivery.list-unknown"
+required_role = "ADMIN"
+audit = "SECURITY"
+default_limit = 50
+max_limit = 100
+timeout_s = 10
+
+[[components.management_queries]]
+id = "delivery.unknown.get"
+port = "delivery.get-unknown"
+required_role = "ADMIN"
+audit = "SECURITY"
+timeout_s = 10
+
+[[components.management_actions]]
+id = "delivery.unknown.resolve"
+port = "delivery.reconcile"
+priority = "P0"
+actor_field = "requested_by"
+timeout_s = 20
 
 [[components.unit_of_work_plans]]
 name = "delivery.release"

@@ -2377,7 +2377,8 @@ class PackageGenerationAdapter:
                 403,
             )
         kernel_command = declaration in self.component.get("kernel_commands", ())
-        if not kernel_command and declaration not in self.component.get("domain_commands", ()):
+        uow_plan = declaration in self.component.get("unit_of_work_plans", ())
+        if not kernel_command and not uow_plan and declaration not in self.component.get("domain_commands", ()):
             raise ForestError(
                 "MODULE_MANAGEMENT_BINDING_INVALID",
                 "Management action is not bound to this package Generation",
@@ -2391,6 +2392,7 @@ class PackageGenerationAdapter:
                 409,
             )
         authority = (
+            self._unit_of_work_coordinator if uow_plan else
             self._kernel_management_commands if kernel_command else self._domain_commands
         )
         if authority is None:
@@ -2444,10 +2446,17 @@ class PackageGenerationAdapter:
                         if verify_in is not None:
                             await verify_in(conn)
 
+                    if uow_plan:
+                        result = await authority.execute(
+                            scope, declaration, payload,
+                            parent_call_id=parent_call_id,
+                            timeout_seconds=timeout_seconds,
+                            before_steps=before_write,
+                            result_validator=output_validator.is_valid,
+                        )
+                        return result
                     return await authority.invoke_management_action(
-                        scope,
-                        declaration,
-                        payload,
+                        scope, declaration, payload,
                         parent_call_id=parent_call_id,
                         timeout_seconds=timeout_seconds,
                         before_write=before_write,

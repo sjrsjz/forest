@@ -239,6 +239,8 @@ class PostgresPackageUnitOfWorkCoordinator:
         *,
         parent_call_id: str,
         timeout_seconds: float,
+        before_steps=None,
+        result_validator=None,
     ) -> Any:
         if scope.component_id != self.component_id:
             raise ForestError(
@@ -261,7 +263,7 @@ class PostgresPackageUnitOfWorkCoordinator:
                             conn,
                             component_id=self.component_id,
                             generation_id=scope.generation_id,
-                            admission_lane="DATA",
+                            admission_lane="CONTROL" if before_steps is not None else "DATA",
                         )
                     participants = {
                         component_id: self._resolve(component_id)
@@ -284,6 +286,8 @@ class PostgresPackageUnitOfWorkCoordinator:
                             component_id=component_id,
                             generation_id=participant.generation_id,
                         )
+                    if before_steps is not None:
+                        await before_steps(conn)
                     read_only = declaration.get("read_only", False)
                     if read_only:
                         for step in declaration["steps"]:
@@ -339,6 +343,11 @@ class PostgresPackageUnitOfWorkCoordinator:
                         )
                         prior[step["id"]] = result
                     result = prior[declaration["steps"][-1]["id"]]
+                    if result_validator is not None and not result_validator(result):
+                        raise ForestError(
+                            "PACKAGE_UOW_OUTPUT_INVALID",
+                            "UnitOfWork result violates its package schema", 502,
+                        )
                 if self.work_notifier is not None and not declaration.get("read_only", False):
                     self.work_notifier()
                 return result

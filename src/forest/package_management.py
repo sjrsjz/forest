@@ -49,6 +49,10 @@ class PackageManagementContract(ModuleConfigurationContract):
             (item["name"], item)
             for item in component.get("kernel_commands", ())
         )
+        command_ports.update(
+            (item["name"], item)
+            for item in component.get("unit_of_work_plans", ())
+        )
         self._queries = {
             item["id"]: (item, query_ports[item["port"]])
             for item in component.get("management_queries", ())

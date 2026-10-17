@@ -265,6 +265,82 @@ async def test_management_preflight_wraps_the_domain_transaction(tmp_path):
     ]
 
 
+async def test_delivery_management_action_runs_authorized_uow_plan(tmp_path):
+    snapshot = PackageCatalog(tmp_path / "catalog").build(
+        Path(__file__).parents[1] / "src/forest/builtin/delivery"
+    )
+    events = []
+
+    class Coordinator:
+        async def execute(
+            self, scope, declaration, payload, *, before_steps, result_validator, **_kwargs
+        ):
+            assert scope.component_id == "delivery"
+            assert declaration["name"] == "delivery.reconcile"
+            assert payload["requested_by"] == "web:admin"
+            events.append("transaction")
+            await before_steps("transaction")
+            events.append("effect")
+            result = {
+                "intent_id": "intent/1", "state": "SENT",
+                "accepted": True, "conflict_code": None,
+            }
+            assert result_validator(result)
+            events.append("delivery")
+            return result
+
+    adapter = PackageGenerationAdapter(
+        snapshot=snapshot, bot_id="bot/one",
+        module_configuration=Configuration(),
+        grants=SimpleNamespace(grant_set_digest="sha256:" + "1" * 64, entries=()),
+        service_routes={}, resolved_contracts={},
+        generation_verifier=lambda **_values: None,
+        generation_member_verifier=lambda **_values: None,
+        state_queries=None, state_commands=None,
+        unit_of_work_coordinator=Coordinator(),
+        owned_work_authority=SimpleNamespace(),
+        service_operation_ledger=NoServiceLedger(),
+    )
+    adapter.state = PackageGenerationState.ACTIVE
+    adapter.generation_identity = SimpleNamespace(generation_id="generation/delivery")
+    adapter._prepared_binding = SimpleNamespace(
+        instance_id="instance/delivery", worker_incarnation="worker/delivery"
+    )
+    plan = next(item for item in snapshot.component["unit_of_work_plans"]
+                if item["name"] == "delivery.reconcile")
+    payload = {
+        "work": {
+            "intent_id": "intent/1", "attempt_id": "attempt/1",
+            "effect_operation_ref": "effect/1",
+        },
+        "observed_status": "SENT", "error_code": None, "receipt": None,
+        "effect": {
+            "protocol": "forest.effect-observe/1",
+            "effect_operation_id": "effect/1", "attempt_id": "effect-attempt/1",
+            "observation_operation_id": "observation/1",
+            "status": "SUCCEEDED", "evidence_kind": "reconciliation",
+            "evidence_payload": None,
+        },
+        "evidence": {"kind": "platform-log", "reference": "log/77"},
+        "requested_by": "web:admin",
+    }
+
+    async def authorize(conn, **kwargs):
+        assert conn == "transaction"
+        assert kwargs["component_id"] == "delivery"
+        assert kwargs["action_key"] == "delivery.unknown.resolve"
+        events.append("authorize")
+
+    result = await adapter.invoke_management_action(
+        plan, payload, action_id="delivery.unknown.resolve",
+        operation_id="operation/reconcile", plan_digest=None,
+        request_digest=digest_json(payload), timeout_seconds=5,
+        authorization=object(), authorization_guard=authorize,
+    )
+    assert result["state"] == "SENT"
+    assert events == ["transaction", "authorize", "effect", "delivery"]
+
+
 def test_management_only_memory_services_have_no_runtime_routes(tmp_path):
     snapshot = PackageCatalog(tmp_path / "catalog").build(
         Path(__file__).parents[1] / "src/forest/builtin/memory_graph"

@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 v37 Delivery UNKNOWN 人工调和：源码包 `forest.delivery` 0.4.8 / SQL 3.1.5 通过模块声明的管理查询、P0 管理动作和跨 `kernel.effect` / Delivery 的 UnitOfWork 接入。独立部署与新 Bot 库中，假群 `@` 经假模型生成回复，假 OneBot 在收到发送动作后断开，产生 UNKNOWN；管理 API 列表与详情返回尝试和观察记录。管理员提供可复核证据后，`REJECTED_NOT_APPLIED` 原子收敛为 Effect `NOT_APPLIED`、Delivery intent `FAILED`、attempt `REJECTED`，保留解决时间与证据；矛盾的后续 `SENT` 裁决返回 `EFFECT_EVIDENCE_CONFLICT`，两个账本状态不变。测试未触及真实 QQ；现役 v33 不变。详见 [v37 Delivery 调和验收](live-v37-delivery-reconciliation-2026-10-17.md)。
+
 2026-10-17 v36 完整 Delivery 观察链验收：独立新库、镜像 `forest:runtime-6f3c16c7`、本地拒绝发送的假 OneBot 中，一次假群 `@` 经 Agent、Kernel Effect 和 Delivery 正式 UnitOfWork 产生配对的 accepted 观察行（Effect `NOT_APPLIED`，Delivery `REJECTED_NOT_APPLIED`），intent/part FAILED 且只有 1 次发送尝试。Delivery 官方热重载 r4→r5 后观察账本和单次尝试保持。假 Bot OFFLINE、容器已停止，v33 与树莓派真实 QQ 单连接不变。真实晚到调和入口和真实配置交接仍待完成。详见 [v36 Delivery 观察验收](live-v36-delivery-observation-2026-10-17.md)。
 
 2026-10-17 Delivery 私有观察账本接通：源码包 0.4.7 / SQL 3.1.4 校验同事务 `kernel.effect` 回执并持久记录接受/冲突观察；隔离 PostgreSQL 测试证实明确拒绝的接受行和晚到冲突行并存，冲突不改变 FAILED/REJECTED 终态，退避测试仍通过。尚未构建新版完整运行镜像，也未验证真实调和入口或完整 UnitOfWork；现役 v33 不变。

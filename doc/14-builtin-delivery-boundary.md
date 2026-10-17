@@ -34,14 +34,9 @@
 
 包在 manifest 中声明固定顺序的 UnitOfWork plan。协调器从同一 RuntimeGraph 解析每个 participant 的精确 Generation，在一个 PostgreSQL 事务内逐步调用；任一步 typed rejection 都回滚全部数据库写入。
 
-准备发送至少包含：
+准备发送时，Worker 先通过 `adapter.onebot.delivery.prepare` 得到带连接/Generation fence 的 wire 投影，再物化 wire Payload；`delivery.prepare` plan 在同一数据库事务中依次执行 `authorization.issue`、`effect.prepare`、`delivery.record-prepare`。`delivery.handoff`、`delivery.observe`、`delivery.abandon` 和 `delivery.reconcile` 各有固定的 plan。外部 dispatch 位于 prepare 与 handoff 事务之后；一旦交接，取消或进程丢失只能写入 UNKNOWN/显式 evidence，不能伪装成未发送。
 
-1. `adapter.onebot/adapter.transport-fence`；
-2. `delivery/delivery.attempt-prepare`；
-3. `kernel.authorization/authorization.issue`；
-4. `kernel.effect/effect.prepare`。
-
-交接、观察、放弃和人工 reconciliation 各自使用独立 plan。plan 是不可变协议，不是可编辑工作流或 WebUI “执行链”。外部 dispatch 位于数据库准备与交接之后；一旦交接，取消或进程丢失只能写入 UNKNOWN/显式 evidence，不能伪装成未发送。
+人工调和是包声明的 P0 管理动作 `delivery.unknown.resolve`，绑定 `delivery.reconcile` UnitOfWork plan。管理网关只负责当前 Web 主体、票据和 CONTROL 准入；通用协调器在执行 Effect/Delivery participant 前于同一 PostgreSQL 事务验签并消费票据。Effect 只收敛通用副作用状态，Delivery 校验准确 Intent、Attempt 和 Effect 引用，保存 `forest.delivery-reconciliation-evidence/1` 的操作者与可复核引用，并释放 lane。票据或任一步失败均回滚整个事务；相反结论的后到观察仍记为冲突，不改终态。plan 是不可变协议，不是可编辑工作流或 WebUI“执行链”。
 
 ## 生命周期和热重载
 

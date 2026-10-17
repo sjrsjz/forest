@@ -37,8 +37,15 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
         "delivery.prepare",
         "delivery.handoff",
         "delivery.observe",
+        "delivery.reconcile",
         "delivery.release",
         "delivery.abandon",
+    ]
+    assert {item["id"] for item in snapshot.component["management_queries"]} == {
+        "delivery.unknown.list", "delivery.unknown.get",
+    }
+    assert [item["port"] for item in snapshot.component["management_actions"]] == [
+        "delivery.reconcile",
     ]
     assert snapshot.management_ui() is not None
 

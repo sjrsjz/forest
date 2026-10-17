@@ -810,6 +810,8 @@ DECLARE plan jsonb:=input->'input'; work jsonb:=plan->'work'; attempt record; in
         requested text:=plan->>'observed_status'; resulting text; receipt jsonb:=plan->'receipt';
         effect jsonb:=input->'prior'->'effect'; existing record; prior_state text;
         target_state text; expected_effect_state text; accepted boolean; conflict text;
+        reconciliation boolean:=plan->'effect'->>'evidence_kind'='reconciliation';
+        evidence_details jsonb;
 BEGIN
     SELECT * INTO attempt FROM __forest_module_schema__.transport_attempts
      WHERE bot_id=context->>'bot_id' AND attempt_id=work->>'attempt_id' FOR UPDATE;
@@ -835,6 +837,31 @@ BEGIN
       RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
         jsonb_build_object('code','DELIVERY_OBSERVATION_CONFLICT','message','Effect observation differs from Delivery plan','status',409));
     END IF;
+    IF plan->'effect'->>'effect_operation_id' IS DISTINCT FROM attempt.effect_operation_ref
+       OR work->>'effect_operation_ref' IS DISTINCT FROM attempt.effect_operation_ref
+       OR work->>'intent_id' IS DISTINCT FROM attempt.intent_id THEN
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+        jsonb_build_object('code','DELIVERY_OBSERVATION_CONFLICT','message','Effect or intent reference differs','status',409));
+    END IF;
+    IF reconciliation THEN
+      IF requested='UNKNOWN' OR jsonb_typeof(plan->'receipt') IS DISTINCT FROM 'null'
+         OR NULLIF(plan->>'requested_by','') IS NULL
+         OR NULLIF(plan->'evidence'->>'kind','') IS NULL
+         OR NULLIF(plan->'evidence'->>'reference','') IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+          jsonb_build_object('code','DELIVERY_RECONCILIATION_EVIDENCE_INVALID',
+            'message','Reconciliation requires actor and verifiable evidence','status',422));
+      END IF;
+      evidence_details:=jsonb_build_object(
+        'protocol','forest.delivery-reconciliation-evidence/1',
+        'kind',plan->'evidence'->>'kind',
+        'reference',plan->'evidence'->>'reference',
+        'requested_by',plan->>'requested_by');
+    ELSIF plan ? 'evidence' OR plan ? 'requested_by' THEN
+      RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+        jsonb_build_object('code','DELIVERY_OBSERVATION_CONFLICT',
+          'message','Executor observation cannot carry management evidence','status',409));
+    END IF;
     SELECT * INTO existing FROM __forest_module_schema__.delivery_observations
      WHERE bot_id=context->>'bot_id' AND observation_operation_id=context->>'operation_id';
     IF FOUND THEN
@@ -844,7 +871,8 @@ BEGIN
           jsonb_build_object('code','DELIVERY_OBSERVATION_CONFLICT','message','Observation operation differs','status',409));
       END IF;
       RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
-        jsonb_build_object('intent_id',intent.intent_id,'state',intent.state));
+        jsonb_build_object('intent_id',intent.intent_id,'state',intent.state,
+          'accepted',existing.accepted,'conflict_code',existing.conflict_code));
     END IF;
     prior_state:=attempt.state;
     accepted:=(effect->>'accepted')::boolean AND (
@@ -857,17 +885,20 @@ BEGIN
     INSERT INTO __forest_module_schema__.delivery_observations(
       bot_id,observation_operation_id,effect_observation_operation_id,attempt_id,
       input_digest,evidence_kind,observed_status,receipt_payload_id,receipt_payload_digest,
-      error_code,accepted,previous_state,resulting_state,conflict_code)
+      evidence_details,error_code,accepted,previous_state,resulting_state,conflict_code)
     VALUES(context->>'bot_id',context->>'operation_id',effect->>'observation_operation_id',
       attempt.attempt_id,context->>'input_digest',upper(effect->>'evidence_kind'),requested,
-      receipt->>'payload_id',receipt->>'digest',plan->>'error_code',accepted,
+      receipt->>'payload_id',receipt->>'digest',evidence_details,
+      plan->>'error_code',accepted,
       prior_state,CASE WHEN accepted THEN target_state ELSE prior_state END,conflict);
     IF NOT accepted OR prior_state=target_state THEN
       RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
-        jsonb_build_object('intent_id',intent.intent_id,'state',intent.state));
+        jsonb_build_object('intent_id',intent.intent_id,'state',intent.state,
+          'accepted',accepted,'conflict_code',conflict));
     END IF;
     IF requested='SENT' THEN
       UPDATE __forest_module_schema__.transport_attempts SET state='SENT',settled_at=clock_timestamp(),
+        resolved_at=CASE WHEN prior_state='UNKNOWN' THEN clock_timestamp() ELSE resolved_at END,
         receipt_payload_id=receipt->>'payload_id',receipt_payload_digest=receipt->>'digest'
        WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
       UPDATE __forest_module_schema__.send_parts SET state='SENT',owner_id=NULL,owner_expires_at=NULL,
@@ -885,6 +916,7 @@ BEGIN
     ELSIF requested='RETRYABLE_NOT_APPLIED' THEN
       resulting:='QUEUED';
       UPDATE __forest_module_schema__.transport_attempts SET state='NOT_APPLIED',settled_at=clock_timestamp(),
+        resolved_at=CASE WHEN prior_state='UNKNOWN' THEN clock_timestamp() ELSE resolved_at END,
         error_code=plan->>'error_code' WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
       UPDATE __forest_module_schema__.send_parts SET state='QUEUED',owner_id=NULL,owner_expires_at=NULL,
         current_attempt_id=NULL,
@@ -897,6 +929,7 @@ BEGIN
     ELSIF requested='REJECTED_NOT_APPLIED' THEN
       resulting:='FAILED';
       UPDATE __forest_module_schema__.transport_attempts SET state='REJECTED',settled_at=clock_timestamp(),
+        resolved_at=CASE WHEN prior_state='UNKNOWN' THEN clock_timestamp() ELSE resolved_at END,
         error_code=plan->>'error_code' WHERE bot_id=context->>'bot_id' AND attempt_id=attempt.attempt_id;
       UPDATE __forest_module_schema__.send_parts SET state='FAILED',owner_id=NULL,owner_expires_at=NULL,
         updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id'
@@ -915,7 +948,8 @@ BEGIN
         updated_at=clock_timestamp() WHERE bot_id=context->>'bot_id' AND intent_id=intent.intent_id;
     END IF;
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
-      jsonb_build_object('intent_id',intent.intent_id,'state',resulting));
+      jsonb_build_object('intent_id',intent.intent_id,'state',resulting,
+        'accepted',accepted,'conflict_code',conflict));
 END;
 $$;
 
@@ -960,5 +994,93 @@ BEGIN
   END IF;
   RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
     jsonb_build_object('intent_id',attempt.intent_id,'state','QUEUED'));
+END;
+$$;
+
+CREATE FUNCTION delivery_list_unknown(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE snapshot_at timestamptz:=COALESCE((input->>'as_of')::timestamptz,statement_timestamp());
+        page jsonb; requested_limit integer:=COALESCE((input->>'limit')::integer,50);
+BEGIN
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'intent_id',ranked.intent_id,'lane_kind',ranked.lane_kind,
+    'channel_kind',ranked.channel_kind,'channel_ref',ranked.channel_ref,
+    'state','UNKNOWN','updated_at',ranked.updated_at,
+    'attempt_id',ranked.current_attempt_id)
+    ORDER BY ranked.updated_at DESC,ranked.intent_id DESC),'[]'::jsonb)
+    INTO page
+  FROM (
+    SELECT i.intent_id,i.lane_kind,i.channel_kind,i.channel_ref,i.updated_at,
+           p.current_attempt_id
+    FROM __forest_module_schema__.send_intents i
+    JOIN __forest_module_schema__.send_parts p
+      ON p.bot_id=i.bot_id AND p.intent_id=i.intent_id
+     AND p.part_index=i.current_part_index
+    WHERE i.bot_id=context->>'bot_id' AND i.state='UNKNOWN'
+      AND i.updated_at<=snapshot_at
+      AND (input->>'lane_kind' IS NULL OR i.lane_kind=input->>'lane_kind')
+      AND (input->>'channel_ref' IS NULL OR i.channel_ref=input->>'channel_ref')
+      AND (input->>'before_updated_at' IS NULL OR
+        (i.updated_at,i.intent_id)<((input->>'before_updated_at')::timestamptz,
+                                    input->>'before_intent_id'))
+    ORDER BY i.updated_at DESC,i.intent_id DESC LIMIT requested_limit
+  ) ranked;
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,
+    'value',jsonb_build_object('as_of',snapshot_at,'items',page));
+END;
+$$;
+
+CREATE FUNCTION delivery_get_unknown(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql STABLE SET search_path=pg_catalog AS $$
+DECLARE intent record; attempt record; part record; observed jsonb;
+BEGIN
+  SELECT * INTO intent FROM __forest_module_schema__.send_intents
+   WHERE bot_id=context->>'bot_id' AND intent_id=input->>'intent_id';
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+      'error',jsonb_build_object('code','DELIVERY_INTENT_NOT_FOUND',
+        'message','Delivery intent is unavailable','status',404));
+  END IF;
+  SELECT * INTO attempt FROM __forest_module_schema__.transport_attempts
+   WHERE bot_id=intent.bot_id AND intent_id=intent.intent_id
+   ORDER BY prepared_at DESC,attempt_id DESC LIMIT 1;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+      'error',jsonb_build_object('code','DELIVERY_ATTEMPT_NOT_FOUND',
+        'message','Delivery intent has no transport attempt','status',404));
+  END IF;
+  SELECT * INTO part FROM __forest_module_schema__.send_parts
+   WHERE bot_id=attempt.bot_id AND intent_id=attempt.intent_id
+     AND part_index=attempt.part_index;
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'observation_operation_id',o.observation_operation_id,
+    'effect_observation_operation_id',o.effect_observation_operation_id,
+    'evidence_kind',o.evidence_kind,'observed_status',o.observed_status,
+    'evidence_details',o.evidence_details,'accepted',o.accepted,
+    'previous_state',o.previous_state,'resulting_state',o.resulting_state,
+    'conflict_code',o.conflict_code,'observed_at',o.observed_at)
+    ORDER BY o.observed_at,o.observation_operation_id),'[]'::jsonb)
+    INTO observed
+  FROM __forest_module_schema__.delivery_observations o
+  WHERE o.bot_id=attempt.bot_id AND o.attempt_id=attempt.attempt_id;
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object(
+      'intent',jsonb_build_object('intent_id',intent.intent_id,'state',intent.state,
+        'lane_kind',intent.lane_kind,'channel_kind',intent.channel_kind,
+        'channel_ref',intent.channel_ref,'binding_ref',intent.binding_ref,
+        'delivery_generation_id',intent.delivery_generation_id,
+        'current_part_index',intent.current_part_index,'part_count',intent.part_count,
+        'created_at',intent.created_at,'updated_at',intent.updated_at,
+        'error_code',intent.error_code),
+      'part',jsonb_build_object('part_index',part.part_index,'state',part.state,
+        'effect_operation_ref',part.effect_operation_ref,
+        'current_attempt_id',part.current_attempt_id),
+      'attempt',jsonb_build_object('attempt_id',attempt.attempt_id,'state',attempt.state,
+        'attempt_no',attempt.attempt_no,'effect_attempt_ref',attempt.effect_attempt_ref,
+        'effect_operation_ref',attempt.effect_operation_ref,
+        'adapter_generation_id',attempt.adapter_generation_id,
+        'started_at',attempt.started_at,'settled_at',attempt.settled_at,
+        'resolved_at',attempt.resolved_at,'error_code',attempt.error_code),
+      'observations',observed));
 END;
 $$;
