@@ -443,15 +443,37 @@ async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
     })
     assert bound["ok"] is True
 
-    def reserve_body(name, *, request_limit=1):
+    claim_names = [
+        "one", "two", "different-id", "after-unknown", "charged",
+        "released", "after-release", "document-headroom", "document-blocked",
+        "query-headroom", "token-blocked", "query-token-headroom",
+    ]
+    async with store.pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            sql.SQL(
+                "INSERT INTO {}.embedding_claims (bot_id,claim_id,purpose,space_id,"
+                "source_epoch_high_watermark,lease_seconds,lease_deadline,item_limit,"
+                "item_count,claim_payload) SELECT %s,'batch/'||name,"
+                "CASE WHEN name IN ('query-headroom','query-token-headroom') "
+                "THEN 'QUERY' ELSE 'DOCUMENT' END,%s,0,600,"
+                "clock_timestamp()+interval '10 minutes',1,0,'{{}}'::jsonb "
+                "FROM unnest(%s::text[]) AS names(name)"
+            ).format(sql.Identifier(namespace)),
+            (store.bot_id, "sha256:" + "a" * 64, claim_names),
+        )
+
+    def reserve_body(name, *, request_limit=1, token_limit=1000,
+                     query_request_reserve=0, query_token_reserve=0):
         return {
             "protocol": "forest.memory-embedding-budget-reserve/1",
             "reservation_id": f"budget/{name}",
             "batch_ref": f"batch/{name}",
-            "policy_revision": "daily-cost-cap/1",
+            "policy_revision": "daily-cost-cap/2",
             "request_limit": request_limit,
-            "token_limit": 1000,
+            "token_limit": token_limit,
             "reserved_tokens": 100,
+            "query_request_reserve": query_request_reserve,
+            "query_token_reserve": query_token_reserve,
         }
 
     first, second = await asyncio.gather(
@@ -545,6 +567,43 @@ async def test_embedding_budget_serializes_claims_and_keeps_unknown_spend(
     other_bot = await budget_snapshot("other-bot")
     assert other_bot["charged_tokens"] == "0"
     assert other_bot["unknown_requests"] == "0"
+
+    def headroom(name, *, request_limit=4, token_limit=500):
+        return reserve_body(
+            name, request_limit=request_limit, token_limit=token_limit,
+            query_request_reserve=1, query_token_reserve=100,
+        )
+
+    document = await invoke(
+        "memory_reserve_embedding_budget", "reserve/document-headroom",
+        headroom("document-headroom"),
+    )
+    assert document["value"]["state"] == "RESERVED"
+    blocked_document = await invoke(
+        "memory_reserve_embedding_budget", "reserve/document-blocked",
+        headroom("document-blocked"),
+    )
+    assert blocked_document["error"]["code"] == "MEMORY_EMBEDDING_BUDGET_EXHAUSTED"
+    query = await invoke(
+        "memory_reserve_embedding_budget", "reserve/query-headroom",
+        headroom("query-headroom"),
+    )
+    assert query["value"]["state"] == "RESERVED"
+    await invoke("memory_settle_embedding_budget", "settle/query-headroom", {
+        "protocol": "forest.memory-embedding-budget-settle/1",
+        "reservation_id": "budget/query-headroom", "state": "RELEASED",
+        "charged_tokens": None, "error_code": None,
+    })
+    token_blocked = await invoke(
+        "memory_reserve_embedding_budget", "reserve/token-blocked",
+        headroom("token-blocked", request_limit=10, token_limit=450),
+    )
+    assert token_blocked["error"]["code"] == "MEMORY_EMBEDDING_BUDGET_EXHAUSTED"
+    query_token = await invoke(
+        "memory_reserve_embedding_budget", "reserve/query-token-headroom",
+        headroom("query-token-headroom", request_limit=10, token_limit=450),
+    )
+    assert query_token["value"]["state"] == "RESERVED"
 
 
 
@@ -1903,10 +1962,12 @@ def _configuration():
             "association_weight": 0.9,
         },
         "embedding_budget": {
-            "policy_revision": "daily-cost-cap/1",
+            "policy_revision": "daily-cost-cap/2",
             "daily_request_limit": 1000,
             "daily_token_limit": 10000000,
             "reservation_tokens": 32768,
+            "query_request_reserve": 200,
+            "query_token_reserve": 2000000,
         },
     }
 
@@ -4031,7 +4092,7 @@ async def test_memory_package_qualifies_exact_conversation_batch(
                 ).format(sql.Identifier(namespace)),
                 (
                     store.bot_id, "budget/embedding/claim", "reserve/embedding/claim",
-                    "sha256:" + "b" * 64, claim_id, "daily-cost-cap/1",
+                    "sha256:" + "b" * 64, claim_id, "daily-cost-cap/2",
                 ),
             )
             prepared_attempt = await (

@@ -76,6 +76,14 @@ class MemoryGraph(Plugin):
                 "MEMORY_CONFIGURATION_INVALID",
                 "One embedding reservation cannot exceed the daily token threshold", 422,
             )
+        budget = value["embedding_budget"]
+        if (budget["query_request_reserve"] >= budget["daily_request_limit"]
+                or budget["query_token_reserve"] + budget["reservation_tokens"]
+                > budget["daily_token_limit"]):
+            raise ForestError(
+                "MEMORY_CONFIGURATION_INVALID",
+                "Query reserve must leave room for one document embedding batch", 422,
+            )
         self.profile = value
         self.profile_digest = _digest(value)
 

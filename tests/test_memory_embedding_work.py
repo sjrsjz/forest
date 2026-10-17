@@ -38,10 +38,12 @@ async def test_embedding_worker_handoffs_before_http_and_observes_claim_order():
     profile = {
         "embedding": {**profile_snapshot, "model_kind": "TEXT_IMAGE", "normalization": "L2"},
         "embedding_budget": {
-            "policy_revision": "daily-cost-cap/1",
+            "policy_revision": "daily-cost-cap/2",
             "daily_request_limit": 10,
             "daily_token_limit": 1000,
             "reservation_tokens": 100,
+            "query_request_reserve": 2,
+            "query_token_reserve": 200,
         },
     }
     facets = [{"facet_id": "facet/one"}, {"facet_id": "facet/two"}]

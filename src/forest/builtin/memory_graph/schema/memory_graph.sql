@@ -7393,6 +7393,11 @@ DECLARE
     request_limit_value integer;
     token_limit_value bigint;
     reserved_tokens_value bigint;
+    query_request_reserve_value integer;
+    query_token_reserve_value bigint;
+    claim_purpose text;
+    used_requests bigint;
+    used_tokens bigint;
     budget_day_value date;
     existing __forest_module_schema__.embedding_budget_reservations%ROWTYPE;
     day_row __forest_module_schema__.embedding_budget_days%ROWTYPE;
@@ -7404,10 +7409,14 @@ BEGIN
        OR requested_digest !~ '^sha256:[a-f0-9]{64}$'
        OR reservation_value IS NULL OR octet_length(reservation_value) NOT BETWEEN 1 AND 256
        OR octet_length(body->>'batch_ref') NOT BETWEEN 1 AND 256
-       OR body->>'policy_revision' IS DISTINCT FROM 'daily-cost-cap/1'
+       OR body->>'policy_revision' IS DISTINCT FROM 'daily-cost-cap/2'
        OR body->>'request_limit' !~ '^[1-9][0-9]*$'
        OR body->>'token_limit' !~ '^[1-9][0-9]*$'
-       OR body->>'reserved_tokens' !~ '^[1-9][0-9]*$' THEN
+       OR body->>'reserved_tokens' !~ '^[1-9][0-9]*$'
+       OR body->>'query_request_reserve' IS NULL
+       OR body->>'query_request_reserve' !~ '^(0|[1-9][0-9]*)$'
+       OR body->>'query_token_reserve' IS NULL
+       OR body->>'query_token_reserve' !~ '^(0|[1-9][0-9]*)$' THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_INPUT_INVALID',
                 'message','Embedding budget reservation is invalid','status',422));
@@ -7415,9 +7424,14 @@ BEGIN
     request_limit_value := (body->>'request_limit')::integer;
     token_limit_value := (body->>'token_limit')::bigint;
     reserved_tokens_value := (body->>'reserved_tokens')::bigint;
+    query_request_reserve_value := (body->>'query_request_reserve')::integer;
+    query_token_reserve_value := (body->>'query_token_reserve')::bigint;
     IF request_limit_value NOT BETWEEN 1 AND 1000000
        OR token_limit_value NOT BETWEEN 1 AND 1000000000000
-       OR reserved_tokens_value NOT BETWEEN 1 AND LEAST(token_limit_value,1000000000) THEN
+       OR reserved_tokens_value NOT BETWEEN 1 AND LEAST(token_limit_value,1000000000)
+       OR query_request_reserve_value NOT BETWEEN 0 AND request_limit_value-1
+       OR query_token_reserve_value NOT BETWEEN 0 AND
+          token_limit_value-reserved_tokens_value THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_INPUT_INVALID',
                 'message','Embedding budget limits are invalid','status',422));
@@ -7454,15 +7468,30 @@ BEGIN
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_DOMAIN_UNBOUND',
                 'message','Embedding domain is not bound','status',409));
     END IF;
+    SELECT purpose INTO claim_purpose
+    FROM __forest_module_schema__.embedding_claims
+    WHERE bot_id=requested_bot AND claim_id=body->>'batch_ref'
+      AND state='CLAIMED' AND lease_deadline>clock_timestamp();
+    IF claim_purpose IS NULL THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','MEMORY_EMBEDDING_CLAIM_LOST',
+                'message','Embedding batch claim is no longer current','status',409));
+    END IF;
     budget_day_value := (clock_timestamp() AT TIME ZONE 'UTC')::date;
     INSERT INTO __forest_module_schema__.embedding_budget_days(bot_id,budget_day)
     VALUES(requested_bot,budget_day_value) ON CONFLICT DO NOTHING;
     SELECT * INTO day_row FROM __forest_module_schema__.embedding_budget_days
     WHERE bot_id=requested_bot AND budget_day=budget_day_value FOR UPDATE;
-    IF day_row.reserved_requests::bigint+day_row.settled_requests+
-       day_row.unknown_requests+1 > request_limit_value
-       OR day_row.reserved_tokens+day_row.charged_tokens+
-          day_row.unknown_tokens+reserved_tokens_value > token_limit_value THEN
+    used_requests := day_row.reserved_requests::bigint+day_row.settled_requests+
+                     day_row.unknown_requests;
+    used_tokens := day_row.reserved_tokens+day_row.charged_tokens+
+                   day_row.unknown_tokens;
+    IF used_requests+1 > request_limit_value
+       OR used_tokens+reserved_tokens_value > token_limit_value
+       OR (claim_purpose='DOCUMENT' AND (
+           used_requests+1 > request_limit_value-query_request_reserve_value
+           OR used_tokens+reserved_tokens_value >
+              token_limit_value-query_token_reserve_value)) THEN
         RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
             'error',jsonb_build_object('code','MEMORY_EMBEDDING_BUDGET_EXHAUSTED',
                 'message','Daily embedding budget is exhausted','status',429));

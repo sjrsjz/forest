@@ -302,6 +302,8 @@ async def dispatch(ctx, task, profile):
                 "request_limit": budget["daily_request_limit"],
                 "token_limit": budget["daily_token_limit"],
                 "reserved_tokens": budget["reservation_tokens"],
+                "query_request_reserve": budget["query_request_reserve"],
+                "query_token_reserve": budget["query_token_reserve"],
             },
             "authorization": {
                 "protocol": "forest.authorization-issue/1",

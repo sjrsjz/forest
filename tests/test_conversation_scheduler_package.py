@@ -109,10 +109,12 @@ async def test_conversation_package_owns_ingress_and_classification_participants
                 "association_weight": 0.9,
             },
             "embedding_budget": {
-                "policy_revision": "daily-cost-cap/1",
+                "policy_revision": "daily-cost-cap/2",
                 "daily_request_limit": 1000,
                 "daily_token_limit": 10000000,
                 "reservation_tokens": 32768,
+                "query_request_reserve": 200,
+                "query_token_reserve": 2000000,
             },
         },
         resolved_contracts={},

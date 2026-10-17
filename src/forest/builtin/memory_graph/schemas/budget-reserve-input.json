@@ -1,14 +1,16 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object", "additionalProperties": false,
-  "required": ["protocol", "reservation_id", "batch_ref", "policy_revision", "request_limit", "token_limit", "reserved_tokens"],
+  "required": ["protocol", "reservation_id", "batch_ref", "policy_revision", "request_limit", "token_limit", "reserved_tokens", "query_request_reserve", "query_token_reserve"],
   "properties": {
     "protocol": {"const": "forest.memory-embedding-budget-reserve/1"},
     "reservation_id": {"type": "string", "minLength": 1, "maxLength": 256},
     "batch_ref": {"type": "string", "minLength": 1, "maxLength": 256},
-    "policy_revision": {"const": "daily-cost-cap/1"},
+    "policy_revision": {"const": "daily-cost-cap/2"},
     "request_limit": {"type": "integer", "minimum": 1, "maximum": 1000000},
     "token_limit": {"type": "integer", "minimum": 1, "maximum": 1000000000000},
-    "reserved_tokens": {"type": "integer", "minimum": 1, "maximum": 1000000000}
+    "reserved_tokens": {"type": "integer", "minimum": 1, "maximum": 1000000000},
+    "query_request_reserve": {"type": "integer", "minimum": 0, "maximum": 999999},
+    "query_token_reserve": {"type": "integer", "minimum": 0, "maximum": 999999999999}
   }
 }

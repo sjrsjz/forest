@@ -175,6 +175,8 @@ cache_key = H(bot_id, storage_generation, profile_revision, space_id,
 
 Worker 使用有界批次、积压阈值、每 Bot 预算和重试退避。媒体未就绪时图像部分状态为 `WAIT_MEDIA`；文本部分可独立完成，但同一条图文消息的索引完整性仍是 `PARTIAL`。向量发布明确包含成功的段与失败段，不能以一段文字成功就标记整条多模态消息已完成。
 
+同一 Bot 的 UTC 日嵌入请求和 token 阈值仍为总成本上限。Memory 预算接纳区分 `DOCUMENT` 后台索引与 `QUERY` 交互检索：配置的查询预留量从后台接纳阈值中扣除，而 QUERY 使用完整总阈值；两类请求在同一日账本行锁下合流，不能分别花掉一份总额度。预算事务根据持久 claim 的 purpose 判定类别，不信任调用者单独声明。额度耗尽时 DOCUMENT facet 退避到下一 UTC 日，QUERY 不因后台先耗光其预留而被拒；已发生的 QUERY 费用仍占总阈值，实际 token 超过预留时可能吃掉剩余空间，不能承诺供应商计费的硬上限。管理页同时显示总阈值和查询预留，便于管理员按流量调节，而不改变冻结的嵌入模型身份。
+
 ### 6.1 Memory 调度与 Embedding Provider 边界
 
 索引流水由两个平级 Generation 协作：
