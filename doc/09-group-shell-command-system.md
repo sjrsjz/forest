@@ -53,9 +53,17 @@ Shell 接纳事务先复核 Binding、接纳时限与当前管理员资格，再
 #forest core reload --expect-graph <graph-revision>
 ```
 
-`status/cancel/disable` 可以声明 P0，`reload` 为 P1。普通 `core.status/pause/resume/reload` 由 `component.worker-host` 包贡献，包内 Worker 通过受限 `kernel.runtime` 服务端口查询状态、以 maintenance epoch CAS 更改 DATA admission，或以 graph revision CAS 提交整图 replacement request。内核负责 HostLease 围栏与状态写入，不解析 Shell 命令；独立救援路由只能调用这些受限权威，不能把 Shell 包的业务状态复制进内核。单组件 reload 由 Worker Host 的 `module.reload` 生命周期动作提供，Shell 不把整图换代假装成局部替换。命令只写持久 replacement request 并返回，宿主监督循环在该 Shell operation 完成后领取请求，避免执行者同步排空自身造成死锁。`disable` 关闭当前 Bot 的 data admission 并保留 CONTROL，不等于卸载某个模块；模块停用使用模块自己的 lifecycle action。只有接纳时命中 `shell.command` 对当前 Binding/群生效的管理员策略，并通过 `kernel.authorization` 精确能力检查的主体才能保留 P0；否则命令拒绝或降为普通 P1 查询，不能仅凭文本或平台群角色取得保留槽。执行和回执前再次查询当前授权、Binding epoch、Host lease、目标 revision 和资源所有权。
+`status/cancel/disable` 可以声明 P0，`reload` 为 P1。普通 `core.status/pause/resume/reload` 由 `component.worker-host` 包贡献，包内 Worker 通过受限 `kernel.runtime` 服务端口查询状态、以 maintenance epoch CAS 更改 DATA admission，或以 graph revision CAS 提交整图 replacement request。内核负责 HostLease 围栏与状态写入，不解析普通 Shell 命令；独立救援路由只能调用这些受限权威，不能把 Shell 包的业务状态复制进内核。单组件 reload 由 Worker Host 的 `module.reload` 生命周期动作提供，Shell 不把整图换代假装成局部替换。命令只写持久 replacement request 并返回，宿主监督循环在该 operation 完成后领取请求，避免执行者同步排空自身造成死锁。`disable` 关闭当前 Bot 的 data admission 并保留 CONTROL，不等于卸载某个模块；模块停用使用模块自己的 lifecycle action。普通 Shell 的 P0 资格仍由当前 `shell.command` 管理员策略与 `kernel.authorization` 精确能力共同决定；独立救援命令使用下述内核救援授权，不借用失效包的最近一次管理员快照。两条路径都不能仅凭文本或平台群角色取得保留槽，执行和回执前须再次核对授权、Binding epoch、Host lease、目标 revision 和资源所有权。
 
-Core Gate 只规范化到既有 operation、Conversation Run 和 module lifecycle 权威。它不复制 Agent/Memory/Scheduler 状态机，不直接停止线程或改数据库行。正常模块不可用时，Core 命令仍须能撤下路由、请求取消或读取最小健康信息；实现状态不由本目标文档断言。
+Core Gate 只规范化到既有 operation、Conversation Run 和 module lifecycle 权威。它不复制 Agent/Memory/Scheduler 状态机，不直接停止线程或改数据库行。`shell.command` 不可用时，救援命令仍须能撤下路由、请求取消或读取最小健康信息；Adapter、入站来源与内核权威自身故障不在这条救援链的可用性承诺内，必须保留可诊断失败。实现状态不由本目标文档断言。
+
+### 独立救援链
+
+内核为每个 Bot 单独持有有界的救援授权事实，键为已认证的 `(binding_ref, group_ref, principal_ref)`，能力仅限上述四个 `core` 动作。Web/CLI 经当前 Bot 管理授权及审计，以期望修订 CAS 增删该事实；撤销立即阻止新接纳与执行。它不复制 `shell.command` 的普通管理员名单、命令目录或群策略。救援资格只由同一入站事务中的 ShellGate Payload 因果证明、OneBot 包对原始帧和当前 Binding 的身份证明，以及内核救援授权共同决定。`core` 文本、群成员角色和 Worker 自报的 principal 都不能单独产生救援权。授权事实变更和救援请求均留可追踪的操作与安全审计。
+
+Adapter 对完整 `#forest core` 前缀选择独立的有界接纳事务，先保存平台事件与群历史，再核对两份入站证明及救援授权，最后把准确命令、期望修订和来源冻结为内核救援请求；该事务不得包含 `shell.command` participant，Adapter 的启动依赖也不能要求 `shell.ingress.inspect` 常驻。其他 `#forest` 命令仍交给可替换的 Shell 包；Shell 不可用时它们保持失败关闭，不回落到 Agent。救援命令即使语法或授权错误也不能变成普通触发消息。若群历史或来源归档暂时不可用，救援接纳必须显式失败并保留可诊断的入站观察，不得假装已经成功写入完整上下文。
+
+最小救援执行器只调用已有内核 Runtime、Operation 和模块生命周期受限端口，使用 Bot、HostLease、Binding、授权修订和目标修订围栏；它不解析业务命令、不直接调用进程终止或模块私表。`status` 只读有界健康投影，`cancel` 登记目标 operation/Run 的取消意图，`disable` 以 maintenance epoch CAS 关闭 DATA，`reload` 以 graph revision CAS 登记 replacement request。回执通过正常 CONTROL Delivery 发送；Delivery 不可用时保留持久结果供 Web/CLI 查询，不绕过发送账本直接调用 OneBot。`shell.command` Worker 停止、报错或热替换时，应以假 OneBot 验证四种救援语义、撤权竞争、同键重放、跨群/Binding 拒绝和 Agent 不触发；实现与验收状态仍以[实现状态](implementation-status.md)为准。
 
 其他命令由模块描述符注册：
 

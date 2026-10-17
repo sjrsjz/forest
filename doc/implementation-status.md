@@ -4,12 +4,14 @@
 
 | 范围 | 现有直接证据 | 尚未闭合 |
 | --- | --- | --- |
-| 微内核与包生命周期 | 现役主 Bot 22/22 ACTIVE，Delivery、Memory 正式热替换；隔离 Bot 的非空 `vector.index` 集合重建后图片直接召回保持，Vector 正式热替换 8 个依赖成员、14 个成员保留。 | 不同 SQL 存储基线的同库在线升级、发布后故障变体和长期多 Bot 运行尚无完整生产证据。 |
+| 微内核与包生命周期 | 现役主 Bot 22/22 ACTIVE，Delivery、Memory 正式热替换；隔离 Bot 的非空 `vector.index` 集合重建后图片直接召回保持，Vector 正式热替换 8 个依赖成员、14 个成员保留。首次发布前的不同 SQL 基线按[控制面合同](13-microkernel-control-plane-redesign.md)用新库切换，不要求旧库原位迁移。 | 发布后跨 SQL 基线升级图尚未设计或验证；长期多 Bot 运行和发布后故障变体尚无完整生产证据。 |
 | Bot 全局多主干图文记忆 | 同部署隔离 Bot 的两个群主干、真实 VL 文本/图片查询、真实图片直接种子、来源群与作者、永久费用账本已核对；跨主干联想另有隔离 PostgreSQL/真实 VL 用例。 | 数月混合图文负载、在线非空自然记忆与大规模并发写入的长期费用分布尚未验证。 |
 | 群聊 Agent 与外部回复 | 隔离端到端用例覆盖同群串行、跨群并行、下一次模型调用切口和工具续轮；v38 只读观察无重叠会话。 | 现役许可群 `933179609` 仍无新入站，真实 `@ → Agent → Provider → Delivery → QQ` 回复尚无样本。 |
 | 群聊 Shell 与管理 | 内核前缀门禁、同事务 ingress proof、Adapter 平台身份复核和可热替换 Shell 包已接通。 | 脱离 `shell.command` 包的最小 Core 救援路由尚未实现；真实 QQ Shell 管理操作和浏览器长期负载尚未验收。 |
 
 下文为按实施时间保留的证据记录。较早版本条目中的“当前”和“尚未”只描述当时状态；以上表及最新现役记录为准。
+
+2026-10-17 Core 救援依赖审计：`adapter.onebot` 的准确包清单把 `shell.ingress.inspect` 声明为必需启动依赖，已认领前缀的两条正式入站事务均含 `shell.command` participant；当前内核 `shell.gate.inspect` 仅识别保留前缀，没有独立的救援授权或请求结算。因此现役 v38 在 Shell 包失效时不能凭 Core Gate 独立处理群聊 `core` 命令。目标救援链的身份、授权、独立事务和回执边界已在[群聊 Shell 设计](09-group-shell-command-system.md)写明；源码和现役实例均未实现，不能用普通 `component.worker-host` 的 `core.status/pause/resume/reload` 贡献冒充该能力。不同 SQL 基线在首次发布前按新库切换，缺少同库迁移不是此阶段的验收缺陷。
 
 2026-10-17 v38 非空向量重建与热重载：同部署隔离 Bot 的真实 Milvus 集合经正式管理动作从绑定修订 1 发布到 2，发布时 12 条 ref 水位不变；原图片来源在重建后、`vector.index` 正式热替换后均作为真实 VL 图片查询的直接种子命中。隔离图 6→7，8 个依赖成员换代、14 个保留；旧集合保留期到后由包自有 GC 结算为 DELETED，待回收数 1→0。隔离 Bot 累计嵌入 9 次/333 tokens、UNKNOWN/预留 0，已退役；现役主 Bot 仍 ONLINE、图 4、22/22 ACTIVE、账本 2 次/44 tokens，树莓派 QQ 登录态 READY。许可群真实 @ 回复、长期负载和故障注入仍待验收。详见 [v38 新库切换记录](live-v38-cutover-2026-10-17.md)。
 

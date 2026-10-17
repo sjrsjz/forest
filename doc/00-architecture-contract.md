@@ -139,7 +139,7 @@ dispatch trace 只读投影上述事实，按稳定 `caused_by`、RuntimeGraph �
 
 ## 4. 命令与 Shell 策略
 
-ShellGate 只保留有界 `#forest` 前缀识别、入口容量隔离和最小救援能力。管理员名单、群/Binding 策略、命令 schema、优先级和执行结果属于 `shell.command`。
+ShellGate 只保留有界 `#forest` 前缀识别、入口容量隔离和最小救援能力。普通管理员名单、群/Binding 策略、命令 schema、优先级和执行结果属于 `shell.command`；仅独立 Core 救援所需的极小、可撤销授权事实由内核持有，其边界见[群聊 Shell 设计](09-group-shell-command-system.md)。
 
 - P0/P1 是经当前策略计算出的控制服务资格，只影响调度资源，不改变群历史顺序。
 - CONTROL 回执和 CHAT 回复使用独立 lane；它们共享真实 Adapter 限流与外部效果账本。
