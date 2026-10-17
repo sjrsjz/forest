@@ -30,7 +30,11 @@ from forest.kernel_package_catalog_snapshot import (
     package_catalog_artifact_service,
     package_catalog_page_service,
 )
-from forest.packages import PackageCatalog, auto_install_official_sources
+from forest.packages import (
+    PackageCatalog,
+    auto_install_official_sources,
+    official_release_sources,
+)
 from forest.schema_bundles import StorageBundleSpec, module_schema_namespace
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "counter"
@@ -43,6 +47,8 @@ def test_official_auto_install_catalogs_are_scope_separated(tmp_path):
     assert bot_sources and deployment_sources
     assert set(bot_sources).isdisjoint(deployment_sources)
     assert set(host_sources).isdisjoint((*bot_sources, *deployment_sources))
+    release_only = set(official_release_sources("bot")) - set(bot_sources)
+    assert {source.name for source in release_only} == {"component_worker_host"}
     catalog = PackageCatalog(tmp_path / "official-auto-install")
     assert all(catalog.build(source).component["scope"] == "bot" for source in bot_sources)
     assert all(
@@ -406,8 +412,9 @@ def test_official_archive_registration_failure_rolls_back_index(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_host_local_command_publishes_only_bundled_bot_identity(tmp_path, capsys):
-    source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin/routing_graph"
+@pytest.mark.parametrize("folder", ("routing_graph", "component_worker_host"))
+async def test_host_local_command_publishes_only_bundled_bot_identity(tmp_path, capsys, folder):
+    source_root = Path(__file__).resolve().parents[1] / "src/forest/builtin" / folder
     staging = PackageCatalog(tmp_path / "staging")
     default = staging.build(source_root)
     updated_root = tmp_path / "updated-routing"

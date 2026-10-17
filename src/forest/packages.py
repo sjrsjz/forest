@@ -88,6 +88,15 @@ def auto_install_official_sources(scope: str) -> tuple[Path, ...]:
     return tuple(source for _, source in sorted(selected))
 
 
+def official_release_sources(scope: str) -> tuple[Path, ...]:
+    """Include the Bot bootstrap package without making it an auto-installed member."""
+    sources = auto_install_official_sources(scope)
+    if scope != "bot":
+        return sources
+    worker_host = files("forest").joinpath("builtin/component_worker_host")
+    return (*sources, Path(str(worker_host)))
+
+
 def _valid_json_pointer(value: object, *, wildcards: bool = False) -> bool:
     if not isinstance(value, str) or not 2 <= len(value.encode("utf-8")) <= 1024:
         return False

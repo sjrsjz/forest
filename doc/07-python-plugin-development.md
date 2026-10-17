@@ -201,6 +201,8 @@ Context裁剪使用框架的确定性预算与Archive/ViewPlan接口，不存在
 
 Bot 首次物化时，`component.worker-host` 通过包自有的初始化命令把本次捕获的其他自动安装官方包及 manifest 摘要写成修订 1 的完整选择快照。后续冷启动按此快照恢复这些准确工件；只更换宿主镜像不会隐式升级它们，也不会因新镜像携带另一 SQL 基线而自行改写旧 Bot 库。`source_kind = "official"` 和 `source_kind = "installed"` 固定准确包及 manifest 摘要；管理员显式选择 `source_kind = "builtin"` 才表示该组件跟随当前发行镜像，这种重启后的前进属于**冷启动发行升级**，不能计作运行中热重载。新增或移除官方组件使发行成员集合与已冻结快照不一致时须拒绝冷启动，先通过明确的组件变更流程处理。`component.worker-host` 是读取自身选择账本所需的引导包：第一次物化从当前发行捕获；之后内核只读最后一张**已发布** RuntimeGraph 的准确包摘要并从持久工件目录恢复它，未发布候选不能改变冷启动选择。其自身的官方工件升级由旧 Generation 的选择端口提交精确摘要并经同一预览、修订 CAS 和发布围栏；候选装配先通过旧包读取选择，再验证并装配新包，发布后交接管理契约，冷启动从新图恢复。自停用与非官方替代均拒绝。运行中的 `module.reload` 不靠重启：候选包按当前选择捕获，生命周期协调器同时换代目标及其冻结依赖闭包，保留闭包外 Generation 的身份；旧代排空并释放后才完成交接。此流程以候选包兼容当前私有 SQL 基线且宿主支持其 manifest/内核 API 为前提；SQL 基线变更仍需显式存储升级或开发期重建，不得伪装成代码热重载。Bot 基础身份与期望运行意图仍由部署内核持有，管理 builtin 只通过受限端口操作。
 
+`forest plugin publish-official-bot` 的本地包目录发布名单包含 `component.worker-host`，仍按当前发行物的组件 ID、包 ID 与运行时核对，并要求准确的 ZIP、包和 Manifest 摘要。它不进入其他 Bot 包的自动安装成员集合，也不会因为发布工件就切换任何 Bot；切换仍由旧 Worker Host 的包内选择协议发起。
+
 Python 的 reload 不会自动重绑定其他模块持有的旧对象引用，既有类实例也继续使用旧类定义。因此这里的代际替换需要新装载环境和路由交接，不能只调用 reload。相关行为见[Python importlib 官方文档](https://docs.python.org/3.11/library/importlib.html#importlib.reload)。
 
 ```text

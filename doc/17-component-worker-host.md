@@ -10,6 +10,8 @@ Worker Host 不能负责物理启动或停止自己，也不能握住其他 Work
 
 Worker Host 自身的包选择不存在第二个内核业务账本。冷启动先由 `kernel.runtime` 最后一张已发布图给出准确旧工件摘要；首次物化没有图时才捕获发行包。旧工件的包自有选择端口读取完整快照、以 revision CAS 接受一个已启用的 `official` 新工件并提交替换请求；通用候选预览按摘要编译新描述符，装配时仍先通过旧工件读取和围栏快照，再验证新包的选择投影与存储身份一致。旧读端口的共享发布围栏持续到内核 Graph 发布；成功后新 Generation 接管管理端口，旧 Generation 排空并释放。未发布候选不能成为下次冷启动的引导来源。自停用、`builtin` 跟随镜像、自选普通安装包均拒绝。代码工件可在相同私有 SQL 基线上在线换代；改变 SQL 基线需要独立的存储升级协议，不能把旧库强行覆盖或称作热重载成功。
 
+宿主操作员可用本地 `plugin publish-official-bot` 把 Worker Host 的准确 ZIP 登记到持久官方包目录；该入口只登记来源，不提交 Bot 选择，不属于群 Shell、Web gateway 或 Worker 的权限。引导包不列入普通官方包的自动安装枚举，防止被重复物化。
+
 `kernel.runtime` 继续拥有 Bot 整体 admission、Graph/Generation 事实、Host lease 和通用图替换队列。Shell 的 `core reload` 是整个 RuntimeGraph 的维护请求，属于内核；`component reload/enable/disable/validate` 是 Worker Host 的独立操作，不能把 `core reload` 伪称为单组件热重载。若候选图暂时只能整体重新实例化，必须在结果中明示影响的所有 Generation；在能保留未变化 Generation 之前，不宣称已实现局部重载。
 
 首个包的边界必须按下表落地，不能借用当前 gateway 的对象引用作为依赖注入：

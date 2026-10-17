@@ -275,7 +275,7 @@ async def run_official_release_command(args: argparse.Namespace) -> None:
     from forest.packages import (
         MAX_ARCHIVE_BYTES,
         PackageCatalog,
-        auto_install_official_sources,
+        official_release_sources,
         validate_source_package,
     )
 
@@ -290,14 +290,9 @@ async def run_official_release_command(args: argparse.Namespace) -> None:
             "OFFICIAL_RELEASE_CATALOG_INVALID",
             "Official release requires an existing absolute catalog directory", 422,
         )
-    if scope == "bot" and args.component_id == "component.worker-host":
-        raise ForestError(
-            "OFFICIAL_RELEASE_COMPONENT_UNSUPPORTED",
-            "Worker Host cannot be selected by an official Bot package digest", 422,
-        )
     source = None
     bundled_runtime = None
-    for candidate in auto_install_official_sources(scope):
+    for candidate in official_release_sources(scope):
         try:
             manifest = tomllib.loads(candidate.joinpath("module.toml").read_text(encoding="utf-8"))
         except (OSError, UnicodeError, ValueError):
