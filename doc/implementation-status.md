@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-17 v36 完整 Delivery 观察链验收：独立新库、镜像 `forest:runtime-6f3c16c7`、本地拒绝发送的假 OneBot 中，一次假群 `@` 经 Agent、Kernel Effect 和 Delivery 正式 UnitOfWork 产生配对的 accepted 观察行（Effect `NOT_APPLIED`，Delivery `REJECTED_NOT_APPLIED`），intent/part FAILED 且只有 1 次发送尝试。Delivery 官方热重载 r4→r5 后观察账本和单次尝试保持。假 Bot OFFLINE、容器已停止，v33 与树莓派真实 QQ 单连接不变。真实晚到调和入口和真实配置交接仍待完成。详见 [v36 Delivery 观察验收](live-v36-delivery-observation-2026-10-17.md)。
+
 2026-10-17 Delivery 私有观察账本接通：源码包 0.4.7 / SQL 3.1.4 校验同事务 `kernel.effect` 回执并持久记录接受/冲突观察；隔离 PostgreSQL 测试证实明确拒绝的接受行和晚到冲突行并存，冲突不改变 FAILED/REJECTED 终态，退避测试仍通过。尚未构建新版完整运行镜像，也未验证真实调和入口或完整 UnitOfWork；现役 v33 不变。
 
 2026-10-17 Delivery 可重试确定未发送的退避：源码包 0.4.6 / SQL 3.1.3 为 part 增加持久 `retry_ready_at`，按 attempt 序号指数退避至最多 60 秒，到期前不可领取。隔离 PostgreSQL 的状态机测试通过；该版本尚未打包进入 v35 镜像。设计审计当时发现 `delivery_observations` 只建表、观察函数不写该表，随后在 0.4.7 / SQL 3.1.4 中接通。
