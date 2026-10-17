@@ -340,6 +340,42 @@ async def test_agent_package_owns_run_snapshot_and_epoch_fenced_lease(clean_auth
                 timeout_seconds=10,
             )
         assert started["state"] == "PREPARING_MODEL"
+        core_cancel = {
+            "protocol": "forest.uow-step/1",
+            "caller": {"component_id": "kernel.runtime", "generation_id": "kernel/test"},
+            "input": {
+                "run_id": "run/agent-package/1",
+                "expected_checkpoint_seq": 0,
+                "reason_code": "CORE_RESCUE_CANCEL",
+                "requested_by": "qq:42",
+            },
+            "prior": {},
+        }
+        with pytest.raises(RuntimeError, match="roll back core cancellation"):
+            async with store.pool.connection() as conn, conn.transaction():
+                requested = await participant.invoke_in(
+                    conn, "agent.request-core-cancel", core_cancel,
+                    operation_id="core:test/agent-cancel",
+                    causal_root_kind="core.rescue.request",
+                    causal_root_id="core:test/agent-cancel",
+                    parent_call_id="call:core/agent-cancel",
+                    timeout_seconds=10,
+                )
+                assert requested == {
+                    "protocol": "forest.agent-cancel-requested/1",
+                    "run_id": "run/agent-package/1",
+                    "request_id": "core:test/agent-cancel",
+                    "state": "REQUESTED",
+                }
+                raise RuntimeError("roll back core cancellation")
+        async with store.pool.connection() as conn:
+            rows = await (await conn.execute(
+                sql.SQL("SELECT count(*) AS count FROM {}.run_cancel_requests "
+                        "WHERE bot_id=%s AND run_id=%s").format(
+                    sql.Identifier(package.descriptor.storage.spec.namespace)
+                ), (store.bot_id, "run/agent-package/1"),
+            )).fetchone()
+        assert rows["count"] == 0
         sessions = await instance.management_contract.query(
             "agent.sessions.page", {
                 "conversation_ref": "conversation/onebot/group/933179609",

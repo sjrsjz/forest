@@ -24,6 +24,7 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
         "delivery.create-chat-intent-uow",
         "delivery.create-control-intent",
         "delivery.create-control-intent-uow",
+        "delivery.create-core-rescue-intent-uow",
         "delivery.record-prepare",
         "delivery.record-handoff",
         "delivery.record-observe",

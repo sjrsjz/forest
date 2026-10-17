@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.4.8"
+version = "0.4.9"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -87,7 +87,7 @@ order = 20
 schema_id = "forest.delivery"
 schema_version = "3.1.5"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "0db925bce79122c81e090d57323d6b5cc79a2f9342efebed030aa49aeb4018db"
+baseline_sha256 = "7fae80654d7924c04c713d4e80bb49720cc6d16f2f2d0378fd97e9e3c4b17ba8"
 scope = "bot"
 repository_contract = "forest.delivery.repository/3"
 execution_profile = "official"
@@ -295,4 +295,17 @@ output_schema = "schemas/intent-output.json"
 path = "/input/parts/*/payload"
 owner_component = "shell.command"
 owner_kind = "shell.result"
+owner_id_path = "/input/parts/*/payload/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "delivery.create-core-rescue-intent-uow"
+contract = "1.0"
+function = "delivery_create_core_rescue_intent_uow"
+input_schema = "schemas/core-rescue-intent-uow-envelope.json"
+output_schema = "schemas/intent-output.json"
+
+[[components.unit_of_work_participants.payload_refs]]
+path = "/input/parts/*/payload"
+owner_component = "kernel.runtime"
+owner_kind = "core.rescue.result"
 owner_id_path = "/input/parts/*/payload/owner_id"

@@ -1877,6 +1877,123 @@ async def test_builtin_package_domain_state_runs_only_through_declared_authority
 
 
 @pytest.mark.postgres
+async def test_delivery_core_rescue_intent_has_separate_owner_and_cause(
+    clean_authority, tmp_path,
+):
+    store, installer = clean_authority
+    kernel = await bootstrap_kernel(store, installer)
+    delivery = await bootstrap_builtin_package(
+        Path(str(files("forest").joinpath("builtin/delivery"))),
+        PackageCatalog(tmp_path / "delivery-core-packages"),
+        store, installer, kernel=kernel,
+        initial_configuration={"protocol": "forest.delivery/1"},
+        effect_driver_registry=PackageEffectDriverRegistry({
+            "kernel.payload-json": kernel_payload_json_effect_driver_factory(
+                runtime=kernel.runtime, payloads=kernel.payload,
+            ),
+        }),
+        resolved_contracts={},
+    )
+    request_id = "core:test/1"
+    saved = await kernel.payload.put_bytes(
+        owner_component_id="kernel.runtime",
+        owner_kind="core.rescue.result",
+        owner_id=request_id,
+        media_type="application/json",
+        content=b'{"text":"Core status ready"}',
+        expected_deletion_epoch=await kernel.payload.epoch(),
+    )
+    namespace = sql.Identifier(delivery.descriptor.storage.spec.namespace)
+    context = {
+        "bot_id": store.bot_id,
+        "generation_id": "generation/delivery-core-test",
+        "operation_id": "core-delivery/1",
+        "input_digest": digest_json({"request_id": request_id}),
+    }
+    intent = {
+        "protocol": "forest.delivery-intent/1",
+        "intent_id": "core-intent/1",
+        "binding_ref": "binding/main",
+        "lane_kind": "CONTROL",
+        "ordering_key": "onebot:group:933179609",
+        "conversation_ref": None,
+        "channel_kind": "GROUP",
+        "channel_ref": "933179609",
+        "cause_component_id": "kernel.runtime",
+        "cause_kind": "core.rescue.request",
+        "cause_id": request_id,
+        "delivery_generation_id": "generation/delivery-core-test",
+        "reply_ref": None,
+        "parts": [{
+            "part_operation_id": "core-part/1",
+            "effect_operation_ref": "core-effect/1",
+            "payload": {
+                "payload_id": saved.payload_id,
+                "digest": saved.content_digest,
+                "owner_component_id": "kernel.runtime",
+                "owner_kind": "core.rescue.result",
+                "owner_id": request_id,
+            },
+        }],
+    }
+    envelope = {
+        "protocol": "forest.uow-step/1",
+        "caller": {"component_id": "kernel.runtime", "generation_id": "kernel/test"},
+        "input": intent,
+        "prior": {},
+    }
+    async with store.pool.connection() as conn, conn.transaction():
+        denied = await (await conn.execute(
+            sql.SQL("SELECT {}.delivery_create_core_rescue_intent_uow(%s::jsonb,%s::jsonb) "
+                    "AS value").format(namespace),
+            (psycopg.types.json.Jsonb(context), psycopg.types.json.Jsonb({
+                **envelope,
+                "caller": {"component_id": "shell.command", "generation_id": "shell/test"},
+            })),
+        )).fetchone()
+        assert denied["value"]["error"]["code"] == "DELIVERY_CORE_RESCUE_INPUT_INVALID"
+        wrong_owner = await (await conn.execute(
+            sql.SQL("SELECT {}.delivery_create_core_rescue_intent_uow(%s::jsonb,%s::jsonb) "
+                    "AS value").format(namespace),
+            (psycopg.types.json.Jsonb(context), psycopg.types.json.Jsonb({
+                **envelope,
+                "input": {
+                    **intent,
+                    "parts": [{
+                        **intent["parts"][0],
+                        "payload": {
+                            **intent["parts"][0]["payload"],
+                            "owner_id": "core:someone-else",
+                        },
+                    }],
+                },
+            })),
+        )).fetchone()
+        assert wrong_owner["value"]["error"]["code"] == (
+            "DELIVERY_CORE_RESCUE_INPUT_INVALID"
+        )
+        created = await (await conn.execute(
+            sql.SQL("SELECT {}.delivery_create_core_rescue_intent_uow(%s::jsonb,%s::jsonb) "
+                    "AS value").format(namespace),
+            (psycopg.types.json.Jsonb(context), psycopg.types.json.Jsonb(envelope)),
+        )).fetchone()
+    assert created["value"]["ok"] is True
+    assert created["value"]["value"]["intent_id"] == "core-intent/1"
+    async with store.pool.connection() as conn:
+        row = await (await conn.execute(
+            sql.SQL("SELECT cause_component_id,cause_kind,cause_id,lane_kind "
+                    "FROM {}.send_intents WHERE bot_id=%s AND intent_id=%s").format(namespace),
+            (store.bot_id, "core-intent/1"),
+        )).fetchone()
+    assert row == {
+        "cause_component_id": "kernel.runtime",
+        "cause_kind": "core.rescue.request",
+        "cause_id": request_id,
+        "lane_kind": "CONTROL",
+    }
+
+
+@pytest.mark.postgres
 async def test_delivery_builtin_owns_transactional_intent_creation(clean_authority, tmp_path):
     store, installer = clean_authority
     kernel = await bootstrap_kernel(store, installer)

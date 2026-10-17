@@ -301,6 +301,25 @@ BEGIN
 END;
 $$;
 
+CREATE FUNCTION agent_request_core_cancel(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog AS $$
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'kernel.runtime'
+       OR envelope#>>'{caller,generation_id}' IS NULL
+       OR jsonb_typeof(envelope->'input') IS DISTINCT FROM 'object'
+       OR jsonb_typeof(envelope->'prior') IS DISTINCT FROM 'object'
+       OR envelope#>>'{input,reason_code}' IS DISTINCT FROM 'CORE_RESCUE_CANCEL'
+    THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','AGENT_CORE_CANCEL_CALLER_INVALID',
+                'message','Core cancellation participant requires kernel.runtime',
+                'status',403));
+    END IF;
+    RETURN __forest_module_schema__.agent_request_cancel(context,envelope->'input');
+END;
+$$;
+
 CREATE TABLE session_close_operations (
     bot_id text NOT NULL,
     operation_id text NOT NULL CHECK (octet_length(operation_id) BETWEEN 1 AND 256),

@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.agent-runtime"
-version = "4.53.2"
+version = "4.53.3"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "agent_runtime:AgentRuntime"
@@ -221,7 +221,7 @@ output_schema = "schemas/run-snapshot-output.json"
 schema_id = "forest.agent.runtime"
 schema_version = "2.33.1"
 baseline = "schema/agent_runtime.sql"
-baseline_sha256 = "5b6ccdcfaa4fa50c3c67b87da0332b29524419420af8fc939d206456c7e00109"
+baseline_sha256 = "0568ef06559d7899e23a45bde08fba95a8a44f628e96383d663fcfb0807fc154"
 scope = "bot"
 repository_contract = "forest.agent-runtime.repository/1"
 execution_profile = "official"
@@ -266,6 +266,13 @@ name = "agent.request-cancel"
 contract = "1.0"
 function = "agent_request_cancel"
 input_schema = "schemas/cancel-request-input.json"
+output_schema = "schemas/cancel-request-output.json"
+
+[[components.unit_of_work_participants]]
+name = "agent.request-core-cancel"
+contract = "1.0"
+function = "agent_request_core_cancel"
+input_schema = "schemas/core-cancel-envelope.json"
 output_schema = "schemas/cancel-request-output.json"
 
 [[components.management_actions]]

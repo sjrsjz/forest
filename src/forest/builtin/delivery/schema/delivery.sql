@@ -571,6 +571,49 @@ CREATE FUNCTION delivery_create_control_intent_uow(context jsonb, envelope jsonb
 RETURNS jsonb LANGUAGE sql VOLATILE SET search_path=pg_catalog
 AS $$ SELECT __forest_module_schema__.delivery_create_intent(context,envelope->'input') $$;
 
+CREATE FUNCTION delivery_create_core_rescue_intent_uow(context jsonb, envelope jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE
+    input jsonb := envelope->'input';
+    result_part jsonb;
+BEGIN
+    IF envelope->>'protocol' IS DISTINCT FROM 'forest.uow-step/1'
+       OR envelope#>>'{caller,component_id}' IS DISTINCT FROM 'kernel.runtime'
+       OR envelope#>>'{caller,generation_id}' IS NULL
+       OR jsonb_typeof(input) IS DISTINCT FROM 'object'
+       OR jsonb_typeof(envelope->'prior') IS DISTINCT FROM 'object'
+       OR input->>'lane_kind' IS DISTINCT FROM 'CONTROL'
+       OR input->>'channel_kind' IS DISTINCT FROM 'GROUP'
+       OR input->>'ordering_key' IS DISTINCT FROM
+          'onebot:group:' || (input->>'channel_ref')
+       OR input->>'conversation_ref' IS NOT NULL
+       OR input->>'cause_component_id' IS DISTINCT FROM 'kernel.runtime'
+       OR input->>'cause_kind' IS DISTINCT FROM 'core.rescue.request'
+       OR input->>'cause_id' IS NULL
+       OR jsonb_typeof(input->'parts') IS DISTINCT FROM 'array'
+    THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','DELIVERY_CORE_RESCUE_INPUT_INVALID',
+                'message','Core rescue delivery intent is invalid','status',422));
+    END IF;
+    IF jsonb_array_length(input->'parts') <> 1 THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','DELIVERY_CORE_RESCUE_INPUT_INVALID',
+                'message','Core rescue delivery requires one part','status',422));
+    END IF;
+    result_part := input->'parts'->0;
+    IF result_part#>>'{payload,owner_component_id}' IS DISTINCT FROM 'kernel.runtime'
+       OR result_part#>>'{payload,owner_kind}' IS DISTINCT FROM 'core.rescue.result'
+       OR result_part#>>'{payload,owner_id}' IS DISTINCT FROM input->>'cause_id'
+    THEN
+        RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,
+            'error',jsonb_build_object('code','DELIVERY_CORE_RESCUE_INPUT_INVALID',
+                'message','Core rescue result payload owner is invalid','status',422));
+    END IF;
+    RETURN __forest_module_schema__.delivery_create_intent(context,input);
+END;
+$$;
+
 CREATE TABLE owned_work_settlements (
     claim_token text PRIMARY KEY,
     input_payload jsonb NOT NULL,
