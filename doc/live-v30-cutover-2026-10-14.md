@@ -1,12 +1,12 @@
 # v30 完整源码候选与单实例切换（2026-10-14）
 
-当前 `memory.graph` 1.93.5 / SQL 3.92.1 与 v29 的 1.93.4 / SQL 3.92.0 基线不同。使用提交 `fb8199b` 的完整源码镜像 `forest:runtime-candidate-fb8199b`，建立独立部署 `forest/candidate-v30-20261014`、`forest_deployment_v30`、`forest_host_v30`、Bot 库 `forest_bot_467cdffde2fd7c8d4328a89e` 和私有包卷 `forest-candidate-v30_packages`。Supervisor 接入原部署网络和 Milvus 网络；密钥卷只读共享。管理入口 `http://127.0.0.1:18101`。
+当前 `memory.graph` 1.93.5 / SQL 3.92.1 与 v29 的 1.93.4 / SQL 3.92.0 基线不同。使用提交 `fb8199b` 的完整源码镜像 `forest:runtime-candidate-fb8199b`，建立独立部署 `forest/candidate-v30-20261014`、`forest_deployment_v30`、`forest_host_v30`、Bot 库 `forest_bot_467cdffde2fd7c8d4328a89e` 和私有包卷 `forest-candidate-v30_packages`。Supervisor 接入原部署网络和 Milvus 网络；密钥卷只读共享。管理入口 `<MANAGEMENT_URL>`。
 
 正式管理 API 复制 v29 冻结的模型、嵌入、OneBot 与许可群配置，并重新签发 Secret 引用。供应请求 SETTLED、供应 Job SUCCEEDED，Bot READY/OFFLINE，22 个 schema bundle 均 READY。Agent SQL 2.33.0、Memory SQL 3.92.1。凭证和本地切换脚本仅在忽略的 `.local/candidate-v30` 中。
 
 切换前 v29 READY/ONLINE，活动 Agent Run、Job、待发送均为 0。先令 v29 OFFLINE，并确认树莓派 OneBot 8080 的已建立连接为 0；再令 v30 ONLINE。v30 达到 READY/ONLINE、图修订 1、22/22 组件 ACTIVE，观察器违规项为空，活动 Run、Job、待发送均为 0。运行图装载 `agent.runtime` 4.52.0 / SQL 2.33.0、`memory.graph` 1.93.5 / SQL 3.92.1；树莓派仅有 1 条 Bot 主机的 OneBot 连接。旧 `alicebot.service` 仍停用。NapCat 实际使用 QQ 3.2.34-53644；系统级 `linuxqq` 3.2.19 不参与该服务。
 
-v30 是空的独立记忆库，切换时 0 条来源和 0 个 facet。v29 历史记忆及 28 个 `DOCUMENT.UNKNOWN` facet 保留于旧库，未复制或重试，避免对未知结果的嵌入请求重复计费。没有主动向 QQ 发消息；许可群 `933179609` 的新显式 @→Agent→Provider→QQ 回复、图片召回及长期负载尚待验收。组件健康不能代替端到端验收。
+v30 是空的独立记忆库，切换时 0 条来源和 0 个 facet。v29 历史记忆及 28 个 `DOCUMENT.UNKNOWN` facet 保留于旧库，未复制或重试，避免对未知结果的嵌入请求重复计费。没有主动向 QQ 发消息；许可群 `<GROUP_ID>` 的新显式 @→Agent→Provider→QQ 回复、图片召回及长期负载尚待验收。组件健康不能代替端到端验收。
 
 回退顺序：先通过 v30 管理面令 `forest-main-v30` OFFLINE，确认观测状态和 OneBot 连接释放；再通过 v29 管理面令 `forest-main-v29` ONLINE。两库独立，回退不会自动合并 v30 期间的新消息或记忆。
 
@@ -22,10 +22,10 @@ v30 是空的独立记忆库，切换时 0 条来源和 0 个 facet。v29 历史
 
 04:36 在无主动 QQ 发送的静默验收中，经正式 WebUI 配置 plan/apply 暂将 `conversation.scheduler` 上下文窗口设为 2/1 条，并把 `memory.graph` 当日嵌入预算限为 12 请求 / 16,384 tokens / 单次预留 2,048 tokens；随后两项配置均通过同一正式接口恢复原值，desired/effective 修订均为 3，运行图修订为 8。Bot 库保留 2 条群聊主干、6 条真实来源，其中 4 条 `ELIGIBLE`、2 条 `REGISTERED`；`DOCUMENT.READY` facet 共 5 条（3 文本、2 图片），两条主干均有图文 facet，嵌入账本当日 4 个已结算请求、2,683 tokens、0 UNKNOWN/预留/待处理。该试验只证明静默裁剪/归档和多模态 facet 生成；未证明非空召回或 Agent 端到端回复。未主动向 QQ 发送消息。
 
-04:40 用户报告 QQ 因“版本低”下线。树莓派当前捆绑 QQ 为 3.2.34-53644，而 NapCat Core 为 4.18.28；官方 v4.18.34 起新增该 QQ build 的兼容映射。通过 SSH 下载并核对官方 NapCat v4.18.38 `NapCat.Shell.zip`（35,884,742 字节，SHA-256 `735f2e633247df3ffd6e8ee8b84d7039c315b2655f5807e5f0029f93d2c30016`），预解压并复制原配置；停用 `nc_3605196653.service` 后清理其遗留 QQ 子进程，原子替换 `app_launcher/napcat`，旧目录保留于 `/home/sjz1/Napcat/opt/napcat-v4.18.28-rollback-20261014`，重新启动服务。NapCat 4.18.38 已运行，但 QQ 快捷登录未恢复，`CheckLoginStatus` 为 `waiting_qrcode`，需手机 QQ 扫码确认；旧 `alicebot.service` 仍 inactive。Bot 启动门禁因此使 v30 `desired=ONLINE / observed=FAILED / ONEBOT_API_UNAVAILABLE`，22 个 schema bundle 仍 READY，5 个 facet 与成本账本完整，当前无运行图、活动 Run/Job 或待发送。Supervisor 按失败次数自动退避重试，QQ 恢复后仍需核验 Bot READY、OneBot 单连接及正式非空召回试验；不得把 NapCat 进程 active 视为 QQ 登录或 Bot 在线。
+04:40 用户报告 QQ 因“版本低”下线。树莓派当前捆绑 QQ 为 3.2.34-53644，而 NapCat Core 为 4.18.28；官方 v4.18.34 起新增该 QQ build 的兼容映射。通过 SSH 下载并核对官方 NapCat v4.18.38 `NapCat.Shell.zip`（35,884,742 字节，SHA-256 `735f2e633247df3ffd6e8ee8b84d7039c315b2655f5807e5f0029f93d2c30016`），预解压并复制原配置；停用 `nc_<BOT_QQ_ID>.service` 后清理其遗留 QQ 子进程，原子替换 `app_launcher/napcat`，旧目录保留于 `<NAPCAT_INSTALL_DIR>/opt/napcat-v4.18.28-rollback-20261014`，重新启动服务。NapCat 4.18.38 已运行，但 QQ 快捷登录未恢复，`CheckLoginStatus` 为 `waiting_qrcode`，需手机 QQ 扫码确认；旧 `alicebot.service` 仍 inactive。Bot 启动门禁因此使 v30 `desired=ONLINE / observed=FAILED / ONEBOT_API_UNAVAILABLE`，22 个 schema bundle 仍 READY，5 个 facet 与成本账本完整，当前无运行图、活动 Run/Job 或待发送。Supervisor 按失败次数自动退避重试，QQ 恢复后仍需核验 Bot READY、OneBot 单连接及正式非空召回试验；不得把 NapCat 进程 active 视为 QQ 登录或 Bot 在线。
 
 
-QQ 待扫码期间继续做不依赖运行图的只读索引验收：按 `index_ref_id` 将 5 个 `DOCUMENT.READY` facet 与 `vector.index` 私有账本逐条关联，2 个图片、3 个文本 ref 均为 `ACTIVE/DOCUMENT`，space 与 vector digest 一致，当前 collection 绑定 `READY`、物理 ID `469447031268509105`。直接从 Milvus 以 Strong consistency GET 这 5 个 ref，5 行的 Bot/space/purpose/input digest 与 PostgreSQL 账本一致，4096 维 float32 物理摘要也全部一致。以其中一个图片 facet 的已存向量做限定 Bot/space/DOCUMENT 的物理搜索，返回 5 个命中，该 ref 排第一、余弦相似度 1.0，来源仍指向群 `598445021`。此项证明独立物理向量索引与引用账本可读且一致；它不等于管理召回试验、文本/图片新查询嵌入或 QiYu 式图扩散已通过。
+QQ 待扫码期间继续做不依赖运行图的只读索引验收：按 `index_ref_id` 将 5 个 `DOCUMENT.READY` facet 与 `vector.index` 私有账本逐条关联，2 个图片、3 个文本 ref 均为 `ACTIVE/DOCUMENT`，space 与 vector digest 一致，当前 collection 绑定 `READY`、物理 ID `469447031268509105`。直接从 Milvus 以 Strong consistency GET 这 5 个 ref，5 行的 Bot/space/purpose/input digest 与 PostgreSQL 账本一致，4096 维 float32 物理摘要也全部一致。以其中一个图片 facet 的已存向量做限定 Bot/space/DOCUMENT 的物理搜索，返回 5 个命中，该 ref 排第一、余弦相似度 1.0，来源仍指向群 `<SOURCE_GROUP_ID_B>`。此项证明独立物理向量索引与引用账本可读且一致；它不等于管理召回试验、文本/图片新查询嵌入或 QiYu 式图扩散已通过。
 
 15:51–15:57 UTC 再次只读复核时，树莓派 NapCat `CheckLoginStatus` 已返回 `READY`、`is_login=true`、`core_ready=true`；本轮没有观察到实际重新登录的操作，因此只记录当前状态。v30 原先为 `desired=ONLINE / observed=FAILED / ONEBOT_API_UNAVAILABLE`，通过正式 `deployment.bot-catalog` 管理动作先切 OFFLINE、再切 ONLINE，恢复到图修订 37、22/22 ACTIVE、OneBot 单连接；原来源和 facet 账本未重建。
 
@@ -33,8 +33,8 @@ QQ 待扫码期间继续做不依赖运行图的只读索引验收：按 `index_
 
 将已构建且定向验证过的 `forest:runtime-candidate-8c31ac5` 作为未启动容器预备，逐项核对环境、用户、命令、健康检查、挂载、端口与双网络均和当前 Supervisor 一致；然后停旧容器并保留为 `forest-candidate-v30-supervisor-prev-8c31ac5`，启动新容器。启动期健康检查一度显示 unhealthy，随后自动达到 healthy，未执行回退。新镜像含由 Adapter Generation 持有、每 30 秒检查 `get_status` 的运行期 QQ 状态任务。切换后 v30 READY/ONLINE、图修订 39、22/22 ACTIVE、27 条来源、4 个主干、5 个 DOCUMENT.READY 与 1 个 QUERY.READY facet；活动 Run、Job、待发送、UNKNOWN 嵌入和观察器违规均为 0。树莓派 QQ 登录仍 READY，OneBot 恰好一条连接。没有主动向 QQ 发送消息；许可群显式 @→回复和运行期真实离线回收仍待验收。
 
-16:07 UTC 再以现场生成的 256×256 PNG 通过正式管理资产上传和 `memory.trial.start` 发起一次图片查询。查询结算 READY，结果 0 项；图像与现有群聊图片语义不相关，因此不能用零命中推断图片召回失效，也不能把 READY 当作非空召回验收。只读预算记录当日文本＋图片两次查询共 107 token、0 UNKNOWN；v30 图 39 仍 22/22 ACTIVE、0 活动 Run/Job/待发送或观察违规。自然入站增至 32 条来源、5 个主干，许可群 `933179609` 仍无入站记录。
+16:07 UTC 再以现场生成的 256×256 PNG 通过正式管理资产上传和 `memory.trial.start` 发起一次图片查询。查询结算 READY，结果 0 项；图像与现有群聊图片语义不相关，因此不能用零命中推断图片召回失效，也不能把 READY 当作非空召回验收。只读预算记录当日文本＋图片两次查询共 107 token、0 UNKNOWN；v30 图 39 仍 22/22 ACTIVE、0 活动 Run/Job/待发送或观察违规。自然入站增至 32 条来源、5 个主干，许可群 `<GROUP_ID>` 仍无入站记录。
 
 16:24 UTC 在 0 活动 Run、Job、待发送的前提下，通过正式 `component.worker-host` 管理动作对 `adapter.onebot` 执行同工件 `module.reload`。包侧请求 `reload:de15ed09d207616d8a0a382e66b2a831` 状态为 SUBMITTED；内核 `latest_replacement` 的准确操作 `component-reload:reload:de15ed09d207616d8a0a382e66b2a831` 为 SUCCEEDED、一次尝试、结果图修订 40、无错误。Adapter Generation 从 `generation:50bb88a7-2223-4935-99db-ea6e460d553e:ec15da6bc41de6e8761deef8` 换为 `generation:c42e43f6-d4a6-580e-9f06-31600c5be51c:5031850f779b53199446a42c`，Memory Generation 保留；运行图 22/22 ACTIVE，Bot ONLINE、无观察违规，QQ 登录 READY，OneBot 连接仍恰好一条。临时核对脚本在图发布后误以为 Adapter 的 RuntimeStatus 成员必有 `storage` 字段而抛出 KeyError；这是脚本读取可选字段的错误，不是替换失败，独立观察器与内核账本已分别核对发布结果。此轮没有主动发送 QQ 消息。
 
-???????尝试规划在短时 Docker 工具容器内，把其他群聊现有召回证据图片经正式管理 API 读出并再次作为查询输入；自动审批审查因当前测试授权仅覆盖群 `933179609` 而拒绝该读取与重新提交，即使媒体不写入主机也属于未经授权的私有数据处理。命令未执行，未产生新的图片读取、上传或付费嵌入。v30 的非空图片召回继续等待许可群自有的测试图片；此前抽象合成 PNG 查询虽 READY、结果为 0，其向量候选需满足当前 `min_similarity=0.35`，不能把零命中当作图片召回失效。
+???????尝试规划在短时 Docker 工具容器内，把其他群聊现有召回证据图片经正式管理 API 读出并再次作为查询输入；自动审批审查因当前测试授权仅覆盖群 `<GROUP_ID>` 而拒绝该读取与重新提交，即使媒体不写入主机也属于未经授权的私有数据处理。命令未执行，未产生新的图片读取、上传或付费嵌入。v30 的非空图片召回继续等待许可群自有的测试图片；此前抽象合成 PNG 查询虽 READY、结果为 0，其向量候选需满足当前 `min_similarity=0.35`，不能把零命中当作图片召回失效。

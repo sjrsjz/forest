@@ -2,7 +2,7 @@
 
 提交 `f37b4f8` 构建为 `forest:runtime-candidate-v26-f37b4f8`，镜像清单摘要 `sha256:fe73cae84ae7284a9e033290a1cebb3dae79c33545f8a1b7551e862d888e73aa`。此前当前源码在一次性 PostgreSQL Bot 库运行完整 BotHost 图装配、热替换、停机与冷启动恢复，`1 passed in 641.90s`；Conversation 4.39.0 / 私有 SQL 4.32.0 的失败退避包级数据库用例及相邻调度回归 2 passed。镜像内 SQL 字节 SHA-256 为 `42936c89032ea0183d1f52d0b0cd1f190525f38dd3ec1c422f19d791d575c352`，与包清单一致。
 
-v26 使用新建的 `forest_deployment_v26`、`forest_host_v26`、独立 Bot 物理库和 `forest-candidate-v26_packages` 包卷；部署身份 `forest/candidate-v26-20261012`，Bot `forest-main-v26`，管理入口 `http://127.0.0.1:18097`。它复用已有只读部署密钥卷及 PostgreSQL/Milvus 物理服务，但不复用 v25 的部署、Host、Bot 数据库或包卷。Web 配对凭据重新签发，管理员账户沿用现有测试身份；Bot 数据库角色使用新的独立凭据。Bot 配置从在线 v25 的冻结配置和密文按准确源部署 AAD 解密、重加密后供应，许可群仍只含 `933179609`、需显式 @，OneBot 登录账号仍为 `3605196653`。新 Bot 没有复制 v25 的消息或记忆。v25 数据库和包卷保留作回退点。
+v26 使用新建的 `forest_deployment_v26`、`forest_host_v26`、独立 Bot 物理库和 `forest-candidate-v26_packages` 包卷；部署身份 `forest/candidate-v26-20261012`，Bot `forest-main-v26`，管理入口 `<MANAGEMENT_URL>`。它复用已有只读部署密钥卷及 PostgreSQL/Milvus 物理服务，但不复用 v25 的部署、Host、Bot 数据库或包卷。Web 配对凭据重新签发，管理员账户沿用现有测试身份；Bot 数据库角色使用新的独立凭据。Bot 配置从在线 v25 的冻结配置和密文按准确源部署 AAD 解密、重加密后供应，许可群仍只含 `<GROUP_ID>`、需显式 @，OneBot 登录账号仍为 `<BOT_QQ_ID>`。新 Bot 没有复制 v25 的消息或记忆。v25 数据库和包卷保留作回退点。
 
 首次启动 v26 Supervisor 因新建包卷由 root 持有触发 `DATA_OWNER_MISMATCH`；仅对这只空 v26 包卷设置运行 UID 10001 的属主后重启，服务稳定 `healthy`、重启计数 0、管理 HTTP 200。供给辅助脚本最初缺少新 Bot 角色凭据挂载，并误将源密文的部署 AAD 替换成 v26 日期，AES-GCM 认证拒绝；修正辅助脚本的源部署身份与只读凭据路径后，存储请求 `SETTLED`、供给任务 `SUCCEEDED`，Bot `READY/OFFLINE`。这些失败没有导致 QQ 连接，也没有修改 v25 的数据。
 

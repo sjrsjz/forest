@@ -1,6 +1,6 @@
 # 在线 v21 OneBot 传输监督热修（2026-10-11）
 
-在线 `forest-main` 的部署观察曾保持 `ONLINE`，但只读探针发现最新入站停在 2026-10-10 15:32 UTC，Supervisor 进程中也没有到树莓派 `192.168.31.117:8080` 的连接。目标端点从同一 Docker 网络可达。代码检查确认 OneBot 客户端的读取任务在 WebSocket 关闭后会结束，而 `PackageGenerationAdapter.owned_tasks()` 原先只上报包持有的工作任务，没有上报 Effect Driver 的任务。因此 HTTP 健康和 RuntimeGraph 状态都不能发现该失联。
+在线 `forest-main` 的部署观察曾保持 `ONLINE`，但只读探针发现最新入站停在 2026-10-10 15:32 UTC，Supervisor 进程中也没有到树莓派 `<ONEBOT_HOST>:<ONEBOT_PORT>` 的连接。目标端点从同一 Docker 网络可达。代码检查确认 OneBot 客户端的读取任务在 WebSocket 关闭后会结束，而 `PackageGenerationAdapter.owned_tasks()` 原先只上报包持有的工作任务，没有上报 Effect Driver 的任务。因此 HTTP 健康和 RuntimeGraph 状态都不能发现该失联。
 
 修复给持有长期任务的 Effect Driver 定义 `owned_tasks` 端口；OneBot Driver 上报每个 Binding 的客户端任务，Package Generation 再汇入 RuntimeGraph 的宿主监督集合。当前图中的读取任务结束会使 BotHost 失败，并由多 Bot Supervisor 按既有退避和运行意图重试。定向 OneBot/Driver 测试 `6 passed`，镜像导入检查通过。
 

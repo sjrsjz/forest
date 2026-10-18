@@ -1,6 +1,6 @@
 # v34 独立离线候选（2026-10-17）
 
-以提交 `95474cba` 的源码构建生产镜像 `forest:runtime-95474cba`。候选 Compose 项目为 `forest-accept-v34`，使用独立的 Secret、PostgreSQL、包目录卷和 `forest/accept-v34` 部署身份；仅借用现有 `forest-clean_default` 网络访问 Milvus，不启动第二套 Milvus。管理端口仅绑定 `127.0.0.1:18106`。候选的配置和一次性验收脚本保存在忽略目录 `.cache/accept-v34`，未并入正式 Compose。
+以提交 `95474cba` 的源码构建生产镜像 `forest:runtime-95474cba`。候选 Compose 项目为 `forest-accept-v34`，使用独立的 Secret、PostgreSQL、包目录卷和 `forest/accept-v34` 部署身份；仅借用现有 `forest-clean_default` 网络访问 Milvus，不启动第二套 Milvus。管理端口仅绑定 `<MANAGEMENT_BIND_ADDRESS>`。候选的配置和一次性验收脚本保存在忽略目录 `.cache/accept-v34`，未并入正式 Compose。
 
 初始化器生成新的数据库口令及 Host ID，独立随机主密钥与 Web 首次配对凭据经受保护的 Secret 容器写入新卷。首次管理员设置完成后，管理首页返回 200；部署 RuntimeGraph 修订 1 为 ACTIVE，含 8 个部署 builtin；Host RuntimeGraph 修订 1 为 ACTIVE，含 `host.audit` 与 `host.storage`。此时 Bot 目录为空。
 

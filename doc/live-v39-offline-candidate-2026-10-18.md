@@ -2,9 +2,9 @@
 
 > 此文记录切换前的候选状态。v39 已接替 v38 在线运行；当前运行状态及未完成的真实 QQ 验收见 [v39 切换记录](live-v39-cutover-2026-10-18.md)。
 
-以提交 `97165332` 构建的 `forest:runtime-memory-query-headroom-97165332`（镜像 ID `sha256:35afca452126bc92459bf976ed2ded08fce1e6847e5d5b5fecfa2911204dc3e0`）供应了独立部署 `forest/accept-v39`。Deployment 数据库 `forest_deployment_v39`、Host 数据库 `forest_host_v39`、Bot 数据库 `forest_bot_9607fec8da7cc9ef10c77e63` 及包卷 `forest-v39-packages` 均独立于现役 v38。候选复用现有 PostgreSQL 服务，部署密钥文件从 v38 secrets 卷只读挂载；新的引导文件和准备脚本位于被 Git 忽略的 `.cache/accept-v39`。管理入口仅绑定 `127.0.0.1:18130`。
+以提交 `97165332` 构建的 `forest:runtime-memory-query-headroom-97165332`（镜像 ID `sha256:35afca452126bc92459bf976ed2ded08fce1e6847e5d5b5fecfa2911204dc3e0`）供应了独立部署 `forest/accept-v39`。Deployment 数据库 `forest_deployment_v39`、Host 数据库 `forest_host_v39`、Bot 数据库 `forest_bot_9607fec8da7cc9ef10c77e63` 及包卷 `forest-v39-packages` 均独立于现役 v38。候选复用现有 PostgreSQL 服务，部署密钥文件从 v38 secrets 卷只读挂载；新的引导文件和准备脚本位于被 Git 忽略的 `.cache/accept-v39`。管理入口仅绑定 `<MANAGEMENT_BIND_ADDRESS>`。
 
-通过正式部署管理动作，候选完成存储申请 `PENDING → SETTLED`、冻结 Bootstrap 配置、供应任务 `RUNNING → SUCCEEDED`。Bot `forest-main-v39` 为 `READY/OFFLINE`，没有 ONLINE 意图；Bot 库 22/22 个 schema bundle 为 READY，`memory.graph` 私有 schema 为 4.0.1。管理 API 返回 Deployment 图 ACTIVE、8 个组件和 Bot READY/OFFLINE。只读对照确认 v38 与 v39 的嵌入模型身份及端点、OneBot 账号与地址、仅允许群 `933179609` 的触发策略、Agent 核心提示配置及 Provider/Embedding/OneBot 三份凭据的明文摘要一致；验证没有输出或提交凭据明文。
+通过正式部署管理动作，候选完成存储申请 `PENDING → SETTLED`、冻结 Bootstrap 配置、供应任务 `RUNNING → SUCCEEDED`。Bot `forest-main-v39` 为 `READY/OFFLINE`，没有 ONLINE 意图；Bot 库 22/22 个 schema bundle 为 READY，`memory.graph` 私有 schema 为 4.0.1。管理 API 返回 Deployment 图 ACTIVE、8 个组件和 Bot READY/OFFLINE。只读对照确认 v38 与 v39 的嵌入模型身份及端点、OneBot 账号与地址、仅允许群 `<GROUP_ID>` 的触发策略、Agent 核心提示配置及 Provider/Embedding/OneBot 三份凭据的明文摘要一致；验证没有输出或提交凭据明文。
 
 初次供应期间现役 v38 保持 ONLINE，树莓派 NapCat 的 OneBot 8080 只有一条已建立连接。初次停机时 v39 尚未运行 BotHost，也没有发送 QQ 消息或调用外部模型。候选接入了现有 Milvus 网络但未发起向量请求；正常 SIGTERM 停机退出码为 0，日志无租约关闭错误。
 

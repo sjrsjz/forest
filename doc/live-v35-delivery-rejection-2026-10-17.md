@@ -1,6 +1,6 @@
 # v35 隔离候选：明确拒绝的终态与 Delivery 热重载（2026-10-17）
 
-以已提交源码 `46a23592` 构建镜像 `forest:runtime-46a23592`，镜像 ID 为 `sha256:7a0b307a42805f9b2348ac00d42544eab63216c45f6b8b121e4927077e2e68ca`。新建 `forest-accept-v35` 专用 PostgreSQL、包卷、管理端口 `127.0.0.1:18107` 和 Bot `bot/accept-v35-offline-20261017`；没有复用 v33/v34 的数据库。正式管理端口的存储申请、引导配置和供应任务均结算，Bot 起初为 `READY / OFFLINE`。其独立 Bot 库 `forest_bot_afc1a14b5e62d45eddda81e5` 中 22 个 schema bundle 全为 `READY`，Adapter 为 SQL 2.2.0、Delivery 为 SQL 3.1.2、Memory 为 SQL 3.99.0。
+以已提交源码 `46a23592` 构建镜像 `forest:runtime-46a23592`，镜像 ID 为 `sha256:7a0b307a42805f9b2348ac00d42544eab63216c45f6b8b121e4927077e2e68ca`。新建 `forest-accept-v35` 专用 PostgreSQL、包卷、管理端口 `<MANAGEMENT_BIND_ADDRESS>` 和 Bot `bot/accept-v35-offline-20261017`；没有复用 v33/v34 的数据库。正式管理端口的存储申请、引导配置和供应任务均结算，Bot 起初为 `READY / OFFLINE`。其独立 Bot 库 `forest_bot_afc1a14b5e62d45eddda81e5` 中 22 个 schema bundle 全为 `READY`，Adapter 为 SQL 2.2.0、Delivery 为 SQL 3.1.2、Memory 为 SQL 3.99.0。
 
 在只允许读取账户状态、对所有发送动作明确返回失败的本地假 OneBot 上，将 Bot 置为 ONLINE、22/22 组件 ACTIVE。通过正式配置端口仅将嵌入 endpoint 改为固定向量假端点（冻结 VL profile 不变）、Provider 改为假聊天端点，并将第二个假群纳入触发许可。向假群注入一条显式 `@`：持久入站和触发各 1 条，Agent Run `COMPLETED`，假模型记录 1 次请求。假 OneBot 对 `send_group_msg` 返回失败后，Delivery intent 和 part 都是 `FAILED`，transport attempt 是 `REJECTED / PLATFORM_REJECTED`，attempt_count 为 1；假端点日志也只有 1 次发送拒绝动作。
 

@@ -2,7 +2,7 @@
 
 提交 `f08ceac` 构建为 `forest:runtime-candidate-f08ceac`。内核 `runtime.effect-executor-outcome/2` 只按冻结路由与通用服务账本查询回执；Agent 从冻结 Model Request 取得模型 wire 摘要，Provider 负责模型载荷校验。`agent.runtime` 4.49.0 / SQL 2.32.0。Agent 纯逻辑 15 项、Agent 包隔离 PostgreSQL 1 项、BotHost 两种效果恢复各 1 项通过；Ruff 与编译检查通过。
 
-v25 使用独立的 `forest_deployment_v25`、`forest_host_v25`、Bot 物理库和 `forest-candidate-v25_packages` 包卷。部署身份 `forest/candidate-v25-20261011`，Supervisor `forest-candidate-v25-supervisor`，管理入口 `http://127.0.0.1:18096`。Bot `forest-main-v25` 从已验证的 v22 配置重新供应，默认仅许可群 `933179609` 显式 @ 触发；未复制旧消息或记忆。首次供应为 READY/OFFLINE，22 个 schema bundle 为 READY。
+v25 使用独立的 `forest_deployment_v25`、`forest_host_v25`、Bot 物理库和 `forest-candidate-v25_packages` 包卷。部署身份 `forest/candidate-v25-20261011`，Supervisor `forest-candidate-v25-supervisor`，管理入口 `<MANAGEMENT_URL>`。Bot `forest-main-v25` 从已验证的 v22 配置重新供应，默认仅许可群 `<GROUP_ID>` 显式 @ 触发；未复制旧消息或记忆。首次供应为 READY/OFFLINE，22 个 schema bundle 为 READY。
 
 首次启动遗漏 Milvus 所在 `forest-clean_default` 网络，导致 `VECTOR_INDEX_UNAVAILABLE`。期间撤回 v25 意图并恢复 v24，确认 OneBot 连接为 v24=1/v25=0。补齐网络后，按 v24 OFFLINE → 连接数 0 → v25 ONLINE 重新切换。当前 v25 Supervisor healthy、图 8 为 22/22 ACTIVE，向量绑定修订 1 为 READY，无未完成 claim；v24/v25 到树莓派 OneBot 的 ESTABLISHED 连接为 0/1。失败图 1–7 均 STOPPED。首条非许可群入站已完整进入 Context/Memory，Agent Run 为 0。
 
@@ -16,7 +16,7 @@ v25 使用独立的 `forest_deployment_v25`、`forest_host_v25`、Bot 物理库�
 
 ## 2026-10-11 许可群静默诊断
 
-只读检查截至 `2026-10-11T05:00:22Z` 的入站元数据：49 条消息全部进入 Context，48 条建立 Memory 来源；唯一缺失来源是非许可群图片像素超限，已以 `MEDIA_CAPTURE_UNAVAILABLE` 记账。许可群 10 条消息均为 `mention_required`，Agent Run 仍为 0。逐条对照 OneBot 原始段和规范化段后确认 @ 未在适配器丢失：v25 登录账号 `3605196653`，许可群现有 @ 段指向其他账号，另有仅含回复引用而无 @ 的消息。当前 MENTION 策略要求显式 @ 登录账号；等待一次明确 @3605196653 的低频真人验收。
+只读检查截至 `2026-10-11T05:00:22Z` 的入站元数据：49 条消息全部进入 Context，48 条建立 Memory 来源；唯一缺失来源是非许可群图片像素超限，已以 `MEDIA_CAPTURE_UNAVAILABLE` 记账。许可群 10 条消息均为 `mention_required`，Agent Run 仍为 0。逐条对照 OneBot 原始段和规范化段后确认 @ 未在适配器丢失：v25 登录账号 `<BOT_QQ_ID>`，许可群现有 @ 段指向其他账号，另有仅含回复引用而无 @ 的消息。当前 MENTION 策略要求显式 @ 登录账号；等待一次明确 @`<BOT_QQ_ID>` 的低频真人验收。
 
 ## 2026-10-11 Web 管理入口实调
 
@@ -42,7 +42,7 @@ Memory 管理入口同样经真实会话验证：按许可群号筛选主干得�
 
 ## 2026-10-11 已响应模型结果的阻塞诊断
 
-许可群 933179609 的一个 Run 自 10:25:50 UTC 起保持 BLOCKED_UNKNOWN，10:35:50 UTC 截止时间已过。只读账本确认 Provider 在 10:26:46 UTC 保存了 model.result 和 model.usage；结果为 RESPONDED、finish_reason=length、text 为空、error_code=MODEL_OUTPUT_INCOMPLETE。旧版 Provider 4.4.1 的派发输出 schema 只接受 RESPONDED.error_code=null，故通用服务账本把已经完成的调用记为 RUNTIME_SERVICE_OUTPUT_INVALID；旧版只读 lookup 又拒绝该真实结果，Agent/Effect 无法对账。不能把原 Attempt 当作未发送重试。
+许可群 `<GROUP_ID>` 的一个 Run 自 10:25:50 UTC 起保持 BLOCKED_UNKNOWN，10:35:50 UTC 截止时间已过。只读账本确认 Provider 在 10:26:46 UTC 保存了 model.result 和 model.usage；结果为 RESPONDED、finish_reason=length、text 为空、error_code=MODEL_OUTPUT_INCOMPLETE。旧版 Provider 4.4.1 的派发输出 schema 只接受 RESPONDED.error_code=null，故通用服务账本把已经完成的调用记为 RUNTIME_SERVICE_OUTPUT_INVALID；旧版只读 lookup 又拒绝该真实结果，Agent/Effect 无法对账。不能把原 Attempt 当作未发送重试。
 
 提交 85c7d34 将 Provider 升至 4.4.2、Agent 升至 4.49.1，保留已响应质量错误并经原 Attempt 转成协议修复或终结事实；过期 Run 不再发起修复调用。57 项模型/Agent 定向离线测试通过，两包在本地和候选镜像内部的工件摘要一致。仅覆盖这八个修复文件的镜像 forest:runtime-candidate-quality-85c7d34 已构建，基础镜像仍是在线使用的 0968bfb；预创建容器的环境、挂载、网络、端口与资源限制均与线上一致，但未启动，随后已清理。在线 v25 仍使用原镜像和原包。
 
@@ -58,7 +58,7 @@ Memory 管理入口同样经真实会话验证：按许可群号筛选主干得�
 
 确认 Bot 处于 OFFLINE 且 component.worker-host 选择账本没有 Agent/Provider 的显式固定摘要后，使用已验证约束的 forest:runtime-candidate-quality-85c7d34 替换 Supervisor 容器；旧容器停止并保留为 forest-candidate-v25-supervisor-backup-0968bfb-quality。新 Supervisor healthy、重启 0，沿用原部署/Host/Bot 库、密钥、包卷、管理端口及两个网络。通过原管理契约把 Bot 设回 ONLINE 后，冷启动图修订 16 的 22/22 成员 ACTIVE：Provider 4.4.2 摘要 sha256:cc22d87f233cc3cdcaaf734db54a54e46701faaefa5b49c6c97684bce1dbee1e，Agent 4.49.1 摘要 sha256:d0e2061d94285a0c4467f27ca2bff0e5ade9fc5612dbe382e90511f55bb0191d。由于旧活动图已停止，这是正常冷启动装配，未绕过活动图的 UNKNOWN 热替换围栏。
 
-旧 Run run:9b104319e5bd04f994e7bbd7d069887b9bb094f742bb81d224c018518e1eeca2 在 13:05:08 UTC 终结为 FAILED/AGENT_PROTOCOL_FAILED，协议失败事实为 AGENT_PROTOCOL_OUTPUT_INCOMPLETE。原 Request 只有 1 次 Attempt，原 Effect 只有 1 次；两者经已保存的 Provider 结果回查收敛为 SUCCEEDED，没有第二次模型派发。许可群 933179609 的分类与 Context 水位均为 25，执行槽已释放。20 秒三次只读观察均为零违约、活动 Run 0、过期 Run 0、待发送 0，最近 QQ 发送仍为 08:46:52 UTC 的旧回执。本次恢复没有向 QQ 主动发送新消息，也没有删除历史数据库。
+旧 Run run:9b104319e5bd04f994e7bbd7d069887b9bb094f742bb81d224c018518e1eeca2 在 13:05:08 UTC 终结为 FAILED/AGENT_PROTOCOL_FAILED，协议失败事实为 AGENT_PROTOCOL_OUTPUT_INCOMPLETE。原 Request 只有 1 次 Attempt，原 Effect 只有 1 次；两者经已保存的 Provider 结果回查收敛为 SUCCEEDED，没有第二次模型派发。许可群 `<GROUP_ID>` 的分类与 Context 水位均为 25，执行槽已释放。20 秒三次只读观察均为零违约、活动 Run 0、过期 Run 0、待发送 0，最近 QQ 发送仍为 08:46:52 UTC 的旧回执。本次恢复没有向 QQ 主动发送新消息，也没有删除历史数据库。
 
 
 ## 2026-10-11 召回成本上限调整

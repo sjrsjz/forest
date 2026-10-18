@@ -21,7 +21,7 @@ OneBot 消息进入后，Adapter 复核 Binding、连接世代与传输围栏，
 
 ## 部署环境契约
 
-直接启动至少需要：
+直接启动至少需要以下设置；尖括号表示须按部署填写的占位符，不是真实账号或群号：
 
 ```text
 FOREST_BOT_DSN=postgresql://...
@@ -30,10 +30,10 @@ FOREST_MODEL_API_KEY=...
 FOREST_MODEL_NAME=...
 FOREST_EMBEDDING_ENDPOINT=https://api.siliconflow.cn/v1/embeddings
 FOREST_EMBEDDING_API_KEY=...
-FOREST_ONEBOT_SELF_ID=123456789
+FOREST_ONEBOT_SELF_ID=<BOT_QQ_ID>
 FOREST_ONEBOT_WEBSOCKET_URL=ws://127.0.0.1:3001/
 FOREST_ONEBOT_ACCESS_TOKEN=...
-FOREST_ALLOWED_GROUP_IDS=933179609
+FOREST_ALLOWED_GROUP_IDS=<GROUP_ID>
 ```
 
 直接运行 `forest bot` 时，模型、Embedding 和 OneBot 凭据也可分别通过 `FOREST_MODEL_API_KEY_FILE`、`FOREST_EMBEDDING_API_KEY_FILE` 与 `FOREST_ONEBOT_ACCESS_TOKEN_FILE` 注入；同一种凭据不得同时设置文本值和文件。这是显式诊断路径，当前 Compose 不再包含单 Bot 服务。
@@ -117,7 +117,7 @@ NapCat 运行在另一台树莓派时，还需独立查询实际 QQ 登录态。
 
 ```powershell
 Get-Content -Raw -Encoding UTF8 scripts/observe_napcat_login.py |
-  ssh sjz1@192.168.31.117 python3 - --config /home/sjz1/Napcat/opt/QQ/resources/app/app_launcher/napcat/config/webui.json
+  ssh "<SSH_USER>@<SSH_HOST>" python3 - --config "<NAPCAT_WEBUI_CONFIG_PATH>"
 ```
 
 QQ 登录态 `READY` 仍须结合许可群一次低频真实 @→Agent→发送验收；不以心跳或管理页状态替代回复证据。
@@ -126,7 +126,7 @@ QQ 登录态 `READY` 仍须结合许可群一次低频真实 @→Agent→发送�
 
 要核对模块级热重载的实际影响，可重复传入 `--component-id audit.console --component-id kernel.audit`（最多八个不同组件）。探针在同一只读 repeatable-read 快照内返回当前 Graph 中这些组件的 Generation ID、包版本和工件摘要；当前 Graph 不含某组件时明确返回 `null`。在管理员经 WebUI 或获权群 Shell 提交重载前后比较目标及其依赖闭包与无关组件的身份，并结合持久重载回执判断完成状态；这个观测选项本身不提交重载。
 
-指定 `--group-id 933179609` 时，探针还从该群的 CHAT 投递 lane 读取最新一条发送意图的状态、错误码、序号及完成时间。查询使用 `(bot_id,binding_ref,lane_kind,ordering_key,lane_sequence)` 唯一索引，群消息增加后仍只读取末条意图；没有意图时返回 `latest_chat_send: null`。它不会读取回复正文，且 `SENT` 只证明 Delivery 已记录传输结果，群内实际呈现仍以低频现场观察为准。
+指定 `--group-id <GROUP_ID>` 时，探针还从该群的 CHAT 投递 lane 读取最新一条发送意图的状态、错误码、序号及完成时间。查询使用 `(bot_id,binding_ref,lane_kind,ordering_key,lane_sequence)` 唯一索引，群消息增加后仍只读取末条意图；没有意图时返回 `latest_chat_send: null`。它不会读取回复正文，且 `SENT` 只证明 Delivery 已记录传输结果，群内实际呈现仍以低频现场观察为准。
 
 ## 受控进程现场验收
 
@@ -172,7 +172,7 @@ Supervisor 同时启动多作用域 WebUI，并把 Host Graph 作为独立作用
 
 ## 当前 v25 验收与回退边界（2026-10-11）
 
-`forest-candidate-v25-supervisor` 的 WebUI 监听本机 `127.0.0.1:18096`；部署、Host、Bot 数据库与包卷均独立。只读复核显示 Supervisor healthy、Bot 图 22/22 ACTIVE，v24/v25 到树莓派 OneBot 的已建立连接为 0/1。当前 Bot 的 OneBot `self_id` 为 `3605196653`，触发策略只允许群 `933179609` 显式 @ 该账号；此前许可群入站均未满足这一条件，Agent Run 为 0。真实 @→Agent→Provider→Delivery 尚未验收，不能用连接数或其他群的入站代替。
+`forest-candidate-v25-supervisor` 的 WebUI 监听本机 `<MANAGEMENT_BIND_ADDRESS>`；部署、Host、Bot 数据库与包卷均独立。只读复核显示 Supervisor healthy、Bot 图 22/22 ACTIVE，v24/v25 到树莓派 OneBot 的已建立连接为 0/1。当前 Bot 的 OneBot `self_id` 为 `<BOT_QQ_ID>`，触发策略只允许群 `<GROUP_ID>` 显式 @ 该账号；此前许可群入站均未满足这一条件，Agent Run 为 0。真实 @→Agent→Provider→Delivery 尚未验收，不能用连接数或其他群的入站代替。
 
 回退前重新读取运行意图、运行观察与 OneBot 连接：先将 v25 Bot 改为 OFFLINE，确认其连接退出，再将 v24 Bot 改为 ONLINE；两者不可同时持有同一 QQ 身份。切换操作应使用新的幂等键与当前意图修订，不重放旧切换请求。任何 `UNKNOWN` 发送或模型效果按所属模块的证据协议恢复，不能靠重复群消息探测。实际步骤与保存的旧容器见 [v25 在线验收记录](live-v25-cutover-2026-10-11.md)。
 
