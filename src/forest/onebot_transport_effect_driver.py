@@ -10,6 +10,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import SimpleNamespace
+from weakref import WeakValueDictionary
 
 from forest.adapters.onebot import OneBotWebSocketClient, PreparedSend
 from forest.errors import ForestError
@@ -393,6 +394,36 @@ class OneBotTransportEffectDriver:
     async def quiesce(self) -> None:
         self._send_admission = False
 
+    async def groups_page(self, payload, *, scope):
+        transport = self._bindings.get(payload["binding_ref"])
+        if (not self._send_admission or transport is None
+                or scope.component_id != self.identity.component_id
+                or scope.generation_id != self.identity.generation_id
+                or any(payload[key] != value for key, value in {
+                    "binding_ref": transport.declaration["binding_ref"],
+                    "binding_epoch": transport.declaration["binding_epoch"],
+                    "connection_epoch": transport.connection_epoch,
+                    "client_incarnation": transport.client_incarnation,
+                    "adapter_generation_id": self.identity.generation_id,
+                    "graph_id": self.identity.graph_id,
+                    "graph_revision": self.identity.graph_revision,
+                    "transport_digest": transport.transport_digest,
+                }.items())):
+            raise ForestError("ONEBOT_EFFECT_FENCE_MISMATCH", "Group query has a stale transport", 409)
+        await self.runtime.verify_generation_member(
+            component_id=self.identity.component_id, generation_id=self.identity.generation_id,
+        )
+        groups = await transport.client.get_group_list(timeout=10)
+        query, after = payload["query"].casefold(), payload["after_group_id"]
+        matching = sorted(
+            (row for row in groups if query in row["group_id"] or query in row["group_name"].casefold()),
+            key=lambda row: int(row["group_id"]),
+        )
+        remaining = [row for row in matching if after is None or int(row["group_id"]) > int(after)]
+        items = remaining[:25]
+        return {"items": items, "total": len(matching),
+                "next_after_group_id": items[-1]["group_id"] if len(remaining) > 25 else None}
+
     async def resume(self) -> None:
         if any(transport.client.is_closed for transport in self._bindings.values()):
             raise ForestError(
@@ -424,6 +455,33 @@ class OneBotTransportEffectDriver:
             ) from failures[0]
 
 
+class _OneBotGroupsReadView:
+    """Read port borrowing the sole transport owner of this Generation."""
+
+    def __init__(self, owners, identity):
+        self._owners = owners
+        self._generation_id = identity.generation_id
+        self._active = False
+
+    async def start(self):
+        self._active = True
+
+    async def quiesce(self):
+        self._active = False
+
+    async def resume(self):
+        self._active = True
+
+    async def close(self):
+        self._active = False
+
+    async def invoke(self, payload, *, scope, invocation):
+        owner = self._owners.get(self._generation_id)
+        if not self._active or owner is None:
+            raise ForestError("ONEBOT_TRANSPORT_CLOSED", "OneBot group discovery is unavailable", 503)
+        return await owner.groups_page(payload, scope=scope)
+
+
 def onebot_transport_effect_driver_factory(
     *,
     effects,
@@ -433,11 +491,17 @@ def onebot_transport_effect_driver_factory(
     send_guard=None,
     client_factory=OneBotWebSocketClient.create,
 ):
+    owners = WeakValueDictionary()
+
     def create(configuration, configuration_revision, identity, declaration):
         if declaration.get("name") == "adapter.onebot.wire.materialize":
             from forest.onebot_wire_effect_driver import OneBotWireEffectDriver
             return OneBotWireEffectDriver(identity, runtime=runtime, payloads=payloads)
-        return OneBotTransportEffectDriver(
+        if (declaration.get("kind") == "onebot.websocket-v11"
+                and declaration.get("name") == "adapter.onebot.transport.groups-page"
+                and declaration.get("semantics") == "read"):
+            return _OneBotGroupsReadView(owners, identity)
+        driver = OneBotTransportEffectDriver(
             configuration,
             configuration_revision,
             identity,
@@ -449,5 +513,7 @@ def onebot_transport_effect_driver_factory(
             send_guard=send_guard,
             client_factory=client_factory,
         )
+        owners[identity.generation_id] = driver
+        return driver
 
     return create

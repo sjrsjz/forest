@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "3.1.1"
+version = "3.2.1"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -69,7 +69,8 @@ requests = [
   "uow.execute:adapter.ingress-rescue-memory",
   "uow.execute:adapter.ingress-rescue-media",
   "service.call:kernel.payload.bytes-write",
-  "service.call:adapter.onebot.transport.send"
+  "service.call:adapter.onebot.transport.send",
+  "service.call:adapter.onebot.transport.groups-page"
 ]
 
 [[components.requires]]
@@ -150,6 +151,21 @@ kind = "kernel.payload-bytes"
 semantics = "idempotent"
 input_schema = "schemas/payload-write-input.json"
 output_schema = "schemas/payload-write-output.json"
+
+[[components.provides]]
+name = "adapter.onebot.groups.page"
+contract = "1.0"
+semantics = "read"
+input_schema = "schemas/groups-page-input.json"
+output_schema = "schemas/groups-page-output.json"
+
+[[components.effect_services]]
+name = "adapter.onebot.transport.groups-page"
+contract = "1.0"
+kind = "onebot.websocket-v11"
+semantics = "read"
+input_schema = "schemas/transport-groups-input.json"
+output_schema = "schemas/transport-groups-output.json"
 
 [components.management_ui]
 entrypoint = "ui/index.html"

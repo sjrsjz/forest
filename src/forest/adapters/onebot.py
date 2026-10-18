@@ -31,8 +31,10 @@ CAPABILITIES = {
 MAX_EVENT_BYTES = 128 * 1024
 MAX_SEND_BYTES = 12 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024
+MAX_GROUP_LIST_BYTES = 4 * 1024 * 1024
+MAX_JOINED_GROUPS = 4096
 MAX_SEGMENTS = 256
-MAX_WS_FRAME_BYTES = MAX_EVENT_BYTES + 4096
+MAX_WS_FRAME_BYTES = MAX_GROUP_LIST_BYTES
 MAX_WS_EVENTS = 256
 MAX_WS_PENDING = 64
 _DECIMAL = re.compile(r"-?(?:0|[1-9][0-9]{0,18})\Z")
@@ -438,6 +440,7 @@ class OneBotWebSocketClient:
         self._events: asyncio.Queue[bytes | None] = asyncio.Queue(event_capacity + 1)
         self._pending_slots = asyncio.Semaphore(pending_capacity)
         self._pending: dict[str, asyncio.Future[bytes]] = {}
+        self._response_limits: dict[str, int] = {}
         self._expired: set[str] = set()
         self._expired_order: list[str] = []
         self._event_handler: Callable[[bytes], Awaitable[None]] | None = None
@@ -563,10 +566,13 @@ class OneBotWebSocketClient:
                         )
                     future = self._pending.get(echo)
                     if future is not None:
-                        if future.done() or len(body) > MAX_RESPONSE_BYTES:
+                        if future.done():
                             raise ForestError(
                                 "ONEBOT_WEBSOCKET_PROTOCOL", "Invalid action response", 502
                             )
+                        if len(body) > self._response_limits[echo]:
+                            future.set_exception(_ActionError("ONEBOT_RESPONSE_TOO_LARGE", uncertain=True))
+                            continue
                         future.set_result(body)
                         continue
                     if echo in self._expired:
@@ -631,7 +637,10 @@ class OneBotWebSocketClient:
             old = self._expired_order.pop(0)
             self._expired.discard(old)
 
-    async def _request(self, action: str, params: dict[str, Any], timeout: float) -> bytes:
+    async def _request(
+        self, action: str, params: dict[str, Any], timeout: float,
+        *, response_limit: int = MAX_RESPONSE_BYTES,
+    ) -> bytes:
         if self.is_closed or self._socket is None:
             raise _ActionError("ONEBOT_WEBSOCKET_CLOSED", uncertain=False)
         echo = "forest:" + str(uuid4())
@@ -645,6 +654,7 @@ class OneBotWebSocketClient:
                 if self.is_closed or self._socket is None:
                     raise _ActionError("ONEBOT_WEBSOCKET_CLOSED", uncertain=False)
                 self._pending[echo] = future
+                self._response_limits[echo] = response_limit
                 wire = _encode(
                     {"action": action, "params": params, "echo": echo},
                     MAX_SEND_BYTES + 4096,
@@ -668,6 +678,7 @@ class OneBotWebSocketClient:
         except (ConnectionClosed, OSError, RuntimeError):
             raise _ActionError("ONEBOT_WEBSOCKET_CLOSED", uncertain=dispatched) from None
         finally:
+            self._response_limits.pop(echo, None)
             if self._pending.pop(echo, None) is not None and not future.done():
                 future.cancel()
             if acquired:
@@ -696,6 +707,33 @@ class OneBotWebSocketClient:
         except (ForestError, _ActionError, ValueError, TypeError):
             raise ForestError(
                 "ONEBOT_API_UNAVAILABLE", "Could not verify the OneBot API account", 502
+            ) from None
+
+    async def get_group_list(self, *, timeout: float | None = None) -> list[dict[str, str]]:
+        try:
+            body = await self._request(
+                "get_group_list", {}, self._timeout(timeout), response_limit=MAX_GROUP_LIST_BYTES,
+            )
+            result = _json(body, MAX_GROUP_LIST_BYTES)
+            if (not isinstance(result, dict) or result.get("status") != "ok"
+                    or type(result.get("retcode")) is not int or result["retcode"] != 0
+                    or not isinstance(result.get("data"), list)
+                    or len(result["data"]) > MAX_JOINED_GROUPS):
+                raise _invalid()
+            groups, seen = [], set()
+            for row in result["data"]:
+                if not isinstance(row, dict):
+                    raise _invalid()
+                group_id = _id(row.get("group_id"))
+                name = row.get("group_name")
+                if group_id in seen or not isinstance(name, str):
+                    raise _invalid()
+                seen.add(group_id)
+                groups.append({"group_id": group_id, "group_name": _string(name, limit=256)})
+            return groups
+        except (ForestError, _ActionError, ValueError, TypeError):
+            raise ForestError(
+                "ONEBOT_GROUP_LIST_UNAVAILABLE", "Could not read the OneBot group list", 502
             ) from None
 
     async def get_status(self, *, timeout: float | None = None) -> dict[str, bool]:

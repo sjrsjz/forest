@@ -13,6 +13,16 @@ def _digest(value):
 
 
 class TriggerPolicy(Plugin):
+    @service(
+        "conversation.trigger.groups.page", semantics="read", contract="1.0",
+        input_schema="schemas/groups-page-input.json", output_schema="schemas/groups-page-output.json",
+    )
+    async def groups_page(self, payload, ctx):
+        return await ctx.services.call(
+            "adapter.onebot.groups.page", dict(payload), timeout=12, contract_major=1,
+            operation_id=ctx.operations.stable("discover-groups"),
+        )
+
     async def prepare(self, ctx, config, restored_state=None):
         await super().prepare(ctx, config, restored_state)
         self.allowed_groups = frozenset(config["allowed_group_ids"])

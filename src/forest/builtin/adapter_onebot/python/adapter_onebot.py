@@ -81,6 +81,27 @@ class AdapterOneBot(Plugin):
             raise ForestError("ONEBOT_BINDING_UNAVAILABLE", "OneBot Binding is unavailable", 404)
         return binding
 
+    @service(
+        "adapter.onebot.groups.page", semantics="read", contract="1.0",
+        input_schema="schemas/groups-page-input.json", output_schema="schemas/groups-page-output.json",
+    )
+    async def groups_page(self, payload, ctx):
+        accounts = [{"binding_ref": row["binding_ref"], "self_id": row["self_id"]}
+                    for row in self.bindings.values() if row["enabled"]]
+        binding_ref = payload["binding_ref"]
+        if binding_ref is None:
+            return {"accounts": accounts, "binding_ref": None, "items": [],
+                    "total": 0, "next_after_group_id": None}
+        binding = self._binding(binding_ref)
+        page = await ctx.services.call(
+            "adapter.onebot.transport.groups-page",
+            {**_transport_identity(ctx, binding), "query": payload["query"],
+             "after_group_id": payload["after_group_id"]},
+            timeout=11, contract_major=1,
+            operation_id=ctx.operations.stable("transport-groups-page"),
+        )
+        return {"accounts": accounts, "binding_ref": binding_ref, **_plain(page)}
+
     async def _write_payload(
         self, ctx, *, owner_kind, owner_id, media_type, content, source, parents=()
     ):

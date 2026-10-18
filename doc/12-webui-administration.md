@@ -2,6 +2,8 @@
 
 > 本文展开[00 架构总契约](00-architecture-contract.md)中的模块控制台协议。控制台壳不得拥有固定 Agent、Memory、Bot、OneBot 或任务后台；发现、查询、动作、配置 schema 和可选 UI 工件都来自准确模块 Generation。
 
+触发策略模块的群选择页遵循[23 触发策略控制页与群发现](23-trigger-policy-group-selection.md)：UI 属于 trigger-policy 包，群目录由 Adapter 只读服务提供，控制台壳不认识 QQ 群或其策略。选择结果仍经统一配置计划提交。
+
 模块可在包清单 `configuration_documents` 中声明顶层配置字段持有的 JSON 文档：字段名、文档 Schema、所属 Payload kind、owner 前缀、字节上限和关联修订字段。管理读取对期望/生效配置分别返回经准确引用核验的文档值；模块 UI 可将草稿字段设为 `{"$document": value}`。配置计划是写操作，在已有鉴权、操作幂等和配置头 CAS 的同一事务内验证文档、物化本模块不可变 Payload、生成内容修订并保存仅含准确引用的配置计划；失败全部回滚。应用及图换代沿用现有通用协议。宿主不识别人格或 Agent 业务，不执行包代码；读取不得物化文档，编辑不得直接覆盖 Payload。
 
 ## 1. 目标与强制边界

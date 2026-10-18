@@ -7,7 +7,10 @@ import pytest
 
 from forest.adapters.onebot import PreparedSend, SendResult
 from forest.errors import ForestError
-from forest.onebot_transport_effect_driver import OneBotTransportEffectDriver
+from forest.onebot_transport_effect_driver import (
+    OneBotTransportEffectDriver,
+    onebot_transport_effect_driver_factory,
+)
 from forest.package_runtime import PackageGenerationAdapter
 
 
@@ -55,6 +58,9 @@ class FakeClient:
 
     async def get_status(self, *, timeout):
         return self.status
+
+    async def get_group_list(self, *, timeout):
+        return [{"group_id": str(i), "group_name": "Test"} for i in range(140, 100, -1)]
 
     def activate_events(self, handler):
         assert self.handler is None
@@ -337,6 +343,69 @@ async def test_onebot_transport_rejects_offline_account_before_activation():
     assert caught.value.code == "ONEBOT_ACCOUNT_NOT_READY"
     assert client.closed
     assert driver._bindings == {}
+
+
+async def test_group_query_borrows_connection_and_cannot_cross_generation_or_outlive_owner():
+    client, created = FakeClient(), []
+    client.owned_tasks = lambda: ()
+
+    async def client_factory(*args, **kwargs):
+        created.append(1)
+        return client
+
+    async def credential_resolver(*args):
+        return "token"
+
+    class Runtime:
+        async def verify_generation_member(self, **values):
+            assert values["generation_id"] == "generation:groups"
+
+    identity = SimpleNamespace(component_id="adapter.onebot", generation_id="generation:groups",
+                               graph_id="graph:groups", graph_revision=3)
+    binding = {"enabled": True, "binding_ref": "binding/main", "self_id": "123456789",
+               "credential_ref": "secret://onebot/main", "websocket_url": "ws://onebot.invalid/",
+               "timeout_seconds": 15, "event_capacity": 32, "pending_capacity": 8, "binding_epoch": 1}
+    factory = onebot_transport_effect_driver_factory(
+        effects=object(), runtime=Runtime(), credential_resolver=credential_resolver,
+        payloads=Payloads(), client_factory=client_factory,
+    )
+    configuration = {"bindings": [binding]}
+    owner = factory(configuration, 1, identity, {
+        "name": "adapter.onebot.transport.send", "kind": "onebot.websocket-v11",
+        "ingress": {"name": "adapter.onebot.transport.frame"},
+    })
+    view = factory(configuration, 1, identity, {
+        "name": "adapter.onebot.transport.groups-page", "kind": "onebot.websocket-v11",
+        "semantics": "read",
+    })
+    owner.bind_ingress(lambda *args, **kwargs: None)
+    await owner.start()
+    await view.start()
+    transport = owner._bindings[binding["binding_ref"]]
+    payload = {"binding_ref": binding["binding_ref"], "binding_epoch": binding["binding_epoch"],
+               "connection_epoch": transport.connection_epoch, "client_incarnation": transport.client_incarnation,
+               "transport_digest": transport.transport_digest, "adapter_generation_id": identity.generation_id,
+               "graph_id": identity.graph_id, "graph_revision": identity.graph_revision,
+               "query": "test", "after_group_id": None}
+    try:
+        page = await view.invoke(payload, scope=identity, invocation=None)
+        assert len(created) == 1 and not client.sent
+        assert page["total"] == 40 and len(page["items"]) == 25
+        assert page["items"][0]["group_id"] == "101" and page["next_after_group_id"] == "125"
+        rest = await view.invoke({**payload, "after_group_id": "125"}, scope=identity, invocation=None)
+        assert len(rest["items"]) == 15 and rest["next_after_group_id"] is None
+        with pytest.raises(ForestError) as caught:
+            await view.invoke({**payload, "adapter_generation_id": "retired"}, scope=identity, invocation=None)
+        assert caught.value.code == "ONEBOT_EFFECT_FENCE_MISMATCH"
+        await view.close()
+        assert not client.closed
+        await view.start()
+        await owner.close()
+        with pytest.raises(ForestError):
+            await view.invoke(payload, scope=identity, invocation=None)
+    finally:
+        await view.close()
+        await owner.close()
 
 
 async def test_onebot_transport_detects_account_offline_on_open_socket(monkeypatch):

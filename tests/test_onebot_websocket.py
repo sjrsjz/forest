@@ -104,6 +104,31 @@ async def eventually(predicate, *, timeout=3):
             await asyncio.sleep(0)
 
 
+async def test_group_discovery_uses_existing_socket_and_its_own_response_bound(monkeypatch):
+    client, socket = await create_client(monkeypatch)
+    rows = [{"group_id": 100000 + i, "group_name": "群" * 60} for i in range(600)]
+
+    async def respond(wire):
+        request = json.loads(wire)
+        assert request["action"] == "get_group_list" and request["params"] == {}
+        await socket.incoming.put(json.dumps({
+            "status": "ok", "retcode": 0, "data": rows, "echo": request["echo"],
+        }, ensure_ascii=False))
+
+    socket.send = respond
+    try:
+        groups = await client.get_group_list()
+        assert len(groups) == 600 and groups[0] == {"group_id": "100000", "group_name": "群" * 60}
+        assert not client.is_closed
+        rows.append(rows[0])
+        with pytest.raises(onebot.ForestError, match="group list"):
+            await client.get_group_list()
+        assert not client.is_closed
+        assert not client._pending and not client._response_limits
+    finally:
+        await client.aclose()
+
+
 @pytest.mark.asyncio
 async def test_sustained_event_stream_is_buffered_then_consumed_once_in_order(monkeypatch):
     client, socket = await create_client(monkeypatch, event_capacity=1200)

@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-19 触发策略群选择页：`conversation.trigger-policy` 1.1.1 随包提供 **对话触发策略** UI，消费 Adapter 3.2.1 的只读群目录服务；内核未增加 QQ 群管理业务。支持多账号选择、群名/群号搜索、每页 25 条、完整已选集合，以及群触发方式和私聊开关；翻页或查询失败均保留已有白名单。只读端口复用 Generation 的唯一 OneBot 连接，按代际和绑定身份隔离，没有新增数据库或后台轮询。46 项 OneBot 检查、2 项隔离 PostgreSQL/完整 BotHost 检查通过；桌面浏览器验证了分页、失败保留、账号切换和安全文本渲染。真实管理查询识别出一个账号的 24 个已加入群，真实控制台核对现有勾选状态，并成功生成、丢弃标准配置计划；原触发配置保持不变，未发送群聊测试消息。设计见 [23 群选择契约](23-trigger-policy-group-selection.md)，操作见[使用指南](user-guide.md#选择允许触发的群)。
+
 2026-10-19 00:30 CST 停启修复已部署：处理 `CONTROL_DRIVER_CONSUMER_CONFLICT` 的旧 BotHost 绑定残留。Registry 将已退休且资源已释放的事实与排空错误分开；BotHost 在异常路径也撤销已释放的绑定，尚未完成的资源、Graph 或租约清理继续保留所有者。10 项定向检查及隔离 PostgreSQL 的完整 BotHost 链通过。新镜像同一 Supervisor 内实际 OFFLINE → ONLINE 成功，RuntimeGraph 修订 26、22/22 ACTIVE、22/22 schema bundle READY，首观察样本零违规。见[停启验收](lifecycle-stop-start-acceptance-2026-10-19.md)。
 
 2026-10-19 整条 CQ 记忆：Codec 2.1.1、Adapter 3.1.1 已经正式热替换，维护后 RuntimeGraph 修订 11、22/22 ACTIVE。OneBot 的 @、回复、表情与正文按一个完整 CQ TEXT part 保存、查询和召回，当前 Context 使用相同编码；图片只放受管引用，实际像素继续走 VL。旧 599 条消息已从原事件离线重建，104 个图片 part、人格和原费用账本保留，旧向量及旧种子联想清除，Memory 图重建 SUCCEEDED、发布修订 51。00:04 CST 569 个 DOCUMENT facet 全部 READY，待嵌入、RESERVED/UNKNOWN 为零，新观察首样本零违规。文本与图文完整 BotHost 检查通过；真实群回复的语义效果及完整 24 小时观察未据此宣称验收。见[验收记录](cq-memory-acceptance-2026-10-19.md)。
