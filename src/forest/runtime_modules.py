@@ -2398,6 +2398,7 @@ class RuntimeModuleRegistry:
                 frozen = self._freeze_owned_admission(components=owned)
             lease = None
             superseded = False
+            graph_retired = self.generation_authority is None or self.graph_identity is None
             if self.generation_authority is not None and self.graph_identity is not None:
                 lease = self._lease(allow_closing=True)
                 try:
@@ -2409,6 +2410,7 @@ class RuntimeModuleRegistry:
                         # A newer graph already fenced this owner. Drain its
                         # process-local work and retain its historical facts.
                         superseded = True
+                        graph_retired = True
                     elif not self._lost_persistence_authority(exc):
                         raise
                     else:
@@ -2458,6 +2460,7 @@ class RuntimeModuleRegistry:
                 if not superseded:
                     try:
                         await self.generation_authority.retire_graph(lease, self.graph_identity)
+                        graph_retired = True
                     except ForestError as exc:
                         if not self._lost_persistence_authority(exc):
                             errors.append(exc)
@@ -2473,7 +2476,7 @@ class RuntimeModuleRegistry:
                     await source._record_current_states(
                         lease, failure_code=failure_code, components=components,
                     )
-            self._closed = not errors and all(
+            self._closed = graph_retired and all(
                 component_id in self._transferred_components
                 or (
                     component_id in self._retained_components
@@ -2483,6 +2486,11 @@ class RuntimeModuleRegistry:
                 for component_id, state in self.states.items()
             )
             return errors
+
+    @property
+    def resources_released(self) -> bool:
+        """All locally owned components have stopped, even if draining reported errors."""
+        return self._closed
 
     async def _quiesce_and_cleanup(self, component_id):
         await self._quiesce_only(component_id)

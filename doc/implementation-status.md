@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-19 00:30 CST 停启修复已部署：处理 `CONTROL_DRIVER_CONSUMER_CONFLICT` 的旧 BotHost 绑定残留。Registry 将已退休且资源已释放的事实与排空错误分开；BotHost 在异常路径也撤销已释放的绑定，尚未完成的资源、Graph 或租约清理继续保留所有者。10 项定向检查及隔离 PostgreSQL 的完整 BotHost 链通过。新镜像同一 Supervisor 内实际 OFFLINE → ONLINE 成功，RuntimeGraph 修订 26、22/22 ACTIVE、22/22 schema bundle READY，首观察样本零违规。见[停启验收](lifecycle-stop-start-acceptance-2026-10-19.md)。
+
 2026-10-19 整条 CQ 记忆：Codec 2.1.1、Adapter 3.1.1 已经正式热替换，维护后 RuntimeGraph 修订 11、22/22 ACTIVE。OneBot 的 @、回复、表情与正文按一个完整 CQ TEXT part 保存、查询和召回，当前 Context 使用相同编码；图片只放受管引用，实际像素继续走 VL。旧 599 条消息已从原事件离线重建，104 个图片 part、人格和原费用账本保留，旧向量及旧种子联想清除，Memory 图重建 SUCCEEDED、发布修订 51。00:04 CST 569 个 DOCUMENT facet 全部 READY，待嵌入、RESERVED/UNKNOWN 为零，新观察首样本零违规。文本与图文完整 BotHost 检查通过；真实群回复的语义效果及完整 24 小时观察未据此宣称验收。见[验收记录](cq-memory-acceptance-2026-10-19.md)。
 
 2026-10-18 23:21 CST Bot 提示词设置已发布：Agent 5.3.0 工作区默认“Bot 提示词”文本编辑，另有执行记录和只读核心协议视图；通过包声明式配置文档、原子计划和现有换代协议生效。实现提交 `b3435f01`，沿用既有 Bot/记忆库，原人格保留；正式换代后图修订 5、22/22 ACTIVE、22/22 schema bundle READY、OneBot 单连接。事务并发、回滚和引用所有权验证，以及正式 BotHost 新提示词进入模型输入及准确 Run 引用验证通过；现役人格文档与编辑工件可读，新观察首样本零违规，真实 QQ 新人格与长期观察仍待实际验收。见[验收记录](agent-preset-acceptance-2026-10-18.md)。

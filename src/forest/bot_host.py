@@ -1373,8 +1373,11 @@ class BotHost:
             await self._close_without_driver_gate()
             return
         async with gate:
-            await self._close_without_driver_gate()
-            gate.detach(self)
+            try:
+                await self._close_without_driver_gate()
+            finally:
+                if self.registry is None and self._lease is None:
+                    gate.detach(self)
 
     async def _close_without_driver_gate(self) -> None:
         lock = self._replacement_lock
@@ -1395,9 +1398,11 @@ class BotHost:
         if replacement is not None:
             replacement.cancel()
             await asyncio.gather(replacement, return_exceptions=True)
-        registry, self.registry = self.registry, None
+        registry = self.registry
         if registry is not None:
             errors = await registry.close()
+            if registry.resources_released:
+                self.registry = None
             if errors:
                 failure = ForestError(
                     "RUNTIME_MODULE_CLEANUP_FAILED",
@@ -1413,17 +1418,22 @@ class BotHost:
         # The HostLease fences every cleanup write. Keep renewing it until the
         # graph has frozen admission, drained owned work, released contribution
         # directories, stopped Workers, and retired its persistent Generation.
+        if self.registry is not None:
+            raise failure or ForestError(
+                "RUNTIME_MODULE_CLEANUP_FAILED", "Bot runtime resources remain owned", 503,
+            )
         task, self._renewal_task = self._renewal_task, None
         if task is not None:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        lease, self._lease = self._lease, None
-        if failure is None and lease is not None:
+        lease = self._lease
+        if lease is not None:
             try:
                 await self._kernel.runtime.release_host(lease)
             except ForestError as exc:
                 if exc.code != "STALE_HOST":
-                    failure = exc
+                    raise
+            self._lease = None
         await self.store.close()
         if failure is not None:
             raise failure
