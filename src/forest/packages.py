@@ -152,6 +152,18 @@ MANIFEST_SCHEMA = {
                     },
                     "scope": {"enum": ["bot", "deployment", "host"]},
                     "configuration_apply": {"const": "worker-host/1"},
+                    "configuration_documents": {
+                        "type": "array", "minItems": 1, "maxItems": 16,
+                        "items": {
+                            "type": "object", "additionalProperties": False,
+                            "required": ["field", "schema", "owner_kind", "owner_prefix", "max_bytes", "revision_field"],
+                            "properties": {
+                                **{key: {"type": "string", "minLength": 1, "maxLength": 128}
+                                   for key in ("field", "schema", "owner_kind", "owner_prefix", "revision_field")},
+                                "max_bytes": {"type": "integer", "minimum": 1, "maximum": 65536},
+                            },
+                        },
+                    },
                     "configuration_publication": {
                         "type": "object", "additionalProperties": False,
                         "required": ["name", "function", "input_schema", "output_schema"],
@@ -1584,7 +1596,28 @@ def _manifest(files: dict[str, bytes]) -> dict:
             "INVALID_DEPENDENCY",
             "Service call grants must name a declared dependency or local effect",
         )
-    _schema(files, component.get("config_schema"))
+    configuration_schema = _schema(files, component.get("config_schema"))
+    document_fields = set()
+    for document in component.get('configuration_documents', ()):
+        field, revision = document['field'], document['revision_field']
+        properties = configuration_schema.get('properties', {})
+        reference_schema = properties.get(field, {})
+        if (field == revision or field in document_fields or revision in document_fields
+                or not IDENTIFIER.fullmatch(field) or not IDENTIFIER.fullmatch(revision)
+                or not IDENTIFIER.fullmatch(document['owner_kind'])
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._/-]{0,127}', document['owner_prefix'])
+                or field not in configuration_schema.get('required', ())
+                or revision not in configuration_schema.get('required', ())
+                or properties.get(revision, {}).get('type') != 'string'
+                or reference_schema.get('type') != 'object'
+                or set(reference_schema.get('required', ())) != {'payload_id', 'digest', 'owner_id'}
+                or set(reference_schema.get('properties', {})) != {'payload_id', 'digest', 'owner_id'}
+                or any(item.get('type') != 'string' for item in reference_schema.get('properties', {}).values())
+                or reference_schema.get('additionalProperties') is not False
+                or component['scope'] != 'bot' or component.get('configuration_apply') != 'worker-host/1'):
+            _fail('INVALID_CONFIGURATION_DOCUMENTS', 'Configuration documents require distinct module fields and owned Payload identities')
+        document_fields.update((field, revision))
+        _schema(files, document['schema'])
     bootstrap_config = component.get("bootstrap_config")
     if component.get("auto_install") and (
         bootstrap_config is None or component["scope"] not in {"bot", "deployment", "host"}

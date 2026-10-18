@@ -907,6 +907,87 @@ def runtime_binding(
 
 
 @pytest.mark.postgres
+async def test_configuration_document_plan_is_atomic_idempotent_and_preserves_old_revision(clean_authority):
+    from forest.builtin_packages import _installed_configuration_storage
+    from forest.configuration_documents import ConfigurationDocuments
+
+    store, installer = clean_authority
+    await installer.initialize_kernel()
+    payload_storage = official_storage_bundle(
+        'kernel.payload', 'forest.kernel.payload', 'forest.kernel-payload.repository/1',
+        'storage/official/kernel_payload.sql',
+    )
+    configuration_storage = _installed_configuration_storage('example.documents')
+    for storage in (payload_storage, configuration_storage):
+        await installer.install(storage.spec, storage.baseline, storage.package_digest,
+                                execution_profile=storage.execution_profile)
+    payloads = KernelPayloadRepository(store, namespace=payload_storage.spec.namespace)
+    configuration = ModuleConfigurationRepository(
+        store, component_id='example.documents', namespace=configuration_storage.spec.namespace,
+        payloads=payloads,
+    )
+    document_schema = {'type': 'object', 'required': ['system'], 'additionalProperties': False,
+                       'properties': {'system': {'type': 'array', 'maxItems': 32, 'items': {'type': 'string'}}}}
+    schema = {'type': 'object', 'required': ['preset', 'revision'], 'additionalProperties': False,
+              'properties': {'preset': {'type': 'object', 'required': ['payload_id', 'digest', 'owner_id'],
+                  'properties': {'payload_id': {'type': 'string'}, 'digest': {'type': 'string'}, 'owner_id': {'type': 'string'}},
+                  'additionalProperties': False}, 'revision': {'type': 'string'}}}
+    documents = ConfigurationDocuments(configuration, [{'field': 'preset', 'revision_field': 'revision',
+        'schema': 'document.json', 'owner_kind': 'preset.context', 'owner_prefix': 'preset/', 'max_bytes': 128}],
+        lambda _name: document_schema, schema)
+    old = await payloads.put_bytes(owner_component_id='example.documents', owner_kind='preset.context',
+                                  owner_id='original', media_type='application/json', content=b'{"system":["Original personality"]}',
+                                  expected_deletion_epoch=await payloads.epoch())
+    value = {'preset': {'payload_id': old.payload_id, 'digest': old.content_digest, 'owner_id': 'original'},
+             'revision': 'original'}
+    await configuration.initialize(operation_id='initial', value=value, validation_digest=digest_json(schema))
+    async def count_payloads():
+        async with store.pool.connection() as conn:
+            return (await (await conn.execute(sql.SQL('SELECT count(*) AS n FROM {}.payload_headers').format(
+                sql.Identifier(payloads.namespace)))).fetchone())['n']
+    before = await count_payloads()
+    offered = {'preset': {'$document': {'system': ['New personality']}}, 'revision': 'ignored'}
+    async def plan(operation='document-plan', candidate=None, revision=1):
+        return await configuration.plan(operation_id=operation, expected_desired_revision=revision,
+            value=offered if candidate is None else candidate, validation_digest=digest_json(schema),
+            materialize_in=documents.materialize_in)
+    async def invalid_operation():
+        # The document is written first; the invalid sibling must roll it back.
+        await plan('invalid-sibling', {**offered, 'unexpected': True})
+    with pytest.raises(ForestError, match='package schema'):
+        await invalid_operation()
+    assert await count_payloads() == before
+    with pytest.raises(ForestError) as caught:
+        await plan('oversize', {'preset': {'$document': {'system': ['中' * 50]}}, 'revision': 'ignored'})
+    assert caught.value.code == 'CONFIGURATION_DOCUMENT_TOO_LARGE'
+    assert await count_payloads() == before
+    first, replay = await asyncio.gather(plan(), plan())
+    assert first['plan_id'] == replay['plan_id']
+    assert await count_payloads() == before + 2
+    await configuration.apply(operation_id='apply-document', plan_id=first['plan_id'], expected_desired_revision=1)
+    desired = await configuration.desired(include_value=True)
+    effective = await configuration.effective(include_value=True)
+    snapshot = {'desired': {'value': desired.value}, 'effective': {'value': effective.value}}
+    read = await documents.read(snapshot)
+    assert read['preset']['desired'] == {'system': ['New personality']}
+    assert read['preset']['effective'] == {'system': ['Original personality']}
+    assert desired.value['revision'] == digest_json({'system': ['New personality']})
+    stable_count = await count_payloads()
+    with pytest.raises(ForestError) as caught:
+        await plan('stale', {'preset': {'$document': {'system': ['Lost update']}}, 'revision': 'ignored'})
+    assert caught.value.code == 'MODULE_CONFIGURATION_CONFLICT'
+    assert await count_payloads() == stable_count
+    # One Bot cannot reference a differently owned document even with a valid digest.
+    foreign = await payloads.put_bytes(owner_component_id='other.module', owner_kind='preset.context',
+                                      owner_id='foreign', media_type='application/json', content=b'{"system":["Foreign"]}',
+                                      expected_deletion_epoch=await payloads.epoch())
+    with pytest.raises(ForestError):
+        await plan('forged-owner', {'preset': {'payload_id': foreign.payload_id, 'digest': foreign.content_digest,
+                                             'owner_id': 'foreign'}, 'revision': 'foreign'}, revision=2)
+    assert (await configuration.desired(include_value=True)).value == desired.value
+
+
+@pytest.mark.postgres
 async def test_clean_runtime_repository_publishes_exact_generation_graph(clean_authority):
     store, installer = clean_authority
     await installer.initialize_kernel()

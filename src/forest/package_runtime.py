@@ -102,6 +102,7 @@ _PAYLOAD_STAGING_BYTES = 32 * 1024 * 1024
 
 def _component_schema_references(component: Mapping[str, Any]) -> tuple[str, ...]:
     references: list[str] = [component["config_schema"]]
+    references.extend(item['schema'] for item in component.get('configuration_documents', ()))
     publication = component.get("configuration_publication")
     if publication is not None:
         references.extend((publication["input_schema"], publication["output_schema"]))

@@ -2,6 +2,8 @@
 
 > 本文只定义 Bot 作用域事实以及 `agent.runtime`、`memory.graph` 等模块之间的公开契约。Bot 不是组合根，Agent 也不是框架主循环。实现状态仅见 [implementation-status.md](implementation-status.md)。
 
+Bot 人格与行为提示词属于该 Bot 的 `agent.runtime` 配置，不是全局框架提示词。Agent 包贡献“Bot 提示词”文本编辑器和独立的只读“核心协议”视图；通过配置文档声明读取和更新 `preset`，生成不可变 `preset.context` 引用及内容修订。保存必须走标准配置计划/应用与代际换代；现有 Run/Session 保持其已冻结配置与预设，不在一次响应中途读取新人格。UI 不要求管理员填写 Payload ID、摘要或内部修订；32 段和 32 KiB 文档大小由包声明约束。
+
 ## 1. Bot 作用域与身份边界
 
 Bot 是长期存在的身份、资源、授权、预算和数据作用域记录，不是 Python 对象聚合、平台连接、群聊或单个 LLM 会话。它不能拥有或构造 Agent、Memory、Adapter、Shell、Scheduler、Delivery 等具体运行对象；这些能力来自当前 RuntimeGraph 中可独立替换的模块 Generation。

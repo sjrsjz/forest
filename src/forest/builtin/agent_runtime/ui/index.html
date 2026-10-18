@@ -21,20 +21,38 @@
     details{margin-top:10px;border-top:1px solid #284036;padding-top:8px}summary{cursor:pointer}
     .step-list{max-height:240px;overflow:auto}.step-list div{padding:7px 0;border-bottom:1px solid #284036;overflow-wrap:anywhere}
     #core-prompt{max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;border:1px solid #284036;border-radius:8px;background:#09130f;color:#dcebe2}
+    h2{font-size:15px;margin:10px 0}nav{margin-bottom:8px}nav button[aria-selected="true"]{background:#70cfa1;color:#092015}
+    #preset-panel{display:grid;gap:10px}#preset-list{display:grid;gap:10px;max-height:330px;overflow:auto}
+    .prompt-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:start}
+    .prompt-row textarea{box-sizing:border-box;width:100%;min-height:140px;resize:vertical;border:1px solid #395247;border-radius:8px;padding:10px;background:#09130f;color:inherit;font:inherit}
     [hidden]{display:none!important}
     @media(max-width:760px){.item{grid-template-columns:1fr 1fr}dl{grid-template-columns:1fr 1fr}}
   </style>
 </head>
 <body>
   <main>
-    <h1>Agent 执行记录</h1>
-    <p>按 Bot、群聊或 Session 追踪执行；列表只展示执行元数据。</p>
-    <details id="protocol-browser">
-      <summary>Agent 核心协议（只读）</summary>
+    <h1>Agent</h1>
+    <nav class="actions" aria-label="Agent 工作区">
+      <button type="button" data-view="preset" aria-selected="true">Bot 提示词</button>
+      <button type="button" data-view="execution" aria-selected="false">执行记录</button>
+      <button type="button" data-view="protocol" aria-selected="false">核心协议（只读）</button>
+    </nav>
+    <section id="preset-panel">
+      <h2>Bot 人格与行为提示词</h2>
+      <p>仅用于当前 Bot。按顺序填写人格、语气和行为要求；留空表示不添加人格预设。</p>
+      <p id="preset-revision"></p>
+      <div id="preset-list"></div>
+      <div class="actions"><button id="add-preset" type="button" disabled>添加一段</button><button id="plan-preset" type="button" disabled>检查提示词计划</button><span id="preset-size"></span></div>
+      <p>检查后点击外层“应用计划”。新配置生效前，现有响应继续使用原提示词。</p>
+    </section>
+    <section id="protocol-panel" hidden>
+      <h2>Agent 核心协议（只读）</h2>
       <p>这里显示当前 Agent 包 Generation 的固定核心提示词。Bot 行为预设另行配置，不会改写此协议。</p>
       <p id="protocol-identity"></p>
       <pre id="core-prompt"></pre>
-    </details>
+    </section>
+    <section id="execution-panel" hidden>
+    <p>按 Bot、群聊或 Session 追踪执行；列表只展示执行元数据。</p>
     <details id="session-browser">
       <summary>浏览 Session</summary>
       <div class="filters">
@@ -45,7 +63,7 @@
       <div class="list" id="sessions"></div>
     </details>
     <div class="filters">
-      <label>会话引用<input id="conversation" placeholder="onebot:group:933179609" autocomplete="off"></label>
+      <label>会话引用<input id="conversation" placeholder="onebot:group:群号" autocomplete="off"></label>
       <label>Run 状态<select id="state"><option value="">全部</option>
         <option>WAIT_INPUT</option><option>PREPARING_MODEL</option><option>MODEL_PENDING</option>
         <option>PARSING</option><option>REPAIR_READY</option><option>WAIT_TOOL</option>
@@ -75,6 +93,7 @@
       <details><summary>工具调用</summary><div class="step-list" id="tool-calls"></div><button id="more-tool-calls" type="button" hidden>更多调用</button></details>
       <details><summary>待核对效果</summary><p>这里只列出尚未证明终态的效果；缺少回执不能证明请求未发送。</p><div class="step-list" id="unresolved-effects"></div><button id="more-effects" type="button" hidden>更多效果</button></details>
     </section>
+    </section>
     <p id="status" role="status"></p>
   </main>
   <script>
@@ -82,6 +101,7 @@
     let port,nonce,sequence=0,pageCursor=null,filter={},selectedRun='',selectedSession='';
     let sessionCursor=null,sessionFilter={};
     let protocolLoaded=false;
+    let draft=null,presetValues=[],initialPreset=[],executionLoaded=false;
     const stepCursors={MODEL_TURN:null,TOOL_CALL:null};let effectCursor=null;
     const pending=new Map(),el=id=>document.getElementById(id);
     const send=(type,payload={})=>port.postMessage({protocol:'forest.management-ui-channel/1',nonce,type,...payload});
@@ -92,6 +112,36 @@
     });
     const call=(operation_id,value)=>request('query',operation_id,value);
     const status=message=>{el('status').textContent=message||'';resize();};
+    function presetDocument(){return {system:presetValues};}
+    function updatePresetDraft(){
+      const size=new TextEncoder().encode(JSON.stringify(presetDocument())).length;
+      el('preset-size').textContent=`${presetValues.length}/32 段 · ${size}/32768 字节`;
+      el('plan-preset').disabled=!draft||size>32768||presetValues.length>32;
+      el('add-preset').disabled=!draft||presetValues.length>=32;
+      if(draft){draft.preset={$document:presetDocument()};send('set-draft',{value:draft});}
+    }
+    function renderPreset(){
+      el('preset-list').replaceChildren();
+      presetValues.forEach((text,index)=>{
+        const row=document.createElement('div');row.className='prompt-row';
+        const input=document.createElement('textarea');input.value=text;
+        input.setAttribute('aria-label',`Bot 提示词第 ${index+1} 段`);
+        input.oninput=()=>{presetValues[index]=input.value;updatePresetDraft();};
+        const remove=document.createElement('button');remove.type='button';remove.textContent='移除';
+        remove.onclick=()=>{presetValues.splice(index,1);renderPreset();updatePresetDraft();};
+        row.append(input,remove);el('preset-list').append(row);
+      });
+      el('preset-size').textContent=`${presetValues.length}/32 段 · ${new TextEncoder().encode(JSON.stringify(presetDocument())).length}/32768 字节`;
+      el('plan-preset').disabled=!draft;
+      el('add-preset').disabled=!draft||presetValues.length>=32;
+    }
+    function showView(view){
+      for(const name of ['preset','execution','protocol'])el(name+'-panel').hidden=name!==view;
+      document.querySelectorAll('[data-view]').forEach(button=>button.setAttribute('aria-selected',String(button.dataset.view===view)));
+      if(view==='protocol')loadProtocol().catch(error=>status(error.message));
+      if(view==='execution'&&!executionLoaded){executionLoaded=true;load().catch(error=>{executionLoaded=false;status(error.message);});}
+      resize();
+    }
     async function loadProtocol(){
       if(protocolLoaded)return;
       const descriptor=await call('agent.protocol',{});
@@ -231,14 +281,26 @@
       port.onmessage=event=>{
         const data=event.data||{};
         if(data.protocol!=='forest.management-ui-channel/1'||data.nonce!==nonce)return;
-        if(data.type==='initialize'){load().catch(error=>status(error.message));resize();return;}
+        if(data.type==='initialize'){
+          const configuration=data.configuration,document=configuration.documents?.preset?.desired;
+          if(!document||!Array.isArray(document.system)){status('当前插件未提供 Bot 提示词文档，请刷新或检查插件版本。');return;}
+          draft=structuredClone(configuration.desired.value);initialPreset=[...document.system];presetValues=[...initialPreset];
+          el('preset-revision').textContent=`期望 r${configuration.desired.revision} · 生效 r${configuration.effective.revision}`;
+          renderPreset();el('add-preset').disabled=presetValues.length>=32;el('plan-preset').disabled=false;resize();return;
+        }
+        if(data.type==='reset'){draft=structuredClone(data.value);presetValues=[...initialPreset];renderPreset();status('提示词草稿已丢弃');return;}
+        if(data.type==='plan-ready'){status('提示词计划已检查，请点击外层“应用计划”。');return;}
+        if(data.type==='desired-committed'){status(`提示词配置 r${data.revision} 已提交，等待生效。`);return;}
+        if(data.type==='error'){status(data.message||'提示词计划失败');return;}
         const waiter=pending.get(data.request_id);if(!waiter)return;pending.delete(data.request_id);
         if(data.type==='operation-error')waiter.reject(new Error(data.message||'查询失败'));
         else waiter.resolve(data.value);
       };
       port.start();send('ready');
     },{once:true});
-    el('protocol-browser').ontoggle=()=>{if(el('protocol-browser').open)loadProtocol().catch(error=>status(error.message));};
+    document.querySelectorAll('[data-view]').forEach(button=>{button.onclick=()=>showView(button.dataset.view);});
+    el('add-preset').onclick=()=>{presetValues.push('');renderPreset();updatePresetDraft();resize();};
+    el('plan-preset').onclick=()=>{updatePresetDraft();if(!el('plan-preset').disabled)send('request-plan');};
     el('session-browser').ontoggle=()=>{if(el('session-browser').open)loadSessions().catch(error=>status(error.message));};
     el('search-sessions').onclick=()=>loadSessions().catch(error=>status(error.message));
     el('next-sessions').onclick=()=>loadSessions(true).catch(error=>status(error.message));

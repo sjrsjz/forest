@@ -4733,7 +4733,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cq-image", "cq-missing", "cross-group", "success", "core-run-cancel", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real", "vector-web-recover")
+    "scenario", ("preset-update", "text", "visual", "cq-image", "cq-missing", "cross-group", "success", "core-run-cancel", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real", "vector-web-recover")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -4807,7 +4807,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
     )
     RecordingModelClient.reply_text = (
         "Forest success fixture"
-        if scenario in {"success", "core-run-cancel", "result-ledger-recovery", "result-payload-recovery", "cross-group", "prepared-crash"} else None
+        if scenario in {"success", "preset-update", "core-run-cancel", "result-ledger-recovery", "result-payload-recovery", "cross-group", "prepared-crash"} else None
     )
     RecordingModelClient.reply_factory = None
     if scenario == "success":
@@ -4880,6 +4880,24 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 if domain is not None and domain["state"] == "READY":
                     break
                 await asyncio.sleep(0.1)
+        if scenario == "preset-update":
+            agent = host.registry.get("agent.runtime")
+            initial = await agent.management_contract.read()
+            assert initial["documents"]["preset"]["desired"] == {"system": [settings.agent_system_prompt]}
+            changed = deepcopy(initial["desired"]["value"])
+            changed["preset"] = {"$document": {"system": ["Updated Bot-only personality."]}}
+            plan = await agent.management_contract.plan(
+                operation_id="preset-plan", expected_desired_revision=initial["desired"]["revision"], value=changed,
+            )
+            await agent.module_configuration.apply(
+                operation_id="preset-apply", plan_id=plan["plan_id"],
+                expected_desired_revision=initial["desired"]["revision"],
+            )
+            await host.replace_runtime_graph()
+            saved_preset = await host.registry.get("agent.runtime").management_contract.read()
+            assert saved_preset["documents"]["preset"]["desired"] == saved_preset["documents"]["preset"]["effective"]
+            assert saved_preset["documents"]["preset"]["effective"] == {"system": ["Updated Bot-only personality."]}
+            assert saved_preset["desired"]["revision"] == saved_preset["effective"]["revision"] == initial["desired"]["revision"] + 1
         if scenario == "prepared-tool-crash":
             agent = host.registry.get("agent.runtime")
             configuration = agent.module_configuration
@@ -5622,6 +5640,14 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         assert account_header.find("./field[@name='receiving_account']/field[@name='external_user_id']").text == settings.onebot_self_id
         assert any("targets_assistant" in part.get("text", "") and ">true<" in part["text"]
                    for part in user_message["content"])
+        if scenario == "preset-update":
+            sent_messages = json.loads(prepared.body)["messages"]
+            system_messages = [message for message in sent_messages if message["role"] in {"system", "developer"}]
+            assert any("Updated Bot-only personality." in json.dumps(message) for message in system_messages)
+            assert not any(settings.agent_system_prompt in json.dumps(message) for message in system_messages)
+            active_agent = host.registry.get("agent.runtime")
+            run = await active_agent.management_contract.query("agent.run", {"run_id": prepared.manifest["run_id"]})
+            assert run["profile"]["preset"]["payload_id"] == saved_preset["effective"]["value"]["preset"]["payload_id"]
         manifest = prepared.manifest
         assert manifest["memory_evidence"]["status"] == "READY"
         assert manifest["memory_evidence"]["current_source"]["external_group_id"] == "933179609"

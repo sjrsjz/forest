@@ -121,6 +121,7 @@ class ModuleConfigurationRepository:
         authorization=None,
         authorization_guard=None,
         authorization_input_digest: str | None = None,
+        materialize_in=None,
     ) -> dict:
         input_digest = digest_json(
             [
@@ -170,6 +171,9 @@ class ModuleConfigurationRepository:
                     "Configuration desired head changed before planning",
                     409,
                 )
+            parents = ()
+            if materialize_in is not None:
+                value, parents = await materialize_in(conn, value)
             await self._assert_immutable_in(conn, value)
             payload = await self._put_value_in(
                 conn,
@@ -177,6 +181,7 @@ class ModuleConfigurationRepository:
                 owner_id=f"plan:{plan_id}",
                 source_revision=expected_desired_revision + 1,
                 value=value,
+                parents=parents,
             )
             row = await (
                 await conn.execute(
@@ -671,6 +676,7 @@ class ModuleConfigurationRepository:
         owner_id: str,
         source_revision: int,
         value: object,
+        parents: tuple[str, ...] = (),
     ):
         epoch = await self.payloads.epoch_in(conn)
         return await self.payloads.put_json_in(
@@ -679,6 +685,7 @@ class ModuleConfigurationRepository:
             owner_component_id=self.component_id,
             owner_kind="module.configuration",
             owner_id=owner_id,
+            parents=parents,
             sources=(
                 PayloadSource(
                     self.component_id,

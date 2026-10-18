@@ -2,6 +2,8 @@
 
 > 本文展开[00 架构总契约](00-architecture-contract.md)中的模块控制台协议。控制台壳不得拥有固定 Agent、Memory、Bot、OneBot 或任务后台；发现、查询、动作、配置 schema 和可选 UI 工件都来自准确模块 Generation。
 
+模块可在包清单 `configuration_documents` 中声明顶层配置字段持有的 JSON 文档：字段名、文档 Schema、所属 Payload kind、owner 前缀、字节上限和关联修订字段。管理读取对期望/生效配置分别返回经准确引用核验的文档值；模块 UI 可将草稿字段设为 `{"$document": value}`。配置计划是写操作，在已有鉴权、操作幂等和配置头 CAS 的同一事务内验证文档、物化本模块不可变 Payload、生成内容修订并保存仅含准确引用的配置计划；失败全部回滚。应用及图换代沿用现有通用协议。宿主不识别人格或 Agent 业务，不执行包代码；读取不得物化文档，编辑不得直接覆盖 Payload。
+
 ## 1. 目标与强制边界
 
 WebUI 是 Forest 首版正式管理入口，也是微内核控制台宿主。管理员通过浏览器完成初始化、配置、部署、诊断和恢复；日常运行不要求进入服务器编辑 TOML、JSON、数据库行或插件源码。CLI 与[群聊 Shell](09-group-shell-command-system.md)保留自动化和远程救援用途，与 WebUI 共用类型化控制契约、授权、持久操作及审计。控制台不把 Bot 或 Agent 当成产品中心，具体业务配置由模块注册表和模块管理 UI 提供。

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
+from forest.configuration_documents import ConfigurationDocuments
 from forest.errors import ForestError
 from forest.module_management_contract import ModuleConfigurationContract
 from forest.packages import digest_json
@@ -31,6 +32,10 @@ class PackageManagementContract(ModuleConfigurationContract):
         )
         self.adapter = adapter
         component = adapter.component
+        declarations = component.get('configuration_documents', ())
+        self._configuration_documents = ConfigurationDocuments(
+            configuration, declarations, adapter.schema_snapshot, schema, validator,
+        ) if declarations else None
         query_ports = {
             item["name"]: item for item in component.get("domain_queries", ())
         }
@@ -70,6 +75,29 @@ class PackageManagementContract(ModuleConfigurationContract):
         self._artifacts = {
             item["id"]: (item, effect_ports[item["port"]])
             for item in component.get("management_artifacts", ())
+        }
+
+    async def read(self) -> dict:
+        value = await super().read()
+        if self._configuration_documents is not None:
+            value['documents'] = await self._configuration_documents.read(value)
+        return value
+
+    async def plan(self, *, operation_id, expected_desired_revision, value,
+                   authorization=None, authorization_guard=None):
+        if self._configuration_documents is None:
+            return await super().plan(
+                operation_id=operation_id, expected_desired_revision=expected_desired_revision,
+                value=value, authorization=authorization, authorization_guard=authorization_guard,
+            )
+        plan = await self.configuration.plan(
+            operation_id=operation_id, expected_desired_revision=expected_desired_revision,
+            value=value, validation_digest=self.schema_digest,
+            authorization=authorization, authorization_guard=authorization_guard,
+            materialize_in=self._configuration_documents.materialize_in,
+        )
+        return {key: plan[key] for key in ('plan_id', 'expected_desired_revision', 'input_digest', 'state')} | {
+            'reload_policy': self.reload_policy,
         }
 
     def describe(self) -> dict:

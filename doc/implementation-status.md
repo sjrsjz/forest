@@ -1,5 +1,7 @@
 # Forest 实现状态
 
+2026-10-18 Bot 提示词设置候选：Agent 5.3.0 工作区新增默认“Bot 提示词”文本编辑，以及独立执行记录和只读核心协议视图；通过包声明式配置文档、原子计划和现有换代协议生效。配置 Schema/SQL 不变，沿用既有 Bot/记忆库。事务并发、回滚和引用所有权验证通过，正式 BotHost 新提示词进入模型输入及准确 Run 引用验证通过；在线发布尚待完成。见[验收记录](agent-preset-acceptance-2026-10-18.md)。
+
 2026-10-18 20:55 CST OneBot CQ：实现提交 `50cccc56` 已交接至 `forest-main-v42`，ONLINE/ONLINE、22/22 ACTIVE、22/22 schema bundle READY，Supervisor healthy、树莓派 OneBot 单连接，管理地址仍为 `<MANAGEMENT_URL>`。支持 at/reply/face/受管图片、单次转义与引用式 wire 交接；定向检查 68 passed，正式 BotHost 正常 CQ 和缺图拒绝分别通过，后者无传输 attempt、无模拟平台发送。采用新记忆库、保留旧库，冻结 VL 和真实配置沿用；首条只读观察零违规，真实 QQ CQ 呈现与完整长期观察未验收。见 [设计](22-onebot-cq-presentation.md)及[验收记录](onebot-cq-acceptance-2026-10-18.md)。
 
 2026-10-18 18:47 CST：已从 v39 切换到原生协议 v40（提交 `b21cbde3`），主 Bot `forest-main-v40` ONLINE/ONLINE、22/22 ACTIVE，DeepSeek thinking/high 已配置，树莓派 OneBot 单连接，旧 Supervisor 正常退出。新管理入口 `<MANAGEMENT_URL>`；使用新记忆库、旧库保留，未迁移历史。新版只读观察首样本零违规，真实许可群新触发与完整 24 小时观察尚待验证。详见[原生协议验收](native-assistant-acceptance-2026-10-18.md)。
