@@ -8,4 +8,6 @@
 
 包与管理端定向检查 120 passed、2 skipped；Schema 非 PostgreSQL 检查 11 passed；模型投影、CQ 和相关定向检查 64 passed。各组不相加表述覆盖率。Node JavaScript 语法、Ruff 与差异检查通过。没有据此声称完成真实浏览器的视觉验收。
 
-发布镜像 `forest:runtime-agent-preset-candidate`，镜像 ID `sha256:4e46afc535be7395e1aff17ff0994e4bd0198b5933e2e369e8c5782dc4cd29e3`。在线发布与管理页可读性核对结果在实际完成后追加；现阶段不能把候选工件登记当成已生效。
+发布镜像 `forest:runtime-agent-preset-candidate`，镜像 ID `sha256:4e46afc535be7395e1aff17ff0994e4bd0198b5933e2e369e8c5782dc4cd29e3`，实现提交 `b3435f01`。23:21 CST 已在原部署和原 Bot 数据库上完成宿主升级及正式 Agent 包预检/选择/热换代，当前图修订 5、22/22 ACTIVE、22/22 schema bundle READY、管理 HTTP 200、OneBot 单连接。管理 API 的期望/生效人格文档一致，原有一段预设保留；准确 Generation 的管理工件可读取并包含提示词编辑器。未重建 Bot、未迁移数据库、未代填新人格。
+
+升级前的只读观察停止于第 29 次采样、23:15 CST，最后样本零违规，未完成 24 小时。新版只读观察首样本为 23:21 CST：547 条来源、8 个主干、556 个 READY facet、无活跃 Run/Job/待发送、零违规；嵌入账本仍为升级前的 123 次/62384 tokens。此计数说明原非空记忆与成本事实得以保留，不能据此声称新提示词的真实 QQ 回复或完整长期观察已验收。
