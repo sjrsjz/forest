@@ -1,1 +1,43 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["binding_ref","channel_kind","channel_ref","parts","operation_id"],"properties":{"binding_ref":{"type":"string"},"channel_kind":{"enum":["GROUP","PRIVATE"]},"channel_ref":{"type":"string"},"parts":{"type":"array","minItems":1,"maxItems":256,"items":{"type":"object"}},"operation_id":{"type":"string"}},"additionalProperties":false}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "binding_ref",
+    "channel_kind",
+    "channel_ref",
+    "parts",
+    "operation_id",
+    "wire_owner_id"
+  ],
+  "properties": {
+    "binding_ref": {
+      "type": "string"
+    },
+    "channel_kind": {
+      "enum": [
+        "GROUP",
+        "PRIVATE"
+      ]
+    },
+    "channel_ref": {
+      "type": "string"
+    },
+    "parts": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object"
+      }
+    },
+    "operation_id": {
+      "type": "string"
+    },
+    "wire_owner_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 import json
 from types import SimpleNamespace
@@ -22,11 +21,25 @@ def _prepared(text="hello"):
         separators=(",", ":"),
     ).encode()
     value = PreparedSend("send_group_msg", body, hashlib.sha256(body).hexdigest())
+    Payloads.contents[value.wire_digest] = body
     return {
         "action": value.action,
-        "wire_body_b64": base64.b64encode(value.wire_body).decode(),
+        "wire_payload": {"payload_id": "wire/" + value.wire_digest, "digest": "sha256:" + value.wire_digest,
+                         "owner_component_id": "kernel.effect", "owner_kind": "effect.wire", "owner_id": "attempt:1"},
         "wire_digest": value.wire_digest,
     }
+
+
+class Payloads:
+    contents = {}
+
+    def __init__(self):
+        self.revoked = False
+
+    async def read_verified_batch(self, references):
+        if self.revoked:
+            raise ForestError("PAYLOAD_REVOKED", "Source was deleted", 410)
+        return tuple(self.contents[ref.digest.removeprefix("sha256:")] for ref in references)
 
 
 class FakeClient:
@@ -104,6 +117,7 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
         "fence_id": identity.graph_id,
         "fence_epoch": identity.graph_revision,
         "wire_payload_digest": "sha256:" + prepared["wire_digest"],
+        "wire_payload_id": prepared["wire_payload"]["payload_id"],
     }
     effect = {
         "state": "DISPATCHING",
@@ -150,6 +164,7 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
         effects=Effects(),
         runtime=Runtime(),
         credential_resolver=credential_resolver,
+        payloads=Payloads(),
         send_guard=unexpected_rescue_guard,
         client_factory=client_factory,
     )
@@ -197,7 +212,7 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
 
     transport = driver._bindings["binding/main"]
     payload = {
-        "protocol": "forest.onebot-send/2",
+        "protocol": "forest.onebot-send/3",
         "effect_operation_id": "effect:1",
         "attempt_id": "attempt:1",
         "binding_ref": "binding/main",
@@ -219,7 +234,7 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
         invocation=SimpleNamespace(operation_id="adapter-dispatch:1"),
     )
     assert result == {
-        "protocol": "forest.onebot-send-result/2",
+        "protocol": "forest.onebot-send-result/3",
         "status": "SENT",
         "message_id": "42",
         "error_code": None,
@@ -242,6 +257,30 @@ async def test_onebot_transport_owns_ingress_send_fences_and_resource_lifecycle(
             invocation=SimpleNamespace(operation_id="adapter-dispatch:2"),
         )
     assert caught.value.code == "ONEBOT_EFFECT_FENCE_MISMATCH"
+    assert len(client.sent) == 1
+
+    substituted = {
+        **payload,
+        "prepared": {
+            **prepared,
+            "wire_payload": {**prepared["wire_payload"], "payload_id": "wire/another-owner"},
+        },
+    }
+    with pytest.raises(ForestError) as caught:
+        await driver.invoke(
+            substituted,
+            scope=SimpleNamespace(component_id="adapter.onebot", generation_id=identity.generation_id),
+            invocation=SimpleNamespace(operation_id="adapter-dispatch:3"),
+        )
+    assert caught.value.code == "ONEBOT_EFFECT_FENCE_MISMATCH"
+    driver.payloads.revoked = True
+    rejected = await driver.invoke(
+        payload,
+        scope=SimpleNamespace(component_id="adapter.onebot", generation_id=identity.generation_id),
+        invocation=SimpleNamespace(operation_id="adapter-dispatch:4"),
+    )
+    assert rejected["status"] == "REJECTED"
+    assert rejected["error_code"] == "PAYLOAD_REVOKED"
     assert len(client.sent) == 1
 
     await driver.close()
@@ -289,6 +328,7 @@ async def test_onebot_transport_rejects_offline_account_before_activation():
         effects=object(),
         runtime=object(),
         credential_resolver=credential_resolver,
+        payloads=Payloads(),
         client_factory=client_factory,
     )
     driver.bind_ingress(lambda *_args, **_kwargs: None)
@@ -341,6 +381,7 @@ async def test_onebot_transport_detects_account_offline_on_open_socket(monkeypat
         effects=object(),
         runtime=object(),
         credential_resolver=credential_resolver,
+        payloads=Payloads(),
         client_factory=client_factory,
     )
     driver.bind_ingress(lambda *_args, **_kwargs: None)

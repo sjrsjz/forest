@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import json
 from importlib.resources import files
@@ -34,6 +33,7 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
         "delivery.record-handoff",
         "delivery.record-observe",
         "delivery.release-claim",
+        "delivery.reject-prepare-record",
         "delivery.record-abandon",
     }
     assert [item["name"] for item in snapshot.component["owned_work_handlers"]] == [
@@ -46,6 +46,7 @@ def test_delivery_builtin_is_an_immutable_worker_package(tmp_path):
         "delivery.reconcile",
         "delivery.release",
         "delivery.abandon",
+        "delivery.reject-prepare",
     ]
     assert {item["id"] for item in snapshot.component["management_queries"]} == {
         "delivery.unknown.list", "delivery.unknown.get",
@@ -63,12 +64,13 @@ async def test_core_revoke_at_adapter_boundary_is_settled_as_unsent():
     }).encode()
     wire_digest = hashlib.sha256(wire_body).hexdigest()
     adapter = {
+        "status": "READY", "error_code": None,
         "binding_ref": "binding/main", "binding_epoch": 1,
         "connection_epoch": 1, "client_incarnation": "client/1",
         "adapter_generation_id": "adapter/1", "graph_id": "graph/1",
         "graph_revision": 1, "transport_digest": "sha256:" + "b" * 64,
         "prepared": {
-            "wire_body_b64": base64.b64encode(wire_body).decode(),
+            "wire_payload": {"payload_id": "wire/1", "digest": "sha256:" + wire_digest},
             "wire_digest": wire_digest,
         },
     }

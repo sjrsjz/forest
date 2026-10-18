@@ -102,6 +102,18 @@ class AdapterOneBot(Plugin):
     async def prepare_delivery(self, payload, ctx):
         value = _plain(payload)
         binding = self._binding(value["binding_ref"])
+        try:
+            return await self._prepare_delivery(value, binding, ctx)
+        except ForestError as error:
+            if error.code not in {
+                "ONEBOT_INVALID", "ONEBOT_MEDIA_UNAVAILABLE", "ONEBOT_MEDIA_SIZE_EXCEEDED",
+                "ONEBOT_MEDIA_REFERENCE_INVALID", "PAYLOAD_REVOKED", "PAYLOAD_DIGEST_MISMATCH",
+            }:
+                raise
+            return {"protocol": "forest.onebot-delivery-prepared/3", **_transport_identity(ctx, binding),
+                    "status": "REJECTED", "prepared": None, "error_code": error.code}
+
+    async def _prepare_delivery(self, value, binding, ctx):
         prepared = await ctx.services.call(
             "onebot.codec.prepare-send",
             {
@@ -110,11 +122,32 @@ class AdapterOneBot(Plugin):
                 "segments": value["parts"],
             },
             operation_id=ctx.operations.stable("prepare-wire"),
+            contract_major=2,
+        )
+        template = _plain(prepared)
+        images = [part for part in template["body"]["message"] if part["type"] == "image"]
+        if images:
+            references = [part["data"]["file"]["media_reference"] for part in images]
+            resolved = await ctx.services.call(
+                "media.context.resolve", {"items": references},
+                operation_id=ctx.operations.stable("resolve-output-images"), timeout=15,
+            )
+            assets = {(item["media_ref"], item["media_revision"]): item for item in resolved["assets"]}
+            for part, reference in zip(images, references, strict=True):
+                asset = assets.get((reference["media_ref"], reference["media_revision"]))
+                if asset is None:
+                    raise ForestError("ONEBOT_MEDIA_UNAVAILABLE", "Output image is not an available managed asset", 409)
+                part["data"]["file"] = {"payload": _plain(asset["payload"])}
+        wire = await ctx.services.call(
+            "adapter.onebot.wire.materialize",
+            {**template, "wire_owner_id": value["wire_owner_id"]},
+            operation_id=ctx.operations.stable("materialize-wire"),
         )
         return {
-            "protocol": "forest.onebot-delivery-prepared/2",
+            "protocol": "forest.onebot-delivery-prepared/3",
+            "status": "READY", "error_code": None,
             **_transport_identity(ctx, binding),
-            "prepared": _plain(prepared),
+            "prepared": _plain(wire),
         }
 
     @service("adapter.onebot.delivery.dispatch", semantics="at-most-once")
@@ -124,7 +157,7 @@ class AdapterOneBot(Plugin):
             _plain(payload),
             operation_id=ctx.operations.stable("transport-send"),
             timeout=payload["timeout_seconds"] + 5,
-            contract_major=2,
+            contract_major=3,
         )
 
     @service("adapter.onebot.transport.frame", semantics="at-most-once")
@@ -257,6 +290,11 @@ class AdapterOneBot(Plugin):
             media_type="application/json",
             content=_canonical({
                 "parts": context_parts,
+                "platform_message_id": message_ref,
+                "output_format": {
+                    "syntax": "cq-code",
+                    "instructions": "Your final assistant text may use [CQ:at,qq=<user_id>], [CQ:reply,id=<platform_message_id>], [CQ:face,id=<face_id>], and [CQ:image,file=<media_ref>,revision=<media_revision>,source_unit_id=<source_unit_id>,part_id=<part_id>]. Use only supplied managed image references, not URLs, paths or base64. To print literal CQ, escape & as &amp;, [ as &#91;, ] as &#93;. In CQ parameter values also escape comma as &#44;. Other unsupported CQ is printed literally.",
+                },
                 "receiving_account": {
                     "bot_id": ctx.identity["bot_id"],
                     "binding_ref": binding["binding_ref"],

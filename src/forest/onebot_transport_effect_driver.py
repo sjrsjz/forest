@@ -9,6 +9,7 @@ import inspect
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from forest.adapters.onebot import OneBotWebSocketClient, PreparedSend
 from forest.errors import ForestError
@@ -74,6 +75,7 @@ class OneBotTransportEffectDriver:
         effects,
         runtime,
         credential_resolver,
+        payloads,
         send_guard=None,
         client_factory=OneBotWebSocketClient.create,
     ) -> None:
@@ -95,6 +97,7 @@ class OneBotTransportEffectDriver:
         self.effects = effects
         self.runtime = runtime
         self.credential_resolver = credential_resolver
+        self.payloads = payloads
         self.send_guard = send_guard
         self.client_factory = client_factory
         self._ingress = None
@@ -292,14 +295,24 @@ class OneBotTransportEffectDriver:
         )
         await self._frames_drained.wait()
 
-    async def _verify_effect(self, payload: dict, transport: _BindingTransport) -> None:
+    async def _prepared(self, value: dict) -> PreparedSend:
+        if set(value) != {"action", "wire_payload", "wire_digest"}:
+            raise ForestError("ONEBOT_WIRE_REFERENCE_INVALID", "Send requires a frozen wire Payload", 422)
+        ref = value["wire_payload"]
+        if (set(ref) != {"payload_id", "digest", "owner_component_id", "owner_kind", "owner_id"}
+                or ref["owner_component_id"] != "kernel.effect" or ref["owner_kind"] != "effect.wire"
+                or ref["digest"] != "sha256:" + value["wire_digest"]):
+            raise ForestError("ONEBOT_WIRE_REFERENCE_INVALID", "Send wire identity is invalid", 422)
+        (wire,) = await self.payloads.read_verified_batch((SimpleNamespace(**ref),))
+        return PreparedSend(value["action"], wire, value["wire_digest"])
+
+    async def _verify_effect(self, payload: dict, transport: _BindingTransport, prepared: PreparedSend) -> None:
         await self.runtime.verify_generation_member(
             component_id=self.identity.component_id,
             generation_id=self.identity.generation_id,
         )
         loaded = await self.effects.load(payload["effect_operation_id"])
         effect, attempt = loaded["effect"], loaded["attempt"]
-        prepared = PreparedSend.from_codec_result(payload["prepared"])
         wire = json.loads(prepared.wire_body)
         target_key = "group_id" if prepared.action == "send_group_msg" else "user_id"
         if (
@@ -314,6 +327,7 @@ class OneBotTransportEffectDriver:
             or attempt["fence_id"] != self.identity.graph_id
             or attempt["fence_epoch"] != self.identity.graph_revision
             or attempt["wire_payload_digest"] != "sha256:" + prepared.wire_digest
+            or attempt["wire_payload_id"] != payload["prepared"]["wire_payload"]["payload_id"]
             or effect["effect_kind"] != "onebot.send"
             or effect["target_kind"]
             != ("group" if target_key == "group_id" else "private")
@@ -345,8 +359,14 @@ class OneBotTransportEffectDriver:
                 "OneBot request belongs to another transport Generation",
                 409,
             )
-        await self._verify_effect(payload, transport)
-        prepared = PreparedSend.from_codec_result(payload["prepared"])
+        try:
+            prepared = await self._prepared(payload["prepared"])
+        except ForestError as error:
+            if error.code != "PAYLOAD_REVOKED":
+                raise
+            return {"protocol": "forest.onebot-send-result/3", "status": "REJECTED",
+                    "message_id": None, "error_code": error.code}
+        await self._verify_effect(payload, transport, prepared)
         async def send():
             return await transport.client.send(
                 prepared, timeout=float(payload["timeout_seconds"])
@@ -368,7 +388,7 @@ class OneBotTransportEffectDriver:
                 channel_ref=str(wire[target_key]),
                 send=send,
             )
-        return {"protocol": "forest.onebot-send-result/2", **result.as_dict()}
+        return {"protocol": "forest.onebot-send-result/3", **result.as_dict()}
 
     async def quiesce(self) -> None:
         self._send_admission = False
@@ -409,10 +429,14 @@ def onebot_transport_effect_driver_factory(
     effects,
     runtime,
     credential_resolver,
+    payloads,
     send_guard=None,
     client_factory=OneBotWebSocketClient.create,
 ):
     def create(configuration, configuration_revision, identity, declaration):
+        if declaration.get("name") == "adapter.onebot.wire.materialize":
+            from forest.onebot_wire_effect_driver import OneBotWireEffectDriver
+            return OneBotWireEffectDriver(identity, runtime=runtime, payloads=payloads)
         return OneBotTransportEffectDriver(
             configuration,
             configuration_revision,
@@ -421,6 +445,7 @@ def onebot_transport_effect_driver_factory(
             effects=effects,
             runtime=runtime,
             credential_resolver=credential_resolver,
+            payloads=payloads,
             send_guard=send_guard,
             client_factory=client_factory,
         )

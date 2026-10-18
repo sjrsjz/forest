@@ -29,7 +29,7 @@ CAPABILITIES = {
     "unknown_result_retry": False,
 }
 MAX_EVENT_BYTES = 128 * 1024
-MAX_SEND_BYTES = 192 * 1024
+MAX_SEND_BYTES = 12 * 1024 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_SEGMENTS = 256
 MAX_WS_FRAME_BYTES = MAX_EVENT_BYTES + 4096
@@ -185,6 +185,19 @@ def _validate_prepared_body(action: str, body: bytes) -> None:
                 _id(data["qq"])
         elif kind == "reply" and isinstance(data, dict) and set(data) == {"id"}:
             _id(data["id"], message=True)
+        elif kind == "face" and isinstance(data, dict) and set(data) == {"id"}:
+            if not isinstance(data["id"], str) or re.fullmatch(r"[0-9]{1,5}", data["id"]) is None:
+                raise _invalid("Prepared face segment is invalid")
+        elif kind == "image" and isinstance(data, dict) and set(data) == {"file", "proxy", "timeout"}:
+            if (data["proxy"] != "0" or data["timeout"] != "10"
+                    or not isinstance(data["file"], str) or not data["file"].startswith("base64://")):
+                raise _invalid("Prepared image must contain managed image bytes")
+            try:
+                image = base64.b64decode(data["file"][9:], validate=True)
+            except ValueError:
+                raise _invalid("Prepared image encoding is invalid") from None
+            if not 0 < len(image) <= 8 * 1024 * 1024:
+                raise _invalid("Prepared image exceeds its byte limit")
         else:
             raise _invalid("Prepared send contains an unsupported segment")
 
@@ -204,15 +217,6 @@ class PreparedSend:
         ):
             raise _invalid("Prepared send digest does not match its exact bytes")
 
-    @classmethod
-    def from_codec_result(cls, value: Any) -> PreparedSend:
-        if not isinstance(value, dict) or set(value) != {"action", "wire_body_b64", "wire_digest"}:
-            raise _invalid("OneBot codec result is invalid")
-        try:
-            body = base64.b64decode(value["wire_body_b64"], validate=True)
-        except (TypeError, ValueError):
-            raise _invalid("OneBot codec body is not canonical base64") from None
-        return cls(value["action"], body, value["wire_digest"])
 
 
 class _FixedEndpointConnect(connect):

@@ -643,6 +643,7 @@ class BotHost:
         onebot_effect_factory = onebot_transport_effect_driver_factory(
             effects=self._kernel.effect,
             runtime=self._kernel.runtime,
+            payloads=self._kernel.payload,
             credential_resolver=resolve_onebot_secret,
             send_guard=guard_onebot_send,
             **adapter_driver_options,

@@ -36,7 +36,7 @@ from forest.model_contract import (
 )
 from forest.model_contract import _encode as _contract_encode
 
-PROJECTION_REVISION = "forest-native-model-view-v4"
+PROJECTION_REVISION = "forest-native-model-view-v5"
 MEMORY_EVIDENCE_REVISION = "forest-memory-evidence-v2"
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _XML_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
@@ -584,6 +584,8 @@ class _Projection:
                 if reason is not None:
                     self.omitted.append({**reference, "reason": reason})
                     content = self.text({"part_id": part_id, "type": "unavailable", "reason": reason,
+                                         "media_ref": media_ref, "media_revision": part.get("media_revision"),
+                                         "source_unit_id": unit["source_unit_id"] if memory else unit["unit_id"],
                                          "text": "当前模型未接收这张图片的内容。"})
                     wire.append(content)
                     semantic.append(content)
@@ -595,7 +597,8 @@ class _Projection:
                         or (part.get("media_revision") is not None
                             and part["media_revision"] != image.media_revision)):
                     raise _error("MODEL_MEDIA_SOURCE_MISMATCH", "Image snapshot does not belong to this source")
-                label = self.text({"part_id": part_id, "type": "image", "source_unit_id": source_unit_id})
+                label = self.text({"part_id": part_id, "type": "image", "source_unit_id": source_unit_id,
+                                   "media_ref": image.media_ref, "media_revision": image.media_revision})
                 wire.extend([label, {"type": "image_url", "image_url": {
                     "url": "data:" + image.mime + ";base64," + base64.b64encode(image.content).decode(),
                     "detail": self.capabilities.image_detail,
@@ -669,6 +672,8 @@ class _Projection:
                                 "receiving_account": unit.get("receiving_account"),
                                 "receiving_account_role": "your_platform_account_for_this_message"
                                 if unit.get("receiving_account") is not None else None,
+                                "output_format": unit.get("output_format"),
+                                "platform_message_id": unit.get("platform_message_id"),
                                 "ingress_seq": unit.get("ingress_seq"),
                                 "authority_trigger_id": next((
                                     claim["last_trigger_ref"] for claim in self.snapshot["trigger_claims"]

@@ -331,7 +331,7 @@ def test_native_memory_image_obeys_bound_model_modality():
                                    path_edge_id=None)
     text_only = prepared(value, evidence=evidence)
     assert "image_url" not in text_only.body.decode()
-    assert "image-a" not in text_only.body.decode()
+    assert "image-a" in text_only.body.decode()  # Reference is usable without claiming to have seen pixels.
     assert text_only.manifest["omitted_part_refs"][0]["reason"] == "MODEL_IMAGE_UNSUPPORTED"
     assert _learning_candidates(text_only.manifest) == []
     visual = prepared(value, capabilities(input_modalities=("text", "image")),

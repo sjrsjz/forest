@@ -4733,7 +4733,7 @@ async def test_bot_host_starts_retires_and_restarts_exact_graph(tmp_path, monkey
 
 @pytest.mark.postgres
 @pytest.mark.parametrize(
-    "scenario", ("text", "visual", "cross-group", "success", "core-run-cancel", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real", "vector-web-recover")
+    "scenario", ("text", "visual", "cq-image", "cq-missing", "cross-group", "success", "core-run-cancel", "tool-continuation", "prepared-tool-crash", "result-ledger-recovery", "result-payload-recovery", "requeue", "transport-exhausted", "reload", "reload-publish", "reload-full", "reload-lost-receipt", "prepared-crash", "long-model-lease", "vector-web", "vector-web-real", "vector-web-recover")
 )
 async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario, monkeypatch):
     dsn = os.environ.get("FOREST_TEST_DSN")
@@ -4751,7 +4751,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
         model_base_url="http://127.0.0.1:8000/v1", model_api_key="test-model-key",
         model="test-model", model_deployment_id="provider.chat-completions/test",
         model_max_output_tokens=1024,
-        model_input_modalities=("text", "image") if scenario == "visual" else ("text",),
+        model_input_modalities=("text", "image") if scenario in {"visual", "cq-image", "cq-missing"} else ("text",),
         embedding_endpoint="http://127.0.0.1:8001/v1/embeddings",
         embedding_api_key="test-embedding-key",
         embedding_deployment_id="embedding.multimodal/qiyu-vl/test",
@@ -4781,7 +4781,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             settings, bot_id="bot-vector-web-" + uuid4().hex[:16],
             vector_index_endpoint=milvus_uri,
         )
-    valid_media = real_transport or bool(os.environ.get("FOREST_TEST_MEDIA_CAPTURE_DELAY_SECONDS"))
+    valid_media = scenario in {"cq-image", "cq-missing"} or real_transport or bool(os.environ.get("FOREST_TEST_MEDIA_CAPTURE_DELAY_SECONDS"))
     if qiyu_env_file:
         qiyu_values = qiyu_embedding_config(qiyu_env_file)
         milvus_uri = os.environ["FOREST_TEST_MILVUS_URI"]
@@ -4831,6 +4831,16 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             return "Forest tool continuation fixture"
 
         RecordingModelClient.reply_factory = tool_then_answer
+
+    if scenario in {"cq-image", "cq-missing"}:
+        def cq_answer(prepared, _invocation_number):
+            media = prepared.manifest["media_transform_refs"][0]
+            if scenario == "cq-missing":
+                media = {**media, "media_ref": "media:" + "b" * 64}
+            image = ("[CQ:image,file=" + media["media_ref"] + ",revision=" + str(media["media_revision"])
+                     + ",source_unit_id=" + media["source_unit_id"] + ",part_id=" + media["part_id"] + "]")
+            return '[CQ:reply,id=90001][CQ:at,qq=20001]Photo[CQ:face,id=178] ' + image + ' &#91;CQ:at,qq=999&#93; &amp;#91;'
+        RecordingModelClient.reply_factory = cq_answer
 
     async def create_websocket(_url, _token, **_limits):
         client = FakeWebSocketClient(settings.onebot_self_id)
@@ -5280,7 +5290,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 *([{"type": "image", "data": {
                     "file": "current-question-image",
                     "url": "https://media.example/current-question-image",
-                }}] if scenario == "visual" else []),
+                }}] if scenario in {"visual", "cq-image", "cq-missing"} else []),
             ],
         }).encode())
         if scenario == "prepared-tool-crash":
@@ -5735,7 +5745,7 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                 row["ref_id"] for row in active_refs
             }
             assert receipts["count"] >= 2
-        if scenario == "visual":
+        if scenario in {"visual", "cq-image", "cq-missing"}:
             assert b"image_url" in prepared.body
             assert manifest["media_transform_refs"]
             conversation_schema = next(
@@ -6687,6 +6697,52 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
                                       "reason": "collection identity changed"}
                 finally:
                     collection["collection_id"] = original_id
+        if scenario == "cq-image":
+            async with asyncio.timeout(45):
+                while not clients[-1].sent:
+                    await asyncio.sleep(0.1)
+            assert len(clients[-1].sent) == 1
+            sent = json.loads(clients[-1].sent[0].wire_body)["message"]
+            assert [part["type"] for part in sent] == ["reply", "at", "text", "face", "text", "image", "text"]
+            assert sent[1]["data"]["qq"] == "20001"
+            assert sent[5]["data"]["file"].startswith("base64://")
+            assert sent[-1]["data"]["text"] == " [CQ:at,qq=999] &#91;"
+
+        if scenario == "cq-missing":
+            delivery_schema = next(item.storage.spec.namespace for item in host.registry.descriptors
+                                   if item.component_id == "delivery")
+            try:
+                async with asyncio.timeout(45):
+                    while True:
+                        async with host.store.pool.connection() as conn:
+                            rejected = await (await conn.execute(sql.SQL(
+                                "SELECT state,error_code FROM {}.send_intents WHERE bot_id=%s")
+                                .format(sql.Identifier(delivery_schema)), (settings.bot_id,))).fetchone()
+                        if rejected and rejected["state"] == "FAILED":
+                            break
+                        await asyncio.sleep(0.1)
+            except TimeoutError as error:
+                agent_schema = next(item.storage.spec.namespace for item in host.registry.descriptors
+                                    if item.component_id == "agent.runtime")
+                async with host.store.pool.connection() as conn:
+                    settlements = await (await conn.execute(sql.SQL(
+                        "SELECT input_payload->'outcome' AS outcome FROM {}.owned_work_settlements LIMIT 4")
+                        .format(sql.Identifier(delivery_schema)))).fetchall()
+                    parts = await (await conn.execute(sql.SQL(
+                        "SELECT state,owner_epoch,current_attempt_id FROM {}.send_parts")
+                        .format(sql.Identifier(delivery_schema)))).fetchall()
+                    runs = await (await conn.execute(sql.SQL(
+                        "SELECT state,error_code FROM {}.agent_runs")
+                        .format(sql.Identifier(agent_schema)))).fetchall()
+                raise AssertionError(f"CQ rejection stalled: {rejected}; parts={parts}; settlements={settlements}; runs={runs}") from error
+            assert rejected["error_code"] == "ONEBOT_MEDIA_UNAVAILABLE"
+            async with host.store.pool.connection() as conn:
+                attempts = await (await conn.execute(sql.SQL(
+                    "SELECT count(*) AS count FROM {}.transport_attempts WHERE bot_id=%s")
+                    .format(sql.Identifier(delivery_schema)), (settings.bot_id,))).fetchone()
+            assert attempts["count"] == 0
+            assert clients[-1].sent == []
+
     finally:
         if RecordingModelClient.first_gate is not None:
             RecordingModelClient.first_gate.set()

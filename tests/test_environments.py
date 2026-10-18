@@ -256,7 +256,6 @@ async def test_real_workers_isolate_locked_dependency_generations_and_host_packa
 
 
 async def test_builtin_onebot_codec_is_a_complete_isolated_package(tmp_path):
-    from forest.adapters.onebot import PreparedSend
 
     root = Path(__file__).resolve().parents[1] / "src/forest/builtin/onebot_codec"
     snapshot = PackageCatalog(tmp_path / "catalog").build(root)
@@ -270,8 +269,7 @@ async def test_builtin_onebot_codec_is_a_complete_isolated_package(tmp_path):
         result = await worker.invoke("onebot.codec.prepare-send", {
             "channel_kind": "group", "channel_id": "123", "segments": segments,
         }, call_id="prepare", operation_id="prepare")
-        prepared = PreparedSend.from_codec_result(result)
-        assert json.loads(prepared.wire_body)["message"] == [
+        assert result["body"]["message"] == [
             {"type": "text", "data": {"text": "literal [CQ:at,qq=42]"}}
         ]
         normalized = await worker.invoke("onebot.codec.normalize", {

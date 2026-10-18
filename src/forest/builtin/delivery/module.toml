@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.delivery"
-version = "0.6.0"
+version = "0.7.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "delivery:Delivery"
@@ -41,6 +41,7 @@ requests = [
   "uow.execute:delivery.handoff",
   "uow.execute:delivery.observe",
   "uow.execute:delivery.release",
+  "uow.execute:delivery.reject-prepare",
   "uow.execute:delivery.abandon"
 ]
 official_bot_grants = [
@@ -50,13 +51,13 @@ official_bot_grants = [
 
 [[components.requires]]
 name = "adapter.onebot.delivery.prepare"
-contract = ">=2.0,<3.0"
+contract = ">=3.0,<4.0"
 required = true
 startup_dependency = true
 
 [[components.requires]]
 name = "adapter.onebot.delivery.dispatch"
-contract = ">=2.0,<3.0"
+contract = ">=3.0,<4.0"
 required = true
 startup_dependency = true
 
@@ -92,9 +93,9 @@ order = 20
 
 [components.storage]
 schema_id = "forest.delivery"
-schema_version = "3.3.0"
+schema_version = "3.4.0"
 baseline = "schema/delivery.sql"
-baseline_sha256 = "764a5b2b2986a0caa0ed66be70a04f46a4baea4d2c9fe8bed97daeea5827fd06"
+baseline_sha256 = "e3a4c5ddc33a63d727ffa55790c076e2423ff1dcc8dc14379c189a4f38fd658c"
 scope = "bot"
 repository_contract = "forest.delivery.repository/3"
 execution_profile = "official"
@@ -316,3 +317,18 @@ path = "/input/parts/*/payload"
 owner_component = "kernel.runtime"
 owner_kind = "core.rescue.result"
 owner_id_path = "/input/parts/*/payload/owner_id"
+
+[[components.unit_of_work_participants]]
+name = "delivery.reject-prepare-record"
+contract = "1.0"
+function = "delivery_reject_prepare"
+input_schema = "schemas/uow-envelope.json"
+output_schema = "schemas/delivery-result.json"
+
+[[components.unit_of_work_plans]]
+name = "delivery.reject-prepare"
+contract = "1.0"
+input_schema = "schemas/release-plan.json"
+output_schema = "schemas/delivery-result.json"
+timeout_s = 10
+steps = [{ id = "delivery", component_id = "delivery", participant = "delivery.reject-prepare-record" }]

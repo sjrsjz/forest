@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.adapter-onebot"
-version = "2.9.0"
+version = "3.0.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "adapter_onebot:AdapterOneBot"
@@ -53,6 +53,8 @@ stop_timeout_s = 10
 
 [components.capabilities]
 requests = [
+  "service.call:adapter.onebot.wire.materialize",
+  "service.call:media.context.resolve",
   "service.call:onebot.codec.normalize",
   "service.call:onebot.codec.prepare-send",
   "service.call:conversation.trigger.classify",
@@ -77,7 +79,7 @@ startup_dependency = true
 
 [[components.requires]]
 name = "onebot.codec.prepare-send"
-contract = ">=1.0,<2.0"
+contract = ">=2.0,<3.0"
 required = true
 startup_dependency = true
 
@@ -107,21 +109,21 @@ startup_dependency = false
 
 [[components.provides]]
 name = "adapter.onebot.delivery.prepare"
-contract = "2.0"
+contract = "3.0"
 semantics = "idempotent"
 input_schema = "schemas/delivery-prepare-input.json"
 output_schema = "schemas/delivery-prepared.json"
 
 [[components.provides]]
 name = "adapter.onebot.delivery.dispatch"
-contract = "2.0"
+contract = "3.0"
 semantics = "at-most-once"
 input_schema = "schemas/send-input.json"
 output_schema = "schemas/send-output.json"
 
 [[components.effect_services]]
 name = "adapter.onebot.transport.send"
-contract = "2.0"
+contract = "3.0"
 kind = "onebot.websocket-v11"
 semantics = "at-most-once"
 input_schema = "schemas/send-input.json"
@@ -297,3 +299,17 @@ steps = [
   { id = "rescue", component_id = "kernel.runtime", participant = "core.rescue.admit", input_path = "/rescue" },
   { id = "classification", component_id = "conversation.scheduler", participant = "conversation.classify-core-rescue-ingress", input_path = "/rescue_classification" }
 ]
+
+[[components.requires]]
+name = "media.context.resolve"
+contract = ">=1.0,<2.0"
+required = true
+startup_dependency = false
+
+[[components.effect_services]]
+name = "adapter.onebot.wire.materialize"
+contract = "1.0"
+kind = "onebot.websocket-v11"
+semantics = "idempotent"
+input_schema = "schemas/wire-materialize-input.json"
+output_schema = "schemas/wire-materialize-output.json"

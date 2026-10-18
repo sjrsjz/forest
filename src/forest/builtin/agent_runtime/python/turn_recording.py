@@ -429,7 +429,7 @@ class TurnRecorder:
             )
         reply_ref = stable("reply", owner["run_id"])
         candidate = await self.ctx.payloads.put_json(
-            {"text": assistant["text"]},
+            {"parts": [{"type": "text", "format": "platform-markup", "text": assistant["text"]}]},
             owner_kind="final.reply",
             owner_id=reply_ref,
             parents=(source,),

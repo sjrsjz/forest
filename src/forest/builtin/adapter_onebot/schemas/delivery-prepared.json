@@ -1,1 +1,162 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","required":["protocol","binding_ref","binding_epoch","connection_epoch","client_incarnation","adapter_generation_id","graph_id","graph_revision","transport_digest","prepared"],"properties":{"protocol":{"const":"forest.onebot-delivery-prepared/2"},"binding_ref":{"type":"string"},"binding_epoch":{"type":"integer","minimum":1},"connection_epoch":{"type":"integer","minimum":1},"client_incarnation":{"type":"string"},"adapter_generation_id":{"type":"string"},"graph_id":{"type":"string"},"graph_revision":{"type":"integer","minimum":1},"transport_digest":{"type":"string","pattern":"^sha256:[a-f0-9]{64}$"},"prepared":{"$ref":"#/$defs/prepared"}},"$defs":{"prepared":{"type":"object","required":["action","wire_body_b64","wire_digest"],"properties":{"action":{"enum":["send_group_msg","send_private_msg"]},"wire_body_b64":{"type":"string"},"wire_digest":{"type":"string","pattern":"^[a-f0-9]{64}$"}},"additionalProperties":false}},"additionalProperties":false}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "protocol",
+    "binding_ref",
+    "binding_epoch",
+    "connection_epoch",
+    "client_incarnation",
+    "adapter_generation_id",
+    "graph_id",
+    "graph_revision",
+    "transport_digest",
+    "prepared",
+    "status",
+    "error_code"
+  ],
+  "properties": {
+    "protocol": {
+      "const": "forest.onebot-delivery-prepared/3"
+    },
+    "binding_ref": {
+      "type": "string"
+    },
+    "binding_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "connection_epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "client_incarnation": {
+      "type": "string"
+    },
+    "adapter_generation_id": {
+      "type": "string"
+    },
+    "graph_id": {
+      "type": "string"
+    },
+    "graph_revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "transport_digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "prepared": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/prepared"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "enum": [
+        "READY",
+        "REJECTED"
+      ]
+    },
+    "error_code": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 128
+    }
+  },
+  "$defs": {
+    "prepared": {
+      "type": "object",
+      "required": [
+        "action",
+        "wire_payload",
+        "wire_digest"
+      ],
+      "properties": {
+        "action": {
+          "enum": [
+            "send_group_msg",
+            "send_private_msg"
+          ]
+        },
+        "wire_payload": {
+          "type": "object",
+          "required": [
+            "payload_id",
+            "digest",
+            "owner_component_id",
+            "owner_kind",
+            "owner_id"
+          ],
+          "properties": {
+            "payload_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "digest": {
+              "type": "string",
+              "pattern": "^sha256:[a-f0-9]{64}$"
+            },
+            "owner_component_id": {
+              "const": "kernel.effect"
+            },
+            "owner_kind": {
+              "const": "effect.wire"
+            },
+            "owner_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "additionalProperties": false
+        },
+        "wire_digest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "READY"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "prepared": {
+            "type": "object"
+          },
+          "error_code": {
+            "type": "null"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "prepared": {
+            "type": "null"
+          },
+          "error_code": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

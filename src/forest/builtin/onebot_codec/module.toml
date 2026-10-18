@@ -1,6 +1,6 @@
 manifest_version = 1
 package_id = "forest.codec.onebot"
-version = "1.0.2"
+version = "2.0.0"
 kernel_api = ">=1.0,<2.0"
 runtime = "python-worker"
 entrypoint = "onebot:OneBotCodec"
@@ -38,7 +38,7 @@ output_schema = "schemas/normalize-result.json"
 
 [[components.provides]]
 name = "onebot.codec.prepare-send"
-contract = "1.0"
+contract = "2.0"
 semantics = "read"
 input_schema = "schemas/prepare.json"
 output_schema = "schemas/prepare-result.json"

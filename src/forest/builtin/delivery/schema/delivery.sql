@@ -102,9 +102,10 @@ CREATE TABLE send_parts (
             AND owner_expires_at IS NULL)
     ),
     CHECK (
-        (state IN ('PREPARED','DISPATCHING','SENT','FAILED','UNKNOWN')
+        (state IN ('PREPARED','DISPATCHING','SENT','UNKNOWN')
             AND current_attempt_id IS NOT NULL)
         OR (state IN ('QUEUED','CLAIMED','CANCELLED') AND current_attempt_id IS NULL)
+        OR state='FAILED'
     )
 );
 
@@ -345,7 +346,7 @@ BEGIN
         RAISE EXCEPTION 'SendPart identity is immutable' USING ERRCODE='55000';
     END IF;
     IF OLD.state='QUEUED' AND NEW.state IN ('CLAIMED','CANCELLED') THEN RETURN NEW; END IF;
-    IF OLD.state='CLAIMED' AND NEW.state IN ('QUEUED','PREPARED','CANCELLED') THEN RETURN NEW; END IF;
+    IF OLD.state='CLAIMED' AND NEW.state IN ('QUEUED','PREPARED','FAILED','CANCELLED') THEN RETURN NEW; END IF;
     IF OLD.state='PREPARED' AND NEW.state IN ('CLAIMED','DISPATCHING','CANCELLED') THEN RETURN NEW; END IF;
     IF OLD.state='DISPATCHING' AND NEW.state IN ('SENT','FAILED','UNKNOWN','QUEUED') THEN
         RETURN NEW;
@@ -1026,6 +1027,29 @@ BEGIN
     RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
       jsonb_build_object('intent_id',intent.intent_id,'state',resulting,
         'accepted',accepted,'conflict_code',conflict));
+END;
+$$;
+
+CREATE FUNCTION delivery_reject_prepare(context jsonb, input jsonb)
+RETURNS jsonb LANGUAGE plpgsql VOLATILE SET search_path=pg_catalog AS $$
+DECLARE work jsonb:=input->'input'->'work'; changed integer;
+BEGIN
+  PERFORM 1 FROM __forest_module_schema__.send_intents
+    WHERE bot_id=context->>'bot_id' AND intent_id=work->>'intent_id' FOR UPDATE;
+  UPDATE __forest_module_schema__.send_parts SET state='FAILED',owner_id=NULL,
+    owner_expires_at=NULL,updated_at=clock_timestamp()
+    WHERE bot_id=context->>'bot_id' AND intent_id=work->>'intent_id'
+      AND part_index=(work->>'part_index')::integer AND state='CLAIMED'
+      AND current_attempt_id IS NULL AND owner_id=work->>'attempt_id'
+      AND owner_epoch=(work->>'owner_epoch')::bigint AND owner_expires_at>clock_timestamp();
+  GET DIAGNOSTICS changed=ROW_COUNT;
+  IF changed<>1 THEN RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',false,'error',
+    jsonb_build_object('code','DELIVERY_REJECTION_CONFLICT','message','Delivery claim is stale','status',409)); END IF;
+  UPDATE __forest_module_schema__.send_intents SET state='FAILED',completed_at=clock_timestamp(),
+    error_code=input->'input'->>'reason_code',updated_at=clock_timestamp()
+    WHERE bot_id=context->>'bot_id' AND intent_id=work->>'intent_id';
+  RETURN jsonb_build_object('protocol','forest.domain-result/1','ok',true,'value',
+    jsonb_build_object('intent_id',work->>'intent_id','state','FAILED'));
 END;
 $$;
 

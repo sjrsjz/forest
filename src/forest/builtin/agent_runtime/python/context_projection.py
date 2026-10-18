@@ -631,6 +631,17 @@ class ContextSnapshotReader:
                 projected[-1]["parts"] = []
             if account is not None:
                 projected[-1]["receiving_account"] = account
+            output_format = content.get("output_format")
+            if output_format is not None:
+                if (not isinstance(output_format, dict) or set(output_format) != {"syntax", "instructions"}
+                        or any(not isinstance(value, str) or not 1 <= len(value) <= 4096 for value in output_format.values())):
+                    raise ForestError("AGENT_CONTEXT_PRESENTATION_INVALID", "Invalid Adapter output format", 409)
+                projected[-1]["output_format"] = output_format
+            platform_message_id = content.get("platform_message_id")
+            if platform_message_id is not None:
+                if not isinstance(platform_message_id, str) or not 1 <= len(platform_message_id) <= 256:
+                    raise ForestError("AGENT_CONTEXT_PRESENTATION_INVALID", "Invalid platform message identity", 409)
+                projected[-1]["platform_message_id"] = platform_message_id
         return {
             "bot_id": self.bot_id,
             "conversation_id": snapshot["conversation_id"],

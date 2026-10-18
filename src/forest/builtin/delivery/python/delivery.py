@@ -1,4 +1,3 @@
-import base64
 import hashlib
 import json
 from datetime import UTC, datetime, timedelta
@@ -73,22 +72,19 @@ class Delivery(Plugin):
                     "channel_kind": work["channel_kind"],
                     "channel_ref": work["channel_ref"],
                     "parts": self._parts(source["value"]),
+                    "wire_owner_id": work["attempt_id"],
                     "operation_id": ctx.operations.stable("wire-prepare"),
                 },
                 operation_id=ctx.operations.stable("adapter-prepare"),
-                contract_major=2,
+                contract_major=3,
             )
-            wire_value = json.loads(base64.b64decode(adapter["prepared"]["wire_body_b64"]))
-            wire = await ctx.services.call(
-                "kernel.effect.json-materialize",
-                {
-                    "protocol": "forest.effect-json-materialize/1",
-                    "owner_kind": "effect.wire",
-                    "owner_id": work["attempt_id"],
-                    "value": wire_value,
-                },
-                operation_id=ctx.operations.stable("wire-materialize"),
-            )
+            if adapter["status"] == "REJECTED":
+                return await ctx.uow.call(
+                    "delivery.reject-prepare",
+                    {"work": work, "reason_code": adapter["error_code"]},
+                    operation_id=ctx.operations.stable("reject-prepare"),
+                )
+            wire = {"payload": adapter["prepared"]["wire_payload"]}
             if wire["payload"]["digest"] != "sha256:" + adapter["prepared"]["wire_digest"]:
                 raise ForestError("DELIVERY_WIRE_DIGEST_MISMATCH", "Prepared wire bytes changed", 500)
             plan_digest = _digest(
@@ -208,7 +204,7 @@ class Delivery(Plugin):
             result = await ctx.services.call(
                 "adapter.onebot.delivery.dispatch",
                 {
-                    "protocol": "forest.onebot-send/2",
+                    "protocol": "forest.onebot-send/3",
                     "effect_operation_id": work["effect_operation_ref"],
                     "attempt_id": work["attempt_id"],
                     "binding_ref": adapter["binding_ref"],
@@ -224,7 +220,7 @@ class Delivery(Plugin):
                 },
                 operation_id=ctx.operations.stable("adapter-dispatch"),
                 timeout=25,
-                contract_major=2,
+                contract_major=3,
             )
         except ForestError as error:
             if (

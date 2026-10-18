@@ -11,7 +11,6 @@ communication/{http,http-post,authorization}.md and message/{string,segment}.md.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 import json
@@ -142,7 +141,7 @@ def _unescape(text: str, *, parameter: bool = False) -> str:
     return _ENTITY.sub(lambda match: entities.get(match[0], match[0]), text)
 
 
-def _cq_segments(text: str) -> list[dict[str, Any]]:
+def _cq_segments(text: str, *, keep_source: bool = False) -> list[dict[str, Any]]:
     segments: list[dict[str, Any]] = []
     start = 0
 
@@ -162,7 +161,8 @@ def _cq_segments(text: str) -> list[dict[str, Any]]:
                 break
             data[key] = _unescape(value, parameter=True)
         if valid:
-            segments.append({"type": parts[0], "data": data})
+            segments.append({"type": parts[0], "data": data,
+                             **({"cq_source": match[0]} if keep_source else {})})
         else:
             append_text(match[0])
         start = match.end()
@@ -340,123 +340,3 @@ def _http_url(value: str, *, origin_only: bool = False) -> str:
     except (ValueError, UnicodeError):
         raise _invalid("Invalid HTTP endpoint") from None
     return result.rstrip("/") if origin_only else result
-
-
-@dataclass(frozen=True)
-class AuthorizedImage:
-    """Host-approved image materialization, never constructed from a chat DTO.
-
-    This marker prevents accidentally echoing inbound acquisition locators. The
-    caller must authorize media/visibility before creating it; it is not itself
-    a capability. Local paths and file URIs are deliberately unsupported.
-    """
-
-    uri: str | None = None
-    content: bytes | None = None
-
-    def wire_file(self) -> str:
-        if (self.uri is None) == (self.content is None):
-            raise _invalid("Choose exactly one approved image representation")
-        if self.uri is not None:
-            return _http_url(self.uri)
-        if not isinstance(self.content, bytes) or not 0 < len(self.content) <= 128 * 1024:
-            raise _invalid("Approved image exceeds inline byte limit")
-        return "base64://" + base64.b64encode(self.content).decode("ascii")
-
-
-def _validate_wire(action: str, body: bytes) -> None:
-    if not isinstance(action, str) or action not in _ACTIONS.values():
-        raise _invalid("Unsupported OneBot action")
-    data = _json(body, MAX_SEND_BYTES)
-    target = "group_id" if action == "send_group_msg" else "user_id"
-    if not isinstance(data, dict) or set(data) != {target, "message", "auto_escape"}:
-        raise _invalid("Invalid prepared send envelope")
-    _id(data[target])
-    if data["auto_escape"] is not True:
-        raise _invalid("Prepared send must use literal text segments")
-    message = data["message"]
-    if not isinstance(message, list) or not 1 <= len(message) <= MAX_SEGMENTS:
-        raise _invalid("Invalid outbound segment array")
-    for part in message:
-        if not isinstance(part, dict) or set(part) != {"type", "data"}:
-            raise _invalid("Invalid outbound segment")
-        kind, value = part["type"], part["data"]
-        if not isinstance(value, dict):
-            raise _invalid("Invalid outbound segment")
-        if kind == "text" and set(value) == {"text"}:
-            if not isinstance(value["text"], str):
-                raise _invalid("Text requires a string")
-        elif kind == "at" and set(value) == {"qq"}:
-            if action != "send_group_msg":
-                raise _invalid("Mentions require a group")
-            if value["qq"] != "all":
-                _id(value["qq"])
-        elif kind == "reply" and set(value) == {"id"}:
-            _id(value["id"], message=True)
-        elif kind == "image" and set(value) == {"file", "proxy", "timeout"}:
-            image_file = value["file"]
-            if not isinstance(image_file, str) or value["proxy"] != "0" or value["timeout"] != "10":
-                raise _invalid("Invalid approved image")
-            if image_file.startswith("base64://"):
-                try:
-                    image_bytes = base64.b64decode(image_file[9:], validate=True)
-                except ValueError:
-                    raise _invalid("Invalid inline image") from None
-                if not 0 < len(image_bytes) <= 128 * 1024:
-                    raise _invalid("Invalid inline image size")
-            else:
-                _http_url(image_file)
-        else:
-            raise _invalid("Unsupported outbound segment")
-
-
-@dataclass(frozen=True)
-class PreparedSend:
-    action: str
-    wire_body: bytes
-    wire_digest: str
-
-    def __post_init__(self) -> None:
-        _validate_wire(self.action, self.wire_body)
-        if (
-            not isinstance(self.wire_digest, str)
-            or not re.fullmatch(r"[0-9a-f]{64}", self.wire_digest)
-            or not hmac.compare_digest(hashlib.sha256(self.wire_body).hexdigest(), self.wire_digest)
-        ):
-            raise _invalid("Prepared send digest does not match its exact bytes")
-
-
-def prepare_send(
-    channel_kind: str, channel_id: str, segments: list[dict[str, Any] | AuthorizedImage]
-) -> PreparedSend:
-    """Serialize exact API bytes without opening a socket or allocating an effect."""
-    if not isinstance(channel_kind, str) or channel_kind not in _ACTIONS:
-        raise _invalid("Unsupported conversation kind")
-    channel_id = _id(channel_id)
-    if not isinstance(segments, list) or not 1 <= len(segments) <= MAX_SEGMENTS:
-        raise _invalid("Invalid outbound segments")
-    message = []
-    for part in segments:
-        if isinstance(part, AuthorizedImage):
-            message.append(
-                {
-                    "type": "image",
-                    "data": {"file": part.wire_file(), "proxy": "0", "timeout": "10"},
-                }
-            )
-            continue
-        if not isinstance(part, dict):
-            raise _invalid("Invalid outbound segment")
-        if part.get("type") == "text" and set(part) == {"type", "text"}:
-            message.append({"type": "text", "data": {"text": part["text"]}})
-        elif part.get("type") == "mention" and set(part) == {"type", "external_user_id"}:
-            message.append({"type": "at", "data": {"qq": part["external_user_id"]}})
-        elif part.get("type") == "reply" and set(part) == {"type", "platform_message_id"}:
-            message.append({"type": "reply", "data": {"id": part["platform_message_id"]}})
-        else:
-            raise _invalid("Outbound media requires explicit host authorization")
-    target_key = "group_id" if channel_kind == "group" else "user_id"
-    body = _encode(
-        {target_key: int(channel_id), "message": message, "auto_escape": True}, MAX_SEND_BYTES
-    )
-    return PreparedSend(_ACTIONS[channel_kind], body, hashlib.sha256(body).hexdigest())
