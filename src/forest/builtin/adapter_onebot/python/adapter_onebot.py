@@ -255,7 +255,15 @@ class AdapterOneBot(Plugin):
             owner_kind="onebot.normalized-event",
             owner_id=event_id,
             media_type="application/json",
-            content=_canonical({"parts": context_parts}),
+            content=_canonical({
+                "parts": context_parts,
+                "receiving_account": {
+                    "bot_id": ctx.identity["bot_id"],
+                    "binding_ref": binding["binding_ref"],
+                    "platform": normalized["platform"],
+                    "external_user_id": binding["self_id"],
+                },
+            }),
             source=source,
         )
         if not memory_texts and not images:

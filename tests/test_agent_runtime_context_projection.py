@@ -3,6 +3,7 @@ import json
 import pytest
 
 from forest.builtin.agent_runtime.python.context_projection import ContextSnapshotReader
+from forest.errors import ForestError
 from forest.packages import digest_json
 
 
@@ -33,7 +34,10 @@ class _Context:
 
 @pytest.mark.asyncio
 async def test_agent_package_interleaves_run_history_at_input_revision_boundary():
-    first = {"text": "first trigger"}
+    first = {"parts": [{"type": "mention", "external_user_id": "345"},
+                       {"type": "text", "text": "first trigger"}],
+             "receiving_account": {"bot_id": "bot:1", "binding_ref": "binding:onebot:1",
+                                   "platform": "onebot", "external_user_id": "345"}}
     second = {"text": "queued trigger"}
     first_author = {"display_name": "Alice", "external_user_id": "100"}
     second_author = {"display_name": "Bob", "external_user_id": "200"}
@@ -169,10 +173,19 @@ async def test_agent_package_interleaves_run_history_at_input_revision_boundary(
     ]
     assert view["units"][0]["author"]["principal_ref"] == "qq:100"
     assert view["units"][2]["author"]["principal_ref"] == "qq:200"
+    assert view["units"][0]["receiving_account"] == first["receiving_account"]
     assert view["required_unit_ids"] == ["first", "second"]
     assert [item["last_trigger_ref"] for item in view["trigger_claims"]] == [
         "trigger:1", "trigger:2"
     ]
+
+    first["receiving_account"]["bot_id"] = "another-bot"
+    snapshot["units"][0]["payload_digest"] = digest_json(first)
+    with pytest.raises(ForestError) as rejected:
+        await ContextSnapshotReader(_Context(values), bot_id="bot:1").project(snapshot)
+    assert rejected.value.code == "AGENT_CONTEXT_ACCOUNT_MISMATCH"
+    first["receiving_account"]["bot_id"] = "bot:1"
+    snapshot["units"][0]["payload_digest"] = digest_json(first)
 
     old = {"text": "optional old context"}
     old_author = {"display_name": "Carol", "external_user_id": "300"}

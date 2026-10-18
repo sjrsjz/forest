@@ -5606,6 +5606,12 @@ async def test_group_trigger_recall_reaches_provider_request(tmp_path, scenario,
             ) from exc
         prepared = RecordingModelClient.requests[0]
         prepared.verify()
+        from xml.etree import ElementTree
+        user_message = next(item for item in json.loads(prepared.body)["messages"] if item["role"] == "user")
+        account_header = ElementTree.fromstring(user_message["content"][0]["text"])
+        assert account_header.find("./field[@name='receiving_account']/field[@name='external_user_id']").text == settings.onebot_self_id
+        assert any("targets_assistant" in part.get("text", "") and ">true<" in part["text"]
+                   for part in user_message["content"])
         manifest = prepared.manifest
         assert manifest["memory_evidence"]["status"] == "READY"
         assert manifest["memory_evidence"]["current_source"]["external_group_id"] == "933179609"

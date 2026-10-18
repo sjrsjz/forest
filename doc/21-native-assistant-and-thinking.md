@@ -22,6 +22,8 @@ Run 内从已提交 Provider 结果回放原生 assistant；Run 结束后，Cont
 
 ## 回放与缓存
 
+每条 Adapter 消息的 Context Payload 保留独立的 `receiving_account`：`bot_id`、`binding_ref`、`platform`、`external_user_id`。它来自已绑定平台账号，不能从用户正文、昵称或人格配置推断。Agent 验证其 Bot、Binding 与平台归属，在宿主 XML 消息头中明确说明这是该消息的机器人接收账号，并按该账号给 mention 标记 `targets_assistant`。旧记录缺少账号时保留未知，不补造身份。来源群、发言者与机器人接收账号分别表达；账号事实不授予任何权限，也不作为用户人格文本编辑。
+
 历史 assistant 不再插入宿主元数据或改写工具 arguments。用户与召回数据携带可信来源，assistant 的内部归因保存在账本和 manifest。召回材料放在稳定历史之后，减少每次召回改动对前部历史的影响；不承诺整个请求始终是上一请求的严格追加，因为上下文选择、裁剪和召回仍可能改变视图。
 
 DeepSeek 缓存匹配已落盘的完整前缀单元，输入结束和输出结束可产生单元，公共前缀另行检测持久化；缓存构建与命中尽力而为。用量保留 hit/miss、cached_tokens 和 reasoning_tokens，以实际数字评价效果，不从 XML 或 JSON 格式推断命中比例。

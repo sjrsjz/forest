@@ -560,6 +560,16 @@ class ContextSnapshotReader:
             if snapshot["thread_ref"]:
                 source["thread_id"] = snapshot["thread_ref"]
             parts = _parts(unit_id, content)
+            account = content.get("receiving_account")
+            if account is not None:
+                if (not isinstance(account, dict)
+                        or set(account) != {"bot_id", "binding_ref", "platform", "external_user_id"}
+                        or any(not isinstance(value, str) or not 1 <= len(value) <= 256
+                               for value in account.values())
+                        or account["bot_id"] != self.bot_id
+                        or account["binding_ref"] != snapshot["binding_ref"]
+                        or account["platform"] != snapshot["platform"]):
+                    raise ForestError("AGENT_CONTEXT_ACCOUNT_MISMATCH", "Receiving account differs from its Context scope", 409)
             seen_indexes = set()
             for media in unit["media_parts"]:
                 index = media.get("part_index") if isinstance(media, dict) else None
@@ -619,6 +629,8 @@ class ContextSnapshotReader:
             if native is not None:
                 projected[-1]["assistant_message"] = native
                 projected[-1]["parts"] = []
+            if account is not None:
+                projected[-1]["receiving_account"] = account
         return {
             "bot_id": self.bot_id,
             "conversation_id": snapshot["conversation_id"],

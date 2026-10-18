@@ -651,6 +651,20 @@ def test_native_tool_schema_preserves_nested_schema_references_and_trigger_autho
     assert tool["parameters"]["properties"]["query"]["$ref"] == "#/$defs/query"
 
 
+def test_receiver_account_and_mentions_are_distinct_from_speaker_and_persona():
+    message = unit(parts=[{"type": "mention", "external_user_id": target}
+                          for target in ("345", "999", "all")])
+    message["receiving_account"] = {"bot_id": "bot-a", "binding_ref": "binding-a",
+                                    "platform": "onebot-v11", "external_user_id": "345"}
+    wire = json.loads(prepared(snapshot(message)).body)["messages"][1]
+    header = ET.fromstring(wire["content"][0]["text"])
+    assert header.find("./field[@name='receiving_account']/field[@name='external_user_id']").text == "345"
+    assert header.find("./field[@name='receiving_account_role']").text == "your_platform_account_for_this_message"
+    assert header.find("./field[@name='author']/field[@name='external_user_id']").text == "alice"
+    assert [ET.fromstring(part["text"]).find("./field[@name='targets_assistant']").text
+            for part in wire["content"][1:]] == ["true", "false", "false"]
+
+
 async def test_self_hosted_provider_can_omit_credentials_without_inheriting_them(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-inherited")
 

@@ -36,7 +36,7 @@ from forest.model_contract import (
 )
 from forest.model_contract import _encode as _contract_encode
 
-PROJECTION_REVISION = "forest-native-model-view-v3"
+PROJECTION_REVISION = "forest-native-model-view-v4"
 MEMORY_EVIDENCE_REVISION = "forest-memory-evidence-v2"
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _XML_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
@@ -627,8 +627,12 @@ class _Projection:
                 if any(not isinstance(part[key], str) or len(part[key]) > 256
                        for key in allowed if key in part):
                     raise _error("MODEL_INPUT_INVALID", "Reference parts require bounded textual IDs")
-                content = self.text({"part_id": part_id, "type": kind,
-                                     **{key: part[key] for key in allowed if key in part}})
+                reference_data = {key: part[key] for key in allowed if key in part}
+                if kind == "mention" and unit.get("receiving_account") is not None:
+                    reference_data["targets_assistant"] = (
+                        part.get("external_user_id") == unit["receiving_account"]["external_user_id"]
+                    )
+                content = self.text({"part_id": part_id, "type": kind, **reference_data})
                 wire.append(content)
                 semantic.append(content)
                 self.included.append(reference)
@@ -662,6 +666,9 @@ class _Projection:
                 continue
             header = self.text({"unit_id": unit["unit_id"], "context_role": unit["role"],
                                 "source": unit["source"], "author": unit["author"],
+                                "receiving_account": unit.get("receiving_account"),
+                                "receiving_account_role": "your_platform_account_for_this_message"
+                                if unit.get("receiving_account") is not None else None,
                                 "ingress_seq": unit.get("ingress_seq"),
                                 "authority_trigger_id": next((
                                     claim["last_trigger_ref"] for claim in self.snapshot["trigger_claims"]
